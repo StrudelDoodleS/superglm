@@ -26,7 +26,7 @@ def remember_selection_dom(page) -> None:
                 firstAxis: document.querySelector('#chart line.axis'),
                 chartTitle: document.querySelector('#chart text.label:not(.x-axis-title)'),
                 xAxisTitle: document.querySelector('#chart .x-axis-title'),
-                termOptions: Array.from(document.querySelectorAll('#term option')),
+                termOptions: Array.from(document.querySelectorAll('#featureRows [data-term]')),
             };
         }"""
     )
@@ -36,7 +36,7 @@ def selection_dom_is_unchanged(page) -> bool:
     return page.evaluate(
         """() => {
             const before = window.__selectionDom;
-            const options = Array.from(document.querySelectorAll('#term option'));
+            const options = Array.from(document.querySelectorAll('#featureRows [data-term]'));
             return before.editedPath === document.querySelector('#chart path.edited')
                 && before.firstPoint === document.querySelector(
                     `#chart circle.point[data-index="${before.firstPointIndex}"]`
@@ -86,7 +86,9 @@ def test_real_editor_boots_and_draws_svg(open_editor_page):
 
         assert page.title() == "SuperGLM Editor"
         assert page.locator("#chart").get_attribute("role") == "img"
-        assert page.locator("#term").input_value() == "curve"
+        assert (
+            page.locator('#featureList [aria-current="true"]').get_attribute("data-term") == "curve"
+        )
         geometry = edited_path.evaluate(
             """path => ({
                 namespace: path.namespaceURI,
@@ -768,7 +770,7 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
         assert popover.is_visible()
         assert trigger.get_attribute("aria-describedby") == "uiPopover"
 
-        page.locator("#term").focus()
+        page.locator("#ciToggle").focus()
         popover.wait_for(state="hidden")
         assert trigger.get_attribute("aria-describedby") is None
 
@@ -811,7 +813,7 @@ def test_tool_rail_popover_closes_when_tool_is_activated(open_editor_page):
         assert popover.is_hidden()
 
 
-def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page):
+def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page, choose_feature):
     with open_editor_page() as (page, _session):
         held_select = []
         page.route("**/select", lambda route: held_select.append(route))
@@ -856,7 +858,7 @@ def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page)
         with page.expect_request(
             lambda request: request.method == "POST" and request.url.endswith("/term")
         ):
-            page.select_option("#term", "territory")
+            choose_feature(page, "territory")
 
         page.wait_for_timeout(50)
         assert len(held_term) == 1
@@ -869,7 +871,7 @@ def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page)
             held_term[0].continue_()
 
 
-def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page):
+def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page, choose_feature):
     with open_editor_page() as (page, _session):
         page.locator("#metricGrid > *").first.wait_for()
         page.locator("#summaryFrame > *").first.wait_for()
@@ -881,7 +883,11 @@ def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page):
                     metric: document.querySelector('#metricGrid > *'),
                     summary: document.querySelector('#summaryFrame > *'),
                     history: document.querySelector('#historyFrame > *'),
-                    termOptions: Array.from(document.querySelectorAll('#term option')),
+                    featureRows: document.querySelector('#featureRows'),
+                    features: Array.from(
+                        document.querySelectorAll('#featureRows [data-term]'),
+                        row => row.dataset.term,
+                    ),
                 };
             }"""
         )
@@ -889,7 +895,7 @@ def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page):
         with page.expect_response(
             lambda response: response.request.method == "POST" and response.url.endswith("/term")
         ):
-            page.select_option("#term", "territory")
+            choose_feature(page, "territory")
         page.wait_for_function(
             "() => document.querySelector('#status')?.dataset.term === 'territory'"
         )
@@ -897,14 +903,21 @@ def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page):
         boundaries = page.evaluate(
             """() => {
                 const before = window.__panelBoundaryNodes;
-                const options = Array.from(document.querySelectorAll('#term option'));
+                const features = Array.from(
+                    document.querySelectorAll('#featureRows [data-term]'),
+                    row => row.dataset.term,
+                );
                 return {
                     chartChanged: before.editedPath !== document.querySelector('#chart path.edited'),
                     metricStable: before.metric === document.querySelector('#metricGrid > *'),
                     summaryStable: before.summary === document.querySelector('#summaryFrame > *'),
                     historyStable: before.history === document.querySelector('#historyFrame > *'),
-                    optionsStable: before.termOptions.length === options.length
-                        && before.termOptions.every((node, index) => node === options[index]),
+                    // The list moves its current row, so it re-renders its own
+                    // rows, but it names the same features in the same place.
+                    featuresStable: before.featureRows === document.querySelector('#featureRows')
+                        && before.features.join('|') === features.join('|'),
+                    current: document.querySelector('#featureRows [aria-current="true"]')
+                        ?.dataset.term,
                 };
             }"""
         )
@@ -913,7 +926,8 @@ def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page):
             "metricStable": True,
             "summaryStable": True,
             "historyStable": True,
-            "optionsStable": True,
+            "featuresStable": True,
+            "current": "territory",
         }
 
 
@@ -934,7 +948,7 @@ def test_contribution_frames_update_only_the_chart_scene(open_editor_page):
                     metric: document.querySelector('#metricGrid > *'),
                     summary: document.querySelector('#summaryFrame > *'),
                     history: document.querySelector('#historyFrame > *'),
-                    termOptions: Array.from(document.querySelectorAll('#term option')),
+                    termOptions: Array.from(document.querySelectorAll('#featureRows [data-term]')),
                 };
             }"""
         )
@@ -947,7 +961,7 @@ def test_contribution_frames_update_only_the_chart_scene(open_editor_page):
         boundaries = page.evaluate(
             """() => {
                 const before = window.__contributionBoundaryNodes;
-                const options = Array.from(document.querySelectorAll('#term option'));
+                const options = Array.from(document.querySelectorAll('#featureRows [data-term]'));
                 return {
                     chartChanged: !before.chart.isConnected,
                     toolStable: before.tool === document.querySelector('#toolRail [data-tool]'),
@@ -988,7 +1002,7 @@ def test_summary_updating_status_preserves_confirmed_table_nodes(open_editor_pag
                     chart: document.querySelector('#chart path.edited'),
                     metric: document.querySelector('#metricGrid > *'),
                     history: document.querySelector('#historyFrame > *'),
-                    termOptions: Array.from(document.querySelectorAll('#term option')),
+                    termOptions: Array.from(document.querySelectorAll('#featureRows [data-term]')),
                 };
             }"""
         )
@@ -1028,7 +1042,7 @@ def test_summary_updating_status_preserves_confirmed_table_nodes(open_editor_pag
         isolation = page.evaluate(
             """() => {
                 const before = window.__summaryBoundaryNodes;
-                const options = Array.from(document.querySelectorAll('#term option'));
+                const options = Array.from(document.querySelectorAll('#featureRows [data-term]'));
                 return {
                     summaryChanged: window.__confirmedSummaryChild
                         !== document.querySelector('#summaryFrame > *'),
@@ -1122,7 +1136,7 @@ def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_pag
         reference_ci.evaluate("node => { node.hidden = true; }")
         page.evaluate("window.__superglmTest.setAppBusy(false)")
 
-        assert page.evaluate("document.activeElement?.id") in {"term", "inspectorToggle"}
+        assert page.evaluate("document.activeElement?.id") in {"featureSearch", "inspectorToggle"}
         for selector in ["#appBar", ".context-bar", "#editorView", "#reportPanel"]:
             assert page.locator(selector).get_attribute("inert") is None
 
@@ -1183,7 +1197,7 @@ def test_application_bar_exposes_views_undo_redo_and_export(open_editor_page):
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
 
 
-def test_application_bar_history_actions_follow_the_selected_term(open_editor_page):
+def test_application_bar_history_actions_follow_the_selected_term(open_editor_page, choose_feature):
     with open_editor_page(selected_term="curve") as (page, _session):
         select_chart_tool(page, "Select")
         page.locator('button[data-op="select_all"]').click()
@@ -1197,7 +1211,7 @@ def test_application_bar_history_actions_follow_the_selected_term(open_editor_pa
                 and response.url.split("?", maxsplit=1)[0].endswith("/term")
             )
         ):
-            page.locator("#term").select_option("territory")
+            choose_feature(page, "territory")
         page.wait_for_function("() => document.querySelector('#undoAction').disabled")
         assert page.get_by_role("button", name="Undo edit").is_disabled()
 
@@ -1207,7 +1221,7 @@ def test_application_bar_history_actions_follow_the_selected_term(open_editor_pa
                 and response.url.split("?", maxsplit=1)[0].endswith("/term")
             )
         ):
-            page.locator("#term").select_option("curve")
+            choose_feature(page, "curve")
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
         page.get_by_role("button", name="Undo edit").click()
         page.wait_for_function("() => !document.querySelector('#redoAction').disabled")
@@ -1218,7 +1232,7 @@ def test_application_bar_history_actions_follow_the_selected_term(open_editor_pa
                 and response.url.split("?", maxsplit=1)[0].endswith("/term")
             )
         ):
-            page.locator("#term").select_option("territory")
+            choose_feature(page, "territory")
         page.wait_for_function("() => document.querySelector('#redoAction').disabled")
         assert page.get_by_role("button", name="Redo edit").is_disabled()
 
@@ -1305,7 +1319,7 @@ def test_export_dialog_downloads_both_formats_without_redrawing_the_app(open_edi
                     chart: document.querySelector('#chart'),
                     summary: document.querySelector('#summaryFrame'),
                     report: document.querySelector('#reportFrame'),
-                    term: document.querySelector('#term'),
+                    features: document.querySelector('#featureRows [data-term]'),
                 };
             }"""
         )
@@ -1346,7 +1360,7 @@ def test_export_dialog_downloads_both_formats_without_redrawing_the_app(open_edi
                 return before.chart === document.querySelector('#chart')
                     && before.summary === document.querySelector('#summaryFrame')
                     && before.report === document.querySelector('#reportFrame')
-                    && before.term === document.querySelector('#term');
+                    && before.features === document.querySelector('#featureRows [data-term]');
             }"""
         )
 
@@ -1694,7 +1708,8 @@ def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):
 def test_context_bar_reports_term_kind_and_edf(open_editor_page):
     with open_editor_page(selected_term="curve") as (page, _session):
         context = page.get_by_role("region", name="Term context")
-        assert context.get_by_label("Term").input_value() == "curve"
+        current = page.get_by_role("navigation", name="Features").locator('[aria-current="true"]')
+        assert current.get_attribute("data-term") == "curve"
         assert "spline" in context.locator("#termKind").inner_text().lower()
         assert "EDF" in context.locator("#termEdf").inner_text()
         inspector_toggle = context.get_by_role("button", name="Inspector")
@@ -1709,7 +1724,7 @@ def test_tool_rail_selects_one_mode_and_supports_roving_shortcuts(open_editor_pa
         select = rail.get_by_role("radio", name="Select", exact=True)
         move = rail.get_by_role("radio", name="Move", exact=True)
         zoom = rail.get_by_role("radio", name="Zoom", exact=True)
-        breaks = rail.get_by_role("radio", name="Breaks", exact=True)
+        handles = rail.get_by_role("radio", name="Handles", exact=True)
 
         assert select.get_attribute("aria-checked") == "true"
         assert select.get_attribute("tabindex") == "0"
@@ -1727,9 +1742,13 @@ def test_tool_rail_selects_one_mode_and_supports_roving_shortcuts(open_editor_pa
         assert zoom.evaluate("node => document.activeElement === node")
 
         page.keyboard.press("End")
-        assert breaks.get_attribute("aria-checked") == "true"
-        assert breaks.evaluate("node => document.activeElement === node")
-        assert page.locator("#breaksControls").is_visible()
+        assert handles.get_attribute("aria-checked") == "true"
+        assert handles.evaluate("node => document.activeElement === node")
+        assert rail.get_by_role("radio", name="Breaks").count() == 0
+
+        page.locator("#chart").focus()
+        page.keyboard.press("b")
+        assert handles.get_attribute("aria-checked") == "true"
 
         page.locator("#chart").focus()
         page.keyboard.press("v")
@@ -1738,7 +1757,9 @@ def test_tool_rail_selects_one_mode_and_supports_roving_shortcuts(open_editor_pa
         assert page.get_by_role("button", name="Help", exact=True).is_visible()
 
 
-def test_handles_tool_is_disabled_only_when_the_term_has_no_controls(open_editor_page):
+def test_handles_tool_is_disabled_only_when_the_term_has_no_controls(
+    open_editor_page, choose_feature
+):
     with open_editor_page(selected_term="territory") as (page, _session):
         handles = page.get_by_role("radiogroup", name="Chart tools").get_by_role(
             "radio", name="Handles", exact=True
@@ -1751,7 +1772,7 @@ def test_handles_tool_is_disabled_only_when_the_term_has_no_controls(open_editor
                 and response.url.split("?", maxsplit=1)[0].endswith("/term")
             )
         ):
-            page.select_option("#term", "curve")
+            choose_feature(page, "curve")
         page.wait_for_function(
             "term => document.querySelector('#status')?.dataset.term === term", arg="curve"
         )
@@ -1990,7 +2011,7 @@ def test_open_narrow_drawer_clears_its_scrim_when_resized_wide(open_editor_page)
         assert not scrim.is_hidden()
 
         page.set_viewport_size({"width": 1100, "height": 720})
-        page.wait_for_function("() => !matchMedia('(max-width: 1047px)').matches")
+        page.wait_for_function("() => !matchMedia('(max-width: 1085px)').matches")
         page.wait_for_function("() => document.querySelector('#inspectorScrim')?.hidden")
         assert scrim.is_hidden()
         scrim.evaluate("node => { node.hidden = false; }")
@@ -2017,7 +2038,7 @@ def test_resize_to_narrow_restores_focus_from_inspector_to_toggle(open_editor_pa
 
 @pytest.mark.parametrize(
     ("width", "expected_open"),
-    [(1047, "false"), (1048, "true")],
+    [(1085, "false"), (1086, "true")],
 )
 def test_workspace_breakpoint_preserves_chart_width_without_overflow(
     open_editor_page, width, expected_open
@@ -2063,4 +2084,27 @@ def test_short_window_scrolls_without_chart_metric_overlap(open_editor_page):
         assert visible_metrics["y"] >= 0
         assert visible_metrics["y"] + visible_metrics["height"] <= (
             page.evaluate("window.innerHeight") + 1
+        )
+
+
+@pytest.mark.parametrize(("width", "expected_open"), [(1277, "false"), (1278, "true")])
+def test_feature_list_opens_by_default_only_where_the_chart_keeps_its_width(
+    open_editor_page, width, expected_open
+):
+    with open_editor_page(viewport={"width": width, "height": 720}) as (page, _session):
+        feature_list = page.get_by_role("navigation", name="Features")
+        chart = page.locator("#chart").bounding_box()
+
+        assert chart is not None
+        assert feature_list.get_attribute("data-open") == expected_open
+        assert page.locator("#inspector").get_attribute("data-open") == "true"
+        assert chart["width"] >= 600
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+        # A choice the analyst made outranks the width default on the next load.
+        page.locator("#featureListToggle").click()
+        page.reload(wait_until="domcontentloaded")
+        page.locator("#chart path.edited").first.wait_for()
+        assert feature_list.get_attribute("data-open") == (
+            "true" if expected_open == "false" else "false"
         )

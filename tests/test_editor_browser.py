@@ -17,6 +17,20 @@ def select_chart_tool(page, name: str) -> None:
     ).click()
 
 
+def choose_feature(page, term: str) -> None:
+    """Pick a term from the feature list, opening its collapsed strip first."""
+    collapsed = page.locator("#featureList").get_attribute("data-open") == "false"
+    if collapsed:
+        page.locator("#featureListToggle").click()
+    page.locator(f'#featureList [data-term="{term}"]').click()
+    if collapsed:
+        page.locator("#featureListToggle").click()
+
+
+def current_feature(page) -> str | None:
+    return page.locator('#featureList [aria-current="true"]').get_attribute("data-term")
+
+
 @pytest.fixture
 def browser_editor_widget():
     rng = np.random.default_rng(20260711)
@@ -48,7 +62,7 @@ def test_editor_browser_loads_authoritative_state(browser_editor_widget):
         page = browser.new_page(viewport={"width": 1180, "height": 720})
         page.goto(browser_editor_widget.app_url)
         page.locator("#chart .edited").first.wait_for()
-        assert page.locator("#term").input_value() == "age"
+        assert current_feature(page) == "age"
         assert page.locator("#status").get_attribute("style") in (None, "")
         layout = page.evaluate(
             """() => {
@@ -217,7 +231,7 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
                             stats.termMutations +=
                                 record.addedNodes.length + record.removedNodes.length;
                         }
-                    }).observe(document.querySelector('#term'), { childList: true, subtree: true });
+                    }).observe(document.querySelector('#featureRows'), { childList: true, subtree: true });
                 }"""
             )
             begin_selected_point_drag(page, -36)
@@ -420,7 +434,7 @@ def test_editor_browser_failed_term_switch_keeps_authoritative_term(
             page.goto(browser_editor_widget.app_url)
             page.locator("#chart .edited").first.wait_for()
 
-            page.locator("#term").select_option("region")
+            choose_feature(page, "region")
             page.wait_for_function(
                 """() => !document.querySelector('#appAlert')?.hidden &&
                     document.querySelector('#appAlertMessage')?.textContent.includes(
@@ -429,7 +443,7 @@ def test_editor_browser_failed_term_switch_keeps_authoritative_term(
                 """
             )
 
-            assert page.locator("#term").input_value() == "age"
+            assert current_feature(page) == "age"
             assert browser_editor_widget.selected_term == "age"
             assert "region unavailable" not in page.locator("#appAlertMessage").inner_text()
 
@@ -476,7 +490,7 @@ def test_editor_browser_lost_term_response_uses_recovered_authoritative_term(
             page.goto(browser_editor_widget.app_url)
             page.locator("#chart .edited").first.wait_for()
 
-            page.locator("#term").select_option("region")
+            choose_feature(page, "region")
             page.wait_for_function(
                 """() => !document.querySelector('#appAlert')?.hidden &&
                     document.querySelector('#appAlertMessage')?.textContent.includes(
@@ -485,7 +499,7 @@ def test_editor_browser_lost_term_response_uses_recovered_authoritative_term(
                 """
             )
 
-            assert page.locator("#term").input_value() == "region"
+            assert current_feature(page) == "region"
             assert browser_editor_widget.selected_term == "region"
             assert "response lost" not in page.locator("#appAlertMessage").inner_text()
 

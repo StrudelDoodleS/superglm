@@ -6,7 +6,7 @@ pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
 
 
-@pytest.mark.parametrize("width", [1180, 1048, 900])
+@pytest.mark.parametrize("width", [1180, 1086, 900])
 def test_categorical_ticks_stay_inside_svg_and_above_title(open_editor_page, width):
     with open_editor_page(selected_term="territory", viewport={"width": width, "height": 720}) as (
         page,
@@ -51,7 +51,7 @@ def test_long_labels_truncate_only_on_screen_and_keep_exact_model_strings(open_e
     unicode_full = "Family👨‍👩‍👧‍👦DriverCaféCategory"
 
     with open_editor_page(
-        selected_term="long_category", viewport={"width": 1048, "height": 720}
+        selected_term="long_category", viewport={"width": 1086, "height": 720}
     ) as (page, session):
         original_levels = list(session.terms["long_category"].levels)
         assert full in original_levels
@@ -83,8 +83,8 @@ def test_long_labels_truncate_only_on_screen_and_keep_exact_model_strings(open_e
         assert page.locator("#chart").get_attribute("data-axis-measurement-count") == "10"
 
 
-def test_identical_categorical_redraw_reuses_text_measurements(open_editor_page):
-    with open_editor_page(viewport={"width": 1048, "height": 720}) as (page, _session):
+def test_identical_categorical_redraw_reuses_text_measurements(open_editor_page, choose_feature):
+    with open_editor_page(viewport={"width": 1086, "height": 720}) as (page, _session):
         page.evaluate(
             """() => {
                 const original = SVGTextElement.prototype.getComputedTextLength;
@@ -102,7 +102,7 @@ def test_identical_categorical_redraw_reuses_text_measurements(open_editor_page)
                 and response.url.split("?", maxsplit=1)[0].endswith("/term")
             )
         ):
-            page.select_option("#term", "long_category")
+            choose_feature(page, "long_category")
         page.wait_for_function(
             "term => document.querySelector('#status')?.dataset.term === term",
             arg="long_category",

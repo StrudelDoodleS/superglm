@@ -66,6 +66,48 @@ Current limitations:
 - tensor interactions with multi-order spline parents are not yet supported
 - `kind="cr_cardinal"` currently supports only `m=2`
 
+### Polynomial ranges (`polynomial_ranges=`)
+
+`polynomial_ranges=` pins a spline to a simple polynomial on chosen stretches
+of the axis. Everywhere else the term stays the ordinary penalised smooth, and
+REML still chooses its smoothing parameter.
+
+```python
+from superglm import PolynomialRange, Spline
+
+Spline(kind="bs", k=12, polynomial_ranges=[
+    PolynomialRange(25, 35, degree=1),   # a straight line from 25 to 35
+    PolynomialRange(65, 75, degree=0),   # flat from 65 to 75
+])
+```
+
+- `degree` is 0 (flat), 1 (line), 2 (quadratic) or 3 (cubic), and at most the
+  spline's own degree.
+- `join="kink"` (the default) keeps the curve continuous at each edge but lets
+  its slope change there. `join="smooth"` keeps the spline's own smoothness at
+  the edge.
+- Ranges must lie inside the fitted range of the feature and must not overlap.
+  Two ranges may share an edge when both use `join="kink"`.
+- Each range needs at least `degree + 1` distinct values of the feature inside
+  it.
+- The penalty leaves the pinned ranges alone, so a pinned quadratic is not
+  shrunk towards a line.
+- Only `kind="bs"` and `kind="cr"` take ranges.
+- Ranges cannot be combined with `select=True` or with a shape constraint.
+
+On an `OrderedCategorical` with a spline basis, the edges may be band names;
+each name resolves to that band's position on the axis:
+
+```python
+OrderedCategorical(
+    order=["A", "B", "C", "D", "E", "F"],
+    basis=Spline(kind="cr", k=6, polynomial_ranges=[PolynomialRange("B", "E", 1)]),
+)
+```
+
+The editor's shape icons write these ranges for you; see
+[Editing a Fitted Model](../tutorials/edit-a-model-in-the-browser.md).
+
 ## Monotone Splines
 
 If monotonicity is part of the model specification, prefer solver-backed

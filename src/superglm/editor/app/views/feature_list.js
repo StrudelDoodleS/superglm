@@ -147,15 +147,17 @@ export function renderFeatureList(
 }
 
 /**
- * Whether the list was left open; unusable storage (private mode, a blocked
- * origin) means open.
+ * Whether the list was left open or collapsed; with no stored choice, or
+ * unusable storage (private mode, a blocked origin), `fallback` decides.
+ * @param {boolean} fallback
  * @param {Pick<Storage, 'getItem'>} [storage] defaults to localStorage, whose access may itself throw
  */
-export function readFeatureListOpen(storage) {
+export function readFeatureListOpen(fallback, storage) {
   try {
-    return (storage ?? localStorage).getItem(STORAGE_KEY) !== "collapsed";
+    const stored = (storage ?? localStorage).getItem(STORAGE_KEY);
+    return stored === null ? fallback : stored === "open";
   } catch {
-    return true;
+    return fallback;
   }
 }
 

@@ -298,24 +298,26 @@ test("the collapsed strip names the active feature and the toggle reports each c
   assert.equal(calls.toggles, 2);
 });
 
-test("the collapse preference is stored and read back, and storage that throws defaults to open", () => {
+test("a stored collapse preference outranks the width default, which also covers storage that throws", () => {
   const store = new Map();
   const storage = {
     getItem: (key) => store.get(key) ?? null,
     setItem: (key, value) => store.set(key, value),
   };
-  assert.equal(readFeatureListOpen(storage), true);
+  assert.equal(readFeatureListOpen(true, storage), true);
+  assert.equal(readFeatureListOpen(false, storage), false);
   storeFeatureListOpen(false, storage);
   assert.deepEqual([...store.entries()], [["superglm.editor.featureList", "collapsed"]]);
-  assert.equal(readFeatureListOpen(storage), false);
+  assert.equal(readFeatureListOpen(true, storage), false);
   storeFeatureListOpen(true, storage);
-  assert.equal(readFeatureListOpen(storage), true);
+  assert.equal(readFeatureListOpen(false, storage), true);
 
   const blocked = {
     getItem() { throw new Error("storage disabled"); },
     setItem() { throw new Error("storage disabled"); },
   };
-  assert.equal(readFeatureListOpen(blocked), true);
+  assert.equal(readFeatureListOpen(true, blocked), true);
+  assert.equal(readFeatureListOpen(false, blocked), false);
   assert.doesNotThrow(() => storeFeatureListOpen(false, blocked));
 });
 

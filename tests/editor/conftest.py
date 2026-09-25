@@ -84,6 +84,25 @@ def chromium_browser():
         browser.close()
 
 
+def choose_feature(page, term: str) -> None:
+    """Pick a term from the feature list as an analyst would.
+
+    Below 1278px the list opens collapsed to a strip, so open it, click the
+    row, and collapse it again to leave the layout under test as it was.
+    """
+    collapsed = page.locator("#featureList").get_attribute("data-open") == "false"
+    if collapsed:
+        page.locator("#featureListToggle").click()
+    page.locator(f'#featureList [data-term="{term}"]').click()
+    if collapsed:
+        page.locator("#featureListToggle").click()
+
+
+@pytest.fixture(name="choose_feature")
+def choose_feature_fixture():
+    return choose_feature
+
+
 @pytest.fixture
 def open_editor_page(chromium_browser, editor_browser_model):
     opened: list[ExitStack] = []
@@ -125,7 +144,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
                         and response.url.split("?", maxsplit=1)[0].endswith("/term")
                     )
                 ):
-                    page.select_option("#term", selected_term)
+                    choose_feature(page, selected_term)
                 page.wait_for_function(
                     "term => document.querySelector('#status')?.dataset.term === term",
                     arg=selected_term,

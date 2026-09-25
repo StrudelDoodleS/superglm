@@ -87,7 +87,9 @@ const featureListNodes = Object.freeze({
   strip: document.getElementById("featureListStrip")
 });
 let featureQuery = "";
-let featureListOpen = readFeatureListOpen();
+// Open by default only where the open list still leaves the chart 600px beside
+// the inspector: 1086px plus the 192px the open list takes over its strip.
+let featureListOpen = readFeatureListOpen(window.matchMedia("(min-width: 1278px)").matches);
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
 const termReference = document.getElementById("termReference");
@@ -237,7 +239,9 @@ const chartContext = {
 
 let openHelp = () => inspectorToggle.click();
 
-const narrowQuery = window.matchMedia("(max-width: 1047px)");
+// The inspector sits beside the chart only where a 600px chart, the tool rail,
+// the collapsed feature strip and the inspector all fit.
+const narrowQuery = window.matchMedia("(max-width: 1085px)");
 renderHelpDrawer(helpPane);
 const inspector = bindInspector({
   root: inspectorNode,

@@ -199,7 +199,7 @@ body {
   stroke-linejoin: round;
 }
 
-@media (max-width: 1047px) {
+@media (max-width: 1085px) {
   .editor-workspace {
     grid-template-columns: auto var(--tool-rail-width) minmax(0, 1fr);
   }
@@ -223,7 +223,7 @@ body {
   }
 }
 
-@media (min-width: 1048px) and (max-height: 620px) {
+@media (min-width: 1086px) and (max-height: 620px) {
   .inspector,
   .feature-list {
     /* Match the 360px chart, 8px gap, and 170px reserved two-row metrics. */

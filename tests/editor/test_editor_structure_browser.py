@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+import numpy as np
 import pytest
-
-from superglm import Piecewise
+from tests.test_editor_structure import EPS, _line_residual, _pinning_tolerance
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -41,59 +41,156 @@ def _plot_point(page, display_index: int) -> dict[str, float]:
     )
 
 
-def test_breaks_mode_transforms_an_ordered_term(open_editor_page):
-    with open_editor_page(selected_term="age_band") as (page, session):
-        page.locator("#chart").focus()
-        page.keyboard.press("b")
-        page.locator("#breaksControls").wait_for(state="visible")
-        for band in (2, 4):
-            point = _plot_point(page, band)
-            page.mouse.click(point["x"], point["y"])
-        page.wait_for_function("() => document.querySelectorAll('#chart .break-line').length === 2")
+def _settled_after_refit(page) -> None:
+    """Wait until a structural refit has handed the page back to the analyst."""
+    page.wait_for_function(
+        "() => document.querySelector('#appBusyOverlay')?.hidden"
+        " && !document.querySelector('#editorView')?.hasAttribute('inert')"
+    )
 
-        chip = page.locator("#chart .degree-chip").first
-        before = chip.get_attribute("aria-label")
-        chip.click()
-        page.wait_for_function(
-            "label => document.querySelector('#chart .degree-chip')"
-            "?.getAttribute('aria-label') !== label",
-            arg=before,
-        )
 
-        with page.expect_response(_posted("/transform_term")) as response_info:
-            page.locator("#transformTerm").click()
+def _box_select_x(page, lo: float, hi: float) -> None:
+    """Drag a Select box over the whole plot height between two x values."""
+    corners = page.evaluate(
+        """([lo, hi]) => {
+            const svg = document.querySelector('#chart');
+            const scale = svg._scale;
+            const client = (x, y) => {
+                const point = svg.createSVGPoint();
+                point.x = x;
+                point.y = y;
+                const mapped = point.matrixTransform(svg.getScreenCTM());
+                return { x: mapped.x, y: mapped.y };
+            };
+            return [
+                client(scale.sx(lo), scale.margin.top + 1),
+                client(scale.sx(hi), scale.margin.top + scale.innerH - 1),
+            ];
+        }""",
+        [lo, hi],
+    )
+    page.mouse.move(corners[0]["x"], corners[0]["y"])
+    page.mouse.down()
+    page.mouse.move(corners[1]["x"], corners[1]["y"], steps=4)
+    with page.expect_response(_posted("/select")):
+        page.mouse.up()
+
+
+def test_line_icon_pins_a_run_of_points_and_restore_removes_it(open_editor_page):
+    with open_editor_page() as (page, session):
+        before = session.model
+        _box_select_x(page, 3.0, 5.0)
+        selected = session.selection("curve")
+        # Precondition: the box took one contiguous run of the drawn points.
+        assert selected.size > 2
+        np.testing.assert_array_equal(np.diff(selected), 1)
+
+        line = page.locator("#shapeLine")
+        line.wait_for(state="visible")
+        assert line.get_attribute("aria-disabled") == "false"
+        with page.expect_response(_posted("/shape_range")) as response_info:
+            line.click()
         assert response_info.value.status == 200
-        page.locator("#restoreStructure").wait_for(state="visible")
-        assert isinstance(session.model._specs["age_band"]._spline_obj, Piecewise)
+        _settled_after_refit(page)
 
+        spec = session.model._specs["curve"]
+        [pinned] = spec.polynomial_ranges
+        term = session.terms["curve"]
+        assert pinned.degree == 1
+        assert pinned.lo <= term.x[selected[0]] and term.x[selected[-1]] <= pinned.hi
 
-def test_breaks_mode_draws_every_band_of_a_collapsed_ordered_term(open_editor_page):
-    with open_editor_page(
-        selected_term="age_band", collapsed_levels=("age_band", ("18-24", "25-34"))
-    ) as (page, _):
-        drawn = "document.querySelector('#chart')._selectionView.view"
-        # A grouped ordered term opens on its Collapsed display ...
-        assert page.evaluate(f"() => {drawn}.displayIsCollapsed") is True
-        page.locator("#chart").focus()
-        page.keyboard.press("b")
-        page.locator("#breaksControls").wait_for(state="visible")
-        # ... but a break names one original band, so Breaks mode draws them all.
-        assert page.evaluate(f"() => {drawn}.displayIsCollapsed") is False
-        assert page.locator("#groupDisplayMode").is_disabled()
-
-        index = page.evaluate(f"() => {drawn}.levels.indexOf('55-64')")
-        point = _plot_point(page, index)
-        page.mouse.click(point["x"], point["y"])
-        label = page.locator("#chart .break-label")
-        label.wait_for()
-        assert label.get_attribute("aria-valuetext") == "55-64"
-        line_x = float(page.locator("#chart .break-line").get_attribute("x1"))
-        point_x = page.evaluate(
-            "index => { const s = document.querySelector('#chart')._scale;"
-            " return s.sx(s.x[index]); }",
-            index,
+        band = page.locator("#chart .shape-range")
+        assert band.count() == 1
+        assert band.locator(".shape-range-label").text_content() == "Line"
+        assert band.get_attribute("data-popover-title") == "Line"
+        assert band.get_attribute("data-popover-body") == (
+            f"Pinned to a straight line from {pinned.lo:g} to {pinned.hi:g}."
         )
-        assert line_x == point_x
+
+        # The curve the page draws on the range is the pinned line: log of the
+        # plotted relativity against x, to the fit's round-off plus one exp and
+        # one log per value.
+        drawn = page.evaluate(
+            "() => { const s = document.querySelector('#chart')._scale;"
+            " return { x: s.x, y: s.y }; }"
+        )
+        x = np.asarray(drawn["x"])
+        inside = (x >= pinned.lo) & (x <= pinned.hi)
+        effect = np.log(np.asarray(drawn["y"])[inside])
+        bound = _pinning_tolerance(session.model, "curve", spec, effect) + 4 * EPS * (
+            1.0 + np.max(np.abs(effect))
+        )
+        assert _line_residual(x[inside], effect) <= bound
+
+        page.locator("#restoreStructure").click()
+        _settled_after_refit(page)
+        page.wait_for_function("() => !document.querySelector('#chart .shape-range')")
+        assert session.model is before
+        assert session.model._specs["curve"].polynomial_ranges == ()
+
+
+def test_quadratic_on_bands_spans_whole_bands_and_cubic_says_why_not(open_editor_page):
+    with open_editor_page(selected_term="age_band") as (page, session):
+        session.select_levels("age_band", ["25-34", "35-44", "45-54"])
+        _reload_editor(page, "age_band")
+        page.locator("#selectionMenu").wait_for(state="visible")
+
+        cubic = page.locator("#shapeCubic")
+        assert cubic.get_attribute("aria-disabled") == "true"
+        assert cubic.get_attribute("data-popover-body") == "Select at least 4 bands for a Cubic."
+        with page.expect_response(_posted("/shape_range")) as response_info:
+            page.locator("#shapeQuadratic").click()
+        assert response_info.value.status == 200
+        _settled_after_refit(page)
+
+        declared = session.model._specs["age_band"]._spline_obj.polynomial_ranges
+        assert [(r.lo, r.hi, r.degree) for r in declared] == [("25-34", "45-54", 2)]
+        # A band owns half a unit each side of its position, so the shaded
+        # range runs from the first band's left edge to the last band's right.
+        extent = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const { sx, x } = svg._scale;
+                const rect = svg.querySelector('.shape-range rect');
+                const left = Number(rect.getAttribute('x'));
+                return {
+                    left,
+                    right: left + Number(rect.getAttribute('width')),
+                    expected: [sx(x[1] - 0.5), sx(x[3] + 0.5)],
+                };
+            }"""
+        )
+        assert [extent["left"], extent["right"]] == pytest.approx(extent["expected"], abs=1e-9)
+        label = page.locator("#chart .shape-range-label")
+        assert label.text_content() == "Quadratic"
+
+
+def test_feature_search_filters_the_list_and_opens_the_first_match(open_editor_page):
+    with open_editor_page() as (page, _session):
+        feature_list = page.get_by_role("navigation", name="Features")
+        # At 1180px the list opens collapsed to a strip; the analyst opens it.
+        assert feature_list.get_attribute("data-open") == "false"
+        page.locator("#featureListToggle").click()
+        assert feature_list.get_attribute("data-open") == "true"
+        search = page.get_by_role("searchbox", name="Search features")
+        rows = feature_list.locator("[data-term]")
+        assert rows.count() == 4
+
+        search.fill("TERR")
+        assert [row.get_attribute("data-term") for row in rows.all()] == ["territory"]
+        with page.expect_response(_posted("/term")):
+            search.press("Enter")
+        page.wait_for_function(
+            "() => document.querySelector('#status')?.dataset.term === 'territory'"
+        )
+        current = feature_list.locator('[aria-current="true"]')
+        assert current.get_attribute("data-term") == "territory"
+        # The shape icons stay hidden on an unordered categorical.
+        assert page.locator("#shapeLine").is_hidden()
+
+        search.press("Escape")
+        assert search.input_value() == ""
+        assert rows.count() == 4
 
 
 def test_set_reference_icon_needs_exactly_one_level(open_editor_page):

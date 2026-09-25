@@ -23,6 +23,18 @@ The standard iframe is 1180 by 720 pixels. At narrower notebook widths the inspe
 drawer; in a short window the workspace scrolls instead of shrinking the plot into an unusable
 strip.
 
+## Find a Feature
+
+The feature list on the left names every term in the editor, grouped as the chart groups them,
+with each term's kind and effective degrees of freedom. The current term is highlighted.
+
+- Type in the search box to filter the list. Enter opens the first match and Escape clears the
+  search.
+- The arrow keys step between features; Enter or a click opens one.
+- The toggle at the top collapses the list to a thin strip that names the current term, so the
+  plot keeps its width. The editor remembers your choice.
+- In a window narrower than about 1280 pixels, the list starts collapsed until you open it.
+
 ## Select, Move, Zoom, and Handles
 
 - **Select** brushes points or levels. Shift-click toggles a point or level; Select all selects the
@@ -81,38 +93,47 @@ the selection palette. SuperGLM refits the model with that level as the referenc
 - Special levels of an ordered term cannot be the reference.
 - A term used by an interaction cannot change its reference.
 
-## Give a Term a Shape with Breaks
+## Shape a Range
 
-Breaks mode (shortcut `B`) replaces a term's curve with a simpler shape that you place by hand. It
-works on ordered categorical terms and on numeric terms drawn as a curve.
+A shape pins part of a spline term to a simple polynomial while the rest of the term stays the
+fitted smooth. It works on numeric spline terms and on ordered terms with a spline basis.
 
-- Click inside the plot to add a break. Drag a break to move it; click the × on its label to
-  remove it.
-- With a break focused, the arrow keys move it one step and Delete removes it.
-- On an ordered term, breaks sit on bands, never on the first or last band.
-- On an ordered term with collapsed groups, Breaks mode shows every band, because a break sits on
-  one band.
-- A band with a break on it cannot be collapsed into a group. Remove or move the break first.
-- On a numeric term, breaks sit strictly inside the fitted range.
-- A linear term is drawn as a single point, so it has no axis to place breaks on.
+1. In Select mode, select a continuous run of points, or of bands on an ordered term.
+2. Choose one of the four shape icons in the selection palette: **Flat**, **Line**, **Quadratic**
+   or **Cubic**.
 
-Choose the form in the action bar:
+SuperGLM refits straight away. The range is drawn as a light band labelled with its shape; hover
+over it to see the shape and its edges.
 
-- **Piecewise** draws straight segments between the breaks. On an ordered term, click a segment's
-  chip to make it flat, linear, quadratic or cubic.
-- **Spline** draws a smooth curve with a knot at each break. It keeps the term's spline settings
-  and any shape constraint.
-- **Polynomial** draws one polynomial of degree 1 to 5 across the whole axis. It ignores the
-  breaks.
+- On a numeric term the range runs from the first to the last selected point, widened to a round
+  value at three significant figures of the fitted range.
+- On an ordered term the range covers whole bands.
+- The curve stays continuous at each edge of the range, but its slope may change there.
+- To fit one polynomial over the whole axis, choose Select all and then a shape.
+- A term can hold several ranges, each added as its own step.
+- A new range may not overlap one already shaped. Restore the old one, or choose a range outside
+  it.
+- Choosing a new shape on exactly the same range replaces the old shape.
+- A Quadratic needs at least three distinct values in the range, and a Cubic needs four.
+- A range cannot start or end inside a collapsed group. Ungroup the bands at its ends first.
+- A band at the edge of a shaped range cannot be collapsed into a group.
+- A P-spline term is refitted as a B-spline with the same knots and a derivative penalty, so the
+  penalty can leave the shaped range alone.
 
-Nothing changes until you choose **Transform and refit**. A term with a shape constraint can only
-become a Spline, so the constraint is never dropped. The summary, the Python `summary()` and the
-workbook note that the breaks were placed in the editor from this data: judge them on validation
-deviance.
+The icons are disabled, with the reason on hover, when a term cannot take a shape:
+
+- The term is not a spline.
+- The term is a cardinal cubic regression spline.
+- The term has a shape constraint, such as increasing or convex.
+- The term uses `select=True`.
+- The term is used by an interaction.
+
+The summary, the Python `summary()` and the workbook note that shaped ranges were chosen in the
+editor from this data. Tests are conditional on them, so judge them on validation deviance.
 
 ## Restore and Revert
 
-Collapse, ungroup, set reference and transform each add one step to a single history.
+Collapse, ungroup, set reference and shape each add one step to a single history.
 **Restore previous structure**, at the right end of the chart's action bar, undoes the most recent
 step. It shows whenever there is a step to undo, and its popover names that step.
 
@@ -171,8 +192,8 @@ large formatted text block.
 
 ## Keyboard Shortcuts
 
-- Use Tab to reach application tabs, the tool rail, context controls, the SVG action palette, and
-  the inspector.
+- Use Tab to reach application tabs, the feature list, the tool rail, context controls, the SVG
+  action palette, and the inspector.
 - Use arrow keys inside tab lists and the mode rail; Home and End jump to the first and last item.
 - Use Enter or Space to activate a focused control.
 - Use Escape to close the current popover, Help drawer, inspector drawer, or dialog.
