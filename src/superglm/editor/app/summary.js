@@ -3,7 +3,7 @@ import { escapeHTML, fmt } from "./format.js";
 
 /** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
 /** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
-/** @typedef {import('./api/contracts.js').TransformTermRequest} TransformTermRequest */
+/** @typedef {import('./api/contracts.js').ShapeRangeRequest} ShapeRangeRequest */
 
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
 const summaryMarkupByFrame = new WeakMap();
@@ -210,14 +210,14 @@ export function setReferenceTransition(term, level) {
 }
 
 /**
- * @param {TransformTermRequest} payload
- * @returns {{name:string, path:string, payload:TransformTermRequest}}
+ * @param {string} term @param {number|string} lo @param {number|string} hi @param {number} degree
+ * @returns {{name:string, path:string, payload:ShapeRangeRequest}}
  */
-export function transformTransition(payload) {
+export function shapeRangeTransition(term, lo, hi, degree) {
   return {
-    name: "transform and refit",
-    path: "/transform_term",
-    payload: { ...payload }
+    name: "shape and refit",
+    path: "/shape_range",
+    payload: { term, lo, hi, degree, method: "auto" }
   };
 }
 

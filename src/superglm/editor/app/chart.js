@@ -1,5 +1,5 @@
 import { fmt } from "./format.js";
-import { drawBreakOverlay } from "./chart/break_overlay.js";
+import { drawShapeOverlay } from "./chart/shape_overlay.js";
 import {
   evenlySpacedIndices,
   planCategoricalAxis,
@@ -187,6 +187,9 @@ export function drawChart(term, selection, context) {
   );
   const yLabel = text(svg, 22, margin.top + innerH / 2, term.y_label, "label", "middle");
   yLabel.setAttribute("transform", `rotate(-90 22 ${margin.top + innerH / 2})`);
+  // Shaped ranges sit above the grid and beneath the curves; a Build animation
+  // shows the basis alone.
+  if (!buildActive) drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH });
 
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
@@ -240,8 +243,6 @@ export function drawChart(term, selection, context) {
   } else {
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
-  const breakDraft = visualMode === "breaks" ? context.breakDraft() : null;
-  if (breakDraft) drawBreakOverlay(svg, { term, draft: breakDraft, sx, margin, innerW, innerH });
   applyPlotClip(svg);
   const legendLayer = el("g", { class: "legend-layer" });
   svg.appendChild(legendLayer);

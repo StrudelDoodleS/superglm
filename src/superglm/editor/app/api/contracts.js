@@ -1,7 +1,7 @@
 // @ts-check
 
 /** @typedef {'editor'|'validation'|'final'} AppView */
-/** @typedef {'select'|'move'|'zoom'|'handles'|'breaks'} EditorMode */
+/** @typedef {'select'|'move'|'zoom'|'handles'} EditorMode */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
 /** @typedef {'metrics'|'summary'|'report'} EvidencePanel */
@@ -38,25 +38,33 @@
  * @property {string} level
  * @property {'most_exposed'|'first'|'pinned'} policy
  */
-/** @typedef {'piecewise'|'spline'|'polynomial'} BreakForm */
 /**
- * A per-term Breaks draft. Breaks are band labels on an ordered axis and x
- * values on a numeric axis, exactly as /transform_term takes them.
- * @typedef {Object} BreakDraft
- * @property {BreakForm} form
- * @property {Array<string|number>} breaks
- * @property {number[]} degrees
+ * A range of a term pinned to a polynomial. Edges are x values on a numeric
+ * term and band labels on an ordered one; degree 0-3 is Flat, Line,
+ * Quadratic or Cubic, which ``label`` names.
+ * @typedef {Object} ShapedRange
+ * @property {number|string} lo
+ * @property {number|string} hi
  * @property {number} degree
+ * @property {string} label
  */
 /**
- * The /transform_term request: degrees only for a piecewise draft on bands, a
- * degree only for a polynomial.
- * @typedef {Object} TransformTermRequest
+ * The palette's shape state for a term: the ranges in force, and the hover
+ * reason when the term cannot take one.
+ * @typedef {Object} TermShape
+ * @property {boolean} available
+ * @property {string|null} reason
+ * @property {ShapedRange[]} ranges
+ */
+/**
+ * The /shape_range request: the selection's edges as shapeRangeForSelection
+ * names them, and the degree of the icon chosen.
+ * @typedef {Object} ShapeRangeRequest
  * @property {string} term
- * @property {BreakForm} form
- * @property {Array<string|number>} breaks
- * @property {number[]} [degrees]
- * @property {number} [degree]
+ * @property {number|string} lo
+ * @property {number|string} hi
+ * @property {number} degree
+ * @property {string} method
  */
 /**
  * The /set_reference request: a displayed level, which may be a group label.
@@ -68,11 +76,6 @@
 /**
  * The /revert_to_original and /restore_structure requests carry no fields.
  * @typedef {Record<string, never>} EmptyStructuralRequest
- */
-/**
- * @typedef {Object} TermTransform
- * @property {string[]|null} axis
- * @property {{breaks:Array<string|number>, degrees:number[]}|null} piecewise
  */
 /**
  * @typedef {Object} TermPayload
@@ -89,7 +92,8 @@
  * @property {ImpactPayload} impact
  * @property {number|null} [effective_df]
  * @property {TermReference|null} [reference]
- * @property {TermTransform|null} [transform]
+ * @property {Array<{label:string, indices:number[]}>} [level_groups]
+ * @property {TermShape} shape
  */
 /**
  * @typedef {Object} StructureHistory
@@ -154,7 +158,6 @@
  * @property {SummaryLevelDisplay} summaryLevelDisplay
  * @property {Record<string, unknown>} zoomByTerm
  * @property {Record<string, string>} groupModeByTerm
- * @property {Record<string, BreakDraft>} breakDraftByTerm
  * @property {'summary'|'history'|'advanced'|'help'} inspectorPane
  * @property {boolean} inspectorOpen
  * @property {{term:string, payload:TermPayload, selection:number[]}|null} preview

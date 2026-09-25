@@ -7,7 +7,6 @@ import { selectActiveTermName } from "./selectors.js";
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').StructuralTransitionEnvelope} StructuralTransitionEnvelope */
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
-/** @typedef {import('../api/contracts.js').BreakDraft} BreakDraft */
 
 /** @param {EditorSnapshot|null} snapshot @returns {EditorState} */
 export function createInitialEditorState(snapshot = null) {
@@ -22,7 +21,6 @@ export function createInitialEditorState(snapshot = null) {
       summaryLevelDisplay: "expanded",
       zoomByTerm: {},
       groupModeByTerm: {},
-      breakDraftByTerm: {},
       inspectorPane: "summary",
       inspectorOpen: true,
       preview: null,
@@ -127,15 +125,6 @@ export function patchView(state, patch) {
  */
 export function setPreviewTerm(state, term, payload, selection = []) {
   return patchView(state, { preview: { term, payload, selection: selection.slice() } });
-}
-
-/** @param {EditorState} state @param {string} term @param {BreakDraft|null} draft */
-export function setBreakDraft(state, term, draft) {
-  const breakDraftByTerm = { ...state.view.breakDraftByTerm };
-  if (draft === null && !(term in breakDraftByTerm)) return state;
-  if (draft === null) delete breakDraftByTerm[term];
-  else breakDraftByTerm[term] = draft;
-  return patchView(state, { breakDraftByTerm });
 }
 
 /** @param {number[]} indices @returns {number[]} */

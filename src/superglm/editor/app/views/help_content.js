@@ -29,12 +29,6 @@ export const TOOL_HELP = Object.freeze({
     body: "Edit spline control handles and inspect basis contributions.",
     shortcut: "H",
   }),
-  breaks: Object.freeze({
-    title: "Breaks",
-    body:
-      "Click the plot to add a break, drag a break to move it, and click × to remove it. Choose a form, then Transform and refit.",
-    shortcut: "B",
-  }),
   help: Object.freeze({
     title: "Help",
     body: "Open modes, gestures, shortcuts, curve operations, refits, and exporting.",
@@ -102,18 +96,31 @@ export const OPERATION_HELP = Object.freeze({
     body:
       "Pin the selected level as the reference (relativity 1.00) and refit. Predictions stay the same unless a selection penalty is on. Unseen levels rated at the reference move with it.",
   }),
+  shape_flat: Object.freeze({
+    title: "Flat and refit",
+    body: "Make the selected range flat and refit. The rest of the curve stays smooth. Restore undoes it.",
+  }),
+  shape_line: Object.freeze({
+    title: "Line and refit",
+    body:
+      "Make the selected range a straight line and refit. The rest of the curve stays smooth. Restore undoes it.",
+  }),
+  shape_quadratic: Object.freeze({
+    title: "Quadratic and refit",
+    body:
+      "Make the selected range a quadratic and refit. The rest of the curve stays smooth. Restore undoes it.",
+  }),
+  shape_cubic: Object.freeze({
+    title: "Cubic and refit",
+    body: "Make the selected range a cubic and refit. The rest of the curve stays smooth. Restore undoes it.",
+  }),
 });
 
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
 export const STRUCTURE_HELP = Object.freeze({
-  transform_term: Object.freeze({
-    title: "Transform and refit",
-    body:
-      "Replace this term with the form and breaks shown, then refit the model. Restore undoes it.",
-  }),
   restore_structure: Object.freeze({
     title: "Restore previous structure",
-    body: "Undo the latest collapse, ungroup, transform or reference change.",
+    body: "Undo the latest collapse, ungroup, shape or reference change.",
   }),
   revert_to_original: Object.freeze({
     title: "Revert to original model",
@@ -148,11 +155,27 @@ export const CONTROL_HELP = Object.freeze({
 export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Modes",
-    keys: Object.freeze(["select", "move", "zoom", "handles", "breaks"]),
+    keys: Object.freeze(["select", "move", "zoom", "handles"]),
   }),
   Object.freeze({
     title: "Selection operations",
     keys: Object.freeze(Object.keys(OPERATION_HELP)),
+  }),
+  Object.freeze({
+    title: "Shaped ranges",
+    items: Object.freeze([
+      "Select a run of points or bands on a spline term, then choose Flat, Line, Quadratic or Cubic. That range is pinned to the shape; the rest of the term stays the fitted smooth.",
+      "The curve stays continuous at the range's edges and its slope may change there. Select all, then a shape, for one polynomial over the whole axis.",
+      "A new range may not overlap one already shaped; the same range with a new shape replaces it. Restore undoes the latest shape.",
+      "A P-spline term becomes a B-spline with a derivative penalty so its penalty can skip the shaped range.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Features",
+    items: Object.freeze([
+      "Type in the search box to filter the feature list; Enter opens the first match and Escape clears the search.",
+      "Arrow keys step between features; Enter or a click opens one. The toggle collapses the list to a strip.",
+    ]),
   }),
   Object.freeze({
     title: "Model structure",
@@ -196,8 +219,11 @@ export function helpForElement(element) {
   const tool = element.dataset.tool;
   if (tool && TOOL_HELP[tool] && !element.dataset.popoverBody) return TOOL_HELP[tool];
 
+  // A disabled icon's own reason outranks its operation help, as for tools.
   const operation = element.dataset.helpOperation || element.dataset.op;
-  if (operation && OPERATION_HELP[operation]) return OPERATION_HELP[operation];
+  if (operation && OPERATION_HELP[operation] && !element.dataset.popoverBody) {
+    return OPERATION_HELP[operation];
+  }
 
   const control = element.dataset.helpControl;
   if (control && CONTROL_HELP[control]) return CONTROL_HELP[control];

@@ -48,9 +48,6 @@ export function selectRenderableTerm(state) {
 
 /** @param {EditorState} state */
 export function selectGroupDisplayMode(state) {
-  // Breaks name original bands, and a collapsed point can stand for several:
-  // Breaks mode always draws every band.
-  if (state.view.mode === "breaks") return "expanded";
   const active = selectActiveTermName(state);
   const term = selectCurrentTerm(state);
   return state.view.groupModeByTerm[active]

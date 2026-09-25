@@ -1,15 +1,9 @@
 import { editorClient } from "./api/client.js";
-import {
-  draftProblem,
-  initialDraft,
-  isTransformable,
-  setPolynomialDegree,
-  transformPayload
-} from "./breaks.js";
 import { drawChart, groupedTerms, updateChartSelection } from "./chart.js";
 import { renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
+import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
 import { createEditorActions } from "./state/actions.js";
 import {
   selectActiveTermName,
@@ -26,7 +20,6 @@ import {
   createEditorStore,
   createInitialEditorState,
   patchView as patchViewState,
-  setBreakDraft as setBreakDraftState,
   setPreviewTerm as setPreviewTermState
 } from "./state/store.js";
 import {
@@ -42,12 +35,11 @@ import {
   restoreTransition,
   revertTransition,
   setReferenceTransition,
-  transformTransition,
+  shapeRangeTransition,
   ungroupTransition
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
-import { bindBreaksControls, renderBreaksControls } from "./views/breaks_controls.js";
 import { renderContextBar } from "./views/context_bar.js";
 import { bindExportDialog } from "./views/export_dialog.js";
 import {
@@ -131,7 +123,7 @@ const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const setReference = document.getElementById("setReference");
 const restoreStructure = document.getElementById("restoreStructure");
-const breaksControls = document.getElementById("breaksControls");
+const shapeButtons = [...document.querySelectorAll("button[data-shape-degree]")];
 const structuralConfirmDialog = document.getElementById("structuralConfirmDialog");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
@@ -240,8 +232,7 @@ const chartContext = {
   showCi: () => store.getState().view.showCi,
   showContrib: () => store.getState().view.showContrib,
   buildProgress: () => buildProgress,
-  groupDisplayMode: () => activeGroupDisplayMode(),
-  breakDraft: activeBreakDraft
+  groupDisplayMode: () => activeGroupDisplayMode()
 };
 
 let openHelp = () => inspectorToggle.click();
@@ -384,33 +375,6 @@ function clearZoom(term) {
 
 function activeGroupDisplayMode() {
   return selectGroupDisplayMode(store.getState());
-}
-
-// The active term's Breaks draft: the stored one, else derived from the payload.
-function activeBreakDraft() {
-  const term = currentTerm();
-  if (!isTransformable(term)) return null;
-  return store.getState().view.breakDraftByTerm[selectedTerm()] ?? initialDraft(term);
-}
-
-function setBreakDraft(draft) {
-  store.update((state) => setBreakDraftState(state, selectedTerm(), draft));
-}
-
-function updateBreakDraft(change) {
-  setBreakDraft(change(activeBreakDraft()));
-}
-
-async function transformActiveTerm() {
-  const term = currentTerm();
-  const name = selectedTerm();
-  const draft = activeBreakDraft();
-  if (draftProblem(term, draft) !== null) return;
-  const envelope = await runStructuralRefit(
-    transformTransition(transformPayload(name, term, draft))
-  );
-  // The draft re-derives from the transformed term's own breaks.
-  if (envelope) store.update((state) => setBreakDraftState(state, name, null));
 }
 
 function visualMode() {
@@ -806,13 +770,10 @@ function renderChartWorkspace() {
     : currentSelection();
   statusNode.style.color = "";
   if (updateHandleCount(term)) return;
-  renderToolRail(toolRail, {
-    mode: view.mode,
-    handlesAvailable: Boolean(term.controls),
-    breaksAvailable: isTransformable(term)
-  });
+  renderToolRail(toolRail, { mode: view.mode, handlesAvailable: Boolean(term.controls) });
   updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
+  updateShapeActions(term, selection);
   updateResetOrderAction(term);
   drawChart(term, selection, chartContext);
   const collapsedOriginalNote = selectionContextNote(term);
@@ -881,8 +842,7 @@ function selectChartRenderState(state) {
     zoom: view.zoomByTerm[activeTerm] || null,
     groupMode: Object.prototype.hasOwnProperty.call(view.groupModeByTerm, activeTerm)
       ? view.groupModeByTerm[activeTerm]
-      : null,
-    breakDraft: view.breakDraftByTerm[activeTerm] ?? null
+      : null
   };
 }
 
@@ -894,39 +854,7 @@ function sameChartRenderState(next, previous) {
     next.showCi === previous.showCi &&
     next.showContrib === previous.showContrib &&
     next.zoom === previous.zoom &&
-    next.groupMode === previous.groupMode &&
-    next.breakDraft === previous.breakDraft;
-}
-
-function selectBreaksRenderState(state) {
-  const activeTerm = selectActiveTermName(state);
-  return {
-    visible: state.remote.snapshot !== null && state.view.mode === "breaks",
-    chartEpoch: state.remote.chartEpoch,
-    activeTerm,
-    draft: state.view.breakDraftByTerm[activeTerm] ?? null,
-    busy: state.request.mutation.status === "running"
-  };
-}
-
-function sameBreaksRenderState(next, previous) {
-  return next.visible === previous.visible &&
-    next.chartEpoch === previous.chartEpoch &&
-    next.activeTerm === previous.activeTerm &&
-    next.draft === previous.draft &&
-    next.busy === previous.busy;
-}
-
-function renderBreaksControlsState({ visible, busy }) {
-  const draft = visible ? activeBreakDraft() : null;
-  breaksControls.hidden = draft === null;
-  if (draft === null) return;
-  renderBreaksControls({
-    root: breaksControls,
-    draft,
-    problem: draftProblem(currentTerm(), draft),
-    busy
-  });
+    next.groupMode === previous.groupMode;
 }
 
 function selectHistoryRenderState(state) {
@@ -1025,6 +953,7 @@ function renderSelectionState({ termName, indices }) {
   const selection = new Set(indices);
   updateChartSelection(term, selection, chartContext);
   updateCollapseAction(term, selection);
+  updateShapeActions(term, selection);
   renderContextBar(
     { kindNode: termKind, edfNode: termEdf, referenceNode: termReference, statusNode },
     {
@@ -1235,8 +1164,7 @@ function renderEvidenceFreshness(evidence, options) {
 function updateGroupDisplayControl(term) {
   if (!groupDisplayWrap || !groupDisplayMode) return;
   const available = Boolean(term && term.group_display && term.group_display.available);
-  // Breaks mode always draws every band (selectGroupDisplayMode).
-  groupDisplayMode.disabled = !available || visualMode() === "breaks";
+  groupDisplayMode.disabled = !available;
   if (!available) {
     groupDisplayMode.value = "expanded";
     return;
@@ -1257,6 +1185,29 @@ function updateCollapseAction(term, selection) {
     const label = isLevelTerm ? selectedLevelLabel(term, selection) : null;
     setReference.hidden = label === null || label === term.reference?.level;
   }
+}
+
+// The four shape icons share one state per selection, except that the bands
+// of an ordered term bound the degree they can carry.
+function updateShapeActions(term, selection) {
+  for (const button of shapeButtons) {
+    const degree = Number(button.dataset.shapeDegree);
+    const { visible, enabled, reason } = shapeButtonState(term, selection, degree);
+    button.hidden = !visible;
+    button.setAttribute("aria-disabled", String(!enabled));
+    renderShapeReason(button, reason);
+  }
+}
+
+// A disabled shape icon says why; its own popover text outranks the operation help.
+function renderShapeReason(button, reason) {
+  if (reason === null) {
+    delete button.dataset.popoverTitle;
+    delete button.dataset.popoverBody;
+    return;
+  }
+  button.dataset.popoverTitle = button.getAttribute("aria-label");
+  button.dataset.popoverBody = reason;
 }
 
 // One displayed level: a single source level, or one whole collapsed group.
@@ -1337,7 +1288,6 @@ function applyTermDefaults(term) {
   } else if (!canShowContributions(term) && view.showContrib) {
     patch.showContrib = false;
   }
-  if (view.mode === "breaks" && !isTransformable(term)) patch.mode = "select";
   if (!Object.keys(patch).length) return false;
   actions.patchView(patch);
   return true;
@@ -1450,17 +1400,7 @@ const interactions = bindInteractions({
   clearPreviewTerm: clearInteractionPreview,
   setZoom,
   clearZoom,
-  breakDraft: activeBreakDraft,
-  setBreakDraft,
   actions,
-});
-
-bindBreaksControls({
-  root: breaksControls,
-  onForm: (form) => updateBreakDraft((draft) => ({ ...draft, form })),
-  onDegree: (step) => updateBreakDraft((draft) => setPolynomialDegree(draft, draft.degree + step)),
-  onClear: () => updateBreakDraft((draft) => ({ ...draft, breaks: [], degrees: [1] })),
-  onTransform: transformActiveTerm
 });
 
 async function selectFeature(term) {
@@ -1620,13 +1560,21 @@ if (setReference) {
     await runStructuralRefit(setReferenceTransition(selectedTerm(), label));
   });
 }
+for (const button of shapeButtons) {
+  button.addEventListener("click", async () => {
+    const term = currentTerm();
+    const range = term && shapeRangeForSelection(term, currentSelection());
+    if (!range || button.getAttribute("aria-disabled") === "true") return;
+    const degree = Number(button.dataset.shapeDegree);
+    await runStructuralRefit(shapeRangeTransition(selectedTerm(), range.lo, range.hi, degree));
+  });
+}
 restoreStructure.addEventListener("click", async () => {
   await runStructuralRefit(restoreTransition());
 });
 
 
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
-store.subscribe(selectBreaksRenderState, renderBreaksControlsState, sameBreaksRenderState);
 store.subscribe(
   selectFeatureListRenderState,
   renderFeatureListState,

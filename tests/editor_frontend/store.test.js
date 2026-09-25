@@ -20,7 +20,6 @@ const {
   normalizeSelectionIndices,
   patchView,
   selectionIndicesEqual,
-  setBreakDraft,
   setSelectionPreview,
   setPreviewTerm
 } = storeModule;
@@ -48,7 +47,7 @@ function snapshot(revision = 0) {
       age: {
         kind: "spline", term_type: "spline", x: [1], y: [1], original_y: [1],
         previous_y: null, levels: null, n_points: 1, controls: null,
-        group_display: null, impact: {}
+        group_display: null, impact: {}, shape: { available: true, reason: null, ranges: [] }
       }
     },
     selection: { age: [0] },
@@ -650,8 +649,6 @@ test("selectors expose confirmed state defaults and per-term display overrides",
   assert.strictEqual(selectCurrentTerm(state), confirmed.terms.age);
   assert.deepEqual(selectCurrentSelection(state), [0]);
   assert.equal(selectGroupDisplayMode(state), "collapsed");
-  // Breaks name original bands, so Breaks mode draws every band.
-  assert.equal(selectGroupDisplayMode(patchView(state, { mode: "breaks" })), "expanded");
   assert.strictEqual(selectMutation(state), state.request.mutation);
   assert.strictEqual(selectEvidence("metrics")(state), state.request.evidence.metrics);
 
@@ -665,20 +662,6 @@ test("selectors expose confirmed state defaults and per-term display overrides",
   assert.deepEqual(selectCurrentSelection(empty), []);
   assert.equal(selectRenderableTerm(empty), null);
   assert.equal(selectGroupDisplayMode(empty), "expanded");
-});
-
-test("a break draft is kept per term and deleted by a null draft", () => {
-  const initial = createInitialEditorState(snapshot(1));
-  assert.deepEqual(initial.view.breakDraftByTerm, {});
-  /** @type {import('../../src/superglm/editor/app/api/contracts.js').BreakDraft} */
-  const draft = { form: "piecewise", breaks: [2.5], degrees: [1, 1], degree: 3 };
-  const withDraft = setBreakDraft(initial, "age", draft);
-  assert.deepEqual(withDraft.view.breakDraftByTerm, { age: draft });
-  assert.deepEqual(initial.view.breakDraftByTerm, {});
-  const cleared = setBreakDraft(withDraft, "age", null);
-  assert.deepEqual(cleared.view.breakDraftByTerm, {});
-  assert.equal("age" in cleared.view.breakDraftByTerm, false);
-  assert.strictEqual(setBreakDraft(cleared, "age", null), cleared);
 });
 
 test("state modules expose only their requested public symbols", () => {
@@ -695,7 +678,6 @@ test("state modules expose only their requested public symbols", () => {
     "normalizeSelectionIndices",
     "patchView",
     "selectionIndicesEqual",
-    "setBreakDraft",
     "setPreviewTerm",
     "setSelectionPreview"
   ]);

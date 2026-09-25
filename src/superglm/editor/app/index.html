@@ -109,37 +109,6 @@
     <button id="resetZoom" type="button">Home</button>
     <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
     <button type="button" data-op="reset">Reset</button>
-    <div id="breaksControls" class="breaks-controls" hidden>
-      <div class="form-switch" role="radiogroup" aria-label="Form">
-        <button type="button" role="radio" aria-checked="true" data-form="piecewise"
-          data-popover-title="Piecewise"
-          data-popover-body="Straight segments between the breaks. On an ordered term each segment can be flat, linear, quadratic or cubic.">Piecewise</button>
-        <button type="button" role="radio" aria-checked="false" data-form="spline"
-          data-popover-title="Spline"
-          data-popover-body="A smooth curve with a knot at each break. Keeps the term's spline settings and any shape constraint.">Spline</button>
-        <button type="button" role="radio" aria-checked="false" data-form="polynomial"
-          data-popover-title="Polynomial"
-          data-popover-body="One polynomial across the whole axis, degree 1 to 5. Breaks are not used.">Polynomial</button>
-      </div>
-      <div id="polynomialDegreeWrap" class="degree-stepper" hidden>
-        <span>Degree</span>
-        <button type="button" data-degree-step="-1" aria-label="Lower degree">&minus;</button>
-        <output id="polynomialDegree">3</output>
-        <button type="button" data-degree-step="1" aria-label="Raise degree">+</button>
-      </div>
-      <span id="breaksHint" class="breaks-hint" role="status" aria-live="polite"></span>
-      <button id="clearBreaks" type="button">Clear breaks</button>
-      <button id="transformTerm" class="icon-button primary" type="button"
-        aria-label="Transform and refit" data-help-operation="transform_term"
-        data-popover-title="Transform and refit"
-        data-popover-body="Replace this term with the form and breaks shown, then refit the model. Restore undoes it.">
-        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M3 17h5l5-9h8"></path>
-          <circle cx="8" cy="17" r="1.8"></circle>
-          <circle cx="13" cy="8" r="1.8"></circle>
-        </svg>
-      </button>
-    </div>
     <button id="restoreStructure" class="icon-button action-bar-end" type="button"
       aria-label="Restore previous structure" data-popover-title="Restore previous structure"
       data-popover-body="" hidden>
@@ -195,13 +164,6 @@
             <circle cx="4" cy="17" r="2"></circle>
             <circle cx="12" cy="8" r="2"></circle>
             <circle cx="20" cy="17" r="2"></circle>
-          </svg>
-        </button>
-        <button type="button" role="radio" aria-checked="false" aria-label="Breaks"
-          aria-keyshortcuts="B" data-tool="breaks" tabindex="-1">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M3 15c3-7 6-7 9 0s6 7 9 0"></path>
-            <path d="M9 4v16M15 4v16" stroke-dasharray="2.5 2.5"></path>
           </svg>
         </button>
       </div>
@@ -335,6 +297,34 @@
             <path d="M12 18c-3-3.2-4.5-5.8-4.5-8a4.5 4.5 0 0 1 9 0c0 2.2-1.5 4.8-4.5 8z"></path>
             <circle cx="12" cy="10" r="1.5"></circle>
             <path d="M5 20h14"></path>
+          </svg>
+        </button>
+        <button id="shapeFlat" class="selection-item" data-shape-degree="0"
+          data-help-operation="shape_flat" type="button" aria-label="Flat and refit" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path class="range-ticks" d="M4 4v16M20 4v16"></path>
+            <path d="M4 12h16"></path>
+          </svg>
+        </button>
+        <button id="shapeLine" class="selection-item" data-shape-degree="1"
+          data-help-operation="shape_line" type="button" aria-label="Line and refit" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path class="range-ticks" d="M4 4v16M20 4v16"></path>
+            <path d="M4 18 20 6"></path>
+          </svg>
+        </button>
+        <button id="shapeQuadratic" class="selection-item" data-shape-degree="2"
+          data-help-operation="shape_quadratic" type="button" aria-label="Quadratic and refit" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path class="range-ticks" d="M4 4v16M20 4v16"></path>
+            <path d="M4 18Q12 -2 20 18"></path>
+          </svg>
+        </button>
+        <button id="shapeCubic" class="selection-item" data-shape-degree="3"
+          data-help-operation="shape_cubic" type="button" aria-label="Cubic and refit" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path class="range-ticks" d="M4 4v16M20 4v16"></path>
+            <path d="M4 18C12 18 12 6 20 6"></path>
           </svg>
         </button>
         </div>

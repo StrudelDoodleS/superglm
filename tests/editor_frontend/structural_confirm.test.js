@@ -120,9 +120,18 @@ test("collapse impact copies exact selected category labels and history count", 
   assert.notStrictEqual(impact.selectedLabels, current.terms.region.levels);
 });
 
-test("structural impact uses exact operation copy for ungroup and restore", () => {
+test("structural impact uses exact operation copy for ungroup, shape and restore", () => {
   const current = deepFreeze(snapshot(2, 0, COLLAPSE_STEP));
   const cases = [
+    {
+      operation: {
+        name: "shape and refit",
+        path: "/shape_range",
+        payload: { term: "region", lo: "B", hi: "C", degree: 1, method: "auto" },
+      },
+      title: "Shape range",
+      message: "Shape range B, C in region? This refit clears 2 manual edit history entries.",
+    },
     {
       operation: {
         name: "ungroup levels",

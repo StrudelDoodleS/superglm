@@ -16,7 +16,7 @@ const {
   restoreTransition,
   revertTransition,
   setReferenceTransition,
-  transformTransition,
+  shapeRangeTransition,
   runOffsetRefit,
   ungroupTransition
 } = await import(summaryModulePath);
@@ -30,7 +30,7 @@ function snapshot(revision) {
       age: {
         kind: "spline", term_type: "spline", x: [1], y: [1], original_y: [1],
         previous_y: null, levels: null, n_points: 1, controls: null,
-        group_display: null, impact: {}
+        group_display: null, impact: {}, shape: { available: true, reason: null, ranges: [] }
       }
     },
     selection: { age: [0] },
@@ -202,10 +202,13 @@ test("structural transition descriptors are pure route descriptions", () => {
     path: "/revert_to_original",
     payload: {}
   });
-  assert.deepEqual(transformTransition({ term: "age", form: "spline", breaks: ["B3"] }), {
-    name: "transform and refit",
-    path: "/transform_term",
-    payload: { term: "age", form: "spline", breaks: ["B3"] }
+  assert.deepEqual(shapeRangeTransition("age", 30, 45, 1), {
+    name: "shape and refit",
+    path: "/shape_range",
+    payload: { term: "age", lo: 30, hi: 45, degree: 1, method: "auto" }
+  });
+  assert.deepEqual(shapeRangeTransition("band", "B2", "B4", 0).payload, {
+    term: "band", lo: "B2", hi: "B4", degree: 0, method: "auto"
   });
 });
 
