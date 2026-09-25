@@ -112,8 +112,11 @@ over it to see the shape and its edges.
 - On an ordered term the range covers whole bands and is drawn from the first band to the last.
   Two ranges can share an edge band.
 - The curve stays continuous at each edge of the range, but its slope may change there.
-- Flat fits a level to the range. To hold the curve at its value at a range's edge instead of
-  fitting a level, use **Level from left** or **Level from right**. That is an edit, not a refit.
+- Flat fits a level to the range. **Hold**, the icon after Cubic, is the one-click form of
+  **Level from left** or **Level from right** for a tail: on a run that reaches one end of the
+  axis, it holds the curve at its value where the run begins and keeps it flat to that end. It is
+  an edit, not a refit, so it works on any term except an unordered categorical one, and Undo
+  removes it.
 - To fit one polynomial over the whole axis, choose Select all and then a shape.
 - A term can hold several ranges, each added as its own step.
 - A new range may not overlap one already shaped. Restore the old one, or choose a range outside

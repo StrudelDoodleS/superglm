@@ -4,9 +4,12 @@ import test from "node:test";
 
 import {
   GROUPED_EDGE,
+  HOLD_NEEDS_AN_END,
+  HOLD_NEEDS_A_FREE_PART,
   NOT_CONTIGUOUS,
   SPECIAL_LEVEL,
   TOO_FEW_POINTS,
+  holdButtonState,
   shapeButtonState,
   shapeRangeDescription,
   shapeRangeExtent,
@@ -155,6 +158,39 @@ test("a numeric run is gated on the values Python counts between its snapped edg
   assert.equal(shapeButtonState(numeric, new Set([1, 2]), 3).enabled, true);
 });
 
+test("Hold levels a tail from the end the run leaves free", () => {
+  // Reaching the last point, it holds the value where the run starts: Level from left.
+  assert.deepEqual(holdButtonState(numeric, new Set([4, 5])), {
+    visible: true,
+    enabled: true,
+    reason: null,
+    operation: "level_left"
+  });
+  // Reaching the first, it holds the value where the run ends: Level from right.
+  assert.equal(holdButtonState(numeric, new Set([0, 1, 2])).operation, "level_right");
+  // Bands take it too, and so does a linear term: it is a level edit, not a shape.
+  assert.equal(holdButtonState(ordered(), new Set([3, 4, 5])).operation, "level_left");
+  const linear = { ...numeric, term_type: "numeric", shape: { ...AVAILABLE, available: false } };
+  assert.equal(holdButtonState(linear, new Set([0, 1])).enabled, true);
+});
+
+test("Hold says why a run cannot be held", () => {
+  const disabled = (reason) => ({ visible: true, enabled: false, reason, operation: null });
+  assert.deepEqual(holdButtonState(numeric, new Set([2, 3])), disabled(HOLD_NEEDS_AN_END));
+  assert.deepEqual(
+    holdButtonState(numeric, new Set([0, 1, 2, 3, 4, 5])),
+    disabled(HOLD_NEEDS_A_FREE_PART)
+  );
+  assert.deepEqual(holdButtonState(numeric, new Set([3, 5])), disabled(NOT_CONTIGUOUS));
+  const categorical = { term_type: "categorical", x: [0, 1], levels: ["N", "S"], shape: AVAILABLE };
+  assert.deepEqual(holdButtonState(categorical, new Set([1])), {
+    visible: false,
+    enabled: false,
+    reason: null,
+    operation: null
+  });
+});
+
 test("the overlay names the pinned shape and its edges", () => {
   assert.equal(
     shapeRangeDescription({ lo: 30, hi: 45, degree: 1, label: "Line" }),
@@ -208,7 +244,7 @@ globalThis.HTMLElement = FakeElement;
 test("a disabled shape icon's reason outranks its operation help", () => {
   assert.equal(OPERATION_HELP.shape_line.title, "Line and refit");
   assert.deepEqual(Object.keys(OPERATION_HELP).filter((key) => key.startsWith("shape_")), [
-    "shape_flat", "shape_line", "shape_quadratic", "shape_cubic"
+    "shape_flat", "shape_line", "shape_quadratic", "shape_cubic", "shape_hold"
   ]);
   const enabled = new FakeElement({ helpOperation: "shape_line" });
   assert.strictEqual(helpForElement(enabled), OPERATION_HELP.shape_line);

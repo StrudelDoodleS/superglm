@@ -3,7 +3,7 @@ import { drawChart, groupedTerms, updateChartSelection } from "./chart.js";
 import { renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
-import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
+import { holdButtonState, shapeButtonState, shapeRangeForSelection } from "./shapes.js";
 import { createEditorActions } from "./state/actions.js";
 import {
   selectActiveTermName,
@@ -126,6 +126,7 @@ const ungroupLevels = document.getElementById("ungroupLevels");
 const setReference = document.getElementById("setReference");
 const restoreStructure = document.getElementById("restoreStructure");
 const shapeButtons = [...document.querySelectorAll("button[data-shape-degree]")];
+const shapeHold = document.getElementById("shapeHold");
 const structuralConfirmDialog = document.getElementById("structuralConfirmDialog");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
@@ -322,6 +323,11 @@ async function executeStateMutation(path, payload) {
     path,
     payload
   });
+}
+
+async function runOperation(operation) {
+  stopContributionBuild();
+  await executeStateMutation("/op", { operation });
 }
 
 function mutationName(path, payload) {
@@ -1192,15 +1198,19 @@ function updateCollapseAction(term, selection) {
 }
 
 // The four shape icons share one state per selection, except that the bands
-// of an ordered term bound the degree they can carry.
+// of an ordered term bound the degree they can carry. Hold beside them is a level edit.
 function updateShapeActions(term, selection) {
   for (const button of shapeButtons) {
     const degree = Number(button.dataset.shapeDegree);
-    const { visible, enabled, reason } = shapeButtonState(term, selection, degree);
-    button.hidden = !visible;
-    button.setAttribute("aria-disabled", String(!enabled));
-    renderShapeReason(button, reason);
+    renderShapeState(button, shapeButtonState(term, selection, degree));
   }
+  renderShapeState(shapeHold, holdButtonState(term, selection));
+}
+
+function renderShapeState(button, { visible, enabled, reason }) {
+  button.hidden = !visible;
+  button.setAttribute("aria-disabled", String(!enabled));
+  renderShapeReason(button, reason);
 }
 
 // A disabled shape icon says why; its own popover text outranks the operation help.
@@ -1494,8 +1504,7 @@ for (const button of document.querySelectorAll("button[data-op]")) {
       });
       return;
     }
-    stopContributionBuild();
-    await executeStateMutation("/op", { operation });
+    await runOperation(operation);
   });
 }
 
@@ -1573,6 +1582,13 @@ for (const button of shapeButtons) {
     await runStructuralRefit(shapeRangeTransition(selectedTerm(), range.lo, range.hi, degree));
   });
 }
+// Hold dispatches the Level menu's own edit, so history, undo and evidence match it.
+shapeHold.addEventListener("click", async () => {
+  const term = currentTerm();
+  const operation = term && holdButtonState(term, currentSelection()).operation;
+  if (!operation) return;
+  await runOperation(operation);
+});
 restoreStructure.addEventListener("click", async () => {
   await runStructuralRefit(restoreTransition());
 });
