@@ -83,6 +83,16 @@ def _drawn_y(page) -> list[float]:
     return page.evaluate("() => document.querySelector('#chart')._scale.y")
 
 
+def _history_rows(page) -> list[list[str]]:
+    """Each row of the History tab as [class, text], top to bottom."""
+    return page.evaluate(
+        """() => Array.from(
+            document.querySelectorAll('#historyFrame .history-list > li'),
+            row => [row.className, (row.querySelector('.history-label') ?? row).textContent],
+        )"""
+    )
+
+
 def test_line_icon_pins_a_run_of_points_and_undo_and_redo_step_across_it(open_editor_page):
     with open_editor_page() as (page, session):
         before = session.model
@@ -322,3 +332,42 @@ def test_revert_is_one_step_that_undo_takes_back(open_editor_page):
         page.wait_for_function("() => !document.querySelector('#revertAction').disabled")
         assert markers.count() == 2
         assert session.model is collapsed
+
+
+def test_history_lists_the_session_in_order_and_follows_undo_and_redo(open_editor_page):
+    with open_editor_page() as (page, session):
+        _box_select_x(page, 3.0, 5.0)
+        with page.expect_response(_posted("/op")):
+            page.get_by_role("button", name="Increase selection").click()
+        line = page.locator("#shapeLine")
+        line.wait_for(state="visible")
+        with page.expect_response(_posted("/shape_range")):
+            line.click()
+        _settled_after_refit(page)
+        shape = session.structure_history[-1].label
+
+        page.locator("#historyTab").click()
+        rows = "document.querySelectorAll('#historyFrame .history-list > li')"
+        page.wait_for_function(f"() => {rows}.length === 3")
+        listed = [
+            ["history-item edit", "shift curve"],
+            ["history-item structural", shape],
+            ["history-now", "now"],
+        ]
+        assert _history_rows(page) == listed
+
+        with page.expect_response(_posted("/op")):
+            page.keyboard.press("Control+z")
+        page.wait_for_function(f"() => {rows}[2].classList.contains('redo')")
+        assert session.structure_redo[-1].label == shape
+        assert _history_rows(page) == [
+            ["history-item edit", "shift curve"],
+            ["history-now", "now"],
+            ["history-item structural redo", shape],
+        ]
+
+        with page.expect_response(_posted("/op")):
+            page.keyboard.press("Control+Shift+z")
+        page.wait_for_function(f"() => {rows}[1].classList.contains('history-item')")
+        assert session.structure_history[-1].label == shape
+        assert _history_rows(page) == listed

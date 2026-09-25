@@ -18,9 +18,18 @@
  * @property {Record<string, unknown>} [compact]
  */
 /**
- * @typedef {Object} EditorHistory
- * @property {Array<Record<string, unknown>>} active
- * @property {Array<Record<string, unknown>>} redo
+ * One action on the session's timeline, oldest first. The "marker" entry is
+ * the current position: Undo takes the entry before it, and the `redo`
+ * entries after it are what Redo would put back, in that order.
+ * @typedef {Object} TimelineEntry
+ * @property {"edit"|"structural"|"marker"} kind
+ * @property {string} [operation]
+ * @property {string|null} [term]
+ * @property {string} [label]
+ * @property {number} [n_points]
+ * @property {Record<string, unknown>} [params]
+ * @property {string} [hash]
+ * @property {boolean} [redo]
  */
 /**
  * @typedef {Object} GroupDisplayPayload
@@ -122,7 +131,7 @@
  * @property {Record<string, TermPayload>} terms
  * @property {Record<string, number[]>} selection
  * @property {UndoRedo} undo_redo
- * @property {EditorHistory} history
+ * @property {TimelineEntry[]} timeline
  * @property {boolean} in_force_is_original
  */
 /**

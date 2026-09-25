@@ -41,8 +41,8 @@ from superglm.editor.io import jsonable
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import (
-    history_payload,
     session_payload,
+    timeline_payload,
     undo_redo_payload,
 )
 from superglm.editor.reports import report_payload, split_metrics_payload
@@ -174,7 +174,7 @@ class EditorWidget:
                     for name in self.session.terms
                 },
                 "undo_redo": undo_redo_payload(self.session),
-                "history": history_payload(self.session),
+                "timeline": timeline_payload(self.session),
                 # With the live edits, this says whether Revert has anything to
                 # change: a structural step or a re-profile each make it False.
                 "in_force_is_original": self.session.model is self.session.reference_model,

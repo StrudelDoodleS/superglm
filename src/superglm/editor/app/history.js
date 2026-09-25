@@ -1,38 +1,53 @@
 import { escapeHTML } from "./format.js";
 
-export function renderHistory(history, node) {
+/** @typedef {import('./api/contracts.js').TimelineEntry} TimelineEntry */
+
+/**
+ * Render the session's timeline: every edit and structural step in order, a
+ * marker at the current position, and what Redo would put back, muted, after it.
+ * @param {TimelineEntry[]|undefined} timeline
+ * @param {HTMLElement|null} node
+ */
+export function renderHistory(timeline, node) {
   if (!node) return;
-  const active = history && Array.isArray(history.active) ? history.active : [];
-  const redo = history && Array.isArray(history.redo) ? history.redo : [];
-  if (!active.length && !redo.length) {
-    node.innerHTML = `<div class="history-empty">No edits yet.</div>`;
+  const entries = Array.isArray(timeline) ? timeline : [];
+  if (entries.length <= 1) {
+    node.innerHTML = `<div class="history-empty">Nothing yet.</div>`;
     return;
   }
-  node.innerHTML = [
-    historyList("Active edits", active),
-    redo.length ? historyList("Redo stack", redo, true) : ""
-  ].join("");
+  node.innerHTML = `<ol class="history-list">${entries.map(historyItem).join("")}</ol>`;
+  node.querySelector(".history-now")?.scrollIntoView({ block: "nearest" });
 }
 
-function historyList(title, records, muted = false) {
-  const items = records.map((record) => historyItem(record, muted)).join("");
-  return `<section class="history-section${muted ? " muted" : ""}">
-    <h3>${escapeHTML(title)}</h3>
-    <ol class="history-list">${items}</ol>
-  </section>`;
-}
-
-function historyItem(record, muted) {
-  const params = paramsLabel(record.params);
-  return `<li class="history-item${record.is_head ? " head" : ""}${muted ? " muted" : ""}">
-    <code class="history-hash">${escapeHTML(record.hash || "-------")}</code>
+/** @param {TimelineEntry} entry */
+function historyItem(entry) {
+  if (entry.kind === "marker") {
+    return `<li class="history-now" role="separator" aria-label="Current position">now</li>`;
+  }
+  const meta = entry.kind === "edit" ? `<div class="history-meta">${editMeta(entry)}</div>` : "";
+  return `<li class="history-item ${entry.kind}${entry.redo ? " redo" : ""}">
+    ${entryMark(entry)}
     <div class="history-body">
-      <div><strong>${escapeHTML(record.operation || "edit")}</strong> · ${escapeHTML(record.term || "")}</div>
-      <div class="history-meta">${Number(record.n_points || 0)} points${params ? ` · ${escapeHTML(params)}` : ""}</div>
+      <div class="history-label">${escapeHTML(entry.label || "")}</div>
+      ${meta}
     </div>
   </li>`;
 }
 
+/** @param {TimelineEntry} entry */
+function entryMark(entry) {
+  return entry.kind === "edit"
+    ? `<code class="history-hash">${escapeHTML(entry.hash || "-------")}</code>`
+    : `<span class="history-chip">step</span>`;
+}
+
+/** @param {TimelineEntry} entry */
+function editMeta(entry) {
+  const params = paramsLabel(entry.params);
+  return `${Number(entry.n_points || 0)} points${params ? ` · ${escapeHTML(params)}` : ""}`;
+}
+
+/** @param {Record<string, unknown>|undefined} params */
 function paramsLabel(params) {
   if (!params || typeof params !== "object") return "";
   return Object.entries(params)

@@ -194,6 +194,7 @@ export const HELP_SECTIONS = Object.freeze([
       "Ctrl/Cmd+Z: undo",
       "Ctrl/Cmd+Shift+Z or Ctrl+Y: redo",
       "Revert to original model is one more step: Undo brings back everything it cleared.",
+      "History, in the inspector, lists every edit and step of the session in order. Undo takes the entry above the current-position line; the muted entries below it are what Redo would put back.",
     ]),
   }),
   Object.freeze({

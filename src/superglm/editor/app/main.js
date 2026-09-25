@@ -244,7 +244,7 @@ const inspector = bindInspector({
   onPanelChange: (panel) => {
     actions.patchView({ inspectorPane: panel });
     const snapshot = store.getState().remote.snapshot;
-    if (panel === "history" && snapshot) renderHistory(snapshot.history, historyFrame);
+    if (panel === "history" && snapshot) renderHistory(snapshot.timeline, historyFrame);
     scheduleVisibleEvidenceCatchUp();
   },
   onOpenChange: (open) => {
@@ -855,16 +855,16 @@ function sameChartRenderState(next, previous) {
 }
 
 function selectHistoryRenderState(state) {
-  const history = state.remote.snapshot?.history || null;
-  return { history, key: history ? JSON.stringify(history) : "" };
+  const timeline = state.remote.snapshot?.timeline || null;
+  return { timeline, key: timeline ? JSON.stringify(timeline) : "" };
 }
 
 function sameHistoryRenderState(next, previous) {
   return next.key === previous.key;
 }
 
-function renderHistoryState({ history }) {
-  if (history) renderHistory(history, historyFrame);
+function renderHistoryState({ timeline }) {
+  if (timeline) renderHistory(timeline, historyFrame);
 }
 
 function selectAppBarRenderState(state) {

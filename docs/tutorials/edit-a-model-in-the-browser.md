@@ -188,8 +188,12 @@ remain in Python; the browser receives aggregate metrics rather than a copy of t
 
 ## Inspector and Help
 
-Summary shows the current in-force model, History shows confirmed edits, Advanced contains
-infrequent curve and diagnostic controls, and Help lists modes, gestures, operations, and shortcuts.
+Summary shows the current in-force model. History lists every manual edit and structural step of
+the session in the order you made them, each step marked as one; a line marks the current
+position, so Undo takes the entry just above it, and the muted entries below it are what Redo would
+put back. Undoing a step moves it and the edits after it below the line; nothing is cleared. A
+distribution re-profile starts the list afresh, as it does for Undo. Advanced contains infrequent
+curve and diagnostic controls, and Help lists modes, gestures, operations, and shortcuts.
 On a narrow screen these panes share a dismissible drawer. Escape closes a popover or drawer and
 returns focus to its launcher.
 

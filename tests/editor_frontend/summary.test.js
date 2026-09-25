@@ -20,7 +20,10 @@ const {
   ungroupTransition
 } = await import(summaryModulePath);
 
-/** @param {number} revision */
+/**
+ * @param {number} revision
+ * @returns {import("../../src/superglm/editor/app/api/contracts.js").EditorSnapshot}
+ */
 function snapshot(revision) {
   return {
     model_revision: revision,
@@ -34,7 +37,7 @@ function snapshot(revision) {
     },
     selection: { age: [0] },
     undo_redo: { undo: null, redo: null },
-    history: { active: [], redo: [] },
+    timeline: [{ kind: "marker" }],
     in_force_is_original: true
   };
 }

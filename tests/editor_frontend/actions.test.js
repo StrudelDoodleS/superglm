@@ -45,7 +45,7 @@ function snapshot(revision) {
     terms: { age: termPayload() },
     selection: { age: [0] },
     undo_redo: { undo: null, redo: null },
-    history: { active: [], redo: [] },
+    timeline: [{ kind: "marker" }],
     in_force_is_original: true
   };
 }

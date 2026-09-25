@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from itertools import chain
 from typing import Any
 
 import numpy as np
 
+from superglm.editor._types import StructuralStep
 from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES
 from superglm.editor.group_display import build_group_display
 from superglm.editor.shapes import shape_payload
@@ -66,13 +68,63 @@ def session_payload(
     return payload
 
 
-def history_payload(session) -> dict[str, Any]:
-    """Return display metadata for the session's linear edit history."""
-    active = _history_records_payload(getattr(session, "history", []))
-    redo = _history_records_payload(getattr(session, "redo_stack", []))
-    if active:
-        active[0]["is_head"] = True
-    return {"active": active, "redo": redo}
+def timeline_payload(session) -> list[dict[str, Any]]:
+    """Every action in the session, oldest first, with a marker at the current position.
+
+    Before the marker: for each structural step on the undo stack, the edits
+    made before it and then the step, then the live edits. After it, what
+    Redo would put back in the order it would: the undone edits, then each
+    undone step followed by the edits undone after it. A step on the undo
+    stack holds the state before it; on the redo stack, the state it left.
+    """
+    done = [
+        *chain.from_iterable(map(_before_step, session.structure_history)),
+        *session.history,
+    ]
+    undone = [
+        *reversed(session.redo_stack),
+        *chain.from_iterable(map(_after_step, reversed(session.structure_redo))),
+    ]
+    entries: list[dict[str, Any]] = []
+    parent: str | None = None
+    for position, item in enumerate([*done, None, *undone]):
+        entry = _timeline_entry(item, parent, redo=position > len(done))
+        parent = entry.get("hash", parent)
+        entries.append(entry)
+    return entries
+
+
+def _before_step(step: StructuralStep) -> list[Any]:
+    return [*step.state.history, step]
+
+
+def _after_step(step: StructuralStep) -> list[Any]:
+    return [step, *reversed(step.state.redo_stack)]
+
+
+def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, Any]:
+    if item is None:
+        return {"kind": "marker"}
+    if isinstance(item, StructuralStep):
+        return {
+            "kind": "structural",
+            "operation": item.operation,
+            "term": item.term,
+            "label": item.label,
+            "redo": redo,
+        }
+    # The hash chains through the edits in timeline order, so it names an edit
+    # by its place in the session and survives its moves across the marker.
+    return {
+        "kind": "edit",
+        "operation": str(item.operation),
+        "term": str(item.term),
+        "label": _edit_label(item),
+        "n_points": int(np.asarray(item.indices, dtype=np.intp).size),
+        "params": _json_safe(item.params),
+        "hash": _record_hash(item, parent_hash),
+        "redo": redo,
+    }
 
 
 def undo_redo_payload(session) -> dict[str, str | None]:
@@ -86,28 +138,12 @@ def undo_redo_payload(session) -> dict[str, str | None]:
 def _next_label(records, steps) -> str | None:
     """The live edits lie nearer than any structural step, either way, so they go first."""
     if records:
-        return f"{records[-1].operation.replace('_', ' ')} {records[-1].term}"
+        return _edit_label(records[-1])
     return steps[-1].label if steps else None
 
 
-def _history_records_payload(records) -> list[dict[str, Any]]:
-    parent_hash: str | None = None
-    chronological = []
-    for record in records:
-        record_hash = _record_hash(record, parent_hash)
-        chronological.append(
-            {
-                "hash": record_hash,
-                "parent": parent_hash,
-                "term": str(record.term),
-                "operation": str(record.operation),
-                "n_points": int(np.asarray(record.indices, dtype=np.intp).size),
-                "params": _json_safe(record.params),
-                "is_head": False,
-            }
-        )
-        parent_hash = record_hash
-    return list(reversed(chronological))
+def _edit_label(record) -> str:
+    return f"{record.operation.replace('_', ' ')} {record.term}"
 
 
 def _record_hash(record, parent_hash: str | None) -> str:

@@ -28,7 +28,7 @@ from superglm import (
 from superglm.editor import EditorSession
 from superglm.editor import session as session_module
 from superglm.editor.errors import EditorValueError
-from superglm.editor.payloads import session_payload
+from superglm.editor.payloads import session_payload, timeline_payload, undo_redo_payload
 from superglm.editor.session import _SHAPE_REFUSED, _STRETCH_REFUSED
 from superglm.editor.shapes import EDITOR_CHOSEN_SHAPE_ATTRIBUTE, _numeric_edges, snap_edge
 from superglm.editor.summaries import summary_payload
@@ -123,6 +123,7 @@ def test_state_says_when_the_in_force_model_is_not_the_opened_one(region_model, 
         # A re-profile replaces the in-force model and clears both histories:
         # only this fact leaves Revert something to do.
         assert state["undo_redo"] == {"undo": None, "redo": None}
+        assert state["timeline"] == [{"kind": "marker"}]
         assert state["in_force_is_original"] is False
         assert widget._revert_to_original()["state"]["in_force_is_original"] is True
     finally:
@@ -1077,6 +1078,103 @@ def test_the_timeline_holds_one_state_per_step(region_model):
     gc.collect()
     # The new edit ended the undone step's future, and its model with it.
     assert dropped() is None
+
+
+def _outline(session) -> list[tuple[str, str | None, bool | None]]:
+    """Each timeline entry as (kind, label, redo): what a reader of the History tab sees."""
+    return [(e["kind"], e.get("label"), e.get("redo")) for e in timeline_payload(session)]
+
+
+def test_the_timeline_lists_every_action_around_the_current_position(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_levels("region", ["D"])
+    session.shift("region", 0.1)
+    session.replace_with_shaped_range("x", lo=2.0, hi=4.0, degree=1, method="fit")
+    shape = session.structure_history[-1].label
+    session.select_indices("x", [0, 1])
+    session.shift("x", -0.05)
+    session.undo()
+
+    assert _outline(session) == [
+        ("edit", "shift region", False),
+        ("structural", shape, False),
+        ("marker", None, None),
+        ("edit", "shift x", True),
+    ]
+    # The entries either side of the marker read as the Undo and Redo popovers do.
+    assert undo_redo_payload(session) == {"undo": shape, "redo": "shift x"}
+    undone = timeline_payload(session)[-1]
+
+    session.redo()
+    assert _outline(session) == [
+        ("edit", "shift region", False),
+        ("structural", shape, False),
+        ("edit", "shift x", False),
+        ("marker", None, None),
+    ]
+    # An edit's hash names its place in the session, whichever side of the marker it is on.
+    assert timeline_payload(session)[2]["hash"] == undone["hash"]
+
+    # Undone past the step, the step and the edits after it wait in the order Redo takes them.
+    session.select_indices("x", [5, 6])
+    session.smooth("x", 0.5)
+    session.undo().undo().undo()
+    assert _outline(session) == [
+        ("edit", "shift region", False),
+        ("marker", None, None),
+        ("structural", shape, True),
+        ("edit", "shift x", True),
+        ("edit", "smooth x", True),
+    ]
+
+
+def test_a_collapse_keeps_the_edits_made_before_it_on_the_timeline(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_indices("x", [2, 3])
+    session.shift("x", 0.1)
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+
+    assert session.history == []
+    assert _outline(session) == [
+        ("edit", "shift x", False),
+        ("structural", "collapse B + C in region", False),
+        ("marker", None, None),
+    ]
+
+    # Live edits undone after it queue for Redo in the order they were made.
+    session.select_indices("x", [5, 6])
+    session.smooth("x", 0.5)
+    session.select_levels("region", ["D"])
+    session.shift("region", 0.1)
+    session.undo().undo()
+    assert _outline(session)[2:] == [
+        ("marker", None, None),
+        ("edit", "smooth x", True),
+        ("edit", "shift region", True),
+    ]
+
+
+def test_revert_is_a_timeline_entry_that_waits_as_redo_once_undone(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_indices("x", [2, 3])
+    session.shift("x", 0.1)
+    session.revert_to_reference_model()
+    assert _outline(session) == [
+        ("edit", "shift x", False),
+        ("structural", "revert to original model", False),
+        ("marker", None, None),
+    ]
+
+    session.undo()
+    assert _outline(session) == [
+        ("edit", "shift x", False),
+        ("marker", None, None),
+        ("structural", "revert to original model", True),
+    ]
 
 
 def test_widget_http_revert_to_original_returns_transition_envelope(region_model):

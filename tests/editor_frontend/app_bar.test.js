@@ -179,16 +179,22 @@ test("Undo and Redo follow the snapshot and name what they would take", () => {
 
 test("Revert is available whenever anything differs from the opened model", () => {
   const snapshot = (overrides) => ({
-    history: { active: [], redo: [] },
+    timeline: [{ kind: "marker" }],
     undo_redo: { undo: null, redo: null },
     in_force_is_original: true,
     ...overrides,
   });
+  const marker = { kind: "marker" };
+  const edit = (redo) => ({ kind: "edit", label: "shift age", redo });
+  const step = (redo) => ({ kind: "structural", label: "Line 30–45 in age", redo });
   assert.equal(revertAvailable(snapshot({})), false);
-  assert.equal(revertAvailable(snapshot({ history: { active: [{}], redo: [] } })), true);
+  assert.equal(revertAvailable(snapshot({ timeline: [edit(false), marker] })), true);
+  assert.equal(revertAvailable(snapshot({ timeline: [step(false), edit(false), marker] })), true);
   // An undone edit or step differs from nothing in force, and Revert would
   // only push a step that changes nothing.
-  assert.equal(revertAvailable(snapshot({ history: { active: [], redo: [{}] } })), false);
+  assert.equal(revertAvailable(snapshot({ timeline: [marker, edit(true)] })), false);
+  // Edits before a step were set aside by it, so they are not live.
+  assert.equal(revertAvailable(snapshot({ timeline: [edit(false), step(false), marker] })), false);
   assert.equal(
     revertAvailable(snapshot({ undo_redo: { undo: "revert to original model", redo: "x" } })),
     false,

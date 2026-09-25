@@ -3942,42 +3942,44 @@ def test_session_payload_previous_y_uses_latest_edit_for_that_term(editor_model)
     assert payload["x_num"]["previous_y"] is not None
 
 
-def test_history_payload_includes_stable_linear_history(editor_model):
-    from superglm.editor.payloads import history_payload
+def test_timeline_payload_includes_stable_linear_history(editor_model):
+    from superglm.editor.payloads import timeline_payload
 
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     session.select_indices("x_spline", [0, 1])
     session.shift("x_spline", 0.05)
 
-    first = history_payload(session)["active"][0]
-    second = history_payload(session)["active"][0]
+    first, marker = timeline_payload(session)
+    second = timeline_payload(session)[0]
 
     assert first["hash"] == second["hash"]
     assert len(first["hash"]) == 7
+    assert first["kind"] == "edit"
     assert first["term"] == "x_spline"
     assert first["operation"] == "shift"
+    assert first["label"] == "shift x_spline"
     assert first["n_points"] == 2
-    assert first["is_head"] is True
+    assert first["redo"] is False
+    assert marker == {"kind": "marker"}
 
 
-def test_history_payload_reports_redo_stack_after_undo(editor_model):
-    from superglm.editor.payloads import history_payload
+def test_timeline_payload_puts_an_undone_edit_after_the_marker(editor_model):
+    from superglm.editor.payloads import timeline_payload
 
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     session.select_indices("x_spline", [0])
     session.shift("x_spline", 0.05)
     session.undo()
 
-    history = history_payload(session)
+    marker, undone = timeline_payload(session)
 
-    assert history["active"] == []
-    assert len(history["redo"]) == 1
-    assert history["redo"][0]["operation"] == "shift"
-    assert history["redo"][0]["is_head"] is False
+    assert marker == {"kind": "marker"}
+    assert undone["operation"] == "shift"
+    assert undone["redo"] is True
 
 
 def test_reset_clears_term_history_without_creating_reset_edit(editor_model):
-    from superglm.editor.payloads import history_payload, session_payload
+    from superglm.editor.payloads import session_payload, timeline_payload
 
     session = EditorSession.from_model(editor_model, terms=["x_spline", "x_num"])
     session.select_indices("x_spline", [0, 1])
@@ -3988,14 +3990,14 @@ def test_reset_clears_term_history_without_creating_reset_edit(editor_model):
 
     session.reset("x_spline")
 
-    history = history_payload(session)
-    assert [record["term"] for record in history["active"]] == ["x_num"]
-    assert history["redo"] == []
+    timeline = timeline_payload(session)
+    assert [entry.get("term") for entry in timeline] == ["x_num", None]
+    assert timeline[-1] == {"kind": "marker"}
     assert session_payload(session)["x_spline"]["previous_y"] is None
 
 
 def test_partial_reset_preserves_history_for_unreset_points(editor_model):
-    from superglm.editor.payloads import history_payload
+    from superglm.editor.payloads import timeline_payload
 
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     term = session.terms["x_spline"]
@@ -4006,11 +4008,11 @@ def test_partial_reset_preserves_history_for_unreset_points(editor_model):
     session.select_indices("x_spline", [0])
     session.reset("x_spline")
 
-    history = history_payload(session)
+    kept = timeline_payload(session)[0]
     assert term.edited_log_effect[0] == pytest.approx(original[0])
     assert term.edited_log_effect[1] == pytest.approx(original[1] + 0.05)
-    assert history["active"][0]["term"] == "x_spline"
-    assert history["active"][0]["n_points"] == 1
+    assert kept["term"] == "x_spline"
+    assert kept["n_points"] == 1
 
     session.undo("x_spline")
     assert term.edited_log_effect[0] == pytest.approx(original[0])
@@ -4028,7 +4030,7 @@ def test_widget_state_includes_edit_history(editor_model):
     finally:
         widget.close()
 
-    assert state["history"]["active"][0]["term"] == "x_spline"
+    assert state["timeline"][0]["term"] == "x_spline"
 
 
 def test_session_payload_adds_collapsed_group_display_for_ordered_levels(
@@ -5097,7 +5099,7 @@ def test_widget_http_drag_and_reset_updates_session(editor_model):
         _post_json(f"{widget.url}/op", {"operation": "reset"})
         assert term.edited_log_effect[5] == pytest.approx(original[5])
         state = _get_json(f"{widget.url}/state")
-        assert state["history"]["active"] == []
+        assert state["timeline"] == [{"kind": "marker"}]
         assert state["terms"]["x_spline"]["previous_y"] is None
     finally:
         widget.close()
@@ -6780,7 +6782,7 @@ def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
     assert history_js_path.exists()
 
 
-def test_editor_history_module_renders_hashes_and_redo_stack():
+def test_editor_history_module_renders_the_timeline():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     history_js_path = root / "history.js"
 
@@ -6788,7 +6790,8 @@ def test_editor_history_module_renders_hashes_and_redo_stack():
     source = history_js_path.read_text()
 
     assert "renderHistory" in source
-    assert "Redo stack" in source
+    assert "history-now" in source
+    assert "history-chip" in source
     assert "history-hash" in source
 
 

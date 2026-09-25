@@ -96,9 +96,7 @@ function isEditorSnapshot(value) {
   if (typeof value.selected_term !== "string") return false;
   if (!isRecord(value.terms) || !isRecord(value.selection)) return false;
   if (!isUndoRedo(value.undo_redo)) return false;
-  return isRecord(value.history) &&
-    Array.isArray(value.history.active) &&
-    Array.isArray(value.history.redo);
+  return Array.isArray(value.timeline);
 }
 
 /** @param {unknown} value @returns {boolean} */

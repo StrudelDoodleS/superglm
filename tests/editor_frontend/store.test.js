@@ -52,7 +52,7 @@ function snapshot(revision = 0) {
     },
     selection: { age: [0] },
     undo_redo: { undo: null, redo: null },
-    history: { active: [], redo: [] },
+    timeline: [{ kind: "marker" }],
     in_force_is_original: true
   };
 }
@@ -105,7 +105,7 @@ test("summary level display defaults expanded and patches view state only", () =
   assert.strictEqual(grouped.remote, initial.remote);
   assert.strictEqual(grouped.request, initial.request);
   assert.equal(grouped.remote.snapshot?.model_revision, 4);
-  assert.deepEqual(grouped.remote.snapshot?.history, initial.remote.snapshot?.history);
+  assert.deepEqual(grouped.remote.snapshot?.timeline, initial.remote.snapshot?.timeline);
 });
 
 test("structural transition commits snapshot and summary atomically without ending the mutation", () => {

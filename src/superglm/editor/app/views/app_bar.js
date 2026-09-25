@@ -121,10 +121,14 @@ export function renderAppBar({
 /**
  * Whether anything differs from the opened model: a live manual edit, or an
  * in-force model a structural step or a distribution re-profile put there.
+ * The live edits are the run just before the timeline's marker, so one exists
+ * exactly when the entry before the marker is an edit.
  * @param {EditorSnapshot} snapshot
  */
 export function revertAvailable(snapshot) {
-  return snapshot.history.active.length > 0 || !snapshot.in_force_is_original;
+  const { timeline } = snapshot;
+  const marker = timeline.findIndex((entry) => entry.kind === "marker");
+  return timeline[marker - 1]?.kind === "edit" || !snapshot.in_force_is_original;
 }
 
 /** @param {EventTarget | null} target */
