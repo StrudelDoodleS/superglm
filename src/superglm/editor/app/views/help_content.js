@@ -161,7 +161,7 @@ export const HELP_SECTIONS = Object.freeze([
     title: "Shaped ranges",
     items: Object.freeze([
       "Select a run of points or bands on a spline term, then choose Flat, Line, Quadratic or Cubic. That range is pinned to the shape; the rest of the term stays the fitted smooth.",
-      "The curve stays continuous at the range's edges and its slope may change there. Select all, then a shape, for one polynomial over the whole axis.",
+      "At each edge the curve leaves the shape along its slope (Tangent). The toggle beside the shape icons chooses Corner instead, where the slope may change at the edge. Select all, then a shape, for one polynomial over the whole axis.",
       "Flat fits a level. To hold the curve at its value at a range's edge instead of fitting a level, use Level from left or Level from right. That is an edit, not a refit.",
       "A new range may not overlap one already shaped, and one selected right beside it meets it. The same range with a new shape replaces it. Undo takes back the latest shape.",
       "A P-spline or natural spline term becomes a B-spline with a derivative penalty so its penalty can skip the shaped range; a natural spline's ends are then no longer held straight.",

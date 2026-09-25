@@ -50,12 +50,14 @@
 /**
  * A range of a term pinned to a polynomial. Edges are x values on a numeric
  * term and band labels on an ordered one; degree 0-3 is Flat, Line,
- * Quadratic or Cubic, which ``label`` names.
+ * Quadratic or Cubic, which ``label`` names. ``join`` is how the range meets
+ * the free curve at its edges: "tangent", or "kink" (Corner).
  * @typedef {Object} ShapedRange
  * @property {number|string} lo
  * @property {number|string} hi
  * @property {number} degree
  * @property {string} label
+ * @property {"tangent"|"kink"} [join]
  */
 /**
  * How many values a numeric term's refit sees, per grid point: ``below[k]``
@@ -78,12 +80,13 @@
  */
 /**
  * The /shape_range request: the selection's edges as shapeRangeForSelection
- * names them, and the degree of the icon chosen.
+ * names them, the degree of the icon chosen, and the join toggle's choice.
  * @typedef {Object} ShapeRangeRequest
  * @property {string} term
  * @property {number|string} lo
  * @property {number|string} hi
  * @property {number} degree
+ * @property {"tangent"|"kink"} join
  * @property {string} method
  */
 /**

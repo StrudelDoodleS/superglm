@@ -202,15 +202,17 @@ export function setReferenceTransition(term, level) {
 }
 
 /**
- * Named for its shape, which the busy overlay shows.
+ * Named for its shape, which the busy overlay shows. ``join`` is how the
+ * range meets the free curve: "tangent" (the default) or "kink" (Corner).
  * @param {string} term @param {number|string} lo @param {number|string} hi @param {number} degree
+ * @param {"tangent"|"kink"} [join]
  * @returns {{name:string, path:string, payload:ShapeRangeRequest}}
  */
-export function shapeRangeTransition(term, lo, hi, degree) {
+export function shapeRangeTransition(term, lo, hi, degree, join = "tangent") {
   return {
     name: `make a ${SHAPE_NAMES[degree]} range`,
     path: "/shape_range",
-    payload: { term, lo, hi, degree, method: "auto" }
+    payload: { term, lo, hi, degree, join, method: "auto" }
   };
 }
 

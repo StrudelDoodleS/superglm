@@ -199,13 +199,14 @@ test("structural transition descriptors are pure route descriptions", () => {
     path: "/revert_to_original",
     payload: {}
   });
+  // The join is the toggle's choice; Tangent when no choice is given.
   assert.deepEqual(shapeRangeTransition("age", 30, 45, 1), {
     name: "make a Line range",
     path: "/shape_range",
-    payload: { term: "age", lo: 30, hi: 45, degree: 1, method: "auto" }
+    payload: { term: "age", lo: 30, hi: 45, degree: 1, join: "tangent", method: "auto" }
   });
-  assert.deepEqual(shapeRangeTransition("band", "B2", "B4", 0).payload, {
-    term: "band", lo: "B2", hi: "B4", degree: 0, method: "auto"
+  assert.deepEqual(shapeRangeTransition("band", "B2", "B4", 0, "kink").payload, {
+    term: "band", lo: "B2", hi: "B4", degree: 0, join: "kink", method: "auto"
   });
 });
 
