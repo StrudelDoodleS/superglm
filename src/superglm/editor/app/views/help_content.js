@@ -114,11 +114,6 @@ export const OPERATION_HELP = Object.freeze({
     title: "Cubic and refit",
     body: "Make the selected range a cubic and refit. The rest of the curve stays smooth. Restore undoes it.",
   }),
-  shape_hold: Object.freeze({
-    title: "Hold level",
-    body:
-      "Hold the curve at its value where the range meets the rest of the axis and keep it flat to the end. An edit, not a refit: the range's own data no longer set its level, and the metric strip shows what that costs. Undo removes it.",
-  }),
 });
 
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
@@ -171,7 +166,7 @@ export const HELP_SECTIONS = Object.freeze([
     items: Object.freeze([
       "Select a run of points or bands on a spline term, then choose Flat, Line, Quadratic or Cubic. That range is pinned to the shape; the rest of the term stays the fitted smooth.",
       "The curve stays continuous at the range's edges and its slope may change there. Select all, then a shape, for one polynomial over the whole axis.",
-      "Flat fits a level. Hold, on a range that runs to one end of the axis, instead holds the curve at its value where the range begins: the one-click form of Level from left or Level from right. That is an edit, not a refit.",
+      "Flat fits a level. To hold the curve at its value at a range's edge instead of fitting a level, use Level from left or Level from right. That is an edit, not a refit.",
       "A new range may not overlap one already shaped, and one selected right beside it meets it. The same range with a new shape replaces it. Restore undoes the latest shape.",
       "A P-spline or natural spline term becomes a B-spline with a derivative penalty so its penalty can skip the shaped range; a natural spline's ends are then no longer held straight.",
     ]),

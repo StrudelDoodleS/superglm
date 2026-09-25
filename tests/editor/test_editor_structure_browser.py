@@ -209,43 +209,6 @@ def test_back_to_back_runs_give_ranges_that_meet(open_editor_page):
         assert _numeric_edges(spec, grid[101], grid[140])[0] > first.hi
 
 
-def _drawn_y(page) -> np.ndarray:
-    return np.asarray(page.evaluate("() => document.querySelector('#chart')._scale.y"))
-
-
-def test_hold_levels_a_tail_at_its_first_value_and_undo_restores_it(open_editor_page):
-    with open_editor_page() as (page, session):
-        n = session.terms["curve"].size
-        start = n - n // 5
-        session.select_indices("curve", list(range(start, n)))
-        _reload_editor(page, "curve")
-        page.locator("#selectionMenu").wait_for(state="visible")
-        before = _drawn_y(page)
-        # Precondition: the tail is not already flat, so holding it moves it.
-        assert np.ptp(before[start:]) > 0
-
-        hold = page.locator("#shapeHold")
-        assert hold.get_attribute("aria-disabled") == "false"
-        with page.expect_response(_posted("/op")) as response_info:
-            hold.click()
-        assert response_info.value.status == 200
-        assert response_info.value.request.post_data_json == {"operation": "level_left"}
-        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
-
-        # The payload plots exp of the edited log effect, and a JSON float64
-        # round-trips exactly, so the held tail repeats its first value bit for
-        # bit and the free points are the very values drawn before.
-        after = _drawn_y(page)
-        np.testing.assert_array_equal(after[start:], np.full(n - start, before[start]))
-        np.testing.assert_array_equal(after[:start], before[:start])
-        assert session.history[-1].operation == "level_left"
-
-        with page.expect_response(_posted("/op")):
-            page.locator("#undoAction").click()
-        page.wait_for_function("() => document.querySelector('#undoAction').disabled")
-        np.testing.assert_array_equal(_drawn_y(page), before)
-
-
 def test_feature_search_filters_the_list_and_opens_the_first_match(open_editor_page):
     with open_editor_page() as (page, _session):
         feature_list = page.get_by_role("navigation", name="Features")

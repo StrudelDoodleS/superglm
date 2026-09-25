@@ -22,8 +22,6 @@ export const GROUPED_EDGE =
   "A range must start and end on single bands. Ungroup the bands at its ends first.";
 export const SPECIAL_LEVEL =
   "A range covers bands only. Leave special levels out of the selection.";
-export const HOLD_NEEDS_AN_END = "Hold works on a range that runs to the end of the axis.";
-export const HOLD_NEEDS_A_FREE_PART = "Hold needs part of the curve left free to hold its value.";
 
 /**
  * The selection as a run of source indices: null unless it is non-empty and
@@ -74,37 +72,11 @@ function meetingEdge(term, index, direction) {
  * @returns {{visible:boolean, enabled:boolean, reason:string|null}}
  */
 export function shapeButtonState(term, selectedIndices, degree = 0) {
-  if (isUnorderedCategorical(term)) return { visible: false, enabled: false, reason: null };
+  if ((term.term_type || term.kind) === "categorical") {
+    return { visible: false, enabled: false, reason: null };
+  }
   const reason = disabledReason(term, selectedIndices, degree);
   return { visible: true, enabled: reason === null, reason };
-}
-
-/**
- * Hold is Level from left on a run reaching the last point, holding the value
- * where the run starts, and Level from right on one reaching the first. It is
- * a level edit, so it needs no spline: only unordered categorical terms hide it.
- * @param {TermPayload} term @param {Set<number>} selectedIndices
- * @returns {{visible:boolean, enabled:boolean, reason:string|null,
- *   operation:"level_left"|"level_right"|null}}
- */
-export function holdButtonState(term, selectedIndices) {
-  if (isUnorderedCategorical(term)) {
-    return { visible: false, enabled: false, reason: null, operation: null };
-  }
-  const run = selectedRun(selectedIndices);
-  const atStart = run?.[0] === 0;
-  const atEnd = run?.[1] === term.x.length - 1;
-  const operation = atStart === atEnd ? null : atEnd ? "level_left" : "level_right";
-  const reason = !run ? NOT_CONTIGUOUS
-    : operation ? null
-    : atStart ? HOLD_NEEDS_A_FREE_PART
-    : HOLD_NEEDS_AN_END;
-  return { visible: true, enabled: reason === null, reason, operation };
-}
-
-/** @param {TermPayload} term */
-function isUnorderedCategorical(term) {
-  return (term.term_type || term.kind) === "categorical";
 }
 
 /** @param {TermPayload} term @param {Set<number>} selectedIndices @param {number} degree */
