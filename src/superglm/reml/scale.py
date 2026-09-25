@@ -1246,9 +1246,11 @@ def _newton_tweedie_log_phi(
         if curvature > 0.0:
             step = -score / curvature
             # Quadratic convergence: the stepped point is within O(step^2)
-            # of the root, below the score's own evaluation round-off.
+            # of the root, below the score's own evaluation round-off. l_sat
+            # moves by -T per unit log phi, so carrying it along the step keeps
+            # the value the returned point's to O(step^2) as well.
             if abs(step) <= _TWEEDIE_NEWTON_STEP_TOL:
-                return log_phi + step, saturated, curvature
+                return log_phi + step, saturated - saturated_score * step, curvature
         proposal = log_phi + float(
             np.clip(step, -_TWEEDIE_NEWTON_MAX_STEP, _TWEEDIE_NEWTON_MAX_STEP)
         )

@@ -223,10 +223,35 @@ def test_series_skips_rows_past_the_term_cap_without_summing() -> None:
     log_t = np.full(3, 70.0)
     outputs = [np.empty(3, dtype=np.bool_)] + [np.empty(3) for _ in range(3)]
 
-    summed = _series_moments_kernel(log_t, 1.5, 1_000, *outputs)
+    summed = _series_moments_kernel(log_t, 1.5, 1_000, 1_000_000, *outputs)
 
     assert summed == 0
     assert not np.any(outputs[0])
+
+
+def test_series_stops_once_its_total_work_budget_is_spent() -> None:
+    """Rows each inside the per-row cap cannot add up past the call's total budget.
+
+    Each row here needs about a hundred terms; a budget of three and a half
+    rows sums three, and the rest come back not exact without being summed.
+    """
+    from superglm._tweedie_profile_kernel import _series_moments_kernel
+
+    def run(log_t, max_total_terms):
+        outputs = [np.empty(log_t.size, dtype=np.bool_)] + [np.empty(log_t.size) for _ in range(3)]
+        work = _series_moments_kernel(log_t, 1.5, 100_000, max_total_terms, *outputs)
+        return work, outputs
+
+    log_t = np.full(50, 12.0)
+    one_row, _ = run(log_t[:1], 10**9)
+    budget = 3 * one_row + one_row // 2
+    work, outputs = run(log_t, budget)
+    _, unbounded = run(log_t, 10**9)
+
+    assert work <= budget
+    assert outputs[0].tolist() == [True] * 3 + [False] * 47
+    for budgeted, full in zip(outputs[1:], unbounded[1:], strict=True):
+        assert budgeted[:3].tolist() == full[:3].tolist()
 
 
 @pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])

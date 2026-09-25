@@ -20,6 +20,9 @@ _DEFAULT_MAX_TERMS = 100_000
 _DEFAULT_MAX_TOTAL_TERMS = 1_000_000
 # lgamma table entries shared by every row of one series_moments call.
 _SERIES_TABLE_LIMIT = 1 << 20
+# series_moments' default total budget: this many terms per row on average,
+# the width past which the density evaluator hands a row to wright_bessel.
+_SERIES_MEAN_ROW_TERMS = 1_024
 
 
 @dataclass(frozen=True)
@@ -418,16 +421,19 @@ def _series_moments_kernel(
     log_t: NDArray[np.float64],
     a: float,
     max_terms: int,
+    max_total_terms: int,
     exact: NDArray[np.bool_],
     log_sum: NDArray[np.float64],
     mean_j: NDArray[np.float64],
     variance_j: NDArray[np.float64],
 ) -> int:
-    """Fill each row's Dunn-Smyth log W, E[J] and Var[J]; return how many rows were summed.
+    """Fill each row's Dunn-Smyth log W, E[J] and Var[J]; return the terms summed.
 
-    Each row is summed on its own, so its result never depends on the other
-    rows. ``lgamma(j + 1) + lgamma(a j)`` is shared by every row and tabulated
-    once per call, sized by the largest mode whose series fits ``max_terms``.
+    A row's result never depends on the other rows' values; only whether it is
+    summed does, once ``max_total_terms`` is spent the remaining rows come back
+    not exact. ``lgamma(j + 1) + lgamma(a j)`` is shared by every row and
+    tabulated once per call, sized by the largest mode whose series fits
+    ``max_terms``.
     """
     a_plus_one = a + 1.0
     a_log_a = a * math.log(a)
@@ -447,20 +453,25 @@ def _series_moments_kernel(
     log_base = np.empty(table_size, dtype=np.float64)
     for j in range(1, table_size):
         log_base[j] = math.lgamma(j + 1.0) + math.lgamma(a * j)
+    total_terms = 0
     for row in range(log_t.size):
-        moments = (False, math.nan, math.nan, math.nan)
-        if feasible[row]:
+        moments = (False, math.nan, math.nan, math.nan, 0)
+        budget = min(max_terms, max_total_terms - total_terms)
+        if feasible[row] and budget > 0:
             mode = max(1, int(math.floor(math.exp((log_t[row] - a_log_a) / a_plus_one))))
-            moments = _row_series_moments(log_t[row], a, mode, max_terms, log_base)
-        exact[row], log_sum[row], mean_j[row], variance_j[row] = moments
-    return int(np.count_nonzero(feasible))
+            moments = _row_series_moments(log_t[row], a, mode, budget, log_base)
+        exact[row], log_sum[row], mean_j[row], variance_j[row], row_terms = moments
+        total_terms += row_terms
+    return total_terms
 
 
 @njit(cache=True)
 def _row_series_moments(
     log_t: float, a: float, mode: int, max_terms: int, log_base: NDArray[np.float64]
-) -> tuple[bool, float, float, float]:
+) -> tuple[bool, float, float, float, int]:
     """Sum one row's series outward from its peak term until a term falls ``_LOG_CUTOFF`` below.
+
+    The last entry is the number of terms summed, whether or not the row came out.
 
     The terms are log-concave in j, so climbing from the estimated ``mode``
     reaches the peak, every relative term is then at most 1, and once a term
@@ -482,7 +493,7 @@ def _row_series_moments(
         j = mode + direction
         while j >= 1:
             if row_terms >= max_terms:
-                return False, math.nan, math.nan, math.nan
+                return False, math.nan, math.nan, math.nan, row_terms
             q = _tabulated_series_term(j, log_t, a, log_base)
             relative = math.exp(q - peak)
             offset = float(j - mode)
@@ -497,8 +508,8 @@ def _row_series_moments(
     log_sum = peak + math.log(mass)
     variance = second / mass - mean_offset * mean_offset
     if not (math.isfinite(log_sum) and math.isfinite(variance)):
-        return False, math.nan, math.nan, math.nan
-    return True, log_sum, mode + mean_offset, variance
+        return False, math.nan, math.nan, math.nan, row_terms
+    return True, log_sum, mode + mean_offset, variance, row_terms
 
 
 @njit(cache=True)
@@ -513,18 +524,25 @@ def series_moments(
     a: float,
     *,
     max_terms: int = _DEFAULT_MAX_TERMS,
+    max_total_terms: int | None = None,
 ) -> tuple[NDArray[np.bool_], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Return which rows the series evaluated, and their log W, E[J] and Var[J].
 
-    Rows the series cannot reach within ``max_terms`` terms, or whose mode is
-    past float64's exact integers, come back not exact with NaN moments.
+    Rows the series cannot reach within ``max_terms`` terms, rows left once
+    ``max_total_terms`` are spent (by default ``_SERIES_MEAN_ROW_TERMS`` per
+    row, at least ``_DEFAULT_MAX_TOTAL_TERMS``), and rows whose mode is past
+    float64's exact integers come back not exact with NaN moments.
     """
     log_t = np.ascontiguousarray(log_t, dtype=np.float64)
     exact = np.empty(log_t.size, dtype=np.bool_)
     log_sum = np.empty(log_t.size, dtype=np.float64)
     mean_j = np.empty(log_t.size, dtype=np.float64)
     variance_j = np.empty(log_t.size, dtype=np.float64)
-    _series_moments_kernel(log_t, float(a), int(max_terms), exact, log_sum, mean_j, variance_j)
+    if max_total_terms is None:
+        max_total_terms = max(_DEFAULT_MAX_TOTAL_TERMS, _SERIES_MEAN_ROW_TERMS * log_t.size)
+    _series_moments_kernel(
+        log_t, float(a), int(max_terms), int(max_total_terms), exact, log_sum, mean_j, variance_j
+    )
     return exact, log_sum, mean_j, variance_j
 
 
