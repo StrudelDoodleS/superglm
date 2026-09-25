@@ -83,11 +83,16 @@ Spline(kind="bs", k=12, polynomial_ranges=[
 
 - `degree` is 0 (flat), 1 (line), 2 (quadratic) or 3 (cubic), and at most the
   spline's own degree.
-- `join="kink"` (the default) keeps the curve continuous at each edge but lets
-  its slope change there. `join="smooth"` keeps the spline's own smoothness at
-  the edge.
+- `join` sets how the curve meets the range at each edge:
+  - `"tangent"` (the default): the curve leaves the range along its slope, so
+    there is no corner.
+  - `"kink"`: the curve stays continuous, but its slope may change at the
+    edge, so there can be a corner.
+  - `"smooth"`: the curve keeps the spline's own smoothness at the edge, which
+    can pull the range and its neighbours towards each other.
 - Ranges must lie inside the fitted range of the feature and must not overlap.
-  Two ranges may share an edge when both use `join="kink"`.
+  Two ranges may share an edge; they always meet there at a corner, because two
+  shapes joined any more smoothly would be forced into one.
 - Each range needs at least `degree + 1` distinct values of the feature inside
   it.
 - A binned fit (`discrete=True`) sees only the centres of its bins, so a

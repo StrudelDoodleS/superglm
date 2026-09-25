@@ -505,8 +505,10 @@ def test_library_refusal_reaches_the_browser_as_the_fixed_sentence(aged):
 
 @pytest.mark.parametrize("discrete", [False, True])
 def test_a_range_leaving_too_few_values_beside_it_says_to_widen_it(aged, discrete):
-    # A third-order penalty needs two values on the free stretch past a range.
-    # Stopping at 89 leaves one: even a Flat is refused, and reaching the end is not.
+    # A third-order penalty needs two values on the free stretch past a range
+    # a Corner join leaves free. Stopping at 89 leaves one: even a Flat is
+    # refused, and reaching the end is not. (A Tangent edge carries the slope
+    # across too, which settles that stretch.)
     model, X = aged
     third = SuperGLM(
         family="poisson",
@@ -518,7 +520,9 @@ def test_a_range_leaving_too_few_values_beside_it_says_to_widen_it(aged, discret
     third.fit(X, model._fit_y_ref)
     session = EditorSession.from_model(third, terms=["age"])
     with pytest.raises(EditorValueError) as caught:
-        session.replace_with_shaped_range("age", lo=30.0, hi=89.0, degree=0, method="fit")
+        session.replace_with_shaped_range(
+            "age", lo=30.0, hi=89.0, degree=0, join="kink", method="fit"
+        )
     assert str(caught.value) == _STRETCH_REFUSED
     assert session.model is third and session.structure_history == []
     session.replace_with_shaped_range("age", lo=30.0, hi=90.0, degree=0, method="fit")
@@ -763,6 +767,34 @@ def test_a_degree_outside_the_four_shapes_is_refused(aged, degree):
         session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=degree, method="fit")
 
 
+def test_shapes_default_to_a_tangent_join_and_a_corner_can_be_chosen(aged):
+    model, _ = aged
+    session = EditorSession.from_model(model, terms=["age"])
+    session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=1, method="fit")
+    spec = session.model._specs["age"]
+    assert [r.join for r in spec.polynomial_ranges] == ["tangent"]
+    assert np.count_nonzero(spec.fitted_knots == 30.0) == spec.degree - 1
+    # The same range with the other join replaces it rather than overlapping.
+    session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=1, join="kink", method="fit")
+    spec = session.model._specs["age"]
+    assert [(r.lo, r.hi, r.degree, r.join) for r in spec.polynomial_ranges] == [
+        (30.0, 45.0, 1, "kink")
+    ]
+    assert np.count_nonzero(spec.fitted_knots == 30.0) == spec.degree
+    assert session_payload(session)["age"]["shape"]["ranges"][0]["join"] == "kink"
+
+
+@pytest.mark.parametrize("join", ["smooth", "round", 1, None])
+def test_a_join_outside_tangent_and_corner_is_refused(aged, join):
+    model, _ = aged
+    session = EditorSession.from_model(model, terms=["age"])
+    with pytest.raises(EditorValueError, match="^Choose a join: Tangent or Corner.$"):
+        session.replace_with_shaped_range(
+            "age", lo=30.0, hi=45.0, degree=1, join=join, method="fit"
+        )
+    assert session.model is model
+
+
 @pytest.mark.parametrize("edge", [float("nan"), float("inf"), "30"])
 def test_a_numeric_term_refuses_edges_that_are_not_finite_numbers(aged, edge):
     model, _ = aged
@@ -812,7 +844,7 @@ def test_an_ordered_term_pins_whole_bands_and_becomes_a_b_spline(banded):
     assert getattr(declared, EDITOR_CHOSEN_SHAPE_ATTRIBUTE) is True
     np.testing.assert_array_equal(spec._basis_spline.fitted_base_knots, placed)
     assert session_payload(session)["band"]["shape"]["ranges"] == [
-        {"lo": "B3", "hi": "B6", "degree": 1, "label": "Line"}
+        {"lo": "B3", "hi": "B6", "degree": 1, "label": "Line", "join": "tangent"}
     ]
     assert session.structure_history[-1].label == "Line B3–B6 in band"
     # The four pinned bands lie on one line in their axis positions.
@@ -870,7 +902,7 @@ def test_widget_http_shape_range_returns_transition_envelope(aged):
         assert shape == {
             "available": True,
             "reason": None,
-            "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line"}],
+            "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line", "join": "tangent"}],
             "specials": [],
         }
         n_points = payload["state"]["terms"]["age"]["n_points"]

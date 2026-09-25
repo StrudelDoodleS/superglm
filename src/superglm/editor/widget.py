@@ -1016,13 +1016,14 @@ class EditorWidget:
         lo: str | float,
         hi: str | float,
         degree: int,
+        join: str = "tangent",
         method: str = "auto",
         level_display: str = "expanded",
     ) -> dict[str, Any]:
         return self._structural_step(
             "shape_range",
             lambda target: self.session.replace_with_shaped_range(
-                target, lo=lo, hi=hi, degree=degree, method=method
+                target, lo=lo, hi=hi, degree=degree, join=join, method=method
             ),
             term=term,
             level_display=level_display,

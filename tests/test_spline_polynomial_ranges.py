@@ -21,6 +21,7 @@ from superglm.features._spline_ranges import (
     certify_determined,
     constraint_null_space,
     derivative_design,
+    edge_multiplicity,
     merged_interior_knots,
     pinned_intervals,
     pinning_rows,
@@ -60,7 +61,7 @@ def _left_limit(spline, x, nu):
 
 
 @pytest.mark.parametrize("degree", [0, 1, 2, 3])
-@pytest.mark.parametrize("join", ["kink", "smooth"])
+@pytest.mark.parametrize("join", ["kink", "tangent", "smooth"])
 def test_every_member_is_a_polynomial_of_the_range_degree(degree, join):
     spline, knots = _null_space_members(
         [PolynomialRange(3.0, 6.0, degree, join)], np.linspace(1, 9, 9)
@@ -90,28 +91,41 @@ def test_pinning_is_independent_of_the_feature_units():
     assert _polynomial_residual(spline, 6 * scale, 8 * scale, 2) <= tolerance
 
 
-def test_knots_inside_a_range_are_dropped_and_kink_edges_repeat():
-    ranges = validate_ranges([PolynomialRange(3.0, 6.0, 1)], DEGREE, LO, HI)
+@pytest.mark.parametrize(("join", "copies"), [("kink", 3), ("tangent", 2), ("smooth", 1)])
+def test_knots_inside_a_range_are_dropped_and_edges_repeat_by_join(join, copies):
+    ranges = validate_ranges([PolynomialRange(3.0, 6.0, 1, join)], DEGREE, LO, HI)
     interior = merged_interior_knots(np.array([2.0, 3.0, 4.0, 5.0, 7.0]), ranges, DEGREE, LO, HI)
-    np.testing.assert_array_equal(interior, [2.0, 3.0, 3.0, 3.0, 6.0, 6.0, 6.0, 7.0])
+    np.testing.assert_array_equal(interior, [2.0, *[3.0] * copies, *[6.0] * copies, 7.0])
 
 
 def test_boundary_edges_are_not_inserted():
-    ranges = validate_ranges([PolynomialRange(LO, 4.0, 0)], DEGREE, LO, HI)
+    ranges = validate_ranges([PolynomialRange(LO, 4.0, 0, "kink")], DEGREE, LO, HI)
     interior = merged_interior_knots(np.array([2.0, 5.0, 8.0]), ranges, DEGREE, LO, HI)
     np.testing.assert_array_equal(interior, [4.0, 4.0, 4.0, 5.0, 8.0])
 
 
-def test_a_shared_edge_is_inserted_once_at_its_multiplicity():
+@pytest.mark.parametrize("join", ["kink", "tangent", "smooth"])
+def test_a_shared_edge_is_one_kink_whatever_the_joins(join):
+    """Two pinned pieces joined more smoothly than C0 would be forced into one:
+    a Line meeting a Flat with matching slope is flat. The shared edge is a
+    kink; the outer edges keep the requested join."""
     ranges = validate_ranges(
-        [PolynomialRange(2.0, 5.0, 1), PolynomialRange(5.0, 7.0, 0)], DEGREE, LO, HI
+        [PolynomialRange(2.0, 5.0, 1, join), PolynomialRange(5.0, 7.0, 0, join)], DEGREE, LO, HI
     )
     interior = merged_interior_knots(np.array([1.0, 4.0, 6.0, 8.0]), ranges, DEGREE, LO, HI)
-    np.testing.assert_array_equal(interior, [1.0, 2.0, 2.0, 2.0, 5.0, 5.0, 5.0, 7.0, 7.0, 7.0, 8.0])
+    outer = edge_multiplicity(join, DEGREE)
+    np.testing.assert_array_equal(
+        interior, [1.0, *[2.0] * outer, 5.0, 5.0, 5.0, *[7.0] * outer, 8.0]
+    )
+    spline, _ = _null_space_members(ranges, np.array([1.0, 4.0, 6.0, 8.0]))
+    assert _polynomial_residual(spline, 2.0, 5.0, 1) <= 64 * EPS
+    assert _polynomial_residual(spline, 5.0, 7.0, 0) <= 64 * EPS
+    slopes = spline(np.array([3.0]), nu=1)
+    assert np.max(np.abs(slopes)) > np.sqrt(EPS)  # the Line is not forced flat
 
 
 def test_kink_join_is_continuous_and_leaves_the_slope_free():
-    spline, _ = _null_space_members([PolynomialRange(3.0, 6.0, 1)], np.linspace(1, 9, 9))
+    spline, _ = _null_space_members([PolynomialRange(3.0, 6.0, 1, "kink")], np.linspace(1, 9, 9))
     edges = np.array([3.0, 6.0])
     value_jump = np.abs(_left_limit(spline, edges, 0) - spline(edges))
     assert np.max(value_jump) <= 2 * (DEGREE + 1) * EPS
@@ -120,6 +134,18 @@ def test_kink_join_is_continuous_and_leaves_the_slope_free():
     slope_jump = np.abs(_left_limit(spline, edges, 1) - spline(edges, nu=1))
     slope_scale = np.max(np.abs(spline(np.linspace(LO, HI, 201), nu=1)))
     assert np.all(np.max(slope_jump, axis=1) > np.sqrt(EPS) * slope_scale)
+
+
+def test_tangent_join_carries_value_and_slope_and_leaves_curvature_free():
+    spline, _ = _null_space_members([PolynomialRange(3.0, 6.0, 1)], np.linspace(1, 9, 9))
+    edges = np.array([3.0, 6.0])
+    for nu in (0, 1):
+        jump = np.abs(_left_limit(spline, edges, nu) - spline(edges, nu=nu))
+        scale = np.max(np.abs(spline(np.linspace(LO, HI, 201), nu=nu)))
+        assert np.max(jump) <= 2 * (DEGREE + 1) * EPS * scale
+    curvature_jump = np.abs(_left_limit(spline, edges, 2) - spline(edges, nu=2))
+    curvature_scale = np.max(np.abs(spline(np.linspace(LO, HI, 201), nu=2)))
+    assert np.all(np.max(curvature_jump, axis=1) > np.sqrt(EPS) * curvature_scale)
 
 
 @pytest.mark.parametrize("nu", range(DEGREE))
@@ -138,7 +164,6 @@ def test_smooth_join_keeps_the_splines_own_continuity(nu):
         ([(-1.0, 2.0, 1)], DEGREE, "inside the fitted range"),
         ([(8.0, 11.0, 1)], DEGREE, "inside the fitted range"),
         ([(2.0, 5.0, 1), (4.0, 7.0, 0)], DEGREE, "overlap"),
-        ([(2.0, 5.0, 1, "smooth"), (5.0, 7.0, 0)], DEGREE, "meet at a kink"),
         ([(2.0, 5.0, 3)], 2, "exceeds the spline degree 2"),
     ],
 )
@@ -189,7 +214,8 @@ def test_close_smooth_ranges_are_refused_as_dependent():
 BASE = np.linspace(1.0, 9.0, 9)
 DENSE = np.linspace(LO, HI, 201)
 BIN_CENTRES = 0.25 + 0.5 * np.arange(20)  # 20 equal-width bins on [0, 10]
-GAP = [PolynomialRange(2.0, 4.0, 1), PolynomialRange(4.1, 6.0, 1)]
+GAP = [PolynomialRange(2.0, 4.0, 1, "kink"), PolynomialRange(4.1, 6.0, 1, "kink")]
+TANGENT_GAP = [PolynomialRange(2.0, 4.0, 1), PolynomialRange(4.1, 6.0, 1)]
 
 
 def _rank(M):
@@ -231,8 +257,19 @@ def _undetermined_directions(ranges, support, order):
     ("ranges", "support", "order", "undetermined"),
     [
         pytest.param([PolynomialRange(4.0, 6.0, 2)], DENSE, 2, False, id="dense"),
-        pytest.param([PolynomialRange(4.0, 4.3, 3)], BIN_CENTRES, 2, True, id="cubic-in-one-bin"),
-        pytest.param([PolynomialRange(0.2, 5.0, 1)], BIN_CENTRES, 2, True, id="kink-by-empty-end"),
+        pytest.param(
+            [PolynomialRange(4.0, 4.3, 3, "kink")], BIN_CENTRES, 2, True, id="cubic-in-one-bin"
+        ),
+        pytest.param(
+            [PolynomialRange(0.2, 5.0, 1, "kink")], BIN_CENTRES, 2, True, id="kink-by-empty-end"
+        ),
+        pytest.param(
+            [PolynomialRange(0.2, 5.0, 1, "tangent")],
+            BIN_CENTRES,
+            2,
+            False,
+            id="tangent-by-empty-end",
+        ),
         pytest.param(
             [PolynomialRange(0.2, 5.0, 1, "smooth")],
             BIN_CENTRES,
@@ -243,6 +280,8 @@ def _undetermined_directions(ranges, support, order):
         pytest.param([PolynomialRange(0.2, 5.0, 1)], BIN_CENTRES, 1, False, id="order-1-empty-end"),
         pytest.param(GAP, BIN_CENTRES, 2, False, id="empty-gap-order-2"),
         pytest.param(GAP, BIN_CENTRES, 3, True, id="empty-gap-order-3"),
+        # A tangent edge carries value and slope, so the empty gap is determined.
+        pytest.param(TANGENT_GAP, BIN_CENTRES, 3, False, id="tangent-empty-gap-order-3"),
         pytest.param(GAP, np.sort(np.append(BIN_CENTRES, 4.05)), 3, False, id="held-gap-order-3"),
         pytest.param(
             [PolynomialRange(LO, HI, 2)], np.array([1.0, 5.0, 9.0]), 2, False, id="whole-3"
@@ -373,7 +412,7 @@ def test_pinned_quadratic_is_not_shrunk_by_the_penalty(kind):
     smoothing parameter can shrink it.
     """
     x = _book()[0]["age"].to_numpy()
-    spec = Spline(kind=kind, k=12, polynomial_ranges=[PolynomialRange(30.0, 45.0, 2)])
+    spec = Spline(kind=kind, k=12, polynomial_ranges=[PolynomialRange(30.0, 45.0, 2, "kink")])
     spec._place_knots(x)
     grid = np.linspace(spec._lo, spec._hi, 2001)
     bump = np.where((grid >= 30.0) & (grid <= 45.0), (grid - 30.0) * (45.0 - grid), 0.0)
@@ -477,7 +516,7 @@ def test_a_quadratic_range_at_a_cr_end_is_a_full_quadratic():
 
 def test_fitted_knots_report_edges_and_base_knots_reproduce_placement():
     x = _book()[0]["age"].to_numpy()
-    ranges = [PolynomialRange(30.0, 45.0, 1)]
+    ranges = [PolynomialRange(30.0, 45.0, 1, "kink")]
     spec = Spline(kind="bs", k=12, polynomial_ranges=ranges)
     spec._place_knots(x)
     knots, base = spec.fitted_knots, spec.fitted_base_knots
@@ -534,14 +573,15 @@ def test_a_binned_fit_refuses_an_end_stretch_no_bin_centre_reaches():
     # the stretch below a range starting 0.03 above it holds none: its slope
     # would be set by nothing. The exact fit sees the youngest age itself.
     book = _book()
-    sliver = [PolynomialRange(float(book[0]["age"].min()) + 0.03, 50.0, 1)]
+    sliver = [PolynomialRange(float(book[0]["age"].min()) + 0.03, 50.0, 1, "kink")]
     _fit("bs", sliver, book=book)
     with pytest.raises(ValueError, match=r"outside the polynomial ranges.*once binned to 512"):
         _fit("bs", sliver, discrete=True, book=book)
 
 
-def test_ppform_export_reproduces_a_kinked_ranged_spline():
-    model = _fit("bs", [PolynomialRange(30.0, 45.0, 1)])
+@pytest.mark.parametrize("join", ["kink", "tangent"])
+def test_ppform_export_reproduces_a_ranged_spline(join):
+    model = _fit("bs", [PolynomialRange(30.0, 45.0, 1, join)])
     block = extract_ppform(model, "age")
     lo, hi = model._specs["age"].fitted_boundary
     grid = np.linspace(lo, hi, 301)

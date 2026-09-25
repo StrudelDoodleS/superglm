@@ -36,6 +36,10 @@ def shape_availability(model, name: str) -> tuple[bool, str | None]:
     return reason is None, reason
 
 
+# The joins the editor offers: Tangent, and Corner (the library's kink).
+EDITOR_JOINS = ("tangent", "kink")
+
+
 def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dict[str, Any]:
     """The palette's state for one term: availability, the ranges in force, ``support``.
 
@@ -44,7 +48,7 @@ def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dic
     spec = model._specs[name]
     available, reason = shape_availability(model, name)
     ranges = [
-        {"lo": r.lo, "hi": r.hi, "degree": r.degree, "label": r.label}
+        {"lo": r.lo, "hi": r.hi, "degree": r.degree, "label": r.label, "join": r.join}
         for r in _current_ranges(spec)
     ]
     specials = spec._special_display if isinstance(spec, OrderedCategorical) else ()
@@ -86,11 +90,15 @@ def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[in
     }
 
 
-def shaped_feature_spec(model, name: str, *, lo, hi, degree: int, X) -> tuple[Any, dict[str, Any]]:
+def shaped_feature_spec(
+    model, name: str, *, lo, hi, degree: int, join: str = "tangent", X
+) -> tuple[Any, dict[str, Any]]:
     """A fresh spec for ``name`` with ``[lo, hi]`` pinned to a ``degree`` polynomial.
 
-    Ranges already in force are kept; the same range with a new degree
-    replaces the old one, and any other overlap is refused by name. A
+    ``join`` is ``"tangent"`` (the curve leaves the range along its slope) or
+    ``"kink"`` (the slope may change at the edge). Ranges already in force are
+    kept; the same range with a new degree or join replaces the old one, and
+    any other overlap is refused by name. A
     numeric term keeps its fitted base knots and boundary, so the free
     part's knots never move; an ordered term rebuilds from its declaration,
     whose placement is deterministic on the same level axis.
@@ -100,11 +108,13 @@ def shaped_feature_spec(model, name: str, *, lo, hi, degree: int, X) -> tuple[An
         raise EditorValueError(reason)
     if not _is_shape_degree(degree):
         raise EditorValueError("Choose a shape: Flat, Line, Quadratic or Cubic.")
+    if join not in EDITOR_JOINS:
+        raise EditorValueError("Choose a join: Tangent or Corner.")
     spec = model._specs[name]
     ordered = isinstance(spec, OrderedCategorical)
     position = spec._range_edge_value if ordered else float
     lo, hi = _band_edges(spec, name, lo, hi) if ordered else _numeric_edges(spec, lo, hi)
-    new = PolynomialRange(lo, hi, degree)
+    new = PolynomialRange(lo, hi, degree, join)
     ranges = _merged_ranges(_current_ranges(spec), new, position)
     if ordered:
         source = _pristine_basis(spec)
@@ -122,6 +132,7 @@ def shaped_feature_spec(model, name: str, *, lo, hi, degree: int, X) -> tuple[An
         "lo": lo,
         "hi": hi,
         "degree": degree,
+        "join": join,
         "label": f"{new.label} {span} in {name}",
         "message": f"{name} was given a {new.label} range {span} in the editor "
         "and the full model was refit.",

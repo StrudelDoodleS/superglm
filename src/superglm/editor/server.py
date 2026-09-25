@@ -299,6 +299,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 lo=_range_edge(_required(payload, "lo")),
                 hi=_range_edge(_required(payload, "hi")),
                 degree=_required(payload, "degree"),
+                join=payload.get("join", "tangent"),
                 method=str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
             )

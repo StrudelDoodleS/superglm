@@ -957,19 +957,21 @@ class EditorSession:
             label=refit_model._editor_step["label"],
         )
 
-    def replace_with_shaped_range(self, term: str, *, lo, hi, degree: int, **refit_kwargs: Any):
+    def replace_with_shaped_range(
+        self, term: str, *, lo, hi, degree: int, join: str = "tangent", **refit_kwargs: Any
+    ):
         """Pin ``term`` to a ``degree`` polynomial on ``[lo, hi]``, refit, put it in force.
 
         ``lo`` and ``hi`` are values on a numeric term (snapped outward to
         three significant figures of the fitted span) and band labels on an
-        ordered one.
+        ordered one. ``join`` is ``"tangent"`` or ``"kink"`` (Corner).
         """
         self._require_term(term)
         try:
             refit_model = self._refit_replacing(
                 term,
                 lambda X_ref: shaped_feature_spec(
-                    self.model, term, lo=lo, hi=hi, degree=degree, X=X_ref
+                    self.model, term, lo=lo, hi=hi, degree=degree, join=join, X=X_ref
                 ),
                 **refit_kwargs,
             )
