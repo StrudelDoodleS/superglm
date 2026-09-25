@@ -1346,16 +1346,16 @@ class ModelSummary:
         return "\n".join(parts)
 
 
-_EDITOR_BREAKS_NOTE = (
-    "were placed in the editor from this data. Tests are conditional on those "
-    "breaks; judge them on validation deviance."
+_EDITOR_SHAPE_NOTE = (
+    "were chosen in the editor from this data. Tests are conditional on them; "
+    "judge them on validation deviance."
 )
 
 
-def editor_break_notes(info: dict[str, Any]) -> list[str]:
-    """The note for terms whose breaks were placed in the editor."""
-    terms = info.get("editor_break_terms") or []
-    return [f"Breaks for {', '.join(terms)} {_EDITOR_BREAKS_NOTE}"] if terms else []
+def editor_shape_notes(info: dict[str, Any]) -> list[str]:
+    """The note for terms whose shaped ranges were chosen in the editor."""
+    terms = info.get("editor_shape_terms") or []
+    return [f"Shaped ranges for {', '.join(terms)} {_EDITOR_SHAPE_NOTE}"] if terms else []
 
 
 def _editor_notes(info: dict[str, Any]) -> list[str]:
@@ -1367,5 +1367,5 @@ def _editor_notes(info: dict[str, Any]) -> list[str]:
     if info.get("editor_offset_terms"):
         terms = ", ".join(info.get("editor_offset_terms") or [])
         notes.append(f"{_EDITOR_OFFSET_NOTE} Offset terms: {terms}.")
-    notes.extend(editor_break_notes(info))
+    notes.extend(editor_shape_notes(info))
     return notes

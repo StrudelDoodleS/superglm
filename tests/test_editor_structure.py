@@ -683,13 +683,16 @@ def test_restore_walks_a_mixed_two_term_sequence_back_exactly(banded):
     assert not session.can_uncollapse_levels()
 
 
-def test_breaks_note_reaches_every_renderer_and_survives_export(banded):
+def test_shape_note_reaches_every_renderer_and_survives_export(banded):
     model, _, _ = banded
     session = EditorSession.from_model(model, terms=["band", "x"])
     session.replace_with_transformed_term(
         "band", form="piecewise", breaks=["B3", "B6"], degrees=[1, 2, 0], method="fit"
     )
-    sentence = "Breaks for band were placed in the editor from this data."
+    sentence = (
+        "Shaped ranges for band were chosen in the editor from this data. "
+        "Tests are conditional on them; judge them on validation deviance."
+    )
     assert sentence in str(session.model.summary())
     assert sentence in session.model.summary()._repr_html_()
     assert any(sentence in note for note in build_summary_export_payload(session.model).notes)
@@ -701,11 +704,11 @@ def test_breaks_note_reaches_every_renderer_and_survives_export(banded):
     # A later step on another term keeps the note: the mark lives on the basis.
     session.replace_with_transformed_term("x", form="polynomial", breaks=[], degree=2, method="fit")
     edited = session.to_model()
-    assert edited.summary()._info["editor_break_terms"] == ["band"]
+    assert edited.summary()._info["editor_shape_terms"] == ["band"]
     buffer = io.BytesIO()
     joblib.dump(edited, buffer)
     buffer.seek(0)
-    assert joblib.load(buffer).summary()._info["editor_break_terms"] == ["band"]
+    assert joblib.load(buffer).summary()._info["editor_shape_terms"] == ["band"]
 
 
 @pytest.mark.parametrize(
@@ -718,8 +721,8 @@ def test_breaks_note_reaches_every_renderer_and_survives_export(banded):
     ],
     ids=["polynomial", "set_reference"],
 )
-def test_no_breaks_note_without_editor_placed_breaks(banded, step):
+def test_no_shape_note_without_an_editor_chosen_shape(banded, step):
     model, _, _ = banded
     session = EditorSession.from_model(model, terms=["band"])
     step(session)
-    assert "editor_break_terms" not in session.model.summary()._info
+    assert "editor_shape_terms" not in session.model.summary()._info

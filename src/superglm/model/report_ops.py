@@ -250,11 +250,11 @@ def summary(
             "Manual editor terms are fixed as an offset.",
         )
 
-    # The editor marks a basis whose breaks it placed (editor/transform.py,
-    # EDITOR_BREAKS_ATTRIBUTE); read by name so this layer never imports the editor.
-    break_terms = [name for name, spec in model._specs.items() if _editor_chose_breaks(spec)]
-    if break_terms:
-        model_info["editor_break_terms"] = break_terms
+    # The editor marks a basis whose shape it chose (EDITOR_CHOSEN_SHAPE_ATTRIBUTE);
+    # read by name so this layer never imports the editor.
+    shape_terms = [name for name, spec in model._specs.items() if _editor_chose_shape(spec)]
+    if shape_terms:
+        model_info["editor_shape_terms"] = shape_terms
 
     nb_pr = getattr(model, "_nb_profile_result", None)
     if nb_pr is not None:
@@ -714,9 +714,9 @@ def _drop_repaired_basis_detail(basis_detail, groups, repaired_features) -> None
             basis_detail.pop(group.name, None)
 
 
-def _editor_chose_breaks(spec) -> bool:
+def _editor_chose_shape(spec) -> bool:
     # An ordered term hosts its basis; a numeric term is its own basis.
-    return bool(getattr(getattr(spec, "_spline_obj", spec), "_editor_chosen_breaks", False))
+    return bool(getattr(getattr(spec, "_spline_obj", spec), "_editor_chosen_shape", False))
 
 
 def _suppress_editor_inference(coef_rows) -> None:

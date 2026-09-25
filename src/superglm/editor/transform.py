@@ -25,9 +25,9 @@ FORMS = ("piecewise", "spline", "polynomial")
 MAX_SEGMENT_DEGREE = 3
 MAX_POLYNOMIAL_DEGREE = 5
 # Read by model/report_ops.py BY NAME, so the model layer never imports the
-# editor: a basis carrying it had its breaks placed in the editor from this
-# data, so its tests are conditional on them (spec §3.3).
-EDITOR_BREAKS_ATTRIBUTE = "_editor_chosen_breaks"
+# editor: a basis carrying it had its shape chosen in the editor from this
+# data, so its tests are conditional on it (spec §3.3).
+EDITOR_CHOSEN_SHAPE_ATTRIBUTE = "_editor_chosen_shape"
 # A linear Numeric term is drawn as a single point, so it has no axis to place
 # a break on: the Breaks tool stays off for it.
 _NUMERIC_KINDS = (_SplineBase, Polynomial, Piecewise)
@@ -58,7 +58,7 @@ def transformed_feature_spec(
             if form == "piecewise"
             else _knotted_spline(source, breaks, extrapolation)
         )
-        setattr(basis, EDITOR_BREAKS_ATTRIBUTE, True)
+        setattr(basis, EDITOR_CHOSEN_SHAPE_ATTRIBUTE, True)
     replacement = _hosted(spec, basis, term.name, X) if ordered else basis
     return replacement, _metadata(term.name, form, breaks, degrees, degree)
 
