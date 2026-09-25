@@ -823,21 +823,54 @@ def test_level_and_snap_selected_values(editor_model):
     np.testing.assert_allclose(term.edited_log_effect[10:14], -0.4)
 
 
-def test_isotonic_anchors_selected_region_to_neighbors(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
-    term = session.terms["x_spline"]
-    term.edited_log_effect[:] = np.linspace(0.0, 1.0, term.size)
-    term.edited_log_effect[10:15] = [0.8, -0.2, 0.6, 0.1, 0.5]
+def _numeric_term_session(values, weights):
+    values = np.asarray(values, dtype=np.float64)
+    term = EditableTerm(
+        name="x",
+        kind="spline",
+        x=np.arange(values.size, dtype=np.float64),
+        original_log_effect=values.copy(),
+        edited_log_effect=values.copy(),
+        weights=np.asarray(weights, dtype=np.float64),
+    )
+    return EditorSession(model=None, terms={"x": term})
 
-    left_neighbor = term.edited_log_effect[9]
-    right_neighbor = term.edited_log_effect[15]
-    session.select_indices("x_spline", range(10, 15))
-    session.isotonic("x_spline", direction="increasing")
 
-    after = term.edited_log_effect
-    assert after[10] >= left_neighbor
-    assert after[14] <= right_neighbor
-    assert np.all(np.diff(after[10:15]) >= -1e-12)
+def test_isotonic_is_exposure_weighted_pooling_of_the_run():
+    # Pool-adjacent-violators by hand: (0.8, -0.2) at weights (1, 3) pool to
+    # 0.05 and (0.6, 0.1) to 0.35; the neighbours 0.0 and 0.2 take no part.
+    session = _numeric_term_session(
+        [0.0, 0.8, -0.2, 0.6, 0.1, 0.5, 0.2], [5.0, 1.0, 3.0, 1.0, 1.0, 2.0, 5.0]
+    )
+    session.select_indices("x", range(1, 6))
+    session.isotonic("x", direction="increasing")
+
+    after = session.terms["x"].edited_log_effect
+    np.testing.assert_allclose(after[1:6], [0.05, 0.05, 0.35, 0.35, 0.5], atol=1e-12)
+    weights = session.terms["x"].weights[1:6]
+    assert np.average(after[1:6], weights=weights) == pytest.approx(
+        np.average([0.8, -0.2, 0.6, 0.1, 0.5], weights=weights)
+    )
+
+
+def test_isotonic_does_not_lift_a_dip_to_a_higher_neighbour():
+    # A decreasing edit whose selection ends partway up a dip: the dip and the
+    # rise pool to their mean, leaving a step up into the neighbour, instead
+    # of the whole stretch being lifted to the neighbour's 0.03.
+    session = _numeric_term_session([0.10, 0.05, -0.02, -0.05, -0.04, 0.0, 0.03], np.ones(7))
+    session.select_indices("x", range(1, 6))
+    session.isotonic("x", direction="decreasing")
+
+    after = session.terms["x"].edited_log_effect
+    np.testing.assert_allclose(after[1:6], [0.05, -0.02, -0.03, -0.03, -0.03], atol=1e-12)
+    assert after[5] < after[6]
+
+
+def test_isotonic_weights_an_unexposed_run_equally():
+    session = _numeric_term_session([0.0, 0.3, -0.1, 0.0], [1.0, 0.0, 0.0, 1.0])
+    session.select_indices("x", [1, 2])
+    session.isotonic("x", direction="increasing")
+    np.testing.assert_allclose(session.terms["x"].edited_log_effect[1:3], [0.1, 0.1], atol=1e-12)
 
 
 def test_isotonic_neighbor_anchors_constrain_without_pinning_to_both_sides():

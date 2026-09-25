@@ -56,7 +56,9 @@ The floating palette acts on the current selection:
 - Smooth reduces local variation while respecting adjacent unselected values.
 - **Straighten selection** interpolates the selected relativities between their first and last
   points.
-- Increasing and Decreasing apply anchored monotonic constraints.
+- Increasing and Decreasing replace the selection with the closest monotone curve,
+  weighted by exposure. It is not tied to the points either side, so it can
+  leave a step at an edge.
 - Level left, Average, and Level right flatten the selection to the named reference value.
 - Snap highest and Snap lowest flatten to the selected extreme.
 

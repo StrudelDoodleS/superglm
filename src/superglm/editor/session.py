@@ -37,8 +37,8 @@ from superglm.editor.level_order import (
     level_order_for_target,
 )
 from superglm.editor.operations import (
-    anchored_isotonic_values,
     anchored_smooth_values,
+    isotonic_values,
     monotone_clamp_values,
 )
 from superglm.editor.refit import fit_refit_model
@@ -476,14 +476,15 @@ class EditorSession:
             and term in self._level_orders
         )
 
-    # Shape-changing operations anchor selected runs to adjacent unselected
-    # values so local edits do not create artificial jumps at selection edges.
+    # Smoothing anchors selected runs to adjacent unselected values so it does
+    # not create jumps at selection edges; isotonic regression does not.
     def isotonic(self, term: str, direction: str = "increasing") -> EditorSession:
-        """Apply weighted isotonic regression to selected values.
+        """Apply exposure-weighted isotonic regression to selected values.
 
-        Selected contiguous runs are anchored to adjacent unselected neighbors
-        when available. This avoids visible jumps at edit boundaries. If no
-        points are selected, the operation applies to the whole term.
+        Each contiguous run becomes the closest monotone sequence to itself,
+        not tied to its unselected neighbours, so the edit can step at a
+        selection edge. A categorical term clamps instead. If no points are
+        selected, the operation applies to the whole term.
         """
         if direction not in ("increasing", "decreasing"):
             raise EditorValueError(
@@ -495,7 +496,7 @@ class EditorSession:
         if editable.levels is not None:
             after = monotone_clamp_values(editable.edited_log_effect, idx, direction)
         else:
-            after = anchored_isotonic_values(
+            after = isotonic_values(
                 editable.edited_log_effect,
                 idx,
                 None if editable.weights is None else editable.weights,

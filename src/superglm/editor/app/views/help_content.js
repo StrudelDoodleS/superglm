@@ -56,11 +56,13 @@ export const OPERATION_HELP = Object.freeze({
   }),
   increasing: Object.freeze({
     title: "Make increasing",
-    body: "Constrain selected relativities to a non-decreasing sequence.",
+    body: "The closest non-decreasing curve to the selection, weighted by exposure. It is not tied "
+      + "to the points either side, so it can leave a step at an edge.",
   }),
   decreasing: Object.freeze({
     title: "Make decreasing",
-    body: "Constrain selected relativities to a non-increasing sequence.",
+    body: "The closest non-increasing curve to the selection, weighted by exposure. It is not tied "
+      + "to the points either side, so it can leave a step at an edge.",
   }),
   level_left: Object.freeze({
     title: "Level from left",
