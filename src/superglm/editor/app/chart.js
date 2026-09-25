@@ -1172,8 +1172,8 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure) {
     exposureDensity(svg, x, exposure.y, sx, exposureY, yBase);
   } else {
     const nominalW = x.length > 1
-      ? Math.abs(sx(x[1]) - sx(x[0])) * 0.7
-      : innerW * 0.4;
+      ? Math.min(Math.abs(sx(x[1]) - sx(x[0])) * 0.7, innerW / 12)
+      : innerW / 12;
     for (let i = 0; i < exposure.y.length; i++) {
       const h = Math.max(1, maxH * exposure.y[i] / maxWeight);
       svg.appendChild(el("rect", {
