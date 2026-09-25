@@ -27,12 +27,27 @@ JOINS = ("kink", "tangent", "smooth")
 SHAPE_NAMES = ("Flat", "Line", "Quadratic", "Cubic")
 
 
-class UndeterminedStretchError(ValueError):
+class RangeError(ValueError):
+    """A polynomial range the spline cannot take."""
+
+
+class UndeterminedRangeError(RangeError):
+    """A range holds too few distinct values of the feature for its degree."""
+
+
+class UndeterminedStretchError(RangeError):
     """A free stretch between ranges, or a range and an end, holds too few values."""
 
 
-class ConstantRangesError(ValueError):
+class ConstantRangesError(RangeError):
     """Flat ranges tile the whole axis, leaving the term a constant the intercept carries."""
+
+
+# REML ranks a penalty at eps**(2/3) of its largest eigenvalue, and a free
+# piece of width h adds eigenvalues growing like h**-3, so a gap narrower than
+# eps**(2/9) of the span can cost the smooth part rank (measured: rank 7 at
+# gaps of 1e-2 and 1e-3 of the span, 6 at 1e-4, 2 at 1e-5, singular below).
+_NARROWEST_GAP = float(np.finfo(np.float64).eps) ** (2.0 / 9.0)
 
 
 @dataclass(frozen=True)
@@ -52,11 +67,11 @@ class PolynomialRange:
 
     def __post_init__(self) -> None:
         if isinstance(self.degree, bool) or not isinstance(self.degree, (int, np.integer)):
-            raise ValueError(f"PolynomialRange degree must be an integer, got {self.degree!r}")
+            raise RangeError(f"PolynomialRange degree must be an integer, got {self.degree!r}")
         if not 0 <= int(self.degree) <= 3:
-            raise ValueError(f"PolynomialRange degree must be 0-3, got {self.degree}")
+            raise RangeError(f"PolynomialRange degree must be 0-3, got {self.degree}")
         if self.join not in JOINS:
-            raise ValueError(f"PolynomialRange join must be one of {JOINS}, got {self.join!r}")
+            raise RangeError(f"PolynomialRange join must be one of {JOINS}, got {self.join!r}")
 
     @property
     def label(self) -> str:
@@ -88,25 +103,26 @@ def validate_ranges(
     ordered = tuple(ordered)
     for r in ordered:
         if not float(r.lo) < float(r.hi):
-            raise ValueError(f"PolynomialRange lo must be below hi, got [{r.lo}, {r.hi}]")
+            raise RangeError(f"PolynomialRange lo must be below hi, got [{r.lo}, {r.hi}]")
         if float(r.lo) < lo or float(r.hi) > hi:
-            raise ValueError(
+            raise RangeError(
                 f"PolynomialRange [{r.lo}, {r.hi}] must lie inside the fitted range [{lo}, {hi}]"
             )
         if int(r.degree) > degree:
-            raise ValueError(
+            raise RangeError(
                 f"PolynomialRange degree {r.degree} exceeds the spline degree {degree}"
             )
         if r.join == "tangent" and degree < 2:
-            raise ValueError(
+            raise RangeError(
                 "A degree-1 spline has no slope continuity to carry, so a range "
                 "cannot join it along its tangent; use join='kink'."
             )
     for left, right in zip(ordered[:-1], ordered[1:]):
         if float(right.lo) < float(left.hi):
-            raise ValueError(
+            raise RangeError(
                 f"PolynomialRanges [{left.lo}, {left.hi}] and [{right.lo}, {right.hi}] overlap"
             )
+    _refuse_narrow_gaps(ordered, lo, hi)
     tiled = (
         bool(ordered)
         and ordered[0].lo == lo
@@ -120,6 +136,21 @@ def validate_ranges(
             "intercept already carries; drop the term or leave part of the axis free."
         )
     return ordered
+
+
+def _refuse_narrow_gaps(ranges: Sequence[PolynomialRange], lo: float, hi: float) -> None:
+    """Refuse a free gap, between two ranges or a range and an end, narrower than ``_NARROWEST_GAP``."""
+    if not ranges:
+        return
+    starts = np.array([lo, *(r.hi for r in ranges)])
+    ends = np.array([*(r.lo for r in ranges), hi])
+    narrow = np.flatnonzero((ends > starts) & (ends - starts < _NARROWEST_GAP * (hi - lo)))
+    if narrow.size:
+        i = narrow[0]
+        raise RangeError(
+            f"The free gap between {starts[i]:g} and {ends[i]:g} is too narrow to penalise "
+            "stably; make the ranges meet there or leave a wider gap."
+        )
 
 
 def _snapped(edge: float, lo: float, hi: float, tolerance: float) -> float:
@@ -191,7 +222,7 @@ def certify_determined(
     short = np.flatnonzero(held <= np.array([int(r.degree) for r in ranges]))
     if short.size:
         r, found = ranges[short[0]], held[short[0]]
-        raise ValueError(
+        raise UndeterminedRangeError(
             f"PolynomialRange [{r.lo:g}, {r.hi:g}] needs at least {r.degree + 1} distinct "
             f"values of the feature inside it; it has {found}{note}."
         )
@@ -266,7 +297,7 @@ def constraint_null_space(C: NDArray) -> NDArray:
     """
     C = np.asarray(C, dtype=np.float64)
     if np.linalg.matrix_rank(C / np.linalg.norm(C, axis=1, keepdims=True)) < C.shape[0]:
-        raise ValueError(
+        raise RangeError(
             "polynomial range constraints are dependent; ranges this close need to meet at a kink"
         )
     Q, _ = np.linalg.qr(C.T, mode="complete")

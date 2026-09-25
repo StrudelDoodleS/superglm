@@ -429,11 +429,12 @@ def _series_moments_kernel(
 ) -> int:
     """Fill each row's Dunn-Smyth log W, E[J] and Var[J]; return the terms summed.
 
-    A row's result never depends on the other rows' values; only whether it is
-    summed does, once ``max_total_terms`` is spent the remaining rows come back
-    not exact. ``lgamma(j + 1) + lgamma(a j)`` is shared by every row and
-    tabulated once per call, sized by the largest mode whose series fits
-    ``max_terms``.
+    Each row is summed on its own, so its result never depends on the other
+    rows. If ``max_total_terms`` runs out before every row is summed, no row
+    comes back exact: which rows fit inside a budget depends on their order,
+    so a partial answer would too. ``lgamma(j + 1) + lgamma(a j)`` is shared
+    by every row and tabulated once per call, sized by the largest mode whose
+    series fits ``max_terms``.
     """
     a_plus_one = a + 1.0
     a_log_a = a * math.log(a)
@@ -454,6 +455,7 @@ def _series_moments_kernel(
     for j in range(1, table_size):
         log_base[j] = math.lgamma(j + 1.0) + math.lgamma(a * j)
     total_terms = 0
+    exhausted = False
     for row in range(log_t.size):
         moments = (False, math.nan, math.nan, math.nan, 0)
         budget = min(max_terms, max_total_terms - total_terms)
@@ -462,6 +464,12 @@ def _series_moments_kernel(
             moments = _row_series_moments(log_t[row], a, mode, budget, log_base)
         exact[row], log_sum[row], mean_j[row], variance_j[row], row_terms = moments
         total_terms += row_terms
+        exhausted = exhausted or (feasible[row] and not exact[row] and budget < max_terms)
+    if exhausted:
+        exact[:] = False
+        log_sum[:] = math.nan
+        mean_j[:] = math.nan
+        variance_j[:] = math.nan
     return total_terms
 
 
@@ -528,10 +536,10 @@ def series_moments(
 ) -> tuple[NDArray[np.bool_], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Return which rows the series evaluated, and their log W, E[J] and Var[J].
 
-    Rows the series cannot reach within ``max_terms`` terms, rows left once
-    ``max_total_terms`` are spent (by default ``_SERIES_MEAN_ROW_TERMS`` per
-    row, at least ``_DEFAULT_MAX_TOTAL_TERMS``), and rows whose mode is past
-    float64's exact integers come back not exact with NaN moments.
+    Rows the series cannot reach within ``max_terms`` terms, and rows whose
+    mode is past float64's exact integers, come back not exact with NaN
+    moments; if ``max_total_terms`` (by default ``_SERIES_MEAN_ROW_TERMS`` per
+    row, at least ``_DEFAULT_MAX_TOTAL_TERMS``) runs out, every row does.
     """
     log_t = np.ascontiguousarray(log_t, dtype=np.float64)
     exact = np.empty(log_t.size, dtype=np.bool_)

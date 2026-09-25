@@ -38,6 +38,7 @@ def shape_availability(model, name: str) -> tuple[bool, str | None]:
 
 # The joins the editor offers: Tangent, and Corner (the library's kink).
 EDITOR_JOINS = ("tangent", "kink")
+_LINEAR_TANGENT = "A degree-1 spline cannot join a range along its tangent; choose Corner."
 
 
 def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dict[str, Any]:
@@ -52,12 +53,15 @@ def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dic
         for r in _current_ranges(spec)
     ]
     specials = spec._special_display if isinstance(spec, OrderedCategorical) else ()
+    linear = available and _source_spline(spec).degree < 2
     return {
         "available": available,
         "reason": reason,
         "ranges": ranges,
         "support": support,
         "specials": [str(level) for level in specials],
+        "joins": ["kink"] if linear else list(EDITOR_JOINS),
+        "join_reason": _LINEAR_TANGENT if linear else None,
     }
 
 
@@ -111,9 +115,7 @@ def shaped_feature_spec(
     if join not in EDITOR_JOINS:
         raise EditorValueError("Choose a join: Tangent or Corner.")
     if join == "tangent" and _source_spline(model._specs[name]).degree < 2:
-        raise EditorValueError(
-            "A degree-1 spline cannot join a range along its tangent; choose Corner."
-        )
+        raise EditorValueError(_LINEAR_TANGENT)
     spec = model._specs[name]
     ordered = isinstance(spec, OrderedCategorical)
     position = spec._range_edge_value if ordered else float
@@ -170,6 +172,10 @@ def _unavailable_reason(model, name: str) -> str | None:
         return "Remove the term's shape constraint to add shaped ranges."
     if source.select:
         return "Remove select=True from the term to add shaped ranges."
+    if max(source._m_orders) > source.degree:
+        # A shaped term is rebuilt with a derivative penalty, whose order the
+        # degree bounds; a difference penalty (ps) is not bounded so.
+        return "Shapes need a penalty order no higher than the spline's degree."
     if interaction_users(model, name):
         return "A term used by an interaction cannot be reshaped."
     return None

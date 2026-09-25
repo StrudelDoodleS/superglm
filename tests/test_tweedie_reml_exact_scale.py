@@ -318,13 +318,24 @@ class TestScaleProfileUnit:
             y, weights, power, weight_semantics="prior"
         )
         monkeypatch.setattr(scale_module, "_TWEEDIE_NEWTON_STEP_TOL", tolerance)
+        evaluated = []
+        real_derivatives = type(data).saturated_log_phi_derivatives
 
+        def recorded(self, phi):
+            evaluated.append((phi, real_derivatives(self, phi)))
+            return evaluated[-1][1]
+
+        monkeypatch.setattr(type(data), "saturated_log_phi_derivatives", recorded)
         log_phi, saturated, _ = scale_module._newton_tweedie_log_phi(
             data, penalized_deviance, nullity
         )
         exact, _, slope = data.saturated_log_phi_derivatives(float(np.exp(log_phi)))
 
         assert abs(saturated - exact) <= abs(slope) * tolerance**2 + 1e-12 * abs(exact)
+        # The test has power only while the last step is long enough that the
+        # value at the point it stepped from would miss that bound.
+        last_phi, (_, last_score, _) = evaluated[-2]
+        assert abs(last_score * (log_phi - np.log(last_phi))) > abs(slope) * tolerance**2
         # So the published criterion is the objective at the published phi.
         profiled = scale_module.profile_tweedie_reml_scale(data, penalized_deviance, nullity)
         phi = 1.0 / profiled.inverse_phi

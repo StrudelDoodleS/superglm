@@ -167,6 +167,8 @@ def test_smooth_join_keeps_the_splines_own_continuity(nu):
         ([(2.0, 5.0, 1), (4.0, 7.0, 0)], DEGREE, "overlap"),
         ([(2.0, 5.0, 3)], 2, "exceeds the spline degree 2"),
         ([(2.0, 5.0, 1)], 1, "cannot join it along its tangent"),
+        ([(2.0, 5.0, 1), (5.0 + 1e-5 * (HI - LO), 7.0, 0)], DEGREE, "too narrow to penalise"),
+        ([(LO + 1e-5 * (HI - LO), 3.0, 1)], DEGREE, "too narrow to penalise"),
     ],
 )
 def test_invalid_ranges_are_refused_by_name(ranges, degree, message):
@@ -198,6 +200,12 @@ def test_flat_ranges_tiling_the_axis_are_refused(ranges):
 
 def test_a_line_among_ranges_tiling_the_axis_keeps_the_term():
     ranges = [PolynomialRange(LO, 4.0, 0), PolynomialRange(4.0, HI, 1)]
+    assert len(validate_ranges(ranges, DEGREE, LO, HI)) == 2
+
+
+def test_a_free_gap_wide_enough_to_keep_its_rank_is_accepted():
+    # 1e-3 of the span keeps the penalty rank the 1e-2 gap has; 1e-4 does not.
+    ranges = [PolynomialRange(2.0, 5.0, 1), PolynomialRange(5.0 + 1e-3 * (HI - LO), 7.0, 0)]
     assert len(validate_ranges(ranges, DEGREE, LO, HI)) == 2
 
 

@@ -717,6 +717,12 @@ UNAVAILABLE = [
         {"x": Spline(n_knots=6, select=True)},
         "Remove select=True from the term to add shaped ranges.",
     ),
+    (
+        # A degree-1 P-spline keeps its second-order difference penalty, which
+        # the bs derivative penalty a shaped term is rebuilt with cannot carry.
+        {"x": Spline(kind="ps", n_knots=6, degree=1)},
+        "Shapes need a penalty order no higher than the spline's degree.",
+    ),
 ]
 
 
@@ -734,6 +740,8 @@ def test_an_unshapeable_term_says_why_and_is_refused_unchanged(region_model, fea
         "ranges": [],
         "support": None,
         "specials": [],
+        "joins": ["tangent", "kink"],
+        "join_reason": None,
     }
     with pytest.raises(EditorValueError, match=f"^{re.escape(reason)}$"):
         session.replace_with_shaped_range("x", lo=2.0, hi=4.0, degree=1, method="fit")
@@ -765,6 +773,8 @@ def test_categorical_and_ordered_step_terms_report_shapes_unavailable(region_mod
         "ranges": [],
         "support": None,
         "specials": [],
+        "joins": ["tangent", "kink"],
+        "join_reason": None,
     }
     _, X, y = banded
     model = SuperGLM(
@@ -815,6 +825,31 @@ def test_a_join_outside_tangent_and_corner_is_refused(aged, join):
     assert session.model is model
 
 
+def test_a_refit_failure_that_is_not_a_range_refusal_keeps_its_own_error(aged, banded, monkeypatch):
+    # Only the library's range refusals are reworded: a solver failure on a
+    # shaped or collapsed term must reach the caller, and the server log, as itself.
+    from superglm.editor import session as session_module
+
+    model, _ = aged
+    shaping = EditorSession.from_model(model, terms=["age"])
+    banded_model, _, _ = banded
+    collapsing = EditorSession.from_model(banded_model, terms=["band"])
+    collapsing.replace_with_shaped_range("band", lo="B3", hi="B6", degree=1, method="fit")
+    collapsing.select_levels("band", ["B4", "B5"])
+
+    def failed(*args, **kwargs):
+        raise ValueError("solver failed")
+
+    monkeypatch.setattr(session_module, "fit_refit_model", failed)
+    for refit in (
+        lambda: shaping.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=1, method="fit"),
+        lambda: collapsing.replace_with_collapsed_levels("band", method="fit"),
+    ):
+        with pytest.raises(ValueError, match="^solver failed$") as raised:
+            refit()
+        assert not isinstance(raised.value, EditorValueError)
+
+
 def test_select_all_then_flat_is_refused_in_words(aged):
     model, _ = aged
     session = EditorSession.from_model(model, terms=["age"])
@@ -833,6 +868,8 @@ def test_a_degree_one_spline_refuses_a_tangent_join_and_takes_a_corner(aged):
         features={"age": Spline(kind="bs", k=10, degree=1, m=1)},
     ).fit(X[["age"]], y)
     session = EditorSession.from_model(model, terms=["age"])
+    shape = session_payload(session)["age"]["shape"]
+    assert shape["joins"] == ["kink"] and shape["join_reason"].startswith("A degree-1 spline")
     with pytest.raises(EditorValueError, match="^A degree-1 spline cannot join a range"):
         session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=1, method="fit")
     assert session.model is model
@@ -962,6 +999,8 @@ def test_widget_http_shape_range_returns_transition_envelope(aged):
             "reason": None,
             "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line", "join": "tangent"}],
             "specials": [],
+            "joins": ["tangent", "kink"],
+            "join_reason": None,
         }
         n_points = payload["state"]["terms"]["age"]["n_points"]
         assert len(support["below"]) == len(support["through"]) == n_points

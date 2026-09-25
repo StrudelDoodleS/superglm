@@ -50,7 +50,12 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
-from superglm.features._spline_ranges import ConstantRangesError, UndeterminedStretchError
+from superglm.features._spline_ranges import (
+    ConstantRangesError,
+    RangeError,
+    UndeterminedRangeError,
+    UndeterminedStretchError,
+)
 from superglm.solvers.dispersion import model_weight_semantics
 
 _SHAPE_REFUSED = (
@@ -69,21 +74,40 @@ _COLLAPSE_IN_RANGE_REFUSED = (
     "Collapsing those bands leaves a shaped range too few bands for its shape. "
     "Collapse bands outside it, or undo the range first."
 )
+_COLLAPSE_STRETCH_REFUSED = (
+    "Collapsing those bands leaves too few bands beside a shaped range to fit the rest "
+    "of the curve. Collapse fewer bands, or undo the range first."
+)
+# Most specific first: every range refusal is a RangeError.
+_SHAPE_SENTENCES = (
+    (UndeterminedStretchError, _STRETCH_REFUSED),
+    (ConstantRangesError, _CONSTANT_REFUSED),
+    (RangeError, _SHAPE_REFUSED),
+)
+_COLLAPSE_SENTENCES = (
+    (UndeterminedRangeError, _COLLAPSE_IN_RANGE_REFUSED),
+    (UndeterminedStretchError, _COLLAPSE_STRETCH_REFUSED),
+)
 
 
-def _shape_refusal(exc: BaseException | None) -> str:
-    """The sentence for a library refusal, found on its cause chain.
+def _range_refusal(exc: BaseException, sentences) -> str | None:
+    """The sentence for the first range refusal on ``exc``'s cause chain, or None.
 
     The fit re-raises a term's build refusal to name the term, so the
-    library's own error can sit one or more causes down.
+    library's own error can sit one or more causes down. Anything else, a
+    solver failure say, is not a range refusal and keeps its own error.
     """
+    return next(filter(None, (_sentence_for(cause, sentences) for cause in _causes(exc))), None)
+
+
+def _sentence_for(exc: BaseException, sentences) -> str | None:
+    return next((sentence for kind, sentence in sentences if isinstance(exc, kind)), None)
+
+
+def _causes(exc: BaseException | None):
     while exc is not None:
-        if isinstance(exc, UndeterminedStretchError):
-            return _STRETCH_REFUSED
-        if isinstance(exc, ConstantRangesError):
-            return _CONSTANT_REFUSED
+        yield exc
         exc = exc.__cause__
-    return _SHAPE_REFUSED
 
 
 class EditorSession:
@@ -900,12 +924,12 @@ class EditorSession:
         except EditorClientError:
             raise
         except ValueError as exc:
-            # Collapsing bands inside a shaped range takes away positions its
-            # polynomial needs; the library refuses that at the refit.
-            basis = getattr(self.model._specs[term], "_spline_obj", None)
-            if not getattr(basis, "polynomial_ranges", ()):
+            # Collapsing bands can take away positions a shaped range, or the
+            # free curve beside it, needs; the library refuses that at the refit.
+            sentence = _range_refusal(exc, _COLLAPSE_SENTENCES)
+            if sentence is None:
                 raise
-            raise EditorValueError(_COLLAPSE_IN_RANGE_REFUSED) from exc
+            raise EditorValueError(sentence) from exc
 
     def replace_with_collapsed_levels(self, term: str, **kwargs: Any):
         """Collapse selected levels, refit, and make the refit the in-force edit model."""
@@ -1006,7 +1030,10 @@ class EditorSession:
         except ValueError as exc:
             # The library's refusal text is backend text (editor/errors.py): the
             # analyst gets an intentional sentence, Python callers keep the cause.
-            raise EditorValueError(_shape_refusal(exc)) from exc
+            sentence = _range_refusal(exc, _SHAPE_SENTENCES)
+            if sentence is None:
+                raise
+            raise EditorValueError(sentence) from exc
         return self._push_structure(
             refit_model,
             operation="shape_range",

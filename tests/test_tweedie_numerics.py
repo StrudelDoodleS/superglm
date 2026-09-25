@@ -233,7 +233,8 @@ def test_series_stops_once_its_total_work_budget_is_spent() -> None:
     """Rows each inside the per-row cap cannot add up past the call's total budget.
 
     Each row here needs about a hundred terms; a budget of three and a half
-    rows sums three, and the rest come back not exact without being summed.
+    rows stops the call after at most that work, and then no row is exact,
+    so which rows a budget reaches never shows up in the answer.
     """
     from superglm._tweedie_profile_kernel import _series_moments_kernel
 
@@ -246,12 +247,21 @@ def test_series_stops_once_its_total_work_budget_is_spent() -> None:
     one_row, _ = run(log_t[:1], 10**9)
     budget = 3 * one_row + one_row // 2
     work, outputs = run(log_t, budget)
-    _, unbounded = run(log_t, 10**9)
 
     assert work <= budget
-    assert outputs[0].tolist() == [True] * 3 + [False] * 47
-    for budgeted, full in zip(outputs[1:], unbounded[1:], strict=True):
-        assert budgeted[:3].tolist() == full[:3].tolist()
+    assert not np.any(outputs[0])
+
+
+def test_series_results_do_not_depend_on_row_order() -> None:
+    """Permuting the rows permutes the results, with or without a binding budget."""
+    rng = np.random.default_rng(7)
+    log_t = rng.uniform(2.0, 14.0, 200)
+    order = rng.permutation(log_t.size)
+    for max_total_terms in (None, 2_000):
+        forward = series_moments(log_t, 1.5, max_total_terms=max_total_terms)
+        permuted = series_moments(log_t[order], 1.5, max_total_terms=max_total_terms)
+        for column, shuffled in zip(forward, permuted, strict=True):
+            np.testing.assert_array_equal(column[order], shuffled)
 
 
 @pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])
