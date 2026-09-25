@@ -52,6 +52,7 @@ import { renderHelpDrawer } from "./views/help_drawer.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
 import {
   bindJoinToggle,
+  effectiveShapeJoin,
   readShapeJoin,
   renderJoinToggle,
   storeShapeJoin
@@ -341,13 +342,20 @@ bindToolRail({
 // Help sits in the app bar, outside the tool rail's own click handling.
 helpAction.addEventListener("click", () => openHelp());
 
-// The join a shaped range gets at its edges, kept across pages when storage allows.
+// The join a shaped range gets at its edges, kept across pages when storage
+// allows; a term that cannot take it shows, and gets, the join it can.
 let shapeJoinChoice = readShapeJoin();
+function renderShapeJoin(term) {
+  const joins = term?.shape?.joins;
+  renderJoinToggle(
+    shapeJoin, effectiveShapeJoin(shapeJoinChoice, joins), joins, term?.shape?.join_reason ?? null
+  );
+}
 bindJoinToggle(shapeJoin, {
   onChange: (join) => {
     shapeJoinChoice = join;
     storeShapeJoin(join);
-    renderJoinToggle(shapeJoin, join);
+    renderShapeJoin(currentTerm());
   }
 });
 renderJoinToggle(shapeJoin, shapeJoinChoice);
@@ -1229,6 +1237,7 @@ function updateShapeActions(term, selection) {
     shapesVisible = shapesVisible || visible;
   }
   shapeJoin.hidden = !shapesVisible;
+  renderShapeJoin(term);
   shapeJoinSeparator.hidden = !shapesVisible;
   const refitVisible = shapesVisible ||
     [collapseLevels, ungroupLevels, setReference].some((button) => button && !button.hidden);
@@ -1605,7 +1614,10 @@ for (const button of shapeButtons) {
     if (!range || button.getAttribute("aria-disabled") === "true") return;
     const degree = Number(button.dataset.shapeDegree);
     await runStructuralRefit(
-      shapeRangeTransition(selectedTerm(), range.lo, range.hi, degree, shapeJoinChoice)
+      shapeRangeTransition(
+        selectedTerm(), range.lo, range.hi, degree,
+        effectiveShapeJoin(shapeJoinChoice, term.shape.joins)
+      )
     );
   });
 }

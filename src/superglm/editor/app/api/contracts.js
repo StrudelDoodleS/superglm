@@ -77,6 +77,8 @@
  * @property {ShapedRange[]} ranges
  * @property {ShapeSupport|null} support
  * @property {string[]} specials
+ * @property {("tangent"|"kink")[]} [joins] the joins the term can take
+ * @property {string|null} [join_reason] why a join is missing from ``joins``
  */
 /**
  * The /shape_range request: the selection's edges as shapeRangeForSelection

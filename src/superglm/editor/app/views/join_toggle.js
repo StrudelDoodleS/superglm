@@ -29,6 +29,18 @@ export function readShapeJoin(storage) {
   }
 }
 
+/**
+ * The join a range on the term gets: the chosen one when the term can take
+ * it, else the first it can (a degree-1 spline takes only Corner). The
+ * choice itself is kept for the terms that can.
+ * @param {ShapeJoin} chosen @param {readonly string[]} [allowed] every join when omitted
+ * @returns {ShapeJoin}
+ */
+export function effectiveShapeJoin(chosen, allowed) {
+  if (!allowed || allowed.includes(chosen)) return chosen;
+  return allowed.find(isShapeJoin) ?? chosen;
+}
+
 /** @param {ShapeJoin} join @param {Pick<Storage, 'setItem'>} [storage] */
 export function storeShapeJoin(join, storage) {
   try {
@@ -46,12 +58,12 @@ export function storeShapeJoin(join, storage) {
  * @returns {{destroy:()=>void}}
  */
 export function bindJoinToggle(root, { onChange }) {
-  /** @returns {HTMLButtonElement[]} */
+  /** @returns {HTMLButtonElement[]} the radios the term can take */
   function radios() {
     /** @type {HTMLButtonElement[]} */
     const found = [];
     for (const element of root.querySelectorAll("[data-join]")) {
-      if (element instanceof HTMLButtonElement) found.push(element);
+      if (element instanceof HTMLButtonElement && !isDisabled(element)) found.push(element);
     }
     return found;
   }
@@ -60,6 +72,7 @@ export function bindJoinToggle(root, { onChange }) {
   function onClick(event) {
     const element = event.target instanceof Element ? event.target.closest("[data-join]") : null;
     if (!(element instanceof HTMLButtonElement) || !root.contains(element)) return;
+    if (isDisabled(element)) return;
     const join = element.dataset.join;
     if (isShapeJoin(join)) onChange(join);
   }
@@ -94,13 +107,26 @@ export function bindJoinToggle(root, { onChange }) {
 
 /**
  * Mark the chosen join: it is the checked radio and the group's one tab stop.
+ * A join the term cannot take is disabled, and its popover says why.
  * @param {HTMLElement} root @param {ShapeJoin} join
+ * @param {readonly string[]} [allowed] every join when omitted
+ * @param {string|null} [reason] why the others are unavailable
  */
-export function renderJoinToggle(root, join) {
+export function renderJoinToggle(root, join, allowed, reason = null) {
   for (const element of root.querySelectorAll("[data-join]")) {
     if (!(element instanceof HTMLButtonElement)) continue;
     const active = element.dataset.join === join;
+    const usable = !allowed || allowed.includes(element.dataset.join ?? "");
     element.setAttribute("aria-checked", String(active));
+    element.setAttribute("aria-disabled", String(!usable));
     element.tabIndex = active ? 0 : -1;
+    element.dataset.defaultPopoverBody ??= element.dataset.popoverBody;
+    const body = usable || !reason ? element.dataset.defaultPopoverBody : reason;
+    if (body !== undefined) element.dataset.popoverBody = body;
   }
+}
+
+/** @param {HTMLButtonElement} element */
+function isDisabled(element) {
+  return element.getAttribute("aria-disabled") === "true";
 }

@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   bindJoinToggle,
+  effectiveShapeJoin,
   readShapeJoin,
   renderJoinToggle,
   storeShapeJoin,
@@ -127,4 +128,37 @@ test("the join is remembered in storage and is Tangent without one or with stora
   };
   assert.equal(readShapeJoin(blocked), "tangent");
   assert.doesNotThrow(() => storeShapeJoin("kink", blocked));
+});
+
+test("a term that cannot take the chosen join gets the first it can, and the choice is kept", () => {
+  assert.equal(effectiveShapeJoin("tangent", undefined), "tangent");
+  assert.equal(effectiveShapeJoin("tangent", ["tangent", "kink"]), "tangent");
+  assert.equal(effectiveShapeJoin("tangent", ["kink"]), "kink");
+  assert.equal(effectiveShapeJoin("kink", ["kink"]), "kink");
+});
+
+test("a join the term cannot take is disabled, says why, and ignores clicks and arrows", () => {
+  const { buttons, root, chosen, binding } = fixture();
+  globalThis.HTMLButtonElement = FakeButton;
+  globalThis.Element = FakeButton;
+  try {
+    buttons[0].dataset.popoverBody = "The curve leaves the shape along its slope.";
+    renderJoinToggle(root, "kink", ["kink"], "A degree-1 spline cannot join a range along its tangent.");
+    assert.deepEqual(
+      buttons.map((button) => [button.getAttribute("aria-disabled"), button.getAttribute("aria-checked")]),
+      [["true", "false"], ["false", "true"]],
+    );
+    assert.equal(buttons[0].dataset.popoverBody, "A degree-1 spline cannot join a range along its tangent.");
+    root.emit("click", { target: buttons[0] });
+    root.emit("keydown", { target: buttons[1], key: "ArrowLeft", preventDefault: () => {} });
+    assert.deepEqual(chosen, ["kink"]);
+
+    renderJoinToggle(root, "tangent", ["tangent", "kink"], null);
+    assert.equal(buttons[0].getAttribute("aria-disabled"), "false");
+    assert.equal(buttons[0].dataset.popoverBody, "The curve leaves the shape along its slope.");
+    binding.destroy();
+  } finally {
+    delete globalThis.HTMLButtonElement;
+    delete globalThis.Element;
+  }
 });
