@@ -1,0 +1,104 @@
+/* dark.css: the dark palette. Every colour token in tokens.css is restated
+   for a dark ground, keyed on <html data-theme="dark">: index.html sets that
+   attribute before first paint from the remembered choice or the browser's
+   setting, and views/theme.js keeps it current. The ground, the paper text
+   and the unchanged yellow are the docs site's dark (docs/_static/custom.css);
+   the blue is the same hue stepped up for the dark ground; the chart's
+   categorical palettes are the light hues re-stepped into the dark lightness
+   band and validated against this surface. It lives apart from tokens.css
+   because superglm/plotting/editor_style.py reads that file as the light
+   palette. */
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --text: #f2efe6;
+  --muted: #a6a8ae;
+  --surface: #15171c;
+  --surface-subtle: #1c1f26;
+  --surface-hover: #272b34;
+  --border: #2c3038;
+  --border-strong: #6f737c;
+  --hairline: rgba(242, 239, 230, 0.12);
+  --grid: rgba(166, 168, 174, 0.14);
+  --blue: #7aa2f7;
+  --blue-soft: #24314f;
+  --blue-band: rgba(122, 162, 247, 0.12);
+  --orange: #fb923c;
+  --red: #f26b52;
+  --yellow: #f4b942;
+  --yellow-border: #f4b942;
+  --danger: #f26b52;
+  --danger-surface: #3a201c;
+  --danger-text: #ffb3a7;
+  --better: #2dd4bf;
+  --worse: #f26b52;
+  --focus: #7aa2f7;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --ink: #000000;
+  --primary-hover: #dcd9cf;
+  --popover-muted: #4f535b;
+  --grey: #6f7883;
+  --zero: rgba(242, 239, 230, 0.3);
+  --ci: rgba(122, 162, 247, 0.16);
+  --ci-whisker: rgba(122, 162, 247, 0.6);
+  --basis-contribution: rgba(166, 168, 174, 0.35);
+  --build-end: #7aa2f7;
+  --trace-ink: #a6a8ae;
+  --sig-strong-bg: #14382b;
+  --sig-strong-fg: #86efc0;
+  --sig-medium-bg: #163a2a;
+  --sig-medium-fg: #a3e4b4;
+  --sig-standard-bg: #2f3a15;
+  --sig-standard-fg: #d5e79b;
+  --sig-weak-bg: #3f2b12;
+  --sig-weak-fg: #f5c98c;
+  --sig-none-bg: #421d1d;
+  --sig-none-fg: #ffb3b3;
+  --group-0: #cf7e1a;
+  --group-1: #903be3;
+  --group-2: #2da97b;
+  --group-3: #f2403a;
+  --group-4: #2ca2c4;
+  --group-5: #3877ff;
+  --basis-0: #2caf56;
+  --basis-1: #d97705;
+  --basis-2: #8c54fe;
+  --basis-3: #2ca2c4;
+  --basis-4: #f2403a;
+  --basis-5: #3877ff;
+  --basis-6: #d75527;
+  --basis-7: #6aa819;
+  --basis-8: #d3336e;
+  --basis-9: #2b8880;
+  --basis-10: #a54cfe;
+  --basis-11: #c48607;
+  --trace-0: #267cef;
+  --trace-1: #3aae57;
+  --trace-2: #d44d9b;
+  --trace-3: #d97705;
+  --trace-4: #9364f4;
+  --trace-5: #3583ff;
+  --trace-6: #e53c40;
+  --trace-7: #2b91a1;
+  --trace-8: #8055d5;
+  --trace-9: #68717b;
+}
+
+/* A translucent yellow over near-black composes to a dim gold whatever its
+   tint, and at the light strip's opacity the curves crossing it would sink
+   into it. So the strip stays lighter on the dark ground, the curve stays the
+   figure, and a bright edge along the strip carries the yellow. */
+:root[data-theme="dark"] .exposure,
+:root[data-theme="dark"] .exposure-density {
+  fill-opacity: 0.4;
+}
+:root[data-theme="dark"] .exposure,
+:root[data-theme="dark"] .exposure-edge,
+:root[data-theme="dark"] .legend-swatch {
+  stroke: var(--yellow);
+  stroke-width: 1;
+  stroke-opacity: 0.8;
+}
+:root[data-theme="dark"] .exposure-edge {
+  stroke-width: 1.5;
+}

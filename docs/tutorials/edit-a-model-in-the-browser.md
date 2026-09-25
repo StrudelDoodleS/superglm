@@ -201,6 +201,12 @@ curve and diagnostic controls, and Help lists modes, gestures, operations, and s
 On a narrow screen these panes share a dismissible drawer. Escape closes a popover or drawer and
 returns focus to its launcher.
 
+## Theme
+
+The theme icon in the application bar cycles through Auto, Light and Dark. Auto follows the
+browser's light or dark setting, which inside a notebook is not always the notebook's own theme,
+so choose Light or Dark to override it. The choice is kept through a reload of the page.
+
 ## Export
 
 Choose **Export > Python model** to download a fitted `.joblib` artifact or write it to a kernel

@@ -4,10 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SuperGLM Editor</title>
+<script>
+  // The theme before first paint: the remembered choice, else the browser's
+  // setting. views/theme.js takes over once the app loads.
+  {
+    let choice = null;
+    try { choice = localStorage.getItem("superglm.editor.theme"); } catch { /* blocked */ }
+    const dark = choice === "dark" ||
+      (choice !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/assets/styles/tokens.css">
+<link rel="stylesheet" href="/assets/styles/dark.css">
 <link rel="stylesheet" href="/assets/styles.css">
 <link rel="stylesheet" href="/assets/styles/shell.css">
 <link rel="stylesheet" href="/assets/styles/chart.css">
@@ -96,6 +108,20 @@
         </svg>
       </button>
       <span class="app-actions-gap" aria-hidden="true"></span>
+      <button id="themeAction" class="icon-button" type="button" aria-label="Theme: Auto"
+        data-popover-title="Theme: Auto" data-popover-body="Follows the browser's setting.">
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true" data-theme-icon="auto">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"></path>
+        </svg>
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true" data-theme-icon="light" hidden>
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2.5V5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"></path>
+        </svg>
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true" data-theme-icon="dark" hidden>
+          <path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"></path>
+        </svg>
+      </button>
       <button id="helpAction" class="icon-button" type="button" aria-label="Help"
         aria-keyshortcuts="?" data-tool="help">
         <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">

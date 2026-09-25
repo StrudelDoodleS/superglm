@@ -57,6 +57,7 @@ import {
   storeShapeJoin
 } from "./views/join_toggle.js";
 import { bindPopovers } from "./views/popover.js";
+import { mountThemeControl } from "./views/theme.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
 const appBar = document.getElementById("appBar");
@@ -218,6 +219,11 @@ bindAppBar({
   onRedo: redo,
   onRevert: () => runStructuralRefit(revertTransition()),
   onRefresh: refreshFromPython
+});
+mountThemeControl({
+  button: document.getElementById("themeAction"),
+  root: document.documentElement,
+  media: window.matchMedia("(prefers-color-scheme: dark)")
 });
 
 async function refreshFromPython() {

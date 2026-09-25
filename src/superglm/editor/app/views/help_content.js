@@ -200,6 +200,13 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    title: "Theme",
+    items: Object.freeze([
+      "The theme icon in the application bar cycles through Auto, Light and Dark. Auto follows the browser's light or dark setting, which inside a notebook is not always the notebook's own; a chosen theme wins over it.",
+      "The choice is kept through a reload of the page.",
+    ]),
+  }),
+  Object.freeze({
     title: "Exporting",
     items: Object.freeze([
       "Python model exports are round-trip validated and prediction-checked when evaluation rows are available.",
