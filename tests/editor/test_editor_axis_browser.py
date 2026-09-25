@@ -50,9 +50,9 @@ def test_long_labels_truncate_only_on_screen_and_keep_exact_model_strings(open_e
     full = "MyReallyLongCategoryNameThatWouldNeverFit"
     unicode_full = "Family👨‍👩‍👧‍👦DriverCaféCategory"
 
-    with open_editor_page(
-        selected_term="long_category", viewport={"width": 1086, "height": 720}
-    ) as (page, session):
+    # At the default 1180px the 694px chart draws all ten labels, angled and
+    # truncated; a 600px chart at 1086px keeps nine of them.
+    with open_editor_page(selected_term="long_category") as (page, session):
         original_levels = list(session.terms["long_category"].levels)
         assert full in original_levels
         assert unicode_full in original_levels

@@ -244,6 +244,13 @@ def test_selection_incremental_feedback_precedes_delayed_backend_success(open_ed
 
 def test_failed_delayed_selection_recovers_without_rebuilding_chart(open_editor_page):
     with open_editor_page() as (page, session):
+        # The error banner this test raises takes a row above the editor, and a
+        # chart whose panel shrinks is redrawn at its new size. Pin the panel at
+        # its current height so the only redraw in play is the one the
+        # recovery path must not make.
+        page.locator(".chart-shell").evaluate(
+            "node => { node.style.height = `${node.getBoundingClientRect().height}px`; }"
+        )
         select_chart_tool(page, "Select")
         term = "curve"
         total_points = session.terms[term].size

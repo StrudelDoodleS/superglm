@@ -160,9 +160,6 @@ button:active { background: #e6edf3; }
   min-height: 0;
 }
 #chart {
-  width: 100%;
-  height: 100%;
-  min-height: 360px;
   display: block;
   border: 1px solid var(--border);
   border-radius: 6px;

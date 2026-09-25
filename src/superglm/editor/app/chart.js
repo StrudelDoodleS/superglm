@@ -1,6 +1,7 @@
 import { fmt } from "./format.js";
 import { drawShapeOverlay } from "./chart/shape_overlay.js";
 import {
+  chartSize,
   evenlySpacedIndices,
   planCategoricalAxis,
   splitLabelGraphemes
@@ -56,7 +57,11 @@ export function drawChart(term, selection, context) {
   const { svg } = context;
   const visualMode = context.visualMode();
   svg.innerHTML = "";
-  const width = 940, height = 520;
+  // Draw at the chart's own CSS-pixel size so nothing is scaled: text keeps
+  // its nominal size and the plot fills its panel. A hidden chart, or a DOM
+  // without layout, draws at the fallback size.
+  const { width, height } = chartSize(svg.clientWidth, svg.clientHeight);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   const baseMargin = { left: 76, right: 76, top: 48, bottom: 72 };
   const view = resolveDisplayTerm(
     term,
@@ -137,7 +142,7 @@ export function drawChart(term, selection, context) {
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
   // curves and interactive handles/points.
   exposureLayer(svg, view, sx, margin, innerW, innerH, exposure);
-  for (const tick of ticks(yMin, yMax, 6)) {
+  for (const tick of ticks(yMin, yMax, tickCount(innerH, 70))) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
     text(svg, margin.left - 10, sy(tick) + 4, fmt(tick), "tick-label", "end");
   }
@@ -164,7 +169,7 @@ export function drawChart(term, selection, context) {
       }
     }
   } else {
-    for (const tick of continuousXTicks(xMin, xMax)) {
+    for (const tick of continuousXTicks(xMin, xMax, innerW)) {
       const tickX = sx(tick.value);
       const tickY = margin.top + innerH + 22;
       line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
@@ -487,9 +492,7 @@ function showPointTooltip(svg, target, lines) {
   const cy = Number(target.getAttribute("cy") || 0);
   const width = tooltipWidth(lines);
   const height = 12 + lines.length * 16;
-  const bounds = svg.viewBox.baseVal;
-  const svgWidth = bounds && bounds.width ? bounds.width : Number(svg.getAttribute("width")) || 940;
-  const svgHeight = bounds && bounds.height ? bounds.height : Number(svg.getAttribute("height")) || 520;
+  const { width: svgWidth, height: svgHeight } = svg.viewBox.baseVal;
   const x = Math.max(8, Math.min(svgWidth - width - 8, cx + 12));
   const y = Math.max(8, Math.min(svgHeight - height - 8, cy - height - 12));
   const group = el("g", { class: "point-tooltip" });
@@ -1023,8 +1026,15 @@ function measureText(probe, value) {
   return probe.getComputedTextLength();
 }
 
-function continuousXTicks(xMin, xMax) {
-  return ticks(xMin, xMax, 6).map((value) => ({ value, label: fmt(value) }));
+function continuousXTicks(xMin, xMax, innerW) {
+  return ticks(xMin, xMax, tickCount(innerW, 130)).map((value) => ({ value, label: fmt(value) }));
+}
+
+// One tick per `spacing` px and at least three: the 940x520 fallback keeps its
+// six ticks each way, and a wider chart gets more ticks, not the same six
+// spread out.
+function tickCount(extent, spacing) {
+  return Math.max(3, Math.round(extent / spacing));
 }
 
 function ticks(min, max, n) {

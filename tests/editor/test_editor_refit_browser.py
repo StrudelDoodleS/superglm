@@ -213,6 +213,13 @@ def test_editor_evidence_catches_up_after_an_edit_in_report_view(open_editor_pag
         ):
             page.get_by_role("button", name="Increase selection", exact=True).click()
         _wait_for_editor_idle(page)
+        # The edit's debounced metrics and summary refresh fires 150ms later
+        # whichever view is showing; let it land before leaving the editor, so
+        # the only stale evidence below is the undo's.
+        page.wait_for_function(
+            "() => document.querySelector('#metricGrid')?.dataset.freshness === 'current'"
+            " && document.querySelector('#summaryFrame')?.dataset.freshness === 'current'"
+        )
 
         with page.expect_response(
             lambda response: response.request.method == "POST" and _path(response.url) == "/report"

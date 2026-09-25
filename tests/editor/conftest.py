@@ -150,6 +150,16 @@ def open_editor_page(chromium_browser, editor_browser_model):
                     arg=selected_term,
                 )
                 page.locator("#chart path.edited").first.wait_for()
+            # The chart is drawn at its panel's size, and the panel settles a
+            # frame after the feature list toggles or the metrics render.
+            page.wait_for_function(
+                """() => {
+                    const svg = document.querySelector('#chart');
+                    const viewBox = svg.viewBox.baseVal;
+                    return viewBox.width === svg.clientWidth
+                        && viewBox.height === svg.clientHeight;
+                }"""
+            )
             yield page, session
         finally:
             if resources in opened:

@@ -190,6 +190,20 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
             page = browser.new_page(viewport={"width": 1180, "height": 720})
             page.goto(browser_editor_widget.app_url)
             page.locator("#chart path.edited").first.wait_for()
+            # The chart is drawn at its panel's size, and the error banner this
+            # test raises takes a row above the editor. Pin the panel so the
+            # path data compared below stays in one coordinate system.
+            page.locator(".chart-shell").evaluate(
+                "node => { node.style.height = `${node.getBoundingClientRect().height}px`; }"
+            )
+            page.wait_for_function(
+                """() => {
+                    const svg = document.querySelector('#chart');
+                    const viewBox = svg.viewBox.baseVal;
+                    return viewBox.width === svg.clientWidth
+                        && viewBox.height === svg.clientHeight;
+                }"""
+            )
 
             select_chart_tool(page, "Select")
             page.locator("#chart circle.point[data-index]").last.click()

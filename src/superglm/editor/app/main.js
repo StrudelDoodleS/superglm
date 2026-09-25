@@ -1,5 +1,6 @@
 import { editorClient } from "./api/client.js";
 import { drawChart, groupedTerms, updateChartSelection } from "./chart.js";
+import { chartSize } from "./chart/geometry.js";
 import { renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
@@ -298,6 +299,22 @@ store.subscribe(
 );
 narrowQuery.addEventListener("change", syncViewport);
 syncViewport();
+
+// The chart is drawn at its own pixel size, so a panel that changes size is
+// redrawn inside the observer callback: that runs once per frame, after
+// layout and before paint, so no frame shows the old drawing scaled. The
+// redraw never changes the chart's layout, so it cannot loop. A hidden chart
+// keeps its drawing until it is shown again.
+new ResizeObserver(redrawChartToFit).observe(svg);
+
+function redrawChartToFit() {
+  const drawn = svg.viewBox.baseVal;
+  const box = chartSize(svg.clientWidth, svg.clientHeight);
+  if (!svg.clientWidth || (box.width === drawn.width && box.height === drawn.height)) return;
+  const preview = store.getState().view.preview;
+  if (preview && preview.term === selectedTerm()) renderInteractionPreview(preview);
+  else renderChartOnly();
+}
 
 bindToolRail({
   root: toolRail,

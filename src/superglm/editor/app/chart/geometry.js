@@ -90,6 +90,22 @@ export function evenlySpacedIndices(count, maximum) {
   return Array.from(new Set(indices)).sort((left, right) => left - right);
 }
 
+/** The drawing size for a chart that has no layout box: hidden, or a DOM without layout. */
+export const FALLBACK_CHART_SIZE = Object.freeze({ width: 940, height: 520 });
+
+/**
+ * The size to draw a chart at, in CSS pixels: its own laid-out viewport, in
+ * whole pixels, so one SVG unit is one pixel and nothing is scaled.
+ *
+ * @param {number} width The SVG viewport's width (`clientWidth`), 0 without layout.
+ * @param {number} height The SVG viewport's height (`clientHeight`), 0 without layout.
+ * @returns {{width:number, height:number}}
+ */
+export function chartSize(width, height) {
+  if (!(width > 0 && height > 0)) return FALLBACK_CHART_SIZE;
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
 /**
  * Fit measured text to a pixel budget without changing the source label.
  *
