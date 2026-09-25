@@ -435,6 +435,10 @@ _TWEEDIE_DEVIANCE_SERIES_THRESHOLD = 1e-3
 _TWEEDIE_DEVIANCE_SERIES_TERMS = 8
 _PROFILE_SERIES_MAX_TOTAL_TERMS = 1_000_000
 _SERIES_FIRST_MIN_ROWS = 32
+# Series-first rows are those cheaper than Wright's function: a compiled series
+# term costs ~5 ns and a wright_bessel row ~5 us. Longer rows go to Wright
+# first and get the full series only if it fails.
+_SERIES_FIRST_MAX_ROW_TERMS = 1_024
 _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT = 1.0e6
 _JOINT_SAFE_POWER_BOUNDS = (1.05, 1.95)
 # Candidate REML fits only rank powers. On flat-lambda designs this bar leaves
@@ -691,16 +695,15 @@ def _evaluate_tweedie_density(
         wright_a_plus_one: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
         positive_logpdf: NDArray[np.float64] = np.empty(len(log_t), dtype=np.float64)
         use_series = np.zeros(len(log_t), dtype=np.bool_)
-        series_attempted = np.zeros(len(log_t), dtype=np.bool_)
         series_expected_j: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
 
-        def evaluate_series_rows(candidate_mask: NDArray) -> None:
+        def evaluate_series_rows(candidate_mask: NDArray, **limits: int) -> None:
             if not np.any(candidate_mask):
                 return
-            series_attempted[candidate_mask] = True
             series_exact, series_log_sum, expected_j, _ = series_moments(
                 log_t[candidate_mask],
                 prepared.a,
+                **limits,
             )
             candidate_indices = np.flatnonzero(candidate_mask)
             successful_indices = candidate_indices[series_exact]
@@ -718,7 +721,10 @@ def _evaluate_tweedie_density(
             and prepared.p != 1.5
             and prepared.t_arg_limit > 0.0
         ):
-            evaluate_series_rows(np.ones(len(log_t), dtype=np.bool_))
+            evaluate_series_rows(
+                np.ones(len(log_t), dtype=np.bool_),
+                max_terms=_SERIES_FIRST_MAX_ROW_TERMS,
+            )
 
         try_exact = ~use_series & (log_t < prepared.log_t_arg_limit)
 
@@ -752,7 +758,7 @@ def _evaluate_tweedie_density(
 
         exact_fallback = ~(exact | use_series) & (prepared.t_arg_limit > 0.0)
         p15_candidates = exact_fallback & (prepared.p == 1.5)
-        series_candidates = exact_fallback & ~p15_candidates & ~series_attempted
+        series_candidates = exact_fallback & ~p15_candidates
         use_p15_bessel = np.zeros(len(log_t), dtype=np.bool_)
         p15_score: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
         if np.any(p15_candidates):

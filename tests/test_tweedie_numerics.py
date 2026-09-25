@@ -216,6 +216,19 @@ def test_exact_series_rejects_impossible_work_without_raising() -> None:
     assert np.isfinite(log_sum[1])
 
 
+def test_series_skips_rows_past_the_term_cap_without_summing() -> None:
+    """Near phi = 1e-12 every row needs millions of terms; none may be summed."""
+    from superglm._tweedie_profile_kernel import _series_moments_kernel
+
+    log_t = np.full(3, 70.0)
+    outputs = [np.empty(3, dtype=np.bool_)] + [np.empty(3) for _ in range(3)]
+
+    summed = _series_moments_kernel(log_t, 1.5, 1_000, *outputs)
+
+    assert summed == 0
+    assert not np.any(outputs[0])
+
+
 @pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])
 def test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics(p: float) -> None:
     x = np.linspace(-1.0, 1.0, 40)
