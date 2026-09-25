@@ -90,10 +90,16 @@ Spline(kind="bs", k=12, polynomial_ranges=[
   Two ranges may share an edge when both use `join="kink"`.
 - Each range needs at least `degree + 1` distinct values of the feature inside
   it.
+- A binned fit (`discrete=True`) sees only the centres of its bins, so a
+  range counts those, not the raw values.
+- The stretches outside the ranges need data too. A fit that would leave one
+  of them undetermined is refused by name.
 - The penalty leaves the pinned ranges alone, so a pinned quadratic is not
   shrunk towards a line.
 - Only `kind="bs"` and `kind="cr"` take ranges.
 - Ranges cannot be combined with `select=True` or with a shape constraint.
+- A spline with ranges cannot be a parent of an interaction in this version.
+  Declare the interaction on a spline without them.
 
 On an `OrderedCategorical` with a spline basis, the edges may be band names;
 each name resolves to that band's position on the axis:

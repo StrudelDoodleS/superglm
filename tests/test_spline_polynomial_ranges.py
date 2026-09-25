@@ -612,3 +612,56 @@ def test_a_grouping_that_absorbs_a_named_range_edge_is_refused_by_name():
 def test_an_unknown_band_in_a_range_is_refused_by_name():
     with pytest.raises(ValueError, match="PolynomialRange edge entry 'Z' does not name"):
         _ordered([PolynomialRange("B", "Z", 1)])
+
+
+# ── Interactions: ranges shape main effects only ─────────────────────────
+
+
+def _crossed(age, pair):
+    """A fit with interaction ``pair`` beside a ranged ``age`` and ranged bands."""
+    from superglm import Categorical
+
+    rng = np.random.default_rng(11)
+    n = 2_000
+    X = pd.DataFrame(
+        {
+            "age": rng.uniform(18.0, 80.0, n),
+            "veh": rng.uniform(0.0, 20.0, n),
+            "region": rng.choice(["N", "S", "W"], n),
+            "band": rng.choice(BANDS, n),
+        }
+    )
+    features = {
+        "age": age,
+        "veh": Spline(kind="bs", k=8),
+        "region": Categorical(),
+        "band": _ordered([PolynomialRange("B", "E", 1)]),
+    }
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features=features,
+        interactions=[pair],
+    )
+    return model, X, rng.poisson(1.0, n)
+
+
+@pytest.mark.parametrize("pair", [("age", "region"), ("age", "veh"), ("band", "region")])
+@pytest.mark.parametrize("kind", ["bs", "cr"])
+def test_a_ranged_spline_cannot_parent_an_interaction(kind, pair):
+    # Neither margin was certified: a cr parent's interaction was rebuilt as a
+    # cardinal spline without the ranges (the age curve along a level bent
+    # 0.026 inside a Line range), and a bs parent's kept them unpenalised in
+    # every level and cross-section.
+    ranged = Spline(kind=kind, k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
+    model, X, y = _crossed(ranged, pair)
+    with pytest.raises(NotImplementedError, match=f"'{pair[0]}' has polynomial_ranges"):
+        model.fit(X, y)
+
+
+def test_an_interaction_beside_ranged_terms_still_fits():
+    # Only a ranged parent is refused: veh x region sits beside ranged age and band.
+    ranged = Spline(kind="bs", k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
+    model, X, y = _crossed(ranged, ("veh", "region"))
+    model.fit(X, y)
+    assert "veh:region" in model._interaction_specs
