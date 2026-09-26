@@ -57,6 +57,16 @@ def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
         )
 
 
+def _is_unpenalised(omega: NDArray) -> bool:
+    """Whether a built penalty is identically zero.
+
+    Only polynomial ranges covering every knot interval produce one. The term
+    is then an unpenalised polynomial and is built like a parametric term,
+    with no penalty matrix, so REML has no smoothing parameter to estimate.
+    """
+    return not np.any(omega)
+
+
 def build_group_info(
     spec: Any,
     x: NDArray,
@@ -137,6 +147,8 @@ def build_group_info(
             NDArray,
             sum(component_omega for _, component_omega in penalty_components),
         )
+    if _is_unpenalised(omega):
+        omega, penalty_components = None, None
 
     constraints = None
     monotone_engine = None
@@ -159,8 +171,12 @@ def build_group_info(
         monotone_engine=monotone_engine,
         raw_to_solver_map=raw_to_solver_map,
     )
-    if spec._lambda_policy is not None and info.penalty_components is None:
-        info.penalty_components = [("wiggle", cast(NDArray, info.penalty_matrix))]
+    if (
+        spec._lambda_policy is not None
+        and info.penalty_components is None
+        and info.penalty_matrix is not None
+    ):
+        info.penalty_components = [("wiggle", info.penalty_matrix)]
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
     return info
@@ -170,12 +186,13 @@ def build_knots_and_penalty(
     spec: Any,
     x: NDArray,
     sample_weight: NDArray | None = None,
-) -> tuple[NDArray, int, NDArray | None]:
+    n_bins: int | None = None,
+) -> tuple[NDArray | None, int, NDArray | None]:
     """Place knots and return projected penalty info without building the full basis."""
     _raise_if_unsupported_fit_shape_constraint(spec)
 
     x = np.asarray(x, dtype=np.float64).ravel()
-    spec._place_knots(x, sample_weight)
+    spec._place_knots(x, sample_weight, n_bins)
     spec._validate_m_orders_build()
     omega = spec._build_penalty()
     _, omega_constrained, n_cols, projection = spec._apply_constraints(None, omega)
@@ -227,6 +244,8 @@ def build_knots_and_penalty(
         )
     else:
         spec._penalty_components = None
+    if _is_unpenalised(omega_ident):
+        omega_ident, spec._penalty_components = None, None
 
     return omega_ident, n_cols, projection
 

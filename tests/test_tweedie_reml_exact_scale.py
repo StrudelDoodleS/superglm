@@ -299,6 +299,102 @@ class TestScaleProfileUnit:
             finite_difference, rel=1e-3
         )
 
+    def test_newton_returns_the_saturated_value_of_the_point_it_returns(self, monkeypatch):
+        """The criterion pairs the returned l_sat with the returned phi.
+
+        A loose step tolerance makes the final step large enough that the
+        value at the point Newton stepped from would be off by ``T * step``;
+        carried along the step, it is off only by the second-order remainder.
+        """
+        from superglm.reml import scale as scale_module
+
+        rng = np.random.default_rng(11)
+        n, power, nullity, tolerance = 2_000, 1.5, 3.0, 1e-4
+        mu = np.exp(0.1 + rng.normal(0.0, 0.5, n))
+        weights = rng.gamma(4.0, 0.25, n) + 0.05
+        y = generate_tweedie_cpg(n, mu, phi=0.6 / weights, p=power, rng=rng)
+        penalized_deviance = float(np.sum(weights * Tweedie(p=power).deviance_unit(y, mu)))
+        data = scale_module.prepare_tweedie_reml_scale_data(
+            y, weights, power, weight_semantics="prior"
+        )
+        monkeypatch.setattr(scale_module, "_TWEEDIE_NEWTON_STEP_TOL", tolerance)
+        evaluated = []
+        real_derivatives = type(data).saturated_log_phi_derivatives
+
+        def recorded(self, phi):
+            evaluated.append((phi, real_derivatives(self, phi)))
+            return evaluated[-1][1]
+
+        monkeypatch.setattr(type(data), "saturated_log_phi_derivatives", recorded)
+        log_phi, saturated, _ = scale_module._newton_tweedie_log_phi(
+            data, penalized_deviance, nullity
+        )
+        exact, _, slope = data.saturated_log_phi_derivatives(float(np.exp(log_phi)))
+
+        assert abs(saturated - exact) <= abs(slope) * tolerance**2 + 1e-12 * abs(exact)
+        # The test has power only while the last step is long enough that the
+        # value at the point it stepped from would miss that bound.
+        last_phi, (_, last_score, _) = evaluated[-2]
+        assert abs(last_score * (log_phi - np.log(last_phi))) > abs(slope) * tolerance**2
+        # So the published criterion is the objective at the published phi.
+        profiled = scale_module.profile_tweedie_reml_scale(data, penalized_deviance, nullity)
+        phi = 1.0 / profiled.inverse_phi
+        recomputed = (
+            0.5 * penalized_deviance / phi
+            - data.saturated_log_likelihood(phi)
+            - 0.5 * nullity * (np.log(2.0 * np.pi) + np.log(phi))
+        )
+        assert profiled.criterion == pytest.approx(
+            recomputed, abs=abs(slope) * tolerance**2 + 1e-12 * abs(recomputed)
+        )
+
+    @pytest.mark.parametrize("power", [1.2, 1.5, 1.8])
+    def test_newton_profile_matches_the_bounded_search(self, power, monkeypatch):
+        """Newton on the analytic score lands on the bounded search's optimum in a few passes.
+
+        The bounded value-only search needed ~19 density passes per profile
+        and made a 105k-row fit spend 98% of its time here; the analytic slope
+        (``-Var[J]/(p-1)^2 - c w/phi``) must equal a difference of the score.
+        """
+        from superglm.reml import scale as scale_module
+
+        rng = np.random.default_rng(11)
+        n = 2_000
+        mu = np.exp(0.1 + rng.normal(0.0, 0.5, n))
+        weights = rng.gamma(4.0, 0.25, n) + 0.05
+        y = generate_tweedie_cpg(n, mu, phi=0.6 / weights, p=power, rng=rng)
+        penalized_deviance = float(np.sum(weights * Tweedie(p=power).deviance_unit(y, mu)))
+        nullity = 3.0
+
+        def prepared():
+            return scale_module.prepare_tweedie_reml_scale_data(
+                y, weights, power, weight_semantics="prior"
+            )
+
+        bounded = scale_module._bounded_tweedie_log_phi(prepared(), penalized_deviance, nullity)
+        data = prepared()
+        passes = 0
+        real_derivatives = type(data).saturated_log_phi_derivatives
+
+        def counted(self, phi):
+            nonlocal passes
+            passes += 1
+            return real_derivatives(self, phi)
+
+        monkeypatch.setattr(type(data), "saturated_log_phi_derivatives", counted)
+        newton = scale_module._newton_tweedie_log_phi(data, penalized_deviance, nullity)
+
+        assert newton is not None
+        assert passes <= 8
+        assert newton[0] == pytest.approx(bounded[0], abs=1e-9)
+        assert newton[2] == pytest.approx(bounded[2], rel=1e-5)
+        step = 1e-4
+        phi = float(np.exp(newton[0]))
+        _, _, slope = real_derivatives(data, phi)
+        score_hi = real_derivatives(data, phi * np.exp(step))[1]
+        score_lo = real_derivatives(data, phi * np.exp(-step))[1]
+        assert slope == pytest.approx((score_hi - score_lo) / (2.0 * step), rel=1e-6)
+
     def test_sparse_positive_boundary_admits_power_dependent_profiles(self):
         """The finite-profile test must use the Tweedie tail, not a Gaussian one.
 

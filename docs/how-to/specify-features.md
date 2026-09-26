@@ -66,6 +66,60 @@ Current limitations:
 - tensor interactions with multi-order spline parents are not yet supported
 - `kind="cr_cardinal"` currently supports only `m=2`
 
+### Polynomial ranges (`polynomial_ranges=`)
+
+`polynomial_ranges=` pins a spline to a simple polynomial on chosen stretches
+of the axis. Everywhere else the term stays the ordinary penalised smooth, and
+REML still chooses its smoothing parameter.
+
+```python
+from superglm import PolynomialRange, Spline
+
+Spline(kind="bs", k=12, polynomial_ranges=[
+    PolynomialRange(25, 35, degree=1),   # a straight line from 25 to 35
+    PolynomialRange(65, 75, degree=0),   # flat from 65 to 75
+])
+```
+
+- `degree` is 0 (flat), 1 (line), 2 (quadratic) or 3 (cubic), and at most the
+  spline's own degree.
+- `join` sets how the curve meets the range at each edge:
+  - `"tangent"` (the default): the curve leaves the range along its slope, so
+    there is no corner. A degree-1 spline has no slope to carry, so it needs
+    `"kink"`.
+  - `"kink"`: the curve stays continuous, but its slope may change at the
+    edge, so there can be a corner.
+  - `"smooth"`: the curve keeps the spline's own smoothness at the edge, which
+    can pull the range and its neighbours towards each other.
+- Ranges must lie inside the fitted range of the feature and must not overlap.
+  Two ranges may share an edge; they always meet there at a corner, because two
+  shapes joined any more smoothly would be forced into one.
+- Each range needs at least `degree + 1` distinct values of the feature inside
+  it.
+- A binned fit (`discrete=True`) sees only the centres of its bins, so a
+  range counts those, not the raw values.
+- The stretches outside the ranges need data too. A fit that would leave one
+  of them undetermined is refused by name.
+- The penalty leaves the pinned ranges alone, so a pinned quadratic is not
+  shrunk towards a line.
+- Only `kind="bs"` and `kind="cr"` take ranges.
+- Ranges cannot be combined with `select=True` or with a shape constraint.
+- A spline with ranges cannot be a parent of an interaction in this version.
+  Declare the interaction on a spline without them.
+
+On an `OrderedCategorical` with a spline basis, the edges may be band names;
+each name resolves to that band's position on the axis:
+
+```python
+OrderedCategorical(
+    order=["A", "B", "C", "D", "E", "F"],
+    basis=Spline(kind="cr", k=6, polynomial_ranges=[PolynomialRange("B", "E", 1)]),
+)
+```
+
+The editor's shape icons write these ranges for you; see
+[Editing a Fitted Model](../tutorials/edit-a-model-in-the-browser.md).
+
 ## Monotone Splines
 
 If monotonicity is part of the model specification, prefer solver-backed

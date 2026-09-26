@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 
 from superglm import OrderedCategorical, Spline, SuperGLM
-from superglm.editor.collapse import _ordered_spec_with_grouping
+from superglm.editor.collapse import rebuilt_ordered_spec
 from superglm.features.spline import PSpline
 
 LEVELS = [f"L{i}" for i in range(8)]
@@ -166,10 +166,9 @@ def test_mutating_the_caller_s_spline_cannot_change_a_built_spec() -> None:
     assert spec._spline_obj.n_knots == 4
     assert spec._spline.n_knots == 4
 
-    clone = _ordered_spec_with_grouping(
+    clone = rebuilt_ordered_spec(
         spec,
         grouping=None,
-        selected_levels=[],
         base="first",
         data=np.asarray(LEVELS, dtype=object),
     )
@@ -221,10 +220,9 @@ def test_editor_clone_of_canonical_spline_stays_quiet() -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        replacement = _ordered_spec_with_grouping(
+        replacement = rebuilt_ordered_spec(
             spec,
             grouping=None,
-            selected_levels=[],
             base="first",
             data=np.asarray(LEVELS, dtype=object),
         )
@@ -239,10 +237,9 @@ def test_editor_clone_of_quiet_implicit_default_stays_quiet() -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        replacement = _ordered_spec_with_grouping(
+        replacement = rebuilt_ordered_spec(
             spec,
             grouping=None,
-            selected_levels=[],
             base="first",
             data=np.asarray(LEVELS, dtype=object),
         )
@@ -360,10 +357,9 @@ def test_step_mode_pickle_is_refused_by_the_editor_clone() -> None:
     default P-spline; the ``_basis_spline`` read refuses it first."""
     spec = _restored_step_spec()
     with pytest.raises(AttributeError, match=r"[Ss]tep mode was removed"):
-        _ordered_spec_with_grouping(
+        rebuilt_ordered_spec(
             spec,
             grouping=None,
-            selected_levels=[],
             base="first",
             data=np.asarray(["A", "B", "C"], dtype=object),
         )
@@ -483,10 +479,9 @@ def test_collapse_clone_does_not_repeat_the_construction_clamp_warning() -> None
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        clone = _ordered_spec_with_grouping(
+        clone = rebuilt_ordered_spec(
             spec,
             grouping=None,
-            selected_levels=[],
             base="first",
             data=data,
         )
@@ -510,10 +505,9 @@ def test_spline_mode_shortcut_pickle_still_transforms_and_clones() -> None:
     out = spec.transform(np.array(["A", "B", "C"]))
     assert out.shape[0] == 3
 
-    replacement = _ordered_spec_with_grouping(
+    replacement = rebuilt_ordered_spec(
         spec,
         grouping=None,
-        selected_levels=[],
         base="first",
         data=np.asarray(["A", "B", "C"], dtype=object),
     )
@@ -532,10 +526,9 @@ def test_pickle_without_a_spline_obj_key_still_names_the_migration() -> None:
     assert "_spline_obj" not in spec.__dict__
 
     with pytest.raises(AttributeError, match=r"[Ss]tep mode was removed"):
-        _ordered_spec_with_grouping(
+        rebuilt_ordered_spec(
             spec,
             grouping=None,
-            selected_levels=[],
             base="first",
             data=np.asarray(["A", "B", "C"], dtype=object),
         )
@@ -578,10 +571,9 @@ def test_shortcut_pickle_ungroup_recovers_the_requested_knot_count() -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        restored = _ordered_spec_with_grouping(
+        restored = rebuilt_ordered_spec(
             spec,
             grouping=None,
-            selected_levels=[],
             base="first",
             data=np.asarray(original, dtype=object),
         )
@@ -605,10 +597,9 @@ def test_shortcut_pickle_clone_still_clamps_to_the_new_level_count() -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        restored = _ordered_spec_with_grouping(
+        restored = rebuilt_ordered_spec(
             spec,
             grouping=None,
-            selected_levels=[],
             base="first",
             data=np.asarray(["B0", "B1", "B2"], dtype=object),
         )

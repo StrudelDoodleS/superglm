@@ -133,6 +133,9 @@ test("tool rail owns exclusive semantics, shortcuts, roving focus, and cleanup",
   assert.deepEqual(modes, ["move", "zoom"]);
 
   shortcuts.emit("keydown", { target: root, key: "v" });
+  // Breaks mode is gone: its B shortcut switches nothing.
+  const stray = shortcuts.emit("keydown", { target: root, key: "b" });
+  assert.equal(stray.defaultPrevented, false);
   shortcuts.emit("keydown", { target: root, key: "?" });
   assert.deepEqual(modes, ["move", "zoom", "select"]);
   assert.equal(helpCount, 1);

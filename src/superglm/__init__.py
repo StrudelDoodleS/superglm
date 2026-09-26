@@ -50,6 +50,7 @@ from superglm.distributional.families.two_piece import (
 from superglm.distributional.predictor import Predictor
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
+from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
 from superglm.features.constraint import ConstraintSpec as ConstraintSpec
@@ -265,6 +266,7 @@ __all__ = [
     "BSplineSmooth",
     "NaturalSpline",
     "CubicRegressionSpline",
+    "PolynomialRange",
     "Categorical",
     "OrderedCategorical",
     "Constraint",

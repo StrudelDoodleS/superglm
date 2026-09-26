@@ -31,6 +31,11 @@ _TWEEDIE_LOG_PHI_EDGE_TOL = 1e-6
 # fallback (analytic scores unavailable on some saddlepoint rows) pays
 # O(eps/step^2) and uses the smaller step to bound its truncation instead.
 _TWEEDIE_SCORE_CURVATURE_STEP = 1e-3
+# Safeguarded Newton on the analytic profile score: iteration cap, largest
+# move in log phi per step, and the Newton step below which the root is taken.
+_TWEEDIE_NEWTON_MAX_STEPS = 60
+_TWEEDIE_NEWTON_MAX_STEP = 2.0
+_TWEEDIE_NEWTON_STEP_TOL = 1e-8
 
 
 class _ScoreUnavailableInBracketError(Exception):
@@ -901,6 +906,11 @@ class TweedieScaleProfileData:
         repr=False,
         compare=False,
     )
+    _series_cache: dict[float, tuple[float, float, float] | None] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def positive_size(self) -> float:
@@ -939,6 +949,38 @@ class TweedieScaleProfileData:
                 + self._row_total(log_scaled)
             )
         return value if np.isfinite(value) else None
+
+    def saturated_log_phi_derivatives(self, phi: float) -> tuple[float, float, float] | None:
+        """``(l_sat, T, dT/d log phi)`` from one compiled series pass, or None.
+
+        ``T = d(-l_sat)/d log phi``. Each positive row's Dunn & Smyth (2005)
+        series gives ``log W``, ``E[J]`` and ``Var[J]`` over its terms; ``log t``
+        is linear in ``log phi`` with slope ``-1/(p-1)``, so a row contributes
+        ``E[J]/(p-1) + c w/phi`` to ``T`` and ``-Var[J]/(p-1)^2 - c w/phi`` to its
+        slope, where ``c w/phi`` is the row's canonical term. None when a row
+        lies outside the compiled series' work bounds.
+        """
+        key = float(phi)
+        if key in self._series_cache:
+            return self._series_cache[key]
+        from superglm._tweedie_profile_kernel import series_moments
+
+        prepared = self.prepared_positive
+        inverse_r = prepared.a + 1.0
+        log_t = prepared.positive_log_t_phi_independent - inverse_r * float(np.log(key))
+        exact, log_sum, mean_j, variance_j = series_moments(log_t, prepared.a)
+        totals = None
+        if np.all(exact):
+            canonical = prepared.positive_canonical_c * prepared.weights / key
+            totals = (
+                self._row_total(log_sum - prepared.positive_log_y + canonical),
+                self._row_total(mean_j * inverse_r + canonical),
+                self._row_total(-variance_j * inverse_r**2 - canonical),
+            )
+            if not all(np.isfinite(totals)):
+                totals = None
+        self._series_cache[key] = totals
+        return totals
 
     def _bessel_saturated_score(self, phi: float) -> tuple[float, float] | None:
         """Closed-form ``(T(phi), l_sat(phi))`` at p = 1.5, or None.
@@ -1002,6 +1044,9 @@ class TweedieScaleProfileData:
         if cached is not None:
             return cached
         value = self._bessel_saturated_log_likelihood(key)
+        series = None if value is not None else self.saturated_log_phi_derivatives(key)
+        if series is not None:
+            value = series[0]
         if value is None:
             from superglm.profiling.tweedie import _evaluate_tweedie_density
 
@@ -1035,6 +1080,11 @@ class TweedieScaleProfileData:
                 self._saturated_cache.setdefault(key, saturated_value)
             self._saturated_score_cache[key] = score_value
             return score_value if np.isfinite(score_value) else None
+        series = self.saturated_log_phi_derivatives(key)
+        if series is not None:
+            self._saturated_cache.setdefault(key, series[0])
+            self._saturated_score_cache[key] = series[1]
+            return series[1]
         from superglm.profiling.tweedie import _evaluate_tweedie_density
 
         evaluation = _evaluate_tweedie_density(
@@ -1154,50 +1204,66 @@ def prepare_tweedie_reml_scale_data(
     )
 
 
-def profile_tweedie_reml_scale(
+def _newton_tweedie_log_phi(
     profile_data: TweedieScaleProfileData,
     penalized_deviance: float,
     penalty_nullity: float,
-) -> ProfiledScaleTerm:
-    """Profile Tweedie dispersion while retaining Wood's saturated likelihood.
+) -> tuple[float, float, float] | None:
+    """Root of the profile score in ``log(phi)`` by safeguarded Newton, or None.
 
-    Minimizes the exact scale-dependent part of the Wood (2011) Eq. (4) /
-    Wood, Pya & Saefken (2016) Sec. 3.3 criterion over ``log(phi)``:
-
-        Q(phi) = Dp / (2 phi) - l_sat(phi) - (Mp / 2) log(2 pi phi)
-
-    with ``l_sat`` the exact compound Poisson-gamma saturated log-likelihood
-    (zero rows are an atom and contribute a phi-free 0; positive rows carry
-    the Dunn-Smyth series normalizer). This replaces the Gaussian-shaped
-    substitution ``0.5 (n - Mp) log(Dp)``, which charges every zero row a
-    ``log phi`` the exact saturated likelihood does not contain and thereby
-    overweights the deviance arm in proportion to the zero fraction.
-
-    The solve is a bounded scalar minimization in ``log(phi)`` with an
-    expanding bracket; the ``d(1/phi)/d(Dp)`` contract required by the outer
-    REML Newton follows from implicit differentiation of the profile score,
-    with the log-phi curvature measured by a central difference of ``Q``
-    around the optimum (the same quantity the Gaussian and Gamma profilers
-    obtain in closed form).
+    Returns ``(log_phi, l_sat, Q'')`` at the root. One compiled series pass
+    gives the saturated value, the analytic score and its slope together
+    (Dunn & Smyth 2005 derive the dispersion derivatives for this use), so
+    Newton needs a handful of passes where the value-only bounded search
+    needs about nineteen. A step that leaves the current sign-change bracket,
+    or meets non-positive curvature, bisects instead (Press et al., Numerical
+    Recipes, rtsafe). None when a series pass is unavailable or the iteration
+    does not settle, and the caller falls back to the bounded search.
     """
-    if not isinstance(profile_data, TweedieScaleProfileData):
-        raise TypeError("profile_data must be TweedieScaleProfileData")
-    penalized_deviance = float(penalized_deviance)
-    penalty_nullity = float(penalty_nullity)
-    if not np.isfinite(penalized_deviance) or penalized_deviance <= 0.0:
-        raise ValueError("penalized_deviance must be positive and finite")
-    if not np.isfinite(penalty_nullity) or penalty_nullity < 0.0:
-        raise ValueError("penalty_nullity must be finite and non-negative")
-    # Each positive row's saturated density decays like phi**(-1/(p-1)) as
-    # phi grows (the Dunn-Smyth series is dominated by its single-event term,
-    # whose weight carries phi**(-(alpha+1)) with alpha+1 = 1/(p-1); verified
-    # numerically at p in {1.2, 1.5, 1.8} to 1e-6), NOT like 1/phi - assuming
-    # the Gaussian-shaped 1/phi tail here is the same substitution this
-    # profiler exists to remove, one level down. Q's upper-tail slope in
-    # log(phi) is therefore N_pos/(p-1) - Mp/2, and a finite interior
-    # optimum needs that positive.
-    if 2.0 * profile_data.positive_size <= (profile_data.power - 1.0) * penalty_nullity:
-        raise ValueError("Tweedie REML scale profile has no finite interior optimum")
+    lower, upper = -_TWEEDIE_LOG_PHI_LIMIT, _TWEEDIE_LOG_PHI_LIMIT
+    positive_size = profile_data.positive_size
+    # The saddlepoint density's root, where every positive row adds 1/2 to T.
+    log_phi = float(
+        np.clip(
+            np.log(penalized_deviance / max(positive_size - penalty_nullity, 0.5 * positive_size)),
+            lower + 1.0,
+            upper - 1.0,
+        )
+    )
+    for _ in range(_TWEEDIE_NEWTON_MAX_STEPS):
+        derivatives = profile_data.saturated_log_phi_derivatives(float(np.exp(log_phi)))
+        if derivatives is None:
+            return None
+        saturated, saturated_score, saturated_slope = derivatives
+        half_deviance = 0.5 * penalized_deviance * float(np.exp(-log_phi))
+        score = saturated_score - half_deviance - 0.5 * penalty_nullity
+        curvature = saturated_slope + half_deviance
+        if score > 0.0:
+            upper = log_phi
+        else:
+            lower = log_phi
+        step = float(np.copysign(_TWEEDIE_NEWTON_MAX_STEP, -score))
+        if curvature > 0.0:
+            step = -score / curvature
+            # Quadratic convergence: the stepped point is within O(step^2)
+            # of the root, below the score's own evaluation round-off. l_sat
+            # moves by -T per unit log phi, so carrying it along the step keeps
+            # the value the returned point's to O(step^2) as well.
+            if abs(step) <= _TWEEDIE_NEWTON_STEP_TOL:
+                return log_phi + step, saturated - saturated_score * step, curvature
+        proposal = log_phi + float(
+            np.clip(step, -_TWEEDIE_NEWTON_MAX_STEP, _TWEEDIE_NEWTON_MAX_STEP)
+        )
+        log_phi = proposal if lower < proposal < upper else 0.5 * (lower + upper)
+    return None
+
+
+def _bounded_tweedie_log_phi(
+    profile_data: TweedieScaleProfileData,
+    penalized_deviance: float,
+    penalty_nullity: float,
+) -> tuple[float, float, float]:
+    """Value-only bounded search for ``(log_phi, Q, Q'')`` when Newton cannot run."""
 
     def criterion(log_phi: float) -> float:
         phi = float(np.exp(log_phi))
@@ -1309,6 +1375,68 @@ def profile_tweedie_reml_scale(
         log_phi_curvature = (
             criterion(log_phi - step) - 2.0 * criterion_value + criterion(log_phi + step)
         ) / (step * step)
+    return log_phi, criterion_value, log_phi_curvature
+
+
+def profile_tweedie_reml_scale(
+    profile_data: TweedieScaleProfileData,
+    penalized_deviance: float,
+    penalty_nullity: float,
+) -> ProfiledScaleTerm:
+    """Profile Tweedie dispersion while retaining Wood's saturated likelihood.
+
+    Minimizes the exact scale-dependent part of the Wood (2011) Eq. (4) /
+    Wood, Pya & Saefken (2016) Sec. 3.3 criterion over ``log(phi)``:
+
+        Q(phi) = Dp / (2 phi) - l_sat(phi) - (Mp / 2) log(2 pi phi)
+
+    with ``l_sat`` the exact compound Poisson-gamma saturated log-likelihood
+    (zero rows are an atom and contribute a phi-free 0; positive rows carry
+    the Dunn-Smyth series normalizer). This replaces the Gaussian-shaped
+    substitution ``0.5 (n - Mp) log(Dp)``, which charges every zero row a
+    ``log phi`` the exact saturated likelihood does not contain and thereby
+    overweights the deviance arm in proportion to the zero fraction.
+
+    The solve is a safeguarded Newton iteration on the analytic profile
+    score in ``log(phi)``, each step one compiled series pass; where a pass
+    is unavailable, a bounded scalar minimization with an expanding bracket
+    takes over. The ``d(1/phi)/d(Dp)`` contract required by the outer REML
+    Newton follows from implicit differentiation of the profile score, with
+    the log-phi curvature analytic on the Newton path and a central
+    difference on the fallback (the same quantity the Gaussian and Gamma
+    profilers obtain in closed form).
+    """
+    if not isinstance(profile_data, TweedieScaleProfileData):
+        raise TypeError("profile_data must be TweedieScaleProfileData")
+    penalized_deviance = float(penalized_deviance)
+    penalty_nullity = float(penalty_nullity)
+    if not np.isfinite(penalized_deviance) or penalized_deviance <= 0.0:
+        raise ValueError("penalized_deviance must be positive and finite")
+    if not np.isfinite(penalty_nullity) or penalty_nullity < 0.0:
+        raise ValueError("penalty_nullity must be finite and non-negative")
+    # Each positive row's saturated density decays like phi**(-1/(p-1)) as
+    # phi grows (the Dunn-Smyth series is dominated by its single-event term,
+    # whose weight carries phi**(-(alpha+1)) with alpha+1 = 1/(p-1); verified
+    # numerically at p in {1.2, 1.5, 1.8} to 1e-6), NOT like 1/phi - assuming
+    # the Gaussian-shaped 1/phi tail here is the same substitution this
+    # profiler exists to remove, one level down. Q's upper-tail slope in
+    # log(phi) is therefore N_pos/(p-1) - Mp/2, and a finite interior
+    # optimum needs that positive.
+    if 2.0 * profile_data.positive_size <= (profile_data.power - 1.0) * penalty_nullity:
+        raise ValueError("Tweedie REML scale profile has no finite interior optimum")
+
+    newton = _newton_tweedie_log_phi(profile_data, penalized_deviance, penalty_nullity)
+    if newton is None:
+        log_phi, criterion_value, log_phi_curvature = _bounded_tweedie_log_phi(
+            profile_data, penalized_deviance, penalty_nullity
+        )
+    else:
+        log_phi, saturated, log_phi_curvature = newton
+        criterion_value = float(
+            0.5 * penalized_deviance * np.exp(-log_phi)
+            - saturated
+            - 0.5 * penalty_nullity * (_LOG_TWO_PI + log_phi)
+        )
     if not np.isfinite(log_phi_curvature) or log_phi_curvature <= 0.0:
         raise FloatingPointError("Tweedie REML scale profile has non-positive curvature")
 

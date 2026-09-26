@@ -72,6 +72,7 @@ PUBLIC_API = [
     "Piecewise",
     "Poisson",
     "Polynomial",
+    "PolynomialRange",
     "PowerLink",
     "Predictor",
     "PriorWeightLatticeWarning",

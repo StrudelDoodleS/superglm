@@ -174,7 +174,7 @@ nitpick_ignore_regex = [
         r"|TensorMarginalInfo)"
         r"|_frame\.EagerFrame"
         r"|terms\.(InteractionSpec|TermInput)"
-        r"|features\.(piecewise\.StructuralContrastRow|spline\._B?SplineBase)"
+        r"|features\.(piecewise\.StructuralContrastRow|spline\._(B?SplineBase|IntegratedPenaltySpline))"
         r"|penalties\.base\.Flavor"
         r"|profiling\.tweedie\._CPGRNG"
         r"|editor\.evaluation_cache\.EditMaterializationRequest)",

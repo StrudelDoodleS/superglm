@@ -1,32 +1,106 @@
+/* tokens.css: the editor's design tokens, in the light theme. Neutrals and
+   the sand/red/yellow family come from the docs site (docs/_static/custom.css)
+   so the two read as one product; the blue is the one interactive accent and
+   the current edit. superglm/plotting/editor_style.py restates these and
+   tests hold them equal; styles/dark.css restates them for the dark theme. */
+
 :root {
   color-scheme: light;
-  --text: #24292f;
-  --muted: #57606a;
+  --text: #15171c;
+  --muted: #5c6068;
   --surface: #ffffff;
-  --surface-subtle: #f6f8fa;
-  --surface-hover: #eef2f6;
-  --border: #d0d7de;
-  --border-strong: #8c959f;
-  --grid: rgba(140, 149, 159, 0.22);
-  --blue: #0969da;
-  --blue-soft: #dbeafe;
-  --red: #d1242f;
-  --orange: #bf6a02;
-  --yellow: #f4d35e;
-  --yellow-border: #d8a10f;
+  --surface-subtle: #f7f5f0;
+  --surface-hover: #ebe9e2;
+  --border: #e2e0d9;
+  --border-strong: #8c8a83;
+  --hairline: rgba(21, 23, 28, 0.1);
+  --grid: rgba(140, 149, 159, 0.16);
+  --blue: #2457c5;
+  --blue-soft: #e3ebfa;
+  --blue-band: rgba(36, 87, 197, 0.08);
+  --orange: #ea580c;
+  --red: #d6402b;
+  --yellow: #f4b942;
+  --yellow-border: #d9a12c;
   --danger: #b42318;
-  --danger-surface: #fff1f0;
-  --danger-text: #7a271a;
-  --focus: #0969da;
-  --shadow: rgba(31, 35, 40, 0.16);
+  --danger-surface: #fdf1ef;
+  --danger-text: #7a1f14;
+  --better: #0f766e;
+  --worse: #b42318;
+  --focus: #2457c5;
+  --shadow: rgba(21, 23, 28, 0.14);
+  /* Ink: what shadows, scrims and backdrops are cast in; the ground's opposite. */
+  --ink: #15171c;
+  --primary-hover: #2a2d35;
+  --popover-muted: #d9dbe1;
+  /* The chart grammar's own colours; the classes editor_style.py reads carry
+     whole colours here, and their relatives compose from --blue with
+     color-mix(). */
+  --grey: #8c959f;
+  --zero: rgba(21, 23, 28, 0.28);
+  --ci: rgba(36, 87, 197, 0.13);
+  --ci-whisker: rgba(36, 87, 197, 0.5);
+  --basis-contribution: rgba(92, 96, 104, 0.3);
+  --build-end: #0969da;
+  --trace-ink: #57606a;
+  /* Significance tints in the summary table: a background and its text. */
+  --sig-strong-bg: #d5f2e4;
+  --sig-strong-fg: #0b5c3f;
+  --sig-medium-bg: #e1f5e6;
+  --sig-medium-fg: #166534;
+  --sig-standard-bg: #eef7d4;
+  --sig-standard-fg: #4d6a13;
+  --sig-weak-bg: #fbeed0;
+  --sig-weak-fg: #8a4b0d;
+  --sig-none-bg: #fbe1e1;
+  --sig-none-fg: #8f1d1d;
+  /* Categorical palettes, in fixed order: level groups, the spline basis in
+     a Build, and the profile dialog's trace. chart.js and summary.js name
+     them by index. */
+  --group-0: #c47400;
+  --group-1: #7e22ce;
+  --group-2: #059669;
+  --group-3: #dc2626;
+  --group-4: #0891b2;
+  --group-5: #2563eb;
+  --basis-0: #16a34a;
+  --basis-1: #d97706;
+  --basis-2: #7c3aed;
+  --basis-3: #0891b2;
+  --basis-4: #dc2626;
+  --basis-5: #2563eb;
+  --basis-6: #c2410c;
+  --basis-7: #65a30d;
+  --basis-8: #be185d;
+  --basis-9: #0f766e;
+  --basis-10: #9333ea;
+  --basis-11: #ca8a04;
+  --trace-0: #0969da;
+  --trace-1: #2da44e;
+  --trace-2: #bf3989;
+  --trace-3: #d97706;
+  --trace-4: #8250df;
+  --trace-5: #1f6feb;
+  --trace-6: #cf222e;
+  --trace-7: #0a7f8f;
+  --trace-8: #6f42c1;
+  --trace-9: #57606a;
+  /* The Build's green is the basis palette's first colour; the profile
+     dialog's best marker is the trace palette's green. */
+  --green: var(--basis-0);
+  --trace-best: var(--trace-1);
+  --font-sans: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --radius-sm: 4px;
   --radius-md: 6px;
+  --radius-lg: 10px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
-  --tool-rail-width: 44px;
-  --inspector-width: 360px;
+  --control-height: 28px;
+  --feature-list-width: 200px;
+  --inspector-width: 340px;
   --tooltip-delay-ms: 350ms;
 }
 
@@ -46,7 +120,8 @@ body {
   margin: 0;
   background: var(--surface);
   color: var(--text);
-  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 13px/1.4 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -65,7 +140,7 @@ input:focus-visible,
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 0.45;
 }
 
 [hidden] {

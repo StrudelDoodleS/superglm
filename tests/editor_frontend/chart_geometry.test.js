@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FALLBACK_CHART_SIZE,
+  chartSize,
   evenlySpacedIndices,
   fitMeasuredLabel,
   planCategoricalAxis,
@@ -263,4 +265,14 @@ test("geometry rejects nonfinite and negative dimensions", () => {
     }),
     /svgHeight/,
   );
+});
+
+test("chart size is the laid-out viewport in whole pixels, or the fallback without layout", () => {
+  assert.deepEqual(chartSize(1241.6, 829.4), { width: 1242, height: 829 });
+  assert.deepEqual(chartSize(694, 452), { width: 694, height: 452 });
+  assert.deepEqual(FALLBACK_CHART_SIZE, { width: 940, height: 520 });
+  for (const [width, height] of [[0, 0], [0, 452], [694, 0], [NaN, 452], [-1, 452]]) {
+    assert.equal(chartSize(width, height), FALLBACK_CHART_SIZE);
+  }
+  assert.ok(Object.isFrozen(FALLBACK_CHART_SIZE));
 });

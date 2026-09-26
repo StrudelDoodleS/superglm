@@ -1,4 +1,4 @@
-/* chart.css: chart surface, SVG axis, selection palette, and shared popover. */
+/* chart.css: chart surface, SVG axis, shaped ranges, and the shared popover. */
 
 .chart-shell,
 #chart,
@@ -14,8 +14,7 @@
   width: max-content;
   max-width: min(280px, calc(100vw - 16px));
   padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--text);
   color: var(--surface);
   box-shadow: 0 8px 24px var(--shadow);
@@ -29,7 +28,7 @@
 
 .ui-popover span {
   margin-top: 2px;
-  color: #eaeef2;
+  color: var(--popover-muted);
   font-size: 12px;
 }
 
@@ -48,4 +47,52 @@
 
 .axis-measure-layer {
   pointer-events: none;
+}
+
+/* Shaped ranges: a light band per pinned range, named by a tag at its top. */
+
+.shape-range rect {
+  fill: color-mix(in srgb, var(--blue) 5.5%, transparent);
+  stroke: color-mix(in srgb, var(--blue) 22%, transparent);
+  stroke-width: 1;
+}
+
+.shape-range:hover rect {
+  fill: color-mix(in srgb, var(--blue) 10%, transparent);
+}
+
+.shape-range rect.shape-range-tag {
+  fill: var(--surface);
+  stroke: color-mix(in srgb, var(--blue) 30%, transparent);
+  stroke-width: 1;
+}
+
+.shape-range:hover rect.shape-range-tag {
+  fill: var(--surface);
+}
+
+.shape-range-label {
+  fill: var(--blue);
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+/* The shape icons share faint range ticks: the shape is what the range becomes. */
+
+.selection-icon .range-ticks {
+  stroke-width: 1;
+  opacity: 0.45;
+}
+
+/* A shape icon that cannot act stays hoverable so its reason can show. */
+
+.selection-item[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.selection-item[aria-disabled="true"]:hover {
+  background: transparent;
+  color: var(--text);
 }

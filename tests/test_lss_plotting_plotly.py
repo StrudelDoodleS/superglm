@@ -38,18 +38,31 @@ from superglm.distributional.surfaces import (
     risk_curves,
 )
 from superglm.distributional.terms import term_effect
+from superglm.plotting.editor_style import CHART, DIVERGING, SEQUENTIAL, TOKENS
 from tests.bound_predictor_fixtures import model_from_templates
 
 go = pytest.importorskip("plotly.graph_objects")
 pio = pytest.importorskip("plotly.io")
 dp = importlib.import_module("superglm.plotting.distributional_plotly")
 
-BAND_FILL = "rgba(9, 105, 218, 0.13)"
-WHISKER = "rgba(9, 105, 218, 0.55)"
+
+def _rgba(color, alpha: float) -> str:
+    """A chart colour with its alpha, as the editor's CSS writes it."""
+    if isinstance(color, str):
+        color = [int(color.lstrip("#")[index : index + 2], 16) for index in (0, 2, 4)]
+    return "rgba({}, {}, {}, {})".format(*color, alpha)
+
+
+BAND_FILL = _rgba(CHART["ci"]["color"], CHART["ci"]["alpha"])
+WHISKER = _rgba(CHART["ci_whisker"]["color"], CHART["ci_whisker"]["alpha"])
 SELECTED = "rgba(22, 163, 74, 0.62)"
-BLUE = "#0969da"
-GREY = "#8c959f"
-RED = "#d1242f"
+BLUE = CHART["edited"]["color"]
+REFERENCE = _rgba(CHART["original"]["color"], CHART["original"]["alpha"])
+ZERO = _rgba(CHART["zero"]["color"], CHART["zero"]["alpha"])
+EXPOSURE = _rgba(CHART["exposure"]["fill"], CHART["exposure"]["alpha"])
+POINT = CHART["point"]["face"]
+FLAG = CHART["point_selected"]["face"]
+ZERO_DASH = ",".join(f"{length}px" for length in CHART["zero"]["dash"])
 
 
 # --------------------------------------------------------------------------- #
@@ -255,8 +268,8 @@ def assert_editor_template(fig) -> None:
     assert template.layout.plot_bgcolor == "#ffffff"
     assert template.layout.paper_bgcolor == "#ffffff"
     assert template.layout.font.size == 13
-    assert template.layout.xaxis.gridcolor == "rgba(140, 149, 159, 0.22)"
-    assert template.layout.yaxis.gridcolor == "rgba(140, 149, 159, 0.22)"
+    assert template.layout.xaxis.gridcolor == TOKENS["grid"]
+    assert template.layout.yaxis.gridcolor == TOKENS["grid"]
 
 
 def band_traces(fig) -> list:
@@ -290,11 +303,11 @@ def test_qq_draws_an_envelope_a_reference_and_the_order_statistics(qq) -> None:
     envelope, reference, observed = fig.data
     assert envelope.fillcolor == BAND_FILL
     assert envelope.line.width == 0
-    assert reference.line.color == GREY
-    assert reference.line.dash == "7px,5px"
+    assert reference.line.color == REFERENCE
+    assert reference.line.dash is None
     assert observed.mode == "markers"
     assert observed.selected.marker.color == SELECTED
-    assert set(as_list(observed.marker.color)) <= {"#ffffff", RED}
+    assert set(as_list(observed.marker.color)) <= {POINT, FLAG}
     assert "%{x" in observed.hovertemplate
 
 
@@ -303,8 +316,8 @@ def test_qq_flags_the_order_statistics_outside_the_envelope(qq) -> None:
     observed = fig.data[2]
     outside = (qq.observed < qq.envelope_lower) | (qq.observed > qq.envelope_upper)
     colors = np.asarray(observed.marker.color)
-    assert list(colors[outside]) == [RED] * int(outside.sum())
-    assert set(colors[~outside]) <= {"#ffffff"}
+    assert list(colors[outside]) == [FLAG] * int(outside.sum())
+    assert set(colors[~outside]) <= {POINT}
 
 
 def test_worm_draws_three_traces_per_interval(worm, worm_by_x) -> None:
@@ -313,7 +326,7 @@ def test_worm_draws_three_traces_per_interval(worm, worm_by_x) -> None:
     assert len(worm.panels) == 1
     assert len(single.data) == 3
     assert single.data[0].fillcolor == BAND_FILL
-    assert single.data[1].line.dash == "7px,5px"
+    assert single.data[1].line.color == REFERENCE
     assert single.data[2].line.color == BLUE
 
     grid = dp.plotly_worm(worm_by_x)
@@ -332,7 +345,7 @@ def test_worm_reports_the_q_statistics_in_the_panel_titles(worm_by_x) -> None:
 
     seen = {str(note.text).split(" \u00b7 ")[0]: note.font.color for note in fig.layout.annotations}
     assert set(seen) == set(labels)
-    assert seen == {label: (RED if label in flagged else "#24292f") for label in labels}
+    assert seen == {label: (FLAG if label in flagged else TOKENS["text"]) for label in labels}
 
 
 def test_pit_draws_the_band_the_uniform_line_and_the_bars(pit) -> None:
@@ -342,11 +355,11 @@ def test_pit_draws_the_band_the_uniform_line_and_the_bars(pit) -> None:
 
     band, expected, bars = fig.data
     assert band.fillcolor == BAND_FILL
-    assert expected.line.dash == "4px,4px"
-    assert expected.line.color == "#d0d7de"
+    assert expected.line.dash == ZERO_DASH
+    assert expected.line.color == ZERO
     assert isinstance(bars, go.Bar)
-    assert set(as_list(bars.marker.color)) <= {"rgba(244, 211, 94, 0.95)", RED}
-    assert bars.marker.line.color == "#d8a10f"
+    assert set(as_list(bars.marker.color)) <= {EXPOSURE, FLAG}
+    assert bars.marker.line.color == CHART["exposure"]["edge"]
     assert list(bars.y) == list(pit.counts)
 
 
@@ -355,7 +368,7 @@ def test_pit_flags_the_bins_outside_the_consistency_band(pit) -> None:
     counts = np.asarray(pit.counts, dtype=np.float64)
     outside = (counts < pit.band_lower) | (counts > pit.band_upper)
     colors = np.asarray(bars.marker.color)
-    assert list(colors[outside]) == [RED] * int(outside.sum())
+    assert list(colors[outside]) == [FLAG] * int(outside.sum())
 
 
 # --------------------------------------------------------------------------- #
@@ -376,7 +389,7 @@ def test_binned_draws_three_statistics_and_the_bin_counts(binned) -> None:
 
     references = [fig.data[index] for index in (1, 4, 7)]
     assert [float(np.unique(trace.y)[0]) for trace in references] == [0.0, 1.0, 0.0]
-    assert all(trace.line.dash == "4px,4px" for trace in references)
+    assert all(trace.line.dash == ZERO_DASH for trace in references)
 
 
 def test_binned_flags_the_bins_whose_band_excludes_the_reference(binned) -> None:
@@ -385,7 +398,7 @@ def test_binned_flags_the_bins_whose_band_excludes_the_reference(binned) -> None
     assert excluded.any(), "the fixture must flag at least one skewness bin"
 
     skew = fig.data[8]
-    assert list(np.asarray(skew.marker.color)) == list(np.where(excluded, RED, "#ffffff"))
+    assert list(np.asarray(skew.marker.color)) == list(np.where(excluded, FLAG, POINT))
     assert skew.selected.marker.color == SELECTED
 
 
@@ -404,7 +417,7 @@ def test_binned_2d_is_one_diverging_heatmap_centred_at_zero(binned2d) -> None:
     heatmap = fig.data[0]
     assert isinstance(heatmap, go.Heatmap)
     assert heatmap.zmid == 0.0
-    assert [stop[1] for stop in heatmap.colorscale] == [RED, "#ffffff", BLUE]
+    assert [stop[1] for stop in heatmap.colorscale] == DIVERGING
     assert np.asarray(heatmap.z).shape == binned2d.mean.T.shape
 
 
@@ -423,7 +436,7 @@ def test_actual_expected_draws_the_model_the_data_the_ratio_and_the_exposure(
     expected, actual, reference, ratio, weight = fig.data
     assert expected.line.color == BLUE
     assert actual.mode == "markers"
-    assert reference.line.dash == "4px,4px"
+    assert reference.line.dash == ZERO_DASH
     assert ratio.error_y.color == WHISKER
     assert list(ratio.error_y.array) == list(actual_expected.ratio_se)
     assert ratio.selected.marker.color == SELECTED
@@ -437,8 +450,10 @@ def test_actual_expected_flags_the_bins_further_than_two_standard_errors(
     ratio = dp.plotly_actual_expected(actual_expected).data[3]
     off = np.abs(actual_expected.ratio - 1.0) > 2.0 * actual_expected.ratio_se
     colors = np.asarray(ratio.marker.color)
-    assert list(colors) == list(np.where(off, RED, "#ffffff"))
-    assert list(np.asarray(ratio.marker.line.color)) == list(np.where(off, RED, BLUE))
+    assert list(colors) == list(np.where(off, FLAG, POINT))
+    assert list(np.asarray(ratio.marker.line.color)) == list(
+        np.where(off, CHART["point_selected"]["edge"], CHART["point"]["edge"])
+    )
 
 
 def _level_totals(n_levels: int, *, ratio: np.ndarray | None = None) -> ActualExpected:
@@ -479,9 +494,9 @@ def test_calibration_without_thresholds_draws_two_panels(calibration_no_tails) -
     assert len(fig.data) == 4
 
     nominal, realised, one_minus_p, exceedance = fig.data
-    assert nominal.line.dash == "4px,4px"
+    assert nominal.line.dash == ZERO_DASH
     assert realised.error_y.color == WHISKER
-    assert one_minus_p.line.dash == "4px,4px"
+    assert one_minus_p.line.dash == ZERO_DASH
     assert list(exceedance.x) == list(calibration_no_tails.quantiles["p"])
 
 
@@ -513,9 +528,9 @@ def test_calibration_colours_each_threshold_and_names_the_tail_ticks(case) -> No
     curves = [trace for trace in fig.data if str(trace.name).startswith("reliability at ")]
     assert len(curves) == len(thresholds)
     assert [trace.line.color for trace in curves] == [
-        "#dbeafe",
+        SEQUENTIAL[0],
         dp._sequential_color(0.5),
-        BLUE,
+        SEQUENTIAL[1],
     ]
 
     assert list(fig.layout.xaxis3.ticktext) == [
@@ -535,14 +550,14 @@ def test_comparison_draws_segments_the_murphy_curves_and_the_difference(comparis
     assert len(fig.data) == 7
 
     zero, segments, curve_a, curve_b, band, difference, murphy_zero = fig.data
-    assert zero.line.dash == "4px,4px"
+    assert zero.line.dash == ZERO_DASH
     assert segments.error_y.color == WHISKER
     assert list(segments.x) == list(comparison.by_segment.index.astype(str))
     assert curve_a.line.color == BLUE
-    assert curve_b.line.dash == "7px,5px"
+    assert curve_b.line.color == REFERENCE
     assert band.fillcolor == BAND_FILL
     assert difference.line.color == BLUE
-    assert murphy_zero.line.dash == "4px,4px"
+    assert murphy_zero.line.dash == ZERO_DASH
 
 
 def test_comparison_without_segments_or_murphy_draws_the_overall_difference(
@@ -571,9 +586,9 @@ def test_term_effect_of_a_smooth_fills_the_pointwise_band_and_outlines_the_simul
     band, sim_lower, sim_upper, zero, curve = fig.data
     assert band.fillcolor == BAND_FILL
     assert sim_lower.line.color == WHISKER and sim_upper.line.color == WHISKER
-    assert sim_lower.line.width == 1.4
-    assert zero.line.dash == "4px,4px"
-    assert curve.line.color == BLUE and curve.line.width == 2.3
+    assert sim_lower.line.width == CHART["ci_whisker"]["width"]
+    assert zero.line.dash == ZERO_DASH
+    assert curve.line.color == BLUE and curve.line.width == CHART["edited"]["width"]
     assert "se" in curve.hovertemplate
 
 
@@ -593,7 +608,7 @@ def test_term_effect_with_an_exposure_strip_adds_one_bar(smooth_effect, case) ->
     assert len(fig.data) == 6
     bar = fig.data[-1]
     assert isinstance(bar, go.Bar)
-    assert bar.marker.line.color == "#d8a10f"
+    assert bar.marker.line.color == CHART["exposure"]["edge"]
     assert list(bar.y) == list(exposure.astype(float))
 
 
@@ -603,7 +618,7 @@ def test_term_effect_of_a_categorical_draws_levels_with_whiskers(level_effect) -
     assert len(fig.data) == 3
 
     zero, markers, simultaneous = fig.data
-    assert zero.line.dash == "4px,4px"
+    assert zero.line.dash == ZERO_DASH
     assert markers.mode == "markers"
     assert list(markers.x) == list(level_effect.levels)
     assert markers.error_y.color == WHISKER
@@ -618,8 +633,8 @@ def test_term_effect_draws_the_special_levels_as_their_own_trace(level_effect) -
     assert len(fig.data) == 4
     special = next(trace for trace in fig.data if trace.name == "special")
     assert list(special.x) == [level_effect.levels[-1]]
-    assert special.marker.color == RED
-    assert special.marker.line.color == RED
+    assert special.marker.color == FLAG
+    assert special.marker.line.color == CHART["point_selected"]["edge"]
 
     ordinary = next(trace for trace in fig.data if trace.name.endswith(":g"))
     assert list(ordinary.x) == list(level_effect.levels[:-1])
@@ -677,7 +692,7 @@ def test_density_fan_is_one_sequential_heatmap(fan) -> None:
 
     heatmap = fig.data[0]
     assert isinstance(heatmap, go.Heatmap)
-    assert [stop[1] for stop in heatmap.colorscale] == ["#dbeafe", BLUE]
+    assert [stop[1] for stop in heatmap.colorscale] == SEQUENTIAL
     assert np.asarray(heatmap.z).shape == fan.density.T.shape
 
 
@@ -857,5 +872,5 @@ def test_diagnostics_figure_bins_the_scatter_panels_above_max_points(qq, worm, p
 
     dense = [trace for trace in fig.data if isinstance(trace, go.Histogram2d)]
     assert len(dense) == 2
-    assert [stop[1] for stop in dense[0].colorscale] == ["#dbeafe", BLUE]
+    assert [stop[1] for stop in dense[0].colorscale] == SEQUENTIAL
     assert not any(trace.mode == "markers" for trace in fig.data if isinstance(trace, go.Scatter))

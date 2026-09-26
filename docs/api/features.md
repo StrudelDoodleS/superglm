@@ -18,6 +18,7 @@ builds from a pair of columns are on the [Internals](internals.md) page.
    superglm.BSplineSmooth
    superglm.NaturalSpline
    superglm.CubicRegressionSpline
+   superglm.PolynomialRange
    superglm.n_knots_from_k
    superglm.Categorical
    superglm.OrderedCategorical

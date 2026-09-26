@@ -243,7 +243,7 @@ def test_collapsing_ordered_levels_keeps_the_special_free(specials_model):
     replacement, metadata = collapsed_feature_spec(model, term, idx, X=X)
 
     assert metadata["group_label"] == "2+3"
-    # _ordered_spec_with_grouping rebuilds the spec from an explicit argument
+    # rebuilt_ordered_spec rebuilds the spec from an explicit argument
     # list (collapse.py:367-372); without specials= the free level is silently
     # smoothed back into the curve.
     assert replacement._specials == ["MISSING"]
@@ -403,7 +403,7 @@ def test_editing_an_ordered_level_without_specials_moves_only_that_level():
 
 
 def test_the_collapse_clone_keeps_a_special_s_raw_label():
-    # `_ordered_spec_with_grouping` rebuilds the spec with
+    # `rebuilt_ordered_spec` rebuilds the spec with
     # `specials=list(spec._specials)` -- the STRING-COERCED labels. The rebuilt
     # spec therefore has `_special_raw == ["9"]` and has lost the raw-label
     # fallback that `_special_mask` needs, because on a float column
@@ -413,14 +413,14 @@ def test_the_collapse_clone_keeps_a_special_s_raw_label():
     # path is separately broken for ANY non-string level labels, specials or not
     # (see the float-column grouping issue), so driving it would test the wrong
     # defect and could not pass.
-    from superglm.editor.collapse import _ordered_spec_with_grouping
+    from superglm.editor.collapse import rebuilt_ordered_spec
 
     spec = OrderedCategorical(order=[1, 2, 3, 4, 9], specials=[9], basis=Spline(kind="ps", k=5))
     assert 9 in spec._special_raw, "precondition: the original keeps the raw label"
 
     data = pd.DataFrame({"band": np.array([1.0, 2.0, 3.0, 4.0, 9.0, 9.0])})
 
-    clone = _ordered_spec_with_grouping(spec, None, ["1", "2"], "1", data)
+    clone = rebuilt_ordered_spec(spec, grouping=None, base="1", data=data)
 
     assert clone._specials == ["9"]
     assert 9 in clone._special_raw, "the clone dropped the raw label and can only match str"

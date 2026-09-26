@@ -6,13 +6,25 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-def anchored_isotonic_values(
+def isotonic_values(
     y_all: NDArray,
     idx: NDArray[np.intp],
     weights_all: NDArray | None,
     direction: str,
 ) -> NDArray:
-    return _apply_runs(idx, lambda run: _anchored_isotonic_run(y_all, run, weights_all, direction))
+    """Exposure-weighted isotonic regression of each contiguous run of ``idx``.
+
+    The closest monotone sequence to the run in weighted least squares
+    (Barlow et al. 1972), as GAM Changer does. The run is not tied to its
+    unselected neighbours: where the curve turns just outside the selection,
+    the edit can leave a step at the edge rather than lift or press the
+    whole stretch to the neighbour's level.
+    """
+    weights = None if weights_all is None else np.asarray(weights_all, dtype=np.float64)
+    return _apply_runs(
+        idx,
+        lambda run: _isotonic_run(y_all[run], None if weights is None else weights[run], direction),
+    )
 
 
 def anchored_smooth_values(
@@ -147,43 +159,11 @@ def _clamp_boundary_jump(value: float, original: float, anchor: float) -> float:
     return float(np.clip(value, anchor - max_jump, anchor + max_jump))
 
 
-def _anchored_isotonic_run(
-    y_all: NDArray,
-    run: NDArray[np.intp],
-    weights_all: NDArray | None,
-    direction: str,
-) -> NDArray:
-    left = int(run[0]) - 1
-    right = int(run[-1]) + 1
-    has_left = left >= 0
-    has_right = right < y_all.size
-    run_weights = None if weights_all is None else np.asarray(weights_all[run], dtype=np.float64)
-    anchor_weight = _anchor_weight(run_weights, run.size)
-
-    values = []
-    weights = []
-    if has_left:
-        values.append(float(y_all[left]))
-        weights.append(anchor_weight)
-    values.extend(float(v) for v in y_all[run])
-    weights.extend([1.0] * run.size if run_weights is None else [float(v) for v in run_weights])
-    if has_right:
-        values.append(float(y_all[right]))
-        weights.append(anchor_weight)
-
-    fitted = _isotonic_values(
-        np.asarray(values, dtype=np.float64),
-        np.asarray(weights, dtype=np.float64),
-        direction,
-    )
-    start = 1 if has_left else 0
-    run_after = fitted[start : start + run.size].copy()
-    return _project_to_anchors(
-        run_after,
-        float(y_all[left]) if has_left else None,
-        float(y_all[right]) if has_right else None,
-        direction,
-    )
+def _isotonic_run(y: NDArray, weights: NDArray | None, direction: str) -> NDArray:
+    """One run's fit; a run with no positive exposure is weighted equally."""
+    if weights is not None and not np.any(weights > 0):
+        weights = None
+    return _isotonic_values(np.asarray(y, dtype=np.float64), weights, direction)
 
 
 def _contiguous_runs(idx: NDArray[np.intp]) -> list[NDArray[np.intp]]:
@@ -191,47 +171,3 @@ def _contiguous_runs(idx: NDArray[np.intp]) -> list[NDArray[np.intp]]:
         return []
     breaks = np.flatnonzero(np.diff(idx) != 1) + 1
     return [run.astype(np.intp, copy=False) for run in np.split(idx, breaks)]
-
-
-def _anchor_weight(weights: NDArray | None, size: int) -> float:
-    # The anchors are synthetic observations. They get very high weight so the
-    # selected run respects neighboring untouched values without hard-pinning
-    # every interior point to those neighbors.
-    if weights is None:
-        return float(max(size, 1) * 1_000_000)
-    finite_positive = weights[np.isfinite(weights) & (weights > 0)]
-    total = float(np.sum(finite_positive)) if finite_positive.size else float(max(size, 1))
-    return max(total, 1.0) * 1_000_000
-
-
-def _project_to_anchors(
-    values: NDArray,
-    left_value: float | None,
-    right_value: float | None,
-    direction: str,
-) -> NDArray:
-    # IsotonicRegression handles monotonicity but not external boundary
-    # constraints. Projecting afterward keeps the fitted run compatible with
-    # the nearest untouched values when those anchors are directionally valid.
-    values = np.asarray(values, dtype=np.float64).copy()
-    if values.size == 0:
-        return values
-
-    if direction == "increasing":
-        lower = -np.inf if left_value is None else left_value
-        upper = np.inf if right_value is None else right_value
-        if lower <= upper:
-            values = np.clip(values, lower, upper)
-        values = np.maximum.accumulate(values)
-        if right_value is not None and lower <= upper:
-            values = np.minimum(values, right_value)
-        return values
-
-    upper = np.inf if left_value is None else left_value
-    lower = -np.inf if right_value is None else right_value
-    if lower <= upper:
-        values = np.clip(values, lower, upper)
-    values = np.minimum.accumulate(values)
-    if right_value is not None and lower <= upper:
-        values = np.maximum(values, right_value)
-    return values

@@ -95,11 +95,15 @@ function isEditorSnapshot(value) {
   if (!isRecord(value) || !Number.isInteger(value.model_revision)) return false;
   if (typeof value.selected_term !== "string") return false;
   if (!isRecord(value.terms) || !isRecord(value.selection)) return false;
-  if (typeof value.can_uncollapse_levels !== "boolean") return false;
-  if (value.last_collapse !== null && !isRecord(value.last_collapse)) return false;
-  return isRecord(value.history) &&
-    Array.isArray(value.history.active) &&
-    Array.isArray(value.history.redo);
+  if (!isUndoRedo(value.undo_redo)) return false;
+  return Array.isArray(value.timeline);
+}
+
+/** @param {unknown} value @returns {boolean} */
+function isUndoRedo(value) {
+  return isRecord(value) &&
+    (value.undo === null || typeof value.undo === "string") &&
+    (value.redo === null || typeof value.redo === "string");
 }
 
 /** @param {unknown} value @returns {boolean} */
@@ -241,6 +245,33 @@ export function createEditorActions({
       };
     });
     return { ok: false, error: normalizedError };
+  }
+
+  /**
+   * Re-read the Python session without refitting. A notebook-side change may leave the
+   * revision equal while the selection or structure moved, so the snapshot is accepted at an
+   * equal revision and the visible evidence is re-requested at once.
+   *
+   * @returns {Promise<ActionResult>}
+   */
+  async function refreshFromPython() {
+    if (store.getState().request.mutation.status === "running") {
+      return skippedMutation("An editor mutation is already running.");
+    }
+    let candidate;
+    try {
+      candidate = await client.getState();
+    } catch (value) {
+      return { ok: false, error: normalizeError(value) };
+    }
+    if (!isEditorSnapshot(candidate)) {
+      return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
+    }
+    const snapshot = /** @type {EditorSnapshot} */ (candidate);
+    store.update((state) => commitRemote(state, snapshot));
+    void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
+      .catch(() => {});
+    return { ok: true, snapshot };
   }
 
   /** @returns {Promise<EditorSnapshot>} */
@@ -590,6 +621,7 @@ export function createEditorActions({
 
   return {
     initialize,
+    refreshFromPython,
     executeSelectionMutation,
     executeStateMutation,
     executeStructuralMutation,
