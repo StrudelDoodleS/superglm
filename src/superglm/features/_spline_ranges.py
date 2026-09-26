@@ -326,7 +326,11 @@ def constraint_null_space(C: NDArray) -> NDArray:
     it, and the natural-spline null space stays bit-identical to its old QR.
     """
     C = np.asarray(C, dtype=np.float64)
-    if np.linalg.matrix_rank(C / np.linalg.norm(C, axis=1, keepdims=True)) < C.shape[0]:
+    # No rows are trivially independent, and matrix_rank raises on them before NumPy 2.5.
+    if (
+        C.shape[0]
+        and np.linalg.matrix_rank(C / np.linalg.norm(C, axis=1, keepdims=True)) < C.shape[0]
+    ):
         raise RangeError(
             "polynomial range constraints are dependent; ranges this close need to meet at a kink"
         )
