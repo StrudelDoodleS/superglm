@@ -228,7 +228,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `warmup() -> None`.
   - Module constant `MAX_ROW_TERMS: int = 1_000_000`.
 
-- [ ] **Step 1: Write the oracle generator** `benchmarks/tweedie_series_oracle.py` (run with `uv run --with mpmath`):
+- [x] **Step 1: Write the oracle generator** `benchmarks/tweedie_series_oracle.py` (run with `uv run --with mpmath`):
 
 ```python
 """50-digit reference values of the Dunn-Smyth series log W(t) = log sum_j t^j / (j! Gamma(a j))."""
@@ -279,7 +279,7 @@ json.dump({"generator": "benchmarks/tweedie_series_oracle.py", "digits": 50, "ro
 
 Run: `uv run --with mpmath python benchmarks/tweedie_series_oracle.py tests/fixtures/tweedie_series_oracle.json`. Expected: about 237 rows.
 
-- [ ] **Step 2: Write the failing tests** in `tests/test_tweedie_series.py`:
+- [x] **Step 2: Write the failing tests** in `tests/test_tweedie_series.py`:
 
 ```python
 import json
@@ -349,9 +349,9 @@ def test_rows_past_the_work_bound_are_refused_not_nan():
     assert MAX_ROW_TERMS == 1_000_000
 ```
 
-- [ ] **Step 3: Run them to confirm they fail.** Run: `uv run pytest tests/test_tweedie_series.py -q`. Expected: ERROR on import (`No module named 'superglm._tweedie_series'`).
+- [x] **Step 3: Run them to confirm they fail.** Run: `uv run pytest tests/test_tweedie_series.py -q`. Expected: ERROR on import (`No module named 'superglm._tweedie_series'`).
 
-- [ ] **Step 4: Implement `src/superglm/_tweedie_series.py`:**
+- [x] **Step 4: Implement `src/superglm/_tweedie_series.py`:**
 
 ```python
 """Compiled Dunn-Smyth (2005) series for the Tweedie density, 1 < p < 2.
@@ -479,9 +479,9 @@ def warmup() -> None:
         raise RuntimeError("Tweedie series warmup failed")
 ```
 
-- [ ] **Step 5: Run the tests to confirm they pass.** Run: `uv run pytest tests/test_tweedie_series.py -q`. Expected: all pass. If an oracle row fails, report the row, the bound and the error; do not widen the bound without a derivation.
+- [x] **Step 5: Run the tests to confirm they pass.** Run: `uv run pytest tests/test_tweedie_series.py -q`. Expected: all pass. If an oracle row fails, report the row, the bound and the error; do not widen the bound without a derivation.
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add src/superglm/_tweedie_series.py benchmarks/tweedie_series_oracle.py tests/fixtures/tweedie_series_oracle.json tests/test_tweedie_series.py
