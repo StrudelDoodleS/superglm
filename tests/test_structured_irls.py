@@ -11,6 +11,7 @@ import scipy.sparse as sp
 
 import superglm.reml.objective as reml_objective
 import superglm.solvers.irls_direct as irls_direct
+from superglm import generate_tweedie_cpg
 from superglm.distributions import (
     Gamma,
     Gaussian,
@@ -27,7 +28,6 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
 )
 from superglm.links import IdentityLink, LogLink
-from superglm.profiling.tweedie import generate_tweedie_cpg
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction

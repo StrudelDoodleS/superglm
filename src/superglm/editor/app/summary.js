@@ -86,7 +86,7 @@ export async function runDistributionProfile(
     status: "running",
     parameter,
     trace: [],
-    options: profileOptionsPayload(nodes, parameter)
+    options: profileOptionsPayload(nodes)
   }, nodes);
   try {
     const started = await request("/profile_distribution/start", {
@@ -95,7 +95,7 @@ export async function runDistributionProfile(
       body: JSON.stringify({
         parameter,
         level_display: levelDisplay,
-        ...profileOptionsPayload(nodes, parameter)
+        ...profileOptionsPayload(nodes)
       })
     });
     let status = started;
@@ -146,17 +146,11 @@ function openProfileDialog(nodes) {
   }
 }
 
-function profileOptionsPayload(nodes, parameter) {
+function profileOptionsPayload(nodes) {
   const xatol = Number(nodes.profileTolerance ? nodes.profileTolerance.value : 0.001);
-  const payload = {
+  return {
     xatol: Number.isFinite(xatol) && xatol > 0 ? xatol : 0.001
   };
-  if (parameter === "tweedie_p" && nodes.profilePhiMethod) {
-    payload.method = nodes.profileMethod ? nodes.profileMethod.value : "brent";
-    payload.phi_method = nodes.profilePhiMethod.value;
-    payload.trace_iterations = true;
-  }
-  return payload;
 }
 
 function requestedLevelDisplay(nodes) {
@@ -274,8 +268,6 @@ export function updateDistributionProfileActions(payload, nodes) {
     reprofileNb2.hidden = !canProfileNb2;
   }
   if (nodes.profileOptions) nodes.profileOptions.hidden = !(canProfileTweedie || canProfileNb2);
-  if (nodes.profileMethodWrap) nodes.profileMethodWrap.hidden = !canProfileTweedie;
-  if (nodes.profilePhiWrap) nodes.profilePhiWrap.hidden = !canProfileTweedie;
 }
 
 function renderProfileTrace(job, nodes) {
@@ -528,13 +520,15 @@ function profileTraceLegendHTML(trace, estimate, label) {
 function profileEstimateCIText(estimate) {
   const low = formatProfileNumber(estimate.ci_low);
   const high = formatProfileNumber(estimate.ci_high);
-  if (estimate.ci_status === "unavailable for Pearson plug-in") {
-    return "CI unavailable for Pearson plug-in";
-  }
   if (!low || !high) {
     return estimate.ci_status === "not computed" ? "CI not computed" : "CI pending";
   }
-  return `CI [${low}, ${high}]`;
+  return `CI [${low}, ${high}]${profileCensoredSuffix(estimate.ci_status)}`;
+}
+
+// A censored side is where the search stopped, not a likelihood-ratio crossing.
+function profileCensoredSuffix(status) {
+  return status === "censored" ? " censored" : "";
 }
 
 function profileLearningCurveLegend(curves, estimate) {
@@ -680,15 +674,10 @@ function renderCompactSummary(payload) {
   ];
   if (model.tweedie_p !== null && model.tweedie_p !== undefined) {
     facts.push(["Tweedie p", model.tweedie_p]);
-    if (model.tweedie_p_method) {
-      facts.push(["Tweedie p method", model.tweedie_p_method]);
-    }
     const ci = Array.isArray(model.tweedie_p_ci) ? model.tweedie_p_ci : null;
-    const ciText = model.tweedie_p_ci_status === "unavailable for Pearson plug-in"
-      ? model.tweedie_p_ci_status
-      : ci && ci.length >= 2
-        ? `[${formatProfileNumber(ci[0])}, ${formatProfileNumber(ci[1])}]`
-        : model.tweedie_p_ci_status || "not computed";
+    const ciText = ci && ci.length >= 2
+      ? `[${formatProfileNumber(ci[0])}, ${formatProfileNumber(ci[1])}]${profileCensoredSuffix(model.tweedie_p_ci_status)}`
+      : model.tweedie_p_ci_status || "not computed";
     facts.push(["Tweedie p CI", ciText]);
   }
   if (model.nb_theta !== null && model.nb_theta !== undefined) facts.push(["NB2 theta", model.nb_theta]);

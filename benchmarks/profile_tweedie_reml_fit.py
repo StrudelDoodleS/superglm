@@ -396,7 +396,7 @@ def load_synthetic(n_rows: int, seed: int = 7, signal: str = "weak"):
     flat criterion directions) that the original A/B's 400k case lived in;
     ``signal="strong"`` is the sharply identified regime (lambda < 1).
     """
-    from superglm.profiling.tweedie import generate_tweedie_cpg
+    from superglm import generate_tweedie_cpg
 
     rng = np.random.default_rng(seed)
     x1 = rng.uniform(0.0, 1.0, n_rows)
@@ -437,7 +437,7 @@ def build_synthetic_model(discrete: bool):
 
 
 def load_random_effect(n_rows: int, seed: int = 11):
-    from superglm.profiling.tweedie import generate_tweedie_cpg
+    from superglm import generate_tweedie_cpg
 
     rng = np.random.default_rng(seed)
     n_levels = 250
@@ -475,7 +475,7 @@ _BURN_PHI = 167.5
 
 
 def load_burn_cost(n_rows: int, seed: int = 2026):
-    from superglm.profiling.tweedie import generate_tweedie_cpg
+    from superglm import generate_tweedie_cpg
 
     if n_rows <= 0:
         n_rows = 67_000

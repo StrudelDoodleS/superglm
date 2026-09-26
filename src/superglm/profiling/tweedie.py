@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,16 +18,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-# generate_tweedie_cpg and tweedie_logpdf are re-exported for importers not yet
-# moved to superglm._tweedie; the re-export goes when they move.
-from superglm._tweedie import (  # noqa: F401
-    PhiSolve,
-    TweedieRows,
-    generate_tweedie_cpg,
-    solve_log_phi,
-    tweedie_logpdf,
-    tweedie_unit_deviance,
-)
+from superglm._tweedie import PhiSolve, TweedieRows, solve_log_phi, tweedie_unit_deviance
 from superglm.distributions import Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import (
@@ -79,6 +71,7 @@ class _PowerProfile:
         self.clone = _clone_profile_model(model, X, sample_weight)
         self.candidates: dict[float, _Candidate] = {}
         self.infeasible: dict[float, str] = {}
+        self.on_evaluation: Callable[[dict], None] | None = None
         if fit_mode == "fit_reml":
             self._prepare_reml(X, y, sample_weight, offset)
         else:
@@ -98,6 +91,10 @@ class _PowerProfile:
         solved = profile_phi_at(self.y, mu, self.w, p)
         nll = solved.criterion / self.n
         self.candidates[p] = _Candidate(solved.phi, fit_converged)
+        if self.on_evaluation is not None:
+            self.on_evaluation(
+                {"p": p, "nll": nll, "phi": solved.phi, "fit_converged": fit_converged}
+            )
         return nll
 
     def _prepare_ml(self, X, y, sample_weight, offset) -> None:
@@ -216,15 +213,21 @@ def search_power(
     p_bounds: tuple[float, float] = (1.05, 1.95),
     xatol: float = 1e-3,
     maxiter: int = 30,
+    on_evaluation: Callable[[dict], None] | None = None,
 ) -> TweedieProfileResult:
     """Bounded Brent on the profile mean NLL over ``p_bounds``, refitting mu at every p.
 
     ``fit_mode`` is ``"fit"`` or ``"fit_reml"``. Inputs are validated by the
-    caller (``estimate_p``).
+    caller (``estimate_p``). ``on_evaluation`` receives each feasible search
+    candidate as ``{"p", "nll", "phi", "fit_converged"}`` while the search runs.
     """
     profile = _PowerProfile(model, X, y, sample_weight, offset, fit_mode)
     objective = RecordedObjective(profile)
+    profile.on_evaluation = on_evaluation
     search_converged = minimize_profile(objective, p_bounds, xatol=xatol, maxiter=maxiter)
+    # The interval evaluates the same profile later, after the caller's
+    # progress display has finished with the search.
+    profile.on_evaluation = None
     p_hat, nll_hat = objective.best()
     best = profile.candidates[p_hat]
     candidates = [profile.candidates.get(p, _INFEASIBLE_CANDIDATE) for p in objective.values]

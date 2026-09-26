@@ -931,7 +931,7 @@ class TestTweedieProfileCI:
 
     def test_ci_works(self):
         """Tweedie profile CI should produce a valid interval."""
-        from superglm.profiling.tweedie import generate_tweedie_cpg
+        from superglm import generate_tweedie_cpg
 
         rng = np.random.default_rng(42)
         n = 1000
@@ -964,7 +964,7 @@ class TestTweedieProfileCI:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        from superglm.profiling.tweedie import generate_tweedie_cpg
+        from superglm import generate_tweedie_cpg
 
         rng = np.random.default_rng(42)
         n = 500

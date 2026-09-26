@@ -9,13 +9,14 @@ import pytest
 from scipy.special import gammaln
 from scipy.stats import poisson
 
-from superglm import ModelMetrics, SuperGLM
+from superglm import ModelMetrics, SuperGLM, generate_tweedie_cpg
 from superglm.distributions import Gamma, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.model.fit_state import FittedStateRevision
+from superglm.profiling._scalar import Interval
 
 
 def _publish_result_revision(model, **changes) -> None:
@@ -1509,8 +1510,6 @@ class TestResiduals:
 
     def test_quantile_residuals_tweedie(self):
         """Quantile residuals for Tweedie should be approximately standard normal."""
-        from superglm.profiling.tweedie import generate_tweedie_cpg
-
         rng = np.random.default_rng(42)
         n = 2000
         x = rng.standard_normal(n)
@@ -1535,8 +1534,6 @@ class TestResiduals:
         assert abs(np.std(qr) - 1.0) < 0.15
 
     def test_tweedie_quantile_residuals_retain_prior_weight_precision(self):
-        from superglm.profiling.tweedie import generate_tweedie_cpg
-
         rng = np.random.default_rng(2194)
         n = 180
         x = rng.normal(size=n)
@@ -2391,13 +2388,7 @@ class TestTweedieProfileSummary:
     """Tweedie p profile result appears in ASCII and HTML summary."""
 
     @staticmethod
-    def _profile_result(
-        *,
-        phi_method="mle",
-        method="brent",
-        density_exact=True,
-        ci_cache=None,
-    ):
+    def _profile_result(*, ci_cache=None):
         def unexpected_ci(*args, **kwargs):
             raise AssertionError("summary reporting must not evaluate a Tweedie profile CI")
 
@@ -2405,17 +2396,12 @@ class TestTweedieProfileSummary:
             p_hat=1.55,
             phi_hat=0.8,
             nll=11.0,
-            method=method,
-            phi_method=phi_method,
-            density_exact=density_exact,
             _ci_cache={} if ci_cache is None else dict(ci_cache),
             ci=unexpected_ci,
-            ci_details=unexpected_ci,
+            interval=unexpected_ci,
         )
 
     def test_tweedie_profile_summary(self):
-        from superglm.profiling.tweedie import generate_tweedie_cpg
-
         rng = np.random.default_rng(42)
         n = 500
         x = rng.uniform(0, 5, n)
@@ -2427,160 +2413,85 @@ class TestTweedieProfileSummary:
             selection_penalty=0.0,
             features={"x": Numeric()},
         )
-        model.estimate_p(X, y, p_bounds=(1.1, 1.9), phi_method="mle")
+        model.estimate_p(X, y, p_bounds=(1.1, 1.9))
         m = model.metrics(X, y)
         text = str(m.summary())
         assert "Tweedie p" in text
         html = m.summary()._repr_html_()
         assert "Tweedie p" in html
+        assert "Profile NLL" in str(model.summary())
 
-    def test_model_summary_reports_uncached_mle_ci_without_computing_it(self, fitted_poisson):
+    def test_model_summary_reports_uncached_ci_without_computing_it(self, fitted_poisson):
         model, _, _, _ = fitted_poisson
-        profile = self._profile_result()
-        model._tweedie_profile_result = profile
+        model._tweedie_profile_result = self._profile_result()
         model._summary_cache = None
 
         summary = model.summary()
 
         assert summary._info["tweedie_p_ci"] is None
         assert summary._info["tweedie_p_ci_status"] == "not computed"
-        assert summary._info["tweedie_p_method"] == "Profile MLE (Brent)"
+        assert "tweedie_p_method" not in summary._info
         assert "CI not computed" in str(summary)
         assert "CI not computed" in summary._repr_html_()
 
-    def test_metrics_summary_reports_uncached_mle_ci_without_computing_it(self, fitted_poisson):
+    def test_metrics_summary_reports_uncached_ci_without_computing_it(self, fitted_poisson):
         model, X, y, weights = fitted_poisson
-        profile = self._profile_result()
-        model._tweedie_profile_result = profile
+        model._tweedie_profile_result = self._profile_result()
 
         summary = model.metrics(X, y, sample_weight=weights).summary()
 
         assert summary._info["tweedie_p_ci"] is None
         assert summary._info["tweedie_p_ci_status"] == "not computed"
-        assert summary._info["tweedie_p_method"] == "Profile MLE (Brent)"
+        assert "tweedie_p_method" not in summary._info
 
-    def test_pearson_summary_ignores_stale_cached_lr_interval(self, fitted_poisson):
-        model, X, y, weights = fitted_poisson
-        profile = self._profile_result(
-            phi_method="pearson",
-            ci_cache={0.05: (1.4, 1.7)},
-        )
-        model._tweedie_profile_result = profile
-        model._summary_cache = None
-
-        model_summary = model.summary()
-        metrics_summary = model.metrics(X, y, sample_weight=weights).summary()
-
-        for summary in (model_summary, metrics_summary):
-            assert summary._info["tweedie_p_ci"] is None
-            assert summary._info["tweedie_p_ci_status"] == "unavailable for Pearson plug-in"
-            assert summary._info["tweedie_p_method"] == (
-                "Approximate profile (Brent; Pearson plug-in)"
-            )
-            assert "1.400" not in str(summary)
-            assert "CI unavailable for Pearson plug-in" in str(summary)
-            assert "CI unavailable for Pearson plug-in" in summary._repr_html_()
-
-    def test_summary_requires_exact_mle_method_value_for_cached_ci(self, fitted_poisson):
-        model, _, _, _ = fitted_poisson
-        profile = self._profile_result(
-            phi_method="MLE",
-            ci_cache={0.05: (1.4, 1.7)},
-        )
-        model._tweedie_profile_result = profile
-        model._summary_cache = None
-
-        summary = model.summary()
-
-        assert summary._info["tweedie_p_ci"] is None
-        assert summary._info["tweedie_p_ci_status"] == "not computed"
-        assert summary._info["tweedie_p_method"] == "Profile (Brent)"
-
-    def test_model_summary_refreshes_when_cached_ci_or_search_identity_changes(
-        self, fitted_poisson
+    @pytest.mark.parametrize(
+        ("interval", "status", "rendered"),
+        [
+            (Interval(1.4, 1.7, False, False), "available", "1.550 [1.400, 1.700]"),
+            (Interval(1.55, 1.7, True, False), "censored", "1.550 [1.550, 1.700] censored"),
+        ],
+    )
+    def test_summaries_report_a_cached_interval_and_its_status(
+        self, fitted_poisson, interval, status, rendered
     ):
+        model, X, y, weights = fitted_poisson
+        model._tweedie_profile_result = self._profile_result(ci_cache={0.05: interval})
+        model._summary_cache = None
+
+        for summary in (model.summary(), model.metrics(X, y, sample_weight=weights).summary()):
+            assert summary._info["tweedie_p_ci"] == (interval.lower, interval.upper)
+            assert summary._info["tweedie_p_ci_status"] == status
+            assert rendered in str(summary)
+            assert rendered in summary._repr_html_()
+
+    def test_model_summary_refreshes_when_an_interval_is_computed_or_cleared(self, fitted_poisson):
         model, _, _, _ = fitted_poisson
         profile = self._profile_result()
         model._tweedie_profile_result = profile
         model._summary_cache = None
 
         uncached = model.summary()
-        profile._ci_cache[0.05] = (1.4, 1.7)
+        profile._ci_cache[0.05] = Interval(1.4, 1.7, False, False)
         cached = model.summary()
 
         assert cached is not uncached
         assert cached._info["tweedie_p_ci"] == (1.4, 1.7)
-        assert cached._info["tweedie_p_ci"] is profile._ci_cache[0.05]
-        assert cached._info["tweedie_p_ci_status"] == "available"
-        assert "1.550 [1.400, 1.700]" in str(cached)
         assert model.summary() is cached
 
-        profile.method = "grid_refine"
-        changed_method = model.summary()
-        assert changed_method is not cached
-        assert changed_method._info["tweedie_p_method"] == "Profile MLE (Grid Refine)"
-
-        replacement = self._profile_result(
-            method="grid_refine",
-            ci_cache={0.05: (1.4, 1.7)},
-        )
-        model._tweedie_profile_result = replacement
-        changed_search = model.summary()
-        assert changed_search is not changed_method
-
-    def test_model_summary_refreshes_for_equal_valued_ci_tuple_replacement(self, fitted_poisson):
-        model, _, _, _ = fitted_poisson
-        first_interval = tuple([1.4, 1.7])
-        profile = self._profile_result(ci_cache={0.05: first_interval})
-        model._tweedie_profile_result = profile
-        model._summary_cache = None
-
-        first_summary = model.summary()
-        replacement_interval = tuple([1.4, 1.7])
-        assert replacement_interval is not first_interval
-        profile._ci_cache[0.05] = replacement_interval
-        replacement_summary = model.summary()
-
-        assert replacement_summary is not first_summary
-        assert replacement_summary._info["tweedie_p_ci"] is replacement_interval
-        assert replacement_summary._info["tweedie_p_ci_status"] == "available"
-
-    def test_model_summary_refreshes_after_ci_cache_clear_and_recompute(self, fitted_poisson):
-        model, _, _, _ = fitted_poisson
-        first_interval = tuple([1.4, 1.7])
-        profile = self._profile_result(ci_cache={0.05: first_interval})
-        model._tweedie_profile_result = profile
-        model._summary_cache = None
-
-        cached_summary = model.summary()
-        assert cached_summary._info["tweedie_p_ci"] is first_interval
-
         profile._ci_cache.clear()
-        cleared_summary = model.summary()
-        assert cleared_summary is not cached_summary
-        assert cleared_summary._info["tweedie_p_ci"] is None
+        cleared = model.summary()
+        assert cleared is not cached
+        assert cleared._info["tweedie_p_ci"] is None
 
-        recomputed_interval = tuple([1.4, 1.7])
-        profile._ci_cache[0.05] = recomputed_interval
-        recomputed_summary = model.summary()
-
-        assert recomputed_summary is not cleared_summary
-        assert recomputed_summary._info["tweedie_p_ci"] is recomputed_interval
-        assert recomputed_summary._info["tweedie_p_ci_status"] == "available"
+        model._tweedie_profile_result = self._profile_result()
+        assert model.summary() is not cleared
 
     @pytest.mark.parametrize(
-        ("attribute", "new_value", "info_key", "expected"),
+        ("attribute", "new_value", "info_key"),
         [
-            ("p_hat", 1.62, "tweedie_p", 1.62),
-            ("phi_hat", 0.91, "tweedie_phi", 0.91),
-            ("nll", 9.75, "tweedie_profile_nll", 9.75),
-            ("method", "grid_refine", "tweedie_p_method", "Profile MLE (Grid Refine)"),
-            (
-                "density_exact",
-                False,
-                "tweedie_p_method",
-                "Profile MLE (Brent; density approximation)",
-            ),
+            ("p_hat", 1.62, "tweedie_p"),
+            ("phi_hat", 0.91, "tweedie_phi"),
+            ("nll", 9.75, "tweedie_profile_nll"),
         ],
     )
     def test_model_summary_refreshes_when_rendered_profile_state_changes(
@@ -2589,11 +2500,9 @@ class TestTweedieProfileSummary:
         attribute,
         new_value,
         info_key,
-        expected,
     ):
         model, _, _, _ = fitted_poisson
-        interval = tuple([1.4, 1.7])
-        profile = self._profile_result(ci_cache={0.05: interval})
+        profile = self._profile_result(ci_cache={0.05: Interval(1.4, 1.7, False, False)})
         model._tweedie_profile_result = profile
         model._summary_cache = None
 
@@ -2602,135 +2511,8 @@ class TestTweedieProfileSummary:
         after = model.summary()
 
         assert after is not before
-        assert after._info[info_key] == expected
-        assert after._info["tweedie_p_ci"] is interval
-
-    def test_model_summary_refreshes_when_phi_method_becomes_exact_mle(self, fitted_poisson):
-        model, _, _, _ = fitted_poisson
-        interval = tuple([1.4, 1.7])
-        profile = self._profile_result(phi_method="unknown", ci_cache={0.05: interval})
-        model._tweedie_profile_result = profile
-        model._summary_cache = None
-
-        before = model.summary()
-        profile.phi_method = "mle"
-        after = model.summary()
-
-        assert after is not before
-        assert after._info["tweedie_p_method"] == "Profile MLE (Brent)"
-        assert after._info["tweedie_p_ci"] is interval
-
-    def test_summary_rejects_str_subclass_spoofing_exact_mle(self, fitted_poisson):
-        class SpoofedMethod(str):
-            def __eq__(self, other):
-                return other == "mle"
-
-        model, _, _, _ = fitted_poisson
-        profile = self._profile_result(
-            phi_method=SpoofedMethod("not-mle"),
-            ci_cache={0.05: (1.4, 1.7)},
-        )
-        model._tweedie_profile_result = profile
-        model._summary_cache = None
-
-        summary = model.summary()
-
-        assert summary._info["tweedie_p_ci"] is None
-        assert summary._info["tweedie_p_ci_status"] == "not computed"
-        assert summary._info["tweedie_p_method"] == "Profile (Brent)"
-
-    def test_summary_rejects_dict_subclass_without_calling_overridden_get(self, fitted_poisson):
-        calls = []
-
-        class HostileCache(dict):
-            def get(self, key, default=None):
-                calls.append((key, default))
-                return super().get(key, default)
-
-        model, _, _, _ = fitted_poisson
-        profile = self._profile_result()
-        profile._ci_cache = HostileCache({0.05: (1.4, 1.7)})
-        model._tweedie_profile_result = profile
-        model._summary_cache = None
-
-        summary = model.summary()
-
-        assert calls == []
-        assert summary._info["tweedie_p_ci"] is None
-        assert summary._info["tweedie_p_ci_status"] == "not computed"
-
-    def test_summary_rejects_tuple_subclass_without_calling_overridden_access(self, fitted_poisson):
-        calls = []
-
-        class HostileInterval(tuple):
-            def __len__(self):
-                calls.append("len")
-                return super().__len__()
-
-            def __iter__(self):
-                calls.append("iter")
-                return super().__iter__()
-
-            def __getitem__(self, index):
-                calls.append(("getitem", index))
-                return super().__getitem__(index)
-
-        model, _, _, _ = fitted_poisson
-        profile = self._profile_result()
-        profile._ci_cache[0.05] = HostileInterval((1.4, 1.7))
-        model._tweedie_profile_result = profile
-        model._summary_cache = None
-
-        summary = model.summary()
-
-        assert calls == []
-        assert summary._info["tweedie_p_ci"] is None
-        assert summary._info["tweedie_p_ci_status"] == "not computed"
-
-    def test_profile_report_identity_stays_hashable_for_unhashable_legacy_metadata(self):
-        from superglm.profiling._reporting import tweedie_profile_report_identity
-
-        result = SimpleNamespace(
-            p_hat=[],
-            phi_hat={},
-            nll=set(),
-            method=[],
-            phi_method={},
-            density_exact=[],
-            _ci_cache={},
-        )
-
-        identity = tweedie_profile_report_identity(result, 0.05)
-
-        assert isinstance(hash(identity), int)
-
-    def test_summary_qualifies_approximation_based_density(self, fitted_poisson):
-        model, _, _, _ = fitted_poisson
-        model._tweedie_profile_result = self._profile_result(
-            density_exact=False,
-            ci_cache={0.05: (1.4, 1.7)},
-        )
-        model._summary_cache = None
-
-        summary = model.summary()
-
-        assert summary._info["tweedie_p_method"] == ("Profile MLE (Brent; density approximation)")
-
-    def test_summary_tolerates_legacy_profile_without_reporting_attributes(self, fitted_poisson):
-        model, X, y, weights = fitted_poisson
-        model._tweedie_profile_result = SimpleNamespace(
-            p_hat=1.55,
-            phi_hat=0.8,
-            nll=11.0,
-        )
-        model._summary_cache = None
-
-        model_summary = model.summary()
-        metrics_summary = model.metrics(X, y, sample_weight=weights).summary()
-
-        for summary in (model_summary, metrics_summary):
-            assert summary._info["tweedie_p_ci"] is None
-            assert summary._info["tweedie_p_ci_status"] == "not computed"
+        assert after._info[info_key] == new_value
+        assert after._info["tweedie_p_ci"] == (1.4, 1.7)
 
 
 class TestInactiveSummaryRendering:

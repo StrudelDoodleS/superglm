@@ -36,10 +36,7 @@ from superglm.model.state_ops import (
     _solver_space_working_weights,
 )
 from superglm.penalties.base import selection_shrunk_group_names
-from superglm.profiling._reporting import (
-    cached_tweedie_profile_ci,
-    tweedie_profile_method_label,
-)
+from superglm.profiling._reporting import cached_tweedie_profile_ci
 from superglm.solvers.centered_system import penalty_factor
 from superglm.solvers.rank import (
     decompose_factor,
@@ -1595,7 +1592,6 @@ class ModelMetrics:
             ci = nb_pr.ci(alpha=alpha)
             model_info["nb_theta"] = nb_pr.theta_hat
             model_info["nb_theta_ci"] = ci
-            model_info["nb_theta_method"] = "Profile (exact)"
 
         # Tweedie p profile info
         tw_pr = getattr(self._model, "_tweedie_profile_result", None)
@@ -1605,7 +1601,6 @@ class ModelMetrics:
             model_info["tweedie_p_ci"] = ci
             model_info["tweedie_p_ci_status"] = ci_status
             model_info["tweedie_phi"] = tw_pr.phi_hat
-            model_info["tweedie_p_method"] = tweedie_profile_method_label(tw_pr)
 
         from superglm.model.report_ops import (
             _drop_repaired_basis_detail,

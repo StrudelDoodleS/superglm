@@ -190,7 +190,6 @@ def _compact_summary_payload(
             "tweedie_p": _compact_scalar(info.get("tweedie_p")),
             "tweedie_p_ci": _compact_profile_ci(info.get("tweedie_p_ci")),
             "tweedie_p_ci_status": _compact_scalar(info.get("tweedie_p_ci_status")),
-            "tweedie_p_method": _compact_scalar(info.get("tweedie_p_method")),
             "nb_theta": _compact_scalar(info.get("nb_theta")),
         },
         "rows": rows,

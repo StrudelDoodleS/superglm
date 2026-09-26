@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -1296,13 +1296,18 @@ class SuperGLM:
         *,
         fit_mode: str = "fit",
         search_fit_mode: str | None = None,
-        phi_method: str = "mle",
-        method: str = "auto",
+        p_bounds: tuple[float, float] = (1.05, 1.95),
+        xatol: float = 1e-3,
         ci_alpha: float | None = None,
         max_reml_iter: int | None = None,
-        **kwargs,
+        progress_callback: Callable[..., None] | None = None,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
+
+        At each candidate ``p`` the mean is refitted and ``phi`` is its
+        maximum-likelihood value at that mean; ``p`` minimises the resulting
+        profile negative log-likelihood by bounded Brent search (Dunn & Smyth
+        2005), and the published fit is refitted at the selected ``p``.
 
         Parameters
         ----------
@@ -1345,21 +1350,12 @@ class SuperGLM:
             ``superglm.PublicationModeError`` naming the ways out. Likelihood-ratio confidence intervals remain
             available either way; they invert the searched profile, so they
             describe the regime named by ``search_fit_mode``.
-        phi_method : {"pearson", "mle"}
-            How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
-            ``"mle"`` (default) maximizes the likelihood in ``phi``; the joint
-            fast path uses exact derivatives and defensive searches use a nested
-            scalar optimization. ``"pearson"`` is an explicit faster plug-in and
-            does not support likelihood-ratio confidence intervals.
-        method : {"auto", "joint_ml", "brent", "grid", "grid_refine", "profile_opt"}
-            Search strategy. ``"auto"`` (default) uses safeguarded exact joint
-            ML for ordinary MLE profiles and Brent otherwise. ``"joint_ml"``
-            explicitly requests that fast path within its stable ``p`` range and
-            falls back defensively otherwise. ``"brent"`` uses bounded scalar
-            optimisation. ``"grid"`` does exhaustive grid search.
-            ``"grid_refine"`` does a coarse grid + local Brent refinement.
-            ``"profile_opt"`` uses a general-purpose optimizer on
-            logit-transformed p.
+        p_bounds : tuple of float
+            Search interval for ``p``, strictly inside ``(1, 2)``. An estimate on
+            a bound is reported in ``result.warnings``: a maximum as ``p -> 1``
+            can be an artefact of rounded responses.
+        xatol : float
+            Absolute resolution of the Brent search in ``p``.
         ci_alpha : float, optional
             Significance level for an explicitly requested likelihood-ratio
             profile confidence interval. For example, ``0.05`` computes a 95%
@@ -1371,6 +1367,11 @@ class SuperGLM:
             ``fit_mode="reml"`` -- a pure-ML publication has no REML
             iteration to budget and refuses the parameter. The default
             ``None`` uses the ``fit_reml`` default of 20.
+        progress_callback : callable, optional
+            Called as ``progress_callback(phase, payload)``: ``"profiling"``
+            with ``{"profile_trace": [row]}`` for each feasible search
+            candidate, then ``"best_found"`` and ``"final_refit"`` with
+            ``{"profile_estimate": ...}``.
         """
         return profile_ops.estimate_p(
             self,
@@ -1380,11 +1381,11 @@ class SuperGLM:
             offset,
             fit_mode=fit_mode,
             search_fit_mode=search_fit_mode,
-            phi_method=phi_method,
-            method=method,
+            p_bounds=p_bounds,
+            xatol=xatol,
             ci_alpha=ci_alpha,
             max_reml_iter=max_reml_iter,
-            **kwargs,
+            progress_callback=progress_callback,
         )
 
     def estimate_theta(

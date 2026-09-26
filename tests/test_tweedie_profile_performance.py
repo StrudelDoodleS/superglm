@@ -28,11 +28,10 @@ from benchmarks.tweedie_profile_end_to_end import (
 from scipy.optimize import OptimizeResult, minimize_scalar
 
 import superglm.profiling.tweedie as tweedie_module
-from superglm import SuperGLM
+from superglm import SuperGLM, generate_tweedie_cpg
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
-from superglm.profiling.tweedie import generate_tweedie_cpg
 
 
 @dataclass(frozen=True)

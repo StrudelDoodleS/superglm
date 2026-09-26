@@ -1364,7 +1364,7 @@ class TestPublicationREMLBudget:
         # One outer iteration can never satisfy the two-evaluation
         # convergence contract: the budget provably bound the refit.
         assert int(model._reml_result.n_reml_iter) == 1
-        assert result.reml_converged is False
+        assert result.converged is False
 
     def test_a_pure_ml_publication_refuses_the_reml_budget(self):
         frame, y, features = _small_search_fixture()

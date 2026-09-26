@@ -5,14 +5,17 @@ from __future__ import annotations
 import copy
 import logging
 import operator
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import fields, replace
+from functools import partial
 
 import numpy as np
 
 from superglm.distributions import NegativeBinomial, Tweedie
+from superglm.model.fit_state import configured_family
 from superglm.profiling._reporting import cached_tweedie_profile_ci
+from superglm.profiling.tweedie import profile_phi_at
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
-from superglm.solvers.dispersion import model_weight_semantics
+from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, model_weight_semantics
 
 logger = logging.getLogger(__name__)
 
@@ -100,14 +103,174 @@ def estimate_p(
     *,
     fit_mode="fit",
     search_fit_mode=None,
-    phi_method="mle",
-    method="auto",
+    p_bounds=(1.05, 1.95),
+    xatol=1e-3,
     ci_alpha=None,
     max_reml_iter=None,
     progress_callback=None,
-    **kwargs,
 ):
     """Estimate Tweedie p and atomically publish one profiled final fit."""
+    from superglm.model import fit_ops
+    from superglm.model.fit_workspace import FitWorkspace
+    from superglm.profiling.tweedie import search_power
+
+    publish_mode, search_mode, reml_budget = _resolve_power_request(
+        model,
+        fit_mode=fit_mode,
+        search_fit_mode=search_fit_mode,
+        p_bounds=p_bounds,
+        ci_alpha=ci_alpha,
+        max_reml_iter=max_reml_iter,
+    )
+    report = progress_callback or _ignore_progress
+    references = {"X_ref": X, "y_ref": y, "sample_weight_ref": sample_weight, "offset_ref": offset}
+    validated = fit_ops._validate_entrypoint_input(model, X, y, sample_weight, offset)
+    X, y, sample_weight, offset = validated
+    _refuse_replication_weights(model, sample_weight)
+
+    # Profiling is attempt-local: the result's lazy interval keeps refitting this
+    # private model, never the caller's installed fitted revision.
+    profile_workspace = FitWorkspace.start(
+        model, mode="estimate_p_profile", validated_inputs=validated
+    )
+    result = search_power(
+        profile_workspace.model,
+        X,
+        y,
+        sample_weight,
+        offset,
+        fit_mode=search_mode,
+        p_bounds=p_bounds,
+        xatol=xatol,
+        on_evaluation=lambda row: report("profiling", {"profile_trace": [row]}),
+    )
+    del profile_workspace
+    result.fit_mode = publish_mode
+    if ci_alpha is not None:
+        result.interval(ci_alpha)
+    estimate = {"profile_estimate": _tweedie_estimate_payload(result)}
+    report("best_found", estimate)
+    report("final_refit", estimate)
+    _publish_profiled_family(
+        model,
+        validated,
+        references,
+        fit_mode=publish_mode,
+        family=Tweedie(p=result.p_hat),
+        parameter="p",
+        value=result.p_hat,
+        synchronize=partial(_install_tweedie_profile, X=X, y=y, offset=offset, result=result),
+        decoupled=search_mode != publish_mode,
+        max_reml_iter=reml_budget,
+    )
+    return result
+
+
+def _ignore_progress(phase, payload=None) -> None:
+    """The progress sink when the caller passed none."""
+
+
+def _resolve_power_request(model, *, fit_mode, search_fit_mode, p_bounds, ci_alpha, max_reml_iter):
+    """Validate an estimate_p call before any data is read.
+
+    Returns the publication fit mode, the search fit mode and the REML
+    publication budget.
+    """
+    family = configured_family(model)
+    if not isinstance(family, Tweedie):
+        raise ValueError(
+            f"estimate_p requires a Tweedie family, got {family!r}. "
+            "Use families.tweedie(p=...) to create one."
+        )
+    # The compound Poisson-gamma density exists only strictly inside (1, 2).
+    if not 1.0 < p_bounds[0] < p_bounds[1] < 2.0:
+        raise ValueError(
+            f"p_bounds must be increasing and strictly inside (1, 2), got {p_bounds!r}"
+        )
+    # The interval checks its level too; this one fails before the search runs.
+    if ci_alpha is not None and not 0.0 < ci_alpha < 1.0:
+        raise ValueError(f"ci_alpha must be strictly between 0 and 1, got {ci_alpha!r}")
+    publish_mode = _resolve_profile_fit_mode(model, fit_mode)
+    search_mode = (
+        publish_mode
+        if search_fit_mode is None
+        else _resolve_profile_fit_mode(model, search_fit_mode, parameter="search_fit_mode")
+    )
+    _validate_profile_selection_mode(model, publish_mode)
+    _validate_profile_selection_mode(model, search_mode)
+    return (
+        publish_mode,
+        search_mode,
+        _publication_reml_budget(max_reml_iter, publish_mode, fit_mode),
+    )
+
+
+def _publication_reml_budget(max_reml_iter, publish_mode: str, fit_mode) -> int:
+    """Outer-iteration budget of the REML publication refit; candidate fits keep their own."""
+    if max_reml_iter is None:
+        return 20
+    # Refused under an ML publication: a mode-scoped parameter that silently
+    # no-ops is how inert knobs are born.
+    if publish_mode != "fit_reml":
+        raise ValueError(
+            "max_reml_iter controls the REML publication refit and requires "
+            f"fit_mode='reml'; this call publishes with fit_mode={fit_mode!r}, "
+            "which has no REML iteration to budget"
+        )
+    # An iteration count is a non-boolean integer (the integer-index protocol):
+    # coercing first let 1.9, True and "5" through as budgets. np.bool_ is not
+    # a Python bool but implements __index__, so it is named explicitly.
+    message = f"max_reml_iter must be an integer iteration count, got {max_reml_iter!r}"
+    if isinstance(max_reml_iter, (bool, np.bool_)):
+        raise ValueError(message)
+    try:
+        budget = operator.index(max_reml_iter)
+    except TypeError:
+        raise ValueError(message) from None
+    if budget < 1:
+        raise ValueError(
+            "max_reml_iter must be >= 1: the publication refit needs at least "
+            f"one REML iteration, got {max_reml_iter!r}"
+        )
+    return budget
+
+
+def _refuse_replication_weights(model, weights) -> None:
+    """The power profile is the prior-weight EDM likelihood.
+
+    Read as replication counts, the weights would need the unit-weight density
+    counted w times: a different objective, not a rescaled one. The two
+    contracts coincide only at unit weights, so those are admitted.
+    """
+    if model_weight_semantics(model) == FREQUENCY_WEIGHTS and np.any(weights != 1.0):
+        raise ValueError(
+            "estimate_p profiles the Tweedie power against the EDM "
+            "prior-weight likelihood, so it cannot honour "
+            'weight_semantics="frequency" with non-unit weights. Fit with '
+            'weight_semantics="prior", or expand the rows the replication '
+            "counts stand for and profile with unit weights."
+        )
+
+
+def _publish_profiled_family(
+    model,
+    validated,
+    references,
+    *,
+    fit_mode,
+    family,
+    parameter,
+    value,
+    synchronize,
+    decoupled=False,
+    max_reml_iter=20,
+) -> None:
+    """Refit at the selected parameter on a private candidate, then install it atomically.
+
+    ``synchronize(final_model)`` restates the refit around the profile estimate
+    while the refit still holds its fitted rows; the durable state is compacted
+    only afterwards, and the model changes in the single install at the end.
+    """
     from superglm.model import fit_ops
     from superglm.model.fit_state import (
         ModelConfigPublication,
@@ -115,230 +278,80 @@ def estimate_p(
         capture_fit_state,
     )
     from superglm.model.fit_workspace import FitWorkspace
-    from superglm.profiling.tweedie import _validate_profile_ci_alpha, estimate_tweedie_p
 
-    resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
-    resolved_search_mode = (
-        resolved_mode
-        if search_fit_mode is None
-        else _resolve_profile_fit_mode(model, search_fit_mode, parameter="search_fit_mode")
-    )
-    decoupled = resolved_search_mode != resolved_mode
-    _validate_profile_selection_mode(model, resolved_mode)
-    _validate_profile_selection_mode(model, resolved_search_mode)
-    # The budget names the REML publication refit; candidate search fits keep
-    # their own loose-bar budget. Refusing it under a pure-ML publication is
-    # deliberate: a mode-scoped parameter that silently no-ops is how inert
-    # knobs are born.
-    if max_reml_iter is not None and resolved_mode != "fit_reml":
-        raise ValueError(
-            "max_reml_iter controls the REML publication refit and requires "
-            f"fit_mode='reml'; this call publishes with fit_mode={fit_mode!r}, "
-            "which has no REML iteration to budget"
-        )
-    if max_reml_iter is not None:
-        # Coercing before validating silently accepted non-counts: 1.9
-        # truncated to one iteration, True and "5" passed as budgets. An
-        # iteration count is a non-boolean integer (integer-index protocol).
-        # np.bool_ is not a Python bool but implements __index__ on the
-        # supported NumPy floor (1.24), so it is named explicitly.
-        if isinstance(max_reml_iter, (bool, np.bool_)):
-            raise ValueError(
-                f"max_reml_iter must be an integer iteration count, got {max_reml_iter!r}"
-            )
-        try:
-            max_reml_iter = operator.index(max_reml_iter)
-        except TypeError:
-            raise ValueError(
-                f"max_reml_iter must be an integer iteration count, got {max_reml_iter!r}"
-            ) from None
-        if max_reml_iter < 1:
-            raise ValueError(
-                "max_reml_iter must be >= 1: the publication refit needs at least "
-                f"one REML iteration, got {max_reml_iter!r}"
-            )
-    resolved_ci_alpha = None if ci_alpha is None else _validate_profile_ci_alpha(ci_alpha)
-    if resolved_ci_alpha is not None and phi_method == "pearson":
-        raise RuntimeError(
-            "Tweedie likelihood-ratio profile CI requires exact MLE dispersion "
-            "profiling (phi_method='mle'); use bootstrap/sandwich inference for "
-            "Pearson plug-in profiles."
-        )
-    # A decoupled run is entitled to an eager interval: `result.ci` inverts the
-    # searched objective around its own recorded value at ``p_hat``
-    # (``search_nll``), and the eager call below runs only after publication
-    # has recorded it. Refusing here while the returned object hands out the
-    # same interval lazily would be a contradiction, not a safeguard.
-
-    X_ref = X
-    y_ref = y
-    sample_weight_ref = sample_weight
-    offset_ref = offset
-    X, y, sample_weight, offset = fit_ops._validate_entrypoint_input(
-        model,
-        X,
-        y,
-        sample_weight,
-        offset,
-    )
-    validated_inputs = (X, y, sample_weight, offset)
-
-    # Profiling is attempt-local too: lazy CI closures may retain this model,
-    # but can never retain or mutate the caller's installed fitted revision.
-    profile_workspace = FitWorkspace.start(
-        model,
-        mode="estimate_p_profile",
-        validated_inputs=validated_inputs,
-    )
-    result = estimate_tweedie_p(
-        profile_workspace.model,
-        X,
-        y,
-        sample_weight=sample_weight,
-        offset=offset,
-        fit_mode=resolved_search_mode,
-        phi_method=phi_method,
-        method=method,
-        **kwargs,
-    )
-    result.fit_mode = resolved_mode
-    del profile_workspace
-    if progress_callback is not None:
-        progress_callback("best_found", {"profile_estimate": _tweedie_estimate_payload(result)})
-
-    if progress_callback is not None:
-        progress_callback("final_refit", {"profile_estimate": _tweedie_estimate_payload(result)})
-
-    selected_family = Tweedie(p=result.p_hat)
-    selected_config = model._config.with_value(family=selected_family)
     final_workspace = FitWorkspace.start(
         model,
-        mode=resolved_mode,
-        validated_inputs=validated_inputs,
-        config_overrides={
-            "family": selected_family,
-            # Synchronization needs fitted rows even when the durable public
-            # state is compact. Release them only after phi and fit statistics
-            # have been revised on this private candidate.
-            "retain_fit_state": True,
-        },
+        mode=fit_mode,
+        validated_inputs=validated,
+        config_overrides={"family": family, "retain_fit_state": True},
     )
-    debug_recorder = None
-    if resolved_mode == "fit_reml":
-        try:
-            debug_recorder = fit_ops._fit_reml_in_workspace(
-                final_workspace.model,
-                X,
-                y,
-                sample_weight,
-                offset,
-                X_ref=X_ref,
-                y_ref=y_ref,
-                sample_weight_ref=sample_weight_ref,
-                offset_ref=offset_ref,
-                max_reml_iter=20 if max_reml_iter is None else int(max_reml_iter),
-                pirls_tol=final_workspace.model._tol,
-                max_pirls_iter=final_workspace.model._max_iter,
-                durable_retain_fit_state=bool(model._retain_fit_state),
-            )
-        except ObservedModeNotCertifiedError as exc:
-            raise _publication_mode_failure(
-                exc, parameter="p", value=float(result.p_hat), decoupled=decoupled
-            ) from exc
-    else:
-        fit_ops._fit_in_workspace(
-            final_workspace.model,
-            X,
-            y,
-            sample_weight,
-            offset,
-            X_ref=X_ref,
-            y_ref=y_ref,
-            sample_weight_ref=sample_weight_ref,
-            offset_ref=offset_ref,
-        )
-
     final_model = final_workspace.model
-    _synchronize_tweedie_profile_refit(
-        final_model,
-        y,
-        result,
-        # Both modes publish a refit whose settings differ from the candidate
-        # fits -- decoupled by regime, coupled by the publication tolerance --
-        # so the published dispersion is profiled against the published mean
-        # in both. search_nll keeps the searched curve for the CI and plots.
-        reprofile_phi=True,
-        phi_method=phi_method,
-        # The canonical public mean: on discretized models the internal
-        # design's matvec is a binned approximation of it.
-        public_mu=final_model.predict(X, offset=offset),
-    )
+    try:
+        debug_recorder = _refit_selected(
+            final_model, validated, references, fit_mode, max_reml_iter, model._retain_fit_state
+        )
+    except ObservedModeNotCertifiedError as exc:
+        raise _publication_mode_failure(
+            exc, parameter=parameter, value=float(value), decoupled=decoupled
+        ) from exc
+    synchronize(final_model)
     if not model._retain_fit_state:
         final_model._retain_fit_state = False
         fit_ops._maybe_release_fit_state(final_model)
-    if resolved_ci_alpha is not None:
-        result.ci(alpha=resolved_ci_alpha)
-    # Install last on the private candidate too: any state carrying this
-    # result has already been synchronized and, if requested, compacted.
-    installed_result = _installed_tweedie_profile_copy(result)
-    final_model._tweedie_profile_result = installed_result
-
     candidate = capture_fit_state(
         final_workspace,
         model,
         revision=model._fit_revision + 1,
         config_publication=replace(
             ModelConfigPublication.capture(model),
-            config=selected_config,
+            config=model._config.with_value(family=family),
             revision=model._config_revision + 1,
             family=final_model._family_config,
         ),
     )
     _install_fit_state(model, candidate)
-    if resolved_mode == "fit_reml":
+    if fit_mode == "fit_reml":
         fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
 
-    return result
 
+def _refit_selected(final_model, validated, references, fit_mode, max_reml_iter, retain):
+    """The publication fit: REML at the tight publication default, or an ordinary fit."""
+    from superglm.model import fit_ops
 
-_TWEEDIE_PROFILE_SHARED_RUNTIME_FIELDS = frozenset(
-    {
-        "_objective",
-        "_evaluation_count",
-        "_evaluation_record",
-    }
-)
-
-
-def _installed_tweedie_profile_copy(result):
-    """Detach published estimates while retaining lazy-CI runtime caches.
-
-    The public result remains usable for later lazy likelihood-ratio inference.
-    Its objective/evaluation registry is shared, but estimate-dependent CI
-    caches are independently owned: mutating a returned estimate and then
-    calling ``ci()`` must not poison the installed model's connected profile
-    component. Core estimates and reporting containers are independent too.
-    """
-    installed = copy.copy(result)
-    field_names = (
-        (field.name for field in fields(result)) if is_dataclass(result) else iter(vars(result))
+    if fit_mode != "fit_reml":
+        fit_ops._fit_in_workspace(final_model, *validated, **references)
+        return None
+    return fit_ops._fit_reml_in_workspace(
+        final_model,
+        *validated,
+        **references,
+        max_reml_iter=max_reml_iter,
+        pirls_tol=final_model._tol,
+        max_pirls_iter=final_model._max_iter,
+        durable_retain_fit_state=bool(retain),
     )
-    for field_name in field_names:
-        if field_name in _TWEEDIE_PROFILE_SHARED_RUNTIME_FIELDS:
-            continue
-        setattr(installed, field_name, copy.deepcopy(getattr(result, field_name)))
-    ci_cache = getattr(installed, "_ci_cache", None)
-    if ci_cache is not None:
-        owned_ci_cache = {}
-        details_cache = getattr(installed, "_ci_details_cache", None)
-        for alpha, interval in ci_cache.items():
-            owned_interval = (float(interval[0]), float(interval[1]))
-            owned_ci_cache[alpha] = owned_interval
-            details = None if details_cache is None else details_cache.get(alpha)
-            if details_cache is not None and details is not None and is_dataclass(details):
-                details_cache[alpha] = replace(details, interval=owned_interval)
-        installed._ci_cache = owned_ci_cache
-    return installed
+
+
+def _install_tweedie_profile(final_model, *, X, y, offset, result) -> None:
+    """Restate the refit at the profiled dispersion and attach the result.
+
+    The installed copy shares the searched objective but owns its interval
+    cache: an interval computed through a mutated returned result must not
+    reach the model's summary.
+    """
+    # The canonical public mean: on a discretized model the internal design's
+    # matvec is a binned approximation of it.
+    _synchronize_tweedie_profile_refit(
+        final_model, y, final_model.predict(X, offset=offset), result
+    )
+    # The estimate is converged only if the fit it is published with is.
+    reml = getattr(final_model, "_reml_result", None)
+    result.converged = bool(
+        result.converged and final_model.result.converged and (reml is None or reml.converged)
+    )
+    installed = copy.copy(result)
+    installed._ci_cache = dict(result._ci_cache)
+    final_model._tweedie_profile_result = installed
 
 
 def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
@@ -356,183 +369,29 @@ def _replace_pirls_phi(result, phi):
     return _replace_dataclass_preserving_dynamic_attributes(result, phi=float(phi))
 
 
-def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, phi_method) -> None:
-    """Re-profile dispersion against the published fit.
+def _reprofile_published_dispersion(result, y_arr, weights, mu) -> None:
+    """Profile phi at the PUBLISHED mean; the searched curve keeps search_nll for the CI.
 
-    The search profiled phi at its own candidate fits' fitted means. The
-    publication refit never reproduces those fits: a decoupled run publishes
-    under a different regime entirely, and a coupled run publishes at the
-    tight publication tolerance while candidates ran at the search bar.
-    Carrying the search's phi across would hand back a dispersion estimated
-    from coefficients the caller never receives. Re-profile at the published
-    mean instead, and move the objective with it so the reported likelihood
-    still refers to the reported estimates.
+    The search profiled phi at its candidates' means, which the publication
+    refit does not reproduce: a decoupled run publishes under another regime,
+    a coupled one at the tight publication bar. Carrying the search's phi
+    across would report a dispersion of coefficients the caller never receives.
     """
-    from superglm.profiling.tweedie import _profile_phi_detailed
-
-    edf = float(getattr(model.result, "effective_df", 0.0) or 0.0)
-    phi_result = _profile_phi_detailed(
-        y_arr,
-        mu,
-        float(profile_result.p_hat),
-        weights=weights,
-        df_resid=max(float(len(y_arr)) - edf, 1.0),
-        phi_method=phi_method,
-        phi_start=float(profile_result.phi_hat),
-    )
-    # Keep the searched objective's value at `p_hat` before moving `nll` onto
-    # the published fit's curve. The CI, the profile plot and the deviance
-    # curve all measure searched values against it; without it they would
-    # subtract this published number and report a likelihood ratio that is
-    # negative at the search's own optimum.
-    if profile_result.search_nll is None:
-        profile_result.search_nll = float(profile_result.nll)
-        # Stash the searched winner's certification flags with it: the CI
-        # inverts the searched curve, so its guard must judge these after
-        # the overwrite below repoints the live flags at the publication.
-        profile_result.search_objective_finite = bool(profile_result.objective_finite)
-        profile_result.search_phi_converged = bool(profile_result.phi_converged)
-        profile_result.search_fit_converged = bool(profile_result.fit_converged)
-        # And its density provenance: `p_hat` was selected on this curve,
-        # so an approximation-scored search stays visible after the
-        # publication re-profile installs its own density story below.
-        profile_result.search_density_method = profile_result.density_method
-        profile_result.search_density_exact = profile_result.density_exact
-        profile_result.search_saddlepoint_fraction = (
-            None
-            if profile_result.saddlepoint_fraction is None
-            else float(profile_result.saddlepoint_fraction)
-        )
-    # The fit flags become the PUBLICATION refit's own. Candidates run at the
-    # loose search bar and the publication runs tight, so they can disagree
-    # on exactly the flat-lambda designs the split was built for; a decoupled
-    # run's candidates are ML fits with no REML story at all, while what it
-    # publishes is a REML fit.
-    solver_result = model._solver_pirls_result()
-    reml_result = getattr(model, "_reml_result", None)
-    publication_solver_converged = bool(solver_result.converged)
-    publication_reml_converged = None if reml_result is None else bool(reml_result.converged)
-    profile_result.solver_converged = publication_solver_converged
-    profile_result.reml_converged = publication_reml_converged
-    profile_result.fit_converged = bool(
-        publication_solver_converged and publication_reml_converged is not False
-    )
-    profile_result.phi_hat = float(phi_result.phi)
-    profile_result.nll = float(phi_result.nll)
-    profile_result.objective_finite = bool(phi_result.objective_finite)
-    profile_result.phi_converged = bool(phi_result.converged)
-    profile_result.phi_optimizer = str(phi_result.optimizer)
-    profile_result.phi_score = phi_result.score
-    profile_result.phi_used_fallback = bool(phi_result.used_fallback)
-    profile_result.phi_fallback_reason = phi_result.fallback_reason
-    profile_result.phi_branch_switch_detected = bool(phi_result.branch_switch_detected)
-    profile_result.phi_message = str(phi_result.message)
-    # The published dispersion is this re-profile, so the whole derived
-    # story must be the published story: the boundary label, the density
-    # classification, the phi warnings and the aggregate convergence flag
-    # all describe the re-profile from here on -- a boundary hit, a
-    # fallback, a saddlepoint evaluation or a non-convergent profile here
-    # cannot hide behind the search's clean record, and the search's
-    # troubles cannot outlive the dispersion they described.
-    from superglm.profiling.tweedie import (
-        _build_density_messages,
-        _classify_density_diagnostics,
-        _phi_boundary_label,
-        _warning_describes_winner_phi,
-    )
-
-    profile_result.phi_boundary = _phi_boundary_label(phi_result)
-    density = _classify_density_diagnostics(float(profile_result.p_hat), phi_result.diagnostics)
-    profile_result.saddlepoint_fraction = float(density.fraction)
-    profile_result.n_saddlepoint = int(density.n_saddlepoint)
-    profile_result.n_positive = int(density.n_positive)
-    profile_result.density_method = density.method
-    profile_result.density_exact = density.exact
-    profile_result.density_warning_severity = density.severity
-    profile_result.near_power_boundary = bool(density.near_power_boundary)
-
-    kept = [w for w in profile_result.warnings if not _warning_describes_winner_phi(w)]
-    kept.extend(_build_density_messages(float(profile_result.p_hat), density))
-    if profile_result.search_density_exact is False and density.exact:
-        # The rebuild above drops the search's own density warning, but
-        # p_hat was selected on that curve: an exact published re-profile
-        # must not relabel an approximation-based power estimate.
-        fraction = profile_result.search_saddlepoint_fraction
-        detail = "" if fraction is None else f" (saddlepoint fraction {fraction:.2f})"
-        kept.append(
-            "The power search scored its winner with "
-            f"{profile_result.search_density_method} density{detail}; the "
-            "published dispersion re-profile evaluated exactly. p_hat and "
-            "its profile CI come from the searched curve."
-        )
-    if not phi_result.converged or phi_result.used_fallback:
-        detail = "did not converge" if not phi_result.converged else "used a fallback"
-        kept.append(f"published dispersion re-profile {detail}: {phi_result.message}")
-    if profile_result.phi_boundary:
-        kept.append(
-            f"Published dispersion estimate is at the {profile_result.phi_boundary} "
-            "dispersion boundary."
-        )
-    profile_result.warnings = kept
-    # `converged` aggregates the same components `_finalize_profile_record`
-    # combined, with the phi flags now the published re-profile's: the
-    # aggregate and `phi_converged` cannot disagree on the result callers
-    # actually receive.
-    profile_result.converged = bool(
-        phi_result.objective_finite
-        and profile_result.outer_converged
-        and profile_result.fit_converged
-        and phi_result.converged
-    )
-    profile_result.phi_n_evaluations += phi_result.n_evaluations
-    profile_result.phi_n_score_evaluations += phi_result.n_score_evaluations
-    profile_result.phi_n_value_only_evaluations += phi_result.n_value_only_evaluations
-    profile_result.phi_n_fallback_evaluations += phi_result.n_fallback_evaluations
+    solved = profile_phi_at(y_arr, mu, weights, result.p_hat)
+    result.phi_hat = solved.phi
+    result.nll = solved.criterion / float(len(y_arr))
 
 
-def _synchronize_tweedie_profile_refit(
-    model,
-    y,
-    profile_result,
-    *,
-    reprofile_phi: bool = False,
-    phi_method: str = "mle",
-    public_mu=None,
-) -> None:
+def _synchronize_tweedie_profile_refit(model, y, public_mu, profile_result) -> None:
     """Atomically synchronize a retained final refit to the profiled dispersion."""
-    from superglm.distributions import clip_mu
-    from superglm.links import stabilize_eta
     from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
 
     distribution = model._distribution
-    if not isinstance(distribution, Tweedie) or distribution.p != profile_result.p_hat:
-        raise RuntimeError("Final Tweedie refit does not match the profiled power parameter")
-    if model._dm is None or model._fit_weights is None:
-        raise RuntimeError("Final Tweedie refit state was released before synchronization")
-
-    public_result = model.result
-    solver_result = model._solver_pirls_result()
     weights = model._fit_weights
     offset_arr = model._fit_offset
-    y_arr = np.asarray(y, dtype=np.float64)
-
-    eta = model._dm.matvec(solver_result.beta) + solver_result.intercept
-    if offset_arr is not None:
-        eta = eta + offset_arr
-    eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), distribution)
-    published_mu = mu
-    if reprofile_phi:
-        # On a discretized model the internal design's matvec is a binned
-        # approximation of the mean callers get from predict(); the published
-        # dispersion must be profiled at the public mean, so the caller passes
-        # it in. The internal mu remains the fallback for direct invocations.
-        published_mu = mu if public_mu is None else np.asarray(public_mu, dtype=np.float64)
-        _reprofile_published_dispersion(
-            model, y_arr, weights, published_mu, profile_result, phi_method
-        )
+    _reprofile_published_dispersion(profile_result, y, weights, public_mu)
     null_mu = _compute_null_mu(
-        y_arr,
+        y,
         weights,
         offset_arr,
         distribution,
@@ -544,8 +403,8 @@ def _synchronize_tweedie_profile_refit(
     # publish a hybrid -- public-mean phi inside binned-mean likelihood,
     # Pearson chi-square and explained deviance.
     fit_stats = _compute_fit_stats(
-        y_arr,
-        published_mu,
+        y,
+        public_mu,
         weights,
         offset_arr,
         distribution,
@@ -555,8 +414,8 @@ def _synchronize_tweedie_profile_refit(
         weight_semantics=model_weight_semantics(model),
     )
 
-    replacement_public = _replace_pirls_phi(public_result, profile_result.phi_hat)
-    replacement_solver = _replace_pirls_phi(solver_result, profile_result.phi_hat)
+    replacement_public = _replace_pirls_phi(model.result, profile_result.phi_hat)
+    replacement_solver = _replace_pirls_phi(model._solver_pirls_result(), profile_result.phi_hat)
     reml_result = getattr(model, "_reml_result", None)
     replacement_reml = (
         None
@@ -570,7 +429,7 @@ def _synchronize_tweedie_profile_refit(
     model._solver_result = replacement_solver
     if reml_result is not None:
         model._reml_result = replacement_reml
-    model._fit_mu = published_mu
+    model._fit_mu = public_mu
     model._fit_null_mu = null_mu
     model._fit_stats = fit_stats
 
@@ -760,11 +619,11 @@ def _tweedie_estimate_payload(result):
     return {
         "parameter": "p",
         "label": "p_hat",
-        "value": getattr(result, "p_hat", None),
+        "value": result.p_hat,
         "ci_low": ci_low,
         "ci_high": ci_high,
         "ci_status": ci_status,
-        "objective": getattr(result, "nll", None),
+        "objective": result.nll,
         "objective_label": "loss",
         "lower_is_better": True,
     }

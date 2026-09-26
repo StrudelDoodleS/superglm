@@ -91,7 +91,7 @@ class TestWeightedTweedieP:
         n = 1000
         x = rng.uniform(0, 1, n)
         w = rng.uniform(0.5, 2.0, n)
-        from superglm.profiling.tweedie import generate_tweedie_cpg
+        from superglm import generate_tweedie_cpg
 
         mu = np.exp(0.5 + 0.3 * x)
         y = generate_tweedie_cpg(n, mu=mu, phi=1.5, p=1.5, rng=rng)
@@ -103,7 +103,7 @@ class TestWeightedTweedieP:
             features={"x": Numeric()},
         )
         model.fit(df, y, sample_weight=w)
-        model.estimate_p(df, y, sample_weight=w, phi_method="mle")
+        model.estimate_p(df, y, sample_weight=w)
         np.testing.assert_allclose(model._fit_weights, w)
 
 
@@ -115,7 +115,7 @@ class TestCICache:
         rng = np.random.default_rng(42)
         n = 500
         x = rng.uniform(0, 1, n)
-        from superglm.profiling.tweedie import generate_tweedie_cpg
+        from superglm import generate_tweedie_cpg
 
         y = generate_tweedie_cpg(n, mu=np.exp(0.5 * x), phi=1.5, p=1.5, rng=rng)
         df = pd.DataFrame({"x": x})
@@ -126,11 +126,11 @@ class TestCICache:
             features={"x": Numeric()},
         )
         model.fit(df, y)
-        result = model.estimate_p(df, y, phi_method="mle")
+        result = model.estimate_p(df, y)
 
-        ci1 = result.ci(alpha=0.05)
-        ci2 = result.ci(alpha=0.05)
-        assert ci1 is ci2  # exact same object = cached
+        first = result.interval(alpha=0.05)
+        assert result.interval(alpha=0.05) is first  # exact same object = cached
+        assert result.ci(alpha=0.05) == (first.lower, first.upper)
 
     def test_nb_ci_cached(self, weighted_nb_data):
         """Repeated NB .ci() calls at same alpha return cached result."""
@@ -155,7 +155,7 @@ class TestStaleProfileClear:
         """fit() at fixed p should not show profile results in summary."""
         rng = np.random.default_rng(42)
         n = 500
-        from superglm.profiling.tweedie import generate_tweedie_cpg
+        from superglm import generate_tweedie_cpg
 
         x = rng.uniform(0, 1, n)
         y = generate_tweedie_cpg(n, mu=np.exp(0.5 * x), phi=1.5, p=1.5, rng=rng)
@@ -167,7 +167,7 @@ class TestStaleProfileClear:
             features={"x": Numeric()},
         )
         model.fit(df, y)
-        model.estimate_p(df, y, phi_method="mle")
+        model.estimate_p(df, y)
         assert model._tweedie_profile_result is not None
 
         # Refit at fixed p — should clear the stale profile result
@@ -200,7 +200,7 @@ class TestStaleProfileClear:
         """fit_reml() should also clear stale profile results."""
         rng = np.random.default_rng(42)
         n = 500
-        from superglm.profiling.tweedie import generate_tweedie_cpg
+        from superglm import generate_tweedie_cpg
 
         x = rng.uniform(0, 1, n)
         y = generate_tweedie_cpg(n, mu=np.exp(0.5 * x), phi=1.5, p=1.5, rng=rng)
@@ -212,7 +212,7 @@ class TestStaleProfileClear:
             features={"x": Spline(n_knots=5)},
         )
         model.fit(df, y)
-        model.estimate_p(df, y, phi_method="mle")
+        model.estimate_p(df, y)
         assert model._tweedie_profile_result is not None
 
         model.fit_reml(df, y)

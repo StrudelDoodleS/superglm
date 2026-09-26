@@ -1530,7 +1530,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `profile_ops._publish_profiled_family(model, X, y, sample_weight, offset, *, fit_mode, family, parameter, value, progress) -> final_model`. This is the shared search → final refit → install skeleton; Task 8 reuses it for θ.
   - `_reporting.cached_tweedie_profile_ci(result, alpha) -> (interval | None, status)`, where status ∈ {"available", "censored", "not computed"}.
 
-- [ ] **Step 1: Write the failing publication tests** in `tests/test_tweedie_nb_characterisation.py`:
+- [x] **Step 1: Write the failing publication tests** in `tests/test_tweedie_nb_characterisation.py`:
 
 ```python
 def test_published_phi_is_profiled_at_the_published_mean(characterisation_case):
@@ -1558,9 +1558,9 @@ def test_estimate_p_signature_is_the_slim_one():
 
 The `characterisation_case` fixture accepts `weight_semantics` and forwards it to the `SuperGLM` constructor.
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `uv run pytest tests/test_tweedie_nb_characterisation.py -k "published or frequency or signature" -q`. Expected: FAIL.
+- [x] **Step 2: Run to confirm they fail.** Run: `uv run pytest tests/test_tweedie_nb_characterisation.py -k "published or frequency or signature" -q`. Expected: FAIL.
 
-- [ ] **Step 3: Rewire `profile_ops.estimate_p`.**
+- [x] **Step 3: Rewire `profile_ops.estimate_p`.**
   - Keep master's input validation (`_validate_entrypoint_input`, `_resolve_profile_fit_mode`, `_validate_profile_selection_mode`, the `max_reml_iter` checks) and the frequency-weight refusal from master's `estimate_tweedie_p`.
   - Replace the call to `estimate_tweedie_p` with `search_power(profile_workspace.model, X, y, sample_weight, offset, fit_mode=resolved_search_mode, p_bounds=p_bounds, xatol=xatol)`.
   - Extract the search → final refit → install sequence (master lines 186–301, and the parallel block in `estimate_theta`) into `_publish_profiled_family`. The ONLY differences between p and θ are the family, the parameter name used by `_publication_mode_failure`, and the post-refit synchronisation callback.
@@ -1578,9 +1578,9 @@ def _reprofile_published_dispersion(result, y_arr, weights, mu) -> None:
   - Delete `_installed_tweedie_profile_copy` and `_TWEEDIE_PROFILE_SHARED_RUNTIME_FIELDS`. Install `copy.copy(result)` with `_ci_cache` copied as a new dict and `_objective` shared.
   - Delete the `phi_method` and `method` plumbing.
 
-- [ ] **Step 4: Update `api.py` `estimate_p`** to the Produces signature, with its docstring listing only the surviving parameters.
+- [x] **Step 4: Update `api.py` `estimate_p`** to the Produces signature, with its docstring listing only the surviving parameters.
 
-- [ ] **Step 5: Update the summary and reporting.**
+- [x] **Step 5: Update the summary and reporting.**
   - `_reporting.py` shrinks to three functions:
     - `cached_tweedie_profile_ci(result, alpha)`: reads `result._ci_cache.get(float(alpha))` and returns `((lower, upper), "censored" if either flag else "available")`, or `(None, "not computed")`;
     - `tweedie_profile_report_identity(result, alpha)`: `(id(result), p_hat, phi_hat, nll, status, interval)`;
@@ -1588,15 +1588,15 @@ def _reprofile_published_dispersion(result, y_arr, weights, mu) -> None:
   - Delete `tweedie_profile_method_label` and `_uses_density_approximation`.
   - In `report_ops.py` and `metrics.py`, delete the `tweedie_p_method` and `nb_theta_method` keys.
 
-- [ ] **Step 6: Update the editor.**
+- [x] **Step 6: Update the editor.**
   - `widget._profile_trace_rows` returns `result.evaluations.to_dict("records")` for Tweedie. For NB it reads `result.evaluations`, the same frame from Task 8. Until Task 8 lands, keep the NB `cache` branch.
   - `server._profile_options` allows only `{"fit_mode", "xatol", "p_bounds", "theta_bounds"}`, plus `"search_fit_mode"` only if decision (b) kept it.
   - Remove the profile method and φ-method `<select>` elements from `index.html` and the two `payload.method`/`payload.phi_method` lines from `summary.js`.
   - Search the editor for any remaining reference: `grep -rn "profileMethod\|profilePhiMethod\|phi_method\|grid_refine" src/superglm/editor` must return nothing.
 
-- [ ] **Step 7: Run the focused tests.** Run: `uv run pytest tests/test_tweedie_nb_characterisation.py tests/test_tweedie_p_recovery.py -n 8 -q`, then `uv run --with plotly pytest tests -k "editor and (profile or estimate)" -n 8 -q`. Expected: the characterisation and recovery tests pass. Editor tests that assert removed options are updated to the surviving ones, and each change is listed in the commit.
+- [x] **Step 7: Run the focused tests.** Run: `uv run pytest tests/test_tweedie_nb_characterisation.py tests/test_tweedie_p_recovery.py -n 8 -q`, then `uv run --with plotly pytest tests -k "editor and (profile or estimate)" -n 8 -q`. Expected: the characterisation and recovery tests pass. Editor tests that assert removed options are updated to the surviving ones, and each change is listed in the commit.
 
-- [ ] **Step 8: Commit.**
+- [x] **Step 8: Commit.**
 
 ```bash
 git add -u src/superglm tests
@@ -1606,6 +1606,17 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
+
+**Task 7 outcome:**
+
+- `estimate_p` keeps `search_fit_mode` (decision (b)) and validates once at entry: Tweedie family, `p_bounds` strictly inside (1, 2), `ci_alpha`, both fit modes and the REML budget; then `_validate_entrypoint_input` and the frequency-weight refusal. `_validate_strict_prior_weights` is not called again: entry validation already applies it to prior-weight Tweedie input, and the frequency refusal leaves only unit weights.
+- `_publish_profiled_family(model, validated, references, *, fit_mode, family, parameter, value, synchronize, decoupled=False, max_reml_iter=20)` takes a `synchronize(final_model)` callback rather than returning the final model, so the compaction and the single install stay in one place. Task 8 moves θ onto it.
+- The published φ̂ and `nll` are profiled at the public mean. `result.converged` also requires the publication fit to converge, as on master; the REML-budget test pins it.
+- Editor live trace. `trace_callback` is gone from `estimate_p`, so per-candidate rows travel through `progress_callback("profiling", {"profile_trace": [row]})`, fed by an `on_evaluation` hook on `search_power`. The hook is detached after the search, so later interval evaluations never reach a finished job. Without it the Profile dialog would read "waiting for first evaluation" for the whole search. The completed job's trace is replaced by the result's feasible evaluations, numbered in search order like the live rows.
+- Summary: `tweedie_p_method` and `nb_theta_method` are gone; the header row shows the profile NLL; the CI status is `available`, `censored` or `not computed`, and a censored interval is marked in the text, HTML, export and editor summaries.
+- `superglm.profiling.tweedie` no longer re-exports `generate_tweedie_cpg` or `tweedie_logpdf`; importers use the package root.
+- Private validation dataset, `estimate_p(fit_mode="reml")`: p̂ agrees with master to 2e-15, φ̂ to 1.1e-11 relative, CI endpoints to 1.1e-8; wall 0.66× master (median of three, same harness), peak RSS within 1 MB; 11 candidate fits, as on master.
+- Criterion 8: 15 of 18 recovery cases pass. The three REML p = 1.8 cases still fail on mode certification, as recorded in the Task 5 and 6 outcome.
 
 ### Task 8: NB2 θ on the shared machinery
 

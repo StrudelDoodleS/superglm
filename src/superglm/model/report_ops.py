@@ -18,7 +18,6 @@ from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
-    tweedie_profile_method_label,
     tweedie_profile_report_identity,
 )
 from superglm.solvers.rank import selected_group_name_set
@@ -261,7 +260,6 @@ def summary(
         ci = nb_pr.ci(alpha=alpha)
         model_info["nb_theta"] = nb_pr.theta_hat
         model_info["nb_theta_ci"] = ci
-        model_info["nb_theta_method"] = "Profile (exact)"
         model_info["nb_profile_nll"] = nb_pr.nll
 
     if tw_pr is not None:
@@ -270,9 +268,7 @@ def summary(
         model_info["tweedie_p_ci"] = ci
         model_info["tweedie_p_ci_status"] = ci_status
         model_info["tweedie_phi"] = tw_pr.phi_hat
-        model_info["tweedie_p_method"] = tweedie_profile_method_label(tw_pr)
-        if hasattr(tw_pr, "nll"):
-            model_info["tweedie_profile_nll"] = tw_pr.nll
+        model_info["tweedie_profile_nll"] = tw_pr.nll
 
     editor_inference_stale = bool(model_info.get("editor_inference_stale", False))
     if editor_inference_stale:

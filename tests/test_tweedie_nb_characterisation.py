@@ -202,6 +202,53 @@ def test_boundary_optimum_is_reported_not_raised(characterisation_case):
     assert result.interval(0.05).lower_censored
 
 
+def test_censored_interval_is_reported_in_the_summary(characterisation_case):
+    model, X, y = characterisation_case("zeros90")
+    result = model.estimate_p(X, y, p_bounds=(1.6, 1.9), ci_alpha=0.05)
+    summary = model.summary(alpha=0.05)
+    assert summary._info["tweedie_p_ci"] == result.ci(0.05)
+    assert summary._info["tweedie_p_ci_status"] == "censored"
+    assert "censored" in str(summary)
+
+
+def test_published_phi_is_profiled_at_the_published_mean(characterisation_case):
+    model, X, y = characterisation_case("zeros90")
+    result = model.estimate_p(X, y, fit_mode="reml")
+    expected = profile_phi_at(np.asarray(y, float), model.predict(X), np.ones(len(y)), result.p_hat)
+    assert result.phi_hat == pytest.approx(expected.phi, rel=1e-12)
+    assert model.result.phi == result.phi_hat
+    assert result.nll == pytest.approx(expected.criterion / len(y), rel=1e-12)
+
+
+def test_estimate_p_refuses_nonunit_frequency_weights(characterisation_case):
+    model, X, y = characterisation_case("zeros90", weight_semantics="frequency")
+    with pytest.raises(ValueError, match="frequency"):
+        model.estimate_p(X, y, sample_weight=np.full(len(y), 2.0))
+
+
+def test_progress_reports_each_candidate_while_the_search_runs(characterisation_case):
+    model, X, y = characterisation_case("zeros90")
+    events = []
+    result = model.estimate_p(
+        X, y, p_bounds=(1.4, 1.6), progress_callback=lambda *event: events.append(event)
+    )
+    rows = [payload["profile_trace"][0] for phase, payload in events if phase == "profiling"]
+    assert rows == result.evaluations.to_dict("records")
+    assert [phase for phase, _ in events[len(rows) :]] == ["best_found", "final_refit"]
+    # The interval evaluates the same profile after the caller's display is done.
+    result.ci(0.05)
+    assert len(events) == len(rows) + 2
+
+
+def test_estimate_p_signature_is_the_slim_one():
+    import inspect
+
+    from superglm import SuperGLM
+
+    parameters = set(inspect.signature(SuperGLM.estimate_p).parameters)
+    assert {"method", "phi_method", "kwargs"}.isdisjoint(parameters)
+
+
 def test_uncertifiable_power_is_skipped(characterisation_case, monkeypatch):
     model, X, y = characterisation_case("positive96")
     original = type(model).fit_reml

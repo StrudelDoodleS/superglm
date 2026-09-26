@@ -382,22 +382,7 @@ def _profile_options(payload: dict[str, Any]) -> dict[str, Any]:
     # unexpected keyword.
     tweedie_only = {"search_fit_mode"}
     parameter = str(payload.get("parameter", ""))
-    allowed = {
-        "fit_mode",
-        "search_fit_mode",
-        "phi_method",
-        "method",
-        "xatol",
-        "maxiter",
-        "p_bounds",
-        "n_grid",
-        "grid",
-        "n_grid_coarse",
-        "optimizer",
-        "theta_bounds",
-        "trace_iterations",
-        "verbose",
-    }
+    allowed = {"fit_mode", "search_fit_mode", "xatol", "p_bounds", "theta_bounds"}
     options = {key: value for key, value in payload.items() if key in allowed}
     if parameter not in {"tweedie", "tweedie_p", "p"}:
         for key in tweedie_only:
