@@ -61,9 +61,11 @@ class DiscretizationResult:
         Per main effect banded with ``bin_strategy="exact"``: ``bands``,
         ``tolerance_factor`` (1.0 unless ``n_bins`` forced a wider limit),
         ``worst_error`` and ``mean_error`` (relative error of the band factor
-        against the curve, the mean weighted by geometry mass) and
-        ``worst_error_se`` (the largest gap in standard errors).  Empty for the
-        other strategies.
+        against the curve, ``|band / curve - 1|``, the mean weighted by
+        geometry mass) and ``worst_error_se`` (the largest gap in standard
+        errors).  Empty for the other strategies.  The standard errors are the
+        term's own under its centring, so they narrow where the curve crosses
+        its weighted mean and bands can bunch there.
     """
 
     tables: dict[str, pd.DataFrame]
@@ -286,9 +288,21 @@ def _exact_edges(
     value, the convention the other strategies use, so ``np.digitize`` with the
     final clip assigns every row.  A single-value last band therefore has equal
     ``bin_from`` and ``bin_to``.
+
+    A term carrying a post-fit shape repair is refused: its standard errors
+    would come from the unconstrained fit's covariance around constrained
+    coefficients, which ``feature_se`` and ``summary()`` withhold.
     """
     from superglm.diagnostics.exact_banding import MAX_EXACT_VALUES, exact_bands
+    from superglm.model.explain_ops import _shape_repaired
 
+    if _shape_repaired(model, name):
+        raise ValueError(
+            f"Feature {name!r} carries a post-fit shape repair, so its standard errors "
+            "would come from the unconstrained fit's covariance around constrained "
+            "coefficients, which bin_strategy='exact' would band on. Fit the constraint "
+            "(Constraint.fit.*) or use another bin_strategy."
+        )
     positive = geometry_weight > 0.0
     values, inverse = np.unique(x_raw[positive], return_inverse=True)
     if len(values) > MAX_EXACT_VALUES:
@@ -304,7 +318,8 @@ def _exact_edges(
     banding = exact_bands(curve, weight, tol, max_bands)
     edges = np.append(values[banding.starts], values[-1])
     ends = np.append(banding.starts[1:], len(values))
-    gap = curve - np.repeat(banding.factors, ends - banding.starts)
+    # Band minus curve, so the relative error is the band factor's against the curve's.
+    gap = np.repeat(banding.factors, ends - banding.starts) - curve
     relative = np.abs(np.expm1(gap))
     in_se = np.divide(np.abs(gap), se, out=np.zeros_like(gap), where=se > 0.0)
     diagnostics: dict[str, float] = {

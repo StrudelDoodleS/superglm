@@ -11,6 +11,7 @@ prefix, or swapping in a better prefix would improve the whole.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -19,7 +20,6 @@ from numpy.typing import NDArray
 MAX_EXACT_VALUES = 5000
 _EPS = float(np.finfo(np.float64).eps)
 _FACTOR_RTOL = 1e-6
-_FACTOR_LIMIT = 2.0**60
 
 
 @dataclass(frozen=True)
@@ -66,8 +66,7 @@ def exact_bands(s, w, tol, max_bands: int) -> ExactBanding:
     starts, sse = _fewest_then_least(s, w, tol)
     factor = 1.0
     if len(starts) > max_bands:
-        factor = _smallest_fitting_factor(s, w, tol, max_bands)
-        starts, sse = _fewest_then_least(s, w, factor * tol)
+        factor, (starts, sse) = _smallest_fitting_factor(s, w, tol, max_bands)
     ends = np.append(starts[1:], len(s))
     factors = np.array(
         [np.average(s[a:b], weights=w[a:b]) for a, b in zip(starts, ends, strict=True)],
@@ -106,31 +105,42 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
     values.  For each end ``j`` the candidate starts run leftwards until the
     tolerance window ``[max(s - tol), min(s + tol)]`` empties; the window only
     shrinks as a band grows, so every longer band is infeasible too.  Memory is
-    O(n); time is O(n) per end over the feasible starts.
+    O(n); the window scan is O(n) per end, so a solve is O(n^2).
+
+    Everything is compared in the frame shifted by ``s[j]``, so the curve's
+    level drops out of every rounding error, and a band is accepted only when
+    its computed mean clears the window by more than that error: every
+    accepted band keeps every value within its requested tolerance.
     """
     n = len(s)
     count = np.zeros(n + 1, dtype=np.int64)
     sse = np.zeros(n + 1, dtype=np.float64)
     start = np.zeros(n, dtype=np.intp)
-    low = s - tol
-    high = s + tol
     never = np.iinfo(np.int64).max
     for j in range(n):
-        lo = np.maximum.accumulate(low[j::-1])
-        hi = np.minimum.accumulate(high[j::-1])
+        # d is exact for values within a factor two of s[j] (Sterbenz), and
+        # otherwise off by at most eps |d|.
+        d_all = s[j::-1] - s[j]
+        t_all = tol[j::-1]
+        lo = np.maximum.accumulate(d_all - t_all)
+        hi = np.minimum.accumulate(d_all + t_all)
         closed = lo > hi
         m = int(np.argmax(closed)) if closed.any() else j + 1
-        # Shift by s[j] so the running sums do not cancel against the curve's level.
-        d = s[j::-1][:m] - s[j]
+        d = d_all[:m]
         wr = w[j::-1][:m]
         cw = np.cumsum(wr)
         mean = np.cumsum(wr * d) / cw
         cost = np.maximum(np.cumsum(wr * d * d) - cw * mean * mean, 0.0)
-        # A length-k weighted mean of shifted values carries at most a few k*eps
-        # of relative error in its terms, plus one rounding when s[j] is added back.
-        slack = 4.0 * _EPS * np.arange(1, m + 1) * (abs(s[j]) + np.maximum.accumulate(np.abs(d)))
-        level = mean + s[j]
-        ok = (lo[:m] - slack <= level) & (level <= hi[:m] + slack)
+        # The mean of k shifted values errs by at most about (k + 2) eps max|d|
+        # and each window edge by eps (|d| + tol); a zero-tolerance plateau has
+        # d = 0 and no error, so it still merges.
+        k = np.arange(1, m + 1)
+        err = (
+            2.0
+            * _EPS
+            * ((k + 2) * np.maximum.accumulate(np.abs(d)) + np.maximum.accumulate(t_all[:m]))
+        )
+        ok = (lo[:m] + err <= mean) & (mean <= hi[:m] - err)
         ok[0] = True  # a single value is its own mean
         first = j - np.arange(m)
         candidate = np.where(ok, count[first] + 1, never)
@@ -148,28 +158,46 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
     return np.array(starts[::-1], dtype=np.intp), float(sse[n])
 
 
-def _fits(s, w, tol, factor: float, max_bands: int) -> bool:
-    return len(_fewest_then_least(s, w, factor * tol)[0]) <= max_bands
+def _banding_within(s, w, tol, factor: float, max_bands: int):
+    """The banding at ``factor * tol`` if it fits ``max_bands``, else None."""
+    starts, sse = _fewest_then_least(s, w, factor * tol)
+    return (starts, sse) if len(starts) <= max_bands else None
 
 
-def _smallest_fitting_factor(s, w, tol, max_bands: int) -> float:
+def _smallest_fitting_factor(s, w, tol, max_bands: int):
     """Smallest multiplier of ``tol``, to relative 1e-6, whose banding fits ``max_bands``.
 
-    Widening every tolerance only enlarges each feasible set, so the fewest-band
-    count never rises with the factor and bisection applies.
+    Returns the factor and that banding.  Widening every tolerance only enlarges
+    each feasible set (float64 rounding is monotone), so the fewest-band count
+    never rises with the factor and bisection applies.  At ``2 R / tau``, with
+    ``R`` the curve's range and ``tau`` its least positive tolerance, every
+    positive-tolerance window holds every possible band mean, so no larger
+    factor fits more; if that fails, zero tolerances are what stand in the
+    way.  The bisection is geometric, so a factor near 1e30 takes about thirty
+    solves.
     """
-    lower, upper = 1.0, 2.0
-    while not _fits(s, w, tol, upper, max_bands):
-        lower, upper = upper, 2.0 * upper
-        if upper > _FACTOR_LIMIT:
+    positive = tol[tol > 0.0]
+    if positive.size == 0:
+        upper = math.inf
+    else:
+        upper = 2.0 * float(s.max() - s.min()) / float(positive.min())
+        if not math.isfinite(upper):
             raise ValueError(
-                f"cannot fit {len(s)} values into {max_bands} bands at any tolerance: "
-                "values with zero tolerance cannot share a band"
+                f"cannot fit {len(s)} values into {max_bands} bands: the smallest positive "
+                f"tolerance, {float(positive.min()):.3g}, is too small to widen in double precision"
             )
+    banding = _banding_within(s, w, tol, upper, max_bands) if math.isfinite(upper) else None
+    if banding is None:
+        raise ValueError(
+            f"cannot fit {len(s)} values into {max_bands} bands at any tolerance: "
+            "values with zero tolerance cannot share a band"
+        )
+    lower = 1.0
     while upper / lower - 1.0 > _FACTOR_RTOL:
-        middle = 0.5 * (lower + upper)
-        if _fits(s, w, tol, middle, max_bands):
-            upper = middle
-        else:
+        middle = math.sqrt(lower * upper)
+        trial = _banding_within(s, w, tol, middle, max_bands)
+        if trial is None:
             lower = middle
-    return upper
+        else:
+            upper, banding = middle, trial
+    return upper, banding

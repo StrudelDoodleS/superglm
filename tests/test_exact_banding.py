@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Polynomial, Spline, SuperGLM
+from superglm import Constraint, Polynomial, Spline, SuperGLM
 from superglm.diagnostics.discretize import (
     _compute_edges,
     _term_se_at,
@@ -141,6 +141,23 @@ def test_no_widening_when_the_cap_is_not_binding():
 def test_zero_tolerances_that_cannot_merge_are_refused():
     with pytest.raises(ValueError, match="cannot fit"):
         exact_bands(np.arange(6.0), np.ones(6), np.zeros(6), max_bands=3)
+
+
+def test_rounding_slack_cannot_admit_a_band_that_breaks_a_tolerance():
+    # Two values 7 ulps apart near 100, tolerances of 4.2 ulps, the weight on the
+    # upper one: their mean lands 7 ulps from the lower value, past its 4.2. A
+    # slack scaled by the curve's level (100) let that band through.
+    u = np.spacing(100.0)
+    s = np.array([100.0, 100.0 + 7.0 * u])
+    result = exact_bands(s, np.array([1.0, 1e6]), np.full(2, 4.2 * u), max_bands=2)
+    assert result.starts.tolist() == [0, 1]
+
+
+def test_a_tiny_positive_tolerance_widens_by_its_finite_factor():
+    # The least factor is 0.5 / 1e-30 = 5e29; a fixed 2**60 limit called it impossible.
+    result = exact_bands(np.array([0.0, 1.0]), np.ones(2), np.full(2, 1e-30), max_bands=1)
+    assert result.starts.tolist() == [0]
+    assert result.tolerance_factor == pytest.approx(5e29, rel=2e-6)
 
 
 @pytest.fixture(scope="module")
@@ -360,3 +377,89 @@ def test_impact_sheet_shows_the_band_limit(banded_model):
     row = payload.discretization_impact.query("feature == 'age'").iloc[0]
     assert row["band_tolerance_factor"] > 1.0
     assert row["band_worst_error"] > 0.10
+
+
+def test_band_error_is_the_band_factors_error_against_the_curve(banded_model):
+    # A band log(1.1) above the curve is 10% off it, not the 9.1% the curve is off the band.
+    model, df, y, w = banded_model
+    result = model.discretization_impact(
+        df, y, sample_weight=w, n_bins=5, bin_strategy="exact", features=["age"]
+    )
+    table = result.tables["age"]
+    age = df["age"].to_numpy()
+    curve = extract_ppform(model, "age").evaluate(age)
+    band = np.array([_row_of(table, value)["log_relativity"] for value in age])
+    _, geometry = _validated_discretization_weights(model, w, len(df))
+    relative = np.abs(np.expm1(band - curve))
+    diagnostics = result.band_diagnostics["age"]
+    assert diagnostics["worst_error"] == pytest.approx(relative.max(), rel=1e-8)
+    assert diagnostics["mean_error"] == pytest.approx(
+        np.average(relative, weights=geometry), rel=1e-8
+    )
+
+
+def test_exact_bands_refuse_a_post_fit_repaired_term():
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 1.0, 200)
+    y = -((x - 0.35) ** 2) + 0.05 * rng.normal(size=len(x))
+    df = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Spline(kind="ps", n_knots=10, constraint=Constraint.postfit.convex)},
+    ).fit(df, y)
+    model.apply_shape_postfit(df)
+    assert model._shape_repairs["x"]
+    with pytest.raises(ValueError, match="post-fit shape repair"):
+        model.discretization_impact(df, y, bin_strategy="exact")
+
+
+def test_a_single_value_last_band_exports_a_closed_key(banded_model):
+    # Its half-open key [x, x) would match nothing, not even the rows it rates.
+    model, df, y, w = banded_model
+    payload = build_rating_table_payload(
+        model,
+        df,
+        y,
+        sample_weight=w,
+        n_bins=100,
+        impact_bins=(),
+        bin_strategy="exact",
+        band_max_error=1e-12,
+    )
+    keys = next(b for b in payload.main_effects if b.name == "age").table["age"].tolist()
+    top = float(df["age"].max())
+    assert keys[-1] == f"[{top!r}, {top!r}]"
+    assert all(key.endswith(")") for key in keys[:-1])
+
+
+def test_a_binned_offset_is_refused_before_any_band_is_solved(monkeypatch):
+    from superglm.diagnostics import exact_banding
+
+    rng = np.random.default_rng(5)
+    df = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 300)})
+    exposure = rng.uniform(0.5, 2.0, 300)
+    y = rng.poisson(exposure * np.exp(0.3 * df["x"].to_numpy())).astype(float)
+    model = SuperGLM(features={"x": Spline(n_knots=5)}).fit(df, y, offset=np.log(exposure))
+
+    def solved(*args, **kwargs):
+        raise AssertionError("a band was solved before the refusal")
+
+    monkeypatch.setattr(exact_banding, "exact_bands", solved)
+    with pytest.raises(ValueError, match="binned offset has no fitted curve"):
+        build_rating_table_payload(
+            model,
+            df,
+            y,
+            offset=np.log(exposure),
+            impact_bins=(),
+            bin_strategy="exact",
+            offset_kind="binned",
+        )
+
+
+def test_band_settings_are_checked_even_when_nothing_is_binned(banded_model):
+    model, df, y, w = banded_model
+    with pytest.raises(ValueError, match="band_se must be a positive finite number"):
+        build_rating_table_payload(
+            model, df, y, sample_weight=w, impact_bins=(), continuous_kind="ppform", band_se=-1.0
+        )

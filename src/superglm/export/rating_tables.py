@@ -264,10 +264,16 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
     # arrive as that refusal rather than as a ``RuntimeWarning`` from here.
     with np.errstate(over="ignore", under="ignore"):
         factor = float(np.exp(-centering_shift))
+    # A last band holding only the largest value has bin_from == bin_to, and
+    # its half-open key would match nothing: it is the one closed row.
     out = pd.DataFrame(
         {
             name: [
-                _format_interval(float(row.bin_from), float(row.bin_to))
+                _format_interval(
+                    float(row.bin_from),
+                    float(row.bin_to),
+                    closed_right=float(row.bin_from) == float(row.bin_to),
+                )
                 for row in table.itertuples(index=False)
             ],
             "Relativity": table["relativity"].astype(float).to_numpy() * factor,
@@ -515,6 +521,25 @@ def _require_supported_continuous_kind(continuous_kind: str) -> None:
 
 
 _SUPPORTED_OFFSET_KINDS = frozenset({"auto", "discrete", "per_unit", "binned"})
+
+
+def _require_exact_banding_settings(
+    model: SuperGLM, bin_strategy: str, band_se, band_max_error, offset_kind: str
+) -> None:
+    """Check the band limit settings up front, whatever terms turn out to be binned.
+
+    A binned offset has no fitted curve to band exactly, so that refusal comes
+    before any main effect is solved rather than after.
+    """
+    from superglm.diagnostics.discretize import _positive_finite
+
+    _positive_finite("band_se", band_se)
+    _positive_finite("band_max_error", band_max_error)
+    if bin_strategy == "exact" and offset_kind == "binned" and _fit_used_offset(model):
+        raise ValueError(
+            "bin_strategy='exact' places bands on a fitted curve and its standard errors, "
+            "and a binned offset has no fitted curve. Choose another offset_kind or bin_strategy."
+        )
 
 
 def _require_supported_offset_kind(offset_kind: str) -> None:
@@ -2372,6 +2397,7 @@ def build_rating_table_payload(
     # block builders meant only the declared-source path ever looked, so an
     # unknown kind reached the undeclared path as ``"auto"``.
     _require_supported_offset_kind(offset_kind)
+    _require_exact_banding_settings(model, bin_strategy, band_se, band_max_error, offset_kind)
     if continuous_kind == "ppform":
         _require_ppform_exportable(
             model,
