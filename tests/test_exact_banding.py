@@ -193,9 +193,25 @@ def test_weights_near_the_largest_double_do_not_overflow_the_mean():
     assert np.isfinite(result.sse)
 
 
-def test_a_curve_wider_than_the_window_ceiling_is_refused():
-    with pytest.raises(ValueError, match="quarter of the largest double"):
-        exact_bands(np.array([0.0, 1e308]), np.ones(2), np.ones(2), max_bands=1)
+@pytest.mark.parametrize("top", [1e200, 1e308])
+def test_a_curve_too_wide_for_its_moments_is_refused(top):
+    # w * d * d overflows once |d| passes about 1.3e154; the band count survived
+    # but sse came back NaN and ties fell to whichever NaN argmin met first.
+    with pytest.raises(ValueError, match="below 2\\*\\*500"):
+        exact_bands(np.array([0.0, top]), np.ones(2), np.full(2, top), max_bands=1)
+
+
+def test_a_product_that_underflows_cannot_carry_a_band_past_its_tolerance():
+    # w * d = 2**-1020 * -2**-60 rounds to zero, so the computed mean of {0, 2**-60}
+    # was 0 and the band was accepted with the second value 2**-61 from the exact
+    # mean against a tolerance of 2**-100.
+    result = exact_bands(
+        np.array([0.0, 2.0**-60, 1.0]),
+        np.array([2.0**-1020, 2.0**-1020, 1.0]),
+        np.array([2.0**-59, 2.0**-100, 0.0]),
+        max_bands=3,
+    )
+    assert result.starts.tolist() == [0, 1, 2]
 
 
 def test_the_acceptance_margin_certifies_ties_at_rounding_level():
@@ -596,3 +612,25 @@ def test_a_weight_near_the_largest_double_keeps_the_table_finite():
         df, y, sample_weight=weights, n_bins=150, bin_strategy="exact"
     )
     assert np.isfinite(result.tables["x"]["log_relativity"]).all()
+
+
+def test_exact_tables_export_the_certified_factors(banded_model, monkeypatch):
+    # Re-averaging the rows could differ from the certified factor by a rounding,
+    # which a tolerance below that rounding would then see as a breach.
+    from superglm.diagnostics import exact_banding
+
+    model, df, y, w = banded_model
+    certified = []
+    solve = exact_banding.exact_bands
+
+    def recorded(*args, **kwargs):
+        certified.append(solve(*args, **kwargs))
+        return certified[-1]
+
+    monkeypatch.setattr(exact_banding, "exact_bands", recorded)
+    result = model.discretization_impact(
+        df, y, sample_weight=w, n_bins=150, bin_strategy="exact", features=["age"]
+    )
+    np.testing.assert_array_equal(
+        result.tables["age"]["log_relativity"].to_numpy(), certified[0].factors
+    )

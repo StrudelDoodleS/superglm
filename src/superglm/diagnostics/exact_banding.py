@@ -21,6 +21,9 @@ MAX_EXACT_VALUES = 5000
 _EPS = float(np.finfo(np.float64).eps)
 _FACTOR_RTOL = 1e-6
 _TOLERANCE_CEILING = float(np.finfo(np.float64).max) / 4.0
+# Below this range the running moments w d and w d**2 stay finite for any band
+# (5000 R**2 below the largest double); exp overflows long before, at ~709.
+_RANGE_CEILING = 2.0**500
 
 
 @dataclass(frozen=True)
@@ -32,7 +35,10 @@ class ExactBanding:
     starts : NDArray
         Index of each band's first value, ascending, starting at 0.
     factors : NDArray
-        Weighted mean of the curve in each band.
+        Weighted mean of the curve in each band.  The certificate covers the
+        exact mean; a factor is that mean rounded once to a double, so a
+        tolerance below half a unit in the last place of the curve's level
+        cannot be met by any double.
     tolerance_factor : float
         Multiplier applied to the tolerances: 1.0 unless ``max_bands`` forced
         a wider limit.
@@ -112,11 +118,10 @@ def _validated(s, w, tol, max_bands):
         raise ValueError("exact banding weights must be positive")
     if np.any(tol < 0.0):
         raise ValueError("exact banding tolerances must be nonnegative")
-    if s.max() - s.min() > _TOLERANCE_CEILING:
-        # Widened windows are held below the ceiling so no edge is infinite;
-        # a log relativity never comes near it.
+    if s.max() - s.min() > _RANGE_CEILING:
         raise ValueError(
-            "exact banding needs a curve whose range is below a quarter of the largest double"
+            "exact banding needs a curve whose range is below 2**500, where its running "
+            "moments stay finite; a log relativity never comes near it"
         )
     if isinstance(max_bands, bool) or not isinstance(max_bands, int | np.integer) or max_bands < 1:
         raise ValueError(f"max_bands must be a positive integer, got {max_bands!r}")
@@ -165,7 +170,11 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
         # Feasibility is then monotone in a widening factor, and a plateau
         # (d = 0) merges whatever its tolerances.
         length = np.arange(1, m + 1)
-        err = 2.0 * _EPS * (length + 2) * np.maximum.accumulate(np.abs(d))
+        max_d = np.maximum.accumulate(np.abs(d))
+        # A product w * d below the smallest normal double rounds absolutely, by
+        # at most 2**-1075 each, so that goes in too; a plateau (d = 0) has none.
+        underflow = np.where(max_d > 0.0, length * 2.0**-1074 / cw, 0.0)
+        err = 2.0 * _EPS * (length + 2) * max_d + underflow
         low_edge = lo[:m] + err + _EPS * np.abs(lo[:m])
         high_edge = hi[:m] - err - _EPS * np.abs(hi[:m])
         ok = (low_edge <= mean) & (mean <= high_edge)

@@ -281,8 +281,8 @@ def _exact_edges(
     max_bands: int,
     band_se: float,
     band_max_error: float,
-) -> tuple[NDArray, dict[str, float]]:
-    """Edges from :func:`exact_bands` on the term's distinct weighted values.
+) -> tuple[NDArray, dict[str, float], NDArray]:
+    """Edges, diagnostics and certified factors from :func:`exact_bands` on the term's distinct weighted values.
 
     Each band starts at its smallest value and the last edge is the largest
     value, the convention the other strategies use, so ``np.digitize`` with the
@@ -335,9 +335,9 @@ def _exact_edges(
         "tolerance_factor": banding.tolerance_factor,
         "worst_error": float(relative.max()),
         "worst_error_se": float(in_se.max()),
-        "mean_error": float(np.average(relative, weights=weight)),
+        "mean_error": float(np.average(relative, weights=weight / weight.max())),
     }
-    return edges, diagnostics
+    return edges, diagnostics, banding.factors
 
 
 def _is_continuous_feature(model: SuperGLM, name: str) -> bool:
@@ -957,7 +957,7 @@ def discretization_impact(
 
         # Compute bin edges using the selected strategy
         if bin_strategy == "exact":
-            edges, band_diagnostics[name] = _exact_edges(
+            edges, band_diagnostics[name], exact_factors = _exact_edges(
                 model,
                 name,
                 x_raw,
@@ -969,6 +969,7 @@ def discretization_impact(
             )
         else:
             edges = _compute_edges(x_raw, geometry_weight, n_bins, bin_strategy)
+            exact_factors = None
         actual_n_bins = len(edges) - 1
 
         # Assign observations to bins
@@ -995,6 +996,11 @@ def discretization_impact(
                         # near the largest double would overflow weight * value.
                         weights=geometry_mass / geometry_mass.max(),
                     )
+
+        # Exact bands export the factors they were certified with, one per band,
+        # rather than a re-averaged copy that can differ by a rounding.
+        if exact_factors is not None:
+            bin_log_rel = np.asarray(exact_factors, dtype=np.float64).copy()
 
         # Build rating table
         table_rows = []
