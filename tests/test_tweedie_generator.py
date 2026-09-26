@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from superglm._tweedie import generate_tweedie_cpg
 from superglm.profiling import tweedie as tweedie_module
-from superglm.profiling.tweedie import generate_tweedie_cpg
 
 
 class _RecordingRNG:

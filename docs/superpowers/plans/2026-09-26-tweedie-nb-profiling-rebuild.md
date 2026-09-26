@@ -508,7 +508,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `solve_log_phi(rows, deviance, nullity=0.0) -> PhiSolve`.
   - `generate_tweedie_cpg(n, mu, phi, p, rng=None) -> NDArray`.
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_tweedie_density.py`:
+- [x] **Step 1: Write the failing tests** in `tests/test_tweedie_density.py`:
 
 ```python
 import math
@@ -628,9 +628,9 @@ def test_logpdf_matches_master_within_old_route_error(row):
     assert abs(value - row["logpdf"]) <= bound
 ```
 
-- [ ] **Step 2: Run the tests to confirm they fail.** Run: `uv run pytest tests/test_tweedie_density.py tests/test_tweedie_nb_characterisation.py -q`. Expected: ERROR on import of `superglm._tweedie`.
+- [x] **Step 2: Run the tests to confirm they fail.** Run: `uv run pytest tests/test_tweedie_density.py tests/test_tweedie_nb_characterisation.py -q`. Expected: ERROR on import of `superglm._tweedie`.
 
-- [ ] **Step 3: Implement `src/superglm/_tweedie.py`:**
+- [x] **Step 3: Implement `src/superglm/_tweedie.py`:**
 
 ```python
 """Tweedie (1 < p < 2) density, dispersion profile and simulation on one series.
@@ -850,9 +850,9 @@ def generate_tweedie_cpg(n: int, mu, phi, p: float, rng=None) -> NDArray:
 
 Move `_tweedie_positive_unit_deviance` (with its two constants) into this file as `tweedie_unit_deviance`, verbatim except for the name and its self-call.
 
-- [ ] **Step 4: Run the tests to confirm they pass.** Run: `uv run pytest tests/test_tweedie_density.py tests/test_tweedie_nb_characterisation.py tests/test_tweedie_series.py -n 8 -q` and `uv run pytest tests/test_tweedie_generator.py -k "legacy or bitwise" -q`. Expected: all pass. A characterisation row that fails is reported with its p, φ, y and error. A row that the old code evaluated by `wright_bessel` and whose new value agrees with the Task 2 oracle better than the fixture does is **evidence for the new value**. List those rows in the commit message; do not loosen the bound.
+- [x] **Step 4: Run the tests to confirm they pass.** Run: `uv run pytest tests/test_tweedie_density.py tests/test_tweedie_nb_characterisation.py tests/test_tweedie_series.py -n 8 -q` and `uv run pytest tests/test_tweedie_generator.py -k "legacy or bitwise" -q`. Expected: all pass. A characterisation row that fails is reported with its p, φ, y and error. A row that the old code evaluated by `wright_bessel` and whose new value agrees with the Task 2 oracle better than the fixture does is **evidence for the new value**. List those rows in the commit message; do not loosen the bound.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/superglm/_tweedie.py tests/test_tweedie_density.py tests/test_tweedie_nb_characterisation.py
