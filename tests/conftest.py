@@ -20,6 +20,30 @@ def pytest_configure(config):
     # the main thread, before any worker starts. Serial runs skip the cost.
     if getattr(config.option, "numprocesses", None):
         import superglm  # noqa: F401
+    _register_numba_numpy_overloads()
+
+
+def _register_numba_numpy_overloads() -> None:
+    """Compile once in every process, before any test can swap a NumPy function.
+
+    Numba registers its NumPy overloads (``np.empty``, ``np.zeros``, ...) against
+    the function objects it finds at its first compile in a process. Several
+    tests guard allocations by swapping ``np.empty`` or ``np.zeros``; when a
+    worker's first compile lands inside one, the overload is keyed on the guard
+    and every later ``np.zeros`` compile in that worker fails with "Use of
+    unsupported NumPy function 'numpy.empty'". Which worker that is depends on
+    how the shards and worksteal fall, so it surfaced as one shard failing on
+    every platform. Measured in a fresh process: a first compile under a guarded
+    ``np.empty`` breaks the next ``np.zeros`` compile; one compile before it
+    does not.
+    """
+    import numba
+
+    numba.njit(cache=False)(_first_compile)(1)
+
+
+def _first_compile(n):
+    return n + 1
 
 
 def pytest_collection_modifyitems(config, items):
