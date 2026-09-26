@@ -536,16 +536,14 @@ def _compute_fit_stats(
         )
 
     if isinstance(distribution, Tweedie):
-        from superglm.profiling.tweedie import (
-            _tweedie_logpdf_pair,
-        )
+        from superglm._tweedie import tweedie_logpdf_pair
 
         # The prior contract puts the weight inside the compound-Poisson
         # density; the frequency contract evaluates the unit-weight density and
         # counts each row w times.  The Pearson numerator below scales with the
         # weight under either reading, so only this pair moves.
         replication = weight_semantics == "frequency"
-        fitted_logpdf, null_logpdf = _tweedie_logpdf_pair(
+        fitted_logpdf, null_logpdf = tweedie_logpdf_pair(
             y,
             mu,
             null_mu,

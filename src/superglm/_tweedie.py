@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 import operator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,6 +35,13 @@ class TweedieRows:
     log_y: NDArray
     saturated_canonical: NDArray
     count: NDArray | None
+    # solve_log_phi results by (D, M). A REML optimizer re-profiles its accepted
+    # line-search point with identical (Dp, Mp) at the next iteration's start; the
+    # solve is a pure function of these immutable rows and the two floats, so it
+    # lives as long as the rows do.
+    phi_solves: dict[tuple[float, float], PhiSolve] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     @classmethod
     def prepare(
@@ -101,6 +108,13 @@ def solve_log_phi(rows: TweedieRows, deviance: float, nullity: float = 0.0) -> P
     safeguarded by bisection inside the sign-change bracket (Press et al.,
     rtsafe): no concavity result is known for the Tweedie dispersion profile.
     """
+    key = (deviance, nullity)
+    if key not in rows.phi_solves:
+        rows.phi_solves[key] = _newton_log_phi(rows, deviance, nullity)
+    return rows.phi_solves[key]
+
+
+def _newton_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSolve:
     size = rows.size
     if not (math.isfinite(deviance) and deviance > 0.0):
         raise ValueError("Tweedie dispersion needs a positive finite deviance")
@@ -121,18 +135,24 @@ def solve_log_phi(rows: TweedieRows, deviance: float, nullity: float = 0.0) -> P
         else:
             lower = u
         step = -score / curvature if curvature > 0.0 else math.copysign(_NEWTON_MAX_STEP, -score)
-        if curvature > 0.0 and abs(step) <= _NEWTON_STEP_TOL:
-            # Quadratic convergence puts u + step within O(step^2) of the root;
-            # l_sat moves by -T per unit u, so carrying it keeps Q to O(step^2).
-            u += step
+        proposal = u + max(-_NEWTON_MAX_STEP, min(step, _NEWTON_MAX_STEP))
+        # rtsafe tests the move actually taken, Newton or bisection: at large
+        # modes the score's round-off keeps Newton steps above the tolerance
+        # after the sign-change bracket has already collapsed. The bracket test
+        # is inclusive because a zero score leaves u itself as the bracket end.
+        move = (proposal if lower <= proposal <= upper else 0.5 * (lower + upper)) - u
+        if curvature > 0.0 and abs(move) <= _NEWTON_STEP_TOL:
+            # A converged Newton step or a collapsed bracket puts u + move within
+            # the tolerance of the root; l_sat moves by -T per unit u, so carrying
+            # it keeps Q to O(move^2).
+            u += move
             criterion = (
-                half_deviance * math.exp(-step)
-                - (saturated - saturated_score * step)
+                half_deviance * math.exp(-move)
+                - (saturated - saturated_score * move)
                 - 0.5 * nullity * (_LOG_TWO_PI + u)
             )
             return PhiSolve(math.exp(u), criterion, curvature, n_passes)
-        proposal = u + max(-_NEWTON_MAX_STEP, min(step, _NEWTON_MAX_STEP))
-        u = proposal if lower < proposal < upper else 0.5 * (lower + upper)
+        u += move
     raise FloatingPointError(
         f"Tweedie dispersion Newton did not settle in {_NEWTON_MAX_STEPS} steps at p={rows.p:.6g}"
     )

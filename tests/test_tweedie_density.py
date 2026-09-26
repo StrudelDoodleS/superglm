@@ -95,6 +95,63 @@ def test_solve_log_phi_refuses_no_interior_optimum():
         solve_log_phi(TweedieRows.prepare(y, np.ones_like(y), 1.5), 0.0)
 
 
+class _UnitScoreRows(TweedieRows):
+    """l_sat(u) = -u, so T = 1 and Q'(u) = 1 - e^-u at D = 2, M = 0: the root is u = 0."""
+
+    def saturated(self, phi):
+        return -math.log(phi), 1.0, 0.0
+
+
+def test_solve_log_phi_stops_on_an_exact_root():
+    # Two rows start Newton at log(D / N) = 0, the root itself, where the score is
+    # exactly 0.0 and u becomes the bracket's lower end; a bracket test that
+    # excludes its ends bisects away from the root instead of stopping there.
+    rows = _UnitScoreRows(1.5, 1.0, np.zeros(2), np.zeros(2), np.zeros(2), None)
+    solved = solve_log_phi(rows, 2.0)
+    assert solved.phi == 1.0 and solved.n_passes == 1
+
+
+SCORE_NOISE = 1e-4
+
+
+class _NoisyScoreRows(_UnitScoreRows):
+    """T = 1 plus a fixed pseudo-random error in [-SCORE_NOISE, SCORE_NOISE).
+
+    The error is keyed on the bits of u (Knuth's multiplicative hash) and is 1e4
+    times the score the 1e-8 step tolerance resolves at curvature e^-u ~ 1. That is
+    the state of real rows at peak indices near 1e7: the weighted SCOP fit in
+    test_pearson_scale_weights reaches phi ~ 1.5e-7, where T cancels two sums of 3e9
+    and carries round-off up to 5e-4 over a curvature of 17.
+    """
+
+    def saturated(self, phi):
+        bits = int(np.float64(math.log(phi)).view(np.uint64))
+        draw = (((bits * 0x9E3779B97F4A7C15) % 2**64) >> 11) / 2.0**52 - 1.0
+        value, score, slope = super().saturated(phi)
+        return value, score + SCORE_NOISE * draw, slope
+
+
+def test_solve_log_phi_settles_when_score_round_off_outlasts_the_newton_step():
+    rows = _NoisyScoreRows(1.5, 1.0, np.zeros(1), np.zeros(1), np.zeros(1), None)
+    solved = solve_log_phi(rows, 2.0)
+    # The evaluated score has the true sign wherever |1 - e^-u| > SCORE_NOISE, so
+    # a bracket end that ever held a sign lies within SCORE_NOISE (1 + SCORE_NOISE)
+    # of the root. The solver stops on a Newton move of at most 1e-8, whose
+    # score bounds its start the same way, or on a bracket of width at most 2e-8.
+    assert abs(math.log(solved.phi)) <= SCORE_NOISE * (1.0 + SCORE_NOISE) + 2e-8
+    assert solved.curvature > 0.0
+
+
+def test_a_repeated_solve_makes_no_series_pass(monkeypatch):
+    # REML re-profiles its accepted line-search point with the same (Dp, Mp).
+    y, mu = _book()
+    rows = TweedieRows.prepare(y, np.ones_like(y), 1.5)
+    deviance = float(np.sum(tweedie_unit_deviance(y, mu, 1.5)))
+    first = solve_log_phi(rows, deviance, 2.0)
+    monkeypatch.setattr(TweedieRows, "saturated", lambda self, phi: pytest.fail("series pass"))
+    assert solve_log_phi(rows, deviance, 2.0) is first
+
+
 def test_frequency_counts_equal_replicated_rows():
     y, _ = _book(p=1.4, n=300)
     counts = np.random.default_rng(2).integers(1, 4, y.size).astype(float)

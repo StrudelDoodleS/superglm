@@ -6,6 +6,7 @@ master commit named in its provenance.
 
 import json
 import math
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -67,3 +68,18 @@ def test_logpdf_matches_the_exact_density_or_master(row):
     # is the fixture's old_route_max_rel_error_by_route.
     old_route_error = FIXTURE["old_route_max_rel_error_by_route"][row["route"]]
     assert abs(value - row["logpdf"]) <= bound + old_route_error * max(1.0, abs(row["logpdf"]))
+
+
+@pytest.mark.parametrize(
+    "row", FIXTURE["reml_phi"] + FIXTURE["reml_phi_books"], ids=lambda r: r["case"]
+)
+def test_reml_phi_matches_master(row):
+    from benchmarks.tweedie_nb_characterisation import build_case
+
+    model, X, y = build_case(row["case"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y)
+    # The master saturated likelihood used the series (or i1e at p=1.5) to <=1e-13;
+    # phi moves by that over the profile curvature, well under 1e-9 relative.
+    assert model.result.phi == pytest.approx(row["phi"], rel=1e-9)

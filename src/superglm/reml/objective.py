@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._tweedie import TweedieRows
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
@@ -25,7 +26,6 @@ from superglm.reml.penalty_algebra import (
 from superglm.reml.scale import (
     GammaScaleProfileData,
     ProfiledScaleTerm,
-    TweedieScaleProfileData,
     gaussian_reml_scale_terms,
     prepare_gamma_reml_scale_data,
     prepare_tweedie_reml_scale_data,
@@ -75,7 +75,7 @@ def reml_laml_objective(
     tensor_pair_evaluations: dict | None = None,
     likelihood_size: float | None = None,
     gamma_scale_data: GammaScaleProfileData | None = None,
-    tweedie_scale_data: TweedieScaleProfileData | None = None,
+    tweedie_scale_data: TweedieRows | None = None,
     return_evaluation: bool = False,
     *,
     weight_semantics: str,

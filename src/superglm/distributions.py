@@ -530,13 +530,13 @@ class Tweedie:
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Tweedie unit deviance evaluated without close-mean cancellation."""
-        from superglm.profiling.tweedie import _tweedie_positive_unit_deviance
+        from superglm._tweedie import tweedie_unit_deviance
 
-        return _tweedie_positive_unit_deviance(y, mu, self.p)
+        return tweedie_unit_deviance(y, mu, self.p)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
-        """Tweedie log-likelihood via exact Wright-Bessel evaluation."""
-        from superglm.profiling.tweedie import tweedie_logpdf
+        """Tweedie log-likelihood via the Dunn–Smyth series."""
+        from superglm._tweedie import tweedie_logpdf
 
         logpdf = tweedie_logpdf(y, mu, phi, self.p, weights=weights)
         return float(np.sum(logpdf))
@@ -775,7 +775,7 @@ def prior_weight_log_density(
     if isinstance(family, Tweedie):
         # Already the prior form: the compound-Poisson density evaluator takes
         # the weight into its own normalizer.
-        from superglm.profiling.tweedie import tweedie_logpdf
+        from superglm._tweedie import tweedie_logpdf
 
         return np.asarray(tweedie_logpdf(y, mu, phi, family.p, weights=w), dtype=np.float64)
     return None
@@ -792,7 +792,7 @@ def _frequency_weight_log_likelihood(
     if isinstance(family, Tweedie):
         # The family's own method applies w as a prior weight, so the
         # replication form has to be assembled from unit-weight rows.
-        from superglm.profiling.tweedie import tweedie_logpdf
+        from superglm._tweedie import tweedie_logpdf
 
         w = np.asarray(weights, dtype=np.float64)
         unit = np.ones_like(w)

@@ -882,7 +882,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
   Both keep their current names and signatures. `TweedieScaleProfileData` is removed.
 
-- [ ] **Step 1: Add the REML-phi arm to the characterisation test** in `tests/test_tweedie_nb_characterisation.py`:
+- [x] **Step 1: Add the REML-phi arm to the characterisation test** in `tests/test_tweedie_nb_characterisation.py`:
 
 ```python
 @pytest.mark.parametrize("row", FIXTURE["reml_phi"], ids=lambda r: r["case"])
@@ -897,15 +897,15 @@ def test_reml_phi_matches_master(row):
 
 If `tests/test_tweedie_reml_exact_scale.py` has no reusable builder, extract its model construction into a module-level `fit_fixture_model(case: str)` in that test file first. That is a test-only refactor; its assertions stay unchanged.
 
-- [ ] **Step 2: Run to confirm the new arm passes on the current code** (the fixture came from it). Run: `uv run pytest tests/test_tweedie_nb_characterisation.py -k reml_phi -q`. Expected: PASS. This is the baseline the switch must preserve.
+- [x] **Step 2: Run to confirm the new arm passes on the current code** (the fixture came from it). Run: `uv run pytest tests/test_tweedie_nb_characterisation.py -k reml_phi -q`. Expected: PASS. This is the baseline the switch must preserve.
 
-- [ ] **Step 3: Rewire the density callers.**
+- [x] **Step 3: Rewire the density callers.**
   - In `distributions.py`, replace each `from superglm.profiling.tweedie import tweedie_logpdf` with `from superglm._tweedie import tweedie_logpdf`, and `_tweedie_positive_unit_deviance` with `from superglm._tweedie import tweedie_unit_deviance`.
   - In `stats/model_tests.py`, the same.
   - In `fit_ops._compute_fit_stats`, import `tweedie_logpdf_pair` from `superglm._tweedie` and call it with the same arguments.
   - Fix the docstring at `distributions.py:537` to read "Tweedie log-likelihood via the Dunn–Smyth series."
 
-- [ ] **Step 4: Rewrite the Tweedie part of `reml/scale.py`.**
+- [x] **Step 4: Rewrite the Tweedie part of `reml/scale.py`.**
   1. Delete `_ScoreUnavailableInBracketError`; the whole `TweedieScaleProfileData` class (850–1113); `_newton_tweedie_log_phi`; `_bounded_tweedie_log_phi`; all `_TWEEDIE_*` constants; and the `_P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT` import, `i0e`, `i1e` and `brentq` (if Gamma no longer uses them; check with grep).
   2. Replace `prepare_tweedie_reml_scale_data` with:
 
@@ -963,11 +963,11 @@ def profile_tweedie_reml_scale(
   5. In `reml/objective.py`, import `TweedieRows` from `superglm._tweedie` in place of `TweedieScaleProfileData` (import list and the annotation at line 78).
   6. Decision (c) from Task 1: if it kept the Bessel path, re-add it as a `TweedieRows`-independent fast path inside `profile_tweedie_reml_scale` for `p == 1.5` only, with the measured speed-up cited in its comment. Otherwise add nothing.
 
-- [ ] **Step 5: Run the focused tests.** Run: `uv run pytest tests/test_tweedie_reml_exact_scale.py tests/test_reml_scale.py tests/test_reml_scale_integration.py tests/test_discrete_reml_scale.py tests/test_tweedie_reml_reference.py tests/test_pearson_scale_weights.py tests/test_nb2.py tests/test_tweedie_nb_characterisation.py tests/test_tweedie_density.py -n 8 -q`. Expected: the mgcv oracles pass unchanged, `reml_phi` passes, and the `logpdf` arm passes.
+- [x] **Step 5: Run the focused tests.** Run: `uv run pytest tests/test_tweedie_reml_exact_scale.py tests/test_reml_scale.py tests/test_reml_scale_integration.py tests/test_discrete_reml_scale.py tests/test_tweedie_reml_reference.py tests/test_pearson_scale_weights.py tests/test_nb2.py tests/test_tweedie_nb_characterisation.py tests/test_tweedie_density.py -n 8 -q`. Expected: the mgcv oracles pass unchanged, `reml_phi` passes, and the `logpdf` arm passes.
   - Tests that import `TweedieScaleProfileData` or its private methods fail with `ImportError`/`AttributeError`. List them in the commit message; Task 9 rewrites them.
   - Run `tests/test_tweedie_profile.py` too, and report only the failures that are not private-name imports.
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add -u src/superglm tests/test_tweedie_nb_characterisation.py tests/test_tweedie_reml_exact_scale.py
@@ -975,6 +975,14 @@ git commit -m "refactor: REML scale and Tweedie densities on the single series s
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+**Task 4 outcome:**
+
+- `solve_log_phi` stops on the move rtsafe actually takes, Newton or bisection. Testing only the Newton step never settled on the weighted SCOP fit in `test_pearson_scale_weights.py`. There φ ≈ 1.5e-7, every peak index is about 1e7, and the score's round-off (up to 5e-4, against a curvature of 17) kept Newton steps above 1e-8 after the bracket had collapsed. Master's Newton failed the same way and fell through to the bounded search this rebuild deletes. The bracket test is inclusive, so a score of exactly 0.0 stops the solve where it is. A strict test bisected away from the root and cost one p = 1.95 REML solve 29 passes instead of 5.
+- `TweedieRows.phi_solves` holds the solves by (D, M). The direct REML optimizer re-profiles each accepted line-search point with identical (Dp, Mp) at the next iteration's start, 4 of 12 calls on positive96. Master's per-φ cache absorbed these. Without the memo a fit makes 48 series passes against master's 32; with it, 32.
+- Decision (c) is honoured: `fit_reml` has no Bessel path.
+- The characterisation arm reuses `benchmarks/tweedie_nb_characterisation.build_case`, the builder that wrote the fixture, and also covers `reml_phi_books`. `tests/test_tweedie_reml_exact_scale.py` is unchanged.
+- **Open (needs a decision):** `test_tweedie_numerics.py::test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics` now raises the §10 refusal from `fit()`. The cause is fit statistics at φ ≈ 2.6e-26, where all 40 rows' modes are past 2^52.
 
 ---
 
