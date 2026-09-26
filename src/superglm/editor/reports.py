@@ -51,7 +51,6 @@ def final_fit_report_payload(
     model_revision: int | None = None,
     request_sequence: int | None = None,
     model_override=None,
-    collapse_info_override=None,
 ) -> dict[str, Any]:
     """Return the current in-force model summary and split metrics."""
     if splits is None:
@@ -69,12 +68,7 @@ def final_fit_report_payload(
         ),
         "metric_labels": {metric: METRIC_LABELS[metric] for metric in _REPORT_METRICS},
         "splits": splits,
-        "summary": summary_payload(
-            widget,
-            "in_force",
-            model_override=model_override,
-            collapse_info_override=collapse_info_override,
-        ),
+        "summary": summary_payload(widget, "in_force", model_override=model_override),
         "can_run_cv": False,
     }
 
@@ -87,7 +81,6 @@ def report_payload(
     model_revision: int | None = None,
     request_sequence: int | None = None,
     model_override=None,
-    collapse_info_override=None,
 ) -> dict[str, Any]:
     """Dispatch a named report for the local editor app."""
     if report == "final":
@@ -97,7 +90,6 @@ def report_payload(
             model_revision=model_revision,
             request_sequence=request_sequence,
             model_override=model_override,
-            collapse_info_override=collapse_info_override,
         )
     return validation_report_payload(
         widget.session,

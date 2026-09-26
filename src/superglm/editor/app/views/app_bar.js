@@ -1,15 +1,24 @@
 // @ts-check
 
+/** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
+
 /**
  * @param {object} options
  * @param {HTMLElement} options.root
  * @param {HTMLButtonElement} options.undoButton
  * @param {HTMLButtonElement} options.redoButton
+ * @param {HTMLButtonElement} options.revertButton
+ * @param {HTMLButtonElement} options.refreshButton
  * @param {(view:string)=>unknown} options.onView
  * @param {()=>unknown} options.onUndo
  * @param {()=>unknown} options.onRedo
+ * @param {()=>unknown} options.onRevert
+ * @param {()=>unknown} options.onRefresh
  */
-export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRedo }) {
+export function bindAppBar({
+  root, undoButton, redoButton, revertButton, refreshButton,
+  onView, onUndo, onRedo, onRevert, onRefresh,
+}) {
   const tabs = Array.from(root.querySelectorAll('[role="tab"]')).filter(
     (tab) => tab instanceof HTMLButtonElement,
   );
@@ -60,6 +69,8 @@ export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRed
   root.addEventListener("keydown", onTabKeyDown);
   undoButton.addEventListener("click", onUndo);
   redoButton.addEventListener("click", onRedo);
+  revertButton.addEventListener("click", onRevert);
+  refreshButton.addEventListener("click", onRefresh);
   document.addEventListener("keydown", onDocumentKeyDown);
 
   return Object.freeze({
@@ -68,6 +79,8 @@ export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRed
       root.removeEventListener("keydown", onTabKeyDown);
       undoButton.removeEventListener("click", onUndo);
       redoButton.removeEventListener("click", onRedo);
+      revertButton.removeEventListener("click", onRevert);
+      refreshButton.removeEventListener("click", onRefresh);
       document.removeEventListener("keydown", onDocumentKeyDown);
     },
   });
@@ -79,10 +92,17 @@ export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRed
  * @param {string} options.activeView
  * @param {HTMLButtonElement} options.undoButton
  * @param {HTMLButtonElement} options.redoButton
- * @param {boolean} options.canUndo
- * @param {boolean} options.canRedo
+ * @param {HTMLButtonElement} options.revertButton
+ * @param {HTMLButtonElement} options.refreshButton
+ * @param {string|null} options.undoLabel what Undo would take back; null disables it
+ * @param {string|null} options.redoLabel what Redo would put back; null disables it
+ * @param {boolean} options.canRevert
+ * @param {boolean} options.busy
  */
-export function renderAppBar({ root, activeView, undoButton, redoButton, canUndo, canRedo }) {
+export function renderAppBar({
+  root, activeView, undoButton, redoButton, revertButton, refreshButton,
+  undoLabel, redoLabel, canRevert, busy,
+}) {
   for (const element of root.querySelectorAll('[role="tab"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
     const active = element.dataset.view === activeView;
@@ -90,8 +110,25 @@ export function renderAppBar({ root, activeView, undoButton, redoButton, canUndo
     element.setAttribute("aria-selected", String(active));
     element.tabIndex = active ? 0 : -1;
   }
-  undoButton.disabled = !canUndo;
-  redoButton.disabled = !canRedo;
+  undoButton.disabled = undoLabel === null;
+  undoButton.dataset.popoverBody = undoLabel === null ? "Nothing to undo." : `Undo: ${undoLabel}`;
+  redoButton.disabled = redoLabel === null;
+  redoButton.dataset.popoverBody = redoLabel === null ? "Nothing to redo." : `Redo: ${redoLabel}`;
+  revertButton.disabled = !canRevert;
+  refreshButton.disabled = busy;
+}
+
+/**
+ * Whether anything differs from the opened model: a live manual edit, or an
+ * in-force model a structural step or a distribution re-profile put there.
+ * The live edits are the run just before the timeline's marker, so one exists
+ * exactly when the entry before the marker is an edit.
+ * @param {EditorSnapshot} snapshot
+ */
+export function revertAvailable(snapshot) {
+  const { timeline } = snapshot;
+  const marker = timeline.findIndex((entry) => entry.kind === "marker");
+  return timeline[marker - 1]?.kind === "edit" || !snapshot.in_force_is_original;
 }
 
 /** @param {EventTarget | null} target */

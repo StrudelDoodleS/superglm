@@ -492,14 +492,14 @@ def test_ten_thousand_row_likelihood_pair_is_vectorized(monkeypatch) -> None:
     mu = y * np.exp(np.linspace(-0.2, 0.2, n))
     null_mu = np.full(n, 1.0)
     weights = np.geomspace(0.5, 2.0, n)
-    real_series = tweedie_module.tweedie_log_series
+    real_series = tweedie_module.series_moments
     batch_sizes: list[int] = []
 
     def counted_series(log_t, a, **kwargs):
         batch_sizes.append(len(log_t))
         return real_series(log_t, a, **kwargs)
 
-    monkeypatch.setattr(tweedie_module, "tweedie_log_series", counted_series)
+    monkeypatch.setattr(tweedie_module, "series_moments", counted_series)
 
     fitted, null = tweedie_module._tweedie_logpdf_pair(
         y,
@@ -515,25 +515,26 @@ def test_ten_thousand_row_likelihood_pair_is_vectorized(monkeypatch) -> None:
     assert all(size > 1 for size in batch_sizes)
 
 
-def test_fit_stat_pair_passes_strict_general_power_series_budget(monkeypatch) -> None:
+def test_fit_stat_pair_evaluates_rows_wright_bessel_misses_by_series(monkeypatch) -> None:
+    """Rows Wright's function cannot evaluate get the exact series, not the saddlepoint."""
     p = 1.4
     y = np.ones(16)
     mu = np.linspace(0.9, 1.1, len(y))
     null_mu = np.full_like(y, 1.0)
     phi = 1.0 / (0.6 * 10_000.0)
-    real_series = tweedie_module.tweedie_log_series
-    budgets: list[int | None] = []
+    real_evaluate = tweedie_module._evaluate_tweedie_density
+    evaluations = []
 
     def force_wright_failure(a, b, z):
         del a, b
         return np.full_like(z, np.nan, dtype=np.float64)
 
-    def counted_series(log_t, a, **kwargs):
-        budgets.append(kwargs.get("max_total_terms"))
-        return real_series(log_t, a, **kwargs)
+    def recorded(prepared, phi, **kwargs):
+        evaluations.append(real_evaluate(prepared, phi, **kwargs))
+        return evaluations[-1]
 
     monkeypatch.setattr(tweedie_module, "wright_bessel", force_wright_failure)
-    monkeypatch.setattr(tweedie_module, "tweedie_log_series", counted_series)
+    monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", recorded)
 
     fitted, null = tweedie_module._tweedie_logpdf_pair(
         y,
@@ -545,8 +546,8 @@ def test_fit_stat_pair_passes_strict_general_power_series_budget(monkeypatch) ->
 
     assert np.all(np.isfinite(fitted))
     assert np.all(np.isfinite(null))
-    assert budgets and all(budget is not None for budget in budgets)
-    assert max(budgets) <= 4_096
+    assert evaluations
+    assert all(item.diagnostics.n_saddlepoint == 0 for item in evaluations)
 
 
 class TestREMLProfileSearchOverhead:

@@ -13,6 +13,7 @@ import logging
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -39,7 +40,11 @@ from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
-from superglm.editor.payloads import history_payload, session_payload
+from superglm.editor.payloads import (
+    session_payload,
+    timeline_payload,
+    undo_redo_payload,
+)
 from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
@@ -113,10 +118,7 @@ class EditorWidget:
         self._offset_refit_model = None
         self._offset_refit_terms: list[str] = []
         self._offset_refit_labels: list[dict[str, Any]] = []
-        self._collapsed_refit_model = None
-        self._collapsed_refit_info: dict[str, Any] | None = None
-        self._collapse_info_history: list[dict[str, Any] | None] = []
-        self._in_force_info: dict[str, Any] | None = None
+        self._offset_refit_revision: int | None = None
         self._profile_jobs: dict[str, dict[str, Any]] = {}
         self._profile_job_counter = 0
         self._profile_condition = threading.Condition(threading.RLock())
@@ -171,14 +173,11 @@ class EditorWidget:
                     name: self.session.selection(name).astype(int).tolist()
                     for name in self.session.terms
                 },
-                "can_uncollapse_levels": self.session.can_uncollapse_levels(),
-                "last_collapse": (
-                    None
-                    if not self.session.can_uncollapse_levels()
-                    or self._collapsed_refit_info is None
-                    else dict(self._collapsed_refit_info)
-                ),
-                "history": history_payload(self.session),
+                "undo_redo": undo_redo_payload(self.session),
+                "timeline": timeline_payload(self.session),
+                # With the live edits, this says whether Revert has anything to
+                # change: a structural step or a re-profile each make it False.
+                "in_force_is_original": self.session.model is self.session.reference_model,
             }
             self._state_generation += 1
             state["state_generation"] = self._state_generation
@@ -236,9 +235,9 @@ class EditorWidget:
                 editable = self.session.terms[target]
                 self.session.select_indices(target, np.arange(editable.size, dtype=np.intp))
             elif operation == "undo":
-                self.session.undo(target)
+                self.session.undo()
             elif operation == "redo":
-                self.session.redo(target)
+                self.session.redo()
             else:
                 raise EditorValueError(f"Unknown editor operation: {operation!r}")
             # A fixed-offset refit is conditional on the current edited factors,
@@ -495,10 +494,13 @@ class EditorWidget:
             current_revision = self.session.model_revision
             if model_revision is not None and int(model_revision) != current_revision:
                 return _superseded_payload(int(model_revision), request_sequence)
+            # A notebook-side edit advances the revision without passing through
+            # this widget, so a stored fixed-offset refit can outlive its edits.
+            if self._offset_refit_revision != current_revision:
+                self._invalidate_refit()
 
         offset_terms_override: list[str] | None = None
         offset_labels_override: list[dict[str, Any]] | None = None
-        collapse_info_override: dict[str, Any] | None = None
         if source == "in_force":
             model, revision = self._current_model_for_evidence()
             if model is None:
@@ -506,8 +508,6 @@ class EditorWidget:
             with self._lock:
                 if revision != self.session.model_revision:
                     return _superseded_payload(revision, request_sequence)
-                collapse_info = None if self._in_force_info is None else dict(self._in_force_info)
-            collapse_info_override = collapse_info
         else:
             with self._lock:
                 revision = self.session.model_revision
@@ -524,7 +524,6 @@ class EditorWidget:
             model_override=model,
             offset_terms_override=offset_terms_override,
             offset_labels_override=offset_labels_override,
-            collapse_info_override=collapse_info_override,
             level_display=level_display,
         )
         with self._lock:
@@ -554,7 +553,6 @@ class EditorWidget:
                 return _superseded_payload(revision, request_sequence)
             datasets = tuple(evaluation_datasets(self.session))
             reference_model = getattr(self.session, "reference_model", self.session.model)
-            collapse_info = None if self._in_force_info is None else dict(self._in_force_info)
             if reference_model is None:
                 return report_payload(
                     self,
@@ -595,7 +593,6 @@ class EditorWidget:
             model_revision=revision,
             request_sequence=request_sequence,
             model_override=summary_model,
-            collapse_info_override=collapse_info,
         )
         with self._lock:
             if revision != self.session.model_revision:
@@ -774,6 +771,7 @@ class EditorWidget:
             self._offset_refit_model = refit_model
             self._offset_refit_terms = list(terms)
             self._offset_refit_labels = offset_label_payload(self.session, terms)
+            self._offset_refit_revision = self.session.model_revision
             return summary_payload(self, "refit", level_display=level_display)
 
     def _profile_distribution(
@@ -937,13 +935,15 @@ class EditorWidget:
                 },
             }
 
-    def _collapse_levels(
+    def _structural_step(
         self,
-        term: str | None = None,
-        method: str = "auto",
+        operation: str,
+        apply: Callable[[str], Any],
         *,
+        term: str | None = None,
         level_display: str = "expanded",
     ) -> dict[str, Any]:
+        """Run one structural session change and return its atomic transition envelope."""
         level_display = validate_level_display(level_display)
         with self._lock:
             operation_start = time.perf_counter()
@@ -952,24 +952,33 @@ class EditorWidget:
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
-            previous_info = None if self._in_force_info is None else dict(self._in_force_info)
             fit_start = time.perf_counter()
-            refit_model = self.session.replace_with_collapsed_levels(target, method=method)
+            apply(target)
             fit_end = time.perf_counter()
-            self._collapse_info_history.append(previous_info)
-            self._collapsed_refit_model = refit_model
-            self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
-            self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
             self._chart_generation += 1
             return self._structural_transition(
-                "collapse_levels",
+                operation,
                 operation_start=operation_start,
                 fit_start=fit_start,
                 fit_end=fit_end,
                 level_display=level_display,
             )
+
+    def _collapse_levels(
+        self,
+        term: str | None = None,
+        method: str = "auto",
+        *,
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        return self._structural_step(
+            "collapse_levels",
+            lambda target: self.session.replace_with_collapsed_levels(target, method=method),
+            term=term,
+            level_display=level_display,
+        )
 
     def _ungroup_levels(
         self,
@@ -978,40 +987,47 @@ class EditorWidget:
         *,
         level_display: str = "expanded",
     ) -> dict[str, Any]:
-        level_display = validate_level_display(level_display)
-        with self._lock:
-            operation_start = time.perf_counter()
-            if term is not None:
-                self._select_term(term)
-            target = self.selected_term
-            selected_indices = self.session.selection(target).astype(int).tolist()
-            selected_levels = self._selected_level_labels(target)
-            previous_info = None if self._in_force_info is None else dict(self._in_force_info)
-            previous_history_depth = len(self.session.collapse_history)
-            fit_start = time.perf_counter()
-            refit_model = self.session.replace_with_ungrouped_levels(target, method=method)
-            fit_end = time.perf_counter()
-            current_history_depth = len(self.session.collapse_history)
-            if current_history_depth > previous_history_depth:
-                self._collapse_info_history.append(previous_info)
-            elif current_history_depth < previous_history_depth:
-                del self._collapse_info_history[current_history_depth:]
-            self._collapsed_refit_model = refit_model
-            refit_info = getattr(refit_model, "_editor_level_collapse", None)
-            self._collapsed_refit_info = None if not refit_info else dict(refit_info)
-            self._in_force_info = (
-                None if self._collapsed_refit_info is None else dict(self._collapsed_refit_info)
-            )
-            self._invalidate_refit()
-            self._restore_selection(target, selected_levels, selected_indices)
-            self._chart_generation += 1
-            return self._structural_transition(
-                "ungroup_levels",
-                operation_start=operation_start,
-                fit_start=fit_start,
-                fit_end=fit_end,
-                level_display=level_display,
-            )
+        return self._structural_step(
+            "ungroup_levels",
+            lambda target: self.session.replace_with_ungrouped_levels(target, method=method),
+            term=term,
+            level_display=level_display,
+        )
+
+    def _set_reference(
+        self,
+        term: str,
+        level: str,
+        method: str = "auto",
+        *,
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        return self._structural_step(
+            "set_reference",
+            lambda target: self.session.replace_with_reference_level(target, level, method=method),
+            term=term,
+            level_display=level_display,
+        )
+
+    def _shape_range(
+        self,
+        term: str,
+        *,
+        lo: str | float,
+        hi: str | float,
+        degree: int,
+        join: str = "tangent",
+        method: str = "auto",
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        return self._structural_step(
+            "shape_range",
+            lambda target: self.session.replace_with_shaped_range(
+                target, lo=lo, hi=hi, degree=degree, join=join, method=method
+            ),
+            term=term,
+            level_display=level_display,
+        )
 
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
         with self._lock:
@@ -1021,32 +1037,12 @@ class EditorWidget:
             self._chart_generation += 1
             return self._state()
 
-    def _uncollapse_levels(self, *, level_display: str = "expanded") -> dict[str, Any]:
-        level_display = validate_level_display(level_display)
-        with self._lock:
-            operation_start = time.perf_counter()
-            fit_start = time.perf_counter()
-            restored_model = self.session.uncollapse_levels()
-            fit_end = time.perf_counter()
-            restored_info = (
-                self._collapse_info_history.pop() if self._collapse_info_history else None
-            )
-            self._collapsed_refit_model = (
-                restored_model if getattr(restored_model, "_editor_level_collapse", None) else None
-            )
-            self._collapsed_refit_info = None if restored_info is None else dict(restored_info)
-            self._in_force_info = None if restored_info is None else dict(restored_info)
-            self._invalidate_refit()
-            if self.selected_term not in self.session.terms:
-                self.selected_term = next(iter(self.session.terms), "")
-            self._chart_generation += 1
-            return self._structural_transition(
-                "uncollapse_levels",
-                operation_start=operation_start,
-                fit_start=fit_start,
-                fit_end=fit_end,
-                level_display=level_display,
-            )
+    def _revert_to_original(self, *, level_display: str = "expanded") -> dict[str, Any]:
+        return self._structural_step(
+            "revert_to_original",
+            lambda _target: self.session.revert_to_reference_model(),
+            level_display=level_display,
+        )
 
     def _selected_level_labels(self, term: str) -> list[str]:
         editable = self.session.terms.get(term)
@@ -1084,6 +1080,7 @@ class EditorWidget:
         self._offset_refit_model = None
         self._offset_refit_terms = []
         self._offset_refit_labels = []
+        self._offset_refit_revision = None
 
 
 def _superseded_payload(

@@ -90,12 +90,11 @@ SELECTED_COLOR = "rgba(22, 163, 74, 0.62)"
 EXPOSURE_FILL = _rgba(CHART["exposure"]["fill"], CHART["exposure"]["alpha"])
 _FITTED = dict(color=CHART["edited"]["color"], width=CHART["edited"]["width"])
 _REFERENCE = dict(
-    color=CHART["original"]["color"],
+    color=_rgba(CHART["original"]["color"], CHART["original"]["alpha"]),
     width=CHART["original"]["width"],
-    dash=_dash(CHART["original"]["dash"]),
 )
 _ZERO = dict(
-    color=CHART["zero"]["color"],
+    color=_rgba(CHART["zero"]["color"], CHART["zero"]["alpha"]),
     width=CHART["zero"]["width"],
     dash=_dash(CHART["zero"]["dash"]),
 )
@@ -1563,7 +1562,7 @@ def plotly_portfolio(payload: Any) -> go.Figure:
         for quantile in payload.quantiles:
             fig.add_vline(
                 x=payload.total_quantiles[quantile],
-                line_color=CHART["zero"]["color"],
+                line_color=_ZERO["color"],
                 line_width=CHART["zero"]["width"],
                 line_dash=_ZERO["dash"],
                 row=1,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+import numpy as np
 import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 
@@ -23,6 +24,7 @@ from superglm.features import (
     _spline_knots,
     _spline_multi_penalty,
     _spline_penalties,
+    _spline_ranges,
     _spline_runtime,
     _spline_select,
     _spline_subclass_ops,
@@ -30,6 +32,9 @@ from superglm.features import (
 from superglm.types import GroupInfo, LambdaPolicy, LinearConstraintSet, TensorMarginalInfo
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from superglm.features._spline_ranges import PolynomialRange
     from superglm.solvers.scop import SCOPSolverReparam
 
 
@@ -52,7 +57,7 @@ class _SplineBase:
     """Base class for all spline feature specs.
 
     Subclasses must implement ``_build_penalty()`` and may override
-    ``_apply_constraints()`` to add boundary constraints.
+    ``_constraint_rows()`` to add boundary constraints.
 
     Basis capability attributes (override in subclasses):
         _penalty_semantics : how the penalty is computed
@@ -110,6 +115,13 @@ class _SplineBase:
     _select_supported: bool = True
     _tensor_supported: bool = True
 
+    # Class-level defaults for the polynomial-range state. Unpickling bypasses
+    # `__init__`, so a spec pickled before this state existed reads these: no
+    # ranges, and base knots equal to the fitted ones. Immutable, because a
+    # class attribute is shared by every instance that never assigns its own.
+    _polynomial_ranges: tuple[PolynomialRange, ...] = ()
+    _base_interior_knots: NDArray | None = None
+
     def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
         """Whether select=True is supported with these m orders.
 
@@ -150,6 +162,7 @@ class _SplineBase:
         constraint=None,
         m: int | tuple[int, ...] = 2,
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
+        polynomial_ranges: Sequence[PolynomialRange] | None = None,
     ):
         _spline_config.initialize_spec(
             self,
@@ -167,6 +180,7 @@ class _SplineBase:
             constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
+            polynomial_ranges=polynomial_ranges,
         )
 
     def _prepare_eval_points(self, x: NDArray) -> tuple[NDArray, bool]:
@@ -204,9 +218,10 @@ class _SplineBase:
         self,
         x: NDArray,
         sample_weight: NDArray | None = None,
+        n_bins: int | None = None,
     ) -> None:
-        """Place interior knots and build the full knot vector."""
-        _spline_runtime.place_knots(self, x, sample_weight)
+        """Place interior knots and build the full knot vector (``n_bins``: a binned fit's)."""
+        _spline_runtime.place_knots(self, x, sample_weight, n_bins)
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
         """Build the full knot vector from interior knots.
@@ -238,7 +253,8 @@ class _SplineBase:
         reused on every subsequent ``transform()`` / ``predict()`` call.
         Pass them back via ``Spline(knots=..., boundary=...)`` to
         guarantee identical placement *and* boundary on a refit with
-        different data.
+        different data. With polynomial ranges they hold the repeated edge
+        knots, which ``knots=`` refuses; pass ``fitted_base_knots`` instead.
         """
         if self._n_basis == 0:
             return None
@@ -250,6 +266,24 @@ class _SplineBase:
         if self._n_basis == 0:
             return None
         return (self._lo, self._hi)
+
+    @property
+    def fitted_base_knots(self) -> NDArray | None:
+        """Interior knots as placed before any range edges went in, or None before fit.
+
+        ``fitted_knots`` less the polynomial ranges' edge knots, and with the
+        placed knots inside a range still present. Pass these back as
+        ``knots=`` (with ``boundary=fitted_boundary``) to keep the free part's
+        knots fixed when the ranges change.
+        """
+        if self._base_interior_knots is None:
+            return self.fitted_knots
+        return self._base_interior_knots.copy()
+
+    @property
+    def polynomial_ranges(self) -> tuple[PolynomialRange, ...]:
+        """The pinned ranges; sorted, with float edges, once the spline is built."""
+        return self._polynomial_ranges
 
     @property
     def absorbs_intercept(self) -> bool:
@@ -278,12 +312,25 @@ class _SplineBase:
             apply_identifiability=self._apply_identifiability,
         )
 
-    def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
-        """Apply boundary constraints. Returns (B, omega, n_cols, projection).
+    def _constraint_rows(self) -> NDArray:
+        """Equality rows C with ``C @ beta = 0`` on the raw coefficients.
 
-        Default: no constraints (identity).
+        Default: the polynomial ranges' pinning rows, empty without ranges.
         """
-        return B, omega, self._n_basis, None
+        return _spline_ranges.pinning_rows(self._knots, self.degree, self._polynomial_ranges)
+
+    def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
+        """Absorb ``C beta = 0`` as ``beta = Z theta``. Returns (B, omega, n_cols, projection).
+
+        Z spans the null space of C (Wood 2017, section 1.8.1); without rows
+        the basis is left as it is.
+        """
+        C = self._constraint_rows()
+        if C.shape[0] == 0:
+            return B, omega, self._n_basis, None
+        Z = _spline_ranges.constraint_null_space(C)
+        self._Z = Z
+        return B, Z.T @ omega @ Z, Z.shape[1], Z
 
     def _identifiability_projection(
         self,
@@ -304,19 +351,9 @@ class _SplineBase:
         """Remove the intercept-confounded smooth direction."""
         return _spline_identifiability.apply_identifiability_for_spec(self, x, omega, projection)
 
-    def _natural_constraint_null_space(self) -> NDArray:
-        """Compute (K, K-2) null space of the natural boundary constraints.
-
-        Builds a 2xK constraint matrix C where each row is the second
-        derivative of each B-spline basis function evaluated at a boundary.
-        The null space of C (via QR of C.T) gives the subspace satisfying
-        f''(boundary) = 0.
-
-        Uses ``BSpline.__call__(x, nu=2)`` (de Boor algorithm) rather than
-        ``BSpline.derivative(2)`` to avoid the repeated-knot division error
-        at clamped boundaries.
-        """
-        return _spline_constraints.build_natural_constraint_null_space(
+    def _natural_constraint_rows(self) -> NDArray:
+        """The 2 x K natural boundary rows f''(lo) = f''(hi) = 0."""
+        return _spline_constraints.build_natural_constraint_rows(
             self._knots,
             self.degree,
             lo=self._lo,
@@ -347,11 +384,12 @@ class _SplineBase:
         return _spline_build.build_group_info(self, x, sample_weight)
 
     def build_knots_and_penalty(
-        self, x: NDArray, sample_weight: NDArray | None = None
-    ) -> tuple[NDArray, int, NDArray | None]:
+        self, x: NDArray, sample_weight: NDArray | None = None, n_bins: int | None = None
+    ) -> tuple[NDArray | None, int, NDArray | None]:
         """Place knots and return penalty info, without building the full basis.
 
-        Used by the discretization path to avoid the O(n) basis construction.
+        Used by the discretization path, binning ``x`` to ``n_bins``, to avoid
+        the O(n) basis construction.
         Applies boundary constraints (NaturalSpline/CRS) and identifiability
         so the returned penalty and column count match the exact ``build()``
         path.
@@ -361,11 +399,12 @@ class _SplineBase:
 
         Returns
         -------
-        omega : (n_cols, n_cols) penalty matrix (projected if constrained).
+        omega : (n_cols, n_cols) penalty matrix (projected if constrained), or
+            None when polynomial ranges pin every knot interval.
         n_cols : effective number of basis columns.
         projection : (K, n_cols) constraint projection, or None.
         """
-        return _spline_build.build_knots_and_penalty(self, x, sample_weight)
+        return _spline_build.build_knots_and_penalty(self, x, sample_weight, n_bins)
 
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix using knots learned during build()."""
@@ -412,7 +451,7 @@ class _BSplineBase(_SplineBase):
 
     Provides the open knot-vector assembly used by both PSpline and
     BSplineSmooth. CubicRegressionSpline has its own clamped knot assembly
-    and inherits from _SplineBase directly.
+    and does not inherit from it.
     """
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
@@ -430,6 +469,33 @@ class _BSplineBase(_SplineBase):
         to the data range.
         """
         _spline_subclass_ops.assemble_open_knot_vector(self, interior)
+
+
+class _IntegratedPenaltySpline(_SplineBase):
+    """Shared base for the derivative-penalty splines (BSplineSmooth, CubicRegressionSpline).
+
+    The penalty integrates the squared m-th derivative knot interval by knot
+    interval, so it skips the intervals the polynomial ranges pin.
+    """
+
+    _penalty_semantics = "integrated_derivative"
+
+    def _build_penalty_for_order(self, order: int) -> NDArray:
+        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature.
+
+        With polynomial ranges, the penalty is certified to keep its rank
+        under REML's threshold (``certify_penalty_rank``).
+        """
+        excluded = _spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi)
+        omega = _spline_penalties.build_integrated_derivative_penalty(
+            self._knots, self.degree, order, excluded=excluded
+        )
+        if self._polynomial_ranges:
+            structural = _spline_penalties.structural_derivative_penalty(
+                self._knots, self.degree, order, excluded=excluded
+            )
+            _spline_ranges.certify_penalty_rank(omega, structural, self._constraint_rows())
+        return omega
 
 
 class PSpline(_BSplineBase):
@@ -535,7 +601,7 @@ class PSpline(_BSplineBase):
         return self._build_penalty_for_order(self._m_orders[0])
 
 
-class BSplineSmooth(_BSplineBase):
+class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
     """B-spline smooth: B-spline basis with an integrated-derivative penalty.
 
     Same raw B-spline basis as ``PSpline``, but penalised via the
@@ -585,9 +651,12 @@ class BSplineSmooth(_BSplineBase):
         Integrated derivative order(s) for the penalty.
     lambda_policy : LambdaPolicy or dict or None
         Per-component lambda control.
+    polynomial_ranges : sequence of PolynomialRange or None
+        Ranges of the axis on which the curve is pinned to a polynomial of
+        the range's degree; the rest stays the penalised smooth, and the
+        penalty skips the pinned intervals.
     """
 
-    _penalty_semantics = "integrated_derivative"
     _max_penalty_order: int | None = None  # validated dynamically in _build_penalty_for_order
 
     def __init__(
@@ -606,6 +675,7 @@ class BSplineSmooth(_BSplineBase):
         constraint=None,
         m: int | tuple[int, ...] = 2,
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
+        polynomial_ranges: Sequence[PolynomialRange] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -622,12 +692,7 @@ class BSplineSmooth(_BSplineBase):
             constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
-        )
-
-    def _build_penalty_for_order(self, order: int) -> NDArray:
-        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature."""
-        return _spline_penalties.build_integrated_derivative_penalty(
-            self._knots, self.degree, order
+            polynomial_ranges=polynomial_ranges,
         )
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
@@ -692,7 +757,6 @@ class NaturalSpline(_SplineBase):
             m=m,
             lambda_policy=lambda_policy,
         )
-        self._Z: NDArray | None = None
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
         return _spline_penalties.build_difference_penalty(self._n_basis, order)
@@ -705,16 +769,13 @@ class NaturalSpline(_SplineBase):
             return super()._basis_matrix(x)
         return self._linear_tail_basis_matrix(x)
 
-    def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
+    def _constraint_rows(self) -> NDArray:
         if self.degree < 3:
-            return B, omega, self._n_basis, None
-        Z = self._natural_constraint_null_space()
-        self._Z = Z
-        omega_nat = Z.T @ omega @ Z  # (K-2, K-2) projected penalty
-        return B, omega_nat, self._n_basis - 2, Z
+            return super()._constraint_rows()
+        return self._natural_constraint_rows()
 
 
-class CubicRegressionSpline(_SplineBase):
+class CubicRegressionSpline(_IntegratedPenaltySpline):
     """CR spline: integrated f'' squared penalty + natural boundary constraints.
 
     Compatible with the standard cubic regression spline construction
@@ -741,9 +802,13 @@ class CubicRegressionSpline(_SplineBase):
         automatic lambda estimation uses the QP passthrough heuristic
         (unconstrained REML followed by constrained refit), not exact joint
         constrained REML.
+    polynomial_ranges : sequence of PolynomialRange or None
+        Ranges of the axis on which the curve is pinned to a polynomial of
+        the range's degree; the rest stays the penalised smooth, and the
+        penalty skips the pinned intervals.
+        A range reaching an end replaces that end's natural condition.
     """
 
-    _penalty_semantics = "integrated_derivative"
     _max_penalty_order = 3
 
     def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
@@ -765,6 +830,7 @@ class CubicRegressionSpline(_SplineBase):
         constraint=None,
         m: int | tuple[int, ...] = 2,
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
+        polynomial_ranges: Sequence[PolynomialRange] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -781,8 +847,8 @@ class CubicRegressionSpline(_SplineBase):
             constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
+            polynomial_ranges=polynomial_ranges,
         )
-        self._Z: NDArray | None = None
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
         """Clamped knot vector with exact boundary knots (no padding).
@@ -792,12 +858,6 @@ class CubicRegressionSpline(_SplineBase):
         epsilon like the base-class default.
         """
         _spline_subclass_ops.assemble_clamped_knot_vector(self, interior)
-
-    def _build_penalty_for_order(self, order: int) -> NDArray:
-        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature."""
-        return _spline_penalties.build_integrated_derivative_penalty(
-            self._knots, self.degree, order
-        )
 
     def _build_penalty(self) -> NDArray:
         return self._build_penalty_for_order(self._m_orders[0])
@@ -819,12 +879,19 @@ class CubicRegressionSpline(_SplineBase):
         """
         return _spline_subclass_ops.build_shape_constraints_raw(self)
 
-    def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
-        """Natural boundary constraints: f''(lo) = f''(hi) = 0."""
-        Z = self._natural_constraint_null_space()
-        self._Z = Z
-        omega_nat = Z.T @ omega @ Z
-        return B, omega_nat, self._n_basis - 2, Z
+    def _constraint_rows(self) -> NDArray:
+        """Natural boundary rows f''(lo) = f''(hi) = 0, then the ranges' pinning rows.
+
+        A range reaching an end sets the curve's shape there, so that end's
+        natural row goes: for a Flat or Line range it is implied (a dependent
+        duplicate), and for a Quadratic or Cubic one it would flatten the range.
+        """
+        ranges = self._polynomial_ranges
+        free_ends = [
+            all(r.lo > self._lo for r in ranges),
+            all(r.hi < self._hi for r in ranges),
+        ]
+        return np.vstack([self._natural_constraint_rows()[free_ends], super()._constraint_rows()])
 
 
 class CardinalCRSpline(_SplineBase):
@@ -914,8 +981,12 @@ class CardinalCRSpline(_SplineBase):
         self,
         x: NDArray,
         sample_weight: NDArray | None = None,
+        n_bins: int | None = None,
     ) -> None:
-        """Place K = n_knots + 2 knots and build the cardinal CR matrices."""
+        """Place K = n_knots + 2 knots and build the cardinal CR matrices.
+
+        ``n_bins`` certifies polynomial ranges, which this kind refuses.
+        """
         _spline_cardinal_spec.place_knots(self, x, sample_weight)
 
     def _build_cr_matrices(self) -> None:
@@ -1001,8 +1072,14 @@ def Spline(
     constraint=None,
     m: int | tuple[int, ...] = 2,
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
+    polynomial_ranges: Sequence[PolynomialRange] | None = None,
 ) -> _SplineBase:
-    """Create a spline feature spec."""
+    """Create a spline feature spec.
+
+    ``polynomial_ranges`` (``kind="bs"`` or ``"cr"`` only) pins the curve to a
+    polynomial on each :class:`PolynomialRange` and leaves the rest the
+    penalised smooth.
+    """
     return cast(
         _SplineBase,
         _spline_factory.Spline(
@@ -1022,6 +1099,7 @@ def Spline(
             constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
+            polynomial_ranges=polynomial_ranges,
         ),
     )
 

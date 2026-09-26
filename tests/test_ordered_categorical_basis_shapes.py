@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 
 from superglm import OrderedCategorical, Piecewise, Polynomial, Spline, SuperGLM
-from superglm.editor.collapse import _ordered_spec_with_grouping
+from superglm.editor.collapse import rebuilt_ordered_spec
 from superglm.features.grouping import collapse_levels
 from superglm.features.ordered_categorical import resolve_interaction_parent
 from superglm.types import GroupInfo
@@ -383,12 +383,11 @@ def test_editor_collapse_and_ungroup_round_trip_stays_green() -> None:
     baseline = model.predict(X.head(50))
 
     data = X["band"].to_numpy(dtype=object)
-    grouped = _ordered_spec_with_grouping(
+    grouped = rebuilt_ordered_spec(
         spec,
-        _grouping({"Mi001+Mi002": ["Mi001", "Mi002"]}),
-        ["Mi001", "Mi002"],
-        "most_exposed",
-        data,
+        grouping=_grouping({"Mi001+Mi002": ["Mi001", "Mi002"]}),
+        base="most_exposed",
+        data=data,
     )
     assert grouped._spline.breaks == [3.0]
     collapsed_model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": grouped})
@@ -398,9 +397,7 @@ def test_editor_collapse_and_ungroup_round_trip_stays_green() -> None:
     # grouping=None, and the break re-resolves to the declared position.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        ungrouped = _ordered_spec_with_grouping(
-            grouped, None, ["Mi001", "Mi002"], "most_exposed", data
-        )
+        ungrouped = rebuilt_ordered_spec(grouped, grouping=None, base="most_exposed", data=data)
     assert ungrouped._spline.breaks == [4.0]
     restored = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": ungrouped})
     restored.fit(X, y)

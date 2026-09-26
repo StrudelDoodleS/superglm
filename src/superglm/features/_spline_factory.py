@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, cast
 
 from numpy.typing import ArrayLike
@@ -9,6 +10,7 @@ from numpy.typing import ArrayLike
 from superglm.types import LambdaPolicy
 
 if TYPE_CHECKING:
+    from superglm.features._spline_ranges import PolynomialRange
     from superglm.features.spline import _SplineBase
 
 _VALID_SPLINE_KINDS = ("bs", "ps", "ns", "cr", "cr_cardinal")
@@ -57,6 +59,7 @@ def Spline(
     constraint=None,
     m: int | tuple[int, ...] = 2,
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
+    polynomial_ranges: Sequence[PolynomialRange] | None = None,
 ) -> _SplineBase:
     """Create a spline feature spec."""
     from superglm.features.spline import (
@@ -84,6 +87,15 @@ def Spline(
         raise ValueError(
             "Cannot specify both k and n_knots. Use k (public basis size) or n_knots (interior knots), not both."
         )
+
+    if polynomial_ranges and kind not in ("bs", "cr"):
+        raise ValueError(
+            f"polynomial_ranges needs kind='bs' or kind='cr', got kind={kind!r}: range edges "
+            "repeat knots, which the equal-spacing difference penalties of 'ps' and 'ns' and "
+            "the knot-gap penalty of 'cr_cardinal' cannot take."
+        )
+    # Only the two supporting classes take the keyword; the others never see it.
+    range_kwargs = {"polynomial_ranges": polynomial_ranges} if polynomial_ranges else {}
 
     if constraint is not None and kind == "ns":
         raise NotImplementedError(
@@ -121,6 +133,7 @@ def Spline(
                 constraint=constraint,
                 m=m,
                 lambda_policy=lambda_policy,
+                **range_kwargs,
             ),
         )
     if kind in ("cr", "cr_cardinal"):
@@ -140,6 +153,7 @@ def Spline(
                 constraint=constraint,
                 m=m,
                 lambda_policy=lambda_policy,
+                **range_kwargs,
             ),
         )
     return cast(

@@ -1,11 +1,18 @@
 import { fmt } from "./format.js";
+import { drawShapeOverlay } from "./chart/shape_overlay.js";
 import {
+  chartSize,
   evenlySpacedIndices,
   planCategoricalAxis,
   splitLabelGraphemes
 } from "./chart/geometry.js";
+import { el, line, text } from "./chart/svg.js";
 
 const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
+// A curve drawn with more points than this hides them until they are
+// selected, hovered, or within the lens around the pointer.
+const DENSE_POINT_COUNT = 40;
+const LENS_HALF_WIDTH = 26;
 const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
   "font-family",
   "font-size",
@@ -54,8 +61,12 @@ export function drawChart(term, selection, context) {
   const { svg } = context;
   const visualMode = context.visualMode();
   svg.innerHTML = "";
-  const width = 940, height = 520;
-  const baseMargin = { left: 76, right: 76, top: 48, bottom: 72 };
+  // Draw at the chart's own CSS-pixel size so nothing is scaled: text keeps
+  // its nominal size and the plot fills its panel. A hidden chart, or a DOM
+  // without layout, draws at the fallback size.
+  const { width, height } = chartSize(svg.clientWidth, svg.clientHeight);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  const baseMargin = { left: 58, right: 46, top: 28, bottom: 52 };
   const view = resolveDisplayTerm(
     term,
     context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
@@ -135,9 +146,9 @@ export function drawChart(term, selection, context) {
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
   // curves and interactive handles/points.
   exposureLayer(svg, view, sx, margin, innerW, innerH, exposure);
-  for (const tick of ticks(yMin, yMax, 6)) {
+  for (const tick of ticks(yMin, yMax, tickCount(innerH, 70))) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
-    text(svg, margin.left - 10, sy(tick) + 4, fmt(tick), "tick-label", "end");
+    text(svg, margin.left - 8, sy(tick) + 4, fmt(tick), "tick-label", "end");
   }
   if (categoricalLayout) {
     for (const tick of categoricalLayout.ticks) {
@@ -162,29 +173,31 @@ export function drawChart(term, selection, context) {
       }
     }
   } else {
-    for (const tick of continuousXTicks(xMin, xMax)) {
+    for (const tick of continuousXTicks(xMin, xMax, innerW)) {
       const tickX = sx(tick.value);
-      const tickY = margin.top + innerH + 22;
+      const tickY = margin.top + innerH + 20;
       line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
       text(svg, tickX, tickY, tick.label, "tick-label", "middle");
     }
   }
+  // The baseline at relativity one: the level an edit is judged against.
   const baseline = Math.min(Math.max(1, yMin), yMax);
   line(svg, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
-  line(svg, margin.left, margin.top, margin.left, margin.top + innerH, "axis");
   line(svg, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
 
-  text(svg, width / 2, 24, term.title, "label", "middle");
   text(
     svg,
-    width / 2,
-    categoricalLayout ? categoricalLayout.titleY : height - 20,
+    margin.left + innerW / 2,
+    categoricalLayout ? categoricalLayout.titleY : height - 12,
     term.x_label,
     "label x-axis-title",
     "middle"
   );
-  const yLabel = text(svg, 22, margin.top + innerH / 2, term.y_label, "label", "middle");
-  yLabel.setAttribute("transform", `rotate(-90 22 ${margin.top + innerH / 2})`);
+  const yLabel = text(svg, 14, margin.top + innerH / 2, term.y_label, "label", "middle");
+  yLabel.setAttribute("transform", `rotate(-90 14 ${margin.top + innerH / 2})`);
+  // Shaped ranges sit above the grid and beneath the curves; a Build animation
+  // shows the basis alone.
+  if (!buildActive) drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH });
 
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
@@ -212,7 +225,8 @@ export function drawChart(term, selection, context) {
   const displaySelected = displaySelection(view, selection);
   const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
   const handlesMode = visualMode === "handles" && term.controls;
-  if (!handlesMode && selectedBounds) drawSelectionBounds(svg, selectedBounds);
+  const plot = { top: margin.top, height: innerH };
+  if (!handlesMode && selectedBounds) drawSelectionBounds(svg, selectedBounds, plot);
   if (!handlesMode) {
     if (view.displayIsCollapsed) drawCollapsedLevelGroups(svg, view, sx, sy);
     else drawLevelGroups(svg, view, sx, sy);
@@ -223,7 +237,10 @@ export function drawChart(term, selection, context) {
   const unselectedPoints = [];
   let pointLayer = null;
   if (!handlesMode) {
-    pointLayer = el("g", { class: "point-layer" });
+    pointLayer = el("g", {
+      class: "point-layer",
+      "data-dense": String(basePoints.size > DENSE_POINT_COUNT)
+    });
     svg.appendChild(pointLayer);
     for (const i of visiblePoints) {
       if (displaySelected.has(i)) selectedPoints.push(i);
@@ -241,7 +258,13 @@ export function drawChart(term, selection, context) {
   applyPlotClip(svg);
   const legendLayer = el("g", { class: "legend-layer" });
   svg.appendChild(legendLayer);
-  legend(legendLayer, width - 160, 26, view.displayIsCollapsed, Boolean(previous));
+  legend(legendLayer, width - 10, 13, {
+    originalProjected: view.displayIsCollapsed,
+    hasPrevious: Boolean(previous),
+    exposureLabel: exposure && exposure.y && exposure.y.length
+      ? exposure.label || "exposure"
+      : null
+  });
 
   svg._scale = {
     sx, sy, x, y, xMin, xMax, yMin, yMax,
@@ -324,8 +347,37 @@ export function updateChartSelection(term, selection, context) {
         scale.innerW,
         scale.innerH
       );
-  updateSelectionBounds(svg, bounds);
+  updateSelectionBounds(svg, bounds, { top: scale.margin.top, height: scale.innerH });
   positionSelectionMenu(svg, context.selectionMenu, bounds);
+}
+
+/**
+ * A dense curve shows the points near the pointer: a lens that follows it
+ * across the chart, so the handles are there when reached for and the line
+ * stays clean otherwise. Bound once; the drawn circles change underneath.
+ * @param {SVGSVGElement} svg
+ */
+export function bindPointLens(svg) {
+  const reveal = (pointerX) => {
+    const layer = svg.querySelector(".point-layer[data-dense='true']");
+    if (!layer) return;
+    for (const point of layer.querySelectorAll("circle.point[data-index]")) {
+      const near = pointerX !== null &&
+        Math.abs(Number(point.getAttribute("cx")) - pointerX) <= LENS_HALF_WIDTH;
+      point.classList.toggle("near", near);
+    }
+  };
+  svg.addEventListener("pointermove", (event) => reveal(svgPointerX(svg, event)));
+  svg.addEventListener("pointerleave", () => reveal(null));
+}
+
+function svgPointerX(svg, event) {
+  const matrix = svg.getScreenCTM();
+  if (!matrix) return null;
+  const point = svg.createSVGPoint();
+  point.x = event.clientX;
+  point.y = event.clientY;
+  return point.matrixTransform(matrix.inverse()).x;
 }
 
 function resolveDisplayTerm(term, mode) {
@@ -405,6 +457,7 @@ function applyPlotClip(svg) {
     ".ci-whisker",
     ".exposure",
     ".exposure-density",
+    ".exposure-edge",
     ".basis-contribution",
     ".basis-active",
     ".basis-build-halo",
@@ -482,9 +535,7 @@ function showPointTooltip(svg, target, lines) {
   const cy = Number(target.getAttribute("cy") || 0);
   const width = tooltipWidth(lines);
   const height = 12 + lines.length * 16;
-  const bounds = svg.viewBox.baseVal;
-  const svgWidth = bounds && bounds.width ? bounds.width : Number(svg.getAttribute("width")) || 940;
-  const svgHeight = bounds && bounds.height ? bounds.height : Number(svg.getAttribute("height")) || 520;
+  const { width: svgWidth, height: svgHeight } = svg.viewBox.baseVal;
   const x = Math.max(8, Math.min(svgWidth - width - 8, cx + 12));
   const y = Math.max(8, Math.min(svgHeight - height - 8, cy - height - 12));
   const group = el("g", { class: "point-tooltip" });
@@ -596,18 +647,16 @@ function drawLevelGroupMarker(svg, x, y, sx, sy, groupIndex) {
   }
 }
 
+// The categorical palettes live in tokens.css, one value per theme: the SVG
+// names a colour by index and the stylesheet supplies it, at the alpha asked.
 function levelGroupColor(index, alpha = 1) {
-  const colors = [
-    [196, 116, 0],
-    [126, 34, 206],
-    [5, 150, 105],
-    [220, 38, 38],
-    [8, 145, 178],
-    [37, 99, 235]
-  ];
-  const rgb = colors[Math.abs(Number(index) || 0) % colors.length];
-  const opacity = Math.max(0, Math.min(1, Number(alpha)));
-  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${opacity})`;
+  return paletteColor("group", 6, index, alpha);
+}
+
+function paletteColor(palette, count, index, alpha) {
+  const slot = Math.abs(Number(index) || 0) % count;
+  const percent = Math.max(0, Math.min(1, Number(alpha))) * 100;
+  return `color-mix(in srgb, var(--${palette}-${slot}) ${percent}%, transparent)`;
 }
 
 function drawControlHandles(svg, term, sx, sy, margin, innerH) {
@@ -706,32 +755,14 @@ function finalContributionEta(basis, logEffects, n) {
   return eta;
 }
 
+// The build curve runs from the basis green to the finished blue.
 function mixBuildColor(progress) {
-  const t = Math.max(0, Math.min(1, Number(progress) || 0));
-  const start = [22, 163, 74];
-  const end = [9, 105, 218];
-  const rgb = start.map((value, i) => Math.round(value + (end[i] - value) * t));
-  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+  const percent = Math.max(0, Math.min(1, Number(progress) || 0)) * 100;
+  return `color-mix(in srgb, var(--build-end) ${percent}%, var(--green))`;
 }
 
 function basisColor(index, alpha = 1) {
-  const colors = [
-    [22, 163, 74],
-    [217, 119, 6],
-    [124, 58, 237],
-    [8, 145, 178],
-    [220, 38, 38],
-    [37, 99, 235],
-    [194, 65, 12],
-    [101, 163, 13],
-    [190, 24, 93],
-    [15, 118, 110],
-    [147, 51, 234],
-    [202, 138, 4]
-  ];
-  const rgb = colors[Math.abs(Number(index) || 0) % colors.length];
-  const opacity = Math.max(0, Math.min(1, Number(alpha)));
-  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${opacity})`;
+  return paletteColor("basis", 12, index, alpha);
 }
 
 function contributionComponents(term) {
@@ -785,29 +816,30 @@ function selectionBounds(x, y, selection, sx, sy, margin, innerW, innerH) {
   return { x: x0, y: y0, width: Math.max(1, x1 - x0), height: Math.max(1, y1 - y0) };
 }
 
-function drawSelectionBounds(svg, bounds) {
-  for (const className of ["selection-bounds-halo", "selection-bounds"]) {
-    svg.appendChild(el("rect", {
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-      rx: 4,
-      ry: 4,
-      class: className
-    }));
+// The selection is drawn twice: a light band down the whole plot over the
+// selected stretch, and a quiet frame around the points the palette sits by.
+function selectionRects(bounds, plot) {
+  return [
+    ["selection-bounds-halo", { x: bounds.x, y: plot.top, width: bounds.width, height: plot.height, rx: 0, ry: 0 }],
+    ["selection-bounds", { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, rx: 4, ry: 4 }]
+  ];
+}
+
+function drawSelectionBounds(svg, bounds, plot) {
+  for (const [className, attrs] of selectionRects(bounds, plot)) {
+    svg.appendChild(el("rect", { ...attrs, class: className }));
   }
 }
 
-function updateSelectionBounds(svg, bounds) {
-  for (const className of ["selection-bounds-halo", "selection-bounds"]) {
+function updateSelectionBounds(svg, bounds, plot) {
+  for (const [className, attrs] of selectionRects(bounds || { x: 0, y: 0, width: 0, height: 0 }, plot)) {
     let node = svg.querySelector(`.${className}`);
     if (!bounds) {
       if (node) node.remove();
       continue;
     }
     if (!node) {
-      node = el("rect", { rx: 4, ry: 4, class: className });
+      node = el("rect", { class: className });
       const foreground = svg.querySelector([
         ".level-group-link",
         ".level-group-marker",
@@ -816,10 +848,7 @@ function updateSelectionBounds(svg, bounds) {
       ].join(","));
       svg.insertBefore(node, foreground);
     }
-    node.setAttribute("x", bounds.x);
-    node.setAttribute("y", bounds.y);
-    node.setAttribute("width", bounds.width);
-    node.setAttribute("height", bounds.height);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
   }
 }
 
@@ -839,6 +868,7 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
   selectionMenu.hidden = false;
   selectionMenu.style.left = "0px";
   selectionMenu.style.top = "0px";
+  fitSelectionMenuWidth(selectionMenu, chartBox.width - 16);
   const menuBox = selectionMenu.getBoundingClientRect();
   const parentBox = (selectionMenu.offsetParent || svg.parentElement).getBoundingClientRect();
   const topLeft = svgClientPoint(svg, bounds.x, bounds.y);
@@ -868,11 +898,20 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
       top: plotBottom.y - parentBox.top + pad
     });
   }
-  const maxLeft = Math.max(pad, chartBox.width - menuBox.width - pad);
-  const maxTop = Math.max(pad, chartBox.height - menuBox.height - pad);
+  // The palette keeps to the plot area when it fits there, so it never sits
+  // on the axes or their labels; otherwise the chart's own box bounds it.
+  const chartLimits = {
+    minLeft: pad,
+    maxLeft: Math.max(pad, chartBox.width - menuBox.width - pad),
+    minTop: pad,
+    maxTop: Math.max(pad, chartBox.height - menuBox.height - pad)
+  };
+  const limits = scale && scale.margin
+    ? plotLimits(svg, scale, parentBox, menuBox, pad, chartLimits)
+    : chartLimits;
   const positioned = candidates.map((candidate) => ({
-    left: Math.max(pad, Math.min(maxLeft, candidate.left)),
-    top: Math.max(pad, Math.min(maxTop, candidate.top))
+    left: Math.max(limits.minLeft, Math.min(limits.maxLeft, candidate.left)),
+    top: Math.max(limits.minTop, Math.min(limits.maxTop, candidate.top))
   }));
   let best = positioned[0];
   let bestIntersections = selectionMenuPointIntersections(svg, parentBox, menuBox, best);
@@ -886,6 +925,47 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
   selectionMenu.style.top = `${best.top}px`;
 }
 
+// The palette wraps its rows itself: as wide as its widest row, never wider
+// than the chart. Left to CSS, the row break would stretch it to the chart.
+function fitSelectionMenuWidth(selectionMenu, maxWidth) {
+  selectionMenu.style.width = "";
+  const style = window.getComputedStyle(selectionMenu);
+  const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  let widest = 0;
+  let row = 0;
+  for (const child of selectionMenu.children) {
+    if (child.hidden) continue;
+    if (child.classList.contains("selection-break")) {
+      widest = Math.max(widest, row);
+      row = 0;
+      continue;
+    }
+    const childStyle = window.getComputedStyle(child);
+    row += child.getBoundingClientRect().width +
+      parseFloat(childStyle.marginLeft) + parseFloat(childStyle.marginRight);
+  }
+  widest = Math.max(widest, row);
+  if (!widest) return;
+  selectionMenu.style.width = `${Math.min(Math.ceil(widest + padding) + 1, Math.max(maxWidth, 1))}px`;
+}
+
+function plotLimits(svg, scale, parentBox, menuBox, pad, fallback) {
+  const topLeft = svgClientPoint(svg, scale.margin.left, scale.margin.top);
+  const bottomRight = svgClientPoint(
+    svg,
+    scale.margin.left + scale.innerW,
+    scale.margin.top + scale.innerH
+  );
+  const limits = {
+    minLeft: topLeft.x - parentBox.left + pad,
+    maxLeft: bottomRight.x - parentBox.left - menuBox.width - pad,
+    minTop: topLeft.y - parentBox.top + pad,
+    maxTop: bottomRight.y - parentBox.top - menuBox.height - pad
+  };
+  const fits = limits.maxLeft >= limits.minLeft && limits.maxTop >= limits.minTop;
+  return fits ? limits : fallback;
+}
+
 function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
   const clearance = 2;
   const menuLeft = parentBox.left + candidate.left - clearance;
@@ -893,7 +973,7 @@ function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
   const menuRight = menuLeft + menuBox.width + clearance * 2;
   const menuBottom = menuTop + menuBox.height + clearance * 2;
   let intersections = 0;
-  for (const point of svg.querySelectorAll("circle.point[data-index]")) {
+  for (const point of svg.querySelectorAll(visiblePointSelector(svg))) {
     const pointBox = point.getBoundingClientRect();
     if (
       pointBox.right >= menuLeft &&
@@ -905,6 +985,15 @@ function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
     }
   }
   return intersections;
+}
+
+// The points the palette must not cover: on a dense curve only the selected
+// ones show, so only they count.
+function visiblePointSelector(svg) {
+  const layer = svg.querySelector(".point-layer");
+  return layer && layer.getAttribute("data-dense") === "true"
+    ? "circle.point.selected[data-index]"
+    : "circle.point[data-index]";
 }
 
 function svgClientPoint(svg, x, y) {
@@ -1002,9 +1091,23 @@ function categoricalMeasurementCache(svg, probe) {
 
 function categoricalFontSignature(probe) {
   const style = window.getComputedStyle(probe);
-  return JSON.stringify(CATEGORICAL_FONT_PROPERTIES.map(
+  const properties = CATEGORICAL_FONT_PROPERTIES.map(
     (property) => [property, style.getPropertyValue(property)]
-  ));
+  );
+  // A web font that arrives after the first draw changes every width, so
+  // whether the family is loaded yet is part of the signature.
+  properties.push(["loaded", String(fontLoaded(style))]);
+  return JSON.stringify(properties);
+}
+
+function fontLoaded(style) {
+  const fonts = document.fonts;
+  if (!fonts || typeof fonts.check !== "function") return true;
+  try {
+    return fonts.check(`${style.getPropertyValue("font-size")} ${style.getPropertyValue("font-family")}`);
+  } catch {
+    return true;
+  }
 }
 
 function evictOldCategoricalMeasurements(cache) {
@@ -1018,8 +1121,15 @@ function measureText(probe, value) {
   return probe.getComputedTextLength();
 }
 
-function continuousXTicks(xMin, xMax) {
-  return ticks(xMin, xMax, 6).map((value) => ({ value, label: fmt(value) }));
+function continuousXTicks(xMin, xMax, innerW) {
+  return ticks(xMin, xMax, tickCount(innerW, 130)).map((value) => ({ value, label: fmt(value) }));
+}
+
+// One tick per `spacing` px and at least three: the 940x520 fallback keeps its
+// six ticks each way, and a wider chart gets more ticks, not the same six
+// spread out.
+function tickCount(extent, spacing) {
+  return Math.max(3, Math.round(extent / spacing));
 }
 
 function ticks(min, max, n) {
@@ -1036,14 +1146,15 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure) {
   if (!Number.isFinite(maxWeight) || maxWeight <= 0) return;
   const x = exposure.x || term.x;
   const yBase = margin.top + innerH;
-  const maxH = innerH * 0.22;
+  // A strip along the axis, up to a third of the plot: context for the curve.
+  const maxH = innerH / 3;
   const exposureY = (v) => yBase - maxH * v / maxWeight;
   if (exposure.kind === "density") {
     exposureDensity(svg, x, exposure.y, sx, exposureY, yBase);
   } else {
     const nominalW = x.length > 1
-      ? Math.abs(sx(x[1]) - sx(x[0])) * 0.82
-      : innerW * 0.55;
+      ? Math.min(Math.abs(sx(x[1]) - sx(x[0])) * 0.7, innerW / 12)
+      : innerW / 12;
     for (let i = 0; i < exposure.y.length; i++) {
       const h = Math.max(1, maxH * exposure.y[i] / maxWeight);
       svg.appendChild(el("rect", {
@@ -1051,11 +1162,13 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure) {
         y: yBase - h,
         width: nominalW,
         height: h,
+        rx: 2,
+        ry: 2,
         class: "exposure"
       }));
     }
   }
-  exposureAxis(svg, margin.left + innerW, yBase, maxH, maxWeight, exposure.label || "exposure");
+  exposureAxis(svg, margin.left + innerW, yBase, maxH, maxWeight);
 }
 
 function exposureDensity(svg, x, y, sx, exposureY, yBase) {
@@ -1063,17 +1176,19 @@ function exposureDensity(svg, x, y, sx, exposureY, yBase) {
   const right = `L ${sx(x[x.length - 1]).toFixed(2)} ${yBase.toFixed(2)}`;
   const left = `L ${sx(x[0]).toFixed(2)} ${yBase.toFixed(2)} Z`;
   svg.appendChild(el("path", { d: `${top} ${right} ${left}`, class: "exposure-density" }));
+  // The strip's top edge on its own, for a theme that outlines it.
+  svg.appendChild(el("path", { d: top, class: "exposure-edge" }));
 }
 
-function exposureAxis(svg, x, yBase, maxH, maxWeight, label) {
+// The strip's scale: its top and bottom, ticked on the right edge. The legend
+// names it.
+function exposureAxis(svg, x, yBase, maxH, maxWeight) {
   line(svg, x, yBase - maxH, x, yBase, "exposure-axis");
-  for (const value of [0, maxWeight / 2, maxWeight]) {
+  for (const value of [0, maxWeight]) {
     const y = yBase - maxH * value / maxWeight;
-    line(svg, x, y, x + 5, y, "exposure-axis");
-    text(svg, x + 8, y + 4, fmt(value), "tick-label", "start");
+    line(svg, x, y, x + 4, y, "exposure-axis");
+    text(svg, x + 7, y + 3.5, fmt(value), "tick-label small", "start");
   }
-  const labelNode = text(svg, x + 46, yBase - maxH / 2, label, "label", "middle");
-  labelNode.setAttribute("transform", `rotate(-90 ${x + 46} ${yBase - maxH / 2})`);
 }
 
 function path(svg, x, y, sx, sy, cls) {
@@ -1104,34 +1219,24 @@ function errorBars(svg, x, lower, upper, sx, sy) {
   }
 }
 
-function line(svg, x1, y1, x2, y2, cls) {
-  svg.appendChild(el("line", { x1, y1, x2, y2, class: cls }));
-}
-
-function text(svg, x, y, value, cls, anchor) {
-  const node = el("text", { x, y, class: cls, "text-anchor": anchor });
-  node.textContent = value;
-  svg.appendChild(node);
-  return node;
-}
-
-function legend(svg, x, y, originalProjected = false, hasPrevious = false) {
-  line(svg, x, y, x + 28, y, "original");
-  text(svg, x + 36, y + 4, originalProjected ? "original projection" : "original", "legend", "start");
-  let row = 1;
-  if (hasPrevious) {
-    line(svg, x, y + 22, x + 28, y + 22, "previous-edit");
-    text(svg, x + 36, y + 26, "previous edit", "legend", "start");
-    row += 1;
-  }
-  line(svg, x, y + 22 * row, x + 28, y + 22 * row, "edited");
-  text(svg, x + 36, y + 4 + 22 * row, "current edit", "legend", "start");
-  svg.appendChild(el("circle", { cx: x + 14, cy: y + 22 * (row + 1), r: 4.6, class: "point selected" }));
-  text(svg, x + 36, y + 4 + 22 * (row + 1), "selected", "legend", "start");
-}
-
-function el(tag, attrs) {
-  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
-  return node;
+// One quiet row above the plot, ending at `right`: the series, then the
+// exposure strip's swatch.
+function legend(svg, right, y, { originalProjected, hasPrevious, exposureLabel }) {
+  const items = [["original", originalProjected ? "original projection" : "original"]];
+  if (hasPrevious) items.push(["previous-edit", "previous edit"]);
+  items.push(["edited", "current edit"]);
+  if (exposureLabel) items.push(["legend-swatch", exposureLabel]);
+  const keyWidth = 22;
+  const gap = 18;
+  const widths = items.map(([, label]) => keyWidth + 6 + label.length * 5.6);
+  let x = right - widths.reduce((total, width) => total + width + gap, -gap);
+  items.forEach(([cls, label], index) => {
+    if (cls === "legend-swatch") {
+      svg.appendChild(el("rect", { x, y: y - 5, width: keyWidth, height: 10, rx: 2, ry: 2, class: cls }));
+    } else {
+      line(svg, x, y, x + keyWidth, y, cls);
+    }
+    text(svg, x + keyWidth + 6, y + 4, label, "legend", "start");
+    x += widths[index] + gap;
+  });
 }

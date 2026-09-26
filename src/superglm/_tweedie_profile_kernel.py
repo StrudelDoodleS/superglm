@@ -18,6 +18,11 @@ _LOG_CUTOFF = 37.0
 _MAX_SAFE_MODE = float(2**52)
 _DEFAULT_MAX_TERMS = 100_000
 _DEFAULT_MAX_TOTAL_TERMS = 1_000_000
+# lgamma table entries shared by every row of one series_moments call.
+_SERIES_TABLE_LIMIT = 1 << 20
+# series_moments' default total budget: this many terms per row on average,
+# the width past which the density evaluator hands a row to wright_bessel.
+_SERIES_MEAN_ROW_TERMS = 1_024
 
 
 @dataclass(frozen=True)
@@ -411,6 +416,144 @@ def _exact_profile_statistics_kernel(
     )
 
 
+@njit(cache=True)
+def _series_moments_kernel(
+    log_t: NDArray[np.float64],
+    a: float,
+    max_terms: int,
+    max_total_terms: int,
+    exact: NDArray[np.bool_],
+    log_sum: NDArray[np.float64],
+    mean_j: NDArray[np.float64],
+    variance_j: NDArray[np.float64],
+) -> int:
+    """Fill each row's Dunn-Smyth log W, E[J] and Var[J]; return the terms summed.
+
+    Each row is summed on its own, so its result never depends on the other
+    rows. If ``max_total_terms`` runs out before every row is summed, no row
+    comes back exact: which rows fit inside a budget depends on their order,
+    so a partial answer would too. ``lgamma(j + 1) + lgamma(a j)`` is shared
+    by every row and tabulated once per call, sized by the largest mode whose
+    series fits ``max_terms``.
+    """
+    a_plus_one = a + 1.0
+    a_log_a = a * math.log(a)
+    log_safe_mode = math.log(_MAX_SAFE_MODE)
+    # A row whose terms above the cutoff span more than ``max_terms`` is
+    # skipped before any summing: near a phi bound that is most rows, each
+    # needing millions of terms.
+    feasible = np.empty(log_t.size, dtype=np.bool_)
+    table_size = 64
+    for row in range(log_t.size):
+        log_mode = (log_t[row] - a_log_a) / a_plus_one
+        mode = math.exp(min(log_mode, log_safe_mode))
+        radius = math.sqrt(2.0 * _LOG_CUTOFF * mode / a_plus_one)
+        feasible[row] = log_mode <= log_safe_mode and 2.0 * radius < max_terms
+        if feasible[row]:
+            table_size = max(table_size, int(min(mode + 4.0 * radius + 64.0, _SERIES_TABLE_LIMIT)))
+    log_base = np.empty(table_size, dtype=np.float64)
+    for j in range(1, table_size):
+        log_base[j] = math.lgamma(j + 1.0) + math.lgamma(a * j)
+    total_terms = 0
+    exhausted = False
+    for row in range(log_t.size):
+        moments = (False, math.nan, math.nan, math.nan, 0)
+        budget = min(max_terms, max_total_terms - total_terms)
+        if feasible[row] and budget > 0:
+            mode = max(1, int(math.floor(math.exp((log_t[row] - a_log_a) / a_plus_one))))
+            moments = _row_series_moments(log_t[row], a, mode, budget, log_base)
+        exact[row], log_sum[row], mean_j[row], variance_j[row], row_terms = moments
+        total_terms += row_terms
+        exhausted = exhausted or (feasible[row] and not exact[row] and budget < max_terms)
+    if exhausted:
+        exact[:] = False
+        log_sum[:] = math.nan
+        mean_j[:] = math.nan
+        variance_j[:] = math.nan
+    return total_terms
+
+
+@njit(cache=True)
+def _row_series_moments(
+    log_t: float, a: float, mode: int, max_terms: int, log_base: NDArray[np.float64]
+) -> tuple[bool, float, float, float, int]:
+    """Sum one row's series outward from its peak term until a term falls ``_LOG_CUTOFF`` below.
+
+    The last entry is the number of terms summed, whether or not the row came out.
+
+    The terms are log-concave in j, so climbing from the estimated ``mode``
+    reaches the peak, every relative term is then at most 1, and once a term
+    falls that far below the peak every later term on that side does too.
+    """
+    peak = _tabulated_series_term(mode, log_t, a, log_base)
+    for direction in (1, -1):
+        while mode + direction >= 1:
+            neighbour = _tabulated_series_term(mode + direction, log_t, a, log_base)
+            if not neighbour > peak:
+                break
+            mode += direction
+            peak = neighbour
+    mass = 1.0
+    first = 0.0
+    second = 0.0
+    row_terms = 1
+    for direction in (1, -1):
+        j = mode + direction
+        while j >= 1:
+            if row_terms >= max_terms:
+                return False, math.nan, math.nan, math.nan, row_terms
+            q = _tabulated_series_term(j, log_t, a, log_base)
+            relative = math.exp(q - peak)
+            offset = float(j - mode)
+            mass += relative
+            first += relative * offset
+            second += relative * offset * offset
+            row_terms += 1
+            if q <= peak - _LOG_CUTOFF:
+                break
+            j += direction
+    mean_offset = first / mass
+    log_sum = peak + math.log(mass)
+    variance = second / mass - mean_offset * mean_offset
+    if not (math.isfinite(log_sum) and math.isfinite(variance)):
+        return False, math.nan, math.nan, math.nan, row_terms
+    return True, log_sum, mode + mean_offset, variance, row_terms
+
+
+@njit(cache=True)
+def _tabulated_series_term(j: int, log_t: float, a: float, log_base: NDArray[np.float64]) -> float:
+    if j < log_base.size:
+        return j * log_t - log_base[j]
+    return j * log_t - (math.lgamma(j + 1.0) + math.lgamma(a * j))
+
+
+def series_moments(
+    log_t: NDArray[np.float64],
+    a: float,
+    *,
+    max_terms: int = _DEFAULT_MAX_TERMS,
+    max_total_terms: int | None = None,
+) -> tuple[NDArray[np.bool_], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Return which rows the series evaluated, and their log W, E[J] and Var[J].
+
+    Rows the series cannot reach within ``max_terms`` terms, and rows whose
+    mode is past float64's exact integers, come back not exact with NaN
+    moments; if ``max_total_terms`` (by default ``_SERIES_MEAN_ROW_TERMS`` per
+    row, at least ``_DEFAULT_MAX_TOTAL_TERMS``) runs out, every row does.
+    """
+    log_t = np.ascontiguousarray(log_t, dtype=np.float64)
+    exact = np.empty(log_t.size, dtype=np.bool_)
+    log_sum = np.empty(log_t.size, dtype=np.float64)
+    mean_j = np.empty(log_t.size, dtype=np.float64)
+    variance_j = np.empty(log_t.size, dtype=np.float64)
+    if max_total_terms is None:
+        max_total_terms = max(_DEFAULT_MAX_TOTAL_TERMS, _SERIES_MEAN_ROW_TERMS * log_t.size)
+    _series_moments_kernel(
+        log_t, float(a), int(max_terms), int(max_total_terms), exact, log_sum, mean_j, variance_j
+    )
+    return exact, log_sum, mean_j, variance_j
+
+
 def _warmup_tweedie_profile() -> None:
     _digamma_positive(1.0)
     _trigamma_positive(1.0)
@@ -418,6 +561,11 @@ def _warmup_tweedie_profile() -> None:
     term = _series_term_derivatives(1, 0.0, 0.0, 0.0, 2.0)
     _series_term_is_finite(term)
     _failure_tuple(PROFILE_KERNEL_WORK_LIMIT, 0, 0)
+    log_base = np.zeros(4, dtype=np.float64)
+    _tabulated_series_term(1, 0.0, 1.0, log_base)
+    _row_series_moments(0.0, 1.0, 1, 10, log_base)
+    if not np.all(series_moments(np.array([-1.0, 2.0]), 1.0)[0]):
+        raise RuntimeError("Tweedie series moments warmup failed")
     arrays = (
         np.array([0.0, 1.0], dtype=np.float64),
         np.ones(2, dtype=np.float64),

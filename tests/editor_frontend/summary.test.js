@@ -13,12 +13,17 @@ const {
   refreshSummary,
   renderSummary,
   runDistributionProfile,
+  revertTransition,
+  setReferenceTransition,
+  shapeRangeTransition,
   runOffsetRefit,
-  uncollapseTransition,
   ungroupTransition
 } = await import(summaryModulePath);
 
-/** @param {number} revision */
+/**
+ * @param {number} revision
+ * @returns {import("../../src/superglm/editor/app/api/contracts.js").EditorSnapshot}
+ */
 function snapshot(revision) {
   return {
     model_revision: revision,
@@ -27,13 +32,13 @@ function snapshot(revision) {
       age: {
         kind: "spline", term_type: "spline", x: [1], y: [1], original_y: [1],
         previous_y: null, levels: null, n_points: 1, controls: null,
-        group_display: null, impact: {}
+        group_display: null, impact: {}, shape: { available: true, reason: null, ranges: [], support: null, specials: [] }
       }
     },
     selection: { age: [0] },
-    can_uncollapse_levels: false,
-    last_collapse: null,
-    history: { active: [], redo: [] }
+    undo_redo: { undo: null, redo: null },
+    timeline: [{ kind: "marker" }],
+    in_force_is_original: true
   };
 }
 
@@ -184,10 +189,24 @@ test("structural transition descriptors are pure route descriptions", () => {
     path: "/ungroup_levels",
     payload: { term: "region", method: "auto" }
   });
-  assert.deepEqual(uncollapseTransition(), {
-    name: "restore collapsed levels",
-    path: "/uncollapse_levels",
+  assert.deepEqual(setReferenceTransition("region", "B"), {
+    name: "set reference and refit",
+    path: "/set_reference",
+    payload: { term: "region", level: "B", method: "auto" }
+  });
+  assert.deepEqual(revertTransition(), {
+    name: "revert to original model",
+    path: "/revert_to_original",
     payload: {}
+  });
+  // The join is the toggle's choice; Tangent when no choice is given.
+  assert.deepEqual(shapeRangeTransition("age", 30, 45, 1), {
+    name: "make a Line range",
+    path: "/shape_range",
+    payload: { term: "age", lo: 30, hi: 45, degree: 1, join: "tangent", method: "auto" }
+  });
+  assert.deepEqual(shapeRangeTransition("band", "B2", "B4", 0, "kink").payload, {
+    term: "band", lo: "B2", hi: "B4", degree: 0, join: "kink", method: "auto"
   });
 });
 

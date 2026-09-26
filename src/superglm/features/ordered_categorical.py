@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -1156,6 +1157,26 @@ class OrderedCategorical:
             spline._explicit_boundary, spline._explicit_knots
         )
 
+    def _resolve_spline_named_ranges(self, spline: _SplineBase) -> None:
+        """Resolve ``PolynomialRange`` band-name edges to level values.
+
+        A range edge names a band exactly as a Spline knot does, so it
+        resolves, and is guarded against a grouping that absorbs or straddles
+        it, the same way; numeric edges stay axis values.
+        """
+        spline._polynomial_ranges = tuple(
+            replace(r, lo=self._range_edge_value(r.lo), hi=self._range_edge_value(r.hi))
+            for r in spline._polynomial_ranges
+        )
+
+    def _range_edge_value(self, edge: float | str) -> float | str:
+        if not isinstance(edge, str):
+            return edge
+        parameter = "PolynomialRange edge"
+        declared_position = self._resolve_declared_position(edge, parameter=parameter)
+        grouped_position = self._grouped_break_position(declared_position, parameter=parameter)
+        return float(self._level_to_value[self._smooth_levels[grouped_position]])
+
     def _init_spline(self) -> None:
         """Create the internal basis: a deep copy of ``basis`` that we own,
         resolved against the declared levels (band names to positions or
@@ -1168,6 +1189,7 @@ class OrderedCategorical:
             self._resolve_inner_polynomial(self._spline)
             return
         self._resolve_spline_named_knots(self._spline)
+        self._resolve_spline_named_ranges(self._spline)
         if self._spline.n_knots > self._n_levels - 1:
             effective = self._n_levels - 1
             requested = self._spline.n_knots

@@ -1,6 +1,6 @@
 // @ts-check
 
-/** @typedef {'select'|'move'|'zoom'|'handles'} ToolMode */
+/** @typedef {import('../api/contracts.js').EditorMode} ToolMode */
 
 /** @type {Readonly<Record<string, ToolMode>>} */
 const SHORTCUT_MODES = Object.freeze({

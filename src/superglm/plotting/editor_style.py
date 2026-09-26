@@ -49,19 +49,19 @@ __all__ = [
 
 # ── The design tokens: editor/app/styles/tokens.css ────────────────
 TOKENS: dict[str, str] = {
-    "text": "#24292f",
-    "muted": "#57606a",
+    "text": "#15171c",
+    "muted": "#5c6068",
     "surface": "#ffffff",
-    "surface_subtle": "#f6f8fa",
-    "border": "#d0d7de",
-    "border_strong": "#8c959f",
-    "grid": "rgba(140, 149, 159, 0.22)",
-    "blue": "#0969da",
-    "blue_soft": "#dbeafe",
-    "red": "#d1242f",
-    "orange": "#bf6a02",
-    "yellow": "#f4d35e",
-    "yellow_border": "#d8a10f",
+    "surface_subtle": "#f7f5f0",
+    "border": "#e2e0d9",
+    "border_strong": "#8c8a83",
+    "grid": "rgba(140, 149, 159, 0.16)",
+    "blue": "#2457c5",
+    "blue_soft": "#e3ebfa",
+    "red": "#d6402b",
+    "orange": "#ea580c",
+    "yellow": "#f4b942",
+    "yellow_border": "#d9a12c",
     "danger": "#b42318",
 }
 
@@ -69,18 +69,18 @@ TOKENS: dict[str, str] = {
 # Colours given as an ``(r, g, b)`` triple carry a separate ``alpha``, matching
 # the ``rgba(...)`` the CSS writes; hex strings are opaque.
 CHART: dict[str, dict[str, Any]] = {
-    "edited": dict(color="#0969da", width=2.3),
-    "original": dict(color="#8c959f", width=1.7, dash=(7, 5)),
-    "previous_edit": dict(color="#f59e0b", width=2.0),
-    "ci": dict(color=(9, 105, 218), alpha=0.13),
-    "ci_whisker": dict(color=(9, 105, 218), alpha=0.55, width=1.4),
-    "exposure": dict(fill="#f4d35e", alpha=0.95, edge="#d8a10f", width=1.0),
-    "point": dict(face="#ffffff", edge="#0969da", width=1.5),
-    "point_selected": dict(face="#d1242f", edge="#d1242f"),
-    "basis_contribution": dict(color=(87, 96, 106), alpha=0.28, width=1.25, dash=(4, 4)),
-    "zero": dict(color="#d0d7de", width=1.0, dash=(4, 4)),
+    "edited": dict(color="#2457c5", width=2.2),
+    "original": dict(color="#8c959f", alpha=0.45, width=4.0),
+    "previous_edit": dict(color="#f59e0b", width=1.6),
+    "ci": dict(color=(36, 87, 197), alpha=0.13),
+    "ci_whisker": dict(color=(36, 87, 197), alpha=0.5, width=1.2),
+    "exposure": dict(fill="#f4b942", alpha=0.6, edge="#d9a12c", width=0.0),
+    "point": dict(face="#2457c5", edge="#ffffff", width=1.5),
+    "point_selected": dict(face="#ea580c", edge="#ffffff"),
+    "basis_contribution": dict(color=(92, 96, 104), alpha=0.3, width=1.2, dash=(4, 4)),
+    "zero": dict(color=(21, 23, 28), alpha=0.28, width=1.5, dash=(6, 5)),
     "axis": dict(color="#8c959f", width=1.0),
-    "grid": dict(color=(140, 149, 159), alpha=0.22, width=1.0),
+    "grid": dict(color=(140, 149, 159), alpha=0.16, width=1.0),
 }
 
 # Matplotlib resolves the first family it can find; the editor's own stack is
@@ -89,9 +89,9 @@ FONT_STACK = ["Segoe UI", "Helvetica Neue", "Arial", "DejaVu Sans"]
 FONT_CSS = "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
 BODY_PT = 13
 LABEL_PT = 11
-PANEL: dict[str, Any] = dict(width_in=9.4, height_in=5.2, frame="#d0d7de", radius_px=6)
-SEQUENTIAL = ["#dbeafe", "#0969da"]
-DIVERGING = ["#d1242f", "#ffffff", "#0969da"]
+PANEL: dict[str, Any] = dict(width_in=9.4, height_in=5.2, frame="#e2e0d9", radius_px=6)
+SEQUENTIAL = ["#e3ebfa", "#2457c5"]
+DIVERGING = ["#d6402b", "#ffffff", "#2457c5"]
 COLORWAY = [
     TOKENS["blue"],
     TOKENS["orange"],

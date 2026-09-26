@@ -1,14 +1,17 @@
 import { editorClient } from "./api/client.js";
-import { drawChart, groupedTerms, updateChartSelection } from "./chart.js";
+import { bindPointLens, drawChart, groupedTerms, updateChartSelection } from "./chart.js";
+import { chartSize } from "./chart/geometry.js";
 import { renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
+import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
 import { createEditorActions } from "./state/actions.js";
 import {
   selectActiveTermName,
   selectCurrentSelection,
   selectEvidenceNeedsRefresh,
   selectGroupDisplayMode,
+  selectModelRevision,
   selectRenderableTerm,
   selectSnapshot,
   selectSummaryLevelDisplay,
@@ -30,22 +33,39 @@ import {
   runDistributionProfile,
   showDistributionProfileDialog,
   runOffsetRefit,
-  uncollapseTransition,
+  revertTransition,
+  setReferenceTransition,
+  shapeRangeTransition,
   ungroupTransition
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
-import { bindAppBar, renderAppBar } from "./views/app_bar.js";
+import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { renderContextBar } from "./views/context_bar.js";
 import { bindExportDialog } from "./views/export_dialog.js";
+import {
+  bindFeatureList,
+  readFeatureListOpen,
+  renderFeatureList,
+  storeFeatureListOpen
+} from "./views/feature_list.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
+import {
+  bindJoinToggle,
+  effectiveShapeJoin,
+  readShapeJoin,
+  renderJoinToggle,
+  storeShapeJoin
+} from "./views/join_toggle.js";
 import { bindPopovers } from "./views/popover.js";
-import { bindStructuralConfirm, structuralImpact } from "./views/structural_confirm.js";
+import { mountThemeControl } from "./views/theme.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
 const appBar = document.getElementById("appBar");
 const undoAction = document.getElementById("undoAction");
 const redoAction = document.getElementById("redoAction");
+const revertAction = document.getElementById("revertAction");
+const refreshAction = document.getElementById("refreshAction");
 const appShell = document.querySelector(".app-shell");
 const appBusyOverlay = document.getElementById("appBusyOverlay");
 const appBusyAnnouncement = document.getElementById("appBusyAnnouncement");
@@ -66,9 +86,22 @@ const reportRetry = document.getElementById("reportRetry");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
-const termSelect = document.getElementById("term");
+const featureListNodes = Object.freeze({
+  root: document.getElementById("featureList"),
+  search: document.getElementById("featureSearch"),
+  rows: document.getElementById("featureRows"),
+  toggle: document.getElementById("featureListToggle"),
+  strip: document.getElementById("featureListStrip")
+});
+let featureQuery = "";
+// Open by default only where the open list still leaves the chart 600px beside
+// the inspector: 1086px plus the 192px the open list takes over its strip.
+let featureListOpen = readFeatureListOpen(window.matchMedia("(min-width: 1278px)").matches);
+const termNameNode = document.getElementById("termName");
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
+const termReference = document.getElementById("termReference");
+const helpAction = document.getElementById("helpAction");
 const inspectorToggle = document.getElementById("inspectorToggle");
 const inspectorNode = document.getElementById("inspector");
 const inspectorClose = document.getElementById("inspectorClose");
@@ -99,8 +132,12 @@ const exportStatus = document.getElementById("exportStatus");
 const exportFormatInputs = [...document.querySelectorAll('input[name="exportFormat"]')];
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
-const uncollapseLevels = document.getElementById("uncollapseLevels");
-const structuralConfirmDialog = document.getElementById("structuralConfirmDialog");
+const setReference = document.getElementById("setReference");
+const shapeButtons = [...document.querySelectorAll("button[data-shape-degree]")];
+const shapeJoin = document.getElementById("shapeJoin");
+const shapeJoinSeparator = document.getElementById("shapeJoinSeparator");
+const selectionRefitBreak = document.getElementById("selectionRefitBreak");
+const selectionRefitLabel = document.getElementById("selectionRefitLabel");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
 const metricFreshness = document.getElementById("metricFreshness");
@@ -138,10 +175,6 @@ const statusNode = document.getElementById("status");
 const uiPopover = document.getElementById("uiPopover");
 if (!uiPopover) throw new Error("Editor popover element is missing");
 bindPopovers({ root: document, popover: uiPopover });
-if (!(structuralConfirmDialog instanceof HTMLDialogElement)) {
-  throw new Error("Structural confirmation dialog is missing");
-}
-const structuralConfirm = bindStructuralConfirm(structuralConfirmDialog);
 
 let buildProgress = null;
 let buildFrame = null;
@@ -180,10 +213,29 @@ bindAppBar({
   root: appBar,
   undoButton: undoAction,
   redoButton: redoAction,
+  revertButton: revertAction,
+  refreshButton: refreshAction,
   onView: showView,
   onUndo: undo,
-  onRedo: redo
+  onRedo: redo,
+  onRevert: () => runStructuralRefit(revertTransition()),
+  onRefresh: refreshFromPython
 });
+mountThemeControl({
+  button: document.getElementById("themeAction"),
+  root: document.documentElement,
+  media: window.matchMedia("(prefers-color-scheme: dark)")
+});
+
+async function refreshFromPython() {
+  const result = await actions.refreshFromPython();
+  if (result.ok) {
+    statusNode.textContent = `Synced with Python · revision ${result.snapshot.model_revision}`;
+  } else if (!result.skipped) {
+    statusNode.textContent = result.error.message;
+    statusNode.classList.add("is-error");
+  }
+}
 
 const chartContext = {
   svg,
@@ -199,7 +251,9 @@ const chartContext = {
 
 let openHelp = () => inspectorToggle.click();
 
-const narrowQuery = window.matchMedia("(max-width: 1047px)");
+// The inspector sits beside the chart only where a 600px chart, the tool rail,
+// the collapsed feature strip and the inspector all fit.
+const narrowQuery = window.matchMedia("(max-width: 1085px)");
 renderHelpDrawer(helpPane);
 const inspector = bindInspector({
   root: inspectorNode,
@@ -209,7 +263,7 @@ const inspector = bindInspector({
   onPanelChange: (panel) => {
     actions.patchView({ inspectorPane: panel });
     const snapshot = store.getState().remote.snapshot;
-    if (panel === "history" && snapshot) renderHistory(snapshot.history, historyFrame);
+    if (panel === "history" && snapshot) renderHistory(snapshot.timeline, historyFrame);
     scheduleVisibleEvidenceCatchUp();
   },
   onOpenChange: (open) => {
@@ -256,6 +310,22 @@ store.subscribe(
 narrowQuery.addEventListener("change", syncViewport);
 syncViewport();
 
+// The chart is drawn at its own pixel size, so a panel that changes size is
+// redrawn inside the observer callback: that runs once per frame, after
+// layout and before paint, so no frame shows the old drawing scaled. The
+// redraw never changes the chart's layout, so it cannot loop. A hidden chart
+// keeps its drawing until it is shown again.
+new ResizeObserver(redrawChartToFit).observe(svg);
+
+function redrawChartToFit() {
+  const drawn = svg.viewBox.baseVal;
+  const box = chartSize(svg.clientWidth, svg.clientHeight);
+  if (!svg.clientWidth || (box.width === drawn.width && box.height === drawn.height)) return;
+  const preview = store.getState().view.preview;
+  if (preview && preview.term === selectedTerm()) renderInteractionPreview(preview);
+  else renderChartOnly();
+}
+
 bindToolRail({
   root: toolRail,
   onMode: (mode) => {
@@ -269,6 +339,26 @@ bindToolRail({
   },
   onHelp: () => openHelp()
 });
+// Help sits in the app bar, outside the tool rail's own click handling.
+helpAction.addEventListener("click", () => openHelp());
+
+// The join a shaped range gets at its edges, kept across pages when storage
+// allows; a term that cannot take it shows, and gets, the join it can.
+let shapeJoinChoice = readShapeJoin();
+function renderShapeJoin(term) {
+  const joins = term?.shape?.joins;
+  renderJoinToggle(
+    shapeJoin, effectiveShapeJoin(shapeJoinChoice, joins), joins, term?.shape?.join_reason ?? null
+  );
+}
+bindJoinToggle(shapeJoin, {
+  onChange: (join) => {
+    shapeJoinChoice = join;
+    storeShapeJoin(join);
+    renderShapeJoin(currentTerm());
+  }
+});
+renderJoinToggle(shapeJoin, shapeJoinChoice);
 
 async function loadState() {
   await actions.initialize();
@@ -370,7 +460,6 @@ function summaryNodes() {
     profileTraceTable,
     collapseLevels,
     ungroupLevels,
-    uncollapseLevels,
     summaryStatus,
     summaryNote,
     summaryFrame
@@ -524,30 +613,14 @@ function scheduleVisibleEvidenceCatchUp() {
   scheduleVisibleEvidence(revision, { immediate: true, onlyStale: true });
 }
 
+// A structural step loses nothing: Undo puts back the state before it, edits
+// included, so it runs without asking.
 async function runStructuralRefit(descriptor) {
-  while (true) {
-    const state = store.getState();
-    if (appBusyActive || state.request.mutation.status !== "idle") {
-      return { ok: false, skipped: true };
-    }
-    const snapshot = selectSnapshot(store.getState());
-    if (!snapshot) return { ok: false, skipped: true };
-    const impact = structuralImpact(snapshot, descriptor);
-    if (impact.requiresConfirmation && !(await structuralConfirm.confirm(impact))) {
-      return { ok: false, skipped: true };
-    }
-
-    const confirmedState = store.getState();
-    if (appBusyActive || confirmedState.request.mutation.status !== "idle") {
-      return { ok: false, skipped: true };
-    }
-    if (selectSnapshot(confirmedState) === snapshot) break;
+  if (appBusyActive || store.getState().request.mutation.status !== "idle") {
+    return { ok: false, skipped: true };
   }
-
   stopContributionBuild();
-  if (descriptor.name !== "restore collapsed levels") {
-    summarySource.value = "selected";
-  }
+  summarySource.value = "selected";
   const operationStart = performance.now();
   const requestStart = performance.now();
   const milestones = {
@@ -627,7 +700,7 @@ function setAppBusy(active, title = "Working...", detail = "") {
 }
 
 function restoreFocusAfterBusy(opener) {
-  for (const candidate of [opener, termSelect, inspectorToggle]) {
+  for (const candidate of [opener, featureListNodes.search, inspectorToggle]) {
     if (!candidate || !candidate.isConnected || typeof candidate.focus !== "function") continue;
     candidate.focus({ preventScroll: true });
     if (document.activeElement === candidate) return;
@@ -718,7 +791,6 @@ function renderChartWorkspace() {
   const snapshot = editorState.remote.snapshot;
   if (!snapshot) return;
   const view = editorState.view;
-  ciToggle.style.background = view.showCi ? "#dbeafe" : "#f6f8fa";
   ciToggle.setAttribute("aria-pressed", String(view.showCi));
   const selected = selectedTerm();
   const term = currentTerm();
@@ -731,19 +803,23 @@ function renderChartWorkspace() {
   const selection = view.preview && view.preview.term === selected
     ? new Set(view.preview.selection)
     : currentSelection();
-  statusNode.style.color = "";
+  statusNode.classList.remove("is-error");
   if (updateHandleCount(term)) return;
-  renderToolRail(toolRail, {
-    mode: view.mode,
-    handlesAvailable: Boolean(term.controls)
-  });
+  renderToolRail(toolRail, { mode: view.mode, handlesAvailable: Boolean(term.controls) });
   updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
+  updateShapeActions(term, selection);
   updateResetOrderAction(term);
   drawChart(term, selection, chartContext);
   const collapsedOriginalNote = selectionContextNote(term);
   renderContextBar(
-    { kindNode: termKind, edfNode: termEdf, statusNode },
+    {
+      nameNode: termNameNode,
+      kindNode: termKind,
+      edfNode: termEdf,
+      referenceNode: termReference,
+      statusNode
+    },
     { name: selected, term, selectionSize: selection.size, note: collapsedOriginalNote }
   );
 }
@@ -764,39 +840,34 @@ function termCatalogueKey(terms) {
   ).join("\u0001");
 }
 
-function selectTermPickerRenderState(state) {
+// The revision stands in for every row's EDF, which only a refit changes.
+function selectFeatureListRenderState(state) {
   const snapshot = selectSnapshot(state);
   return {
     ready: snapshot !== null,
     catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}) : "",
+    revision: selectModelRevision(state),
     activeTerm: selectActiveTermName(state)
   };
 }
 
-function sameTermPickerRenderState(next, previous) {
+function sameFeatureListRenderState(next, previous) {
   return next.ready === previous.ready &&
     next.catalogueKey === previous.catalogueKey &&
+    next.revision === previous.revision &&
     next.activeTerm === previous.activeTerm;
 }
 
-function renderTermPickerState(next, previous) {
-  const snapshot = selectSnapshot(store.getState());
-  if (!snapshot) return;
-  if (!previous.ready || next.catalogueKey !== previous.catalogueKey) {
-    termSelect.innerHTML = "";
-    for (const [group, names] of groupedTerms(snapshot.terms || {})) {
-      const optgroup = document.createElement("optgroup");
-      optgroup.label = group;
-      for (const name of names) {
-        const option = document.createElement("option");
-        option.value = name;
-        option.textContent = name;
-        optgroup.appendChild(option);
-      }
-      termSelect.appendChild(optgroup);
-    }
-  }
-  if (termSelect.value !== next.activeTerm) termSelect.value = next.activeTerm;
+function renderFeatureListState() {
+  const state = store.getState();
+  const terms = selectSnapshot(state)?.terms ?? {};
+  renderFeatureList(featureListNodes, {
+    groups: groupedTerms(terms),
+    terms,
+    activeTerm: selectActiveTermName(state),
+    query: featureQuery,
+    open: featureListOpen
+  });
 }
 
 function selectChartRenderState(state) {
@@ -828,38 +899,37 @@ function sameChartRenderState(next, previous) {
 }
 
 function selectHistoryRenderState(state) {
-  const history = state.remote.snapshot?.history || null;
-  return { history, key: history ? JSON.stringify(history) : "" };
+  const timeline = state.remote.snapshot?.timeline || null;
+  return { timeline, key: timeline ? JSON.stringify(timeline) : "" };
 }
 
 function sameHistoryRenderState(next, previous) {
   return next.key === previous.key;
 }
 
-function renderHistoryState({ history }) {
-  if (history) renderHistory(history, historyFrame);
+function renderHistoryState({ timeline }) {
+  if (timeline) renderHistory(timeline, historyFrame);
 }
 
 function selectAppBarRenderState(state) {
   const snapshot = state.remote.snapshot;
-  const selectedTerm = snapshot?.selected_term;
   return {
     ready: snapshot !== null,
     activeView: state.view.activeView,
-    canUndo: Boolean(
-      selectedTerm && snapshot?.history.active.some((record) => record.term === selectedTerm)
-    ),
-    canRedo: Boolean(
-      selectedTerm && snapshot?.history.redo.some((record) => record.term === selectedTerm)
-    )
+    undoLabel: snapshot?.undo_redo.undo ?? null,
+    redoLabel: snapshot?.undo_redo.redo ?? null,
+    canRevert: Boolean(snapshot && revertAvailable(snapshot)),
+    busy: state.request.mutation.status === "running"
   };
 }
 
 function sameAppBarRenderState(next, previous) {
   return next.ready === previous.ready &&
     next.activeView === previous.activeView &&
-    next.canUndo === previous.canUndo &&
-    next.canRedo === previous.canRedo;
+    next.undoLabel === previous.undoLabel &&
+    next.redoLabel === previous.redoLabel &&
+    next.canRevert === previous.canRevert &&
+    next.busy === previous.busy;
 }
 
 function renderAppBarState(state) {
@@ -869,8 +939,12 @@ function renderAppBarState(state) {
     activeView: state.activeView,
     undoButton: undoAction,
     redoButton: redoAction,
-    canUndo: state.canUndo,
-    canRedo: state.canRedo
+    revertButton: revertAction,
+    refreshButton: refreshAction,
+    undoLabel: state.undoLabel,
+    redoLabel: state.redoLabel,
+    canRevert: state.canRevert,
+    busy: state.busy
   });
 }
 
@@ -909,8 +983,15 @@ function renderSelectionState({ termName, indices }) {
   const selection = new Set(indices);
   updateChartSelection(term, selection, chartContext);
   updateCollapseAction(term, selection);
+  updateShapeActions(term, selection);
   renderContextBar(
-    { kindNode: termKind, edfNode: termEdf, statusNode },
+    {
+      nameNode: termNameNode,
+      kindNode: termKind,
+      edfNode: termEdf,
+      referenceNode: termReference,
+      statusNode
+    },
     {
       name: termName,
       term,
@@ -1128,7 +1209,6 @@ function updateGroupDisplayControl(term) {
 }
 
 function updateCollapseAction(term, selection) {
-  const snapshot = store.getState().remote.snapshot;
   const type = term.term_type || term.kind || "";
   const isLevelTerm = type === "categorical" || type === "ordered categorical";
   if (collapseLevels) {
@@ -1137,16 +1217,57 @@ function updateCollapseAction(term, selection) {
   if (ungroupLevels) {
     ungroupLevels.hidden = !(isLevelTerm && selectionTouchesCollapsedGroup(term, selection));
   }
-  if (uncollapseLevels) {
-    uncollapseLevels.hidden = !(
-      isLevelTerm &&
-      snapshot &&
-      snapshot.can_uncollapse_levels &&
-      snapshot.last_collapse &&
-      snapshot.last_collapse.term === selectedTerm() &&
-      selectionTouchesCollapsedGroup(term, selection)
-    );
+  if (setReference) {
+    const label = isLevelTerm ? selectedLevelLabel(term, selection) : null;
+    setReference.hidden = label === null || label === term.reference?.level;
   }
+}
+
+// The four shape icons share one state per selection, except that the bands
+// of an ordered term bound the degree they can carry. The join toggle shows
+// with them, and the palette's refit row only when something is on it.
+function updateShapeActions(term, selection) {
+  let shapesVisible = false;
+  for (const button of shapeButtons) {
+    const degree = Number(button.dataset.shapeDegree);
+    const { visible, enabled, reason } = shapeButtonState(term, selection, degree);
+    button.hidden = !visible;
+    button.setAttribute("aria-disabled", String(!enabled));
+    renderShapeReason(button, reason);
+    shapesVisible = shapesVisible || visible;
+  }
+  shapeJoin.hidden = !shapesVisible;
+  renderShapeJoin(term);
+  shapeJoinSeparator.hidden = !shapesVisible;
+  const refitVisible = shapesVisible ||
+    [collapseLevels, ungroupLevels, setReference].some((button) => button && !button.hidden);
+  selectionRefitBreak.hidden = !refitVisible;
+  selectionRefitLabel.hidden = !refitVisible;
+}
+
+// A disabled shape icon says why; its own popover text outranks the operation help.
+function renderShapeReason(button, reason) {
+  if (reason === null) {
+    delete button.dataset.popoverTitle;
+    delete button.dataset.popoverBody;
+    return;
+  }
+  button.dataset.popoverTitle = button.getAttribute("aria-label");
+  button.dataset.popoverBody = reason;
+}
+
+// One displayed level: a single source level, or one whole collapsed group.
+function selectedLevelLabel(term, selection) {
+  if (selection.size === 1) {
+    const [index] = selection;
+    return term.levels?.[index] ?? null;
+  }
+  const groups = Array.isArray(term.level_groups) ? term.level_groups : [];
+  const group = groups.find((candidate) =>
+    candidate.indices.length === selection.size &&
+    candidate.indices.every((index) => selection.has(Number(index)))
+  );
+  return group ? group.label : null;
 }
 
 function selectionTouchesCollapsedGroup(term, selection) {
@@ -1175,7 +1296,7 @@ function updateHandleCount(term) {
   contribPlay.hidden = !canShowContrib;
   contribPlay.disabled = buildFrame !== null;
   updateBuildDurationLabel();
-  basisToggle.style.background = view.showContrib && canShowContrib ? "#dbeafe" : "#f6f8fa";
+  basisToggle.setAttribute("aria-pressed", String(Boolean(view.showContrib && canShowContrib)));
   if (!canShowContrib) {
     stopContributionBuild();
     if (view.showContrib) {
@@ -1327,9 +1448,10 @@ const interactions = bindInteractions({
   clearZoom,
   actions,
 });
+bindPointLens(svg);
 
-termSelect.addEventListener("change", async () => {
-  const term = termSelect.value;
+async function selectFeature(term) {
+  if (term === selectedTerm()) return;
   const result = await executeStateMutation("/term", { term });
   if (result.ok) {
     actions.patchView({ activeTerm: term });
@@ -1338,10 +1460,23 @@ termSelect.addEventListener("change", async () => {
   const snapshot = store.getState().remote.snapshot;
   const authoritativeTerm = snapshot?.selected_term;
   if (authoritativeTerm && snapshot.terms[authoritativeTerm]) {
-    termSelect.value = authoritativeTerm;
     actions.patchView({ activeTerm: authoritativeTerm });
   }
+}
+
+bindFeatureList(featureListNodes, {
+  onSelect: selectFeature,
+  onQuery: (query) => {
+    featureQuery = query;
+    renderFeatureListState();
+  },
+  onToggle: () => {
+    featureListOpen = !featureListOpen;
+    storeFeatureListOpen(featureListOpen);
+    renderFeatureListState();
+  }
 });
+renderFeatureListState();
 
 if (groupDisplayMode) {
   groupDisplayMode.addEventListener("change", () => {
@@ -1464,17 +1599,35 @@ if (ungroupLevels) {
     await runStructuralRefit(ungroupTransition(selectedTerm()));
   });
 }
-if (uncollapseLevels) {
-  uncollapseLevels.addEventListener("click", async () => {
-    await runStructuralRefit(uncollapseTransition());
+if (setReference) {
+  setReference.addEventListener("click", async () => {
+    const term = currentTerm();
+    const label = term ? selectedLevelLabel(term, currentSelection()) : null;
+    if (label === null) return;
+    await runStructuralRefit(setReferenceTransition(selectedTerm(), label));
+  });
+}
+for (const button of shapeButtons) {
+  button.addEventListener("click", async () => {
+    const term = currentTerm();
+    const range = term && shapeRangeForSelection(term, currentSelection());
+    if (!range || button.getAttribute("aria-disabled") === "true") return;
+    const degree = Number(button.dataset.shapeDegree);
+    await runStructuralRefit(
+      shapeRangeTransition(
+        selectedTerm(), range.lo, range.hi, degree,
+        effectiveShapeJoin(shapeJoinChoice, term.shape.joins)
+      )
+    );
   });
 }
 
+
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
 store.subscribe(
-  selectTermPickerRenderState,
-  renderTermPickerState,
-  sameTermPickerRenderState
+  selectFeatureListRenderState,
+  renderFeatureListState,
+  sameFeatureListRenderState
 );
 store.subscribe(selectHistoryRenderState, renderHistoryState, sameHistoryRenderState);
 store.subscribe(selectAppBarRenderState, renderAppBarState, sameAppBarRenderState);
@@ -1541,5 +1694,5 @@ loadState().then(async () => {
   await refreshSummaryView();
 }).catch((error) => {
   statusNode.textContent = error.message;
-  statusNode.style.color = "#b42318";
+  statusNode.classList.add("is-error");
 });

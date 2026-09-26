@@ -478,6 +478,7 @@ def add_interaction(
     Mutates ``interaction_specs`` and ``interaction_order`` in place.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.spline import _SplineBase
 
     if feat1 not in specs:
         raise ValueError(f"Parent feature not found: {feat1}")
@@ -521,6 +522,16 @@ def add_interaction(
                 "an unpenalized parametric block with no marginal smooth to cross "
                 "with; use basis=Spline(...) for an interactable ordinal parent, or "
                 "a Categorical feature for level-by-level structure."
+            )
+        # A cr margin is rebuilt as a cardinal spline without the ranges and a
+        # bs margin keeps them, unpenalised, in every level or cross-section;
+        # neither is certified, so ranges stay on main effects in this version.
+        spline = spec._spline if isinstance(spec, OrderedCategorical) else spec
+        if isinstance(spline, _SplineBase) and spline.polynomial_ranges:
+            raise NotImplementedError(
+                f"cannot add the interaction ({feat1!r}, {feat2!r}): {parent!r} has "
+                "polynomial_ranges, which shape a main effect only in this version; "
+                "declare the interaction on a spline without them."
             )
 
     kind1 = _spec_kind(specs[feat1])

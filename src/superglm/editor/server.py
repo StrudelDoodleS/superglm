@@ -274,10 +274,33 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
-    @app.post("/uncollapse_levels")
-    def uncollapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+    @app.post("/revert_to_original")
+    def revert_to_original(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
-            lambda: widget._uncollapse_levels(
+            lambda: widget._revert_to_original(level_display=_level_display(payload))
+        )
+
+    @app.post("/set_reference")
+    def set_reference(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._set_reference(
+                str(_required(payload, "term")),
+                str(_required(payload, "level")),
+                str(payload.get("method", "auto")),
+                level_display=_level_display(payload),
+            )
+        )
+
+    @app.post("/shape_range")
+    def shape_range(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._shape_range(
+                str(_required(payload, "term")),
+                lo=_range_edge(_required(payload, "lo")),
+                hi=_range_edge(_required(payload, "hi")),
+                degree=_required(payload, "degree"),
+                join=payload.get("join", "tangent"),
+                method=str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
             )
         )
@@ -486,6 +509,12 @@ def _float(value: Any, name: str) -> float:
 
 def _optional_int(value: Any, name: str) -> int | None:
     return None if value is None else _int(value, name)
+
+
+def _range_edge(value: Any) -> str | float:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        raise EditorValueError("lo and hi must be band names or numbers.")
+    return value if isinstance(value, str) else float(value)
 
 
 def _number_list[T](

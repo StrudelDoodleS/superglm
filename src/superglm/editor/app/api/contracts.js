@@ -18,9 +18,18 @@
  * @property {Record<string, unknown>} [compact]
  */
 /**
- * @typedef {Object} EditorHistory
- * @property {Array<Record<string, unknown>>} active
- * @property {Array<Record<string, unknown>>} redo
+ * One action on the session's timeline, oldest first. The "marker" entry is
+ * the current position: Undo takes the entry before it, and the `redo`
+ * entries after it are what Redo would put back, in that order.
+ * @typedef {Object} TimelineEntry
+ * @property {"edit"|"structural"|"marker"} kind
+ * @property {string} [operation]
+ * @property {string|null} [term]
+ * @property {string} [label]
+ * @property {number} [n_points]
+ * @property {Record<string, unknown>} [params]
+ * @property {string} [hash]
+ * @property {boolean} [redo]
  */
 /**
  * @typedef {Object} GroupDisplayPayload
@@ -32,6 +41,66 @@
  * @typedef {Object} ImpactPayload
  * @property {number} [weighted_mean_relativity]
  * @property {number} [selected_weight_share]
+ */
+/**
+ * @typedef {Object} TermReference
+ * @property {string} level
+ * @property {'most_exposed'|'first'|'pinned'} policy
+ */
+/**
+ * A range of a term pinned to a polynomial. Edges are x values on a numeric
+ * term and band labels on an ordered one; degree 0-3 is Flat, Line,
+ * Quadratic or Cubic, which ``label`` names. ``join`` is how the range meets
+ * the free curve at its edges: "tangent", or "kink" (Corner).
+ * @typedef {Object} ShapedRange
+ * @property {number|string} lo
+ * @property {number|string} hi
+ * @property {number} degree
+ * @property {string} label
+ * @property {"tangent"|"kink"} [join]
+ */
+/**
+ * How many values a numeric term's refit sees, per grid point: ``below[k]``
+ * under the lower edge a selection starting at k snaps to, ``through[k]`` up
+ * to the upper edge one ending at k snaps to.
+ * @typedef {Object} ShapeSupport
+ * @property {number[]} below
+ * @property {number[]} through
+ */
+/**
+ * The palette's shape state for a term: the ranges in force, the hover
+ * reason when the term cannot take one, a numeric term's support counts and
+ * an ordered term's special levels, which no range can cover.
+ * @typedef {Object} TermShape
+ * @property {boolean} available
+ * @property {string|null} reason
+ * @property {ShapedRange[]} ranges
+ * @property {ShapeSupport|null} support
+ * @property {string[]} specials
+ * @property {("tangent"|"kink")[]} [joins] the joins the term can take
+ * @property {string|null} [join_reason] why a join is missing from ``joins``
+ */
+/**
+ * The /shape_range request: the selection's edges as shapeRangeForSelection
+ * names them, the degree of the icon chosen, and the join toggle's choice.
+ * @typedef {Object} ShapeRangeRequest
+ * @property {string} term
+ * @property {number|string} lo
+ * @property {number|string} hi
+ * @property {number} degree
+ * @property {"tangent"|"kink"} join
+ * @property {string} method
+ */
+/**
+ * The /set_reference request: a displayed level, which may be a group label.
+ * @typedef {Object} SetReferenceRequest
+ * @property {string} term
+ * @property {string} level
+ * @property {string} method
+ */
+/**
+ * The /revert_to_original request carries no fields.
+ * @typedef {Record<string, never>} EmptyStructuralRequest
  */
 /**
  * @typedef {Object} TermPayload
@@ -47,6 +116,16 @@
  * @property {GroupDisplayPayload|null} group_display
  * @property {ImpactPayload} impact
  * @property {number|null} [effective_df]
+ * @property {TermReference|null} [reference]
+ * @property {Array<{label:string, indices:number[]}>} [level_groups]
+ * @property {TermShape} shape
+ */
+/**
+ * What Undo and Redo would take next, edits and structural steps alike; null
+ * when there is nothing.
+ * @typedef {Object} UndoRedo
+ * @property {string|null} undo
+ * @property {string|null} redo
  */
 /**
  * @typedef {Object} EditorSnapshot
@@ -56,9 +135,9 @@
  * @property {string} selected_term
  * @property {Record<string, TermPayload>} terms
  * @property {Record<string, number[]>} selection
- * @property {boolean} can_uncollapse_levels
- * @property {Record<string, unknown>|null} last_collapse
- * @property {EditorHistory} history
+ * @property {UndoRedo} undo_redo
+ * @property {TimelineEntry[]} timeline
+ * @property {boolean} in_force_is_original
  */
 /**
  * @typedef {Object} StructuralTransitionTiming

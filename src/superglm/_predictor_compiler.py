@@ -253,10 +253,10 @@ def compile_predictor_design(
         )
 
         if use_discrete:
-            omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
-                x_col, feature_build_weight
-            )
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
+            omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
+                x_col, feature_build_weight, n_bins_feat
+            )
             bin_centers, bin_idx = _discretize_spline_column(
                 x_col,
                 n_bins_feat,

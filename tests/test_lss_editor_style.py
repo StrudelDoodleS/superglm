@@ -82,10 +82,13 @@ def test_chart_grammar_matches_the_editor_css():
             assert spec[field] == colour, name
             if alpha is not None:
                 assert spec["alpha"] == pytest.approx(alpha), name
-        if "fill-opacity" in rule:
-            assert spec["alpha"] == pytest.approx(float(rule["fill-opacity"])), name
-        elif "alpha" not in spec:
-            assert "fill-opacity" not in rule, name
+        # A class's alpha is stated once in the CSS: in an rgba() colour or as
+        # a separate fill-/stroke-opacity (the original-model line uses the latter).
+        opacity = rule.get("fill-opacity", rule.get("stroke-opacity"))
+        if opacity is not None:
+            assert spec["alpha"] == pytest.approx(float(opacity)), name
+        elif all(_colour(rule[prop])[1] is None for prop in fields.values()):
+            assert "alpha" not in spec, name
         if "width" in spec:
             assert spec["width"] == pytest.approx(float(rule["stroke-width"])), name
         else:

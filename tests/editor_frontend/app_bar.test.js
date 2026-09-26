@@ -3,7 +3,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bindAppBar } from "../../src/superglm/editor/app/views/app_bar.js";
+import {
+  bindAppBar,
+  renderAppBar,
+  revertAvailable,
+} from "../../src/superglm/editor/app/views/app_bar.js";
 
 class FakeElement {
   constructor(tagName = "div") {
@@ -91,9 +95,13 @@ test("global undo and redo shortcuts pause while any native dialog is open", (t)
     root,
     undoButton,
     redoButton,
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
     onView: () => {},
     onUndo: () => { undoCalls += 1; },
     onRedo: () => { redoCalls += 1; },
+    onRevert: () => {},
+    onRefresh: () => {},
   });
 
   documentHub.openDialog = new FakeElement("dialog");
@@ -111,4 +119,86 @@ test("global undo and redo shortcuts pause while any native dialog is open", (t)
   assert.equal(redo.defaultPrevented, true);
 
   binding.destroy();
+});
+
+test("Refresh is disabled while busy and Revert only when something can be reverted", () => {
+  const root = new FakeElement("nav");
+  const buttons = {
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+  };
+  const render = (overrides) => renderAppBar({
+    root,
+    activeView: "editor",
+    ...buttons,
+    undoLabel: null,
+    redoLabel: null,
+    canRevert: false,
+    busy: false,
+    ...overrides,
+  });
+
+  render({});
+  assert.deepEqual(
+    [buttons.refreshButton.disabled, buttons.revertButton.disabled],
+    [false, true],
+  );
+  render({ busy: true });
+  assert.equal(buttons.refreshButton.disabled, true);
+  render({ canRevert: true });
+  assert.deepEqual(
+    [buttons.refreshButton.disabled, buttons.revertButton.disabled],
+    [false, false],
+  );
+});
+
+test("Undo and Redo follow the snapshot and name what they would take", () => {
+  const root = new FakeElement("nav");
+  const buttons = {
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+  };
+  const render = (undoLabel, redoLabel) => {
+    renderAppBar({
+      root, activeView: "editor", ...buttons, undoLabel, redoLabel, canRevert: false, busy: false,
+    });
+    const { undoButton, redoButton } = buttons;
+    return [undoButton.disabled, undoButton.dataset.popoverBody,
+      redoButton.disabled, redoButton.dataset.popoverBody];
+  };
+
+  assert.deepEqual(render("Line 30–45 in age", null),
+    [false, "Undo: Line 30–45 in age", true, "Nothing to redo."]);
+  assert.deepEqual(render(null, "shift age"),
+    [true, "Nothing to undo.", false, "Redo: shift age"]);
+});
+
+test("Revert is available whenever anything differs from the opened model", () => {
+  const snapshot = (overrides) => ({
+    timeline: [{ kind: "marker" }],
+    undo_redo: { undo: null, redo: null },
+    in_force_is_original: true,
+    ...overrides,
+  });
+  const marker = { kind: "marker" };
+  const edit = (redo) => ({ kind: "edit", label: "shift age", redo });
+  const step = (redo) => ({ kind: "structural", label: "Line 30–45 in age", redo });
+  assert.equal(revertAvailable(snapshot({})), false);
+  assert.equal(revertAvailable(snapshot({ timeline: [edit(false), marker] })), true);
+  assert.equal(revertAvailable(snapshot({ timeline: [step(false), edit(false), marker] })), true);
+  // An undone edit or step differs from nothing in force, and Revert would
+  // only push a step that changes nothing.
+  assert.equal(revertAvailable(snapshot({ timeline: [marker, edit(true)] })), false);
+  // Edits before a step were set aside by it, so they are not live.
+  assert.equal(revertAvailable(snapshot({ timeline: [edit(false), step(false), marker] })), false);
+  assert.equal(
+    revertAvailable(snapshot({ undo_redo: { undo: "revert to original model", redo: "x" } })),
+    false,
+  );
+  // A structural step or a distribution re-profile puts another model in force.
+  assert.equal(revertAvailable(snapshot({ in_force_is_original: false })), true);
 });

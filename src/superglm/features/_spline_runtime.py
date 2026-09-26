@@ -8,7 +8,13 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import BSpline as BSpl
 
+from superglm._group_matrix._group_matrix_bins import discretize_column
 from superglm.features import _spline_extrapolation, _spline_knots
+from superglm.features._spline_ranges import (
+    certify_determined,
+    merged_interior_knots,
+    validate_ranges,
+)
 
 _SPLINE_SCORE_CHUNK_SIZE = 8192
 _SPLINE_SCORE_SAMPLE_SIZE = 4096
@@ -103,8 +109,13 @@ def place_knots(
     spec: Any,
     x: NDArray,
     sample_weight: NDArray | None = None,
+    n_bins: int | None = None,
 ) -> None:
-    """Place interior knots and build the full knot vector."""
+    """Place interior knots and build the full knot vector.
+
+    ``n_bins`` is the bin count of a discretised fit, which sees the feature
+    only at bin centres; polynomial ranges are certified against those.
+    """
     named = getattr(spec, "_named_knots", None)
     if named is not None:
         # Reachable only when a Spline stated as knots=[level names] is built
@@ -138,7 +149,37 @@ def place_knots(
         explicit_boundary=spec._explicit_boundary,
         sample_weight=sample_weight,
     )
+    spec._base_interior_knots = np.array(interior, dtype=np.float64)
+    if spec._polynomial_ranges:
+        interior = _ranged_interior(spec, x, interior, n_bins)
     spec._assemble_knot_vector(interior)
+
+
+def fit_support(x: NDArray, n_bins: int | None = None) -> NDArray:
+    """The sorted distinct values a fit evaluates the basis at, from positive-weight rows.
+
+    An exact fit sees the distinct values themselves; a discretised one sees
+    the centres of the occupied bins of ``discretize_column``, the placement
+    its design is built on.
+    """
+    if n_bins is None:
+        return np.unique(x)
+    centres, index = discretize_column(x, n_bins)
+    return centres[np.unique(index)]
+
+
+def _ranged_interior(spec: Any, x: NDArray, interior: NDArray, n_bins: int | None) -> NDArray:
+    """Certify the spec's ranges against the support the fit sees and insert their edge knots.
+
+    The highest penalty order is the one certified: REML may take the lower
+    orders' smoothing parameters towards zero.
+    """
+    ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
+    note = "" if n_bins is None else f" once binned to {n_bins} equal-width bins"
+    order = max(spec._m_orders)
+    certify_determined(ranges, fit_support(x, n_bins), spec._lo, spec._hi, order, note)
+    spec._polynomial_ranges = ranges
+    return merged_interior_knots(interior, ranges, spec.degree, spec._lo, spec._hi)
 
 
 def assemble_clamped_knot_vector(spec: Any, interior: NDArray) -> None:

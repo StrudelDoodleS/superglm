@@ -1,4 +1,5 @@
 import { escapeHTML, fmt, fmtSigned } from "./format.js";
+import { metricDirection } from "./metrics.js";
 
 const reportMetricKeys = [
   "deviance",
@@ -52,16 +53,17 @@ function renderSplitRow(split) {
         <strong>${escapeHTML(split.label || split.name || "")}</strong>
         <span class="report-delta">${escapeHTML(String(split.n_obs || 0))} rows</span>
       </td>
-      ${reportMetricKeys.map((metric) => renderMetricCell(edited[metric], delta[metric])).join("")}
+      ${reportMetricKeys.map((metric) => renderMetricCell(metric, edited[metric], delta[metric])).join("")}
     </tr>
   `;
 }
 
-function renderMetricCell(value, delta) {
+function renderMetricCell(metric, value, delta) {
+  const direction = metricDirection(metric, Number(delta));
   return `
     <td>
       ${escapeHTML(fmt(value))}
-      <span class="report-delta">Δ ${escapeHTML(fmtSigned(delta))}</span>
+      <span class="report-delta" data-direction="${direction}">Δ ${escapeHTML(fmtSigned(delta))}</span>
     </td>
   `;
 }
