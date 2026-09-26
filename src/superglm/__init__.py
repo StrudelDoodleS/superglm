@@ -24,6 +24,7 @@ sklearn-compatible API:
 """
 
 from superglm import families
+from superglm._tweedie import generate_tweedie_cpg, tweedie_logpdf
 from superglm.constraints import (
     MonotoneRepairer as MonotoneRepairer,
 )
@@ -131,23 +132,7 @@ from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.plotting import plot_term_comparison
 from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning, estimate_nb_theta
-from superglm.profiling.tweedie import (
-    TweedieProfileCIDensityProvenance as TweedieProfileCIDensityProvenance,
-)
-from superglm.profiling.tweedie import (
-    TweedieProfileCIDetails,
-    TweedieProfileResult,
-    estimate_phi,
-    estimate_tweedie_p,
-    generate_tweedie_cpg,
-    tweedie_logpdf,
-)
-from superglm.profiling.tweedie import (
-    TweedieProfileCIEndpoint as TweedieProfileCIEndpoint,
-)
-from superglm.profiling.tweedie import (
-    TweedieProfileCIEvaluation as TweedieProfileCIEvaluation,
-)
+from superglm.profiling.tweedie import TweedieProfileResult
 from superglm.reml import REMLResult
 from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
 from superglm.stats.davies import psum_chisq, satterthwaite
@@ -290,11 +275,8 @@ __all__ = [
     "REMLResult",
     "LambdaPolicy",
     "estimate_nb_theta",
-    "estimate_tweedie_p",
     "TweedieProfileResult",
-    "TweedieProfileCIDetails",
     "tweedie_logpdf",
-    "estimate_phi",
     "generate_tweedie_cpg",
     "psum_chisq",
     "satterthwaite",

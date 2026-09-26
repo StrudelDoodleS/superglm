@@ -1227,7 +1227,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     Methods: `ci(alpha=0.05) -> tuple[float, float]`, `interval(alpha=0.05) -> Interval`, `profile_plot(alpha=0.05, ax=None)`.
   - `profile_phi_at(y, mu, weights, p) -> PhiSolve` (ML dispersion at a fitted mean; used by publication in Task 7).
 
-- [ ] **Step 1: Write the failing tests.** Create `tests/test_tweedie_p_recovery.py`:
+- [x] **Step 1: Write the failing tests.** Create `tests/test_tweedie_p_recovery.py`:
 
 ```python
 """Spec criterion 8: estimate_p recovers the true power on constant-phi data."""
@@ -1302,11 +1302,11 @@ Add a `characterisation_case` fixture to `tests/conftest.py` (or a local conftes
 
 The phi and CI tolerances above are placeholders to derive, not to accept. Before asserting, compute the actual bounds from the fixture's recorded curvature: phi tolerance = nll bound / (Q'' · phi); CI tolerance = rtol + nll bound / |profile slope at the endpoint|. Replace the literals with the derived expressions, with the derivation in a comment.
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `uv run pytest tests/test_tweedie_p_recovery.py tests/test_tweedie_nb_characterisation.py -k "recover or estimate_p or boundary" -q`. Expected: FAIL. The recovery test fails on `result._objective`/`result.search_nll` attribute shape, or passes on master; record which. The boundary test fails on `result.interval`.
+- [x] **Step 2: Run to confirm they fail.** Run: `uv run pytest tests/test_tweedie_p_recovery.py tests/test_tweedie_nb_characterisation.py -k "recover or estimate_p or boundary" -q`. Expected: FAIL. The recovery test fails on `result._objective`/`result.search_nll` attribute shape, or passes on master; record which. The boundary test fails on `result.interval`.
 
-- [ ] **Step 3: Add warm starts to `_solve_coefficients`.** In `fit_ops._solve_coefficients`, add the keyword-only parameters `beta_init=None, intercept_init=None` and pass `beta_init=beta_init, intercept_init=intercept_init` to both `fit_irls_direct(...)` and `fit_pirls(...)`. Existing callers are unchanged.
+- [x] **Step 3: Add warm starts to `_solve_coefficients`.** In `fit_ops._solve_coefficients`, add the keyword-only parameters `beta_init=None, intercept_init=None` and pass `beta_init=beta_init, intercept_init=intercept_init` to both `fit_irls_direct(...)` and `fit_pirls(...)`. Existing callers are unchanged.
 
-- [ ] **Step 4: Write the new `src/superglm/profiling/tweedie.py`.** Core code below. Keep the whole module ≤ 600 lines.
+- [x] **Step 4: Write the new `src/superglm/profiling/tweedie.py`.** Core code below. Keep the whole module ≤ 600 lines.
 
 ```python
 """Profile-likelihood estimation of the Tweedie power (Dunn & Smyth 2005).
@@ -1467,7 +1467,7 @@ class TweedieProfileResult:
                             alpha=alpha, interval=interval, label="p")
 ```
 
-- [ ] **Step 5: Run the tests.** Run: `uv run pytest tests/test_tweedie_p_recovery.py tests/test_tweedie_nb_characterisation.py tests/test_profile_scalar.py -n 8 -q`. Expected: pass (`estimate_p` itself is rewired in Task 7; until then, call `search_power` through a temporary test helper, or run this step at the end of Task 7). Add `test_uncertifiable_power_is_skipped`:
+- [x] **Step 5: Run the tests.** Run: `uv run pytest tests/test_tweedie_p_recovery.py tests/test_tweedie_nb_characterisation.py tests/test_profile_scalar.py -n 8 -q`. Expected: pass (`estimate_p` itself is rewired in Task 7; until then, call `search_power` through a temporary test helper, or run this step at the end of Task 7). Add `test_uncertifiable_power_is_skipped`:
 
 ```python
 def test_uncertifiable_power_is_skipped(characterisation_case, monkeypatch):
@@ -1488,7 +1488,7 @@ def test_uncertifiable_power_is_skipped(characterisation_case, monkeypatch):
 
 Check `ObservedModeNotCertifiedError`'s constructor signature in `reml/observed_geometry.py` and construct it accordingly.
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add -A src/superglm/profiling/tweedie.py src/superglm/model/fit_ops.py tests/test_tweedie_p_recovery.py tests/test_tweedie_nb_characterisation.py tests/conftest.py
@@ -1496,6 +1496,24 @@ git commit -m "feat: Brent power search on the single dispersion solver
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+**Task 5 and 6 outcome:**
+
+- `search_power` reproduces master's Brent path on every fixture row that master searched by Brent away from a certification wall. p̂ agrees within 4e-12, `search_nll` within 6e-15 relative, and the CI endpoints within 4.9e-6, which is inside master's own accepted root residual. On the private validation dataset p̂ and `search_nll` are identical in both modes and the CI agrees within 1.1e-8.
+- The REML `lambda2_init` warm start is removed, which settles Task 10 Step 3. It was inert: candidate fits were bitwise identical with and without it, because the direct and discrete engines bootstrap their own lambdas.
+- `test_estimate_p_matches_master` has derived tolerances:
+  - p̂: scipy's bounded Brent leaves each estimate within 2·(√ε·p + xatol/3) of the minimiser it brackets, so two searches differ by at most twice that (1.33·xatol, not xatol).
+  - `search_nll`: c·reach²/2 plus the density bound, plus, for ML candidates, the warm-started fit's determination tol·D/(2φn). The curvature c is recovered from master's interval.
+  - φ: checked as the ML dispersion at master's p̂ on the published mean, where only the density and the fit move it. The published φ̂ itself moves with p̂: on `unpen/fit`, d log φ/dp ≈ 4, so no bound derivable from the fixture covers it.
+  - CI: master's accepted LR residual (10⁻³·χ²) over 2n·slope, plus brentq's tolerance, plus the NLL shift over the slope.
+  - Measured against an emulated publication, every ratio is ≤ 0.53. Seven source mutations each redden at least one test.
+- Listed flip: `re_flat_p18/reml`. Master scored p = 1.76433 uncertifiable. The rebuilt REML scale certifies it, because a mode score against the 10⁻⁹ bar is a knife edge. Brent then routes on to p̂ = 1.76493, with a mean NLL 0.0066 lower (20 log-likelihood units) and still censored between uncertifiable powers. The test checks that the profile agrees at master's p̂ (2e-13), that the new estimate is no worse, and that the censoring is disclosed.
+- Warnings:
+  - p̂ is at a search bound when it is the first or last evaluated power.
+  - An infeasible evaluated neighbour marks p̂ censored.
+  - Every skipped power is listed.
+  - The interval's search is cut to the search bound on the side p̂ sits on. The plan's widened bounds would find a root beyond the bound and fail the plan's own boundary test.
+- **Open, criterion 8 REML arm:** plain `fit_reml` at p = 1.8 fails mode certification on all three recovery seeds, with scores 1.3e-9 to 1.1e-7 against the 10⁻⁹ bar. The failure is identical on master. The REML search is then censored: seed 3 is trapped at p̂ = 1.691, the same as master. Its curvature probes also land on uncertifiable powers. With publication emulated, the recovery test passes 15 of 18 cases; the three REML p = 1.8 cases fail. This needs a decision; it is not a search defect.
 
 ---
 

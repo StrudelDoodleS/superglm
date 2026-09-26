@@ -1193,6 +1193,24 @@ def _nb_joint_nll(y_arr, model, theta: float) -> float:
     )
 
 
+def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
+    """Refuse the monotone configurations no ordinary-fit solver honours, once the groups exist."""
+    # The constrained QP solver path ignores lambda1 — reject explicitly.
+    if (
+        any(g.monotone_engine is not None for g in model._groups)
+        and penalty.lambda1 is not None
+        and penalty.lambda1 > 0
+        and has_lambda1_targets
+    ):
+        raise NotImplementedError(
+            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
+            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
+        )
+    monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
+    if len(monotone_engines) > 1:
+        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
+
+
 def _solve_coefficients(
     model,
     y,
@@ -1206,6 +1224,8 @@ def _solve_coefficients(
     tol,
     record_diagnostics,
     convergence,
+    beta_init=None,
+    intercept_init=None,
 ):
     """Apply the ordinary fit policy for selecting the coefficient solver."""
     has_constraints = any(group.constraints is not None for group in model._groups)
@@ -1226,6 +1246,8 @@ def _solve_coefficients(
             groups=model._groups,
             lambda2=lambda2,
             offset=offset,
+            beta_init=beta_init,
+            intercept_init=intercept_init,
             max_iter=max_iter,
             tol=tol,
             record_diagnostics=record_diagnostics,
@@ -1245,6 +1267,8 @@ def _solve_coefficients(
         groups=model._groups,
         penalty=penalty,
         offset=offset,
+        beta_init=beta_init,
+        intercept_init=intercept_init,
         max_iter_outer=max_iter,
         tol=tol,
         active_set=model._active_set,
@@ -1351,23 +1375,7 @@ def _fit_in_workspace(
     # Invalidate cached properties from previous fit
     _clear_fit_inference_caches(model)
 
-    # Monotone fit-time constraints are incompatible with selection_penalty (lambda1).
-    # The constrained QP solver path ignores lambda1 — reject explicitly.
-    if (
-        any(g.monotone_engine is not None for g in model._groups)
-        and penalty.lambda1 is not None
-        and penalty.lambda1 > 0
-        and has_lambda1_targets
-    ):
-        raise NotImplementedError(
-            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
-            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
-        )
-
-    # Guard: SCOP + QP monotone engines cannot coexist in the same model.
-    _monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
-    if len(_monotone_engines) > 1:
-        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
+    _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets)
 
     model._result = _solve_coefficients(
         model,

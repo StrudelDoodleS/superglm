@@ -247,7 +247,7 @@ def _simulate_response(
         return draws / weights if prior else draws
 
     if isinstance(family, Tweedie):
-        from superglm.profiling.tweedie import generate_tweedie_cpg
+        from superglm._tweedie import generate_tweedie_cpg
 
         row_phi = phi / weights if prior else np.full_like(weights, phi)
         return generate_tweedie_cpg(len(mu), mu, row_phi, family.p, rng=rng)
