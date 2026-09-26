@@ -991,7 +991,9 @@ def discretization_impact(
                 if np.any(geometry_mass > 0.0):
                     bin_log_rel[b] = np.average(
                         log_rel_smooth[mask],
-                        weights=geometry_mass,
+                        # Scaled by the largest, which only ratios see: a weight
+                        # near the largest double would overflow weight * value.
+                        weights=geometry_mass / geometry_mass.max(),
                     )
 
         # Build rating table

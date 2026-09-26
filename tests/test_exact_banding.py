@@ -2,6 +2,7 @@
 
 import itertools
 import warnings
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -186,10 +187,59 @@ def test_the_widening_search_survives_factors_near_the_top_of_double(s, tol, lea
 def test_weights_near_the_largest_double_do_not_overflow_the_mean():
     # w * d was 1e308 * -10 = -inf; only ratios of weights matter.
     result = exact_bands(
-        np.array([0.0, 10.0]), np.array([1e308, 1.0]), np.array([1.0, 11.0]), max_bands=2
+        np.array([0.0, 10.0]), np.array([1e308, 1e10]), np.array([1.0, 11.0]), max_bands=2
     )
     assert result.starts.tolist() == [0]
     assert np.isfinite(result.sse)
+
+
+def test_a_curve_wider_than_the_window_ceiling_is_refused():
+    with pytest.raises(ValueError, match="quarter of the largest double"):
+        exact_bands(np.array([0.0, 1e308]), np.ones(2), np.ones(2), max_bands=1)
+
+
+def test_the_acceptance_margin_certifies_ties_at_rounding_level():
+    """Tolerances set to each value's exact distance from the exact mean, rounded.
+
+    Rounding to nearest leaves about half of them short of feasibility by less
+    than the computed mean's own rounding; the margin has to refuse those, so
+    every band returned meets every tolerance in exact arithmetic.
+    """
+    rng = np.random.default_rng(23)
+    for _ in range(400):
+        k = int(rng.integers(2, 6))
+        s = 100.0 + np.cumsum(rng.normal(0.0, 1e-3, k))
+        w = rng.uniform(0.1, 3.0, k) ** 3
+        exact_mean = sum(Fraction(a) * Fraction(b) for a, b in zip(w, s)) / sum(map(Fraction, w))
+        tol = np.array([float(abs(exact_mean - Fraction(value))) for value in s])
+        result = exact_bands(s, w, tol, max_bands=k)
+        ends = np.append(result.starts[1:], k)
+        for a, b in zip(result.starts, ends, strict=True):
+            band_s = list(map(Fraction, s[a:b]))
+            weights = list(map(Fraction, w[a:b]))
+            mean = sum(x * y for x, y in zip(weights, band_s)) / sum(weights)
+            assert all(abs(mean - value) <= Fraction(t) for value, t in zip(band_s, tol[a:b]))
+
+
+def test_the_acceptance_margin_does_not_cost_bands_it_can_certify():
+    # Eight times the margin clears any rounding, so one band must be taken.
+    rng = np.random.default_rng(29)
+    for _ in range(100):
+        k = int(rng.integers(2, 6))
+        s = 100.0 + np.cumsum(rng.normal(0.0, 1e-3, k))
+        w = rng.uniform(0.1, 3.0, k) ** 3
+        # In the frame of the last value, as the banding measures, so the
+        # tolerances are not rounded at the curve's level of 100.
+        d = s - s[-1]
+        mean = np.average(d, weights=w)
+        margin = 16.0 * _EPS * (k + 2) * np.abs(d).max()
+        result = exact_bands(s, w, np.abs(d - mean) + margin, max_bands=k)
+        assert result.starts.tolist() == [0]
+
+
+def test_weights_spanning_more_than_a_double_are_refused():
+    with pytest.raises(ValueError, match="span more than a double can average"):
+        exact_bands(np.array([0.0, 1.0]), np.array([1e308, 1e-20]), np.zeros(2), max_bands=2)
 
 
 @pytest.fixture(scope="module")
@@ -530,3 +580,19 @@ def test_only_a_last_single_value_band_gets_a_closed_key():
     )
     keys = _continuous_block("x", table, 0.0).table["x"].tolist()
     assert keys == ["[0.0, 1.0)", "[1.0, 1.0)", "[1.0, 2.0)", "[2.0, 2.0]"]
+
+
+def test_a_weight_near_the_largest_double_keeps_the_table_finite():
+    # One replication weight of 1e308 at a value whose log relativity is near 2:
+    # its weight * value overflowed in the table's own average of that band.
+    rng = np.random.default_rng(11)
+    x = rng.integers(0, 21, 3000).astype(float) / 20.0
+    y = rng.poisson(np.exp(-1.0 + 4.0 * x)).astype(float)
+    df = pd.DataFrame({"x": x})
+    model = SuperGLM(features={"x": Spline(n_knots=6)}, weight_semantics="frequency").fit(df, y)
+    weights = np.ones(len(df))
+    weights[np.flatnonzero(x == x.max())[0]] = 1e308
+    result = model.discretization_impact(
+        df, y, sample_weight=weights, n_bins=150, bin_strategy="exact"
+    )
+    assert np.isfinite(result.tables["x"]["log_relativity"]).all()

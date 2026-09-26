@@ -37,7 +37,10 @@ class ExactBanding:
         Multiplier applied to the tolerances: 1.0 unless ``max_bands`` forced
         a wider limit.
     sse : float
-        Weighted squared error of the banding.
+        Weighted squared error of the banding.  It is formed from running
+        moments about each band's last value, so it loses accuracy when that
+        value sits far from the band's mean relative to the band's spread; it
+        only orders bandings with the fewest bands, never their count.
     """
 
     starts: NDArray[np.intp]
@@ -67,6 +70,13 @@ def exact_bands(s, w, tol, max_bands: int) -> ExactBanding:
     # Only ratios of weights matter; scaling by the largest keeps w * d finite.
     scale = float(w.max())
     w = w / scale
+    if np.any(w < np.finfo(np.float64).tiny):
+        # Below the smallest normal double the rounding is absolute, not relative,
+        # and the smallest weights would vanish from their bands' means.
+        raise ValueError(
+            "exact banding weights span more than a double can average: the smallest "
+            "is below 2**-1022 of the largest"
+        )
     starts, sse = _fewest_then_least(s, w, tol)
     factor = 1.0
     if len(starts) > max_bands:
@@ -102,6 +112,12 @@ def _validated(s, w, tol, max_bands):
         raise ValueError("exact banding weights must be positive")
     if np.any(tol < 0.0):
         raise ValueError("exact banding tolerances must be nonnegative")
+    if s.max() - s.min() > _TOLERANCE_CEILING:
+        # Widened windows are held below the ceiling so no edge is infinite;
+        # a log relativity never comes near it.
+        raise ValueError(
+            "exact banding needs a curve whose range is below a quarter of the largest double"
+        )
     if isinstance(max_bands, bool) or not isinstance(max_bands, int | np.integer) or max_bands < 1:
         raise ValueError(f"max_bands must be a positive integer, got {max_bands!r}")
     return s, w, tol
