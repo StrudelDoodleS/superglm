@@ -999,7 +999,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `likelihood_ratio_interval(objective, x_hat, nll_hat, bounds, *, alpha, scale, rtol) -> Interval`.
   - `profile_plot(values: dict[float, float], x_hat, nll_hat, *, scale, alpha, interval: Interval | None, label: str, ax=None)`, returning the matplotlib `Axes`.
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_profile_scalar.py`:
+- [x] **Step 1: Write the failing tests** in `tests/test_profile_scalar.py`:
 
 ```python
 import math
@@ -1058,9 +1058,9 @@ def test_interval_side_ending_at_infeasible_region_is_censored():
     assert not interval.lower_censored
 ```
 
-- [ ] **Step 2: Run them to confirm they fail.** Run: `uv run pytest tests/test_profile_scalar.py -q`. Expected: ERROR on import.
+- [x] **Step 2: Run them to confirm they fail.** Run: `uv run pytest tests/test_profile_scalar.py -q`. Expected: ERROR on import.
 
-- [ ] **Step 3: Implement `src/superglm/profiling/_scalar.py`:**
+- [x] **Step 3: Implement `src/superglm/profiling/_scalar.py`:**
 
 ```python
 """One-parameter profile likelihood: recorded bounded search and likelihood-ratio interval."""
@@ -1189,9 +1189,9 @@ def profile_plot(values, x_hat, nll_hat, *, scale, alpha, interval, label, ax=No
     return ax
 ```
 
-- [ ] **Step 4: Run the tests to confirm they pass.** Run: `uv run pytest tests/test_profile_scalar.py -q`. Expected: all pass.
+- [x] **Step 4: Run the tests to confirm they pass.** Run: `uv run pytest tests/test_profile_scalar.py -q`. Expected: all pass.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add src/superglm/profiling/_scalar.py tests/test_profile_scalar.py
