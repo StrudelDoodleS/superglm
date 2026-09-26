@@ -216,13 +216,15 @@ def test_the_widening_bracket_covers_the_underflow_margin():
 def test_a_product_that_underflows_cannot_carry_a_band_past_its_tolerance():
     # w * d = 2**-1020 * -2**-60 rounds to zero, so the computed mean of {0, 2**-60}
     # was 0 and the band was accepted with the second value 2**-61 from the exact
-    # mean against a tolerance of 2**-100.
-    result = exact_bands(
-        np.array([0.0, 2.0**-60, 1.0]),
-        np.array([2.0**-1020, 2.0**-1020, 1.0]),
-        np.array([2.0**-59, 2.0**-100, 0.0]),
-        max_bands=3,
-    )
+    # mean against a tolerance of 2**-100.  The certificate covers that rounding,
+    # so a caller raising on underflow gets the same answer.
+    with np.errstate(under="raise"):
+        result = exact_bands(
+            np.array([0.0, 2.0**-60, 1.0]),
+            np.array([2.0**-1020, 2.0**-1020, 1.0]),
+            np.array([2.0**-59, 2.0**-100, 0.0]),
+            max_bands=3,
+        )
     assert result.starts.tolist() == [0, 1, 2]
 
 
@@ -266,7 +268,7 @@ def test_the_acceptance_margin_does_not_cost_bands_it_can_certify():
 
 
 def test_weights_spanning_more_than_a_double_are_refused():
-    with pytest.raises(ValueError, match="span more than a double can average"):
+    with np.errstate(under="raise"), pytest.raises(ValueError, match="span more than a double"):
         exact_bands(np.array([0.0, 1.0]), np.array([1e308, 1e-20]), np.zeros(2), max_bands=2)
 
 

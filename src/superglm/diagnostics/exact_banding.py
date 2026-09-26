@@ -36,7 +36,9 @@ class ExactBanding:
         Index of each band's first value, ascending, starting at 0.
     factors : NDArray
         Weighted mean of the curve in each band.  The certificate covers the
-        exact mean; a factor is that mean rounded once to a double, so a
+        exact mean; a factor is that mean evaluated in double in the frame of
+        the band's first value, so it can differ from it by about ``k * eps``
+        times the band's spread plus :func:`_underflow_margin`, and a
         tolerance below half a unit in the last place of the curve's level
         cannot be met by any double.
     tolerance_factor : float
@@ -55,6 +57,9 @@ class ExactBanding:
     sse: float
 
 
+# The certificate accounts for underflow (_underflow_margin), so a caller's
+# np.seterr(under="raise") must not turn the subnormal products it covers into errors.
+@np.errstate(under="ignore")
 def exact_bands(s, w, tol, max_bands: int) -> ExactBanding:
     """Band the curve ``s`` (weights ``w``) so each value stays within ``tol``.
 
@@ -152,7 +157,7 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
     sse = np.zeros(n + 1, dtype=np.float64)
     start = np.zeros(n, dtype=np.intp)
     never = np.iinfo(np.int64).max
-    underflow = _underflow_margin(n, w)
+    underflow = _underflow_margin(w)
     for j in range(n):
         # d is exact for values within a factor two of s[j] (Sterbenz), and
         # otherwise off by at most eps |d|.
@@ -198,15 +203,16 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
     return np.array(starts[::-1], dtype=np.intp), float(sse[n])
 
 
-def _underflow_margin(n: int, w) -> float:
+def _underflow_margin(w) -> float:
     """Absolute error bound on a band mean from products ``w * d`` that underflow.
 
-    Each rounds by at most 2**-1075; over at most ``n`` of them and a band weight
-    of at least ``min(w)``, plus 2**-1074 for the division's own rounding and this
-    bound's.  ``w`` is scaled to a maximum of 1 and refused below the smallest
-    normal double, so this is at most ``n * 2**-52``.
+    Each rounds by at most 2**-1075, and a band of ``k`` values weighs at least
+    ``k * min(w)``, so its underflowed products move the mean by less than
+    ``2**-1075 / min(w)``; 2**-1074 more covers the division's own rounding and
+    this bound's.  ``w`` is scaled to a maximum of 1 and refused below the
+    smallest normal double, so this is at most about ``2**-52``.
     """
-    return n * 2.0**-1074 / float(w.min()) + 2.0**-1074
+    return 2.0**-1074 / float(w.min()) + 2.0**-1074
 
 
 def _banding_within(s, w, tol, factor: float, max_bands: int):
@@ -226,12 +232,11 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
 
     Returns the factor and that banding.  Widening every tolerance only enlarges
     each feasible set (float64 rounding is monotone), so the fewest-band count
-    never rises with the factor and bisection applies.  At ``2 R / tau``, with
-    ``R`` the curve's range plus :func:`_underflow_margin` and ``tau`` the
-    least positive tolerance, every
-    positive-tolerance window holds every possible band mean, so no larger
-    factor fits more; if that fails, zero tolerances are what stand in the
-    way.  The bisection is geometric, so a factor near 1e30 takes about thirty
+    never rises with the factor and bisection applies.  At ``2 * reach / tau``,
+    with ``reach`` the curve's range plus :func:`_underflow_margin` and ``tau``
+    the least positive tolerance, every positive-tolerance window holds every
+    possible band mean, so no larger factor fits more; if that fails, zero
+    tolerances are what stand in the way.  The bisection is geometric, so a factor near 1e30 takes about thirty
     solves.
     """
     positive = tol[tol > 0.0]
@@ -241,7 +246,7 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
             "values with zero tolerance cannot share a band"
         )
     # Past the largest double the bound is taken as the largest double.
-    reach = float(s.max() - s.min()) + _underflow_margin(len(s), w)
+    reach = float(s.max() - s.min()) + _underflow_margin(w)
     upper = max(2.0 * reach / float(positive.min()), 1.0)
     upper = min(upper, float(np.finfo(np.float64).max))
     banding = _banding_within(s, w, tol, upper, max_bands)
