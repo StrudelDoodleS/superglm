@@ -40,6 +40,21 @@ def _schur_absolute_cutoff(reference_scale: float, width: int) -> float:
     return np.finfo(np.float64).eps * float(reference_scale) * max(int(width), 1) * 10.0
 
 
+def _schur_fallback_cutoff(A: NDArray, eliminated: NDArray, width: int) -> float:
+    """Return the SVD fallback's rank floor, scaled by the larger of ``A`` and the eliminated mass.
+
+    Only the fallback reads this floor.  The two spectral norms are full SVDs of
+    the border, so computing them for a Schur complement that Cholesky accepts
+    cost more than the factorization itself on wide borders.
+    """
+    reference_scale = max(
+        float(np.linalg.norm(A, ord=2)),
+        float(np.linalg.norm(eliminated, ord=2)),
+        1.0,
+    )
+    return _schur_absolute_cutoff(reference_scale, width)
+
+
 def _cancellation_pivot_floor(
     A_diagonal: NDArray,
     eliminated_diagonal: NDArray,
@@ -191,12 +206,6 @@ class ScalarSchurFactor:
         eliminated = self.C.T @ self._F
         Q = self.A - eliminated
         self._Q = 0.5 * (Q + Q.T)
-        schur_reference_scale = max(
-            float(np.linalg.norm(self.A, ord=2)) if q else 0.0,
-            float(np.linalg.norm(eliminated, ord=2)) if q else 0.0,
-            1.0,
-        )
-        absolute_cutoff = _schur_absolute_cutoff(schur_reference_scale, q)
         self._Q_cholesky: NDArray | None = None
         self._Q_svd: tuple[NDArray, NDArray, NDArray] | None = None
         self.used_dense_fallback = False
@@ -247,6 +256,7 @@ class ScalarSchurFactor:
                 self._Q_cholesky = None
                 self.used_dense_fallback = True
                 self.fallback_reason = f"Schur Cholesky fallback: {error}"
+                absolute_cutoff = _schur_fallback_cutoff(self.A, eliminated, q)
                 _reject_negative_schur_curvature(self._Q, absolute_cutoff, term_name=term_name)
                 U, singular_values, Vh = np.linalg.svd(self._Q, full_matrices=False)
                 threshold = (
@@ -733,12 +743,6 @@ class BlockSchurFactor:
         eliminated = np.einsum("kiq,kir->qr", self.C, self._F, optimize=True)
         Q = self.A - eliminated
         self._Q = 0.5 * (Q + Q.T)
-        schur_reference_scale = max(
-            float(np.linalg.norm(self.A, ord=2)) if q else 0.0,
-            float(np.linalg.norm(eliminated, ord=2)) if q else 0.0,
-            1.0,
-        )
-        absolute_cutoff = _schur_absolute_cutoff(schur_reference_scale, q)
         self._Q_cholesky: NDArray | None = None
         self._Q_svd: tuple[NDArray, NDArray, NDArray] | None = None
         self.used_dense_fallback = False
@@ -789,6 +793,7 @@ class BlockSchurFactor:
                 self._Q_cholesky = None
                 self.used_dense_fallback = True
                 self.fallback_reason = f"Schur Cholesky fallback: {error}"
+                absolute_cutoff = _schur_fallback_cutoff(self.A, eliminated, q)
                 _reject_negative_schur_curvature(self._Q, absolute_cutoff, term_name=term_name)
                 U, singular_values, Vh = np.linalg.svd(self._Q, full_matrices=False)
                 threshold = (

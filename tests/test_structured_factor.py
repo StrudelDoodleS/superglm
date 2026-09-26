@@ -312,6 +312,60 @@ def test_scalar_schur_uses_diagnostic_small_svd_fallback_for_singular_schur():
     )
 
 
+def _block_schur(A):
+    return BlockSchurFactor(
+        A=A,
+        C=np.zeros((2, 2, 2)),
+        D=np.broadcast_to(np.eye(2), (2, 2, 2)).copy(),
+        small_indices=np.array([0, 1], dtype=np.intp),
+        structured_indices=np.arange(2, 6, dtype=np.intp).reshape(2, 2),
+        term_name="x:group:fs",
+    )
+
+
+def test_schur_rank_floor_is_computed_only_on_the_svd_fallback(monkeypatch):
+    """The floor's two spectral norms are full SVDs of the border.
+
+    Built eagerly they dominated wide-border fits (a 4,000-column border spent
+    12 of 14 profile samples in them) while a Schur complement Cholesky accepts
+    never reads the floor.
+    """
+    factors = import_module("superglm.solvers._structured.factors")
+    real_cutoff = factors._schur_fallback_cutoff
+    calls = []
+
+    def counted(*args):
+        calls.append(args)
+        return real_cutoff(*args)
+
+    monkeypatch.setattr(factors, "_schur_fallback_cutoff", counted)
+    A, C, d, small_indices, structured_indices, H = _spd_scalar_blocks()
+    accepted = ScalarSchurFactor(
+        A=A,
+        C=C,
+        d=d,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+        term_name="broker",
+    )
+    accepted_block = _block_schur(np.eye(2))
+    assert not accepted.used_dense_fallback and not accepted_block.used_dense_fallback
+    assert calls == []
+
+    singular = ScalarSchurFactor(
+        A=np.diag([2.0, 0.0]),
+        C=np.zeros((3, 2)),
+        d=np.array([1.0, 1.5, 2.0]),
+        small_indices=np.array([0, 1], dtype=np.intp),
+        structured_indices=np.array([2, 3, 4], dtype=np.intp),
+        term_name="broker",
+    )
+    singular_block = _block_schur(np.diag([1.0, 0.0]))
+    assert singular.used_dense_fallback and singular_block.used_dense_fallback
+    assert len(calls) == 2
+    assert singular.rank == 4 and singular_block.rank == 5
+
+
 def test_scalar_schur_keeps_exact_tiny_decoupled_pivot():
     """A pivot that is merely tiny is not cancellation residue.
 
