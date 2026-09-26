@@ -160,6 +160,38 @@ def test_a_tiny_positive_tolerance_widens_by_its_finite_factor():
     assert result.tolerance_factor == pytest.approx(5e29, rel=2e-6)
 
 
+def test_a_plateau_merges_whatever_its_tolerances():
+    # A bound on the widest tolerance used to shrink a zero-width window past the
+    # exact mean of two equal values, and the widening then reported a factor of 0.
+    result = exact_bands(np.array([1.0, 1.0]), np.ones(2), np.array([0.0, 0.1]), max_bands=1)
+    assert result.starts.tolist() == [0]
+    assert result.tolerance_factor == 1.0
+
+
+@pytest.mark.parametrize(
+    ("s", "tol", "least"),
+    [
+        # sqrt(lower * upper) overflowed once the bounds passed about 1e154.
+        (np.array([0.0, 1.0]), np.full(2, 1e-200), 5e199),
+        # 2 R / tau overflowed, though a factor of 1e308 fits.
+        (np.array([0.0, 1.0, 2.0]), np.array([1e-308, 1.0, 1e-308]), 1e308),
+    ],
+)
+def test_the_widening_search_survives_factors_near_the_top_of_double(s, tol, least):
+    result = exact_bands(s, np.ones(len(s)), tol, max_bands=1)
+    assert result.starts.tolist() == [0]
+    assert result.tolerance_factor == pytest.approx(least, rel=2e-6)
+
+
+def test_weights_near_the_largest_double_do_not_overflow_the_mean():
+    # w * d was 1e308 * -10 = -inf; only ratios of weights matter.
+    result = exact_bands(
+        np.array([0.0, 10.0]), np.array([1e308, 1.0]), np.array([1.0, 11.0]), max_bands=2
+    )
+    assert result.starts.tolist() == [0]
+    assert np.isfinite(result.sse)
+
+
 @pytest.fixture(scope="module")
 def banded_model():
     """Integer ages (63 values) with a steep young-driver effect, and a polynomial."""
@@ -291,10 +323,15 @@ def test_exact_rejects_bad_band_settings(banded_model, bad):
         )
 
 
-def test_other_strategies_ignore_band_settings(banded_model):
+def test_band_settings_are_checked_under_every_strategy(banded_model):
+    # One contract with the export, which checks them whatever is binned.
     model, df, y, w = banded_model
+    with pytest.raises(ValueError, match="band_se must be a positive finite number"):
+        model.discretization_impact(
+            df, y, sample_weight=w, n_bins=10, bin_strategy="exposure_quantile", band_se=-1.0
+        )
     result = model.discretization_impact(
-        df, y, sample_weight=w, n_bins=10, bin_strategy="exposure_quantile", band_se=-1.0
+        df, y, sample_weight=w, n_bins=10, bin_strategy="exposure_quantile"
     )
     assert result.band_diagnostics == {}
 
@@ -463,3 +500,33 @@ def test_band_settings_are_checked_even_when_nothing_is_binned(banded_model):
         build_rating_table_payload(
             model, df, y, sample_weight=w, impact_bins=(), continuous_kind="ppform", band_se=-1.0
         )
+
+
+def test_exact_bands_refuse_a_model_carrying_editor_edits(banded_model):
+    # Its standard errors are the fit's before the edit, as term_inference says.
+    from superglm.editor import EditorSession
+
+    model, df, y, w = banded_model
+    session = EditorSession.from_model(model, terms=["age"])
+    session.select_x("age", 30.0, 40.0)
+    session.shift("age", 0.1)
+    edited = session.to_model()
+    with pytest.raises(ValueError, match="Editor coefficient edits"):
+        edited.discretization_impact(df, y, sample_weight=w, bin_strategy="exact", features=["age"])
+
+
+def test_only_a_last_single_value_band_gets_a_closed_key():
+    # Repeated uniform edges give zero-width rows too; they stay half-open and
+    # empty, so a consumer never sees two matching rows.
+    from superglm.export.rating_tables import _continuous_block
+
+    table = pd.DataFrame(
+        {
+            "bin_from": [0.0, 1.0, 1.0, 2.0],
+            "bin_to": [1.0, 1.0, 2.0, 2.0],
+            "relativity": [1.0, 1.1, 1.2, 1.3],
+            "sample_weight": [1.0, 0.0, 1.0, 1.0],
+        }
+    )
+    keys = _continuous_block("x", table, 0.0).table["x"].tolist()
+    assert keys == ["[0.0, 1.0)", "[1.0, 1.0)", "[1.0, 2.0)", "[2.0, 2.0]"]

@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 MAX_EXACT_VALUES = 5000
 _EPS = float(np.finfo(np.float64).eps)
 _FACTOR_RTOL = 1e-6
+_TOLERANCE_CEILING = float(np.finfo(np.float64).max) / 4.0
 
 
 @dataclass(frozen=True)
@@ -63,16 +64,24 @@ def exact_bands(s, w, tol, max_bands: int) -> ExactBanding:
         ``tolerance_factor``.
     """
     s, w, tol = _validated(s, w, tol, max_bands)
+    # Only ratios of weights matter; scaling by the largest keeps w * d finite.
+    scale = float(w.max())
+    w = w / scale
     starts, sse = _fewest_then_least(s, w, tol)
     factor = 1.0
     if len(starts) > max_bands:
         factor, (starts, sse) = _smallest_fitting_factor(s, w, tol, max_bands)
     ends = np.append(starts[1:], len(s))
+    # Averaged in the band's own frame, so the factor carries its final rounding
+    # rather than one scaled by the curve's level.
     factors = np.array(
-        [np.average(s[a:b], weights=w[a:b]) for a, b in zip(starts, ends, strict=True)],
+        [
+            s[a] + np.average(s[a:b] - s[a], weights=w[a:b])
+            for a, b in zip(starts, ends, strict=True)
+        ],
         dtype=np.float64,
     )
-    return ExactBanding(starts=starts, factors=factors, tolerance_factor=factor, sse=sse)
+    return ExactBanding(starts=starts, factors=factors, tolerance_factor=factor, sse=sse * scale)
 
 
 def _validated(s, w, tol, max_bands):
@@ -110,7 +119,10 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
     Everything is compared in the frame shifted by ``s[j]``, so the curve's
     level drops out of every rounding error, and a band is accepted only when
     its computed mean clears the window by more than that error: every
-    accepted band keeps every value within its requested tolerance.
+    accepted band keeps every value within its requested tolerance.  The cost
+    of certifying is a tie at rounding level: a mean that meets a zero-width
+    window exactly, as around a zero tolerance, is rejected unless the band is
+    a plateau.
     """
     n = len(s)
     count = np.zeros(n + 1, dtype=np.int64)
@@ -131,16 +143,16 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
         cw = np.cumsum(wr)
         mean = np.cumsum(wr * d) / cw
         cost = np.maximum(np.cumsum(wr * d * d) - cw * mean * mean, 0.0)
-        # The mean of k shifted values errs by at most about (k + 2) eps max|d|
-        # and each window edge by eps (|d| + tol); a zero-tolerance plateau has
-        # d = 0 and no error, so it still merges.
-        k = np.arange(1, m + 1)
-        err = (
-            2.0
-            * _EPS
-            * ((k + 2) * np.maximum.accumulate(np.abs(d)) + np.maximum.accumulate(t_all[:m]))
-        )
-        ok = (lo[:m] + err <= mean) & (mean <= hi[:m] - err)
+        # The mean of k shifted values errs by at most about (k + 2) eps max|d|,
+        # and each window edge by eps times its own size (x + eps |x| is
+        # increasing, so that covers every d - t below lo and d + t above hi).
+        # Feasibility is then monotone in a widening factor, and a plateau
+        # (d = 0) merges whatever its tolerances.
+        length = np.arange(1, m + 1)
+        err = 2.0 * _EPS * (length + 2) * np.maximum.accumulate(np.abs(d))
+        low_edge = lo[:m] + err + _EPS * np.abs(lo[:m])
+        high_edge = hi[:m] - err - _EPS * np.abs(hi[:m])
+        ok = (low_edge <= mean) & (mean <= high_edge)
         ok[0] = True  # a single value is its own mean
         first = j - np.arange(m)
         candidate = np.where(ok, count[first] + 1, never)
@@ -159,8 +171,14 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
 
 
 def _banding_within(s, w, tol, factor: float, max_bands: int):
-    """The banding at ``factor * tol`` if it fits ``max_bands``, else None."""
-    starts, sse = _fewest_then_least(s, w, factor * tol)
+    """The banding at ``factor * tol`` if it fits ``max_bands``, else None.
+
+    A widened tolerance is held at a quarter of the largest double: that still
+    covers any curve's range, and a window edge can never become infinite.
+    """
+    with np.errstate(over="ignore"):
+        widened = np.minimum(factor * tol, _TOLERANCE_CEILING)
+    starts, sse = _fewest_then_least(s, w, widened)
     return (starts, sse) if len(starts) <= max_bands else None
 
 
@@ -178,23 +196,23 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
     """
     positive = tol[tol > 0.0]
     if positive.size == 0:
-        upper = math.inf
-    else:
-        upper = 2.0 * float(s.max() - s.min()) / float(positive.min())
-        if not math.isfinite(upper):
-            raise ValueError(
-                f"cannot fit {len(s)} values into {max_bands} bands: the smallest positive "
-                f"tolerance, {float(positive.min()):.3g}, is too small to widen in double precision"
-            )
-    banding = _banding_within(s, w, tol, upper, max_bands) if math.isfinite(upper) else None
-    if banding is None:
         raise ValueError(
             f"cannot fit {len(s)} values into {max_bands} bands at any tolerance: "
             "values with zero tolerance cannot share a band"
         )
+    # Past the largest double the bound is taken as the largest double.
+    upper = max(2.0 * float(s.max() - s.min()) / float(positive.min()), 1.0)
+    upper = min(upper, float(np.finfo(np.float64).max))
+    banding = _banding_within(s, w, tol, upper, max_bands)
+    if banding is None:
+        raise ValueError(
+            f"cannot fit {len(s)} values into {max_bands} bands at any tolerance a double "
+            "can hold: values with zero or vanishingly small tolerance cannot share a band"
+        )
     lower = 1.0
     while upper / lower - 1.0 > _FACTOR_RTOL:
-        middle = math.sqrt(lower * upper)
+        # sqrt of each bound, since their product can overflow.
+        middle = math.sqrt(lower) * math.sqrt(upper)
         trial = _banding_within(s, w, tol, middle, max_bands)
         if trial is None:
             lower = middle

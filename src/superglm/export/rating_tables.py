@@ -216,11 +216,13 @@ def _format_number(value: float) -> str:
 
 
 def _format_interval(left: float, right: float, *, closed_right: bool = False) -> str:
-    """One half-open interval key, or the one CLOSED key the export ever emits.
+    """One half-open interval key, or one of the two CLOSED keys the export emits.
 
     Every row of every banded block is ``[lo, hi)``, so that each row's upper
     bound is identically the next row's lower bound and no value falls between
-    two rows.  The single exception is the last row of a ppform block under
+    two rows.  One exception is a binned block whose last band holds only the
+    largest value, ``[x, x]``, which a half-open key would leave matching
+    nothing.  The other is the last row of a ppform block under
     ``extrapolation="error"``, which has no next row to hand the endpoint to:
     the block stops at the boundary knot, and a right-open key there leaves the
     boundary itself matching nothing.  That value is normally the observed
@@ -265,16 +267,18 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
     with np.errstate(over="ignore", under="ignore"):
         factor = float(np.exp(-centering_shift))
     # A last band holding only the largest value has bin_from == bin_to, and
-    # its half-open key would match nothing: it is the one closed row.
+    # its half-open key would match nothing, so it alone is closed. Other
+    # zero-width rows (repeated uniform edges) stay half-open and empty.
+    last = len(table) - 1
     out = pd.DataFrame(
         {
             name: [
                 _format_interval(
                     float(row.bin_from),
                     float(row.bin_to),
-                    closed_right=float(row.bin_from) == float(row.bin_to),
+                    closed_right=index == last and float(row.bin_from) == float(row.bin_to),
                 )
-                for row in table.itertuples(index=False)
+                for index, row in enumerate(table.itertuples(index=False))
             ],
             "Relativity": table["relativity"].astype(float).to_numpy() * factor,
             "Weight": table["sample_weight"].astype(float).to_numpy(),

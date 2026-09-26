@@ -289,13 +289,21 @@ def _exact_edges(
     final clip assigns every row.  A single-value last band therefore has equal
     ``bin_from`` and ``bin_to``.
 
-    A term carrying a post-fit shape repair is refused: its standard errors
-    would come from the unconstrained fit's covariance around constrained
-    coefficients, which ``feature_se`` and ``summary()`` withhold.
+    A term carrying a post-fit shape repair, or a model carrying editor
+    edits, is refused: its standard errors would not be the published
+    curve's, which ``feature_se``, ``term_inference`` and ``summary()``
+    withhold.  The bound holds at the observed values the bands are placed
+    on; between two of them the curve can bend.
     """
     from superglm.diagnostics.exact_banding import MAX_EXACT_VALUES, exact_bands
     from superglm.model.explain_ops import _shape_repaired
 
+    if getattr(model, "_editor_inference_stale", False):
+        raise ValueError(
+            "Editor coefficient edits leave this model's standard errors from the fit "
+            "before them, which bin_strategy='exact' would band on. Refit the model, or "
+            "use another bin_strategy."
+        )
     if _shape_repaired(model, name):
         raise ValueError(
             f"Feature {name!r} carries a post-fit shape repair, so its standard errors "
@@ -843,9 +851,9 @@ def discretization_impact(
     if isinstance(n_bins, bool) or not isinstance(n_bins, int | np.integer) or n_bins < 1:
         raise ValueError(f"n_bins must be a positive integer, got {n_bins!r}")
     n_bins = int(n_bins)
-    if bin_strategy == "exact":
-        band_se = _positive_finite("band_se", band_se)
-        band_max_error = _positive_finite("band_max_error", band_max_error)
+    # Checked under every strategy, as the export does: the defaults are valid.
+    band_se = _positive_finite("band_se", band_se)
+    band_max_error = _positive_finite("band_max_error", band_max_error)
 
     beta = result.beta
     from superglm.distributions import clip_mu
