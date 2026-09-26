@@ -27,6 +27,8 @@ Date: 2026-09-26 · Branch: `claude/tweedie-profiling-refactor-7be675` (from `or
 5. Characterisation fixtures captured from the current code (§7) agree within the derived tolerances.
 6. Complete-fit benchmarks (§9): no case slower than 1.05× baseline wall time, and peak RSS no higher.
 7. The full suite, ruff, `uv lock --check` and the strict off-mode docs build all pass.
+8. **p is recovered** (Max, 2026-09-26: "the ability to recover p"). On constant-φ compound Poisson–gamma simulations, `estimate_p` under both fit modes lands within 3 profile standard errors of the true p. The fixed grid is true p ∈ {1.2, 1.5, 1.8}, three seeds each, n = 20,000, with a spline and a factor in the mean. The SE comes from the profile curvature. This is a permanent test. Constant φ is required: a constant-φ model absorbs mean-correlated dispersion into p, and that is a property of the model, not a defect of the estimator.
+9. **Fast** (Max: "fast"). `estimate_p` wall time drops below its baseline on every §9 case. Stage 0 attributes baseline time three ways: candidate fits, φ/density, and search bookkeeping. The rebuild removes the second and third buckets down to the one compiled φ solve per candidate. The PR reports the before/after breakdown.
 
 ## 2. Current state (measured 2026-09-26)
 
