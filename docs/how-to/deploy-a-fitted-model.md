@@ -179,7 +179,10 @@ Two rules a loader must implement, and one it must not assume:
 3. **Read the closing bracket.** Rows are `[lower, upper)` — except the last row
    under `extrapolation="error"`, which is `[lower, upper]` so that the boundary
    knot, which the model rates, has a row. Under `"clip"` the trailing unbounded
-   row covers it and every key is right-open.
+   row covers it and every key is right-open. A binned block's last row can also
+   be closed, `[x, x]`, when it holds only the largest value: `bin_strategy="exact"`
+   gives that value a band of its own when its factor differs from its
+   neighbours', and any strategy does on a feature with a single value.
 
 If you fingerprint staged rows with a content digest over an allow-list of
 columns, **include the coefficients**. Two models differing only in `a b c d`

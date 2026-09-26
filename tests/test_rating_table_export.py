@@ -3453,3 +3453,11 @@ def test_a_zero_export_weight_is_refused_under_tweedie_and_accepted_otherwise(co
         build_rating_table_payload(
             tweedie, X, tweedie_y, sample_weight=weights, continuous_kind=continuous_kind
         )
+
+
+def test_exact_banding_is_refused_for_a_binned_offset():
+    model, X, y, w = _fit_offset_export_model(distinct_terms=40)
+    with pytest.raises(ValueError, match="no fitted curve"):
+        build_rating_table_payload(
+            model, X, y, sample_weight=w, offset_kind="binned", bin_strategy="exact"
+        )

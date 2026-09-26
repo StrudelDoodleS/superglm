@@ -142,6 +142,18 @@ payload.discretization_impact[
 ].round(3)
 ```
 
+`bin_strategy="exact"` places bands where the curve moves rather than where the
+exposure is. It uses the fewest bands that keep every value's band average
+within one standard error of the fitted curve, and never more than 10% from it
+(`band_se=1.0`, `band_max_error=0.10`), with `n_bins` as the maximum. When the
+maximum is too small, the limit widens by the least factor that fits: the
+export warns, and the impact sheet's `band_*` columns and
+`discretization_impact(...).band_diagnostics` report it. The limit holds at
+the observed values the bands are placed on. A band holding only the largest
+value is written as a closed key, `[x, x]`. A model carrying editor edits, or a
+term with a post-fit shape repair, is refused, because its standard errors are
+not the published curve's.
+
 `export_rating_tables` writes the same payload as an Excel workbook: one sheet
 of rating tables laid out side by side for a rater to key on, one for the
 discretization impact above, and one for the model summary. The format comes

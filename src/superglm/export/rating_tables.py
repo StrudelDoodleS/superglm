@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -215,11 +216,13 @@ def _format_number(value: float) -> str:
 
 
 def _format_interval(left: float, right: float, *, closed_right: bool = False) -> str:
-    """One half-open interval key, or the one CLOSED key the export ever emits.
+    """One half-open interval key, or one of the two CLOSED keys the export emits.
 
     Every row of every banded block is ``[lo, hi)``, so that each row's upper
     bound is identically the next row's lower bound and no value falls between
-    two rows.  The single exception is the last row of a ppform block under
+    two rows.  One exception is a binned block whose last band holds only the
+    largest value, ``[x, x]``, which a half-open key would leave matching
+    nothing.  The other is the last row of a ppform block under
     ``extrapolation="error"``, which has no next row to hand the endpoint to:
     the block stops at the boundary knot, and a right-open key there leaves the
     boundary itself matching nothing.  That value is normally the observed
@@ -263,11 +266,19 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
     # arrive as that refusal rather than as a ``RuntimeWarning`` from here.
     with np.errstate(over="ignore", under="ignore"):
         factor = float(np.exp(-centering_shift))
+    # A last band holding only the largest value has bin_from == bin_to, and
+    # its half-open key would match nothing, so it alone is closed. Other
+    # zero-width rows (repeated uniform edges) stay half-open and empty.
+    last = len(table) - 1
     out = pd.DataFrame(
         {
             name: [
-                _format_interval(float(row.bin_from), float(row.bin_to))
-                for row in table.itertuples(index=False)
+                _format_interval(
+                    float(row.bin_from),
+                    float(row.bin_to),
+                    closed_right=index == last and float(row.bin_from) == float(row.bin_to),
+                )
+                for index, row in enumerate(table.itertuples(index=False))
             ],
             "Relativity": table["relativity"].astype(float).to_numpy() * factor,
             "Weight": table["sample_weight"].astype(float).to_numpy(),
@@ -514,6 +525,25 @@ def _require_supported_continuous_kind(continuous_kind: str) -> None:
 
 
 _SUPPORTED_OFFSET_KINDS = frozenset({"auto", "discrete", "per_unit", "binned"})
+
+
+def _require_exact_banding_settings(
+    model: SuperGLM, bin_strategy: str, band_se, band_max_error, offset_kind: str
+) -> None:
+    """Check the band limit settings up front, whatever terms turn out to be binned.
+
+    A binned offset has no fitted curve to band exactly, so that refusal comes
+    before any main effect is solved rather than after.
+    """
+    from superglm.diagnostics.discretize import _positive_finite
+
+    _positive_finite("band_se", band_se)
+    _positive_finite("band_max_error", band_max_error)
+    if bin_strategy == "exact" and offset_kind == "binned" and _fit_used_offset(model):
+        raise ValueError(
+            "bin_strategy='exact' places bands on a fitted curve and its standard errors, "
+            "and a binned offset has no fitted curve. Choose another offset_kind or bin_strategy."
+        )
 
 
 def _require_supported_offset_kind(offset_kind: str) -> None:
@@ -1754,6 +1784,20 @@ def _empty_impact_frame() -> pd.DataFrame:
     )
 
 
+def _warn_widened_bands(band_diagnostics: dict[str, dict[str, float]], n_bins: int) -> None:
+    """Say when ``bin_strategy="exact"`` could not hold its limit in ``n_bins`` bands."""
+    for name, diagnostics in band_diagnostics.items():
+        factor = diagnostics["tolerance_factor"]
+        if factor > 1.0:
+            warnings.warn(
+                f"bin_strategy='exact' could not keep {name!r} within its limit in "
+                f"{n_bins} bands, so the limit was widened {factor:.3g}x; the worst band "
+                f"error is {diagnostics['worst_error']:.1%}. Raise n_bins to keep the limit.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+
 def _impact_sweep(
     model: SuperGLM,
     X: EagerFrame,
@@ -1765,6 +1809,8 @@ def _impact_sweep(
     bin_strategy: str,
     features: list[str],
     exported_n_bins: int,
+    band_se: float,
+    band_max_error: float,
 ) -> pd.DataFrame:
     """One row per approximated block per swept resolution.
 
@@ -1799,6 +1845,8 @@ def _impact_sweep(
             n_bins=int(n_bins),
             bin_strategy=bin_strategy,
             features=features,
+            band_se=band_se,
+            band_max_error=band_max_error,
         )
         for feature, table in result.tables.items():
             row: dict[str, float | int | str] = {
@@ -1808,6 +1856,11 @@ def _impact_sweep(
                 "actual_bins": int(len(table)),
             }
             row.update(result.metrics)
+            if bin_strategy == "exact":
+                diagnostics = result.band_diagnostics.get(feature, {})
+                row.update(
+                    {f"band_{key}": value for key, value in diagnostics.items() if key != "bands"}
+                )
             rows.append(row)
         # Beside the main-effect rows and in the same columns, because a
         # reader has to be able to see every block the workbook approximates
@@ -1843,6 +1896,8 @@ def build_rating_table_payload(
     n_bins: int = 150,
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
+    band_se: float = 1.0,
+    band_max_error: float = 0.10,
     centering: str = "native",
     continuous_kind: str = "binned",
     allow_unbounded_extrapolation: bool = False,
@@ -2141,6 +2196,13 @@ def build_rating_table_payload(
     150 export as 29 interval rows.  So staying under the budget is not a route
     to an exact block; ``"ppform"`` is.
 
+    ``bin_strategy="exact"`` bounds the banding error instead: ``n_bins`` caps
+    the band count, and the fewest bands are placed that keep every band average
+    within ``min(band_se * SE, log(1 + band_max_error))`` of the curve (defaults
+    1.0 and 0.10).  When ``n_bins`` is too few, the limit is widened by the least
+    factor that fits, with a warning, and the impact sheet's ``band_*`` columns
+    record it.  See ``discretization_impact``.
+
     ``"ppform"`` emits the exact piecewise-polynomial form of the fitted curve
     instead: one row per knot interval carrying four coefficients.  A consumer
     reads both bounds back out of the interval key -- ``"[18.0,
@@ -2339,6 +2401,7 @@ def build_rating_table_payload(
     # block builders meant only the declared-source path ever looked, so an
     # unknown kind reached the undeclared path as ``"auto"``.
     _require_supported_offset_kind(offset_kind)
+    _require_exact_banding_settings(model, bin_strategy, band_se, band_max_error, offset_kind)
     if continuous_kind == "ppform":
         _require_ppform_exportable(
             model,
@@ -2402,10 +2465,14 @@ def build_rating_table_payload(
             n_bins=n_bins,
             bin_strategy=bin_strategy,
             features=binned_continuous,
+            band_se=band_se,
+            band_max_error=band_max_error,
         )
         if binned_continuous
         else None
     )
+    if selected is not None and bin_strategy == "exact":
+        _warn_widened_bands(selected.band_diagnostics, n_bins)
 
     main_effects: list[RatingTableBlock] = []
     for name in model._feature_order:
@@ -2503,6 +2570,8 @@ def build_rating_table_payload(
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
         exported_n_bins=int(n_bins),
+        band_se=band_se,
+        band_max_error=band_max_error,
         # Both lists, because both are approximated, and BOTH read off the
         # blocks that were built rather than re-derived from the specs -- so a
         # term the workbook carries exactly cannot be reported as approximated.
@@ -2548,6 +2617,8 @@ def export_rating_tables(
     n_bins: int = 150,
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
+    band_se: float = 1.0,
+    band_max_error: float = 0.10,
     format: str | None = None,
     sheet_name: str = "Rating Tables",
     summary_sheet_name: str = "Model Summary",
@@ -2587,6 +2658,9 @@ def export_rating_tables(
     opens in the sparse tails.  ``n_bins`` is a budget rather than a target, and
     staying under it is not a route to an exact block -- see
     ``build_rating_table_payload``, where that is measured.
+    ``bin_strategy="exact"`` bounds that error instead: every band average
+    stays within ``min(band_se * SE, log(1 + band_max_error))`` of the curve,
+    unless ``n_bins`` is too few, in which case the limit widens with a warning.
 
     ``"ppform"`` writes the exact piecewise-polynomial form of the fitted
     curve: one row per knot interval carrying four coefficients.  A consumer
@@ -2659,6 +2733,8 @@ def export_rating_tables(
         n_bins=n_bins,
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
+        band_se=band_se,
+        band_max_error=band_max_error,
         centering=centering,
         continuous_kind=continuous_kind,
         allow_unbounded_extrapolation=allow_unbounded_extrapolation,

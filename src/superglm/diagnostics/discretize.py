@@ -57,6 +57,15 @@ class DiscretizationResult:
         Comparison metrics between original and discretized predictions. Joint
         over everything discretized in the call, main effects and interactions
         alike, since that is the prediction a consumer of the whole table gets.
+    band_diagnostics : dict[str, dict[str, float]]
+        Per main effect banded with ``bin_strategy="exact"``: ``bands``,
+        ``tolerance_factor`` (1.0 unless ``n_bins`` forced a wider limit),
+        ``worst_error`` and ``mean_error`` (relative error of the band factor
+        against the curve, ``|band / curve - 1|``, the mean weighted by
+        geometry mass) and ``worst_error_se`` (the largest gap in standard
+        errors).  Empty for the other strategies.  The standard errors are the
+        term's own under its centring, so they narrow where the curve crosses
+        its weighted mean and bands can bunch there.
     """
 
     tables: dict[str, pd.DataFrame]
@@ -64,6 +73,7 @@ class DiscretizationResult:
     original_predictions: NDArray
     metrics: dict[str, float]
     interaction_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    band_diagnostics: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 def _validated_discretization_weights(
@@ -211,11 +221,126 @@ def _compute_edges(x: NDArray, sample_weight: NDArray, n_bins: int, strategy: st
         return _uniform_edges(x[sample_weight > 0.0], n_bins)
     elif strategy == "winsorized":
         return _winsorized_edges(x, sample_weight, n_bins)
+    elif strategy == "exact":
+        raise ValueError(
+            "bin_strategy='exact' places bands on a fitted curve and its standard "
+            "errors, and this block has no fitted curve. Use 'exposure_quantile', "
+            "'uniform' or 'winsorized' here."
+        )
     else:
         raise ValueError(
             f"Unknown bin_strategy: {strategy!r}. "
-            "Use 'exposure_quantile', 'uniform', or 'winsorized'."
+            "Use 'exposure_quantile', 'uniform', 'winsorized' or 'exact'."
         )
+
+
+def _positive_finite(name: str, value) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float | np.integer | np.floating):
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}")
+    value = float(value)
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}")
+    return value
+
+
+def _term_se_at(model: SuperGLM, name: str, x: NDArray) -> NDArray:
+    """Pointwise standard error of a continuous term's log relativity at ``x``.
+
+    Native centering, the identification ``discretization_impact`` bins.  A
+    spline goes through ``_spline_se`` with ``x_eval``; a polynomial takes the
+    same quadratic form ``diag(M Cov M')`` on its own basis, as
+    ``feature_se_from_cov`` does on its grid.
+    """
+    from superglm.features.spline import _SplineBase
+    from superglm.inference._term_helpers import _spline_se
+
+    cov_active, active_groups = model._coef_covariance
+    spec = model._specs[name]
+    x = np.asarray(x, dtype=np.float64)
+    if isinstance(spec, _SplineBase):
+        feature_groups = [g for g in model._groups if g.feature_name == name]
+        return _spline_se(
+            spec, name, model.result.beta, feature_groups, active_groups, cov_active, x_eval=x
+        )
+    active = [g for g in active_groups if g.feature_name == name]
+    if not active:
+        return np.zeros(len(x), dtype=np.float64)
+    indices = np.concatenate([np.arange(g.start, g.end) for g in active])
+    basis = np.asarray(spec.transform(x), dtype=np.float64)
+    q = basis @ cov_active[np.ix_(indices, indices)]
+    return np.sqrt(np.maximum(np.sum(q * basis, axis=1), 0.0))
+
+
+def _exact_edges(
+    model: SuperGLM,
+    name: str,
+    x_raw: NDArray,
+    log_rel_smooth: NDArray,
+    geometry_weight: NDArray,
+    *,
+    max_bands: int,
+    band_se: float,
+    band_max_error: float,
+) -> tuple[NDArray, dict[str, float], NDArray]:
+    """Edges, diagnostics and certified factors of the term's distinct weighted values.
+
+    Each band starts at its smallest value and the last edge is the largest
+    value, the convention the other strategies use, so ``np.digitize`` with the
+    final clip assigns every row.  A single-value last band therefore has equal
+    ``bin_from`` and ``bin_to``.
+
+    A term carrying a post-fit shape repair, or a model carrying editor
+    edits, is refused: its standard errors would not be the published
+    curve's, which ``feature_se``, ``term_inference`` and ``summary()``
+    withhold.  The bound holds at the observed values the bands are placed
+    on; between two of them the curve can bend.
+    """
+    from superglm.diagnostics.exact_banding import MAX_EXACT_VALUES, exact_bands
+    from superglm.model.explain_ops import _shape_repaired
+
+    if getattr(model, "_editor_inference_stale", False):
+        raise ValueError(
+            "Editor coefficient edits leave this model's standard errors from the fit "
+            "before them, which bin_strategy='exact' would band on. Refit the model, or "
+            "use another bin_strategy."
+        )
+    if _shape_repaired(model, name):
+        raise ValueError(
+            f"Feature {name!r} carries a post-fit shape repair, so its standard errors "
+            "would come from the unconstrained fit's covariance around constrained "
+            "coefficients, which bin_strategy='exact' would band on. Fit the constraint "
+            "(Constraint.fit.*) or use another bin_strategy."
+        )
+    positive = geometry_weight > 0.0
+    values, inverse = np.unique(x_raw[positive], return_inverse=True)
+    if len(values) > MAX_EXACT_VALUES:
+        raise ValueError(
+            f"Feature {name!r} has {len(values)} distinct values; bin_strategy='exact' "
+            f"supports at most {MAX_EXACT_VALUES}. Round the feature or use another bin_strategy."
+        )
+    weight = np.bincount(inverse, weights=geometry_weight[positive], minlength=len(values))
+    curve = np.empty(len(values), dtype=np.float64)
+    curve[inverse] = log_rel_smooth[positive]
+    se = _term_se_at(model, name, values)
+    # A band_se near the largest double overflows once SE passes 1; that inf is
+    # above the finite relative cap, so the minimum is the cap either way.
+    with np.errstate(over="ignore"):
+        tol = np.minimum(band_se * se, np.log1p(band_max_error))
+    banding = exact_bands(curve, weight, tol, max_bands)
+    edges = np.append(values[banding.starts], values[-1])
+    ends = np.append(banding.starts[1:], len(values))
+    # Band minus curve, so the relative error is the band factor's against the curve's.
+    gap = np.repeat(banding.factors, ends - banding.starts) - curve
+    relative = np.abs(np.expm1(gap))
+    in_se = np.divide(np.abs(gap), se, out=np.zeros_like(gap), where=se > 0.0)
+    diagnostics: dict[str, float] = {
+        "bands": len(banding.starts),
+        "tolerance_factor": banding.tolerance_factor,
+        "worst_error": float(relative.max()),
+        "worst_error_se": float(in_se.max()),
+        "mean_error": float(np.average(relative, weights=weight / weight.max())),
+    }
+    return edges, diagnostics, banding.factors
 
 
 def _is_continuous_feature(model: SuperGLM, name: str) -> bool:
@@ -635,6 +760,8 @@ def discretization_impact(
     n_bins: int = 100,
     bin_strategy: str = "exposure_quantile",
     features: list[str] | None = None,
+    band_se: float = 1.0,
+    band_max_error: float = 0.10,
 ) -> DiscretizationResult:
     """Analyse the impact of discretizing the smooth terms of a fit.
 
@@ -683,13 +810,24 @@ def discretization_impact(
         Binning strategy: ``"exposure_quantile"`` (the retained public name)
         places edges at equal geometry-weight mass; ``"uniform"`` uses
         equal-width bins; ``"winsorized"`` uses geometry-weight quantiles on
-        the interior [p5, p95] with dedicated tail bins. Geometry weight means
-        replication mass under the frequency contract and unit physical-row mass for
-        Tweedie.
+        the interior [p5, p95] with dedicated tail bins; ``"exact"`` chooses
+        the fewest bands that keep every value's band average within
+        ``min(band_se * SE, log(1 + band_max_error))`` of the curve, then the
+        least weighted squared error, with ``n_bins`` as the maximum band count.
+        When that is too few, every tolerance is widened by the least factor
+        that fits and ``band_diagnostics`` reports it.
+        Geometry weight means replication mass under the frequency contract and
+        unit physical-row mass for Tweedie.
     features : list[str], optional
         Subset of names to discretize: spline/polynomial features, and
         continuous-by-continuous interaction names as they appear in
         ``model._interaction_order``. None means every one of both.
+    band_se : float
+        Under ``"exact"``: the tolerance in pointwise standard errors of the
+        term's log relativity (native centering). Default 1.0.
+    band_max_error : float
+        Under ``"exact"``: the largest relative error of a band factor against
+        the curve. Default 0.10.
 
     Returns
     -------
@@ -716,6 +854,9 @@ def discretization_impact(
     if isinstance(n_bins, bool) or not isinstance(n_bins, int | np.integer) or n_bins < 1:
         raise ValueError(f"n_bins must be a positive integer, got {n_bins!r}")
     n_bins = int(n_bins)
+    # Checked under every strategy, as the export does: the defaults are valid.
+    band_se = _positive_finite("band_se", band_se)
+    band_max_error = _positive_finite("band_max_error", band_max_error)
 
     beta = result.beta
     from superglm.distributions import clip_mu
@@ -801,6 +942,7 @@ def discretization_impact(
 
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
+    band_diagnostics: dict[str, dict[str, float]] = {}
     total_delta = np.zeros(n)
 
     for name in target_features:
@@ -817,7 +959,20 @@ def discretization_impact(
         ).ravel()
 
         # Compute bin edges using the selected strategy
-        edges = _compute_edges(x_raw, geometry_weight, n_bins, bin_strategy)
+        if bin_strategy == "exact":
+            edges, band_diagnostics[name], exact_factors = _exact_edges(
+                model,
+                name,
+                x_raw,
+                log_rel_smooth,
+                geometry_weight,
+                max_bands=n_bins,
+                band_se=band_se,
+                band_max_error=band_max_error,
+            )
+        else:
+            edges = _compute_edges(x_raw, geometry_weight, n_bins, bin_strategy)
+            exact_factors = None
         actual_n_bins = len(edges) - 1
 
         # Assign observations to bins
@@ -840,8 +995,15 @@ def discretization_impact(
                 if np.any(geometry_mass > 0.0):
                     bin_log_rel[b] = np.average(
                         log_rel_smooth[mask],
-                        weights=geometry_mass,
+                        # Scaled by the largest, which only ratios see: a weight
+                        # near the largest double would overflow weight * value.
+                        weights=geometry_mass / geometry_mass.max(),
                     )
+
+        # Exact bands export the factors they were certified with, one per band,
+        # rather than a re-averaged copy that can differ by a rounding.
+        if exact_factors is not None:
+            bin_log_rel = np.asarray(exact_factors, dtype=np.float64).copy()
 
         # Build rating table
         table_rows = []
@@ -993,4 +1155,5 @@ def discretization_impact(
         original_predictions=original_predictions,
         metrics=metrics,
         interaction_tables=interaction_tables,
+        band_diagnostics=band_diagnostics,
     )
