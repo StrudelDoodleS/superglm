@@ -1,0 +1,778 @@
+{
+ "description": "Before/after receipts for the Tweedie/NB2 profiling rebuild (spec docs/superpowers/specs/2026-09-26-tweedie-nb-profiling-rebuild-design.md, section 9). 'baseline' is master's code; Task 10 adds 'after'.",
+ "provenance": {
+  "master_sha": "9e0fe6f9f686c9b92f1a778bb35ce60035451e60",
+  "head_sha": "8da6e600183f4b9a18f03b9d1573c0dc2b325c3a",
+  "script": "benchmarks/tweedie_estimate_p_timing.py, benchmarks/nb_auto_theta_reml.py and the pre-existing benchmarks named under method.commands",
+  "generated": "2026-09-26",
+  "thread_pools": {
+   "OMP_NUM_THREADS": "1",
+   "OPENBLAS_NUM_THREADS": "1",
+   "MKL_NUM_THREADS": "1",
+   "NUMBA_NUM_THREADS": "1",
+   "VECLIB_MAXIMUM_THREADS": "1",
+   "BLIS_NUM_THREADS": "1",
+   "NUMEXPR_NUM_THREADS": "1"
+  },
+  "versions": {
+   "superglm": "0.35.0",
+   "numpy": "2.5.2",
+   "scipy": "1.18.0",
+   "numba": "0.67.0"
+  },
+  "host": {
+   "cpu_count": 16,
+   "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+   "python": "3.13.14"
+  },
+  "unset": [
+   "SUPERGLM_BLAS_THREADS"
+  ]
+ },
+ "method": {
+  "timing": "Three repetitions per case, each a fresh process, cases interleaved with the order reversed on the middle repetition; all seven thread pools pinned to 1; the one-minute load average before each run is recorded. wall_s/cpu_s time the operation only (warmup and data build excluded); peak_rss_mb is the process high-water mark (ru_maxrss), peak_rss_before_operation_mb the same mark just before the operation. reml_search_cost reports its own per-leg wall and sampled peak RSS, and no CPU time.",
+  "profiling": "A separate run: benchmarks/tweedie_estimate_p_timing.py --buckets wraps the functions in BUCKET_TARGETS and charges wall time to the outermost bucket entered (candidate fits: fit_irls_direct, fit_pirls, SuperGLM.fit_reml, the fit_ops publication refits; phi/density: _profile_phi_detailed, _evaluate_tweedie_density, the joint kernel). reml_scale_inside_fits_s is profile_tweedie_reml_scale, timed on its own clock inside candidate fits.",
+  "commands": {
+   "zeros90_fit": "uv run python benchmarks/tweedie_estimate_p_timing.py --case zeros90 --fit-mode fit",
+   "zeros90_reml": "uv run python benchmarks/tweedie_estimate_p_timing.py --case zeros90 --fit-mode reml",
+   "positive96_fit": "uv run python benchmarks/tweedie_estimate_p_timing.py --case positive96 --fit-mode fit",
+   "positive96_reml": "uv run python benchmarks/tweedie_estimate_p_timing.py --case positive96 --fit-mode reml",
+   "positive96_reml_searchfit": "uv run python benchmarks/tweedie_estimate_p_timing.py --case positive96 --fit-mode reml --search-fit-mode fit",
+   "unpen_fit_joint_ml": "uv run python benchmarks/tweedie_estimate_p_timing.py --case unpen --fit-mode fit --method joint_ml",
+   "unpen_fit_brent": "uv run python benchmarks/tweedie_estimate_p_timing.py --case unpen --fit-mode fit --method brent",
+   "fremtpl2_fitreml_asis": "run_once() of benchmarks/profile_tweedie_reml_fit.py (--dataset fremtpl2 --rows 100000 --no-probes), in-process, with TweedieScaleProfileData._bessel_saturated_log_likelihood and _bessel_saturated_score wrapped to count calls (arm 'asis') or to return None, forcing the series (arm 'series')",
+   "fremtpl2_fitreml_series": "run_once() of benchmarks/profile_tweedie_reml_fit.py (--dataset fremtpl2 --rows 100000 --no-probes), in-process, with TweedieScaleProfileData._bessel_saturated_log_likelihood and _bessel_saturated_score wrapped to count calls (arm 'asis') or to return None, forcing the series (arm 'series')",
+   "burncost_fitreml_asis": "run_once() of benchmarks/profile_tweedie_reml_fit.py (--dataset burn-cost --rows 100000 --no-probes), in-process, with TweedieScaleProfileData._bessel_saturated_log_likelihood and _bessel_saturated_score wrapped to count calls (arm 'asis') or to return None, forcing the series (arm 'series')",
+   "burncost_fitreml_series": "run_once() of benchmarks/profile_tweedie_reml_fit.py (--dataset burn-cost --rows 100000 --no-probes), in-process, with TweedieScaleProfileData._bessel_saturated_log_likelihood and _bessel_saturated_score wrapped to count calls (arm 'asis') or to return None, forcing the series (arm 'series')",
+   "positive96_fitreml15_asis": "run() of benchmarks/tweedie_estimate_p_timing.py --case positive96 --fit-reml-at 1.5, with the same two methods wrapped as for the asis arm",
+   "positive96_fitreml15_series": "run() of benchmarks/tweedie_estimate_p_timing.py --case positive96 --fit-reml-at 1.5, with the same two methods wrapped as for the series arm",
+   "reml_search_cost": "uv run python benchmarks/tweedie_reml_search_cost.py --json",
+   "nb_auto_theta_reml": "uv run python benchmarks/nb_auto_theta_reml.py"
+  },
+  "private_validation_dataset": "Run through the same drivers into the session scratchpad; numbers are not recorded here."
+ },
+ "baseline": {
+  "cases": {
+   "zeros90_fit": {
+    "median_wall_s": 0.573192548006773,
+    "wall_s": [
+     0.6277644718065858,
+     0.5223527811467648,
+     0.573192548006773
+    ],
+    "median_cpu_s": 0.5731294230000001,
+    "cpu_s": [
+     0.6277303490000001,
+     0.5221509430000002,
+     0.5731294230000001
+    ],
+    "median_peak_rss_mb": 470.48046875,
+    "load_before": [
+     2.439453125,
+     2.658203125,
+     2.60546875
+    ],
+    "median_peak_rss_before_operation_mb": 425.17578125,
+    "p_hat": 1.493941483728245,
+    "phi_hat": 5.89659061763738,
+    "nll": 0.4255660970604499,
+    "n_candidates": 12,
+    "method": "brent",
+    "phi_passes": 39,
+    "last_fit_meta": {
+     "method": "fit",
+     "discrete": false
+    },
+    "direct_backend": "gram"
+   },
+   "zeros90_reml": {
+    "median_wall_s": 3.7549661060329527,
+    "wall_s": [
+     4.149938358925283,
+     3.7549661060329527,
+     3.4529655780643225
+    ],
+    "median_cpu_s": 3.753500133,
+    "cpu_s": [
+     4.148381885,
+     3.753500133,
+     3.4508118189999997
+    ],
+    "median_peak_rss_mb": 461.5546875,
+    "load_before": [
+     2.40380859375,
+     2.59521484375,
+     2.556640625
+    ],
+    "median_peak_rss_before_operation_mb": 425.20703125,
+    "p_hat": 1.4939815141266086,
+    "phi_hat": 5.8989634352039335,
+    "nll": 0.42561063865721543,
+    "n_candidates": 12,
+    "method": "brent",
+    "phi_passes": 39,
+    "last_fit_meta": {
+     "method": "fit_reml",
+     "discrete": false,
+     "direct_backend": "gram",
+     "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+    },
+    "direct_backend": "gram"
+   },
+   "positive96_fit": {
+    "median_wall_s": 1.7563606519252062,
+    "wall_s": [
+     1.7563606519252062,
+     1.7614038798492402,
+     1.552345059113577
+    ],
+    "median_cpu_s": 1.756071891,
+    "cpu_s": [
+     1.756071891,
+     1.7611265560000002,
+     1.5519661539999996
+    ],
+    "median_peak_rss_mb": 482.25,
+    "load_before": [
+     2.37109375,
+     2.47265625,
+     2.67236328125
+    ],
+    "median_peak_rss_before_operation_mb": 425.1015625,
+    "p_hat": 1.4493385537235848,
+    "phi_hat": 0.5960107718210278,
+    "nll": 1.2852157556479233,
+    "n_candidates": 10,
+    "method": "brent",
+    "phi_passes": 35,
+    "last_fit_meta": {
+     "method": "fit",
+     "discrete": false
+    },
+    "direct_backend": "gram"
+   },
+   "positive96_reml": {
+    "median_wall_s": 5.691547299036756,
+    "wall_s": [
+     6.46406288491562,
+     5.691547299036756,
+     5.544088505208492
+    ],
+    "median_cpu_s": 5.689653812000001,
+    "cpu_s": [
+     6.461431287000001,
+     5.689653812000001,
+     5.5380400829999985
+    ],
+    "median_peak_rss_mb": 470.09375,
+    "load_before": [
+     2.31396484375,
+     2.369140625,
+     2.6181640625
+    ],
+    "median_peak_rss_before_operation_mb": 425.046875,
+    "p_hat": 1.44934083092539,
+    "phi_hat": 0.5960485691384292,
+    "nll": 1.2852594487808335,
+    "n_candidates": 10,
+    "method": "brent",
+    "phi_passes": 35,
+    "last_fit_meta": {
+     "method": "fit_reml",
+     "discrete": false,
+     "direct_backend": "gram",
+     "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+    },
+    "direct_backend": "gram"
+   },
+   "positive96_reml_searchfit": {
+    "median_wall_s": 1.946034766966477,
+    "wall_s": [
+     2.0259857969358563,
+     1.946034766966477,
+     1.9239541161805391
+    ],
+    "median_cpu_s": 1.941400082,
+    "cpu_s": [
+     2.0257054789999995,
+     1.941400082,
+     1.9205372440000001
+    ],
+    "median_peak_rss_mb": 486.37890625,
+    "load_before": [
+     2.26513671875,
+     2.4013671875,
+     2.5966796875
+    ],
+    "median_peak_rss_before_operation_mb": 425.25390625,
+    "p_hat": 1.4493385537235848,
+    "phi_hat": 0.5960477944220522,
+    "nll": 1.2852594488301086,
+    "n_candidates": 10,
+    "method": "brent",
+    "phi_passes": 36,
+    "last_fit_meta": {
+     "method": "fit_reml",
+     "discrete": false,
+     "direct_backend": "gram",
+     "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+    },
+    "direct_backend": "gram"
+   },
+   "unpen_fit_joint_ml": {
+    "median_wall_s": 0.1798481319565326,
+    "wall_s": [
+     0.17038077884353697,
+     0.1798481319565326,
+     0.18852542899549007
+    ],
+    "median_cpu_s": 0.17968916199999985,
+    "cpu_s": [
+     0.1700855830000001,
+     0.17968916199999985,
+     0.1883872740000001
+    ],
+    "median_peak_rss_mb": 444.46875,
+    "load_before": [
+     2.24365234375,
+     2.26220703125,
+     2.548828125
+    ],
+    "median_peak_rss_before_operation_mb": 424.75,
+    "p_hat": 1.4944248501529949,
+    "phi_hat": 5.916086499775636,
+    "nll": 0.42580619345774745,
+    "n_candidates": 4,
+    "method": "joint_ml",
+    "phi_passes": 21,
+    "last_fit_meta": {
+     "method": "fit",
+     "discrete": false
+    },
+    "direct_backend": "gram"
+   },
+   "unpen_fit_brent": {
+    "median_wall_s": 0.4204976970795542,
+    "wall_s": [
+     0.41242754203267395,
+     0.4204976970795542,
+     0.4502259960863739
+    ],
+    "median_cpu_s": 0.42045802099999996,
+    "cpu_s": [
+     0.4124067499999997,
+     0.42045802099999996,
+     0.45020258
+    ],
+    "median_peak_rss_mb": 461.14453125,
+    "load_before": [
+     2.384765625,
+     2.28515625,
+     2.50439453125
+    ],
+    "median_peak_rss_before_operation_mb": 424.8671875,
+    "p_hat": 1.4944577794959428,
+    "phi_hat": 5.916910508168559,
+    "nll": 0.42580619245932455,
+    "n_candidates": 11,
+    "method": "brent",
+    "phi_passes": 39,
+    "last_fit_meta": {
+     "method": "fit",
+     "discrete": false
+    },
+    "direct_backend": "gram"
+   },
+   "fremtpl2_fitreml_asis": {
+    "median_wall_s": 0.6737,
+    "wall_s": [
+     0.8362,
+     0.6285,
+     0.6737
+    ],
+    "median_cpu_s": 0.6723,
+    "cpu_s": [
+     0.8352,
+     0.6275,
+     0.6723
+    ],
+    "median_peak_rss_mb": 634.43359375,
+    "load_before": [
+     2.353515625,
+     2.22265625,
+     2.54443359375
+    ],
+    "phi_hat": 6.883536239346745,
+    "n_reml_iter": 5,
+    "bessel_calls": {
+     "value": 0,
+     "score": 0
+    }
+   },
+   "fremtpl2_fitreml_series": {
+    "median_wall_s": 0.661,
+    "wall_s": [
+     0.7325,
+     0.6596,
+     0.661
+    ],
+    "median_cpu_s": 0.6602,
+    "cpu_s": [
+     0.7313,
+     0.6589,
+     0.6602
+    ],
+    "median_peak_rss_mb": 634.36328125,
+    "load_before": [
+     2.3251953125,
+     2.2421875,
+     2.50048828125
+    ],
+    "phi_hat": 6.883536239346745,
+    "n_reml_iter": 5,
+    "bessel_calls": {
+     "value": 0,
+     "score": 0
+    }
+   },
+   "burncost_fitreml_asis": {
+    "median_wall_s": 2.5701,
+    "wall_s": [
+     2.8304,
+     2.5701,
+     2.2374
+    ],
+    "median_cpu_s": 2.5687,
+    "cpu_s": [
+     2.8244,
+     2.5687,
+     2.2361
+    ],
+    "median_peak_rss_mb": 585.3046875,
+    "load_before": [
+     2.298828125,
+     2.263671875,
+     2.4599609375
+    ],
+    "phi_hat": 169.4037640786294,
+    "n_reml_iter": 7,
+    "bessel_calls": {
+     "value": 0,
+     "score": 0
+    }
+   },
+   "burncost_fitreml_series": {
+    "median_wall_s": 2.4758,
+    "wall_s": [
+     2.5028,
+     2.4758,
+     2.2652
+    ],
+    "median_cpu_s": 2.4746,
+    "cpu_s": [
+     2.501,
+     2.4746,
+     2.2635
+    ],
+    "median_peak_rss_mb": 584.81640625,
+    "load_before": [
+     2.326171875,
+     2.287109375,
+     2.50341796875
+    ],
+    "phi_hat": 169.4037640786294,
+    "n_reml_iter": 7,
+    "bessel_calls": {
+     "value": 0,
+     "score": 0
+    }
+   },
+   "positive96_fitreml15_asis": {
+    "median_wall_s": 0.670529330149293,
+    "wall_s": [
+     0.6819697408936918,
+     0.670529330149293,
+     0.6428789380006492
+    ],
+    "median_cpu_s": 0.6698847379999999,
+    "cpu_s": [
+     0.680665962,
+     0.6698847379999999,
+     0.6399986100000001
+    ],
+    "median_peak_rss_mb": 452.37890625,
+    "load_before": [
+     2.2998046875,
+     2.3125,
+     2.462890625
+    ],
+    "median_peak_rss_before_operation_mb": 424.50390625,
+    "phi_hat": 0.5893357365318306,
+    "last_fit_meta": {
+     "method": "fit_reml",
+     "discrete": false,
+     "direct_backend": "gram",
+     "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+    },
+    "direct_backend": "gram",
+    "n_reml_iter": 5,
+    "bessel_calls": {
+     "value": 0,
+     "score": 0
+    }
+   },
+   "positive96_fitreml15_series": {
+    "median_wall_s": 0.6504354099743068,
+    "wall_s": [
+     0.8228041590191424,
+     0.6455282459501177,
+     0.6504354099743068
+    ],
+    "median_cpu_s": 0.6495601720000002,
+    "cpu_s": [
+     0.8213800099999999,
+     0.644408742,
+     0.6495601720000002
+    ],
+    "median_peak_rss_mb": 452.35546875,
+    "load_before": [
+     2.275390625,
+     2.33984375,
+     2.42578125
+    ],
+    "median_peak_rss_before_operation_mb": 424.52734375,
+    "phi_hat": 0.5893357365318306,
+    "last_fit_meta": {
+     "method": "fit_reml",
+     "discrete": false,
+     "direct_backend": "gram",
+     "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+    },
+    "direct_backend": "gram",
+    "n_reml_iter": 5,
+    "bessel_calls": {
+     "value": 0,
+     "score": 0
+    }
+   },
+   "reml_search_cost": {
+    "legs": {
+     "estimate_p_reml": {
+      "median_wall_s": 11.939470407087356,
+      "wall_s": [
+       13.149239385034889,
+       11.939470407087356,
+       11.604606376960874
+      ],
+      "median_peak_rss_mb": 558.14453125,
+      "p_hat": 1.5746144502804549,
+      "phi_hat": 42.05277637680797,
+      "n_candidates": 10,
+      "phi_passes": 37,
+      "backend": "gram",
+      "complaints": []
+     },
+     "two_step": {
+      "median_wall_s": 4.463136195903644,
+      "wall_s": [
+       4.7539904420264065,
+       4.463136195903644,
+       4.431839484954253
+      ],
+      "median_peak_rss_mb": 585.03515625,
+      "p_hat": 1.5746133405826144,
+      "phi_hat": 42.05153409766292,
+      "n_candidates": 10,
+      "phi_passes": 37,
+      "backend": "gram",
+      "complaints": []
+     },
+     "decoupled_search": {
+      "median_wall_s": 3.8193675079382956,
+      "wall_s": [
+       3.8193675079382956,
+       3.76922811800614,
+       4.0198339370545
+      ],
+      "median_peak_rss_mb": 582.44140625,
+      "p_hat": 1.5746133405826144,
+      "phi_hat": 42.0528768478207,
+      "n_candidates": 10,
+      "phi_passes": 38,
+      "backend": "gram",
+      "complaints": []
+     },
+     "single_fit_reml": {
+      "median_wall_s": 1.7897188570350409,
+      "wall_s": [
+       1.9325395619962364,
+       1.579688586993143,
+       1.7897188570350409
+      ],
+      "median_peak_rss_mb": 571.62109375,
+      "p_hat": null,
+      "phi_hat": null,
+      "n_candidates": null,
+      "phi_passes": null,
+      "backend": "gram",
+      "complaints": []
+     }
+    },
+    "load_before": [
+     2.306640625,
+     2.326171875,
+     2.47216796875
+    ]
+   },
+   "nb_auto_theta_reml": {
+    "median_wall_s": 2.66500730603002,
+    "wall_s": [
+     2.66500730603002,
+     2.6870149350725114,
+     2.569422797067091
+    ],
+    "median_cpu_s": 2.663073748,
+    "cpu_s": [
+     2.663073748,
+     2.6843109239999996,
+     2.567652048
+    ],
+    "median_peak_rss_mb": 593.4296875,
+    "load_before": [
+     2.4921875,
+     2.38623046875,
+     2.3779296875
+    ],
+    "direct_backend": "gram",
+    "theta_hat": 1.00643,
+    "theta_converged": true,
+    "reml_fits": 2,
+    "reml_iterations": [
+     2,
+     2
+    ]
+   }
+  },
+  "breakdown": {
+   "zeros90_fit": {
+    "total_s": 0.7019090128596872,
+    "candidate_fits_s": 0.2963915409054607,
+    "phi_density_s": 0.32921033981256187,
+    "other_s": 0.07630713214166462,
+    "reml_scale_inside_fits_s": 0.0,
+    "share_candidate_fits": 0.4222649025376027,
+    "share_phi_density": 0.46902138850063685,
+    "share_other": 0.10871370896176047,
+    "outermost_calls": {
+     "candidate_fits": 13,
+     "phi_density": 14
+    },
+    "n_candidates": 12,
+    "phi_passes": 39
+   },
+   "zeros90_reml": {
+    "total_s": 4.029605037998408,
+    "candidate_fits_s": 3.5252161007374525,
+    "phi_density_s": 0.2995002616662532,
+    "other_s": 0.20488867559470236,
+    "reml_scale_inside_fits_s": 0.1599840463604778,
+    "share_candidate_fits": 0.8748291873509527,
+    "share_phi_density": 0.07432496704814065,
+    "share_other": 0.05084584560090658,
+    "outermost_calls": {
+     "candidate_fits": 13,
+     "phi_density": 14,
+     "reml_scale": 113
+    },
+    "n_candidates": 12,
+    "phi_passes": 39
+   },
+   "positive96_fit": {
+    "total_s": 1.5728712698910385,
+    "candidate_fits_s": 0.21167247625999153,
+    "phi_density_s": 1.2967581923585385,
+    "other_s": 0.0644406012725085,
+    "reml_scale_inside_fits_s": 0.0,
+    "share_candidate_fits": 0.13457711404103354,
+    "share_phi_density": 0.8244528444138801,
+    "share_other": 0.0409700415450863,
+    "outermost_calls": {
+     "candidate_fits": 11,
+     "phi_density": 12
+    },
+    "n_candidates": 10,
+    "phi_passes": 35
+   },
+   "positive96_reml": {
+    "total_s": 5.771596845937893,
+    "candidate_fits_s": 4.307110848836601,
+    "phi_density_s": 1.3054182149935514,
+    "other_s": 0.15906778210774064,
+    "reml_scale_inside_fits_s": 1.503433769568801,
+    "share_candidate_fits": 0.7462598244137562,
+    "share_phi_density": 0.2261797297765726,
+    "share_other": 0.027560445809671222,
+    "outermost_calls": {
+     "candidate_fits": 11,
+     "phi_density": 12,
+     "reml_scale": 110
+    },
+    "n_candidates": 10,
+    "phi_passes": 35
+   },
+   "reml_search_cost": {
+    "total_s": 12.707088056020439,
+    "candidate_fits_s": 8.98593505914323,
+    "phi_density_s": 1.1781671491917223,
+    "other_s": 2.542985847685486,
+    "reml_scale_inside_fits_s": 0.526504023000598,
+    "share_candidate_fits": 0.7071592657206638,
+    "share_phi_density": 0.09271731997115762,
+    "share_other": 0.2001234143081786,
+    "outermost_calls": {
+     "candidate_fits": 11,
+     "phi_density": 12,
+     "reml_scale": 85
+    },
+    "n_candidates": 10,
+    "phi_passes": 37
+   }
+  }
+ },
+ "decisions": {
+  "a_series_refusals": {
+   "question": "Does any row need more than 1e6 Dunn-Smyth series terms, or a peak index past 2**52, at the probed (p, phi)?",
+   "probe": {
+    "rows": "every positive row of every Tweedie characterisation case (the three re_*.csv files, zeros90, positive96, unpen) and of the private validation dataset",
+    "p": [
+     1.05,
+     1.2,
+     1.5,
+     1.8,
+     1.95
+    ],
+    "phi": "Pearson estimate at the mean refitted at each p, times 1e-3, 0.1, 1, 10, 1e3",
+    "terms_needed": "2 sqrt(2 * 37 * mode / (a + 1)), and series_moments(max_terms=1e6) called directly",
+    "command": "uv run python benchmarks/tweedie_nb_characterisation.py --series-scan --out <file>"
+   },
+   "largest_terms_needed": 3414.613006068077,
+   "largest_at": {
+    "case": "positive96",
+    "p": 1.95,
+    "phi_multiplier": 0.001,
+    "peak_index": 41463.66280657635
+   },
+   "rows_over_1e5_terms": 0,
+   "rows_over_1e6_terms": 0,
+   "rows_mode_past_2_52": 0,
+   "rows_refused_by_series_moments_at_1e6": 0,
+   "per_case_largest_terms": {
+    "re_ident_p15": 1352.694884924926,
+    "re_flat_p15_lowzero": 3280.140501288304,
+    "re_flat_p18": 1412.3231221845851,
+    "zeros90": 607.8290561281044,
+    "positive96": 3414.613006068077,
+    "unpen": 606.2507569834098
+   },
+   "logpdf_grid": {
+    "dataset": "logpdf_grid",
+    "n_positive": 1620,
+    "max_mode": 3299383.8917065323,
+    "max_terms": 10483.286985597106,
+    "rows_over_1e5_terms": 0,
+    "rows_over_1e6_terms": 0
+   },
+   "private_validation_dataset": "scanned the same way; no refusal; numbers held outside the repository",
+   "suite_tweedie_tests": {
+    "scope": "GLM Tweedie/REML-scale/profile tests (20 files), every density, REML-scale and joint-kernel pass instrumented",
+    "tests_with_passes": 217,
+    "tests_with_rows_over_1e6_terms": 91,
+    "of_which_only_at_phi_1e-12": 79,
+    "phi_1e-12_is": "the pre-rebuild phi search's lower bound (_PHI_LOWER_BOUND), probed by the bounded, branch-scan and fallback machinery the rebuild deletes",
+    "tests_over_1e6_elsewhere": [
+     "tests/test_tweedie_numerics.py::test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics[1.2]",
+     "tests/test_tweedie_numerics.py::test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics[1.4]",
+     "tests/test_tweedie_numerics.py::test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics[1.5]",
+     "tests/test_tweedie_numerics.py::test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics[1.8]",
+     "tests/test_tweedie_numerics.py::test_p15_large_argument_uses_finite_scaled_asymptotic",
+     "tests/test_tweedie_profile.py::TestDetailedPhiProfile::test_derivative_only_failure_preserves_exact_objective_and_uses_fallback",
+     "tests/test_tweedie_profile.py::TestDetailedPhiProfile::test_near_one_multimodal_dispersion_uses_global_comparison",
+     "tests/test_tweedie_profile.py::TestDetailedPhiProfile::test_nonfinite_exact_objectives_are_never_reported_converged",
+     "tests/test_tweedie_profile.py::TestDetailedPhiProfile::test_unsuccessful_fallback_cannot_be_overwritten_by_a_finite_start",
+     "tests/test_tweedie_profile.py::TestDetailedPhiProfile::test_zero_heavy_large_profile_uses_large_profile_refinement_cap",
+     "tests/test_tweedie_profile.py::TestTweedieLogPhiScore::test_log_phi_score_forced_saddlepoint_close_y_mu_is_stable",
+     "tests/test_tweedie_profile.py::TestTweedieLogPhiScore::test_log_phi_score_overflowing_positive_ratio_uses_extended_real_values"
+    ],
+    "largest_terms_at_a_phi_the_solver_reached": {
+     "terms": 212461.15085334925,
+     "test": "tests/test_pearson_scale_weights.py::test_weighted_tweedie_scop_reml_uses_observation_count_for_terminal_phi",
+     "at": {
+      "p": 1.5,
+      "phi": 3.798769532923294e-08,
+      "source": "reml_scale"
+     }
+    }
+   },
+   "decision": "No probed row exceeds 1e5 terms, let alone 1e6, and no peak index passes 2**52. MAX_ROW_TERMS = 1_000_000 stands and a refusal is an error (FloatingPointError naming p, phi and the row count). Not blocked.",
+   "flag_for_tasks_3_4": "tests/test_tweedie_numerics.py::test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics fits an exact curve, so the Pearson phi is about 2.6e-26 and the fit-statistics density puts 40 of 40 rows past 2**52; the pre-rebuild code evaluates them by saddlepoint. Under the rebuild's refusal contract that fit raises unless fit statistics handle the refusal. The other off-bound hits are adversarial tests of internals the rebuild deletes."
+  },
+  "b_search_fit_mode": {
+   "question": "Is estimate_p(fit_mode='reml', search_fit_mode='fit') at least 1.5x faster than estimate_p(fit_mode='reml')?",
+   "positive96": {
+    "coupled_median_wall_s": 5.691547299036756,
+    "decoupled_median_wall_s": 1.946034766966477,
+    "speedup": 2.9246894226401046,
+    "p_hat_coupled": 1.44934083092539,
+    "p_hat_decoupled": 1.4493385537235848,
+    "p_hat_difference": 2.2772018051231413e-06
+   },
+   "reml_search_cost_benchmark": {
+    "coupled_median_wall_s": 11.939470407087356,
+    "decoupled_median_wall_s": 3.8193675079382956,
+    "speedup": 3.126033402722304,
+    "p_hat_difference": 1.1096978405067404e-06
+   },
+   "private_validation_dataset": "speed-up also at least 1.5x; numbers held outside the repository",
+   "decision": "Keep search_fit_mode as it is (spec section 6): the speed-up is at least 1.5x on both the positive96 shape and the private validation dataset, and on the REML search-cost benchmark."
+  },
+  "c_p15_bessel_in_fit_reml": {
+   "question": "Is a complete fit_reml at p = 1.5 at least 1.1x faster with the REML-scale Bessel closed form than with the series?",
+   "bessel_calls_in_asis_arm": {
+    "fremtpl2_fitreml": {
+     "value": 0,
+     "score": 0
+    },
+    "burncost_fitreml": {
+     "value": 0,
+     "score": 0
+    },
+    "positive96_fitreml15": {
+     "value": 0,
+     "score": 0
+    }
+   },
+   "series_over_asis_wall": {
+    "fremtpl2_fitreml": 0.981148879323141,
+    "burncost_fitreml": 0.9633088206684565,
+    "positive96_fitreml15": 0.970032749841812
+   },
+   "mechanism": "The Newton phi solve takes its value, score and slope from series_moments; the Bessel methods are reached only from the bounded fallback and its polish, which none of these fits entered (0 calls). The ratios are timing noise around 1.",
+   "private_validation_dataset": "0 Bessel calls; ratio within noise of 1; numbers held outside the repository",
+   "decision": "Do not keep a Bessel path in fit_reml: it buys nothing (below 1.1x, and never called on the Newton path). The p = 1.5 closed form stays a test oracle only."
+  },
+  "d_joint_ml_vs_brent": {
+   "question": "What does removing joint_ml cost on the unpenalized design (informational)?",
+   "unpen_fit": {
+    "joint_ml_median_wall_s": 0.1798481319565326,
+    "brent_median_wall_s": 0.4204976970795542,
+    "brent_over_joint_ml": 2.338070974132687,
+    "joint_ml_candidates": 4,
+    "brent_candidates": 11,
+    "p_hat_joint_ml": 1.4944248501529949,
+    "p_hat_brent": 1.4944577794959428,
+    "p_hat_difference": 3.292934294796268e-05
+   },
+   "decision": "Informational. Removing joint_ml accepts a 2.3x slower estimate_p on unpenalized ML designs at master's phi cost (4 vs 11 candidate fits, p_hat within xatol); Task 10 re-measures Brent with the rebuilt phi solve on this case."
+  }
+ }
+}

@@ -146,7 +146,7 @@ Fixture schema (all floats are JSON numbers written with `repr` precision):
 }
 ```
 
-- [ ] **Step 1: Write the characterisation generator.** In `benchmarks/tweedie_nb_characterisation.py`:
+- [x] **Step 1: Write the characterisation generator.** In `benchmarks/tweedie_nb_characterisation.py`:
   - **`logpdf` grid:**
     - Axes: p ∈ {1.01, 1.05, 1.1, 1.3, 1.5, 1.7, 1.9, 1.95, 1.99}; φ ∈ {1e-3, 1e-2, 0.1, 1, 10, 100}; y ∈ {0, 1e-3, 0.1, 1, 10, 1e3}; μ ∈ {0.5·y, y, 2·y}, with μ = 1 when y = 0; w ∈ {1, 3.5}.
     - Evaluate through `superglm.profiling.tweedie._prepare_tweedie_density` / `_evaluate_tweedie_density`, one row at a time, and record `saddlepoint = bool(evaluation.positive_saddlepoint_mask[0])` for positive rows.
@@ -166,13 +166,13 @@ Fixture schema (all floats are JSON numbers written with `repr` precision):
   - **`estimate_theta`:** `nb_clamp005.csv` and `nb_worst.csv` built as in `tests/test_nb_theta_estimation_correctness.py`, plus a Poisson-limit case (`generate` Poisson counts, n = 5,000, seed 7). Run under `fit` and `reml`, and record `result.ci(0.05)`.
   - Write the JSON with `json.dump(..., indent=1)`.
 
-- [ ] **Step 2: Generate the fixture on master code.** Run: `uv run --with mpmath python benchmarks/tweedie_nb_characterisation.py --out tests/fixtures/tweedie_nb_characterisation.json`. Expected: the file is written; `"logpdf"` has at least 1,500 rows; `old_route_max_rel_error` is finite.
+- [x] **Step 2: Generate the fixture on master code.** Run: `uv run --with mpmath python benchmarks/tweedie_nb_characterisation.py --out tests/fixtures/tweedie_nb_characterisation.json`. Expected: the file is written; `"logpdf"` has at least 1,500 rows; `old_route_max_rel_error` is finite.
 
-- [ ] **Step 3: Run the private dataset through the same script into scratch.** Build the model from the real-book spec given in your prompt, run `estimate_p` under reml with default arguments, and write to `$SCRATCH/private_characterisation.json`. Never write it under the repository.
+- [x] **Step 3: Run the private dataset through the same script into scratch.** Build the model from the real-book spec given in your prompt, run `estimate_p` under reml with default arguments, and write to `$SCRATCH/private_characterisation.json`. Never write it under the repository.
 
-- [ ] **Step 4: Write `benchmarks/nb_auto_theta_reml.py`.** Replicate the `nb_worst.csv` design to 200,000 rows (np.tile, seed-fixed jitter on the continuous column), fit `families.nb2()` (auto θ) with one spline and one factor under `fit_reml`, and print wall time, CPU time, peak RSS (`resource.getrusage`), θ̂, refit count and the REML iteration count.
+- [x] **Step 4: Write `benchmarks/nb_auto_theta_reml.py`.** Replicate the `nb_worst.csv` design to 200,000 rows (np.tile, seed-fixed jitter on the continuous column), fit `families.nb2()` (auto θ) with one spline and one factor under `fit_reml`, and print wall time, CPU time, peak RSS (`resource.getrusage`), θ̂, refit count and the REML iteration count.
 
-- [ ] **Step 5: Baseline receipts and the time breakdown.** With the six thread pools pinned, run each §9 case from the spec three times interleaved. The cases are:
+- [x] **Step 5: Baseline receipts and the time breakdown.** With the six thread pools pinned, run each §9 case from the spec three times interleaved. The cases are:
   - `benchmarks/tweedie_profile_end_to_end.py` on the `zeros90` and `positive96` shapes, under fit and under reml;
   - `benchmarks/profile_tweedie_reml_fit.py`;
   - `benchmarks/tweedie_reml_search_cost.py`;
@@ -188,7 +188,7 @@ Fixture schema (all floats are JSON numbers written with `repr` precision):
   
   Write all of it to `benchmarks/tweedie_nb_rebuild_receipts.json` under `"baseline"`. Private-dataset numbers go only to scratch.
 
-- [ ] **Step 6: The four stage 0 measurements. Record each under `"decisions"`.**
+- [x] **Step 6: The four stage 0 measurements. Record each under `"decisions"`.**
   - **(a) Series refusals.** Instrument by calling `series_moments(log_t, a)` from `_tweedie_profile_kernel` directly:
     - rows: every positive row of every fixture case, the private dataset and the `re_*.csv` files;
     - p ∈ {1.05, 1.2, 1.5, 1.8, 1.95};
@@ -199,7 +199,7 @@ Fixture schema (all floats are JSON numbers written with `repr` precision):
   - **(c) p = 1.5 Bessel vs series inside `fit_reml`.** Time `benchmarks/profile_tweedie_reml_fit.py` at p = 1.5 as-is, then with `TweedieScaleProfileData._bessel_saturated_log_likelihood` and `_bessel_saturated_score` monkeypatched to return `None` (forcing the series). Decision: keep a Bessel path if and only if the complete fit is ≥ 1.1× faster with it.
   - **(d) `joint_ml` vs Brent on `unpen`.** Time `estimate_p(method="joint_ml")` against `method="brent"`. This is informational only: record the regression that removing `joint_ml` accepts.
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```bash
 git add benchmarks/tweedie_nb_characterisation.py benchmarks/nb_auto_theta_reml.py benchmarks/tweedie_nb_rebuild_receipts.json tests/fixtures/tweedie_nb_characterisation.json
@@ -207,6 +207,13 @@ git commit -m "bench: characterise the Tweedie/NB2 profilers before the rebuild
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+**Stage 0 outcome** (measured on master code; numbers in `benchmarks/tweedie_nb_rebuild_receipts.json` under `"decisions"`):
+
+- **(a) Series refusals: none.** The largest per-row work on the probed (p, φ) grid is 3,415 terms (positive96, p = 1.95, φ̂/10³); the logpdf grid's largest is 10,483. No row passes 10⁵ terms or a peak index of 2⁵². `MAX_ROW_TERMS = 1_000_000` stands and a refusal is an error. In the suite's Tweedie tests, rows past 10⁶ terms occur only at the old φ search's lower bound 1e-12 and in adversarial tests of deleted internals, with one behavioural exception for Tasks 3–4: `test_tweedie_numerics.py::test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics` (exact-curve data, Pearson φ ≈ 2.6e-26, every row's peak index past 2⁵², evaluated by saddlepoint on master).
+- **(b) `search_fit_mode` stays** (spec §6): the decoupled search is 2.9× faster on positive96 and 3.1× on the REML search-cost benchmark, with p̂ moving by 2e-6 and 1e-6; the private validation dataset agrees.
+- **(c) No Bessel path in `fit_reml`.** The REML-scale Bessel methods ran 0 times in complete p = 1.5 fits (the Newton solve uses the series; only the bounded fallback reaches them), and disabling them changes wall time by noise (0.96–0.98×).
+- **(d) `joint_ml` removal costs 2.3× on `unpen`** at master's φ cost (0.18 s vs 0.42 s; 4 vs 11 candidate fits; p̂ within 3.3e-5). Informational; Task 10 re-measures Brent there.
 
 ---
 
