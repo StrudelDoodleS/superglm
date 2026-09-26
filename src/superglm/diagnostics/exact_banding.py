@@ -118,7 +118,9 @@ def _validated(s, w, tol, max_bands):
         raise ValueError("exact banding weights must be positive")
     if np.any(tol < 0.0):
         raise ValueError("exact banding tolerances must be nonnegative")
-    if s.max() - s.min() > _RANGE_CEILING:
+    with np.errstate(over="ignore"):
+        span = s.max() - s.min()
+    if span > _RANGE_CEILING:
         raise ValueError(
             "exact banding needs a curve whose range is below 2**500, where its running "
             "moments stay finite; a log relativity never comes near it"
@@ -150,6 +152,7 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
     sse = np.zeros(n + 1, dtype=np.float64)
     start = np.zeros(n, dtype=np.intp)
     never = np.iinfo(np.int64).max
+    underflow = _underflow_margin(n, w)
     for j in range(n):
         # d is exact for values within a factor two of s[j] (Sterbenz), and
         # otherwise off by at most eps |d|.
@@ -171,10 +174,10 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
         # (d = 0) merges whatever its tolerances.
         length = np.arange(1, m + 1)
         max_d = np.maximum.accumulate(np.abs(d))
-        # A product w * d below the smallest normal double rounds absolutely, by
-        # at most 2**-1075 each, so that goes in too; a plateau (d = 0) has none.
-        underflow = np.where(max_d > 0.0, length * 2.0**-1074 / cw, 0.0)
-        err = 2.0 * _EPS * (length + 2) * max_d + underflow
+        err = 2.0 * _EPS * (length + 2) * max_d
+        # max_d starts at 0 and never falls: the underflow margin goes on every
+        # band past the plateau, which has none.
+        err[np.searchsorted(max_d, 0.0, side="right") :] += underflow
         low_edge = lo[:m] + err + _EPS * np.abs(lo[:m])
         high_edge = hi[:m] - err - _EPS * np.abs(hi[:m])
         ok = (low_edge <= mean) & (mean <= high_edge)
@@ -195,6 +198,17 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
     return np.array(starts[::-1], dtype=np.intp), float(sse[n])
 
 
+def _underflow_margin(n: int, w) -> float:
+    """Absolute error bound on a band mean from products ``w * d`` that underflow.
+
+    Each rounds by at most 2**-1075; over at most ``n`` of them and a band weight
+    of at least ``min(w)``, plus 2**-1074 for the division's own rounding and this
+    bound's.  ``w`` is scaled to a maximum of 1 and refused below the smallest
+    normal double, so this is at most ``n * 2**-52``.
+    """
+    return n * 2.0**-1074 / float(w.min()) + 2.0**-1074
+
+
 def _banding_within(s, w, tol, factor: float, max_bands: int):
     """The banding at ``factor * tol`` if it fits ``max_bands``, else None.
 
@@ -213,7 +227,8 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
     Returns the factor and that banding.  Widening every tolerance only enlarges
     each feasible set (float64 rounding is monotone), so the fewest-band count
     never rises with the factor and bisection applies.  At ``2 R / tau``, with
-    ``R`` the curve's range and ``tau`` its least positive tolerance, every
+    ``R`` the curve's range plus :func:`_underflow_margin` and ``tau`` the
+    least positive tolerance, every
     positive-tolerance window holds every possible band mean, so no larger
     factor fits more; if that fails, zero tolerances are what stand in the
     way.  The bisection is geometric, so a factor near 1e30 takes about thirty
@@ -226,7 +241,8 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
             "values with zero tolerance cannot share a band"
         )
     # Past the largest double the bound is taken as the largest double.
-    upper = max(2.0 * float(s.max() - s.min()) / float(positive.min()), 1.0)
+    reach = float(s.max() - s.min()) + _underflow_margin(len(s), w)
+    upper = max(2.0 * reach / float(positive.min()), 1.0)
     upper = min(upper, float(np.finfo(np.float64).max))
     banding = _banding_within(s, w, tol, upper, max_bands)
     if banding is None:

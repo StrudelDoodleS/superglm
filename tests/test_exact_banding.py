@@ -193,12 +193,24 @@ def test_weights_near_the_largest_double_do_not_overflow_the_mean():
     assert np.isfinite(result.sse)
 
 
-@pytest.mark.parametrize("top", [1e200, 1e308])
-def test_a_curve_too_wide_for_its_moments_is_refused(top):
+@pytest.mark.parametrize("low, top", [(0.0, 1e200), (0.0, 1e308), (-1e308, 1e308)])
+def test_a_curve_too_wide_for_its_moments_is_refused(low, top):
     # w * d * d overflows once |d| passes about 1.3e154; the band count survived
-    # but sse came back NaN and ties fell to whichever NaN argmin met first.
-    with pytest.raises(ValueError, match="below 2\\*\\*500"):
-        exact_bands(np.array([0.0, top]), np.ones(2), np.full(2, top), max_bands=1)
+    # but sse came back NaN and ties fell to whichever NaN argmin met first.  A
+    # range past the largest double overflows the check itself, so it runs raising.
+    with np.errstate(over="raise"), pytest.raises(ValueError, match="below 2\\*\\*500"):
+        exact_bands(np.array([low, top]), np.ones(2), np.full(2, top), max_bands=1)
+
+
+def test_the_widening_bracket_covers_the_underflow_margin():
+    # The absolute underflow margin does not shrink with the range, so a bracket
+    # of 2 R / tau alone refused this, though a factor near 2e14 certifies it.
+    s = np.array([0.0, 1e-17, 2e-17])
+    tol = np.array([0.0, 1e-30, 1e-30])
+    banding = exact_bands(s, np.array([1.0, 2.0**-1022, 2.0**-1022]), tol, max_bands=2)
+    assert banding.starts.tolist() == [0, 1]
+    band = np.repeat(banding.factors, np.diff(np.append(banding.starts, len(s))))
+    assert np.all(np.abs(band - s) <= banding.tolerance_factor * tol)
 
 
 def test_a_product_that_underflows_cannot_carry_a_band_past_its_tolerance():
@@ -598,7 +610,8 @@ def test_only_a_last_single_value_band_gets_a_closed_key():
     assert keys == ["[0.0, 1.0)", "[1.0, 1.0)", "[1.0, 2.0)", "[2.0, 2.0]"]
 
 
-def test_a_weight_near_the_largest_double_keeps_the_table_finite():
+@pytest.mark.parametrize("strategy", ["exposure_quantile", "exact"])
+def test_a_weight_near_the_largest_double_keeps_the_table_finite(strategy):
     # One replication weight of 1e308 at a value whose log relativity is near 2:
     # its weight * value overflowed in the table's own average of that band.
     rng = np.random.default_rng(11)
@@ -609,7 +622,7 @@ def test_a_weight_near_the_largest_double_keeps_the_table_finite():
     weights = np.ones(len(df))
     weights[np.flatnonzero(x == x.max())[0]] = 1e308
     result = model.discretization_impact(
-        df, y, sample_weight=weights, n_bins=150, bin_strategy="exact"
+        df, y, sample_weight=weights, n_bins=150, bin_strategy=strategy
     )
     assert np.isfinite(result.tables["x"]["log_relativity"]).all()
 
@@ -634,3 +647,22 @@ def test_exact_tables_export_the_certified_factors(banded_model, monkeypatch):
     np.testing.assert_array_equal(
         result.tables["age"]["log_relativity"].to_numpy(), certified[0].factors
     )
+
+
+def test_a_band_se_near_the_largest_double_leaves_the_relative_cap_binding(
+    banded_model, monkeypatch
+):
+    # band_se * SE overflowed once SE passed 1, though the minimum is the finite cap.
+    from superglm.diagnostics import discretize
+
+    model, df, y, w = banded_model
+    monkeypatch.setattr(discretize, "_term_se_at", lambda _m, _n, x: np.full(len(x), 2.0))
+
+    def table(band_se):
+        with np.errstate(over="raise"):
+            result = model.discretization_impact(
+                df, y, sample_weight=w, bin_strategy="exact", features=["age"], band_se=band_se
+            )
+        return result.tables["age"]
+
+    pd.testing.assert_frame_equal(table(np.finfo(np.float64).max), table(1e300))

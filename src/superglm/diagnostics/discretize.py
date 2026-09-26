@@ -282,7 +282,7 @@ def _exact_edges(
     band_se: float,
     band_max_error: float,
 ) -> tuple[NDArray, dict[str, float], NDArray]:
-    """Edges, diagnostics and certified factors from :func:`exact_bands` on the term's distinct weighted values.
+    """Edges, diagnostics and certified factors of the term's distinct weighted values.
 
     Each band starts at its smallest value and the last edge is the largest
     value, the convention the other strategies use, so ``np.digitize`` with the
@@ -322,7 +322,10 @@ def _exact_edges(
     curve = np.empty(len(values), dtype=np.float64)
     curve[inverse] = log_rel_smooth[positive]
     se = _term_se_at(model, name, values)
-    tol = np.minimum(band_se * se, np.log1p(band_max_error))
+    # A band_se near the largest double overflows once SE passes 1; that inf is
+    # above the finite relative cap, so the minimum is the cap either way.
+    with np.errstate(over="ignore"):
+        tol = np.minimum(band_se * se, np.log1p(band_max_error))
     banding = exact_bands(curve, weight, tol, max_bands)
     edges = np.append(values[banding.starts], values[-1])
     ends = np.append(banding.starts[1:], len(values))
