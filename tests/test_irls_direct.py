@@ -1063,6 +1063,27 @@ class TestDirectSolverBasic:
         assert "irls_observed_newton_iters" not in fisher_profile
         assert newton.n_iter < fisher.n_iter
 
+        # Both stop on a last step s with |s_i| <= tol max(1, |b_i|). Near the mode
+        # Fisher scoring maps the error by G = I - F^-1 H (F, H the Fisher and
+        # observed information), so the error left after s is -(H^-1 F - I) s;
+        # Newton's is second order in s. Each fixed point also rounds by F^-1
+        # times the rounding of A'Wz, eps log2(n) sum |A| W |z|.
+        design = np.column_stack([np.ones(n), X_raw])
+        coefficients = np.r_[newton.intercept, newton.beta]
+        mu_hat = np.exp(design @ coefficients)
+        fisher_w = mu_hat ** (2.0 - 1.8)
+        observed_w = mu_hat ** (1.0 - 1.8) * ((2.0 - 1.8) * mu_hat + 0.8 * y)
+        fisher_info = design.T @ (fisher_w[:, None] * design)
+        observed_info = design.T @ (observed_w[:, None] * design)
+        contraction = np.linalg.solve(observed_info, fisher_info) - np.eye(4)
+        step_bound = 1e-10 * np.abs(contraction) @ np.maximum(1.0, np.abs(coefficients))
+        working = np.log(mu_hat) + (y - mu_hat) / mu_hat
+        eps = np.finfo(np.float64).eps
+        rounded = eps * np.log2(n) * np.abs(design).T @ np.abs(fisher_w * working)
+        round_off = 2.0 * np.abs(np.linalg.inv(fisher_info)) @ rounded
+        gap = np.abs(coefficients - np.r_[fisher.intercept, fisher.beta])
+        np.testing.assert_array_less(gap, step_bound + round_off)
+
     def test_gamma_log_observed_controller_rescues_then_falls_back_atomically(self, monkeypatch):
         """A Fisher rejection enables one observed attempt; its rejection restores Fisher."""
         import superglm.solvers.irls_direct as irls_direct

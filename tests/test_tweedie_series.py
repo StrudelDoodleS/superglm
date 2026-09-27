@@ -64,11 +64,20 @@ def test_moments_are_row_local():
 
 
 def test_mean_and_variance_match_finite_differences_of_log_w():
-    # d log W / d log t = E[J]; d2 log W / d log t2 = Var[J].
-    log_t, a, h = 4.0, 0.6, 1e-4
-    _, lw, mean_j, var_j = series_moments(np.array([log_t - h, log_t, log_t + h]), a)
-    assert mean_j[1] == pytest.approx((lw[2] - lw[0]) / (2 * h), rel=1e-7)
-    assert var_j[1] == pytest.approx((lw[2] - 2 * lw[1] + lw[0]) / h**2, rel=1e-4)
+    # d log W / d log t = E[J]; d2 log W / d log t2 = Var[J]. The central differences
+    # err by (h^2 / 6) kappa3 and (h^2 / 12) kappa4 to first order in h, with the
+    # cumulants kappa_{r+1} = d kappa_r / d log t read off the kernel's own Var[J];
+    # each log W rounds within _series_bound, delta, adding delta / h and 4 delta / h^2.
+    # h = 2^-13 keeps log t +- h exact, so the spacing is exactly h.
+    log_t, a, h = 4.0, 0.6, 2.0**-13
+    _, lw, mean_j, var_j = series_moments(log_t + h * np.array([-1.0, 0.0, 1.0]), a)
+    kappa3 = (var_j[2] - var_j[0]) / (2 * h)
+    kappa4 = (var_j[2] - 2 * var_j[1] + var_j[0]) / h**2
+    delta = max(_series_bound(log_t + h, a, int(m)) for m in mean_j)
+    mean_bound = h**2 / 6 * (abs(kappa3) + h * abs(kappa4)) + delta / h
+    assert abs(mean_j[1] - (lw[2] - lw[0]) / (2 * h)) <= mean_bound
+    var_bound = h**2 / 12 * abs(kappa4) + 4 * delta / h**2
+    assert abs(var_j[1] - (lw[2] - 2 * lw[1] + lw[0]) / h**2) <= var_bound
 
 
 def test_rows_past_the_work_bound_are_refused_not_nan():

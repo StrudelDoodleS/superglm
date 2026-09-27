@@ -19,10 +19,13 @@ from numpy.typing import NDArray
 _LOG_CUTOFF = 37.0
 # Beyond 2**52 consecutive integers are no longer exact in float64.
 _MAX_SAFE_MODE = float(2**52)
-# Covers peak indices up to ~3e9 (a + 1); stage 0 of the rebuild found no real row
-# needing more (benchmarks/tweedie_nb_rebuild_receipts.json, decision a).
+# A cap on one row's work: peak indices up to ~3.4e9 (a + 1). The density's
+# accuracy switch to the saddlepoint (superglm._tweedie.saddlepoint_switch) sits
+# below it for every p < 2 - 2e-9, so on that path it binds only nearer p = 2.
 MAX_ROW_TERMS = 1_000_000
-# lgamma(j + 1) + lgamma(a j) is shared by every row of one call; cap its size.
+# lgamma(j + 1) + lgamma(a j) is shared by every row of one call. The accuracy
+# switch bounds it by about 1.1 j* entries; this cap binds only where j* > 9e5,
+# p > 1.9999.
 _TABLE_LIMIT = 1 << 20
 
 
@@ -75,20 +78,17 @@ def _row_moments(log_t: float, a: float, mode: int, log_base: NDArray):
 
 
 @njit(cache=True)
-def _series_moments_kernel(log_t, a, ok, log_w, mean_j, var_j) -> None:
+def _series_moments_kernel(log_t, a, log_max_mode, ok, log_w, mean_j, var_j) -> None:
     a_plus_one = a + 1.0
     a_log_a = a * math.log(a)
-    log_safe_mode = math.log(_MAX_SAFE_MODE)
-    modes = np.zeros(log_t.size, dtype=np.int64)  # 0 marks a row past the work bound
+    modes = np.zeros(log_t.size, dtype=np.int64)  # 0 marks a row past log_max_mode
     table_size = 64
     for row in range(log_t.size):
         log_mode = (log_t[row] - a_log_a) / a_plus_one
-        if log_mode > log_safe_mode:
+        if log_mode > log_max_mode:
             continue
         mode = math.exp(log_mode)
         radius = math.sqrt(2.0 * _LOG_CUTOFF * mode / a_plus_one)
-        if 2.0 * radius >= MAX_ROW_TERMS:
-            continue
         modes[row] = max(1, int(math.floor(mode)))
         # A row's window is mode +- radius; one whose window sits entirely above
         # the table limit reads nothing from the table and does not size it.
@@ -108,15 +108,21 @@ def _series_moments_kernel(log_t, a, ok, log_w, mean_j, var_j) -> None:
 
 
 def series_moments(
-    log_t: NDArray, a: float
+    log_t: NDArray, a: float, max_mode: float = math.inf
 ) -> tuple[NDArray[np.bool_], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """Per row: whether the series evaluated, log W, E[J] and Var[J]."""
+    """Per row: whether the series evaluated, log W, E[J] and Var[J].
+
+    A row is refused when its peak index passes ``max_mode``, 2**52 or the work
+    bound, where its term window 2 sqrt(2 * 37 j / (a + 1)) reaches MAX_ROW_TERMS.
+    """
+    work_bound = (0.5 * MAX_ROW_TERMS) ** 2 * (a + 1.0) / (2.0 * _LOG_CUTOFF)
+    log_max_mode = math.log(min(max_mode, work_bound, _MAX_SAFE_MODE))
     log_t = np.ascontiguousarray(log_t, dtype=np.float64)
     ok = np.empty(log_t.size, dtype=np.bool_)
     log_w = np.empty(log_t.size, dtype=np.float64)
     mean_j = np.empty(log_t.size, dtype=np.float64)
     var_j = np.empty(log_t.size, dtype=np.float64)
-    _series_moments_kernel(log_t, float(a), ok, log_w, mean_j, var_j)
+    _series_moments_kernel(log_t, float(a), log_max_mode, ok, log_w, mean_j, var_j)
     return ok, log_w, mean_j, var_j
 
 

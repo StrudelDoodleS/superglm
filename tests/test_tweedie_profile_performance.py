@@ -257,9 +257,9 @@ def test_ten_thousand_row_likelihood_pair_is_vectorized(monkeypatch) -> None:
     real_series = density_module.series_moments
     batch_sizes: list[int] = []
 
-    def counted_series(log_t, a):
+    def counted_series(log_t, a, **kwargs):
         batch_sizes.append(len(log_t))
-        return real_series(log_t, a)
+        return real_series(log_t, a, **kwargs)
 
     monkeypatch.setattr(density_module, "series_moments", counted_series)
 

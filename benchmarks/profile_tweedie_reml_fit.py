@@ -147,10 +147,10 @@ class Probes:
 
         orig_series = tweedie_mod.series_moments
 
-        def counting_series(log_t, a):
+        def counting_series(log_t, a, **kwargs):
             t0 = time.perf_counter()
             try:
-                return orig_series(log_t, a)
+                return orig_series(log_t, a, **kwargs)
             finally:
                 probes.series_time += time.perf_counter() - t0
                 probes.series_calls += 1

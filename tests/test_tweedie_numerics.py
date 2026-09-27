@@ -104,10 +104,10 @@ def test_tweedie_fit_stats_reuses_one_density_normalizer(monkeypatch) -> None:
     real_series = density_module.series_moments
     calls = 0
 
-    def counted(log_t, a):
+    def counted(log_t, a, **kwargs):
         nonlocal calls
         calls += 1
-        return real_series(log_t, a)
+        return real_series(log_t, a, **kwargs)
 
     monkeypatch.setattr(density_module, "series_moments", counted)
 

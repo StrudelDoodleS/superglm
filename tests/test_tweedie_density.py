@@ -1,7 +1,9 @@
 """Tweedie density, fitted/null pair, dispersion solver and simulation on the one series."""
 
+import json
 import math
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -9,20 +11,25 @@ import pytest
 from scipy.optimize import minimize_scalar
 from scipy.special import i1e
 
+import superglm._tweedie as density_module
 from superglm import SuperGLM
 from superglm._tweedie import (
     TweedieRows,
+    _corrected_saddlepoint,
     generate_tweedie_cpg,
+    saddlepoint_switch,
     solve_log_phi,
     tweedie_logpdf,
     tweedie_logpdf_pair,
     tweedie_unit_deviance,
 )
-from superglm._tweedie_series import MAX_ROW_TERMS, series_moments
+from superglm._tweedie_series import series_moments
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
+from superglm.reml.scale import prepare_tweedie_reml_scale_data, profile_tweedie_reml_scale
 
 EPS = np.finfo(np.float64).eps
+ORACLE = json.loads((Path(__file__).parent / "fixtures" / "tweedie_series_oracle.json").read_text())
 
 
 def _book(p=1.5, phi=2.0, n=4000, seed=11):
@@ -61,19 +68,28 @@ def test_unit_deviance_is_accurate_below_half_the_mean(p):
     """
     mp = pytest.importorskip("mpmath")
     mp.mp.dps = 50
-    mu = np.geomspace(0.1, 10.0, 40)
-    y = np.geomspace(1e-12, 0.45, 40) * mu
+    # Means from 0.1 through 1e6 to 1e100, where log y - log mu would err by
+    # ulps of |log mu| ~ 230 and break the bound below, and a quotient y / mu
+    # that underflows to a subnormal.
+    mu = np.append(np.geomspace(0.1, 1e100, 80), 1e10)
+    y = np.append(np.geomspace(1e-12, 0.45, 80) * mu[:-1], 1e-300)
     got = tweedie_unit_deviance(y, mu, p)
-    # log(y) - log(mu) is within 3u (|log y| + |log mu|); each factor of g has
-    # log-sensitivity at most 2 - p + 1/log 2 < 2.45 to it and the difference
-    # g = first - second cancels by at most 6.2, around 13 roundings besides.
     for value, response, mean in zip(got, y, mu, strict=True):
         Y, M, P = mp.mpf(response), mp.mpf(mean), mp.mpf(p)
         exact = 2 * (
             Y ** (2 - P) / ((1 - P) * (2 - P)) - Y * M ** (1 - P) / (1 - P) + M ** (2 - P) / (2 - P)
         )
-        logs = abs(math.log(response)) + abs(math.log(mean))
-        bound = (EPS / 2) * (6.2 * (2.45 * 3.0 + 1.0) * logs + 41.0)
+        # In units of u = eps / 2: a normal y / mu rounds once and its log adds
+        # 2u |L|, L = log(y / mu); log(y) - log(mu) is within 3u (|log y| + |log mu|).
+        # Each factor of g has log-sensitivity at most 2 - p + 1/log 2 < 2.45 to L,
+        # the products (2 - p) L and (p - 1) L round by u |L|, and g = first - second
+        # cancels by at most 6.2, around 13 roundings besides.
+        log_ratio = abs(math.log(response) - math.log(mean))
+        if response / mean >= np.finfo(np.float64).tiny:
+            log_error = 1.0 + 2.0 * log_ratio
+        else:
+            log_error = 3.0 * (abs(math.log(response)) + abs(math.log(mean)))
+        bound = (EPS / 2) * (6.2 * (2.45 * log_error + log_ratio) + 41.0)
         assert abs(float(mp.mpf(value) / exact - 1)) <= bound
 
 
@@ -81,8 +97,10 @@ def test_logpdf_pair_null_shares_the_saturated_term():
     y, mu = _book(p=1.3)
     null_mu = np.full_like(mu, y.mean())
     fitted, null = tweedie_logpdf_pair(y, mu, null_mu, 1.7, 1.3)
+    # Both routes evaluate the same saturated rows and the same deviance on the
+    # same arrays, so they agree bitwise.
     np.testing.assert_array_equal(fitted, tweedie_logpdf(y, mu, 1.7, 1.3))
-    np.testing.assert_allclose(null, tweedie_logpdf(y, null_mu, 1.7, 1.3), rtol=1e-13, atol=1e-13)
+    np.testing.assert_array_equal(null, tweedie_logpdf(y, null_mu, 1.7, 1.3))
 
 
 def _saddlepoint_saturated(y, w, phi, p):
@@ -90,54 +108,180 @@ def _saddlepoint_saturated(y, w, phi, p):
     return -0.5 * (math.log(2 * math.pi) + math.log(phi) - np.log(w) + p * np.log(y))
 
 
-def _work_bound_peak_index(a):
-    # The kernel refuses a row whose term window 2 sqrt(2 * 37 j / (a + 1)) reaches MAX_ROW_TERMS.
-    return (MAX_ROW_TERMS / 2) ** 2 * (a + 1) / 74.0
+def _series_bounds(p, y, w, phi, peak, variance):
+    """Float64 bounds on the series' l_sat, T and T' at one row, to first order.
 
-
-@pytest.mark.parametrize("peak", [1e3, 1e5, "bound"])
-@pytest.mark.parametrize("p", [1.2, 1.5, 1.8])
-def test_saddlepoint_agrees_with_the_series_up_to_the_work_bound(p, peak):
+    Each term's log q(j) = j log t - lgamma(j + 1) - lgamma(a j) rounds within
+    delta = 16 eps of its parts' magnitudes at the peak (test_tweedie_series), and
+    log W inherits at most delta. The weights exp(q - peak) err by at most 2 delta
+    relative, which moves E[J] by at most 2 delta sqrt(Var J) and Var J by at most
+    4 delta Var J (Cauchy-Schwarz; E|(J - E J)^2 - Var J| <= 2 Var J); T and T'
+    scale those by a + 1 and (a + 1)^2. Each of the three adds two parts of size
+    (a + 1) j, the canonical term c w / phi = -(a + 1) j among them, at 16 eps.
+    """
     a = (2 - p) / (p - 1)
-    j_max = 0.99 * _work_bound_peak_index(a) if peak == "bound" else peak
-    y, w = 1.7, 2.5
-    phi = w * y ** (2 - p) / ((2 - p) * j_max)
-    rows = TweedieRows.prepare(np.array([y]), np.array([w]), p)
-    log_t = rows.log_t_unit_phi - (a + 1) * math.log(phi)
-    assert series_moments(log_t, a)[0].all()  # the series, not the saddlepoint arm
-    series = rows.row_saturated(phi)[0][0]
-    # The saddlepoint drops the Stirling corrections of lgamma(j + 1) and lgamma(a j)
-    # at the peak, (1 + 1/a) / (12 j_max), and the Laplace sum's own correction.
-    # Together they give the saddlepoint expansion's leading term
-    # rho4 / 8 - 5 rho3^2 / 24 = p (p - 3) / (24 (2 - p) j_max) from the Tweedie
-    # cumulants kappa_r = (phi / w)^(r - 1) d^r kappa / d theta^r at mean y. That is
-    # 1 to 1.125 times the Stirling term, so four times it covers the leading term
-    # and the O(1 / j_max^2) remainder from j_max = 1e3 up.
-    saddle_bound = 4.0 * (1.0 + 1.0 / a) / (12.0 * j_max)
-    # The series' own float64 error (tests/test_tweedie_series.py) plus the canonical
-    # term's rounding; near the work bound it is ~1e7 times the saddlepoint's error.
-    mode = int(j_max)
-    magnitude = abs(mode * log_t[0]) + math.lgamma(mode + 1.0) + abs(math.lgamma(a * mode))
-    float_bound = 16.0 * EPS * (magnitude + abs(rows.saturated_canonical[0] / phi))
-    error = abs(series - _saddlepoint_saturated(y, w, phi, p))
-    assert error <= saddle_bound + float_bound
-
-
-def test_rows_past_the_work_bound_take_the_saddlepoint():
-    # At p = 1.5 the peak index is 2 w sqrt(y) / phi: 4e10 for the first row, past
-    # the work bound (6.8e9); 2e24 for the second, past 2**52; 2e6 for the third,
-    # which the series sums in about 17,000 terms.
-    y, w, phi = np.array([1e8, 1e36, 1.0]), np.array([2.0, 1.0, 1.0]), 1e-6
-    value, score, slope = TweedieRows.prepare(y, w, 1.5).row_saturated(phi)
-    expected = _saddlepoint_saturated(y[:2], w[:2], phi, 1.5)
-    # Rearranged from the same four logs: a few ulps of their magnitudes.
-    rounding = (
-        8 * EPS * (math.log(2 * math.pi) - math.log(phi) + np.log(w[:2]) + 1.5 * np.log(y[:2]))
+    log_t = a * (math.log(y) - math.log(p - 1)) - math.log(2 - p)
+    log_t += (a + 1) * (math.log(w) - math.log(phi))
+    delta = 16 * EPS * (abs(peak * log_t) + math.lgamma(peak + 1) + abs(math.lgamma(a * peak)))
+    parts = 16 * EPS * 2 * (a + 1) * peak
+    return (
+        delta + parts + 16 * EPS * abs(math.log(y)),
+        2 * (a + 1) * delta * math.sqrt(variance) + parts,
+        4 * (a + 1) ** 2 * delta * variance + parts,
     )
-    np.testing.assert_array_less(np.abs(value[:2] - expected), rounding)
-    np.testing.assert_array_equal(score[:2], 0.5)
-    np.testing.assert_array_equal(slope[:2], 0.0)
-    assert np.isfinite(value[2]) and np.isfinite(score[2]) and np.isfinite(slope[2])
+
+
+def _saddle_bounds(p, y, peak, value):
+    """Bounds on the corrected saddlepoint's l_sat, T and T' at one row.
+
+    Its remainder is B3 e^3 + B4 e^4 + ..., e = 1/((2 - p) j), with |B3| <= 1/360
+    (Stirling's value at p -> 1 and 2, smaller between) and |B4| under a third of
+    that on the oracle. e is proportional to phi, so the remainder's first and
+    second log-phi derivatives weight e^k by k and k^2. The sum over integer j
+    adds the lattice term 2 exp(-2 pi^2 (p - 1) j) (Poisson summation with
+    Var J ~ (p - 1) j), each log-phi derivative of it at most 2 pi j larger. The
+    float64 formula rounds within 8 eps of its logs.
+    """
+    e = 1 / ((2 - p) * peak)
+    lattice = 2 * math.exp(-2 * math.pi**2 * (p - 1) * peak)
+    return (
+        (e**3 + e**4) / 360 + lattice + 8 * EPS * (1 + abs(value) + abs(math.log(y))),
+        (3 * e**3 + 4 * e**4) / 360 + 2 * math.pi * peak * lattice + 8 * EPS,
+        (9 * e**3 + 16 * e**4) / 360 + (2 * math.pi * peak) ** 2 * lattice + 8 * EPS * e,
+    )
+
+
+@pytest.mark.parametrize(
+    "row", ORACLE["saturated"], ids=lambda r: f"p{r['p']}-j{r['peak_index']:.0e}"
+)
+def test_saturated_rows_match_the_50_digit_oracle_on_both_sides_of_the_switch(row):
+    """l_sat, T and T' against 50 digits at peak indices 1e2 to 1e7, astride every switch.
+
+    Past the switch the bound is the corrected saddlepoint's remainder, about
+    e^3 / 360. The uncorrected saddlepoint misses by |A| e = p (3 - p) / (24 (2 - p) j),
+    and a wrong sign or constant in A misses by twice that, far above the bound at
+    every row past the switch. Below it the bound is the series' own float64 error.
+    """
+    p, y, w, phi, peak = (row[k] for k in ("p", "y", "w", "phi", "peak_index"))
+    reference = [float(row[k]) for k in ("l_sat", "score", "slope")]
+    got = TweedieRows.prepare(np.array([y]), np.array([w]), p).row_saturated(phi)
+    if peak > saddlepoint_switch(p):
+        bounds = _saddle_bounds(p, y, peak, reference[0])
+    else:
+        # T' = -(a + 1)^2 Var J + (a + 1) j, and 1 / (a + 1) = p - 1.
+        variance = (peak / (p - 1) - reference[2]) * (p - 1) ** 2
+        bounds = _series_bounds(p, y, w, phi, peak, variance)
+    for value, exact, bound in zip(got, reference, bounds, strict=True):
+        assert abs(value[0] - exact) <= bound
+
+
+@pytest.mark.parametrize("p", [1.01, 1.05, 1.2, 1.5, 1.8, 1.95, 1.99])
+def test_the_switch_is_continuous_within_both_bounds(p):
+    """At the switch the series and the corrected saddlepoint differ by at most their two bounds."""
+    y, w = 1.7, 2.5
+    peak = saddlepoint_switch(p)
+    phi = w * y ** (2 - p) / ((2 - p) * peak)
+    rows = TweedieRows.prepare(np.array([y]), np.array([w]), p)
+    log_t = rows.log_t_unit_phi - (rows.a + 1) * math.log(phi)
+    _, log_w, mean_j, var_j = series_moments(log_t, rows.a)
+    canonical = rows.saturated_canonical / phi
+    series = (
+        log_w - rows.log_y + canonical,
+        (rows.a + 1) * mean_j + canonical,
+        -((rows.a + 1) ** 2) * var_j - canonical,
+    )
+    saddle = _corrected_saddlepoint(p, -canonical, rows.log_y)
+    bounds = np.add(
+        _series_bounds(p, y, w, phi, peak, var_j[0]), _saddle_bounds(p, y, peak, saddle[0][0])
+    )
+    for summed, closed_form, bound in zip(series, saddle, bounds, strict=True):
+        assert abs(summed[0] - closed_form[0]) <= bound
+    # A relative 1e-9 either side of it routes the row to each arm.
+    around = log_t[0] + (rows.a + 1) * np.array([-1e-9, 1e-9])
+    assert series_moments(around, rows.a, max_mode=peak)[0].tolist() == [True, False]
+
+
+def test_rows_past_the_switch_take_the_corrected_saddlepoint():
+    # At p = 1.5 the peak index is 2 w sqrt(y) / phi: 4e10, 2e24 (past 2**52) and
+    # 2e6, all past the switch near 1.3e3, so no series term is summed.
+    y, w, phi, p = np.array([1e8, 1e36, 1.0]), np.array([2.0, 1.0, 1.0]), 1e-6, 1.5
+    value, score, slope = TweedieRows.prepare(y, w, p).row_saturated(phi)
+    e = phi * y ** (p - 2) / w  # 1 / ((2 - p) j)
+    first = p * (p - 3) / 24 * e
+    second = -p * (p - 1) * (p - 2) * (p - 3) / 48 * e**2
+    expected = _saddlepoint_saturated(y, w, phi, p) + first + second
+    # Rearranged from the same four logs: a few ulps of their magnitudes. e is
+    # formed through about eight roundings on each side.
+    rounding = 8 * EPS * (math.log(2 * math.pi) - math.log(phi) + np.log(w) + p * np.log(y))
+    np.testing.assert_array_less(np.abs(value - expected), rounding)
+    np.testing.assert_allclose(score, 0.5 - first - 2 * second, rtol=16 * EPS, atol=0)
+    np.testing.assert_allclose(slope, -first - 4 * second, rtol=16 * EPS, atol=0)
+
+
+@pytest.mark.parametrize("via", ["solve", "reml"])
+@pytest.mark.parametrize("nullity", [0.0, 3.0, 30.0])
+def test_a_round_off_exact_fit_profiles_to_the_saddlepoint_root(nullity, via):
+    """D / N = 1e-26 puts every peak index past 2**52, where the root is log(D / (N - M)).
+
+    T = N / 2 + O(e) there with e = 1 / ((2 - p) j) ~ 1e-26, so the root of
+    Q' = T - M / 2 - D e^-u / 2 is log(D / (N - M)) to 1e-25, and the solve stops
+    within its step tolerance of it. A fixed +-45 window instead stopped on its own
+    unevaluated limit, log phi = -45.
+    """
+    y = np.exp(0.3 + 0.5 * np.linspace(-1.0, 1.0, 40))
+    rows = TweedieRows.prepare(y, np.ones_like(y), 1.5)
+    deviance = 1e-26 * rows.size
+    if via == "solve":
+        phi = solve_log_phi(rows, deviance, nullity).phi
+    else:
+        data = prepare_tweedie_reml_scale_data(y, np.ones_like(y), 1.5, weight_semantics="prior")
+        phi = profile_tweedie_reml_scale(data, deviance, nullity).phi
+    expected = math.log(deviance / (rows.size - nullity))
+    bound = density_module._NEWTON_STEP_TOL + 4 * EPS * abs(expected)
+    assert abs(math.log(phi) - expected) <= bound
+
+
+def _assert_root_within_the_step_tolerance(rows, deviance, nullity, solved):
+    """The stop rule leaves the root of Q' within _NEWTON_STEP_TOL of log phi.
+
+    A Newton stop is a move of at most the tolerance, whose residual is second
+    order in it; a bisection stop is the midpoint of a sign-change bracket of
+    width at most twice it. The score at u -+ 2 tol then has sign -/+ with a
+    margin of at least Q'' tol, far above its evaluation round-off: a few eps
+    (a + 1) j log j per row (_SERIES_ERROR's measurement) at order-one j.
+    """
+    u, tol = math.log(solved.phi), density_module._NEWTON_STEP_TOL
+
+    def score(v):
+        return -0.5 * deviance * math.exp(-v) + rows.saturated(math.exp(v))[1] - 0.5 * nullity
+
+    assert score(u - 2 * tol) < 0.0 < score(u + 2 * tol)
+
+
+def _assert_value_minimiser(rows, deviance, nullity, solved, brute, xatol):
+    """Placement against a value-only bounded Brent search of Q, and its cost.
+
+    Q rounds to 32 eps of its terms' magnitudes (log W, log y and c w / phi of
+    summed rows, the logs of saddlepoint rows, D / (2 phi) and the nullity term),
+    so a value-only search cannot place a minimum of curvature Q'' more finely
+    than sqrt(2 round-off / Q''); fminbound (Brent 1973) stops once its bracket
+    is within 2 (sqrt(eps) |x| + xatol / 3), and Newton on a step of the tolerance.
+    Each Newton pass and each reference value costs one series pass.
+    """
+    u = math.log(solved.phi)
+    log_t = rows.log_t_unit_phi - (rows.a + 1.0) * u
+    summed = series_moments(log_t, rows.a, max_mode=saddlepoint_switch(rows.p))[0]
+    canonical = np.where(summed, rows.saturated_canonical / solved.phi, 0.0)
+    log_w = rows.row_saturated(solved.phi)[0] + rows.log_y - canonical
+    magnitudes = np.sum(np.abs(log_w) + np.abs(rows.log_y) + np.abs(canonical))
+    magnitudes += 0.5 * deviance / solved.phi + 0.5 * nullity * abs(math.log(2 * math.pi) + u)
+    du = (
+        math.sqrt(2.0 * 32.0 * EPS * magnitudes / solved.curvature)
+        + 2.0 * (math.sqrt(EPS) * abs(brute.x) + xatol / 3.0)
+        + density_module._NEWTON_STEP_TOL
+    )
+    assert abs(u - brute.x) <= du
+    assert solved.n_passes < brute.nfev
 
 
 def test_solve_log_phi_converges_with_rows_past_the_work_bound():
@@ -156,10 +300,9 @@ def test_solve_log_phi_converges_with_rows_past_the_work_bound():
     brute = minimize_scalar(
         criterion, bounds=(u - 1, u + 1), method="bounded", options={"xatol": 1e-10}
     )
-    assert u == pytest.approx(brute.x, abs=1e-7)
+    _assert_value_minimiser(rows, deviance, 0.0, solved, brute, 1e-10)
     assert solved.criterion == pytest.approx(criterion(u), rel=1e-12)
-    score = -0.5 * deviance / solved.phi + rows.saturated(solved.phi)[1]
-    assert abs(score) <= 1e-9 * rows.size
+    _assert_root_within_the_step_tolerance(rows, deviance, 0.0, solved)
 
 
 @pytest.mark.parametrize("p", [1.05, 1.3, 1.5, 1.8, 1.95])
@@ -178,12 +321,10 @@ def test_solve_log_phi_is_the_profile_minimiser(p):
         method="bounded",
         options={"xatol": 1e-10},
     )
-    assert math.log(solved.phi) == pytest.approx(brute.x, abs=1e-7)
+    _assert_value_minimiser(rows, deviance, 0.0, solved, brute, 1e-10)
     assert solved.criterion == pytest.approx(criterion(math.log(solved.phi)), rel=1e-12)
-    # Score at the root: Q'(u) = -D e^{-u}/2 + T(u); zero up to its evaluation round-off.
-    score = -0.5 * deviance / solved.phi + rows.saturated(solved.phi)[1]
-    assert abs(score) <= 1e-9 * rows.size
-    assert solved.curvature > 0 and solved.n_passes <= 12
+    _assert_root_within_the_step_tolerance(rows, deviance, 0.0, solved)
+    assert solved.curvature > 0
 
 
 def test_solve_log_phi_refuses_no_interior_optimum():
@@ -212,9 +353,7 @@ def test_solve_log_phi_with_a_nullity_is_the_reml_scale_minimiser():
     assert solved.criterion == pytest.approx(
         _reml_scale_criterion(rows, deviance, nullity, u), rel=1e-12
     )
-    # Q'(u) = -D e^-u / 2 + T(u) - M / 2 vanishes to its round-off.
-    score = -0.5 * deviance / solved.phi + rows.saturated(solved.phi)[1] - 0.5 * nullity
-    assert abs(score) <= 1e-9 * rows.size
+    _assert_root_within_the_step_tolerance(rows, deviance, nullity, solved)
 
 
 def test_interior_optimum_exists_until_the_nullity_reaches_2n_over_p_minus_1():
@@ -225,8 +364,8 @@ def test_interior_optimum_exists_until_the_nullity_reaches_2n_over_p_minus_1():
     deviance = float(np.sum(tweedie_unit_deviance(y, mu, 1.5)))
     limit = 2.0 * rows.size / 0.5
     solved = solve_log_phi(rows, deviance, 0.75 * limit)
-    score = -0.5 * deviance / solved.phi + rows.saturated(solved.phi)[1] - 0.375 * limit
-    assert solved.curvature > 0.0 and abs(score) <= 1e-9 * rows.size
+    assert solved.curvature > 0.0
+    _assert_root_within_the_step_tolerance(rows, deviance, 0.75 * limit, solved)
     with pytest.raises(ValueError, match="no finite interior optimum"):
         solve_log_phi(rows, deviance, limit)
 
@@ -288,10 +427,9 @@ class _NoisyScoreRows(_UnitScoreRows):
     """T = 1 plus a fixed pseudo-random error in [-SCORE_NOISE, SCORE_NOISE).
 
     The error is keyed on the bits of u (Knuth's multiplicative hash) and is 1e4
-    times the score the 1e-8 step tolerance resolves at curvature e^-u ~ 1. That is
-    the state of real rows at peak indices near 1e7: the weighted SCOP fit in
-    test_pearson_scale_weights reaches phi ~ 1.5e-7, where T cancels two sums of 3e9
-    and carries round-off up to 5e-4 over a curvature of 17.
+    times the score the 1e-8 step tolerance resolves at curvature e^-u ~ 1. That
+    was the state of real rows at peak indices near 1e7 before the saddlepoint
+    switch: T cancelled two sums of 3e9 and carried round-off up to 5e-4.
     """
 
     def saturated(self, phi):

@@ -435,11 +435,9 @@ class TestScaleProfileUnit:
         scatter in log phi across trivially equivalent solver windows, which
         downstream gradient differencing amplified ~2500x into a 2e-6
         machine-dependent Hessian discrepancy on CI. The polished optimum is
-        a root of the analytic profile score: placement freedom gone, and
-        the returned phi is identical across solver windows to floating
-        precision.
+        a root of the analytic profile score: placement freedom gone, with no
+        solver window left to place it.
         """
-        import superglm._tweedie as tweedie_module
         from superglm.reml.scale import (
             prepare_tweedie_reml_scale_data,
             profile_tweedie_reml_scale,
@@ -463,18 +461,6 @@ class TestScaleProfileUnit:
         # alone leaves |score| ~ curvature * placement ~ 1e-5; the root
         # polish leaves evaluation roundoff.
         assert abs(score) < 1e-8
-        # Placement invariance across a trivially shifted solver window.
-        original_window = tweedie_module._LOG_PHI_LIMIT
-        try:
-            tweedie_module._LOG_PHI_LIMIT = original_window + 3.0e-7
-            shifted = profile_tweedie_reml_scale(
-                prepare_tweedie_reml_scale_data(y, weights, 1.5, weight_semantics="prior"),
-                penalized_deviance,
-                nullity,
-            )
-        finally:
-            tweedie_module._LOG_PHI_LIMIT = original_window
-        assert abs(float(np.log(shifted.phi)) - log_phi) < 1e-12
 
     def test_custom_estimated_scale_family_warns_on_the_fallback(self):
         """A custom scale_known=False family must warn, not substitute silently."""

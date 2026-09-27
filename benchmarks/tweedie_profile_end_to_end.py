@@ -62,9 +62,9 @@ def _bounded_inner_phi_reference(y, mu, weights, p, *, optimizer_successes):
     def criterion(u):
         return 0.5 * deviance * np.exp(-u) - rows.saturated(float(np.exp(u)))[0]
 
-    limit = density_module._LOG_PHI_LIMIT
+    # A value-only search needs a finite window; these fits' log phi is order one.
     optimizer = minimize_scalar(
-        criterion, bounds=(-limit, limit), method="bounded", options={"xatol": 1e-9}
+        criterion, bounds=(-45.0, 45.0), method="bounded", options={"xatol": 1e-9}
     )
     optimizer_successes.append(bool(optimizer.success))
     return density_module.PhiSolve(
@@ -138,9 +138,9 @@ def _run_end_to_end_profile_once(
     local_optimizer_successes: list[bool] = []
     passes = {"inside_phi": 0, "phi_solves": 0, "active": False}
 
-    def counted_series(log_t, a):
+    def counted_series(log_t, a, **kwargs):
         passes["inside_phi"] += passes["active"]
-        return real_series(log_t, a)
+        return real_series(log_t, a, **kwargs)
 
     solve = (
         partial(_bounded_inner_phi_reference, optimizer_successes=local_optimizer_successes)

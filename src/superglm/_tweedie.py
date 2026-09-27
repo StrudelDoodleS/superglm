@@ -15,10 +15,19 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._tweedie_series import series_moments
+from superglm._tweedie_series import _LOG_CUTOFF, series_moments
 
 _LOG_TWO_PI = math.log(2.0 * math.pi)
-_LOG_PHI_LIMIT = 45.0
+_EPS = float(np.finfo(np.float64).eps)
+# The series' float64 error in l_sat stays below _SERIES_ERROR eps (a + 1) j log j
+# against the 50-digit oracle (benchmarks/tweedie_series_oracle.py) over
+# p in [1.01, 1.99] and peak indices j from 1e2 to 1e6: log W ~ (a + 1) j
+# cancels against the canonical term, both built from terms of that size.
+_SERIES_ERROR = 2.5
+# The corrected saddlepoint's remainder is B3 e^3, e = 1/((2 - p) j): |B3| = 1/360
+# at p -> 1 and p -> 2 (Stirling's series), smaller between on the same oracle,
+# and exactly 21/8192 at p = 1.5 (DLMF 10.40.1 for I_1).
+_SADDLE_REMAINDER = 1.0 / 360.0
 _NEWTON_MAX_STEPS = 60
 _NEWTON_MAX_STEP = 2.0
 _NEWTON_STEP_TOL = 1e-8
@@ -67,24 +76,19 @@ class TweedieRows:
     def row_saturated(self, phi: float) -> tuple[NDArray, NDArray, NDArray]:
         """Per row: l_sat, T = d(-l_sat)/d log phi and dT/d log phi at ``phi``."""
         ok, log_w, mean_j, var_j = series_moments(
-            self.log_t_unit_phi - (self.a + 1.0) * math.log(phi), self.a
+            self.log_t_unit_phi - (self.a + 1.0) * math.log(phi),
+            self.a,
+            max_mode=saddlepoint_switch(self.p),
         )
         canonical = self.saturated_canonical / phi
         inverse_r = self.a + 1.0
         value = log_w - self.log_y + canonical
         score = mean_j * inverse_r + canonical
         slope = -var_j * inverse_r**2 - canonical
-        # The series refuses a row only past its work bound, a peak index
-        # j = w y^(2-p) / ((2-p) phi) above ~3.4e9 (a+1): phi at round-off next
-        # to y, as in a near-exact fit. There the saddlepoint (Jorgensen 1997)
-        # -(1/2) log(2 pi phi y^p / w) = (1/2) log((p-1)(2-p) |c w / phi| / (2 pi)) - log y
-        # is off by p(3-p) / (24 (2-p) j), under 5e-10 for p <= 1.95 and below
-        # the series' own float64 cancellation at such j.
         past = np.flatnonzero(~ok)
-        saddle_scale = (self.p - 1.0) * (2.0 - self.p) / (2.0 * math.pi)
-        value[past] = 0.5 * np.log(saddle_scale * -canonical[past]) - self.log_y[past]
-        score[past] = 0.5
-        slope[past] = 0.0
+        value[past], score[past], slope[past] = _corrected_saddlepoint(
+            self.p, -canonical[past], self.log_y[past]
+        )
         return value, score, slope
 
     def saturated(self, phi: float) -> tuple[float, float, float]:
@@ -94,9 +98,52 @@ class TweedieRows:
         return float(self.count @ value), float(self.count @ score), float(self.count @ slope)
 
 
+def saddlepoint_switch(p: float) -> float:
+    """Peak index above which the corrected saddlepoint beats the series in float64.
+
+    Solves _SERIES_ERROR eps (a + 1) j log j = _SADDLE_REMAINDER / ((2 - p) j)^3,
+    that is j^4 log j = K, taking log j ~ log(K) / 4 inside the slowly varying
+    factor (a 1% shift in j). Below 37 (a + 1) / (2 pi^2), Var J ~ j / (a + 1) is
+    small enough that the sum over integer j departs from the saddlepoint's
+    integral by the lattice term 2 exp(-2 pi^2 Var J) (Poisson summation); that
+    floor binds as p -> 1, where the density becomes the Poisson lattice.
+    """
+    a_plus_one = 1.0 / (p - 1.0)
+    log_k = math.log(_SADDLE_REMAINDER / (_SERIES_ERROR * _EPS * a_plus_one * (2.0 - p) ** 3))
+    # K < e^4 only for p < 1 + 2e-13, where the lattice floor is far larger.
+    switch = math.exp(0.25 * (log_k - math.log(max(1.0, 0.25 * log_k))))
+    return max(switch, _LOG_CUTOFF * a_plus_one / (2.0 * math.pi**2))
+
+
+def _corrected_saddlepoint(
+    p: float, negative_canonical: NDArray, log_y: NDArray
+) -> tuple[NDArray, NDArray, NDArray]:
+    """l_sat, T and T' of rows past the switch: the saddlepoint with two corrections.
+
+    The small-dispersion saddlepoint (Jorgensen 1997, Ch. 3) is
+    -(1/2) log(2 pi phi y^p / w) = (1/2) log((p-1)(2-p) |c w / phi| / (2 pi)) - log y.
+    Daniels' (1954) expansion adds A e + B e^2, e = 1/((2-p) j) at the peak index
+    j = w y^(2-p) / ((2-p) phi) = (p-1) |c w / phi|. The Tweedie standardized
+    cumulants are rho_r = e^(r/2 - 1) prod_{k=1}^{r-2} (k p - k + 1), so
+    A = rho4/8 - 5 rho3^2/24 = p (p-3)/24, and the second-order term (Kato, Sekine
+    & Yoshikawa 2014, Prop. 16) less A^2/2 is B = -p (p-1)(p-2)(p-3)/48.
+    e is proportional to phi, so T = 1/2 - A e - 2 B e^2 and T' = -A e - 4 B e^2.
+    """
+    dispersion = 1.0 / ((p - 1.0) * (2.0 - p) * negative_canonical)
+    first = p * (p - 3.0) / 24.0 * dispersion
+    second = -p * (p - 1.0) * (p - 2.0) * (p - 3.0) / 48.0 * dispersion**2
+    saddle_scale = (p - 1.0) * (2.0 - p) / (2.0 * math.pi)
+    value = 0.5 * np.log(saddle_scale * negative_canonical) - log_y + first + second
+    return value, 0.5 - first - 2.0 * second, -first - 4.0 * second
+
+
 @dataclass(frozen=True)
 class PhiSolve:
-    """Profiled dispersion: phi, Q at the optimum, Q'' in log phi and the series passes used."""
+    """Profiled dispersion: phi, Q at the optimum, Q'' in log phi and the series passes used.
+
+    ``curvature`` is Q'' at the iterate before the last move, which is at most
+    the step tolerance from log phi.
+    """
 
     phi: float
     criterion: float
@@ -127,9 +174,12 @@ def _newton_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSo
     # minimum only if the upper-tail slope N/(p-1) - M/2 is positive.
     if 2.0 * size <= (rows.p - 1.0) * nullity:
         raise ValueError("Tweedie dispersion profile has no finite interior optimum")
-    lower, upper = -_LOG_PHI_LIMIT, _LOG_PHI_LIMIT
+    # A bracket end is a point where the score's sign was seen. While one side
+    # has none, every proposal lies on that side of u (a Newton step toward the
+    # root or a 2-unit walk), so bisection never lands on an unevaluated limit.
+    lower, upper = -math.inf, math.inf
     # The saddlepoint density's root, where every positive row adds 1/2 to T.
-    u = min(max(math.log(deviance / max(size - nullity, 0.5 * size)), lower + 1.0), upper - 1.0)
+    u = math.log(deviance / max(size - nullity, 0.5 * size))
     for n_passes in range(1, _NEWTON_MAX_STEPS + 1):
         saturated, saturated_score, saturated_slope = rows.saturated(math.exp(u))
         half_deviance = 0.5 * deviance * math.exp(-u)
@@ -158,8 +208,10 @@ def _newton_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSo
             )
             return PhiSolve(math.exp(u), criterion, curvature, n_passes)
         u += move
+    bracketed = math.isfinite(lower) and math.isfinite(upper)
     raise FloatingPointError(
         f"Tweedie dispersion Newton did not settle in {_NEWTON_MAX_STEPS} steps at p={rows.p:.6g}"
+        + ("" if bracketed else "; the score kept one sign from the saddlepoint start")
     )
 
 
@@ -233,13 +285,12 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
     # order and their values are unchanged, so the result is bitwise identical.
     zero_indices = np.flatnonzero(zero_mask)
     if zero_indices.size:
-        # A zero response has the closed form 2 mu**(2-p) / (2-p). The general
-        # machinery below reproduces it through its delta == -1 recovery
-        # branch (log(0), exp) at several transcendental evaluations per row;
-        # on zero-inflated fits those rows are the bulk of every deviance
-        # evaluation. The two routes are bitwise identical: the recovery
-        # branch's g reduces to exactly 0.0 - (0.0 - 1.0)/(2.0 - p) and both
-        # multiply the same power the same way.
+        # A zero response has the closed form 2 mu**(2-p) / (2-p). The y < mu/2
+        # branch below reproduces it through log(0) = -inf at several
+        # transcendental evaluations per row; on zero-inflated fits those rows
+        # are the bulk of every deviance evaluation. The two routes are bitwise
+        # identical: that branch's g reduces to exactly -0.0 - (-1.0)/(2.0 - p)
+        # and both multiply the same power the same way.
         deviance = np.empty_like(mu_array)
         with np.errstate(over="ignore"):
             deviance[zero_indices] = (
@@ -287,13 +338,20 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
         g[regular] = first - second
 
     # y < mu/2, down to a delta that rounds to exactly -1: take log(y / mu)
-    # from the original values. With log_ratio <= -log 2 both expm1 factors
-    # are accurate, and g = first - second cancels by at most a factor of 6.2
-    # (reached at y = mu/2 as p -> 2).
+    # from the original values. A normal quotient carries one rounding, so its
+    # log errs by about eps (1 + 2 |log(y / mu)|) at any scale, where
+    # log y - log mu errs by ulps of max(|log y|, |log mu|); only a subnormal or
+    # underflowed quotient needs the difference. With log_ratio <= -log 2 both
+    # expm1 factors are accurate, and g = first - second cancels by at most a
+    # factor of 6.2 (reached at y = mu/2 as p -> 2).
     below = ~near & ~regular & ~extreme_positive
     if np.any(below):
+        y_below, mu_below = y_array[below], mu_array[below]
         with np.errstate(all="ignore"):
-            log_ratio = np.log(y_array[below]) - np.log(mu_array[below])
+            ratio = y_below / mu_below
+            log_ratio = np.log(ratio)
+            subnormal = ratio < np.finfo(np.float64).tiny
+            log_ratio[subnormal] = np.log(y_below[subnormal]) - np.log(mu_below[subnormal])
             first = np.exp((2.0 - p) * log_ratio) * np.expm1((p - 1.0) * log_ratio) / (p - 1.0)
             second = np.expm1((2.0 - p) * log_ratio) / (2.0 - p)
         g[below] = first - second
