@@ -1937,10 +1937,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 2. The TweedieLSS complete-fit wall time on the LSS benchmark (the fit in `tests/test_tweedie_lss_vertical_slice.py`, scaled to 100k rows in a scratch script) is ≤ 1.05× baseline.
 3. The net source lines of the two LSS kernel files fall.
 
-- [ ] **Step 1: Map the LSS kernel's outputs.** For each `KERNEL_*` status and each derivative channel `_positive_row` returns, write down the series quantity it needs: log W, E[J], Var[J], and for p the per-term digamma/trigamma sums that master's `_exact_profile_statistics_kernel` computed (`_series_term_derivatives`). Write the mapping into the commit message.
-- [ ] **Step 2: Extend `_tweedie_series.py`** with `series_p_moments(log_t, a, dlog_t_dp, d2log_t_dp2) -> (ok, log_w, dlogw_dp, d2logw_dp2, d2logw_dp_dlogphi)`. Accumulate term derivatives in the same outward walk (reuse `_row_moments`'s structure, adding the per-term digamma/trigamma channels from master's `_series_term_derivatives`). Add a finite-difference test against `series_moments` in `tests/test_tweedie_series.py`.
-- [ ] **Step 3: Route `_positive_row`'s series summary through the new kernel.** Keep the LSS status codes that describe states of the LSS point evaluation; delete those that described the old series' internal failures.
-- [ ] **Step 4: Run the gate.** If it fails, `git revert` this task's commits and write the follow-up into the PR body.
+- [x] **Step 1: Map the LSS kernel's outputs.** For each `KERNEL_*` status and each derivative channel `_positive_row` returns, write down the series quantity it needs: log W, E[J], Var[J], and for p the per-term digamma/trigamma sums that master's `_exact_profile_statistics_kernel` computed (`_series_term_derivatives`). Write the mapping into the commit message.
+- [x] **Step 2: Extend `_tweedie_series.py`** with `series_p_moments(log_t, a, dlog_t_dp, d2log_t_dp2) -> (ok, log_w, dlogw_dp, d2logw_dp2, d2logw_dp_dlogphi)`. Accumulate term derivatives in the same outward walk (reuse `_row_moments`'s structure, adding the per-term digamma/trigamma channels from master's `_series_term_derivatives`). Add a finite-difference test against `series_moments` in `tests/test_tweedie_series.py`.
+- [x] **Step 3: Route `_positive_row`'s series summary through the new kernel.** Keep the LSS status codes that describe states of the LSS point evaluation; delete those that described the old series' internal failures.
+- [x] **Step 4: Run the gate.** If it fails, `git revert` this task's commits and write the follow-up into the PR body.
 - [ ] **Step 5: Commit.**
 
 ```bash
@@ -1949,6 +1949,24 @@ git commit -m "refactor: TweedieLSS kernel on the shared Dunn-Smyth series
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+
+**Task 11 outcome: gate failed, stage dropped.** The attempt is commit d2af1709. It was reverted in 60fdeeae (`git revert`), so the tree is byte-identical to e5ad43c2. Step 5 did not run.
+
+- **Port as attempted.**
+  - `_tweedie_series.row_p_moments` is a per-row walk: the shared closed-form mode plus climb, the shared direct term, and the LSS's own peak-anchored weighted-Welford moments of the per-term log-derivatives.
+  - The ratio bracket, the log-gamma increment expansion and the Bernoulli table were deleted. The status and channel mapping (Step 1) is in the d2af1709 message.
+- **Deviation from the plan's Step 2.** The plan's `series_p_moments(log_t, a, ...)` takes one power per call. TweedieLSS models p per row, so the walk takes each row's own `a`. The plan's finite-difference test was not added, because the LSS oracle and characterisation files are the stronger check, and the port was reverted.
+- **Gate 1 fails.** The four LSS files were run with their tolerances unchanged: 15 failures.
+  - Three are numerical. The 100-digit high-mode oracle `test_peak_centered_moments_match_high_mode_direct_recurrence` misses d loglik / d log phi by 1.38e-6 against 2e-9. That row has peak index 1e6 at φ = 2e-6. Its Cov and Var assertions miss by 3.7e-3 against 1e-6 and by 7.4e-3 against 4e-6. `test_adversarial_grid_matches_frozen_characterization[1]` and `[2]` miss the score envelope on the same row by about 8,000x.
+  - One is `test_compiled_special_functions_are_local_cache_dependencies`. Numba 0.67.0 serves a stale cached caller after a callee in another file changes (a scratch two-module check returned 4.0 where 202.0 was due). Every compiled caller of the series must therefore live in the series' own module.
+  - Eleven pin removed internals.
+- **Mechanism.** At j ≈ 1e6, the direct term rounds at lgamma's magnitude (about 1.3e7). The log weights then err by up to 9.2e-9, and the error is correlated with j. Over the 12,201-term window it shifts E[J] by -6.906e-7, which is the port's score error to every printed digit. The LSS ratio recurrence has no such cancellation.
+- **Accuracy by peak index.** The port departs from the LSS kernel steadily as the peak index grows. At p = 1.5, the relative gap in the dispersion Hessian is 3e-8 at peak index 1e4, 1e-5 at 1e5 and 4e-3 at 1e6.
+- **Gates 2 and 3 pass.**
+  - Wall time: the 100k-row vertical-slice fit (5 interleaved runs, pools pinned) runs at 0.81x baseline with fixed smoothing (2.07 s against 2.55 s) and 0.80x under EFS (2.97 s against 3.73 s). Penalized log-likelihood and θ are identical; coefficients agree to 1e-15.
+  - Lines: the LSS kernel files fall from 1,483 to 988, and the shared series grows from 125 to 328, a net of -292.
+- **Follow-up.** Unify on the LSS's ratio arithmetic, not the reverse. The GLM keeps its per-call table by tabulating the log-gamma increments for its common a, and the series and all compiled callers go into one module. This is gated like Task 11, plus the GLM series and characterisation tests and GLM fit_reml timing.
 
 ---
 
