@@ -1639,15 +1639,23 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Mathematics.** At μ = y the unit deviance vanishes. Take the small-dispersion (saddlepoint) expansion of the saturated density of a positive row with prior weight w (Dunn & Smyth 2005, §2; Jørgensen 1997): ℓ_sat ≈ −½(log 2π + log φ − log w + p·log y). Its relative error is O(φ / (w·y^(2−p))), which is O(1/j_max). At the work bound j_max > about 3.4e9·(a+1), the absolute error in ℓ_sat is below 1e-10. Its log-φ derivatives are T = ½ and dT/d log φ = 0.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   1. At p ∈ {1.2, 1.5, 1.8}, pick a row whose peak index is just inside the work bound. The series evaluates it, and the saddlepoint expression agrees with the series within the derived O(1/j_max) bound. Write the bound as the leading Stirling correction 1/(12·j_max)·(1 + 1/a) with a factor of 4 slack, derived in a comment.
   2. A row past the bound gets a finite `row_saturated` value equal to the saddlepoint expression, with T = ½ and slope 0.
   3. The near-perfect-fit test (moved into `test_tweedie_density.py` by the repair) now asserts finite log-likelihood, AIC and null log-likelihood, and no `RuntimeWarning`.
   4. `solve_log_phi` still converges when some rows are past the bound.
-- [ ] **Step 2:** Run them and confirm they fail.
-- [ ] **Step 3: Implement.** In `row_saturated`, fill rows with `ok == False` using the saddlepoint expression and its derivatives. Delete the `FloatingPointError` for series refusal and its tests (spec §10's first bullet no longer applies). Delete the fit-stats catch-and-NaN path, and state in a comment why a row can reach the saddlepoint arm.
-- [ ] **Step 4:** Run `tests/test_tweedie_density.py tests/test_tweedie_series.py tests/test_tweedie_nb_characterisation.py tests/test_pearson_scale_weights.py tests/test_tweedie_reml_exact_scale.py`.
-- [ ] **Step 5:** Commit: `feat: saddlepoint for Tweedie rows past the series work bound`.
+- [x] **Step 2:** Run them and confirm they fail.
+- [x] **Step 3: Implement.** In `row_saturated`, fill rows with `ok == False` using the saddlepoint expression and its derivatives. Delete the `FloatingPointError` for series refusal and its tests (spec §10's first bullet no longer applies). Delete the fit-stats catch-and-NaN path, and state in a comment why a row can reach the saddlepoint arm.
+- [x] **Step 4:** Run `tests/test_tweedie_density.py tests/test_tweedie_series.py tests/test_tweedie_nb_characterisation.py tests/test_pearson_scale_weights.py tests/test_tweedie_reml_exact_scale.py`.
+- [x] **Step 5:** Commit: `feat: saddlepoint for Tweedie rows past the series work bound`.
+
+**Task 7b outcome:**
+
+- `TweedieRows.row_saturated` fills the rows the series refuses with the saddlepoint, written through the prepared canonical term: ℓ_sat = ½ log((p−1)(2−p)·|c w/φ| / 2π) − log y, T = ½, dT/d log φ = 0. It works under both weight contracts, since the canonical term carries w under prior weights and none under frequency counts. The series-refusal `FloatingPointError` and the fit-statistics NaN-and-warning catch are gone. The kernel-level refusal (`ok=False`) stays, and so does its test.
+- The saddlepoint's leading error is exactly p(p−3)/(24(2−p) j_max). That is the expansion term ρ₄/8 − 5ρ₃²/24 with the Tweedie cumulants, between 1 and 1.125 times the plan's Stirling term (1 + 1/a)/(12 j_max). Measured against the series, it agrees to four digits for j_max from 1e2 to 1e5. At the work bound the error is at most p(3−p)(p−1)/(24(2−p)·3.4e9): 1e-10 at p = 1.8 and 4.8e-10 at p = 1.95. So the spec's "below 1e-10" holds only for p ≤ 1.8, and the code comment gives the p ≤ 1.95 figure.
+- **Deviation, test 1.** At a peak index just inside the work bound, the series' own float64 cancellation is 3e-5 to 5e-5 against the saddlepoint (measured at p = 1.2, 1.5, 1.8 and 1.95). That is 1e5 to 1e6 times the O(1/j_max) bound, so the plan's bound alone cannot hold there. The test bound is the plan's 4·Stirling term plus Task 2's derived series bound, 16ε·(peak-term magnitudes + |c w/φ|). The test runs at j_max ∈ {1e3, 1e5}, where the saddlepoint term dominates and pins the formula, and at 0.99× the work bound, where it checks continuity. Test 1 checks the mathematics, so it passes against the unfixed code as well. Tests 2 to 4 failed before the change.
+- Mutations: dropping the 1/(2π) turns test 2 red; T = 0 for saddlepoint rows turns tests 2 and 4 red; removing the fill (the pre-change code) turns tests 2 and 4 and the four near-perfect cases red.
+- Spec §10's first bullet (series refusal) is struck through with the 2026-09-27 amendment. On near-exact data `estimate_p` now completes. `fit_reml` on the same data stops at REML mode certification (score 2.2e-9 against 1e-9), which is not a density state.
 
 ### Task 8: NB2 θ on the shared machinery
 

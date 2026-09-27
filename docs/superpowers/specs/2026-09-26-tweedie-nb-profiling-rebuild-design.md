@@ -255,7 +255,7 @@ Each case reports: wall time, peak RSS, output deltas against §7, candidate-fit
 
 A refusal appears only for a state that occurs and is tested:
 
-- A series row past the term cap or the safe mode raises `FloatingPointError` naming p, φ and the row count. REML treats it the same way it treats today's "not representable" scale error.
+- ~~A series row past the term cap or the safe mode raises `FloatingPointError` naming p, φ and the row count.~~ *Amended 2026-09-27 (Max, criterion 3):* such a row takes the saddlepoint, so it is not a refusal state (Task 7b).
 - No interior φ optimum (2·N_pos ≤ (p−1)·M) raises `ValueError`, unchanged.
 - p̂ or a CI side at a search bound: a warning recorded in `result.warnings`. This is a real statistical state (Dunn & Smyth's spurious maximum as p→1).
 - A REML candidate power whose mode cannot be certified is skipped as infeasible, as today. The search routes around it, and the result records it.

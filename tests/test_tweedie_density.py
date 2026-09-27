@@ -1,6 +1,7 @@
 """Tweedie density, fitted/null pair, dispersion solver and simulation on the one series."""
 
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,7 @@ from superglm._tweedie import (
     tweedie_logpdf_pair,
     tweedie_unit_deviance,
 )
+from superglm._tweedie_series import MAX_ROW_TERMS, series_moments
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
 
@@ -57,13 +59,81 @@ def test_logpdf_pair_null_shares_the_saturated_term():
     np.testing.assert_allclose(null, tweedie_logpdf(y, null_mu, 1.7, 1.3), rtol=1e-13, atol=1e-13)
 
 
-def test_series_refusal_names_power_dispersion_and_rows():
-    # At p = 1.5 the peak index is 2 sqrt(y) / phi: 2e10 for the first row, past
-    # the work bound inside the exact-integer range (spec section 10), and 2e6
-    # for the second, which the series sums (17,000 terms).
-    rows = TweedieRows.prepare(np.array([1e8, 1.0]), np.ones(2), 1.5)
-    with pytest.raises(FloatingPointError, match=r"1 of 2 positive rows at p=1\.5, phi=1e-06"):
-        rows.row_saturated(1e-6)
+def _saddlepoint_saturated(y, w, phi, p):
+    """Small-dispersion (saddlepoint) saturated log density of a positive row (Jorgensen 1997)."""
+    return -0.5 * (math.log(2 * math.pi) + math.log(phi) - np.log(w) + p * np.log(y))
+
+
+def _work_bound_peak_index(a):
+    # The kernel refuses a row whose term window 2 sqrt(2 * 37 j / (a + 1)) reaches MAX_ROW_TERMS.
+    return (MAX_ROW_TERMS / 2) ** 2 * (a + 1) / 74.0
+
+
+@pytest.mark.parametrize("peak", [1e3, 1e5, "bound"])
+@pytest.mark.parametrize("p", [1.2, 1.5, 1.8])
+def test_saddlepoint_agrees_with_the_series_up_to_the_work_bound(p, peak):
+    a = (2 - p) / (p - 1)
+    j_max = 0.99 * _work_bound_peak_index(a) if peak == "bound" else peak
+    y, w = 1.7, 2.5
+    phi = w * y ** (2 - p) / ((2 - p) * j_max)
+    rows = TweedieRows.prepare(np.array([y]), np.array([w]), p)
+    log_t = rows.log_t_unit_phi - (a + 1) * math.log(phi)
+    assert series_moments(log_t, a)[0].all()  # the series, not the saddlepoint arm
+    series = rows.row_saturated(phi)[0][0]
+    # The saddlepoint drops the Stirling corrections of lgamma(j + 1) and lgamma(a j)
+    # at the peak, (1 + 1/a) / (12 j_max), and the Laplace sum's own correction.
+    # Together they give the saddlepoint expansion's leading term
+    # rho4 / 8 - 5 rho3^2 / 24 = p (p - 3) / (24 (2 - p) j_max) from the Tweedie
+    # cumulants kappa_r = (phi / w)^(r - 1) d^r kappa / d theta^r at mean y. That is
+    # 1 to 1.125 times the Stirling term, so four times it covers the leading term
+    # and the O(1 / j_max^2) remainder from j_max = 1e3 up.
+    saddle_bound = 4.0 * (1.0 + 1.0 / a) / (12.0 * j_max)
+    # The series' own float64 error (tests/test_tweedie_series.py) plus the canonical
+    # term's rounding; near the work bound it is ~1e7 times the saddlepoint's error.
+    mode = int(j_max)
+    magnitude = abs(mode * log_t[0]) + math.lgamma(mode + 1.0) + abs(math.lgamma(a * mode))
+    float_bound = 16.0 * EPS * (magnitude + abs(rows.saturated_canonical[0] / phi))
+    error = abs(series - _saddlepoint_saturated(y, w, phi, p))
+    assert error <= saddle_bound + float_bound
+
+
+def test_rows_past_the_work_bound_take_the_saddlepoint():
+    # At p = 1.5 the peak index is 2 w sqrt(y) / phi: 4e10 for the first row, past
+    # the work bound (6.8e9); 2e24 for the second, past 2**52; 2e6 for the third,
+    # which the series sums in about 17,000 terms.
+    y, w, phi = np.array([1e8, 1e36, 1.0]), np.array([2.0, 1.0, 1.0]), 1e-6
+    value, score, slope = TweedieRows.prepare(y, w, 1.5).row_saturated(phi)
+    expected = _saddlepoint_saturated(y[:2], w[:2], phi, 1.5)
+    # Rearranged from the same four logs: a few ulps of their magnitudes.
+    rounding = (
+        8 * EPS * (math.log(2 * math.pi) - math.log(phi) + np.log(w[:2]) + 1.5 * np.log(y[:2]))
+    )
+    np.testing.assert_array_less(np.abs(value[:2] - expected), rounding)
+    np.testing.assert_array_equal(score[:2], 0.5)
+    np.testing.assert_array_equal(slope[:2], 0.0)
+    assert np.isfinite(value[2]) and np.isfinite(score[2]) and np.isfinite(slope[2])
+
+
+def test_solve_log_phi_converges_with_rows_past_the_work_bound():
+    # Two exactly fitted rows so large that at phi ~ 2 their peak indices, sqrt(y),
+    # are 1e15 (past the term bound) and 1e20 (past 2**52).
+    y, mu = _book(p=1.5)
+    y, mu = np.append(y, [1e30, 1e40]), np.append(mu, [1e30, 1e40])
+    rows = TweedieRows.prepare(y, np.ones_like(y), 1.5)
+    deviance = float(np.sum(tweedie_unit_deviance(y, mu, 1.5)))
+    solved = solve_log_phi(rows, deviance)
+
+    def criterion(u):
+        return 0.5 * deviance * math.exp(-u) - rows.saturated(math.exp(u))[0]
+
+    u = math.log(solved.phi)
+    brute = minimize_scalar(
+        criterion, bounds=(u - 1, u + 1), method="bounded", options={"xatol": 1e-10}
+    )
+    assert u == pytest.approx(brute.x, abs=1e-7)
+    assert solved.criterion == pytest.approx(criterion(u), rel=1e-12)
+    score = -0.5 * deviance / solved.phi + rows.saturated(solved.phi)[1]
+    assert abs(score) <= 1e-9 * rows.size
 
 
 @pytest.mark.parametrize("p", [1.05, 1.3, 1.5, 1.8, 1.95])
@@ -154,16 +224,18 @@ def test_frequency_counts_solve_as_the_replicated_rows_at_a_nullity():
 @pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])
 def test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics(p):
     # An exact curve leaves phi at round-off (~1e-26), where every row's series
-    # peak index is past the work bound. The fit is published; its likelihood,
-    # which the series cannot evaluate there, is NaN with a warning naming why.
+    # peak index is past the work bound; the saddlepoint gives the likelihood.
     x = np.linspace(-1.0, 1.0, 40)
     y = np.exp(0.3 + 0.5 * x)
+    X = pd.DataFrame({"x": x})
     model = SuperGLM(family=Tweedie(p=p), selection_penalty=0, features={"x": Numeric()})
-    with pytest.warns(RuntimeWarning, match="series cannot evaluate 40 of 40"):
-        model.fit(pd.DataFrame({"x": x}), y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        model.fit(X, y)
     assert np.isfinite(model.result.phi) and np.isfinite(model.result.deviance)
-    assert np.isnan(model._fit_stats.log_likelihood)
-    assert np.isnan(model._fit_stats.null_log_likelihood)
+    assert np.isfinite(model._fit_stats.log_likelihood)
+    assert np.isfinite(model._fit_stats.null_log_likelihood)
+    assert np.isfinite(model.metrics(X, y).aic)
     assert "Log-Likelihood" in str(model.summary())
 
 

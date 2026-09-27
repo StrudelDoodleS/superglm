@@ -69,18 +69,23 @@ class TweedieRows:
         ok, log_w, mean_j, var_j = series_moments(
             self.log_t_unit_phi - (self.a + 1.0) * math.log(phi), self.a
         )
-        if not ok.all():
-            raise FloatingPointError(
-                f"Tweedie series cannot evaluate {int(np.count_nonzero(~ok))} of {ok.size} "
-                f"positive rows at p={self.p:.6g}, phi={phi:.6g}"
-            )
         canonical = self.saturated_canonical / phi
         inverse_r = self.a + 1.0
-        return (
-            log_w - self.log_y + canonical,
-            mean_j * inverse_r + canonical,
-            -var_j * inverse_r**2 - canonical,
-        )
+        value = log_w - self.log_y + canonical
+        score = mean_j * inverse_r + canonical
+        slope = -var_j * inverse_r**2 - canonical
+        # The series refuses a row only past its work bound, a peak index
+        # j = w y^(2-p) / ((2-p) phi) above ~3.4e9 (a+1): phi at round-off next
+        # to y, as in a near-exact fit. There the saddlepoint (Jorgensen 1997)
+        # -(1/2) log(2 pi phi y^p / w) = (1/2) log((p-1)(2-p) |c w / phi| / (2 pi)) - log y
+        # is off by p(3-p) / (24 (2-p) j), under 5e-10 for p <= 1.95 and below
+        # the series' own float64 cancellation at such j.
+        past = np.flatnonzero(~ok)
+        saddle_scale = (self.p - 1.0) * (2.0 - self.p) / (2.0 * math.pi)
+        value[past] = 0.5 * np.log(saddle_scale * -canonical[past]) - self.log_y[past]
+        score[past] = 0.5
+        slope[past] = 0.0
+        return value, score, slope
 
     def saturated(self, phi: float) -> tuple[float, float, float]:
         value, score, slope = self.row_saturated(phi)
