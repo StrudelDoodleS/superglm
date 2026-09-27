@@ -491,6 +491,26 @@ class TestNB2AutoTheta:
 
         assert profile_calls == []
 
+    @pytest.mark.parametrize("xatol", [0.0, -1e-3, np.nan, np.inf])
+    def test_invalid_xatol_is_rejected_before_profile_work(self, monkeypatch, xatol):
+        from superglm.profiling import nb as nb_module
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
+        y = np.resize(np.array([1.0, 2.0, 3.0]), len(X))
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+
+        def unexpected_profile(*args, **kwargs):
+            raise AssertionError("profile work must not start")
+
+        monkeypatch.setattr(nb_module, "estimate_nb_theta", unexpected_profile)
+
+        with pytest.raises(ValueError, match="xatol must be finite and strictly positive"):
+            model.estimate_theta(X, y, xatol=xatol)
+
     def test_estimate_theta_inherit_preserves_reml_final_refit(self, monkeypatch):
         X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 80)})
         y = np.resize(np.array([1.0, 2.0, 3.0, 4.0]), len(X))

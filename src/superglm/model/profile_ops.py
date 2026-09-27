@@ -118,6 +118,7 @@ def estimate_p(
         fit_mode=fit_mode,
         search_fit_mode=search_fit_mode,
         p_bounds=p_bounds,
+        xatol=xatol,
         ci_alpha=ci_alpha,
         max_reml_iter=max_reml_iter,
     )
@@ -176,7 +177,19 @@ def _ignore_progress(phase, payload=None) -> None:
     """The progress sink when the caller passed none."""
 
 
-def _resolve_power_request(model, *, fit_mode, search_fit_mode, p_bounds, ci_alpha, max_reml_iter):
+def _require_positive_tolerance(xatol) -> None:
+    """Refuse a search tolerance before any candidate fit runs.
+
+    An infinite one lets the bounded search stop at once and publish its best
+    endpoint; NaN or a negative one fails only after expensive candidate fits.
+    """
+    if not (np.isfinite(xatol) and xatol > 0.0):
+        raise ValueError(f"xatol must be finite and strictly positive, got {xatol!r}")
+
+
+def _resolve_power_request(
+    model, *, fit_mode, search_fit_mode, p_bounds, xatol, ci_alpha, max_reml_iter
+):
     """Validate an estimate_p call before any data is read.
 
     Returns the publication fit mode, the search fit mode and the REML
@@ -193,6 +206,7 @@ def _resolve_power_request(model, *, fit_mode, search_fit_mode, p_bounds, ci_alp
         raise ValueError(
             f"p_bounds must be increasing and strictly inside (1, 2), got {p_bounds!r}"
         )
+    _require_positive_tolerance(xatol)
     # The interval checks its level too; this one fails before the search runs.
     if ci_alpha is not None and not 0.0 < ci_alpha < 1.0:
         raise ValueError(f"ci_alpha must be strictly between 0 and 1, got {ci_alpha!r}")
@@ -489,7 +503,7 @@ def estimate_theta(
     from superglm.model import fit_ops
 
     publish_mode = _resolve_theta_request(
-        model, fit_mode=fit_mode, theta_bounds=theta_bounds, ci_alpha=ci_alpha
+        model, fit_mode=fit_mode, theta_bounds=theta_bounds, xatol=xatol, ci_alpha=ci_alpha
     )
     report = progress_callback or _ignore_progress
     references = {"X_ref": X, "y_ref": y, "sample_weight_ref": sample_weight, "offset_ref": offset}
@@ -515,7 +529,7 @@ def estimate_theta(
     )
 
 
-def _resolve_theta_request(model, *, fit_mode, theta_bounds, ci_alpha):
+def _resolve_theta_request(model, *, fit_mode, theta_bounds, xatol, ci_alpha):
     """Validate an estimate_theta call before any data is read; returns the publication mode."""
     family = configured_family(model)
     if not isinstance(family, NegativeBinomial):
@@ -526,6 +540,7 @@ def _resolve_theta_request(model, *, fit_mode, theta_bounds, ci_alpha):
     lower, upper = theta_bounds
     if not 0.0 < lower < upper < np.inf:
         raise ValueError(f"theta_bounds must satisfy 0 < lower < upper < inf, got {theta_bounds!r}")
+    _require_positive_tolerance(xatol)
     if ci_alpha is not None and not 0.0 < ci_alpha < 1.0:
         raise ValueError(f"ci_alpha must be strictly between 0 and 1, got {ci_alpha!r}")
     publish_mode = _resolve_profile_fit_mode(model, fit_mode)

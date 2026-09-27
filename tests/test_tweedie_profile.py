@@ -1167,6 +1167,23 @@ class TestEstimatePFitMode:
 
         assert profile_calls == []
 
+    @pytest.mark.parametrize("xatol", [0.0, -1e-3, np.nan, np.inf])
+    def test_invalid_xatol_is_rejected_before_profile_work(self, monkeypatch, xatol):
+        X, y, _ = _tweedie_data(n=24, seed=20260806)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+
+        def unexpected_profile(*args, **kwargs):
+            raise AssertionError("profile work must not start")
+
+        monkeypatch.setattr(tweedie_module, "search_power", unexpected_profile)
+
+        with pytest.raises(ValueError, match="xatol must be finite and strictly positive"):
+            model.estimate_p(X, y, xatol=xatol)
+
     def test_ci_failure_preserves_previously_fitted_revision(self, monkeypatch):
         X, y, _ = _tweedie_data(n=48, seed=20260808)
         model = SuperGLM(
