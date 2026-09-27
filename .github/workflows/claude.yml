@@ -1,6 +1,10 @@
 name: Claude PR Review
 
 on:
+  # Every pull request gets a full review when it opens, reopens, leaves draft
+  # or receives a push; `@claude` comments still ask ad-hoc questions.
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
     types: [created]
   pull_request_review_comment:
@@ -13,7 +17,12 @@ permissions:
 
 jobs:
   claude-review:
+    # Fork and Dependabot pull requests get no secrets, so they cannot run it.
     if: |
+      (github.event_name == 'pull_request' &&
+       !github.event.pull_request.draft &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.login != 'dependabot[bot]') ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
        contains(github.event.comment.body, '@claude')) ||
@@ -21,6 +30,11 @@ jobs:
        contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' &&
        contains(github.event.review.body, '@claude'))
+    # A newer push supersedes the review of an older one; comment-triggered runs
+    # each get their own group so they are never cancelled.
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('claude-review-pr-{0}', github.event.pull_request.number) || format('claude-review-run-{0}', github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -65,7 +79,29 @@ jobs:
       - name: Run Claude PR review
         id: claude
         uses: anthropics/claude-code-action@9ca9355b36297178e28d37c799d1c9c8a28e6507 # v1 (main)
+        env:
+          AUTOMATIC_REVIEW_BRIEF: |
+            Review this pull request thoroughly: every commit against the base
+            branch, not only the latest push. Report, in this order:
+            1. Correctness defects: wrong numbers, broken invariants, lost
+               behaviour, error paths that cannot be reached or are unhandled.
+            2. Test adequacy: tests that would still pass against the unfixed
+               code, and tolerances that are not derived from an error analysis
+               or a recorded measurement.
+            3. AGENTS.md compliance: numerical policy, performance evidence for
+               anything that changes time to fit, and the release-impact
+               declaration in the description.
+            Put each finding as an inline comment on the exact line, with a
+            severity, and summarise all of them in the tracking comment. If an
+            earlier review on this pull request raised findings, say which are
+            now fixed.
         with:
+          # On pull_request events, track_progress runs the same tag mode as an
+          # @claude comment (one tracking comment, edited in place) and appends
+          # the brief as custom instructions. Comment events keep the comment
+          # body as the brief.
+          track_progress: ${{ github.event_name == 'pull_request' }}
+          prompt: ${{ github.event_name == 'pull_request' && env.AUTOMATIC_REVIEW_BRIEF || '' }}
           path_to_claude_code_executable: ${{ steps.claude-code.outputs.path }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Avoid embedding the Claude App token in the Git remote. Commit tools stay denied.
