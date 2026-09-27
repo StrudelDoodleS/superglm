@@ -863,7 +863,15 @@ class ModelMetrics:
                         penalty=fitted_penalty(self._model),
                     )
                     self.__dict__["_coefficient_estimable"] = np.ones(len(beta), dtype=bool)
-                X_a = EvaluationDesign(self._model, self._X, selected_columns)
+                # A structured covariance keeps the fit's coordinates, whose columns
+                # sit ``intercept_shift`` above the public ones wherever zero prior
+                # weights moved the fit's centring; released rows are mapped back.
+                X_a = EvaluationDesign(
+                    self._model,
+                    self._X,
+                    selected_columns,
+                    shift=getattr(augmented, "intercept_shift", None),
+                )
             compact_estimable = fit_inference.get("coefficient_estimable")
             if compact_estimable is not None:
                 self.__dict__["_coefficient_estimable"] = compact_estimable

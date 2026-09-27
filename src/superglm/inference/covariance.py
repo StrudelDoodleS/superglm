@@ -17,6 +17,8 @@ assembly -- stayed, because those two are its callers.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -89,6 +91,18 @@ class StructuredSlopeCovarianceAccessor:
 
     def solve(self, rhs: NDArray) -> NDArray:
         return self.scale * self.factor.solve(rhs)
+
+    @property
+    def row_quadratic_forms(self) -> Callable[[NDArray], NDArray] | None:
+        """Row-wise ``x_i' V x_i`` from the factor's structured pieces.
+
+        ``None`` for block and sum-to-zero factors, which have no row method and
+        keep the bounded selected-block route.
+        """
+        row_forms = getattr(self.factor, "row_quadratic_forms", None)
+        if row_forms is None:
+            return None
+        return lambda rows: self.scale * row_forms(rows)
 
     def trace(self) -> float:
         indices = np.arange(self.shape[0], dtype=np.intp)

@@ -36,6 +36,7 @@ from superglm.solvers._structured.nested import (
     NestedDataOperator,
     NestedLeafStatistics,
     NestedStructuredLayout,
+    _divide_rows,
 )
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
@@ -198,21 +199,23 @@ def _centered_leaf_pass(
 
     The exact centred row pass of §3.4 and §3.6 (decision 1) in ONE pass over
     the border rows: rows are taken in leaf order (``layout.leaf_order``)
-    in chunks of whole leaves of at least ``chunk_size`` rows, each chunk
-    materialized once and centred on the layout's global centre ``c``.  A
-    chunk never splits a leaf, so a chunk holds up to ``max(chunk_size,
-    largest leaf)`` rows and its few ``rows x q`` temporaries scale with the
-    largest leaf (full DVSA step D: 336,385 rows, 460 MiB per pass).
+    in chunks of ``chunk_size`` rows, each chunk materialized once and
+    centred on the layout's global centre ``c``, so the pass holds a few
+    ``chunk_size x q`` temporaries whatever the largest leaf.
     Without ``mean`` it forms the data leaf means in the shifted form ``x_ref
     - c + sum_r w_r ((x_r - c) - (x_ref - c)) / w_l`` about each leaf's first
     weighted row (0 where ``w_l == 0``), so a column constant on a leaf's
     weighted rows gives that constant exactly; the deviations are then zero
-    by construction and returned as ``None``.  With ``mean`` (a signed operator about its factor's centred data means) it also
-    forms ``dev_l = sum_r a_r (x_r - m_l)``.  Leaf sums are ``np.add.reduceat``
-    segments of the sorted chunk; the scatter ``sum_r a_r (x_r - m_l)(x_r -
-    m_l)'`` is one product per chunk that never subtracts raw moments, so such
-    a column has an exactly zero row and column; chunks accumulate with
-    compensated addition and the result is symmetrized.  The absolute mass is
+    by construction and returned as ``None``.  A leaf cut by a chunk edge is
+    centred piece by piece on each piece's own mean and its pieces are
+    combined after the pass (``_combine_leaf_pieces``).  With ``mean`` (a
+    signed operator about its factor's centred data means) it also forms
+    ``dev_l = sum_r a_r (x_r - m_l)``, summed over a cut leaf's pieces.  Leaf
+    sums are ``np.add.reduceat`` segments of the sorted chunk; the scatter
+    ``sum_r a_r (x_r - m_l)(x_r - m_l)'`` is one product per chunk that never
+    subtracts raw moments, so such a column has an exactly zero row and
+    column; chunks accumulate with compensated addition and the result is
+    symmetrized.  The absolute mass is
     ``sum_r e_r (x_rj - m_lj)^2`` with ``e_r`` the scale of row ``r``'s weight
     error (§3.7): ``a_r`` itself when no weight is negative, as Fisher weights
     are each accurate to a few ulp, and ``max |a|`` on every weighted row of a
@@ -222,9 +225,7 @@ def _centered_leaf_pass(
     n, center = len(weights), layout.border_center
     order, starts = layout.leaf_order, layout.leaf_starts
     present = np.flatnonzero(np.diff(starts))
-    first = starts[present]
-    edges = np.append(first, n)
-    bounds = np.unique(np.searchsorted(first, np.arange(0, n, chunk_size), side="right") - 1)
+    edges = np.append(starts[present], n)
     deviation = None
     if mean is None:
         mean = np.zeros((len(leaf_weight), len(center)))
@@ -236,33 +237,91 @@ def _centered_leaf_pass(
     absolute = np.zeros(len(center))
     signed = bool(np.any(weights < 0.0))
     largest = float(np.max(np.abs(weights), initial=0.0))
-    for lo, hi in zip(bounds, np.append(bounds[1:], len(present)), strict=True):
-        leaves, segment = present[lo:hi], first[lo:hi] - first[lo]
-        counts = np.diff(edges[lo : hi + 1])
-        rows = order[first[lo] : edges[hi]]
+    pieces: list[tuple] = []
+    for lo in range(0, n, chunk_size):
+        hi = min(lo + chunk_size, n)
+        # the present leaves with rows in [lo, hi) and their segments of the chunk
+        span = slice(np.searchsorted(edges, lo, side="right") - 1, np.searchsorted(edges, hi))
+        leaves, begin, end = present[span], edges[span], edges[span.start + 1 : span.stop + 1]
+        segment = np.maximum(begin, lo) - lo
+        counts = np.minimum(end, hi) - lo - segment
+        cut = (begin < lo) | (end > hi)
+        rows = order[lo:hi]
         centered = _border_rows(layout, rows)
         centered -= center
         a = weights[rows]
+        error = largest * (a != 0.0) if signed else a
         if deviation is None:
-            # each leaf's first weighted row (any row of a leaf without one)
+            # each segment's first weighted row (any row of a segment without one)
             nonzero = np.append(np.flatnonzero(a), len(a))
             first_weighted = nonzero[np.searchsorted(nonzero, segment)]
             reference = centered[np.minimum(first_weighted, segment + counts - 1)]
             difference = centered - np.repeat(reference, counts, axis=0)
             difference *= a[:, None]
             shift = np.add.reduceat(difference, segment, axis=0)
-            active = leaf_weight[leaves] != 0.0
-            mean[leaves[active]] = (
-                reference[active] + shift[active] / leaf_weight[leaves[active], None]
-            )
+            # a cut leaf's piece is centred on the mean of its own rows
+            total = np.where(cut, np.add.reduceat(a, segment), leaf_weight[leaves])
+            centre = np.where(total[:, None] != 0.0, reference + _divide_rows(shift, total), 0.0)
+            mean[leaves] = centre
         centered -= np.repeat(mean[leaves], counts, axis=0)
         weighted = a[:, None] * centered
         _compensated_add(within, compensation, centered.T @ weighted)
-        error = largest * (a != 0.0) if signed else a
         absolute += np.einsum("r,rj,rj->j", error, centered, centered)
         if deviation is not None:
-            deviation[leaves] = np.add.reduceat(weighted, segment, axis=0)
+            deviation[leaves] += np.add.reduceat(weighted, segment, axis=0)
+            continue
+        # a cut segment (the chunk's first or last) keeps W_p, m_p, E_p = sum e and
+        # t_p = sum e (x - m_p); with e = a, E_p = W_p and t_p is the residual the
+        # scatter update drops, 0 up to rounding
+        error_sum, residual = total[cut], np.zeros((np.count_nonzero(cut), len(center)))
+        if signed:
+            error_sum = np.add.reduceat(error, segment)[cut]
+            residual = np.add.reduceat(error[:, None] * centered, segment, axis=0)[cut]
+        pieces.append((leaves[cut], total[cut], centre[cut], error_sum, residual))
+    if pieces:
+        _combine_leaf_pieces(pieces, leaf_weight, mean, within, compensation, absolute)
     return mean, 0.5 * (within + within.T), absolute, deviation
+
+
+def _combine_leaf_pieces(
+    pieces: list[tuple],
+    leaf_weight: NDArray,
+    mean: NDArray,
+    within: NDArray,
+    compensation: NDArray,
+    absolute: NDArray,
+) -> None:
+    """Combine the pieces of every leaf a chunk edge cut, in place (data pass).
+
+    Each piece ``p`` of leaf ``l`` was centred on its own mean ``m_p`` (0 when
+    its weight ``W_p`` is 0) and its rows added ``sum a (x - m_p)(x - m_p)'``
+    to ``within`` and ``sum e (x - m_p)^2`` to ``absolute``; it records ``W_p``,
+    ``m_p``, ``E_p = sum e`` and ``t_p = sum e (x - m_p)``.  With ``d_p = m_p -
+    m_l``, the Chan, Golub & LeVeque (1979) pairwise update of partial
+    (weight, mean, centred scatter) sums, taken over all of a leaf's pieces
+    at once, adds ``sum_p W_p d_p d_p'`` to the scatter, and the exact identity
+    ``sum_{r in l} e (x - m_l)^2 = sum_p [U_p + 2 d_p t_p + E_p d_p^2]`` moves the
+    absolute mass (``t_p`` is not 0: the error weights ``e`` of a signed vector
+    are not ``a``).  The update drops ``sum a (x - m_p)``, 0 up to rounding
+    when ``W_p != 0`` and a rounding-weight term when a piece's weights cancel
+    exactly, inside the floor ``absolute`` charges.  The leaf mean is shifted
+    about its heaviest piece, ``m_h + sum_p W_p (m_p - m_h) / w_l`` (0 where
+    ``w_l == 0``), so a column constant on the leaf's weighted rows keeps that
+    constant and a zero scatter row.
+    """
+    leaf, weight, centre, error, error_residual = (
+        np.concatenate(values) for values in zip(*pieces, strict=True)
+    )
+    new_leaf = np.diff(leaf, prepend=-1) != 0
+    first, owner = np.flatnonzero(new_leaf), np.cumsum(new_leaf) - 1
+    reference = centre[np.lexsort((-np.abs(weight), leaf))[first]]
+    shift = np.add.reduceat(weight[:, None] * (centre - reference[owner]), first, axis=0)
+    total = leaf_weight[leaf[first]]
+    combined = np.where(total[:, None] != 0.0, reference + _divide_rows(shift, total), 0.0)
+    mean[leaf[first]] = combined
+    delta = centre - combined[owner]
+    _compensated_add(within, compensation, delta.T @ (weight[:, None] * delta))
+    absolute += np.sum(2.0 * delta * error_residual + error[:, None] * delta**2, axis=0)
 
 
 def build_nested_leaf_statistics(

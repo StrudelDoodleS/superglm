@@ -9,6 +9,7 @@ refer to ``notes/research/2026-09-26-nested-random-effect-elimination.md``.
 
 from __future__ import annotations
 
+import tracemalloc
 from dataclasses import dataclass, replace
 from fractions import Fraction
 
@@ -33,13 +34,14 @@ from superglm.links import LogLink
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.rank import decompose_factor
+from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.solvers.structured import (
     CenteredBlockOperator,
     NestedStructuredLayout,
     ProfiledNestedSchurFactor,
     ProfiledScalarSchurFactor,
     _random_effect_auto_cost_ratios,
+    build_augmented_nested_factor,
     build_nested_leaf_statistics,
     build_nested_structured_layout,
     build_nested_structured_system,
@@ -488,11 +490,12 @@ def test_leaf_statistics_carry_no_column_offset() -> None:
     assert np.all(np.abs(shifted.within - stats.within) <= within_bound)
 
 
+@pytest.mark.parametrize("chunk_size", [7, 8192])
 @pytest.mark.parametrize("weight_scale", [1.0, 1e4])
-def test_leaf_constant_columns_give_exact_means_and_zero_scatter(weight_scale) -> None:
+def test_leaf_constant_columns_give_exact_means_and_zero_scatter(weight_scale, chunk_size) -> None:
     case = _nested_case(weight_scale=weight_scale)
     layout = _layout(case)
-    stats = build_nested_leaf_statistics(layout, case.matrices, case.weights)
+    stats = build_nested_leaf_statistics(layout, case.matrices, case.weights, chunk_size=chunk_size)
     dense = case.matrices[0].M
     reference = np.zeros((case.sizes[2], dense.shape[1]))
     reference[case.codes[2]] = dense - layout.border_center[: dense.shape[1]]
@@ -507,7 +510,9 @@ def test_leaf_constant_columns_give_exact_means_and_zero_scatter(weight_scale) -
     np.testing.assert_array_equal(stats.within[columns, :], 0.0)
     np.testing.assert_array_equal(stats.within[:, columns], 0.0)
     signed_rows = np.random.default_rng(1).normal(size=case.dm.n) * case.weights
-    signed = build_nested_leaf_statistics(layout, case.matrices, signed_rows, mean=stats.mean)
+    signed = build_nested_leaf_statistics(
+        layout, case.matrices, signed_rows, mean=stats.mean, chunk_size=chunk_size
+    )
     np.testing.assert_array_equal(signed.deviation[:, columns], 0.0)
     np.testing.assert_array_equal(signed.within[columns, :], 0.0)
 
@@ -537,22 +542,93 @@ def test_leaf_means_are_shifted_about_a_weighted_row() -> None:
     np.testing.assert_array_equal(stats.within[3], 0.0)
 
 
-def test_leaf_statistics_do_not_depend_on_the_chunking() -> None:
+@pytest.mark.parametrize("chunk_size", [1, 7, 64])
+def test_leaves_cut_by_chunk_edges_give_the_unsplit_statistics(chunk_size) -> None:
+    """Pieces of a cut leaf combine to the leaf's statistics (Chan, Golub & LeVeque).
+
+    Compared with the one-chunk pass on non-negative weights and on weights
+    with rounding-negative rows (all in zero-weight leaves, so every leaf is
+    one-signed and every row is charged ``max |w|``), and for a signed pass
+    about the data means.  Bounds: every centre either pass subtracts (a
+    leaf row, a piece mean, the heaviest piece's mean) lies in the hull of the
+    leaf's rows, so each centred entry is at most ``M_l = 2 D_l + |m_l|`` with
+    ``D_l`` the leaf's largest deviation from its mean ``m_l`` (``|m_l|`` for
+    the roundings of the centres themselves).  Each pass sums at most ``n``
+    row terms, ``P`` piece terms and a few more, each within 4 eps of its
+    exact value, and the pairwise update's dropped residual ``sum a (x -
+    m_p)`` is the piece mean's error times ``W_p``: each statistic is then
+    within ``gamma = (6 n + 2 P + 32) eps`` of the exact one relative to ``M_l``
+    (mean), ``A_l M_li M_lj`` (scatter, ``A_l = sum |a|``) or ``E_l M_lj^2``
+    (absolute mass, ``E_l = sum e``), and the two passes differ by twice that.
+    """
     case = _nested_case()
     layout = _layout(case)
-    results = [
-        build_nested_leaf_statistics(layout, case.matrices, case.weights, chunk_size=size)
-        for size in (1, 7, 8192)
-    ]
     X = _border_rows(layout) - layout.border_center
-    centered = X - results[-1].mean[case.codes[2]]
-    absolute_scatter = np.abs(centered).T @ (case.weights[:, None] * np.abs(centered))
-    for stats in results[:-1]:
-        assert np.all(np.abs(stats.mean - results[-1].mean) <= 16 * EPS * np.abs(stats.mean))
-        assert np.all(
-            np.abs(stats.within - results[-1].within)
-            <= 2 * (case.dm.n + 4) * EPS * absolute_scatter + np.finfo(float).tiny
+    leaf, K, n = case.codes[2], case.sizes[2], case.dm.n
+    pieces = 2 * -(-n // chunk_size)  # at most two per chunk
+    gamma = (6 * n + 2 * pieces + 32) * EPS
+    rounding = case.weights.copy()
+    rounding[np.flatnonzero(rounding == 0.0)[:3]] = -1e-16 * np.max(rounding)
+    data = build_nested_leaf_statistics(layout, case.matrices, case.weights, chunk_size=n)
+    signed_rows = np.random.default_rng(9).normal(size=n) * case.weights
+    passes = [(case.weights, None), (rounding, None), (signed_rows, data.mean)]
+    for weights, mean in passes:
+        whole = build_nested_leaf_statistics(
+            layout, case.matrices, weights, mean=mean, chunk_size=n
         )
+        cut = build_nested_leaf_statistics(
+            layout, case.matrices, weights, mean=mean, chunk_size=chunk_size
+        )
+        deviation = np.zeros((K, X.shape[1]))
+        np.maximum.at(deviation, leaf, np.abs(X - whole.mean[leaf]))
+        M = 2.0 * deviation + np.abs(whole.mean)
+        error = np.max(np.abs(weights)) * (weights != 0.0) if np.any(weights < 0.0) else weights
+        A = np.bincount(leaf, weights=np.abs(weights), minlength=K)
+        E = np.bincount(leaf, weights=error, minlength=K)
+        np.testing.assert_array_equal(cut.weight, whole.weight)
+        assert np.all(np.abs(cut.mean - whole.mean) <= 2 * gamma * M)
+        assert np.all(np.abs(cut.within - whole.within) <= 2 * gamma * (M.T @ (A[:, None] * M)))
+        assert np.all(np.abs(cut.absolute - whole.absolute) <= 2 * gamma * (E @ M**2))
+        if mean is not None:
+            assert np.all(np.abs(cut.deviation - whole.deviation) <= 2 * gamma * A[:, None] * M)
+
+
+def test_the_row_pass_memory_is_bounded_by_the_chunk_not_the_leaf() -> None:
+    """Four leaves of 16 chunks each: the traced peak stays within the chunk budget.
+
+    The pass scans the weights once for their sign and largest magnitude (9
+    bytes a row) and holds at most five ``chunk x q`` float64 temporaries at a
+    time (the chunk's centred rows, its differences or repeated means and
+    weighted rows, and the previous chunk's until they are rebound); the
+    budget allows eight for BLAS and einsum workspace, plus the ``(K + q) q``
+    statistics.  Materializing one whole leaf needs more than all of that.
+    """
+    n, q, leaves, chunk = 2**16, 16, 4, 1024
+    rng = np.random.default_rng(0)
+    codes = np.repeat(np.arange(leaves), n // leaves)
+    matrices = [
+        DenseGroupMatrix(rng.normal(size=(n, q))),
+        RandomEffectGroupMatrix(codes % 2, 2),
+        RandomEffectGroupMatrix(codes, leaves),
+    ]
+    groups, start = [], 0
+    for name, matrix in zip(("x", "parent", "leaf"), matrices, strict=True):
+        end = start + matrix.shape[1]
+        groups.append(GroupSlice(name=name, start=start, end=end, penalized=name != "x"))
+        start = end
+    dm = DesignMatrix(matrices, n=n, p=start)
+    layout = get_structured_layout(dm, groups, dominant_group_index=2, chain_group_indices=(1, 2))
+    weights = rng.exponential(size=n)
+    build_nested_leaf_statistics(layout, matrices, weights, chunk_size=chunk)  # the cached centre
+    tracemalloc.start()
+    try:
+        build_nested_leaf_statistics(layout, matrices, weights, chunk_size=chunk)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    budget = 9 * n + 8 * (chunk * q * 8) + 8 * (leaves + q) * q * 8
+    assert budget < (n // leaves) * q * 8
+    assert peak <= budget
 
 
 def test_signed_pass_deviation_matches_exact_rational_sums() -> None:
@@ -834,6 +910,127 @@ def test_nested_estimability_matches_the_dense_centred_rank() -> None:
     assert not np.any(result[layout.structured_indices])
     assert not np.any(expected[layout.structured_indices])
     np.testing.assert_array_equal(result[:5], [False, True, False, False, False])
+
+
+def _augmented_factor(matrices, groups, weights, lambdas, components, chain):
+    dm = DesignMatrix(matrices, n=len(weights), p=groups[-1].end)
+    layout = get_structured_layout(
+        dm, groups, dominant_group_index=chain[-1], chain_group_indices=chain
+    )
+    system = build_nested_structured_system(matrices, groups, weights, 0.3 * weights, layout=layout)
+    penalized = build_penalized_nested_operator(
+        system, matrices, groups, lambdas, reml_penalties=components
+    )
+    return layout, build_augmented_nested_factor(system, penalized)
+
+
+@pytest.mark.parametrize("weight_scale", [1.0, 1e6])
+def test_the_row_pass_floor_nulls_a_column_carried_by_rounding_weights(weight_scale) -> None:
+    """End to end (§3.7): the production row pass into the augmented factor.
+
+    A border column is non-zero on two rows only, whose weights are 0, +1e-16
+    or -1e-16 of ``max |w|`` in a vector with a rounding-negative row
+    elsewhere.  Such a vector came from a cancellation, so the pass charges
+    every weighted row ``max |w|`` and the column's pivot is inside its floor:
+    an exact null direction beside the constant column in all three cases.
+    A pass charging each row its own weight keeps the +1e-16 column (``1 /
+    Q_jj`` near 1e16) and refuses -1e-16 as materially negative.  The logdets
+    differ by the two rows' weights and each factor's own rounding, both
+    within ``(n + n_nodes + q + 10) eps`` of the scaled ``Q_s`` entrywise, so by
+    ``2 q^2 (n + n_nodes + q + 10) eps kappa_s`` (Weyl, ``lambda_max(Q_s) >= 1``).
+    """
+    case = _nested_case(weight_scale=weight_scale)
+    dense = case.matrices[0].M.copy()
+    rows = np.flatnonzero(case.weights)[[10, 200]]
+    dense[:, 1] = 0.0
+    dense[rows, 1] = 1.0
+    matrices = [DenseGroupMatrix(dense), *case.matrices[1:]]
+    largest = np.max(case.weights)
+    weights = case.weights.copy()
+    weights[np.flatnonzero(weights == 0.0)[0]] = -1e-16 * largest
+    factors = []
+    for value in (0.0, 1e-16, -1e-16):
+        weights[rows] = value * largest
+        _, (factor, _) = _augmented_factor(
+            matrices, case.groups, weights, _lambdas(), _components(case), CHAIN
+        )
+        factors.append(factor)
+    reference = factors[0]
+    p, q = reference.shape[0], len(reference.small_indices)
+    eigenvalues = reference.scaled_schur_eigenvalues()
+    kappa = eigenvalues[-1] / eigenvalues[eigenvalues > 1e-10 * eigenvalues[-1]].min()
+    bound = 2 * q**2 * (case.dm.n + p + 10) * EPS * kappa
+    assert reference.rank == p - 2
+    for factor in factors[1:]:
+        assert factor.rank == reference.rank
+        np.testing.assert_array_equal(
+            factor.coefficient_estimable(), reference.coefficient_estimable()
+        )
+        assert abs(factor.logdet() - reference.logdet()) <= bound
+
+
+@pytest.mark.parametrize("shift", [2020.0, 2013.0])
+def test_a_truncated_logdet_is_the_dense_backends_centred_pseudo_determinant(shift) -> None:
+    """``year + age = shift`` aliases the intercept; the logdet equals the gram backend's.
+
+    At 2020 both columns are centred (``|mean| > sd``) and their null vector
+    misses the intercept; at 2013 age (mean 3.0, sd 3.2) is not, so the
+    centred null vector touches it.  The dense backend reports ``log sum_w +
+    log pdet(H_c)`` with ``H_c`` the weighted-mean-centred slope Hessian, a
+    pseudo-determinant that no choice of centre moves.  Both are backward
+    stable in their Jacobi-scaled metrics to ``(n + p) eps`` entrywise, so by
+    Weyl they differ by at most ``2 p^2 (n + p) eps / lambda_min`` over the
+    retained scaled spectrum of ``H_c``.
+    """
+    rng = np.random.default_rng(5)
+    n = 3000
+    variant = rng.integers(0, 60, n)
+    model = variant // 5
+    make = model % 4
+    year = rng.integers(2005, 2016, n).astype(float)
+    matrices = [
+        DenseGroupMatrix(np.column_stack([year, shift - year])),
+        RandomEffectGroupMatrix(make, 4),
+        RandomEffectGroupMatrix(model, 12),
+        RandomEffectGroupMatrix(variant, 60),
+    ]
+    groups, start = [], 0
+    for name, matrix in zip(("numeric", "make", "model", "variant"), matrices, strict=True):
+        end = start + matrix.shape[1]
+        groups.append(GroupSlice(name=name, start=start, end=end, penalized=name != "numeric"))
+        start = end
+    lambdas = {"make": 3.0, "model": 5.0, "variant": 8.0}
+    components = [
+        PenaltyComponent(
+            name=group.name,
+            group_name=group.name,
+            group_index=index,
+            group_sl=group.sl,
+            omega_raw=None,
+            penalty_kind="identity",
+        )
+        for index, group in enumerate(groups)
+        if index
+    ]
+    weights = np.exp(rng.normal(size=n))
+    layout, (factor, _) = _augmented_factor(
+        matrices, groups, weights, lambdas, components, (1, 2, 3)
+    )
+    assert (layout.border_center[1] == 0.0) == (shift == 2013.0)
+    design = np.hstack([matrix.toarray() for matrix in matrices])
+    centered = design - (weights @ design) / np.sum(weights)
+    ridge = np.concatenate(
+        [np.zeros(2), *(np.full(groups[i].size, lambdas[groups[i].name]) for i in (1, 2, 3))]
+    )
+    H = centered.T @ (weights[:, None] * centered) + np.diag(ridge)
+    H = 0.5 * (H + H.T)
+    dense = decompose_gram(H)
+    scale = 1.0 / np.sqrt(np.diag(H))
+    retained = np.linalg.eigvalsh(scale[:, None] * H * scale[None, :])[1:]
+    p = factor.shape[0]
+    assert factor.rank == p - 1 and dense.rank == p - 2
+    expected = np.log(np.sum(weights)) + dense.log_pdet
+    assert abs(factor.logdet() - expected) <= 2 * p**2 * (n + p) * EPS / retained.min()
 
 
 # ── Standard errors of a large RandomEffect ───────────────────────────────

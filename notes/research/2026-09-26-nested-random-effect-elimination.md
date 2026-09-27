@@ -222,20 +222,20 @@ through `R = I − e_0 c'`, which touches only the intercept row: `Q`, `F`, `e`
 and every closed form are free of the columns' offsets, and traces and
 `log|H|` are invariant. The row pass reads the border rows once, in leaf
 order: the rows sorted stably by leaf code (held with the tree in the nesting
-cache of section 5) are taken in chunks of whole leaves of at least
-`chunk_size = 8192` rows, and each chunk forms its leaves' shifted means and
-then the centred scatter and deviations, by `np.add.reduceat` segments, with
-compensated addition across chunks. A chunk never splits a leaf, so the
-pass's transient memory is `max(chunk_size, largest leaf) × q` doubles per
-temporary, not `chunk_size × q`. On full DVSA step D (25,633,263 rows, `q =
-40`, 53,753 leaves, the largest 336,385 rows) one data pass traced a 457 to
-469 MiB peak against 99 MiB for the 8,192-row two-read pass of the first
-build, on a process of 13.8 to 14.0 GB whose high-water mark during the pass
-was 14.4 GB, below the 15.1 GB peak of the whole fit at the first build
-(measured 2026-09-27). A single level holding most rows would make that
-transient several times the border's dense rows; splitting such leaves needs
-a second read of their rows for the mean, and 78% of DVSA's rows sit in
-leaves of more than 8,192 rows.
+cache of section 5) are taken in chunks of exactly `chunk_size = 8192` rows,
+and each chunk forms, for every leaf piece it holds, the piece's weight, mean,
+centred scatter and deviations by `np.add.reduceat` segments. A leaf cut by a
+chunk edge is centred piece by piece on each piece's own mean and joined after
+the pass by the Chan–Golub–LeVeque pairwise update (Chan, Golub & LeVeque
+1983): the scatter gains `Σ_p W_p d_p d_p'` about the leaf mean, which is
+shifted about its heaviest piece, and the absolute mass uses the exact
+identity `Σ_p [U_p + 2 d_p t_p + E_p d_p²]` with each piece's error-weight
+sums `E_p = Σ e` and `t_p = Σ e (x − m_p)`. So the rows are still read once and
+the pass's transient memory is `chunk_size × q` doubles per temporary whatever
+the leaf sizes. (The first build's one-pass version chunked whole leaves and
+traced 457 to 469 MiB per pass on full DVSA step D, whose largest leaf holds
+336,385 rows, against 99 MiB for the original two-read pass; measured
+2026-09-27.)
 
 ### 3.5 Inverse structure and the Takahashi scalars
 
@@ -294,8 +294,9 @@ fixture, ratio 6.1e+13 against the bound). For the data operator (`a = w`)
 | Method | Formula | Cost |
 |---|---|---|
 | `solve(r)` | `u = T⁻¹ r_t` (tree forward/diagonal/backward passes), `x_b = Q⁻¹(r_b − C_leaf' (M u)_leaf)`, `x_t = u − F x_b` | O(k q + q²) per column |
-| `logdet()` | `Σ_u log D_u + log|Q|` | O(1) after build |
+| `logdet()` | `Σ_u log D_u + log|Q|`; for a truncated (rank-deficient) factor with an intercept, the pseudo-determinant is mapped to the dense backend's weighted-mean-centred convention by adding `log det(N₁'N₁)` for the mapped null basis, so it does not depend on which border columns the row pass centred | O(1) after build (O(q × nullity) when truncated) |
 | `selected_inverse_diagonal` | tree `u`: `Z_uu + F_u Q⁻¹ F_u'`; border: `diag(Q⁻¹)` | O(k q²) once, cached |
+| `row_quadratic_forms(rows)` | leverage: `h_i/w_i = b' T⁻¹ b + y' Q⁺ y` with `y = a − F' b` (Bates et al. 2015, eqs. 63–65); the tree part is `‖D^{-1/2} L⁻¹ b‖²`, where `L⁻¹ e_u` is non-zero only on `u` and its ancestors | O(n (d + q²)); no K × K block |
 | `selected_inverse_block(idx)` | columns `H⁻¹ e_i` by `solve` (cap 256 over every chain level; the caller consequence is in section 6) | O(|idx| (k q + q²)) |
 | `trace_inverse_penalty(E_I)` | `Σ_{u∈I} (Z_uu + F_u Q⁻¹ F_u')`; border penalties through `Q⁻¹` blocks as today | O(K_I) after the diagonal |
 | `penalty_cross_trace(E_I, E_J)` | `‖(H⁻¹)_{IJ}‖_F² = t1 + t2 + t3` with `t1 = ‖Z_{IJ}‖_F² = Σ_a (h^I_a + 1_I(a))(h^J_a + 1_J(a))/D_a² + 2 Σ_a e^I_a e^J_a t_a / D_a`, `h^I_a = Σ_{c} (1_I(c) σ_c² + ρ_c² h^I_c)` bottom-up, `e^I_a = ρ_a h^I_a − 1_I(a) σ_a`; `t2 = 2 tr(Q⁻¹ F_J' (T⁻¹E_I F)_J)`; `t3 = tr(Q⁻¹ G_J Q⁻¹ G_I)`, `G_I = F_I'F_I` | `t1` O(k); `t2` O(k q); `t3` O(q³) with `G_I` cached per level |

@@ -283,7 +283,9 @@ class NestedLeafStatistics:
     - ``mean`` ``(K, q)``: the DATA leaf means ``m_l - center`` of the factor
       these statistics belong to, in the shifted form ``x_ref(l) - c + sum_{r
       in l} w_r ((x_r - c) - (x_ref(l) - c)) / w_l`` with the data weights
-      ``w`` (never the operator's ``a``), and 0 for a leaf with ``w_l == 0``.
+      ``w`` (never the operator's ``a``; a leaf cut by the row pass's chunks
+      combines its pieces' means the same way about the heaviest piece), and
+      0 for a leaf with ``w_l == 0``.
       A column that is constant within a leaf gives that constant (less
       ``c``) exactly.  Signed operators carry the same array their factor was
       built from.
@@ -762,9 +764,12 @@ class NestedSchurFactor:
     and ``R x`` out, the intercept entry of ``diag(H^-1)`` is ``(e_0 - c)'
     Q^-1 (e_0 - c)``, ``inverse_operator_diagonal``, ``diag(Q^+ Q)`` and
     ``coefficient_estimable`` add their intercept-column terms, and traces and
-    ``logdet`` are invariant (``logdet`` of a truncated factor is the
-    pseudo-determinant of the centred ``Q``, the convention of the centred
-    dense decomposition).  ``intercept=False`` is the unaugmented coefficient
+    a full-rank ``logdet`` are invariant.  A pseudo-determinant is not: the
+    ``logdet`` of a truncated factor is mapped to the dense backend's
+    weighted-mean-centred coordinates, where the intercept is H-orthogonal,
+    by ``log det(N_1' N_1)`` with ``N_1`` the orthonormal null basis of ``Q``
+    without its intercept row, so it does not depend on which columns ``c``
+    centres.  ``intercept=False`` is the unaugmented coefficient
     factor that ``reml_finalize`` retains for the ``(X'WX + S)^-1``
     covariance view; with no intercept to absorb the centre it works on the
     raw means ``mean + center``.
@@ -1073,6 +1078,13 @@ class NestedSchurFactor:
                     + np.sum(np.log(q_diag[q_diag > 0.0]))
                     + np.linalg.slogdet(null_gram)[1]
                 )
+                if self.intercept:
+                    # To the dense convention, whatever centre c the threshold
+                    # chose: in weighted-mean-centred coordinates the intercept is
+                    # H-orthogonal, so a change of centre R = I + e_0 r' maps the
+                    # null basis N to R^-1 N = N with row 0 set to 0, and
+                    # pdet(R'QR) = pdet(Q) det(N'R^-T R^-1 N) for orthonormal N.
+                    logdet_Q += float(np.linalg.slogdet(null[1:].T @ null[1:])[1])
                 self.schur_condition_estimate = (
                     float("inf") if null.shape[1] else float(eigenvalues[-1] / eigenvalues[0])
                 )
@@ -1209,7 +1221,8 @@ class NestedSchurFactor:
 
         On a truncated factor ``log|Q|`` is ``log det(B' Q B)`` with ``B`` an
         orthonormal basis of the complement of the certified null space, the
-        pseudo-determinant the single-level factor reports.
+        pseudo-determinant the single-level factor reports; with an intercept
+        it is taken in the dense backend's weighted-mean-centred coordinates.
         """
         return self._logdet
 
@@ -1255,6 +1268,45 @@ class NestedSchurFactor:
         unit[selected, np.arange(len(selected))] = 1.0
         block = self.solve(unit)[selected]
         return 0.5 * (block + block.T)
+
+    def row_quadratic_forms(self, rows: NDArray) -> NDArray:
+        """Return ``x_i' H^+ x_i`` for each row of ``rows`` ``(m, p)``, forming no ``K x K`` block.
+
+        In the factor's coordinates ``H^+ = [[T^-1 + F Q^+ F', -F Q^+], [-Q^+ F',
+        Q^+]]``, so a row with tree part ``b`` and border part ``a`` (``R'``
+        applied) gives ``||D^-1/2 L^-1 b||^2 + y' Q^+ y`` with ``y = a - F' b``:
+        the random-effect and fixed-effect halves of the hat diagonal of Bates et
+        al. (2015, eqs. 63-65).  ``L^-1 e_u`` lives on the reach of ``u`` (Gilbert
+        and Peierls 1988), its ancestors-or-self: 1 at ``u`` and ``-sigma_u`` times
+        the ``rho`` product strictly between at each ancestor (``_path``).  Each
+        nonzero of ``b`` adds at most ``depth`` terms, summed per row and node
+        before squaring, so a row whose levels are not one root-to-leaf path is
+        exact too.  O(nnz(b) depth + m q^2).
+        """
+        values = scipy.sparse.csr_array(rows, dtype=np.float64)
+        if values.shape[1] != self.shape[0]:
+            raise ValueError(f"rows must have shape (m, {self.shape[0]}), got {values.shape}.")
+        tree = self._tree
+        border = values[:, self.small_indices].toarray()
+        # R' x: the centred border columns lose c times the intercept entry.
+        border -= border[:, :1] * self._center
+        keys, terms = [], []
+        for level, (start, stop) in enumerate(zip(tree.offsets[:-1], tree.offsets[1:])):
+            level_rows = values[:, self.structured_indices[start:stop]].tocoo()
+            border -= level_rows @ self._F[level]
+            row, local = (np.asarray(index, dtype=np.intp) for index in level_rows.coords)
+            reach = np.vstack(
+                (-self._sigma[level][local] * self._path[level][:, local], np.ones(len(local)))
+            )
+            keys.append((row * tree.n_nodes + self._ancestor[level][:, local]).ravel())
+            terms.append((level_rows.data * reach).ravel())
+        reached, slot = np.unique(np.concatenate(keys), return_inverse=True)
+        solved = np.bincount(slot, weights=np.concatenate(terms))
+        pivots = np.concatenate(self._pivots)[reached % tree.n_nodes]
+        tree_part = np.bincount(
+            reached // tree.n_nodes, weights=solved * solved / pivots, minlength=values.shape[0]
+        )
+        return tree_part + np.sum((border @ self._Q_inverse) * border, axis=1)
 
     # -- penalty components --------------------------------------------------
     def _classify(self, component: PenaltyComponent) -> tuple[str, int | NDArray]:

@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse
 from numpy.typing import NDArray
 
 from superglm.solvers._structured.geometry import (
@@ -523,6 +524,23 @@ class ScalarSchurFactor:
                 f"Structured term {self.term_name!r} selected inverse is not representable."
             )
         return diagonal
+
+    def row_quadratic_forms(self, rows: NDArray) -> NDArray:
+        """Return ``x_i' H^+ x_i`` for each row of ``rows`` ``(m, p)``, forming no ``K x K`` block.
+
+        ``H^+ = [[Q^+, -Q^+ F'], [-F Q^+, D^-1 + F Q^+ F']]``, so a row with dense
+        part ``a`` and random-effect part ``b`` gives ``b' D^-1 b + y' Q^+ y`` with
+        ``y = a - F' b``: the random-effect and fixed-effect halves of the hat
+        diagonal of Bates et al. (2015, eqs. 63-65).  O(nnz(b) q + m q^2).
+        """
+        values = scipy.sparse.csr_array(rows, dtype=np.float64)
+        if values.shape[1] != self.shape[0]:
+            raise ValueError(f"rows must have shape (m, {self.shape[0]}), got {values.shape}.")
+        local = values[:, self.structured_indices]
+        border = values[:, self.small_indices].toarray() - local @ self._F
+        return local.multiply(local) @ self._d_inv + np.sum(
+            (border @ self._Q_inverse()) * border, axis=1
+        )
 
     def trace_inverse_penalty(self, component: PenaltyComponent) -> float:
         """Return ``trace(H^-1 Omega)`` without expanding identity penalties."""
