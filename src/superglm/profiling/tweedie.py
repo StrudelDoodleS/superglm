@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import math
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -253,6 +254,14 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
             "fit_converged": [candidate.fit_converged for candidate in candidates],
         }
     )
+    messages = _search_warnings(objective.values, profile.infeasible, p_hat)
+    if not search_converged:
+        # Brent ran out of steps: p_hat is the best power evaluated, not a located minimum.
+        messages.append(
+            f"The power search stopped at its iteration limit; p_hat={p_hat:.6g} is the best "
+            "evaluated power and the result reports converged=False."
+        )
+        warnings.warn(messages[-1], UserWarning, stacklevel=3)
     return TweedieProfileResult(
         p_hat=p_hat,
         phi_hat=best.phi,
@@ -260,7 +269,7 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         converged=search_converged and best.fit_converged,
         fit_mode=fit_mode,
         evaluations=evaluations,
-        warnings=_search_warnings(objective.values, profile.infeasible, p_hat),
+        warnings=messages,
         search_nll=nll_hat,
         _objective=objective,
         _ll_scale=profile.n,

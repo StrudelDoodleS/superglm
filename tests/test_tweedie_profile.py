@@ -2009,6 +2009,20 @@ class TestProfileFitParity:
 
         _assert_fitted_model_unchanged(model, X, snapshot)
 
+    def test_a_search_out_of_iterations_warns_and_is_not_converged(self):
+        X, y, _ = _tweedie_data(n=200, seed=20260928)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+
+        with pytest.warns(UserWarning, match="iteration limit"):
+            result = search_power(model, X, y, np.ones(len(y)), None, fit_mode="fit", maxiter=1)
+
+        assert not result.converged
+        assert any("iteration limit" in message for message in result.warnings)
+
     def test_profile_clone_keeps_shorthand_interaction_pending_until_build(self):
         X, y = self._custom_tensor_problem()
         model = SuperGLM(

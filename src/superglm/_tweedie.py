@@ -103,14 +103,14 @@ def saddlepoint_switch(p: float) -> float:
 
     Solves _SERIES_ERROR eps (a + 1) j log j = _SADDLE_REMAINDER / ((2 - p) j)^3,
     that is j^4 log j = K, taking log j ~ log(K) / 4 inside the slowly varying
-    factor (a 1% shift in j). Below 37 (a + 1) / (2 pi^2), Var J ~ j / (a + 1) is
+    factor (about a 2% shift in j). Below 37 (a + 1) / (2 pi^2), Var J ~ j / (a + 1) is
     small enough that the sum over integer j departs from the saddlepoint's
     integral by the lattice term 2 exp(-2 pi^2 Var J) (Poisson summation); that
     floor binds as p -> 1, where the density becomes the Poisson lattice.
     """
     a_plus_one = 1.0 / (p - 1.0)
     log_k = math.log(_SADDLE_REMAINDER / (_SERIES_ERROR * _EPS * a_plus_one * (2.0 - p) ** 3))
-    # K < e^4 only for p < 1 + 2e-13, where the lattice floor is far larger.
+    # K < e^4 only for p < 1 + 1.1e-11, where the lattice floor is far larger.
     switch = math.exp(0.25 * (log_k - math.log(max(1.0, 0.25 * log_k))))
     return max(switch, _LOG_CUTOFF * a_plus_one / (2.0 * math.pi**2))
 
