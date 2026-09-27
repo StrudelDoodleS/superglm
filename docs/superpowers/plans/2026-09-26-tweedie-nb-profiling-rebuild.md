@@ -2106,7 +2106,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - Here the search is no longer censored: p̂ = 1.7873, 0 infeasible powers, search NLL 0.855892 against 0.859119 at baseline and 0.865718 in master's fixture.
     - The tight fit at master's p̂ agrees with baseline to 1.7e-10.
   - `test_reml_search_infeasible_mode.py`: the natural wall at p = 1.95 was Fisher stopping short, and it is gone at every size from 2,000 to 6,000 rows. The wall is now injected at the same power, and the three claims keep their assertions.
-  - `test_separation.py`: Newton reaches the fixture's mode in 7 iterations, so the budget drops from 10 to 4. The last step still moves the deviance 2.4%, so the budget still ends mid-descent.
+  - `test_separation.py`: Newton reaches the fixture's mode in 7 iterations, so a budget of 10 converges before the stagnation clause is read. A smaller budget is no fix: the clause requires `max_iter >= 10`, and at a budget of 4 the test passed the `0.0 < STAGNANT_DEVIANCE_DELTA` mutant (the #341 bug).
+    - The budget stays at 10. A constant offset of −30, which the intercept-only start ignores, puts every row 30 log units below its mode.
+    - A Newton working response rises less than 1/(p − 1) = 2 above η, so the climb takes 20 iterations and the tenth still moves the deviance 63%.
+    - The test asserts every other input of the clause from the iteration log, and the mutant turns it red.
 - **Performance: complete fits before (05d1877d) and after.**
   - Method: median of 3 interleaved runs, all six thread pools pinned to 1, the same harness on both trees. Another session's single-core benchmark shared the 16-core machine.
   - Backends are unchanged: gram, or structured for the random-effect cases.

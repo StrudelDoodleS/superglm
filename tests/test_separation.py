@@ -273,23 +273,32 @@ def test_runtime_backstop_is_silent_when_the_budget_ends_mid_descent(monkeypatch
     mu = np.exp(1.0 + 2.5 * x)
     y = np.where(rng.random(n) < 0.3, rng.gamma(2.0, np.clip(mu, 1e-8, 1e8) / 2.0), 0.0)
 
-    # Tweedie/log PIRLS takes full-Newton steps, which reach this mode in
-    # seven iterations; a budget of four ends while the last step still moves
-    # the deviance by 2.4%.
+    # The intercept-only start ignores the offset, so every row starts 30 log
+    # units below its mode. A full-Newton Tweedie/log working response rises
+    # less than 1/(p - 1) = 2 above eta, so the climb takes about twenty
+    # bounded steps and a budget at the gate's own floor of ten ends in it.
+    offset = np.full(n, -30.0)
+    max_iter = 10
     model = SuperGLM(
         family=Tweedie(p=1.5),
         link="log",
         features={"x": Numeric()},
-        max_iter=4,
+        max_iter=max_iter,
         tol=1e-14,
         separation="warn",
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.fit(pd.DataFrame({"x": x}), y)
+        model.fit(pd.DataFrame({"x": x}), y, offset=offset, record_diagnostics=True)
 
-    # Non-vacuity: the budget really did run out, so the gate was reached.
-    assert not model.result.converged
+    # Non-vacuity: every other input of the exhausted-and-stagnant clause
+    # holds, so the deviance movement alone decides it.
+    log = model.result.iteration_log
+    assert len(log) == max_iter
+    assert log[-1].termination_reason == "max_iter"
+    assert log[-1].w_ratio > separation_module.EXTREME_WEIGHT_RATIO
+    movement = abs(log[-1].deviance - log[-2].deviance) / (abs(log[-2].deviance) + 1)
+    assert movement > separation_module.STAGNANT_DEVIANCE_DELTA
 
     exhaustion = [
         str(w.message)
