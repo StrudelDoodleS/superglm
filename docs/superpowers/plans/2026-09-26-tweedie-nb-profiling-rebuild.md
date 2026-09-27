@@ -2036,6 +2036,113 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - ruff check and format, `uv lock --check`, `uv pip check` and `run_test.py` pass.
   - `.test_durations` is not regenerated: 8 new IDs leave coverage well above the 95% contract.
 
+**REML certification near p → 2: outcome** (Max: "1.8 is sad"; spec criterion 8 amended again):
+
+- **Baseline** (05d1877d, plain `fit_reml` on the recovery simulations, true p = 1.8):
+  - grid p ∈ {1.5, 1.6, 1.7, 1.75, 1.8, 1.85, 1.9, 1.95} × seeds 1–3;
+  - 11 of 24 cells certify: every p ≤ 1.7, plus (seed 2, 1.75) and (seed 3, 1.85);
+  - 13 refuse, with mode scores from 1.3e-9 to 3.0e-7 against the 1e-9 bar.
+- **Two mechanisms, found by tracing refused candidates.** Neither is a limit near p → 2.
+  - **The merit was noisy.**
+    - Seed 2 at p = 1.9 under Newton rows still refused. Its line search rejected full Newton steps of |Δβ| = 3.8e-7, and the penalized-deviance delta stayed near +8e-9 as the step halved to 7e-11: noise against a round-off allowance of 8.9e-10.
+    - η recomputed by exact summation agreed to 4.4e-16, so the noise was in the deviance. One row, y = 3.8e-9 at μ = 0.93, moved its unit deviance by 8.7e-9 between adjacent trials.
+    - `tweedie_unit_deviance` formed y/μ as 1 + (y − μ)/μ, which is exact only for μ/2 ≤ y ≤ 2μ (Sterbenz). Below μ/2 it carried a relative error of order ε·μ/y.
+    - Against a 50-digit reference its worst error for y/μ < 1e-6 was 6.0e9 ε at p = 1.8 and 7.6e10 ε at p = 1.95. For y/μ in [1e-6, 0.5) it was up to 1.3e4 ε. The fixed branch is at most 5 ε.
+    - The step-length test then fired on the damped steps, short of the mode.
+  - **Fisher stops short.** Tweedie/log is non-canonical, and a zero row keeps only 2 − p of its Fisher curvature. On `flat_lambda_fixture` (83% zeros, prior weights down to 1e-5), Fisher with the accurate deviance still refused at (4000 rows, p = 1.9) and (5000, 1.95), with scores 2.1e-7 and 6.7e-5. Newton rows certify both, at 1.2e-15 and 7.7e-16.
+- **Attribution grid** (the same 24 cells):
+
+  | Configuration | Cells certified | Largest mode score | PIRLS iterations per `fit_reml` |
+  |---|---|---|---|
+  | Baseline | 11 of 24 | 3.0e-7 (refused) | — |
+  | Newton rows only | 21 of 24 | 1.5e-9 to 9.7e-8 (refused) | — |
+  | Newton after the first accepted Fisher step | 23 of 24 | 1.1e-8 (refused) | — |
+  | Deviance fix only (Fisher) | 24 of 24 | 2.6e-12 | 50–82 |
+  | Deviance fix and Newton from the first iteration (shipped) | 24 of 24 | 2.0e-15 | 26–44 |
+  | Deviance fix and Newton after the first Fisher step | 24 of 24 | 2.2e-15 | 31–48 |
+
+  The cells that still refused on the Newton-only rows are (seed 2, 1.9), (seed 2, 1.95) and (seed 3, 1.8). On Newton after the first Fisher step it is (seed 3, 1.9).
+- **Literature.**
+  - Wood (2011, JRSSB 73(1) §3; his "REML estimation of penalized GLMs" slides) gives the full-Newton PIRLS weights w·α/(V g′²) with α = 1 + (y − μ)(V′/V + g″/g′). Fisher scoring is α = 1. H = XᵀWX/φ, and the implicit derivatives dβ̂/dρ hold only for Newton PIRLS.
+  - Wood, Pya & Säfken (2016, JASA §3.3) take PIRLS weights ½ ∂²D/∂η² and note that the expected and observed Hessians coincide only under a canonical link.
+  - For Tweedie/log, α = [(2 − p)μ + (p − 1)y]/μ ≥ 2 − p > 0 for y ≥ 0. The row NLL is strictly convex in η, so the negative-weight machinery of Wood (2011) §3.3 is not needed.
+- **Changes.**
+  - `tweedie_unit_deviance`: rows with y < μ/2 take the log-ratio branch, log y − log μ. The branch uses an expm1 form whose cancellation is bounded by 6.2.
+  - `supports_observed_newton` approves the exact types Tweedie + LogLink.
+  - `coefficient_working_rows` dispatches the observed rows to one helper per family:
+    - Tweedie: W = w μ^(1−p) c and z = η + (y − μ)/c, with c = (2 − p)μ + (p − 1)y;
+    - Gamma: the previous arithmetic and product repair, moved verbatim into its own helper.
+  - `irls_direct` starts Newton at the first iteration exactly when the Fisher weights are not constant.
+    - Tweedie/log therefore never owns a constant-weight Gram or Fisher-data cache, and there is nothing for Newton to invalidate.
+    - Gamma/log keeps Fisher first, with Newton as its rejection rescue, because its constant Fisher weights reuse one weighted Gram.
+    - A rejected Newton proposal falls back to Fisher through the existing path, which clears the caches.
+- **Activation policy, decided by measurement.** The deviance fix is in all three arms below; wall times are medians of 3, pinned and interleaved.
+  - Newton from the first iteration against Newton after the first accepted Fisher step, over 20 workload × p cells:
+    - both certify everything;
+    - "first" needs fewer PIRLS iterations in every cell (for example burn-cost 26 against 33, synthetic 26 against 31);
+    - "first" is faster in 11 of the 20 cells, including every synthetic, burn-cost and private-dataset cell; the other 9 are sub-second fits.
+  - Against Fisher, "first" is faster in 19 of 20 cells (0.65–0.97×). The exception is random-effect at p = 1.5, 1.02× on a 0.4 s fit.
+- **Tests.** Every mutation turned the tests red.
+  - `test_tweedie_p_recovery.py`:
+    - the strict xfail on the REML arm at true p = 1.8 is removed, and all three seeds pass;
+    - `test_fit_reml_certifies_the_mode_near_p_two` covers seeds 1–3 × p ∈ {1.8, 1.9}. Every cell refused at baseline. Reverting the deviance fix turns (3, 1.8) and (2, 1.9) red.
+    - `test_fit_reml_certifies_where_fisher_scoring_stops_short` fits `flat_lambda_fixture` at (4000, 1.9) and (5000, 1.95). Dropping Tweedie from `supports_observed_newton` turns both red.
+  - `test_tweedie_density.py::test_unit_deviance_is_accurate_below_half_the_mean`:
+    - 0 < y/μ ≤ 0.45 against a 50-digit reference;
+    - bound (ε/2)(52(|log y| + |log μ|) + 41), derived from the log-difference error, the factors' sensitivity (2.45), the cancellation (6.2) and 13 roundings;
+    - the old code fails it at p = 1.5, 1.8 and 1.95, with first misses of 1e5× and 2e6× the bound.
+  - `test_irls_working_rows.py`:
+    - W and z against 50-digit `mpmath.diff` derivatives of the log-density's mean part, to 7u in W and u(6|z − η| + |η|) in z;
+    - central differences of `tweedie_logpdf` at the optimal steps, within truncation plus 64 ε max(1, |l|) round-off;
+    - the p = 2 helper equals the Gamma rows, z bitwise and W to 3 ε.
+    - Mutants: dropping Tweedie from approval (8 red here), and Fisher-like curvature c = (2 − p)μ + (p − 1)μ (9 red here, plus the activation test).
+  - `test_irls_direct.py::test_tweedie_log_takes_observed_newton_steps_from_the_first_iteration`:
+    - every iteration uses observed rows;
+    - 5 iterations against Fisher's 8 at tol 1e-10;
+    - red under both the approval mutant and a rescue-only mutant.
+- **Tests adapted to the fix, not loosened.**
+  - `test_tweedie_nb_characterisation.py::test_estimate_p_matches_master[re_flat_p18-reml]`: master censored this row. Its candidate at master's p̂ passed through 8 uncertified line-search trials, so its loose-tolerance REML stop is no reference.
+    - Censored rows now assert the rebuilt search lands no worse and discloses censoring exactly when an infeasible power sits beside p̂.
+    - Here the search is no longer censored: p̂ = 1.7873, 0 infeasible powers, search NLL 0.855892 against 0.859119 at baseline and 0.865718 in master's fixture.
+    - The tight fit at master's p̂ agrees with baseline to 1.7e-10.
+  - `test_reml_search_infeasible_mode.py`: the natural wall at p = 1.95 was Fisher stopping short, and it is gone at every size from 2,000 to 6,000 rows. The wall is now injected at the same power, and the three claims keep their assertions.
+  - `test_separation.py`: Newton reaches the fixture's mode in 7 iterations, so the budget drops from 10 to 4. The last step still moves the deviance 2.4%, so the budget still ends mid-descent.
+- **Performance: complete fits before (05d1877d) and after.**
+  - Method: median of 3 interleaved runs, all six thread pools pinned to 1, the same harness on both trees. Another session's single-core benchmark shared the 16-core machine.
+  - Backends are unchanged: gram, or structured for the random-effect cases.
+
+  `fit_reml`, wall in seconds (ratio), PIRLS iterations:
+
+  | Case | p = 1.5 | p = 1.8 |
+  |---|---|---|
+  | zeros90 | 0.494 → 0.418 (0.85), 36 → 17 | 0.569 → 0.476 (0.84), 44 → 21 |
+  | positive96 | 0.742 → 0.595 (0.80), 32 → 19 | 0.712 → 0.695 (0.98), 34 → 20; REML iterations 5 → 4 |
+  | re_ident_p15 | 0.284 → 0.224 (0.79), 69 → 25 | 0.331 → 0.249 (0.75), 104 → 36 |
+  | re_flat_p15_lowzero | 0.266 → 0.217 (0.82), 41 → 19 | 0.328 → 0.280 (0.85), 61 → 27 |
+  | re_flat_p18 | 0.253 → 0.257 (1.02), 64 → 24 | refused (score 9.0e-8) → 0.329 s, 41 |
+  | fremtpl2, 100k rows | 0.859 → 0.702 (0.82), 45 → 19 | 0.916 → 0.776 (0.85), 58 → 22 |
+  | synthetic, 100k rows | 3.793 → 2.684 (0.71), 54 → 26 | 3.501 → 2.799 (0.80), 53 → 27 |
+  | random-effect | 0.388 → 0.316 (0.82), 87 → 30 | 0.350 → 0.295 (0.85), 65 → 24 |
+  | burn-cost | 2.392 → 2.029 (0.85), 68 → 26 | 2.148 → 2.008 (0.93), 68 → 27 |
+  | private dataset | 0.85×, 37 → 15 | 0.81×, 55 → 21 |
+
+  Other cases:
+  - `estimate_p(fit_mode="reml")`:
+    - zeros90: 0.86× and positive96: 0.92×, with p̂ unchanged;
+    - private dataset: 0.81×, p̂ unchanged;
+    - re_flat_p18: 0.72×, and it now completes uncensored, as above.
+  - Gamma/log `fit_reml`: medians 0.417 → 0.429 s at 30k rows (10 reps, ranges overlapping) and 1.476 → 1.490 s at 300k rows (5 reps). Outputs are bitwise identical, with 34 PIRLS iterations on both trees and no observed rows.
+- **Output deltas.** The bound is the old mode's certificate, a KKT residual of at most 1e-9 at fixed λ, plus REML's own determination where λ̂ moved.
+  - Where λ̂ agrees to 1e-9 or better (11 cells), predictions agree to at most 7.5e-11 relative and φ̂ to 8.0e-12.
+  - REML's flat heavy-smoothing directions moved λ̂ elsewhere: up to 1.2e-3 on burn-cost, 1.3e-4 on synthetic, and 1.4e-7 to 8.2e-6 on fremtpl2 and positive96 at p = 1.8 and on the private dataset. There predictions agree to 2.3e-6, 2.7e-8 and at most 3.9e-8 respectively, and the REML objective differs by at most 4.8e-11 relative.
+- **Checks.**
+  - Full suite (`uv run --with mpmath python scripts/run_test_suite.py`): 17,641 passed, 8 skipped, 1 strict xfail (the near-p = 1 dispersion case). The threads stage passed 40 of 40.
+  - ruff check and format, `uv lock --check`, `uv pip check` and `run_test.py` pass.
+- **Follow-ups, not changed.**
+  - The regular deviance branch still reaches about 150 ε for 0.5 ≤ y/μ ≤ 2, which is harmless as merit noise.
+  - `stopped_on_iteration_budget`'s docstring attributes a "period-2 round-off limit cycle" on burn-cost-scale Tweedie fits. It may have been this merit noise and should be re-measured.
+  - `mode_certification_hint` still tells Tweedie users that conditioning worsens toward p = 2.
+
 ---
 
 ## Self-review record
