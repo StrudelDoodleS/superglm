@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm import SuperGLM, generate_tweedie_cpg
 from superglm.distributions import NegativeBinomial, Tweedie
@@ -152,6 +153,35 @@ class TestTweedieProfileCI:
         # Interval should be within the valid range
         assert ci_lo >= 1.0
         assert ci_hi <= 2.0
+
+    @pytest.mark.parametrize(
+        ("p_true", "seed", "side"),
+        [pytest.param(1.057, 1, "lower", id="lower"), pytest.param(1.93, 3, "upper", id="upper")],
+    )
+    def test_an_interior_estimate_reaches_its_crossing_past_the_search_bound(
+        self, p_true, seed, side
+    ):
+        """The interval searches (1.02, 1.98), past the default bounds (1.05, 1.95).
+
+        An interior p_hat near a bound can have its likelihood-ratio crossing
+        beyond it; stopping at the bound would report that genuine endpoint as
+        censored. Both crossings sit at least 5e-3 past the bound, fifty times
+        the interval's 1e-4 root tolerance.
+        """
+        rng = np.random.default_rng(seed)
+        n = 400
+        x = rng.uniform(-1.0, 1.0, n)
+        y = generate_tweedie_cpg(n, np.exp(0.3 + 0.5 * x), 1.0, p_true, rng=rng)
+        model = SuperGLM(family=Tweedie(p=1.5), selection_penalty=0.0, features={"x": Numeric()})
+        result = model.estimate_p(pd.DataFrame({"x": x}), y)
+
+        interval = result.interval(0.05)
+
+        assert 1.05 < result.p_hat < 1.95
+        assert not getattr(interval, f"{side}_censored")
+        end = getattr(interval, side)
+        assert 1.02 < end < 1.05 if side == "lower" else 1.95 < end < 1.98
+        assert result.warnings == []
 
     def test_profile_plot_returns_axes(self):
         """profile_plot() draws the evaluated powers and returns its Axes."""

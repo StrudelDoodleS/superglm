@@ -332,6 +332,141 @@ class TestNB2ProfileTheta:
         assert model.family.theta == pytest.approx(2.5)
 
 
+def _prior_score_error_bound(y, mu, w, theta):
+    """Float64 error of the branch ``theta_score`` takes, plus the expansion's truncation.
+
+    A row's rounding scales with the terms it combines (``rounding``), so 8 eps
+    of their sizes bounds it; summing the n row values (``summands``) adds at
+    most n eps of their absolute total (Higham 2002, sec. 4.2). The expansion
+    also drops psi's 1/(120 z^4) term, which moves psi(a + b) - psi(a) by at
+    most 4 b / (120 a^5) for a = w theta, b = w y.
+    """
+    from scipy.special import digamma
+
+    eps = np.finfo(np.float64).eps
+    if theta * w.min() >= 1e5:
+        shifted = theta + y
+        x = (y - mu) / (theta + mu)
+        tail = np.abs(0.5 * y / (theta * shifted) / w) + np.abs(
+            (1.0 / theta**2 - 1.0 / shifted**2) / 12.0 / w**2
+        )
+        # log1p(x) - x cancels parts of size |x| to a value of size x^2 / 2.
+        rounding, summands = np.abs(x) + tail, np.abs(np.log1p(x) - x) + tail
+        truncation = 4.0 * (w * y) / (120.0 * (w * theta) ** 5)
+    else:
+        terms = np.stack(
+            [
+                digamma(w * (y + theta)),
+                -digamma(w * theta),
+                np.full_like(y, np.log(theta)),
+                np.ones_like(y),
+                -np.log(theta + mu),
+                -(y + theta) / (mu + theta),
+            ]
+        )
+        rounding, summands = np.abs(terms).sum(axis=0), np.abs(terms.sum(axis=0))
+        truncation = 0.0
+    return float(
+        np.sum(w * (8.0 * eps * rounding + truncation)) + y.size * eps * np.sum(w * summands)
+    )
+
+
+def _nb_profile(y, mu, weights, semantics):
+    from superglm.profiling.nb import nb_nll, solve_theta
+
+    theta = solve_theta(y, mu, weights, 1.0, weight_semantics=semantics, bounds=(1e-8, 1e8)).theta
+    return NBProfileResult(
+        theta,
+        nb_nll(y, mu, weights, theta, weight_semantics=semantics),
+        True,
+        _y=y,
+        _mu=mu,
+        _weights=weights,
+        _weight_semantics=semantics,
+    )
+
+
+class TestNB2WeightedProfile:
+    """Prior weights and frequency counts in the theta score and the interval."""
+
+    @pytest.mark.parametrize(
+        ("weights", "mu_range", "theta"),
+        [
+            pytest.param((0.5, 4.0), (0.5, 4.0), 1e6, id="expansion-w-theta-5e5"),
+            pytest.param((1e-4,), (5e3, 2e4), 1e5, id="direct-w-theta-10"),
+        ],
+    )
+    def test_prior_weight_score_is_the_exact_digamma_score(self, weights, mu_range, theta):
+        """Under prior weights the psi arguments are w (y + theta) and w theta.
+
+        The large-theta expansion's two psi corrections carry 1/w and 1/w^2,
+        and the switch to it follows the smallest psi argument w theta, not
+        theta: at w theta = 10 its dropped Bernoulli term is 1e5 times this
+        bound. Each count w y is Poisson, the regime a large theta describes.
+        """
+        mpmath = pytest.importorskip("mpmath")
+        from superglm.profiling.nb import theta_score
+
+        rng = np.random.default_rng(3)
+        n = 300
+        mu = rng.uniform(*mu_range, n)
+        w = rng.choice(weights, n)
+        y = rng.poisson(w * mu) / w
+        mpmath.mp.dps = 60
+        t = mpmath.mpf(theta)
+        exact = float(
+            sum(
+                mpmath.mpf(wi)
+                * (
+                    mpmath.digamma(mpmath.mpf(wi) * (mpmath.mpf(yi) + t))
+                    - mpmath.digamma(mpmath.mpf(wi) * t)
+                    + mpmath.log(t)
+                    + 1
+                    - mpmath.log(t + mpmath.mpf(mi))
+                    - (mpmath.mpf(yi) + t) / (mpmath.mpf(mi) + t)
+                )
+                for yi, mi, wi in zip(y, mu, w)
+            )
+        )
+
+        score = theta_score(y, mu, w, theta, weight_semantics="prior")
+
+        assert abs(score - exact) <= _prior_score_error_bound(y, mu, w, theta)
+
+    def test_frequency_counts_give_the_interval_of_the_replicated_rows(self):
+        """The likelihood-ratio scale is the total count, not the row count."""
+        rng = np.random.default_rng(17)
+        n = 400
+        mu = rng.uniform(1.0, 4.0, n)
+        y = _generate_nb2(n, mu=mu, theta=2.0, rng=rng)
+        counts = rng.integers(1, 5, n)
+        compressed = _nb_profile(y, mu, counts.astype(np.float64), "frequency")
+        replicated = _nb_profile(
+            np.repeat(y, counts), np.repeat(mu, counts), np.ones(counts.sum()), "frequency"
+        )
+
+        # Each endpoint is rooted to 1e-6 in log theta.
+        np.testing.assert_allclose(
+            np.log(compressed.ci(0.05)), np.log(replicated.ci(0.05)), rtol=0.0, atol=2e-6
+        )
+
+    def test_zero_prior_weights_leave_the_interval_as_if_their_rows_were_deleted(self):
+        rng = np.random.default_rng(19)
+        n = 400
+        mu = rng.uniform(1.0, 4.0, n)
+        y = _generate_nb2(n, mu=mu, theta=2.0, rng=rng)
+        weights = rng.uniform(0.5, 2.0, n)
+        weights[::4] = 0.0
+        carried = weights > 0.0
+        with_zeros = _nb_profile(y, mu, weights, "prior")
+        deleted = _nb_profile(y[carried], mu[carried], weights[carried], "prior")
+
+        # Each endpoint is rooted to 1e-6 in log theta.
+        np.testing.assert_allclose(
+            np.log(with_zeros.ci(0.05)), np.log(deleted.ci(0.05)), rtol=0.0, atol=2e-6
+        )
+
+
 class TestNB2AutoTheta:
     def test_reml_mode_rejects_selection_before_profile_work(self, monkeypatch):
         from superglm.profiling import nb as nb_module
