@@ -344,7 +344,7 @@ class TestPublicationDispersion:
         likelihood/deviance. Both are claims about one search."""
         from superglm import Spline as _Spline
         from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
-        from superglm.profiling.tweedie import _profile_phi_detailed
+        from superglm.profiling.tweedie import profile_phi_at
 
         rng = np.random.default_rng(11)
         # 1500 rows keep the binned and public means ~1e-2 apart, and the
@@ -368,25 +368,7 @@ class TestPublicationDispersion:
         ones = np.ones(n)
 
         with subtests.test("the published phi is profiled at the public mean"):
-            edf = float(model.result.effective_df)
-            # Warm-start from the SEARCH winner's phi, not from the published
-            # answer: starting at result.phi_hat only proves the answer is a
-            # stationary point; starting where the old code would have
-            # published from proves the re-profile moved to the published
-            # fit's optimum.
-            trace = result.search_trace
-            gap = (trace["p"] - float(result.p_hat)).abs()
-            search_phi = float(trace.loc[gap.idxmin(), "phi"])
-            oracle = _profile_phi_detailed(
-                y_arr,
-                mu,
-                float(result.p_hat),
-                weights=ones,
-                df_resid=max(float(n) - edf, 1.0),
-                phi_method="mle",
-                phi_start=search_phi,
-            )
-
+            oracle = profile_phi_at(y_arr, mu, ones, float(result.p_hat))
             assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
 
         with subtests.test("the published statistics describe the public mean"):

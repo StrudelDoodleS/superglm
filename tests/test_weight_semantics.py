@@ -532,12 +532,9 @@ class TestScaleProfilerInternals:
     def test_the_frequency_tweedie_saturated_arm_matches_row_replication(self):
         """A replicated row contributes the unit-weight density, ``w`` times.
 
-        Agreement is exact at ``p = 1.5``, where the profiler evaluates a
-        closed-form Bessel reduction.  At other powers the Dunn-Smyth series
-        packs rows into shared term buffers, so a row's value depends on which
-        rows share its batch: the same effect reproduces with the density
-        evaluator alone, off any weight-contract code, and it bounds agreement
-        here at the measured 1e-10 rather than at round-off.
+        The series evaluates every row on its own, so a counted row and its
+        copies carry the same value and the two sums differ only by summation
+        order: at most (number of rows) eps relative, under 1e-13 here.
         """
         rng = np.random.default_rng(14)
         y = np.where(rng.random(40) < 0.35, 0.0, rng.gamma(2.0, 1.5, 40))
@@ -545,17 +542,17 @@ class TestScaleProfilerInternals:
         weights = counts.astype(float)
         replicated = np.repeat(y, counts)
 
-        for power, tolerance in ((1.5, 1e-14), (1.3, 1e-10), (1.7, 1e-10)):
+        for power in (1.5, 1.3, 1.7):
             frequency = prepare_tweedie_reml_scale_data(
                 y, weights, power, weight_semantics="frequency"
             )
             expanded = prepare_tweedie_reml_scale_data(
                 replicated, np.ones_like(replicated), power, weight_semantics="prior"
             )
-            assert frequency.positive_size == pytest.approx(expanded.positive_size)
+            assert frequency.size == expanded.size
             for phi in (0.5, 1.0, 3.0):
-                assert frequency.saturated_log_likelihood(phi) == pytest.approx(
-                    expanded.saturated_log_likelihood(phi), rel=tolerance
+                np.testing.assert_allclose(
+                    frequency.saturated(phi), expanded.saturated(phi), rtol=1e-13
                 )
 
     def test_the_vectorized_gamma_shape_helpers_match_their_scalar_forms(self):

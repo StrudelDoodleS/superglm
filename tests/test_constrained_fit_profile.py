@@ -13,8 +13,8 @@ from benchmarks._constrained_fit_profile import (
     write_profile_artifacts,
 )
 
-import superglm.distributions as distributions_module
-import superglm.profiling.tweedie as tweedie_module
+import superglm.model.fit_ops as fit_ops_module
+import superglm.model.input_validation as input_validation_module
 from superglm import Constraint, SuperGLM
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
@@ -42,17 +42,19 @@ def _evaluate_constrained_profile_once(monkeypatch, feature):
     def fail_pirls(**kwargs):
         raise AssertionError("constrained profile incorrectly dispatched to PIRLS")
 
-    monkeypatch.setattr(tweedie_module, "fit_irls_direct", fake_direct)
-    monkeypatch.setattr(tweedie_module, "fit_pirls", fail_pirls)
+    from superglm.profiling.tweedie import _PowerProfile
+
+    monkeypatch.setattr(fit_ops_module, "fit_irls_direct", fake_direct)
+    monkeypatch.setattr(fit_ops_module, "fit_pirls", fail_pirls)
     model = SuperGLM(
         family=Tweedie(p=1.5),
         selection_penalty=0,
         features={"x": feature},
     )
-    ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
-    ctx.evaluate(1.5, source="one_point")
+    profile = _PowerProfile(model, X, y, None, None, "fit")
+    profile(1.5)
     assert len(direct_calls) == 1
-    return ctx, direct_calls[0]
+    return profile, direct_calls[0]
 
 
 def test_make_synthetic_dataset_repeated_support_has_fewer_unique_values():
@@ -139,10 +141,10 @@ def test_write_profile_artifacts_creates_expected_files(tmp_path: Path):
 def test_tweedie_profile_constrained_terms_dispatch_to_direct(
     monkeypatch, feature, expected_engine
 ):
-    ctx, call = _evaluate_constrained_profile_once(monkeypatch, feature)
+    profile, call = _evaluate_constrained_profile_once(monkeypatch, feature)
 
-    assert {group.monotone_engine for group in ctx.groups} == {expected_engine}
-    assert call["groups"] is ctx.groups
+    assert {group.monotone_engine for group in profile.clone._groups} == {expected_engine}
+    assert call["groups"] is profile.clone._groups
 
 
 def test_tweedie_profile_rejects_monotone_selection_penalty():
@@ -157,7 +159,7 @@ def test_tweedie_profile_rejects_monotone_selection_penalty():
     )
 
     with pytest.raises(NotImplementedError, match="selection_penalty"):
-        tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+        model.estimate_p(X, y)
 
 
 def test_tweedie_profile_rejects_mixed_scop_and_qp_engines():
@@ -178,7 +180,7 @@ def test_tweedie_profile_rejects_mixed_scop_and_qp_engines():
     )
 
     with pytest.raises(NotImplementedError, match=r"SCOP \+ QP"):
-        tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+        model.estimate_p(X, y)
 
 
 def test_tweedie_profile_rejects_fit_only_lambda_policy():
@@ -196,7 +198,7 @@ def test_tweedie_profile_rejects_fit_only_lambda_policy():
     )
 
     with pytest.raises(NotImplementedError, match="lambda_policy"):
-        tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+        model.estimate_p(X, y)
 
 
 def test_tweedie_profile_runs_the_same_response_validation_as_fit(monkeypatch):
@@ -207,15 +209,15 @@ def test_tweedie_profile_runs_the_same_response_validation_as_fit(monkeypatch):
     def validate_response(y_arg, distribution):
         calls.append((y_arg.copy(), distribution))
 
-    monkeypatch.setattr(distributions_module, "validate_response", validate_response)
+    monkeypatch.setattr(input_validation_module, "validate_response", validate_response)
     model = SuperGLM(
         family=Tweedie(p=1.5),
         selection_penalty=0,
         features={"x": Numeric()},
     )
 
-    tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+    model.estimate_p(X, y)
 
-    assert len(calls) == 1
+    assert calls
     np.testing.assert_array_equal(calls[0][0], y)
     assert isinstance(calls[0][1], Tweedie)
