@@ -8,11 +8,18 @@ import numpy as np
 from numba import njit, prange  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
-from superglm._tweedie_series import SERIES_MAX_TERMS, SERIES_MODE_RANGE, row_p_moments
-
 KERNEL_OK = 0
-KERNEL_MODE_RANGE = SERIES_MODE_RANGE
-KERNEL_MAX_TERMS = SERIES_MAX_TERMS
+KERNEL_MODE_RATIO = 1
+KERNEL_MODE_RANGE = 2
+KERNEL_MODE_BRACKET = 3
+KERNEL_MAX_TERMS = 4
+KERNEL_WINDOW_RANGE = 5
+KERNEL_UPPER_RATIO = 6
+KERNEL_LOWER_RATIO = 7
+KERNEL_PEAK = 8
+KERNEL_MASS = 9
+KERNEL_SCORE_MOMENTS = 10
+KERNEL_HESSIAN_MOMENTS = 11
 KERNEL_MEAN_SCORE_SCALE = 12
 KERNEL_MEAN_SCORE = 13
 KERNEL_MEAN_HESSIAN_SCALE = 14
@@ -29,6 +36,112 @@ KERNEL_COMPLETE_HESSIAN = 24
 KERNEL_REQUIRED_WORK = 25
 
 _MAX_SAFE_MODE = 2**52
+_BERNOULLI = (
+    1.0,
+    -0.5,
+    1.0 / 6.0,
+    0.0,
+    -1.0 / 30.0,
+    0.0,
+    1.0 / 42.0,
+    0.0,
+    -1.0 / 30.0,
+    0.0,
+    5.0 / 66.0,
+    0.0,
+)
+
+
+# Keep these two small special-function dependencies in this module.  Numba's
+# on-disk cache does not invalidate a cached caller when an imported compiled
+# callee changes in another file.
+@njit(cache=True)
+def _digamma_positive(value: float) -> float:
+    """Return digamma(value) for a finite positive scalar."""
+    if not math.isfinite(value) or value <= 0.0:
+        return math.nan
+    result = 0.0
+    x = value
+    while x < 12.0:
+        result -= 1.0 / x
+        x += 1.0
+    inverse = 1.0 / x
+    inverse_squared = inverse * inverse
+    correction = inverse_squared * (
+        1.0 / 12.0
+        - inverse_squared
+        * (
+            1.0 / 120.0
+            - inverse_squared
+            * (
+                1.0 / 252.0
+                - inverse_squared
+                * (
+                    1.0 / 240.0
+                    - inverse_squared * (5.0 / 660.0 - inverse_squared * (691.0 / 32760.0))
+                )
+            )
+        )
+    )
+    return result + math.log(x) - 0.5 * inverse - correction
+
+
+@njit(cache=True)
+def _digamma_trigamma_positive(value: float) -> tuple[float, float]:
+    """Return digamma(value) and trigamma(value) with one recurrence."""
+    if not math.isfinite(value) or value <= 0.0:
+        return math.nan, math.nan
+    digamma_result = 0.0
+    trigamma_result = 0.0
+    x = value
+    while x < 12.0:
+        inverse = 1.0 / x
+        digamma_result -= inverse
+        trigamma_result += 1.0 / (x * x)
+        x += 1.0
+
+    inverse = 1.0 / x
+    inverse_squared = inverse * inverse
+    digamma_correction = inverse_squared * (
+        1.0 / 12.0
+        - inverse_squared
+        * (
+            1.0 / 120.0
+            - inverse_squared
+            * (
+                1.0 / 252.0
+                - inverse_squared
+                * (
+                    1.0 / 240.0
+                    - inverse_squared * (5.0 / 660.0 - inverse_squared * (691.0 / 32760.0))
+                )
+            )
+        )
+    )
+    digamma = digamma_result + math.log(x) - 0.5 * inverse - digamma_correction
+
+    trigamma_tail = inverse + 0.5 * inverse_squared
+    trigamma_tail += (
+        inverse
+        * inverse_squared
+        * (
+            1.0 / 6.0
+            - inverse_squared
+            * (
+                1.0 / 30.0
+                - inverse_squared
+                * (
+                    1.0 / 42.0
+                    - inverse_squared
+                    * (
+                        1.0 / 30.0
+                        - inverse_squared * (5.0 / 66.0 - inverse_squared * (691.0 / 2730.0))
+                    )
+                )
+            )
+        )
+    )
+    return digamma, trigamma_result + trigamma_tail
 
 
 @njit(cache=True)
@@ -54,6 +167,360 @@ def _sum3(first: float, second: float, third: float) -> float:
     total, correction = _compensated_add(total, correction, second)
     total, correction = _compensated_add(total, correction, third)
     return total + correction
+
+
+@njit(cache=True)
+def _bernoulli_polynomial(order: int, value: float) -> float:
+    total = 0.0
+    correction = 0.0
+    binomial = 1.0
+    for index in range(order + 1):
+        term = binomial * _BERNOULLI[index] * value ** (order - index)
+        total, correction = _compensated_add(total, correction, term)
+        if index < order:
+            binomial *= float(order - index) / float(index + 1)
+    return total + correction
+
+
+@njit(cache=True)
+def _fill_log_gamma_increment_coefficients(alpha: float, coefficients: NDArray[np.float64]) -> None:
+    for order in range(1, 11):
+        sign = 1.0 if order % 2 == 1 else -1.0
+        coefficients[order - 1] = (
+            sign
+            * (_bernoulli_polynomial(order + 1, alpha) - _BERNOULLI[order + 1])
+            / float(order * (order + 1))
+        )
+
+
+@njit(cache=True)
+def _log_gamma_increment(
+    x: float,
+    alpha: float,
+    coefficients: NDArray[np.float64],
+) -> float:
+    integer_alpha = int(alpha)
+    if alpha == float(integer_alpha) and 1 <= integer_alpha <= 32:
+        total = 0.0
+        correction = 0.0
+        for offset in range(integer_alpha):
+            total, correction = _compensated_add(
+                total,
+                correction,
+                math.log(x + float(offset)),
+            )
+        return total + correction
+    if x < 4096.0:
+        return math.lgamma(x + alpha) - math.lgamma(x)
+    if math.isnan(coefficients[0]):
+        _fill_log_gamma_increment_coefficients(alpha, coefficients)
+    inverse = 1.0 / x
+    power_value = inverse
+    correction = 0.0
+    for index in range(10):
+        correction += coefficients[index] * power_value
+        power_value *= inverse
+    return alpha * math.log(x) + correction
+
+
+@njit(cache=True)
+def _log_adjacent_ratio(
+    j: int,
+    zeta: float,
+    alpha: float,
+    coefficients: NDArray[np.float64],
+) -> float:
+    increment = _log_gamma_increment(alpha * float(j), alpha, coefficients)
+    return zeta - math.log(float(j + 1)) - increment
+
+
+@njit(cache=True)
+def _locate_series_mode(
+    zeta: float,
+    alpha: float,
+    coefficients: NDArray[np.float64],
+) -> tuple[int, int, float, float]:
+    first = _log_adjacent_ratio(1, zeta, alpha, coefficients)
+    if not math.isfinite(first):
+        return KERNEL_MODE_RATIO, 0, math.nan, math.nan
+    if first <= 0.0:
+        return KERNEL_OK, 1, math.nan, first
+
+    lower = 1
+    upper = 2
+    while True:
+        ratio = _log_adjacent_ratio(upper, zeta, alpha, coefficients)
+        if not math.isfinite(ratio):
+            return KERNEL_MODE_RATIO, 0, math.nan, math.nan
+        if ratio <= 0.0:
+            break
+        if upper >= _MAX_SAFE_MODE:
+            return KERNEL_MODE_RANGE, 0, math.nan, math.nan
+        lower = upper
+        upper = min(2 * upper, _MAX_SAFE_MODE)
+
+    while upper - lower > 1:
+        midpoint = lower + (upper - lower) // 2
+        ratio = _log_adjacent_ratio(midpoint, zeta, alpha, coefficients)
+        if not math.isfinite(ratio):
+            return KERNEL_MODE_RATIO, 0, math.nan, math.nan
+        if ratio > 0.0:
+            lower = midpoint
+        else:
+            upper = midpoint
+
+    before = _log_adjacent_ratio(upper - 1, zeta, alpha, coefficients)
+    after = _log_adjacent_ratio(upper, zeta, alpha, coefficients)
+    if before <= 0.0 or after > 0.0:
+        return KERNEL_MODE_BRACKET, 0, math.nan, math.nan
+    return KERNEL_OK, upper, before, after
+
+
+@njit(cache=True)
+def _term_derivative_channels(
+    j: int,
+    zeta_p: float,
+    zeta_pp: float,
+    inverse_r: float,
+    derivative_order: int,
+) -> tuple[float, float, float, float]:
+    j_float = float(j)
+    q_rho = -j_float * inverse_r
+    aj = (inverse_r - 1.0) * j_float
+    inverse_r2 = inverse_r * inverse_r
+    if derivative_order == 1:
+        digamma = _digamma_positive(aj)
+        q_p = j_float * (zeta_p + digamma * inverse_r2)
+        return q_rho, q_p, math.nan, math.nan
+    digamma, trigamma = _digamma_trigamma_positive(aj)
+    q_p = j_float * (zeta_p + digamma * inverse_r2)
+    inverse_r3 = inverse_r2 * inverse_r
+    q_rho_p = j_float * inverse_r2
+    q_pp = (
+        j_float * zeta_pp
+        - j_float * j_float * trigamma * inverse_r2 * inverse_r2
+        - 2.0 * j_float * digamma * inverse_r3
+    )
+    return q_rho, q_p, q_rho_p, q_pp
+
+
+# Series tuples are (status, log_sum, mean_q_rho, mean_q_p, mean_q_rho_p,
+# mean_q_pp, variance_q_rho, covariance_q_rho_p, variance_q_p, terms).
+@njit(cache=True)
+def _series_failure(status: int, terms: int):
+    return (
+        status,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        terms,
+    )
+
+
+@njit(cache=True)
+def _series_summary(
+    zeta: float,
+    zeta_p: float,
+    zeta_pp: float,
+    inverse_r: float,
+    alpha: float,
+    derivative_order: int,
+    max_terms: int,
+    log_cutoff: float,
+    coefficients: NDArray[np.float64],
+):
+    coefficients[0] = math.nan  # Lazy scratch, reset for this row's alpha.
+    status, mode, mode_lower_ratio, mode_upper_ratio = _locate_series_mode(
+        zeta,
+        alpha,
+        coefficients,
+    )
+    if status != KERNEL_OK:
+        return _series_failure(status, 0)
+    terms = 1
+
+    mode_float = float(mode)
+    peak = mode_float * zeta - math.lgamma(mode_float + 1.0) - math.lgamma(alpha * mode_float)
+    if not math.isfinite(peak):
+        return _series_failure(KERNEL_PEAK, terms)
+
+    mass = 1.0
+    anchor_rho = math.nan
+    anchor_p = math.nan
+    anchor_rho_p = math.nan
+    anchor_pp = math.nan
+    mean_delta_rho = math.nan
+    mean_delta_p = math.nan
+    mean_delta_rho_p = math.nan
+    mean_delta_pp = math.nan
+    variance_rho_mass = math.nan
+    covariance_mass = math.nan
+    variance_p_mass = math.nan
+    if derivative_order >= 1:
+        anchor_rho, anchor_p, anchor_rho_p, anchor_pp = _term_derivative_channels(
+            mode,
+            zeta_p,
+            zeta_pp,
+            inverse_r,
+            derivative_order,
+        )
+        mean_delta_rho = 0.0
+        mean_delta_p = 0.0
+        mean_delta_rho_p = 0.0
+        mean_delta_pp = 0.0
+        variance_rho_mass = 0.0
+        covariance_mass = 0.0
+        variance_p_mass = 0.0
+
+    relative_log = 0.0
+    current = mode
+    while current > 1:
+        if terms >= max_terms:
+            return _series_failure(KERNEL_MAX_TERMS, 0)
+        if current == mode:
+            ratio_value = mode_lower_ratio
+        else:
+            ratio_value = _log_adjacent_ratio(current - 1, zeta, alpha, coefficients)
+        if not math.isfinite(ratio_value) or ratio_value <= 0.0:
+            return _series_failure(KERNEL_LOWER_RATIO, 0)
+        relative_log -= ratio_value
+        current -= 1
+        terms += 1
+        relative = math.exp(relative_log)
+        new_mass = mass + relative
+        if derivative_order >= 1:
+            q_rho, q_p, q_rho_p, q_pp = _term_derivative_channels(
+                current,
+                zeta_p,
+                zeta_pp,
+                inverse_r,
+                derivative_order,
+            )
+            ratio = relative / new_mass
+            centered_rho = q_rho - anchor_rho
+            centered_p = q_p - anchor_p
+            delta_rho = centered_rho - mean_delta_rho
+            delta_p = centered_p - mean_delta_p
+            mean_delta_rho += ratio * delta_rho
+            mean_delta_p += ratio * delta_p
+            if derivative_order == 2:
+                variance_rho_mass += relative * delta_rho * (centered_rho - mean_delta_rho)
+                covariance_mass += relative * delta_rho * (centered_p - mean_delta_p)
+                variance_p_mass += relative * delta_p * (centered_p - mean_delta_p)
+                mean_delta_rho_p += ratio * ((q_rho_p - anchor_rho_p) - mean_delta_rho_p)
+                mean_delta_pp += ratio * ((q_pp - anchor_pp) - mean_delta_pp)
+        mass = new_mass
+        if relative_log <= -log_cutoff:
+            break
+
+    relative_log = 0.0
+    current = mode
+    while True:
+        if terms >= max_terms:
+            return _series_failure(KERNEL_MAX_TERMS, 0)
+        if current >= _MAX_SAFE_MODE:
+            return _series_failure(KERNEL_WINDOW_RANGE, 0)
+        if current == mode:
+            ratio_value = mode_upper_ratio
+        else:
+            ratio_value = _log_adjacent_ratio(current, zeta, alpha, coefficients)
+        if not math.isfinite(ratio_value) or ratio_value > 0.0:
+            return _series_failure(KERNEL_UPPER_RATIO, 0)
+        relative_log += ratio_value
+        current += 1
+        terms += 1
+        relative = math.exp(relative_log)
+        new_mass = mass + relative
+        if derivative_order >= 1:
+            q_rho, q_p, q_rho_p, q_pp = _term_derivative_channels(
+                current,
+                zeta_p,
+                zeta_pp,
+                inverse_r,
+                derivative_order,
+            )
+            ratio = relative / new_mass
+            centered_rho = q_rho - anchor_rho
+            centered_p = q_p - anchor_p
+            delta_rho = centered_rho - mean_delta_rho
+            delta_p = centered_p - mean_delta_p
+            mean_delta_rho += ratio * delta_rho
+            mean_delta_p += ratio * delta_p
+            if derivative_order == 2:
+                variance_rho_mass += relative * delta_rho * (centered_rho - mean_delta_rho)
+                covariance_mass += relative * delta_rho * (centered_p - mean_delta_p)
+                variance_p_mass += relative * delta_p * (centered_p - mean_delta_p)
+                mean_delta_rho_p += ratio * ((q_rho_p - anchor_rho_p) - mean_delta_rho_p)
+                mean_delta_pp += ratio * ((q_pp - anchor_pp) - mean_delta_pp)
+        mass = new_mass
+        if relative_log <= -log_cutoff:
+            break
+
+    if not math.isfinite(mass) or mass <= 0.0:
+        return _series_failure(KERNEL_MASS, terms)
+    log_sum = peak + math.log(mass)
+    if derivative_order == 0:
+        return (
+            KERNEL_OK,
+            log_sum,
+            math.nan,
+            math.nan,
+            math.nan,
+            math.nan,
+            math.nan,
+            math.nan,
+            math.nan,
+            terms,
+        )
+
+    mean_rho = _sum2(anchor_rho, mean_delta_rho)
+    mean_p = _sum2(anchor_p, mean_delta_p)
+    if not math.isfinite(mean_rho) or not math.isfinite(mean_p):
+        return _series_failure(KERNEL_SCORE_MOMENTS, terms)
+    if derivative_order == 1:
+        return (
+            KERNEL_OK,
+            log_sum,
+            mean_rho,
+            mean_p,
+            math.nan,
+            math.nan,
+            math.nan,
+            math.nan,
+            math.nan,
+            terms,
+        )
+
+    variance_rho = variance_rho_mass / mass
+    covariance = covariance_mass / mass
+    variance_p = variance_p_mass / mass
+    mean_rho_p = _sum2(anchor_rho_p, mean_delta_rho_p)
+    mean_pp = _sum2(anchor_pp, mean_delta_pp)
+    if not (
+        math.isfinite(mean_rho_p)
+        and math.isfinite(mean_pp)
+        and math.isfinite(variance_rho)
+        and math.isfinite(covariance)
+        and math.isfinite(variance_p)
+    ):
+        return _series_failure(KERNEL_HESSIAN_MOMENTS, terms)
+    return (
+        KERNEL_OK,
+        log_sum,
+        mean_rho,
+        mean_p,
+        mean_rho_p,
+        mean_pp,
+        variance_rho,
+        covariance,
+        variance_p,
+        terms,
+    )
 
 
 @njit(cache=True)
@@ -225,6 +692,7 @@ def _positive_row(
     derivative_order: int,
     max_terms: int,
     log_cutoff: float,
+    coefficients: NDArray[np.float64],
 ):
     log_y = math.log(y)
     log_mean = math.log(mean)
@@ -276,15 +744,16 @@ def _positive_row(
     if derivative_order == 2 and not math.isfinite(zeta_pp):
         return _row_failure(KERNEL_SERIES_BASE)
 
-    summary = row_p_moments(
+    summary = _series_summary(
         zeta,
-        alpha,
         zeta_p,
         zeta_pp,
         inverse_r,
+        alpha,
         derivative_order,
         max_terms,
         log_cutoff,
+        coefficients,
     )
     status = summary[0]
     if status != KERNEL_OK:
@@ -454,6 +923,7 @@ def _evaluate_tweedie_batch_row(
             derivative_order,
         )
     else:
+        coefficients = np.empty(10, dtype=np.float64)
         evaluated = _positive_row(
             response,
             modeled_mean,
@@ -463,6 +933,7 @@ def _evaluate_tweedie_batch_row(
             derivative_order,
             max_terms,
             log_cutoff,
+            coefficients,
         )
     status = evaluated[0]
     if status != KERNEL_OK:

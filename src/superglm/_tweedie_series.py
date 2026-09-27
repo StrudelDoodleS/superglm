@@ -34,13 +34,13 @@ def _term(j: int, log_t: float, a: float, log_base: NDArray) -> float:
 
 
 @njit(cache=True)
-def _climb(log_t: float, a: float, mode: int, log_base: NDArray):
-    """(mode, peak term) reached by climbing from the estimated mode.
+def _row_moments(log_t: float, a: float, mode: int, log_base: NDArray):
+    """(ok, log W, E[J], Var[J]) for one row, summed outward from the peak term.
 
-    The terms are log-concave in j, so the climb reaches the peak. It matters
-    near p = 1: a is large there and one step off the peak already takes
-    exp(q - peak) out of range. Two directions times a climb is the algorithm
-    itself, hence the nested loop.
+    The terms are log-concave in j, so climbing from the estimated mode reaches
+    the peak. The climb matters near p = 1: a is large there and one step off
+    the peak already takes exp(q - peak) out of range. Two directions times a
+    term walk is the algorithm itself, hence the nested loop.
     """
     peak = _term(mode, log_t, a, log_base)
     for direction in (1, -1):
@@ -50,16 +50,6 @@ def _climb(log_t: float, a: float, mode: int, log_base: NDArray):
                 break
             mode += direction
             peak = neighbour
-    return mode, peak
-
-
-@njit(cache=True)
-def _row_moments(log_t: float, a: float, mode: int, log_base: NDArray):
-    """(ok, log W, E[J], Var[J]) for one row, summed outward from the peak term.
-
-    Two directions times a term walk is the algorithm itself, hence the nested loop.
-    """
-    mode, peak = _climb(log_t, a, mode, log_base)
     mass, first, second, n_terms = 1.0, 0.0, 0.0, 1
     for direction in (1, -1):
         j = mode + direction
@@ -128,199 +118,6 @@ def series_moments(
     var_j = np.empty(log_t.size, dtype=np.float64)
     _series_moments_kernel(log_t, float(a), ok, log_w, mean_j, var_j)
     return ok, log_w, mean_j, var_j
-
-
-@njit(cache=True)
-def _digamma_positive(value: float) -> float:
-    """Return digamma(value) for a finite positive scalar."""
-    result = 0.0
-    x = value
-    while x < 12.0:
-        result -= 1.0 / x
-        x += 1.0
-    inverse = 1.0 / x
-    inverse_squared = inverse * inverse
-    correction = inverse_squared * (
-        1.0 / 12.0
-        - inverse_squared
-        * (
-            1.0 / 120.0
-            - inverse_squared
-            * (
-                1.0 / 252.0
-                - inverse_squared
-                * (
-                    1.0 / 240.0
-                    - inverse_squared * (5.0 / 660.0 - inverse_squared * (691.0 / 32760.0))
-                )
-            )
-        )
-    )
-    return result + math.log(x) - 0.5 * inverse - correction
-
-
-@njit(cache=True)
-def _digamma_trigamma_positive(value: float) -> tuple[float, float]:
-    """Return digamma(value) and trigamma(value) with one recurrence."""
-    digamma_result = 0.0
-    trigamma_result = 0.0
-    x = value
-    while x < 12.0:
-        inverse = 1.0 / x
-        digamma_result -= inverse
-        trigamma_result += 1.0 / (x * x)
-        x += 1.0
-
-    inverse = 1.0 / x
-    inverse_squared = inverse * inverse
-    digamma_correction = inverse_squared * (
-        1.0 / 12.0
-        - inverse_squared
-        * (
-            1.0 / 120.0
-            - inverse_squared
-            * (
-                1.0 / 252.0
-                - inverse_squared
-                * (
-                    1.0 / 240.0
-                    - inverse_squared * (5.0 / 660.0 - inverse_squared * (691.0 / 32760.0))
-                )
-            )
-        )
-    )
-    digamma = digamma_result + math.log(x) - 0.5 * inverse - digamma_correction
-
-    trigamma_tail = inverse + 0.5 * inverse_squared
-    trigamma_tail += (
-        inverse
-        * inverse_squared
-        * (
-            1.0 / 6.0
-            - inverse_squared
-            * (
-                1.0 / 30.0
-                - inverse_squared
-                * (
-                    1.0 / 42.0
-                    - inverse_squared
-                    * (
-                        1.0 / 30.0
-                        - inverse_squared * (5.0 / 66.0 - inverse_squared * (691.0 / 2730.0))
-                    )
-                )
-            )
-        )
-    )
-    return digamma, trigamma_result + trigamma_tail
-
-
-@njit(cache=True)
-def _term_p_channels(j: int, log_t_p: float, log_t_pp: float, inverse_r: float, order: int):
-    """d q_j / d log phi, d q_j / dp, d2 q_j / d log phi dp and d2 q_j / dp2.
-
-    q_j = j log t - lgamma(j + 1) - lgamma(a j) with a = 1/r - 1, so da/dp = -1/r^2
-    and d2a/dp2 = 2/r^3; order one needs no trigamma.
-    """
-    j_float = float(j)
-    inverse_r2 = inverse_r * inverse_r
-    if order == 1:
-        digamma = _digamma_positive((inverse_r - 1.0) * j_float)
-        return -j_float * inverse_r, j_float * (log_t_p + digamma * inverse_r2), math.nan, math.nan
-    digamma, trigamma = _digamma_trigamma_positive((inverse_r - 1.0) * j_float)
-    q_pp = (
-        j_float * log_t_pp
-        - j_float * j_float * trigamma * inverse_r2 * inverse_r2
-        - 2.0 * j_float * digamma * inverse_r2 * inverse_r
-    )
-    return (
-        -j_float * inverse_r,
-        j_float * (log_t_p + digamma * inverse_r2),
-        j_float * inverse_r2,
-        q_pp,
-    )
-
-
-@njit(cache=True)
-def _centred_update(moments, relative: float, mass: float, channels, anchor, order: int):
-    """Add one term to peak-anchored weighted means and co-moments (weighted Welford)."""
-    mean_rho, mean_p, mean_rho_p, mean_pp, var_rho, cov, var_p = moments
-    ratio = relative / mass
-    centred_rho = channels[0] - anchor[0]
-    centred_p = channels[1] - anchor[1]
-    delta_rho = centred_rho - mean_rho
-    delta_p = centred_p - mean_p
-    mean_rho += ratio * delta_rho
-    mean_p += ratio * delta_p
-    if order == 2:
-        var_rho += relative * delta_rho * (centred_rho - mean_rho)
-        cov += relative * delta_rho * (centred_p - mean_p)
-        var_p += relative * delta_p * (centred_p - mean_p)
-        mean_rho_p += ratio * ((channels[2] - anchor[2]) - mean_rho_p)
-        mean_pp += ratio * ((channels[3] - anchor[3]) - mean_pp)
-    return mean_rho, mean_p, mean_rho_p, mean_pp, var_rho, cov, var_p
-
-
-# Refusal codes of row_p_moments; the LSS point kernel reports them as its own.
-SERIES_MODE_RANGE = 2
-SERIES_MAX_TERMS = 4
-_NO_TABLE = np.empty(0, dtype=np.float64)
-
-
-@njit(cache=True)
-def _p_failure(status: int):
-    nan = math.nan
-    return status, nan, nan, nan, nan, nan, nan, nan, nan, 0
-
-
-@njit(cache=True)
-def row_p_moments(log_t, a, log_t_p, log_t_pp, inverse_r, order, max_terms, log_cutoff):
-    """One row with its own power: (status, log W, E and Cov of the term log-derivatives, terms).
-
-    The tuple is (status, log W, E[q_rho], E[q_p], E[q_rho,p], E[q_pp], Var[q_rho],
-    Cov[q_rho, q_p], Var[q_p], terms) under weights proportional to exp(q_j), rho =
-    log phi. Unrequested orders stay NaN and never evaluate their special functions.
-    Two directions times a term walk is the algorithm itself, hence the nested loop.
-    """
-    log_mode = (log_t - a * math.log(a)) / (a + 1.0)
-    if log_mode > math.log(_MAX_SAFE_MODE):
-        return _p_failure(SERIES_MODE_RANGE)
-    mode, peak = _climb(log_t, a, max(1, int(math.floor(math.exp(log_mode)))), _NO_TABLE)
-    anchor = (math.nan, math.nan, math.nan, math.nan)
-    if order >= 1:
-        anchor = _term_p_channels(mode, log_t_p, log_t_pp, inverse_r, order)
-    moments = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    mass, terms = 1.0, 1
-    for direction in (-1, 1):
-        j = mode + direction
-        while j >= 1:
-            if terms >= max_terms:
-                return _p_failure(SERIES_MAX_TERMS)
-            if j >= _MAX_SAFE_MODE:
-                return _p_failure(SERIES_MODE_RANGE)
-            relative_log = _term(j, log_t, a, _NO_TABLE) - peak
-            relative = math.exp(relative_log)
-            mass += relative
-            terms += 1
-            if order >= 1:
-                channels = _term_p_channels(j, log_t_p, log_t_pp, inverse_r, order)
-                moments = _centred_update(moments, relative, mass, channels, anchor, order)
-            if relative_log <= -log_cutoff:
-                break
-            j += direction
-    mean_rho, mean_p, mean_rho_p, mean_pp, var_rho, cov, var_p = moments
-    return (
-        0,
-        peak + math.log(mass),
-        anchor[0] + mean_rho,
-        anchor[1] + mean_p,
-        anchor[2] + mean_rho_p if order == 2 else math.nan,
-        anchor[3] + mean_pp if order == 2 else math.nan,
-        var_rho / mass if order == 2 else math.nan,
-        cov / mass if order == 2 else math.nan,
-        var_p / mass if order == 2 else math.nan,
-        terms,
-    )
 
 
 def warmup() -> None:

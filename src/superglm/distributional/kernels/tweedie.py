@@ -237,7 +237,16 @@ def _validated_tweedie_inputs(
 
 
 _COMPILED_ROW_REFUSALS = {
+    _compiled.KERNEL_MODE_RATIO: "series mode ratio is not representable",
     _compiled.KERNEL_MODE_RANGE: "series mode lies above the exact float64 integer range 2**52",
+    _compiled.KERNEL_MODE_BRACKET: "series mode could not be ratio-bracketed",
+    _compiled.KERNEL_WINDOW_RANGE: "series window exceeds exact float64 integer work",
+    _compiled.KERNEL_UPPER_RATIO: "upper series ratio lost its mode bracket",
+    _compiled.KERNEL_LOWER_RATIO: "lower series ratio lost its mode bracket",
+    _compiled.KERNEL_PEAK: "series peak is not representable",
+    _compiled.KERNEL_MASS: "series mass is not representable",
+    _compiled.KERNEL_SCORE_MOMENTS: "series score moments are not representable",
+    _compiled.KERNEL_HESSIAN_MOMENTS: "series Hessian moments are not representable",
     _compiled.KERNEL_MEAN_SCORE_SCALE: "mean score scale is not representable",
     _compiled.KERNEL_MEAN_SCORE: "mean score channel is not representable",
     _compiled.KERNEL_MEAN_HESSIAN_SCALE: "mean Hessian scale is not representable",
@@ -275,13 +284,28 @@ def _raise_compiled_refusal(*, status: int, failing_row: int, max_terms: int) ->
 def _warmup_compiled_tweedie_dispatchers(
     arrays: tuple[NDArray[np.float64], ...],
 ) -> None:
+    coefficients = np.empty(10, dtype=np.float64)
     rho = math.log(float(arrays[2][0]))
     values, scores, hessians, terms, _ = _compiled._allocate_batch_outputs(1, 2)
     limits = (_DEFAULT_MAX_TERMS, _DEFAULT_LOG_CUTOFF)
+    series_point = (0.0, 1.0, coefficients)
     calls = (
+        (_compiled._digamma_positive, (1.0,)),
+        (_compiled._digamma_trigamma_positive, (1.0,)),
         (_compiled._compensated_add, (0.0, 0.0, 1.0)),
         (_compiled._sum2, (1.0, 2.0)),
         (_compiled._sum3, (1.0, 2.0, 3.0)),
+        (_compiled._bernoulli_polynomial, (2, 1.0)),
+        (_compiled._fill_log_gamma_increment_coefficients, (1.0, coefficients)),
+        (_compiled._log_gamma_increment, (1.0, 1.0, coefficients)),
+        (_compiled._log_adjacent_ratio, (1, *series_point)),
+        (_compiled._locate_series_mode, series_point),
+        (_compiled._term_derivative_channels, (1, 0.0, 0.0, 2.0, 2)),
+        (_compiled._series_failure, (_compiled.KERNEL_MAX_TERMS, 0)),
+        (
+            _compiled._series_summary,
+            (0.0, 0.0, 0.0, 2.0, 1.0, 2, *limits, coefficients),
+        ),
         (_compiled._mean_score_channel, (1.0, 1.2, rho, 1.5)),
         (_compiled._mean_hessian_channel, (1.0, 1.2, rho, 1.5)),
         (_compiled._natural_scale_hessian, (-1.0, 1.0, 0.7)),
@@ -289,7 +313,7 @@ def _warmup_compiled_tweedie_dispatchers(
         (_compiled._zero_row, (1.2, 0.7, 1.5, rho, 2)),
         (
             _compiled._positive_row,
-            (1.0, 1.2, 0.7, 1.5, rho, 2, *limits),
+            (1.0, 1.2, 0.7, 1.5, rho, 2, *limits, coefficients),
         ),
         (
             _compiled._evaluate_tweedie_batch_row,
