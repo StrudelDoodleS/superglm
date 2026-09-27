@@ -1155,6 +1155,7 @@ def _refine_nb_theta_to_reml_fixed_point(
         converged=nb_seed.converged and joint_converged and not solve.at_bound and reml_converged,
         evaluations=pd.DataFrame(rows, columns=["theta", "nll"]),
         warnings=warned,
+        _bound_side=solve.side,
     )
     model._nb_profile_result = refreshed._at_mean(y_arr, model._fit_mu, model._fit_weights)
     if refits:

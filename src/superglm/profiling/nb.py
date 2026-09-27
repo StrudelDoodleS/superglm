@@ -31,7 +31,7 @@ from scipy.special import digamma
 from superglm.distributions import NegativeBinomial, clip_mu, weighted_log_likelihood
 from superglm.links import stabilize_eta
 from superglm.model.base import model_has_lambda1_targets, resolve_selection_penalty_for_fit
-from superglm.model.fit_ops import _solve_coefficients
+from superglm.model.fit_ops import _reject_monotone_fit_conflicts, _solve_coefficients
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.profiling._scalar import (
     Interval,
@@ -222,6 +222,11 @@ class ThetaSolve:
     def at_bound(self) -> bool:
         return self.at_lower or self.at_upper
 
+    @property
+    def side(self) -> str | None:
+        """The bound the solve stopped on, or None at an interior root."""
+        return "lower" if self.at_lower else "upper" if self.at_upper else None
+
 
 def solve_theta(
     y: NDArray,
@@ -295,6 +300,8 @@ class _MeanFit:
         self.penalty = configured_penalty(model)
         resolve_selection_penalty_for_fit(model, self.penalty, self.y, self.w)
         self.has_lambda1_targets = model_has_lambda1_targets(model)
+        # Refused here, before the alternation, not by the publication refit after it.
+        _reject_monotone_fit_conflicts(model, self.penalty, self.has_lambda1_targets)
         self.offset = np.zeros_like(self.y) if offset is None else offset
         self.warm_beta = self.warm_intercept = None
 
@@ -357,7 +364,7 @@ def estimate_nb_theta(
         nll = nb_nll(mean.y, mu, mean.w, solve.theta, weight_semantics=semantics)
         rows.append({"theta": solve.theta, "nll": nll})
         if on_evaluation is not None:
-            on_evaluation(rows[-1])
+            on_evaluation(dict(rows[-1]))
         settled = abs(solve.theta - theta) <= xatol * max(solve.theta, theta_bounds[0])
         theta = solve.theta
         if settled:
@@ -377,6 +384,7 @@ def estimate_nb_theta(
         _mu=mu,
         _weights=mean.w,
         _weight_semantics=semantics,
+        _bound_side=solve.side,
     )
 
 
@@ -420,6 +428,8 @@ class NBProfileResult:
     _mu: NDArray | None = field(default=None, repr=False)
     _weights: NDArray | None = field(default=None, repr=False)
     _weight_semantics: str = field(default=FREQUENCY_WEIGHTS, repr=False)
+    # The estimation bound theta_hat sits on ("lower"/"upper"), or None when interior.
+    _bound_side: str | None = field(default=None, repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
 
     def _at_mean(self, y: NDArray, mu: NDArray, weights: NDArray) -> NBProfileResult:
@@ -459,10 +469,7 @@ class NBProfileResult:
                 RecordedObjective(lambda log_theta: self._profile_nll(math.exp(log_theta))),
                 math.log(self.theta_hat),
                 self.nll,
-                (
-                    math.log(min(_CI_RANGE[0], self.theta_hat / 100.0)),
-                    math.log(max(_CI_RANGE[1], self.theta_hat * 100.0)),
-                ),
+                self._log_search_range(),
                 alpha=alpha,
                 scale=self._size,
                 xtol=_CI_LOG_XTOL,
@@ -474,6 +481,20 @@ class NBProfileResult:
                 found.upper_censored,
             )
         return self._ci_cache[alpha]
+
+    def _log_search_range(self) -> tuple[float, float]:
+        """Where each side of the interval may look, in log theta.
+
+        A side whose estimation bound held theta_hat stops there, censored: the
+        estimate established no optimum beyond it.
+        """
+        log_hat = math.log(self.theta_hat)
+        lower = math.log(min(_CI_RANGE[0], self.theta_hat / 100.0))
+        upper = math.log(max(_CI_RANGE[1], self.theta_hat * 100.0))
+        return (
+            log_hat if self._bound_side == "lower" else lower,
+            log_hat if self._bound_side == "upper" else upper,
+        )
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """``(lower, upper)`` of :meth:`interval`; a censored side is where its search stopped."""

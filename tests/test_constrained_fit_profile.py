@@ -163,6 +163,30 @@ def test_tweedie_profile_rejects_monotone_selection_penalty():
         model.estimate_p(X, y)
 
 
+@pytest.mark.parametrize("entry", ["estimate_theta", "auto_theta_fit"])
+def test_nb_theta_profile_rejects_monotone_selection_penalty_before_fitting(monkeypatch, entry):
+    import superglm.profiling.nb as nb_module
+    from superglm.distributions import NegativeBinomial
+
+    X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 24)})
+    y = np.resize(np.array([0.0, 1.0, 2.0, 3.0]), len(X))
+    model = SuperGLM(
+        family=NegativeBinomial(theta="auto"),
+        selection_penalty=0.1,
+        features={"x": BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing)},
+    )
+
+    def unexpected_mean_fit(*args, **kwargs):
+        raise AssertionError("no theta-alternation mean fit may run")
+
+    monkeypatch.setattr(nb_module, "_solve_coefficients", unexpected_mean_fit)
+    with pytest.raises(NotImplementedError, match="selection_penalty"):
+        if entry == "estimate_theta":
+            model.estimate_theta(X, y)
+        else:
+            model.fit(X, y)
+
+
 def test_tweedie_profile_rejects_mixed_scop_and_qp_engines():
     X = pd.DataFrame(
         {

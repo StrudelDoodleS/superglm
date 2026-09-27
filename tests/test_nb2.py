@@ -18,7 +18,7 @@ from superglm._frame import EagerFrame
 from superglm.distributions import resolve_distribution
 from superglm.features.numeric import Numeric
 from superglm.penalties.group_lasso import GroupLasso
-from superglm.profiling.nb import NBProfileResult, estimate_nb_theta
+from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning, estimate_nb_theta
 
 # =====================================================================
 # Helpers
@@ -490,6 +490,52 @@ class TestNB2AutoTheta:
             model.estimate_theta(X, y, fit_mode="reml")
 
         assert profile_calls == []
+
+    def test_a_mutating_callback_cannot_rewrite_the_recorded_evaluations(self):
+        rng = np.random.default_rng(11)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 400)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = rng.negative_binomial(3.0, 3.0 / (3.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        seen = []
+
+        def vandal(row):
+            seen.append(dict(row))
+            row["theta"], row["nll"] = -1.0, float("nan")
+
+        result = estimate_nb_theta(model, X, y, on_evaluation=vandal)
+
+        assert seen
+        assert result.evaluations.to_dict("records") == seen
+
+    @pytest.mark.parametrize("bounds, side", [((0.5, 1.0), "upper"), ((20.0, 100.0), "lower")])
+    def test_interval_is_censored_at_the_estimation_bound_that_held_theta(self, bounds, side):
+        # True theta 4 lies outside both windows, so the estimate stops on a bound.
+        rng = np.random.default_rng(12)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 2000)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = rng.negative_binomial(4.0, 4.0 / (4.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        with pytest.warns(NBThetaBoundWarning):
+            result = model.estimate_theta(X, y, theta_bounds=bounds)
+        interval = result.interval(0.05)
+
+        held = bounds[0] if side == "lower" else bounds[1]
+        assert result.theta_hat == held
+        if side == "upper":
+            assert interval.upper == pytest.approx(held, rel=1e-12) and interval.upper_censored
+            assert interval.lower < held and not interval.lower_censored
+        else:
+            assert interval.lower == pytest.approx(held, rel=1e-12) and interval.lower_censored
+            assert interval.upper > held and not interval.upper_censored
 
     @pytest.mark.parametrize("xatol", [0.0, -1e-3, np.nan, np.inf])
     def test_invalid_xatol_is_rejected_before_profile_work(self, monkeypatch, xatol):
