@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
@@ -11,6 +12,7 @@ from superglm.factor_smooth_geometry import sum_to_zero_penalty
 from superglm.types import PenaltyComponent
 
 if TYPE_CHECKING:
+    from superglm.solvers._structured.factors import DerivativeDirection
     from superglm.solvers.structured import CompactSymmetricOperator
 
 
@@ -131,6 +133,18 @@ class HessianFactor(Protocol):
         scale: float,
         operator: CompactSymmetricOperator,
     ) -> float: ...
+
+
+@runtime_checkable
+class DerivativeCrossTraceFactor(Protocol):
+    """Optional: every REML Hessian cross trace from one call.
+
+    ``derivative_cross_traces`` returns ``trace(H^-1 O_i H^-1 O_j)`` for all
+    pairs of directions ``O = scale * Omega + dH``, by whichever algorithm
+    suits the factor's own structure.
+    """
+
+    def derivative_cross_traces(self, directions: Sequence[DerivativeDirection]) -> NDArray: ...
 
 
 class DenseHessianFactor:
