@@ -16,7 +16,10 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
 )
 from superglm.solvers._structured.nested import NestedStructuredLayout, NestedTree
-from superglm.solvers._structured.selection import cached_nested_parent_codes
+from superglm.solvers._structured.selection import (
+    cached_nested_parent_codes,
+    shared_nesting_cache,
+)
 from superglm.types import GroupSlice
 
 
@@ -199,7 +202,10 @@ def build_nested_structured_layout(
     must pass the strict-nesting count test (§3.7); a level reused under
     several parents is refused with the instruction to build the interaction
     code, as lme4 documents for implicit nesting.  Unobserved child levels
-    point at parent 0.  ``reference_row`` is each leaf's first training row.
+    point at parent 0.  ``nesting_cache`` is the nesting cache (see
+    ``shared_nesting_cache``); the tree and the leaf row order read only the
+    chain's codes, so they are one of its entries and outlive a lambda
+    rebuild, while the border is rebuilt.
     """
     chain = tuple(int(index) for index in chain_group_indices)
     if len(chain) < 2:
@@ -216,6 +222,30 @@ def build_nested_structured_layout(
         if group.constraints is not None or group.scop_reparameterization is not None:
             raise ValueError(f"Nested chain group {group.name!r} carries constraints or SCOP.")
         members[index] = matrix
+    cache = {} if nesting_cache is None else nesting_cache
+    key = ("nested_tree", chain, tuple((group.name, group.start, group.end) for group in groups))
+    if key not in cache:
+        cache[key] = _nested_tree(members, groups, chain, cache)
+    tree, leaf_order, leaf_starts = cache[key]
+    return NestedStructuredLayout(
+        chain_group_indices=chain,
+        chain_group_names=tuple(groups[index].name for index in chain),
+        tree=tree,
+        level_indices=tuple(np.arange(groups[index].start, groups[index].end) for index in chain),
+        leaf_order=leaf_order,
+        leaf_starts=leaf_starts,
+        **_border_partition(group_matrices, groups, chain, members[chain[-1]].shape[0]),
+    )
+
+
+def _nested_tree(
+    members: dict[int, RandomEffectGroupMatrix],
+    groups: list[GroupSlice],
+    chain: tuple[int, ...],
+    nesting_cache: dict,
+) -> tuple[NestedTree, NDArray, NDArray]:
+    """Return the chain's tree after the strict-nesting tests, the rows in stable
+    leaf order and each leaf's start in that order ``(K + 1,)``."""
     parents = [np.full(members[chain[0]].n_levels, -1, dtype=np.intp)]
     for coarse, fine in zip(chain[:-1], chain[1:], strict=True):
         codes = cached_nested_parent_codes(members, groups, fine, coarse, nesting_cache)
@@ -229,18 +259,12 @@ def build_nested_structured_layout(
             )
         parents.append(codes)
     tree = NestedTree(tuple(members[index].n_levels for index in chain), tuple(parents))
-    leaf = members[chain[-1]]
-    n = leaf.shape[0]
-    first_row = np.full(leaf.n_levels, n, dtype=np.intp)
-    np.minimum.at(first_row, leaf.codes, np.arange(n, dtype=np.intp))
-    return NestedStructuredLayout(
-        chain_group_indices=chain,
-        chain_group_names=tuple(groups[index].name for index in chain),
-        tree=tree,
-        level_indices=tuple(np.arange(groups[index].start, groups[index].end) for index in chain),
-        reference_row=np.where(first_row < n, first_row, -1),
-        **_border_partition(group_matrices, groups, chain, n),
-    )
+    codes = members[chain[-1]].codes
+    order = np.argsort(codes, kind="stable")
+    starts = np.concatenate(([0], np.cumsum(np.bincount(codes, minlength=tree.sizes[-1]))))
+    for array in (order, starts):
+        array.setflags(write=False)
+    return tree, order, starts
 
 
 def get_scalar_structured_layout(
@@ -329,8 +353,8 @@ def get_nested_structured_layout(
 ) -> NestedStructuredLayout:
     """Return the DesignMatrix-owned layout of one nested chain.
 
-    Cached under the chain and the group spans in the design's layout cache,
-    which also holds the chain's nesting tests.
+    Cached under the chain and the group spans in the design's layout cache;
+    the chain's nesting tests and tree live in its shared nesting cache.
     """
     signature = (
         "nested",
@@ -344,7 +368,7 @@ def get_nested_structured_layout(
             dm.group_matrices,
             groups,
             chain_group_indices=chain_group_indices,
-            nesting_cache=cache,
+            nesting_cache=shared_nesting_cache(cache),
         )
         cache[signature] = layout
     return layout

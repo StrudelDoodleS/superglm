@@ -6,6 +6,7 @@ import hashlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Literal
 
 import numpy as np
@@ -85,24 +86,29 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # 24.0 GiB.
 #
 # Anchors: complete fit_reml fits, one per process, every thread pool pinned to
-# one, 1-minute load under 2.5; wall seconds, ">300" is the cap:
+# one, 1-minute load under 2.5; wall seconds, ">300" is the cap.  Rows marked *
+# re-measured single against nested on the one-pass row pass (2026-09-27, load
+# 1.9 to 3.4, ABBA means of four fits a side; pg17 C exact one pair):
 #
 #   shape                          n        p       chain            gram  single  nested
-#   pg17 C exact, 5k-row sample    3,885    562     51/407           13.7     7.9    10.1
-#   pg17 C exact                   77,014   1,133   87/942           76.2    30.5    77.3
-#   pg17 C discrete                77,014   1,133   87/942           32.2     3.6    10.3
-#   dvsa C exact, 20k rows         15,794   1,458   91/1,332         41.5     3.9     4.6
-#   dvsa C discrete, 200k rows     157,593  4,008   223/3,749        >300     3.0     3.9
+#   pg17 C exact, 5k-row sample *  3,885    562     51/407           13.7     8.2     4.0
+#   pg17 C exact *                 77,014   1,133   87/942           76.2    28.6    40.4
+#   pg17 C discrete *              77,014   1,133   87/942           32.2     3.5     6.5
+#   dvsa C exact, 20k rows *       15,794   1,458   91/1,332         41.5     3.9     2.7
+#   dvsa C discrete, 200k rows *   157,593  4,008   223/3,749        >300     3.0     3.0
 #   dvsa D discrete, 20k rows      15,794   3,862   91/1,332/2,404   >300    42.4     1.6
 #   dvsa D discrete, 200k rows     157,593  10,046  223/3,749/6,038  >300    >300     6.1
 #   pg17 E discrete (crossed leaf) 77,014   16,850  15,717           >300   135.7        -
 #   pg17 B exact                   77,014   191     87               16.9    13.8        -
 #
-# The chain's extra passes decide between the structured backends: nested wins
-# only when many parent nodes would otherwise widen the border (DVSA step D);
-# 2 passes sits inside the measured bracket (1.23, 401) near its lower end
-# because under-pricing them costs at most those passes (pg17 C exact, 2.5x)
-# while over-pricing them puts the parents back in a cubic border (DVSA D, >300 s).
+# The chain's extra passes decide between the structured backends.  Each anchor
+# fixes the passes at which the two ratios tie; the order measured puts the
+# price in the bracket (0.035, 0.175): below it pg17 C, where 87 parent nodes
+# sit beside 77k rows, would take the slower chain (1.4x exact, 1.8x discrete),
+# above it the pg17 5k sample (2.0x) and then DVSA C exact (1.5x, from 1.06
+# passes) would keep their parents in the border, and DVSA D only above 400.
+# 0.08 sits at the bracket's geometric middle.  The two-read pass it replaced,
+# with its formed border Gram, was priced at 2 inside (1.23, 401).
 #
 # The August 2026 bound of 0.05 (issue #343) was set on a ~67k-row Tweedie(1.5)
 # log-link pricing workload that is not in the repository, where the structured
@@ -115,7 +121,7 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # The largest ratio measured ahead is 0.596; at 0.77 (n=200, K=4 beside q=28) the
 # two tie, so 0.75 keeps near-degenerate shapes dense.
 _AUTO_MAX_RANDOM_EFFECT_COST_RATIO = 0.75
-_AUTO_NESTED_ROW_PASSES = 2.0
+_AUTO_NESTED_ROW_PASSES = 0.08
 # FactorSmooth and sum-to-zero block geometries keep the August 2026 constant
 # bound on the factorization ratio (issue #343): synthetic "fs" and "sz" sweeps
 # then lost at mid ratio and won at tiny ratio, and section 5 leaves them as
@@ -405,9 +411,13 @@ def nested_parent_codes(
     levels point at parent 0 (their accumulated weight is exactly zero, so the
     pointer is never read, §3.7).
     """
-    first = np.zeros(child.n_levels, dtype=np.intp)
-    first[child.codes] = parent.codes
-    if not np.array_equal(first[child.codes], parent.codes):
+    return _parent_codes(child.codes, parent.codes, child.n_levels)
+
+
+def _parent_codes(child: NDArray, parent: NDArray, n_child_levels: int) -> NDArray | None:
+    first = np.zeros(n_child_levels, dtype=np.intp)
+    first[child] = parent
+    if not np.array_equal(first[child], parent):
         return None
     return first
 
@@ -416,27 +426,49 @@ def _group_spans(groups: list[GroupSlice]) -> tuple[tuple[str, int, int], ...]:
     return tuple((group.name, group.start, group.end) for group in groups)
 
 
+# The nesting cache holds the pair tests (``nested_parent``), the chains
+# (``nested_chain``) and the chains' trees with their leaf row orders
+# (``nested_tree``); every key carries its group indices and the group spans.
+# It is one dictionary, stored in a design's ``_scalar_structured_layout_cache``
+# and shared by reference with every lambda rebuild of that design
+# (``carry_nesting_cache``), so the pair tests' O(n) row passes and the leaf
+# argsort run once per design lineage, not once per REML outer iteration or
+# per refit.  The leaf row order is its one O(n) entry, 8 bytes per row plus
+# K + 1 starts, held as long as the fitted design (the cache is not pickled).  Owner: the lineage's RandomEffect codes, which
+# ``rebuild_design_matrix_with_lambdas`` passes through unchanged.  Lifetime:
+# the first design built on those codes and all its rebuilds.  Invalidation:
+# none; a lambda, weight or border change moves no code.  Layouts hold border
+# matrices, which a rebuild replaces, so they stay per design.
+_NESTING_CACHE_KEY = "nesting"
+
+
+def shared_nesting_cache(layout_cache: dict | None) -> dict:
+    """Return the nesting cache inside a design's layout cache (a fresh one for ``None``)."""
+    return {} if layout_cache is None else layout_cache.setdefault(_NESTING_CACHE_KEY, {})
+
+
+def carry_nesting_cache(source: dict, target: dict) -> None:
+    """Share one design's nesting cache with its lambda rebuild (layout caches)."""
+    target[_NESTING_CACHE_KEY] = shared_nesting_cache(source)
+
+
 def cached_nested_parent_codes(
     random_effects: dict[int, RandomEffectGroupMatrix],
     groups: list[GroupSlice],
     child_index: int,
     parent_index: int,
-    cache: dict | None,
+    cache: dict,
 ) -> NDArray | None:
     """``nested_parent_codes`` for two design groups through the nesting cache.
 
     ``random_effects`` maps design group indices to their RandomEffect
-    matrices.  Cache contract: the dictionary is the design's
-    ``_scalar_structured_layout_cache`` (owner and lifetime: the design);
-    group codes are immutable, so an entry is never invalidated.
+    matrices; ``cache`` is the nesting cache (contract above
+    ``_NESTING_CACHE_KEY``).
     """
     key = ("nested_parent", child_index, parent_index, _group_spans(groups))
-    if cache is not None and key in cache:
-        return cache[key]
-    codes = nested_parent_codes(random_effects[child_index], random_effects[parent_index])
-    if cache is not None:
-        cache[key] = codes
-    return codes
+    if key not in cache:
+        cache[key] = nested_parent_codes(random_effects[child_index], random_effects[parent_index])
+    return cache[key]
 
 
 def find_nested_chain(
@@ -447,47 +479,69 @@ def find_nested_chain(
     excluded: frozenset[int] = frozenset(),
     cache: dict | None = None,
 ) -> tuple[int, ...]:
-    """Grow a strictly nested RandomEffect chain upward from its leaf (Rule B, §5).
+    """Return the nested RandomEffect chain above a leaf that eliminates most levels (Rule B, §5).
 
-    Every remaining RandomEffect term, not only the next larger one, is tested
-    for being a function of the current coarsest level; the finest passing
-    term (most observed levels, then most levels, then lowest index) joins the
-    chain.  A crossed term therefore stays in the border without ending the
-    chain.  Terms that fail against a level fail against its parents too
-    (nesting is transitive), so only the passing terms are re-tested.
-    Returns the chain coarsest to finest, ending with ``leaf_index``.
+    Every chain member is a function of the leaf (nesting is transitive), so
+    each remaining RandomEffect term takes one row test against the leaf (the
+    count test of §3.7).  Nesting is a partial order on the passing terms and
+    every totally ordered subset of them is a valid chain; the rule takes the
+    one with the most levels, a heaviest path found by dynamic programming
+    from the coarsest term.  A crossed term, or a coarsening of the leaf
+    crossed with its hierarchy, stays in the border unless its chain carries
+    more levels.  Ties go to the chain met first, finest term first.
+
+    Terms are ordered finest first by observed levels, then levels, then
+    index, which puts every coarsening after its refinements and orders
+    relabelled duplicates.  A pair of passing terms is then tested on the
+    leaf's observed levels instead of the rows: each row's codes are the
+    leaf maps at its leaf, so the pairs met, and the parent codes stored in
+    the cache, are the row test's.  ``cache`` is the nesting cache (contract
+    above ``_NESTING_CACHE_KEY``).  Returns the chain coarsest to finest,
+    ending with ``leaf_index``.
     """
+    cache = {} if cache is None else cache
     random_effects = {
         index: matrix
         for index, matrix in enumerate(group_matrices)
         if isinstance(matrix, RandomEffectGroupMatrix)
     }
-    candidates = [
-        index
+    leaf = random_effects[leaf_index]
+    candidate_maps = {
+        index: cached_nested_parent_codes(random_effects, groups, leaf_index, index, cache)
         for index, matrix in random_effects.items()
         if index != leaf_index and index not in excluded and groups[index].size == matrix.n_levels
-    ]
-    chain = [leaf_index]
-    while candidates:
-        candidates = [
-            index
-            for index in candidates
-            if cached_nested_parent_codes(random_effects, groups, chain[0], index, cache)
-            is not None
-        ]
-        if not candidates:
-            break
-        finest = max(
-            candidates,
-            key=lambda index: (
-                np.count_nonzero(np.bincount(random_effects[index].codes)),
-                random_effects[index].n_levels,
-                -index,
-            ),
+    }
+    observed = np.zeros(leaf.n_levels, dtype=bool)
+    observed[leaf.codes] = True
+    maps = {index: codes[observed] for index, codes in candidate_maps.items() if codes is not None}
+    order = sorted(
+        maps,
+        key=lambda index: (
+            -np.count_nonzero(np.bincount(maps[index])),
+            -random_effects[index].n_levels,
+            index,
+        ),
+    )
+    parents = {
+        (child, parent): _parent_codes(maps[child], maps[parent], random_effects[child].n_levels)
+        for child, parent in combinations(order, 2)
+    }
+    spans = _group_spans(groups)
+    cache.update(
+        (("nested_parent", child, parent, spans), codes)
+        for (child, parent), codes in parents.items()
+    )
+    # best[t]: (levels, chain coarsest to finest) of the heaviest chain ending at t
+    best: dict[int, tuple[int, tuple[int, ...]]] = {}
+    for child in reversed(order):
+        levels, above = max(
+            (best[parent] for parent in order if parents.get((child, parent)) is not None),
+            key=lambda entry: entry[0],
+            default=(0, ()),
         )
-        chain.insert(0, finest)
-        candidates.remove(finest)
-    return tuple(chain)
+        best[child] = (levels + random_effects[child].n_levels, (*above, child))
+    _, chain = max((best[index] for index in order), key=lambda entry: entry[0], default=(0, ()))
+    return (*chain, leaf_index)
 
 
 # §3.7 audit of the observed working weights (critic run ``wsign``): the pairs
@@ -569,22 +623,20 @@ def _resolve_nested_chain(
     S_override: NDArray | None,
     family,
     link,
-    cache: dict | None,
+    cache: dict,
 ) -> tuple[tuple[int, ...], str | None]:
     """Return the chain for a RandomEffect leaf and why a found chain was declined."""
     excluded = _zero_penalty_random_effects(group_matrices, groups, lambda2, S_override)
     chain_key = ("nested_chain", leaf_index, tuple(sorted(excluded)), _group_spans(groups))
-    chain = None if cache is None else cache.get(chain_key)
-    if chain is None:
-        chain = find_nested_chain(
+    if chain_key not in cache:
+        cache[chain_key] = find_nested_chain(
             group_matrices,
             groups,
             leaf_index=leaf_index,
             excluded=excluded - {leaf_index},
             cache=cache,
         )
-        if cache is not None:
-            cache[chain_key] = chain
+    chain = cache[chain_key]
     if len(chain) < 2:
         return chain, None
     names = [groups[index].name for index in chain]
@@ -786,7 +838,7 @@ def resolve_structured_backend(
             S_override=S_override,
             family=family,
             link=link,
-            cache=nesting_cache,
+            cache=shared_nesting_cache(nesting_cache),
         )
     auto_cost_decision = (
         _structured_auto_cost_decision(

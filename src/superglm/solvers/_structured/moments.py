@@ -20,6 +20,7 @@ from superglm._group_matrix._group_matrix_kernels import (
 from superglm.factor_smooth_geometry import adjoint_sum_to_zero_blocks
 from superglm.group_matrix import (
     DenseGroupMatrix,
+    DiscretizedSSPGroupMatrix,
     FactorSmoothGroupMatrix,
     GroupMatrix,
     RandomEffectGroupMatrix,
@@ -158,68 +159,110 @@ def _random_effect_cross(
     )
 
 
+def _group_rows(matrix: GroupMatrix, rows: NDArray) -> NDArray:
+    """``matrix[rows]`` dense; a discretized spline projects only the gathered basis rows.
+
+    Its ``toarray`` projects the whole support table, which for a lossless
+    support (one bin per distinct value) costs a table per chunk.
+    """
+    if isinstance(matrix, DiscretizedSSPGroupMatrix):
+        return matrix.B_unique[matrix.bin_idx[rows]] @ matrix.R_inv
+    return np.asarray(matrix.row_subset(rows).toarray(), dtype=np.float64)
+
+
 def _border_rows(layout: NestedStructuredLayout, rows: NDArray) -> NDArray:
     """Materialize the border rows ``X_b[rows]`` of one chunk (q columns)."""
     if layout.dense_small_matrix is not None:
         return layout.dense_small_matrix[rows]
-    blocks = [
-        np.asarray(matrix.row_subset(rows).toarray(), dtype=np.float64)
-        for matrix in layout.small_matrices
-    ]
+    blocks = [_group_rows(matrix, rows) for matrix in layout.small_matrices]
     return np.hstack(blocks) if blocks else np.empty((len(rows), 0), dtype=np.float64)
+
+
+def _border_rmatvec(layout: NestedStructuredLayout, values: NDArray) -> NDArray:
+    """``X_b' values`` ``(q,)`` through the border matrices' own transposes, densifying no rows."""
+    if layout.dense_small_matrix is not None:
+        return layout.dense_small_matrix.T @ values
+    if not layout.small_matrices:
+        return np.zeros(0)
+    return np.concatenate([matrix.rmatvec(values) for matrix in layout.small_matrices])
 
 
 def _centered_leaf_pass(
     layout: NestedStructuredLayout,
-    codes: NDArray,
     weights: NDArray,
     leaf_weight: NDArray,
     mean: NDArray | None,
     chunk_size: int,
-) -> tuple[NDArray, NDArray, NDArray | None]:
-    """Return leaf means, the centred within-leaf scatter and the deviations.
+) -> tuple[NDArray, NDArray, NDArray, NDArray | None]:
+    """Return leaf means, the centred within-leaf scatter, the absolute mass and the deviations.
 
-    The exact centred row pass of §3.4 and §3.6 (decision 1), in bounded row
-    chunks.  Without ``mean`` it first forms the data leaf means in the
-    shifted form ``x_ref + sum_r w_r (x_r - x_ref) / w_l`` about each leaf's
-    reference row (0 where ``w_l == 0``), so a column constant within a leaf
-    gives that constant exactly; the deviations are then zero by
-    construction and returned as ``None``.  With ``mean`` (a signed operator
-    about its factor's data means) it also forms ``dev_l = sum_r a_r (x_r -
-    m_l)``.  The scatter ``sum_r a_r (x_r - m_l)(x_r - m_l)'`` never subtracts
-    raw moments, so such a column has an exactly zero row and column; chunks
-    accumulate with compensated addition and the result is symmetrized.
+    The exact centred row pass of §3.4 and §3.6 (decision 1) in ONE pass over
+    the border rows: rows are taken in leaf order (``layout.leaf_order``)
+    in chunks of whole leaves of at least ``chunk_size`` rows, each chunk
+    materialized once and centred on the layout's global centre ``c``.  A
+    chunk never splits a leaf, so a chunk holds up to ``max(chunk_size,
+    largest leaf)`` rows and its few ``rows x q`` temporaries scale with the
+    largest leaf (full DVSA step D: 336,385 rows, 460 MiB per pass).
+    Without ``mean`` it forms the data leaf means in the shifted form ``x_ref
+    - c + sum_r w_r ((x_r - c) - (x_ref - c)) / w_l`` about each leaf's first
+    weighted row (0 where ``w_l == 0``), so a column constant on a leaf's
+    weighted rows gives that constant exactly; the deviations are then zero
+    by construction and returned as ``None``.  With ``mean`` (a signed operator about its factor's centred data means) it also
+    forms ``dev_l = sum_r a_r (x_r - m_l)``.  Leaf sums are ``np.add.reduceat``
+    segments of the sorted chunk; the scatter ``sum_r a_r (x_r - m_l)(x_r -
+    m_l)'`` is one product per chunk that never subtracts raw moments, so such
+    a column has an exactly zero row and column; chunks accumulate with
+    compensated addition and the result is symmetrized.  The absolute mass is
+    ``sum_r e_r (x_rj - m_lj)^2`` with ``e_r`` the scale of row ``r``'s weight
+    error (§3.7): ``a_r`` itself when no weight is negative, as Fisher weights
+    are each accurate to a few ulp, and ``max |a|`` on every weighted row of a
+    vector with a negative entry, whose rounding-negative rows come from a
+    cancellation at the scale of the largest weight.
     """
-    n, q = len(weights), len(layout.small_indices)
-    starts = range(0, n, chunk_size)
+    n, center = len(weights), layout.border_center
+    order, starts = layout.leaf_order, layout.leaf_starts
+    present = np.flatnonzero(np.diff(starts))
+    first = starts[present]
+    edges = np.append(first, n)
+    bounds = np.unique(np.searchsorted(first, np.arange(0, n, chunk_size), side="right") - 1)
     deviation = None
     if mean is None:
-        observed = layout.reference_row >= 0
-        reference = np.zeros((len(leaf_weight), q), dtype=np.float64)
-        reference[observed] = _border_rows(layout, layout.reference_row[observed])
-        shift = np.zeros_like(reference)
-        for start in starts:
-            rows = np.arange(start, min(start + chunk_size, n))
-            leaves = codes[rows]
-            difference = _border_rows(layout, rows) - reference[leaves]
-            np.add.at(shift, leaves, weights[rows, None] * difference)
-        active = leaf_weight != 0.0
-        mean = np.zeros_like(reference)
-        mean[active] = reference[active] + shift[active] / leaf_weight[active, None]
+        mean = np.zeros((len(leaf_weight), len(center)))
     else:
         mean = np.asarray(mean, dtype=np.float64)
         deviation = np.zeros_like(mean)
-    within = np.zeros((q, q), dtype=np.float64)
+    within = np.zeros((len(center), len(center)))
     compensation = np.zeros_like(within)
-    for start in starts:
-        rows = np.arange(start, min(start + chunk_size, n))
-        leaves = codes[rows]
-        centered = _border_rows(layout, rows) - mean[leaves]
-        weighted = weights[rows, None] * centered
+    absolute = np.zeros(len(center))
+    signed = bool(np.any(weights < 0.0))
+    largest = float(np.max(np.abs(weights), initial=0.0))
+    for lo, hi in zip(bounds, np.append(bounds[1:], len(present)), strict=True):
+        leaves, segment = present[lo:hi], first[lo:hi] - first[lo]
+        counts = np.diff(edges[lo : hi + 1])
+        rows = order[first[lo] : edges[hi]]
+        centered = _border_rows(layout, rows)
+        centered -= center
+        a = weights[rows]
+        if deviation is None:
+            # each leaf's first weighted row (any row of a leaf without one)
+            nonzero = np.append(np.flatnonzero(a), len(a))
+            first_weighted = nonzero[np.searchsorted(nonzero, segment)]
+            reference = centered[np.minimum(first_weighted, segment + counts - 1)]
+            difference = centered - np.repeat(reference, counts, axis=0)
+            difference *= a[:, None]
+            shift = np.add.reduceat(difference, segment, axis=0)
+            active = leaf_weight[leaves] != 0.0
+            mean[leaves[active]] = (
+                reference[active] + shift[active] / leaf_weight[leaves[active], None]
+            )
+        centered -= np.repeat(mean[leaves], counts, axis=0)
+        weighted = a[:, None] * centered
         _compensated_add(within, compensation, centered.T @ weighted)
+        error = largest * (a != 0.0) if signed else a
+        absolute += np.einsum("r,rj,rj->j", error, centered, centered)
         if deviation is not None:
-            np.add.at(deviation, leaves, weighted)
-    return mean, 0.5 * (within + within.T), deviation
+            deviation[leaves] = np.add.reduceat(weighted, segment, axis=0)
+    return mean, 0.5 * (within + within.T), absolute, deviation
 
 
 def build_nested_leaf_statistics(
@@ -232,24 +275,25 @@ def build_nested_leaf_statistics(
 ) -> NestedLeafStatistics:
     """One row pass of a nested chain: per-leaf statistics of the row weights.
 
-    ``weight`` and ``cross`` come from the existing leaf kernels; ``mean``,
-    ``within`` and ``deviation`` from ``_centered_leaf_pass``.  ``mean=None``
-    is the data pass (shifted data means, deviation ``None``); a given
-    ``mean`` is a signed pass about those means.
+    ``weight`` comes from the leaf kernel; ``mean``, ``within``, ``absolute``
+    and ``deviation`` from ``_centered_leaf_pass`` about the layout's
+    ``border_center``.  ``mean=None`` is the data pass (shifted data means,
+    deviation ``None``); a given ``mean`` is a signed pass about those means.
     """
     leaf = group_matrices[layout.leaf_group_index]
     if not isinstance(leaf, RandomEffectGroupMatrix):
         raise ValueError("The nested leaf group must be a RandomEffectGroupMatrix.")
     values = np.asarray(weights, dtype=np.float64)
     leaf_weight = leaf.rmatvec(values)
-    leaf_mean, within, deviation = _centered_leaf_pass(
-        layout, leaf.codes, values, leaf_weight, mean, chunk_size
+    leaf_mean, within, absolute, deviation = _centered_leaf_pass(
+        layout, values, leaf_weight, mean, chunk_size
     )
     return NestedLeafStatistics(
         weight=leaf_weight,
-        cross=_random_effect_cross(layout, leaf, values, _BlockWeightCache()),
         mean=leaf_mean,
         within=within,
+        absolute=absolute,
+        center=layout.border_center,
         deviation=deviation,
     )
 
@@ -267,8 +311,9 @@ def build_nested_structured_system(
 
     ``mean=None`` is the data system of a PIRLS iterate; a signed W-derivative
     operator passes its factor's ``data_operator.leaf.mean`` (§6).  Only the
-    leaf group touches rows: its level sums come from the leaf kernels and
-    every parent level is their subtree sum.
+    leaf group touches rows: one centred leaf pass, and ``X_b'w``, ``X_b'Wz``
+    through the border's own transposes.  Every parent level is a subtree
+    sum; the border Gram ``X_b'WX_b`` is never formed (decision 1).
     """
     weights, weighted_rhs, leaf = _validate_structured_inputs(
         group_matrices,
@@ -282,22 +327,18 @@ def build_nested_structured_system(
         for matrix, index in zip(layout.small_matrices, layout.small_group_indices, strict=True)
     ) or layout.chain_group_names != tuple(groups[i].name for i in layout.chain_group_indices):
         raise ValueError("Nested layout does not match the supplied grouped design.")
-    A, xtw_small, xtwz_small = _small_block_moments(
-        layout, weights, weighted_rhs, _BlockWeightCache()
-    )
     leaf_statistics = build_nested_leaf_statistics(layout, group_matrices, weights, mean=mean)
     operator = NestedDataOperator(
         tree=layout.tree,
         leaf=leaf_statistics,
-        A=0.5 * (A + A.T),
         small_indices=layout.small_indices,
         structured_indices=layout.structured_indices,
     )
     return NestedStructuredSystem(
         operator=operator,
-        xtw_small=xtw_small,
+        xtw_small=_border_rmatvec(layout, weights),
         xtw_structured=np.concatenate(layout.tree.subtree_sum(leaf_statistics.weight)),
-        xtwz_small=xtwz_small,
+        xtwz_small=_border_rmatvec(layout, weighted_rhs),
         xtwz_structured=np.concatenate(layout.tree.subtree_sum(leaf.rmatvec(weighted_rhs))),
         sum_w=float(np.sum(weights)),
         sum_wz=float(np.sum(weighted_rhs)),

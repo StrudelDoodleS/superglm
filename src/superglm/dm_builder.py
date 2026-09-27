@@ -45,6 +45,7 @@ from superglm.group_matrix import (
     _discretize_column,
 )
 from superglm.links import Link, resolve_link
+from superglm.solvers._structured.selection import carry_nesting_cache
 from superglm.solvers.dispersion import PRIOR_WEIGHTS, validate_weight_semantics
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
@@ -1295,4 +1296,6 @@ def rebuild_design_matrix_with_lambdas(
             new_gms.append(gm)
     rebuilt = DesignMatrix(new_gms, dm.n, dm.p)
     rebuilt._centered_pattern_plan = dm._centered_pattern_plan
+    # RandomEffect matrices pass through unchanged, so their nesting tests do too.
+    carry_nesting_cache(dm._scalar_structured_layout_cache, rebuilt._scalar_structured_layout_cache)
     return rebuilt

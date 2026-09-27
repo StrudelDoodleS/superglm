@@ -905,13 +905,13 @@ def build_augmented_nested_factor(
     """Add the unpenalized intercept to a nested system; return its factor and RHS.
 
     The augmentation is exact (``NestedPenalizedOperator.augmented``): the
-    intercept becomes border column 0 with ``A_00 = sum_w`` and a zero penalty.
+    intercept becomes border column 0 with leaf mean 1 and a zero penalty.
     """
     if penalized.data is not system.operator:
         raise ValueError("The nested penalized operator must wrap the system's data operator.")
     operator = system.operator
     factor = NestedSchurFactor(
-        penalized.augmented(system.sum_w, system.xtw_small),
+        penalized.augmented(),
         chain_group_names=system.chain_group_names,
         chain_group_indices=system.chain_group_indices,
         intercept=True,

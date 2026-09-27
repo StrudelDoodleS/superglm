@@ -333,7 +333,7 @@ def test_nested_layout_refuses_malformed_chains() -> None:
         build(case.matrices, case.groups, chain_group_indices=(CROSSED, VARIANT))
 
 
-def test_nested_layout_border_tree_and_reference_rows() -> None:
+def test_nested_layout_border_tree_and_leaf_row_order() -> None:
     case = _nested_case()
     layout = _layout(case)
     assert layout.chain_group_names == ("make", "model", "variant")
@@ -345,10 +345,10 @@ def test_nested_layout_border_tree_and_reference_rows() -> None:
             layout.level_indices[level], np.arange(case.groups[index].start, case.groups[index].end)
         )
     variant = case.codes[2]
-    for leaf in range(case.sizes[2]):
-        rows = np.flatnonzero(variant == leaf)
-        assert layout.reference_row[leaf] == (rows[0] if len(rows) else -1)
-    assert np.all(layout.reference_row[16:] == -1)
+    np.testing.assert_array_equal(layout.leaf_order, np.argsort(variant, kind="stable"))
+    np.testing.assert_array_equal(
+        np.diff(layout.leaf_starts), np.bincount(variant, minlength=case.sizes[2])
+    )
     make, model, _ = case.codes
     np.testing.assert_array_equal(layout.tree.parent[2][variant], model)
     np.testing.assert_array_equal(layout.tree.parent[1][model], make)
@@ -383,41 +383,109 @@ def test_nested_design_products_match_the_grouped_design() -> None:
 # ── Leaf row pass ─────────────────────────────────────────────────────────
 
 
+def _leaf_sums(leaf: np.ndarray, values: np.ndarray, size: int) -> np.ndarray:
+    return np.stack([np.bincount(leaf, weights=column, minlength=size) for column in values.T], 1)
+
+
+def _dense_leaf_reference(case: NestedCase, layout: NestedStructuredLayout, weights: np.ndarray):
+    """Centred rows ``x - c``, leaf weights, plain leaf means of ``x - c`` and their allowance.
+
+    The reference rounds ``x - c`` exactly as the row pass does; either mean is
+    within ``(n_leaf + 4) eps`` of the exact mean relative to the absolute mass
+    ``sum w |x - c|``, so the two differ by at most twice that.
+    """
+    Xc = _border_rows(layout) - layout.border_center
+    leaf, K = case.codes[2], case.sizes[2]
+    leaf_weight = np.bincount(leaf, weights=weights, minlength=K)
+    active = leaf_weight != 0.0
+    mean, error = np.zeros((K, Xc.shape[1])), np.zeros((K, Xc.shape[1]))
+    n_leaf = np.bincount(leaf, minlength=K).max()
+    mean[active] = _leaf_sums(leaf, weights[:, None] * Xc, K)[active] / leaf_weight[active, None]
+    mass = _leaf_sums(leaf, np.abs(weights[:, None] * Xc), K)
+    error[active] = (n_leaf + 4) * EPS * mass[active] / leaf_weight[active, None]
+    return Xc, leaf_weight, mean, 2 * error
+
+
 def test_leaf_statistics_match_the_dense_formula() -> None:
     case = _nested_case()
     layout = _layout(case)
     stats = build_nested_leaf_statistics(layout, case.matrices, case.weights)
-    X = _border_rows(layout)
-    w, leaf = case.weights, case.codes[2]
-    K = case.sizes[2]
-    leaf_weight = np.bincount(leaf, weights=w, minlength=K)
-    active = leaf_weight != 0.0
-    cross = np.stack([np.bincount(leaf, weights=w * column, minlength=K) for column in X.T], 1)
-    mean = np.zeros_like(cross)
-    mean[active] = cross[active] / leaf_weight[active, None]
-    centered = X - mean[leaf]
+    w, leaf, K = case.weights, case.codes[2], case.sizes[2]
+    Xc, leaf_weight, mean, mean_error = _dense_leaf_reference(case, layout, w)
+    centered = Xc - mean[leaf]
     within = centered.T @ (w[:, None] * centered)
-    absolute_mass = np.stack(
-        [np.bincount(leaf, weights=w * np.abs(column), minlength=K) for column in X.T], 1
-    )
-    n_leaf = np.bincount(leaf, minlength=K).max()
-    # Both means are within (n_leaf + 4) eps of the exact weighted mean, relative
-    # to the absolute mass; the scatter is within (n + 4) eps of its absolute
-    # value about the exact mean, plus the second-order mean term w_l e e'.
-    mean_error = np.zeros_like(mean)
-    mean_error[active] = (n_leaf + 4) * EPS * absolute_mass[active] / leaf_weight[active, None]
+    # The scatter is within (n + 4) eps of its absolute value about the exact
+    # mean, plus the second-order mean term w_l e e'.
     absolute_scatter = np.abs(centered).T @ (w[:, None] * np.abs(centered))
     within_bound = 2 * (case.dm.n + 4) * EPS * absolute_scatter + 4 * (
         mean_error.T @ (leaf_weight[:, None] * mean_error)
     )
+    # The absolute mass sums (n + 4)-eps-rounded squares of deviations that each
+    # move with their mean, each row charged its own non-negative weight.
+    assert np.all(w >= 0.0)
+    moved = mean_error[leaf]
+    absolute = w @ centered**2
+    absolute_bound = w @ (
+        (case.dm.n + 4) * EPS * centered**2 + 2 * np.abs(centered) * moved + moved**2
+    )
+    # The raw cross a_l (m_l + c): the mean's allowance, two roundings, and the
+    # reference's own leaf sums.
+    X = _border_rows(layout)
+    raw_mean = np.abs(mean + layout.border_center)
+    n_leaf = np.bincount(leaf, minlength=K).max()
+    cross = _leaf_sums(leaf, w[:, None] * X, K)
+    cross_bound = leaf_weight[:, None] * (mean_error + 2 * EPS * raw_mean) + (
+        n_leaf + 2
+    ) * EPS * _leaf_sums(leaf, np.abs(w[:, None] * X), K)
 
     np.testing.assert_array_equal(stats.weight, leaf_weight)
-    assert np.all(np.abs(stats.cross - cross) <= 2 * (n_leaf + 2) * EPS * absolute_mass)
-    assert np.all(np.abs(stats.mean - mean) <= 2 * mean_error)
-    np.testing.assert_array_equal(stats.mean[~active], 0.0)
+    np.testing.assert_array_equal(stats.center, layout.border_center)
+    assert np.all(np.abs(stats.mean - mean) <= mean_error)
+    np.testing.assert_array_equal(stats.mean[leaf_weight == 0.0], 0.0)
     assert np.all(np.abs(stats.within - within) <= within_bound)
     np.testing.assert_array_equal(stats.within, stats.within.T)
+    assert np.all(np.abs(stats.absolute - absolute) <= absolute_bound)
+    assert np.all(np.abs(stats.cross - cross) <= cross_bound)
     assert stats.deviation is None
+
+
+def _with_dense(case: NestedCase, dense: np.ndarray) -> NestedCase:
+    matrices = [DenseGroupMatrix(dense), *case.matrices[1:]]
+    return replace(case, dm=DesignMatrix(matrices, n=case.dm.n, p=case.dm.p))
+
+
+def test_leaf_statistics_carry_no_column_offset() -> None:
+    """A column offset by 1e8 gives the same leaf means and scatter up to rounding at its spread.
+
+    The normal column is put on a 2^-20 grid so that ``x + 1e8`` is exact:
+    both designs hold the same data up to the offset.  The offset column is
+    centred (its mean exceeds its spread), so its means round at ``|x - c|``;
+    raw means would carry ``eps * 1e8`` of rounding.
+    """
+    dense = _nested_case().matrices[0].M.copy()
+    dense[:, 1] = np.round(dense[:, 1] * 2.0**20) / 2.0**20
+    case = _with_dense(_nested_case(), dense)
+    offset = np.zeros(dense.shape[1])
+    offset[1] = 1e8
+    shifted_case = _with_dense(case, dense + offset)
+    layout, shifted_layout = _layout(case), _layout(shifted_case)
+    stats = build_nested_leaf_statistics(layout, case.matrices, case.weights)
+    shifted = build_nested_leaf_statistics(shifted_layout, shifted_case.matrices, case.weights)
+    assert shifted.center[1] != 0.0 and stats.center[1] == 0.0
+    w, leaf = case.weights, case.codes[2]
+    Xc, leaf_weight, mean, mean_error = _dense_leaf_reference(case, layout, w)
+    # the shifted means about their own centre: x + 1e8 - c' is exact (Sterbenz),
+    # so an observed leaf's mean moves by c' - 1e8 at one rounding of its size
+    q, active = dense.shape[1], leaf_weight != 0.0
+    moved = shifted.mean[:, :q] + (shifted.center[:q] - offset - stats.center[:q])
+    error = np.abs(moved - stats.mean[:, :q])[active]
+    assert np.all(error <= (2 * mean_error[:, :q] + 2 * EPS * np.abs(mean[:, :q]))[active])
+    centered = np.abs(Xc - mean[leaf])
+    # each scatter is within its own bound of the exact centred scatter
+    within_bound = 4 * (case.dm.n + 4) * EPS * (centered.T @ (w[:, None] * centered)) + 8 * (
+        mean_error.T @ (leaf_weight[:, None] * mean_error)
+    )
+    assert np.all(np.abs(shifted.within - stats.within) <= within_bound)
 
 
 @pytest.mark.parametrize("weight_scale", [1.0, 1e4])
@@ -427,11 +495,12 @@ def test_leaf_constant_columns_give_exact_means_and_zero_scatter(weight_scale) -
     stats = build_nested_leaf_statistics(layout, case.matrices, case.weights)
     dense = case.matrices[0].M
     reference = np.zeros((case.sizes[2], dense.shape[1]))
-    reference[case.codes[2]] = dense
+    reference[case.codes[2]] = dense - layout.border_center[: dense.shape[1]]
     active = stats.weight != 0.0
     columns = list(LEAF_CONSTANT_COLUMNS)
-    # The shifted mean of a column constant within a leaf is that constant,
-    # and its centred scatter row and column are exactly zero (§3.4).
+    # The shifted mean of a column constant within a leaf is that constant
+    # less the centre, and its centred scatter row and column are exactly zero
+    # (§3.4).
     np.testing.assert_array_equal(
         stats.mean[np.ix_(active, columns)], reference[active][:, columns]
     )
@@ -443,6 +512,31 @@ def test_leaf_constant_columns_give_exact_means_and_zero_scatter(weight_scale) -
     np.testing.assert_array_equal(signed.within[columns, :], 0.0)
 
 
+def test_leaf_means_are_shifted_about_a_weighted_row() -> None:
+    """A column constant on a leaf's weighted rows keeps an exact mean and zero scatter.
+
+    Each leaf's first row gets zero weight and a different value in the leaf
+    attribute: the mean of the weighted rows is still that attribute exactly,
+    which a shift about the zero-weight first row would round.
+    """
+    case = _nested_case()
+    variant = case.codes[2]
+    first = np.unique(variant, return_index=True)[1]
+    weights = case.weights.copy()
+    weights[first] = 0.0
+    dense = case.matrices[0].M.copy()
+    attribute = dense[:, 3].copy()
+    dense[first, 3] += 0.1
+    moved = _with_dense(case, dense)
+    layout = _layout(moved)
+    stats = build_nested_leaf_statistics(layout, moved.matrices, weights)
+    active = stats.weight != 0.0
+    expected = np.zeros(case.sizes[2])
+    expected[variant] = attribute - layout.border_center[3]
+    np.testing.assert_array_equal(stats.mean[active, 3], expected[active])
+    np.testing.assert_array_equal(stats.within[3], 0.0)
+
+
 def test_leaf_statistics_do_not_depend_on_the_chunking() -> None:
     case = _nested_case()
     layout = _layout(case)
@@ -450,7 +544,7 @@ def test_leaf_statistics_do_not_depend_on_the_chunking() -> None:
         build_nested_leaf_statistics(layout, case.matrices, case.weights, chunk_size=size)
         for size in (1, 7, 8192)
     ]
-    X = _border_rows(layout)
+    X = _border_rows(layout) - layout.border_center
     centered = X - results[-1].mean[case.codes[2]]
     absolute_scatter = np.abs(centered).T @ (case.weights[:, None] * np.abs(centered))
     for stats in results[:-1]:
@@ -469,20 +563,23 @@ def test_signed_pass_deviation_matches_exact_rational_sums() -> None:
     signed = build_nested_leaf_statistics(layout, case.matrices, a, mean=data.mean)
     assert signed.mean is not data.mean
     np.testing.assert_array_equal(signed.mean, data.mean)
-    X, leaf = _border_rows(layout), case.codes[2]
+    X, leaf, c = _border_rows(layout), case.codes[2], layout.border_center
     exact = [[Fraction(0)] * X.shape[1] for _ in range(case.sizes[2])]
     for row in range(case.dm.n):
         cell = leaf[row]
         for column in range(X.shape[1]):
-            difference = Fraction(float(X[row, column])) - Fraction(float(data.mean[cell, column]))
+            mean = Fraction(float(c[column])) + Fraction(float(data.mean[cell, column]))
+            difference = Fraction(float(X[row, column])) - mean
             exact[cell][column] += Fraction(float(a[row])) * difference
     exact = np.array([[float(value) for value in row] for row in exact])
-    centered = np.abs(X - data.mean[leaf]) * np.abs(a)[:, None]
-    absolute = np.stack(
-        [np.bincount(leaf, weights=column, minlength=case.sizes[2]) for column in centered.T], 1
-    )
+    # x - c rounds at |x - c|, the subtraction of the mean at |x - c - m|
+    centered = (np.abs(X - c - data.mean[leaf]) + np.abs(X - c)) * np.abs(a)[:, None]
+    absolute = _leaf_sums(leaf, centered, case.sizes[2])
     n_leaf = np.bincount(leaf).max()
     assert np.all(np.abs(signed.deviation - exact) <= (n_leaf + 4) * EPS * absolute)
+    # a vector with a negative weight charges every weighted row max |a|
+    squares = np.max(np.abs(a)) * ((a != 0.0) @ (X - c - data.mean[leaf]) ** 2)
+    assert np.all(np.abs(signed.absolute - squares) <= (case.dm.n + 4) * EPS * squares)
 
 
 # ── System and penalties ─────────────────────────────────────────────────
@@ -504,10 +601,23 @@ def test_nested_system_matches_dense_moments() -> None:
     assert np.all(np.abs(system.xtw_structured - Z.T @ w) <= bound * (Z.T @ np.abs(w)))
     assert np.all(np.abs(system.xtwz_structured - Z.T @ Wz) <= bound * (Z.T @ np.abs(Wz)))
     assert np.all(np.abs(system.xtw_small - X.T @ w) <= bound * (np.abs(X).T @ np.abs(w)))
-    assert np.all(
-        np.abs(system.operator.A - X.T @ (w[:, None] * X))
-        <= 2 * bound * (np.abs(X).T @ (np.abs(w)[:, None] * np.abs(X)))
+    assert np.all(np.abs(system.xtwz_small - X.T @ Wz) <= bound * (np.abs(X).T @ np.abs(Wz)))
+    # A = within + M' diag(w) M from the rounded raw means M = m + delta: the
+    # within bound, sum_l w_l (2 |m| |delta| + 2 delta^2), and both sums' rounding.
+    Xc, leaf_weight, mean, mean_error = _dense_leaf_reference(case, layout, w)
+    centered = np.abs(Xc - mean[case.codes[2]])
+    raw = np.abs(mean + layout.border_center)
+    delta = mean_error + 2 * EPS * raw
+    W_l = leaf_weight[:, None]
+    A_bound = (
+        2 * (case.dm.n + 4) * EPS * (centered.T @ (w[:, None] * centered))
+        + raw.T @ (W_l * delta)
+        + delta.T @ (W_l * raw)
+        + 2 * delta.T @ (W_l * delta)
+        + (case.sizes[2] + 2) * EPS * (raw.T @ (W_l * raw))
+        + bound * (np.abs(X).T @ (np.abs(w)[:, None] * np.abs(X)))
     )
+    assert np.all(np.abs(system.operator.A - X.T @ (w[:, None] * X)) <= A_bound)
     assert system.sum_w == pytest.approx(np.sum(w), rel=bound)
     assert system.chain_group_names == ("make", "model", "variant")
     assert system.dominant_group_name == "variant"
@@ -609,15 +719,15 @@ def _auto_case(n: int, q: int, sizes: tuple[int, ...]):
     return matrices, groups, groups[-1].end
 
 
-# The measured winners that anchor the auto rule in selection.py (2026-09-27):
-# rows, border width without the intercept, chain sizes coarsest to finest.
+# The measured winners that anchor the auto rule in selection.py (2026-09-27, on
+# the one-pass row pass): rows, border width without the intercept, chain sizes
+# coarsest to finest.  DVSA C at 200k rows measured a tie and pins nothing.
 @pytest.mark.parametrize(
     ("n", "q", "sizes", "winner"),
     [
-        pytest.param(3_885, 104, (51, 407), "single", id="pg17-C-exact-5k-rows"),
+        pytest.param(3_885, 104, (51, 407), "nested", id="pg17-C-exact-5k-rows"),
         pytest.param(77_014, 104, (87, 942), "single", id="pg17-C"),
-        pytest.param(15_794, 35, (91, 1_332), "single", id="dvsa-C-20k-rows"),
-        pytest.param(157_593, 36, (223, 3_749), "single", id="dvsa-C-200k-rows"),
+        pytest.param(15_794, 35, (91, 1_332), "nested", id="dvsa-C-20k-rows"),
         pytest.param(15_794, 35, (91, 1_332, 2_404), "nested", id="dvsa-D-20k-rows"),
         pytest.param(157_593, 36, (223, 3_749, 6_038), "nested", id="dvsa-D-200k-rows"),
     ],

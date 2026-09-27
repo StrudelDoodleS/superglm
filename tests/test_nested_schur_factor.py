@@ -4,11 +4,14 @@ Every protocol method of ``NestedSchurFactor`` and ``ProfiledNestedSchurFactor``
 is checked against an exact rational assembly of ``H`` from the same float64
 rows, with its exact inverse and determinant.  Bounds are derived per
 quantity from the dimensions, ``eps`` and the Jacobi-scaled condition number
-``kappa_s(Q)`` of the exact Schur complement: ``gamma_tree = n_tree eps`` for
-the recursions that sum non-negative terms, ``gamma_Q = (n + k + q + 10)
-eps`` for the PSD-sum ``Q`` (``_bounds``) and ``gamma_border = q kappa_s(Q)
-gamma_Q`` for one pass through ``Q^-1``, with small integer multiples
-counting the passes.
+``kappa_s(Q)`` of the exact Schur complement in the factor's centred
+coordinates: ``gamma_tree = n_tree eps`` for the recursions that sum
+non-negative terms, ``gamma_Q = (n + k + q + 10) eps`` for the PSD-sum ``Q``
+(``_bounds``) and ``gamma_border = q kappa_s(Q) gamma_Q`` for one pass
+through ``Q^-1``, with small integer multiples counting the passes.  The
+bounds carry no column offset: the leaf statistics are formed about the
+global centre ``c`` (``_center``), so their rounding scales with ``|x - c|``,
+which F9 checks with a column offset by 1e7.
 Positive quantities are measured relative to their value, signed quantities
 against a Cauchy-Schwarz scale, never against ``sum |parts|``.  Solutions of
 ``H x = r`` are certified by their residual on every fixture and compared
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import math
 import tracemalloc
+from dataclasses import replace
 from fractions import Fraction
 from functools import cache
 
@@ -62,11 +66,12 @@ def _make_fixture(
     duplicate=None,
     width=5,
     normal_scale=1.0,
+    offset=0.0,
 ):
     """Chain coarse to fine with ``sizes`` observed and ``extra`` unobserved nodes per level.
 
     The border is the intercept, a normal (times ``normal_scale``), a column
-    with mean 10, a leaf attribute and a root attribute (``width=5``);
+    with mean ``10 + offset``, a leaf attribute and a root attribute (``width=5``);
     ``crossed`` adds that many indicator columns of a crossed factor with its
     own identity penalty; ``duplicate`` repeats that border column
     unpenalised; ``width=0`` is the chain-only design.  Ported from the
@@ -97,7 +102,7 @@ def _make_fixture(
     columns = [
         np.ones(n),
         normal_scale * rng.normal(size=n),
-        10.0 + 3.0 * rng.normal(size=n),
+        offset + 10.0 + 3.0 * rng.normal(size=n),
         leaf_attr[leaf],
         root_attr[root_of_leaf[leaf]],
     ][:width]
@@ -150,6 +155,9 @@ FIXTURES = {
     "F5": dict(seed=5, sizes=[3, 7, 16], n=600, lam=[1e-7, 1e8, 1e-3], wscale=1e-3),
     "F6": dict(seed=6, sizes=[2, 4, 8, 14], n=500, lam=[1e-4, 2.0, 1e-6, 5.0], extra=(1, 0, 1, 1)),
     "F7": dict(seed=1, sizes=[3, 7, 16], n=600, lam=[0.7, 0.05, 3.0], crossed=3),
+    # F4's penalties with the mean-10 column offset by 1e7: kappa_s of the raw Q
+    # is ~1e12 larger than the centred one the factor works on
+    "F9": dict(seed=4, sizes=[3, 7, 16], n=600, lam=[1e8, 1e-7, 1.0], wscale=1e4, offset=1e7),
     # a duplicated leaf attribute (zero within-leaf scatter: every entry of its
     # Schur rows is on the lambda scale) and a duplicated normal column, plain
     # and at scale 1e3 (within-leaf scatter on the raw weight scale, 1e13
@@ -161,9 +169,9 @@ FIXTURES = {
     "F8e": dict(**_DUPLICATED, lam=[1e-7] * 3, wscale=1e4, duplicate=1, normal_scale=1e3),
     "F8f": dict(**_DUPLICATED, lam=[1e-9] * 3, wscale=1e6, duplicate=1),
 }
-MAIN = ["F1", "F2", "F3", "F4", "F5", "F6", "F7"]
+MAIN = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F9"]
 TRUNCATED = ["F8a", "F8b", "F8c", "F8d", "F8e", "F8f"]
-PROFILED = ["F1", "F2", "F4", "F6", "F7"]
+PROFILED = ["F1", "F2", "F4", "F6", "F7", "F9"]
 # Fixtures whose H is well conditioned enough for forward solve comparisons.
 WELL_CONDITIONED = {"F1", "F7"}
 
@@ -193,11 +201,23 @@ def _bincols(index, values, size):
     return np.stack(columns, axis=1) if columns else np.zeros((size, 0))
 
 
+def _center(fx):
+    """The builder's global centre, the rule of ``border_center``: the mean of each
+    column whose offset exceeds its spread, 0 elsewhere and on the intercept column 0."""
+    mean, spread = fx["X"].mean(axis=0), fx["X"].std(axis=0)
+    center = np.where(np.abs(mean) > spread, mean, 0.0)
+    center[:1] = 0.0
+    return center
+
+
 def _leaf_statistics(fx, weights, mean=None, *, shifted=True):
-    """Leaf statistics of ``weights`` from the dense rows about ``mean`` (the data pass when None)."""
-    X, leaf, K = fx["X"], fx["leaf"], fx["K"][-1]
+    """Leaf statistics of ``weights`` from the dense rows about ``mean`` (the data pass when None).
+
+    The rows are centred on ``_center`` as the production row pass centres them.
+    """
+    center = _center(fx)
+    X, leaf, K = fx["X"] - center, fx["leaf"], fx["K"][-1]
     total = np.bincount(leaf, weights=weights, minlength=K)
-    cross = _bincols(leaf, weights[:, None] * X, K)
     if mean is None:
         order = np.argsort(leaf, kind="stable")
         first = order[np.r_[True, leaf[order][1:] != leaf[order][:-1]]]
@@ -214,8 +234,18 @@ def _leaf_statistics(fx, weights, mean=None, *, shifted=True):
         deviation = _bincols(leaf, weights[:, None] * (X - mean[leaf]), K)
     residual = X - mean[leaf]
     within = (residual * weights[:, None]).T @ residual
+    # the row pass's weight error scale: each row's own weight when none is
+    # negative, max |w| on every weighted row otherwise
+    signed = np.any(weights < 0.0)
+    error = np.max(np.abs(weights)) * (weights != 0.0) if signed else weights
+    absolute = error @ residual**2
     return NestedLeafStatistics(
-        weight=total, cross=cross, mean=mean, within=0.5 * (within + within.T), deviation=deviation
+        weight=total,
+        mean=mean,
+        within=0.5 * (within + within.T),
+        absolute=absolute,
+        center=center,
+        deviation=deviation,
     )
 
 
@@ -226,24 +256,18 @@ def _tree(fx):
 def _operator(fx, tree, weights, mean=None, *, columns=None):
     """Leaf-form operator in the exact ordering (nodes first, then the border)."""
     stats = _leaf_statistics(fx, weights, mean)
-    X = fx["X"]
     if columns is not None:
         stats = NestedLeafStatistics(
             weight=stats.weight,
-            cross=stats.cross[:, columns],
             mean=stats.mean[:, columns],
             within=stats.within[np.ix_(columns, columns)],
+            absolute=stats.absolute[columns],
+            center=stats.center[columns],
             deviation=None if stats.deviation is None else stats.deviation[:, columns],
         )
-        X = X[:, columns]
-    A = (X * weights[:, None]).T @ X
-    k, q = tree.n_nodes, X.shape[1]
+    k, q = tree.n_nodes, stats.width
     return NestedDataOperator(
-        tree=tree,
-        leaf=stats,
-        A=0.5 * (A + A.T),
-        small_indices=np.arange(k, k + q),
-        structured_indices=np.arange(k),
+        tree=tree, leaf=stats, small_indices=np.arange(k, k + q), structured_indices=np.arange(k)
     )
 
 
@@ -472,7 +496,11 @@ def _bounds(fx, q, kappa_s):
     rows in this file's builder (``n eps`` componentwise against ``sqrt(W_ii
     W_jj)``), the between-child terms over the ``k`` nodes and the shifted
     means, so ``gamma_Q = (n + k + q + 10) eps``; ``n_tree`` covers only the
-    per-node recursions.
+    per-node recursions.  What the constants assume: each mean is known to
+    ``eps |x - c|`` with ``c`` the global centre, so ``gamma_Q`` holds when a
+    column's ``max |x - c|`` is of the order of its spread (the offset of a
+    raw column cancels in ``x - c``; its range does not), and ``kappa_s`` is
+    that of the centred ``Q`` the factor decides rank on.
     """
     rows_per_leaf = np.bincount(fx["leaf"], minlength=fx["K"][-1]).max()
     fan = max(np.bincount(fx["parents"][j]).max() for j in range(1, fx["depth"]))
@@ -522,7 +550,11 @@ def _case(name):
     refs["Hinv_f"] = Hinv_f
     refs["logdet"] = _log_det(H)
     border = range(k, p)
-    refs["Q"] = _floats(_inverse_pair(_block(Hinv, border, border)))
+    # the Schur complement in the factor's centred coordinates: R' Q R with
+    # R = I - e_0 c' on the border (the intercept is border column 0)
+    R = _pair(np.eye(q) - np.outer(np.eye(q)[0], _center(fx)))
+    Q = _product(_product((R[0].T, R[1]), _inverse_pair(_block(Hinv, border, border))), R)
+    refs["Q"] = _floats(Q)
     refs["kappa_s"] = _scaled_condition(refs["Q"])
     refs["gamma_tree"], refs["gamma_border"] = _bounds(fx, q, refs["kappa_s"])
     refs["pivots"] = _exact_pivots(H_frac, fx, k)
@@ -626,7 +658,19 @@ def _case(name):
     all_c = range(pc)
     HO1c, HO2c = _product(Hinv_c, O1c), _product(Hinv_c, O2c)
     refs["trace_O1_c"] = float(np.sum(_diagonal(HO1c)))
-    refs["diag_O1_c"] = _diagonal(HO1c)
+    # The factor's diagonal is (H_aug^-1 O_aug P)_jj with P built on the float
+    # mean_x (the operators' centre): the exact-centre value less
+    # (mean_x - mean)_j (H_aug^-1 y)_j, y = O_aug e_0.
+    Hy = _product(Hinv, (O1[0][:, [k]], O1[1]))
+    refs["diag_O1_c"] = _diagonal(HO1c) - np.array(
+        [
+            float(
+                (_frac(refs["mean_x"][j]) - Fraction(int(mean[j]), mean_den))
+                * Fraction(int(Hy[0][slope[j], 0]), Hy[1])
+            )
+            for j in range(pc)
+        ]
+    )
     refs["scale_diag_O1_c"] = np.sqrt(np.diag(refs["Hinv_c_f"]) * _row_products(O1c, HO1c))
     refs["tr11_c"], refs["tr22_c"] = _trace_product(HO1c, HO1c), _trace_product(HO2c, HO2c)
     refs["tr12_c"] = _trace_product(HO1c, HO2c)
@@ -705,7 +749,7 @@ def _profiled_case(name):
     penalized = _penalized(fx, data, columns)
     k = refs["k"]
     augmented = NestedSchurFactor(
-        penalized.augmented(refs["sum_w"], refs["xtw"][k:]),
+        penalized.augmented(),
         chain_group_names=CHAIN[: fx["depth"]],
         chain_group_indices=tuple(range(fx["depth"])),
         intercept=True,
@@ -1204,6 +1248,48 @@ def test_rank_deficient_border_is_truncated_by_exactly_one_direction(name):
     assert abs(scaled_border @ null[k:]) <= gamma * np.linalg.norm(scaled_border) * np.sqrt(2.0)
 
 
+def _with_border_column(fx, column):
+    fx = dict(fx)
+    fx["X"] = np.column_stack([fx["X"], column])
+    fx["S_b"], fx["Omega_b"] = np.pad(fx["S_b"], (0, 1)), np.pad(fx["Omega_b"], (0, 1))
+    return fx
+
+
+def test_a_truncated_factor_maps_its_centred_null_to_raw_coordinates():
+    """A centred null direction that touches the intercept is mapped by ``R`` (§3.7).
+
+    A column that is 5 on the weighted rows and 0 on the zero-weight ones is
+    centred at its row mean ``c``, so its centred null is ``e_j - (5 - c) e_0``:
+    ``diag(H^+ H)`` on the border must be the raw ``R Q^+ Q R^-1`` that the
+    factor's own solves give, not the centred one (they differ by 3.7 here).
+    A column that is 0 on the weighted rows and 7 on the (majority of)
+    zero-weight rows has the raw null ``e_j``: the intercept stays estimable
+    although the centred null touches it.
+    """
+    fx = _make_fixture(**FIXTURES["F1"])
+    fx = _with_border_column(fx, np.where(fx["w"] != 0.0, 5.0, 0.0))
+    factor = _factor(fx)
+    border, p = factor.small_indices, factor.shape[0]
+    assert factor.rank == p - 1 and factor._center[-1] != 0.0
+    eigenvalues = factor.scaled_schur_eigenvalues()
+    gamma_tree, gamma_border = _bounds(fx, len(border), eigenvalues[-1] / eigenvalues[1])
+    gamma = 4 * (gamma_tree + gamma_border)
+    unit = _unit_columns(p, border)
+    projector = np.diag(factor.solve(factor.operator.matvec(unit))[border])
+    penalty = np.zeros((p, p))
+    penalty[np.ix_(border, border)] = factor.operator.border_penalty
+    HS = np.diag(factor.solve(penalty @ unit)[border])
+    edf = factor.inverse_operator_diagonal(factor.operator.data)[border]
+    assert np.all(np.abs(edf - (projector - HS)) <= gamma * (1.0 + np.abs(projector) + np.abs(HS)))
+
+    fx = _make_fixture(**(FIXTURES["F1"] | dict(zero_leaves=tuple(range(4, 16)))))
+    fx = _with_border_column(fx, np.where(fx["w"] != 0.0, 0.0, 7.0))
+    factor = _factor(fx)
+    assert factor.rank == factor.shape[0] - 1 and factor._null_scaled[0, 0] != 0.0
+    estimable = factor.coefficient_estimable()[factor.small_indices]
+    assert np.array_equal(estimable, [True] * 5 + [False])
+
+
 def test_rank_decisions_are_taken_on_the_scaled_schur_complement():
     """F8c has cond(Q) near 1e15 unscaled: the scaled rule keeps five directions, nullity one."""
     refs = _case("F8c")
@@ -1222,7 +1308,6 @@ def _factor_with_leaf(fx, data, leaf):
     operator = NestedDataOperator(
         tree=data.tree,
         leaf=leaf,
-        A=data.A,
         small_indices=data.small_indices,
         structured_indices=data.structured_indices,
     )
@@ -1241,12 +1326,7 @@ def _with_within(fx, data, changes):
         within[i, j] += value
         if i != j:
             within[j, i] += value
-    leaf = data.leaf
-    return _factor_with_leaf(
-        fx,
-        data,
-        NestedLeafStatistics(weight=leaf.weight, cross=leaf.cross, mean=leaf.mean, within=within),
-    )
+    return _factor_with_leaf(fx, data, replace(data.leaf, within=within))
 
 
 def test_material_negative_curvature_is_refused_by_the_scaled_eigenvalue_test():
@@ -1263,32 +1343,72 @@ def test_material_negative_curvature_is_refused_by_the_scaled_eigenvalue_test():
         _with_within(fx, data, [(3, 3, -1e3)])
 
 
-def test_a_border_column_with_rounding_curvature_is_an_exact_null_direction():
-    """``Q_jj`` of 0, -1e-16 and -1e-15 give one rank decision: the column is null (§3.7).
+def test_a_border_column_carried_by_rounding_weights_is_an_exact_null_direction():
+    """On weights with a rounding-negative row, 0, +1e-16 and -1e-16 under a column
+    give one factor (§3.7).
 
-    A column carried only by rows whose weights round to zero has no
-    accumulation, so a sign test on its pivot would decide by rounding noise.
+    Such a vector was formed by a cancellation, so each weighted row is charged
+    ``max|w|``.  The column is non-zero on two rows only; with those rows'
+    weights at rounding level its pivot ``Q_jj`` is ``+-1e-16`` against a floor
+    of ``gamma_Q max|w| sum (x - m)^2``, so it is an exact null direction in
+    all three cases.  A sign test on the pivot, or a floor charged only the
+    column's own weights, keeps ``+1e-16`` with ``1/Q_jj = 1e16`` in the
+    inverse and refuses ``-1e-16`` as materially negative.
     """
     fx = dict(_make_fixture(**FIXTURES["F1"]))
     n, q = len(fx["w"]), fx["X"].shape[1]
-    fx["X"] = np.column_stack([fx["X"], np.zeros(n)])
+    rows = np.flatnonzero(fx["w"])[[10, 200]]
+    # a zero-weight row elsewhere rounds negative in every case
+    fx["w"] = np.array(fx["w"])
+    fx["w"][np.flatnonzero(fx["w"] == 0.0)[0]] = -1e-16
+    rare = np.zeros(n)
+    rare[rows] = 1.0
+    fx["X"] = np.column_stack([fx["X"], rare])
     fx["S_b"], fx["Omega_b"] = np.pad(fx["S_b"], (0, 1)), np.pad(fx["Omega_b"], (0, 1))
-    data = _operator(fx, _tree(fx), fx["w"])
-    p = data.shape[0]
-    assert data.leaf.within[q, q] == 0.0
-    reference = _with_within(fx, data, [])
+    p = _tree(fx).n_nodes + q + 1
+    factors = []
+    for value in (0.0, 1e-16, -1e-16):
+        fx["w"] = np.array(fx["w"])
+        fx["w"][rows] = value
+        factors.append(_factor(fx))
+    reference = factors[0]
+    exact = reference.selected_inverse_diagonal(np.arange(p))
     assert reference.rank_truncated and reference.rank == p - 1
     assert not reference.coefficient_estimable()[p - 1]
-    exact = reference.selected_inverse_diagonal(np.arange(p))
-    for curvature in (-1e-16, -1e-15):
-        factor = _with_within(fx, data, [(q, q, curvature)])
+    for factor in factors[1:]:
         assert factor.rank == p - 1 and factor.used_dense_fallback
         assert np.array_equal(factor.coefficient_estimable(), reference.coefficient_estimable())
         assert abs(factor.logdet() - reference.logdet()) <= 8 * EPS * abs(reference.logdet())
-        # one scaled diagonal entry moved by at most eps: the retained inverse
-        # moves by a few eps kappa_s^2 (kappa_s = 3.4 here), the null column by eps
+        # the two rows moved every other statistic by at most 1e-16 of their weight
         diagonal = factor.selected_inverse_diagonal(np.arange(p))
         assert np.all(np.abs(diagonal - exact) <= 64 * EPS * (np.abs(exact) + exact.max()))
+
+
+@pytest.mark.parametrize("ratio", [1e-14, 1e-15])
+def test_a_border_column_carried_by_tiny_positive_weights_keeps_its_pivot(ratio):
+    """Non-negative weights are charged componentwise, so a column carried only by
+    two rows of weight ``ratio max|w|`` is not null (§3.7).
+
+    Fisher weights are each accurate to a few ulp, so these are genuine weights:
+    below ``gamma_Q max|w|`` but far above their own rounding.  The factor keeps
+    the rank of the Jacobi-scaled augmented ``H`` at ``1e-10 lambda_max``, the
+    dense convention; a floor charged ``max|w|`` per row nulls the column.
+    """
+    fx = dict(_make_fixture(**FIXTURES["F1"]))
+    rows = np.flatnonzero(fx["w"])[[10, 200]]
+    rare = np.zeros(len(fx["w"]))
+    rare[rows] = 1.0
+    fx = _with_border_column(fx, rare)
+    fx["w"] = np.array(fx["w"])
+    fx["w"][rows] = ratio * np.max(fx["w"])
+    factor = _factor(fx)
+    p = factor.shape[0]
+    H = factor.operator.matvec(np.eye(p))
+    scale = 1.0 / np.sqrt(np.diag(H))
+    eigenvalues = np.linalg.eigvalsh(scale[:, None] * (0.5 * (H + H.T)) * scale[None, :])
+    assert np.sum(eigenvalues > 1e-10 * eigenvalues[-1]) == p
+    assert factor.rank == p and not factor.rank_truncated
+    assert factor.coefficient_estimable()[p - 1]
 
 
 def test_refusals_by_the_iterate_are_linalg_errors():
@@ -1298,17 +1418,9 @@ def test_refusals_by_the_iterate_are_linalg_errors():
     stats = data.leaf
     bad_weight = np.where(np.arange(len(stats.weight)) == 2, np.nan, stats.weight)
     with pytest.raises(np.linalg.LinAlgError, match="finite"):
-        NestedLeafStatistics(
-            weight=bad_weight, cross=stats.cross, mean=stats.mean, within=stats.within
-        )
+        replace(stats, weight=bad_weight)
     with pytest.raises(np.linalg.LinAlgError, match="finite"):
-        NestedDataOperator(
-            tree=tree,
-            leaf=stats,
-            A=np.full(data.A.shape, np.inf),
-            small_indices=data.small_indices,
-            structured_indices=data.structured_indices,
-        )
+        replace(stats, absolute=np.full(stats.width, np.inf))
     # a zero per-node penalty at an unobserved leaf: lambda_u = 0 and omega_u = 0
     penalty = [np.full(K, lam) for K, lam in zip(fx["K"], fx["lam"], strict=True)]
     penalty[-1][-1] = 0.0
@@ -1323,13 +1435,9 @@ def test_refusals_by_the_iterate_are_linalg_errors():
         )
 
     def with_weight(weight):
-        leaf = NestedLeafStatistics(
-            weight=weight, cross=stats.cross, mean=stats.mean, within=stats.within
-        )
         return NestedDataOperator(
             tree=tree,
-            leaf=leaf,
-            A=data.A,
+            leaf=replace(stats, weight=weight),
             small_indices=data.small_indices,
             structured_indices=data.structured_indices,
         )
@@ -1380,12 +1488,14 @@ def test_malformed_calls_are_value_errors_and_foreign_operators_type_errors():
     other_means = NestedDataOperator(
         tree=tree,
         leaf=plain,
-        A=O1.A,
         small_indices=O1.small_indices,
         structured_indices=O1.structured_indices,
     )
     with pytest.raises(ValueError, match="leaf means"):
         factor.trace_inverse_operator(other_means)
+    other_centre = replace(O1, leaf=replace(O1.leaf, center=np.zeros(q)))
+    with pytest.raises(ValueError, match="leaf means"):
+        factor.inverse_operator_diagonal(other_centre)
     moved = list(fx["parents"])
     moved[2] = np.array(moved[2])
     moved[2][5] = 1 - moved[2][5]
@@ -1393,7 +1503,6 @@ def test_malformed_calls_are_value_errors_and_foreign_operators_type_errors():
     foreign = NestedDataOperator(
         tree=other_tree,
         leaf=O1.leaf,
-        A=O1.A,
         small_indices=O1.small_indices,
         structured_indices=O1.structured_indices,
     )
@@ -1402,7 +1511,6 @@ def test_malformed_calls_are_value_errors_and_foreign_operators_type_errors():
     swapped = NestedDataOperator(
         tree=tree,
         leaf=O1.leaf,
-        A=O1.A,
         small_indices=O1.small_indices[::-1],
         structured_indices=O1.structured_indices,
     )
@@ -1511,14 +1619,19 @@ def test_augmentation_matches_the_operator_applied_to_the_intercept_column():
     slope = _operator(fx, tree, fx["a"], O1.leaf.mean, columns=columns)
     Xs = np.column_stack([_incidence(fx)[fx["leaf"]], fx["X"][:, 1:]])
     cross = Xs.T @ fx["a"]
-    augmented = slope.augmented(float(np.sum(fx["a"])), cross[k:])
+    augmented = slope.augmented()
     e0 = np.zeros(p)
     e0[0] = 1.0
     column = augmented.matvec(e0)
-    assert column[0] == float(np.sum(fx["a"]))
+    # the intercept column sums the leaf statistics: sum_l a_l, and C_leaf' 1
+    # from a_l (m_l + c) + dev_l, rounding at the rows' absolute mass
+    rows_per_leaf = np.bincount(fx["leaf"]).max()
+    mass = np.abs(fx["a"]) @ np.abs(Xs)
+    assert abs(column[0] - np.sum(fx["a"])) <= (len(fx["a"]) + 2) * EPS * np.sum(np.abs(fx["a"]))
     assert np.array_equal(column[1 : k + 1], np.concatenate(tree.subtree_sum(slope.leaf.weight)))
-    assert np.array_equal(column[k + 1 :], cross[k:])
+    assert np.all(np.abs(column[k + 1 :] - cross[k:]) <= 8 * rows_per_leaf * EPS * mass[k:])
     assert np.array_equal(augmented.leaf.mean[:, 0], np.ones(fx["K"][-1]))
+    assert augmented.leaf.center[0] == 0.0 and augmented.leaf.absolute[0] == 0.0
     assert np.all(augmented.leaf.within[0] == 0.0) and np.all(augmented.leaf.within[:, 0] == 0.0)
     assert augmented.leaf.deviation is not None and np.all(augmented.leaf.deviation[:, 0] == 0.0)
     assert augmented.tree is tree
@@ -1530,7 +1643,7 @@ def test_augmentation_matches_the_operator_applied_to_the_intercept_column():
     atol = 8 * rows_per_leaf * EPS * np.abs(dense_exact).max()
     assert np.allclose(dense_augmented, dense_exact[np.ix_(perm, perm)], rtol=0.0, atol=atol)
     assert np.allclose(augmented.diagonal(), np.diag(dense_exact)[perm], rtol=0.0, atol=atol)
-    penalized = _penalized(fx, slope, columns).augmented(float(np.sum(fx["w"])), refs["xtw"][k:])
+    penalized = _penalized(fx, slope, columns).augmented()
     assert np.all(penalized.border_penalty[0] == 0.0)
     assert penalized.border_penalty.shape == (refs["q"], refs["q"])
 

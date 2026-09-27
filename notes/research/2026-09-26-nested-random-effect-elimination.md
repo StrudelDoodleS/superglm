@@ -173,8 +173,8 @@ table). Cost O(k q); memory k x q; `MF` needs no path sum.
 
 With `m_u = c̃_u / ω_u` (zero when `ω_u = 0`; for leaves `m_ℓ = x̄_ℓ`, the
 weighted leaf mean of the border rows), computed as shifted means: at a leaf
-`m_ℓ = x_ref(ℓ) + Σ_{r∈ℓ} w_r (x_r − x_ref(ℓ)) / w_ℓ` with `x_ref(ℓ)` one row
-of the leaf, and at a parent `m_p = m_ref(p) + Σ_c s_c (m_c − m_ref(p)) / ω_p`
+`m_ℓ = x_ref(ℓ) + Σ_{r∈ℓ} w_r (x_r − x_ref(ℓ)) / w_ℓ` with `x_ref(ℓ)` the
+leaf's first row of non-zero weight, and at a parent `m_p = m_ref(p) + Σ_c s_c (m_c − m_ref(p)) / ω_p`
 with `m_ref(p)` the mean of the child with the largest `s_c`, so that a column
 constant within a node gives `d_c = m_c − m_p = 0` exactly instead of
 `ε`-noise (see the end of this subsection),
@@ -210,6 +210,32 @@ intercept, so `Q_00 ≈ Σ_roots s_u` is lost exactly as in the full subtraction
 form (λ = 1e-7, weights x1e4: `Q_00` relative error 3.3e-2 and `log|H|` error
 1.8e-1 against 7.9e-16 and 1.6e-13 for the row pass; critic run `decision1`,
 re-run here). Decision 1 is therefore settled by measurement, not open.
+
+As built, every leaf statistic is formed on the rows `x − c`, with `c` a
+global centre fixed by the layout (`border_center`): the row mean of each
+border column whose `|mean|` exceeds its spread, 0 elsewhere, so an indicator
+column keeps the exact zeros that carry its exact null directions (section
+3.7). Any fixed `c` is exact algebra; it puts the rounding of the leaf means,
+of `d_u` and of `Q` at `|x − c|` instead of `|x|` (a year or epoch column).
+The intercept factor works in the coordinates `[1, X − 1c']` and maps back
+through `R = I − e_0 c'`, which touches only the intercept row: `Q`, `F`, `e`
+and every closed form are free of the columns' offsets, and traces and
+`log|H|` are invariant. The row pass reads the border rows once, in leaf
+order: the rows sorted stably by leaf code (held with the tree in the nesting
+cache of section 5) are taken in chunks of whole leaves of at least
+`chunk_size = 8192` rows, and each chunk forms its leaves' shifted means and
+then the centred scatter and deviations, by `np.add.reduceat` segments, with
+compensated addition across chunks. A chunk never splits a leaf, so the
+pass's transient memory is `max(chunk_size, largest leaf) × q` doubles per
+temporary, not `chunk_size × q`. On full DVSA step D (25,633,263 rows, `q =
+40`, 53,753 leaves, the largest 336,385 rows) one data pass traced a 457 to
+469 MiB peak against 99 MiB for the 8,192-row two-read pass of the first
+build, on a process of 13.8 to 14.0 GB whose high-water mark during the pass
+was 14.4 GB, below the 15.1 GB peak of the whole fit at the first build
+(measured 2026-09-27). A single level holding most rows would make that
+transient several times the border's dense rows; splitting such leaves needs
+a second read of their rows for the mean, and 78% of DVSA's rows sit in
+leaves of more than 8,192 rows.
 
 ### 3.5 Inverse structure and the Takahashi scalars
 
@@ -283,10 +309,17 @@ fixture, ratio 6.1e+13 against the bound). For the data operator (`a = w`)
 | `inverse_operator_square_diagonal(O)` | data operator (`O = H − S`, the only caller): `1 − 2 λ_u Z^H_uu + λ_u (H⁻¹SH⁻¹)_uu` on the tree and `1 − 2 (Q⁻¹S_b)_jj + ((H⁻¹SH⁻¹)_bb S_b)_jj` on the border, with `H⁻¹SH⁻¹` the penalty sandwich (weighted level pattern `Σ_I λ_I N_I` plus `S_b`); generic operators: `Σ_v (H⁻¹OH⁻¹)_uv O_vu` from the operator sandwich | O(k d² + k q²) |
 | `coefficient_estimable()` | null basis of `Q_s` (section 3.7) mapped back by `D_s` and re-orthonormalised, lifted as `[−F z; z]`, as in the scalar factor | O(k q) |
 
-`Z^H` above is `diag(H⁻¹)`. The profiled (intercept-free) view is the same
-index shift as `ProfiledScalarSchurFactor`: the leaf-level low-rank
-representation with the intercept column dropped from the basis and kept in
-the core.
+`Z^H` above is `diag(H⁻¹)`. The profiled (intercept-free) view,
+`ProfiledNestedSchurFactor`, reads the augmented factor through exact
+identities: with `P = [−mean_x'; I]`, `H_aug⁻¹ = e_0 e_0' / Σw + P H_c⁻¹ P'`,
+so penalty traces and pairs are the augmented values under an index shift,
+and a centred operator `O_c = P' O_aug P` with `y = O_aug e_0` and
+`t = (O_aug)_00` gives `tr(H_c⁻¹O_c) = tr(H_aug⁻¹O_aug) − t / Σw`,
+`tr(H_c⁻¹O_cH_c⁻¹O'_c) = tr(H_aug⁻¹O_augH_aug⁻¹O'_aug) − 2 y'H_aug⁻¹y' / Σw +
+t t' / Σw²` and `diag(H_c⁻¹O_c)_j = (H_aug⁻¹O_aug)_{j+1,j+1} − mean_x[j]
+(H_aug⁻¹y)_{j+1}`, all evaluated in the centred coordinates of section 3.4.
+`H_aug⁻¹y` is one solve of the row-pass column `U'(O e_0) = Σ_ℓ V_ℓ`; the
+closed-form intercept quadratic of an earlier build is gone.
 
 ### 3.7 Refusals and where rank decisions live
 
@@ -383,6 +416,24 @@ the core.
   (scaled singular values ≤ 7.5e-18 for the null, ≥ 3.7e-2 for the rest) and
   the coupled-null test accepts (section 8); section 9 makes this a regression
   test.
+- Border pivots. Before scaling, each `Q_jj` is compared with its floor
+  `γ_Q (absolute_j + Σ_u |s_u| d_uj²)`, `γ_Q = (k + q + 10) ε`, the curvature
+  the rounding of its own terms and of the row weights can move: within it the
+  column is an exact null direction (its row and column zeroed, its `D_s`
+  entry 1), below minus it a material negative-curvature refusal. The row
+  pass's `absolute_j = Σ_r e_r (x_rj − m_ℓj)²` charges each row the error
+  scale of its weight: `e_r = w_r` when no weight is negative, since Fisher
+  weights are each accurate to a few ulp, so only an exactly zero pivot is
+  null and a tiny positive weight keeps its column, as in the dense
+  Jacobi-scaled convention (F1 with a column carried by two rows of weight
+  1e-14 and 1e-15 of `max w`: full rank, `κ_s(H)` 4.2e4); `e_r = max |w|` on
+  every weighted row of a vector with a negative entry, which among the
+  admitted pairs arises only from the cancellations in the Poisson/identity
+  and Tweedie/sqrt observed weights, so under such a vector rows of weight
+  `0`, `+ε` and `−ε` give one factor. This replaces the plain `Q_jj ≤ 0`
+  rule, which kept `+ε` with `1/Q_jj = 1e16` in the inverse and refused `−ε`
+  as materially negative; a normwise floor for every vector in turn nulled
+  those genuine tiny weights.
 
 ## 4. Data layout: `NestedStructuredLayout`
 
@@ -427,9 +478,20 @@ factorization, `F` and `e`, the Takahashi scalars.
   RandomEffect terms stay in the border as today. Otherwise take the largest
   random-effect term as the leaf and grow the chain upward by testing every
   remaining random-effect term, not only the next-larger one, for being a
-  function of the current coarsest code (the count test of section 3.7),
-  choosing the finest such term at each step; a crossed term whose size falls
-  between two chain levels is therefore skipped, not a chain terminator.
+  function of the leaf (the count test of section 3.7; nesting is
+  transitive), and take among the passing terms the chain that carries the
+  most levels: nesting is a partial order on them and every totally ordered
+  subset is a valid chain, so a dynamic programme over the terms, finest
+  first, finds the heaviest path. A crossed term whose size falls between two
+  chain levels is skipped, not a chain terminator, and a coarsening of the
+  leaf crossed with its hierarchy stays in the border unless its chain carries
+  more levels (choosing the finest passing term at each step, the earlier
+  rule, took such a term over the true parent). The pair tests, the chains
+  and each chain's tree with its leaf row order live in one nesting cache
+  that a design shares with every lambda rebuild of it: owner the lineage's
+  RandomEffect codes, which a rebuild passes through unchanged; lifetime the
+  lineage; no invalidation. The leaf row order is its one O(n) entry, 8 bytes
+  per row, held as long as the fitted design (the cache is not pickled).
   Levels with a zero penalty leave the chain (section 3.7). A chain of length
   1 is today's scalar Schur backend; a chain of length ≥ 2 selects the nested
   factor. Terms not in the chain stay in the border. `StructuredGroupSelection`
@@ -451,7 +513,13 @@ factorization, `F` and `e`, the Takahashi scalars.
   n_b³) / (p+1)³ ≤ 0.05` with `p ≥ 32`, but its constant 0.05 was calibrated
   end to end on the scalar backend's derivative machinery (`selection.py`),
   and the two proposed nested anchors have ratios near 1e-3 or below, which
-  cannot recalibrate the threshold region. REML derivative work per λ-trial
+  cannot recalibrate the threshold region. As built, `auto` takes the cheaper
+  of the single-level ratio `(b_1 / w)²` and the nested ratio `(b / w)² (1 +
+  P n / w)`, `w = p + 1`, which prices the chain's row passes at `P` passes of
+  `n b²`, and uses it when it is at most 0.75. `P` is 0.08 on the one-pass row
+  pass of section 3.4, inside the bracket (0.035, 0.175) that the anchors
+  recorded in `selection.py` measured on 2026-09-27; it was 2 on the two-read
+  pass, whose bracket was (1.23, 401). REML derivative work per λ-trial
   changes from O(m_b² n_b1³) (all parent penalties in the border) to
   O(m (K q² + q³) + m² (K q + q² + k)) with the small `n_b` (section 3.6).
 - Anchors that must still hold: the five #343 single-random-effect anchors
@@ -596,7 +664,11 @@ level is exactly aliased by the intercept and the root attribute (its `H⁻¹`
 cross blocks are exactly zero, a maximal-cancellation case for `t1 + t2 +
 t3`). Bounds are derived per quantity from dims, `ε` and the Jacobi-scaled
 condition number `κ_s(Q)` (1.5 to 74 on these fixtures, against `cond(Q)` up
-to 1.9e15): `γ_tree = n_tree ε` with `n_tree = rows per leaf + L (fan + 4)`
+to 1.9e15; the built factor forms `Q` in the centred coordinates of section
+3.4, and `κ_s` of that centred `Q` is 1.3 to 3.4 on F1–F6 of
+`tests/test_nested_schur_factor.py`, 1.8 on F4 with its mean-10 column offset
+by 1e7, and 691 with a crossed border factor, measured 2026-09-27; the tests
+derive their bounds from it): `γ_tree = n_tree ε` with `n_tree = rows per leaf + L (fan + 4)`
 for the recursions that sum non-negative terms, `γ_Q = (n_tree + q + 10) ε`
 for the componentwise error of the PSD-sum `Q` (measured against
 `sqrt(Q_ii Q_jj)`), and `γ_border = q κ_s(Q) γ_Q` for one pass through the
