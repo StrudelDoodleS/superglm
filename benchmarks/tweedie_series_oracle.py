@@ -8,8 +8,13 @@ so the fixture measures the kernel's float64 evaluation error alone.
 The ``saturated`` rows are end to end: exact l_sat, T = -d l_sat / d log phi
 and T' = dT / d log phi of one positive row from its float64 (p, y, w, phi), at
 peak indices 1e2 to 1e7 that straddle the series-to-saddlepoint switch for
-every power. Each is a direct sum of every term within 120 log-units of the
-peak, up to about 1e5 terms at j = 1e7.
+every power, and its lattice floor for p = 1.001 to 1.005. Each is a direct sum
+of every term within 120 log-units of the peak, up to about 1e5 terms at j = 1e7.
+
+The ``switch`` rows sit a quarter of and four times saddlepoint_switch(p) as
+it stood when this file was generated, each labelled with the arm that is the
+more accurate there. They are fixed numbers, so a later change that moves the
+switch or drops its floor is measured against them rather than followed.
 """
 
 import itertools
@@ -20,6 +25,8 @@ from pathlib import Path
 
 import mpmath as mp
 
+from superglm._tweedie import saddlepoint_switch
+
 mp.mp.dps = 50
 
 POWERS = (1.01, 1.05, 1.1, 1.3, 1.5, 1.7, 1.9, 1.95, 1.99)
@@ -29,8 +36,10 @@ RESPONSES = (1e-3, 0.1, 1.0, 10.0, 1e3)
 MAX_MODE = 3e5
 # Terms 120 log-units below the peak are below the 50-digit resolution.
 LOG_FLOOR = 120
-SATURATED_POWERS = (1.01, 1.05, 1.2, 1.5, 1.8, 1.95, 1.99)
+# Below p = 1.007 the switch is its lattice floor, 37 / (2 pi^2 (p - 1)).
+SATURATED_POWERS = (1.001, 1.002, 1.005, 1.01, 1.05, 1.2, 1.5, 1.8, 1.95, 1.99)
 SATURATED_PEAKS = (1e2, 3e2, 1e3, 3e3, 1e4, 3e4, 1e5, 1e6, 1e7)
+SWITCH_SIDES = ((0.25, "series"), (4.0, "saddlepoint"))
 
 
 def _side(term, j: int, step: int, peak):
@@ -98,13 +107,22 @@ def reference_saturated(p: float, y: float, w: float, phi: float) -> dict:
     }
 
 
-def saturated_rows() -> list[dict]:
+def _saturated_row(p: float, peak: float) -> dict:
     y, w = 1.7, 2.5
-    rows = []
-    for p, peak in itertools.product(SATURATED_POWERS, SATURATED_PEAKS):
-        phi = w * y ** (2 - p) / ((2 - p) * peak)
-        rows.append({"p": p, "y": y, "w": w, "phi": phi, **reference_saturated(p, y, w, phi)})
-    return rows
+    phi = w * y ** (2 - p) / ((2 - p) * peak)
+    return {"p": p, "y": y, "w": w, "phi": phi, **reference_saturated(p, y, w, phi)}
+
+
+def saturated_rows() -> list[dict]:
+    return [_saturated_row(*row) for row in itertools.product(SATURATED_POWERS, SATURATED_PEAKS)]
+
+
+def switch_rows() -> list[dict]:
+    """Rows a factor 4 either side of the switch, labelled with the arm that should take them."""
+    return [
+        {**_saturated_row(p, factor * saddlepoint_switch(p)), "arm": arm}
+        for (factor, arm), p in itertools.product(SWITCH_SIDES, SATURATED_POWERS)
+    ]
 
 
 def main(out: Path) -> None:
@@ -121,6 +139,7 @@ def main(out: Path) -> None:
         "digits": 50,
         "rows": rows,
         "saturated": saturated_rows(),
+        "switch": switch_rows(),
     }
     out.write_text(json.dumps(payload, indent=1) + "\n")
 

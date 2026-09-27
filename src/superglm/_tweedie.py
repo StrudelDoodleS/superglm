@@ -21,7 +21,7 @@ _LOG_TWO_PI = math.log(2.0 * math.pi)
 _EPS = float(np.finfo(np.float64).eps)
 # The series' float64 error in l_sat stays below _SERIES_ERROR eps (a + 1) j log j
 # against the 50-digit oracle (benchmarks/tweedie_series_oracle.py) over
-# p in [1.01, 1.99] and peak indices j from 1e2 to 1e6: log W ~ (a + 1) j
+# p in [1.001, 1.99] and peak indices j from 1e2 to 1e6: log W ~ (a + 1) j
 # cancels against the canonical term, both built from terms of that size.
 _SERIES_ERROR = 2.5
 # The corrected saddlepoint's remainder is B3 e^3, e = 1/((2 - p) j): |B3| = 1/360

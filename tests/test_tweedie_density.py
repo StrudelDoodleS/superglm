@@ -162,10 +162,34 @@ def test_saturated_rows_match_the_50_digit_oracle_on_both_sides_of_the_switch(ro
     and a wrong sign or constant in A misses by twice that, far above the bound at
     every row past the switch. Below it the bound is the series' own float64 error.
     """
+    _assert_within_the_arm_bound(row, row["peak_index"] > saddlepoint_switch(row["p"]))
+
+
+@pytest.mark.parametrize(
+    "row", ORACLE["switch"], ids=lambda r: f"p{r['p']}-{r['arm']}-j{r['peak_index']:.0f}"
+)
+def test_each_side_of_the_switch_meets_the_bound_of_its_more_accurate_arm(row):
+    """A quarter of and four times the switch as generated: the row meets that side's arm's bound.
+
+    The test above takes its bound from the code's own switch, so it would
+    follow a switch moved anywhere; these rows are fixed numbers. A factor 4
+    either side of the balance point moves the ratio of the arms' errors by
+    4^4. At a quarter of the switch the saddlepoint's remainder is outside the
+    series bound (6.4e-10 against 2.8e-11 in l_sat at p = 1.5); below p = 1.007,
+    where the switch is the lattice floor, its lattice term 2 exp(-2 pi^2 Var J)
+    is (1.5e-4 at p = 1.001). At four times it the series' float64 error is
+    outside the saddlepoint's bound (1.5e-6 against 2.2e-14 in T at p = 1.001).
+    A switch moved past either row, or a dropped floor, fails here.
+    """
+    _assert_within_the_arm_bound(row, row["arm"] == "saddlepoint")
+
+
+def _assert_within_the_arm_bound(row, saddle):
+    """l_sat, T and T' of one oracle row within the float64 bound of the named arm."""
     p, y, w, phi, peak = (row[k] for k in ("p", "y", "w", "phi", "peak_index"))
     reference = [float(row[k]) for k in ("l_sat", "score", "slope")]
     got = TweedieRows.prepare(np.array([y]), np.array([w]), p).row_saturated(phi)
-    if peak > saddlepoint_switch(p):
+    if saddle:
         bounds = _saddle_bounds(p, y, peak, reference[0])
     else:
         # T' = -(a + 1)^2 Var J + (a + 1) j, and 1 / (a + 1) = p - 1.
@@ -175,7 +199,7 @@ def test_saturated_rows_match_the_50_digit_oracle_on_both_sides_of_the_switch(ro
         assert abs(value[0] - exact) <= bound
 
 
-@pytest.mark.parametrize("p", [1.01, 1.05, 1.2, 1.5, 1.8, 1.95, 1.99])
+@pytest.mark.parametrize("p", [1.001, 1.002, 1.005, 1.01, 1.05, 1.2, 1.5, 1.8, 1.95, 1.99])
 def test_the_switch_is_continuous_within_both_bounds(p):
     """At the switch the series and the corrected saddlepoint differ by at most their two bounds."""
     y, w = 1.7, 2.5
