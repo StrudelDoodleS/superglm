@@ -45,7 +45,9 @@ else:  # run by filename
 
 # (module, attribute, bucket). ML candidates fit through _solve_coefficients and
 # REML candidates through SuperGLM.fit_reml; the profile_ops publication refit
-# goes through the fit_ops workspace entries and re-profiles phi there.
+# goes through the fit_ops workspace entries and re-profiles phi there. The
+# published fit statistics evaluate the density outside any fit, as the
+# pre-rebuild targets' density evaluator did.
 BUCKET_TARGETS = (
     ("superglm.profiling.tweedie", "_solve_coefficients", "candidate_fits"),
     ("superglm.model.api", "SuperGLM.fit_reml", "candidate_fits"),
@@ -53,6 +55,8 @@ BUCKET_TARGETS = (
     ("superglm.model.fit_ops", "_fit_in_workspace", "candidate_fits"),
     ("superglm.profiling.tweedie", "profile_phi_at", "phi_density"),
     ("superglm.model.profile_ops", "profile_phi_at", "phi_density"),
+    ("superglm._tweedie", "tweedie_logpdf_pair", "phi_density"),
+    ("superglm._tweedie", "tweedie_logpdf", "phi_density"),
     ("superglm.reml.objective", "profile_tweedie_reml_scale", "reml_scale"),
     ("superglm.reml.direct", "profile_tweedie_reml_scale", "reml_scale"),
     ("superglm.reml.discrete", "profile_tweedie_reml_scale", "reml_scale"),

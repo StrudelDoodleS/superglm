@@ -1892,19 +1892,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `benchmarks/tweedie_nb_rebuild_receipts.json` (add `"after"`)
 - Output: the PR-body evidence section (a text block returned to the main session)
 
-- [ ] **Step 1: Timing.** With pinned thread pools, re-run every Task 1 Step 5 case three times, interleaved with a checkout of the baseline code built in a second worktree:
+- [x] **Step 1: Timing.** With pinned thread pools, re-run every Task 1 Step 5 case three times, interleaved with a checkout of the baseline code built in a second worktree:
   - Run `git worktree add ../tweedie-baseline <baseline commit>` from this worktree, using a relative path under `.claude/worktrees/`.
   - Use the baseline worktree's own venv (`uv run` inside it), or `PYTHONPATH=<worktree>/src`. Verify which tree was imported by printing `superglm.__file__` in each run: the shared `.venv` editable install points at the main checkout.
   
   Record median wall, CPU, peak RSS, candidate-fit count, φ-solver passes per candidate, and backend. Also the private dataset (scratch only).
 
-- [ ] **Step 2: The time breakdown after.** Re-profile `estimate_p` on the §9 cases into the same three buckets: candidate fits, φ/density, everything else. Criterion 9: every case is faster than baseline, and the φ/density plus bookkeeping share is reported before and after.
+- [x] **Step 2: The time breakdown after.** Re-profile `estimate_p` on the §9 cases into the same three buckets: candidate fits, φ/density, everything else. Criterion 9: every case is faster than baseline, and the φ/density plus bookkeeping share is reported before and after.
 
-- [ ] **Step 3: The `lambda2_init` measurement from Task 6.** Time the §9 REML case with and without the warm lambdas, and compare p̂. Keep the warm lambdas only if they are faster and p̂ moves by less than `xatol`; otherwise remove the line and re-run the recovery tests.
+- [x] **Step 3: The `lambda2_init` measurement from Task 6.** Time the §9 REML case with and without the warm lambdas, and compare p̂. Keep the warm lambdas only if they are faster and p̂ moves by less than `xatol`; otherwise remove the line and re-run the recovery tests.
 
-- [ ] **Step 4: The lgamma table.** If the profile shows the kernel's lgamma table build at more than 10% of φ-solver time on any case, hoist it into `TweedieRows` (build once per (p, max mode)) and re-measure. Otherwise leave it.
+- [x] **Step 4: The lgamma table.** If the profile shows the kernel's lgamma table build at more than 10% of φ-solver time on any case, hoist it into `TweedieRows` (build once per (p, max mode)) and re-measure. Otherwise leave it.
 
-- [ ] **Step 5: Line counts.** Run:
+- [x] **Step 5: Line counts.** Run:
 
 ```bash
 git diff --stat 9e0fe6f9 -- src | tail -1
@@ -1914,9 +1914,9 @@ wc -l src/superglm/_tweedie_series.py src/superglm/_tweedie.py src/superglm/prof
 
 Also count the Tweedie part of `reml/scale.py` and the NB functions in `fit_ops.py`, using the same `ast` measurement as the spec §2 table. Criterion 1: ≤ 3,000.
 
-- [ ] **Step 6: Full checks.** `uv run python scripts/run_test_suite.py` (the full suite), `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv lock --check`, `uv pip check`, `uv run python run_test.py`. Also run the freMTPL2-anchored suites with `SUPERGLM_REQUIRE_DATA=1` if `data/` holds the freMTPL2 files; fetch them with `uv run python scripts/fetch_fremtpl.py --dest data/` otherwise. Expected: all green. Any red is diagnosed to a mechanism before it is called pre-existing.
+- [x] **Step 6: Full checks.** `uv run python scripts/run_test_suite.py` (the full suite), `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv lock --check`, `uv pip check`, `uv run python run_test.py`. Also run the freMTPL2-anchored suites with `SUPERGLM_REQUIRE_DATA=1` if `data/` holds the freMTPL2 files; fetch them with `uv run python scripts/fetch_fremtpl.py --dest data/` otherwise. Expected: all green. Any red is diagnosed to a mechanism before it is called pre-existing.
 
-- [ ] **Step 7: Commit the receipts.**
+- [x] **Step 7: Commit the receipts.**
 
 ```bash
 git add benchmarks/tweedie_nb_rebuild_receipts.json
@@ -1924,6 +1924,21 @@ git commit -m "bench: receipts after the Tweedie/NB2 profiling rebuild
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+
+**Task 10 outcome** (numbers in `benchmarks/tweedie_nb_rebuild_receipts.json` under `"after"`):
+
+- **Method.** The baseline was re-measured, not read from `"baseline"`: a worktree at 9e0fe6f9 with the Task 1 drivers copied in, run by the same interpreter with `PYTHONPATH` selecting the tree, `superglm.__file__` checked on every run. Fresh pinned process per run, trees alternating which runs first, case order reversed on odd repetitions, one untimed warm-up repetition per tree. Three repetitions for every case, nine for the fixed-p `fit_reml`, NB, `unpen` and REML search-cost cases.
+- **Criterion 9 (fast): met.** `estimate_p` median wall, after/baseline: zeros90 fit 0.58, zeros90 reml 0.91, positive96 fit 0.31, positive96 reml 0.83, positive96 reml with `search_fit_mode="fit"` 0.45, REML search-cost 0.79; with `ci_alpha=0.05`: zeros90 fit 0.33, zeros90 reml 0.61, positive96 reml 0.54. The private validation dataset: reml 0.73, fit 0.59, with the interval 0.47. φ/density plus bookkeeping share of `estimate_p`, before → after: zeros90 fit 60% → 31%, zeros90 reml 12% → 2%, positive96 fit 86% → 56%, positive96 reml 24% → 6%, search-cost 30% → 6%, private validation dataset 34% → 6%. The candidate fits are what remain.
+- **Criterion 6: met.** No case above 1.05×. Fixed-p `fit_reml` (the #419 case): positive96 0.78, burn-cost 0.99, freMTPL2 0.97 (its three-repetition median read 1.15; nine repetitions spread 0.68–0.87 s on both trees), private validation dataset 0.93. NB auto-θ 1.03 (paired median difference 0.0 s over nine). `unpen` Brent 1.03× master's `joint_ml` and 0.44× master's Brent: the rebuilt φ solve recovers nearly all of what decision (d) accepted. Peak RSS is lower on every fresh-process case (−2.5 to −37 MB). The REML search-cost harness samples VmRSS per leg inside one process, and its later legs read 10–17 MB higher; run alone, each leg peaks lower (−3 to −50 MB), and between legs after `gc` and `malloc_trim` the rebuilt tree's RSS is lower at every mark, so that reading is allocator carry-over, not a leg's cost.
+- **Memory held by the result.** For a retaining model the result keeps the last candidate's fitted state (Task 9's note). Array bytes reachable only from the returned and installed results are still lower than master's, whose result held its own snapshot: zeros90 fit 5.2 → 2.4 MB, zeros90 reml 6.6 → 5.5, positive96 reml 8.4 → 6.1, search-cost 25.9 → 21.1.
+- **Outputs.** p̂ within 6e-13 relative on every case (unpen 2.2e-5: joint_ml against Brent, inside `xatol`), φ̂ within 2.1e-11, NLL within 1.6e-15, interval endpoints within 2.4e-5 (the root tolerance is 1e-4), θ̂ identical, same candidate counts and backend (gram).
+- **Step 3.** Settled in Task 6: the warm lambdas were removed because candidate fits were bitwise identical without them.
+- **Step 4: table left alone.** A pass over one row with the largest mode builds the whole table, and it costs at most 1.9% of a full pass on zeros90, positive96, the search-cost book and the private validation dataset at φ̂, φ̂/10 and 10φ̂.
+- **φ solves.** 4.2 to 6.6 series passes per ML φ solve (positive96 4.2, search-cost 5.9, zeros90 6.6).
+- **Criterion 1: met.** The spec §2 cluster, counted the same way on both trees, is 10,412 → 2,423 lines (§2's 619 for the REML-scale Tweedie part reproduces exactly; its "about 10,200" left out the NB part of `fit_ops`, 191). Over their §5 budgets: `profiling/nb.py` 503 (320), `profile_ops.py` 634 (450), the NB part of `fit_ops` 163 (110). `git diff 9e0fe6f9`: src +1,887 −10,234 (30 files; the editor +31 −328); test code +2,077 −8,018; test fixtures +21,288 (the two JSON oracles).
+- **`BUCKET_TARGETS`.** Task 9 had renamed the targets. This task adds `_tweedie.tweedie_logpdf_pair` and `tweedie_logpdf` to the φ/density bucket, because the pre-rebuild density evaluator also charged the published fit statistics there.
+- **Checks.** Full suite in CI's environment (`--extra dev --extra bench --extra plotting --with mpmath`): 17,610 passed, 8 skipped (4 need R/mgcv, 4 by design), 4 xfailed (the three REML p = 1.8 recovery cases and the near-p = 1 bimodal φ); threads stage 40 passed. With `--extra dev` alone, 407 tests skip on missing mpmath, statsmodels and glum, as they would in any dev-only environment. ruff, `uv lock --check`, `uv pip check`, `run_test.py`, the strict off-mode docs build, and the three freMTPL2 suites with `SUPERGLM_REQUIRE_DATA=1` (80 passed) all pass.
 
 ---
 
