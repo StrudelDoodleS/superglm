@@ -165,21 +165,29 @@ def test_estimate_p_matches_master(row, characterisation_case):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         result = model.estimate_p(X, y, fit_mode=row["fit_mode"], ci_alpha=0.05)
-        at_master_p = result._objective(row["p_hat"])
     nll_bound = _nll_bound(row)
+
+    if _censored_on_master(row):
+        # Master stopped next to a power whose REML mode it could not certify.
+        # Its candidates there ran through uncertified line-search trials -- the
+        # unit deviance's eps * mu / y error for 0 < y < mu/2 swamped the PIRLS
+        # merit -- so their REML paths, and where they stopped, are no reference.
+        # The rebuilt search must land no worse and disclose any censoring it
+        # still meets: an infeasible power beside p_hat.
+        assert result.search_nll <= row["search_nll"] + nll_bound
+        searched = result.evaluations.sort_values("p")["nll"].to_numpy()
+        at = int(np.searchsorted(np.sort(result.evaluations["p"].to_numpy()), result.p_hat))
+        beside_infeasible = bool(np.isinf(searched[max(at - 1, 0) : at + 2]).any())
+        assert beside_infeasible == any("censored estimate" in w for w in result.warnings)
+        return
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        at_master_p = result._objective(row["p_hat"])
     determination = _candidate_determination(model, result, X, y, row["fit_mode"])
     # The same profile: one candidate at master's p_hat moves only by the density
     # and by where its fit stops.
     assert abs(at_master_p - row["search_nll"]) <= nll_bound + determination
-
-    if _censored_on_master(row):
-        # Master stopped next to a power whose REML mode it could not certify.
-        # Certification is a knife edge (a mode score against a 1e-9 bar), so the
-        # rebuilt search may certify that power and route past it: it must land
-        # no worse, and still disclose any censoring it meets.
-        assert result.search_nll <= row["search_nll"] + nll_bound
-        assert any("censored" in w for w in result.warnings)
-        return
 
     reach = _brent_reach(row["p_hat"])
     # Both searches bracket the minimiser of profiles that differ by at most

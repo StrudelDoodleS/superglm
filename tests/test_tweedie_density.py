@@ -51,6 +51,32 @@ def test_zero_rows_are_the_exact_atom():
     np.testing.assert_allclose(value, -np.array([1.0, 2.5]) * mu**0.7 / (0.7 * 0.7), rtol=4 * EPS)
 
 
+@pytest.mark.parametrize("p", [1.2, 1.5, 1.8, 1.95])
+def test_unit_deviance_is_accurate_below_half_the_mean(p):
+    """0 < y < mu/2: y - mu is inexact there, so the log ratio must not come from 1 + delta.
+
+    The old log1p((y - mu) / mu) route carried a relative error of order
+    eps * mu / y -- over 1e-6 of a unit deviance at y = 1e-9 mu, p = 1.8 --
+    enough noise to stall a PIRLS line search short of a certifiable mode.
+    """
+    mp = pytest.importorskip("mpmath")
+    mp.mp.dps = 50
+    mu = np.geomspace(0.1, 10.0, 40)
+    y = np.geomspace(1e-12, 0.45, 40) * mu
+    got = tweedie_unit_deviance(y, mu, p)
+    # log(y) - log(mu) is within 3u (|log y| + |log mu|); each factor of g has
+    # log-sensitivity at most 2 - p + 1/log 2 < 2.45 to it and the difference
+    # g = first - second cancels by at most 6.2, around 13 roundings besides.
+    for value, response, mean in zip(got, y, mu, strict=True):
+        Y, M, P = mp.mpf(response), mp.mpf(mean), mp.mpf(p)
+        exact = 2 * (
+            Y ** (2 - P) / ((1 - P) * (2 - P)) - Y * M ** (1 - P) / (1 - P) + M ** (2 - P) / (2 - P)
+        )
+        logs = abs(math.log(response)) + abs(math.log(mean))
+        bound = (EPS / 2) * (6.2 * (2.45 * 3.0 + 1.0) * logs + 41.0)
+        assert abs(float(mp.mpf(value) / exact - 1)) <= bound
+
+
 def test_logpdf_pair_null_shares_the_saturated_term():
     y, mu = _book(p=1.3)
     null_mu = np.full_like(mu, y.mean())

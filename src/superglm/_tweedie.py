@@ -271,7 +271,13 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
             series += term
         g[near] = delta_near**2 * series
 
-    regular = ~near & ~extreme_positive & (delta > -1.0)
+    # Sterbenz: y - mu is exact only for mu/2 <= y <= 2 mu. Below mu/2 its
+    # rounding leaves 1 + delta an absolute error of order eps, so y / mu, and
+    # the deviance through it, carry a relative error of order eps * mu / y. At
+    # y = 4e-9 mu that moved one row's deviance by 9e-9, ten times a PIRLS line
+    # search's round-off allowance for a whole 20,000-row fit. Those rows take
+    # the log-ratio branch below.
+    regular = ~near & ~extreme_positive & (y_array >= 0.5 * mu_array)
     if np.any(regular):
         delta_regular = delta[regular]
         with np.errstate(all="ignore"):
@@ -280,20 +286,17 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
             second = np.expm1((2.0 - p) * log_ratio) / (2.0 - p)
         g[regular] = first - second
 
-    # For a positive y many orders below mu, delta can round to exactly -1.
-    # Recover log(y / mu) from the original values; this branch is far from
-    # the cancellation region, so the power-scale formula is well-conditioned.
-    rounded_to_minus_one = ~near & ~regular & ~extreme_positive
-    if np.any(rounded_to_minus_one):
+    # y < mu/2, down to a delta that rounds to exactly -1: take log(y / mu)
+    # from the original values. With log_ratio <= -log 2 both expm1 factors
+    # are accurate, and g = first - second cancels by at most a factor of 6.2
+    # (reached at y = mu/2 as p -> 2).
+    below = ~near & ~regular & ~extreme_positive
+    if np.any(below):
         with np.errstate(all="ignore"):
-            log_ratio = np.log(y_array[rounded_to_minus_one]) - np.log(
-                mu_array[rounded_to_minus_one]
-            )
-            ratio = np.exp(log_ratio)
-            ratio_two_minus_p = np.exp((2.0 - p) * log_ratio)
-            first = (ratio_two_minus_p - ratio) / (1.0 - p)
-            second = (ratio_two_minus_p - 1.0) / (2.0 - p)
-        g[rounded_to_minus_one] = first - second
+            log_ratio = np.log(y_array[below]) - np.log(mu_array[below])
+            first = np.exp((2.0 - p) * log_ratio) * np.expm1((p - 1.0) * log_ratio) / (p - 1.0)
+            second = np.expm1((2.0 - p) * log_ratio) / (2.0 - p)
+        g[below] = first - second
 
     deviance = np.empty_like(delta)
     ordinary_ratio = ~extreme_positive
