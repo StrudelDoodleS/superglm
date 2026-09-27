@@ -37,18 +37,17 @@ Where the tolerances come from.
   one on these fixtures (3.2 and 10.7), so ``rho`` depends on the data
   (Osborne 1992, Int. Stat. Rev. 60) and is measured: 0.18 and 0.12 to 0.13.
 - Stopping.  The retained fit is one PIRLS step past the engine's last state.
-  It stops on the coefficient change for exact Gamma and Tweedie fits and on
-  the objective change otherwise, which leaves a discrete Gamma fit 1e-6 from
-  its fixed point.  Two fits held at the same smoothing parameters start from
-  the same state, so when both record the same PIRLS calls and iterations
-  that gap is common to both and ``gamma = 2 (p + k) eps kappa_s(H)``.  A stop
-  on a different iteration leaves them up to a step apart, so ``gamma`` then
-  gains twice the larger bounded fixed-point gap (``_held_gap``), whatever
-  the rule that stopped them.  The nested REML fit and the dense fit held
-  at its smoothing parameters come by different paths, so each is asserted to
-  be within ``PIRLS_TOL`` of the fixed point and ``gamma`` gains
-  ``2 PIRLS_TOL``.  ``gamma`` bounds the coefficients relative to
-  ``max(1, ||beta||_inf)``, and
+  It stops on the coefficient change for exact Gamma and Tweedie fits, on the
+  penalized score or the step for discrete fits (a discrete Gamma fit ends
+  within 1e-9 of its fixed point, against 1e-6 on the objective change), and
+  on the objective change for exact canonical fits, which are Newton's method.
+  Each fit is within its bounded fixed-point gap, so two fits held at the same
+  smoothing parameters are within twice the larger and ``gamma`` gains that
+  (``_held_gap``) whatever iteration stopped them.  The nested REML fit and
+  the dense fit held at its smoothing parameters come by different paths, so
+  each is asserted to be within ``PIRLS_TOL`` of the fixed point and
+  ``gamma`` gains ``2 PIRLS_TOL``.  ``gamma`` bounds the coefficients
+  relative to ``max(1, ||beta||_inf)``, and
   ``|d eta| <= gamma max(1, ||beta||_inf) (1 + ||X||_inf)``.  Deviance,
   dispersion, the REML objective, edf, edf1, standard errors and the REML
   derivatives are smooth functions of ``eta`` and ``H^-1`` evaluated by the
@@ -289,14 +288,7 @@ def _fixed_point_gap(model: SuperGLM, y, offset, weight) -> float:
 
 
 def _held_gap(nested: SuperGLM, dense: SuperGLM, y, offset, weight) -> float:
-    """The stopping gap two fits held at the same smoothing parameters leave.
-
-    Zero when both took the same PIRLS calls and iterations; otherwise the
-    larger of their bounded distances to the fixed point.
-    """
-    profiles = (nested._reml_profile, dense._reml_profile)
-    if len({(profile["irls_calls"], profile["irls_iters"]) for profile in profiles}) == 1:
-        return 0.0
+    """The larger bounded distance to the fixed point of two fits held at the same lambdas."""
     return max(_fixed_point_gap(model, y, offset, weight) for model in (nested, dense))
 
 

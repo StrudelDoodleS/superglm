@@ -469,7 +469,15 @@ def finalize_reml_fit(
             model._groups,
         )
         observed_terminal = terminal_curvature == "observed" and not qp_passthrough
-        final_tolerance = min(pirls_tol, 1e-10) if observed_terminal else pirls_tol
+        # Fisher scoring on a non-canonical link contracts only linearly, so an
+        # objective-change stop certifies the coefficients to about sqrt(tol).
+        # A discrete refit keeps Fisher geometry but certifies its fixed point
+        # to first order at the same tolerance: the score or the step.  Gamma/log
+        # reaches it by observed Newton; other families pay Fisher's linear
+        # rate, tens of iterations when a mode contracts slowly.
+        certified_terminal = observed_terminal or (model._discrete and not qp_passthrough)
+        final_tolerance = min(pirls_tol, 1e-10) if certified_terminal else pirls_tol
+        final_convergence = "coefficients" if observed_terminal else "score"
         final_output = fit_irls_direct(
             X=model._dm,
             y=y,
@@ -483,7 +491,7 @@ def finalize_reml_fit(
             intercept_init=float(best.pirls_result.intercept),
             max_iter=max_pirls_iter,
             tol=final_tolerance,
-            convergence="coefficients" if observed_terminal else "deviance",
+            convergence=final_convergence if certified_terminal else "deviance",
             return_xtwx=True,
             cache_out=final_cache,
             direct_solve=model._direct_solve,

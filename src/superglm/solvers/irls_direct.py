@@ -788,6 +788,35 @@ def _fit_irls_direct_once(
         values = np.asarray(beta_values, dtype=np.float64)
         return float(values @ penalty_matvec(values))
 
+    def relative_penalized_score(
+        beta_values: NDArray, mu_values: NDArray, eta_values: NDArray
+    ) -> float:
+        """``||[1 X]' s - S beta||_inf / sum |s|`` for the row score ``s = W (z - eta)``.
+
+        The unconstrained penalized score, for the discrete terminal refit
+        (``convergence="score"``).  ``s`` is the residual of this solver's own
+        fixed-point equations, and ``sum |s|`` is the intercept column of
+        ``|X|' |s|``, the magnitude the score is summed from.  A level with no
+        finite coefficient has a score that vanishes with its fitted mass, so
+        this stops it where a step test would walk it to the link's overflow
+        guard; a componentwise ``|g_j| / (|X|' |s|)_j`` stays 1 on such a level.
+        The bar is the intercept column's, so a column whose entries are far
+        below 1 (a Numeric in small units) is certified that much more loosely.
+        """
+        rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=mu_values,
+            eta=eta_values,
+            sample_weight=weights,
+            prefer_observed=False,
+        )
+        row_score = rows.weights * (rows.response - eta_values)
+        slope_score = dm.rmatvec(row_score) - penalty_matvec(beta_values)
+        largest = max(abs(float(np.sum(row_score))), float(np.max(np.abs(slope_score), initial=0)))
+        return largest / max(float(np.sum(np.abs(row_score))), np.finfo(np.float64).tiny)
+
     trace_enabled = trace_run is not None and trace_run.enabled
     trace_basis_id = trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
     if not trace_enabled:
@@ -968,7 +997,11 @@ def _fit_irls_direct_once(
         and not _return_working_system
         and supports_observed_newton(family, link)
     )
-    _observed_newton_active = False
+    # The discrete terminal refit certifies the root of the penalized score,
+    # which Fisher scoring reaches only linearly; Newton on the approved
+    # observed rows reaches it quadratically, and the exported geometry is
+    # Fisher either way (``export_rows``).
+    _observed_newton_active = _observed_newton_available and convergence == "score"
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -1163,7 +1196,10 @@ def _fit_irls_direct_once(
         # materializing an unused dense duplicate for numeric and low-cardinality fits.
         _tabmat_split = dm.tabmat_centering_split
     _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
-    _can_reuse_weighted_gram = _can_reuse_weighted_gram and not _use_structured
+    # Observed rows are not the constant Fisher weights this cache assumes.
+    _can_reuse_weighted_gram = (
+        _can_reuse_weighted_gram and not _use_structured and not _observed_newton_active
+    )
     dm.execution_plan.validate_group_spans(groups)
     _defer_raw_spline = (
         not dm.raw_spline_tabmat_plan_built
@@ -2219,7 +2255,7 @@ def _fit_irls_direct_once(
         dev_rel_change = None
         coef_change = None
         if np.isfinite(dev):
-            if convergence == "coefficients":
+            if convergence in ("coefficients", "score"):
                 coef_change = float(
                     np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
                 )
@@ -2242,8 +2278,11 @@ def _fit_irls_direct_once(
                         )
                     )
                     coef_change = max(coef_change, latent_change)
-                converged_this_iter = coef_change < tol
                 convergence_value = coef_change
+                if convergence == "score":
+                    # The stronger of two first-order certificates of the fixed point.
+                    convergence_value = min(coef_change, relative_penalized_score(beta, mu, eta))
+                converged_this_iter = convergence_value < tol
             else:
                 objective = (
                     retained.deviance
