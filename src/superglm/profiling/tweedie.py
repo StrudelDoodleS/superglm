@@ -18,13 +18,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._tweedie import (
-    PhiSolve,
-    RetiredTweedieState,
-    TweedieRows,
-    solve_log_phi,
-    tweedie_unit_deviance,
-)
+from superglm._tweedie import PhiSolve, TweedieRows, solve_log_phi, tweedie_unit_deviance
 from superglm.distributions import Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import (
@@ -348,10 +342,6 @@ class TweedieProfileResult:
     _ci_bounds: tuple[float, float] = field(repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        # superglm 0.35 pickled a search trace where this result has evaluations.
-        self.__dict__.update(state if "evaluations" in state else _published_by_0_35(state))
-
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for p on the searched curve, with censoring flags.
 
@@ -391,63 +381,3 @@ class TweedieProfileResult:
             label="p",
             ax=ax,
         )
-
-
-def _published_by_0_35(state: dict[str, Any]) -> dict[str, Any]:
-    """What a result pickled by superglm 0.35 published.
-
-    Its profile belonged to the retired profiler, so the searched points stay
-    for the plot and any interval it computed stays for reporting, while a new
-    interval refuses. A side that reached the old search range is censored.
-    """
-    trace = state["search_trace"]
-    objective = RecordedObjective(_retired_profile)
-    objective.values.update(zip(trace["p"], trace["nll"]))
-    lowest, highest = bounds = state["_ci_p_range"]
-    return {
-        "p_hat": state["p_hat"],
-        "phi_hat": state["phi_hat"],
-        "nll": state["nll"],
-        "converged": state["converged"],
-        "fit_mode": state["fit_mode"],
-        "evaluations": trace[["p", "nll", "phi", "fit_converged"]].reset_index(drop=True),
-        "warnings": state["warnings"],
-        "search_nll": state["nll"] if state["search_nll"] is None else state["search_nll"],
-        "_objective": objective,
-        "_ll_scale": state["_ll_scale"],
-        "_ci_bounds": bounds,
-        "_ci_cache": {
-            alpha: Interval(lower, upper, lower <= lowest, upper >= highest)
-            for alpha, (lower, upper) in state["_ci_cache"].items()
-        },
-    }
-
-
-def _retired_profile(p: float) -> float:
-    raise RuntimeError(
-        "This Tweedie profile was pickled by superglm 0.35 and cannot be evaluated again; "
-        "its estimate and any interval it computed are kept. Run estimate_p for a new interval."
-    )
-
-
-# Profiler classes of superglm 0.35 that its pickled models name.
-_RETIRED_CLASSES = frozenset(
-    {
-        "TweedieProfileCIDensityProvenance",
-        "TweedieProfileCIDetails",
-        "TweedieProfileCIEndpoint",
-        "TweedieProfileCIEvaluation",
-        "_PhiProfileResult",
-        "_PreparedTweedieDensity",
-        "_ProfileContext",
-        "_ProfileContextREML",
-        "_ProfileEvaluation",
-        "_TweedieLogpdfDiagnostics",
-    }
-)
-
-
-def __getattr__(name: str):
-    if name in _RETIRED_CLASSES:
-        return RetiredTweedieState
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
