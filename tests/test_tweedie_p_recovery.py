@@ -8,6 +8,8 @@ import pytest
 
 from superglm import Categorical, Spline, SuperGLM, families, generate_tweedie_cpg
 
+from ._tweedie_profile_fixtures import flat_lambda_fixture
+
 pytestmark = pytest.mark.slow
 
 
@@ -22,19 +24,43 @@ def _simulate(p: float, seed: int, n: int = 20_000):
     return pd.DataFrame({"x": x, "level": level.astype(str)}), y
 
 
+@pytest.mark.parametrize("p", [1.8, 1.9])
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_fit_reml_certifies_the_mode_near_p_two(seed, p):
+    """Every one of these fits refused its mode (score 1e-9 to 3e-7 against 1e-9).
+
+    PIRLS line searches stalled on merit noise: the unit deviance lost
+    eps * mu / y of accuracy on the many small positive responses p near 2
+    produces, and the step test then fired on a damped step. fit_reml raises
+    ObservedModeNotCertifiedError when the mode misses the bar.
+    """
+    X, y = _simulate(1.8, seed)
+    model = SuperGLM(
+        family=families.tweedie(p=p),
+        features={"x": Spline(n_knots=10), "level": Categorical()},
+    )
+    model.fit_reml(X, y)
+    assert model._reml_result.converged
+
+
+@pytest.mark.parametrize(("n", "p"), [(4000, 1.9), (5000, 1.95)])
+def test_fit_reml_certifies_where_fisher_scoring_stops_short(n, p):
+    """83% zero rows keep only 2 - p of their Fisher curvature near p = 2.
+
+    Fisher steps there fall short of the Newton step, so its step-length test
+    fired with mode scores of 2e-7 and 7e-5, with the unit deviance accurate
+    or not. Tweedie/log PIRLS takes observed-Newton steps and certifies both.
+    """
+    frame, y, weights, offset, features = flat_lambda_fixture(n)
+    model = SuperGLM(family=families.tweedie(p=p), features=features)
+    model.fit_reml(frame, y, sample_weight=weights, offset=offset)
+    assert model._reml_result.converged
+
+
 @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
 @pytest.mark.parametrize("seed", [1, 2, 3])
 @pytest.mark.parametrize("true_p", [1.2, 1.5, 1.8])
-def test_estimate_p_recovers_true_power(true_p, seed, fit_mode, request):
-    if (true_p, fit_mode) == (1.8, "reml"):
-        # Not a search defect: plain fit_reml cannot certify its penalized mode
-        # at most powers in (1.69, 1.95] on these books (mode scores 1e-9 to
-        # 3e-7 against the fixed 1e-9 bar, identically before the rebuild), so
-        # the REML search is censored there and its curvature probes land on
-        # uncertifiable powers. Strict: certifying those modes must remove this.
-        request.applymarker(
-            pytest.mark.xfail(strict=True, reason="REML mode certification fails near p = 1.8")
-        )
+def test_estimate_p_recovers_true_power(true_p, seed, fit_mode):
     X, y = _simulate(true_p, seed)
     model = SuperGLM(
         family=families.tweedie(p=1.5),

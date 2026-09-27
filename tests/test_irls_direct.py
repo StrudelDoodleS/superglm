@@ -1019,6 +1019,50 @@ class TestDirectSolverBasic:
             atol=2e-13,
         )
 
+    def test_tweedie_log_takes_observed_newton_steps_from_the_first_iteration(self):
+        """Tweedie/log PIRLS is full Newton throughout: quadratic, not Fisher's linear rate."""
+        from superglm._tweedie import generate_tweedie_cpg
+        from superglm.distributions import Tweedie
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(1818)
+        n = 4000
+        X_raw = rng.normal(size=(n, 3))
+        mu = np.exp(0.3 + X_raw @ np.array([0.4, -0.3, 0.2]))
+        # p near 2 has many small positive responses and the slowest Fisher
+        # contraction: observed/Fisher row curvature is (2-p) + (p-1) y/mu.
+        y = generate_tweedie_cpg(n, mu, 1.8, 1.8, rng=rng)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=3)
+        groups = [GroupSlice(name="x", start=0, end=3)]
+
+        def fit(use_observed_newton: bool):
+            profile: dict[str, float | int] = {}
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(n),
+                family=Tweedie(1.8),
+                link=LogLink(),
+                groups=groups,
+                lambda2=0.0,
+                tol=1e-10,
+                convergence="coefficients",
+                profile=profile,
+                _use_observed_newton=use_observed_newton,
+                weight_semantics="frequency",
+            )
+            return result, profile
+
+        newton, newton_profile = fit(True)
+        fisher, fisher_profile = fit(False)
+
+        assert newton.converged and fisher.converged
+        # Every iteration, the first included, used the observed rows.
+        assert newton_profile["irls_observed_newton_iters"] == newton.n_iter
+        assert "irls_observed_newton_iters" not in fisher_profile
+        assert newton.n_iter < fisher.n_iter
+
     def test_gamma_log_observed_controller_rescues_then_falls_back_atomically(self, monkeypatch):
         """A Fisher rejection enables one observed attempt; its rejection restores Fisher."""
         import superglm.solvers.irls_direct as irls_direct

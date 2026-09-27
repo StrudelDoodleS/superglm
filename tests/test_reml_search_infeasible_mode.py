@@ -41,7 +41,7 @@ def _model(features, p=1.5):
     return SuperGLM(family=families.tweedie(p=p), features=features)
 
 
-def test_bracket_endpoint_without_a_converged_mode_is_routed_around(recwarn):
+def test_bracket_endpoint_without_a_converged_mode_is_routed_around(recwarn, monkeypatch):
     """The search must survive a probe power whose penalized mode fails.
 
     One realisation carries three claims about the one coupled search: it
@@ -51,17 +51,19 @@ def test_bracket_endpoint_without_a_converged_mode_is_routed_around(recwarn):
     """
     frame, y, weights, offset, features = _fixture(5_000)
 
-    # Precondition: p=1.95 -- the second point Brent probes -- has no usable
-    # penalized mode under REML. Without this the test proves nothing, so the
-    # size is re-derived rather than kept: the mode is now REACHED and judged
-    # on its KKT residual instead of on PIRLS's step-length flag. 5000 still
-    # misses the 1e-9 bar by ~7e4 (score 6.7e-5, measured 2026-09-23); 6000
-    # no longer fails at all, having failed only because the step test could
-    # not fire at its round-off floor. A 4000 arm re-ran this same search at
-    # 150x above the bar (score 1.5e-7) and was dropped as the fragile copy.
-    with pytest.raises(ObservedModeNotCertifiedError) as excinfo:
-        _model(features, p=1.95).fit_reml(frame, y, sample_weight=weights, offset=offset)
-    assert "certify the penalized coefficient mode" in str(excinfo.value)
+    # This realisation used to meet a natural wall at p=1.95 -- the second
+    # point Brent probes -- scoring 6.7e-5 against the 1e-9 bar: Fisher
+    # scoring stopped short of the mode. Observed-Newton PIRLS now certifies
+    # it (test_tweedie_p_recovery pins that), so the wall is injected at the
+    # same power.
+    real_fit_reml = SuperGLM.fit_reml
+
+    def wall_from_195(self, X, yv, **kwargs):
+        if float(getattr(self.family, "p", 0.0)) >= 1.95:
+            raise ObservedModeNotCertifiedError(6.7e-5, 1e-9)
+        return real_fit_reml(self, X, yv, **kwargs)
+
+    monkeypatch.setattr(SuperGLM, "fit_reml", wall_from_195)
 
     coupled = _model(features).estimate_p(
         frame, y, sample_weight=weights, offset=offset, fit_mode="reml"

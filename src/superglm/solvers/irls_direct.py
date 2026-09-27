@@ -643,11 +643,13 @@ def _fit_irls_direct_once(
         retained rank metadata and fit statistics to be disabled. Public and
         terminal fits must leave this True.
     _use_observed_newton : bool
-        Internal rescue-controller switch. When enabled, an ordinary Gamma/log
-        fit switches to its exact positive observed curvature only after an
-        atomic Fisher proposal rejection. Accepted Fisher iterations, unsupported,
-        constrained, SCOP, and cached-working-system routes retain Fisher scoring.
-        Public callers should leave this True.
+        Internal curvature-controller switch. When enabled, an ordinary
+        Tweedie/log fit takes exact observed-Newton steps from its first
+        iteration, and a Gamma/log fit switches to them only after an atomic
+        Fisher proposal rejection. A rejected observed proposal restores Fisher
+        scoring for the rest of the fit. Unsupported, constrained, SCOP, and
+        cached-working-system routes retain Fisher scoring. Public callers
+        should leave this True.
     _deviance_init : float, optional
         Previously evaluated deviance at ``beta_init``/``intercept_init``.
         Used by private fREML steps to avoid repeating a full response scan.
@@ -959,7 +961,17 @@ def _fit_irls_direct_once(
         and not _return_working_system
         and supports_observed_newton(family, link)
     )
-    _observed_newton_active = False
+    # Laplace-approximate REML is built on the observed Hessian, so its PIRLS
+    # runs on full-Newton weights (Wood 2011, JRSSB 73(1), section 3; Wood, Pya
+    # & Saefken 2016, JASA, section 3.3): Fisher scoring shares the mode but
+    # converges only linearly under a non-canonical link. Newton starts only
+    # where the Fisher weights vary, so no constant-weight Gram or Fisher-data
+    # cache exists for it to invalidate. Gamma/log keeps Fisher first: its
+    # constant Fisher weights reuse one weighted Gram that Newton would rebuild
+    # every iteration, and Newton remains its rejection rescue.
+    _observed_newton_active = _observed_newton_available and not _has_constant_irls_weights(
+        family, link
+    )
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -2483,7 +2495,7 @@ def _fit_irls_direct_once(
                     profile.get("irls_observed_newton_rescues", 0) + 1
                 )
             logger.info(
-                "IRLS direct switching Gamma/log coefficient proposals to observed "
+                "IRLS direct switching coefficient proposals to observed "
                 "Newton curvature after iteration %d",
                 it + 1,
             )
@@ -2500,7 +2512,7 @@ def _fit_irls_direct_once(
                     profile.get("irls_observed_newton_rejections", 0) + 1
                 )
             logger.info(
-                "IRLS direct rejected an observed Gamma/log proposal at iteration %d; "
+                "IRLS direct rejected an observed-Newton proposal at iteration %d; "
                 "restoring Fisher scoring",
                 it + 1,
             )

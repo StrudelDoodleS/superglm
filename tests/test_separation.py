@@ -273,11 +273,14 @@ def test_runtime_backstop_is_silent_when_the_budget_ends_mid_descent(monkeypatch
     mu = np.exp(1.0 + 2.5 * x)
     y = np.where(rng.random(n) < 0.3, rng.gamma(2.0, np.clip(mu, 1e-8, 1e8) / 2.0), 0.0)
 
+    # Tweedie/log PIRLS takes full-Newton steps, which reach this mode in
+    # seven iterations; a budget of four ends while the last step still moves
+    # the deviance by 2.4%.
     model = SuperGLM(
         family=Tweedie(p=1.5),
         link="log",
         features={"x": Numeric()},
-        max_iter=10,
+        max_iter=4,
         tol=1e-14,
         separation="warn",
     )
