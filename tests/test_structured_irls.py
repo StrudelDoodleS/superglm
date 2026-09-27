@@ -704,16 +704,15 @@ def test_auto_records_dense_fallback_reason_for_constraints():
     [
         pytest.param(20, 4, False, id="small-total-width-stays-dense"),
         pytest.param(30, 4, True, id="measured-scalar-crossover"),
-        # Ratio ((q+1)/(p+1))**2 = 0.26 here.  A real ~67k-row fit measured the
-        # structured backend ~1.7x SLOWER end to end at this shape class
-        # (issue #343): the factorization the ratio prices is a small minority
-        # of per-iteration work beside the shared O(n) moment build, so a wide
-        # dense border must stay on the dense path.
-        pytest.param(20, 20, False, id="wide-border-stays-dense"),
+        # Ratio ((q+1)/(p+1))**2 = 0.26 here, and 0.596 for issue #343's widest
+        # anchor (K=23 beside q=77).  #343 measured structured slower there in
+        # August 2026; since the structured Newton Hessian forms each product
+        # once, same-shape stand-ins measure it ahead (2026-09-27, selection.py).
+        pytest.param(20, 20, True, id="mid-ratio-border-goes-structured"),
+        pytest.param(23, 77, True, id="issue-343-widest-anchor-goes-structured"),
+        # Ratio 0.772, above the 0.75 bound: measured a tie at n=200.
         pytest.param(4, 28, False, id="insufficient-schur-cost-reduction"),
-        # Ratio 0.0009: the dominant block spans nearly the whole width.  This
-        # is the measured-win regime (1.5x-3.9x faster on real and synthetic
-        # fits) that the recalibrated bound must keep structured.
+        # Ratio 0.0009: the dominant block spans nearly the whole width.
         pytest.param(300, 8, True, id="dominant-block-spans-width"),
     ],
 )
@@ -760,7 +759,7 @@ def test_auto_backend_uses_measured_structured_crossover(
     ("dominant_width", "small_width", "expect_structured"),
     [
         pytest.param(300, 8, True, id="pick-structured"),
-        pytest.param(20, 20, False, id="decline-on-cost"),
+        pytest.param(6, 60, False, id="decline-on-cost"),
     ],
 )
 def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
@@ -775,7 +774,7 @@ def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
     recalibration against real workloads reads.
     """
     rng = np.random.default_rng(343)
-    n = 4 * dominant_width
+    n = 4 * (dominant_width + small_width)
     codes = np.asarray(np.arange(n) % dominant_width, dtype=np.intp)
     numeric = rng.normal(size=(n, small_width))
     y = 0.05 * numeric[:, 0] + rng.normal(scale=0.3, size=n)

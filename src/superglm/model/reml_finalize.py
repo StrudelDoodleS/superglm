@@ -53,7 +53,12 @@ from superglm.solvers.structured import (
     BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
+    NestedDataOperator,
+    NestedPenalizedOperator,
+    NestedSchurFactor,
+    NestedStructuredSystem,
     ProfiledBlockSchurFactor,
+    ProfiledNestedSchurFactor,
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     ScalarStructuredSystem,
@@ -81,26 +86,47 @@ def _build_structured_linear_system_state(
     """Distill a final structured refit into compact persistent state."""
     if not isinstance(
         factor,
-        ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor,
+        ProfiledScalarSchurFactor
+        | ProfiledBlockSchurFactor
+        | ProfiledSumToZeroBlockFactor
+        | ProfiledNestedSchurFactor,
     ):
         return None
     system = cache.get("structured_system")
     penalized_operator = cache.get("penalized_operator")
     if not isinstance(
         system,
-        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem,
     ) or not isinstance(
         penalized_operator,
-        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator,
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedPenalizedOperator,
     ):
         raise RuntimeError("terminal structured refit omitted its compact system state")
     if not isinstance(
         data_operator,
-        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator,
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedDataOperator,
     ):
         raise RuntimeError("terminal structured refit omitted its compact data operator")
 
-    if isinstance(penalized_operator, SumToZeroBlockOperator):
+    if isinstance(penalized_operator, NestedPenalizedOperator) and isinstance(
+        system, NestedStructuredSystem
+    ):
+        coefficient_factor = NestedSchurFactor(
+            penalized_operator,
+            chain_group_names=system.chain_group_names,
+            chain_group_indices=system.chain_group_indices,
+            intercept=False,
+        )
+    elif isinstance(penalized_operator, SumToZeroBlockOperator):
         coefficient_factor = SumToZeroBlockFactor(
             A=penalized_operator.A,
             C=penalized_operator.C,
@@ -156,8 +182,20 @@ def _build_structured_linear_system_state(
 
 
 def _structured_information_by_group(cache: dict) -> dict[int, np.ndarray]:
-    """Reuse dominant Fisher blocks already assembled by a structured refit."""
+    """Reuse dominant Fisher blocks already assembled by a structured refit.
+
+    Every nested chain level reports its node weights, the subtree sums of
+    the leaf information.
+    """
     system = cache.get("structured_system")
+    if isinstance(system, NestedStructuredSystem):
+        return dict(
+            zip(
+                system.chain_group_indices,
+                system.operator.tree.split(system.xtw_structured),
+                strict=True,
+            )
+        )
     if isinstance(system, ScalarStructuredSystem):
         return {system.dominant_group_index: system.operator.d}
     if isinstance(
@@ -166,6 +204,17 @@ def _structured_information_by_group(cache: dict) -> dict[int, np.ndarray]:
     ):
         return {system.dominant_group_index: system.operator.D}
     return {}
+
+
+def _structured_geometry_groups(
+    state: StructuredLinearSystemState | None,
+) -> tuple[int | None, tuple[int, ...]]:
+    """Return the leaf group index and the nested chain (``()`` for one level)."""
+    if state is None:
+        return None, ()
+    if isinstance(state.system, NestedStructuredSystem):
+        return state.system.chain_group_indices[-1], state.system.chain_group_indices
+    return state.system.dominant_group_index, ()
 
 
 def _build_reml_reporting_support_state(
@@ -478,6 +527,7 @@ def finalize_reml_fit(
             ProfiledScalarSchurFactor,
             ProfiledBlockSchurFactor,
             ProfiledSumToZeroBlockFactor,
+            ProfiledNestedSchurFactor,
         ),
     )
     # Profiled-family publication may retain rows transiently so it can
@@ -581,6 +631,9 @@ def finalize_reml_fit(
                 reml_penalties=reml_penalties,
             )
         )
+        structured_group_index, structured_chain = _structured_geometry_groups(
+            structured_linear_state
+        )
         geometry_start = _time.perf_counter()
         try:
             terminal_geometry = build_observed_reml_geometry(
@@ -597,11 +650,8 @@ def finalize_reml_fit(
                 groups=model._groups if structured_linear_state is not None else None,
                 lambdas=lambdas if structured_linear_state is not None else None,
                 reml_penalties=reml_penalties if structured_linear_state is not None else None,
-                structured_group_index=(
-                    structured_linear_state.system.dominant_group_index
-                    if structured_linear_state is not None
-                    else None
-                ),
+                structured_group_index=structured_group_index,
+                structured_chain_group_indices=structured_chain,
             )
         except ObservedGeometryInfeasibleError as exc:
             # The same retype the candidate gate in optimize_direct_reml makes,

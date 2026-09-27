@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -26,11 +27,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StructuredGroupSelection:
-    """Dominant structured group choice or a recorded dense-fallback reason."""
+    """Dominant structured group choice or a recorded dense-fallback reason.
+
+    ``chain_group_indices`` is ``()`` when no group was selected and
+    ``(group_index,)`` otherwise; the nested chain is resolved later, by
+    ``resolve_structured_backend``.
+    """
 
     group_index: int | None
     group_name: str | None
     fallback_reason: str | None
+    chain_group_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -38,11 +45,17 @@ class StructuredBackendDecision:
     """Resolved direct backend and the selected dominant block.
 
     ``auto_cost_ratio`` carries the crossover model's predicted
-    structured/dense factorization flop ratio whenever ``direct_solve="auto"``
+    structured/dense cost ratio whenever ``direct_solve="auto"``
     reached the cost comparison, for either outcome.  It is ``None`` for
     forced backends and for eligibility (non-cost) fallbacks.  Callers put it
     in the fit profile beside the realized timings so the crossover constants
     can be recalibrated against real fits (issue #343).
+
+    ``chain_group_indices`` is ``()`` without a structured group, ``(g,)`` for
+    one dominant block (scalar Schur or FactorSmooth), and for ``len >= 2`` a
+    nested RandomEffect chain, coarsest to finest, with ``[-1] == group_index``
+    (the leaf).  ``nested_fallback_reason`` says why a detected chain was
+    declined to the single-level backend.
     """
 
     use_structured: bool
@@ -50,77 +63,82 @@ class StructuredBackendDecision:
     group_name: str | None
     fallback_reason: str | None
     auto_cost_ratio: float | None = None
+    chain_group_indices: tuple[int, ...] = ()
+    nested_fallback_reason: str | None = None
 
 
 _AUTO_MIN_COEFFICIENT_WIDTH = 32
-# Measured crossover, August 2026 (issue #343).  The flop ratio compares only
-# the two factorizations, but on n >> p fits the factorization is a small
-# minority of per-iteration work -- the shared O(n)-row moment build dominates
-# (the standard operations count for this fitting problem is O(n p^2 + M p^3),
-# Wood 2015, JRSS-C 64(1); both terms belong in any method comparison).  The
-# structured path also carries per-outer-iteration derivative machinery the
-# dense path does not.  So a "25% cheaper factorization" prediction is a
-# prediction about a term that does not decide the fit time, and the previous
-# 0.75 bound admitted wide-border cases where the structured backend was
-# measured ~2x slower end to end.  Block elimination pays off when it
-# eliminates most of the matrix and keeps the dense border small -- the regime
-# every established user of this factorization occupies (lme4's sparse
-# Cholesky, Bates et al. 2015, JSS 67(1); doubly-bordered block-diagonal
-# solvers).  End-to-end anchors on a real ~67k-row Tweedie(1.5) log-link
-# pricing workload, exact REML path, single-threaded:
+# RandomEffect crossover, re-measured 2026-09-27 after the Schur rank floor
+# moved to the SVD fallback, the structured Newton Hessian started forming each
+# H^-1 O product once, and nested chains gained their own factor
+# (notes/research/2026-09-26-nested-random-effect-elimination.md, section 5).
+# With w = p + 1, a structured backend that leaves a border of b columns costs
+# K b^2 + b^3 = w b^2 flop units per factorization against the dense w^3, so it
+# predicts the cost ratio (b / w)^2: b1 = w - K for the single level, b = w - k
+# for a chain of k nodes.  A chain also forms the centred within-leaf scatter at
+# every PIRLS iterate and W-derivative operator (sections 3.4 and 3.6), dense
+# passes over the n rows that the other backends skip, priced as
+# _AUTO_NESTED_ROW_PASSES passes of n b^2: its ratio is (b / w)^2 (1 + passes n / w).
+# auto takes the cheaper structured candidate when its ratio is at most 0.75.
+# Memory, w b against w^2, is at most the square root of that ratio, so it never
+# reverses the order; the dense fits below that hit the cap had peaked at 3.4 to
+# 24.0 GiB.
 #
-#   ratio 0.596 (K=23  beside q=77):  structured 2.03x slower
-#   ratio 0.316 (K=39  beside q=49):  structured 1.66x slower
-#   ratio 0.148 (K=80  beside q=49):  structured 1.41x slower
-#   ratio 0.104 (K=105 beside q=49):  structured 1.10x slower
-#   ratio 0.033 (K=225 beside q=49):  structured 1.56x FASTER
+# Anchors: complete fit_reml fits, one per process, every thread pool pinned to
+# one, 1-minute load under 2.5; wall seconds, ">300" is the cap:
 #
-# Synthetic FactorSmooth ("fs" and "sz") sweeps reproduce the same ordering
-# (mid-ratio loses, tiny-ratio wins), and the discrete cached-W path is
-# insensitive at mid ratio (measured a tie), so one constant governs all three
-# geometries.  0.05 splits the measured bracket [0.033, 0.104] with margin on
-# both sides.  For the scalar geometry the ratio has the closed form
-# ((q+1)/(p+1))^2, so this bound equivalently requires the dominant block to
-# span at least ~78% of the augmented width.
+#   shape                          n        p       chain            gram  single  nested
+#   pg17 C exact, 5k-row sample    3,885    562     51/407           13.7     7.9    10.1
+#   pg17 C exact                   77,014   1,133   87/942           76.2    30.5    77.3
+#   pg17 C discrete                77,014   1,133   87/942           32.2     3.6    10.3
+#   dvsa C exact, 20k rows         15,794   1,458   91/1,332         41.5     3.9     4.6
+#   dvsa C discrete, 200k rows     157,593  4,008   223/3,749        >300     3.0     3.9
+#   dvsa D discrete, 20k rows      15,794   3,862   91/1,332/2,404   >300    42.4     1.6
+#   dvsa D discrete, 200k rows     157,593  10,046  223/3,749/6,038  >300    >300     6.1
+#   pg17 E discrete (crossed leaf) 77,014   16,850  15,717           >300   135.7        -
+#   pg17 B exact                   77,014   191     87               16.9    13.8        -
 #
-# Known boundary (adversarial review, August 2026): every anchor above is
-# n >> p, the regime this backend exists for.  When the factorization itself
-# dominates (n comparable to p), the flop ratio becomes predictive again and
-# this bound points the wrong way: synthetic Tweedie(1.5) fits at n=2,000
-# measured forced-structured 1.7x-2.1x FASTER at ratio ~0.064 (K=600 beside
-# q=200: 10.5s vs 17.6s dense; K=300 beside q=100: 0.86s vs 1.83s), shapes
-# the previous 0.75 bound routed structured.  The constant knowingly trades
-# that small-n corner for the measured 2x win on wide-border n >> p fits;
-# a shape-aware bound needs anchors in both regimes, which the recorded
-# ``structured_auto_cost_ratio`` exists to collect.
+# The chain's extra passes decide between the structured backends: nested wins
+# only when many parent nodes would otherwise widen the border (DVSA step D);
+# 2 passes sits inside the measured bracket (1.23, 401) near its lower end
+# because under-pricing them costs at most those passes (pg17 C exact, 2.5x)
+# while over-pricing them puts the parents back in a cubic border (DVSA D, >300 s).
+#
+# The August 2026 bound of 0.05 (issue #343) was set on a ~67k-row Tweedie(1.5)
+# log-link pricing workload that is not in the repository, where the structured
+# Newton Hessian then cost 5.8 s against 0.01 s dense.  Stand-ins with the same
+# n, K, q and family now show the single level ahead at every #343 shape (gram /
+# single: K=23 beside q=77 41.3 / 37.8; K=39, q=49 15.6 / 14.0; K=80 15.1 / 13.1;
+# K=105 15.6 / 13.7; K=225 14.3 / 11.1), as do Poisson stand-ins at K=80, 105 and
+# 225, pg17 B above (ratio 0.30), and the small-n corner the old bound sent to
+# gram (n=2,000: K=300 beside q=100 14.3 / 10.4; K=600 beside q=200 113 / 73.4).
+# The largest ratio measured ahead is 0.596; at 0.77 (n=200, K=4 beside q=28) the
+# two tie, so 0.75 keeps near-degenerate shapes dense.
+_AUTO_MAX_RANDOM_EFFECT_COST_RATIO = 0.75
+_AUTO_NESTED_ROW_PASSES = 2.0
+# FactorSmooth and sum-to-zero block geometries keep the August 2026 constant
+# bound on the factorization ratio (issue #343): synthetic "fs" and "sz" sweeps
+# then lost at mid ratio and won at tiny ratio, and section 5 leaves them as
+# they are.
 _AUTO_MAX_STRUCTURED_COST_RATIO = 0.05
 
 
-def _structured_auto_is_beneficial(
-    dominant_size: int,
-    small_size: int,
-) -> tuple[bool, float]:
-    """Apply the measured scalar-Schur crossover and return its cost ratio.
+def _random_effect_auto_cost_ratios(
+    n_rows: int,
+    coefficient_width: int,
+    level_sizes: Sequence[int],
+) -> dict[str, float]:
+    """Predicted structured/dense cost ratio of each backend for a RandomEffect leaf.
 
-    The width floor keeps tiny systems dense regardless of shape.  The ratio
-    bound (see ``_AUTO_MAX_STRUCTURED_COST_RATIO``) demands that the scalar
-    Schur elimination remove the overwhelming majority of the augmented
-    width; for this geometry the ratio reduces to ``((q+1)/(p+1))**2``.  The
-    intercept is included in both algebra estimates.
+    ``level_sizes`` runs coarsest to finest, one entry without a chain; the
+    model and its anchors are the comment above.
     """
-    if dominant_size < 1 or small_size < 0:
-        raise ValueError("Structured auto dimensions must be non-negative with a dominant block.")
-    coefficient_width = dominant_size + small_size
-    dense_dimension = coefficient_width + 1
-    schur_small_dimension = small_size + 1
-    dense_cost = float(dense_dimension**3)
-    structured_cost = float(schur_small_dimension**3 + dominant_size * schur_small_dimension**2)
-    cost_ratio = structured_cost / dense_cost
-    return (
-        coefficient_width >= _AUTO_MIN_COEFFICIENT_WIDTH
-        and cost_ratio <= _AUTO_MAX_STRUCTURED_COST_RATIO,
-        cost_ratio,
-    )
+    width = coefficient_width + 1
+    ratios = {"single": ((width - level_sizes[-1]) / width) ** 2}
+    if len(level_sizes) >= 2:
+        border = width - sum(level_sizes)
+        ratios["nested"] = (border / width) ** 2 * (1.0 + _AUTO_NESTED_ROW_PASSES * n_rows / width)
+    return ratios
 
 
 def _block_structured_auto_is_beneficial(
@@ -186,11 +204,36 @@ def _sum_to_zero_structured_auto_is_beneficial(
 def _structured_auto_cost_decision(
     dominant_matrix: GroupMatrix,
     selection: StructuredGroupSelection,
+    groups: list[GroupSlice],
     coefficient_width: int,
-    small_size: int,
+    chain: tuple[int, ...],
+    nested_fallback_reason: str | None,
 ) -> StructuredBackendDecision:
-    """Return the measured automatic crossover decision for one selected block."""
-    if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+    """Return the measured automatic crossover decision for one selected block.
+
+    A RandomEffect leaf compares the cheaper of the single-level and, on a
+    chain, the nested backend with gram; a chain declined for the single level
+    says why in ``nested_fallback_reason``.
+    """
+    small_size = coefficient_width - dominant_matrix.shape[1]
+    bound = _AUTO_MAX_STRUCTURED_COST_RATIO
+    if isinstance(dominant_matrix, RandomEffectGroupMatrix):
+        sizes = [groups[index].size for index in chain]
+        ratios = _random_effect_auto_cost_ratios(dominant_matrix.shape[0], coefficient_width, sizes)
+        backend = min(ratios, key=ratios.__getitem__)
+        cost_ratio, bound = ratios[backend], _AUTO_MAX_RANDOM_EFFECT_COST_RATIO
+        use_structured = coefficient_width >= _AUTO_MIN_COEFFICIENT_WIDTH and cost_ratio <= bound
+        predicted = ", ".join(f"{name}={ratio:.3g}" for name, ratio in ratios.items())
+        if backend == "single" and len(chain) >= 2:
+            names = [groups[index].name for index in chain]
+            nested_fallback_reason = (
+                f"nested chain {names!r} declined: auto predicts the single-level "
+                f"backend cheaper (cost ratios {predicted})"
+            )
+            chain = chain[-1:]
+        geometry_name = "RandomEffect"
+        dimensions = f"n={dominant_matrix.shape[0]}, levels={sizes}, cost ratios {predicted}"
+    elif isinstance(dominant_matrix, FactorSmoothGroupMatrix):
         if dominant_matrix.factor_basis == "sz":
             use_structured, cost_ratio = _sum_to_zero_structured_auto_is_beneficial(
                 dominant_matrix.n_levels,
@@ -205,13 +248,6 @@ def _structured_auto_cost_decision(
             )
         geometry_name = "FactorSmooth"
         dimensions = f"K={dominant_matrix.n_levels}, k={dominant_matrix.block_size}, q={small_size}"
-    elif isinstance(dominant_matrix, RandomEffectGroupMatrix):
-        use_structured, cost_ratio = _structured_auto_is_beneficial(
-            dominant_matrix.shape[1],
-            small_size,
-        )
-        geometry_name = "RandomEffect"
-        dimensions = f"K={dominant_matrix.shape[1]}, q={small_size}"
     else:  # pragma: no cover - StructuredGroupSelection invariant
         raise RuntimeError("structured selection chose an unsupported group matrix")
 
@@ -220,8 +256,7 @@ def _structured_auto_cost_decision(
         fallback_reason = (
             f"{geometry_name} geometry is below the measured structured crossover "
             f"(p={coefficient_width}, {dimensions}, estimated_cost_ratio={cost_ratio:.3f}; "
-            f"require p >= {_AUTO_MIN_COEFFICIENT_WIDTH} and ratio <= "
-            f"{_AUTO_MAX_STRUCTURED_COST_RATIO:.2f})"
+            f"require p >= {_AUTO_MIN_COEFFICIENT_WIDTH} and ratio <= {bound:.2f})"
         )
     logger.debug(
         "structured auto crossover: %s %s (p=%d, %s, estimated_cost_ratio=%.4f)",
@@ -237,6 +272,8 @@ def _structured_auto_cost_decision(
         group_name=selection.group_name,
         fallback_reason=fallback_reason,
         auto_cost_ratio=cost_ratio,
+        chain_group_indices=chain,
+        nested_fallback_reason=nested_fallback_reason,
     )
 
 
@@ -249,7 +286,7 @@ def record_auto_backend_decision(
 ) -> None:
     """Record one automatic crossover decision for offline recalibration.
 
-    Writes the predicted factorization cost ratio and the choice into the fit
+    Writes the predicted cost ratio and the choice into the fit
     profile, where they sit beside the realized per-phase timings
     (``irls_gram_s``, ``irls_solve_s``, ``reml_*_s``) that a forced-backend
     rerun can be compared against.  Emits one INFO line when ``auto`` commits
@@ -265,12 +302,11 @@ def record_auto_backend_decision(
     if log and decision.use_structured:
         logger.info(
             "direct_solve='auto' chose the structured backend for group %r "
-            "(estimated factorization cost ratio %.4f <= %.2f). The fit "
+            "(predicted cost ratio %.4f). The fit "
             "profile records this prediction beside realized timings; compare "
             "against a direct_solve='gram' rerun to recalibrate the crossover.",
             decision.group_name,
             decision.auto_cost_ratio,
-            _AUTO_MAX_STRUCTURED_COST_RATIO,
         )
 
 
@@ -353,7 +389,223 @@ def select_structured_group(
         group_index=dominant_index,
         group_name=dominant_group.name,
         fallback_reason=None,
+        chain_group_indices=(dominant_index,),
     )
+
+
+def nested_parent_codes(
+    child: RandomEffectGroupMatrix,
+    parent: RandomEffectGroupMatrix,
+) -> NDArray | None:
+    """Return each child level's parent code, or ``None`` when not strictly nested.
+
+    The count test of §3.7 in O(n) without a sort: record one parent per child
+    code and require every row to agree with it, which holds exactly when
+    each observed child code meets a single parent code.  Unobserved child
+    levels point at parent 0 (their accumulated weight is exactly zero, so the
+    pointer is never read, §3.7).
+    """
+    first = np.zeros(child.n_levels, dtype=np.intp)
+    first[child.codes] = parent.codes
+    if not np.array_equal(first[child.codes], parent.codes):
+        return None
+    return first
+
+
+def _group_spans(groups: list[GroupSlice]) -> tuple[tuple[str, int, int], ...]:
+    return tuple((group.name, group.start, group.end) for group in groups)
+
+
+def cached_nested_parent_codes(
+    random_effects: dict[int, RandomEffectGroupMatrix],
+    groups: list[GroupSlice],
+    child_index: int,
+    parent_index: int,
+    cache: dict | None,
+) -> NDArray | None:
+    """``nested_parent_codes`` for two design groups through the nesting cache.
+
+    ``random_effects`` maps design group indices to their RandomEffect
+    matrices.  Cache contract: the dictionary is the design's
+    ``_scalar_structured_layout_cache`` (owner and lifetime: the design);
+    group codes are immutable, so an entry is never invalidated.
+    """
+    key = ("nested_parent", child_index, parent_index, _group_spans(groups))
+    if cache is not None and key in cache:
+        return cache[key]
+    codes = nested_parent_codes(random_effects[child_index], random_effects[parent_index])
+    if cache is not None:
+        cache[key] = codes
+    return codes
+
+
+def find_nested_chain(
+    group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
+    groups: list[GroupSlice],
+    *,
+    leaf_index: int,
+    excluded: frozenset[int] = frozenset(),
+    cache: dict | None = None,
+) -> tuple[int, ...]:
+    """Grow a strictly nested RandomEffect chain upward from its leaf (Rule B, §5).
+
+    Every remaining RandomEffect term, not only the next larger one, is tested
+    for being a function of the current coarsest level; the finest passing
+    term (most observed levels, then most levels, then lowest index) joins the
+    chain.  A crossed term therefore stays in the border without ending the
+    chain.  Terms that fail against a level fail against its parents too
+    (nesting is transitive), so only the passing terms are re-tested.
+    Returns the chain coarsest to finest, ending with ``leaf_index``.
+    """
+    random_effects = {
+        index: matrix
+        for index, matrix in enumerate(group_matrices)
+        if isinstance(matrix, RandomEffectGroupMatrix)
+    }
+    candidates = [
+        index
+        for index, matrix in random_effects.items()
+        if index != leaf_index and index not in excluded and groups[index].size == matrix.n_levels
+    ]
+    chain = [leaf_index]
+    while candidates:
+        candidates = [
+            index
+            for index in candidates
+            if cached_nested_parent_codes(random_effects, groups, chain[0], index, cache)
+            is not None
+        ]
+        if not candidates:
+            break
+        finest = max(
+            candidates,
+            key=lambda index: (
+                np.count_nonzero(np.bincount(random_effects[index].codes)),
+                random_effects[index].n_levels,
+                -index,
+            ),
+        )
+        chain.insert(0, finest)
+        candidates.remove(finest)
+    return tuple(chain)
+
+
+# §3.7 audit of the observed working weights (critic run ``wsign``): the pairs
+# whose rows are non-negative, plus two negative only by rounding.
+_NONNEGATIVE_OBSERVED_WEIGHT_PAIRS = frozenset(
+    {
+        ("Poisson", "LogLink"),
+        ("Binomial", "LogitLink"),
+        ("Binomial", "ProbitLink"),
+        ("Binomial", "CloglogLink"),
+        ("Gamma", "LogLink"),
+        ("Gamma", "InverseLink"),
+        ("Tweedie", "LogLink"),
+        ("NegativeBinomial", "LogLink"),
+        ("Gaussian", "IdentityLink"),
+        ("Poisson", "IdentityLink"),
+        ("Tweedie", "SqrtLink"),
+    }
+)
+
+
+def nested_chain_weights_admissible(family, link) -> bool:
+    """Return whether a nested chain may see this family's working weights (§3.7).
+
+    Fisher curvature has non-negative weights.  Observed curvature is admitted
+    only for the audited pairs above; an unaudited or custom pair declines the
+    chain (the single-level backend keeps the parents in the border), which is
+    safe and recorded.  ``None`` for either argument means Fisher weights.
+    """
+    if family is None or link is None:
+        return True
+    from superglm.reml.observed_geometry import classify_reml_curvature
+
+    try:
+        if classify_reml_curvature(family, link) != "observed":
+            return True
+    except NotImplementedError:
+        return False
+    return (type(family).__name__, type(link).__name__) in _NONNEGATIVE_OBSERVED_WEIGHT_PAIRS
+
+
+def _zero_penalty_random_effects(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambda2: float | dict[str, float] | None,
+    S_override: NDArray | None,
+) -> frozenset[int]:
+    """Return the RandomEffect groups whose whole penalty is zero (§3.7).
+
+    Such a level leaves the chain for the border; the chain is re-grown over
+    the others, so its parents compose through the removed level.
+    """
+    random_effects = [
+        index
+        for index, matrix in enumerate(group_matrices)
+        if isinstance(matrix, RandomEffectGroupMatrix)
+    ]
+    if S_override is not None:
+        diagonal = np.diag(np.asarray(S_override, dtype=np.float64))
+        return frozenset(
+            index for index in random_effects if not np.any(diagonal[groups[index].sl] > 0.0)
+        )
+    lambdas = {
+        index: lambda2.get(groups[index].name, 0.0) if isinstance(lambda2, dict) else lambda2
+        for index in random_effects
+    }
+    return frozenset(
+        index for index in random_effects if not groups[index].penalized or lambdas[index] == 0.0
+    )
+
+
+def _resolve_nested_chain(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    leaf_index: int,
+    *,
+    coefficient_width: int,
+    lambda2: float | dict[str, float] | None,
+    S_override: NDArray | None,
+    family,
+    link,
+    cache: dict | None,
+) -> tuple[tuple[int, ...], str | None]:
+    """Return the chain for a RandomEffect leaf and why a found chain was declined."""
+    excluded = _zero_penalty_random_effects(group_matrices, groups, lambda2, S_override)
+    chain_key = ("nested_chain", leaf_index, tuple(sorted(excluded)), _group_spans(groups))
+    chain = None if cache is None else cache.get(chain_key)
+    if chain is None:
+        chain = find_nested_chain(
+            group_matrices,
+            groups,
+            leaf_index=leaf_index,
+            excluded=excluded - {leaf_index},
+            cache=cache,
+        )
+        if cache is not None:
+            cache[chain_key] = chain
+    if len(chain) < 2:
+        return chain, None
+    names = [groups[index].name for index in chain]
+    if not nested_chain_weights_admissible(family, link):
+        return (leaf_index,), (
+            f"nested chain {names!r} declined: {type(family).__name__}/{type(link).__name__} "
+            "observed working weights are not audited non-negative"
+        )
+    if S_override is not None:
+        chain_indices = np.concatenate([np.arange(groups[g].start, groups[g].end) for g in chain])
+        border = np.ones(coefficient_width, dtype=bool)
+        border[chain_indices] = False
+        incompatibility = _structured_override_incompatibility(
+            np.asarray(S_override, dtype=np.float64),
+            small_indices=np.flatnonzero(border),
+            structured_indices=chain_indices,
+            geometry="random_effect",
+        )
+        if incompatibility is not None:
+            return (leaf_index,), f"nested chain {names!r} declined: {incompatibility}"
+    return chain, None
 
 
 def _factor_smooth_component_lambda(
@@ -487,8 +739,20 @@ def resolve_structured_backend(
     row_weights: NDArray | None = None,
     lambda2: float | dict[str, float] | None = None,
     S_override: NDArray | None = None,
+    family=None,
+    link=None,
+    nesting_cache: dict | None = None,
 ) -> StructuredBackendDecision:
-    """Resolve forced/automatic scalar Schur use once for a direct fit."""
+    """Resolve forced/automatic structured use once for a direct fit.
+
+    A RandomEffect leaf grows a nested chain (Rule B, §5) over the other
+    RandomEffect terms with a non-zero penalty.  The chain is declined to the
+    single-level backend, with ``nested_fallback_reason``, when the family's
+    working weights are not audited non-negative or an authoritative
+    ``S_override`` is not diagonal on the chain (§3.7), or under ``auto`` when
+    the cost model predicts the single level cheaper; the leaf's own checks
+    are unchanged.  ``nesting_cache`` is the design's layout cache.
+    """
     if direct_solve not in ("auto", "structured"):
         return StructuredBackendDecision(
             use_structured=False,
@@ -511,14 +775,27 @@ def resolve_structured_backend(
         raise RuntimeError("structured group selection omitted its group name")
 
     dominant_matrix = group_matrices[selection.group_index]
-    dominant_size = dominant_matrix.shape[1]
-    small_size = coefficient_width - dominant_size
+    chain, nested_fallback_reason = selection.chain_group_indices, None
+    if isinstance(dominant_matrix, RandomEffectGroupMatrix):
+        chain, nested_fallback_reason = _resolve_nested_chain(
+            group_matrices,
+            groups,
+            selection.group_index,
+            coefficient_width=coefficient_width,
+            lambda2=lambda2,
+            S_override=S_override,
+            family=family,
+            link=link,
+            cache=nesting_cache,
+        )
     auto_cost_decision = (
         _structured_auto_cost_decision(
             dominant_matrix,
             selection,
+            groups,
             coefficient_width,
-            small_size,
+            chain,
+            nested_fallback_reason,
         )
         if mode == "auto"
         else None
@@ -732,6 +1009,8 @@ def resolve_structured_backend(
             group_index=selection.group_index,
             group_name=group_name,
             fallback_reason=None,
+            chain_group_indices=chain,
+            nested_fallback_reason=nested_fallback_reason,
         )
     if auto_cost_decision is None:  # pragma: no cover - mode invariant
         raise RuntimeError("automatic structured resolution omitted its cost decision")

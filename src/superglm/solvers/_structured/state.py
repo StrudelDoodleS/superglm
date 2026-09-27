@@ -17,8 +17,14 @@ from superglm.solvers._structured.factors import (
 )
 from superglm.solvers._structured.moments import (
     BlockStructuredSystem,
+    NestedStructuredSystem,
     ScalarStructuredSystem,
     SumToZeroBlockStructuredSystem,
+)
+from superglm.solvers._structured.nested import (
+    NestedPenalizedOperator,
+    NestedSchurFactor,
+    ProfiledNestedSchurFactor,
 )
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
@@ -38,13 +44,30 @@ if TYPE_CHECKING:
 class StructuredLinearSystemState:
     """Authoritative compact factors and moments retained after a fit."""
 
-    coefficient_factor: ScalarSchurFactor | BlockSchurFactor | SumToZeroBlockFactor
-    profiled_factor: (
-        ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor
+    coefficient_factor: (
+        ScalarSchurFactor | BlockSchurFactor | SumToZeroBlockFactor | NestedSchurFactor
     )
-    augmented_factor: ScalarSchurFactor | BlockSchurFactor | SumToZeroBlockFactor
-    system: ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem
-    penalized_operator: SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator
+    profiled_factor: (
+        ProfiledScalarSchurFactor
+        | ProfiledBlockSchurFactor
+        | ProfiledSumToZeroBlockFactor
+        | ProfiledNestedSchurFactor
+    )
+    augmented_factor: (
+        ScalarSchurFactor | BlockSchurFactor | SumToZeroBlockFactor | NestedSchurFactor
+    )
+    system: (
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+    )
+    penalized_operator: (
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedPenalizedOperator
+    )
     centered_data_operator: CenteredBlockOperator
     support_totals: dict[
         str,

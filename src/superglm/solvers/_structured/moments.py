@@ -12,6 +12,7 @@ from superglm._group_matrix._group_matrix_algebra import (
     _cross_gram,
     _random_effect_cross_gram,
 )
+from superglm._group_matrix._group_matrix_centered import _compensated_add
 from superglm._group_matrix._group_matrix_kernels import (
     _dense_small_weighted_moments,
     _random_effect_sufficient_stats,
@@ -21,6 +22,7 @@ from superglm.group_matrix import (
     DenseGroupMatrix,
     FactorSmoothGroupMatrix,
     GroupMatrix,
+    RandomEffectGroupMatrix,
 )
 from superglm.solvers._structured.layout import (
     BlockStructuredLayout,
@@ -28,6 +30,11 @@ from superglm.solvers._structured.layout import (
     _validate_structured_inputs,
     build_block_structured_layout,
     build_scalar_structured_layout,
+)
+from superglm.solvers._structured.nested import (
+    NestedDataOperator,
+    NestedLeafStatistics,
+    NestedStructuredLayout,
 )
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
@@ -68,6 +75,29 @@ class BlockStructuredSystem:
 
 
 @dataclass(frozen=True)
+class NestedStructuredSystem:
+    """Leaf-form data operator and working sufficient statistics of a nested chain.
+
+    ``operator`` is the unaugmented data operator (``a = w``, deviation
+    ``None``) that every signed operator of the fit is built about.  The
+    structured vectors are in node order: parent entries are subtree sums of
+    the leaf ones (§4), never a row pass.  ``dominant_group_name`` is the leaf,
+    for reporting only.
+    """
+
+    operator: NestedDataOperator
+    xtw_small: NDArray
+    xtw_structured: NDArray
+    xtwz_small: NDArray
+    xtwz_structured: NDArray
+    sum_w: float
+    sum_wz: float
+    chain_group_indices: tuple[int, ...]
+    chain_group_names: tuple[str, ...]
+    dominant_group_name: str
+
+
+@dataclass(frozen=True)
 class SumToZeroBlockStructuredSystem:
     """Raw all-level SZ moments with public ``K - 1`` transpose products."""
 
@@ -83,6 +113,198 @@ class SumToZeroBlockStructuredSystem:
     dominant_group_index: int
     dominant_group_name: str
     level_labels: tuple[object, ...]
+
+
+def _small_block_moments(
+    layout: ScalarStructuredLayout | NestedStructuredLayout,
+    weights: NDArray,
+    weighted_rhs: NDArray,
+    weight_cache: _BlockWeightCache,
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Return the border Gram ``X_b'WX_b``, ``X_b'W`` and ``X_b'Wz``."""
+    if not len(layout.small_indices):
+        return np.empty((0, 0), dtype=np.float64), np.empty(0), np.empty(0)
+    if layout.dense_small_matrix is not None:
+        return _dense_small_weighted_moments(layout.dense_small_matrix, weights, weighted_rhs)
+    if layout.small_execution_plan is None:  # pragma: no cover - layout invariant
+        raise RuntimeError("Structured small block has no execution plan.")
+    small_moments = layout.small_execution_plan._moments_prevalidated(
+        weights,
+        rhs=(weighted_rhs,),
+        include_xtw=True,
+        signed=bool(np.any(weights < 0.0)),
+        _cache=weight_cache,
+    )
+    if small_moments.xtw is None:  # pragma: no cover - requested above
+        raise RuntimeError("Structured small moment plan omitted X'W.")
+    return small_moments.gram, small_moments.xtw, small_moments.xt_rhs[0]
+
+
+def _random_effect_cross(
+    layout: ScalarStructuredLayout | NestedStructuredLayout,
+    random_effect: RandomEffectGroupMatrix,
+    weights: NDArray,
+    weight_cache: _BlockWeightCache,
+) -> NDArray:
+    """Return the level-by-border cross ``Z_re' W X_b`` from the level kernels."""
+    if not layout.small_matrices:
+        return np.empty((random_effect.n_levels, 0), dtype=np.float64)
+    return np.concatenate(
+        [
+            _random_effect_cross_gram(random_effect, matrix, weights, weight_cache)
+            for matrix in layout.small_matrices
+        ],
+        axis=1,
+    )
+
+
+def _border_rows(layout: NestedStructuredLayout, rows: NDArray) -> NDArray:
+    """Materialize the border rows ``X_b[rows]`` of one chunk (q columns)."""
+    if layout.dense_small_matrix is not None:
+        return layout.dense_small_matrix[rows]
+    blocks = [
+        np.asarray(matrix.row_subset(rows).toarray(), dtype=np.float64)
+        for matrix in layout.small_matrices
+    ]
+    return np.hstack(blocks) if blocks else np.empty((len(rows), 0), dtype=np.float64)
+
+
+def _centered_leaf_pass(
+    layout: NestedStructuredLayout,
+    codes: NDArray,
+    weights: NDArray,
+    leaf_weight: NDArray,
+    mean: NDArray | None,
+    chunk_size: int,
+) -> tuple[NDArray, NDArray, NDArray | None]:
+    """Return leaf means, the centred within-leaf scatter and the deviations.
+
+    The exact centred row pass of §3.4 and §3.6 (decision 1), in bounded row
+    chunks.  Without ``mean`` it first forms the data leaf means in the
+    shifted form ``x_ref + sum_r w_r (x_r - x_ref) / w_l`` about each leaf's
+    reference row (0 where ``w_l == 0``), so a column constant within a leaf
+    gives that constant exactly; the deviations are then zero by
+    construction and returned as ``None``.  With ``mean`` (a signed operator
+    about its factor's data means) it also forms ``dev_l = sum_r a_r (x_r -
+    m_l)``.  The scatter ``sum_r a_r (x_r - m_l)(x_r - m_l)'`` never subtracts
+    raw moments, so such a column has an exactly zero row and column; chunks
+    accumulate with compensated addition and the result is symmetrized.
+    """
+    n, q = len(weights), len(layout.small_indices)
+    starts = range(0, n, chunk_size)
+    deviation = None
+    if mean is None:
+        observed = layout.reference_row >= 0
+        reference = np.zeros((len(leaf_weight), q), dtype=np.float64)
+        reference[observed] = _border_rows(layout, layout.reference_row[observed])
+        shift = np.zeros_like(reference)
+        for start in starts:
+            rows = np.arange(start, min(start + chunk_size, n))
+            leaves = codes[rows]
+            difference = _border_rows(layout, rows) - reference[leaves]
+            np.add.at(shift, leaves, weights[rows, None] * difference)
+        active = leaf_weight != 0.0
+        mean = np.zeros_like(reference)
+        mean[active] = reference[active] + shift[active] / leaf_weight[active, None]
+    else:
+        mean = np.asarray(mean, dtype=np.float64)
+        deviation = np.zeros_like(mean)
+    within = np.zeros((q, q), dtype=np.float64)
+    compensation = np.zeros_like(within)
+    for start in starts:
+        rows = np.arange(start, min(start + chunk_size, n))
+        leaves = codes[rows]
+        centered = _border_rows(layout, rows) - mean[leaves]
+        weighted = weights[rows, None] * centered
+        _compensated_add(within, compensation, centered.T @ weighted)
+        if deviation is not None:
+            np.add.at(deviation, leaves, weighted)
+    return mean, 0.5 * (within + within.T), deviation
+
+
+def build_nested_leaf_statistics(
+    layout: NestedStructuredLayout,
+    group_matrices: list[GroupMatrix],
+    weights: NDArray,
+    *,
+    mean: NDArray | None = None,
+    chunk_size: int = 8192,
+) -> NestedLeafStatistics:
+    """One row pass of a nested chain: per-leaf statistics of the row weights.
+
+    ``weight`` and ``cross`` come from the existing leaf kernels; ``mean``,
+    ``within`` and ``deviation`` from ``_centered_leaf_pass``.  ``mean=None``
+    is the data pass (shifted data means, deviation ``None``); a given
+    ``mean`` is a signed pass about those means.
+    """
+    leaf = group_matrices[layout.leaf_group_index]
+    if not isinstance(leaf, RandomEffectGroupMatrix):
+        raise ValueError("The nested leaf group must be a RandomEffectGroupMatrix.")
+    values = np.asarray(weights, dtype=np.float64)
+    leaf_weight = leaf.rmatvec(values)
+    leaf_mean, within, deviation = _centered_leaf_pass(
+        layout, leaf.codes, values, leaf_weight, mean, chunk_size
+    )
+    return NestedLeafStatistics(
+        weight=leaf_weight,
+        cross=_random_effect_cross(layout, leaf, values, _BlockWeightCache()),
+        mean=leaf_mean,
+        within=within,
+        deviation=deviation,
+    )
+
+
+def build_nested_structured_system(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    W: NDArray,
+    Wz: NDArray,
+    *,
+    layout: NestedStructuredLayout,
+    mean: NDArray | None = None,
+) -> NestedStructuredSystem:
+    """Build the nested data operator and sufficient statistics from one set of rows.
+
+    ``mean=None`` is the data system of a PIRLS iterate; a signed W-derivative
+    operator passes its factor's ``data_operator.leaf.mean`` (§6).  Only the
+    leaf group touches rows: its level sums come from the leaf kernels and
+    every parent level is their subtree sum.
+    """
+    weights, weighted_rhs, leaf = _validate_structured_inputs(
+        group_matrices,
+        groups,
+        W,
+        Wz,
+        layout.leaf_group_index,
+    )
+    if any(
+        matrix is not group_matrices[index]
+        for matrix, index in zip(layout.small_matrices, layout.small_group_indices, strict=True)
+    ) or layout.chain_group_names != tuple(groups[i].name for i in layout.chain_group_indices):
+        raise ValueError("Nested layout does not match the supplied grouped design.")
+    A, xtw_small, xtwz_small = _small_block_moments(
+        layout, weights, weighted_rhs, _BlockWeightCache()
+    )
+    leaf_statistics = build_nested_leaf_statistics(layout, group_matrices, weights, mean=mean)
+    operator = NestedDataOperator(
+        tree=layout.tree,
+        leaf=leaf_statistics,
+        A=0.5 * (A + A.T),
+        small_indices=layout.small_indices,
+        structured_indices=layout.structured_indices,
+    )
+    return NestedStructuredSystem(
+        operator=operator,
+        xtw_small=xtw_small,
+        xtw_structured=np.concatenate(layout.tree.subtree_sum(leaf_statistics.weight)),
+        xtwz_small=xtwz_small,
+        xtwz_structured=np.concatenate(layout.tree.subtree_sum(leaf.rmatvec(weighted_rhs))),
+        sum_w=float(np.sum(weights)),
+        sum_wz=float(np.sum(weighted_rhs)),
+        chain_group_indices=layout.chain_group_indices,
+        chain_group_names=layout.chain_group_names,
+        dominant_group_name=layout.leaf_group_name,
+    )
 
 
 def build_scalar_structured_system(
@@ -125,42 +347,9 @@ def build_scalar_structured_system(
     ):
         raise ValueError("Structured layout does not match the supplied grouped design.")
 
-    if len(layout.small_indices):
-        weight_cache = _BlockWeightCache()
-        if layout.dense_small_matrix is not None:
-            A, xtw_small, xtwz_small = _dense_small_weighted_moments(
-                layout.dense_small_matrix,
-                weights,
-                weighted_rhs,
-            )
-        else:
-            if layout.small_execution_plan is None:  # pragma: no cover - layout invariant
-                raise RuntimeError("Structured small block has no execution plan.")
-            small_moments = layout.small_execution_plan._moments_prevalidated(
-                weights,
-                rhs=(weighted_rhs,),
-                include_xtw=True,
-                signed=bool(np.any(weights < 0.0)),
-                _cache=weight_cache,
-            )
-            if small_moments.xtw is None:  # pragma: no cover - requested above
-                raise RuntimeError("Structured small moment plan omitted X'W.")
-            A = small_moments.gram
-            xtw_small = small_moments.xtw
-            xtwz_small = small_moments.xt_rhs[0]
-        C = np.concatenate(
-            [
-                _random_effect_cross_gram(dominant, matrix, weights, weight_cache)
-                for matrix in layout.small_matrices
-            ],
-            axis=1,
-        )
-    else:
-        A = np.empty((0, 0), dtype=np.float64)
-        C = np.empty((dominant.n_levels, 0), dtype=np.float64)
-        xtw_small = np.empty(0, dtype=np.float64)
-        xtwz_small = np.empty(0, dtype=np.float64)
-
+    weight_cache = _BlockWeightCache()
+    A, xtw_small, xtwz_small = _small_block_moments(layout, weights, weighted_rhs, weight_cache)
+    C = _random_effect_cross(layout, dominant, weights, weight_cache)
     level_W, level_Wz = _random_effect_sufficient_stats(
         dominant.codes,
         weights,
@@ -410,9 +599,16 @@ def build_structured_system(
     *,
     dominant_group_index: int,
     tabmat_split=None,
-    layout: ScalarStructuredLayout | BlockStructuredLayout | None = None,
-) -> ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem:
-    """Dispatch sufficient-statistic construction by dominant matrix type."""
+    layout: ScalarStructuredLayout | BlockStructuredLayout | NestedStructuredLayout | None = None,
+) -> (
+    ScalarStructuredSystem
+    | BlockStructuredSystem
+    | SumToZeroBlockStructuredSystem
+    | NestedStructuredSystem
+):
+    """Dispatch sufficient-statistic construction by layout or dominant matrix type."""
+    if isinstance(layout, NestedStructuredLayout):
+        return build_nested_structured_system(group_matrices, groups, W, Wz, layout=layout)
     dominant = group_matrices[dominant_group_index]
     if isinstance(dominant, FactorSmoothGroupMatrix):
         if layout is not None and not isinstance(layout, BlockStructuredLayout):

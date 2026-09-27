@@ -1270,6 +1270,7 @@ class ModelMetrics:
         from superglm.features.numeric import Numeric
         from superglm.features.ordered_categorical import OrderedCategorical
         from superglm.features.piecewise import Piecewise
+        from superglm.features.random_effect import RandomEffect
         from superglm.features.spline import _SplineBase
         from superglm.inference._term_covariance import feature_se_from_cov
 
@@ -1343,6 +1344,12 @@ class ModelMetrics:
 
         indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
         aug_indices = indices + 1  # offset by 1 for intercept row/col
+        if isinstance(spec, RandomEffect):
+            # One coefficient per level: the diagonal is the whole answer, and
+            # a compact covariance refuses the full block of a large term
+            # (every nested chain level counts against its cap, §6).
+            variance = phi * covariance_selected_diagonal(XtWX_inv_aug, aug_indices)
+            return {"se": np.sqrt(np.maximum(variance, 0.0))}
         Cov_g = phi * covariance_selected_block(XtWX_inv_aug, aug_indices)
 
         if isinstance(spec, _SplineBase):

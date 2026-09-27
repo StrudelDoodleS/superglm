@@ -40,9 +40,13 @@ from superglm.solvers.structured import (
     CenteredBlockOperator,
     CompactSymmetricOperator,
     LowRankSymmetricOperator,
+    NestedStructuredLayout,
+    ProfiledNestedSchurFactor,
     SumBlockOperator,
+    build_nested_structured_system,
     build_structured_system,
     compact_operator_diagonal,
+    get_nested_structured_layout,
     get_structured_layout,
     structured_design_matvec,
     structured_design_rmatvec,
@@ -471,7 +475,21 @@ def reml_w_correction(
 
     structured_group_index: int | None = None
     structured_layout = None
-    if not isinstance(factor, DenseHessianFactor):
+    signed_leaf_mean: NDArray | None = None
+    signed_center = mean_x
+    if isinstance(factor, ProfiledNestedSchurFactor):
+        # A nested factor is found by its chain, never by its leaf name, and
+        # its signed operators are built about its own data leaf means and
+        # centred on its own mean_x (§3.6, §6).
+        structured_group_index = factor.chain_group_indices[-1]
+        structured_layout = get_nested_structured_layout(
+            dm,
+            groups,
+            chain_group_indices=factor.chain_group_indices,
+        )
+        signed_leaf_mean = factor.data_operator.leaf.mean
+        signed_center = factor.mean_x
+    elif not isinstance(factor, DenseHessianFactor):
         dominant_name = getattr(factor, "dominant_group_name", None)
         structured_group_index = next(
             (index for index, group in enumerate(groups) if group.name == dominant_name),
@@ -555,13 +573,24 @@ def reml_w_correction(
     ) -> NDArray | CompactSymmetricOperator:
         """Return ``X_c' diag(row_weights) X_c`` for fixed ``mean_x``."""
         if structured_group_index is not None:
-            system = build_structured_system(
-                list(dm.group_matrices),
-                groups,
-                row_weights,
-                np.zeros_like(row_weights),
-                dominant_group_index=structured_group_index,
-                layout=structured_layout,
+            system = (
+                build_nested_structured_system(
+                    list(dm.group_matrices),
+                    groups,
+                    row_weights,
+                    np.zeros_like(row_weights),
+                    layout=structured_layout,
+                    mean=signed_leaf_mean,
+                )
+                if isinstance(structured_layout, NestedStructuredLayout)
+                else build_structured_system(
+                    list(dm.group_matrices),
+                    groups,
+                    row_weights,
+                    np.zeros_like(row_weights),
+                    dominant_group_index=structured_group_index,
+                    layout=structured_layout,
+                )
             )
             cross = np.empty(p, dtype=np.float64)
             cross[system.operator.small_indices] = system.xtw_small
@@ -570,7 +599,7 @@ def reml_w_correction(
                 raw=system.operator,
                 cross=cross,
                 total=system.sum_w,
-                center=mean_x,
+                center=signed_center,
             )
         if use_stable_signed_gram:
             if stable_gram_rhs is None:  # pragma: no cover - serial calls exclude batching

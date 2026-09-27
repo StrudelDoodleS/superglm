@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import scipy.linalg
@@ -25,6 +26,9 @@ from superglm.solvers.rank import (
     decompose_gram,
     needs_factor_certification,
 )
+
+if TYPE_CHECKING:
+    from superglm.solvers._structured.nested import NestedDataOperator
 
 _MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH = 512
 
@@ -237,6 +241,39 @@ def _independent_block_centered_estimability(
         & (structured_column_scale > 0.0)
         & (lifted_null_norm <= SHARED_RANK_POLICY.factor_rcond)
     )
+    return result
+
+
+def _nested_centered_estimability(
+    operator: CenteredBlockOperator,
+    raw: NestedDataOperator,
+) -> NDArray:
+    """Estimability of a nested chain's data geometry by the §6 reduction.
+
+    The tree design ``Z_leaf M`` spans exactly the columns of ``Z_leaf``
+    (``M = [M_parents | I]``), so a border coordinate is estimable exactly when
+    it is in the single-level geometry with the leaf level dominant.  Every
+    chain coordinate is non-estimable in the data sense: each node is a parent
+    or a child in some ``z = e_p - sum_{c in ch(p)} e_c`` with ``M z = 0``, and
+    the roots alias the intercept.
+    """
+    q, leaves = len(raw.small_indices), raw.tree.sizes[-1]
+    leaf_indices = raw.structured_indices[raw.tree.offsets[-2] :]
+    reduced = np.concatenate((raw.small_indices, leaf_indices))
+    leaf_operator = CenteredBlockOperator(
+        raw=SymmetricBlockOperator(
+            A=raw.A,
+            C=raw.leaf.cross,
+            d=raw.leaf.weight,
+            small_indices=np.arange(q),
+            structured_indices=np.arange(q, q + leaves),
+        ),
+        cross=operator.cross[reduced],
+        total=operator.total,
+        center=operator.center[reduced],
+    )
+    result = np.zeros(operator.shape[0], dtype=bool)
+    result[raw.small_indices] = _independent_block_centered_estimability(leaf_operator)[:q]
     return result
 
 
@@ -1599,9 +1636,13 @@ def centered_operator_coefficient_estimable(
     operator: CenteredBlockOperator,
 ) -> NDArray:
     """Return coefficient estimability from compact centered data geometry."""
+    from superglm.solvers._structured.nested import NestedDataOperator
+
     try:
         if isinstance(operator.raw, SumToZeroBlockOperator):
             return _sum_to_zero_centered_estimability(operator)
+        if isinstance(operator.raw, NestedDataOperator):
+            return _nested_centered_estimability(operator, operator.raw)
         return _independent_block_centered_estimability(operator)
     except (
         np.linalg.LinAlgError,

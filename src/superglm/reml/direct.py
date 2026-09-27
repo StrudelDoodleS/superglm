@@ -213,6 +213,9 @@ def optimize_direct_reml(
         coefficient_width=dm.p,
         row_weights=sample_weight,
         lambda2=lambdas,
+        family=distribution,
+        link=link,
+        nesting_cache=getattr(dm, "_scalar_structured_layout_cache", None),
     )
     use_structured = structured_decision.use_structured
     record_auto_backend_decision(profile, direct_solve, structured_decision)
@@ -560,6 +563,9 @@ def optimize_direct_reml(
                     reml_penalties=penalties if use_structured else None,
                     structured_group_index=(
                         structured_decision.group_index if use_structured else None
+                    ),
+                    structured_chain_group_indices=(
+                        structured_decision.chain_group_indices if use_structured else ()
                     ),
                 )
             except ObservedGeometryInfeasibleError as exc:
@@ -1207,6 +1213,9 @@ def optimize_direct_reml(
                         reml_penalties=penalties if use_structured else None,
                         structured_group_index=(
                             structured_decision.group_index if use_structured else None
+                        ),
+                        structured_chain_group_indices=(
+                            structured_decision.chain_group_indices if use_structured else ()
                         ),
                     )
                 except ObservedGeometryInfeasibleError:

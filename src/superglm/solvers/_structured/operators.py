@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import scipy.linalg
@@ -15,6 +15,9 @@ from superglm.factor_smooth_geometry import (
     adjoint_sum_to_zero_blocks,
     expand_sum_to_zero_blocks,
 )
+
+if TYPE_CHECKING:
+    from superglm.solvers._structured.nested import NestedDataOperator
 
 
 @dataclass(frozen=True)
@@ -248,7 +251,12 @@ class SumToZeroBlockOperator:
 class CenteredBlockOperator:
     """A block operator centered around a fixed weighted design mean."""
 
-    raw: SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator
+    raw: (
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedDataOperator
+    )
     cross: NDArray
     total: float
     center: NDArray
@@ -381,6 +389,8 @@ CompactSymmetricOperator = (
     | LowRankSymmetricOperator
     | SumBlockOperator
 )
+if TYPE_CHECKING:
+    CompactSymmetricOperator = CompactSymmetricOperator | NestedDataOperator
 
 
 @dataclass(frozen=True)
@@ -1180,6 +1190,8 @@ def compact_operator_diagonal(
     operator: CompactSymmetricOperator,
 ) -> NDArray:
     """Return an exact compact-operator diagonal in O(Kq + q²) memory."""
+    from superglm.solvers._structured.nested import NestedDataOperator
+
     if isinstance(operator, SumBlockOperator):
         return sum(
             (compact_operator_diagonal(item) for item in operator.operators),
@@ -1198,6 +1210,8 @@ def compact_operator_diagonal(
             axis1=1,
             axis2=2,
         )
+    elif isinstance(raw, NestedDataOperator):
+        diagonal[raw.structured_indices] = raw.diagonal()[raw.structured_indices]
     else:
         diagonal[raw.structured_indices] = raw.d
     if isinstance(operator, CenteredBlockOperator):

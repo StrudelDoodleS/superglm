@@ -58,7 +58,10 @@ from superglm.solvers.structured import (
     BlockSchurFactor,
     CenteredBlockOperator,
     CompactSymmetricOperator,
+    NestedSchurFactor,
+    NestedStructuredSystem,
     ProfiledBlockSchurFactor,
+    ProfiledNestedSchurFactor,
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     build_augmented_structured_factor,
@@ -1052,13 +1055,17 @@ def build_observed_reml_geometry(
     lambdas: dict[str, float] | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
     structured_group_index: int | None = None,
+    structured_chain_group_indices: tuple[int, ...] = (),
 ) -> ObservedREMLGeometry:
     """Build Wood's observed LAML Hessian without altering fit inference state.
 
     Non-negative observed rows use the shared centered-system execution layer,
     including its Tabmat/discrete kernels.  The uncommon negative-row case
     uses bounded, compensated centered chunks; the final penalized curvature
-    must still be positive semidefinite for a valid Laplace mode.
+    must still be positive semidefinite for a valid Laplace mode.  A nested
+    chain (``structured_chain_group_indices`` of length >= 2, ending with
+    ``structured_group_index``) builds the nested factor through the same
+    refusal seams.
     """
     y = np.asarray(y, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
@@ -1128,6 +1135,7 @@ def build_observed_reml_geometry(
             dm,
             groups,
             dominant_group_index=structured_group_index,
+            chain_group_indices=structured_chain_group_indices,
         )
         # Same split as the factor build below, one step earlier: the structured
         # operators refuse non-finite blocks with a LinAlgError, and everything
@@ -1244,14 +1252,20 @@ def build_observed_reml_geometry(
             # carry, so the unsupported-geometry guard has to run ahead of it.
             # Dispatching afterwards would let an unrecognised factor die on an
             # AttributeError about a private attribute instead of reaching the
-            # TypeError that exists to name what came back.
+            # TypeError that exists to name what came back.  The nested factor
+            # exposes its curvature publicly, on the Jacobi-scaled Schur
+            # complement where its rank decisions are taken (§3.7).
             if not isinstance(  # pragma: no cover - structured dispatch invariant
                 augmented_factor,
-                BlockSchurFactor | ScalarSchurFactor,
+                BlockSchurFactor | ScalarSchurFactor | NestedSchurFactor,
             ):
                 raise TypeError("Unsupported structured observed factor geometry.")
             try:
-                schur_eigenvalues = np.linalg.eigvalsh(augmented_factor._Q)
+                schur_eigenvalues = (
+                    augmented_factor.scaled_schur_eigenvalues()
+                    if isinstance(augmented_factor, NestedSchurFactor)
+                    else np.linalg.eigvalsh(augmented_factor._Q)
+                )
             except np.linalg.LinAlgError as error:
                 # An eigensolver that will not converge on this Schur complement
                 # is a statement about the iterate's curvature, not about the
@@ -1275,12 +1289,21 @@ def build_observed_reml_geometry(
                     sum_w=system.sum_w,
                     xtw=xtw,
                 )
-            else:
+            elif isinstance(augmented_factor, ScalarSchurFactor):
                 profiled_factor = ProfiledScalarSchurFactor(
                     augmented_factor=augmented_factor,
                     sum_w=system.sum_w,
                     xtw=xtw,
                 )
+            elif isinstance(system, NestedStructuredSystem):
+                profiled_factor = ProfiledNestedSchurFactor(
+                    augmented_factor=augmented_factor,
+                    sum_w=system.sum_w,
+                    xtw=xtw,
+                    data_operator=system.operator,
+                )
+            else:  # pragma: no cover - structured dispatch invariant
+                raise TypeError("Unsupported structured observed factor geometry.")
         return ObservedREMLGeometry(
             eta=_readonly(eta),
             mu=_readonly(mu),

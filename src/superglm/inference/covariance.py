@@ -29,6 +29,7 @@ from superglm.group_matrix import (
 from superglm.solvers.hessian_factor import HessianFactor, _expanded_component_omega
 from superglm.solvers.structured import (
     ProfiledBlockSchurFactor,
+    ProfiledNestedSchurFactor,
     ProfiledScalarSchurFactor,
 )
 from superglm.solvers.sum_to_zero import ProfiledSumToZeroBlockFactor
@@ -136,7 +137,10 @@ class StructuredCovarianceAccessor:
     def __init__(
         self,
         factor: (
-            ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor
+            ProfiledScalarSchurFactor
+            | ProfiledBlockSchurFactor
+            | ProfiledSumToZeroBlockFactor
+            | ProfiledNestedSchurFactor
         ),
         *,
         intercept_shift: NDArray | None = None,

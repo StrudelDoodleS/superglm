@@ -117,7 +117,12 @@ from superglm.solvers.structured import (
     BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
+    NestedDataOperator,
+    NestedPenalizedOperator,
+    NestedSchurFactor,
+    NestedStructuredSystem,
     ProfiledBlockSchurFactor,
+    ProfiledNestedSchurFactor,
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     ScalarStructuredSystem,
@@ -702,6 +707,9 @@ def _fit_irls_direct_once(
         row_weights=weights,
         lambda2=lambda2,
         S_override=S_override,
+        family=family,
+        link=link,
+        nesting_cache=getattr(dm, "_scalar_structured_layout_cache", None),
     )
     if structured_decision.use_structured and S_override is None and reml_penalties is None:
         reason = (
@@ -723,6 +731,7 @@ def _fit_irls_direct_once(
             dm,
             groups,
             dominant_group_index=_structured_group_index,
+            chain_group_indices=structured_decision.chain_group_indices,
         )
         if _use_structured and _structured_group_index is not None
         else None
@@ -1377,13 +1386,26 @@ def _fit_irls_direct_once(
     t_start = time.perf_counter()
     converged = False
     XtWX_beta: (
-        NDArray | SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator | None
+        NDArray
+        | SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedDataOperator
+        | None
     ) = None
     _final_structured_system: (
-        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+        | None
     ) = None
     _final_penalized_operator: (
-        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator | None
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedPenalizedOperator
+        | None
     ) = None
 
     # Phase timing accumulators
@@ -1395,7 +1417,11 @@ def _fit_irls_direct_once(
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
     _last_working_structured: (
-        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+        | None
     ) = None
 
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
@@ -2706,7 +2732,11 @@ def _fit_irls_direct_once(
     # moments in block form and never materializes the dominant K x K block.
     centered_final: CenteredSystem | None = None
     structured_final: (
-        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+        | None
     ) = None
     if _use_structured:
         if _return_working_system:
@@ -2800,7 +2830,11 @@ def _fit_irls_direct_once(
     # determinant measure, not the raw augmented pseudo-determinant.
     _t0 = time.perf_counter()
     structured_factor: (
-        ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor | None
+        ProfiledScalarSchurFactor
+        | ProfiledBlockSchurFactor
+        | ProfiledSumToZeroBlockFactor
+        | ProfiledNestedSchurFactor
+        | None
     ) = None
     reml_geometry_summary: REMLGeometrySummary | None = None
     if _use_structured:
@@ -2828,6 +2862,15 @@ def _fit_irls_direct_once(
                 sum_w=structured_final.sum_w,
                 xtw=XtW1,
             )
+        elif isinstance(augmented_factor, NestedSchurFactor) and isinstance(
+            structured_final, NestedStructuredSystem
+        ):
+            structured_factor = ProfiledNestedSchurFactor(
+                augmented_factor=augmented_factor,
+                sum_w=structured_final.sum_w,
+                xtw=XtW1,
+                data_operator=structured_final.operator,
+            )
         else:  # pragma: no cover - structured dispatch invariant
             raise TypeError("Unsupported structured factor geometry.")
         XtWX_beta = structured_final.operator
@@ -2850,7 +2893,10 @@ def _fit_irls_direct_once(
                     total=sum_W,
                     center=mean_x,
                 )
-                if isinstance(XtWX_beta, BlockSymmetricOperator | SumToZeroBlockOperator)
+                if isinstance(
+                    XtWX_beta,
+                    BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator,
+                )
                 else XtWX_beta
             )
             p_eff = 1.0 + structured_factor.trace_inverse_operator(edf_operator)
@@ -2976,6 +3022,12 @@ def _fit_irls_direct_once(
         record_auto_backend_decision(profile, direct_solve, structured_decision, log=False)
         if structured_factor is not None:
             profile["structured_dominant_group"] = structured_factor.dominant_group_name
+            profile["structured_chain"] = tuple(
+                groups[index].name for index in structured_decision.chain_group_indices
+            )
+            profile["structured_nested_fallback_reason"] = (
+                structured_decision.nested_fallback_reason
+            )
             profile["structured_minimum_local_diagonal"] = structured_factor.minimum_local_diagonal
             profile["structured_schur_condition"] = structured_factor.schur_condition_estimate
             profile["structured_used_dense_fallback"] = structured_factor.used_dense_fallback
