@@ -48,6 +48,11 @@ def minimize_profile(
     recorded first and a boundary optimum is found by `objective.best()`.
     Infeasible points (inf) are replaced by a finite barrier inside the search
     so the parabolic steps stay finite; they never win `best()`.
+
+    The method is local (a local minimiser in the interval, as SciPy's
+    fminbound documents it): on a profile with more than one interior minimum
+    it can settle in either, and nothing here detects the other. Only an
+    optimum on a bound is caught, by `best()`.
     """
     objective(bounds[0])
     objective(bounds[1])

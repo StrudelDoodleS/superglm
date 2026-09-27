@@ -1307,7 +1307,10 @@ class SuperGLM:
         At each candidate ``p`` the mean is refitted and ``phi`` is its
         maximum-likelihood value at that mean; ``p`` minimises the resulting
         profile negative log-likelihood by bounded Brent search (Dunn & Smyth
-        2005), and the published fit is refitted at the selected ``p``.
+        2005), and the published fit is refitted at the selected ``p``. The
+        search is local: if the profile has more than one interior minimum
+        in ``p_bounds``, it can return one that is not the global minimum,
+        with no warning. Only an estimate on a bound is flagged.
 
         Parameters
         ----------
