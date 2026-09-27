@@ -1983,6 +1983,59 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - Lines: the LSS kernel files fall from 1,483 to 988, and the shared series grows from 125 to 328, a net of -292.
 - **Follow-up.** Unify on the LSS's ratio arithmetic, not the reverse. The GLM keeps its per-call table by tabulating the log-gamma increments for its common a, and the series and all compiled callers go into one module. This is gated like Task 11, plus the GLM series and characterisation tests and GLM fit_reml timing.
 
+**Run B repair outcome** (critic B, one high and four medium findings; commits 5191cdf0 and 2a94b4d4):
+
+- **Models pickled by 0.35 load again (high). Option (a), the load shim, taken as the delegated default; needs Max's go/no-go.** The deployment guide makes the pickled estimator the deployment artifact, and the migration notes promise that older pickles restore, so (a) is the default consistent with the project.
+  - A 0.35 Tweedie model names eleven retired classes:
+    - `reml.scale.TweedieScaleProfileData`, the `fit_reml` scale memo on `_reml_result`;
+    - ten profiler classes in `profiling.tweedie`: the two search contexts, the prepared density, the evaluation, φ-profile and logpdf-diagnostics records, and the four CI records.
+  - Module `__getattr__` hooks resolve exactly those names to `_tweedie.RetiredTweedieState`, which drops its state on load, because only estimation read it.
+  - `TweedieProfileResult.__setstate__` translates 0.35's layout:
+    - it keeps the estimate, φ̂, NLL, convergence, fit mode, warnings and `search_nll`;
+    - `evaluations` comes from the search trace;
+    - a cached interval is kept, and a side at the old 1.02/1.98 range reads as censored;
+    - a new interval refuses and names the pickle.
+  - **Beyond the critic's report.** A 0.35 `NBProfileResult` with a computed interval loaded, but then broke `summary()` here with "'tuple' object has no attribute 'lower'". This affects most NB models, because 0.35's `summary()` always computed the interval. Its θ cache now becomes `evaluations`, and the interval is recomputed on the intact fixed-mean profile.
+  - **Checked on real 0.35.0 pickles** (scratch), nine shapes:
+    - Tweedie `fit_reml`, direct and discrete;
+    - `estimate_p` under fit and reml, each with and without `ci_alpha`;
+    - a decoupled search;
+    - NB `estimate_theta` with a computed interval;
+    - NB auto-θ `fit_reml`.
+  - **Results.** All nine load, predict bit-identically to 0.35, render `summary()` and re-pickle. They keep the published estimates and 0.35's cached p intervals, and a new p interval refuses. The recomputed NB intervals agree with 0.35's to 4.8e-8 relative, against a root tolerance of 1e-6.
+  - **Cost.** The cluster grows from 2,423 to 2,533 lines by Task 10's count, and `reml/scale.py` gains an 8-line hook outside the measured part. `profiling/nb.py` is now 527 lines against its 320 budget. Option (b) would add no source: accept the break for `release:minor`, state it in the PR body and release notes, and pin the refusal with a test.
+  - **Test.** `tests/test_profile_pickles_from_0_35.py` writes streams the way 0.35 did: the retired classes are registered under their 0.35 names only while pickling, and the result states copy 0.35.0's field layout. It then loads them. Each of these mutations turns it red:
+    - no scale hook;
+    - one profiler name missing;
+    - either result restored verbatim;
+    - the context method names missing;
+    - a range-bound side not censored;
+    - the cached interval dropped;
+    - the retired objective kept;
+    - NB stale pairs kept.
+- **Near-p = 1 local dispersion minimum (medium): recorded, not changed.**
+  - On the 6-row fixture at p = 1.01815, Q has two minima: φ = 31.73 (mean NLL 185.1868) and 35.94 (185.2336). Newton starts at the saddlepoint root, φ = 2178, and settles in the nearer basin.
+  - The two minima are 0.125 apart in log φ. The critic's check, evaluating Q at the start and at the ends of the ±45 bracket, cannot see the other basin, so it would not fix this case.
+  - On the same rows the second minimum is gone by p = 1.02. There is a single minimum at p = 1.02, 1.03, 1.05, 1.1 and 1.2, and Newton finds it.
+  - zeros90, positive96, unpen and the private validation dataset each have one minimum at p = 1.02 and 1.05 (grid of 0.005 in log φ over ±4), and Newton sits on it.
+  - Spec §3 adopted the bracketed local solve because no uniqueness result is known. The strict xfail stays, and the PR body's follow-up now states what this evidence supports, not "reachable only below 1.02".
+- **NB prior-weight score expansion (medium): pinned.**
+  - The test compares `theta_score` with a 60-digit digamma score within a derived float64 bound: 8ε of each row's term sizes, nε of the summed row values, and the expansion's dropped 1/(120 z⁴) term.
+  - Two cases: w ∈ {0.5, 4} at θ = 1e6 (the expansion, with both psi corrections), and a small-exposure book, w = 1e-4 at θ = 1e5, where w·θ = 10 keeps the direct form. The code's error is at most 0.0055 of the bound.
+  - Mutants: N2 deviates 4e8× the bound, N2b 21× and N20 5e6×.
+  - **Deviation from the critic's recipe.** With w ∈ {0.5, 4} alone, N20 cannot fail an accuracy test. At w·θ ≥ 5e4 both forms are accurate, and the mutant is the more accurate of the two. It shows only where the expansion's psi argument is small.
+  - A first version of the bound charged the sum's rounding to |x|, the size of the cancelling terms, instead of to x²/2, the values actually summed. That overestimate let N2b through, and the derivation was corrected.
+- **NB interval likelihood size (medium): pinned.** Frequency counts must give the interval of the literally replicated rows, and zero prior weights that of the deleted rows, each within 2e-6 in log θ (twice the root tolerance). The measured difference is 1.8e-14. N9 moves the endpoints by 0.098 and 0.114 in log θ and turns both tests red.
+- **p interval reach past the search bounds (medium): pinned.** The test uses simulated books with p̂ interior near each default bound:
+  - true p 1.057 (n = 400): p̂ 1.0577, lower end 1.0445;
+  - true p 1.93: p̂ 1.8942, upper end 1.9767.
+  
+  Each side must be uncensored, lie between the interval's reach and the bound, and leave no warning. The margins are at least 5e-3, fifty times the 1e-4 root tolerance. P5 turns the test red, and so does each one-sided version of it.
+- **Checks.**
+  - Full suite in CI's environment (`uv run --with mpmath python scripts/run_test_suite.py`): 17,618 passed, 8 skipped, 4 strict xfails. That is the evidence stage's result plus the 8 new tests. The threads stage passed 40 of 40.
+  - ruff check and format, `uv lock --check`, `uv pip check` and `run_test.py` pass.
+  - `.test_durations` is not regenerated: 8 new IDs leave coverage well above the 95% contract.
+
 ---
 
 ## Self-review record
