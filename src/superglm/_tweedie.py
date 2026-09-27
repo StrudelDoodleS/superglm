@@ -360,3 +360,19 @@ def generate_tweedie_cpg(n: int, mu, phi, p: float, rng=None) -> NDArray:
             raise ValueError("a positive event's Gamma draw underflowed to zero or overflowed")
         y[positive] = draws
     return y
+
+
+class RetiredTweedieState:
+    """Estimation state that superglm 0.35 pickled with a Tweedie model, dropped on load.
+
+    Only estimation read it: the REML scale's dispersion memo and the old
+    profiler's search context. A restored model predicts and reports from its
+    fit, and ``TweedieProfileResult`` keeps what the old result published.
+    """
+
+    # 0.35 pickled its search context's bound methods by name; they must resolve
+    # while loading, and the restored result drops them.
+    evaluate = evaluation_count = evaluation_record = None
+
+    def __setstate__(self, state) -> None:
+        """Drop the state: nothing reads it after load."""

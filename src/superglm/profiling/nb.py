@@ -422,6 +422,10 @@ class NBProfileResult:
     _weight_semantics: str = field(default=FREQUENCY_WEIGHTS, repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
 
+    def __setstate__(self, state: dict) -> None:
+        # superglm 0.35 pickled a theta cache where this result has evaluations.
+        self.__dict__.update(state if "evaluations" in state else _published_by_0_35(state))
+
     def _at_mean(self, y: NDArray, mu: NDArray, weights: NDArray) -> NBProfileResult:
         """The estimate restated at a fitted mean, whose NLL and interval it then describes."""
         y = np.array(y, dtype=np.float64)
@@ -501,3 +505,23 @@ class NBProfileResult:
         )
         ax.set_xscale("log")
         return ax
+
+
+def _published_by_0_35(state: dict) -> dict:
+    """What a result pickled by superglm 0.35 published, on its intact fixed-mean profile.
+
+    Its intervals were cached as bare pairs, so they are recomputed on that
+    profile when next asked for.
+    """
+    return {
+        "theta_hat": state["theta_hat"],
+        "nll": state["nll"],
+        "converged": state["converged"],
+        "evaluations": pd.DataFrame(list(state["cache"].items()), columns=["theta", "nll"]),
+        "warnings": [],
+        "_y": state["_y"],
+        "_mu": state["_mu"],
+        "_weights": state["_weights"],
+        "_weight_semantics": state["_weight_semantics"],
+        "_ci_cache": {},
+    }

@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 from scipy.optimize import brentq
 from scipy.special import digamma, gammaln, polygamma, zeta
 
-from superglm._tweedie import TweedieRows, solve_log_phi
+from superglm._tweedie import RetiredTweedieState, TweedieRows, solve_log_phi
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, PRIOR_WEIGHTS
 
 _GAMMA_ASYMPTOTIC_SHAPE = 100.0
@@ -902,6 +902,14 @@ def prepare_reml_scale_data(
             ),
         )
     return None, None, None, None
+
+
+def __getattr__(name: str):
+    # A Tweedie model fitted by fit_reml and pickled by superglm 0.35 holds its
+    # REML-scale memo under this retired class name.
+    if name == "TweedieScaleProfileData":
+        return RetiredTweedieState
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
