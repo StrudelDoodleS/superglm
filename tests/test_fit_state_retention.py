@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Constraint, Numeric, Spline, SuperGLM
+import superglm.inference.metrics as metrics_module
+from superglm import Categorical, Constraint, Numeric, RandomEffect, Spline, SuperGLM
 from superglm.features.spline import PSpline
 
 
@@ -209,3 +210,85 @@ def test_released_metrics_reject_changed_inference_geometry(changed_geometry: st
     assert not metrics._uses_compact_fit_inference
     with pytest.raises(RuntimeError, match="fit geometry"):
         _ = metrics.coefficient_se
+
+
+def _nested_data(sizes=(4, 12, 48), n=1200):
+    """A strict make > model > variant chain with an exposure offset and prior weights.
+
+    Two variants carry zero weight, so the fit centres its spline columns on the
+    positive-weight rows while the public design centres them on all rows.
+    """
+    rng = np.random.default_rng(20260927)
+    parents = [
+        np.concatenate([np.arange(coarse), rng.integers(0, coarse, fine - coarse)])
+        for coarse, fine in zip(sizes[:-1], sizes[1:], strict=True)
+    ]
+    codes = [rng.integers(0, sizes[-1], n)]
+    for parent in reversed(parents):
+        codes.insert(0, parent[codes[0]])
+    x = rng.uniform(size=n)
+    offset = np.log(rng.uniform(0.5, 2.0, n))
+    eta = 0.3 * np.sin(6.0 * x) + sum(
+        rng.normal(0.0, 0.25, size)[code] for size, code in zip(sizes, codes, strict=True)
+    )
+    y = rng.poisson(np.exp(eta + offset)).astype(float)
+    labels = [codes[0].astype(str)]
+    for code in codes[1:]:
+        labels.append(np.char.add(np.char.add(labels[-1], ":"), code.astype(str)))
+    X = pd.DataFrame({"x": x, "make": labels[0], "model": labels[1], "variant": labels[2]})
+    weights = rng.uniform(0.5, 1.5, n)
+    weights[np.isin(codes[-1], [3, 7])] = 0.0
+    return X, y, weights, offset
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+@pytest.mark.parametrize(
+    "chain", [("variant",), ("make", "model", "variant")], ids=["single", "nested"]
+)
+def test_pickled_structured_metrics_keep_the_compact_covariance(monkeypatch, chain, discrete):
+    """A round trip leaves the caller's frame distinct from the retained copy.
+
+    The training rows are then recognised by content, so the clone serves its
+    retained compact covariance instead of re-forming the dense weighted Gram.
+    """
+    X, y, sample_weight, offset = _nested_data()
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        direct_solve="structured",
+        discrete=discrete,
+        features={"x": Spline(n_knots=6), **{name: RandomEffect() for name in chain}},
+    ).fit_reml(X, y, sample_weight=sample_weight, offset=offset)
+    assert model._reml_profile["structured_chain"] == chain
+    clone = pickle.loads(pickle.dumps(model))
+
+    def dense_gram(*_args):
+        pytest.fail("metrics re-formed the dense weighted Gram")
+
+    monkeypatch.setattr(metrics_module, "weighted_moments", dense_gram)
+    restored = clone.metrics(X, y, sample_weight=sample_weight, offset=offset)
+    assert restored._active_info[3] is clone._fit_inference_info["XtWX_inv_aug"]
+
+    # Rows recognised by content are the training rows: leverage and edf read
+    # the fit design, as the live model's own metrics do.  Any frame but the
+    # retained one is predicted exactly, where a discrete fit's own means are
+    # binned, so an equal copy is the reference for the deviance and for the
+    # Pearson-scaled standard errors.
+    live = model.metrics(X, y, sample_weight=sample_weight, offset=offset)
+    copy = model.metrics(X.copy(), y, sample_weight=sample_weight, offset=offset)
+    # Both sides read equal retained state; only the order of an at most
+    # n-term reduction can separate them.
+    rtol = len(y) * np.finfo(np.float64).eps
+    pairs = [
+        (restored.deviance, copy.deviance),
+        (restored.leverage, live.leverage),
+        (restored._influence_edf[0], live._influence_edf[0]),
+        *((restored.coefficient_se[name], se) for name, se in copy.coefficient_se.items()),
+    ]
+    for actual, expected in pairs:
+        atol = rtol * np.max(np.abs(expected))
+        np.testing.assert_allclose(actual, expected, rtol=rtol, atol=atol)
+
+    changed_rows = X.assign(x=X["x"].to_numpy()[::-1])
+    changed = clone.metrics(changed_rows, y, sample_weight=sample_weight, offset=offset)
+    assert not changed._uses_compact_fit_inference

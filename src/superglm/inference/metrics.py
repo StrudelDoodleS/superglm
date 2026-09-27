@@ -347,19 +347,26 @@ class ModelMetrics:
             and np.array_equal(self._offset, fit_offset_array)
         )
         fit_weights = getattr(model, "_fit_weights", None)
-        released_geometry_guard = getattr(model, "_fit_geometry_guard", None)
-        if self._dm is None and released_geometry_guard is not None:
-            self._fit_geometry_matches = released_geometry_guard.matches(
+        geometry_guard = getattr(model, "_fit_geometry_guard", None)
+        if self._dm is None and geometry_guard is not None:
+            self._fit_geometry_matches = geometry_guard.matches(
                 self._X,
                 self._weights,
                 self._offset,
             )
         else:
+            # Identity misses the training rows after a pickle round trip or when
+            # the caller passes equal copies; the guard's fingerprint of X, y,
+            # weights and offset recognises them by content, so the retained
+            # compact covariance still serves them instead of a dense refactor.
             self._fit_geometry_matches = bool(
                 self._uses_fit_design
                 and fit_weights is not None
                 and np.shape(fit_weights) == np.shape(self._weights)
                 and np.array_equal(np.asarray(fit_weights), self._weights)
+            ) or bool(
+                geometry_guard is not None
+                and geometry_guard.matches_training(self._X, self._y, self._weights, self._offset)
             )
         self._uses_compact_fit_inference = bool(
             (
@@ -837,7 +844,11 @@ class ModelMetrics:
             inverse = fit_inference["XtWX_inv"]
             augmented = fit_inference["XtWX_inv_aug"]
             active_groups = fit_inference["active_groups"]
-            if self._uses_fit_design:
+            # The fit's covariance pairs with the fit's design: rows matched by
+            # content are the training rows, and their public design is shifted
+            # from it (centred on all rows, the fit's on the positive-weight
+            # rows), which x' V x does not absorb.
+            if self._uses_fit_design or (self._dm is not None and self._fit_geometry_matches):
                 fit_X_a, _, _, _, _ = self._model._fit_active_info
                 X_a = fit_X_a
             else:
