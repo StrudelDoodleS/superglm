@@ -1628,6 +1628,27 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - **NB live trace.** `estimate_theta` forwards each θ step as `progress_callback("profiling", {"profile_trace": [row]})`. Task 8 moves this into the alternation.
 - **Tests.** The pins that reached surviving behaviour through removed internals are ported, not deleted: `TestScaleProfileUnit` (6), the frequency saturated arm, discrete publication φ, and `test_constrained_fit_profile` (6). The characterisation NLL bound uses master's measured route error over each case's p range, 2.4e-10 rather than the global 9.8e-9. Rows whose Brent path matches master's compare `search_nll` with no determination term. A 1e-9 relative NLL defect now reddens 8 of 9 rows.
 
+**Max's decisions after Run A (2026-09-27):**
+
+- **Past the series bound: saddlepoint (spec criterion 3 amended).** New Task 7b below replaces the NaN-and-warning repair.
+- **Search regime: no automatic default.** The p search runs under the `fit_mode` the caller picks (`fit` or `fit_reml`). `search_fit_mode` stays an explicit opt-in (decision b measured it at 3× faster). The REML p = 1.8 recovery arm stays a strict xfail naming the certification mechanism. The PR body records "REML mode certification near p→2" as a follow-up (spec criterion 8 amended).
+
+### Task 7b: saddlepoint for rows past the series work bound
+
+**Files:** modify `src/superglm/_tweedie.py` (`TweedieRows.row_saturated`) and `src/superglm/model/fit_ops.py` (remove the Run A repair's `FloatingPointError` catch in `_compute_fit_stats`). Tests: `tests/test_tweedie_density.py`.
+
+**Mathematics.** At μ = y the unit deviance vanishes. Take the small-dispersion (saddlepoint) expansion of the saturated density of a positive row with prior weight w (Dunn & Smyth 2005, §2; Jørgensen 1997): ℓ_sat ≈ −½(log 2π + log φ − log w + p·log y). Its relative error is O(φ / (w·y^(2−p))), which is O(1/j_max). At the work bound j_max > about 3.4e9·(a+1), the absolute error in ℓ_sat is below 1e-10. Its log-φ derivatives are T = ½ and dT/d log φ = 0.
+
+- [ ] **Step 1: Write the failing tests.**
+  1. At p ∈ {1.2, 1.5, 1.8}, pick a row whose peak index is just inside the work bound. The series evaluates it, and the saddlepoint expression agrees with the series within the derived O(1/j_max) bound. Write the bound as the leading Stirling correction 1/(12·j_max)·(1 + 1/a) with a factor of 4 slack, derived in a comment.
+  2. A row past the bound gets a finite `row_saturated` value equal to the saddlepoint expression, with T = ½ and slope 0.
+  3. The near-perfect-fit test (moved into `test_tweedie_density.py` by the repair) now asserts finite log-likelihood, AIC and null log-likelihood, and no `RuntimeWarning`.
+  4. `solve_log_phi` still converges when some rows are past the bound.
+- [ ] **Step 2:** Run them and confirm they fail.
+- [ ] **Step 3: Implement.** In `row_saturated`, fill rows with `ok == False` using the saddlepoint expression and its derivatives. Delete the `FloatingPointError` for series refusal and its tests (spec §10's first bullet no longer applies). Delete the fit-stats catch-and-NaN path, and state in a comment why a row can reach the saddlepoint arm.
+- [ ] **Step 4:** Run `tests/test_tweedie_density.py tests/test_tweedie_series.py tests/test_tweedie_nb_characterisation.py tests/test_pearson_scale_weights.py tests/test_tweedie_reml_exact_scale.py`.
+- [ ] **Step 5:** Commit: `feat: saddlepoint for Tweedie rows past the series work bound`.
+
 ### Task 8: NB2 θ on the shared machinery
 
 **Files:**

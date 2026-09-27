@@ -19,7 +19,7 @@ Date: 2026-09-26 · Branch: `claude/tweedie-profiling-refactor-7be675` (from `or
 
 1. The cluster below (§2) shrinks from about 10,200 source lines to **3,000 or fewer**, counted the same way before and after, with source and test lines reported separately.
 2. The GLM paths use one compiled Tweedie series implementation. There are two only if the gated LSS stage (§8, stage 6) fails its gate.
-3. The production Tweedie density calls none of `wright_bessel`, `ive`/`i1e`/`i0e` or the saddlepoint.
+3. The production Tweedie density calls none of `wright_bessel` or `ive`/`i1e`/`i0e`. It uses the saddlepoint only for rows past the series work bound. *Amended 2026-09-27 (Max):* there the peak index exceeds about 3.4e9·(a+1), and the saddlepoint's O(1/j_max) error is below 1e-10. Such rows appear only in degenerate near-noiseless fits (φ≈1e-26 in the suite). Real data needs at most a few thousand terms.
 4. Every mgcv oracle test passes with unchanged tolerances:
    - `test_tweedie_reml_exact_scale.py`
    - `test_nb_theta_estimation_correctness.py`
@@ -28,6 +28,8 @@ Date: 2026-09-26 · Branch: `claude/tweedie-profiling-refactor-7be675` (from `or
 6. Complete-fit benchmarks (§9): no case slower than 1.05× baseline wall time, and peak RSS no higher.
 7. The full suite, ruff, `uv lock --check` and the strict off-mode docs build all pass.
 8. **p is recovered** (Max, 2026-09-26: "the ability to recover p"). On constant-φ compound Poisson–gamma simulations, `estimate_p` under both fit modes lands within 3 profile standard errors of the true p. The fixed grid is true p ∈ {1.2, 1.5, 1.8}, three seeds each, n = 20,000, with a spline and a factor in the mean. The SE comes from the profile curvature. This is a permanent test. Constant φ is required: a constant-φ model absorbs mean-correlated dispersion into p, and that is a property of the model, not a defect of the estimator.
+
+   *Amended 2026-09-27 (Max):* the search runs under the fit mode the caller picks, with no automatic regime switch. `search_fit_mode` stays an explicit opt-in. REML-searched recovery at true p = 1.8 is a strict expected failure. REML cannot certify its penalized mode above p≈1.69 on these simulations, identically on master. That is a REML certification limit near p→2, recorded as a follow-up, not a profiler defect. Every other cell of the grid must pass.
 9. **Fast** (Max: "fast"). `estimate_p` wall time drops below its baseline on every §9 case. Stage 0 attributes baseline time three ways: candidate fits, φ/density, and search bookkeeping. The rebuild removes the second and third buckets down to the one compiled φ solve per candidate. The PR reports the before/after breakdown.
 
 ## 2. Current state (measured 2026-09-26)
