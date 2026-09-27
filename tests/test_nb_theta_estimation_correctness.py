@@ -90,17 +90,15 @@ class TestThetaWrongRootAndClamp:
         clip converts the runaway into the 50.0 upper bound (returned here as
         a bare float), so the value assertion below reads 50.0.
         """
-        from superglm.profiling.nb import _theta_ml
+        from superglm.profiling.nb import solve_theta
 
         data = pd.read_csv(FIXTURES / "nb_clamp005.csv")
         y = data["y"].to_numpy(dtype=np.float64)
         weights = np.ones(len(y))
         mu = np.full(len(y), y.mean())
-        solve = _theta_ml(y, mu, weights, 1.0, weight_semantics="frequency")
-        theta = float(getattr(solve, "theta", solve))
-        assert theta < 0.2
-        assert bool(getattr(solve, "converged", False))
-        assert not bool(getattr(solve, "at_upper", True))
+        solve = solve_theta(y, mu, weights, 1.0, weight_semantics="frequency", bounds=(1e-8, 1e8))
+        assert solve.theta < 0.2
+        assert not solve.at_bound
 
     def test_user_bounds_bind_loudly_and_honestly(self):
         """A user-supplied bound that binds must warn and report converged=False.
@@ -150,13 +148,11 @@ class TestLargeThetaScoreStability:
         bounds enabled. The stable large-theta expansion holds
         theta^2 * score at +316.88 through 1e9.
         """
-        from superglm.profiling.nb import _theta_profile_score
+        from superglm.profiling.nb import theta_score
 
         y, mu, weights = self._poisson_rows()
         scaled = {
-            theta: theta
-            * theta
-            * _theta_profile_score(y, mu, weights, theta, weight_semantics="frequency")
+            theta: theta * theta * theta_score(y, mu, weights, theta, weight_semantics="frequency")
             for theta in (1e6, 1e7, 1e8)
         }
         for theta, value in scaled.items():
@@ -194,21 +190,19 @@ class TestLargeThetaScoreStability:
         original = nb_module._THETA_SCORE_ASYMPTOTIC_MIN
         try:
             nb_module._THETA_SCORE_ASYMPTOTIC_MIN = 1.0
-            expansion = nb_module._theta_profile_score(
-                y, mu, weights, theta, weight_semantics="frequency"
-            )
+            expansion = nb_module.theta_score(y, mu, weights, theta, weight_semantics="frequency")
         finally:
             nb_module._THETA_SCORE_ASYMPTOTIC_MIN = original
         assert expansion == pytest.approx(naive(theta), rel=1e-6)
 
     def test_poisson_data_reports_the_ceiling_honestly(self):
         """With a trustworthy sign the solve walks to the bound and says so."""
-        from superglm.profiling.nb import _theta_ml
+        from superglm.profiling.nb import solve_theta
 
         y, mu, weights = self._poisson_rows()
-        solve = _theta_ml(y, mu, weights, 1.0, weight_semantics="frequency")
+        solve = solve_theta(y, mu, weights, 1.0, weight_semantics="frequency", bounds=(1e-8, 1e8))
         assert solve.at_upper
-        assert not solve.converged
+        assert solve.theta == 1e8
 
 
 class TestAlternationToleranceIsRelative:
@@ -219,6 +213,7 @@ class TestAlternationToleranceIsRelative:
         from types import SimpleNamespace
 
         from superglm.features import Numeric
+        from superglm.model import fit_ops
         from superglm.profiling import nb as nb_module
 
         X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
@@ -238,22 +233,18 @@ class TestAlternationToleranceIsRelative:
             )
 
         monkeypatch.setattr(
-            nb_module, "fit_irls_direct", lambda **kwargs: (result_for(kwargs["X"]), None)
+            fit_ops, "fit_irls_direct", lambda **kwargs: (result_for(kwargs["X"]), None)
         )
-        monkeypatch.setattr(nb_module, "fit_pirls", lambda **kwargs: result_for(kwargs["X"]))
+        monkeypatch.setattr(fit_ops, "fit_pirls", lambda **kwargs: result_for(kwargs["X"]))
         # A scripted alternation still moving 60% per step at theta ~ 0.002:
         # the absolute reading (|0.002 - 0.005| = 0.003 < 0.01) stops on the
         # second iterate; the relative reading continues to the settled one.
         script = iter([0.005, 0.002, 0.0019998, 0.0019998])
         monkeypatch.setattr(
             nb_module,
-            "_theta_ml",
-            lambda *args, **kwargs: nb_module._ThetaSolve(
-                theta=next(script),
-                converged=True,
-                at_lower=False,
-                at_upper=False,
-                n_score_evaluations=1,
+            "solve_theta",
+            lambda *args, **kwargs: nb_module.ThetaSolve(
+                theta=next(script), at_lower=False, at_upper=False
             ),
         )
         result = nb_module.estimate_nb_theta(model, X, y, maxiter=10)
@@ -286,9 +277,8 @@ class TestProfilePlotSmallTheta:
         )
         result = estimate_nb_theta(model, pd.DataFrame({"x": x}), y)
         assert result.theta_hat < 0.01, "fixture must land in the sub-0.01 band"
-        figure = result.profile_plot()
+        axis = result.profile_plot()
         try:
-            axis = figure.axes[0]
             # The profile CURVE itself must reach below the estimate; the
             # axes' xlim is no instrument (the MLE axvline extends it even
             # when the curve's grid never gets there).
@@ -297,7 +287,7 @@ class TestProfilePlotSmallTheta:
         finally:
             import matplotlib.pyplot as plt
 
-            plt.close(figure)
+            plt.close(axis.figure)
 
 
 class TestSmallThetaSurvivability:
@@ -312,7 +302,7 @@ class TestSmallThetaSurvivability:
         return y, mu, np.ones(n)
 
     def test_ci_endpoints_sit_on_the_lrt_crossing_at_tiny_theta(self):
-        """profile_ci_theta must return the chi-squared crossing, not an
+        """The theta interval must return the chi-squared crossing, not an
         arbitrary in-bracket point.
 
         With theta_hat ~ 3e-5 the whole lower bracket is narrower than the
@@ -323,48 +313,35 @@ class TestSmallThetaSurvivability:
         """
         from scipy.stats import chi2
 
-        from superglm.profiling.nb import _nb2_nll, _theta_ml, profile_ci_theta
+        from superglm.profiling.nb import NBProfileResult, nb_nll, solve_theta
 
         y, mu, weights = self._tiny_theta_rows()
-        solve = _theta_ml(y, mu, weights, 1.0, weight_semantics="frequency")
-        assert solve.converged and solve.theta < 1e-4
+        solve = solve_theta(y, mu, weights, 1.0, weight_semantics="frequency", bounds=(1e-8, 1e8))
+        assert not solve.at_bound and solve.theta < 1e-4
         theta_hat = solve.theta
-        ci_lo, ci_hi = profile_ci_theta(y, mu, weights, theta_hat, weight_semantics="frequency")
-        assert 0.0 < ci_lo < theta_hat < ci_hi
         w_sum = float(np.sum(weights))
-        nll_hat = _nb2_nll(y, mu, weights, theta_hat, weight_semantics="frequency")
+        nll_hat = nb_nll(y, mu, weights, theta_hat, weight_semantics="frequency")
+        result = NBProfileResult(
+            theta_hat,
+            nll_hat,
+            True,
+            _y=y,
+            _mu=mu,
+            _weights=weights,
+            _weight_semantics="frequency",
+        )
+        ci_lo, ci_hi = result.ci()
+        assert 0.0 < ci_lo < theta_hat < ci_hi
         cutoff = float(chi2.ppf(0.95, 1))
         for endpoint in (ci_lo, ci_hi):
             lrt = (
                 2.0
                 * w_sum
-                * (_nb2_nll(y, mu, weights, endpoint, weight_semantics="frequency") - nll_hat)
+                * (nb_nll(y, mu, weights, endpoint, weight_semantics="frequency") - nll_hat)
             )
             assert lrt == pytest.approx(cutoff, rel=0.02), (
                 f"endpoint {endpoint:g} is not on the LRT crossing: {lrt:.4f}"
             )
-
-    def test_cache_keys_survive_below_the_decimal_rounding_floor(self):
-        """A theta below 5e-7 must not record the impossible cache key 0.0.
-
-        Decimal rounding collapsed it there, and profile_plot then fed the
-        zero shape parameter to the NB2 likelihood.
-        """
-        from superglm.profiling.nb import NBProfileResult
-
-        y = np.array([0.0, 0.0, 3.0, 0.0, 11.0])
-        mu = np.full(5, 1.5)
-        weights = np.ones(5)
-        result = NBProfileResult(
-            theta_hat=3e-7,
-            nll=1.0,
-            n_evaluations=1,
-            converged=True,
-            cache={},
-        )
-        published = result._published_with_data(y, mu, weights)
-        assert 0.0 not in published.cache
-        assert all(key > 0.0 for key in published.cache)
 
 
 class TestJointConvergenceHonesty:

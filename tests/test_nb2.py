@@ -218,6 +218,7 @@ class TestNB2ProfileTheta:
     ):
         from types import SimpleNamespace
 
+        from superglm.model import fit_ops
         from superglm.profiling import nb as nb_module
 
         X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
@@ -245,18 +246,13 @@ class TestNB2ProfileTheta:
             calls.append(("pirls", kwargs["penalty"].lambda1))
             return result_for(kwargs["X"])
 
-        monkeypatch.setattr(nb_module, "fit_irls_direct", fake_direct)
-        monkeypatch.setattr(nb_module, "fit_pirls", fake_pirls)
+        # The alternation's mean fits follow the ordinary fit policy's solver route.
+        monkeypatch.setattr(fit_ops, "fit_irls_direct", fake_direct)
+        monkeypatch.setattr(fit_ops, "fit_pirls", fake_pirls)
         monkeypatch.setattr(
             nb_module,
-            "_theta_ml",
-            lambda *args, **kwargs: nb_module._ThetaSolve(
-                theta=1.0,
-                converged=True,
-                at_lower=False,
-                at_upper=False,
-                n_score_evaluations=1,
-            ),
+            "solve_theta",
+            lambda *args, **kwargs: nb_module.ThetaSolve(theta=1.0, at_lower=False, at_upper=False),
         )
 
         estimate_nb_theta(model, X, y, maxiter=1)
@@ -291,7 +287,7 @@ class TestNB2ProfileTheta:
         assert isinstance(result, NBProfileResult)
         np.testing.assert_allclose(result.theta_hat, theta_true, atol=2.0)
 
-    def test_result_has_cache(self):
+    def test_result_records_each_alternation_step(self):
         rng = np.random.default_rng(42)
         n = 2000
         y = _generate_nb2(n, mu=5.0, theta=3.0, rng=rng)
@@ -304,8 +300,8 @@ class TestNB2ProfileTheta:
         )
 
         result = estimate_nb_theta(model, X, y, theta_bounds=(0.5, 15.0))
-        assert len(result.cache) >= 1  # alternating alg converges in few iters
-        assert result.n_evaluations >= 1
+        assert list(result.evaluations.columns) == ["theta", "nll"]
+        assert len(result.evaluations) >= 1  # alternating alg converges in few iters
 
     def test_family_must_be_nb(self):
         model = SuperGLM(
@@ -314,7 +310,7 @@ class TestNB2ProfileTheta:
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
         y = np.array([1.0, 2.0, 3.0])
         with pytest.raises(ValueError, match="NegativeBinomial"):
-            estimate_nb_theta(model, X, y)
+            model.estimate_theta(X, y)
 
     def test_design_matrix_error_restores_temporary_family(self, monkeypatch):
         model = SuperGLM(
@@ -369,12 +365,7 @@ class TestNB2AutoTheta:
             features={"x": Numeric()},
         )
         model._last_fit_meta = {"method": "fit_reml"}
-        result = NBProfileResult(
-            theta_hat=2.5,
-            nll=1.2,
-            n_evaluations=1,
-            converged=True,
-        )
+        result = NBProfileResult(theta_hat=2.5, nll=1.2, converged=True)
         configured_family = model._family_config
         configured_penalty = model._penalty_config
         configured_model = model._config
@@ -533,16 +524,16 @@ class TestNB2AutoTheta:
             spline_penalty=0.75,
             features={"x": Spline(n_knots=5)},
         )
-        from superglm.profiling import nb as nb_module
+        from superglm.model import fit_ops
 
-        real_fit_pirls = nb_module.fit_pirls
+        real_fit_pirls = fit_ops.fit_pirls
         seen_lambda2 = []
 
         def recording_fit_pirls(*args, **kwargs):
             seen_lambda2.append(kwargs.get("lambda2"))
             return real_fit_pirls(*args, **kwargs)
 
-        monkeypatch.setattr(nb_module, "fit_pirls", recording_fit_pirls)
+        monkeypatch.setattr(fit_ops, "fit_pirls", recording_fit_pirls)
 
         estimate_nb_theta(model, X, y, maxiter=1)
 
@@ -560,7 +551,7 @@ class TestNB2AutoTheta:
             features={"x": Numeric()},
         )
 
-        returned = model.estimate_theta(X, y, sample_weight=weights, maxiter=1)
+        returned = model.estimate_theta(X, y, sample_weight=weights)
         installed = model._nb_profile_result
         installed_y = installed._y.copy()
         installed_weights = installed._weights.copy()
@@ -572,12 +563,9 @@ class TestNB2AutoTheta:
         np.testing.assert_allclose(installed._mu, model._fit_mu, rtol=0.0, atol=0.0)
         for values in (installed._y, installed._mu, installed._weights):
             assert not values.flags.writeable
-            with pytest.raises(ValueError):
-                values.setflags(write=True)
-        with pytest.raises(AttributeError, match="published"):
-            returned.theta_hat = 99.0
-        with pytest.raises(TypeError):
-            returned.cache[99.0] = 0.0
+        # An interval computed through the returned result stays out of the model.
+        returned.interval(0.2)
+        assert 0.2 not in installed._ci_cache
 
         y[0] += 20.0
         weights[0] *= 20.0

@@ -583,14 +583,14 @@ def test_dataframe_boundary_tweedie_and_nb_profiles_are_backend_neutral() -> Non
             selection_penalty=0.0,
             features={"x": Numeric()},
         )
-        result = model.estimate_theta(X, nb_y, maxiter=4)
+        result = model.estimate_theta(X, nb_y)
         return model, result
 
     pandas_nb, pandas_theta = nb_profiled(pandas_X)
     polars_nb, polars_theta = nb_profiled(polars_X)
     assert polars_theta.theta_hat == pandas_theta.theta_hat
     assert polars_theta.nll == pandas_theta.nll
-    assert polars_theta.n_evaluations == pandas_theta.n_evaluations
+    pd.testing.assert_frame_equal(polars_theta.evaluations, pandas_theta.evaluations)
     assert polars_theta.converged is pandas_theta.converged
     _assert_fit_results_equal(pandas_nb, polars_nb, pandas_X, polars_X)
 

@@ -935,11 +935,7 @@ def _prime_fit_caches(
     model._fit_null_mu = null_mu
     nb_profile_result = getattr(model, "_nb_profile_result", None)
     if nb_profile_result is not None:
-        model._nb_profile_result = nb_profile_result._published_with_data(
-            y_arr,
-            mu,
-            model._fit_weights,
-        )
+        model._nb_profile_result = nb_profile_result._at_mean(y_arr, mu, model._fit_weights)
     model._fit_X_ref = X_ref
     model._fit_y_ref = y_ref
     model._fit_sample_weight_ref = sample_weight_ref
@@ -1008,17 +1004,7 @@ def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> No
     if isinstance(family, NegativeBinomial) and family.theta == "auto":
         from superglm.profiling.nb import estimate_nb_theta
 
-        # `fit` has already routed these arrays through validate_fit_input,
-        # and so through check_weight_contract. Checking again would report one
-        # condition twice from two source locations inside a single fit.
-        nb_result = estimate_nb_theta(
-            model,
-            X,
-            y,
-            sample_weight=sample_weight,
-            offset=offset,
-            contract_already_checked=True,
-        )
+        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
@@ -1070,11 +1056,13 @@ def _refine_nb_theta_to_reml_fixed_point(
     """
     import warnings
 
+    import pandas as pd
+
     from superglm.profiling.nb import (
-        NBProfileResult,
+        _THETA_DEFAULT_BOUNDS,
         NBThetaBoundWarning,
-        _theta_cache_key,
-        _theta_ml,
+        nb_nll,
+        solve_theta,
     )
 
     nb_seed = getattr(model, "_nb_profile_result", None)
@@ -1090,21 +1078,22 @@ def _refine_nb_theta_to_reml_fixed_point(
     theta = float(family.theta)
     # The joint alternation re-estimates theta against the same likelihood the
     # calibration estimate used. Resolving the contract once here keeps the
-    # score, the cached NLLs and the published result on one reading; letting
+    # score, the recorded NLLs and the published result on one reading; letting
     # any of them fall back to the parameter default would silently overwrite
     # a prior-contract theta with a frequency-contract one.
     weight_semantics = model_weight_semantics(model)
-    cache = dict(nb_seed.cache)
+    rows = nb_seed.evaluations.to_dict("records")
     refits = 0
     joint_converged = False
-    final_solve = None
     while True:
-        mu = model._fit_mu
-        weights = model._fit_weights
-        if mu is None or weights is None:  # pragma: no cover - retention contract
-            raise RuntimeError("NB joint refinement requires retained fit rows")
-        solve = _theta_ml(y_arr, mu, weights, theta, weight_semantics=weight_semantics)
-        final_solve = solve
+        solve = solve_theta(
+            y_arr,
+            model._fit_mu,
+            model._fit_weights,
+            theta,
+            weight_semantics=weight_semantics,
+            bounds=_THETA_DEFAULT_BOUNDS,
+        )
         if abs(solve.theta - theta) <= _NB_JOINT_RELATIVE_TOL * max(abs(theta), 1e-12):
             joint_converged = True
             break
@@ -1137,19 +1126,20 @@ def _refine_nb_theta_to_reml_fixed_point(
             durable_retain_fit_state=durable_retain_fit_state,
             **refit_kwargs,
         )
-        cache[_theta_cache_key(theta)] = _nb_joint_nll(y_arr, model, theta)
+        nll = nb_nll(
+            y_arr, model._fit_mu, model._fit_weights, theta, weight_semantics=weight_semantics
+        )
+        rows.append({"theta": theta, "nll": nll})
 
-    at_bound = final_solve is not None and final_solve.at_bound
-    if at_bound:
-        assert final_solve is not None
-        side = "lower" if final_solve.at_lower else "upper"
-        warnings.warn(
+    warned = list(nb_seed.warnings)
+    if solve.at_bound:
+        side = "lower" if solve.at_lower else "upper"
+        warned.append(
             f"NB2 theta re-estimated at the REML fit sits on the {side} "
             "search bound; theta_hat is a constrained boundary value and the "
-            "profile result reports converged=False.",
-            NBThetaBoundWarning,
-            stacklevel=3,
+            "profile result reports converged=False."
         )
+        warnings.warn(warned[-1], NBThetaBoundWarning, stacklevel=3)
     # The published flag must describe the PUBLISHED state. Theta being
     # stationary at an unfinished REML fit is not a joint fixed point: if the
     # final (warm-started) attempt exhausted max_reml_iter, lambda never
@@ -1158,39 +1148,17 @@ def _refine_nb_theta_to_reml_fixed_point(
     # remove - a clamped/unfinished estimate reporting success.
     final_reml = getattr(model, "_reml_result", None)
     reml_converged = bool(getattr(final_reml, "converged", False))
-    refreshed = NBProfileResult(
+    refreshed = replace(
+        nb_seed,
         theta_hat=theta,
-        nll=float(nb_seed.nll),
-        n_evaluations=int(nb_seed.n_evaluations) + refits,
-        converged=bool(nb_seed.converged) and joint_converged and not at_bound and reml_converged,
-        cache=cache,
-        _weight_semantics=weight_semantics,
+        converged=nb_seed.converged and joint_converged and not solve.at_bound and reml_converged,
+        evaluations=pd.DataFrame(rows, columns=["theta", "nll"]),
+        warnings=warned,
     )
-    model._nb_profile_result = refreshed._published_with_data(
-        y_arr,
-        model._fit_mu,
-        model._fit_weights,
-    )
+    model._nb_profile_result = refreshed._at_mean(y_arr, model._fit_mu, model._fit_weights)
     if refits:
         logger.info(f"NB theta refined at the REML fit: {theta:.4f} after {refits} joint refit(s)")
     return debug_recorder
-
-
-def _nb_joint_nll(y_arr, model, theta: float) -> float:
-    """Weighted mean NB2 NLL of the current workspace fit at ``theta``.
-
-    Read under the model's declared contract, so the cache this feeds cannot
-    mix a frequency-likelihood NLL into a prior-contract profile.
-    """
-    from superglm.profiling.nb import _nb2_nll
-
-    return _nb2_nll(
-        y_arr,
-        model._fit_mu,
-        model._fit_weights,
-        theta,
-        weight_semantics=model_weight_semantics(model),
-    )
 
 
 def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:

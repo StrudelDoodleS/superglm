@@ -390,7 +390,7 @@ class TestNegativeBinomialThetaProfile:
 
     def test_the_prior_score_differentiates_the_prior_likelihood(self):
         """The analytic score is checked against its own objective, not a number."""
-        from superglm.profiling.nb import _nb2_nll, _theta_profile_score
+        from superglm.profiling.nb import nb_nll, theta_score
 
         rng = np.random.default_rng(5)
         n = 60
@@ -401,10 +401,10 @@ class TestNegativeBinomialThetaProfile:
 
         for theta in (0.5, 3.0, 25.0):
             step = theta * 1e-6
-            lower = _nb2_nll(y, mu, w, theta - step, weight_semantics="prior") * size
-            upper = _nb2_nll(y, mu, w, theta + step, weight_semantics="prior") * size
+            lower = nb_nll(y, mu, w, theta - step, weight_semantics="prior") * size
+            upper = nb_nll(y, mu, w, theta + step, weight_semantics="prior") * size
             difference = -(upper - lower) / (2.0 * step)
-            analytic = _theta_profile_score(y, mu, w, theta, weight_semantics="prior")
+            analytic = theta_score(y, mu, w, theta, weight_semantics="prior")
             assert analytic == pytest.approx(difference, rel=1e-6)
 
     def test_a_zero_prior_weight_deletes_its_row_from_the_score(self):
@@ -415,7 +415,7 @@ class TestNegativeBinomialThetaProfile:
         go before the score is formed.  Zero non-Tweedie weights are admitted
         by validation, which makes this reachable from a plain fit.
         """
-        from superglm.profiling.nb import _theta_profile_score
+        from superglm.profiling.nb import theta_score
 
         rng = np.random.default_rng(21)
         n = 50
@@ -437,15 +437,15 @@ class TestNegativeBinomialThetaProfile:
         # exact only up to that association.  Bound measured over 40 seeds and
         # four thetas: worst 1.08e-14.
         for theta in (0.5, 3.0, 25.0, 1e9):
-            prior_full = _theta_profile_score(y, mu, w, theta, weight_semantics="prior")
-            prior_deleted = _theta_profile_score(
+            prior_full = theta_score(y, mu, w, theta, weight_semantics="prior")
+            prior_deleted = theta_score(
                 y[carried], mu[carried], w[carried], theta, weight_semantics="prior"
             )
             assert np.isfinite(prior_full)
             assert prior_full == prior_deleted
 
-            frequency_full = _theta_profile_score(y, mu, w, theta, weight_semantics="frequency")
-            frequency_deleted = _theta_profile_score(
+            frequency_full = theta_score(y, mu, w, theta, weight_semantics="frequency")
+            frequency_deleted = theta_score(
                 y[carried], mu[carried], w[carried], theta, weight_semantics="frequency"
             )
             assert frequency_full == pytest.approx(frequency_deleted, rel=1e-12)
@@ -510,12 +510,13 @@ class TestNegativeBinomialThetaProfile:
 
         assert prior._weight_semantics == "prior"
         assert copy.deepcopy(prior)._weight_semantics == "prior"
-        assert prior._detached_public_copy()._weight_semantics == "prior"
+        # Restating at a published mean, as every publication does, keeps it too.
+        assert prior._at_mean(prior._y, prior._mu, prior._weights)._weight_semantics == "prior"
         # The interval reads the same likelihood the estimate came from.
         assert copy.deepcopy(prior).ci() == pytest.approx(prior.ci(), rel=1e-12)
 
     def test_the_two_score_arms_are_one_expression_at_unit_weight(self):
-        from superglm.profiling.nb import _theta_profile_score
+        from superglm.profiling.nb import theta_score
 
         rng = np.random.default_rng(6)
         n = 40
@@ -523,9 +524,9 @@ class TestNegativeBinomialThetaProfile:
         y = rng.poisson(mu).astype(float)
         ones = np.ones(n)
         for theta in (0.3, 2.0, 40.0):
-            assert _theta_profile_score(
-                y, mu, ones, theta, weight_semantics="prior"
-            ) == _theta_profile_score(y, mu, ones, theta, weight_semantics="frequency")
+            assert theta_score(y, mu, ones, theta, weight_semantics="prior") == theta_score(
+                y, mu, ones, theta, weight_semantics="frequency"
+            )
 
 
 class TestScaleProfilerInternals:

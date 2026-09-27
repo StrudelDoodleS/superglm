@@ -1394,10 +1394,58 @@ class SuperGLM:
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
-        **kwargs,
+        *,
+        fit_mode: str = "fit",
+        theta_bounds: tuple[float, float] = (1e-8, 1e8),
+        xatol: float = 1e-2,
+        ci_alpha: float | None = None,
+        progress_callback: Callable[..., None] | None = None,
     ):
-        """Estimate NB theta via profile likelihood, refit, and return result."""
-        return profile_ops.estimate_theta(self, X, y, sample_weight, offset, **kwargs)
+        """Estimate NB2 theta via profile likelihood, refit, and return result.
+
+        The mean fit alternates with the root of the closed-form profile score
+        in theta at that mean (Venables & Ripley 2002, ch. 7.4; Lawless 1987)
+        until theta settles, and the published fit is refitted at the estimate.
+
+        Parameters
+        ----------
+        X : pandas or eager Polars DataFrame
+            Feature matrix. Lazy frames must be collected before fitting.
+        y : array-like
+            Count response.
+        sample_weight : array-like, optional
+            Observation weights, read under the model's ``weight_semantics``.
+        offset : array-like, optional
+            Offset added to the linear predictor.
+        fit_mode : {"fit", "reml", "inherit"}
+            Fitting regime for the published final fit. The alternation itself
+            uses ordinary fits.
+        theta_bounds : tuple of float
+            Search range for theta. An estimate on a bound warns with
+            ``NBThetaBoundWarning`` and reports ``converged=False``.
+        xatol : float
+            The alternation stops once theta moves by at most this fraction of
+            itself between successive mean fits.
+        ci_alpha : float, optional
+            Compute the ``1 - ci_alpha`` likelihood-ratio interval at the
+            published mean before returning.
+        progress_callback : callable, optional
+            Called as ``progress_callback(phase, payload)``: ``"profiling"``
+            with ``{"profile_trace": [row]}`` for each alternation step, then
+            ``"best_found"`` and ``"final_refit"`` with ``{"profile_estimate": ...}``.
+        """
+        return profile_ops.estimate_theta(
+            self,
+            X,
+            y,
+            sample_weight,
+            offset,
+            fit_mode=fit_mode,
+            theta_bounds=theta_bounds,
+            xatol=xatol,
+            ci_alpha=ci_alpha,
+            progress_callback=progress_callback,
+        )
 
     # ── Plotting ──────────────────────────────────────────────────
 

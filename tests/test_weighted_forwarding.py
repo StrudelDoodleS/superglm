@@ -133,7 +133,7 @@ class TestCICache:
         assert result.ci(alpha=0.05) == (first.lower, first.upper)
 
     def test_nb_ci_cached(self, weighted_nb_data):
-        """Repeated NB .ci() calls at same alpha return cached result."""
+        """Repeated NB intervals at the same alpha return the cached result."""
         df, y, w = weighted_nb_data
         model = SuperGLM(
             family=NegativeBinomial(theta=1.0),
@@ -143,9 +143,7 @@ class TestCICache:
         model.fit(df, y, sample_weight=w)
         result = model.estimate_theta(df, y, sample_weight=w)
 
-        ci1 = result.ci(alpha=0.05)
-        ci2 = result.ci(alpha=0.05)
-        assert ci1 is ci2  # exact same object = cached
+        assert result.interval(0.05) is result.interval(0.05)
 
 
 class TestStaleProfileClear:

@@ -461,7 +461,6 @@ def test_profiled_theta_reml_emits_terminal_only_after_final_install(tmp_path, m
         lambda *_args, **_kwargs: NBProfileResult(
             theta_hat=2.5,
             nll=1.0,
-            n_evaluations=1,
             converged=True,
         ),
     )

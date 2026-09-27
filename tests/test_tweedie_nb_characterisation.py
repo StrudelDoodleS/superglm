@@ -15,6 +15,7 @@ import pytest
 from scipy.stats import chi2
 
 from superglm._tweedie import tweedie_logpdf, tweedie_unit_deviance
+from superglm.profiling.nb import NBThetaBoundWarning
 from superglm.profiling.tweedie import profile_phi_at
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 
@@ -400,12 +401,165 @@ def test_an_unconverged_reml_candidate_leaves_the_estimate_unconverged(
 
 
 def test_theta_steps_reach_the_progress_callback_while_the_search_runs(characterisation_case):
-    from superglm.profiling.nb import _theta_cache_key
-
     model, X, y = characterisation_case("nb_worst")
     events = []
     result = model.estimate_theta(X, y, progress_callback=lambda *event: events.append(event))
     rows = [payload["profile_trace"][0] for phase, payload in events if phase == "profiling"]
-    # The result keys each step by its theta to six significant digits.
-    assert [_theta_cache_key(row["theta"]) for row in rows] == list(result.cache)
+    assert rows == result.evaluations.to_dict("records")
     assert [phase for phase, _ in events[len(rows) :]] == ["best_found", "final_refit"]
+
+
+def _one_published_digit(value: float) -> float:
+    """One unit in the sixth significant digit, the resolution theta_hat is published at."""
+    return 10.0 ** (math.floor(math.log10(abs(value))) - 5)
+
+
+def _alternation_resolution(result) -> float:
+    """The last step the alternation accepted (it starts at theta = 1)."""
+    thetas = [1.0, *result.evaluations["theta"]]
+    return abs(thetas[-1] - thetas[-2])
+
+
+def _statistic_slope(result, theta: float, n: int) -> float:
+    """d/d log theta of the likelihood-ratio statistic 2 n (nll - nll_hat), central difference."""
+    h = 1e-4
+    upper = result._profile_nll(theta * math.exp(h))
+    lower = result._profile_nll(theta * math.exp(-h))
+    return 2.0 * n * (upper - lower) / (2.0 * h)
+
+
+@pytest.mark.parametrize(
+    "row", FIXTURE["estimate_theta"], ids=lambda r: f"{r['case']}-{r['fit_mode']}"
+)
+def test_estimate_theta_matches_master(row, characterisation_case):
+    import dataclasses
+
+    model, X, y = characterisation_case(row["case"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = model.estimate_theta(X, y, fit_mode=row["fit_mode"])
+    messages = [str(w.message) for w in caught if issubclass(w.category, NBThetaBoundWarning)]
+    assert messages == row["warnings"] == result.warnings
+    assert result.converged == row["converged"]
+    # theta_hat is the alternation's last iterate, accepted once its step is at
+    # most xatol (1e-2) of itself, so the estimator resolves theta only to that
+    # step: spec section 7 holds p_hat to Brent's final bracket for the same
+    # reason. The mean fits now stop at the model's tol (1e-6) where master's
+    # direct route stopped at 1e-8 (at 1e-8 the iterates agree to one ulp),
+    # which moves them inside that resolution. Both publish six digits.
+    resolution = _alternation_resolution(result) + _one_published_digit(row["theta_hat"])
+    assert abs(result.theta_hat - row["theta_hat"]) <= resolution
+    # At master's theta_hat the fixed-mean profile is the same family density on
+    # the new publication fit. Each run's fit stops within tol (D + 1) of its
+    # optimum (relative objective change below tol at a linear rate under 1/2),
+    # so the two NLLs differ by at most tol (D + 1) / n.
+    n = len(y)
+    band = model._tol * (model.result.deviance + 1.0) / n
+    at_master = dataclasses.replace(
+        result,
+        theta_hat=row["theta_hat"],
+        nll=result._profile_nll(row["theta_hat"]),
+        _ci_cache={},
+    )
+    assert abs(at_master.nll - row["nll"]) <= band
+    # Each side is rooted to 1e-6 relative (master in theta, the rebuild in
+    # log theta); an NLL offset of `band` at the estimate and at the endpoint
+    # moves the statistic by 4 n band, hence the crossing by that over its slope.
+    for end, master_end in zip(at_master.ci(0.05), row["ci95"]):
+        allowed = 2e-6 + 4.0 * n * band / abs(_statistic_slope(at_master, end, n))
+        assert abs(math.log(end) - math.log(master_end)) <= allowed
+
+
+@pytest.mark.parametrize(
+    "row", FIXTURE["estimate_theta_refused"], ids=lambda r: f"{r['case']}-{r['fit_mode']}"
+)
+def test_estimate_theta_refusals_match_master(row, characterisation_case):
+    from superglm import PublicationModeError
+
+    model, X, y = characterisation_case(row["case"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", NBThetaBoundWarning)
+        with pytest.raises(PublicationModeError, match="theta=1e\\+08"):
+            model.estimate_theta(X, y, fit_mode=row["fit_mode"])
+
+
+def test_nb_nll_agrees_with_family_log_likelihood_at_large_theta():
+    from superglm.distributions import NegativeBinomial
+    from superglm.profiling.nb import nb_nll
+
+    rng = np.random.default_rng(5)
+    mu = rng.uniform(0.5, 3.0, 400)
+    y = rng.poisson(mu).astype(float)
+    w = rng.integers(1, 4, 400).astype(float)
+    for theta in (1e2, 1e6, 1e8):
+        expected = -NegativeBinomial(theta).log_likelihood(y, mu, w) / w.sum()
+        assert nb_nll(y, mu, w, theta, weight_semantics="frequency") == expected
+
+
+def test_prior_weight_moment_start_solves_the_prior_weight_moment_equation():
+    from superglm.profiling.nb import _theta_moment_start
+
+    # w Y ~ NB2(w mu, w theta), so Var(Y) = (mu + mu^2 / theta) / w and
+    # d = w (y - mu)^2 - mu has mean mu^2 / theta on every row.
+    rng = np.random.default_rng(17)
+    n, theta = 40_000, 2.0
+    mu = rng.uniform(1.0, 5.0, n)
+    w = rng.choice([0.5, 1.0, 4.0], n)
+    y = rng.negative_binomial(w * theta, theta / (theta + mu)) / w
+    start = _theta_moment_start(y, mu, w, weight_semantics="prior")
+    d = w * (y - mu) ** 2 - mu
+    # Delta method on the denominator of sum(mu^2) / sum(d).
+    standard_error = start * np.std(d) * math.sqrt(n) / np.sum(d)
+    assert abs(start - theta) <= 4.0 * standard_error
+
+
+def test_estimate_theta_interval_is_the_crossing_at_the_published_mean(characterisation_case):
+    from superglm.profiling.nb import nb_nll
+
+    model, X, y = characterisation_case("nb_worst")
+    result = model.estimate_theta(X, y, fit_mode="reml", ci_alpha=0.1)
+    installed = model._nb_profile_result
+    assert result is not installed
+    assert installed._ci_cache[0.1] == result._ci_cache[0.1]
+    cutoff = chi2.ppf(0.9, 1)
+    y = np.asarray(y, dtype=float)
+
+    def excess(theta):
+        statistic = (
+            2.0
+            * y.size
+            * (
+                nb_nll(y, model._fit_mu, np.ones_like(y), theta, weight_semantics="prior")
+                - result.nll
+            )
+        )
+        return statistic - cutoff
+
+    # Each endpoint is the crossing to 1e-6 in log theta: the excess changes
+    # sign across a 1e-5 relative neighbourhood of it.
+    for end in result.ci(0.1):
+        assert excess(end * (1.0 - 1e-5)) * excess(end * (1.0 + 1e-5)) < 0.0
+
+
+def test_estimate_theta_signature_is_the_slim_one():
+    import inspect
+
+    from superglm import SuperGLM
+
+    parameters = set(inspect.signature(SuperGLM.estimate_theta).parameters)
+    assert {"kwargs", "maxiter", "verbose", "trace_callback"}.isdisjoint(parameters)
+    assert {"fit_mode", "theta_bounds", "xatol", "ci_alpha", "progress_callback"} <= parameters
+
+
+def test_the_reml_alternation_records_each_joint_refit(characterisation_case):
+    from superglm.distributions import NegativeBinomial
+
+    model, X, y = characterisation_case("nb_worst")
+    model.family = NegativeBinomial("auto")
+    model.fit_reml(X, y)
+    result = model._nb_profile_result
+    # The calibration alternation stops near 0.55; the joint REML refits move
+    # theta to the published estimate, and each refit is one more row.
+    assert result.evaluations["theta"].iloc[0] < 0.6
+    assert result.evaluations["theta"].iloc[-1] == result.theta_hat == model._distribution.theta
+    assert result.evaluations["nll"].iloc[-1] == pytest.approx(result.nll, rel=1e-15)

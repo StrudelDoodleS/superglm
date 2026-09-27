@@ -1098,15 +1098,7 @@ def _close_live_widgets() -> None:
 
 
 def _profile_trace_rows(result: Any) -> list[dict[str, Any]]:
-    evaluations = getattr(result, "evaluations", None)
-    if evaluations is None:
-        cache = getattr(result, "cache", None)
-        if isinstance(cache, dict):
-            return [
-                {"step": i, "theta": theta, "nll": nll, "source": "profile"}
-                for i, (theta, nll) in enumerate(cache.items())
-            ]
-        return []
+    evaluations = result.evaluations
     # An infeasible power has no objective to plot.
     feasible = evaluations[np.isfinite(evaluations["nll"])]
     return [jsonable({"step": step, **row}) for step, row in enumerate(feasible.to_dict("records"))]

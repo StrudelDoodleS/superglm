@@ -1,87 +1,68 @@
-"""Negative Binomial theta estimation via alternating GLM + safeguarded solve.
+"""NB2 shape theta: the profile-score root, alternating with the mean fit.
 
-Alternates between fitting the GLM at the current theta (PIRLS) and updating
-theta on the closed-form NB2 profile score (digamma/trigamma). The alternating
-scheme is the standard one described by Venables & Ripley (2002, ch. 7.4);
-the profile score and information are classical NB2 maximum-likelihood theory
-(Lawless 1987). Converges in 3-5 outer iterations instead of the ~14
-black-box evaluations required by Brent profiling.
-
-For NB2: V(mu) = mu + mu^2/theta. The key insight is that given fitted mu,
-the profile likelihood for theta has a closed-form score and information,
-so theta can be updated analytically without refitting the GLM.
-
-The inner theta update is a bracketed scalar root find (Brent) on the profile
-score, started from a method-of-moments estimate. An unsafeguarded Newton
-iteration on this score can ascend the negative log-likelihood from a poor
-start (the profile information is not globally positive), and a silent clip
-into narrow bounds then publishes the wrong end of the parameter space with
-``converged=True``; the bracketing solve removes both failure modes and any
-remaining active bound is reported honestly.
+Given a fitted mean, the NB2 log-likelihood in theta has a closed-form score
+(Lawless 1987). theta is its bracketed root, alternating with a warm-started
+refit of the mean until theta settles: the scheme of Venables & Ripley (2002,
+ch. 7.4) and MASS ``glm.nb``. A fixed-start Newton step can ascend the
+negative log-likelihood where the profile information turns negative, so the
+root is bracketed. The interval inverts the likelihood-ratio test on the
+fixed-mean profile.
 
 References
 ----------
-- Venables & Ripley (2002): Modern Applied Statistics with S, Ch 7.4
-  (alternating GLM fit / profile-score update for the NB shape).
+- Venables & Ripley (2002): Modern Applied Statistics with S, Ch 7.4.
 - Lawless (1987): Negative binomial and mixed Poisson regression,
-  Canadian Journal of Statistics 15(3), 209-225 (NB2 profile score,
-  information, and moment estimation).
+  Canadian Journal of Statistics 15(3), 209-225.
 """
 
 from __future__ import annotations
 
-import copy
+import math
 import warnings
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 from scipy.optimize import brentq
-from scipy.special import digamma, gammaln
+from scipy.special import digamma
 
-from superglm._frame import as_eager_frame
-from superglm.distributions import clip_mu
+from superglm.distributions import NegativeBinomial, clip_mu, weighted_log_likelihood
 from superglm.links import stabilize_eta
-from superglm.model.fit_state import (
-    FrozenMapping,
-    configured_family,
-    configured_lambda2,
-    configured_penalty,
+from superglm.model.base import model_has_lambda1_targets, resolve_selection_penalty_for_fit
+from superglm.model.fit_ops import _solve_coefficients
+from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
+from superglm.profiling._scalar import (
+    Interval,
+    RecordedObjective,
+    likelihood_ratio_interval,
+    profile_plot,
 )
-from superglm.penalties.base import penalty_has_targets
 from superglm.solvers.dispersion import (
     FREQUENCY_WEIGHTS,
     PRIOR_WEIGHTS,
     dispersion_likelihood_size,
     model_weight_semantics,
 )
-from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.pirls import fit_pirls
 
 #: Default search range for the NB2 shape parameter. Deliberately wide: these
 #: are numerical guard rails for the bracketed solve, not a statistical prior.
 #: The historical default of (0.1, 50.0) excluded routinely occurring true
 #: values at both ends (heavy overdispersion sits below 0.1; near-Poisson data
-#: pushes the profile optimum far above 50) and, combined with an
-#: unsafeguarded Newton step, published the wrong clamp end silently.
+#: pushes the profile optimum far above 50).
 _THETA_DEFAULT_BOUNDS: tuple[float, float] = (1e-8, 1e8)
-
 #: Geometric step used to bracket a sign change of the profile score.
 _THETA_BRACKET_FACTOR = 10.0
-
-
-def _theta_cache_key(value: float) -> float:
-    """Cache key for a theta iterate: six SIGNIFICANT digits.
-
-    Decimal rounding (``round(value, 6)``) collapses every theta below 5e-7
-    onto the impossible key 0.0 - which ``profile_plot`` then feeds to the
-    NB2 likelihood as a zero shape parameter - and merges distinct small-
-    theta iterates onto one entry. Significant-digit rounding matches how
-    ``theta_hat`` itself is published, so the publication lookup and the
-    iteration entries share one convention at every scale.
-    """
-    return float(f"{float(value):.6g}")
+#: The root is located to 1e-8 relative, far below the six significant digits
+#: theta_hat is published at.
+_THETA_ROOT_RTOL = 1e-8
+#: The interval searches at least this range, widened to hold theta_hat.
+_CI_RANGE = (0.01, 500.0)
+#: theta_hat is published to six significant digits, a rounding of up to 5e-6
+#: relative; roots to 1e-6 in log theta place each endpoint five times finer
+#: than that at every scale the ten-decade range admits.
+_CI_LOG_XTOL = 1e-6
 
 
 class NBThetaBoundWarning(UserWarning):
@@ -94,304 +75,6 @@ class NBThetaBoundWarning(UserWarning):
     increases toward the Poisson limit ``theta -> inf``); an active lower
     bound means overdispersion beyond the searchable range.
     """
-
-
-@dataclass
-class NBProfileResult:
-    """Result of NB theta parameter estimation."""
-
-    theta_hat: float
-    nll: float
-    n_evaluations: int
-    converged: bool
-    cache: Mapping[float, float] = field(default_factory=dict)
-
-    # Set after estimation to enable .ci()
-    _y: NDArray | None = field(default=None, repr=False)
-    _mu: NDArray | None = field(default=None, repr=False)
-    _weights: NDArray | None = field(default=None, repr=False)
-    # The contract the profile was run under; the interval and the deviance
-    # plot must reuse the same likelihood the estimate came from.
-    _weight_semantics: str = field(default=FREQUENCY_WEIGHTS, repr=False)
-
-    _ci_cache: dict[float, tuple[float, float]] = field(default_factory=dict, repr=False)
-    _publication_locked: bool = field(default=False, init=False, repr=False, compare=False)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        if self.__dict__.get("_publication_locked", False):
-            raise AttributeError(f"published NBProfileResult is immutable; cannot rebind {name!r}")
-        object.__setattr__(self, name, value)
-
-    def _published_with_data(
-        self,
-        y: NDArray,
-        mu: NDArray,
-        weights: NDArray,
-    ) -> NBProfileResult:
-        """Return an owned result synchronized to one final fitted mean vector."""
-        y_owned = _immutable_array_copy(np.asarray(y, dtype=np.float64))
-        mu_owned = _immutable_array_copy(np.asarray(mu, dtype=np.float64))
-        weights_owned = _immutable_array_copy(np.asarray(weights, dtype=np.float64))
-        nll = _nb2_nll(
-            y_owned,
-            mu_owned,
-            weights_owned,
-            float(self.theta_hat),
-            weight_semantics=self._weight_semantics,
-        )
-        cache = dict(self.cache)
-        cache[_theta_cache_key(self.theta_hat)] = nll
-        published = type(self)(
-            theta_hat=float(self.theta_hat),
-            nll=nll,
-            n_evaluations=int(self.n_evaluations),
-            converged=bool(self.converged),
-            cache=FrozenMapping(cache),
-            _y=y_owned,
-            _mu=mu_owned,
-            _weights=weights_owned,
-            _weight_semantics=self._weight_semantics,
-        )
-        object.__setattr__(published, "_publication_locked", True)
-        return published
-
-    def _detached_public_copy(self) -> NBProfileResult:
-        """Return a distinct immutable handle without duplicating immutable row buffers."""
-        cache = self.cache if isinstance(self.cache, FrozenMapping) else FrozenMapping(self.cache)
-        detached = type(self)(
-            theta_hat=float(self.theta_hat),
-            nll=float(self.nll),
-            n_evaluations=int(self.n_evaluations),
-            converged=bool(self.converged),
-            cache=cache,
-            _y=self._y,
-            _mu=self._mu,
-            _weights=self._weights,
-            _weight_semantics=self._weight_semantics,
-            _ci_cache=dict(self._ci_cache),
-        )
-        object.__setattr__(detached, "_publication_locked", True)
-        return detached
-
-    def __deepcopy__(self, memo: dict[int, object]) -> NBProfileResult:
-        existing = memo.get(id(self))
-        if existing is not None:
-            return existing  # type: ignore[return-value]
-        if self.__dict__.get("_publication_locked", False):
-            result = self._detached_public_copy()
-        else:
-            result = type(self)(
-                theta_hat=float(self.theta_hat),
-                nll=float(self.nll),
-                n_evaluations=int(self.n_evaluations),
-                converged=bool(self.converged),
-                cache=copy.deepcopy(self.cache, memo),
-                _y=copy.deepcopy(self._y, memo),
-                _mu=copy.deepcopy(self._mu, memo),
-                _weights=copy.deepcopy(self._weights, memo),
-                _weight_semantics=self._weight_semantics,
-                _ci_cache=copy.deepcopy(self._ci_cache, memo),
-            )
-        memo[id(self)] = result
-        return result
-
-    def __getstate__(self) -> dict[str, object]:
-        return dict(self.__dict__)
-
-    def __setstate__(self, state: dict[str, object]) -> None:
-        published = bool(state.get("_publication_locked", False))
-        object.__setattr__(self, "_publication_locked", False)
-        for name, value in state.items():
-            if name != "_publication_locked":
-                object.__setattr__(self, name, value)
-        if published:
-            for name in ("_y", "_mu", "_weights"):
-                value = getattr(self, name)
-                if value is not None:
-                    object.__setattr__(self, name, _immutable_array_copy(value))
-            object.__setattr__(self, "cache", FrozenMapping(self.cache))
-            object.__setattr__(self, "_publication_locked", True)
-
-    def ci(self, alpha: float = 0.05) -> tuple[float, float]:
-        """Profile likelihood confidence interval for theta.
-
-        Requires that the result was produced by ``estimate_nb_theta``.
-        Results are cached so repeated calls (e.g. from summary()) are free.
-        """
-        if alpha in self._ci_cache:
-            return self._ci_cache[alpha]
-        if self._y is None or self._mu is None or self._weights is None:
-            raise RuntimeError(
-                "Profile CI requires fitted mu. Use estimate_nb_theta() to produce this result."
-            )
-        result = profile_ci_theta(
-            self._y,
-            self._mu,
-            self._weights,
-            self.theta_hat,
-            weight_semantics=self._weight_semantics,
-            alpha=alpha,
-        )
-        self._ci_cache[alpha] = result
-        return result
-
-    def profile_plot(
-        self,
-        *,
-        alpha: float = 0.05,
-        n_points: int = 100,
-        ax=None,
-    ):
-        """Profile deviance plot for NB2 theta.
-
-        Shows the profile deviance curve with the MLE, confidence interval
-        bounds, and chi-squared cutoff. Cheap — each evaluation is O(n)
-        with no refitting.
-
-        Parameters
-        ----------
-        alpha : float
-            Significance level for CI (default 0.05).
-        n_points : int
-            Number of grid points for the curve.
-        ax : matplotlib Axes, optional
-            Axes to plot on. If None, creates a new figure.
-
-        Returns
-        -------
-        matplotlib.figure.Figure
-        """
-        if self._y is None or self._mu is None or self._weights is None:
-            raise RuntimeError(
-                "Profile plot requires fitted mu. Use estimate_nb_theta() to produce this result."
-            )
-
-        import matplotlib.pyplot as plt
-        from scipy.stats import chi2
-
-        ci_lo, ci_hi = self.ci(alpha=alpha)
-
-        # Grid extends beyond CI for visual context. The positive floor must
-        # scale with the estimate: a fixed 0.01 made every theta in the newly
-        # admitted (1e-8, 0.01) band unplottable.
-        margin = 0.3 * (ci_hi - ci_lo)
-        grid_lo = max(min(0.01, 0.1 * self.theta_hat), ci_lo - margin)
-        grid_hi = ci_hi + margin
-        theta_grid = np.linspace(grid_lo, grid_hi, n_points)
-
-        w_sum = dispersion_likelihood_size(
-            self._weights,
-            weight_semantics=self._weight_semantics,
-        )
-        nll_hat = _nb2_nll(
-            self._y,
-            self._mu,
-            self._weights,
-            self.theta_hat,
-            weight_semantics=self._weight_semantics,
-        )
-        deviance = np.array(
-            [
-                2.0
-                * w_sum
-                * (
-                    _nb2_nll(
-                        self._y,
-                        self._mu,
-                        self._weights,
-                        t,
-                        weight_semantics=self._weight_semantics,
-                    )
-                    - nll_hat
-                )
-                for t in theta_grid
-            ]
-        )
-
-        cutoff = chi2.ppf(1.0 - alpha, 1)
-
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(6, 4))
-        else:
-            fig = ax.get_figure()
-
-        ax.plot(theta_grid, deviance, color="steelblue", linewidth=1.5)
-
-        # Mark cached iteration points (re-evaluated on the fixed-mu profile)
-        if self.cache:
-            cache_thetas = np.array(sorted(self.cache.keys()))
-            cache_dev = np.array(
-                [
-                    2.0
-                    * w_sum
-                    * (
-                        _nb2_nll(
-                            self._y,
-                            self._mu,
-                            self._weights,
-                            t,
-                            weight_semantics=self._weight_semantics,
-                        )
-                        - nll_hat
-                    )
-                    for t in cache_thetas
-                ]
-            )
-            ax.scatter(
-                cache_thetas,
-                cache_dev,
-                color="darkorange",
-                s=35,
-                zorder=5,
-                edgecolors="white",
-                linewidths=0.5,
-                label=f"Iterations ({len(cache_thetas)})",
-            )
-
-        ax.axhline(
-            cutoff,
-            linestyle="--",
-            color="grey",
-            linewidth=0.8,
-            label=f"{100 * (1 - alpha):.0f}% cutoff",
-        )
-        ax.axvline(
-            self.theta_hat,
-            linestyle=":",
-            color="black",
-            linewidth=0.8,
-            label=f"MLE = {self.theta_hat:.3f}",
-        )
-        ax.fill_betweenx(
-            [0, cutoff],
-            ci_lo,
-            ci_hi,
-            alpha=0.10,
-            color="firebrick",
-            label=f"{100 * (1 - alpha):.0f}% CI: [{ci_lo:.3f}, {ci_hi:.3f}]",
-        )
-
-        ax.set_xlabel(r"$\theta$")
-        ax.set_ylabel("Profile deviance")
-        ax.set_title(r"NB2 $\theta$ profile likelihood")
-        ax.set_ylim(bottom=0)
-        ax.legend(fontsize=8, loc="upper right")
-        return fig
-
-
-@dataclass(frozen=True)
-class _ThetaSolve:
-    """One safeguarded solve of the fixed-mu NB2 profile score."""
-
-    theta: float
-    converged: bool
-    at_lower: bool
-    at_upper: bool
-    n_score_evaluations: int
-
-    @property
-    def at_bound(self) -> bool:
-        return self.at_lower or self.at_upper
 
 
 #: Above this PSI ARGUMENT the profile score switches to its large-argument
@@ -417,7 +100,7 @@ class _ThetaSolve:
 _THETA_SCORE_ASYMPTOTIC_MIN = 1e5
 
 
-def _theta_profile_score(
+def theta_score(
     y: NDArray,
     mu: NDArray,
     weights: NDArray,
@@ -463,58 +146,41 @@ def _theta_profile_score(
         # leaves the likelihood rather than contributing zero to it.  Both
         # digamma arguments would land on the psi pole and ``0 * (-inf + inf)``
         # is ``nan``, so the row has to go before the score is formed rather
-        # than be multiplied out after.  ``_nb2_nll`` already satisfies this
+        # than be multiplied out after.  ``nb_nll`` already satisfies this
         # row-deletion identity by construction; the score is the arm that did
         # not.  The frequency arm needs no subset -- a zero replication count
         # multiplies a finite row contribution -- and keeping its summation
         # verbatim is what stops shipped numbers drifting.
         carried = weights > 0.0
         if not np.all(carried):
-            y = y[carried]
-            mu = mu[carried]
-            weights = weights[carried]
+            y, mu, weights = y[carried], mu[carried], weights[carried]
         if weights.size == 0:
             return 0.0
-    # The expansion is in the psi argument, which the prior contract scales by
-    # the row weight; switching on the smallest such argument keeps every row
-    # inside the regime the expansion was derived for.  The minimum is taken
-    # over the carried rows only, so one dropped row cannot pin every theta to
-    # the direct branch.
+    # The prior contract scales every psi argument by the row weight. The
+    # frequency arm's scale is 1.0, and x * 1.0 and x / 1.0 are exact, so its
+    # score is unchanged bit for bit.
+    psi_scale = weights if prior else 1.0
+    # The expansion is in the psi argument; switching on the smallest one keeps
+    # every row inside the regime the expansion was derived for. The minimum is
+    # taken over the carried rows only, so one dropped row cannot pin every
+    # theta to the direct branch.
     switch_argument = theta * float(np.min(weights)) if prior else theta
     if switch_argument >= _THETA_SCORE_ASYMPTOTIC_MIN:
         shifted = theta + y
         x = (y - mu) / (theta + mu)
-        core = np.log1p(x) - x
-        if prior:
-            # psi(w a) - psi(w b) carries 1/w on the first correction and
-            # 1/w**2 on the second; the leading log term is scale-free.
-            psi_tail = (
-                0.5 * y / (theta * shifted) / weights
-                + (1.0 / theta**2 - 1.0 / shifted**2) / 12.0 / weights**2
-            )
-        else:
-            psi_tail = 0.5 * y / (theta * shifted) + (1.0 / theta**2 - 1.0 / shifted**2) / 12.0
-        return float(np.sum(weights * (core + psi_tail)))
-    if prior:
-        return float(
-            np.sum(
-                weights
-                * (
-                    digamma(weights * (y + theta))
-                    - digamma(weights * theta)
-                    + np.log(theta)
-                    + 1.0
-                    - np.log(theta + mu)
-                    - (y + theta) / (mu + theta)
-                )
-            )
+        # psi(w a) - psi(w b) carries 1/w on the first correction and 1/w**2
+        # on the second; the leading log term is scale-free.
+        psi_tail = (
+            0.5 * y / (theta * shifted) / psi_scale
+            + (1.0 / theta**2 - 1.0 / shifted**2) / 12.0 / psi_scale**2
         )
+        return float(np.sum(weights * (np.log1p(x) - x + psi_tail)))
     return float(
         np.sum(
             weights
             * (
-                digamma(y + theta)
-                - digamma(theta)
+                digamma(psi_scale * (y + theta))
+                - digamma(psi_scale * theta)
                 + np.log(theta)
                 + 1.0
                 - np.log(theta + mu)
@@ -524,147 +190,137 @@ def _theta_profile_score(
     )
 
 
-def _theta_moment_start(y: NDArray, mu: NDArray, weights: NDArray) -> float | None:
-    """Method-of-moments start for theta from V(mu) = mu + mu^2/theta.
-
-    Solves ``sum(w * ((y - mu)^2 - mu)) = sum(w * mu^2) / theta`` for theta.
-    Returns None when the weighted excess dispersion is non-positive (the data
-    are at most Poisson-dispersed at this mu), in which case the profile
-    optimum lies at or beyond the upper search bound.
-    """
-    numerator = float(np.sum(weights * mu * mu))
-    denominator = float(np.sum(weights * ((y - mu) ** 2 - mu)))
-    if (
-        not np.isfinite(numerator)
-        or not np.isfinite(denominator)
-        or numerator <= 0.0
-        or denominator <= 0.0
-    ):
-        return None
-    return numerator / denominator
-
-
-def _theta_ml(
-    y: NDArray,
-    mu: NDArray,
-    weights: NDArray,
-    theta: float,
-    *,
-    weight_semantics: str,
-    bounds: tuple[float, float] = _THETA_DEFAULT_BOUNDS,
-    max_iter: int = 100,
-    eps: float = 1e-8,
-) -> _ThetaSolve:
-    """Safeguarded maximization of the NB2 profile log-likelihood over theta.
-
-    Maximises the fixed-mu profile log-likelihood by bracketing a sign change
-    of the closed-form profile score (geometric expansion from the start
-    value) and solving it with Brent's method. Every accepted iterate is
-    therefore on the correct side of the likelihood: the solve cannot ascend
-    the negative log-likelihood the way an unguarded Newton step can when the
-    profile information turns negative away from the optimum.
-
-    If the score does not change sign inside ``bounds`` the profile optimum
-    lies at or beyond the corresponding bound; the bound value is returned
-    with ``converged=False`` and the matching ``at_lower``/``at_upper`` flag
-    set, so callers can report the active constraint instead of publishing it
-    as a converged interior estimate.
-
-    Each score evaluation is O(n) with no matrix operations.
-    """
-    lower = float(bounds[0])
-    upper = float(bounds[1])
-    if not (0.0 < lower < upper) or not np.isfinite(lower) or not np.isfinite(upper):
-        raise ValueError(f"theta bounds must satisfy 0 < lower < upper < inf, got {bounds!r}")
-    theta0 = float(min(max(float(theta), lower), upper))
-
-    evaluations = 0
-
-    def score(value: float) -> float:
-        nonlocal evaluations
-        evaluations += 1
-        return _theta_profile_score(y, mu, weights, value, weight_semantics=weight_semantics)
-
-    s0 = score(theta0)
-    if not np.isfinite(s0):
-        raise FloatingPointError("NB2 profile score is not finite at the starting theta")
-    if s0 == 0.0:
-        return _ThetaSolve(theta0, True, theta0 <= lower, theta0 >= upper, evaluations)
-
-    if s0 > 0.0:
-        # Likelihood increasing: the optimum lies to the right of theta0.
-        bracket_lo = theta0
-        current = theta0
-        while True:
-            if current >= upper:
-                return _ThetaSolve(upper, False, False, True, evaluations)
-            current = min(current * _THETA_BRACKET_FACTOR, upper)
-            s_current = score(current)
-            if not np.isfinite(s_current):
-                raise FloatingPointError("NB2 profile score overflowed while bracketing theta")
-            if s_current <= 0.0:
-                bracket_hi = current
-                break
-            bracket_lo = current
-    else:
-        # Likelihood decreasing: the optimum lies to the left of theta0.
-        bracket_hi = theta0
-        current = theta0
-        while True:
-            if current <= lower:
-                return _ThetaSolve(lower, False, True, False, evaluations)
-            current = max(current / _THETA_BRACKET_FACTOR, lower)
-            s_current = score(current)
-            if not np.isfinite(s_current):
-                raise FloatingPointError("NB2 profile score overflowed while bracketing theta")
-            if s_current >= 0.0:
-                bracket_lo = current
-                break
-            bracket_hi = current
-
-    root = float(
-        brentq(
-            score,
-            bracket_lo,
-            bracket_hi,
-            xtol=np.finfo(np.float64).tiny,
-            rtol=max(float(eps), 4.0 * np.finfo(np.float64).eps),
-            maxiter=int(max_iter),
-        )
-    )
-    return _ThetaSolve(root, True, False, False, evaluations)
-
-
-def _immutable_array_copy(value: NDArray) -> NDArray:
-    """Copy onto a bytes-backed buffer whose write flag cannot be restored."""
-    array = np.ascontiguousarray(value)
-    return np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(array.shape)
-
-
-def _nb2_nll(
-    y: NDArray,
-    mu: NDArray,
-    weights: NDArray,
-    theta: float,
-    *,
-    weight_semantics: str,
+def _theta_moment_start(
+    y: NDArray, mu: NDArray, weights: NDArray, *, weight_semantics: str
 ) -> float:
-    """Mean negative NB2 log-likelihood, per unit of the contract's size."""
-    if weight_semantics == PRIOR_WEIGHTS:
-        from superglm.distributions import NegativeBinomial, prior_weight_log_density
+    """Moment estimate of theta at a fitted mean; ``inf`` when there is no excess dispersion.
 
-        density = prior_weight_log_density(NegativeBinomial(theta), y, mu, weights, 1.0)
-        assert density is not None
-        size = dispersion_likelihood_size(weights, weight_semantics=PRIOR_WEIGHTS)
-        return -float(np.sum(density, dtype=np.float64)) / size
-    ll = (
-        gammaln(y + theta)
-        - gammaln(theta)
-        - gammaln(y + 1)
-        + theta * np.log(theta / (mu + theta))
-        + y * np.log(mu / (mu + theta))
+    Frequency counts replicate rows with Var(Y) = mu + mu^2 / theta, so
+    sum(w ((y - mu)^2 - mu)) = sum(w mu^2) / theta. Under prior weights
+    Var(Y) = (mu + mu^2 / theta) / w, so sum(w (y - mu)^2 - mu) = sum(mu^2) / theta
+    over the rows that carry information. A start only: the bracketed root
+    decides theta, and ``inf`` starts it at the upper bound.
+    """
+    if weight_semantics == PRIOR_WEIGHTS:
+        carried = weights > 0.0
+        y, mu, weights = y[carried], mu[carried], weights[carried]
+        numerator, denominator = np.sum(mu * mu), np.sum(weights * (y - mu) ** 2 - mu)
+    else:
+        numerator, denominator = np.sum(weights * mu * mu), np.sum(weights * ((y - mu) ** 2 - mu))
+    return float(numerator / denominator) if denominator > 0.0 else math.inf
+
+
+@dataclass(frozen=True)
+class ThetaSolve:
+    """The fixed-mean score root, or the bound the score never changed sign before."""
+
+    theta: float
+    at_lower: bool
+    at_upper: bool
+
+    @property
+    def at_bound(self) -> bool:
+        return self.at_lower or self.at_upper
+
+
+def solve_theta(
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    theta_start: float,
+    *,
+    weight_semantics: str,
+    bounds: tuple[float, float],
+) -> ThetaSolve:
+    """Root of the fixed-mean NB2 score, bracketed by decades from the start (MASS ``theta.ml``).
+
+    The walk moves the way the likelihood rises, so every bracket end lies on
+    the ascending side and the root is the profile maximum. A score that keeps
+    its sign up to a bound puts the maximum at or past it; that bound is
+    returned and flagged.
+    """
+    lower, upper = bounds
+
+    def score(theta: float) -> float:
+        return theta_score(y, mu, weights, theta, weight_semantics=weight_semantics)
+
+    start = min(max(theta_start, lower), upper)
+    start_score = score(start)
+    if start_score == 0.0:
+        return ThetaSolve(start, start <= lower, start >= upper)
+    direction = 1.0 if start_score > 0.0 else -1.0
+    bound = upper if direction > 0.0 else lower
+    near, far, far_score = start, start, start_score
+    while far_score * direction > 0.0:
+        if far == bound:
+            return ThetaSolve(bound, direction < 0.0, direction > 0.0)
+        near, far = far, min(max(far * _THETA_BRACKET_FACTOR**direction, lower), upper)
+        far_score = score(far)
+    root = brentq(
+        score,
+        min(near, far),
+        max(near, far),
+        xtol=np.finfo(np.float64).tiny,
+        rtol=_THETA_ROOT_RTOL,
+        maxiter=100,
     )
-    return -float(np.sum(weights * ll)) / float(np.sum(weights))
+    return ThetaSolve(float(root), False, False)
+
+
+def nb_nll(
+    y: NDArray, mu: NDArray, weights: NDArray, theta: float, *, weight_semantics: str
+) -> float:
+    """Mean negative NB2 log-likelihood per unit of the contract's size, from the family density."""
+    log_likelihood = weighted_log_likelihood(
+        NegativeBinomial(theta), y, mu, weights, weight_semantics=weight_semantics
+    )
+    return -log_likelihood / dispersion_likelihood_size(weights, weight_semantics=weight_semantics)
+
+
+class _MeanFit:
+    """The NB2 mean at a given theta on one design, each fit warm-started from the last."""
+
+    def __init__(self, model, X, y, sample_weight, offset):
+        if model._splines is not None and not model._specs:
+            model._auto_detect_features(X, sample_weight)
+        # The design does not depend on theta, and the family may still read
+        # "auto": build it under a numeric placeholder, then restore the family.
+        family = configured_family(model)
+        model.family = NegativeBinomial(theta=1.0)
+        try:
+            self.y, self.w, offset = model._build_design_matrix(X, y, sample_weight, offset)
+        finally:
+            model.family = family
+        self.model = model
+        self.penalty = configured_penalty(model)
+        resolve_selection_penalty_for_fit(model, self.penalty, self.y, self.w)
+        self.has_lambda1_targets = model_has_lambda1_targets(model)
+        self.offset = np.zeros_like(self.y) if offset is None else offset
+        self.warm_beta = self.warm_intercept = None
+
+    def fit(self, theta: float) -> NDArray:
+        model = self.model
+        model._distribution = NegativeBinomial(theta)
+        result = _solve_coefficients(
+            model,
+            self.y,
+            self.w,
+            self.offset,
+            penalty=self.penalty,
+            lambda2=configured_lambda2(model),
+            has_lambda1_targets=self.has_lambda1_targets,
+            max_iter=model._max_iter,
+            tol=model._tol,
+            record_diagnostics=False,
+            convergence=model._convergence,
+            beta_init=self.warm_beta,
+            intercept_init=self.warm_intercept,
+        )
+        self.warm_beta, self.warm_intercept = result.beta, result.intercept
+        eta = stabilize_eta(
+            model._dm.matvec(result.beta) + result.intercept + self.offset, model._link
+        )
+        return clip_mu(model._link.inverse(eta), model._distribution)
 
 
 def estimate_nb_theta(
@@ -677,390 +333,171 @@ def estimate_nb_theta(
     theta_bounds: tuple[float, float] = _THETA_DEFAULT_BOUNDS,
     xatol: float = 1e-2,
     maxiter: int = 30,
-    verbose: bool = False,
-    trace_callback=None,
-    contract_already_checked: bool = False,
+    on_evaluation: Callable[[dict], None] | None = None,
 ) -> NBProfileResult:
-    """Estimate NB2 theta via alternating GLM fit + safeguarded profile solve.
+    """Alternate the mean fit with the score root until theta moves by at most ``xatol`` relative.
 
-    Algorithm (Venables & Ripley 2002, ch. 7.4):
-      1. Build design matrix once, calibrate lambda.
-      2. Alternate: fit GLM at current theta (PIRLS with warm starts)
-         → update theta by a bracketed root find on the closed-form profile
-         score (Lawless 1987), started from a method-of-moments estimate on
-         the first pass and warm-started thereafter.
-      3. Converge when ``|theta_new - theta_old|`` < xatol (~3-5 iterations).
-
-    Parameters
-    ----------
-    model : SuperGLM
-        A configured but *unfitted* model with features already added.
-        Must have a NegativeBinomial family (e.g. ``families.nb2(theta=1.0)``).
-    X : pandas or eager Polars DataFrame
-        Feature matrix.
-    y : array-like
-        Response variable (counts).
-    sample_weight : array-like, optional
-        Observation weights, read under the model's declared
-        ``weight_semantics``. Under ``"frequency"`` each row's log-likelihood
-        contribution is scaled by its weight; under ``"prior"`` the profile
-        follows ``w Y ~ NB2(w mu, w theta)``, which scales the digamma pair in
-        the score instead. The two agree at unit weight and give different
-        ``theta_hat`` otherwise, because they are different likelihoods.
-    offset : array-like, optional
-        Offset added to the linear predictor.
-    theta_bounds : tuple
-        Search range for theta, default ``(1e-8, 1e8)``. These are numerical
-        guard rails, not a statistical prior. If the estimate lands on a
-        bound the result reports ``converged=False`` and an
-        ``NBThetaBoundWarning`` is emitted — a bounded value is a constrained
-        boundary report, never a silent interior estimate.
-    xatol : float
-        Convergence tolerance on theta for the outer alternation, applied
-        RELATIVE to the current estimate (with the lower search bound as the
-        scale floor): the alternation stops when
-        ``|theta_new - theta| <= xatol * max(|theta_new|, lower_bound)``.
-        The historical absolute reading was only sound over the old
-        (0.1, 50.0) range; across (1e-8, 1e8) an absolute 1e-2 would accept
-        order-of-magnitude jumps below 0.01 and demand needless precision
-        near the top.
-    maxiter : int
-        Maximum outer iterations (GLM fits).
-    verbose : bool
-        Print progress.
-
-    Returns
-    -------
-    NBProfileResult
+    The caller has validated the inputs, the family and the bounds. The first
+    root starts from a moment estimate at the first mean and later ones from
+    the previous theta; the lower bound floors the relative step's scale.
+    ``on_evaluation`` receives each step as ``{"theta", "nll"}`` while the
+    alternation runs.
     """
-    from superglm.distributions import NegativeBinomial
-
-    X = as_eager_frame(X)
-
-    # Validate family
-    family = configured_family(model)
-    if not isinstance(family, NegativeBinomial):
-        raise ValueError(
-            f"estimate_nb_theta requires a NegativeBinomial family, got {family!r}. "
-            "Use families.nb2(theta=...) to create one."
+    mean = _MeanFit(model, X, y, sample_weight, offset)
+    semantics = model_weight_semantics(model)
+    theta, rows, settled = 1.0, [], False
+    for _ in range(maxiter):
+        mu = mean.fit(theta)
+        start = (
+            theta if rows else _theta_moment_start(mean.y, mu, mean.w, weight_semantics=semantics)
         )
-
-    y = np.asarray(y, dtype=np.float64)
-
-    # --- One-time setup: build design matrix and calibrate lambda ---
-    if model._splines is not None and not model._specs:
-        model._auto_detect_features(X, sample_weight)
-
-    # Temporary theta for _build_design_matrix (DM doesn't depend on theta)
-    from superglm.distributions import NegativeBinomial
-
-    saved_family = configured_family(model)
-    model.family = NegativeBinomial(theta=1.0)
-    try:
-        y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
-    finally:
-        model.family = saved_family
-
-    # The other public likelihood boundary in this module. It takes the arrays
-    # the caller passes, not a fit's stored ones, so nothing has checked them:
-    # `_validate_entrypoint_input` never runs here. Every NLL in the theta
-    # search below reads this response and these weights.
-    #
-    # THETA_ESTIMATED, not THETA_PROFILED: the search refits beta at each
-    # candidate theta (`beta_init=warm_beta` into the IRLS calls), so an
-    # interpolated density reaches the coefficients, not only the interval.
-    from superglm.model.input_validation import THETA_ESTIMATED, check_weight_contract
-
-    # Only when this is the caller's entry point. `fit()` routes the same
-    # arrays through `validate_fit_input` -> `check_weight_contract` before it
-    # reaches auto-theta, so checking again would report one condition twice
-    # from two source locations within a single fit.
-    if not contract_already_checked:
-        check_weight_contract(
-            y_arr,
-            w_arr,
-            configured_family(model),
-            model_weight_semantics(model),
-            theta_role=THETA_ESTIMATED,
+        solve = solve_theta(
+            mean.y, mu, mean.w, start, weight_semantics=semantics, bounds=theta_bounds
         )
-
-    penalty = configured_penalty(model)
-    from superglm.model.base import resolve_selection_penalty_for_fit
-
-    resolve_selection_penalty_for_fit(model, penalty, y_arr, w_arr)
-
-    if offset_arr is None:
-        offset_arr = np.zeros(len(y_arr))
-
-    dm = model._dm
-    groups = model._groups
-    link = model._link
-
-    # Use direct solver when lambda1=0 (no L1 penalty → no BCD needed)
-    _use_direct = penalty.lambda1 is not None and (
-        penalty.lambda1 == 0 or not penalty_has_targets(penalty, groups)
-    )
-    reml_penalties = None
-    if _use_direct:
-        from superglm.model.reml_setup import collect_reml_groups
-        from superglm.reml.penalty_algebra import build_penalty_context
-
-        reml_groups = collect_reml_groups(groups, dm.group_matrices)
-        if reml_groups:
-            reml_penalties, _penalty_caches, _penalty_ranks = build_penalty_context(
-                dm.group_matrices,
-                reml_groups,
-            )
-
-    # --- Alternating estimation ---
-    # theta = 1.0 only seeds the first working GLM fit (the fitted mean is
-    # weakly theta-sensitive); the first profile solve restarts from a
-    # method-of-moments estimate at that mean, so the search begins where the
-    # data point instead of at an arbitrary fixed value.
-    weight_semantics = model_weight_semantics(model)
-    theta = 1.0
-    warm_beta = None
-    warm_intercept = None
-    cache: dict[float, float] = {}
-    converged = False
-    theta_solve: _ThetaSolve | None = None
-
-    for iteration in range(maxiter):
-        # Step 1: Fit GLM at current theta (warm-started after first iter)
-        dist = NegativeBinomial(theta)
-        if _use_direct:
-            pirls_result, _ = fit_irls_direct(
-                X=dm,
-                y=y_arr,
-                weights=w_arr,
-                family=dist,
-                link=link,
-                groups=groups,
-                lambda2=configured_lambda2(model),
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-                direct_solve=getattr(model, "_direct_solve", "auto"),
-                reml_penalties=reml_penalties,
-                weight_semantics=model_weight_semantics(model),
-            )
-        else:
-            pirls_result = fit_pirls(
-                X=dm,
-                y=y_arr,
-                weights=w_arr,
-                family=dist,
-                link=link,
-                groups=groups,
-                penalty=penalty,
-                offset=offset_arr,
-                lambda2=configured_lambda2(model),
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-                weight_semantics=model_weight_semantics(model),
-            )
-
-        eta = stabilize_eta(
-            dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr, link
-        )
-        mu = clip_mu(link.inverse(eta), dist)
-        warm_beta = pirls_result.beta
-        warm_intercept = pirls_result.intercept
-
-        # Step 2: safeguarded profile solve for theta given mu
-        if iteration == 0:
-            moment_start = _theta_moment_start(y_arr, mu, w_arr)
-            # A non-positive moment denominator means the data are at most
-            # Poisson-dispersed at this mean: the profile optimum sits at or
-            # beyond the upper bound, so start the solve there and let the
-            # score decide.
-            theta_start = moment_start if moment_start is not None else theta_bounds[1]
-        else:
-            theta_start = theta
-        theta_solve = _theta_ml(
-            y_arr,
-            mu,
-            w_arr,
-            theta_start,
-            weight_semantics=weight_semantics,
-            bounds=theta_bounds,
-        )
-        theta_new = theta_solve.theta
-
-        nll = _nb2_nll(y_arr, mu, w_arr, theta_new, weight_semantics=weight_semantics)
-        cache[_theta_cache_key(theta_new)] = nll
-        if trace_callback is not None:
-            trace_callback(
-                {
-                    "step": iteration,
-                    "theta": theta_new,
-                    "nll": nll,
-                    "n_iter": pirls_result.n_iter,
-                    "fit_converged": pirls_result.converged,
-                    "source": "newton",
-                }
-            )
-
-        if verbose:
-            print(
-                f"  iter={iteration + 1}  theta={theta_new:.4f}  "
-                f"nll={nll:.4f}  pirls_iters={pirls_result.n_iter}"
-            )
-
-        convergence_scale = max(abs(theta_new), float(theta_bounds[0]))
-        if abs(theta_new - theta) <= xatol * convergence_scale:
-            theta = theta_new
-            converged = True
+        nll = nb_nll(mean.y, mu, mean.w, solve.theta, weight_semantics=semantics)
+        rows.append({"theta": solve.theta, "nll": nll})
+        if on_evaluation is not None:
+            on_evaluation(rows[-1])
+        settled = abs(solve.theta - theta) <= xatol * max(solve.theta, theta_bounds[0])
+        theta = solve.theta
+        if settled:
             break
-        theta = theta_new
-
-    # Round to six significant digits (not six decimals: a decimal round would
-    # collapse a small-theta estimate toward zero and poison the likelihood).
+    # Published to six significant digits, the precision the family reports.
     theta_hat = float(f"{theta:.6g}")
-    at_bound = theta_solve is not None and theta_solve.at_bound
-    if at_bound:
-        assert theta_solve is not None
-        side = "lower" if theta_solve.at_lower else "upper"
-        bound_value = theta_bounds[0] if theta_solve.at_lower else theta_bounds[1]
-        interpretation = (
-            "the data show overdispersion beyond the searchable range"
-            if theta_solve.at_lower
-            else "the profile likelihood increases toward the Poisson limit"
-            " (the data are at most Poisson-dispersed at the fitted mean)"
-        )
-        warnings.warn(
-            f"NB2 theta estimate hit the {side} search bound {bound_value:g}: "
-            f"{interpretation}. theta_hat={theta_hat:g} is a constrained "
-            "boundary value, not an interior optimum, and the result reports "
-            "converged=False. Widen theta_bounds to search further, or "
-            "reconsider the family.",
-            NBThetaBoundWarning,
-            stacklevel=2,
-        )
-    nll_final = cache.get(
-        theta_hat,
-        _nb2_nll(y_arr, mu, w_arr, theta_hat, weight_semantics=weight_semantics),
-    )
-
-    result = NBProfileResult(
-        _weight_semantics=weight_semantics,
+    messages = [_bound_message(solve, theta_bounds, theta_hat)] if solve.at_bound else []
+    for message in messages:
+        warnings.warn(message, NBThetaBoundWarning, stacklevel=2)
+    return NBProfileResult(
         theta_hat=theta_hat,
-        nll=nll_final,
-        n_evaluations=iteration + 1,
-        converged=converged and not at_bound,
-        cache=cache,
-        _y=y_arr,
+        nll=nb_nll(mean.y, mu, mean.w, theta_hat, weight_semantics=semantics),
+        converged=settled and not solve.at_bound,
+        evaluations=pd.DataFrame(rows, columns=["theta", "nll"]),
+        warnings=messages,
+        _y=mean.y,
         _mu=mu,
-        _weights=w_arr,
+        _weights=mean.w,
+        _weight_semantics=semantics,
     )
-    return result._published_with_data(y_arr, mu, w_arr)
 
 
-def profile_ci_theta(
-    y: NDArray,
-    mu: NDArray,
-    weights: NDArray,
-    theta_hat: float,
-    *,
-    weight_semantics: str,
-    alpha: float = 0.05,
-    theta_range: tuple[float, float] = (0.01, 500.0),
-) -> tuple[float, float]:
-    """Profile likelihood confidence interval for NB2 theta.
+def _bound_message(solve: ThetaSolve, bounds: tuple[float, float], theta_hat: float) -> str:
+    side, bound, interpretation = (
+        ("lower", bounds[0], "the data show overdispersion beyond the searchable range")
+        if solve.at_lower
+        else (
+            "upper",
+            bounds[1],
+            "the profile likelihood increases toward the Poisson limit"
+            " (the data are at most Poisson-dispersed at the fitted mean)",
+        )
+    )
+    return (
+        f"NB2 theta estimate hit the {side} search bound {bound:g}: "
+        f"{interpretation}. theta_hat={theta_hat:g} is a constrained "
+        "boundary value, not an interior optimum, and the result reports "
+        "converged=False. Widen theta_bounds to search further, or "
+        "reconsider the family."
+    )
 
-    Given fitted mu (held fixed), evaluates the NB2 profile log-likelihood
-    at different theta values and inverts the LRT at the chi-squared cutoff.
-    This is O(n) per evaluation with no matrix operations or refitting.
 
-    Parameters
-    ----------
-    y : array
-        Response (counts).
-    mu : array
-        Fitted means from the GLM.
-    weights : array
-        Frequency weights.
-    theta_hat : float
-        MLE of theta.
-    alpha : float
-        Significance level (default 0.05 for 95% CI).
-    theta_range : tuple
-        Search range for the CI endpoints.
+@dataclass
+class NBProfileResult:
+    """Profile-likelihood estimate of the NB2 shape theta.
 
-    Returns
-    -------
-    (ci_lower, ci_upper) : tuple of float
+    ``nll`` is the mean negative log-likelihood at ``theta_hat`` and the
+    published fitted mean, which the interval and the plot measure against.
+    ``evaluations`` lists each alternation step's theta and NLL in order.
     """
-    from scipy.stats import chi2
 
-    from superglm.distributions import NegativeBinomial
-    from superglm.model.input_validation import THETA_PROFILED, check_weight_contract
-
-    # A public likelihood boundary of its own: it takes arrays directly, so no
-    # fit-time or evaluation-time check has seen these rows. Every NLL below
-    # reads the same response and weights, and an off-contract input returns an
-    # apparently exact interval with nothing marking it.
-    #
-    # THETA_PROFILED rather than the family-derived role: theta is genuinely
-    # being profiled here, but against a FIXED mu, so the interval moves and
-    # the coefficients cannot. This is the one boundary where saying the
-    # interval is affected is the accurate claim.
-    # Shapes first. The warning describes an interval that is about to be
-    # computed, so on a request that cannot produce one it is noise -- and
-    # under `-W error` it surfaces instead of the mismatch the caller needs.
-    # Fourth time this ordering has bitten on this branch, hence the sweep in
-    # TestEveryBoundaryValidatesBeforeItWarns.
-    y_arr = np.asarray(y, dtype=np.float64).ravel()
-    mu_arr = np.asarray(mu, dtype=np.float64).ravel()
-    w_arr = np.asarray(weights, dtype=np.float64).ravel()
-    if not (y_arr.size == mu_arr.size == w_arr.size):
-        raise ValueError(
-            f"y, mu and weights must describe the same rows; got {y_arr.size}, "
-            f"{mu_arr.size} and {w_arr.size}"
-        )
-
-    check_weight_contract(
-        y_arr,
-        w_arr,
-        NegativeBinomial(theta=theta_hat),
-        weight_semantics,
-        theta_role=THETA_PROFILED,
+    theta_hat: float
+    nll: float
+    converged: bool
+    evaluations: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=["theta", "nll"])
     )
+    warnings: list[str] = field(default_factory=list)
+    _y: NDArray | None = field(default=None, repr=False)
+    _mu: NDArray | None = field(default=None, repr=False)
+    _weights: NDArray | None = field(default=None, repr=False)
+    _weight_semantics: str = field(default=FREQUENCY_WEIGHTS, repr=False)
+    _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
 
-    w_sum = dispersion_likelihood_size(weights, weight_semantics=weight_semantics)
-    nll_hat = _nb2_nll(y, mu, weights, theta_hat, weight_semantics=weight_semantics)
-    cutoff = chi2.ppf(1.0 - alpha, 1)
-
-    def objective(theta: float) -> float:
-        return (
-            2.0
-            * w_sum
-            * (_nb2_nll(y, mu, weights, theta, weight_semantics=weight_semantics) - nll_hat)
-            - cutoff
+    def _at_mean(self, y: NDArray, mu: NDArray, weights: NDArray) -> NBProfileResult:
+        """The estimate restated at a fitted mean, whose NLL and interval it then describes."""
+        y = np.array(y, dtype=np.float64)
+        # The interval re-reads the response long after the caller's array may
+        # have changed.
+        y.setflags(write=False)
+        return replace(
+            self,
+            nll=nb_nll(y, mu, weights, self.theta_hat, weight_semantics=self._weight_semantics),
+            warnings=list(self.warnings),
+            _y=y,
+            _mu=mu,
+            _weights=weights,
+            _ci_cache={},
         )
 
-    # The search range must contain theta_hat, which the widened default
-    # theta estimation bounds no longer guarantee for the fixed default range.
-    lo = min(theta_range[0], theta_hat / 100.0)
-    hi = max(theta_range[1], theta_hat * 100.0)
+    def _profile_nll(self, theta: float) -> float:
+        return nb_nll(
+            self._y, self._mu, self._weights, theta, weight_semantics=self._weight_semantics
+        )
 
-    # Root tolerances must scale with the endpoint, not sit at a fixed
-    # absolute 1e-4: below theta_hat ~ 1e-4 that constant exceeded the
-    # entire lower bracket, so brentq returned an arbitrary in-bracket point
-    # instead of the LRT crossing. A relative tolerance pins each endpoint
-    # to six significant digits at every scale (an endpoint's own magnitude
-    # is the only correct yardstick - even a theta_hat-proportional absolute
-    # tolerance mis-scales when the lower endpoint sits far below
-    # theta_hat); the near-zero xtol merely satisfies brentq's positivity
-    # requirement.
-    try:
-        ci_lower = brentq(objective, lo, theta_hat, xtol=1e-300, rtol=1e-6)
-    except ValueError:
-        ci_lower = lo
+    @property
+    def _size(self) -> float:
+        return dispersion_likelihood_size(self._weights, weight_semantics=self._weight_semantics)
 
-    try:
-        ci_upper = brentq(objective, theta_hat, hi, xtol=1e-300, rtol=1e-6)
-    except ValueError:
-        ci_upper = hi
+    def interval(self, alpha: float = 0.05) -> Interval:
+        """Likelihood-ratio interval for theta on the fixed-mean profile, with censoring flags."""
+        alpha = float(alpha)
+        if not 0.0 < alpha < 1.0:
+            raise ValueError("alpha must be in (0, 1)")
+        if alpha not in self._ci_cache:
+            # Rooted in log theta: the range spans up to eighteen decades, and
+            # an endpoint's own magnitude is its only yardstick.
+            found = likelihood_ratio_interval(
+                RecordedObjective(lambda log_theta: self._profile_nll(math.exp(log_theta))),
+                math.log(self.theta_hat),
+                self.nll,
+                (
+                    math.log(min(_CI_RANGE[0], self.theta_hat / 100.0)),
+                    math.log(max(_CI_RANGE[1], self.theta_hat * 100.0)),
+                ),
+                alpha=alpha,
+                scale=self._size,
+                xtol=_CI_LOG_XTOL,
+            )
+            self._ci_cache[alpha] = Interval(
+                math.exp(found.lower),
+                math.exp(found.upper),
+                found.lower_censored,
+                found.upper_censored,
+            )
+        return self._ci_cache[alpha]
 
-    return (ci_lower, ci_upper)
+    def ci(self, alpha: float = 0.05) -> tuple[float, float]:
+        """``(lower, upper)`` of :meth:`interval`; a censored side is where its search stopped."""
+        interval = self.interval(alpha)
+        return interval.lower, interval.upper
+
+    def profile_plot(self, alpha: float = 0.05, ax=None):
+        """Likelihood-ratio statistic on a 40-point log grid around the interval."""
+        interval = self.interval(alpha)
+        # Each point is an O(n) likelihood; the grid reaches 30% of the
+        # interval's log width past either end for context.
+        low, high = math.log(interval.lower), math.log(interval.upper)
+        margin = 0.3 * (high - low)
+        grid = np.exp(np.linspace(low - margin, high + margin, 40))
+        values = {float(theta): self._profile_nll(theta) for theta in (*grid, self.theta_hat)}
+        ax = profile_plot(
+            values,
+            self.theta_hat,
+            self.nll,
+            scale=self._size,
+            alpha=alpha,
+            interval=interval,
+            label="theta",
+            ax=ax,
+        )
+        ax.set_xscale("log")
+        return ax

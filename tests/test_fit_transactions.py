@@ -185,14 +185,10 @@ def test_failed_theta_profile_preserves_previous_revision(failure_phase, monkeyp
     if failure_phase == "profile_design":
         monkeypatch.setattr(SuperGLM, "_build_design_matrix", fail)
     elif failure_phase == "profile_solver":
-        monkeypatch.setattr("superglm.profiling.nb.fit_irls_direct", fail)
+        # The alternation's mean fits run the ordinary fit policy's solvers.
+        monkeypatch.setattr(fit_ops, "fit_irls_direct", fail)
     else:
-        profile_result = NBProfileResult(
-            theta_hat=2.5,
-            nll=1.2,
-            n_evaluations=1,
-            converged=True,
-        )
+        profile_result = NBProfileResult(theta_hat=2.5, nll=1.2, converged=True)
         monkeypatch.setattr(
             "superglm.profiling.nb.estimate_nb_theta",
             lambda *args, **kwargs: profile_result,
@@ -200,7 +196,9 @@ def test_failed_theta_profile_preserves_previous_revision(failure_phase, monkeyp
         if failure_phase == "final_solver":
             monkeypatch.setattr(fit_ops, "fit_irls_direct", fail)
         else:
-            monkeypatch.setattr(NBProfileResult, "_detached_public_copy", fail)
+            # Restating the estimate at the published mean allocates the
+            # returned and installed results before the install.
+            monkeypatch.setattr(NBProfileResult, "_at_mean", fail)
 
     with pytest.raises(InjectedFitFailure, match=failure_phase):
         model.estimate_theta(X_new, y_new)

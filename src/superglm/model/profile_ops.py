@@ -269,12 +269,13 @@ def _publish_profiled_family(
     synchronize,
     decoupled=False,
     max_reml_iter=20,
-) -> None:
+):
     """Refit at the selected parameter on a private candidate, then install it atomically.
 
     ``synchronize(final_model)`` restates the refit around the profile estimate
     while the refit still holds its fitted rows; the durable state is compacted
     only afterwards, and the model changes in the single install at the end.
+    Returns what ``synchronize`` returns, allocated before that install.
     """
     from superglm.model.fit_workspace import FitWorkspace
 
@@ -297,12 +298,13 @@ def _publish_profiled_family(
         raise _publication_mode_failure(
             exc, parameter=parameter, value=float(value), decoupled=decoupled
         ) from exc
-    synchronize(final_workspace.model)
+    published = synchronize(final_workspace.model)
     _install_refit(model, final_workspace, family)
     if fit_mode == "fit_reml":
         from superglm.model import fit_ops
 
         fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
+    return published
 
 
 def _install_refit(model, final_workspace, family) -> None:
@@ -367,10 +369,15 @@ def _install_tweedie_profile(final_model, *, X, y, offset, result) -> None:
     result.converged = bool(
         result.converged and final_model.result.converged and (reml is None or reml.converged)
     )
-    installed = copy.copy(result)
-    installed._ci_cache = dict(result._ci_cache)
-    installed.warnings = list(result.warnings)
-    final_model._tweedie_profile_result = installed
+    final_model._tweedie_profile_result = _detached_copy(result)
+
+
+def _detached_copy(result):
+    """A copy that owns its interval cache and warnings, so later intervals stay apart."""
+    detached = copy.copy(result)
+    detached._ci_cache = dict(result._ci_cache)
+    detached.warnings = list(result.warnings)
+    return detached
 
 
 def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
@@ -464,140 +471,95 @@ def _synchronize_tweedie_profile_refit(model, y, public_mu, profile_result) -> N
     model._summary_cache = None
 
 
-def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fit", **kwargs):
+def estimate_theta(
+    model,
+    X,
+    y,
+    sample_weight=None,
+    offset=None,
+    *,
+    fit_mode="fit",
+    theta_bounds=(1e-8, 1e8),
+    xatol=1e-2,
+    ci_alpha=None,
+    progress_callback=None,
+):
     """Estimate NB theta and atomically publish one profiled final fit."""
     from superglm.model import fit_ops
-    from superglm.model.fit_state import (
-        ModelConfigPublication,
-        _install_fit_state,
-        capture_fit_state,
+
+    publish_mode = _resolve_theta_request(
+        model, fit_mode=fit_mode, theta_bounds=theta_bounds, ci_alpha=ci_alpha
     )
+    report = progress_callback or _ignore_progress
+    references = {"X_ref": X, "y_ref": y, "sample_weight_ref": sample_weight, "offset_ref": offset}
+    validated = fit_ops._validate_entrypoint_input(model, X, y, sample_weight, offset)
+    result = _search_theta_privately(
+        model, validated, theta_bounds=theta_bounds, xatol=xatol, report=report
+    )
+    estimate = {"profile_estimate": _theta_estimate_payload(result)}
+    report("best_found", estimate)
+    report("final_refit", estimate)
+    return _publish_profiled_family(
+        model,
+        validated,
+        references,
+        fit_mode=publish_mode,
+        family=NegativeBinomial(theta=result.theta_hat),
+        parameter="theta",
+        value=result.theta_hat,
+        synchronize=partial(_install_nb_profile, y=validated[1], result=result, ci_alpha=ci_alpha),
+    )
+
+
+def _resolve_theta_request(model, *, fit_mode, theta_bounds, ci_alpha):
+    """Validate an estimate_theta call before any data is read; returns the publication mode."""
+    family = configured_family(model)
+    if not isinstance(family, NegativeBinomial):
+        raise ValueError(
+            f"estimate_theta requires a NegativeBinomial family, got {family!r}. "
+            "Use families.nb2(theta=...) to create one."
+        )
+    lower, upper = theta_bounds
+    if not 0.0 < lower < upper < np.inf:
+        raise ValueError(f"theta_bounds must satisfy 0 < lower < upper < inf, got {theta_bounds!r}")
+    if ci_alpha is not None and not 0.0 < ci_alpha < 1.0:
+        raise ValueError(f"ci_alpha must be strictly between 0 and 1, got {ci_alpha!r}")
+    publish_mode = _resolve_profile_fit_mode(model, fit_mode)
+    _validate_profile_selection_mode(model, publish_mode)
+    return publish_mode
+
+
+def _search_theta_privately(model, validated, *, theta_bounds, xatol, report):
+    """The theta alternation on an attempt-local copy of the model.
+
+    Returning drops the copy's design before the publication refit builds its own.
+    """
     from superglm.model.fit_workspace import FitWorkspace
     from superglm.profiling.nb import estimate_nb_theta
 
-    resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
-    _validate_profile_selection_mode(model, resolved_mode)
-    progress_callback = kwargs.pop("progress_callback", None)
-    if progress_callback is not None and "trace_callback" not in kwargs:
-        # Each theta step reaches a live display the way estimate_p's candidates do.
-        kwargs["trace_callback"] = lambda row: progress_callback(
-            "profiling", {"profile_trace": [row]}
-        )
-
-    X_ref = X
-    y_ref = y
-    sample_weight_ref = sample_weight
-    offset_ref = offset
-    X, y, sample_weight, offset = fit_ops._validate_entrypoint_input(
-        model,
-        X,
-        y,
-        sample_weight,
-        offset,
-    )
-    validated_inputs = (X, y, sample_weight, offset)
-
     profile_workspace = FitWorkspace.start(
-        model,
-        mode="estimate_theta_profile",
-        validated_inputs=validated_inputs,
+        model, mode="estimate_theta_profile", validated_inputs=validated
     )
-    result = estimate_nb_theta(
+    return estimate_nb_theta(
         profile_workspace.model,
-        X,
-        y,
-        sample_weight=sample_weight,
-        offset=offset,
-        # `_validate_entrypoint_input` above already ran the contract check on
-        # exactly these arrays.
-        contract_already_checked=True,
-        **kwargs,
+        *validated,
+        theta_bounds=theta_bounds,
+        xatol=xatol,
+        on_evaluation=lambda row: report("profiling", {"profile_trace": [row]}),
     )
-    # The profile result retains only the vectors needed for reporting/CI.
-    # Release its design workspace before allocating the final-fit design.
-    del profile_workspace
-    if progress_callback is not None:
-        progress_callback("best_found", {"profile_estimate": _theta_estimate_payload(result)})
-    if progress_callback is not None:
-        progress_callback("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
 
-    selected_family = NegativeBinomial(theta=result.theta_hat)
-    selected_config = model._config.with_value(family=selected_family)
-    final_workspace = FitWorkspace.start(
-        model,
-        mode=resolved_mode,
-        validated_inputs=validated_inputs,
-        config_overrides={
-            "family": selected_family,
-            # Profile publication must synchronize against the final refit even
-            # when the public model requests compact fitted state.  Row-scale
-            # buffers are released again before the atomic install below.
-            "retain_fit_state": True,
-        },
-    )
-    debug_recorder = None
-    if resolved_mode == "fit_reml":
-        try:
-            debug_recorder = fit_ops._fit_reml_in_workspace(
-                final_workspace.model,
-                X,
-                y,
-                sample_weight,
-                offset,
-                X_ref=X_ref,
-                y_ref=y_ref,
-                sample_weight_ref=sample_weight_ref,
-                offset_ref=offset_ref,
-                pirls_tol=final_workspace.model._tol,
-                max_pirls_iter=final_workspace.model._max_iter,
-                durable_retain_fit_state=bool(model._retain_fit_state),
-            )
-        except ObservedModeNotCertifiedError as exc:
-            raise _publication_mode_failure(
-                exc, parameter="theta", value=float(result.theta_hat), decoupled=False
-            ) from exc
-    else:
-        fit_ops._fit_in_workspace(
-            final_workspace.model,
-            X,
-            y,
-            sample_weight,
-            offset,
-            X_ref=X_ref,
-            y_ref=y_ref,
-            sample_weight_ref=sample_weight_ref,
-            offset_ref=offset_ref,
-        )
 
-    final_model = final_workspace.model
-    installed_result = result._published_with_data(
-        y,
-        final_model._fit_mu,
-        final_model._fit_weights,
-    )
-    final_model._nb_profile_result = installed_result
-    if not model._retain_fit_state:
-        final_model._retain_fit_state = False
-        fit_ops._maybe_release_fit_state(final_model)
-    # Allocate the distinct public handle before the no-fail dictionary swap.
-    # A future custom result implementation may make this operation fallible;
-    # such a failure must preserve the previously installed model revision.
-    public_result = installed_result._detached_public_copy()
-    candidate = capture_fit_state(
-        final_workspace,
-        model,
-        revision=model._fit_revision + 1,
-        config_publication=replace(
-            ModelConfigPublication.capture(model),
-            config=selected_config,
-            revision=model._config_revision + 1,
-            family=final_model._family_config,
-        ),
-    )
-    _install_fit_state(model, candidate)
-    if resolved_mode == "fit_reml":
-        fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
-    return public_result
+def _install_nb_profile(final_model, *, y, result, ci_alpha):
+    """Restate the estimate at the published mean and attach it; the caller gets its own copy.
+
+    The NLL and interval are properties of the mean they are measured at, and
+    the alternation's last mean is not the published one.
+    """
+    published = result._at_mean(y, final_model._fit_mu, final_model._fit_weights)
+    if ci_alpha is not None:
+        published.interval(ci_alpha)
+    final_model._nb_profile_result = _detached_copy(published)
+    return published
 
 
 def _resolve_profile_fit_mode(model, fit_mode: str, *, parameter: str = "fit_mode") -> str:
@@ -654,20 +616,15 @@ def _tweedie_estimate_payload(result):
 
 
 def _theta_estimate_payload(result):
+    # Reported before publication: the interval is measured at the published
+    # mean, so none exists yet.
     return {
         "parameter": "theta",
         "label": "theta_hat",
-        "value": getattr(result, "theta_hat", None),
-        "ci_low": _cached_ci(result)[0],
-        "ci_high": _cached_ci(result)[1],
-        "objective": getattr(result, "nll", None),
+        "value": result.theta_hat,
+        "ci_low": None,
+        "ci_high": None,
+        "objective": result.nll,
         "objective_label": "loss",
         "lower_is_better": True,
     }
-
-
-def _cached_ci(result):
-    cache = getattr(result, "_ci_cache", None)
-    if isinstance(cache, dict) and 0.05 in cache:
-        return cache[0.05]
-    return (None, None)

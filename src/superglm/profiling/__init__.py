@@ -7,7 +7,6 @@ from superglm.profiling.nb import (
     NBProfileResult,
     NBThetaBoundWarning,
     estimate_nb_theta,
-    profile_ci_theta,
 )
 from superglm.profiling.tweedie import TweedieProfileResult
 
@@ -16,5 +15,4 @@ __all__ = [
     "NBThetaBoundWarning",
     "TweedieProfileResult",
     "estimate_nb_theta",
-    "profile_ci_theta",
 ]

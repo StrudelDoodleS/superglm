@@ -1656,6 +1656,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - **Deviation, test 1.** At a peak index just inside the work bound, the series' own float64 cancellation is 3e-5 to 5e-5 against the saddlepoint (measured at p = 1.2, 1.5, 1.8 and 1.95). That is 1e5 to 1e6 times the O(1/j_max) bound, so the plan's bound alone cannot hold there. The test bound is the plan's 4·Stirling term plus Task 2's derived series bound, 16ε·(peak-term magnitudes + |c w/φ|). The test runs at j_max ∈ {1e3, 1e5}, where the saddlepoint term dominates and pins the formula, and at 0.99× the work bound, where it checks continuity. Test 1 checks the mathematics, so it passes against the unfixed code as well. Tests 2 to 4 failed before the change.
 - Mutations: dropping the 1/(2π) turns test 2 red; T = 0 for saddlepoint rows turns tests 2 and 4 red; removing the fill (the pre-change code) turns tests 2 and 4 and the four near-perfect cases red.
 - Spec §10's first bullet (series refusal) is struck through with the 2026-09-27 amendment. On near-exact data `estimate_p` now completes. `fit_reml` on the same data stops at REML mode certification (score 2.2e-9 against 1e-9), which is not a density state.
+- Timing: on the private validation dataset, a complete `fit_reml` at p = 1.5 takes 0.99× the time before this task (median of 3 interleaved pinned runs, within noise). φ and the log-likelihood are bitwise identical, because no real row reaches the saddlepoint arm.
 
 ### Task 8: NB2 θ on the shared machinery
 
@@ -1673,7 +1674,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `estimate_nb_theta(model, X, y, sample_weight, offset, *, theta_bounds=(1e-8, 1e8), xatol=1e-2, maxiter=30) -> NBProfileResult`: private use by fit_ops/profile_ops; not exported from the root.
   - `NBProfileResult(theta_hat, nll, converged, evaluations: DataFrame[theta, nll], warnings, _y, _mu, _weights, _weight_semantics, _ci_cache)` with `ci(alpha)`, `interval(alpha)` and `profile_plot(alpha, ax)`.
 
-- [ ] **Step 1: Write the failing tests** (the θ arm) in `tests/test_tweedie_nb_characterisation.py`:
+- [x] **Step 1: Write the failing tests** (the θ arm) in `tests/test_tweedie_nb_characterisation.py`:
 
 ```python
 @pytest.mark.parametrize("row", FIXTURE["estimate_theta"], ids=lambda r: f"{r['case']}-{r['fit_mode']}")
@@ -1701,9 +1702,9 @@ def test_nb_nll_agrees_with_family_log_likelihood_at_large_theta():
         assert nb_nll(y, mu, w, theta, weight_semantics="frequency") == expected
 ```
 
-- [ ] **Step 2: Run to confirm they fail.** Run: `uv run pytest tests/test_tweedie_nb_characterisation.py -k "theta or nb_nll" -q`. Expected: FAIL (`nb_nll` is not defined).
+- [x] **Step 2: Run to confirm they fail.** Run: `uv run pytest tests/test_tweedie_nb_characterisation.py -k "theta or nb_nll" -q`. Expected: FAIL (`nb_nll` is not defined).
 
-- [ ] **Step 3: Write the new `profiling/nb.py`.**
+- [x] **Step 3: Write the new `profiling/nb.py`.**
   - Keep `NBThetaBoundWarning` and master's bound-hit warning text.
   - `estimate_nb_theta` keeps master's alternation (moment start on the first pass, warm-started θ thereafter, six-significant-digit publication). Replace the duplicated solver dispatch (master 799–861) with `fit_ops._solve_coefficients(model, y, w, offset, penalty=..., lambda2=configured_lambda2(model), has_lambda1_targets=model_has_lambda1_targets(model), max_iter=model._max_iter, tol=model._tol, record_diagnostics=False, convergence=model._convergence, beta_init=warm_beta, intercept_init=warm_intercept)`, with `model._distribution = NegativeBinomial(theta)` set before each call.
   - Master passed `reml_penalties` into `fit_irls_direct` on the direct path, which `_solve_coefficients` does not. Compare θ̂ on both mgcv NB fixtures before and after. If θ̂ moves beyond the fixture tolerance, add `reml_penalties=None` passthrough to `_solve_coefficients` and pass it; otherwise drop it and say so in the commit.
@@ -1712,16 +1713,16 @@ def test_nb_nll_agrees_with_family_log_likelihood_at_large_theta():
   - `profile_plot` uses the shared `profile_plot` over a 40-point log grid between the interval bounds (evaluated on demand, since it is O(n) each).
   - The `n_evaluations` and `cache` fields are replaced by `evaluations`.
 
-- [ ] **Step 4: Update fit_ops and profile_ops.**
+- [x] **Step 4: Update fit_ops and profile_ops.**
   - `_maybe_estimate_nb_theta` drops `contract_already_checked`: `estimate_nb_theta` no longer checks the weight contract, because every caller has already run `check_weight_contract` at its entry point (`fit` via `validate_fit_input`, `estimate_theta` via `_validate_entrypoint_input`). Verify that with grep, and note it in the commit.
   - `_refine_nb_theta_to_reml_fixed_point` uses `solve_theta` and `nb_nll`, and builds the refreshed `NBProfileResult` with `evaluations` extended by one row per refit.
   - Delete `_nb_joint_nll`: inline `nb_nll(...)` at its one call site.
   - `profile_ops.estimate_theta` goes through `_publish_profiled_family`.
   - `api.estimate_theta` gets the explicit signature `(X, y, sample_weight=None, offset=None, *, fit_mode="fit", theta_bounds=(1e-8, 1e8), ci_alpha=None, progress_callback=None)`.
 
-- [ ] **Step 5: Run the focused tests.** Run: `uv run pytest tests/test_nb_theta_estimation_correctness.py tests/test_nb2.py tests/test_tweedie_nb_characterisation.py tests/test_profile_scalar.py -n 8 -q`. Expected: the mgcv θ oracles pass unchanged and the θ arm passes. Tests referencing `_nb2_nll`, `_theta_ml`, `profile_ci_theta` or `cache` are listed for Task 9.
+- [x] **Step 5: Run the focused tests.** Run: `uv run pytest tests/test_nb_theta_estimation_correctness.py tests/test_nb2.py tests/test_tweedie_nb_characterisation.py tests/test_profile_scalar.py -n 8 -q`. Expected: the mgcv θ oracles pass unchanged and the θ arm passes. Tests referencing `_nb2_nll`, `_theta_ml`, `profile_ci_theta` or `cache` are listed for Task 9.
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add -u src/superglm tests
@@ -1729,6 +1730,53 @@ git commit -m "feat: NB2 theta on the shared profile machinery and the family de
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+**Task 8 outcome:**
+
+- **Interfaces as built.**
+  - `profiling/nb.py` provides `theta_score`, `solve_theta(..., bounds) -> ThetaSolve(theta, at_lower, at_upper)`, `nb_nll`, `estimate_nb_theta(..., theta_bounds, xatol=1e-2, maxiter=30, on_evaluation=None)` and `NBProfileResult`.
+  - `NBProfileResult` has the fields `theta_hat, nll, converged, evaluations[theta, nll], warnings, _y, _mu, _weights, _weight_semantics, _ci_cache` and the methods `interval`, `ci`, `profile_plot(alpha, ax)` (which returns the axes) and `_at_mean(y, mu, weights)`.
+  - `theta_score` is master's score with its derivation. The prior and frequency arms are merged through `psi_scale = weights if prior else 1.0`, and multiplying or dividing by 1.0 is exact: across 200 books, nine thetas on both branches, both contracts and zero weights, it is bitwise equal to master's score.
+  - `solve_theta` walks by decades the way the likelihood rises, then runs brentq to rtol 1e-8, as master did.
+  - `nb_nll` is `-weighted_log_likelihood(NegativeBinomial(theta), ...)` divided by the contract's size, so it uses the family density only.
+  - `_publish_profiled_family` now returns what `synchronize` returns, allocated before the install.
+  - `estimate_theta` runs `_resolve_theta_request` (family, `theta_bounds`, `ci_alpha`, fit mode, selection), then `_validate_entrypoint_input`, then `_search_theta_privately`, then `_publish_profiled_family(synchronize=_install_nb_profile)`.
+  - `_install_nb_profile` restates the estimate at the published mean. It computes the eager `ci_alpha` interval there and installs a `_detached_copy`, a helper now shared with the Tweedie install.
+- **The θ interval** is rooted in log θ over master's range, `(min(0.01, θ̂/100), max(500, 100 θ̂))`, with the absolute `xtol = 1e-6`. θ̂ is published to six significant digits, a rounding of up to 5e-6 relative, so 1e-6 in log θ locates each endpoint five times finer than that at every scale.
+- **Live trace.** The alternation calls `on_evaluation({"theta", "nll"})` at each step. `estimate_theta` forwards it as `progress_callback("profiling", {"profile_trace": [row]})`, so the repair's bridge is gone. The live rows equal `result.evaluations` records, and the editor's NB `cache` branch is deleted.
+- **`xatol` for θ: kept (decision).** `estimate_theta(..., xatol=1e-2)` is the alternation's relative stopping tolerance, and the editor's Tolerance control keeps sending it (0.001 by default). That is master's behaviour. Dropping it would make that control silently inert for θ.
+- **The mean fits go through `_solve_coefficients`** at the model's `tol` and `max_iter`, as the plan says. `reml_penalties` is dropped: with the tolerance held at master's 1e-8, the new alternation reproduces master's iterates to one ulp without it.
+  - What does move θ̂ is the tolerance itself. Master's direct route defaulted to 1e-8 (its PIRLS route to 1e-6); the model's 1e-6 moves the unrounded iterates by 4e-6 (clamp005) and 9e-6 (nb_worst) relative. That is inside the alternation's own resolution, which is its last accepted step (5e-4 and 1.6e-3).
+  - The auto-θ `fit_reml` path (the mgcv oracles) publishes the same six-digit θ̂ as master on both fixtures.
+- **Moment start, prior arm, fixed.** Var(Y) = (μ + μ²/θ)/w gives Σ(w(y−μ)² − μ) = Σμ²/θ over carried rows. No excess dispersion now returns `inf`, which the solve clamps to the upper bound.
+- **Removed.**
+  - The NB publication lock (`__setattr__`, bytes-backed arrays, the `FrozenMapping` cache, `__deepcopy__`/`__getstate__`/`__setstate__`, `_detached_public_copy`), matching `TweedieProfileResult`.
+  - `profile_ci_theta`, `_nb2_nll`, `_theta_ml`, `_theta_cache_key`, `n_evaluations`, `cache`, `verbose`, `trace_callback`, `contract_already_checked` and `fit_ops._nb_joint_nll`.
+  - The weight-contract check in `estimate_nb_theta`. `fit` and `estimate_theta` both run `check_weight_contract` through `validate_fit_input`, checked by grep.
+  - Kept: the published response is an owned read-only copy, and `_fit_mu` and `_fit_weights` are frozen at capture, so the installed result never aliases the caller's arrays. The returned result is distinct from the installed one, and each owns its interval cache and warnings.
+- **Tests.**
+  - The θ arm of the characterisation:
+    - θ̂ must lie within the alternation's last step plus one published digit. This is the spec §7 resolution rule, which holds p̂ to Brent's final bracket.
+    - At master's θ̂ on the new publication fit, the NLL must lie within tol·(D+1)/n. Each fit stops within tol·(D+1) of its optimum.
+    - Each CI endpoint must lie within 2e-6 plus 4n·band/slope in log θ.
+    - Measured against bound: θ̂ up to 0.0032, NLL up to 0.19, CI up to 0.012.
+  - Also added:
+    - a refusal row;
+    - a check that `nb_nll` is bit-exact to the family density at large θ;
+    - the prior moment start, tested against the prior moment equation within 4 delta-method SE;
+    - the eager `ci_alpha` interval, certified as the crossing at the published mean;
+    - the slim signature;
+    - a check that the REML alternation records each joint refit.
+  - The mgcv oracle tests are byte-identical to master (checked with `ast`).
+  - Behaviour-preserving tests were ported to the renamed interfaces rather than left red: the correctness file's non-oracle tests, `test_nb2`, `test_fit_transactions`, `test_fit_reml_debug`, `test_dataframe_boundary`, `test_weighted_forwarding` and `test_weight_semantics`'s score tests. `test_cache_keys_survive_below_the_decimal_rounding_floor` is deleted, because the cache is gone and the log-θ plot grid is positive.
+- **Mutations.** 12 of 13 turn red. One mutation walks the bracket the wrong way; it hangs the test rather than passing it. The survivor is interval xtol 1e-3: brentq's last superlinear step still lands within the 1e-5 crossing check on this profile, so the tolerance is not observable there.
+- **Timing** (pinned pools, 3 interleaved fresh processes):
+  - NB auto-θ `fit_reml` at 200k rows: 2.531 s against 2.605 s before this task (0.97×). θ̂ is identical (1.00643), with the same REML fits and iterations, the same backend, and peak RSS 5 MB lower.
+- **Left for Task 9** (their behaviour is removed; red now):
+  - `test_weight_semantics::TestTheStandaloneThetaProfileChecksTheContract` (6) and `TestEveryBoundaryValidatesBeforeItWarns::test_the_theta_profile_raises_on_mismatched_arrays`: the `profile_ci_theta` boundary.
+  - `TestEveryPublicLikelihoodEntryChecksTheContract::test_estimate_nb_theta_*` (3): the root `estimate_nb_theta` contract check.
+  - Root export and API snapshot tests. `superglm.estimate_nb_theta` is still exported, but it no longer checks the family or the contract.
+- **Follow-up (pre-existing, not fixed).** `estimate_theta`'s entry check derives the θ role from the family. For a numeric θ that is `THETA_FIXED`, so a fractional-response warning says the coefficients are unaffected, although `estimate_theta` re-estimates θ and refits. Master had the same message, and the standalone `estimate_nb_theta` checked with `THETA_ESTIMATED`. Threading `theta_role` through `validate_fit_input` would fix it.
 
 ---
 
