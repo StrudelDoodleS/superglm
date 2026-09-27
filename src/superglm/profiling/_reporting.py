@@ -1,26 +1,34 @@
-"""Read-only Tweedie profile state for summaries and editor payloads."""
+"""Profile intervals as summaries and editor payloads report them."""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-TweedieCIStatus = Literal["available", "censored", "not computed"]
+ProfileCIStatus = Literal["available", "censored", "not computed"]
+
+
+def reported_interval(interval: Any) -> tuple[tuple[float, float], ProfileCIStatus]:
+    """``(lower, upper)`` and "censored" when either side is where its search stopped.
+
+    A censored endpoint is not a likelihood-ratio crossing, so the interval
+    may extend beyond it.
+    """
+    censored = interval.lower_censored or interval.upper_censored
+    return (interval.lower, interval.upper), "censored" if censored else "available"
 
 
 def cached_tweedie_profile_ci(
     result: Any, alpha: float = 0.05
-) -> tuple[tuple[float, float] | None, TweedieCIStatus]:
+) -> tuple[tuple[float, float] | None, ProfileCIStatus]:
     """The interval already computed at ``alpha``; reporting never evaluates the profile.
 
-    A side that stopped at a search bound or next to an infeasible power makes
-    the interval "censored": that endpoint is where the search stopped, not a
-    likelihood-ratio crossing.
+    Each point of the p profile is a model refit, so an interval nobody asked
+    for is "not computed".
     """
     interval = result._ci_cache.get(float(alpha))
     if interval is None:
         return None, "not computed"
-    censored = interval.lower_censored or interval.upper_censored
-    return (interval.lower, interval.upper), "censored" if censored else "available"
+    return reported_interval(interval)
 
 
 def tweedie_profile_report_identity(result: Any, alpha: float) -> tuple[Any, ...]:
@@ -30,7 +38,8 @@ def tweedie_profile_report_identity(result: Any, alpha: float) -> tuple[Any, ...
 
 
 __all__ = [
-    "TweedieCIStatus",
+    "ProfileCIStatus",
     "cached_tweedie_profile_ci",
+    "reported_interval",
     "tweedie_profile_report_identity",
 ]

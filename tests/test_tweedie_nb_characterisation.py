@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import gammaln
 from scipy.stats import chi2
 
 from superglm._tweedie import tweedie_logpdf, tweedie_unit_deviance
@@ -238,6 +239,7 @@ def test_boundary_optimum_is_reported_not_raised(characterisation_case):
     result = model.estimate_p(X, y, p_bounds=(1.6, 1.9))  # true p = 1.5 lies below the window
     assert result.p_hat == 1.6
     assert any("search bound" in w for w in result.warnings)
+    assert any("rounded responses" in w for w in result.warnings)
     assert result.interval(0.05).lower_censored
     # Spec section 6: the censored side is recorded in the warnings too.
     assert any("95% interval for p is censored at its lower end" in w for w in result.warnings)
@@ -248,6 +250,8 @@ def test_optimum_at_the_upper_bound_is_reported(characterisation_case):
     result = model.estimate_p(X, y, p_bounds=(1.2, 1.4))  # true p = 1.5 lies above the window
     assert result.p_hat == 1.4
     assert any("search bound" in w for w in result.warnings)
+    # The rounded-responses artefact is a maximum as p -> 1, never at an upper bound.
+    assert not any("rounded responses" in w for w in result.warnings)
     interval = result.interval(0.05)
     assert interval.upper_censored and interval.upper == 1.4
     assert any("censored at its upper end" in w for w in result.warnings)
@@ -422,12 +426,6 @@ def _one_published_digit(value: float) -> float:
     return 10.0 ** (math.floor(math.log10(abs(value))) - 5)
 
 
-def _alternation_resolution(result) -> float:
-    """The last step the alternation accepted (it starts at theta = 1)."""
-    thetas = [1.0, *result.evaluations["theta"]]
-    return abs(thetas[-1] - thetas[-2])
-
-
 def _statistic_slope(result, theta: float, n: int) -> float:
     """d/d log theta of the likelihood-ratio statistic 2 n (nll - nll_hat), central difference."""
     h = 1e-4
@@ -449,14 +447,13 @@ def test_estimate_theta_matches_master(row, characterisation_case):
     messages = [str(w.message) for w in caught if issubclass(w.category, NBThetaBoundWarning)]
     assert messages == row["warnings"] == result.warnings
     assert result.converged == row["converged"]
-    # theta_hat is the alternation's last iterate, accepted once its step is at
-    # most xatol (1e-2) of itself, so the estimator resolves theta only to that
-    # step: spec section 7 holds p_hat to Brent's final bracket for the same
-    # reason. The mean fits now stop at the model's tol (1e-6) where master's
-    # direct route stopped at 1e-8 (at 1e-8 the iterates agree to one ulp),
-    # which moves them inside that resolution. Both publish six digits.
-    resolution = _alternation_resolution(result) + _one_published_digit(row["theta_hat"])
-    assert abs(result.theta_hat - row["theta_hat"]) <= resolution
+    # The alternation repeats master's: the same moment start, and direct-route
+    # mean fits stopped at master's 1e-8. Each run locates the score root to
+    # brentq's rtol of 1e-8, so the unrounded iterate lies in the rounding cell of
+    # master's six published digits, widened by twice that.
+    unrounded = float(result.evaluations["theta"].iloc[-1])
+    cell = 0.5 * _one_published_digit(row["theta_hat"]) + 2e-8 * unrounded
+    assert abs(unrounded - row["theta_hat"]) <= cell
     # At master's theta_hat the fixed-mean profile is the same family density on
     # the new publication fit. Each run's fit stops within tol (D + 1) of its
     # optimum (relative objective change below tol at a linear rate under 1/2),
@@ -491,17 +488,56 @@ def test_estimate_theta_refusals_match_master(row, characterisation_case):
             model.estimate_theta(X, y, fit_mode=row["fit_mode"])
 
 
-def test_nb_nll_agrees_with_family_log_likelihood_at_large_theta():
-    from superglm.distributions import NegativeBinomial
+def _nb_log_density_50_digits(mpmath, y: float, mu: float, theta: float) -> float:
+    """The NB2 log density of the float64 inputs, with 50 significant digits."""
+    y, mu, theta = mpmath.mpf(y), mpmath.mpf(mu), mpmath.mpf(theta)
+    return float(
+        mpmath.loggamma(y + theta)
+        - mpmath.loggamma(theta)
+        - mpmath.loggamma(y + 1)
+        + theta * mpmath.log(theta / (mu + theta))
+        + y * mpmath.log(mu / (mu + theta))
+    )
+
+
+@pytest.mark.parametrize("theta", [1e2, 1e6, 1e8])
+def test_nb_nll_matches_the_50_digit_density_at_large_theta(theta):
+    """Near the Poisson limit the log-gamma pair cancels to O(y log theta) from O(theta log theta).
+
+    The float64 density adds at most six formed terms: betaln(theta, y) or its
+    log1p recurrence, log y, y log1p(theta / mu), theta log1p(mu / theta),
+    log Gamma(y + 1), y log mu and y log1p(mu / theta). With theta >= mu and
+    theta >= y, every one is at most S = y (|log theta| + |log mu| + 2) +
+    log Gamma(y + 1) + mu + 1 in size and within 4 eps of S (a rounded ratio,
+    log1p or a log-gamma routine, and one product), and each of the five
+    additions rounds a partial sum of at most 6 S by eps / 2: 24 + 15 < 64 eps S
+    per row. The recurrence's own sum is of terms below y^2 / theta <= y.
+
+    Below the recurrence (theta < eps^-1/2) SciPy's betaln can itself form
+    log Gamma(theta) + log Gamma(y) - log Gamma(theta + y), two log-gamma values
+    within eps of log Gamma(theta + y) each: 4 eps log Gamma(theta + y) more.
+    The weighted mean adds n eps of sum(w |log f|) for its summation. A density
+    formed from the log-gamma pair at theta = 1e8 errs by ulp(log Gamma(theta)),
+    about 2e-7.
+    """
+    mpmath = pytest.importorskip("mpmath")
     from superglm.profiling.nb import nb_nll
 
     rng = np.random.default_rng(5)
     mu = rng.uniform(0.5, 3.0, 400)
     y = rng.poisson(mu).astype(float)
     w = rng.integers(1, 4, 400).astype(float)
-    for theta in (1e2, 1e6, 1e8):
-        expected = -NegativeBinomial(theta).log_likelihood(y, mu, w) / w.sum()
-        assert nb_nll(y, mu, w, theta, weight_semantics="frequency") == expected
+    with mpmath.workdps(50):
+        exact_rows = np.array(
+            [_nb_log_density_50_digits(mpmath, *row, theta) for row in zip(y, mu, strict=True)]
+        )
+    exact = -np.sum(w * exact_rows) / w.sum()
+    size = y * (abs(math.log(theta)) + np.abs(np.log(mu)) + 2.0) + gammaln(y + 1.0) + mu + 1.0
+    betaln_rows = (y > 0.0) & (theta < 1.0 / math.sqrt(EPS))
+    row_error = 64.0 * EPS * size + np.where(betaln_rows, 4.0 * EPS * gammaln(theta + y), 0.0)
+    bound = np.sum(w * row_error) + y.size * EPS * np.sum(w * np.abs(exact_rows))
+    bound /= w.sum()
+    assert abs(nb_nll(y, mu, w, theta, weight_semantics="frequency") - exact) <= bound
 
 
 def test_prior_weight_moment_start_solves_the_prior_weight_moment_equation():
@@ -547,6 +583,8 @@ def test_estimate_theta_interval_is_the_crossing_at_the_published_mean(character
     # sign across a 1e-5 relative neighbourhood of it.
     for end in result.ci(0.1):
         assert excess(end * (1.0 - 1e-5)) * excess(end * (1.0 + 1e-5)) < 0.0
+    # Both ends are crossings, so the summary reports the interval uncensored.
+    assert model.summary(alpha=0.1)._info["nb_theta_ci_status"] == "available"
 
 
 def test_estimate_theta_signature_is_the_slim_one():

@@ -1985,7 +1985,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Run B repair outcome** (critic B, one high and four medium findings; commits 5191cdf0 and 2a94b4d4):
 
-- **Models pickled by 0.35 load again (high). Option (a), the load shim, taken as the delegated default; needs Max's go/no-go.** The deployment guide makes the pickled estimator the deployment artifact, and the migration notes promise that older pickles restore, so (a) is the default consistent with the project.
+- **Models pickled by 0.35 (high). Option (a), the load shim, was taken as the delegated default and then reverted at Max's request (commit 05d1877d, 2026-09-27): backwards compatibility for 0.35 pickles is not wanted.** Nothing below ships. `RetiredTweedieState`, the module `__getattr__` hooks, the `__setstate__` translations and `tests/test_profile_pickles_from_0_35.py` are gone, and there is no refusal message: a 0.35 Tweedie or NB2 pickle fails to load with Python's own `AttributeError` and must be refitted or re-saved, as the PR notes say. The record of what the shim did is kept for reference.
+  - The case made for (a): the deployment guide makes the pickled estimator the deployment artifact, and the migration notes promise that older pickles restore.
   - A 0.35 Tweedie model names eleven retired classes:
     - `reml.scale.TweedieScaleProfileData`, the `fit_reml` scale memo on `_reml_result`;
     - ten profiler classes in `profiling.tweedie`: the two search contexts, the prepared density, the evaluation, φ-profile and logpdf-diagnostics records, and the four CI records.

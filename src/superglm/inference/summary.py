@@ -433,8 +433,9 @@ class ModelSummary:
 
         # NB theta profile row
         if "nb_theta" in info:
-            ci = info["nb_theta_ci"]
-            theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            theta_str = _format_profile_estimate(
+                info["nb_theta"], info["nb_theta_ci"], info["nb_theta_ci_status"]
+            )
             rows.append(("Theta", theta_str, *_profile_nll_cell(info, "nb_profile_nll")))
 
         # Tweedie p profile row
@@ -966,8 +967,9 @@ class ModelSummary:
 
         # NB theta profile row
         if "nb_theta" in info:
-            ci = info["nb_theta_ci"]
-            theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            theta_str = _format_profile_estimate(
+                info["nb_theta"], info["nb_theta_ci"], info["nb_theta_ci_status"]
+            )
             header_rows.append(("Theta", theta_str, *_profile_nll_cell(info, "nb_profile_nll")))
 
         # Tweedie p profile row

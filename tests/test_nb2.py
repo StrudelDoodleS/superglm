@@ -537,6 +537,60 @@ class TestNB2AutoTheta:
             assert interval.lower == pytest.approx(held, rel=1e-12) and interval.lower_censored
             assert interval.upper > held and not interval.upper_censored
 
+    def test_a_near_poisson_upper_side_is_reported_censored(self):
+        from superglm.export.summary import build_summary_export_payload
+
+        # True theta 50 on 400 rows: theta_hat is interior, but the data cannot
+        # reject Poisson, so the statistic stays under its cutoff up to the end
+        # of the searched range, max(500, 100 theta_hat).
+        rng = np.random.default_rng(3)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 400)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = rng.negative_binomial(50.0, 50.0 / (50.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        result = model.estimate_theta(X, y)
+        assert result.converged and not result.warnings
+
+        summary = model.summary()
+        interval = model._nb_profile_result.interval(0.05)
+        assert interval.upper_censored and not interval.lower_censored
+        assert interval.upper == pytest.approx(max(500.0, 100.0 * result.theta_hat), rel=1e-12)
+        assert model._nb_profile_result.warnings == [
+            f"the 95% interval for theta is censored at its upper end theta={interval.upper:.6g}, "
+            "where its search stopped: the likelihood-ratio statistic does not reach its cutoff "
+            "there, so the interval may extend beyond it."
+        ]
+        assert summary._info["nb_theta_ci_status"] == "censored"
+        theta_row = next(line for line in str(summary).splitlines() if "Theta:" in line)
+        assert "] censored" in theta_row
+        assert "] censored" in summary._repr_html_()
+        assert model.metrics(X, y).summary()._info["nb_theta_ci_status"] == "censored"
+        overview = {
+            (row.section, row.metric): row.value
+            for row in build_summary_export_payload(model).overview
+        }
+        assert overview[("Distribution Profile", "NB2 Theta CI Status")] == "censored"
+
+    def test_an_alternation_out_of_steps_warns_and_reports_unconverged(self):
+        rng = np.random.default_rng(12)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 2000)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = rng.negative_binomial(4.0, 4.0 / (4.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        # The first step moves theta from its seed 1 to near 4, far past xatol.
+        with pytest.warns(UserWarning, match="did not settle in 1 mean fits") as caught:
+            result = estimate_nb_theta(model, X, y, maxiter=1)
+        assert not result.converged
+        assert result.warnings == [str(w.message) for w in caught]
+
     @pytest.mark.parametrize("xatol", [0.0, -1e-3, np.nan, np.inf])
     def test_invalid_xatol_is_rejected_before_profile_work(self, monkeypatch, xatol):
         from superglm.profiling import nb as nb_module

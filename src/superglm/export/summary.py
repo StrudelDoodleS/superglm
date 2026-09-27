@@ -200,6 +200,11 @@ def _overview_rows(source: _CompactSummarySource) -> tuple[SummaryOverviewRow, .
                 ),
                 SummaryOverviewRow("Distribution Profile", "NB2 Theta CI Lower", ci_lower),
                 SummaryOverviewRow("Distribution Profile", "NB2 Theta CI Upper", ci_upper),
+                SummaryOverviewRow(
+                    "Distribution Profile",
+                    "NB2 Theta CI Status",
+                    str(info["nb_theta_ci_status"]),
+                ),
             ]
         )
 

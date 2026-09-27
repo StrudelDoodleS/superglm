@@ -508,7 +508,7 @@ def test_summary_export_keeps_distribution_profile_values_typed():
     model._nb_profile_result = SimpleNamespace(
         theta_hat=np.float64(2.75),
         nll=10.0,
-        ci=lambda alpha: (np.float64(2.0), np.float64(3.5)),
+        interval=lambda alpha: Interval(np.float64(2.0), np.float64(3.5), False, False),
     )
     model._tweedie_profile_result = SimpleNamespace(
         p_hat=np.float64(1.55),
@@ -525,6 +525,7 @@ def test_summary_export_keeps_distribution_profile_values_typed():
     assert overview[("Distribution Profile", "NB2 Theta")] == 2.75
     assert overview[("Distribution Profile", "NB2 Theta CI Lower")] == 2.0
     assert overview[("Distribution Profile", "NB2 Theta CI Upper")] == 3.5
+    assert overview[("Distribution Profile", "NB2 Theta CI Status")] == "available"
     assert overview[("Distribution Profile", "Tweedie p")] == 1.55
     assert overview[("Distribution Profile", "Tweedie p CI Lower")] == 1.4
     assert overview[("Distribution Profile", "Tweedie p CI Upper")] == 1.7

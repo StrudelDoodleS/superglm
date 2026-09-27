@@ -31,6 +31,7 @@ from superglm.model.fit_state import configured_lambda2, configured_penalty
 from superglm.profiling._scalar import (
     Interval,
     RecordedObjective,
+    censoring_warnings,
     likelihood_ratio_interval,
     minimize_profile,
     profile_plot,
@@ -84,9 +85,9 @@ class _PowerProfile:
             mu, fit_converged = self._fit(p)
         except ObservedModeNotCertifiedError as exc:
             # A REML candidate whose penalized mode cannot be differentiated
-            # through has no objective to report. Conditioning worsens toward
-            # p = 2, so the power is scored infeasible and the search routes
-            # around it instead of failing on a point it did not need.
+            # through has no objective to report, so the power is scored
+            # infeasible and the search routes around it instead of failing on
+            # a point it did not need.
             self.infeasible[p] = str(exc).partition("\n")[0]
             return math.inf
         solved = profile_phi_at(self.y, mu, self.w, p)
@@ -278,9 +279,15 @@ def _search_warnings(values: dict[float, float], infeasible: dict[float, str], p
     ordered = sorted(values)
     index = ordered.index(p_hat)
     if index in (0, len(ordered) - 1):
+        # Rounded responses can make the likelihood rise as p -> 1 (Dunn &
+        # Smyth 2005): only an estimate on the lower bound can be that artefact.
+        artefact = (
+            " (a maximum as p -> 1 can be an artefact of rounded responses, Dunn & Smyth 2005)"
+            if index == 0
+            else ""
+        )
         warnings.append(
-            f"p_hat={p_hat:.6g} is at a search bound; the optimum may lie beyond it "
-            "(a maximum as p -> 1 can be an artefact of rounded responses, Dunn & Smyth 2005)."
+            f"p_hat={p_hat:.6g} is at a search bound; the optimum may lie beyond it{artefact}."
         )
     warnings.extend(
         f"p_hat={p_hat:.6g} is next to p={p:.6g}, where the fit was infeasible; the optimum "
@@ -300,23 +307,6 @@ def _interval_bounds(p_hat: float, p_bounds: tuple[float, float]) -> tuple[float
     lower = p_bounds[0] if p_hat == p_bounds[0] else min(_CI_BOUNDS[0], p_bounds[0])
     upper = p_bounds[1] if p_hat == p_bounds[1] else max(_CI_BOUNDS[1], p_bounds[1])
     return lower, upper
-
-
-def _censoring_warnings(interval: Interval, alpha: float, bounds: tuple[float, float]):
-    """One warning per censored side, naming where the interval stopped and why."""
-    sides = (
-        ("lower", interval.lower, interval.lower_censored),
-        ("upper", interval.upper, interval.upper_censored),
-    )
-    return [
-        f"the {100.0 * (1.0 - alpha):g}% interval for p is censored at its {side} end "
-        f"p={end:.6g}, "
-        + ("a search bound" if end in bounds else "next to an infeasible power")
-        + ": the likelihood-ratio statistic does not reach its cutoff there, so the "
-        "interval may extend beyond it."
-        for side, end, censored in sides
-        if censored
-    ]
 
 
 @dataclass
@@ -361,8 +351,11 @@ class TweedieProfileResult:
                 xtol=_CI_XTOL,
             )
             self._ci_cache[alpha] = interval
-            self.warnings.extend(_censoring_warnings(interval, alpha, self._ci_bounds))
+            self.warnings.extend(censoring_warnings(interval, alpha, "p", self._stopped_at))
         return self._ci_cache[alpha]
+
+    def _stopped_at(self, end: float) -> str:
+        return "a search bound" if end in self._ci_bounds else "next to an infeasible power"
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """``(lower, upper)`` of :meth:`interval`; a censored side is where its search stopped."""

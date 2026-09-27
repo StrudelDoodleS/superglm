@@ -75,6 +75,23 @@ class Interval:
     upper_censored: bool
 
 
+def censoring_warnings(
+    interval: Interval, alpha: float, label: str, where: Callable[[float], str]
+) -> list[str]:
+    """One warning per censored side, naming where the interval stopped (``where(end)``)."""
+    sides = (
+        ("lower", interval.lower, interval.lower_censored),
+        ("upper", interval.upper, interval.upper_censored),
+    )
+    return [
+        f"the {100.0 * (1.0 - alpha):g}% interval for {label} is censored at its {side} end "
+        f"{label}={end:.6g}, {where(end)}: the likelihood-ratio statistic does not reach its "
+        "cutoff there, so the interval may extend beyond it."
+        for side, end, censored in sides
+        if censored
+    ]
+
+
 def likelihood_ratio_interval(
     objective: RecordedObjective,
     x_hat: float,

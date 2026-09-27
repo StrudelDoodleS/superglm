@@ -1181,6 +1181,15 @@ def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
         raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
 
 
+def _uses_direct_solver(model, penalty, has_lambda1_targets) -> bool:
+    """Whether `_solve_coefficients` takes the direct IRLS route rather than BCD."""
+    return (
+        any(group.constraints is not None for group in model._groups)
+        or any(group.monotone_engine == "scop" for group in model._groups)
+        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
+    )
+
+
 def _solve_coefficients(
     model,
     y,
@@ -1198,15 +1207,7 @@ def _solve_coefficients(
     intercept_init=None,
 ):
     """Apply the ordinary fit policy for selecting the coefficient solver."""
-    has_constraints = any(group.constraints is not None for group in model._groups)
-    has_scop = any(group.monotone_engine == "scop" for group in model._groups)
-    uses_direct_solver = (
-        has_constraints
-        or has_scop
-        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
-    )
-
-    if uses_direct_solver:
+    if _uses_direct_solver(model, penalty, has_lambda1_targets):
         result, _ = fit_irls_direct(
             X=model._dm,
             y=y,

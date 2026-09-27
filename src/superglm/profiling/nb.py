@@ -31,11 +31,16 @@ from scipy.special import digamma
 from superglm.distributions import NegativeBinomial, clip_mu, weighted_log_likelihood
 from superglm.links import stabilize_eta
 from superglm.model.base import model_has_lambda1_targets, resolve_selection_penalty_for_fit
-from superglm.model.fit_ops import _reject_monotone_fit_conflicts, _solve_coefficients
+from superglm.model.fit_ops import (
+    _reject_monotone_fit_conflicts,
+    _solve_coefficients,
+    _uses_direct_solver,
+)
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.profiling._scalar import (
     Interval,
     RecordedObjective,
+    censoring_warnings,
     likelihood_ratio_interval,
     profile_plot,
 )
@@ -63,6 +68,13 @@ _CI_RANGE = (0.01, 500.0)
 #: relative; roots to 1e-6 in log theta place each endpoint five times finer
 #: than that at every scale the ten-decade range admits.
 _CI_LOG_XTOL = 1e-6
+#: Direct-route mean fits stop at this relative objective change, as master's
+#: did. At the model's default 1e-6 the unrounded theta moved 4e-6 to 9e-6
+#: relative, a unit in the sixth published digit; at 1e-8 theta_hat matches
+#: master on every characterisation book for one or two more IRLS iterations
+#: per fit. BCD converges linearly (40% more iterations at 1e-8) and master
+#: left it at 1e-6, the model default.
+_DIRECT_MEAN_FIT_TOL = 1e-8
 
 
 class NBThetaBoundWarning(UserWarning):
@@ -302,6 +314,8 @@ class _MeanFit:
         self.has_lambda1_targets = model_has_lambda1_targets(model)
         # Refused here, before the alternation, not by the publication refit after it.
         _reject_monotone_fit_conflicts(model, self.penalty, self.has_lambda1_targets)
+        direct = _uses_direct_solver(model, self.penalty, self.has_lambda1_targets)
+        self.tol = min(model._tol, _DIRECT_MEAN_FIT_TOL) if direct else model._tol
         self.offset = np.zeros_like(self.y) if offset is None else offset
         self.warm_beta = self.warm_intercept = None
 
@@ -317,7 +331,7 @@ class _MeanFit:
             lambda2=configured_lambda2(model),
             has_lambda1_targets=self.has_lambda1_targets,
             max_iter=model._max_iter,
-            tol=model._tol,
+            tol=self.tol,
             record_diagnostics=False,
             convergence=model._convergence,
             beta_init=self.warm_beta,
@@ -371,9 +385,7 @@ def estimate_nb_theta(
             break
     # Published to six significant digits, the precision the family reports.
     theta_hat = float(f"{theta:.6g}")
-    messages = [_bound_message(solve, theta_bounds, theta_hat)] if solve.at_bound else []
-    for message in messages:
-        warnings.warn(message, NBThetaBoundWarning, stacklevel=2)
+    messages = _warn_unsettled(solve, settled, theta_bounds, theta_hat, maxiter)
     return NBProfileResult(
         theta_hat=theta_hat,
         nll=nb_nll(mean.y, mu, mean.w, theta_hat, weight_semantics=semantics),
@@ -386,6 +398,23 @@ def estimate_nb_theta(
         _weight_semantics=semantics,
         _bound_side=solve.side,
     )
+
+
+def _warn_unsettled(solve, settled, bounds, theta_hat, maxiter) -> list[str]:
+    """Warn about, and return, an estimate on a bound and an alternation out of steps."""
+    messages = []
+    if solve.at_bound:
+        messages.append(_bound_message(solve, bounds, theta_hat))
+        warnings.warn(messages[-1], NBThetaBoundWarning, stacklevel=3)
+    if not settled:
+        # MASS glm.nb warns when its alternation limit is reached; an unsettled
+        # theta_hat is the last iterate, not the fixed point.
+        messages.append(
+            f"NB2 theta alternation did not settle in {maxiter} mean fits; "
+            f"theta_hat={theta_hat:g} is the last iterate and the result reports converged=False."
+        )
+        warnings.warn(messages[-1], UserWarning, stacklevel=3)
+    return messages
 
 
 def _bound_message(solve: ThetaSolve, bounds: tuple[float, float], theta_hat: float) -> str:
@@ -458,7 +487,10 @@ class NBProfileResult:
         return dispersion_likelihood_size(self._weights, weight_semantics=self._weight_semantics)
 
     def interval(self, alpha: float = 0.05) -> Interval:
-        """Likelihood-ratio interval for theta on the fixed-mean profile, with censoring flags."""
+        """Likelihood-ratio interval for theta on the fixed-mean profile, with censoring flags.
+
+        A censored side is also recorded in ``warnings`` when it is computed.
+        """
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
             raise ValueError("alpha must be in (0, 1)")
@@ -474,11 +506,17 @@ class NBProfileResult:
                 scale=self._size,
                 xtol=_CI_LOG_XTOL,
             )
-            self._ci_cache[alpha] = Interval(
+            interval = Interval(
                 math.exp(found.lower),
                 math.exp(found.upper),
                 found.lower_censored,
                 found.upper_censored,
+            )
+            self._ci_cache[alpha] = interval
+            # Near-Poisson data leave the upper side censored: the statistic
+            # stays under its cutoff all the way to the searched range's end.
+            self.warnings.extend(
+                censoring_warnings(interval, alpha, "theta", lambda _: "where its search stopped")
             )
         return self._ci_cache[alpha]
 

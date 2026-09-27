@@ -36,7 +36,7 @@ from superglm.model.state_ops import (
     _solver_space_working_weights,
 )
 from superglm.penalties.base import selection_shrunk_group_names
-from superglm.profiling._reporting import cached_tweedie_profile_ci
+from superglm.profiling._reporting import cached_tweedie_profile_ci, reported_interval
 from superglm.solvers.centered_system import penalty_factor
 from superglm.solvers.rank import (
     decompose_factor,
@@ -1589,9 +1589,10 @@ class ModelMetrics:
         # NB theta profile info
         nb_pr = getattr(self._model, "_nb_profile_result", None)
         if nb_pr is not None:
-            ci = nb_pr.ci(alpha=alpha)
+            ci, ci_status = reported_interval(nb_pr.interval(alpha))
             model_info["nb_theta"] = nb_pr.theta_hat
             model_info["nb_theta_ci"] = ci
+            model_info["nb_theta_ci_status"] = ci_status
 
         # Tweedie p profile info
         tw_pr = getattr(self._model, "_tweedie_profile_result", None)
