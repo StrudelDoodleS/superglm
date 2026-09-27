@@ -124,12 +124,7 @@ def _profile_model(
 
 def _install_deterministic_profile(monkeypatch: pytest.MonkeyPatch, family_name: str) -> None:
     if family_name == "nb":
-        result = NBProfileResult(
-            theta_hat=2.4,
-            nll=0.0,
-            n_evaluations=1,
-            converged=True,
-        )
+        result = NBProfileResult(theta_hat=2.4, nll=0.0, converged=True)
         monkeypatch.setattr(
             "superglm.profiling.nb.estimate_nb_theta",
             lambda *args, **kwargs: result,
@@ -140,14 +135,17 @@ def _install_deterministic_profile(monkeypatch: pytest.MonkeyPatch, family_name:
         p_hat=1.47,
         phi_hat=1.15,
         nll=0.0,
-        n_evaluations=1,
         converged=True,
-        method="brent",
-        phi_method="mle",
-        search_trace=pd.DataFrame({"p": [1.47], "phi": [1.15], "nll": [0.0]}),
+        fit_mode="fit_reml",
+        evaluations=pd.DataFrame({"p": [1.47], "nll": [0.0], "phi": [1.15]}),
+        warnings=[],
+        search_nll=0.0,
+        _objective=None,
+        _ll_scale=1.0,
+        _ci_bounds=(1.02, 1.98),
     )
     monkeypatch.setattr(
-        "superglm.profiling.tweedie.estimate_tweedie_p",
+        "superglm.profiling.tweedie.search_power",
         lambda *args, **kwargs: result,
     )
 
@@ -195,7 +193,7 @@ def test_profiled_reml_retains_compact_structured_reports(
     if family_name == "nb":
         model.estimate_theta(X, y, fit_mode="reml")
     else:
-        model.estimate_p(X, y, fit_mode="reml", phi_method="mle")
+        model.estimate_p(X, y, fit_mode="reml")
 
     if direct_solve != "auto":
         assert model.result.direct_backend == direct_solve
@@ -304,20 +302,14 @@ def test_tweedie_reml_profile_keeps_only_authoritative_public_row_state(
         record_builder,
     )
 
-    result = model.estimate_p(
-        X,
-        y,
-        fit_mode="reml",
-        phi_method="pearson",
-        method="grid",
-        grid=np.array([1.4, 1.6]),
-    )
+    result = model.estimate_p(X, y, fit_mode="reml", p_bounds=(1.4, 1.6), xatol=0.05)
 
-    context = result._objective.__self__
-    scratch_model = context.model
+    # The search's scratch clone follows the model's retention setting.
+    scratch_model = result._objective._objective.clone
     expected_builds = int(not retain_fit_state)
     assert len(builder_calls) == expected_builds
-    _assert_profile_scratch_released(scratch_model)
+    if not retain_fit_state:
+        _assert_profile_scratch_released(scratch_model)
     assert "_suppress_reporting_support" not in model.__dict__
     assert (getattr(model, "_dm") is not None) is retain_fit_state
     assert getattr(model, "_fit_state").retained is retain_fit_state
@@ -326,14 +318,14 @@ def test_tweedie_reml_profile_keeps_only_authoritative_public_row_state(
     else:
         assert term_name in getattr(model, "_reporting_support_state").support_totals
 
-    result._objective(1.5, source="ci_probe")
-
-    assert len(builder_calls) == expected_builds
-    _assert_profile_scratch_released(scratch_model)
-
+    # A later interval evaluation refits the scratch clone, never the model,
+    # and so does one on an unpickled result.
+    result._objective(1.5)
     restored_result = pickle.loads(pickle.dumps(result))
-    restored_result._objective(1.55, source="ci_probe")
-    restored_scratch_model = restored_result._objective.__self__.model
+    restored_result._objective(1.55)
+
     assert len(builder_calls) == expected_builds
-    _assert_profile_scratch_released(restored_scratch_model)
+    if not retain_fit_state:
+        _assert_profile_scratch_released(scratch_model)
+        _assert_profile_scratch_released(restored_result._objective._objective.clone)
     _assert_report_pickle_parity(model, "re", term_name)

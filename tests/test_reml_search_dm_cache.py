@@ -34,6 +34,19 @@ def _count_builds(monkeypatch) -> list[str]:
     return calls
 
 
+def _disable_the_design_cache(monkeypatch) -> None:
+    """Empty the candidate cache before every fetch, so each candidate builds fresh."""
+    import superglm.model.fit_ops as fit_ops_module
+
+    real = fit_ops_module._fetch_or_build_design
+
+    def uncached(model, X, y, sample_weight, offset, cache):
+        cache.clear()
+        return real(model, X, y, sample_weight, offset, cache)
+
+    monkeypatch.setattr(fit_ops_module, "_fetch_or_build_design", uncached)
+
+
 class TestSearchBuildsOnce:
     def test_cached_search_matches_an_uncached_search_bitwise(self, monkeypatch):
         """The cache is a pure cost optimization: every number is identical.
@@ -52,16 +65,14 @@ class TestSearchBuildsOnce:
         cached_result, cached_beta = run()
         assert len(calls) == 2
 
-        import superglm.profiling.tweedie as tweedie_module
-
-        monkeypatch.setattr(tweedie_module, "_SEARCH_DM_CACHE", False)
+        _disable_the_design_cache(monkeypatch)
         uncached_result, uncached_beta = run()
         # Otherwise the comparison below would pit the cached search against itself.
         assert len(calls) > 4, "the uncached search still served from the cache"
 
         assert float(cached_result.p_hat) == float(uncached_result.p_hat)
         assert float(cached_result.phi_hat) == float(uncached_result.phi_hat)
-        assert list(cached_result.search_trace["nll"]) == list(uncached_result.search_trace["nll"])
+        assert list(cached_result.evaluations["nll"]) == list(uncached_result.evaluations["nll"])
         assert np.array_equal(cached_beta, uncached_beta)
 
     def test_cached_search_matches_uncached_on_a_tensor_interaction(self, monkeypatch):
@@ -86,21 +97,19 @@ class TestSearchBuildsOnce:
                 },
                 interactions=[("x1", "x2")],
             )
-            # One Brent step is enough: the two bracket endpoints are the
-            # first build and the first cache hit, where the defect fired.
-            result = model.estimate_p(frame, y, fit_mode="reml", maxiter=1)
+            # A short search is enough: the two bounds, evaluated first, are
+            # the first build and the first cache hit, where the defect fired.
+            result = model.estimate_p(frame, y, fit_mode="reml", p_bounds=(1.45, 1.55), xatol=0.05)
             return result, np.asarray(model.result.beta, dtype=float).copy()
 
         cached_result, cached_beta = run()
 
-        import superglm.profiling.tweedie as tweedie_module
-
-        monkeypatch.setattr(tweedie_module, "_SEARCH_DM_CACHE", False)
+        _disable_the_design_cache(monkeypatch)
         uncached_result, uncached_beta = run()
 
         assert float(cached_result.p_hat) == float(uncached_result.p_hat)
         assert float(cached_result.phi_hat) == float(uncached_result.phi_hat)
-        assert list(cached_result.search_trace["nll"]) == list(uncached_result.search_trace["nll"])
+        assert list(cached_result.evaluations["nll"]) == list(uncached_result.evaluations["nll"])
         assert np.array_equal(cached_beta, uncached_beta)
 
 
@@ -147,8 +156,8 @@ class TestCacheMechanism:
 
 
 class TestCacheScope:
-    def test_direct_public_search_does_not_hijack_a_later_refit(self):
-        """The exported search must not leave its design cache on the model.
+    def test_a_search_does_not_hijack_a_later_refit(self):
+        """The search must not leave its design cache on the model.
 
         A leaked cache is not a stale attribute, it is a wrong answer: the
         next fit_reml sees a nonempty cache, probe-verifies the cached
@@ -156,11 +165,9 @@ class TestCacheScope:
         identity -- and silently fits the search's dataset instead of the
         one the caller just passed.
         """
-        from superglm.profiling.tweedie import estimate_tweedie_p
-
         frame1, y1, features = _search_fixture(n=900, seed=3)
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        estimate_tweedie_p(model, frame1, y1, fit_mode="fit_reml", maxiter=6)
+        result = model.estimate_p(frame1, y1, fit_mode="reml", p_bounds=(1.4, 1.6), xatol=0.05)
 
         assert not hasattr(model, "_profile_design_cache")
 
@@ -168,7 +175,8 @@ class TestCacheScope:
         model.fit_reml(frame2, y2, runtime_validation="skip")
         assert len(model._fit_weights) == len(y2)
 
-        reference = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        # The model now carries the published power.
+        reference = SuperGLM(family=families.tweedie(p=result.p_hat), features=features)
         reference.fit_reml(frame2, y2, runtime_validation="skip")
         np.testing.assert_allclose(
             np.asarray(model.result.beta, dtype=float),
@@ -183,16 +191,16 @@ class TestCacheScope:
     def test_an_abandoned_search_still_removes_the_cache(self, monkeypatch):
         """Cleanup must survive a search that dies mid-candidate."""
         import superglm.profiling.tweedie as tweedie_module
-        from superglm.profiling.tweedie import estimate_tweedie_p
 
-        def exploding(*args, **kwargs):
+        def exploding(objective, *args, **kwargs):
+            objective(1.5)  # one candidate fit fills the cache first
             raise RuntimeError("forced mid-search failure")
 
-        monkeypatch.setattr(tweedie_module, "_search_brent", exploding)
+        monkeypatch.setattr(tweedie_module, "minimize_profile", exploding)
         frame, y, features = _search_fixture(n=900, seed=3)
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         with pytest.raises(RuntimeError, match="forced mid-search failure"):
-            estimate_tweedie_p(model, frame, y, fit_mode="fit_reml", maxiter=6)
+            model.estimate_p(frame, y, fit_mode="reml")
 
         assert not hasattr(model, "_profile_design_cache")
 
@@ -221,9 +229,9 @@ class TestConstrainedGroupsDisableTheCache:
         features = {"x": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)}
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.estimate_p(frame, y, fit_mode="reml", maxiter=2)
+        model.estimate_p(frame, y, fit_mode="reml", p_bounds=(1.4, 1.6), xatol=0.05)
 
         # One build per candidate fit plus the publication: strictly more
         # than the cached search's two, proving no candidate was served a
-        # possibly-mutated design. Two Brent steps already make it five.
+        # possibly-mutated design.
         assert len(calls) > 2

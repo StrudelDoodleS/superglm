@@ -29,8 +29,9 @@ the outputs the rebuilt code is compared against:
 row of every Tweedie case, the Dunn-Smyth series work at p in {1.05, 1.2, 1.5,
 1.8, 1.95} and phi at 1e-3, 0.1, 1, 10 and 1e3 times the Pearson estimate.
 
-The logpdf and scan arms read the pre-rebuild evaluator's private names, so
-they document what was measured and run only against a pre-rebuild checkout.
+The logpdf, scan and estimate arms read the pre-rebuild code's private names
+and result fields, so they document what was measured and run only against a
+pre-rebuild checkout.
 ``build_case`` uses public API alone and is imported by the tests on either
 side of the rebuild.
 

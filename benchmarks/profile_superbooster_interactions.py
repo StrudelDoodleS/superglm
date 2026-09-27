@@ -19,16 +19,24 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
-from superglm.profiling.harness import (
-    SystemSampler,
-    dump_json,
-    summarize_system_samples,
-    write_system_samples_csv,
-    write_tracemalloc_report,
-)
-from superglm.profiling.harness import (
-    write_cprofile_stats as write_pstats_summary,
-)
+try:
+    from benchmarks._harness import (
+        SystemSampler,
+        dump_json,
+        summarize_system_samples,
+        write_system_samples_csv,
+        write_tracemalloc_report,
+    )
+    from benchmarks._harness import write_cprofile_stats as write_pstats_summary
+except ModuleNotFoundError:
+    from _harness import (
+        SystemSampler,
+        dump_json,
+        summarize_system_samples,
+        write_system_samples_csv,
+        write_tracemalloc_report,
+    )
+    from _harness import write_cprofile_stats as write_pstats_summary
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCH_PATH = ROOT / "benchmarks" / "superbooster_interaction_challenger.py"

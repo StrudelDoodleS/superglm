@@ -70,9 +70,7 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert "discrete=True" in source
     assert "n_bins=512" in source
     assert "model.estimate_p(" in source
-    assert "tweedie_profile.search_trace" in source
-    assert 'method="brent"' in source
-    assert 'phi_method="mle"' in source
+    assert "tweedie_profile.evaluations" in source
     assert '"territory": Categorical(base="most_exposed")' in source
     assert 'terms=["age", "mileage", "region", "age_band", "territory"]' in source
     assert "## Collapse Sparse Categorical Levels" in source
@@ -3277,7 +3275,7 @@ def test_profile_options_forward_search_fit_mode():
 
 
 def test_profile_options_filter_tweedie_only_keys_for_theta():
-    """search_fit_mode is Tweedie-only: estimate_nb_theta has no decoupled
+    """search_fit_mode is Tweedie-only: estimate_theta has no decoupled
     search, so a client that retains options while switching parameters must
     not crash the theta profile with an unexpected keyword. Unknown or empty
     parameters strip it too -- fail safe, never fail loud downstream."""

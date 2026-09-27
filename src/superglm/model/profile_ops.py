@@ -12,6 +12,7 @@ import numpy as np
 
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.model.fit_state import configured_family
+from superglm.model.input_validation import THETA_ESTIMATED
 from superglm.profiling._reporting import cached_tweedie_profile_ci
 from superglm.profiling.tweedie import profile_phi_at
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
@@ -492,7 +493,10 @@ def estimate_theta(
     )
     report = progress_callback or _ignore_progress
     references = {"X_ref": X, "y_ref": y, "sample_weight_ref": sample_weight, "offset_ref": offset}
-    validated = fit_ops._validate_entrypoint_input(model, X, y, sample_weight, offset)
+    # The family holds a numeric theta, but this call re-estimates it and refits.
+    validated = fit_ops._validate_entrypoint_input(
+        model, X, y, sample_weight, offset, theta_role=THETA_ESTIMATED
+    )
     result = _search_theta_privately(
         model, validated, theta_bounds=theta_bounds, xatol=xatol, report=report
     )

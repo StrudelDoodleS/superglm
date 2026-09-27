@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 from superglm import SuperGLM
-from superglm.profiling.tweedie import estimate_tweedie_p
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,12 +50,20 @@ def test_tweedie_notebook_first_code_cell_executes_supported_public_imports():
 def test_tweedie_family_guide_documents_current_profile_contract():
     guide = (_ROOT / "docs/explanation/families-and-weights.md").read_text(encoding="utf-8")
     tweedie = guide.split("## Tweedie: estimating the power parameter", maxsplit=1)[1]
+    tweedie = tweedie.split("## How REML treats the dispersion", maxsplit=1)[0]
+    normalized = " ".join(tweedie.split())
 
     assert "per-exposure response" in tweedie
     assert "p_range=" not in tweedie
     assert "p_bounds=(1.1, 1.9)" in tweedie
-    assert '`phi_method="mle"` and `method="auto"` are the defaults' in tweedie
-    assert '`phi_method="pearson"` is an explicit fast plug-in' in tweedie
+    assert "Dunn & Smyth 2005" in normalized
+    assert "*p* is the power that maximises the profile likelihood" in normalized
+    assert "At each candidate power the mean is refitted" in normalized
+    assert "φ is the maximum-likelihood dispersion at that candidate's fitted mean" in normalized
+    assert "inverts the likelihood-ratio test" in normalized
+    assert "marked censored in `result.warnings`" in normalized
+    for removed in ("phi_method", "method=", "trace_plot", "ci_details", "search_trace"):
+        assert removed not in tweedie
     assert "`result.ci()` is explicit and potentially expensive" in tweedie
     assert "ci_alpha=0.05" in tweedie
     assert "detached returned result" in tweedie
@@ -68,8 +75,7 @@ def test_tweedie_family_guide_documents_current_profile_contract():
     assert "Zero-weight observations must be removed" in tweedie
     assert "REML selects spline smoothing penalties" in tweedie
     assert "does not jointly estimate *p* and φ" in tweedie
-    assert "saddlepoint fallback" in tweedie
-    assert "near *p*=1 and *p*=2" in tweedie
+    assert "Near *p*=1 such an edge maximum can be an artefact of rounded responses" in normalized
 
 
 def test_binomial_family_guide_block_executes_a_real_fit() -> None:
@@ -96,14 +102,15 @@ def test_binomial_family_guide_block_executes_a_real_fit() -> None:
     assert np.all((probabilities > 0.0) & (probabilities < 1.0))
 
 
-def test_tweedie_notebook_removes_stale_pearson_default_claims():
+def test_tweedie_notebook_describes_the_current_profile():
     source = _notebook_source()
     all_source = _notebook_all_source()
 
-    assert "default Pearson profile" not in source
-    assert "Pearson moments by default" not in source
-    assert "Exact joint ML is the default" in source
-    assert "Pearson plug-in is explicit" in source
+    for removed in ("Pearson", "phi_method", "n_evaluations", "search_trace", "saddlepoint"):
+        assert removed not in all_source
+    assert "Dunn & Smyth" in source
+    assert "maximum-likelihood `phi` at that fitted mean" in source
+    assert "len(result.evaluations)" in all_source
     assert "`result.ci()`" in source
     assert "ci_alpha=0.05" in all_source
     assert "detached returned result" in source
@@ -111,7 +118,6 @@ def test_tweedie_notebook_removes_stale_pearson_default_claims():
     assert "preceding `result.ci()` call populated the cache" not in source
     assert "Zero-weight observations must be removed" in source
     assert "REML selects spline smoothing penalties" in source
-    assert "saddlepoint fallback" in source
     assert "near `p=1` and `p=2`" in source
 
 
@@ -126,13 +132,12 @@ def test_selection_penalty_docs_make_calibration_explicit():
 
 
 def test_tweedie_profile_api_docstrings_use_prior_weight_convention():
-    for function in (SuperGLM.estimate_p, estimate_tweedie_p):
-        docstring = function.__doc__ or ""
-        assert "EDM prior weights" in docstring
-        assert "Var(Y_i | x_i) = phi * mu_i**p / w_i" in docstring
-        assert "not replication or frequency weights" in docstring
-        assert "Remove zero-weight rows consistently" in docstring
-        assert "Frequency weights. Must be frequency weights" not in docstring
+    docstring = SuperGLM.estimate_p.__doc__ or ""
+    assert "EDM prior weights" in docstring
+    assert "Var(Y_i | x_i) = phi * mu_i**p / w_i" in docstring
+    assert "not replication or frequency weights" in docstring
+    assert "Remove zero-weight rows consistently" in docstring
+    assert "Frequency weights. Must be frequency weights" not in docstring
 
 
 def test_public_fit_docstrings_explain_the_declared_weight_contract():

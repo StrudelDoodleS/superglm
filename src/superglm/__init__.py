@@ -131,7 +131,7 @@ from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.plotting import plot_term_comparison
-from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning, estimate_nb_theta
+from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning
 from superglm.profiling.tweedie import TweedieProfileResult
 from superglm.reml import REMLResult
 from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
@@ -174,13 +174,13 @@ from superglm.validation import (
 def warmup() -> None:
     """Compile optional model-fitting kernels before the first fit."""
     from superglm._group_matrix._group_matrix_kernels import _warmup_group_matrix_kernels
-    from superglm._tweedie_profile_kernel import _warmup_tweedie_profile
+    from superglm._tweedie_series import warmup as _warmup_tweedie_series
     from superglm.distributional.kernels.tweedie import _warmup_tweedie
     from superglm.distributional.solver._global_moments import _warmup_global_moments
     from superglm.distributional.solver._small_group_panels import _warmup_small_group_panels
 
     _warmup_tweedie()
-    _warmup_tweedie_profile()
+    _warmup_tweedie_series()
     _warmup_group_matrix_kernels()
     _warmup_small_group_panels()
     _warmup_global_moments()
@@ -190,8 +190,8 @@ def warmup() -> None:
 # tests/test_public_api_snapshot.py: adding or removing a name here edits that
 # list in the same pull request. Objects the library builds on the user's
 # behalf (auto-detected interaction types, constraint machinery, term-inference
-# parts, Tweedie profile records) are importable from their modules and from
-# this namespace but are not exports.
+# parts) are importable from their modules and from this namespace but are not
+# exports.
 __all__ = [
     "families",
     "warmup",
@@ -274,7 +274,6 @@ __all__ = [
     "PriorWeightLatticeWarning",
     "REMLResult",
     "LambdaPolicy",
-    "estimate_nb_theta",
     "TweedieProfileResult",
     "tweedie_logpdf",
     "generate_tweedie_cpg",

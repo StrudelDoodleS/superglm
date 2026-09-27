@@ -376,7 +376,7 @@ def _bound_local_socket() -> socket.socket:
 
 
 def _profile_options(payload: dict[str, Any]) -> dict[str, Any]:
-    # search_fit_mode is a Tweedie-only option: estimate_nb_theta has no
+    # search_fit_mode is a Tweedie-only option: estimate_theta has no
     # decoupled search, so a generic client that retains options while
     # switching parameters must not crash the theta profile with an
     # unexpected keyword.

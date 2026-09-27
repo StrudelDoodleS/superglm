@@ -51,7 +51,8 @@ def _evaluate_constrained_profile_once(monkeypatch, feature):
         selection_penalty=0,
         features={"x": feature},
     )
-    profile = _PowerProfile(model, X, y, None, None, "fit")
+    # The search takes validated inputs: estimate_p always supplies the weights.
+    profile = _PowerProfile(model, X, y, np.ones(len(y)), None, "fit")
     profile(1.5)
     assert len(direct_calls) == 1
     return profile, direct_calls[0]

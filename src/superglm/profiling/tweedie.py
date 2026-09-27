@@ -37,10 +37,10 @@ from superglm.profiling._scalar import (
 )
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 
-# Candidate REML fits only rank powers. On flat-lambda designs this bar leaves
-# the candidate NLL determined only to ~4e-4 relative, but the ranking holds:
-# p_hat agreed with tight-bar searches to ~1e-11 on the benchmark fixture. The
-# published refit at p_hat runs at the tight publication default.
+# Candidate REML fits only rank powers; the published refit at p_hat runs at the
+# tight publication default. At this bar a candidate's mean NLL was within
+# 2.5e-6 relative of a reml_tol = 1e-11 fit, typically 1e-10 to 1e-7, on the
+# characterisation REML books at p in {1.3, 1.5, 1.7}.
 _SEARCH_REML_TOL = 1e-6
 # The interval may reach past the default search bounds (1.05, 1.95), as
 # master's did; the series is exact from p = 1.01 to 1.99 (its 50-digit oracle).
@@ -135,14 +135,12 @@ class _PowerProfile:
 
     def _prepare_reml(self, X, y, sample_weight, offset) -> None:
         clone = self.clone
-        # Candidate fits are ranked and discarded: keep compact state, skip the
-        # reporting tables, and share one design build across candidates
+        # Candidate fits are ranked and discarded: skip the reporting tables,
+        # and share one design build across candidates
         # (fit_ops._fetch_or_build_design) since the design does not depend on p.
-        clone._retain_fit_state = False
         clone._suppress_reporting_support = True
         clone._profile_design_cache = {}
-        self.X, self.y, self.sample_weight, self.offset = X, y, sample_weight, offset
-        self.w = np.ones_like(y) if sample_weight is None else sample_weight
+        self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         self._fit = self._fit_reml
 
     def _fit_reml(self, p: float) -> tuple[NDArray, bool]:
@@ -156,7 +154,7 @@ class _PowerProfile:
         clone.fit_reml(
             self.X,
             self.y,
-            sample_weight=self.sample_weight,
+            sample_weight=self.w,
             offset=self.offset,
             runtime_validation="skip",
             reml_tol=_SEARCH_REML_TOL,
@@ -164,7 +162,10 @@ class _PowerProfile:
         reml = clone._reml_result
         # A model with no REML-eligible term makes fit_reml an ordinary fit.
         converged = clone.result.converged and (reml is None or reml.converged)
-        return clone._fit_mu, bool(converged)
+        # The clone follows the model's retain_fit_state; a released fit keeps
+        # its coefficients but not its fitted mean.
+        mu = clone._fit_mu if clone._retain_fit_state else clone.predict(self.X, self.offset)
+        return mu, bool(converged)
 
 
 def _clone_profile_model(model, X, sample_weight):
@@ -198,7 +199,7 @@ def _snapshot_profile_inputs(X, y, sample_weight, offset):
     return (
         copy.deepcopy(X),
         np.array(y, dtype=np.float64, copy=True),
-        (None if sample_weight is None else np.array(sample_weight, dtype=np.float64, copy=True)),
+        np.array(sample_weight, dtype=np.float64, copy=True),
         None if offset is None else np.array(offset, dtype=np.float64, copy=True),
     )
 

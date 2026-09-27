@@ -615,7 +615,7 @@ def _required_fit_columns(model) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
-def _validate_entrypoint_input(model, X, y, sample_weight, offset):
+def _validate_entrypoint_input(model, X, y, sample_weight, offset, *, theta_role=None):
     distribution = resolve_distribution(configured_family(model))
     config = model._config
     validated = validate_fit_input(
@@ -627,6 +627,7 @@ def _validate_entrypoint_input(model, X, y, sample_weight, offset):
         required_columns=_required_fit_columns(model),
         check_all_columns=config.splines is not None and not config.feature_templates,
         weight_semantics=model_weight_semantics(model),
+        theta_role=theta_role,
     )
     if (
         not config.features_explicit

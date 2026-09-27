@@ -2350,71 +2350,6 @@ class TestTheEvaluationResponseLengthIsCheckedFirst:
             model.metrics(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))
 
 
-class TestTheStandaloneThetaProfileChecksTheContract:
-    """``profile_ci_theta`` is a public likelihood boundary of its own.
-
-    It takes arrays directly, so no fit-time or evaluation-time check has seen
-    those rows, and every NLL it evaluates reads the same response and weights.
-    An off-contract input returned an apparently exact interval with nothing
-    marking it -- the sixth boundary, and the one this branch missed.
-    """
-
-    @staticmethod
-    def _arrays(n=200, seed=41):
-        rng = np.random.default_rng(seed)
-        y = rng.poisson(4.0, n).astype(float)
-        return y, np.full(n, 4.0), n
-
-    def test_fractional_replication_counts_warn(self):
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        with pytest.warns(FractionalFrequencyWeightWarning):
-            profile_ci_theta(y, mu, np.full(n, 2.5), 3.0, weight_semantics="frequency")
-
-    def test_an_adjusted_prior_response_is_quiet(self):
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        y = y.copy()
-        y[:20] += 0.5
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", PriorWeightLatticeWarning)
-            profile_ci_theta(y, mu, np.full(n, 1.5), 3.0, weight_semantics="prior")
-
-    def test_a_fractional_response_warns_under_frequency(self):
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        y = y.copy()
-        y[:20] += 0.5
-        with pytest.warns(PriorWeightLatticeWarning):
-            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics="frequency")
-
-    @pytest.mark.parametrize("semantics", ["prior", "frequency"])
-    def test_an_honoured_contract_stays_silent(self, semantics):
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", PriorWeightLatticeWarning)
-            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
-            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics=semantics)
-
-    def test_it_reports_the_interval_moving_not_the_coefficients(self):
-        """mu is held fixed here, so nothing can be refitted."""
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        y = y.copy()
-        y[:20] += 0.5
-        with pytest.warns(PriorWeightLatticeWarning) as caught:
-            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics="frequency")
-        message = str(caught[0].message)
-        assert "profiled theta and its interval" in message
-        assert "move as well" not in message  # the coefficients do not
-
-
 class TestTheImpactClaimMatchesWhatTheCallIsDoing:
     """The reach depends on what the caller does with theta, not only on the family.
 
@@ -2460,7 +2395,6 @@ class TestTheImpactClaimMatchesWhatTheCallIsDoing:
         ("role", "expected"),
         [
             ("fixed", "unaffected"),
-            ("profiled", "profiled theta and its interval"),
             ("estimated", "move as well"),
         ],
     )
@@ -2525,41 +2459,37 @@ class TestEveryPublicLikelihoodEntryChecksTheContract:
             model.fit(frame, y, sample_weight=np.full(n, 2.0))
         return model, frame, y, n
 
-    def test_estimate_nb_theta_warns_on_fractional_counts(self):
-        from superglm import estimate_nb_theta
-
+    def test_estimate_theta_warns_on_fractional_counts(self):
         model, frame, y, n = self._fitted_on_whole_counts()
         with pytest.warns(FractionalFrequencyWeightWarning):
-            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.5))
+            model.estimate_theta(frame, y, sample_weight=np.full(n, 2.5))
 
-    def test_estimate_nb_theta_warns_on_a_fractional_response(self):
-        from superglm import estimate_nb_theta
-
+    def test_estimate_theta_warns_on_a_fractional_response(self):
         model, frame, y, n = self._fitted_on_whole_counts()
         y = y.copy()
         y[:30] += 0.5
         with pytest.warns(PriorWeightLatticeWarning):
-            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+            model.estimate_theta(frame, y, sample_weight=np.full(n, 2.0))
 
-    def test_estimate_nb_theta_says_the_estimates_move(self):
-        """It refits beta at each candidate theta, so the reach is the estimates."""
-        from superglm import estimate_nb_theta
+    def test_estimate_theta_says_the_estimates_move(self):
+        """It refits beta at each candidate theta, so the reach is the estimates.
 
+        The fitted family holds a numeric theta, so the role cannot be read
+        from the family: the call has to say it re-estimates theta.
+        """
         model, frame, y, n = self._fitted_on_whole_counts()
         y = y.copy()
         y[:30] += 0.5
         with pytest.warns(PriorWeightLatticeWarning) as caught:
-            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+            model.estimate_theta(frame, y, sample_weight=np.full(n, 2.0))
         assert "move as well" in str(caught[0].message)
 
     def test_an_honoured_contract_stays_silent(self):
-        from superglm import estimate_nb_theta
-
         model, frame, y, n = self._fitted_on_whole_counts()
         with warnings.catch_warnings():
             warnings.simplefilter("error", PriorWeightLatticeWarning)
             warnings.simplefilter("error", FractionalFrequencyWeightWarning)
-            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+            model.estimate_theta(frame, y, sample_weight=np.full(n, 2.0))
 
 
 class TestAFoldIsCheckedOncePerCondition:
@@ -2677,20 +2607,6 @@ class TestEveryBoundaryValidatesBeforeItWarns:
                     frame,
                     np.arange(n - 3, dtype=float) + 0.5,
                     sample_weight=np.full(n - 3, 2.5),
-                )
-
-    def test_the_theta_profile_raises_on_mismatched_arrays(self):
-        from superglm.profiling.nb import profile_ci_theta
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            with pytest.raises(ValueError, match="same rows"):
-                profile_ci_theta(
-                    np.array([1.5, 2.5, 3.5]),
-                    np.ones(2),
-                    np.full(3, 2.5),
-                    3.0,
-                    weight_semantics="frequency",
                 )
 
 

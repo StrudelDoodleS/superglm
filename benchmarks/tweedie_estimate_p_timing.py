@@ -3,8 +3,9 @@
 Runs one ``estimate_p``, or one ``fit_reml`` at a fixed power, on a case from
 ``tweedie_nb_characterisation.build_case`` and prints one JSON line: wall and
 CPU seconds, peak RSS, the estimate, the candidate-fit count and the backend
-the published fit dispatched. It calls public API, so the same command times
-the code before and after the rebuild. Run each repetition in a fresh process
+the published fit dispatched. It calls public API; time the pre-rebuild code
+with that tree's own copy of this driver, whose bucket targets and ``--method``
+option name the pre-rebuild functions. Run each repetition in a fresh process
 (``ru_maxrss`` is a process high-water mark), with the thread pools pinned,
 interleaving cases from outside:
 
@@ -16,8 +17,8 @@ interleaving cases from outside:
 ``BUCKET_TARGETS`` and charges wall time to candidate fits, the phi/density
 profile or neither, a nested call counting toward the outermost bucket
 entered. ``reml_scale`` is timed on its own clock: it runs inside candidate
-fits. The targets name the pre-rebuild code; the output lists any target this
-tree lacks, so the list is updated rather than silently measuring nothing.
+fits. The output lists any target this tree lacks, so the list is updated
+rather than silently measuring nothing.
 """
 
 from __future__ import annotations
@@ -42,17 +43,16 @@ else:  # run by filename
     import _platform
     from tweedie_nb_characterisation import build_case
 
-# (module, attribute, bucket). SuperGLM.fit_reml is how REML candidates fit;
-# the profile_ops publication refit goes through the fit_ops workspace entries.
+# (module, attribute, bucket). ML candidates fit through _solve_coefficients and
+# REML candidates through SuperGLM.fit_reml; the profile_ops publication refit
+# goes through the fit_ops workspace entries and re-profiles phi there.
 BUCKET_TARGETS = (
-    ("superglm.profiling.tweedie", "fit_irls_direct", "candidate_fits"),
-    ("superglm.profiling.tweedie", "fit_pirls", "candidate_fits"),
+    ("superglm.profiling.tweedie", "_solve_coefficients", "candidate_fits"),
     ("superglm.model.api", "SuperGLM.fit_reml", "candidate_fits"),
     ("superglm.model.fit_ops", "_fit_reml_in_workspace", "candidate_fits"),
     ("superglm.model.fit_ops", "_fit_in_workspace", "candidate_fits"),
-    ("superglm.profiling.tweedie", "_profile_phi_detailed", "phi_density"),
-    ("superglm.profiling.tweedie", "_evaluate_tweedie_density", "phi_density"),
-    ("superglm.profiling.tweedie", "_exact_profile_statistics_prevalidated", "phi_density"),
+    ("superglm.profiling.tweedie", "profile_phi_at", "phi_density"),
+    ("superglm.model.profile_ops", "profile_phi_at", "phi_density"),
     ("superglm.reml.objective", "profile_tweedie_reml_scale", "reml_scale"),
     ("superglm.reml.direct", "profile_tweedie_reml_scale", "reml_scale"),
     ("superglm.reml.discrete", "profile_tweedie_reml_scale", "reml_scale"),
@@ -104,12 +104,6 @@ def _peak_rss_mb() -> float:
     return _platform.peak_rss().bytes / 2**20
 
 
-def _candidate_count(result) -> int:
-    # Pre-rebuild results carry search_trace; rebuilt ones carry evaluations.
-    trace = getattr(result, "evaluations", None)
-    return len(result.search_trace if trace is None else trace)
-
-
 def _backend(model) -> dict:
     solver = model._solver_pirls_result()
     return {
@@ -126,8 +120,6 @@ def _operation(model, X, y, sample_weight, offset, args):
     options = {"fit_mode": args.fit_mode}
     if args.search_fit_mode is not None:
         options["search_fit_mode"] = args.search_fit_mode
-    if args.method is not None:
-        options["method"] = args.method
     return model.estimate_p(X, y, sample_weight, offset, **options)
 
 
@@ -138,9 +130,7 @@ def _outcome(model, result) -> dict:
         "p_hat": float(result.p_hat),
         "phi_hat": float(result.phi_hat),
         "nll": float(result.nll),
-        "n_candidates": _candidate_count(result),
-        "method": str(getattr(result, "method", "")),
-        "phi_passes": getattr(result, "phi_n_evaluations", None),
+        "n_candidates": len(result.evaluations),
     }
 
 
@@ -182,7 +172,6 @@ def parser() -> argparse.ArgumentParser:
     parse.add_argument("--case", default=None, help="a build_case name")
     parse.add_argument("--fit-mode", default="fit", choices=("fit", "reml"))
     parse.add_argument("--search-fit-mode", default=None, choices=("fit", "reml"))
-    parse.add_argument("--method", default=None, help="pre-rebuild search method, for stage 0")
     parse.add_argument("--fit-reml-at", type=float, default=None, help="time fit_reml at this p")
     parse.add_argument("--buckets", action="store_true", help="the profiling run")
     return parse

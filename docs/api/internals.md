@@ -88,23 +88,3 @@ plotting, and the knot and basis metadata of a spline term. For an interaction t
    superglm.SmoothCurve
    superglm.SplineMetadata
 ```
-
-## Tweedie profile records
-
-{py:class}`~superglm.TweedieProfileCIDetails`, which
-{py:meth}`~superglm.TweedieProfileResult.ci_details` returns and which is
-listed with the [families](families-and-links.md), holds the evidence for a
-Tweedie profile confidence interval in these: each endpoint and how it was
-obtained, each finite likelihood-ratio evaluation, and the density method
-retained for the evaluated points inside the connected likelihood-ratio
-region, which is not every evaluation.
-
-```{eval-rst}
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   superglm.TweedieProfileCIEndpoint
-   superglm.TweedieProfileCIEvaluation
-   superglm.TweedieProfileCIDensityProvenance
-```

@@ -208,7 +208,7 @@ ci = result.ci(alpha=0.05)  # (lower, upper) via profile likelihood ratio
 ### Profile plot
 
 ```python
-result.profile_plot()  # profile deviance curve + CI region
+result.profile_plot()  # likelihood-ratio statistic + CI region
 ```
 
 ## Tweedie: estimating the power parameter
@@ -248,28 +248,21 @@ print(result.p_hat)  # estimated Tweedie power
 print(model.summary(alpha=0.05))
 ```
 
-`phi_method="mle"` and `method="auto"` are the defaults. For ordinary MLE
-profiles, `auto` evaluates the exact Tweedie likelihood and its joint *p*/φ
-derivatives in one compiled series sweep, then takes safeguarded Newton steps.
-Each accepted *p* still has a fully profiled φ, and the winning point is checked
-against neighboring exact profiles. Unsafe curvature, series work, constraints,
-validation, or bounds outside the stable `[1.05, 1.95]` joint range automatically
-fall back to the defensive Brent profile. Explicit
-`method="brent"` retains the nested scalar search. `phi_method="pearson"` is an explicit fast plug-in
-option when exploratory speed matters, but it is not a likelihood profile
-and cannot support a likelihood-ratio confidence interval.
+How the estimate is made (Dunn & Smyth 2005):
 
-As with other local likelihood optimizers, joint ML and Brent convergence do
-not prove a global optimum on an arbitrarily multimodal surface. Use
-`method="grid_refine"` for an explicit broad search when boundary behavior or
-multiple basins are a substantive concern.
+- *p* is the power that maximises the profile likelihood. At each candidate
+  power the mean is refitted, so every candidate is a full fit.
+- φ is the maximum-likelihood dispersion at that candidate's fitted mean.
+- A bounded search over `p_bounds` picks the power; the model is then refitted
+  at it and returned.
+- The confidence interval inverts the likelihood-ratio test on the same
+  profile.
 
-Positive densities normally use the Wright–Bessel series. A diagnosed
-saddlepoint fallback is used only when that exact evaluation is not finite or
-certifiable. Inspect `density_method`, `density_exact`, `saddlepoint_fraction`,
-`near_power_boundary`, `outer_boundary`, and `warnings` on the result. Profiles
-at a search bound, and especially near *p*=1 and *p*=2, are naturally unstable;
-optimizer convergence alone does not make such an estimate reliable.
+The result's `evaluations` table lists every power the search tried, with its
+negative log-likelihood and dispersion. An estimate at an end of `p_bounds` is
+reported in `result.warnings`, because the best power may lie beyond it. Near
+*p*=1 such an edge maximum can be an artefact of rounded responses rather than
+a property of the data.
 
 `sample_weight` follows the exponential-dispersion-model prior-weight convention:
 `Var(Yᵢ | xᵢ) = φ μᵢᵖ / wᵢ` (equivalently, observation-specific dispersion
@@ -342,8 +335,7 @@ eagerly via `ci_alpha` or lazily via `result.ci()`. The interval inverts the
 profile that was searched, around that profile's own value at `p_hat`
 (recorded as `result.search_nll`), so it describes the regime named by
 `search_fit_mode`; `result.nll` describes the published fit's re-profiled
-dispersion. `trace_plot` and `profile_plot` measure against the same searched
-reference.
+dispersion. `profile_plot` measures against the same searched reference.
 
 ### Profile confidence interval
 
@@ -353,25 +345,28 @@ ci = result.ci(alpha=0.05)  # (lower, upper) via profile LRT
 
 ```{note}
 `result.ci()` is explicit and potentially expensive: each new boundary probe
-can require a full model refit. It is available only for MLE dispersion
-profiles. It updates the detached returned result, not the model's
-independently owned published profile state. Pass `ci_alpha=0.05` to
-`estimate_p()` when the interval should be computed transactionally and
+can require a full model refit. It updates the detached returned result, not
+the model's independently owned published profile state. Pass `ci_alpha=0.05`
+to `estimate_p()` when the interval should be computed transactionally and
 cached for `model.summary(alpha=0.05)`. Omitting `ci_alpha` retains the lazy,
 no-extra-CI-work path.
 ```
 
-### Search trace and profile plots
+An end of the interval that does not reach the likelihood-ratio cutoff stops
+where the search had to stop: at the widest range the interval may use, or
+next to a power where the fit failed. That end is marked censored in
+`result.warnings` and in the summary, since the interval may extend beyond it.
+
+### Search record and profile plot
 
 ```python
-result.trace_plot()    # cached search evaluations; performs no new fits
-result.profile_plot()  # dense profile curve; may fit additional uncached p values
+result.evaluations     # every searched power: p, nll, phi, fit_converged
+result.profile_plot()  # likelihood-ratio statistic at the evaluated powers
 ```
 
-`trace_plot()` sorts by *p* and connects only evaluations already cached by
-`estimate_p()`, making it the cheap diagnostic. `profile_plot()` evaluates a dense
-grid and fits any uncached *p* values, so it can be substantially expensive when
-`phi_method="mle"`.
+`profile_plot()` draws only the powers already evaluated, by the search and by
+any interval computed so far, so it performs no new fits. It shades the
+interval once one has been computed for the same `alpha`.
 
 ## How REML treats the dispersion
 

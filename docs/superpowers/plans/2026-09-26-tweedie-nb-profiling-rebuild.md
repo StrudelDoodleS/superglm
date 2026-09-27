@@ -1798,14 +1798,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - Root exports: `TweedieProfileResult`, `NBProfileResult`, `NBThetaBoundWarning`, `PublicationModeError`, `tweedie_logpdf`, `generate_tweedie_cpg`, `TweedieLSS`, `NegativeBinomialLS`.
   - `superglm.profiling` exports: `TweedieProfileResult`, `NBProfileResult`, `NBThetaBoundWarning`.
 
-- [ ] **Step 1: Exports.**
+- [x] **Step 1: Exports.**
   - `superglm/__init__.py` imports `tweedie_logpdf` and `generate_tweedie_cpg` from `superglm._tweedie`, and the two results and the warning from `superglm.profiling`.
   - Remove from the import block and `__all__`:
     - `estimate_tweedie_p`, `estimate_nb_theta`, `estimate_phi`;
     - `TweedieProfileCIDetails`, `TweedieProfileCIEndpoint`, `TweedieProfileCIEvaluation`, `TweedieProfileCIDensityProvenance`;
     - `profile_ci_p`, `profile_ci_theta`.
 
-- [ ] **Step 2: Sweep for the old rule's fingerprints.** Every pattern below must be gone from `src/`, `docs/` and `benchmarks/`. Tests are handled in Step 3. Run:
+- [x] **Step 2: Sweep for the old rule's fingerprints.** Every pattern below must be gone from `src/`, `docs/` and `benchmarks/`. Tests are handled in Step 3. Run:
 
 ```bash
 grep -rnE "_tweedie_profile_kernel|_evaluate_tweedie_density|_prepare_tweedie_density|_profile_phi|_profile_ci_p_detailed|estimate_tweedie_p|estimate_phi\b|profile_ci_p\b|profile_ci_theta|TweedieProfileCI|phi_method|grid_refine|profile_opt|joint_ml|wright_bessel|t_arg_limit|search_trace|density_exact|saddlepoint|_nb2_nll|_theta_ml\b|TweedieScaleProfileData|contract_already_checked" src docs benchmarks --include=*.py --include=*.md --include=*.ipynb --include=*.js --include=*.html
@@ -1813,13 +1813,13 @@ grep -rnE "_tweedie_profile_kernel|_evaluate_tweedie_density|_prepare_tweedie_de
 
 Expected: no hits in `src/`. In `benchmarks/`, only the Task 1 characterisation script may still name master's internals: it documents what it measured and runs only against a master checkout. Say so in its module docstring. Old benchmarks that call removed APIs (`tweedie_profile_end_to_end.py`, `profile_tweedie_reml_fit.py`, `tweedie_reml_search_cost.py`) are updated to the new API so Task 10 can run them.
 
-- [ ] **Step 3: Tests.**
+- [x] **Step 3: Tests.**
   - For every test file matched by `grep -lE "<the Step 2 pattern>" tests/`, delete a test when the behaviour it pins no longer exists (search methods, density provenance, branch masks, CI record classes, Pearson `phi_method`, trace columns). Rewrite it against the public maths when the behaviour survives (logpdf values, φ̂, p̂, CI endpoints, θ̂, warnings on real states).
   - Each rewritten behavioural test records, in its commit message, the mutation that reddens it: a sign flip in `solve_log_phi`'s score, a dropped `count` multiply, an off-by-one peak in the series, and so on. Run each mutation once to confirm, then revert.
   - Heavy files: `test_tweedie_profile.py` (6,200 lines), `test_profile_ci.py`, `test_tweedie_numerics.py`, `test_tweedie_profile_performance.py`, `test_tweedie_profile_reference.py`, `test_reml_search_infeasible_mode.py`, `test_reml_search_dm_cache.py`, `test_profile_structured_retention.py`, `test_constrained_fit_profile.py`, `test_tweedie_generator.py` (its bitwise legacy pin stays; message-text pins become `pytest.raises(ValueError)` without `match`).
   - `test_tweedie_profile_reference.py` pins p̂ = 1.1968971098776182 ± 2e-4. Keep the value and the tolerance; drop its `method == "joint_ml"` and evaluation-count assertions.
 
-- [ ] **Step 4: Docs and notebooks.**
+- [x] **Step 4: Docs and notebooks.**
   - Replace every `method=`, `phi_method=`, `search_fit_mode=` (unless kept), `trace_plot`, `ci_details` and `search_trace` mention with the surviving API.
   - In `families-and-weights.md`, the estimation section says in plain language:
     - p is chosen by maximising the profile likelihood, refitting the mean at each candidate p;
@@ -1828,11 +1828,11 @@ Expected: no hits in `src/`. In `benchmarks/`, only the Task 1 characterisation 
     - and it cites Dunn & Smyth (2005).
   - `internals.md` drops the CI record classes. Re-run the notebooks' affected cells to refresh their outputs: `uv run jupyter nbconvert --to notebook --execute --inplace <nb>`.
 
-- [ ] **Step 5: Durations and lint.** Run `uv run python scripts/run_test_suite.py --store-durations`, or whatever this repo uses to regenerate `.test_durations`; check `scripts/run_test_suite.py --help`. Then run `uv run ruff check src/ tests/ benchmarks/` and `uv run ruff format --check src/ tests/`.
+- [x] **Step 5: Durations and lint.** Run `uv run python scripts/run_test_suite.py --store-durations`, or whatever this repo uses to regenerate `.test_durations`; check `scripts/run_test_suite.py --help`. Then run `uv run ruff check src/ tests/ benchmarks/` and `uv run ruff format --check src/ tests/`.
 
-- [ ] **Step 6: Build the docs in strict off-mode.** Use the repo's docs build command in its off (no-execution) mode, as the dev-ci docs job runs it. See `.github/workflows` for the exact invocation. Expected: no warnings.
+- [x] **Step 6: Build the docs in strict off-mode.** Use the repo's docs build command in its off (no-execution) mode, as the dev-ci docs job runs it. See `.github/workflows` for the exact invocation. Expected: no warnings.
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```bash
 git add -A src benchmarks docs tests .test_durations
@@ -1840,6 +1840,49 @@ git commit -m "refactor: delete the old Tweedie/NB2 profilers and their internal
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+**Task 9 outcome:**
+
+- **Deleted and moved.**
+  - `_tweedie_profile_kernel.py` (662 lines) is gone, and `superglm.warmup()` now compiles `_tweedie_series`.
+  - The root and `superglm.profiling` exports are as specified. `estimate_nb_theta` is no longer exported; it remains private in `profiling/nb.py`, where auto-θ and `estimate_theta` call it.
+  - `profiling/harness.py` moved to `benchmarks/_harness.py`, and the unreferenced `dataclass_payload` is deleted. The two profiling benchmarks import it the way sibling benchmarks import `_platform`: the package path first, then the script-relative one.
+  - `THETA_PROFILED` and its message branch are deleted. Its only caller was the removed `profile_ci_theta`.
+  - The editor's dead inner fit-trace rendering (Task 7 handoff) is deleted: about 170 lines of `summary.js` and its CSS.
+- **Fingerprint sweep.**
+  - The Step 2 pattern has two false positives in `src/`:
+    - `profile_opt` matches `_profile_options`, the editor helper spec §6 keeps. `profile_opt\b` excludes it.
+    - `saddlepoint` is the arm Max's 2026-09-27 amendment sanctions past the work bound (Task 7b).
+  - With those two corrected, `src/`, the user docs and `benchmarks/` are clean, except the characterisation script. Its docstring now says the logpdf, scan and estimate arms run only on a pre-rebuild checkout. The `docs/superpowers/` plans and specs are records and were not swept.
+- **Benchmarks on the rebuilt API.**
+  - `tweedie_estimate_p_timing.py`: its buckets now name the rebuilt functions, and `--method` is gone. Time the baseline with its own commit's copy of the driver.
+  - `profile_tweedie_reml_fit.py`: its probes count Newton solves, memo hits and series passes.
+  - `tweedie_reml_search_cost.py`: fails closed on `converged` and `result.warnings`.
+  - `tweedie_profile_end_to_end.py`: compares the Newton φ solve against a bounded value-only solve of the same criterion. Series passes: 45 against 184 and 171; identical p̂.
+- **Tests.**
+  - Rule: a test that reached surviving behaviour through a removed internal is ported to the public maths; only tests of removed behaviour are deleted. The per-file list with reasons is in the stage handoff.
+  - Net test counts (per file): `test_tweedie_profile` 200 → 89, `test_profile_ci` 48 → 9, `test_tweedie_numerics` 25 → 5, `test_reml_search_infeasible_mode` 28 → 15, `test_tweedie_generator` 24 → 17, `test_weight_semantics` 128 → 122.
+  - Mutation checks: 21 mutations, each reddening its ported test (listed in the commit message).
+- **Regressions the ports exposed.**
+  1. **REML search on a `retain_fit_state=False` model crashed.** The candidate mean was read from `_fit_mu`, which a released fit drops, so the first candidate failed with "Tweedie dispersion needs a positive finite deviance". Fixed with master's own fallback, `predict(X, offset)` when the clone does not retain fit state.
+     - The `_retain_fit_state = False` line in `_prepare_reml` could not fire, because the fit restores the flag from the captured config. It is deleted.
+     - So the scratch clone follows the model's setting. A retaining model's result keeps the last candidate's fitted rows alive. That is a memory change from master, whose scratch always released them. Master paid a `predict` per candidate for it: 40% of a candidate fit on the private validation dataset, 4-7% on the synthetic books. Task 10 should report it.
+  2. **`estimate_theta`'s contract warning said the coefficients were unaffected.** This was Task 8's follow-up 1. `estimate_theta` now passes `theta_role=THETA_ESTIMATED` through `validate_fit_input`, which gives the root `estimate_nb_theta` tests somewhere to be ported.
+  3. **A near-p=1 bimodal dispersion profile.** `solve_log_phi` settles on the local minimum at φ = 35.94 (mean NLL 185.2336). Master's global comparison found φ = 31.73 (185.1868). This is ported as a strict xfail and recorded as a follow-up.
+- **Critic A's low findings.**
+  - `warmup()` now compiles the live series kernel.
+  - The unreachable `sample_weight is None` branches in `_prepare_reml` and `_snapshot_profile_inputs` are gone.
+  - The `_SEARCH_REML_TOL` comment now carries a measurement. At the search bar, a candidate's mean NLL is within 2.5e-6 relative of a `reml_tol=1e-11` fit, typically 1e-10 to 1e-7, on the four characterisation REML books at p ∈ {1.3, 1.5, 1.7}. The old comment claimed 4e-4.
+- **Docs.**
+  - `families-and-weights.md` states the estimation in plain language and cites Dunn & Smyth (2005).
+  - The API pages drop the removed names. `internals.md` drops the CI records.
+  - `conf.py` nitpick-ignores the internal `Interval` record in place of the dead `_CPGRNG` entry.
+  - Neither notebook stores outputs; the docs contract test requires that for the Tweedie one. Both were executed cell by cell in scratch. The editor demo left an `editor_edits.json`, which was removed.
+  - The strict off-mode build (`sphinx-build -n -W --keep-going`, `SUPERGLM_DOCS_EXECUTE=off`) finishes with no warnings.
+- **`test_tweedie_lss_kernel.py`.** Its one reference to the deleted kernel was a bitwise cross-check against the old `_trigamma_positive`. It is now that function's SciPy check (3e-14); no mgcv oracle changed.
+- **Durations.** `.test_durations` keeps its recorded timings. The 706 entries of tests no longer collected are dropped, and 2,220 missing ones are added from a full pinned run of `scripts/run_test_suite.py --store-durations`. Coverage of the non-browser suite is 99.5%.
+- **Full suite (that run).** 17,563 passed, 52 skipped and 4 xfailed; the threads stage passed 40 of 40. It failed only two `test_constrained_fit_profile` cases, which called `_PowerProfile` with `sample_weight=None` (the removed unreachable branch); the helper now passes the weights `estimate_p` would, and the file passes. The only other failure was the duration manifest before its update.
+- **For Task 11.** Master's per-term digamma/trigamma channels are at `git show 9e0fe6f9:src/superglm/_tweedie_profile_kernel.py`.
 
 ---
 
