@@ -45,7 +45,8 @@ _SEARCH_REML_TOL = 1e-6
 # The interval may reach past the default search bounds (1.05, 1.95), as
 # master's did; the series is exact from p = 1.01 to 1.99 (its 50-digit oracle).
 _CI_BOUNDS = (1.02, 1.98)
-_CI_RTOL = 1e-6
+# Endpoints are reported to three decimals; master located them to the same 1e-4.
+_CI_XTOL = 1e-4
 
 
 def profile_phi_at(y: NDArray, mu: NDArray, weights: NDArray, p: float) -> PhiSolve:
@@ -228,6 +229,17 @@ def search_power(
     # The interval evaluates the same profile later, after the caller's
     # progress display has finished with the search.
     profile.on_evaluation = None
+    if not profile.candidates:
+        power, reason = next(iter(profile.infeasible.items()))
+        raise RuntimeError(
+            "REML could not certify a penalized coefficient mode at any evaluated power in "
+            f"[{p_bounds[0]:.6g}, {p_bounds[1]:.6g}]; the first refusal, at p={power:.6g}: {reason}"
+        )
+    return _searched_result(profile, objective, fit_mode, p_bounds, search_converged)
+
+
+def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
+    """The search's estimate, its evaluations in search order and its warnings."""
     p_hat, nll_hat = objective.best()
     best = profile.candidates[p_hat]
     candidates = [profile.candidates.get(p, _INFEASIBLE_CANDIDATE) for p in objective.values]
@@ -289,6 +301,23 @@ def _interval_bounds(p_hat: float, p_bounds: tuple[float, float]) -> tuple[float
     return lower, upper
 
 
+def _censoring_warnings(interval: Interval, alpha: float, bounds: tuple[float, float]):
+    """One warning per censored side, naming where the interval stopped and why."""
+    sides = (
+        ("lower", interval.lower, interval.lower_censored),
+        ("upper", interval.upper, interval.upper_censored),
+    )
+    return [
+        f"the {100.0 * (1.0 - alpha):g}% interval for p is censored at its {side} end "
+        f"p={end:.6g}, "
+        + ("a search bound" if end in bounds else "next to an infeasible power")
+        + ": the likelihood-ratio statistic does not reach its cutoff there, so the "
+        "interval may extend beyond it."
+        for side, end, censored in sides
+        if censored
+    ]
+
+
 @dataclass
 class TweedieProfileResult:
     """Profile-likelihood estimate of the Tweedie power p and dispersion phi.
@@ -313,20 +342,25 @@ class TweedieProfileResult:
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
 
     def interval(self, alpha: float = 0.05) -> Interval:
-        """Likelihood-ratio interval for p on the searched curve, with censoring flags."""
+        """Likelihood-ratio interval for p on the searched curve, with censoring flags.
+
+        A censored side is also recorded in ``warnings`` when it is computed.
+        """
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
             raise ValueError("alpha must be in (0, 1)")
         if alpha not in self._ci_cache:
-            self._ci_cache[alpha] = likelihood_ratio_interval(
+            interval = likelihood_ratio_interval(
                 self._objective,
                 self.p_hat,
                 self.search_nll,
                 self._ci_bounds,
                 alpha=alpha,
                 scale=self._ll_scale,
-                rtol=_CI_RTOL,
+                xtol=_CI_XTOL,
             )
+            self._ci_cache[alpha] = interval
+            self.warnings.extend(_censoring_warnings(interval, alpha, self._ci_bounds))
         return self._ci_cache[alpha]
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:

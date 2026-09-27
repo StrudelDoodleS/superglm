@@ -111,8 +111,6 @@ def estimate_p(
 ):
     """Estimate Tweedie p and atomically publish one profiled final fit."""
     from superglm.model import fit_ops
-    from superglm.model.fit_workspace import FitWorkspace
-    from superglm.profiling.tweedie import search_power
 
     publish_mode, search_mode, reml_budget = _resolve_power_request(
         model,
@@ -127,24 +125,9 @@ def estimate_p(
     validated = fit_ops._validate_entrypoint_input(model, X, y, sample_weight, offset)
     X, y, sample_weight, offset = validated
     _refuse_replication_weights(model, sample_weight)
-
-    # Profiling is attempt-local: the result's lazy interval keeps refitting this
-    # private model, never the caller's installed fitted revision.
-    profile_workspace = FitWorkspace.start(
-        model, mode="estimate_p_profile", validated_inputs=validated
+    result = _search_power_privately(
+        model, validated, fit_mode=search_mode, p_bounds=p_bounds, xatol=xatol, report=report
     )
-    result = search_power(
-        profile_workspace.model,
-        X,
-        y,
-        sample_weight,
-        offset,
-        fit_mode=search_mode,
-        p_bounds=p_bounds,
-        xatol=xatol,
-        on_evaluation=lambda row: report("profiling", {"profile_trace": [row]}),
-    )
-    del profile_workspace
     result.fit_mode = publish_mode
     if ci_alpha is not None:
         result.interval(ci_alpha)
@@ -164,6 +147,28 @@ def estimate_p(
         max_reml_iter=reml_budget,
     )
     return result
+
+
+def _search_power_privately(model, validated, *, fit_mode, p_bounds, xatol, report):
+    """The power search on an attempt-local copy of the model.
+
+    The result's lazy interval keeps refitting this private model, never the
+    caller's installed fitted revision.
+    """
+    from superglm.model.fit_workspace import FitWorkspace
+    from superglm.profiling.tweedie import search_power
+
+    profile_workspace = FitWorkspace.start(
+        model, mode="estimate_p_profile", validated_inputs=validated
+    )
+    return search_power(
+        profile_workspace.model,
+        *validated,
+        fit_mode=fit_mode,
+        p_bounds=p_bounds,
+        xatol=xatol,
+        on_evaluation=lambda row: report("profiling", {"profile_trace": [row]}),
+    )
 
 
 def _ignore_progress(phase, payload=None) -> None:
@@ -271,12 +276,6 @@ def _publish_profiled_family(
     while the refit still holds its fitted rows; the durable state is compacted
     only afterwards, and the model changes in the single install at the end.
     """
-    from superglm.model import fit_ops
-    from superglm.model.fit_state import (
-        ModelConfigPublication,
-        _install_fit_state,
-        capture_fit_state,
-    )
     from superglm.model.fit_workspace import FitWorkspace
 
     final_workspace = FitWorkspace.start(
@@ -285,16 +284,37 @@ def _publish_profiled_family(
         validated_inputs=validated,
         config_overrides={"family": family, "retain_fit_state": True},
     )
-    final_model = final_workspace.model
     try:
         debug_recorder = _refit_selected(
-            final_model, validated, references, fit_mode, max_reml_iter, model._retain_fit_state
+            final_workspace.model,
+            validated,
+            references,
+            fit_mode,
+            max_reml_iter,
+            model._retain_fit_state,
         )
     except ObservedModeNotCertifiedError as exc:
         raise _publication_mode_failure(
             exc, parameter=parameter, value=float(value), decoupled=decoupled
         ) from exc
-    synchronize(final_model)
+    synchronize(final_workspace.model)
+    _install_refit(model, final_workspace, family)
+    if fit_mode == "fit_reml":
+        from superglm.model import fit_ops
+
+        fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
+
+
+def _install_refit(model, final_workspace, family) -> None:
+    """Compact the synchronized refit as the model asks, then swap it in as one revision."""
+    from superglm.model import fit_ops
+    from superglm.model.fit_state import (
+        ModelConfigPublication,
+        _install_fit_state,
+        capture_fit_state,
+    )
+
+    final_model = final_workspace.model
     if not model._retain_fit_state:
         final_model._retain_fit_state = False
         fit_ops._maybe_release_fit_state(final_model)
@@ -310,8 +330,6 @@ def _publish_profiled_family(
         ),
     )
     _install_fit_state(model, candidate)
-    if fit_mode == "fit_reml":
-        fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
 
 
 def _refit_selected(final_model, validated, references, fit_mode, max_reml_iter, retain):
@@ -336,8 +354,8 @@ def _install_tweedie_profile(final_model, *, X, y, offset, result) -> None:
     """Restate the refit at the profiled dispersion and attach the result.
 
     The installed copy shares the searched objective but owns its interval
-    cache: an interval computed through a mutated returned result must not
-    reach the model's summary.
+    cache and warnings: an interval computed through the returned result must
+    not reach the model's summary.
     """
     # The canonical public mean: on a discretized model the internal design's
     # matvec is a binned approximation of it.
@@ -351,6 +369,7 @@ def _install_tweedie_profile(final_model, *, X, y, offset, result) -> None:
     )
     installed = copy.copy(result)
     installed._ci_cache = dict(result._ci_cache)
+    installed.warnings = list(result.warnings)
     final_model._tweedie_profile_result = installed
 
 
@@ -459,6 +478,11 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
     _validate_profile_selection_mode(model, resolved_mode)
     progress_callback = kwargs.pop("progress_callback", None)
+    if progress_callback is not None and "trace_callback" not in kwargs:
+        # Each theta step reaches a live display the way estimate_p's candidates do.
+        kwargs["trace_callback"] = lambda row: progress_callback(
+            "profiling", {"profile_trace": [row]}
+        )
 
     X_ref = X
     y_ref = y

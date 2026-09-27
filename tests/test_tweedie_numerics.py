@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pytest
 from scipy.special import digamma, gammaln, ive, polygamma
 
 import superglm.profiling.tweedie as tweedie_module
-from superglm import SuperGLM
 from superglm._tweedie_profile_kernel import series_moments
 from superglm.distributions import Tweedie
-from superglm.features.numeric import Numeric
 from superglm.links import LogLink
 from superglm.model.fit_ops import _compute_fit_stats
 from superglm.profiling.tweedie import (
@@ -262,22 +259,6 @@ def test_series_results_do_not_depend_on_row_order() -> None:
         permuted = series_moments(log_t[order], 1.5, max_total_terms=max_total_terms)
         for column, shuffled in zip(forward, permuted, strict=True):
             np.testing.assert_array_equal(column[order], shuffled)
-
-
-@pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])
-def test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics(p: float) -> None:
-    x = np.linspace(-1.0, 1.0, 40)
-    y = np.exp(0.3 + 0.5 * x)
-    frame = pd.DataFrame({"x": x})
-    model = SuperGLM(
-        family=Tweedie(p=p),
-        selection_penalty=0,
-        features={"x": Numeric()},
-    ).fit(frame, y)
-
-    assert np.isfinite(model.result.phi)
-    assert np.isfinite(model._fit_stats.log_likelihood)
-    assert np.isfinite(model._fit_stats.null_log_likelihood)
 
 
 def test_p15_large_argument_uses_finite_scaled_asymptotic() -> None:

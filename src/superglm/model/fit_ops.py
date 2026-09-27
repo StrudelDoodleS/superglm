@@ -543,14 +543,27 @@ def _compute_fit_stats(
         # counts each row w times.  The Pearson numerator below scales with the
         # weight under either reading, so only this pair moves.
         replication = weight_semantics == "frequency"
-        fitted_logpdf, null_logpdf = tweedie_logpdf_pair(
-            y,
-            mu,
-            null_mu,
-            phi,
-            distribution.p,
-            weights=np.ones_like(weights) if replication else weights,
-        )
+        try:
+            fitted_logpdf, null_logpdf = tweedie_logpdf_pair(
+                y,
+                mu,
+                null_mu,
+                phi,
+                distribution.p,
+                weights=np.ones_like(weights) if replication else weights,
+            )
+        except FloatingPointError as exc:
+            import warnings
+
+            # The series refuses rows whose peak index passes its work bound,
+            # which takes phi near round-off: a near-exact fit. The fit stands;
+            # only its likelihood has no series value.
+            warnings.warn(
+                f"Tweedie log-likelihood is not available for this fit: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            fitted_logpdf = null_logpdf = np.full_like(y, np.nan)
         if replication:
             fitted_logpdf = weights * fitted_logpdf
             null_logpdf = weights * null_logpdf

@@ -10,8 +10,8 @@ from scipy.optimize import brentq, minimize_scalar
 from scipy.stats import chi2
 
 # An infeasible point's likelihood-ratio excess. Finite so brentq's
-# interpolation stays finite; any excess above 1 at a root marks the side
-# censored (see _interval_side).
+# interpolation stays finite; a root whose bracket partner is infeasible marks
+# the side censored (see _infeasible_beyond).
 _BARRIER = 1e6
 # Stand-in objective for an infeasible point inside Brent: finite because the
 # parabolic step differences objective values (inf - inf is NaN); its square
@@ -35,8 +35,6 @@ class RecordedObjective:
     def best(self) -> tuple[float, float]:
         """The evaluated point with the smallest finite objective."""
         finite = {x: v for x, v in self.values.items() if math.isfinite(v)}
-        if not finite:
-            raise RuntimeError("no evaluated point has a finite profile objective")
         x_best = min(finite, key=finite.__getitem__)
         return x_best, finite[x_best]
 
@@ -78,40 +76,85 @@ class Interval:
 
 
 def likelihood_ratio_interval(
-    objective: Callable[[float], float],
+    objective: RecordedObjective,
     x_hat: float,
     nll_hat: float,
     bounds: tuple[float, float],
     *,
     alpha: float,
     scale: float,
-    rtol: float,
+    xtol: float,
 ) -> Interval:
-    """{x : 2 scale (nll(x) - nll_hat) <= chi2_1(1 - alpha)} around x_hat (Venzon & Moolgavkar 1988)."""
+    """{x : 2 scale (nll(x) - nll_hat) <= chi2_1(1 - alpha)} around x_hat (Venzon & Moolgavkar 1988).
+
+    Each side is one bracketed root of the excess over the cutoff, found to
+    ``xtol``; a side with no crossing before its bound, or whose crossing is a
+    jump into infeasible points, is censored where it stopped.
+    """
     cutoff = float(chi2.ppf(1.0 - alpha, 1))
 
     def excess(x: float) -> float:
         value = objective(x)
         return 2.0 * scale * (value - nll_hat) - cutoff if math.isfinite(value) else _BARRIER
 
-    lower, lower_censored = _interval_side(excess, bounds[0], x_hat, rtol)
-    upper, upper_censored = _interval_side(excess, bounds[1], x_hat, rtol)
+    recorded = objective.values
+    lower, lower_censored = _interval_side(excess, recorded, x_hat, bounds[0], cutoff, xtol)
+    upper, upper_censored = _interval_side(excess, recorded, x_hat, bounds[1], cutoff, xtol)
     return Interval(lower, upper, lower_censored, upper_censored)
 
 
-def _interval_side(excess, bound: float, x_hat: float, rtol: float) -> tuple[float, bool]:
+def _interval_side(excess, recorded, x_hat, bound, cutoff, xtol) -> tuple[float, bool]:
     """Root of the excess between x_hat and the bound, or the bound when none exists.
 
-    A genuine likelihood-ratio crossing has |excess| <= |slope| * xtol at the
-    root, well under 1 for any realistic n (slope ~ 2 sqrt(chi2 n curvature),
-    about 4e3 at n = 1e6, times the ~1.5e-6 root tolerance). A root that brentq
-    places at a jump into the infeasible barrier does not, and is reported
-    censored.
+    Each evaluation is a model fit, so the walk starts where a quadratic
+    profile predicts the crossing and doubles its step toward the bound until
+    the excess turns positive: a near-quadratic profile is bracketed at the
+    first or second point, and only a censored side reaches the bound.
     """
-    if excess(bound) <= 0.0:
-        return bound, True
-    root = float(brentq(excess, min(bound, x_hat), max(bound, x_hat), xtol=1e-12, rtol=rtol))
-    return root, abs(excess(root)) > 1.0
+    step = _predicted_crossing(excess, recorded, x_hat, bound, cutoff)
+    inner, outer = x_hat, _toward(x_hat, bound, step)
+    while excess(outer) <= 0.0:
+        if outer == bound:
+            return bound, True
+        step *= 2.0
+        inner, outer = outer, _toward(x_hat, bound, step)
+    root = float(brentq(excess, min(inner, outer), max(inner, outer), xtol=xtol))
+    return root, excess(root) < 0.0 and _infeasible_beyond(recorded, root, bound)
+
+
+def _predicted_crossing(excess, recorded, x_hat, bound, cutoff) -> float:
+    """Distance from x_hat to the crossing of a quadratic profile, or to the bound.
+
+    The quadratic passes through x_hat and the recorded point on this side
+    whose statistic is nearest the cutoff, the point whose curvature matters
+    most for this crossing. With no such point the walk starts at the bound.
+    """
+    side = [
+        x
+        for x, value in recorded.items()
+        if math.isfinite(value) and (x - x_hat) * (bound - x_hat) > 0.0 and excess(x) > -cutoff
+    ]
+    if not side:
+        return abs(bound - x_hat)
+    nearest = min(side, key=lambda x: abs(excess(x)))
+    return abs(nearest - x_hat) * math.sqrt(cutoff / (excess(nearest) + cutoff))
+
+
+def _toward(x_hat: float, bound: float, step: float) -> float:
+    """The point ``step`` from x_hat toward the bound, the bound itself once the step reaches it."""
+    return bound if step >= abs(bound - x_hat) else x_hat + math.copysign(step, bound - x_hat)
+
+
+def _infeasible_beyond(recorded, root: float, bound: float) -> bool:
+    """Whether the evaluated point next beyond the root is infeasible.
+
+    brentq keeps a sign-change bracket, so that point is the root's partner:
+    a likelihood-ratio crossing has a feasible partner, a jump into the
+    infeasible region an infeasible one, however small the bracket.
+    """
+    beyond = [x for x in recorded if (x - root) * (bound - root) > 0.0]
+    partner = min(beyond, key=lambda x: abs(x - root))
+    return not math.isfinite(recorded[partner])
 
 
 def profile_plot(values, x_hat, nll_hat, *, scale, alpha, interval, label, ax=None):

@@ -3,10 +3,12 @@
 import math
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.optimize import minimize_scalar
 from scipy.special import i1e
 
+from superglm import SuperGLM
 from superglm._tweedie import (
     TweedieRows,
     generate_tweedie_cpg,
@@ -15,6 +17,8 @@ from superglm._tweedie import (
     tweedie_logpdf_pair,
     tweedie_unit_deviance,
 )
+from superglm.distributions import Tweedie
+from superglm.features.numeric import Numeric
 
 EPS = np.finfo(np.float64).eps
 
@@ -93,6 +97,74 @@ def test_solve_log_phi_refuses_no_interior_optimum():
     y, mu = _book()
     with pytest.raises(ValueError, match="positive finite deviance"):
         solve_log_phi(TweedieRows.prepare(y, np.ones_like(y), 1.5), 0.0)
+
+
+def _reml_scale_criterion(rows, deviance, nullity, u):
+    """Q(u) = D e^-u / 2 - l_sat(e^u) - (M / 2)(log 2 pi + u), evaluated directly."""
+    saturated = rows.saturated(math.exp(u))[0]
+    return 0.5 * deviance * math.exp(-u) - saturated - 0.5 * nullity * (math.log(2 * math.pi) + u)
+
+
+def test_solve_log_phi_with_a_nullity_is_the_reml_scale_minimiser():
+    # Wood (2011) Eq. 4's scale term: the constant (M / 2) log 2 pi moves the
+    # criterion, not phi, so only a direct evaluation of Q pins it.
+    y, mu = _book(p=1.4, n=2000, seed=5)
+    rows = TweedieRows.prepare(y, np.ones_like(y), 1.4)
+    deviance, nullity = float(np.sum(tweedie_unit_deviance(y, mu, 1.4))) + 7.0, 12.0
+    solved = solve_log_phi(rows, deviance, nullity)
+    u = math.log(solved.phi)
+    assert solved.criterion == pytest.approx(
+        _reml_scale_criterion(rows, deviance, nullity, u), rel=1e-12
+    )
+    # Q'(u) = -D e^-u / 2 + T(u) - M / 2 vanishes to its round-off.
+    score = -0.5 * deviance / solved.phi + rows.saturated(solved.phi)[1] - 0.5 * nullity
+    assert abs(score) <= 1e-9 * rows.size
+
+
+def test_interior_optimum_exists_until_the_nullity_reaches_2n_over_p_minus_1():
+    # Q's upper tail slopes as N / (p - 1) - M / 2, so an interior minimum
+    # exists exactly while M < 2 N / (p - 1); 3/4 of that limit still has one.
+    y, mu = _book(p=1.5, n=400, seed=9)
+    rows = TweedieRows.prepare(y, np.ones_like(y), 1.5)
+    deviance = float(np.sum(tweedie_unit_deviance(y, mu, 1.5)))
+    limit = 2.0 * rows.size / 0.5
+    solved = solve_log_phi(rows, deviance, 0.75 * limit)
+    score = -0.5 * deviance / solved.phi + rows.saturated(solved.phi)[1] - 0.375 * limit
+    assert solved.curvature > 0.0 and abs(score) <= 1e-9 * rows.size
+    with pytest.raises(ValueError, match="no finite interior optimum"):
+        solve_log_phi(rows, deviance, limit)
+
+
+def test_frequency_counts_solve_as_the_replicated_rows_at_a_nullity():
+    # The likelihood size of counted rows is their total count. At p = 1.5 an
+    # interior optimum needs M < 4 N; with every row counted three times,
+    # M = 5 N lies inside the replicated book's limit of 12 N but beyond the
+    # limit of its N distinct rows.
+    y, mu = _book(p=1.5, n=300, seed=4)
+    counts = np.full(y.size, 3.0)
+    nullity = 5.0 * float(np.count_nonzero(y))
+    deviance = float(np.sum(counts * tweedie_unit_deviance(y, mu, 1.5)))
+    counted = solve_log_phi(TweedieRows.prepare(y, counts, 1.5, frequency=True), deviance, nullity)
+    replicated_rows = TweedieRows.prepare(np.repeat(y, 3), np.ones(3 * y.size), 1.5)
+    replicated = solve_log_phi(replicated_rows, deviance, nullity)
+    assert counted.phi == pytest.approx(replicated.phi, rel=1e-12)
+    assert counted.criterion == pytest.approx(replicated.criterion, rel=1e-12)
+
+
+@pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])
+def test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics(p):
+    # An exact curve leaves phi at round-off (~1e-26), where every row's series
+    # peak index is past the work bound. The fit is published; its likelihood,
+    # which the series cannot evaluate there, is NaN with a warning naming why.
+    x = np.linspace(-1.0, 1.0, 40)
+    y = np.exp(0.3 + 0.5 * x)
+    model = SuperGLM(family=Tweedie(p=p), selection_penalty=0, features={"x": Numeric()})
+    with pytest.warns(RuntimeWarning, match="series cannot evaluate 40 of 40"):
+        model.fit(pd.DataFrame({"x": x}), y)
+    assert np.isfinite(model.result.phi) and np.isfinite(model.result.deviance)
+    assert np.isnan(model._fit_stats.log_likelihood)
+    assert np.isnan(model._fit_stats.null_log_likelihood)
+    assert "Log-Likelihood" in str(model.summary())
 
 
 class _UnitScoreRows(TweedieRows):
