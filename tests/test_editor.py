@@ -3540,6 +3540,37 @@ def test_tweedie_editor_profile_payload_only_reads_the_cached_ci(
     assert payload["ci_status"] == expected_status
 
 
+def test_nb_editor_profile_payload_keeps_a_censored_side_without_a_warning():
+    import warnings
+
+    from superglm.editor.widget import _profile_estimate_payload
+
+    # True theta 50 on 400 rows cannot reject Poisson: theta_hat is interior and
+    # the interval's upper side stops where its search stopped.
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 400)})
+    mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+    y = rng.negative_binomial(50.0, 50.0 / (50.0 + mu)).astype(float)
+    model = SuperGLM(
+        family=families.NegativeBinomial(theta="auto"),
+        selection_penalty=0,
+        features={"x": Numeric()},
+    )
+    result = model.estimate_theta(X, y)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        payload = _profile_estimate_payload(result, "nb2_theta")
+
+    interval = result._interval(0.05)
+    assert interval.upper_censored
+    assert (payload["ci_low"], payload["ci_high"], payload["ci_status"]) == (
+        interval.lower,
+        interval.upper,
+        "censored",
+    )
+
+
 def test_widget_profile_distribution_job_reports_live_trace(
     editor_model, editor_frame, monkeypatch
 ):

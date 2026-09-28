@@ -49,7 +49,7 @@ from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
 from superglm.inference.summary_levels import validate_level_display
-from superglm.profiling._reporting import cached_tweedie_profile_ci
+from superglm.profiling._reporting import cached_tweedie_profile_ci, reported_interval
 
 _LIVE_WIDGETS: set[EditorWidget] = set()
 _LOGGER = logging.getLogger(__name__)
@@ -1127,13 +1127,15 @@ def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
         cached_ci, ci_status = cached_tweedie_profile_ci(result, 0.05)
         if cached_ci is not None:
             ci_low, ci_high = cached_ci
-    else:
-        ci = getattr(result, "ci", None)
-        if callable(ci):
-            try:
-                ci_low, ci_high = ci(alpha=0.05)
-            except Exception:
-                ci_low, ci_high = None, None
+    elif name == "theta":
+        # The recorded interval keeps its censoring and caution, which ci()
+        # drops, and reading it raises no warning.
+        try:
+            (ci_low, ci_high), ci_status = reported_interval(
+                result._interval(0.05), caution=result._caution is not None
+            )
+        except Exception:
+            ci_status = "not computed"
 
     estimate = {
         "parameter": name,
