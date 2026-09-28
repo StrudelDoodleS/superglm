@@ -350,7 +350,7 @@ class TestMaximumLikelihoodPhi:
         assert "too close to 1" in str(raised.value)
         assert "REML" not in str(raised.value)
 
-    def test_an_unconverged_winner_has_no_interval(self):
+    def test_an_unconverged_winner_still_gets_an_interval_with_a_caution(self):
         """One coefficient iteration per candidate, at a tolerance one cannot meet even from
         the previous candidate's warm start: p_hat's profile value is no optimum."""
         import pandas as pd
@@ -365,16 +365,17 @@ class TestMaximumLikelihoodPhi:
             max_iter=1,
             tol=1e-12,
         )
-        with pytest.warns(UserWarning, match="No likelihood-ratio interval"):
+        with pytest.warns(UserWarning, match="raise max_iter"):
             result = model.estimate_p(pd.DataFrame({"x": x}), y, ci_alpha=0.05)
         assert not result.converged
-        assert any("Raise max_iter" in message for message in result.warnings)
-        with pytest.raises(RuntimeError, match="No likelihood-ratio interval"):
-            result.interval(0.05)
-        # Reports say the interval does not exist rather than that nobody asked.
-        assert "[CI unavailable]" in str(model.summary())
+        # Recorded once, however often the interval is read.
+        assert sum("raise max_iter" in message for message in result.warnings) == 1
+        with pytest.warns(UserWarning, match="raise max_iter"):
+            interval = result.interval(0.05)
+        assert interval.lower < result.p_hat < interval.upper
+        assert "CI not computed" not in str(model.summary())
 
-    def test_an_unsettled_reml_winner_names_the_route_to_an_interval(self, monkeypatch):
+    def test_an_unsettled_reml_winner_names_its_cause_and_keeps_the_interval(self, monkeypatch):
         """One smoothing-parameter iteration per candidate: max_iter cannot help there."""
         import pandas as pd
 
@@ -395,7 +396,9 @@ class TestMaximumLikelihoodPhi:
         model = SuperGLM(family=TweedieDistribution(p=1.5), features={"x": Spline(n_knots=8)})
         with pytest.warns(UserWarning, match="search_fit_mode='fit'"):
             result = model.estimate_p(pd.DataFrame({"x": x}), y, fit_mode="reml", ci_alpha=0.05)
-        assert not any("Raise max_iter" in message for message in result.warnings)
+        assert not any("max_iter" in message for message in result.warnings)
+        # Disclosed, not refused: the interval exists.
+        assert 0.05 in result._ci_cache
 
     def test_a_decoupled_search_keeps_its_own_fit_mode(self):
         import pandas as pd

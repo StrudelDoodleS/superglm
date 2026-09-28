@@ -395,15 +395,15 @@ def estimate_nb_theta(
     # Published to six significant digits, the precision the family reports.
     theta_hat = float(f"{theta:.6g}")
     messages = _warn_unsettled(solve, settled, theta_bounds, theta_hat, maxiter)
-    # An unsettled theta_hat is the last iterate; the interval inverts the
-    # fixed-mean profile from an optimum it is not. A bound is censored instead.
-    refusal = (
+    # An unsettled theta_hat is the last iterate, not the fixed-mean optimum:
+    # the interval inverts the profile from that optimum instead, and says so.
+    # A bound is censored instead.
+    caution = (
         None
         if settled or solve.at_bound
         else (
-            f"No likelihood-ratio interval for theta: the alternation did not settle in "
-            f"{maxiter} mean fits, so theta_hat={theta_hat:g} is its last iterate, not the "
-            "optimum the profile is inverted from."
+            f"theta_hat={theta_hat:g} is the alternation's last iterate after {maxiter} mean "
+            "fits, not the fixed-mean optimum; the theta interval is inverted from that optimum."
         )
     )
     return NBProfileResult(
@@ -417,7 +417,7 @@ def estimate_nb_theta(
         _weights=mean.w,
         _weight_semantics=semantics,
         _bound_side=solve.side,
-        _refusal=refusal,
+        _caution=caution,
     )
 
 
@@ -481,8 +481,9 @@ class NBProfileResult:
     # The estimation bound theta_hat sits on ("lower"/"upper"), or None when interior.
     _bound_side: str | None = field(default=None, repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
-    # Why no interval exists: theta_hat is no located optimum of the profile.
-    _refusal: str | None = field(default=None, repr=False)
+    # Why theta_hat is not the fixed-mean profile's optimum, which the interval
+    # is then inverted from.
+    _caution: str | None = field(default=None, repr=False)
 
     def _at_mean(self, y: NDArray, mu: NDArray, weights: NDArray) -> NBProfileResult:
         """The estimate restated at a fitted mean, whose NLL and interval it then describes."""
@@ -512,35 +513,53 @@ class NBProfileResult:
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for theta on the fixed-mean profile, with censoring flags.
 
-        A censored side is recorded in ``warnings`` when first computed and
-        warned about on every call. Raises RuntimeError when theta_hat is no
-        located optimum (an alternation that did not settle).
+        A censored side, and a theta_hat that is not the fixed-mean optimum, is
+        recorded in ``warnings`` when first computed and warned about on every
+        call; the interval is then inverted from that optimum.
         """
         interval = self._interval(alpha)
-        for message in self._censoring(interval, alpha):
+        cautions = self._censoring(interval, alpha)
+        for message in [self._caution] * (self._caution is not None) + cautions:
             warn_caller(message)
         return interval
 
     def _censoring(self, interval: Interval, alpha: float) -> list[str]:
         return censoring_warnings(interval, alpha, "theta", lambda _: "where its search stopped")
 
-    def _interval_refusal(self) -> str | None:
-        return self._refusal
+    def _optimum(self) -> tuple[float, float]:
+        """log theta and NLL of the fixed-mean profile's maximum the interval inverts from.
+
+        A settled estimate is that maximum to the alternation's tolerance; after
+        a caution the fixed-mean score root replaces it.
+        """
+        if self._caution is None:
+            return math.log(self.theta_hat), self.nll
+        low, high = self._log_search_range()
+        root = solve_theta(
+            self._y,
+            self._mu,
+            self._weights,
+            self.theta_hat,
+            weight_semantics=self._weight_semantics,
+            bounds=(math.exp(low), math.exp(high)),
+        )
+        return math.log(root.theta), self._profile_nll(root.theta)
 
     def _interval(self, alpha: float) -> Interval:
         """The interval, computed once and recorded; reports read it without a warning."""
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
             raise ValueError("alpha must be in (0, 1)")
-        if self._refusal is not None:
-            raise RuntimeError(self._refusal)
+        if self._caution is not None and self._caution not in self.warnings:
+            self.warnings.append(self._caution)
         if alpha not in self._ci_cache:
+            log_optimum, optimum_nll = self._optimum()
             # Rooted in log theta: the range spans up to eighteen decades, and
             # an endpoint's own magnitude is its only yardstick.
             found = likelihood_ratio_interval(
                 RecordedObjective(lambda log_theta: self._profile_nll(math.exp(log_theta))),
-                math.log(self.theta_hat),
-                self.nll,
+                log_optimum,
+                optimum_nll,
                 self._log_search_range(),
                 alpha=alpha,
                 scale=self._size,

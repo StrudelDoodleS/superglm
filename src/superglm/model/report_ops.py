@@ -18,7 +18,7 @@ from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
-    reported_profile_interval,
+    reported_interval,
     tweedie_profile_report_identity,
 )
 from superglm.solvers.rank import selected_group_name_set
@@ -259,7 +259,7 @@ def summary(
     nb_pr = getattr(model, "_nb_profile_result", None)
     if nb_pr is not None:
         # The theta profile is at a fixed mean, cheap enough to invert on demand.
-        ci, ci_status = reported_profile_interval(nb_pr, alpha)
+        ci, ci_status = reported_interval(nb_pr._interval(alpha))
         model_info["nb_theta"] = nb_pr.theta_hat
         model_info["nb_theta_ci"] = ci
         model_info["nb_theta_ci_status"] = ci_status

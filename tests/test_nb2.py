@@ -546,8 +546,12 @@ class TestNB2AutoTheta:
             assert interval.lower == pytest.approx(held, rel=1e-12) and interval.lower_censored
             assert interval.upper > held and not interval.upper_censored
 
-    def test_an_unsettled_alternation_has_no_interval(self, monkeypatch):
-        """One mean fit: theta_hat is the alternation's first iterate, not a fixed point."""
+    def test_an_unsettled_alternation_inverts_from_the_fixed_mean_optimum(self, monkeypatch):
+        """One mean fit: theta_hat is the alternation's first iterate, not the optimum.
+
+        Imperfect convergence is disclosed, not refused: the interval is inverted
+        from the published mean's own profile optimum, and a caution says so.
+        """
         import functools
 
         import superglm.profiling.nb as nb_module
@@ -566,14 +570,26 @@ class TestNB2AutoTheta:
             penalty=GroupLasso(lambda1=0.0),
             features={"x": Numeric()},
         )
-        with pytest.warns(UserWarning, match="No likelihood-ratio interval for theta"):
+        with pytest.warns(UserWarning, match="not the fixed-mean optimum"):
             result = model.estimate_theta(X, y, ci_alpha=0.05)
         assert not result.converged
-        assert any("did not settle" in message for message in result.warnings)
-        with pytest.raises(RuntimeError, match="did not settle"):
-            model._nb_profile_result.interval(0.05)
-        # The summary reports it as unavailable, and does not raise.
-        assert "[CI unavailable]" in str(model.summary())
+        published = model._nb_profile_result
+        root = solve_theta(
+            published._y,
+            published._mu,
+            published._weights,
+            published.theta_hat,
+            weight_semantics=published._weight_semantics,
+            bounds=(1e-8, 1e8),
+        ).theta
+        # The interval is inverted from the fixed-mean score root, to its tolerance,
+        # which the unsettled theta_hat is not.
+        assert math.exp(published._optimum()[0]) == pytest.approx(root, rel=4e-8)
+        assert published.theta_hat != pytest.approx(root, rel=4e-8)
+        with pytest.warns(UserWarning, match="not the fixed-mean optimum"):
+            interval = published.interval(0.05)
+        assert interval.lower < root < interval.upper
+        assert "CI not computed" not in str(model.summary())
 
     def test_a_near_poisson_upper_side_is_reported_censored(self):
         from superglm.export.summary import build_summary_export_payload

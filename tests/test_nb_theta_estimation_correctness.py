@@ -386,8 +386,9 @@ class TestJointRefitLimit:
         result = model._nb_profile_result
         assert result.converged is False
         assert any("did not reach a joint fixed point" in message for message in result.warnings)
-        # theta_hat is off the score root at the published mean: no interval.
-        with pytest.raises(RuntimeError, match="stopped after 0 refits"):
+        # theta_hat is off the score root at the published mean: the interval is
+        # inverted from that root, and says so.
+        with pytest.warns(UserWarning, match="not the optimum at the published mean"):
             result.interval(0.05)
 
 

@@ -1157,11 +1157,11 @@ def _refine_nb_theta_to_reml_fixed_point(
         warnings=warned,
         _bound_side=solve.side,
         # Refits that stop short leave theta_hat off the score root at the
-        # published mean; a joint fixed point puts it there.
-        _refusal=(
-            f"No likelihood-ratio interval for theta: the theta / REML alternation stopped "
-            f"after {_NB_JOINT_MAX_REFITS} refits, so theta_hat={theta:g} is not the optimum "
-            "at the published mean."
+        # published mean; the interval is inverted from that root instead.
+        _caution=(
+            f"theta_hat={theta:g} is where the theta / REML alternation stopped after "
+            f"{_NB_JOINT_MAX_REFITS} refits, not the optimum at the published mean; the theta "
+            "interval is inverted from that optimum."
             if exhausted
             else None
         ),

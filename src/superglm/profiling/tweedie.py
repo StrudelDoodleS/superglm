@@ -293,7 +293,7 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         phi_hat=best.phi,
         nll=nll_hat,
         converged=search_converged and best.fit_converged,
-        _refusal=_winner_refusal(best, p_hat),
+        _caution=_winner_caution(best, p_hat),
         fit_mode=fit_mode,
         search_fit_mode=fit_mode,
         evaluations=evaluations,
@@ -305,24 +305,23 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
     )
 
 
-def _winner_refusal(best: _Candidate, p_hat: float) -> str | None:
-    """Why no interval exists at p_hat: the winner's fit did not settle, per cause.
+def _winner_caution(best: _Candidate, p_hat: float) -> str | None:
+    """What the interval rests on when the winner's fit did not settle, per cause.
 
-    The interval inverts the searched curve from its value at p_hat, which is a
-    located optimum only if that fit converged (as master required).
+    The interval inverts the searched curve from its value at p_hat; a fit that
+    stopped short can leave that value short of the optimum. Imperfect
+    convergence is disclosed, never a reason to withhold the interval.
     """
     if not best.pirls_converged:
         return (
-            f"No likelihood-ratio interval for p: the coefficient fit at p_hat={p_hat:.6g} "
-            "stopped at its iteration limit, so the searched profile's value there is not an "
-            "optimum. Raise max_iter and estimate p again."
+            f"The p interval rests on a coefficient fit at p_hat={p_hat:.6g} that stopped at "
+            "its iteration limit; raise max_iter for a settled profile value there."
         )
     if not best.reml_converged:
         return (
-            f"No likelihood-ratio interval for p: the candidate REML fit at p_hat={p_hat:.6g} "
-            "did not settle its smoothing parameters within the search's own budget, so the "
-            "searched profile's value there is not an optimum. search_fit_mode='fit' searches "
-            "p under ML and gives an interval."
+            f"The p interval rests on a candidate REML fit at p_hat={p_hat:.6g} whose smoothing "
+            "parameters had not settled within the search's own budget; search_fit_mode='fit' "
+            "searches p under ML."
         )
     return None
 
@@ -396,32 +395,27 @@ class TweedieProfileResult:
     _ci_bounds: tuple[float, float] = field(repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
     search_fit_mode: str | None = None
-    _refusal: str | None = field(default=None, repr=False)
+    _caution: str | None = field(default=None, repr=False)
 
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for p on the searched curve, with censoring flags.
 
-        A censored side is recorded in ``warnings`` when first computed and
-        warned about on every call. Raises RuntimeError when the searched
-        winner's fit did not converge: its profile value is then no optimum.
+        A censored side, and a winner whose fit did not settle, is recorded in
+        ``warnings`` when first computed and warned about on every call.
         """
         interval = self._interval(alpha)
-        for message in censoring_warnings(interval, alpha, "p", self._stopped_at):
+        cautions = censoring_warnings(interval, alpha, "p", self._stopped_at)
+        for message in [self._caution] * (self._caution is not None) + cautions:
             warn_caller(message)
         return interval
-
-    def _interval_refusal(self) -> str | None:
-        """Why no interval exists, recorded by the search (`_winner_refusal`), or None."""
-        return self._refusal
 
     def _interval(self, alpha: float) -> Interval:
         """The interval, computed once and recorded; reports read it without a warning."""
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
             raise ValueError("alpha must be in (0, 1)")
-        refusal = self._interval_refusal()
-        if refusal is not None:
-            raise RuntimeError(refusal)
+        if self._caution is not None and self._caution not in self.warnings:
+            self.warnings.append(self._caution)
         if alpha not in self._ci_cache:
             interval = likelihood_ratio_interval(
                 self._objective,
