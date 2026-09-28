@@ -300,6 +300,27 @@ class TestMaximumLikelihoodPhi:
         np.testing.assert_allclose(solved.phi, 31.731271940671984, rtol=2e-7)
         np.testing.assert_allclose(solved.criterion / y.size, 185.18683913586867, atol=1e-9)
 
+    def test_rows_sharing_a_peak_index_bend_the_profile_together(self):
+        """Tiled 600 times, Q is 600 times the fixture's: the same minima, the same answer.
+
+        Its 3,000 positive rows are past the 0.878 / (p - 1)^2 a single row's lattice
+        term needs, but each row shares its phase with 599 others, and together
+        they bend Q as the fixture's single rows do.
+        """
+        p = 1.0181533410437358
+        y = np.array([1.81787899, 11275.9262, 0.0, 0.00306563885, 0.0000232882792, 1.18207511])
+        mu = np.array(
+            [0.0000253947806, 44091.7359, 198.869667, 0.000051937831, 331.859132, 0.0054422757]
+        )
+        weights = np.array(
+            [83.2444169, 0.17590785, 2.31976211, 463.433307, 2.50852264, 0.416322332]
+        )
+
+        solved = profile_phi_at(np.tile(y, 600), np.tile(mu, 600), np.tile(weights, 600), p)
+
+        np.testing.assert_allclose(solved.phi, 31.731271940671984, rtol=2e-7)
+        np.testing.assert_allclose(solved.criterion / (600 * y.size), 185.18683913586867, atol=1e-9)
+
 
 # =====================================================================
 # TestProfileLikelihood

@@ -12,6 +12,7 @@ import math
 import operator
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 
 import numpy as np
 from numpy.typing import NDArray
@@ -95,11 +96,31 @@ class TweedieRows:
         value = log_w - self.log_y + canonical
         score = mean_j * inverse_r + canonical
         slope = -var_j * inverse_r**2 - canonical
+        # The saddlepoint takes log |c w / phi| of the quotient where that is a
+        # normal number, and from log t, whose rounding grows with |log w| and
+        # |log phi|, only where it overflowed.
         past = np.flatnonzero(~ok)
+        negative = -canonical[past]
+        normal = np.isfinite(negative) & (negative >= _TINY)
+        log_negative = np.empty_like(negative)
+        log_negative[normal] = np.log(negative[normal])
+        log_negative[~normal] = _log_negative_canonical(self.p, log_t[past][~normal])
         value[past], score[past], slope[past] = _corrected_saddlepoint(
-            self.p, _log_negative_canonical(self.p, log_t[past]), self.log_y[past]
+            self.p, log_negative, self.log_y[past]
         )
         return value, score, slope
+
+    @cached_property
+    def peak_groups(self) -> tuple[NDArray, NDArray]:
+        """Distinct log peak indices at phi = 1, and the likelihood size sharing each.
+
+        Rows with one peak index (equal y and w, or a counted row) carry one
+        lattice phase at every phi, so their lattice terms bend Q together.
+        """
+        log_peak = math.log(self.p - 1.0) + _log_negative_canonical(self.p, self.log_t_unit_phi)
+        count = np.ones_like(log_peak) if self.count is None else self.count
+        distinct, group = np.unique(log_peak, return_inverse=True)
+        return distinct, np.bincount(group, weights=count, minlength=distinct.size)
 
     def saturated(self, phi: float) -> tuple[float, float, float]:
         value, score, slope = self.row_saturated(phi)
@@ -199,70 +220,71 @@ def _global_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSo
     if 2.0 * size <= (rows.p - 1.0) * nullity:
         raise ValueError("Tweedie dispersion profile has no finite interior optimum")
     # The saddlepoint density's root, where every positive row adds 1/2 to T.
-    smooth_size = max(size - nullity, 0.5 * size)
-    local = _newton_log_phi(rows, deviance, nullity, math.log(deviance / smooth_size))
-    band = _lattice_band(rows.p, smooth_size)
+    local = _newton_log_phi(
+        rows, deviance, nullity, math.log(deviance / max(size - nullity, 0.5 * size))
+    )
     # The window's density bound needs gamma jumps of shape a >= 1 (p <= 1.5).
-    if band is None or rows.a < 1.0:
+    if rows.a < 1.0:
         return local
-    return _lattice_scan(rows, deviance, nullity, local, band)
+    return _lattice_scan(rows, deviance, nullity, local)
 
 
-def _lattice_band(p: float, smooth_size: float) -> tuple[float, float] | None:
-    """Peak indices whose lattice term can bend Q, or None where no row's can.
+def _lattice_bands(p: float, curvature: float, sizes: NDArray) -> tuple[NDArray, NDArray]:
+    """Peak indices [low, high] over which K rows sharing a phase can bend Q; high = 0 if none.
 
     A row's density carries the Poisson-summation lattice term (as in
     `saddlepoint_switch`) 2 exp(-2 pi^2 Var J) cos(2 pi j), Var J ~ j / (a + 1),
     whose phase turns at rate 2 pi j per unit log phi, j = |c w| / ((a + 1) phi).
     It bends Q by at most rho(j) = 8 pi^2 j^2 exp(-k j), k = 2 pi^2 / (a + 1),
     and only for j >= 1: below one term of the series dominates and the phase
-    does not turn. The band is where rho reaches a quarter of the smooth
-    profile's curvature at its minimum, (N - M) / 2, a margin for the leading-
-    term model: the roots of j exp(-k j / 2) = c, c^2 = (N - M) / (64 pi^2),
-    are j = -(2 / k) W(-k c / 2) on the two real branches of Lambert's W.
+    does not turn. K rows of one phase bend Q by K rho(j). The band is where
+    that reaches a quarter of ``curvature``, the deviance term's D / (2 phi) at
+    the Newton root ((N - M) / 2 at the saddlepoint's minimum), a margin for the
+    leading-term model: the roots of j exp(-k j / 2) = c, c^2 = curvature /
+    (32 pi^2 K), are j = -(2 / k) W(-k c / 2) on the two real branches of Lambert's W.
     """
     k = 2.0 * math.pi**2 * (p - 1.0)
-    argument = -0.5 * k * math.sqrt(smooth_size / (64.0 * math.pi**2))
-    if argument <= -1.0 / math.e:
-        return None
-    top = -2.0 / k * float(lambertw(argument, -1).real)
-    if top < 1.0:
-        return None
-    return max(1.0, -2.0 / k * float(lambertw(argument, 0).real)), top
+    argument = -0.5 * k * np.sqrt(curvature / (32.0 * math.pi**2 * sizes))
+    real = argument > -1.0 / math.e
+    low, high = np.ones_like(argument), np.zeros_like(argument)
+    high[real] = -2.0 / k * lambertw(argument[real], -1).real
+    low[real] = np.maximum(1.0, -2.0 / k * lambertw(argument[real], 0).real)
+    high[high < 1.0] = 0.0
+    return low, high
 
 
-def _lattice_scan(
-    rows: TweedieRows,
-    deviance: float,
-    nullity: float,
-    local: PhiSolve,
-    band: tuple[float, float],
-) -> PhiSolve:
+def _lattice_scan(rows: TweedieRows, deviance: float, nullity: float, local: PhiSolve) -> PhiSolve:
     """The lowest local minimum of Q inside the window that must hold the global one.
 
-    Q' is sampled four times per lattice period 1 / j wherever some row's peak
-    index lies in the band; between those stretches no row bends Q, Q' is
-    monotone and its endpoints decide the sign change. Each - to + change is a
-    bracket the Newton polishes.
+    A group of rows sharing a peak index J lies in its band over one interval of
+    u, where j = J e^-u. Q' is sampled four times per lattice period 1 / j there,
+    at the finest period of the groups overlapping; between those stretches no
+    group bends Q, Q' is monotone and its endpoints decide the sign change. Each
+    - to + change is a bracket the Newton polishes.
     """
-    lower, upper = _scan_window(rows, deviance, nullity, local)
-    band_low, band_high = band
-    # Row i's peak index is J_i e^-u; it lies in the band over this u-interval.
-    log_peak = math.log(rows.p - 1.0) + _log_negative_canonical(rows.p, rows.log_t_unit_phi)
-    starts, stops = log_peak - math.log(band_high), log_peak - math.log(band_low)
-    inside = (stops > lower) & (starts < upper)
-    if not np.any(inside):
-        # No row bends Q anywhere in the window: the Newton root is its minimum.
+    log_peak, sizes = rows.peak_groups
+    distinct_sizes, of_size = np.unique(sizes, return_inverse=True)
+    low, high = _lattice_bands(rows.p, 0.5 * deviance / local.phi, distinct_sizes)
+    banded = np.flatnonzero(high[of_size] > 0.0)
+    if banded.size == 0:
         return local
-    order = np.argsort(starts[inside])
-    starts = np.maximum(starts[inside][order], lower)
-    reach = np.maximum.accumulate(np.minimum(stops[inside][order], upper))
+    lower, upper = _scan_window(rows, deviance, nullity, local)
+    band_low, band_high = low[of_size][banded], high[of_size][banded]
+    starts = log_peak[banded] - np.log(band_high)
+    stops = log_peak[banded] - np.log(band_low)
+    inside = np.flatnonzero((stops > lower) & (starts < upper))
+    if inside.size == 0:
+        # No group bends Q anywhere in the window: the Newton root is its minimum.
+        return local
+    order = inside[np.argsort(starts[inside])]
+    starts = np.maximum(starts[order], lower)
+    reach = np.maximum.accumulate(np.minimum(stops[order], upper))
     # A start past every earlier stop opens a new piece of the union.
-    opens = np.r_[True, starts[1:] > reach[:-1]]
-    closes = np.flatnonzero(np.r_[opens[1:], True])
-    step = 0.25 / band_high
+    opens = np.flatnonzero(np.r_[True, starts[1:] > reach[:-1]])
+    closes = np.r_[opens[1:] - 1, starts.size - 1]
+    steps = np.minimum.reduceat(0.25 / band_high[order], opens)
     points = [np.array([lower, upper])]
-    for start, stop in zip(starts[opens], reach[closes], strict=True):
+    for start, stop, step in zip(starts[opens], reach[closes], steps, strict=True):
         points.append(np.linspace(start, stop, int(math.ceil((stop - start) / step)) + 1))
     grid = np.unique(np.concatenate(points))
     u_local = math.log(local.phi)
@@ -280,6 +302,14 @@ def _lattice_scan(
             if polished.criterion < best.criterion:
                 best = polished
         previous_u, previous_score = u, score
+    if previous_score < 0.0:
+        # Past `rising` Q' > 0, so a score still negative at the window's end puts
+        # a minimum within round-off of it: once every row is down to one jump,
+        # E J = 1 holds exactly and that edge is itself a root of Q'.
+        polished = _newton_log_phi(rows, deviance, nullity, previous_u, previous_u, math.inf)
+        n_passes += polished.n_passes
+        if polished.criterion < best.criterion:
+            best = polished
     return replace(best, n_passes=n_passes)
 
 

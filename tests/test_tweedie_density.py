@@ -89,6 +89,17 @@ def test_a_summed_row_whose_canonical_product_overflows_keeps_its_density():
     assert scaled[0] == pytest.approx(base[0], abs=2 * 2 * EPS * math.log(1e308) * (2 + 4))
 
 
+def test_saddlepoint_rows_take_the_quotient_where_it_is_a_normal_number():
+    # w = 1e290 and phi = 1e280 put the row past the switch with |c w / phi| = 4e10,
+    # a normal number. From log t, log |c w / phi| carries the rounding of
+    # (a + 1)(log w - log phi), 268 eps in l_sat here.
+    got = TweedieRows.prepare(np.array([3.0]), np.array([1e290]), 1.5).row_saturated(1e280)[0][0]
+    # The corrected saddlepoint at these float inputs, to 50 digits (mpmath).
+    reference = 9.7700277152590607655
+    # The quotient route rounds a product, a quotient and a few logs of order-one terms.
+    assert got == pytest.approx(reference, abs=8 * EPS * (1.0 + reference))
+
+
 @pytest.mark.parametrize("p", [1.2, 1.5, 1.8])
 def test_log_density_is_finite_where_the_unit_deviance_overflows(p):
     # At y / mu = 1e616, d = 2 y mu^(1-p) / (p - 1) (1 - B/A + C/A) overflows, with
@@ -464,15 +475,58 @@ def test_solve_log_phi_is_the_global_minimum_near_the_poisson_lattice(p, nullity
         fitted = mu * np.exp(np.random.default_rng(seed).normal(0.0, 0.3, y.size))
         deviance = float(np.sum(w * tweedie_unit_deviance(y, fitted, p)))
         rows = TweedieRows.prepare(y, w, p)
-        solved = solve_log_phi(rows, deviance, nullity)
-        grid = math.log(solved.phi) + np.linspace(-8.0, 8.0, 2001)
-        values = [_reml_scale_criterion(rows, deviance, nullity, u) for u in grid]
-        lowest = math.exp(grid[int(np.argmin(values))])
-        tol = density_module._NEWTON_STEP_TOL
-        slack = (solved.curvature + 0.5 * deviance / solved.phi) * tol**2
-        slack += 2.0 * _criterion_round_off(rows, deviance, nullity, solved.phi)
-        slack += _criterion_round_off(rows, deviance, nullity, lowest)
-        assert solved.criterion <= min(values) + slack
+        _assert_no_grid_point_below(rows, deviance, nullity, solve_log_phi(rows, deviance, nullity))
+
+
+def _assert_no_grid_point_below(rows, deviance, nullity, solved, points=2001):
+    """No point of a dense grid over log phi +- 8 lies below the solution.
+
+    The grid minimum bounds the global one from above, so the check is one-sided:
+    the solution may sit below it, never above by more than round-off.
+    """
+    grid = math.log(solved.phi) + np.linspace(-8.0, 8.0, points)
+    values = [_reml_scale_criterion(rows, deviance, nullity, u) for u in grid]
+    lowest = math.exp(grid[int(np.argmin(values))])
+    tol = density_module._NEWTON_STEP_TOL
+    slack = (solved.curvature + 0.5 * deviance / solved.phi) * tol**2
+    slack += 2.0 * _criterion_round_off(rows, deviance, nullity, solved.phi)
+    slack += _criterion_round_off(rows, deviance, nullity, lowest)
+    assert solved.criterion <= min(values) + slack
+
+
+def test_a_minimum_on_the_one_jump_edge_is_found():
+    # One positive row at p = 1.0056 with a REML nullity of 2. Once its peak index
+    # falls below 1, E J = 1 holds exactly, so Q' = 0 at the window's upper edge
+    # itself, and Q is lowest there: 1.6 below the Newton root.
+    p = 1.0055923284422708
+    y = np.array([0.0, 2.611596628644268, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    mu = np.array(
+        [0.6242569258595899, 1.9665878664058265, 0.1879213977573198, 0.4585709804405651]
+        + [0.2529772244620755, 0.048495461291874105, 0.6629478433791297, 0.8198142938793933]
+    )
+    weights = np.array(
+        [1.4721287059185717, 1.3481089957640897, 3.205294003910986, 1.8228471642283448]
+        + [0.525550697600261, 0.992372885967053, 0.8713436230186044, 0.08242028595594196]
+    )
+    deviance = float(np.sum(weights * tweedie_unit_deviance(y, mu, p)))
+    rows = TweedieRows.prepare(y, weights, p)
+    _assert_no_grid_point_below(rows, deviance, 2.0, solve_log_phi(rows, deviance, 2.0), 8001)
+
+
+def test_the_scan_samples_each_lattice_period_four_times():
+    # Four rows tiled 50 times at p = 1.022: one sample per lattice period 1 / j
+    # steps over the global minimum (by 0.15 in Q); four per period do not.
+    p = 1.022323821143762
+    y = np.tile([1.3282268467711957, 1.647160781221533, 0.35026059430826734, 319.9989853303057], 50)
+    mu = np.tile(
+        [0.8699897850055411, 1.3471297746888966, 0.7736905022225017, 306.4179282087071], 50
+    )
+    weights = np.tile(
+        [0.0768496996044912, 0.7755868918100032, 5.967696664624229, 0.4575881655301412], 50
+    )
+    deviance = float(np.sum(weights * tweedie_unit_deviance(y, mu, p)))
+    rows = TweedieRows.prepare(y, weights, p)
+    _assert_no_grid_point_below(rows, deviance, 0.0, solve_log_phi(rows, deviance), 8001)
 
 
 def test_the_lattice_comparison_makes_no_pass_where_no_row_bends_the_profile():

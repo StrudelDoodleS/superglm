@@ -135,15 +135,16 @@ class Probes:
         self._wrap(scale_mod, "profile_tweedie_reml_scale", consumers, "profile")
         self._wrap(scale_mod, "prepare_tweedie_reml_scale_data", consumers, "prepare")
 
-        # solve_log_phi calls _newton_log_phi only when its memo misses.
-        orig_newton = tweedie_mod._newton_log_phi
+        # solve_log_phi calls _global_log_phi only when its memo misses; its
+        # n_passes counts every series pass, a lattice comparison's included.
+        orig_newton = tweedie_mod._global_log_phi
 
         def counting_newton(*args, **kwargs):
             solved = orig_newton(*args, **kwargs)
             probes.newton_passes.append(solved.n_passes)
             return solved
 
-        tweedie_mod._newton_log_phi = counting_newton
+        tweedie_mod._global_log_phi = counting_newton
 
         orig_series = tweedie_mod.series_moments
 
