@@ -213,15 +213,21 @@ def _theta_moment_start(
     sum(w ((y - mu)^2 - mu)) = sum(w mu^2) / theta. Under prior weights
     Var(Y) = (mu + mu^2 / theta) / w, so sum(w (y - mu)^2 - mu) = sum(mu^2) / theta
     over the rows that carry information. A start only: the bracketed root
-    decides theta, and ``inf`` starts it at the upper bound.
+    decides theta, and ``inf`` starts it at the upper bound, as does a ratio
+    that is not a number.
     """
     if weight_semantics == PRIOR_WEIGHTS:
         carried = weights > 0.0
         y, mu, weights = y[carried], mu[carried], weights[carried]
         numerator, denominator = np.sum(mu * mu), np.sum(weights * (y - mu) ** 2 - mu)
     else:
+        # The ratio is free of the counts' common scale, so the sums take w / max w
+        # and stay finite where the counts' products overflow.
+        weights = weights / np.max(weights)
         numerator, denominator = np.sum(weights * mu * mu), np.sum(weights * ((y - mu) ** 2 - mu))
-    return float(numerator / denominator) if denominator > 0.0 else math.inf
+    with np.errstate(invalid="ignore"):
+        start = float(numerator / denominator) if denominator > 0.0 else math.inf
+    return math.inf if math.isnan(start) else start
 
 
 @dataclass(frozen=True)

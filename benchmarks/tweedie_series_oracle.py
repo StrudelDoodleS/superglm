@@ -15,6 +15,10 @@ The ``switch`` rows sit a quarter of and four times saddlepoint_switch(p) as
 it stood when this file was generated, each labelled with the arm that is the
 more accurate there. They are fixed numbers, so a later change that moves the
 switch or drops its floor is measured against them rather than followed.
+
+The ``gamma_limit`` rows sit within 2 - p < 1.2e-9, past the series' work bound
+and below the switch, at peak indices 3.7e9 to 1.5e10: 2e6 to 4e6 terms, a
+minute or two each.
 """
 
 import itertools
@@ -40,6 +44,12 @@ LOG_FLOOR = 120
 SATURATED_POWERS = (1.001, 1.002, 1.005, 1.01, 1.05, 1.2, 1.5, 1.8, 1.95, 1.99)
 SATURATED_PEAKS = (1e2, 3e2, 1e3, 3e3, 1e4, 3e4, 1e5, 1e6, 1e7)
 SWITCH_SIDES = ((0.25, "series"), (4.0, "saddlepoint"))
+# (p, y, w, phi): Gamma shapes 3.7, 0.4 and 1.5.
+GAMMA_LIMIT_ROWS = (
+    (2 - 1e-9, 1.0, 1.0, 0.27),
+    (2 - 1e-10, 1.0, 1.0, 2.5),
+    (2 - 1e-10, 5e3, 3.0, 2.0),
+)
 
 
 def _side(term, j: int, step: int, peak):
@@ -125,6 +135,13 @@ def switch_rows() -> list[dict]:
     ]
 
 
+def gamma_limit_rows() -> list[dict]:
+    return [
+        {"p": p, "y": y, "w": w, "phi": phi, **reference_saturated(p, y, w, phi)}
+        for p, y, w, phi in GAMMA_LIMIT_ROWS
+    ]
+
+
 def main(out: Path) -> None:
     rows = []
     for p, phi, y in itertools.product(POWERS, PHIS, RESPONSES):
@@ -140,6 +157,7 @@ def main(out: Path) -> None:
         "rows": rows,
         "saturated": saturated_rows(),
         "switch": switch_rows(),
+        "gamma_limit": gamma_limit_rows(),
     }
     out.write_text(json.dumps(payload, indent=1) + "\n")
 

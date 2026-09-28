@@ -583,6 +583,33 @@ def test_prior_weight_moment_start_solves_the_prior_weight_moment_equation():
     assert abs(start - theta) <= 4.0 * standard_error
 
 
+def test_frequency_moment_start_is_free_of_the_counts_common_scale():
+    from superglm.profiling.nb import _theta_moment_start, solve_theta
+
+    # Counts near 1e307 overflow sum(w mu^2) and sum(w ((y - mu)^2 - mu)), whose
+    # ratio is the start at unit counts; the score solve only needs signs.
+    mu = np.array([5.0, 8.0, 11.0, 14.0])
+    y = np.array([0.0, 21.0, 3.0, 30.0])
+    unit = _theta_moment_start(y, mu, np.ones(4), weight_semantics="frequency")
+    start = _theta_moment_start(y, mu, np.full(4, 1e307), weight_semantics="frequency")
+    # w / max w is exactly 1 here, so the two sums are the same floats.
+    assert start == unit
+    # The score's own sum overflows at these counts; its sign, which is what
+    # brackets the root, survives.
+    with np.errstate(over="ignore"):
+        solved = solve_theta(
+            y, mu, np.full(4, 1e307), start, weight_semantics="frequency", bounds=(1e-3, 1e6)
+        )
+    assert math.isfinite(solved.theta) and not (solved.at_lower or solved.at_upper)
+    # A mean past sqrt(max float) makes both sums infinite: that ratio is no start,
+    # and the walk begins at the upper bound instead.
+    with np.errstate(over="ignore"):
+        huge = _theta_moment_start(
+            y, np.append(mu[:3], 1e160), np.ones(4), weight_semantics="frequency"
+        )
+    assert huge == math.inf
+
+
 def test_estimate_theta_interval_is_the_crossing_at_the_published_mean(characterisation_case):
     from superglm.profiling.nb import nb_nll
 

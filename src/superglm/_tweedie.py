@@ -16,7 +16,7 @@ from functools import cached_property
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.special import lambertw
+from scipy.special import digamma, gammaln, lambertw, polygamma
 
 from superglm._tweedie_series import _LOG_CUTOFF, series_moments
 
@@ -146,7 +146,7 @@ class TweedieRows:
         value = log_w - self.log_y + canonical
         score = mean_j * inverse_r + canonical
         slope = -var_j * inverse_r**2 - canonical
-        # The saddlepoint takes log |c w / phi| of the quotient where that is a
+        # The closed forms take log |c w / phi| of the quotient where that is a
         # normal number, and from log t, whose rounding grows with |log w| and
         # |log phi|, only where it overflowed.
         past = np.flatnonzero(~ok)
@@ -155,9 +155,18 @@ class TweedieRows:
         log_negative = np.empty_like(negative)
         log_negative[normal] = np.log(negative[normal])
         log_negative[~normal] = _log_negative_canonical(self.p, log_t[past][~normal])
-        value[past], score[past], slope[past] = _corrected_saddlepoint(
-            self.p, log_negative, self.log_y[past]
-        )
+        # Below the switch the series refuses a row only at its work bound, which
+        # binds there only for 2 - p < 1.2e-9: those rows take the p -> 2 limit.
+        # The peak index is (p - 1) |c w / phi|.
+        capped = math.log(self.p - 1.0) + log_negative <= math.log(saddlepoint_switch(self.p))
+        # An empty arm is skipped: its scipy calls cost as much as a small book's pass.
+        for arm, taken in ((_corrected_saddlepoint, ~capped), (_gamma_limit, capped)):
+            if not taken.any():
+                continue
+            rows = past[taken]
+            value[rows], score[rows], slope[rows] = arm(
+                self.p, log_negative[taken], self.log_y[rows]
+            )
         return value, score, slope
 
     @cached_property
@@ -227,6 +236,28 @@ def _corrected_saddlepoint(
     log_saddle_scale = math.log((p - 1.0) * (2.0 - p) / (2.0 * math.pi))
     value = 0.5 * (log_saddle_scale + log_negative_canonical) - log_y + first + second
     return value, 0.5 - first - 2.0 * second, -first - 4.0 * second
+
+
+def _gamma_limit(
+    p: float, log_negative_canonical: NDArray, log_y: NDArray
+) -> tuple[NDArray, NDArray, NDArray]:
+    """l_sat, T and T' at the p -> 2 limit, for rows the series' work bound refused.
+
+    Given N = n jumps, y is Gamma(n a, gamma) with N ~ Poisson(lambda), and at
+    mu = y, y / gamma = lambda a = s = (2 - p) |c w / phi|. As p -> 2 the shape
+    n a concentrates at s with variance s a, so l_sat is the Gamma(s) log density
+    at its mean, s log s - s - log Gamma(s) - log y, short by a s h(s) / 2 + O(a^2),
+    h = (log s - psi(s))^2 - psi'(s): relatively O(a (1 + |log s|)). Where the
+    work bound binds below the switch, a < 1.2e-9 and s < 4, and the corrected
+    saddlepoint's e = 1/((2 - p) j) is order one. s is proportional to 1/phi, so
+    T = s (log s - psi(s)) and T' = -s dT/ds.
+    """
+    log_shape = math.log(2.0 - p) + log_negative_canonical
+    shape = np.exp(log_shape)
+    excess = log_shape - digamma(shape)
+    value = shape * (log_shape - 1.0) - gammaln(shape) - log_y
+    slope = -shape * (excess + 1.0 - shape * polygamma(1, shape))
+    return value, shape * excess, slope
 
 
 @dataclass(frozen=True)

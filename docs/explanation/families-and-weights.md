@@ -205,6 +205,13 @@ published as a converged interior value.
 ci = result.ci(alpha=0.05)  # (lower, upper) via profile likelihood ratio
 ```
 
+The interval is centred on the best theta for the published mean. That is
+`theta_hat` itself unless the alternation stopped before it settled, or the
+published mean was refitted after theta was estimated (for example by
+`fit_mode="reml"`). The interval is still given in both cases. A caution
+explains why when the alternation did not settle, or when `theta_hat` falls
+outside the interval.
+
 ### Profile plot
 
 ```python
@@ -260,7 +267,7 @@ How the estimate is made (Dunn & Smyth 2005):
 
 The result's `evaluations` table lists every power the search tried, with its
 negative log-likelihood and dispersion. An estimate at an end of `p_bounds` is
-reported in `result.warnings`, because the best power may lie beyond it. Near
+warned and recorded in `result.warnings`, because the best power may lie beyond it. Near
 *p*=1 such an edge maximum can be an artefact of rounded responses rather than
 a property of the data.
 

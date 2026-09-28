@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy.optimize import minimize_scalar
-from scipy.special import i1e
+from scipy.special import digamma, gammaln, i1e, polygamma
 
 import superglm._tweedie as density_module
 from superglm import SuperGLM
@@ -354,6 +354,47 @@ def test_rows_past_the_switch_take_the_corrected_saddlepoint():
     np.testing.assert_array_less(np.abs(value - expected), rounding)
     np.testing.assert_allclose(score, 0.5 - first - 2 * second, rtol=16 * EPS, atol=0)
     np.testing.assert_allclose(slope, -first - 4 * second, rtol=16 * EPS, atol=0)
+
+
+@pytest.mark.parametrize(
+    "row", ORACLE["gamma_limit"], ids=lambda r: f"p{r['p']}-j{r['peak_index']:.1e}"
+)
+def test_rows_the_work_bound_refuses_below_the_switch_take_the_gamma_limit(row):
+    """For 2 - p < 1.2e-9 the series' work bound binds below the switch.
+
+    There the corrected saddlepoint's e = 1/((2 - p) j) is order one: it misses
+    l_sat by 2.2e-2 at the second row. The Gamma(s) density at
+    s = (2 - p) |c w / phi| is the exact one short by C = a s h(s) / 2 + O(a^2),
+    h = (log s - psi(s))^2 - psi'(s), and its T and T' by -dC/du and -d^2C/du^2,
+    u = log phi, since s is proportional to e^-u. So the arm plus C meets the
+    50-digit sum to rounding, which also pins that error model.
+    """
+    p, y, w, phi = (row[k] for k in ("p", "y", "w", "phi"))
+    rows = TweedieRows.prepare(np.array([y]), np.array([w]), p)
+    log_t = rows.log_t_unit_phi - (rows.a + 1) * math.log(phi)
+    assert not series_moments(log_t, rows.a)[0][0]
+    assert row["peak_index"] < saddlepoint_switch(p)
+    a, shape = rows.a, w * y ** (2 - p) / ((p - 1) * phi)
+
+    def correction(u):
+        s = shape * math.exp(-u)
+        return a * s * ((math.log(s) - digamma(s)) ** 2 - polygamma(1, s)) / 2
+
+    # Central differences at step 1e-3 err by about 1e-7 of C, a few 1e-17 here.
+    step, centre = 1e-3, correction(0.0)
+    up, down = correction(step), correction(-step)
+    leading = (centre, -(up - down) / (2 * step), -(up - 2 * centre + down) / step**2)
+    # s = exp(log(2 - p) + log|c w / phi|) is within 4 eps (|log(2 - p)| + |log s| + 2)
+    # relatively; `scale` bounds each output's terms and their log-s derivatives,
+    # each rounded within 8 eps.
+    psi = [float(polygamma(k, shape)) for k in range(3)]
+    scale = 1 + abs(math.log(y)) + abs(float(gammaln(shape)))
+    scale += shape * (abs(math.log(shape)) + abs(psi[0]) + 2 + 3 * shape * psi[1])
+    scale += shape**3 * abs(psi[2])
+    bound = 16 * EPS * scale * (abs(math.log(2 - p)) + abs(math.log(shape)) + 2)
+    exact = [float(row[k]) for k in ("l_sat", "score", "slope")]
+    for value, lead, reference in zip(rows.row_saturated(phi), leading, exact, strict=True):
+        assert abs(value[0] + lead - reference) <= bound
 
 
 @pytest.mark.parametrize("via", ["solve", "reml"])

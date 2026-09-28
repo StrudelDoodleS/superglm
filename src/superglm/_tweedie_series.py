@@ -21,7 +21,8 @@ _LOG_CUTOFF = 37.0
 _MAX_SAFE_MODE = float(2**52)
 # A cap on one row's work: peak indices up to ~3.4e9 (a + 1). The density's
 # accuracy switch to the saddlepoint (superglm._tweedie.saddlepoint_switch) sits
-# below it for every p < 2 - 2e-9, so on that path it binds only nearer p = 2.
+# below it for every p < 2 - 1.2e-9; nearer p = 2 the rows it refuses below the
+# switch take the p -> 2 Gamma limit instead.
 MAX_ROW_TERMS = 1_000_000
 # lgamma(j + 1) + lgamma(a j) is shared by every row of one call. The accuracy
 # switch bounds it by 1.03-1.73 j* entries (the low end at the lattice floor as
