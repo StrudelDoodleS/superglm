@@ -153,7 +153,7 @@ def _per_obs_ll_tweedie(
     sample_weight=None,
 ) -> NDArray:
     """Per-observation Tweedie log-density at dispersion ``phi / w_i``."""
-    from superglm.profiling.tweedie import tweedie_logpdf
+    from superglm._tweedie import tweedie_logpdf
 
     return tweedie_logpdf(y, mu, phi, p, weights=sample_weight)
 

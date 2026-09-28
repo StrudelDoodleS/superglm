@@ -69,12 +69,12 @@ import inspect
 import numpy as np
 import superglm
 import superglm._group_matrix._group_matrix_kernels as group_kernels
-import superglm._tweedie_profile_kernel as profile_kernel
+import superglm._tweedie_series as tweedie_series
 import superglm.distributional.kernels._tweedie_numba as tweedie_numba
 from numba.core.registry import CPUDispatcher
 
 dispatchers = {}
-for module in (tweedie_numba, profile_kernel, group_kernels):
+for module in (tweedie_numba, group_kernels):
     dispatchers.update(
         {
             f"{module.__name__}.{name}": value
@@ -83,6 +83,11 @@ for module in (tweedie_numba, profile_kernel, group_kernels):
             and value.py_func.__module__ == module.__name__
         }
     )
+# The series' per-term and per-row helpers are only called from compiled code,
+# so their dispatchers never gain a signature; the entry point carries them.
+dispatchers["superglm._tweedie_series._series_moments_kernel"] = (
+    tweedie_series._series_moments_kernel
+)
 assert dispatchers
 assert inspect.signature(superglm.warmup).parameters == {}
 assert all(not dispatcher.nopython_signatures for dispatcher in dispatchers.values())
@@ -116,19 +121,8 @@ for values in (
         assert group_kernels._operand_exponent_bounds(operand) == (0, 1)
 assert signatures() == compiled, "range checks compiled new layouts after public warmup"
 
-writable_profile_arrays = (
-    np.array([0.0, 1.0], dtype=np.float64),
-    np.ones(2, dtype=np.float64),
-    np.ones(2, dtype=np.float64),
-)
-readonly_profile_arrays = readonly(*(values.copy() for values in writable_profile_arrays))
-writable_profile = profile_kernel._exact_profile_statistics_kernel(
-    *writable_profile_arrays, 1.5, 0.0, 100_000, 1_000_000
-)
-readonly_profile = profile_kernel._exact_profile_statistics_kernel(
-    *readonly_profile_arrays, 1.5, 0.0, 100_000, 1_000_000
-)
-assert writable_profile == readonly_profile
+frozen_response, frozen_mean = readonly(np.array([0.0, 1.0, 2.5]), np.ones(3))
+assert np.all(np.isfinite(superglm.tweedie_logpdf(frozen_response, frozen_mean, 1.0, 1.5)))
 
 values = np.array([1.0, 2.0], dtype=np.float64)
 codes = np.array([0, 1], dtype=np.intp)
@@ -457,11 +451,11 @@ def test_inference_covariance_canonical():
 
 
 def test_profiling_tweedie_canonical():
-    from superglm.profiling.tweedie import TweedieProfileResult, estimate_tweedie_p  # noqa: F401
+    from superglm.profiling.tweedie import TweedieProfileResult  # noqa: F401
 
 
 def test_profiling_nb_canonical():
-    from superglm.profiling.nb import NBProfileResult, estimate_nb_theta  # noqa: F401
+    from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning  # noqa: F401
 
 
 def test_stats_model_tests_canonical():

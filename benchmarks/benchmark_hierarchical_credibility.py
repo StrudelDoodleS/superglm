@@ -85,7 +85,11 @@ import pyarrow.parquet as pq
 
 import superglm
 from superglm import Categorical, RandomEffect, Spline, SuperGLM, lorenz_curve
-from superglm.profiling.harness import SystemSampler, dump_json, summarize_system_samples
+
+try:
+    from benchmarks._harness import SystemSampler, dump_json, summarize_system_samples
+except ModuleNotFoundError:
+    from _harness import SystemSampler, dump_json, summarize_system_samples
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"

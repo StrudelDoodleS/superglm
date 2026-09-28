@@ -24,14 +24,25 @@ import numpy as np
 import pandas as pd
 
 from superglm import FactorSmooth, Numeric, RandomEffect, Spline, SuperGLM
-from superglm.profiling.harness import (
-    SystemSampler,
-    dump_json,
-    summarize_system_samples,
-    write_pstats_summary,
-    write_system_samples_csv,
-    write_tracemalloc_report,
-)
+
+try:
+    from benchmarks._harness import (
+        SystemSampler,
+        dump_json,
+        summarize_system_samples,
+        write_pstats_summary,
+        write_system_samples_csv,
+        write_tracemalloc_report,
+    )
+except ModuleNotFoundError:
+    from _harness import (
+        SystemSampler,
+        dump_json,
+        summarize_system_samples,
+        write_pstats_summary,
+        write_system_samples_csv,
+        write_tracemalloc_report,
+    )
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = ROOT / "benchmarks" / "results" / "structured_credibility"

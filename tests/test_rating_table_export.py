@@ -51,6 +51,7 @@ from superglm.export.summary import (
     SummaryTermRow,
     build_summary_export_payload,
 )
+from superglm.profiling._scalar import Interval
 
 EXPECTED_SUMMARY_TERM_HEADERS = [
     "Term",
@@ -507,18 +508,18 @@ def test_summary_export_keeps_distribution_profile_values_typed():
     model._nb_profile_result = SimpleNamespace(
         theta_hat=np.float64(2.75),
         nll=10.0,
-        ci=lambda alpha: (np.float64(2.0), np.float64(3.5)),
+        # Reports read the interval through the quiet accessor, and its caution.
+        _interval=lambda alpha: Interval(np.float64(2.0), np.float64(3.5), False, False),
+        _caution=None,
+        _ci_cautions={},
     )
     model._tweedie_profile_result = SimpleNamespace(
         p_hat=np.float64(1.55),
         phi_hat=np.float64(0.8),
-        method="brent",
-        phi_method="mle",
-        density_exact=True,
         nll=11.0,
-        _ci_cache={0.05: (np.float64(1.4), np.float64(1.7))},
+        _ci_cache={0.05: Interval(np.float64(1.4), np.float64(1.7), False, False)},
         ci=unexpected_tweedie_ci,
-        ci_details=unexpected_tweedie_ci,
+        interval=unexpected_tweedie_ci,
     )
     model._summary_cache = None
 
@@ -527,44 +528,37 @@ def test_summary_export_keeps_distribution_profile_values_typed():
     assert overview[("Distribution Profile", "NB2 Theta")] == 2.75
     assert overview[("Distribution Profile", "NB2 Theta CI Lower")] == 2.0
     assert overview[("Distribution Profile", "NB2 Theta CI Upper")] == 3.5
-    assert overview[("Distribution Profile", "NB2 Theta Method")] == "Profile (exact)"
+    assert overview[("Distribution Profile", "NB2 Theta CI Status")] == "available"
     assert overview[("Distribution Profile", "Tweedie p")] == 1.55
     assert overview[("Distribution Profile", "Tweedie p CI Lower")] == 1.4
     assert overview[("Distribution Profile", "Tweedie p CI Upper")] == 1.7
     assert overview[("Distribution Profile", "Tweedie p CI Status")] == "available"
     assert overview[("Distribution Profile", "Tweedie phi")] == 0.8
-    assert overview[("Distribution Profile", "Tweedie p Method")] == "Profile MLE (Brent)"
+    profile_metrics = {metric for section, metric in overview if section == "Distribution Profile"}
+    assert not any(metric.endswith("Method") for metric in profile_metrics)
 
 
-def test_summary_export_ignores_stale_pearson_profile_ci():
+def test_summary_export_marks_a_censored_profile_ci():
     model, _, _, _ = _fit_export_model()
 
     def unexpected_ci(*args, **kwargs):
         raise AssertionError("summary export must not evaluate a Tweedie profile CI")
 
     model._tweedie_profile_result = SimpleNamespace(
-        p_hat=np.float64(1.55),
+        p_hat=np.float64(1.6),
         phi_hat=np.float64(0.8),
-        method="brent",
-        phi_method="pearson",
-        density_exact=True,
         nll=11.0,
-        _ci_cache={0.05: (np.float64(1.4), np.float64(1.7))},
+        _ci_cache={0.05: Interval(1.6, 1.7, True, False)},
         ci=unexpected_ci,
-        ci_details=unexpected_ci,
+        interval=unexpected_ci,
     )
     model._summary_cache = None
 
     overview = _overview_values(build_summary_export_payload(model))
 
-    assert overview[("Distribution Profile", "Tweedie p CI Lower")] is None
-    assert overview[("Distribution Profile", "Tweedie p CI Upper")] is None
-    assert overview[("Distribution Profile", "Tweedie p CI Status")] == (
-        "unavailable for Pearson plug-in"
-    )
-    assert overview[("Distribution Profile", "Tweedie p Method")] == (
-        "Approximate profile (Brent; Pearson plug-in)"
-    )
+    assert overview[("Distribution Profile", "Tweedie p CI Lower")] == 1.6
+    assert overview[("Distribution Profile", "Tweedie p CI Upper")] == 1.7
+    assert overview[("Distribution Profile", "Tweedie p CI Status")] == "censored"
 
 
 def test_summary_export_marks_uncached_mle_profile_ci_not_computed():
@@ -576,13 +570,10 @@ def test_summary_export_marks_uncached_mle_profile_ci_not_computed():
     model._tweedie_profile_result = SimpleNamespace(
         p_hat=np.float64(1.55),
         phi_hat=np.float64(0.8),
-        method="brent",
-        phi_method="mle",
-        density_exact=True,
         nll=11.0,
         _ci_cache={},
         ci=unexpected_ci,
-        ci_details=unexpected_ci,
+        interval=unexpected_ci,
     )
     model._summary_cache = None
 

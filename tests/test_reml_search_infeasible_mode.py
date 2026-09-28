@@ -41,7 +41,7 @@ def _model(features, p=1.5):
     return SuperGLM(family=families.tweedie(p=p), features=features)
 
 
-def test_bracket_endpoint_without_a_converged_mode_is_routed_around(recwarn):
+def test_bracket_endpoint_without_a_converged_mode_is_routed_around(recwarn, monkeypatch):
     """The search must survive a probe power whose penalized mode fails.
 
     One realisation carries three claims about the one coupled search: it
@@ -51,17 +51,19 @@ def test_bracket_endpoint_without_a_converged_mode_is_routed_around(recwarn):
     """
     frame, y, weights, offset, features = _fixture(5_000)
 
-    # Precondition: p=1.95 -- the second point Brent probes -- has no usable
-    # penalized mode under REML. Without this the test proves nothing, so the
-    # size is re-derived rather than kept: the mode is now REACHED and judged
-    # on its KKT residual instead of on PIRLS's step-length flag. 5000 still
-    # misses the 1e-9 bar by ~7e4 (score 6.7e-5, measured 2026-09-23); 6000
-    # no longer fails at all, having failed only because the step test could
-    # not fire at its round-off floor. A 4000 arm re-ran this same search at
-    # 150x above the bar (score 1.5e-7) and was dropped as the fragile copy.
-    with pytest.raises(ObservedModeNotCertifiedError) as excinfo:
-        _model(features, p=1.95).fit_reml(frame, y, sample_weight=weights, offset=offset)
-    assert "certify the penalized coefficient mode" in str(excinfo.value)
+    # This realisation used to meet a natural wall at p=1.95 -- the second
+    # point Brent probes -- scoring 6.7e-5 against the 1e-9 bar: Fisher
+    # scoring stopped short of the mode. Observed-Newton PIRLS now certifies
+    # it (test_tweedie_p_recovery pins that), so the wall is injected at the
+    # same power.
+    real_fit_reml = SuperGLM.fit_reml
+
+    def wall_from_195(self, X, yv, **kwargs):
+        if float(getattr(self.family, "p", 0.0)) >= 1.95:
+            raise ObservedModeNotCertifiedError(6.7e-5, 1e-9)
+        return real_fit_reml(self, X, yv, **kwargs)
+
+    monkeypatch.setattr(SuperGLM, "fit_reml", wall_from_195)
 
     coupled = _model(features).estimate_p(
         frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
@@ -73,7 +75,8 @@ def test_bracket_endpoint_without_a_converged_mode_is_routed_around(recwarn):
     # must not fire merely because an infeasible power exists. The wall has to
     # be in the search's own record for that to be tested at all: the 6000-row
     # version of this check met no wall and passed with the distance test gone.
-    assert 1.95 in coupled._infeasible_reason.__self__
+    assert np.isinf(coupled.evaluations.set_index("p").loc[1.95, "nll"])
+    assert not [w for w in coupled.warnings if "censored" in w]
     assert not [w for w in recwarn.list if "censored" in str(w.message)]
 
     # The ML-mode search never fits REML at the failing power, so it completes
@@ -141,51 +144,6 @@ class TestTypedModeFailureContract:
         )
 
         assert float(result.p_hat) < 1.9
-
-
-class TestInitializationSearchesRouteAroundInfeasiblePoints:
-    """grid_refine and profile_opt read every initialization record back.
-
-    An uncertifiable initialization power leaves no evaluation record, so an
-    unconditional cache read raises KeyError and kills the search that was
-    designed to route around exactly this.
-    """
-
-    @pytest.mark.parametrize(
-        ("method", "threshold"),
-        # Each threshold must fail at one of the method's own initialization
-        # powers: grid_refine's coarse grid ends at 1.95, and profile_opt
-        # starts from 1.14, 1.5 and 1.86. A failure above 1.9 never reaches
-        # profile_opt's, so that arm once exercised this only where 1.86
-        # happened to fail naturally.
-        [("grid_refine", 1.9), ("profile_opt", 1.8)],
-    )
-    def test_infeasible_initialization_points_are_routed_around(
-        self, monkeypatch, method, threshold
-    ):
-        from superglm.reml.observed_geometry import ObservedModeNotConvergedError
-
-        frame, y, weights, offset, features = _plumbing_fixture()
-        real_fit_reml = SuperGLM.fit_reml
-
-        def failing_above_threshold(self, X, yv, **kwargs):
-            if float(getattr(self.family, "p", 0.0)) > threshold:
-                raise ObservedModeNotConvergedError()
-            return real_fit_reml(self, X, yv, **kwargs)
-
-        monkeypatch.setattr(SuperGLM, "fit_reml", failing_above_threshold)
-
-        result = _model(features).estimate_p(
-            frame,
-            y,
-            sample_weight=weights,
-            offset=offset,
-            fit_mode="reml",
-            method=method,
-            p_bounds=(1.05, 1.95),
-        )
-
-        assert 1.05 < float(result.p_hat) < threshold
 
 
 class TestPublicationModeFailure:
@@ -314,264 +272,84 @@ class TestPublicationModeFailure:
 class TestBoundaryCensoringWarning:
     """A p_hat pinned against the certifiable boundary is disclosed."""
 
-    def test_a_pinned_optimum_warns(self):
-        from superglm.profiling.tweedie import _boundary_censoring_message
+    def test_an_optimum_pinned_against_a_wall_is_censored(self, monkeypatch):
+        """The profile beyond an infeasible neighbour is unknown, so p_hat is censored.
 
-        message = _boundary_censoring_message(
-            1.6152, {1.6158: "not certifiable", 1.95: "not certifiable"}, xatol=1e-3
-        )
-        assert message is not None
-        assert "censored" in message
-        assert "search_fit_mode" in message
-
-    def test_grid_censoring_uses_grid_spacing_as_resolution(self, monkeypatch):
-        """method='grid' resolves p only to its spacing, so censoring must be
-        judged against that spacing, not against Brent's xatol."""
-        import superglm.profiling.tweedie as tweedie_module
-
-        captured = {}
-        real = tweedie_module._boundary_censoring_message
-
-        def spy(p_hat, infeasible, *, xatol):
-            captured["resolution"] = xatol
-            return real(p_hat, infeasible, xatol=xatol)
-
-        monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", spy)
-        frame, y, weights, offset, features = _plumbing_fixture()
-
-        # Four powers resolve this as well as twenty: any spacing but xatol.
-        _model(features).estimate_p(
-            frame,
-            y,
-            sample_weight=weights,
-            offset=offset,
-            fit_mode="reml",
-            method="grid",
-            n_grid=4,
-        )
-
-        assert captured["resolution"] == pytest.approx((1.95 - 1.05) / 3.0)
-
-    def test_a_grid_step_gap_warns_at_grid_resolution(self):
-        from superglm.profiling.tweedie import _boundary_censoring_message
-
-        spacing = (1.95 - 1.05) / 19.0
-        message = _boundary_censoring_message(1.6184, {1.6658: "not certifiable"}, xatol=spacing)
-        assert message is not None
-        assert "censored" in message
-
-    def test_a_distant_boundary_stays_silent(self):
-        from superglm.profiling.tweedie import _boundary_censoring_message
-
-        assert (
-            _boundary_censoring_message(
-                1.5006, {1.05: "not certifiable", 1.95: "not certifiable"}, xatol=1e-3
-            )
-            is None
-        )
-
-    def test_a_censored_estimate_lands_in_result_warnings(self, monkeypatch, recwarn):
-        """UserWarnings are routinely filtered, swallowed by catch_warnings
-        blocks, or lost on a notebook re-run; the durable channel the guide
-        points users at is result.warnings. A censored optimum converges,
-        so promotion must not depend on outer_converged being False."""
-        import superglm.profiling.tweedie as tweedie_module
-
-        forced = "FORCED: p_hat sits against the certifiable-region boundary (censored estimate)."
-        monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", lambda *a, **k: forced)
-        frame, y, weights, offset, features = _plumbing_fixture()
-        result = _model(features).estimate_p(
-            frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
-        )
-
-        assert result.outer_converged
-        assert forced in result.outer_message
-        assert any(forced in warning for warning in result.warnings)
-
-    def test_the_resolution_follows_the_winning_records_own_stage(self):
-        """grid_refine normally resolves to Brent's xatol -- but when the
-        refined candidate is invalid and the coarse-stage point wins, that
-        winner was resolved only to the coarse spacing, and judging its
-        boundary distance at xatol silences the warning the same way the
-        pure-grid bug did."""
-        from superglm.profiling.tweedie import _censoring_search_resolution
-
-        bounds = (1.05, 1.95)
-        assert (
-            _censoring_search_resolution("grid_refine", None, bounds, 20, 10, 1e-3, "brent_refine")
-            == 1e-3
-        )
-        assert _censoring_search_resolution(
-            "grid_refine", None, bounds, 20, 10, 1e-3, "grid_coarse"
-        ) == pytest.approx((1.95 - 1.05) / 9.0)
-        assert _censoring_search_resolution(
-            "grid", None, bounds, 20, 10, 1e-3, "grid"
-        ) == pytest.approx((1.95 - 1.05) / 19.0)
-        assert _censoring_search_resolution("brent", None, bounds, 20, 10, 1e-3, "brent") == 1e-3
-
-
-class TestCIAtTheCertifiabilityWall:
-    """_profile_ci_p_detailed treats uncertifiable probes as the profile's
-    boundary. Exercised on a synthetic deterministic objective: the REML
-    evaluation stack's candidate-grade nll is warm-start path-dependent at
-    LR scale, so an end-to-end wall fixture is flaky by construction (that
-    determinism defect is the criterion redesign's scope); the wall logic
-    itself is pure and pins exactly here."""
-
-    @staticmethod
-    def _machinery(wall: float):
-        from superglm.profiling.tweedie import _INFEASIBLE_PROFILE_NLL
-
-        infeasible: dict[float, str] = {}
-        p_hat = 1.5
-
-        def objective(p: float) -> float:
-            key = float(p)
-            if key > wall:
-                infeasible[key] = "penalized mode not certifiable"
-                return _INFEASIBLE_PROFILE_NLL
-            # LR = 2 * ll_scale * (nll - nll_hat) crosses the 95% cutoff
-            # (3.841) at |p - p_hat| ~ 0.05 with ll_scale=1000.
-            return 1.0 + 0.768 * (key - p_hat) ** 2
-
-        return p_hat, objective, infeasible
-
-    def test_a_wall_inside_the_lr_region_censors_the_endpoint(self):
-        from superglm.profiling.tweedie import _profile_ci_p_detailed
-
-        p_hat, objective, infeasible = self._machinery(wall=1.52)
-        details = _profile_ci_p_detailed(
-            objective,
-            p_hat,
-            objective(p_hat),
-            1000.0,
-            alpha=0.05,
-            p_range=(1.05, 1.95),
-            infeasible_reason=infeasible.get,
-        )
-
-        assert details.upper.status == "censored"
-        assert 1.52 - 1e-3 <= details.upper.value <= 1.52
-        assert any("censored" in w for w in details.warnings)
-        # The lower side never meets the wall and roots normally.
-        assert details.lower.status == "root_found"
-        assert details.lower.value == pytest.approx(1.45, abs=2e-3)
-
-    def test_a_crossing_before_the_wall_still_roots_normally(self):
-        from superglm.profiling.tweedie import _profile_ci_p_detailed
-
-        p_hat, objective, infeasible = self._machinery(wall=1.60)
-        details = _profile_ci_p_detailed(
-            objective,
-            p_hat,
-            objective(p_hat),
-            1000.0,
-            alpha=0.05,
-            p_range=(1.05, 1.95),
-            infeasible_reason=infeasible.get,
-        )
-
-        assert details.upper.status == "root_found"
-        assert details.upper.value == pytest.approx(1.55, abs=2e-3)
-        assert details.lower.status == "root_found"
-        assert not any("censored" in w for w in details.warnings)
-
-    @staticmethod
-    def _lower_machinery(wall: float):
-        from superglm.profiling.tweedie import _INFEASIBLE_PROFILE_NLL
-
-        infeasible: dict[float, str] = {}
-        p_hat = 1.5
-
-        def objective(p: float) -> float:
-            key = float(p)
-            if key < wall:
-                infeasible[key] = "penalized mode not certifiable"
-                return _INFEASIBLE_PROFILE_NLL
-            return 1.0 + 0.768 * (key - p_hat) ** 2
-
-        return p_hat, objective, infeasible
-
-    def test_a_lower_wall_is_bisected_not_left_at_a_scan_point(self):
-        """The feasibility loop must use the unsigned wall distance: powers
-        DECREASE toward a lower wall, and a signed comparison never enters
-        the loop, leaving the censored endpoint at whatever coarse scan
-        candidate preceded the wall instead of at the wall itself."""
-        from superglm.profiling.tweedie import _profile_ci_p_detailed
-
-        p_hat, objective, infeasible = self._lower_machinery(wall=1.48)
-        details = _profile_ci_p_detailed(
-            objective,
-            p_hat,
-            objective(p_hat),
-            1000.0,
-            alpha=0.05,
-            p_range=(1.05, 1.95),
-            infeasible_reason=infeasible.get,
-        )
-
-        assert details.lower.status == "censored"
-        assert 1.48 <= details.lower.value <= 1.48 + 1e-3
-        assert any("censored" in w for w in details.warnings)
-        assert details.upper.status == "root_found"
-        assert details.upper.value == pytest.approx(1.55, abs=2e-3)
-
-    def test_a_crossing_above_a_lower_wall_still_roots_normally(self):
-        from superglm.profiling.tweedie import _profile_ci_p_detailed
-
-        p_hat, objective, infeasible = self._lower_machinery(wall=1.40)
-        details = _profile_ci_p_detailed(
-            objective,
-            p_hat,
-            objective(p_hat),
-            1000.0,
-            alpha=0.05,
-            p_range=(1.05, 1.95),
-            infeasible_reason=infeasible.get,
-        )
-
-        assert details.lower.status == "root_found"
-        assert details.lower.value == pytest.approx(1.45, abs=2e-3)
-        assert not any("censored" in w for w in details.warnings)
-
-
-class TestStaleInfeasibilityMarkers:
-    def test_a_successful_retry_clears_the_stale_marker(self, monkeypatch):
-        """An infeasible power leaves a marker but no cached record, so a
-        later evaluation refits; if that retry succeeds under a different
-        warm-start state, the marker must go -- otherwise censoring warns
-        against a now-valid point and the CI treats it as a wall."""
+        The fixture's REML optimum is near 1.48; a wall above 1.3 leaves the
+        search's best feasible power next to an infeasible one.
+        """
         from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 
         frame, y, weights, offset, features = _plumbing_fixture()
         real_fit_reml = SuperGLM.fit_reml
-        failures = {"n": 0}
 
-        def failing_once_below_11(self, X, yv, **kwargs):
-            # The 1.05 bracket endpoint is naturally FEASIBLE on this
-            # fixture (it has no walls of its own), so the injected
-            # one-shot failure is the only reason for its marker and the
-            # retry genuinely succeeds.
-            if float(getattr(self.family, "p", 0.0)) < 1.1 and failures["n"] == 0:
-                failures["n"] += 1
+        def failing_above_13(self, X, yv, **kwargs):
+            if float(getattr(self.family, "p", 0.0)) > 1.3:
                 raise ObservedModeNotConvergedError()
             return real_fit_reml(self, X, yv, **kwargs)
 
-        monkeypatch.setattr(SuperGLM, "fit_reml", failing_once_below_11)
+        monkeypatch.setattr(SuperGLM, "fit_reml", failing_above_13)
+        with pytest.warns(UserWarning, match="censored estimate") as raised:
+            result = _model(features).estimate_p(
+                frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
+            )
 
-        result = _model(features).estimate_p(
-            frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
-        )
+        assert float(result.p_hat) <= 1.3
+        assert any("censored estimate" in warning for warning in result.warnings)
+        # Raised at the caller's line, not inside superglm.
+        censored = [w for w in raised if "censored estimate" in str(w.message)]
+        assert censored[0].filename == __file__
+        # So is a censored side of the interval.
+        with pytest.warns(UserWarning, match="interval for p is censored"):
+            result.interval(0.05)
 
-        walls = result._infeasible_reason.__self__
-        assert failures["n"] == 1
-        assert min(walls) < 1.1
-        p_bad = min(walls)
 
-        value = float(result._objective(p_bad))
+class TestCIAtTheCertifiabilityWall:
+    """The interval treats uncertifiable powers as the profile's boundary.
 
-        assert np.isfinite(value) and value < 1e49
-        assert p_bad not in walls
+    Exercised on a synthetic deterministic objective: the wall logic is pure
+    and pins exactly here. The upper-wall pair is
+    test_profile_scalar::test_interval_side_ending_at_infeasible_region_is_censored
+    and ::test_a_crossing_just_before_an_infeasible_region_is_not_censored.
+    """
+
+    @staticmethod
+    def _interval(wall: float):
+        from superglm.profiling._scalar import RecordedObjective, likelihood_ratio_interval
+
+        p_hat = 1.5
+
+        def objective(p: float) -> float:
+            # LR = 2 * 1000 * (nll - nll_hat) crosses the 95% cutoff (3.841)
+            # at |p - p_hat| ~ 0.05.
+            return np.inf if p < wall else 1.0 + 0.768 * (p - p_hat) ** 2
+
+        recorded = RecordedObjective(objective)
+        return likelihood_ratio_interval(
+            recorded,
+            p_hat,
+            recorded(p_hat),
+            (1.05, 1.95),
+            alpha=0.05,
+            scale=1000.0,
+            xtol=1e-4,
+            error=lambda _: 0.0,
+        )[0]
+
+    def test_a_lower_wall_is_bisected_not_left_at_a_scan_point(self):
+        """Powers DECREASE toward a lower wall; the censored end is the wall itself."""
+        interval = self._interval(wall=1.48)
+
+        assert interval.lower_censored
+        assert 1.48 <= interval.lower <= 1.48 + 1e-4
+        assert not interval.upper_censored
+        assert interval.upper == pytest.approx(1.55, abs=2e-3)
+
+    def test_a_crossing_above_a_lower_wall_still_roots_normally(self):
+        interval = self._interval(wall=1.40)
+
+        assert not interval.lower_censored
+        assert interval.lower == pytest.approx(1.45, abs=2e-3)
 
 
 class TestSCOPModeFailuresAreRoutable:
@@ -592,7 +370,7 @@ class TestSCOPModeFailuresAreRoutable:
         features = {"x": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)}
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml", maxiter=8)
+        result = model.estimate_p(frame, y, fit_mode="reml")
 
         assert 1.05 < float(result.p_hat) < 1.95
         assert np.isfinite(float(result.phi_hat))
@@ -670,136 +448,3 @@ class TestQPModeFailuresAreRoutable:
                     reml_penalties=getattr(model, "_reml_penalties", None) or [],
                     compute_fit_stats=lambda *a, **k: None,
                 )
-
-
-class TestProfileOptCensoringResolution:
-    """profile_opt gives xatol no physical p meaning: the L-BFGS-B branch
-    never forwards it to SciPy at all, and Powell applies it as xtol in the
-    logit-transformed coordinate, where the p-space step shrinks toward the
-    bounds -- exactly where censoring walls live. The winner is resolved to
-    the spacing of the search's own evaluations around it, walls included:
-    an infeasible probe is an exploration point."""
-
-    def test_resolution_comes_from_the_evaluation_trace_not_xatol(self):
-        from superglm.profiling.tweedie import _censoring_search_resolution
-
-        bounds = (1.05, 1.95)
-        trace = [1.14, 1.5, 1.6, 1.615, 1.617, 1.6658, 1.86]
-
-        resolution = _censoring_search_resolution(
-            "profile_opt",
-            None,
-            bounds,
-            20,
-            10,
-            1e-3,
-            "optimizer",
-            winner_p=1.615,
-            evaluated_powers=trace,
-        )
-        assert resolution == pytest.approx(0.015)
-
-        insensitive = _censoring_search_resolution(
-            "profile_opt",
-            None,
-            bounds,
-            20,
-            10,
-            0.5,
-            "optimizer",
-            winner_p=1.615,
-            evaluated_powers=trace,
-        )
-        assert insensitive == pytest.approx(0.015)
-
-    def test_a_degenerate_trace_falls_back_to_xatol(self):
-        from superglm.profiling.tweedie import _censoring_search_resolution
-
-        bounds = (1.05, 1.95)
-        for degenerate in ([1.5], None):
-            assert (
-                _censoring_search_resolution(
-                    "profile_opt",
-                    None,
-                    bounds,
-                    20,
-                    10,
-                    1e-3,
-                    "optimizer",
-                    winner_p=1.5,
-                    evaluated_powers=degenerate,
-                )
-                == 1e-3
-            )
-
-    @pytest.mark.parametrize("optimizer", ["L-BFGS-B", "Powell"])
-    def test_the_search_judges_censoring_at_its_trace_spacing(self, optimizer, monkeypatch):
-        """End-to-end on both optimizer branches: the resolution handed to
-        the censoring check equals the trace-local spacing at the winner."""
-        import superglm.profiling.tweedie as tweedie_module
-
-        captured = {}
-        real_resolution = tweedie_module._censoring_search_resolution
-
-        def resolution_spy(*args, **kwargs):
-            captured["evaluated_powers"] = kwargs.get("evaluated_powers")
-            return real_resolution(*args, **kwargs)
-
-        real_message = tweedie_module._boundary_censoring_message
-
-        def message_spy(p_hat, infeasible, *, xatol):
-            captured["p_hat"] = p_hat
-            captured["judged_at"] = xatol
-            return real_message(p_hat, infeasible, xatol=xatol)
-
-        monkeypatch.setattr(tweedie_module, "_censoring_search_resolution", resolution_spy)
-        monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", message_spy)
-        frame, y, weights, offset, features = _plumbing_fixture()
-
-        # Two optimizer iterations already leave a trace around a winner; the
-        # claim is which spacing is handed over, not how precisely p is found.
-        _model(features).estimate_p(
-            frame,
-            y,
-            sample_weight=weights,
-            offset=offset,
-            fit_mode="reml",
-            method="profile_opt",
-            optimizer=optimizer,
-            maxiter=2,
-        )
-
-        trace = np.sort(np.unique(np.asarray(captured["evaluated_powers"], dtype=float)))
-        assert trace.size > 1
-        position = int(np.argmin(np.abs(trace - captured["p_hat"])))
-        gaps = np.diff(trace)
-        expected = float(np.max(gaps[max(position - 1, 0) : position + 1]))
-        assert captured["judged_at"] == pytest.approx(expected)
-
-
-class TestIrregularGridCensoringResolution:
-    def test_resolution_is_local_to_the_winner_not_the_global_max_gap(self):
-        """On a nonuniform explicit grid, one large gap far from the winner
-        must not inflate the censoring resolution: a winner in a finely
-        spaced neighborhood is resolved to ITS spacing, and judging it at
-        the global maximum would censor against walls many local steps
-        away."""
-        from superglm.profiling.tweedie import _censoring_search_resolution
-
-        grid = [1.05, 1.10, 1.12, 1.14, 1.90]
-        bounds = (1.05, 1.95)
-
-        interior = _censoring_search_resolution(
-            "grid", grid, bounds, 20, 10, 1e-3, "grid", winner_p=1.12
-        )
-        assert interior == pytest.approx(0.02)
-
-        endpoint = _censoring_search_resolution(
-            "grid", grid, bounds, 20, 10, 1e-3, "grid", winner_p=1.05
-        )
-        assert endpoint == pytest.approx(0.05)
-
-        wide_side = _censoring_search_resolution(
-            "grid", grid, bounds, 20, 10, 1e-3, "grid", winner_p=1.90
-        )
-        assert wide_side == pytest.approx(0.76)

@@ -390,7 +390,7 @@ class TestNegativeBinomialThetaProfile:
 
     def test_the_prior_score_differentiates_the_prior_likelihood(self):
         """The analytic score is checked against its own objective, not a number."""
-        from superglm.profiling.nb import _nb2_nll, _theta_profile_score
+        from superglm.profiling.nb import nb_nll, theta_score
 
         rng = np.random.default_rng(5)
         n = 60
@@ -401,10 +401,10 @@ class TestNegativeBinomialThetaProfile:
 
         for theta in (0.5, 3.0, 25.0):
             step = theta * 1e-6
-            lower = _nb2_nll(y, mu, w, theta - step, weight_semantics="prior") * size
-            upper = _nb2_nll(y, mu, w, theta + step, weight_semantics="prior") * size
+            lower = nb_nll(y, mu, w, theta - step, weight_semantics="prior") * size
+            upper = nb_nll(y, mu, w, theta + step, weight_semantics="prior") * size
             difference = -(upper - lower) / (2.0 * step)
-            analytic = _theta_profile_score(y, mu, w, theta, weight_semantics="prior")
+            analytic = theta_score(y, mu, w, theta, weight_semantics="prior")
             assert analytic == pytest.approx(difference, rel=1e-6)
 
     def test_a_zero_prior_weight_deletes_its_row_from_the_score(self):
@@ -415,7 +415,7 @@ class TestNegativeBinomialThetaProfile:
         go before the score is formed.  Zero non-Tweedie weights are admitted
         by validation, which makes this reachable from a plain fit.
         """
-        from superglm.profiling.nb import _theta_profile_score
+        from superglm.profiling.nb import theta_score
 
         rng = np.random.default_rng(21)
         n = 50
@@ -437,15 +437,15 @@ class TestNegativeBinomialThetaProfile:
         # exact only up to that association.  Bound measured over 40 seeds and
         # four thetas: worst 1.08e-14.
         for theta in (0.5, 3.0, 25.0, 1e9):
-            prior_full = _theta_profile_score(y, mu, w, theta, weight_semantics="prior")
-            prior_deleted = _theta_profile_score(
+            prior_full = theta_score(y, mu, w, theta, weight_semantics="prior")
+            prior_deleted = theta_score(
                 y[carried], mu[carried], w[carried], theta, weight_semantics="prior"
             )
             assert np.isfinite(prior_full)
             assert prior_full == prior_deleted
 
-            frequency_full = _theta_profile_score(y, mu, w, theta, weight_semantics="frequency")
-            frequency_deleted = _theta_profile_score(
+            frequency_full = theta_score(y, mu, w, theta, weight_semantics="frequency")
+            frequency_deleted = theta_score(
                 y[carried], mu[carried], w[carried], theta, weight_semantics="frequency"
             )
             assert frequency_full == pytest.approx(frequency_deleted, rel=1e-12)
@@ -510,12 +510,13 @@ class TestNegativeBinomialThetaProfile:
 
         assert prior._weight_semantics == "prior"
         assert copy.deepcopy(prior)._weight_semantics == "prior"
-        assert prior._detached_public_copy()._weight_semantics == "prior"
+        # Restating at a published mean, as every publication does, keeps it too.
+        assert prior._at_mean(prior._y, prior._mu, prior._weights)._weight_semantics == "prior"
         # The interval reads the same likelihood the estimate came from.
         assert copy.deepcopy(prior).ci() == pytest.approx(prior.ci(), rel=1e-12)
 
     def test_the_two_score_arms_are_one_expression_at_unit_weight(self):
-        from superglm.profiling.nb import _theta_profile_score
+        from superglm.profiling.nb import theta_score
 
         rng = np.random.default_rng(6)
         n = 40
@@ -523,21 +524,18 @@ class TestNegativeBinomialThetaProfile:
         y = rng.poisson(mu).astype(float)
         ones = np.ones(n)
         for theta in (0.3, 2.0, 40.0):
-            assert _theta_profile_score(
-                y, mu, ones, theta, weight_semantics="prior"
-            ) == _theta_profile_score(y, mu, ones, theta, weight_semantics="frequency")
+            assert theta_score(y, mu, ones, theta, weight_semantics="prior") == theta_score(
+                y, mu, ones, theta, weight_semantics="frequency"
+            )
 
 
 class TestScaleProfilerInternals:
     def test_the_frequency_tweedie_saturated_arm_matches_row_replication(self):
         """A replicated row contributes the unit-weight density, ``w`` times.
 
-        Agreement is exact at ``p = 1.5``, where the profiler evaluates a
-        closed-form Bessel reduction.  At other powers the Dunn-Smyth series
-        packs rows into shared term buffers, so a row's value depends on which
-        rows share its batch: the same effect reproduces with the density
-        evaluator alone, off any weight-contract code, and it bounds agreement
-        here at the measured 1e-10 rather than at round-off.
+        The series evaluates every row on its own, so a counted row and its
+        copies carry the same value and the two sums differ only by summation
+        order: at most (number of rows) eps relative, under 1e-13 here.
         """
         rng = np.random.default_rng(14)
         y = np.where(rng.random(40) < 0.35, 0.0, rng.gamma(2.0, 1.5, 40))
@@ -545,17 +543,17 @@ class TestScaleProfilerInternals:
         weights = counts.astype(float)
         replicated = np.repeat(y, counts)
 
-        for power, tolerance in ((1.5, 1e-14), (1.3, 1e-10), (1.7, 1e-10)):
+        for power in (1.5, 1.3, 1.7):
             frequency = prepare_tweedie_reml_scale_data(
                 y, weights, power, weight_semantics="frequency"
             )
             expanded = prepare_tweedie_reml_scale_data(
                 replicated, np.ones_like(replicated), power, weight_semantics="prior"
             )
-            assert frequency.positive_size == pytest.approx(expanded.positive_size)
+            assert frequency.size == expanded.size
             for phi in (0.5, 1.0, 3.0):
-                assert frequency.saturated_log_likelihood(phi) == pytest.approx(
-                    expanded.saturated_log_likelihood(phi), rel=tolerance
+                np.testing.assert_allclose(
+                    frequency.saturated(phi), expanded.saturated(phi), rtol=1e-13
                 )
 
     def test_the_vectorized_gamma_shape_helpers_match_their_scalar_forms(self):
@@ -2352,71 +2350,6 @@ class TestTheEvaluationResponseLengthIsCheckedFirst:
             model.metrics(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))
 
 
-class TestTheStandaloneThetaProfileChecksTheContract:
-    """``profile_ci_theta`` is a public likelihood boundary of its own.
-
-    It takes arrays directly, so no fit-time or evaluation-time check has seen
-    those rows, and every NLL it evaluates reads the same response and weights.
-    An off-contract input returned an apparently exact interval with nothing
-    marking it -- the sixth boundary, and the one this branch missed.
-    """
-
-    @staticmethod
-    def _arrays(n=200, seed=41):
-        rng = np.random.default_rng(seed)
-        y = rng.poisson(4.0, n).astype(float)
-        return y, np.full(n, 4.0), n
-
-    def test_fractional_replication_counts_warn(self):
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        with pytest.warns(FractionalFrequencyWeightWarning):
-            profile_ci_theta(y, mu, np.full(n, 2.5), 3.0, weight_semantics="frequency")
-
-    def test_an_adjusted_prior_response_is_quiet(self):
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        y = y.copy()
-        y[:20] += 0.5
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", PriorWeightLatticeWarning)
-            profile_ci_theta(y, mu, np.full(n, 1.5), 3.0, weight_semantics="prior")
-
-    def test_a_fractional_response_warns_under_frequency(self):
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        y = y.copy()
-        y[:20] += 0.5
-        with pytest.warns(PriorWeightLatticeWarning):
-            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics="frequency")
-
-    @pytest.mark.parametrize("semantics", ["prior", "frequency"])
-    def test_an_honoured_contract_stays_silent(self, semantics):
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", PriorWeightLatticeWarning)
-            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
-            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics=semantics)
-
-    def test_it_reports_the_interval_moving_not_the_coefficients(self):
-        """mu is held fixed here, so nothing can be refitted."""
-        from superglm.profiling.nb import profile_ci_theta
-
-        y, mu, n = self._arrays()
-        y = y.copy()
-        y[:20] += 0.5
-        with pytest.warns(PriorWeightLatticeWarning) as caught:
-            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics="frequency")
-        message = str(caught[0].message)
-        assert "profiled theta and its interval" in message
-        assert "move as well" not in message  # the coefficients do not
-
-
 class TestTheImpactClaimMatchesWhatTheCallIsDoing:
     """The reach depends on what the caller does with theta, not only on the family.
 
@@ -2462,7 +2395,6 @@ class TestTheImpactClaimMatchesWhatTheCallIsDoing:
         ("role", "expected"),
         [
             ("fixed", "unaffected"),
-            ("profiled", "profiled theta and its interval"),
             ("estimated", "move as well"),
         ],
     )
@@ -2527,41 +2459,37 @@ class TestEveryPublicLikelihoodEntryChecksTheContract:
             model.fit(frame, y, sample_weight=np.full(n, 2.0))
         return model, frame, y, n
 
-    def test_estimate_nb_theta_warns_on_fractional_counts(self):
-        from superglm import estimate_nb_theta
-
+    def test_estimate_theta_warns_on_fractional_counts(self):
         model, frame, y, n = self._fitted_on_whole_counts()
         with pytest.warns(FractionalFrequencyWeightWarning):
-            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.5))
+            model.estimate_theta(frame, y, sample_weight=np.full(n, 2.5))
 
-    def test_estimate_nb_theta_warns_on_a_fractional_response(self):
-        from superglm import estimate_nb_theta
-
+    def test_estimate_theta_warns_on_a_fractional_response(self):
         model, frame, y, n = self._fitted_on_whole_counts()
         y = y.copy()
         y[:30] += 0.5
         with pytest.warns(PriorWeightLatticeWarning):
-            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+            model.estimate_theta(frame, y, sample_weight=np.full(n, 2.0))
 
-    def test_estimate_nb_theta_says_the_estimates_move(self):
-        """It refits beta at each candidate theta, so the reach is the estimates."""
-        from superglm import estimate_nb_theta
+    def test_estimate_theta_says_the_estimates_move(self):
+        """It refits beta at each candidate theta, so the reach is the estimates.
 
+        The fitted family holds a numeric theta, so the role cannot be read
+        from the family: the call has to say it re-estimates theta.
+        """
         model, frame, y, n = self._fitted_on_whole_counts()
         y = y.copy()
         y[:30] += 0.5
         with pytest.warns(PriorWeightLatticeWarning) as caught:
-            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+            model.estimate_theta(frame, y, sample_weight=np.full(n, 2.0))
         assert "move as well" in str(caught[0].message)
 
     def test_an_honoured_contract_stays_silent(self):
-        from superglm import estimate_nb_theta
-
         model, frame, y, n = self._fitted_on_whole_counts()
         with warnings.catch_warnings():
             warnings.simplefilter("error", PriorWeightLatticeWarning)
             warnings.simplefilter("error", FractionalFrequencyWeightWarning)
-            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+            model.estimate_theta(frame, y, sample_weight=np.full(n, 2.0))
 
 
 class TestAFoldIsCheckedOncePerCondition:
@@ -2679,20 +2607,6 @@ class TestEveryBoundaryValidatesBeforeItWarns:
                     frame,
                     np.arange(n - 3, dtype=float) + 0.5,
                     sample_weight=np.full(n - 3, 2.5),
-                )
-
-    def test_the_theta_profile_raises_on_mismatched_arrays(self):
-        from superglm.profiling.nb import profile_ci_theta
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            with pytest.raises(ValueError, match="same rows"):
-                profile_ci_theta(
-                    np.array([1.5, 2.5, 3.5]),
-                    np.ones(2),
-                    np.full(3, 2.5),
-                    3.0,
-                    weight_semantics="frequency",
                 )
 
 

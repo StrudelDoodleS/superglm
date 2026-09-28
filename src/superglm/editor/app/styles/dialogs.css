@@ -302,10 +302,6 @@
   stroke: color-mix(in srgb, var(--grey) 20%, transparent);
   stroke-width: 1;
 }
-.profile-trace-tick {
-  stroke: color-mix(in srgb, var(--trace-ink) 55%, transparent);
-  stroke-width: 1;
-}
 .profile-trace-label {
   fill: var(--trace-ink);
 }
@@ -338,30 +334,6 @@
   stroke-linejoin: round;
   stroke-width: 3px;
 }
-.profile-learning-curve {
-  fill: none;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.profile-learning-point {
-  stroke: var(--surface);
-  stroke-width: 0.8;
-}
-.profile-learning-end {
-  stroke: var(--surface);
-  stroke-width: 1;
-}
-.profile-learning-best {
-  stroke-width: 2.8;
-}
-.profile-learning-best-point {
-  stroke: var(--text);
-  stroke-width: 1.2;
-}
-.profile-learning-label text {
-  font-variant-numeric: tabular-nums;
-}
 .profile-trace-table {
   display: grid;
   gap: 2px;
@@ -377,16 +349,7 @@
   gap: 5px;
   color: var(--muted);
 }
-.profile-fit-trace-row {
-  grid-template-columns: 24px 72px minmax(0, 1fr) 62px;
-}
 .profile-trace-row strong {
   color: var(--text);
   font-weight: 600;
-}
-.profile-fit-loss {
-  overflow: hidden;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }

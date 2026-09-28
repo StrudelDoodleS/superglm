@@ -20,11 +20,11 @@ from superglm import (
     Spline,
     SuperGLM,
     Tweedie,
+    generate_tweedie_cpg,
 )
 from superglm._frame import EagerFrame
 from superglm.model.base import auto_detect, model_build_design_matrix
 from superglm.model.input_validation import validate_fit_input
-from superglm.profiling.tweedie import generate_tweedie_cpg
 
 
 def _compile_without_solving(model: SuperGLM, X, y: np.ndarray) -> SuperGLM:
@@ -556,36 +556,22 @@ def test_dataframe_boundary_tweedie_and_nb_profiles_are_backend_neutral() -> Non
             features={"x": Numeric()},
         )
         events = []
-        trace_rows = []
         result = model.estimate_p(
             X,
             tweedie_y,
             p_bounds=(1.3, 1.7),
             xatol=1e-4,
             progress_callback=lambda phase, payload: events.append((phase, payload)),
-            trace_callback=trace_rows.append,
         )
-        return model, result, events, trace_rows
+        return model, result, events
 
-    pandas_tweedie, pandas_p, pandas_events, pandas_trace = tweedie_profiled(pandas_X)
-    polars_tweedie, polars_p, polars_events, polars_trace = tweedie_profiled(polars_X)
-    for field in (
-        "p_hat",
-        "phi_hat",
-        "nll",
-        "n_evaluations",
-        "converged",
-        "phi_used_fallback",
-        "phi_fallback_reason",
-        "density_method",
-        "density_exact",
-    ):
+    pandas_tweedie, pandas_p, pandas_events = tweedie_profiled(pandas_X)
+    polars_tweedie, polars_p, polars_events = tweedie_profiled(polars_X)
+    for field in ("p_hat", "phi_hat", "nll", "search_nll", "converged", "warnings"):
         assert getattr(polars_p, field) == getattr(pandas_p, field)
-    pd.testing.assert_frame_equal(polars_p.search_trace, pandas_p.search_trace, check_exact=True)
-    assert [phase for phase, _ in polars_events] == [phase for phase, _ in pandas_events]
-    assert [type(row) for row in polars_trace] == [type(row) for row in pandas_trace]
+    pd.testing.assert_frame_equal(polars_p.evaluations, pandas_p.evaluations, check_exact=True)
+    assert polars_events == pandas_events
     assert not _contains_boundary_adapter(polars_events)
-    assert not _contains_boundary_adapter(polars_trace)
     _assert_fit_results_equal(pandas_tweedie, polars_tweedie, pandas_X, polars_X)
 
     theta = 2.5
@@ -597,14 +583,14 @@ def test_dataframe_boundary_tweedie_and_nb_profiles_are_backend_neutral() -> Non
             selection_penalty=0.0,
             features={"x": Numeric()},
         )
-        result = model.estimate_theta(X, nb_y, maxiter=4)
+        result = model.estimate_theta(X, nb_y)
         return model, result
 
     pandas_nb, pandas_theta = nb_profiled(pandas_X)
     polars_nb, polars_theta = nb_profiled(polars_X)
     assert polars_theta.theta_hat == pandas_theta.theta_hat
     assert polars_theta.nll == pandas_theta.nll
-    assert polars_theta.n_evaluations == pandas_theta.n_evaluations
+    pd.testing.assert_frame_equal(polars_theta.evaluations, pandas_theta.evaluations)
     assert polars_theta.converged is pandas_theta.converged
     _assert_fit_results_equal(pandas_nb, polars_nb, pandas_X, polars_X)
 

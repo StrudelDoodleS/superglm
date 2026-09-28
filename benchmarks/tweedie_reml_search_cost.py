@@ -11,8 +11,8 @@ Run before and after any change:
 
 The correctness bar is not "it got faster". This benchmark fails closed: it
 exits non-zero if p_hat or phi_hat drifts past tolerance, and *also* if any
-leg reports non-convergence, a non-finite objective, a boundary-pinned
-optimum, a density warning, or any Python warning. A search that gives up
+leg reports non-convergence, a boundary-pinned or censored optimum, a skipped
+power, or any Python warning. A search that gives up
 early is fast for the wrong reason, and a timing table that cannot tell that
 apart from a real speedup is not evidence.
 """
@@ -102,50 +102,14 @@ def _model(oc_levels):
 def profile_complaints(result) -> list[str]:
     """Name every way a power-search result admits it did not do its job.
 
-    A search that returns unconverged, lands on a configured bound, or profiles
-    a non-finite objective is not a cheaper answer to the same question. Each
-    flag below is one the search itself sets, so leaving them unchecked means
-    the benchmark reports a speedup the search has already disclaimed.
+    A search that returns unconverged, lands on a search bound, or sits next to
+    a power it had to skip is not a cheaper answer to the same question. The
+    result records the first in ``converged`` and the others in ``warnings``,
+    so leaving them unchecked means the benchmark reports a speedup the search
+    has already disclaimed.
     """
-    complaints: list[str] = []
-    _missing = object()
-    for flag in (
-        "converged",
-        "outer_converged",
-        "fit_converged",
-        "solver_converged",
-        "objective_finite",
-        "phi_converged",
-    ):
-        value = getattr(result, flag, _missing)
-        # Fail closed on a renamed or removed flag: a default of True would
-        # read "fine" forever after the field stopped existing.
-        if value is _missing:
-            complaints.append(f"{flag} missing from the result")
-        elif value is False:
-            complaints.append(f"{flag}=False")
-    # None means "REML did not run here", which is legitimate under fit mode.
-    if getattr(result, "reml_converged", None) is False:
-        complaints.append("reml_converged=False")
-    # After publication re-profiles dispersion the live flags describe the
-    # published fit; the searched winner's own certification survives in the
-    # search_* stash, and a search that limped must not present clean
-    # timings because its publication came out clean.
-    for flag in ("search_objective_finite", "search_phi_converged", "search_fit_converged"):
-        if getattr(result, flag, None) is False:
-            complaints.append(f"{flag}=False")
-    boundary = getattr(result, "outer_boundary", None)
-    if boundary:
-        complaints.append(f"outer_boundary={boundary!r} (p_hat pinned to a configured bound)")
-    severity = getattr(result, "density_warning_severity", "none")
-    if severity not in ("none", "label"):
-        complaints.append(f"density_warning_severity={severity!r}")
-    if getattr(result, "near_power_boundary", False):
-        complaints.append("near_power_boundary=True")
-    if getattr(result, "phi_used_fallback", False):
-        complaints.append(f"phi_used_fallback=True ({result.phi_fallback_reason})")
-    for message in getattr(result, "warnings", None) or []:
-        complaints.append(f"result warning: {message}")
+    complaints = [] if result.converged else ["converged=False"]
+    complaints.extend(f"result warning: {message}" for message in result.warnings)
     return complaints
 
 
@@ -263,10 +227,7 @@ def main() -> None:
             "phi_hat": float(r.phi_hat),
             "published_deviance": float(model.result.deviance),
             "backend": published_backend(model),
-            "power_steps": int(r.n_evaluations),
-            "phi_evals": int(r.phi_n_evaluations),
-            "method": str(r.method),
-            "phi_optimizer": str(r.phi_optimizer),
+            "power_steps": len(r.evaluations),
             "complaints": profile_complaints(r) + model_complaints(model, "published fit_reml"),
         }
 
@@ -286,9 +247,7 @@ def main() -> None:
             "published_phi": float(model.result.phi),
             "published_deviance": float(model.result.deviance),
             "backend": published_backend(model),
-            "power_steps": int(r.n_evaluations),
-            "phi_evals": int(r.phi_n_evaluations),
-            "method": str(r.method),
+            "power_steps": len(r.evaluations),
             "complaints": profile_complaints(r) + model_complaints(model, "published fit_reml"),
         }
 
@@ -308,9 +267,7 @@ def main() -> None:
             "phi_hat": float(r.phi_hat),
             "published_deviance": float(model.result.deviance),
             "backend": published_backend(model),
-            "power_steps": int(r.n_evaluations),
-            "phi_evals": int(r.phi_n_evaluations),
-            "method": str(r.method),
+            "power_steps": len(r.evaluations),
             "complaints": profile_complaints(r) + model_complaints(model, "published fit_reml"),
         }
 
@@ -344,7 +301,7 @@ def main() -> None:
         row = results[label]
         print(
             f"{caption:<28}{row['seconds']:7.2f}s  steps={row['power_steps']:>2} "
-            f"phi_evals={row['phi_evals']:>3}  p={row['p_hat']:.5f} phi={row['phi_hat']:.2f}"
+            f"p={row['p_hat']:.5f} phi={row['phi_hat']:.2f}"
         )
     print(
         f"{'single fit_reml':<28}{t_one:7.2f}s  "

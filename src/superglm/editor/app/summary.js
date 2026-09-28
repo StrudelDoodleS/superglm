@@ -86,7 +86,7 @@ export async function runDistributionProfile(
     status: "running",
     parameter,
     trace: [],
-    options: profileOptionsPayload(nodes, parameter)
+    options: profileOptionsPayload(nodes)
   }, nodes);
   try {
     const started = await request("/profile_distribution/start", {
@@ -95,7 +95,7 @@ export async function runDistributionProfile(
       body: JSON.stringify({
         parameter,
         level_display: levelDisplay,
-        ...profileOptionsPayload(nodes, parameter)
+        ...profileOptionsPayload(nodes)
       })
     });
     let status = started;
@@ -146,17 +146,11 @@ function openProfileDialog(nodes) {
   }
 }
 
-function profileOptionsPayload(nodes, parameter) {
+function profileOptionsPayload(nodes) {
   const xatol = Number(nodes.profileTolerance ? nodes.profileTolerance.value : 0.001);
-  const payload = {
+  return {
     xatol: Number.isFinite(xatol) && xatol > 0 ? xatol : 0.001
   };
-  if (parameter === "tweedie_p" && nodes.profilePhiMethod) {
-    payload.method = nodes.profileMethod ? nodes.profileMethod.value : "brent";
-    payload.phi_method = nodes.profilePhiMethod.value;
-    payload.trace_iterations = true;
-  }
-  return payload;
 }
 
 function requestedLevelDisplay(nodes) {
@@ -274,8 +268,6 @@ export function updateDistributionProfileActions(payload, nodes) {
     reprofileNb2.hidden = !canProfileNb2;
   }
   if (nodes.profileOptions) nodes.profileOptions.hidden = !(canProfileTweedie || canProfileNb2);
-  if (nodes.profileMethodWrap) nodes.profileMethodWrap.hidden = !canProfileTweedie;
-  if (nodes.profilePhiWrap) nodes.profilePhiWrap.hidden = !canProfileTweedie;
 }
 
 function renderProfileTrace(job, nodes) {
@@ -293,10 +285,8 @@ function renderProfileTrace(job, nodes) {
   profileProgress.classList.toggle("profile-running", job.status === "running");
   profileProgress.classList.toggle("profile-finalizing", job.status === "running" && isPostSearchPhase(job.phase));
   const label = job.parameter === "nb2_theta" ? "theta" : "p";
-  const status = profileStatusLabel(job, trace.length);
-  const kind = fitTraceKind(trace);
   if (profileTraceStatus) {
-    profileTraceStatus.textContent = kind ? `${status} · ${kind}` : status;
+    profileTraceStatus.textContent = profileStatusLabel(job, trace.length);
   }
   if (profileTraceLegend) {
     profileTraceLegend.innerHTML = profileTraceLegendHTML(trace, estimate, label);
@@ -342,11 +332,6 @@ function profileEstimateShortText(estimate) {
   const label = estimate.label || PROFILE_ESTIMATE_LABELS[estimate.parameter] || estimate.parameter || "estimate";
   const value = formatProfileNumber(estimate.value);
   return value ? `${label} ${value}` : String(label);
-}
-
-function fitTraceKind(trace) {
-  const row = trace.find((item) => Array.isArray(item.fit_trace) && item.fit_trace.length);
-  return row && row.fit_trace_kind ? String(row.fit_trace_kind) : "";
 }
 
 function profileTraceSVG(trace, estimate) {
@@ -416,84 +401,7 @@ function profileObjectiveSVG(values, estimate) {
   `;
 }
 
-function profileLearningCurvesSVG(curves, estimate) {
-  const visible = curves.slice(-10);
-  const allPoints = visible.flatMap((curve) => curve.points);
-  const margin = { left: 48, right: 10, top: 12, bottom: 28 };
-  const width = 320 - margin.left - margin.right;
-  const height = 120 - margin.top - margin.bottom;
-  const xMax = Math.max(1, ...allPoints.map((point) => point.iteration));
-  const yMin = Math.min(...allPoints.map((point) => point.loss));
-  const yMax = Math.max(...allPoints.map((point) => point.loss));
-  const yPad = Math.max((yMax - yMin) * 0.08, Math.abs(yMax) * 0.002, 1e-9);
-  const low = yMin - yPad;
-  const high = yMax + yPad;
-  const x = (iteration) => margin.left + width * (iteration / xMax);
-  const y = (loss) => margin.top + height * (1 - (loss - low) / (high - low || 1));
-  const yTicks = [high, (high + low) / 2, low];
-  const xTicks = profileFitIterTicks(xMax);
-  const axisY = margin.top + height;
-  return `
-    ${yTicks.map((tick) => `
-      <line class="profile-trace-grid" x1="${margin.left}" y1="${y(tick).toFixed(2)}" x2="${margin.left + width}" y2="${y(tick).toFixed(2)}"></line>
-      <text x="${margin.left - 5}" y="${(y(tick) + 3).toFixed(2)}" text-anchor="end" class="profile-trace-label" font-size="9">${escapeHTML(formatProfileNumber(tick))}</text>
-    `).join("")}
-    <line class="profile-trace-grid" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${axisY}"></line>
-    <line class="profile-trace-grid" x1="${margin.left}" y1="${axisY}" x2="${margin.left + width}" y2="${axisY}"></line>
-    ${xTicks.map((tick) => `
-      <line class="profile-trace-tick" x1="${x(tick).toFixed(2)}" y1="${axisY}" x2="${x(tick).toFixed(2)}" y2="${axisY + 4}"></line>
-      <text x="${x(tick).toFixed(2)}" y="${axisY + 14}" text-anchor="middle" class="profile-trace-label" font-size="9">${tick}</text>
-    `).join("")}
-    ${visible.map((curve, i) => profileLearningCurvePath(curve, i, x, y, profileCurveIsBest(curve, visible, estimate))).join("")}
-    <text x="${margin.left}" y="114" class="profile-trace-label" font-size="10">fit iter</text>
-    <text x="310" y="114" text-anchor="end" class="profile-trace-label" font-size="10">loss</text>
-  `;
-}
-
-function profileFitIterTicks(xMax) {
-  const max = Math.max(0, Math.ceil(xMax));
-  const step = Math.max(1, Math.ceil(max / 4));
-  const ticks = [];
-  for (let tick = 0; tick <= max; tick += step) {
-    ticks.push(tick);
-  }
-  if (!ticks.includes(max)) ticks.push(max);
-  return ticks;
-}
-
-function profileLearningCurvePath(curve, index, x, y, isBest) {
-  const points = curve.points
-    .map((point) => `${x(point.iteration).toFixed(2)},${y(point.loss).toFixed(2)}`)
-    .join(" ");
-  const color = profileCurveColor(index);
-  const opacity = 0.45 + 0.5 * ((index + 1) / 10);
-  const curveClass = isBest ? "profile-learning-curve profile-learning-best" : "profile-learning-curve";
-  const markers = curve.points.map((point, pointIndex) => {
-    const isLast = pointIndex === curve.points.length - 1;
-    const classes = isLast
-      ? `profile-learning-point profile-learning-end${isBest ? " profile-learning-best-point" : ""}`
-      : "profile-learning-point";
-    const radius = isLast && isBest ? 3.8 : (isLast ? 2.8 : 2.2);
-    return `<circle class="${classes}" cx="${x(point.iteration).toFixed(2)}" cy="${y(point.loss).toFixed(2)}" r="${radius}" style="fill:${color}"></circle>`;
-  }).join("");
-  return `
-    <polyline class="${curveClass}" points="${points}" style="stroke:${color}" opacity="${isBest ? "1" : opacity.toFixed(2)}"></polyline>
-    ${markers}
-  `;
-}
-
 function profileTraceLegendHTML(trace, estimate, label) {
-  const fitCurves = trace
-    .filter((row) => Array.isArray(row.fit_trace) && row.fit_trace.length)
-    .map((row, index) => ({
-      index,
-      p: Number(row.p),
-      theta: Number(row.theta),
-      profileLoss: outerProfileObjective(row),
-      finalFitLoss: profileFinalFitLoss(row),
-      row
-    }))
-    .filter((curve) => Number.isFinite(curve.profileLoss));
   const estimateBlock = estimate
     ? `<div class="profile-estimate">
         <strong>${escapeHTML(profileEstimateShortText(estimate))}</strong>
@@ -501,9 +409,6 @@ function profileTraceLegendHTML(trace, estimate, label) {
         <em>outer profile objective minimum</em>
       </div>`
     : "";
-  if (fitCurves.length) {
-    return `${estimateBlock}${profileLearningCurveLegend(fitCurves, estimate)}`;
-  }
   const rows = trace
     .map((row, index) => ({
       index,
@@ -528,66 +433,28 @@ function profileTraceLegendHTML(trace, estimate, label) {
 function profileEstimateCIText(estimate) {
   const low = formatProfileNumber(estimate.ci_low);
   const high = formatProfileNumber(estimate.ci_high);
-  if (estimate.ci_status === "unavailable for Pearson plug-in") {
-    return "CI unavailable for Pearson plug-in";
-  }
   if (!low || !high) {
     return estimate.ci_status === "not computed" ? "CI not computed" : "CI pending";
   }
-  return `CI [${low}, ${high}]`;
+  return `CI [${low}, ${high}]${profileCensoredSuffix(estimate.ci_status)}`;
 }
 
-function profileLearningCurveLegend(curves, estimate) {
-  return curves.map((curve, i) => {
-    const labelValue = Number.isFinite(curve.p) ? curve.p : curve.theta;
-    const label = Number.isFinite(labelValue) ? formatProfileNumber(labelValue) : String(curve.index + 1);
-    const title = Number.isFinite(curve.finalFitLoss)
-      ? `inner fit trace final ${formatProfileNumber(curve.finalFitLoss)}`
-      : "inner fit trace";
-    return profileLegendItem({
-      color: profileCurveColor(i),
-      label: `p ${label}`,
-      detail: `profile loss ${formatProfileNumber(curve.profileLoss)}`,
-      title,
-      isBest: profileCurveIsBest(curve, curves, estimate)
-    });
-  }).join("");
+// A censored side is where the search stopped, not a likelihood-ratio crossing;
+// a caution says the interval is not about the estimate as it stands.
+const MARKED_CI_STATUSES = new Set(["censored", "caution", "censored with caution"]);
+
+function profileCensoredSuffix(status) {
+  return MARKED_CI_STATUSES.has(status) ? ` ${status}` : "";
 }
 
-function profileLegendItem({ color, label, detail, title = "", isBest }) {
+function profileLegendItem({ color, label, detail, isBest }) {
   return `
-    <div class="profile-legend-item${isBest ? " profile-legend-best" : ""}" title="${escapeHTML(title)}">
+    <div class="profile-legend-item${isBest ? " profile-legend-best" : ""}">
       <span class="profile-legend-swatch" style="background:${escapeHTML(color)}"></span>
       <strong>${escapeHTML(label)}</strong>
       <em>${escapeHTML(detail || "")}</em>
     </div>
   `;
-}
-
-function profileCurveIsBest(curve, curves, estimate) {
-  const target = Number(estimate && estimate.value);
-  const curveValue = Number.isFinite(curve.p) ? curve.p : curve.theta;
-  if (Number.isFinite(target) && Number.isFinite(curveValue)) {
-    return Math.abs(curveValue - target) < 5e-4;
-  }
-  const withLoss = curves.filter((item) => Number.isFinite(profileCurveFinalLoss(item)));
-  if (!withLoss.length) return false;
-  const best = withLoss.reduce(
-    (acc, item) => (profileCurveFinalLoss(item) < profileCurveFinalLoss(acc) ? item : acc),
-    withLoss[0]
-  );
-  return curve === best;
-}
-
-function profileFinalFitLoss(row) {
-  if (!Array.isArray(row.fit_trace) || !row.fit_trace.length) return NaN;
-  return Number(row.fit_trace.at(-1).loss);
-}
-
-function profileCurveFinalLoss(curve) {
-  if (Number.isFinite(curve.profileLoss)) return curve.profileLoss;
-  if (curve.points && curve.points.length) return Number(curve.points.at(-1).loss);
-  return NaN;
 }
 
 function outerProfileObjective(row) {
@@ -601,12 +468,6 @@ function profileCurveColor(index) {
 }
 
 function profileTraceRows(trace, label) {
-  const fitRows = trace
-    .filter((row) => Array.isArray(row.fit_trace) && row.fit_trace.length)
-    .slice(-4)
-    .reverse();
-  if (fitRows.length) return profileFitTraceRows(fitRows, label);
-
   const rows = trace.slice(-4).reverse();
   if (!rows.length) return '<div class="profile-trace-row"><span></span><span>waiting</span><span></span><span></span></div>';
   return rows.map((row) => {
@@ -620,37 +481,6 @@ function profileTraceRows(trace, label) {
       </div>
     `;
   }).join("");
-}
-
-function profileFitTraceRows(rows, label) {
-  const rangeLabel = "inner fit trace start -> final";
-  return rows.map((row) => {
-    const param = row[label] !== undefined ? `${label} ${formatProfileNumber(row[label])}` : "";
-    const losses = row.fit_trace
-      .map((point) => Number(point.loss))
-      .filter((loss) => Number.isFinite(loss));
-    const start = losses[0];
-    const final = losses.at(-1);
-    const range = losses.length
-      ? `${formatProfileNumber(start)} -> ${formatProfileNumber(final)}`
-      : "";
-    const profileLoss = formatProfileNumber(outerProfileObjective(row));
-    const kind = shortFitTraceKind(row.fit_trace_kind);
-    return `
-      <div class="profile-trace-row profile-fit-trace-row">
-        <span>${escapeHTML(String(row.step ?? ""))}</span>
-        <strong>${escapeHTML(param)}</strong>
-        <span class="profile-fit-loss" title="${escapeHTML(`${rangeLabel}: ${range}`)}">profile loss ${escapeHTML(profileLoss)}</span>
-        <span>${escapeHTML(kind)}</span>
-      </div>
-    `;
-  }).join("");
-}
-
-function shortFitTraceKind(kind) {
-  if (kind === "REML objective") return "REML obj";
-  if (kind === "weighted deviance") return "deviance";
-  return kind || "";
 }
 
 function formatProfileNumber(value) {
@@ -680,15 +510,10 @@ function renderCompactSummary(payload) {
   ];
   if (model.tweedie_p !== null && model.tweedie_p !== undefined) {
     facts.push(["Tweedie p", model.tweedie_p]);
-    if (model.tweedie_p_method) {
-      facts.push(["Tweedie p method", model.tweedie_p_method]);
-    }
     const ci = Array.isArray(model.tweedie_p_ci) ? model.tweedie_p_ci : null;
-    const ciText = model.tweedie_p_ci_status === "unavailable for Pearson plug-in"
-      ? model.tweedie_p_ci_status
-      : ci && ci.length >= 2
-        ? `[${formatProfileNumber(ci[0])}, ${formatProfileNumber(ci[1])}]`
-        : model.tweedie_p_ci_status || "not computed";
+    const ciText = ci && ci.length >= 2
+      ? `[${formatProfileNumber(ci[0])}, ${formatProfileNumber(ci[1])}]${profileCensoredSuffix(model.tweedie_p_ci_status)}`
+      : model.tweedie_p_ci_status || "not computed";
     facts.push(["Tweedie p CI", ciText]);
   }
   if (model.nb_theta !== null && model.nb_theta !== undefined) facts.push(["NB2 theta", model.nb_theta]);

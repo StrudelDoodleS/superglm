@@ -62,6 +62,7 @@ PUBLIC_API = [
     "NBProfileResult",
     "NBThetaBoundWarning",
     "NaturalSpline",
+    "NearPoissonDispersionError",
     "NegativeBinomial",
     "NegativeBinomialLS",
     "NegativeBinomialLink",
@@ -97,7 +98,6 @@ PUBLIC_API = [
     "TermInference",
     "Tweedie",
     "TweedieLSS",
-    "TweedieProfileCIDetails",
     "TweedieProfileResult",
     "TwoPieceLogNormalLSS",
     "TwoPieceNormalLSS",
@@ -110,9 +110,6 @@ PUBLIC_API = [
     "discretization_impact",
     "dispersion_test",
     "double_lift_chart",
-    "estimate_nb_theta",
-    "estimate_phi",
-    "estimate_tweedie_p",
     "export_rating_tables",
     "families",
     "generate_tweedie_cpg",
@@ -150,9 +147,6 @@ IMPORTABLE_NOT_EXPORTED = {
     "SplineCategorical": "superglm.features",
     "SplineMetadata": "superglm.inference",
     "TensorInteraction": "superglm.features.interaction",
-    "TweedieProfileCIDensityProvenance": "superglm.profiling",
-    "TweedieProfileCIEndpoint": "superglm.profiling",
-    "TweedieProfileCIEvaluation": "superglm.profiling",
 }
 
 

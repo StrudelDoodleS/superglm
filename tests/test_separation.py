@@ -5,6 +5,7 @@ iteration) and #341 (refuse, or at minimum loudly flag, instead of returning
 finite garbage on a separated design).
 """
 
+import re
 import warnings
 
 import numpy as np
@@ -221,6 +222,31 @@ def test_runtime_backstop_warns_on_pinned_predictor():
     assert "'z'" in message  # the drifting group is named
 
 
+def test_runtime_backstop_reports_the_expected_curvature_ratio():
+    """Tweedie/log rows are observed-Newton; the gate compares the Fisher ratio.
+
+    The iteration log keeps the observed weights, which are the Fisher weights
+    times (2 - p) + (p - 1) y / mu, so their ratio is not the one the warning reports.
+    """
+    df, y, w = separated_numeric_design()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            features={"z": Numeric()},
+            max_iter=150,
+            convergence="coefficients",
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(df, y, sample_weight=w, record_diagnostics=True)
+    message = next(str(c.message) for c in caught if issubclass(c.category, SeparationWarning))
+    observed = model.result.iteration_log[-1].w_ratio
+    # The negative check reads the ratio the message reports, in this format.
+    assert re.search(r"ratio \d\.\de[+-]\d+", message)
+    assert f"ratio {observed:.1e}" not in message
+
+
 def test_runtime_backstop_error_mode_refuses():
     df, y, w = separated_numeric_design()
     with warnings.catch_warnings():
@@ -273,20 +299,32 @@ def test_runtime_backstop_is_silent_when_the_budget_ends_mid_descent(monkeypatch
     mu = np.exp(1.0 + 2.5 * x)
     y = np.where(rng.random(n) < 0.3, rng.gamma(2.0, np.clip(mu, 1e-8, 1e8) / 2.0), 0.0)
 
+    # The intercept-only start ignores the offset, so every row starts 30 log
+    # units below its mode. A full-Newton Tweedie/log working response rises
+    # less than 1/(p - 1) = 2 above eta, so the climb takes about twenty
+    # bounded steps and a budget at the gate's own floor of ten ends in it.
+    offset = np.full(n, -30.0)
+    max_iter = 10
     model = SuperGLM(
         family=Tweedie(p=1.5),
         link="log",
         features={"x": Numeric()},
-        max_iter=10,
+        max_iter=max_iter,
         tol=1e-14,
         separation="warn",
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.fit(pd.DataFrame({"x": x}), y)
+        model.fit(pd.DataFrame({"x": x}), y, offset=offset, record_diagnostics=True)
 
-    # Non-vacuity: the budget really did run out, so the gate was reached.
-    assert not model.result.converged
+    # Non-vacuity: every other input of the exhausted-and-stagnant clause
+    # holds, so the deviance movement alone decides it.
+    log = model.result.iteration_log
+    assert len(log) == max_iter
+    assert log[-1].termination_reason == "max_iter"
+    assert log[-1].w_ratio > separation_module.EXTREME_WEIGHT_RATIO
+    movement = abs(log[-1].deviance - log[-2].deviance) / (abs(log[-2].deviance) + 1)
+    assert movement > separation_module.STAGNANT_DEVIANCE_DELTA
 
     exhaustion = [
         str(w.message)
@@ -295,3 +333,19 @@ def test_runtime_backstop_is_silent_when_the_budget_ends_mid_descent(monkeypatch
         and "budget" in str(w.message)
     ]
     assert exhaustion == [], f"budget exhaustion alone must not read as separation: {exhaustion}"
+
+
+def test_the_runtime_gate_reads_expected_curvature_under_observed_newton_rows():
+    """Tweedie/log observed rows are Fisher rows times (2 - p) + (p - 1) y / mu.
+
+    At equal means a response 1e13 times its mean spreads the observed weights
+    past the 1e12 bar while the expected curvature, which the bar was set on,
+    stays flat.
+    """
+    from superglm.links import LogLink
+    from superglm.solvers.irls_direct import _separation_weight_ratio
+
+    mu, eta, weights = np.ones(3), np.zeros(3), np.ones(3)
+    common = {"family": Tweedie(p=1.5), "link": LogLink(), "mu": mu, "eta": eta}
+    assert _separation_weight_ratio("observed", 1e13, weights=weights, **common) == 1.0
+    assert _separation_weight_ratio("fisher", 1e13, weights=weights, **common) == 1e13

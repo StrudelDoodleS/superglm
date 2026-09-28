@@ -116,21 +116,30 @@ def _display_method(method: Any) -> str:
     return "MLE" if method_str == "ML" else method_str
 
 
+_MARKED_CI_STATUSES = ("censored", "caution", "censored with caution")
+
+
 def _format_profile_estimate(
     estimate: Any,
     ci: Any,
     ci_status: Any,
 ) -> str:
     """Format a profile estimate without assuming an interval was computed."""
-    status = str(ci_status or "not computed")
-    if status == "unavailable for Pearson plug-in":
-        return f"{float(estimate):.3f} [CI unavailable for Pearson plug-in]"
     if isinstance(ci, tuple | list) and len(ci) >= 2:
+        # A censored side is where the search stopped, not a likelihood-ratio
+        # crossing; a caution says the interval is not about the estimate as it
+        # stands (``warnings`` says why).
+        censored = f" {ci_status}" if ci_status in _MARKED_CI_STATUSES else ""
         try:
-            return f"{float(estimate):.3f} [{float(ci[0]):.3f}, {float(ci[1]):.3f}]"
+            return f"{float(estimate):.3f} [{float(ci[0]):.3f}, {float(ci[1]):.3f}]{censored}"
         except (TypeError, ValueError, OverflowError):
             pass
     return f"{float(estimate):.3f} [CI not computed]"
+
+
+def _profile_nll_cell(info: dict[str, Any], key: str) -> tuple[str, str]:
+    """The right-hand header cell of a profile row: its NLL, when the summary carries one."""
+    return ("Profile NLL", f"{info[key]:.4f}") if key in info else ("", "")
 
 
 _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
@@ -429,12 +438,10 @@ class ModelSummary:
 
         # NB theta profile row
         if "nb_theta" in info:
-            ci = info["nb_theta_ci"]
-            theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
-            method = info["nb_theta_method"]
-            if "nb_profile_nll" in info:
-                method = f"{method}  NLL: {info['nb_profile_nll']:.4f}"
-            rows.append(("Theta", theta_str, "Method", method))
+            theta_str = _format_profile_estimate(
+                info["nb_theta"], info["nb_theta_ci"], info["nb_theta_ci_status"]
+            )
+            rows.append(("Theta", theta_str, *_profile_nll_cell(info, "nb_profile_nll")))
 
         # Tweedie p profile row
         if "tweedie_p" in info:
@@ -443,10 +450,7 @@ class ModelSummary:
                 info.get("tweedie_p_ci"),
                 info.get("tweedie_p_ci_status"),
             )
-            method = info["tweedie_p_method"]
-            if "tweedie_profile_nll" in info:
-                method = f"{method}  NLL: {info['tweedie_profile_nll']:.4f}"
-            rows.append(("Tweedie p", p_str, "Method", method))
+            rows.append(("Tweedie p", p_str, *_profile_nll_cell(info, "tweedie_profile_nll")))
 
         # Compute content width from coefficient columns AND header values
         # Every coefficient field has an explicit leading separator.  Widths
@@ -968,12 +972,10 @@ class ModelSummary:
 
         # NB theta profile row
         if "nb_theta" in info:
-            ci = info["nb_theta_ci"]
-            theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
-            method = info["nb_theta_method"]
-            if "nb_profile_nll" in info:
-                method = f"{method}  NLL: {info['nb_profile_nll']:.4f}"
-            header_rows.append(("Theta", theta_str, "Method", method))
+            theta_str = _format_profile_estimate(
+                info["nb_theta"], info["nb_theta_ci"], info["nb_theta_ci_status"]
+            )
+            header_rows.append(("Theta", theta_str, *_profile_nll_cell(info, "nb_profile_nll")))
 
         # Tweedie p profile row
         if "tweedie_p" in info:
@@ -982,10 +984,9 @@ class ModelSummary:
                 info.get("tweedie_p_ci"),
                 info.get("tweedie_p_ci_status"),
             )
-            method = info["tweedie_p_method"]
-            if "tweedie_profile_nll" in info:
-                method = f"{method}  NLL: {info['tweedie_profile_nll']:.4f}"
-            header_rows.append(("Tweedie p", p_str, "Method", method))
+            header_rows.append(
+                ("Tweedie p", p_str, *_profile_nll_cell(info, "tweedie_profile_nll"))
+            )
         for k1, v1, k2, v2 in header_rows:
             right_label = f"{k2}:" if k2 else ""
             parts.append(

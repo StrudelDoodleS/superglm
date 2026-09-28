@@ -204,21 +204,19 @@ def _execution_results() -> dict[str, object]:
         n_iter_path=np.ones(1, dtype=np.int64),
         converged_path=np.ones(1, dtype=np.bool_),
     )
-    nb_profile = NBProfileResult(
-        theta_hat=1.0,
-        nll=1.0,
-        n_evaluations=1,
-        converged=True,
-    )
+    nb_profile = NBProfileResult(theta_hat=1.0, nll=1.0, converged=True)
     tweedie_profile = TweedieProfileResult(
         p_hat=1.5,
         phi_hat=1.0,
         nll=1.0,
-        n_evaluations=1,
         converged=True,
-        method="grid",
-        phi_method="mle",
-        search_trace=pd.DataFrame(),
+        fit_mode="fit",
+        evaluations=pd.DataFrame(),
+        warnings=[],
+        search_nll=1.0,
+        _objective=None,
+        _ll_scale=1.0,
+        _ci_bounds=(1.05, 1.95),
     )
     cross_validation = CrossValidationResult(
         fold_scores=pd.DataFrame(),
@@ -387,7 +385,6 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
     _method_double(monkeypatch, NBProfileResult, "ci", return_value=(0.5, 2.0))
     _method_double(monkeypatch, NBProfileResult, "profile_plot", return_value=object())
     _method_double(monkeypatch, TweedieProfileResult, "ci", return_value=(1.2, 1.8))
-    _method_double(monkeypatch, TweedieProfileResult, "trace_plot", return_value=object())
     _method_double(monkeypatch, TweedieProfileResult, "profile_plot", return_value=object())
     _method_double(
         monkeypatch,
