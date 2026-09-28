@@ -231,6 +231,19 @@ def test_repository_guidance_pins_the_one_act_release_convention() -> None:
     assert "Tags remain release-only" in agents
 
 
+def test_repository_guidance_pins_review_thread_handling() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    section = agents.split("## Pull request reviews", maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+
+    # Each marker sits on one line, so rewrapping the paragraphs keeps them.
+    assert "is a claim to check against the" in section
+    assert "- resolve the thread once the fix is pushed." in section
+    assert "A reply alone leaves the thread open." in section
+    assert "Do not merge a pull request until every review thread is resolved." in section
+    assert "A reviewer does not raise again a finding already answered with evidence" in section
+    assert "`resolveReviewThread`" in section
+
+
 def test_pull_request_template_records_impact_as_advice() -> None:
     template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
 
