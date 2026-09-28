@@ -130,12 +130,15 @@ class TweedieRows:
         """Likelihood size of the positive rows: their number, or their total count."""
         return float(self.log_y.size) if self.count is None else float(np.sum(self.count))
 
+    @cached_property
+    def switch(self) -> float:
+        """`saddlepoint_switch` at this power, read by every pass."""
+        return saddlepoint_switch(self.p)
+
     def row_saturated(self, phi: float) -> tuple[NDArray, NDArray, NDArray]:
         """Per row: l_sat, T = d(-l_sat)/d log phi and dT/d log phi at ``phi``."""
         log_t = self.log_t_unit_phi - (self.a + 1.0) * math.log(phi)
-        ok, log_w, mean_j, var_j = series_moments(
-            log_t, self.a, max_mode=saddlepoint_switch(self.p)
-        )
+        ok, log_w, mean_j, var_j = series_moments(log_t, self.a, max_mode=self.switch)
         # |c w / phi| = (a + 1) j is at most (a + 1) times the switch on summed
         # rows; past it the quotient may overflow and the saddlepoint takes its log.
         with np.errstate(over="ignore"):
@@ -150,6 +153,8 @@ class TweedieRows:
         # normal number, and from log t, whose rounding grows with |log w| and
         # |log phi|, only where it overflowed.
         past = np.flatnonzero(~ok)
+        if past.size == 0:
+            return value, score, slope
         negative = -canonical[past]
         normal = np.isfinite(negative) & (negative >= _TINY)
         log_negative = np.empty_like(negative)
@@ -158,8 +163,7 @@ class TweedieRows:
         # Below the switch the series refuses a row only at its work bound, which
         # binds there only for 2 - p < 1.2e-9: those rows take the p -> 2 limit.
         # The kernel's own peak index decides which side of the switch a row is.
-        switch = math.log(saddlepoint_switch(self.p))
-        capped = log_peak_index(log_t[past], self.a) <= switch
+        capped = log_peak_index(log_t[past], self.a) <= math.log(self.switch)
         # An empty arm is skipped: its scipy calls cost as much as a small book's pass.
         for arm, taken in ((_corrected_saddlepoint, ~capped), (_gamma_limit, capped)):
             if not taken.any():
