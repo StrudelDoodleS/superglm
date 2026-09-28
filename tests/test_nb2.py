@@ -475,6 +475,33 @@ class TestNB2WeightedProfile:
             np.log(with_zeros.ci(0.05)), np.log(deleted.ci(0.05)), rtol=0.0, atol=2e-6
         )
 
+    def test_a_round_off_lower_value_next_to_the_root_keeps_the_centre(self, monkeypatch):
+        """The profile's values carry summation round-off, which moves no centre."""
+        import superglm.profiling.nb as nb_module
+
+        rng = np.random.default_rng(17)
+        n = 400
+        mu = rng.uniform(1.0, 4.0, n)
+        y = _generate_nb2(n, mu=mu, theta=2.0, rng=rng)
+        result = _nb_profile(y, mu, np.ones(n), "frequency")
+        optimum = result._optimum()
+        shared = nb_module.likelihood_ratio_interval
+        bounds = []
+
+        def with_a_round_off_reading(objective, x_hat, nll_hat, search_range, **kwargs):
+            bounds.append(kwargs["error"](x_hat))
+            # Next to the root, read low by two units of round-off.
+            objective.values[x_hat + 1e-9] = nll_hat - 2.0 * np.finfo(float).eps * abs(nll_hat)
+            return shared(objective, x_hat, nll_hat, search_range, **kwargs)
+
+        monkeypatch.setattr(nb_module, "likelihood_ratio_interval", with_a_round_off_reading)
+        result.interval(0.05)
+
+        assert result._optimum() == optimum
+        assert result._ci_cautions[0.05] == []
+        # The recursive-summation bound over n rows, in the objective's units.
+        assert bounds == [n * np.finfo(float).eps * abs(optimum[1])]
+
 
 class TestNB2AutoTheta:
     def test_reml_mode_rejects_selection_before_profile_work(self, monkeypatch):

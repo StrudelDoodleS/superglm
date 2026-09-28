@@ -3,6 +3,7 @@
 import inspect
 import math
 import pickle
+import re
 import warnings
 from types import SimpleNamespace
 
@@ -403,14 +404,17 @@ class TestMaximumLikelihoodPhi:
         assert "] caution" in str(model.summary())
 
     @staticmethod
-    def _settled_search():
+    def _settled_search(tol=1e-6):
         import pandas as pd
 
         rng = np.random.default_rng(3)
         x = rng.normal(size=500)
         y = generate_tweedie_cpg(500, np.exp(0.5 + 0.8 * x), 1.2, 1.5, rng=rng)
         model = SuperGLM(
-            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x": Numeric()}
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x": Numeric()},
+            tol=tol,
         )
         result = model.estimate_p(pd.DataFrame({"x": x}), y)
         assert result.converged and not result.warnings
@@ -425,8 +429,8 @@ class TestMaximumLikelihoodPhi:
         fit = profile._fit
 
         def stopped_short(p):
-            mu, _, reml_converged = fit(p)
-            return mu, False, reml_converged
+            mu, _, reml = fit(p)
+            return mu, False, reml
 
         profile._fit = stopped_short
         with pytest.warns(UserWarning, match="interval rests on coefficient fits at p="):
@@ -441,12 +445,120 @@ class TestMaximumLikelihoodPhi:
 
         result = self._settled_search()
         lower = result.p_hat + 0.05
-        # As if an interval's evaluations had found it: slightly below p_hat's value.
+        # As if an interval's evaluation had found it: below p_hat's value by more
+        # than the two fits' tolerances resolve.
+        result._candidates[lower] = result._candidates[result.p_hat]
+        assert 1e-4 > 2.0 * result._evaluation_error(result.p_hat)
         result._objective.values[lower] = result.search_nll - 1e-4
         with pytest.warns(UserWarning, match=f"found p={lower:.6g} below p_hat"):
             interval = result.interval(0.05)
         assert interval.lower < lower < interval.upper
         assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
+
+    def test_a_lower_power_within_the_fits_error_changes_nothing(self):
+        """A drop the candidate fits' tolerances cannot resolve is evaluation error."""
+        matplotlib = pytest.importorskip("matplotlib")
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        from superglm.profiling._reporting import cached_tweedie_profile_ci
+
+        expected = self._settled_search().interval(0.05)
+        result = self._settled_search()
+        profile = result._objective._objective
+        lower = result.p_hat + 0.05
+        # Two Fisher-scoring fits erring in opposite directions by the worst
+        # measured for their route, 9.0e-4 of the certificate each.
+        certificate = profile.clone._tol * (1.0 + abs(profile.n * result.search_nll)) / profile.n
+        result._candidates[lower] = result._candidates[result.p_hat]
+        result._objective.values[lower] = result.search_nll - 2.0 * 9.0e-4 * certificate
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            interval = result.interval(0.05)
+        assert interval == expected
+        assert result._ci_cautions[0.05] == []
+        assert cached_tweedie_profile_ci(result, 0.05)[1] == "available"
+        # The plot measures from p_hat as well, the point the shaded interval is inverted from.
+        ax = result.profile_plot(0.05)
+        powers, statistic = ax.lines[0].get_data()
+        assert statistic[list(powers).index(result.p_hat)] == 0.0
+        plt.close(ax.figure)
+
+    def test_an_interval_out_of_re_centrings_says_a_lower_power_remains(self, monkeypatch):
+        from superglm.profiling import _scalar
+        from superglm.profiling._reporting import cached_tweedie_profile_ci
+
+        monkeypatch.setattr(_scalar, "_MAX_RECENTRINGS", 0)
+        result = self._settled_search()
+        profile = result._objective._objective
+
+        def reads_low_once(p):
+            # The interval's first fit reads below p_hat by more than the fits resolve.
+            profile(p)
+            result._objective._objective = profile
+            return result.search_nll - 1e-4
+
+        result._objective._objective = reads_low_once
+        stopped = rf"stopped re-centring with p=\S+ still below p={result.p_hat:.6g}"
+        with pytest.warns(UserWarning, match=stopped):
+            result.interval(0.05)
+        # Inverted from p_hat, which the interval never left.
+        assert not any("below p_hat" in message for message in result.warnings)
+        assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
+
+    def test_a_material_lower_power_on_a_fisher_scoring_fit_moves_the_centre(self):
+        """Fisher-scoring values err far below the REML ratio's allowance, so a drop of
+        0.5 in the statistic, about an eighth of the 95% cutoff, is resolved there."""
+        from superglm.profiling._reporting import cached_tweedie_profile_ci
+
+        result = self._settled_search(tol=1e-4)
+        lower, drop = result.p_hat + 0.05, 0.5
+        result._candidates[lower] = result._candidates[result.p_hat]
+        result._objective.values[lower] = result.search_nll - drop / (2.0 * result._ll_scale)
+        resolved = 2.0 * result._ll_scale * 2.0 * result._candidates[result.p_hat].error
+        # The candidate ratio would have hidden it on this book.
+        ratio = tweedie_module._CANDIDATE_ERROR_RATIO / tweedie_module._SCORING_ERROR_RATIO
+        assert resolved < drop < ratio * resolved
+        caution = f"by {drop:.3g} in the likelihood-ratio statistic, more than the {resolved:.3g}"
+        with pytest.warns(UserWarning, match=re.escape(caution)):
+            interval = result.interval(0.05)
+        assert interval.lower < lower < interval.upper
+        assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
+
+    def test_a_candidate_bounds_its_error_by_its_routes_ratio(self):
+        """error = ratio tol (1 + |objective|) / n: the REML objective at the search
+        tolerance, or n nll at the model's tol with its solver route's ratio."""
+        from superglm import Constraint
+
+        rng = np.random.default_rng(1)
+        x = rng.uniform(0.0, 1.0, 400)
+        y = generate_tweedie_cpg(400, np.exp(0.3 + 0.4 * np.sin(4 * x)), 1.2, 1.5, rng=rng)
+        frame, weights = pd.DataFrame({"x": x}), np.ones(400)
+
+        def candidate(fit_mode, feature, **settings):
+            model = SuperGLM(family=TweedieDistribution(p=1.5), features={"x": feature}, **settings)
+            profile = tweedie_module._PowerProfile(model, frame, y, weights, None, fit_mode)
+            nll = profile(1.5)
+            return profile, nll, profile.candidates[1.5].error
+
+        scoring, other = tweedie_module._SCORING_ERROR_RATIO, tweedie_module._CANDIDATE_ERROR_RATIO
+        reml, _, error = candidate("fit_reml", Spline(n_knots=6))
+        objective = reml.clone._reml_result.objective
+        assert error == other * tweedie_module._SEARCH_REML_TOL * (1.0 + abs(objective)) / 400
+
+        cases = [
+            ("fit", Spline(n_knots=6), {}, scoring),
+            # A selection penalty's proximal route, and a shape constraint's active set.
+            ("fit", Spline(n_knots=6), {"selection_penalty": "auto"}, other),
+            ("fit", Spline(kind="cr", constraint=Constraint.fit.increasing), {}, other),
+            # No REML-eligible term: fit_reml is an ordinary fit at the model's tol.
+            ("fit_reml", Numeric(), {"tol": 1e-4}, scoring),
+        ]
+        for fit_mode, feature, settings, ratio in cases:
+            profile, nll, error = candidate(fit_mode, feature, **settings)
+            certified = ratio * profile.clone._tol * (1.0 + abs(400 * nll)) / 400
+            # n nll is the recorded criterion to two roundings.
+            assert error == pytest.approx(certified, rel=2 * np.finfo(float).eps)
 
     def test_an_unconverged_winner_is_disclosed_with_the_estimate(self):
         """Without ci_alpha, not only once an interval is asked for."""
@@ -1286,6 +1398,8 @@ class TestEstimatePFitMode:
             _objective=recorded,
             _ll_scale=float(len(y)),
             _ci_bounds=(1.02, 1.98),
+            # An exact objective: its recorded values carry no evaluation error.
+            _candidates={1.5: tweedie_module._Candidate(1.0, True, error=0.0)},
         )
         profiler_kwargs = {}
 

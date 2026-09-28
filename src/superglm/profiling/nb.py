@@ -577,6 +577,12 @@ class NBProfileResult:
             self.warnings.append(self._caution)
         if alpha not in self._ci_cache:
             optimum, optimum_nll = self._optimum()
+            # A recorded value sums n row log-densities, each evaluated without
+            # cancellation, so it errs by round-off only: recursive summation by
+            # at most (n - 1) u sum|w l_i| (Higham 2002, section 4.2), where
+            # sum|w l_i| = size * nll since no row's log-probability is positive.
+            # eps = 2u leaves each row its own rounding.
+            roundoff = self._y.size * np.finfo(np.float64).eps * abs(optimum_nll)
             # Rooted in log theta: the range spans up to eighteen decades, and
             # an endpoint's own magnitude is its only yardstick.
             found, log_centre, centre_nll = likelihood_ratio_interval(
@@ -587,6 +593,7 @@ class NBProfileResult:
                 alpha=alpha,
                 scale=self._size,
                 xtol=_CI_LOG_XTOL,
+                error=lambda _: roundoff,
             )
             interval = Interval(
                 math.exp(found.lower),

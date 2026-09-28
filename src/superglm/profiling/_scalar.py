@@ -19,6 +19,9 @@ _BARRIER = 1e6
 # parabolic step differences objective values (inf - inf is NaN); its square
 # stays far below overflow.
 _INFEASIBLE = 1e50
+# Times one interval re-centres on a lower point, a budget like maxiter: each
+# pass inverts both sides again, a model fit per evaluation.
+_MAX_RECENTRINGS = 2
 # Frames under this directory are superglm's own; a warning skips them to land
 # on the caller's line however deep the call (Python 3.12, skip_file_prefixes).
 _PACKAGE_PREFIX = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
@@ -107,6 +110,21 @@ def censoring_warnings(
     ]
 
 
+def credible_lower_point(
+    objective: RecordedObjective, x_hat: float, nll_hat: float, error: Callable[[float], float]
+) -> tuple[float, float] | None:
+    """The lowest recorded point, when it lies below x_hat by more than both values' error.
+
+    ``error(x)`` bounds the error of the value recorded at x. Values known only
+    to a tolerance are told apart only beyond their noise (Moré & Wild 2011);
+    the two bounds summed are the 2 eps_f of Shi, Xie, Byrd & Nocedal (2022).
+    """
+    x_best, nll_best = objective.best()
+    if nll_hat - nll_best > error(x_hat) + error(x_best):
+        return x_best, nll_best
+    return None
+
+
 def likelihood_ratio_interval(
     objective: RecordedObjective,
     x_hat: float,
@@ -116,6 +134,7 @@ def likelihood_ratio_interval(
     alpha: float,
     scale: float,
     xtol: float,
+    error: Callable[[float], float],
 ) -> tuple[Interval, float, float]:
     """{x : 2 scale (nll(x) - nll_min) <= chi2_1(1 - alpha)} (Venzon & Moolgavkar 1988),
     with the minimum it is measured from.
@@ -123,15 +142,18 @@ def likelihood_ratio_interval(
     Each side is one bracketed root of the excess over the cutoff, found to
     ``xtol``; a side with no crossing before its bound, or whose crossing is a
     jump into infeasible points, is censored where it stopped. A point either
-    side evaluates below ``nll_hat`` shows x_hat is not the minimum, so the
-    interval is inverted again from the lowest point recorded, until none is
-    lower. Like the search (`minimize_profile`), a side assumes one crossing:
-    a profile that dips back under the cutoff within one step of its outward
-    walk joins that dip to the interval, and nothing here detects it.
+    side evaluates below ``nll_hat`` by more than the two values' ``error``
+    (`credible_lower_point`) shows x_hat is not the minimum, so the interval is
+    inverted again from the lowest point recorded, at most ``_MAX_RECENTRINGS``
+    times; a smaller drop is evaluation error and leaves x_hat the centre. Like
+    the search (`minimize_profile`), a side assumes one crossing: a profile
+    that dips back under the cutoff within one step of its outward walk joins
+    that dip to the interval, and nothing here detects it.
     """
     # The upper tail directly: 1 - alpha rounds to 1 for alpha below 1.1e-16.
     cutoff = float(chi2.isf(alpha, 1))
     recorded = objective.values
+    recentrings = 0
     while True:
 
         def excess(x: float, nll_min: float = nll_hat) -> float:
@@ -140,10 +162,10 @@ def likelihood_ratio_interval(
 
         lower, lower_censored = _interval_side(excess, recorded, x_hat, bounds[0], cutoff, xtol)
         upper, upper_censored = _interval_side(excess, recorded, x_hat, bounds[1], cutoff, xtol)
-        x_best, nll_best = objective.best()
-        if not nll_best < nll_hat:
+        below = credible_lower_point(objective, x_hat, nll_hat, error)
+        if below is None or recentrings == _MAX_RECENTRINGS:
             return Interval(lower, upper, lower_censored, upper_censored), x_hat, nll_hat
-        x_hat, nll_hat = x_best, nll_best
+        (x_hat, nll_hat), recentrings = below, recentrings + 1
 
 
 def _interval_side(excess, recorded, x_hat, bound, cutoff, xtol) -> tuple[float, bool]:

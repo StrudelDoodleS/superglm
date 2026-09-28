@@ -8,7 +8,7 @@ from superglm import SuperGLM, generate_tweedie_cpg
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.features.numeric import Numeric
 from superglm.profiling._scalar import RecordedObjective
-from superglm.profiling.tweedie import TweedieProfileResult
+from superglm.profiling.tweedie import TweedieProfileResult, _Candidate
 
 
 class TestNBThetaProfileCI:
@@ -240,6 +240,8 @@ class TestTweedieProfileCI:
             _objective=objective,
             _ll_scale=1.0,
             _ci_bounds=(0.0, 1.0),
+            # An exact objective: its recorded values carry no evaluation error.
+            _candidates={0.5: _Candidate(1.0, True, error=0.0)},
         )
 
         # The statistic 0.02 (p - 0.5)^2 never reaches the cutoff inside the bounds.

@@ -326,7 +326,14 @@ class TestCIAtTheCertifiabilityWall:
 
         recorded = RecordedObjective(objective)
         return likelihood_ratio_interval(
-            recorded, p_hat, recorded(p_hat), (1.05, 1.95), alpha=0.05, scale=1000.0, xtol=1e-4
+            recorded,
+            p_hat,
+            recorded(p_hat),
+            (1.05, 1.95),
+            alpha=0.05,
+            scale=1000.0,
+            xtol=1e-4,
+            error=lambda _: 0.0,
         )[0]
 
     def test_a_lower_wall_is_bisected_not_left_at_a_scan_point(self):

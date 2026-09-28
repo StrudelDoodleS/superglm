@@ -32,12 +32,17 @@ from superglm.model.base import (
     model_has_lambda1_targets,
     resolve_selection_penalty_for_fit,
 )
-from superglm.model.fit_ops import _reject_monotone_fit_conflicts, _solve_coefficients
+from superglm.model.fit_ops import (
+    _reject_monotone_fit_conflicts,
+    _solve_coefficients,
+    _uses_direct_solver,
+)
 from superglm.model.fit_state import configured_lambda2, configured_penalty
 from superglm.profiling._scalar import (
     Interval,
     RecordedObjective,
     censoring_warnings,
+    credible_lower_point,
     likelihood_ratio_interval,
     minimize_profile,
     profile_plot,
@@ -50,6 +55,31 @@ from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 # 2.5e-6 relative of a reml_tol = 1e-11 fit, typically 1e-10 to 1e-7, on the
 # characterisation REML books at p in {1.3, 1.5, 1.7}.
 _SEARCH_REML_TOL = 1e-6
+# A recorded value's error per unit of its fit's certificate (_Candidate.error).
+# A REML fit certifies its objective V to tol (1 + |V|), not the likelihood: the
+# NLL errs through the smoothing parameters' residual error, two-sided and first
+# order, by |J' H_V^-1| times the certificate, J = d(n nll)/d log lambda. That
+# ratio has no bound in theory; it is measured: at most 5.4 over 198 candidate fits
+# at reml_tol = 1e-6 against 1e-11 fits (five book shapes, 3k to 100k rows, p in
+# {1.3, 1.5, 1.7}; benchmarks/tweedie_candidate_noise.py reproduces both ratios).
+# A ratio set too low costs a spurious caution; one set too high can only widen
+# an interval: a lower point the floor ignores leaves the centre at most the floor
+# above the minimum, and {2 n (nll - nll_hat) <= cutoff} is then {2 n (nll -
+# nll_min) <= cutoff + drop}, a superset of the interval from the minimum. At
+# reml_tol = 1e-6 the floor at p_hat is 1.4 in the statistic on a smooth
+# 100k-row book and 5.8 on the flat-lambda fixture at 100k rows.
+_CANDIDATE_ERROR_RATIO = 8.0
+# A fit without a REML objective certifies its penalized objective's relative
+# change to the model's tol; the NLL errs first order through the penalty's
+# gradient, by a ratio the solver's rate of convergence sets: fast for Fisher
+# scoring (Osborne 1992), linear for proximal block descent (Tseng & Yun 2009).
+# Replaying estimate_p's warm-started evaluations and continuing each fit to
+# tol 1e-13 (1.2k to 100k rows): Fisher scoring, the route with no active
+# selection penalty and no shape constraint, measured at most 9.0e-4, at the
+# smallest tol that returns each fit. The proximal route of a selection penalty
+# (0.21, tol 1e-4 to 1e-10) and a shape constraint's route (0.14 at tol 1e-6,
+# rising to 6.7 at 1e-9) keep _CANDIDATE_ERROR_RATIO.
+_SCORING_ERROR_RATIO = 2e-3
 # The interval may reach past the default search bounds (1.05, 1.95), as
 # master's did; the series is exact from p = 1.001 to 1.99 (its 50-digit oracle).
 _CI_BOUNDS = (1.02, 1.98)
@@ -75,6 +105,10 @@ class _Candidate:
     pirls_converged: bool
     # A REML candidate also needs its smoothing-parameter iterations to settle.
     reml_converged: bool = True
+    # Bound on the recorded mean NLL's error: the fit's certificate in mean-NLL
+    # units times its measured ratio (_CANDIDATE_ERROR_RATIO, _SCORING_ERROR_RATIO);
+    # an infeasible power has none.
+    error: float = math.nan
 
     @property
     def fit_converged(self) -> bool:
@@ -103,7 +137,7 @@ class _PowerProfile:
 
     def __call__(self, p: float) -> float:
         try:
-            mu, pirls_converged, reml_converged = self._fit(p)
+            mu, pirls_converged, reml = self._fit(p)
             solved = profile_phi_at(self.y, mu, self.w, p, grouping=self.grouping)
         except (ObservedModeNotCertifiedError, NearPoissonDispersionError) as exc:
             # A REML candidate whose penalized mode cannot be differentiated
@@ -113,7 +147,15 @@ class _PowerProfile:
             self.infeasible[p] = str(exc).partition("\n")[0]
             return math.inf
         nll = solved.criterion / self.n
-        candidate = _Candidate(solved.phi, pirls_converged, reml_converged)
+        # A fit's tolerance certifies its objective to tol (1 + |objective|): the
+        # REML objective, or for a fit without one the likelihood itself, n nll.
+        if reml is None:
+            error = self._pirls_ratio() * self.clone._tol * (1.0 + abs(solved.criterion))
+        else:
+            error = _CANDIDATE_ERROR_RATIO * _SEARCH_REML_TOL * (1.0 + abs(reml.objective))
+        candidate = _Candidate(
+            solved.phi, pirls_converged, reml is None or bool(reml.converged), error / self.n
+        )
         fit_converged = candidate.fit_converged
         self.candidates[p] = candidate
         if self.on_evaluation is not None:
@@ -121,6 +163,14 @@ class _PowerProfile:
                 {"p": p, "nll": nll, "phi": solved.phi, "fit_converged": fit_converged}
             )
         return nll
+
+    def _pirls_ratio(self) -> float:
+        """The error ratio of the route a fit without a REML objective took."""
+        shaped = any(
+            group.constraints is not None or group.monotone_engine == "scop"
+            for group in self.clone._groups
+        )
+        return _CANDIDATE_ERROR_RATIO if shaped or self.selecting else _SCORING_ERROR_RATIO
 
     def _prepare_ml(self, X, y, sample_weight, offset) -> None:
         clone = self.clone
@@ -132,9 +182,11 @@ class _PowerProfile:
         _reject_monotone_fit_conflicts(clone, self.penalty, self.has_lambda1_targets)
         self.offset = np.zeros_like(self.y) if offset is None else offset
         self.warm_beta = self.warm_intercept = None
+        # An active selection penalty sends every fit down the proximal route.
+        self.selecting = not _uses_direct_solver(clone, self.penalty, self.has_lambda1_targets)
         self._fit = self._fit_ml
 
-    def _fit_ml(self, p: float) -> tuple[NDArray, bool, bool]:
+    def _fit_ml(self, p: float) -> tuple[NDArray, bool, None]:
         clone = self.clone
         clone._distribution = Tweedie(p)
         result = _solve_coefficients(
@@ -155,7 +207,7 @@ class _PowerProfile:
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
         eta = clone._dm.matvec(result.beta) + result.intercept + self.offset
         mu = clip_mu(clone._link.inverse(stabilize_eta(eta, clone._link)), clone._distribution)
-        return mu, bool(result.converged), True
+        return mu, bool(result.converged), None
 
     def _prepare_reml(self, X, y, sample_weight, offset) -> None:
         clone = self.clone
@@ -165,9 +217,11 @@ class _PowerProfile:
         clone._suppress_reporting_support = True
         clone._profile_design_cache = {}
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
+        # fit_reml refuses a selection penalty.
+        self.selecting = False
         self._fit = self._fit_reml
 
-    def _fit_reml(self, p: float) -> tuple[NDArray, bool, bool]:
+    def _fit_reml(self, p: float) -> tuple[NDArray, bool, Any]:
         clone = self.clone
         clone.family = Tweedie(p)
         # The post-fit runtime parity check certifies published state; candidate
@@ -183,12 +237,11 @@ class _PowerProfile:
             runtime_validation="skip",
             reml_tol=_SEARCH_REML_TOL,
         )
-        reml = clone._reml_result
         # The clone follows the model's retain_fit_state; a released fit keeps
         # its coefficients but not its fitted mean.
         mu = clone._fit_mu if clone._retain_fit_state else clone.predict(self.X, self.offset)
-        # A model with no REML-eligible term makes fit_reml an ordinary fit.
-        return mu, bool(clone.result.converged), reml is None or bool(reml.converged)
+        # None for a model with no REML-eligible term: fit_reml is an ordinary fit.
+        return mu, bool(clone.result.converged), clone._reml_result
 
 
 def _clone_profile_model(model, X, sample_weight):
@@ -386,7 +439,8 @@ class TweedieProfileResult:
     published fit's regime and ``search_fit_mode`` the searched profile's, which
     ``search_nll``, the interval and the plot describe. The interval is
     inverted from the lowest point of that curve, which is ``p_hat`` unless an
-    interval's own evaluations found a lower one; a caution then says so.
+    interval's own evaluations found one lower by more than the fits' own
+    tolerances resolve; a caution then says so.
     """
 
     p_hat: float
@@ -413,8 +467,8 @@ class TweedieProfileResult:
 
         A censored side, a winner whose fit did not settle, and what the
         interval's own evaluations found (a fit that did not settle, or a power
-        below p_hat's value) are recorded in ``warnings`` when first computed and
-        warned about on every call.
+        below p_hat's value by more than the fits resolve) are recorded in
+        ``warnings`` when first computed and warned about on every call.
         """
         interval = self._interval(alpha)
         for message in [self._caution] * (self._caution is not None) + self._interval_warnings(
@@ -440,11 +494,12 @@ class TweedieProfileResult:
             searched = set(self._objective.values)
             interval, centre, centre_nll = likelihood_ratio_interval(
                 self._objective,
-                *self._objective.best(),
+                *self._centre(),
                 self._ci_bounds,
                 alpha=alpha,
                 scale=self._ll_scale,
                 xtol=_CI_XTOL,
+                error=self._evaluation_error,
             )
             self._ci_cache[alpha] = interval
             self._ci_cautions[alpha] = self._evaluation_cautions(
@@ -453,16 +508,37 @@ class TweedieProfileResult:
             self.warnings.extend(self._interval_warnings(alpha))
         return self._ci_cache[alpha]
 
+    def _evaluation_error(self, p: float) -> float:
+        """Bound on the error of the value recorded at p, from its fit's own certificate."""
+        return self._candidates[p].error
+
+    def _centre(self) -> tuple[float, float]:
+        """Where an interval starts and the plot measures from: p_hat, or the lowest
+        recorded power where that lies below p_hat by more than the fits resolve."""
+        lower = credible_lower_point(
+            self._objective, self.p_hat, self.search_nll, self._evaluation_error
+        )
+        return (self.p_hat, self.search_nll) if lower is None else lower
+
     def _evaluation_cautions(self, alpha, evaluated, centre, centre_nll) -> list[str]:
         """What an interval's own evaluations found: a lower power, or fits that did not settle."""
         level = f"{100.0 * (1.0 - alpha):g}%"
         cautions = []
         if centre != self.p_hat:
             drop = 2.0 * self._ll_scale * (self.search_nll - centre_nll)
+            error = self._evaluation_error(self.p_hat) + self._evaluation_error(centre)
             cautions.append(
                 f"the {level} interval's search found p={centre:.6g} below p_hat={self.p_hat:.6g} "
-                f"on the searched curve, by {drop:.3g} in the likelihood-ratio statistic: p_hat "
-                "is a local minimum there, and the interval is inverted from that lower power."
+                f"on the searched curve, by {drop:.3g} in the likelihood-ratio statistic, more "
+                f"than the {2.0 * self._ll_scale * error:.3g} its fits resolve: p_hat is a local "
+                "minimum there, and the interval is inverted from that lower power."
+            )
+        lower = credible_lower_point(self._objective, centre, centre_nll, self._evaluation_error)
+        if lower is not None:
+            cautions.append(
+                f"the {level} interval stopped re-centring with p={lower[0]:.6g} still below "
+                f"p={centre:.6g} by more than its fits resolve; it is inverted from p={centre:.6g}, "
+                "not from the lowest power found."
             )
         # An infeasible power has no fit to report on.
         fits = {p: self._candidates[p] for p in evaluated if p in self._candidates}
@@ -494,8 +570,9 @@ class TweedieProfileResult:
 
     def profile_plot(self, alpha: float = 0.05, ax=None):
         """Likelihood-ratio statistic over every evaluated power, with any computed interval."""
-        # Measured from the curve's lowest point, which the interval is inverted from.
-        centre, centre_nll = self._objective.best()
+        # Measured from the point the interval is inverted from: a lower value
+        # within the fits' error moves neither.
+        centre, centre_nll = self._centre()
         ax = profile_plot(
             self._objective.values,
             centre,

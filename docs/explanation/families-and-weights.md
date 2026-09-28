@@ -346,8 +346,10 @@ says so. Either way the interval is still computed. It inverts the profile that
 was searched, around that profile's own value at `p_hat` (recorded as
 `result.search_nll`), so it describes the regime named by `search_fit_mode`;
 `result.nll` describes the published fit's re-profiled dispersion. If the
-interval's own evaluations find a power below that value, `p_hat` was a local
-minimum: the interval is inverted from the lower power, and a caution says so.
+interval's own evaluations find a power below that value by more than the fits'
+own tolerances can resolve, `p_hat` was a local minimum: the interval is
+inverted from the lower power, and a caution says so. A smaller difference is
+numerical noise from the fits and changes nothing.
 `profile_plot` measures against the same reference. Summaries show a cautioned
 interval as "caution", or "censored with caution" when it is also censored.
 

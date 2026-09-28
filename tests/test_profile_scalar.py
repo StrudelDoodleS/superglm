@@ -3,6 +3,7 @@ import math
 import pytest
 from scipy.stats import chi2
 
+from superglm.profiling import _scalar
 from superglm.profiling._scalar import (
     RecordedObjective,
     likelihood_ratio_interval,
@@ -15,6 +16,16 @@ CURVATURE = 3.0
 
 def quadratic(x):
     return 0.5 * CURVATURE * (x - 0.3) ** 2
+
+
+def exact(_):
+    return 0.0
+
+
+def two_wells(x):
+    # x_hat = 0.3 is a local minimum; the well at 0.5 is one unit deeper, and the
+    # rise between them stays under the cutoff, so a side's evaluations reach it.
+    return min(40.0 * (x - 0.3) ** 2, 40.0 * (x - 0.5) ** 2 - 1.0)
 
 
 def test_minimize_profile_records_bounds_and_finds_minimum():
@@ -43,7 +54,14 @@ def test_infeasible_points_are_routed_around_and_never_best():
 def test_interval_is_exact_for_a_quadratic_profile():
     half_width = math.sqrt(chi2.ppf(0.95, 1) / (N * CURVATURE))
     interval, _, _ = likelihood_ratio_interval(
-        RecordedObjective(quadratic), 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12
+        RecordedObjective(quadratic),
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=exact,
     )
     assert interval.lower == pytest.approx(0.3 - half_width, rel=1e-9)
     assert interval.upper == pytest.approx(0.3 + half_width, rel=1e-9)
@@ -60,7 +78,7 @@ def test_interval_after_a_search_costs_a_few_evaluations_per_side():
     x_hat, nll_hat = objective.best()
     searched = len(objective.values)
     interval, _, _ = likelihood_ratio_interval(
-        objective, x_hat, nll_hat, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-4
+        objective, x_hat, nll_hat, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-4, error=exact
     )
     half_width = math.sqrt(chi2.ppf(0.95, 1) / (N * CURVATURE))
     assert interval.lower == pytest.approx(0.3 - half_width, abs=1e-4)
@@ -70,7 +88,14 @@ def test_interval_after_a_search_costs_a_few_evaluations_per_side():
 
 def test_side_inside_the_acceptance_region_is_censored_at_the_bound():
     interval, _, _ = likelihood_ratio_interval(
-        RecordedObjective(quadratic), 0.3, 0.0, (0.29, 0.31), alpha=0.05, scale=N, xtol=1e-12
+        RecordedObjective(quadratic),
+        0.3,
+        0.0,
+        (0.29, 0.31),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=exact,
     )
     assert (interval.lower, interval.upper) == (0.29, 0.31)
     assert interval.lower_censored and interval.upper_censored
@@ -81,7 +106,14 @@ def test_interval_side_ending_at_infeasible_region_is_censored():
         return math.inf if x > 0.32 else quadratic(x)
 
     interval, _, _ = likelihood_ratio_interval(
-        RecordedObjective(objective), 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12
+        RecordedObjective(objective),
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=exact,
     )
     assert interval.upper_censored and interval.upper == pytest.approx(0.32, abs=1e-9)
     assert not interval.lower_censored
@@ -97,7 +129,14 @@ def test_a_crossing_just_before_an_infeasible_region_is_not_censored():
         return math.inf if x > 0.3 + 1.001 * half_width else quadratic(x)
 
     interval, _, _ = likelihood_ratio_interval(
-        RecordedObjective(objective), 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12
+        RecordedObjective(objective),
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=exact,
     )
     assert interval.upper == pytest.approx(0.3 + half_width, rel=1e-9)
     assert not interval.upper_censored
@@ -110,7 +149,14 @@ def test_a_level_below_half_an_ulp_of_one_has_a_finite_cutoff():
     cutoff = chi2.isf(alpha, 1)
     assert math.isfinite(cutoff)
     interval, _, _ = likelihood_ratio_interval(
-        RecordedObjective(quadratic), 0.3, 0.0, (-5.0, 5.0), alpha=alpha, scale=N, xtol=1e-12
+        RecordedObjective(quadratic),
+        0.3,
+        0.0,
+        (-5.0, 5.0),
+        alpha=alpha,
+        scale=N,
+        xtol=1e-12,
+        error=exact,
     )
     half_width = math.sqrt(cutoff / (N * CURVATURE))
     assert not (interval.lower_censored or interval.upper_censored)
@@ -119,14 +165,9 @@ def test_a_level_below_half_an_ulp_of_one_has_a_finite_cutoff():
 
 
 def test_an_interval_that_finds_a_deeper_well_is_inverted_from_it():
-    # x_hat = 0.3 is a local minimum; the well at 0.5 is one unit deeper, and the
-    # rise between them stays under the cutoff, so a side's evaluations reach it.
-    def two_wells(x):
-        return min(40.0 * (x - 0.3) ** 2, 40.0 * (x - 0.5) ** 2 - 1.0)
-
     objective = RecordedObjective(two_wells)
     interval, centre, centre_nll = likelihood_ratio_interval(
-        objective, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=1.0, xtol=1e-12
+        objective, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=1.0, xtol=1e-12, error=exact
     )
     assert centre_nll < 0.0 and (centre, centre_nll) == objective.best()
     # Each end is a crossing measured from that deeper point, not from x_hat.
@@ -134,3 +175,59 @@ def test_an_interval_that_finds_a_deeper_well_is_inverted_from_it():
     for end in (interval.lower, interval.upper):
         assert 2.0 * (two_wells(end) - centre_nll) == pytest.approx(cutoff, abs=1e-8)
     assert not (interval.lower_censored or interval.upper_censored)
+
+
+def error_bounds(x):
+    # Per-point bounds on a recorded value's error; the lower point's own
+    # dominates, so a comparison that read either bound alone would decide
+    # the two cases below alike.
+    return 3e-4 if x == 0.31 else 1e-4
+
+
+def test_a_lower_value_within_both_values_error_leaves_the_centre():
+    plain = RecordedObjective(quadratic)
+    expected = likelihood_ratio_interval(
+        plain, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12, error=error_bounds
+    )
+    objective = RecordedObjective(quadratic)
+    objective.values[0.31] = -0.9 * (error_bounds(0.3) + error_bounds(0.31))
+
+    found = likelihood_ratio_interval(
+        objective, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12, error=error_bounds
+    )
+
+    # The same single pass from x_hat: the lower value is evaluation error.
+    assert found == expected
+    assert len(objective.values) == len(plain.values) + 1
+
+
+def test_a_lower_value_beyond_both_values_error_moves_the_centre():
+    objective = RecordedObjective(quadratic)
+    drop = 1.1 * (error_bounds(0.3) + error_bounds(0.31))
+    objective.values[0.31] = -drop
+
+    interval, centre, centre_nll = likelihood_ratio_interval(
+        objective, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12, error=error_bounds
+    )
+
+    assert (centre, centre_nll) == (0.31, -drop)
+    cutoff = chi2.isf(0.05, 1)
+    for end in (interval.lower, interval.upper):
+        assert 2.0 * N * (quadratic(end) + drop) == pytest.approx(cutoff, abs=1e-8)
+
+
+def test_re_centring_stops_at_its_budget(monkeypatch):
+    # Allowed no re-centring, the two-well interval stays inverted from x_hat,
+    # with the deeper well recorded but not chased.
+    monkeypatch.setattr(_scalar, "_MAX_RECENTRINGS", 0)
+    objective = RecordedObjective(two_wells)
+
+    interval, centre, centre_nll = likelihood_ratio_interval(
+        objective, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=1.0, xtol=1e-12, error=exact
+    )
+
+    assert (centre, centre_nll) == (0.3, 0.0)
+    assert objective.best()[1] < 0.0
+    cutoff = chi2.isf(0.05, 1)
+    for end in (interval.lower, interval.upper):
+        assert 2.0 * two_wells(end) == pytest.approx(cutoff, abs=1e-8)
