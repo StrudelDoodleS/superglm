@@ -439,9 +439,10 @@ function profileEstimateCIText(estimate) {
   return `CI [${low}, ${high}]${profileCensoredSuffix(estimate.ci_status)}`;
 }
 
-// A censored side is where the search stopped, not a likelihood-ratio crossing.
+// A censored side is where the search stopped, not a likelihood-ratio crossing;
+// a caution is an interval resting on a fit that had not settled.
 function profileCensoredSuffix(status) {
-  return status === "censored" ? " censored" : "";
+  return status === "censored" || status === "caution" ? ` ${status}` : "";
 }
 
 function profileLegendItem({ color, label, detail, isBest }) {

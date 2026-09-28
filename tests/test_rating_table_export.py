@@ -508,8 +508,9 @@ def test_summary_export_keeps_distribution_profile_values_typed():
     model._nb_profile_result = SimpleNamespace(
         theta_hat=np.float64(2.75),
         nll=10.0,
-        # Reports read the interval through the quiet accessor.
+        # Reports read the interval through the quiet accessor, and its caution.
         _interval=lambda alpha: Interval(np.float64(2.0), np.float64(3.5), False, False),
+        _caution=None,
     )
     model._tweedie_profile_result = SimpleNamespace(
         p_hat=np.float64(1.55),

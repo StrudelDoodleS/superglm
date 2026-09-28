@@ -15,11 +15,13 @@ Fixture provenance (all synthetic):
   mgcv ``nb()`` theta: 0.99574. v0.28.0 published theta_hat = 0.5541 (-45%).
 """
 
+import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import chi2
 
 from superglm import SuperGLM
 from superglm.distributions import NegativeBinomial
@@ -386,10 +388,41 @@ class TestJointRefitLimit:
         result = model._nb_profile_result
         assert result.converged is False
         assert any("did not reach a joint fixed point" in message for message in result.warnings)
-        # theta_hat is off the score root at the published mean: the interval is
-        # inverted from that root, and says so.
+        # theta_hat (about 0.55) is far off the score root at the published mean
+        # (about 1.0): the interval is inverted from that root, and says so.
         with pytest.warns(UserWarning, match="not the optimum at the published mean"):
-            result.interval(0.05)
+            interval = result.interval(0.05)
+        _, optimum_nll = result._optimum()
+        cutoff = chi2.ppf(0.95, 1)
+        for end, censored in (
+            (interval.lower, interval.lower_censored),
+            (interval.upper, interval.upper_censored),
+        ):
+            if censored:
+                continue
+            # The statistic from the optimum crosses the cutoff at each end, to the
+            # interval's 1e-6 in log theta times its slope there.
+            h = 1e-4
+            slope = (
+                result._size
+                * (result._profile_nll(end * math.exp(h)) - result._profile_nll(end * math.exp(-h)))
+                / h
+            )
+            statistic = 2.0 * result._size * (result._profile_nll(end) - optimum_nll)
+            assert abs(statistic - cutoff) <= 2.0 * abs(slope) * 1e-6
+        assert model.summary()._info["nb_theta_ci_status"] == "caution"
+        # The plot measures the statistic from the same optimum: it never dips
+        # below zero, and is zero there (theta_hat's baseline would sit below it).
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        with pytest.warns(UserWarning, match="not the optimum at the published mean"):
+            ax = result.profile_plot(0.05)
+        statistic = ax.lines[0].get_ydata()
+        assert min(statistic) == 0.0
+        plt.close(ax.figure)
 
 
 class TestThetaFrozenBeforeReml:

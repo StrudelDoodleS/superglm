@@ -1443,10 +1443,11 @@ class SuperGLM:
             itself between successive mean fits.
         ci_alpha : float, optional
             Compute the ``1 - ci_alpha`` likelihood-ratio interval at the
-            published mean before returning. If theta_hat is not that mean's
-            profile optimum (an alternation that did not settle), the interval
-            is inverted from the optimum instead, and the cause is warned and
-            recorded.
+            published mean before returning. It is inverted from that mean's
+            own profile optimum; where theta_hat is not it (an alternation or
+            joint refinement that stopped short, or theta_hat outside its
+            interval), a caution is warned, recorded, and shown as the
+            interval's status.
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each alternation step, then

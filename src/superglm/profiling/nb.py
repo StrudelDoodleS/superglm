@@ -529,11 +529,11 @@ class NBProfileResult:
     def _optimum(self) -> tuple[float, float]:
         """log theta and NLL of the fixed-mean profile's maximum the interval inverts from.
 
-        A settled estimate is that maximum to the alternation's tolerance; after
-        a caution the fixed-mean score root replaces it.
+        That is the score root at the published mean, one bracketed O(n) solve.
+        theta_hat sits there only to the alternation's tolerance, and not at all
+        where the published mean was fitted differently (a REML publication, or
+        an alternation or joint refinement that stopped short).
         """
-        if self._caution is None:
-            return math.log(self.theta_hat), self.nll
         low, high = self._log_search_range()
         root = solve_theta(
             self._y,
@@ -572,6 +572,14 @@ class NBProfileResult:
                 found.upper_censored,
             )
             self._ci_cache[alpha] = interval
+            if self._caution is None and not interval.lower <= self.theta_hat <= interval.upper:
+                self._caution = (
+                    f"theta_hat={self.theta_hat:g} lies outside its interval "
+                    f"[{interval.lower:.4g}, {interval.upper:.4g}], which is inverted from the "
+                    f"published mean's profile optimum theta={math.exp(log_optimum):.6g}: that "
+                    "mean was not the one theta_hat was estimated at."
+                )
+                self.warnings.append(self._caution)
             # Near-Poisson data leave the upper side censored: the statistic
             # stays under its cutoff all the way to the searched range's end.
             self.warnings.extend(self._censoring(interval, alpha))
@@ -599,21 +607,27 @@ class NBProfileResult:
     def profile_plot(self, alpha: float = 0.05, ax=None):
         """Likelihood-ratio statistic on a 40-point log grid around the interval."""
         interval = self.interval(alpha)
+        # The statistic is measured from the optimum the interval was inverted from.
+        log_optimum, optimum_nll = self._optimum()
+        optimum = math.exp(log_optimum)
         # Each point is an O(n) likelihood; the grid reaches 30% of the
         # interval's log width past either end for context.
         low, high = math.log(interval.lower), math.log(interval.upper)
         margin = 0.3 * (high - low)
         grid = np.exp(np.linspace(low - margin, high + margin, 40))
-        values = {float(theta): self._profile_nll(theta) for theta in (*grid, self.theta_hat)}
+        values = {float(theta): self._profile_nll(theta) for theta in (*grid, optimum)}
         ax = profile_plot(
             values,
-            self.theta_hat,
-            self.nll,
+            optimum,
+            optimum_nll,
             scale=self._size,
             alpha=alpha,
             interval=interval,
             label="theta",
             ax=ax,
         )
+        if self._caution is not None:
+            # theta_hat, where it is not the optimum the statistic is measured from.
+            ax.axvline(self.theta_hat, c="k", lw=1, ls=":")
         ax.set_xscale("log")
         return ax

@@ -373,7 +373,11 @@ class TestMaximumLikelihoodPhi:
         with pytest.warns(UserWarning, match="raise max_iter"):
             interval = result.interval(0.05)
         assert interval.lower < result.p_hat < interval.upper
-        assert "CI not computed" not in str(model.summary())
+        # Reports show the interval with its caution, not as plainly available.
+        from superglm.profiling._reporting import cached_tweedie_profile_ci
+
+        assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
+        assert "] caution" in str(model.summary())
 
     def test_an_unsettled_reml_winner_names_its_cause_and_keeps_the_interval(self, monkeypatch):
         """One smoothing-parameter iteration per candidate: max_iter cannot help there."""

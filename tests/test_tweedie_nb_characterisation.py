@@ -467,12 +467,38 @@ def test_estimate_theta_matches_master(row, characterisation_case):
         _ci_cache={},
     )
     assert abs(at_master.nll - row["nll"]) <= band
+    if row["fit_mode"] == "reml":
+        # Master inverted from theta_hat, which a REML publication's mean does
+        # not maximise: theta_hat is estimated at the configured penalty. The
+        # rebuild inverts from that mean's own profile optimum, so each end is
+        # checked as that curve's crossing instead.
+        _assert_crossings_from_the_optimum(at_master, 0.05, n)
+        return
     # Each side is rooted to 1e-6 relative (master in theta, the rebuild in
     # log theta); an NLL offset of `band` at the estimate and at the endpoint
     # moves the statistic by 4 n band, hence the crossing by that over its slope.
     for end, master_end in zip(at_master.ci(0.05), row["ci95"]):
         allowed = 2e-6 + 4.0 * n * band / abs(_statistic_slope(at_master, end, n))
         assert abs(math.log(end) - math.log(master_end)) <= allowed
+
+
+def _assert_crossings_from_the_optimum(result, alpha, n):
+    """Each uncensored end is where 2 n (nll - nll at the published mean's optimum)
+    crosses the cutoff, located to _CI_LOG_XTOL in log theta: the statistic there
+    is within that step times its slope of the cutoff."""
+    from superglm.profiling.nb import _CI_LOG_XTOL
+
+    _, optimum_nll = result._optimum()
+    interval = result._interval(alpha)
+    cutoff = chi2.ppf(1.0 - alpha, 1)
+    for end, censored in (
+        (interval.lower, interval.lower_censored),
+        (interval.upper, interval.upper_censored),
+    ):
+        if censored:
+            continue
+        statistic = 2.0 * n * (result._profile_nll(end) - optimum_nll)
+        assert abs(statistic - cutoff) <= 2.0 * abs(_statistic_slope(result, end, n)) * _CI_LOG_XTOL
 
 
 @pytest.mark.parametrize(
@@ -561,30 +587,27 @@ def test_estimate_theta_interval_is_the_crossing_at_the_published_mean(character
     from superglm.profiling.nb import nb_nll
 
     model, X, y = characterisation_case("nb_worst")
-    result = model.estimate_theta(X, y, fit_mode="reml", ci_alpha=0.1)
+    with pytest.warns(UserWarning, match="lies outside its interval"):
+        result = model.estimate_theta(X, y, fit_mode="reml", ci_alpha=0.1)
     installed = model._nb_profile_result
     assert result is not installed
     assert installed._ci_cache[0.1] == result._ci_cache[0.1]
     cutoff = chi2.ppf(0.9, 1)
     y = np.asarray(y, dtype=float)
+    # The published REML mean's own profile optimum, which the interval is
+    # inverted from; theta_hat, estimated at the configured penalty, is not it.
+    _, optimum_nll = result._optimum()
 
     def excess(theta):
-        statistic = (
-            2.0
-            * y.size
-            * (
-                nb_nll(y, model._fit_mu, np.ones_like(y), theta, weight_semantics="prior")
-                - result.nll
-            )
-        )
-        return statistic - cutoff
+        nll = nb_nll(y, model._fit_mu, np.ones_like(y), theta, weight_semantics="prior")
+        return 2.0 * y.size * (nll - optimum_nll) - cutoff
 
     # Each endpoint is the crossing to 1e-6 in log theta: the excess changes
     # sign across a 1e-5 relative neighbourhood of it.
     for end in result.ci(0.1):
         assert excess(end * (1.0 - 1e-5)) * excess(end * (1.0 + 1e-5)) < 0.0
-    # Both ends are crossings, so the summary reports the interval uncensored.
-    assert model.summary(alpha=0.1)._info["nb_theta_ci_status"] == "available"
+    # Both ends are crossings, but theta_hat lies outside them: a caution.
+    assert model.summary(alpha=0.1)._info["nb_theta_ci_status"] == "caution"
 
 
 def test_estimate_theta_signature_is_the_slim_one():
