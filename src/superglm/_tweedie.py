@@ -21,6 +21,7 @@ from superglm._tweedie_series import _LOG_CUTOFF, series_moments
 
 _LOG_TWO_PI = math.log(2.0 * math.pi)
 _EPS = float(np.finfo(np.float64).eps)
+_TINY = float(np.finfo(np.float64).tiny)
 # The series' float64 error in l_sat stays below _SERIES_ERROR eps (a + 1) j log j
 # against the 50-digit oracle (benchmarks/tweedie_series_oracle.py) over
 # p in [1.001, 1.99] and peak indices j from 1e2 to 1e6: log W ~ (a + 1) j
@@ -64,11 +65,14 @@ class TweedieRows:
         a = (2.0 - p) / (p - 1.0)
         log_y = np.log(y_positive)
         log_t = a * (log_y - math.log(p - 1.0)) - math.log(2.0 - p)
-        canonical = np.power(y_positive, 2.0 - p) / ((1.0 - p) * (2.0 - p))
-        if frequency:
-            return cls(p, a, log_t, log_y, canonical, weights[positive])
-        w = weights[positive]
-        return cls(p, a, log_t + (a + 1.0) * np.log(w), log_y, canonical * w, None)
+        # c w may overflow; only rows past the switch reach that size at a
+        # representable phi, and those take its logarithm from log t instead.
+        with np.errstate(over="ignore"):
+            canonical = np.power(y_positive, 2.0 - p) / ((1.0 - p) * (2.0 - p))
+            if frequency:
+                return cls(p, a, log_t, log_y, canonical, weights[positive])
+            w = weights[positive]
+            return cls(p, a, log_t + (a + 1.0) * np.log(w), log_y, canonical * w, None)
 
     @property
     def size(self) -> float:
@@ -77,19 +81,23 @@ class TweedieRows:
 
     def row_saturated(self, phi: float) -> tuple[NDArray, NDArray, NDArray]:
         """Per row: l_sat, T = d(-l_sat)/d log phi and dT/d log phi at ``phi``."""
+        log_t = self.log_t_unit_phi - (self.a + 1.0) * math.log(phi)
         ok, log_w, mean_j, var_j = series_moments(
-            self.log_t_unit_phi - (self.a + 1.0) * math.log(phi),
-            self.a,
-            max_mode=saddlepoint_switch(self.p),
+            log_t, self.a, max_mode=saddlepoint_switch(self.p)
         )
-        canonical = self.saturated_canonical / phi
+        # |c w / phi| = (a + 1) j is at most (a + 1) times the switch on summed
+        # rows; past it the quotient may overflow and the saddlepoint takes its log.
+        with np.errstate(over="ignore"):
+            canonical = self.saturated_canonical / phi
+        unrepresented = np.flatnonzero(ok & ~np.isfinite(canonical))
+        canonical[unrepresented] = -np.exp(_log_negative_canonical(self.p, log_t[unrepresented]))
         inverse_r = self.a + 1.0
         value = log_w - self.log_y + canonical
         score = mean_j * inverse_r + canonical
         slope = -var_j * inverse_r**2 - canonical
         past = np.flatnonzero(~ok)
         value[past], score[past], slope[past] = _corrected_saddlepoint(
-            self.p, -canonical[past], self.log_y[past]
+            self.p, _log_negative_canonical(self.p, log_t[past]), self.log_y[past]
         )
         return value, score, slope
 
@@ -117,8 +125,18 @@ def saddlepoint_switch(p: float) -> float:
     return max(switch, _LOG_CUTOFF * a_plus_one / (2.0 * math.pi**2))
 
 
+def _log_negative_canonical(p: float, log_t: NDArray) -> NDArray:
+    """log |c w / phi| from the series' log t, finite wherever log t is.
+
+    With 2 - p = a / (a + 1), log t / (a + 1) differs from
+    log |c w / phi| = (2 - p) log y + log w - log phi - log((p - 1)(2 - p)) only
+    by the constant (p - 1) log(p - 1) + (2 - p) log(2 - p).
+    """
+    return (p - 1.0) * log_t - (p - 1.0) * math.log(p - 1.0) - (2.0 - p) * math.log(2.0 - p)
+
+
 def _corrected_saddlepoint(
-    p: float, negative_canonical: NDArray, log_y: NDArray
+    p: float, log_negative_canonical: NDArray, log_y: NDArray
 ) -> tuple[NDArray, NDArray, NDArray]:
     """l_sat, T and T' of rows past the switch: the saddlepoint with two corrections.
 
@@ -130,12 +148,13 @@ def _corrected_saddlepoint(
     A = rho4/8 - 5 rho3^2/24 = p (p-3)/24, and the second-order term (Kato, Sekine
     & Yoshikawa 2014, Prop. 16) less A^2/2 is B = -p (p-1)(p-2)(p-3)/48.
     e is proportional to phi, so T = 1/2 - A e - 2 B e^2 and T' = -A e - 4 B e^2.
+    Taking log |c w / phi| keeps rows finite where phi and w leave the float range.
     """
-    dispersion = 1.0 / ((p - 1.0) * (2.0 - p) * negative_canonical)
+    dispersion = np.exp(-log_negative_canonical) / ((p - 1.0) * (2.0 - p))
     first = p * (p - 3.0) / 24.0 * dispersion
     second = -p * (p - 1.0) * (p - 2.0) * (p - 3.0) / 48.0 * dispersion**2
-    saddle_scale = (p - 1.0) * (2.0 - p) / (2.0 * math.pi)
-    value = 0.5 * np.log(saddle_scale * negative_canonical) - log_y + first + second
+    log_saddle_scale = math.log((p - 1.0) * (2.0 - p) / (2.0 * math.pi))
+    value = 0.5 * (log_saddle_scale + log_negative_canonical) - log_y + first + second
     return value, 0.5 - first - 2.0 * second, -first - 4.0 * second
 
 
@@ -229,7 +248,7 @@ def _lattice_scan(
     lower, upper = _scan_window(rows, deviance, nullity, local)
     band_low, band_high = band
     # Row i's peak index is J_i e^-u; it lies in the band over this u-interval.
-    log_peak = np.log((rows.p - 1.0) * -rows.saturated_canonical)
+    log_peak = math.log(rows.p - 1.0) + _log_negative_canonical(rows.p, rows.log_t_unit_phi)
     starts, stops = log_peak - math.log(band_high), log_peak - math.log(band_low)
     inside = (stops > lower) & (starts < upper)
     if not np.any(inside):
@@ -394,7 +413,16 @@ def _saturated_rows(y, weights, phi, p) -> NDArray:
 
 
 def _log_density(saturated, weights, phi, deviance) -> NDArray:
-    return saturated - weights * deviance / (2.0 * phi)
+    # w d / (2 phi) through the effective dispersion phi / w, which is all the
+    # density depends on; where w / phi leaves the normal range, through logs.
+    ratio = weights / phi
+    scaled = deviance * (0.5 * ratio)
+    extreme = np.flatnonzero(~(ratio >= _TINY) | ~np.isfinite(ratio))
+    with np.errstate(divide="ignore", over="ignore"):
+        scaled[extreme] = np.exp(
+            np.log(deviance[extreme]) + np.log(weights[extreme]) - math.log(2.0) - math.log(phi)
+        )
+    return saturated - scaled
 
 
 def tweedie_logpdf(y, mu, phi, p, weights=None) -> NDArray:

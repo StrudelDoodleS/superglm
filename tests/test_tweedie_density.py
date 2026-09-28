@@ -58,6 +58,37 @@ def test_zero_rows_are_the_exact_atom():
     np.testing.assert_allclose(value, -np.array([1.0, 2.5]) * mu**0.7 / (0.7 * 0.7), rtol=4 * EPS)
 
 
+@pytest.mark.parametrize(
+    "y, mu, phi, weight, expected",
+    [
+        # Past the switch with zero deviance: the saddlepoint
+        # -(1/2) log(2 pi (phi / w) y^p), its corrections below 1e-75.
+        (1.0, 1.0, 1e-308, 1.0, -0.5 * (math.log(2 * math.pi) + math.log(1e-308))),
+        (1e150, 1e150, 1e250, 1e250, -0.5 * (math.log(2 * math.pi) + 1.5 * math.log(1e150))),
+        # The atom -w mu^(2-p) / (phi (2 - p)).
+        (0.0, 1.0, 1e308, 1e308, -2.0),
+    ],
+)
+def test_log_density_is_finite_where_its_intermediate_products_overflow(
+    y, mu, phi, weight, expected
+):
+    # c w, c w / phi, w d and 2 phi overflow here; the density depends on phi / w.
+    value = tweedie_logpdf(np.array([y]), np.array([mu]), phi, 1.5, weights=np.array([weight]))
+    # The result comes from logs of magnitude up to |log phi| + |log w| + p |log y|.
+    scale = abs(math.log(phi)) + abs(math.log(weight)) + 1.5 * abs(math.log(y or 1.0))
+    assert value[0] == pytest.approx(expected, abs=8 * EPS * scale)
+
+
+def test_a_summed_row_whose_canonical_product_overflows_keeps_its_density():
+    # At p = 1.5, y = 1 and phi / w = 1 the peak index is 2, a summed row. With
+    # w = phi = 1e308, c w = -4e308 overflows, so c w / phi = -4 comes from log t.
+    base = tweedie_logpdf(np.ones(1), np.ones(1), 1.0, 1.5)
+    scaled = tweedie_logpdf(np.ones(1), np.ones(1), 1e308, 1.5, weights=np.array([1e308]))
+    # log t gains (a + 1)(log w - log phi) = 2 (709 - 709), each log rounded to
+    # eps. l_sat moves by at most E J + |c w / phi| = 2 + 4 per unit of log t.
+    assert scaled[0] == pytest.approx(base[0], abs=2 * 2 * EPS * math.log(1e308) * (2 + 4))
+
+
 @pytest.mark.parametrize("p", [1.2, 1.5, 1.8, 1.95])
 def test_unit_deviance_is_accurate_below_half_the_mean(p):
     """0 < y < mu/2: y - mu is inexact there, so the log ratio must not come from 1 + delta.
@@ -214,7 +245,7 @@ def test_the_switch_is_continuous_within_both_bounds(p):
         (rows.a + 1) * mean_j + canonical,
         -((rows.a + 1) ** 2) * var_j - canonical,
     )
-    saddle = _corrected_saddlepoint(p, -canonical, rows.log_y)
+    saddle = _corrected_saddlepoint(p, np.log(-canonical), rows.log_y)
     bounds = np.add(
         _series_bounds(p, y, w, phi, peak, var_j[0]), _saddle_bounds(p, y, peak, saddle[0][0])
     )
