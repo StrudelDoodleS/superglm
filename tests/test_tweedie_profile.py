@@ -317,6 +317,22 @@ class TestMaximumLikelihoodPhi:
         assert profile(1.0 + 1e-8) == math.inf
         assert "too close to 1" in profile.infeasible[1.0 + 1e-8]
 
+    def test_a_reml_candidate_too_close_to_one_is_skipped_as_infeasible(self):
+        """The refusal rises from inside the candidate's fit_reml, through its scale term."""
+        import pandas as pd
+
+        from superglm.features.spline import Spline
+        from superglm.profiling.tweedie import _PowerProfile
+
+        rng = np.random.default_rng(1)
+        x = rng.uniform(0.0, 1.0, 400)
+        y = rng.poisson(np.exp(0.3 + 0.4 * np.sin(4 * x))).astype(float)
+        model = SuperGLM(family=TweedieDistribution(p=1.5), features={"x": Spline(n_knots=6)})
+        frame = pd.DataFrame({"x": x})
+        profile = _PowerProfile(model, frame, y, np.ones(y.size), None, "fit_reml")
+        assert profile(1.0 + 1e-8) == math.inf
+        assert "too close to 1" in profile.infeasible[1.0 + 1e-8]
+
     def test_a_search_with_every_power_refused_names_the_refusal_not_reml(self):
         """Both bounds and every Brent point sit too close to 1 under plain ML fits."""
         import pandas as pd
@@ -333,6 +349,62 @@ class TestMaximumLikelihoodPhi:
             )
         assert "too close to 1" in str(raised.value)
         assert "REML" not in str(raised.value)
+
+    def test_an_unconverged_winner_has_no_interval(self):
+        """One coefficient iteration per candidate, at a tolerance one cannot meet even from
+        the previous candidate's warm start: p_hat's profile value is no optimum."""
+        import pandas as pd
+
+        rng = np.random.default_rng(3)
+        x = rng.normal(size=500)
+        y = generate_tweedie_cpg(500, np.exp(0.5 + 0.8 * x), 1.2, 1.5, rng=rng)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x": Numeric()},
+            max_iter=1,
+            tol=1e-12,
+        )
+        with pytest.warns(UserWarning, match="No likelihood-ratio interval"):
+            result = model.estimate_p(pd.DataFrame({"x": x}), y, ci_alpha=0.05)
+        assert not result.converged
+        assert any("No likelihood-ratio interval" in message for message in result.warnings)
+        with pytest.raises(RuntimeError, match="No likelihood-ratio interval"):
+            result.interval(0.05)
+
+    def test_a_decoupled_search_keeps_its_own_fit_mode(self):
+        import pandas as pd
+
+        from superglm.features.spline import Spline
+
+        rng = np.random.default_rng(4)
+        x = rng.uniform(0.0, 1.0, 800)
+        y = generate_tweedie_cpg(800, np.exp(0.3 + 0.5 * np.sin(4 * x)), 1.3, 1.5, rng=rng)
+        model = SuperGLM(family=TweedieDistribution(p=1.5), features={"x": Spline(n_knots=6)})
+        result = model.estimate_p(pd.DataFrame({"x": x}), y, fit_mode="reml", search_fit_mode="fit")
+        # The interval, search_nll and the plot describe the ML search, not the REML fit.
+        assert (result.fit_mode, result.search_fit_mode) == ("fit_reml", "fit")
+
+    def test_each_progress_phase_gets_its_own_payload(self):
+        import pandas as pd
+
+        rng = np.random.default_rng(5)
+        x = rng.normal(size=400)
+        y = generate_tweedie_cpg(400, np.exp(0.5 + 0.3 * x), 1.2, 1.5, rng=rng)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x": Numeric()}
+        )
+        events = []
+
+        def annotate(phase, payload):
+            events.append((phase, payload))
+            if phase == "best_found":
+                payload["profile_estimate"]["value"] = -1.0
+                payload["seen"] = True
+
+        result = model.estimate_p(pd.DataFrame({"x": x}), y, progress_callback=annotate)
+        final = next(payload for phase, payload in events if phase == "final_refit")
+        assert final["profile_estimate"]["value"] == result.p_hat and "seen" not in final
 
     def test_rows_sharing_a_peak_index_bend_the_profile_together(self):
         """Tiled 600 times, Q is 600 times the fixture's: the same minima, the same answer.

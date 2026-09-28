@@ -151,6 +151,19 @@ def test_the_scaled_deviance_is_accurate_outside_the_normal_range(y, mu, weight,
     assert got == pytest.approx(reference, rel=4 * EPS * scale, abs=0.0)
 
 
+def test_a_positive_deviance_below_the_float_range_keeps_its_weighted_value():
+    # y one ulp above a subnormal mu = 1e-308 at p = 1.01: d = 2.9e-336 underflows,
+    # while w d = 2.9347378532359560031e-28 (80-digit mpmath) is representable.
+    mu = 1e-308
+    y = float(np.nextafter(mu, np.inf))
+    got = weighted_deviance(np.array([y]), np.array([mu]), 1.01, np.array([1e308]))
+    # The exponential of logs of magnitude up to |log d| + |log w|; the power-of-two
+    # rescaling keeps y - mu exact, where a rounded y / mu would lose 10% of it.
+    log_deviance = math.log(2.9347378532359560031e-28) - math.log(1e308)
+    scale = abs(log_deviance) + abs(math.log(1e308)) + 1.0
+    assert got == pytest.approx(2.9347378532359560031e-28, rel=4 * EPS * scale, abs=0.0)
+
+
 def test_an_overflowing_weight_ratio_raises_no_runtime_warning():
     # w / phi = 1e310: the row goes through logs, and quietly.
     with warnings.catch_warnings():
@@ -595,6 +608,35 @@ def test_repeated_rows_collapse_into_counts_for_the_profile():
     assert abs(counted.criterion - summed.criterion) <= 2.0 * (remainder + round_off)
 
 
+def _assert_collapsed_as_replicated(collapsed, replicated, phi):
+    """The same row terms summed in two orders, within (n - 1) eps of their magnitudes."""
+    count = np.ones_like(collapsed.log_y) if collapsed.count is None else collapsed.count
+    magnitudes = count @ np.abs(np.asarray(collapsed.row_saturated(phi)).T)
+    bound = 2.0 * replicated.size * EPS * magnitudes
+    assert collapsed.size == replicated.size
+    assert np.all(np.abs(np.subtract(collapsed.saturated(phi), replicated.saturated(phi))) <= bound)
+
+
+def test_frequency_counts_on_a_repeated_response_sum_into_one_row():
+    y = np.array([1.0, 2.5, 1.0, 0.0, 2.5, 1.0])
+    counts = np.array([2.0, 1.0, 3.0, 4.0, 2.0, 1.0])
+    collapsed = TweedieRows.profile(y, counts, 1.4, frequency=True)
+    replicated = TweedieRows.prepare(np.repeat(y, counts.astype(int)), np.ones(13), 1.4)
+    assert collapsed.log_y.size == 2
+    _assert_collapsed_as_replicated(collapsed, replicated, 1.3)
+
+
+def test_prior_rows_merge_only_on_equal_response_and_weight():
+    # (1, 1) and (2.5, 1.5) repeat; (1, 2) shares its response, not its weight.
+    y, weights = np.array([1.0, 1.0, 2.5, 2.5, 1.0]), np.array([1.0, 2.0, 1.5, 1.5, 1.0])
+    collapsed = TweedieRows.profile(y, weights, 1.4)
+    assert collapsed.log_y.size == 3
+    _assert_collapsed_as_replicated(collapsed, TweedieRows.prepare(y, weights, 1.4), 1.3)
+    # A repeated response with no repeated pair merges nothing and keeps its rows.
+    unmerged = np.array([1.0, 1.0, 2.5]), np.array([1.0, 2.0, 1.5])
+    assert TweedieRows.profile(*unmerged, 1.4).count is None
+
+
 def test_rows_without_a_repeat_keep_their_profile_bitwise():
     y, _ = _book(p=1.5, n=300, seed=13)
     weights = np.random.default_rng(13).uniform(0.5, 2.0, y.size)
@@ -672,6 +714,24 @@ def test_the_band_reads_the_curvature_at_the_root_under_a_large_nullity():
     solved = solve_log_phi(TweedieRows.profile(y, weights, p), deviance, nullity)
     assert solved.n_passes > newton.n_passes
     _assert_no_grid_point_below(rows, deviance, nullity, solved)
+
+
+@pytest.mark.parametrize(
+    "phi, curvature, expected",
+    [
+        # (1 / phi)^2 = 1e-400 underflows and 1e400 overflows; the ratio does neither.
+        (1e200, 1e-300, -5e-101),
+        (1e-200, 1e300, -5e99),
+    ],
+)
+def test_the_reml_scale_derivative_is_formed_in_logs(monkeypatch, phi, curvature, expected):
+    import superglm.reml.scale as scale_module
+
+    solved = density_module.PhiSolve(phi, 0.0, curvature, 1)
+    monkeypatch.setattr(scale_module, "solve_log_phi", lambda *args: solved)
+    derivative = profile_tweedie_reml_scale(None, 1.0, 0.0).d_inverse_phi_d_penalized_deviance
+    scale = 2.0 * abs(math.log(phi)) + abs(math.log(curvature)) + 1.0
+    assert derivative == pytest.approx(expected, rel=4 * EPS * scale, abs=0.0)
 
 
 def test_solve_log_phi_refuses_no_interior_optimum():

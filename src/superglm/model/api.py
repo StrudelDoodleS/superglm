@@ -635,6 +635,10 @@ class SuperGLM:
 
         ``fit_reml()`` is the smoothness-selection path and does not support a
         selection penalty: configure ``selection_penalty=None`` or ``0.0``.
+        A Tweedie power within about 0.005 of 1 makes the dispersion profile
+        multimodal; each of its solves then searches globally (seconds per fit
+        at p = 1.001 on 30,000 rows), and a power too close to 1 for that search
+        raises ``superglm.NearPoissonDispersionError``.
         It optimizes a Laplace approximate REML objective over per-term
         smoothing parameters. For sparse/group selection, use ``fit()`` or
         ``fit_path()``. To let REML shrink spline null spaces, use
@@ -1356,7 +1360,11 @@ class SuperGLM:
         p_bounds : tuple of float
             Search interval for ``p``, strictly inside ``(1, 2)``. An estimate on
             a bound is warned about and recorded in ``result.warnings``: a
-            maximum as ``p -> 1`` can be an artefact of rounded responses.
+            maximum as ``p -> 1`` can be an artefact of rounded responses. Near
+            ``p = 1`` the dispersion profile is multimodal and its global search
+            grows like ``1 / (p - 1)``; a power whose search would exceed its
+            bound (``superglm.NearPoissonDispersionError``) is skipped as
+            infeasible and recorded.
         xatol : float
             Absolute resolution of the Brent search in ``p``.
         ci_alpha : float, optional

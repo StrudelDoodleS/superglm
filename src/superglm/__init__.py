@@ -24,7 +24,7 @@ sklearn-compatible API:
 """
 
 from superglm import families
-from superglm._tweedie import generate_tweedie_cpg, tweedie_logpdf
+from superglm._tweedie import NearPoissonDispersionError, generate_tweedie_cpg, tweedie_logpdf
 from superglm.constraints import (
     MonotoneRepairer as MonotoneRepairer,
 )
@@ -218,6 +218,7 @@ __all__ = [
     "TwoPieceNormalLSS",
     "Predictor",
     "PathResult",
+    "NearPoissonDispersionError",
     "PublicationModeError",
     "DiscretizationResult",
     "discretization_impact",

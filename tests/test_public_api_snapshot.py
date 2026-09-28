@@ -62,6 +62,7 @@ PUBLIC_API = [
     "NBProfileResult",
     "NBThetaBoundWarning",
     "NaturalSpline",
+    "NearPoissonDispersionError",
     "NegativeBinomial",
     "NegativeBinomialLS",
     "NegativeBinomialLink",

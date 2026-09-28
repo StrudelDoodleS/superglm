@@ -14,6 +14,7 @@ from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.model.fit_state import configured_family
 from superglm.model.input_validation import THETA_ESTIMATED
 from superglm.profiling._reporting import cached_tweedie_profile_ci
+from superglm.profiling._scalar import warn_caller
 from superglm.profiling.tweedie import profile_phi_at
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, model_weight_semantics
@@ -132,10 +133,15 @@ def estimate_p(
     )
     result.fit_mode = publish_mode
     if ci_alpha is not None:
-        result.interval(ci_alpha)
-    estimate = {"profile_estimate": _tweedie_estimate_payload(result)}
-    report("best_found", estimate)
-    report("final_refit", estimate)
+        refusal = result._interval_refusal()
+        if refusal is None:
+            result.interval(ci_alpha)
+        else:
+            result.warnings.append(refusal)
+            warn_caller(refusal)
+    # A fresh payload per phase: a callback may keep or annotate the first.
+    report("best_found", {"profile_estimate": _tweedie_estimate_payload(result)})
+    report("final_refit", {"profile_estimate": _tweedie_estimate_payload(result)})
     _publish_profiled_family(
         model,
         validated,
@@ -514,9 +520,8 @@ def estimate_theta(
     result = _search_theta_privately(
         model, validated, theta_bounds=theta_bounds, xatol=xatol, report=report
     )
-    estimate = {"profile_estimate": _theta_estimate_payload(result)}
-    report("best_found", estimate)
-    report("final_refit", estimate)
+    report("best_found", {"profile_estimate": _theta_estimate_payload(result)})
+    report("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
     return _publish_profiled_family(
         model,
         validated,

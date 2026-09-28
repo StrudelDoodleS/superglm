@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -581,8 +582,12 @@ def _gamma_inverse_shape_derivative(
     """
     if not np.isfinite(scaled_curvature) or scaled_curvature <= 0.0:
         raise FloatingPointError("Gamma REML scale profile has non-positive curvature")
+    return _inverse_scale_derivative(np.log(shape), scaled_curvature)
 
-    log_magnitude = float(np.log(0.5) + 2.0 * np.log(shape) - np.log(scaled_curvature))
+
+def _inverse_scale_derivative(log_inverse_scale: float, scaled_curvature: float) -> float:
+    """-(1/2) exp(2 log_inverse_scale) / scaled_curvature, formed in logs and clamped."""
+    log_magnitude = float(np.log(0.5) + 2.0 * log_inverse_scale - np.log(scaled_curvature))
     if log_magnitude < np.log(np.nextafter(0.0, 1.0)):
         return -0.0
     if log_magnitude > np.log(np.finfo(np.float64).max):
@@ -851,12 +856,15 @@ def profile_tweedie_reml_scale(
     d(xi)/d(Dp) = -1/2 / Q''(xi) = -exp(-2 log phi) / (2 Q''(log phi)).
     """
     solved = solve_log_phi(profile_data, float(penalized_deviance), float(penalty_nullity))
-    inverse_phi = 1.0 / solved.phi
     return ProfiledScaleTerm(
         phi=solved.phi,
-        inverse_phi=inverse_phi,
+        inverse_phi=1.0 / solved.phi,
         criterion=solved.criterion,
-        d_inverse_phi_d_penalized_deviance=-0.5 * inverse_phi * inverse_phi / solved.curvature,
+        # -(1/2) phi^-2 / Q''(log phi) in logs: phi^-2 alone can underflow or
+        # overflow where the ratio does not. solve_log_phi stops only on Q'' > 0.
+        d_inverse_phi_d_penalized_deviance=_inverse_scale_derivative(
+            -math.log(solved.phi), solved.curvature
+        ),
     )
 
 

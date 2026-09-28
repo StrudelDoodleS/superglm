@@ -83,24 +83,47 @@ class TweedieRows:
 
     @classmethod
     def profile(
-        cls, y: NDArray, weights: NDArray, p: float, *, frequency: bool = False
+        cls,
+        y: NDArray,
+        weights: NDArray,
+        p: float,
+        *,
+        frequency: bool = False,
+        grouping: tuple[NDArray, NDArray] | None | bool = True,
     ) -> TweedieRows:
         """Rows for the dispersion profile, with repeated positive rows collapsed into counts.
 
         Equal (y, w) rows, or equal y under frequency counts, give equal row
-        terms, so every series pass costs O(distinct rows). A book without a
-        repeated response keeps its rows, and its profile, bitwise unchanged.
+        terms, so every series pass costs O(distinct rows). A book in which no
+        row repeats keeps its rows, and its profile, bitwise unchanged.
+        ``grouping`` is `profile_grouping`'s result for these (y, w), which does not
+        depend on p; True computes it here.
         """
         rows = cls.prepare(y, weights, p, frequency=frequency)
+        if grouping is True:
+            grouping = cls.profile_grouping(y, weights, frequency=frequency)
+        if grouping is None or grouping is False:
+            return rows
+        first, group = grouping
+        count = np.bincount(group, weights=rows.count, minlength=first.size)
+        canonical = rows.saturated_canonical[first]
+        return cls(p, rows.a, rows.log_t_unit_phi[first], rows.log_y[first], canonical, count)
+
+    @staticmethod
+    def profile_grouping(
+        y: NDArray, weights: NDArray, *, frequency: bool = False
+    ) -> tuple[NDArray, NDArray] | None:
+        """First index and group of each positive row's repeat class, or None if none repeats."""
         positive = (y > 0.0) & (weights > 0.0) if frequency else y > 0.0
         y_positive = y[positive]
         if np.unique(y_positive).size == y_positive.size:
-            return rows
+            return None
         key = y_positive[:, None] if frequency else np.column_stack([y_positive, weights[positive]])
         _, first, group = np.unique(key, axis=0, return_index=True, return_inverse=True)
-        count = np.bincount(group.reshape(-1), weights=rows.count, minlength=first.size)
-        canonical = rows.saturated_canonical[first]
-        return cls(p, rows.a, rows.log_t_unit_phi[first], rows.log_y[first], canonical, count)
+        if first.size == y_positive.size:
+            # Repeated y with distinct w: nothing merges, so keep the rows as they are.
+            return None
+        return first, group.reshape(-1)
 
     @property
     def size(self) -> float:
@@ -233,8 +256,11 @@ def solve_log_phi(rows: TweedieRows, deviance: float, nullity: float = 0.0) -> P
     local minimum (`_lattice_scan`). Its model: rows share a phase only within an
     exact group (near-harmonic groups, such as integer responses, are seen where
     any is banded), the bending is measured against the curvature at the Newton
-    root, and Q' is monotone between banded stretches. A comparison that would
-    take more than _SCAN_WORK_LIMIT row passes raises NearPoissonDispersionError.
+    root, and Q' is monotone between banded stretches. A comparison whose grid
+    would take more than _SCAN_WORK_LIMIT row passes raises
+    NearPoissonDispersionError, which a power search scores infeasible and a
+    fixed-power fit raises; polishing its brackets adds a bracketed Newton each.
+    The bound is per solve: a REML fit solves again at every new (Dp, Mp).
     """
     key = (deviance, nullity)
     if key not in rows.phi_solves:
@@ -243,7 +269,15 @@ def solve_log_phi(rows: TweedieRows, deviance: float, nullity: float = 0.0) -> P
 
 
 class NearPoissonDispersionError(FloatingPointError):
-    """The dispersion profile is too close to the Poisson lattice to search globally."""
+    """The Tweedie dispersion profile is too close to the Poisson limit to search globally.
+
+    Near p = 1 the density approaches the Poisson lattice and the dispersion
+    profile has many local minima; the global search over them grows like
+    1 / (p - 1). It is raised where one search would exceed its bound (about
+    five seconds of series work). ``estimate_p`` skips such a power as
+    infeasible and records it; a fit at that fixed power raises it. Fit a power
+    further from 1, or a Poisson family.
+    """
 
 
 def _global_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSolve:
@@ -326,9 +360,10 @@ def _lattice_scan(rows: TweedieRows, deviance: float, nullity: float, local: Phi
     work = float(np.sum(counts) + 2) * (rows.log_y.size + _PASS_OVERHEAD_ROWS)
     if work > _SCAN_WORK_LIMIT:
         raise NearPoissonDispersionError(
-            f"Tweedie p={rows.p:.10g} is too close to 1 for a global dispersion profile: its "
-            f"lattice comparison needs {work:.3g} row passes, over {_SCAN_WORK_LIMIT:.3g}. "
-            "Fit a Poisson family, or search p further from 1."
+            f"Tweedie p={rows.p:.10g} is too close to 1 to profile the dispersion globally: "
+            f"its lattice comparison needs {work:.3g} row passes, over {_SCAN_WORK_LIMIT:.3g}. "
+            "Fit a power further from 1 or a Poisson family; a power search skips such "
+            "a power as infeasible."
         )
     points = [np.array([lower, upper])]
     for start, stop, count in zip(starts[opens], reach[closes], counts, strict=True):
@@ -501,12 +536,15 @@ def _scaled_deviance(y, mu, p, weights, phi) -> NDArray:
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         ratio = weights / phi
         scaled = deviance * (0.5 * ratio)
-    extreme = np.flatnonzero(~np.isfinite(scaled) | ~(ratio >= _TINY))
+    # A positive d below the normal range has lost digits, or underflowed to 0,
+    # though w d / (2 phi) may be representable.
+    underflowed = (deviance < _TINY) & (y != mu)
+    extreme = np.flatnonzero(~np.isfinite(scaled) | ~(ratio >= _TINY) | underflowed)
     if extreme.size:
-        # A finite d keeps its own accuracy; only an overflowed d needs log d.
+        # A normal d keeps its own accuracy; an overflowed or underflowed one needs log d.
         with np.errstate(divide="ignore"):
             log_deviance = np.log(deviance[extreme])
-        overflowed = np.flatnonzero(~np.isfinite(deviance[extreme]))
+        overflowed = np.flatnonzero(~np.isfinite(deviance[extreme]) | underflowed[extreme])
         log_deviance[overflowed] = _log_unit_deviance(
             y[extreme][overflowed], mu[extreme][overflowed], p
         )
@@ -518,19 +556,21 @@ def _scaled_deviance(y, mu, p, weights, phi) -> NDArray:
 
 
 def _log_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
-    """log d(y, mu), finite where d itself overflows.
+    """log d(y, mu), finite where d itself over- or underflows.
 
-    d is homogeneous of degree 2 - p, d(y, mu) = mu^(2-p) d(y / mu, 1), and
-    d(r, 1) is finite unless r nears overflow. There the half-deviance factors
-    as A (1 - B/A + C/A), A = y mu^(1-p) / (p - 1), with
-    B/A = (mu / y)^(p-1) / (2 - p) and C/A = (p - 1)(mu / y) / (2 - p) far below one.
+    d is homogeneous of degree 2 - p. With mu = m 2^e, m in [1/2, 1), scaling
+    both arguments by 2^-e is exact, subnormals included, so
+    d(y, mu) = 2^(e (2 - p)) d(y 2^-e, m) keeps y - mu exact, where a rounded
+    y / mu would not. Only where y 2^-e or that d overflows, y / mu nears
+    overflow, and the half-deviance factors as A (1 - B/A + C/A),
+    A = y mu^(1-p) / (p - 1), with B/A = (mu / y)^(p-1) / (2 - p) and
+    C/A = (p - 1)(mu / y) / (2 - p) far below one.
     """
     log_mu = np.log(mu)
-    with np.errstate(over="ignore", divide="ignore"):
-        ratio = y / mu
-        log_deviance = (2.0 - p) * log_mu + np.log(
-            tweedie_unit_deviance(ratio, np.ones_like(ratio), p)
-        )
+    _, exponent = np.frexp(mu)
+    with np.errstate(over="ignore", under="ignore", divide="ignore"):
+        scaled = tweedie_unit_deviance(np.ldexp(y, -exponent), np.ldexp(mu, -exponent), p)
+        log_deviance = exponent * ((2.0 - p) * math.log(2.0)) + np.log(scaled)
     huge = np.flatnonzero(np.isposinf(log_deviance))
     if huge.size:
         log_y = np.log(y[huge])

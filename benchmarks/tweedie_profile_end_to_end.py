@@ -50,11 +50,12 @@ class _EndToEndProfileCase:
     xatol: float
 
 
-def _bounded_inner_phi_reference(y, mu, weights, p, *, optimizer_successes):
+def _bounded_inner_phi_reference(y, mu, weights, p, *, optimizer_successes, grouping=None):
     """Replace only the Newton phi solve with a bounded value-only minimization.
 
     It minimises the same criterion, Q(u) = D e^-u / 2 - l_sat(e^u) over
-    u = log phi, through the same prepared rows, one series pass per value.
+    u = log phi, one series pass per value, on the uncollapsed rows: the
+    search's ``grouping`` only merges equal rows, which the sum does not need.
     """
     rows = density_module.TweedieRows.prepare(y, weights, p)
     deviance = float(np.sum(weights * density_module.tweedie_unit_deviance(y, mu, p)))
@@ -148,11 +149,11 @@ def _run_end_to_end_profile_once(
         else tweedie_module.profile_phi_at
     )
 
-    def counted_solve(y, mu, weights, p):
+    def counted_solve(y, mu, weights, p, **options):
         passes["active"] = True
         passes["phi_solves"] += 1
         try:
-            return solve(y, mu, weights, p)
+            return solve(y, mu, weights, p, **options)
         finally:
             passes["active"] = False
 

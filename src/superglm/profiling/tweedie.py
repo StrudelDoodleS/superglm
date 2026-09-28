@@ -51,15 +51,22 @@ from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 # characterisation REML books at p in {1.3, 1.5, 1.7}.
 _SEARCH_REML_TOL = 1e-6
 # The interval may reach past the default search bounds (1.05, 1.95), as
-# master's did; the series is exact from p = 1.01 to 1.99 (its 50-digit oracle).
+# master's did; the series is exact from p = 1.001 to 1.99 (its 50-digit oracle).
 _CI_BOUNDS = (1.02, 1.98)
 # Endpoints are reported to three decimals; master located them to the same 1e-4.
 _CI_XTOL = 1e-4
 
 
-def profile_phi_at(y: NDArray, mu: NDArray, weights: NDArray, p: float) -> PhiSolve:
-    """Maximum-likelihood phi at a fitted mean: Q with M = 0."""
-    return solve_log_phi(TweedieRows.profile(y, weights, p), weighted_deviance(y, mu, p, weights))
+def profile_phi_at(
+    y: NDArray, mu: NDArray, weights: NDArray, p: float, *, grouping: Any = True
+) -> PhiSolve:
+    """Maximum-likelihood phi at a fitted mean: Q with M = 0.
+
+    ``grouping`` is TweedieRows.profile_grouping(y, weights), which a search
+    computes once for all its powers; True computes it here.
+    """
+    rows = TweedieRows.profile(y, weights, p, grouping=grouping)
+    return solve_log_phi(rows, weighted_deviance(y, mu, p, weights))
 
 
 @dataclass(frozen=True)
@@ -85,11 +92,13 @@ class _PowerProfile:
         else:
             self._prepare_ml(X, y, sample_weight, offset)
         self.n = float(self.y.size)
+        # Which rows repeat does not depend on p: sort once for the whole search.
+        self.grouping = TweedieRows.profile_grouping(self.y, self.w)
 
     def __call__(self, p: float) -> float:
         try:
             mu, fit_converged = self._fit(p)
-            solved = profile_phi_at(self.y, mu, self.w, p)
+            solved = profile_phi_at(self.y, mu, self.w, p, grouping=self.grouping)
         except (ObservedModeNotCertifiedError, NearPoissonDispersionError) as exc:
             # A REML candidate whose penalized mode cannot be differentiated
             # through, or a power too close to 1 to profile phi globally, has no
@@ -278,6 +287,7 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         nll=nll_hat,
         converged=search_converged and best.fit_converged,
         fit_mode=fit_mode,
+        search_fit_mode=fit_mode,
         evaluations=evaluations,
         warnings=skipped + cautions,
         search_nll=nll_hat,
@@ -338,7 +348,9 @@ class TweedieProfileResult:
     ``nll`` is the mean negative log-likelihood of the published fit and
     ``search_nll`` the searched profile's value at ``p_hat``, which the
     interval and the plot measure against. ``evaluations`` lists every searched
-    power in order; an infeasible power has ``nll = inf``.
+    power in order; an infeasible power has ``nll = inf``. ``fit_mode`` is the
+    published fit's regime and ``search_fit_mode`` the searched profile's, which
+    ``search_nll``, the interval and the plot describe.
     """
 
     p_hat: float
@@ -353,6 +365,7 @@ class TweedieProfileResult:
     _ll_scale: float = field(repr=False)
     _ci_bounds: tuple[float, float] = field(repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
+    search_fit_mode: str | None = None
 
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for p on the searched curve, with censoring flags.
@@ -365,11 +378,31 @@ class TweedieProfileResult:
             warn_caller(message)
         return interval
 
+    def _interval_refusal(self) -> str | None:
+        """Why no interval exists: the searched winner's coefficient fit did not converge.
+
+        The interval inverts the searched curve from its value at p_hat, which
+        is a located optimum only if that fit converged (as master required).
+        """
+        if "fit_converged" not in self.evaluations:
+            return None
+        winner = self.evaluations.loc[self.evaluations["p"] == self.p_hat, "fit_converged"]
+        if winner.empty or bool(winner.iloc[0]):
+            return None
+        return (
+            f"No likelihood-ratio interval for p: the coefficient fit at p_hat={self.p_hat:.6g} "
+            "stopped at its iteration limit, so the searched profile's value there is not an "
+            "optimum. Raise max_iter and estimate p again."
+        )
+
     def _interval(self, alpha: float) -> Interval:
         """The interval, computed once and recorded; reports read it without a warning."""
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
             raise ValueError("alpha must be in (0, 1)")
+        refusal = self._interval_refusal()
+        if refusal is not None:
+            raise RuntimeError(refusal)
         if alpha not in self._ci_cache:
             interval = likelihood_ratio_interval(
                 self._objective,
