@@ -275,8 +275,9 @@ class NearPoissonDispersionError(FloatingPointError):
     profile has many local minima; the global search over them grows like
     1 / (p - 1). It is raised where one search would exceed its bound (about
     five seconds of series work). ``estimate_p`` skips such a power as
-    infeasible and records it; a fit at that fixed power raises it. Fit a power
-    further from 1, or a Poisson family.
+    infeasible and records it; ``fit_reml`` at that fixed power raises it
+    (``fit()`` does not profile the dispersion). Fit a power further from 1, or
+    a Poisson family.
     """
 
 
@@ -526,11 +527,11 @@ def _saturated_rows(y, weights, phi, p) -> NDArray:
 
 
 def _scaled_deviance(y, mu, p, weights, phi) -> NDArray:
-    """w d(y, mu) / (2 phi), through logs where a factor or the product overflows.
+    """w d(y, mu) / (2 phi), through logs where a factor or the product leaves the float range.
 
-    The density depends on phi / w alone, and d may overflow where w d / phi
-    does not; those rows, and rows whose w / phi leaves the normal range, take
-    the exponential of the term's logarithm.
+    The density depends on phi / w alone, and d may overflow or underflow where
+    w d / phi does not; those rows, and rows whose w / phi leaves the normal
+    range, take the exponential of the term's logarithm.
     """
     deviance = tweedie_unit_deviance(y, mu, p)
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):

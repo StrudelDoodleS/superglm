@@ -635,10 +635,11 @@ class SuperGLM:
 
         ``fit_reml()`` is the smoothness-selection path and does not support a
         selection penalty: configure ``selection_penalty=None`` or ``0.0``.
-        A Tweedie power within about 0.005 of 1 makes the dispersion profile
-        multimodal; each of its solves then searches globally (seconds per fit
-        at p = 1.001 on 30,000 rows), and a power too close to 1 for that search
-        raises ``superglm.NearPoissonDispersionError``.
+        A Tweedie power within about 0.005 of 1, or further out for repeated
+        responses (whose rows share a lattice phase), makes the dispersion
+        profile multimodal; each of its solves then searches globally (seconds
+        per fit at p = 1.001 on 30,000 distinct rows), and a power too close to
+        1 for that search raises ``superglm.NearPoissonDispersionError``.
         It optimizes a Laplace approximate REML objective over per-term
         smoothing parameters. For sparse/group selection, use ``fit()`` or
         ``fit_path()``. To let REML shrink spline null spaces, use
@@ -1371,7 +1372,10 @@ class SuperGLM:
             Significance level for an explicitly requested likelihood-ratio
             profile confidence interval. For example, ``0.05`` computes a 95%
             interval and caches it for ``model.summary(alpha=0.05)``. The
-            default ``None`` performs no confidence-interval evaluations.
+            default ``None`` performs no confidence-interval evaluations. If
+            the searched winner's fit did not converge the interval is not
+            computed: the reason is warned and recorded in ``result.warnings``,
+            and the summary reports the interval as unavailable.
         max_reml_iter : int, optional
             Outer-iteration budget for the REML *publication* refit alone;
             candidate search fits keep their own budget. Requires
@@ -1439,7 +1443,10 @@ class SuperGLM:
             itself between successive mean fits.
         ci_alpha : float, optional
             Compute the ``1 - ci_alpha`` likelihood-ratio interval at the
-            published mean before returning.
+            published mean before returning. If theta_hat is no located
+            optimum (an alternation that did not settle) the interval is not
+            computed: the reason is warned and recorded, and the summary reports
+            it as unavailable.
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each alternation step, then

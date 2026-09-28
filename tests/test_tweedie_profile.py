@@ -368,9 +368,34 @@ class TestMaximumLikelihoodPhi:
         with pytest.warns(UserWarning, match="No likelihood-ratio interval"):
             result = model.estimate_p(pd.DataFrame({"x": x}), y, ci_alpha=0.05)
         assert not result.converged
-        assert any("No likelihood-ratio interval" in message for message in result.warnings)
+        assert any("Raise max_iter" in message for message in result.warnings)
         with pytest.raises(RuntimeError, match="No likelihood-ratio interval"):
             result.interval(0.05)
+        # Reports say the interval does not exist rather than that nobody asked.
+        assert "[CI unavailable]" in str(model.summary())
+
+    def test_an_unsettled_reml_winner_names_the_route_to_an_interval(self, monkeypatch):
+        """One smoothing-parameter iteration per candidate: max_iter cannot help there."""
+        import pandas as pd
+
+        from superglm.features.spline import Spline
+
+        fit_reml = SuperGLM.fit_reml
+
+        def short_candidates(self, *args, **kwargs):
+            # Candidate fits skip the reporting tables; the publication refit does not.
+            if getattr(self, "_suppress_reporting_support", False):
+                kwargs["max_reml_iter"] = 1
+            return fit_reml(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", short_candidates)
+        rng = np.random.default_rng(6)
+        x = rng.uniform(0.0, 1.0, 800)
+        y = generate_tweedie_cpg(800, np.exp(0.3 + 0.5 * np.sin(4 * x)), 1.3, 1.5, rng=rng)
+        model = SuperGLM(family=TweedieDistribution(p=1.5), features={"x": Spline(n_knots=8)})
+        with pytest.warns(UserWarning, match="search_fit_mode='fit'"):
+            result = model.estimate_p(pd.DataFrame({"x": x}), y, fit_mode="reml", ci_alpha=0.05)
+        assert not any("Raise max_iter" in message for message in result.warnings)
 
     def test_a_decoupled_search_keeps_its_own_fit_mode(self):
         import pandas as pd

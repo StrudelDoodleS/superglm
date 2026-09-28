@@ -331,7 +331,9 @@ wrong on the way:
   restrict `p_bounds`.
 
 Likelihood-ratio confidence intervals remain available for either coupling,
-eagerly via `ci_alpha` or lazily via `result.ci()`. The interval inverts the
+eagerly via `ci_alpha` or lazily via `result.ci()`, provided the searched
+winner's fit converged; otherwise `result.ci()` raises, `ci_alpha` records why,
+and the summary reports the interval as unavailable. The interval inverts the
 profile that was searched, around that profile's own value at `p_hat`
 (recorded as `result.search_nll`), so it describes the regime named by
 `search_fit_mode`; `result.nll` describes the published fit's re-profiled

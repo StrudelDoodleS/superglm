@@ -546,6 +546,35 @@ class TestNB2AutoTheta:
             assert interval.lower == pytest.approx(held, rel=1e-12) and interval.lower_censored
             assert interval.upper > held and not interval.upper_censored
 
+    def test_an_unsettled_alternation_has_no_interval(self, monkeypatch):
+        """One mean fit: theta_hat is the alternation's first iterate, not a fixed point."""
+        import functools
+
+        import superglm.profiling.nb as nb_module
+
+        monkeypatch.setattr(
+            nb_module,
+            "estimate_nb_theta",
+            functools.partial(nb_module.estimate_nb_theta, maxiter=1),
+        )
+        rng = np.random.default_rng(7)
+        X = pd.DataFrame({"x": rng.normal(size=600)})
+        mu = np.exp(0.4 + 0.5 * X["x"].to_numpy())
+        y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        with pytest.warns(UserWarning, match="No likelihood-ratio interval for theta"):
+            result = model.estimate_theta(X, y, ci_alpha=0.05)
+        assert not result.converged
+        assert any("did not settle" in message for message in result.warnings)
+        with pytest.raises(RuntimeError, match="did not settle"):
+            model._nb_profile_result.interval(0.05)
+        # The summary reports it as unavailable, and does not raise.
+        assert "[CI unavailable]" in str(model.summary())
+
     def test_a_near_poisson_upper_side_is_reported_censored(self):
         from superglm.export.summary import build_summary_export_payload
 

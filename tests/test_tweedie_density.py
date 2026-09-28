@@ -734,6 +734,16 @@ def test_the_reml_scale_derivative_is_formed_in_logs(monkeypatch, phi, curvature
     assert derivative == pytest.approx(expected, rel=4 * EPS * scale, abs=0.0)
 
 
+def test_an_unrepresentable_reml_scale_derivative_raises(monkeypatch):
+    # phi^2 Q'' = 1e-320 leaves -(1/2) phi^-2 / Q'' past the float range.
+    import superglm.reml.scale as scale_module
+
+    solved = density_module.PhiSolve(1e-160, 0.0, 1.0, 1)
+    monkeypatch.setattr(scale_module, "solve_log_phi", lambda *args: solved)
+    with pytest.raises(FloatingPointError, match="Tweedie REML scale derivative"):
+        profile_tweedie_reml_scale(None, 1.0, 0.0)
+
+
 def test_solve_log_phi_refuses_no_interior_optimum():
     y = np.zeros(50)
     with pytest.raises(ValueError, match="no finite interior optimum"):

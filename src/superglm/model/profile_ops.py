@@ -581,7 +581,11 @@ def _install_nb_profile(final_model, *, y, result, ci_alpha):
     """
     published = result._at_mean(y, final_model._fit_mu, final_model._fit_weights)
     if ci_alpha is not None:
-        published.interval(ci_alpha)
+        if published._refusal is None:
+            published.interval(ci_alpha)
+        else:
+            published.warnings.append(published._refusal)
+            warn_caller(published._refusal)
     final_model._nb_profile_result = _detached_copy(published)
     return published
 

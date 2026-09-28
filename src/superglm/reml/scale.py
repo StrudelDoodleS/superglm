@@ -856,15 +856,16 @@ def profile_tweedie_reml_scale(
     d(xi)/d(Dp) = -1/2 / Q''(xi) = -exp(-2 log phi) / (2 Q''(log phi)).
     """
     solved = solve_log_phi(profile_data, float(penalized_deviance), float(penalty_nullity))
+    # -(1/2) phi^-2 / Q''(log phi) in logs: phi^-2 alone can underflow or
+    # overflow where the ratio does not. solve_log_phi stops only on Q'' > 0.
+    derivative = _inverse_scale_derivative(-math.log(solved.phi), solved.curvature)
+    if not math.isfinite(derivative):
+        raise FloatingPointError("Tweedie REML scale derivative is not representable")
     return ProfiledScaleTerm(
         phi=solved.phi,
         inverse_phi=1.0 / solved.phi,
         criterion=solved.criterion,
-        # -(1/2) phi^-2 / Q''(log phi) in logs: phi^-2 alone can underflow or
-        # overflow where the ratio does not. solve_log_phi stops only on Q'' > 0.
-        d_inverse_phi_d_penalized_deviance=_inverse_scale_derivative(
-            -math.log(solved.phi), solved.curvature
-        ),
+        d_inverse_phi_d_penalized_deviance=derivative,
     )
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-ProfileCIStatus = Literal["available", "censored", "not computed"]
+ProfileCIStatus = Literal["available", "censored", "not computed", "unavailable"]
 
 
 def reported_interval(interval: Any) -> tuple[tuple[float, float], ProfileCIStatus]:
@@ -23,12 +23,23 @@ def cached_tweedie_profile_ci(
     """The interval already computed at ``alpha``; reporting never evaluates the profile.
 
     Each point of the p profile is a model refit, so an interval nobody asked
-    for is "not computed".
+    for is "not computed"; one the estimate cannot support is "unavailable".
     """
+    if getattr(result, "_refusal", None) is not None:
+        return None, "unavailable"
     interval = result._ci_cache.get(float(alpha))
     if interval is None:
         return None, "not computed"
     return reported_interval(interval)
+
+
+def reported_profile_interval(
+    result: Any, alpha: float
+) -> tuple[tuple[float, float] | None, ProfileCIStatus]:
+    """An interval a report computes on demand, or "unavailable" where it is refused."""
+    if getattr(result, "_refusal", None) is not None:
+        return None, "unavailable"
+    return reported_interval(result._interval(alpha))
 
 
 def tweedie_profile_report_identity(result: Any, alpha: float) -> tuple[Any, ...]:
@@ -41,5 +52,6 @@ __all__ = [
     "ProfileCIStatus",
     "cached_tweedie_profile_ci",
     "reported_interval",
+    "reported_profile_interval",
     "tweedie_profile_report_identity",
 ]

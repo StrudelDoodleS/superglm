@@ -1156,6 +1156,15 @@ def _refine_nb_theta_to_reml_fixed_point(
         evaluations=pd.DataFrame(rows, columns=["theta", "nll"]),
         warnings=warned,
         _bound_side=solve.side,
+        # Refits that stop short leave theta_hat off the score root at the
+        # published mean; a joint fixed point puts it there.
+        _refusal=(
+            f"No likelihood-ratio interval for theta: the theta / REML alternation stopped "
+            f"after {_NB_JOINT_MAX_REFITS} refits, so theta_hat={theta:g} is not the optimum "
+            "at the published mean."
+            if exhausted
+            else None
+        ),
     )
     model._nb_profile_result = refreshed._at_mean(y_arr, model._fit_mu, model._fit_weights)
     if refits:

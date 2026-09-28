@@ -129,6 +129,8 @@ def _format_profile_estimate(
             return f"{float(estimate):.3f} [{float(ci[0]):.3f}, {float(ci[1]):.3f}]{censored}"
         except (TypeError, ValueError, OverflowError):
             pass
+    if ci_status == "unavailable":
+        return f"{float(estimate):.3f} [CI unavailable]"
     return f"{float(estimate):.3f} [CI not computed]"
 
 

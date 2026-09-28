@@ -395,6 +395,17 @@ def estimate_nb_theta(
     # Published to six significant digits, the precision the family reports.
     theta_hat = float(f"{theta:.6g}")
     messages = _warn_unsettled(solve, settled, theta_bounds, theta_hat, maxiter)
+    # An unsettled theta_hat is the last iterate; the interval inverts the
+    # fixed-mean profile from an optimum it is not. A bound is censored instead.
+    refusal = (
+        None
+        if settled or solve.at_bound
+        else (
+            f"No likelihood-ratio interval for theta: the alternation did not settle in "
+            f"{maxiter} mean fits, so theta_hat={theta_hat:g} is its last iterate, not the "
+            "optimum the profile is inverted from."
+        )
+    )
     return NBProfileResult(
         theta_hat=theta_hat,
         nll=nb_nll(mean.y, mu, mean.w, theta_hat, weight_semantics=semantics),
@@ -406,6 +417,7 @@ def estimate_nb_theta(
         _weights=mean.w,
         _weight_semantics=semantics,
         _bound_side=solve.side,
+        _refusal=refusal,
     )
 
 
@@ -469,6 +481,8 @@ class NBProfileResult:
     # The estimation bound theta_hat sits on ("lower"/"upper"), or None when interior.
     _bound_side: str | None = field(default=None, repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
+    # Why no interval exists: theta_hat is no located optimum of the profile.
+    _refusal: str | None = field(default=None, repr=False)
 
     def _at_mean(self, y: NDArray, mu: NDArray, weights: NDArray) -> NBProfileResult:
         """The estimate restated at a fitted mean, whose NLL and interval it then describes."""
@@ -499,7 +513,8 @@ class NBProfileResult:
         """Likelihood-ratio interval for theta on the fixed-mean profile, with censoring flags.
 
         A censored side is recorded in ``warnings`` when first computed and
-        warned about on every call.
+        warned about on every call. Raises RuntimeError when theta_hat is no
+        located optimum (an alternation that did not settle).
         """
         interval = self._interval(alpha)
         for message in self._censoring(interval, alpha):
@@ -509,11 +524,16 @@ class NBProfileResult:
     def _censoring(self, interval: Interval, alpha: float) -> list[str]:
         return censoring_warnings(interval, alpha, "theta", lambda _: "where its search stopped")
 
+    def _interval_refusal(self) -> str | None:
+        return self._refusal
+
     def _interval(self, alpha: float) -> Interval:
         """The interval, computed once and recorded; reports read it without a warning."""
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
             raise ValueError("alpha must be in (0, 1)")
+        if self._refusal is not None:
+            raise RuntimeError(self._refusal)
         if alpha not in self._ci_cache:
             # Rooted in log theta: the range spans up to eighteen decades, and
             # an endpoint's own magnitude is its only yardstick.

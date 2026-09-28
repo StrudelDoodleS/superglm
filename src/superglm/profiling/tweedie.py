@@ -72,7 +72,13 @@ def profile_phi_at(
 @dataclass(frozen=True)
 class _Candidate:
     phi: float
-    fit_converged: bool
+    pirls_converged: bool
+    # A REML candidate also needs its smoothing-parameter iterations to settle.
+    reml_converged: bool = True
+
+    @property
+    def fit_converged(self) -> bool:
+        return self.pirls_converged and self.reml_converged
 
 
 _INFEASIBLE_CANDIDATE = _Candidate(math.nan, False)
@@ -97,7 +103,7 @@ class _PowerProfile:
 
     def __call__(self, p: float) -> float:
         try:
-            mu, fit_converged = self._fit(p)
+            mu, pirls_converged, reml_converged = self._fit(p)
             solved = profile_phi_at(self.y, mu, self.w, p, grouping=self.grouping)
         except (ObservedModeNotCertifiedError, NearPoissonDispersionError) as exc:
             # A REML candidate whose penalized mode cannot be differentiated
@@ -107,7 +113,9 @@ class _PowerProfile:
             self.infeasible[p] = str(exc).partition("\n")[0]
             return math.inf
         nll = solved.criterion / self.n
-        self.candidates[p] = _Candidate(solved.phi, fit_converged)
+        candidate = _Candidate(solved.phi, pirls_converged, reml_converged)
+        fit_converged = candidate.fit_converged
+        self.candidates[p] = candidate
         if self.on_evaluation is not None:
             self.on_evaluation(
                 {"p": p, "nll": nll, "phi": solved.phi, "fit_converged": fit_converged}
@@ -126,7 +134,7 @@ class _PowerProfile:
         self.warm_beta = self.warm_intercept = None
         self._fit = self._fit_ml
 
-    def _fit_ml(self, p: float) -> tuple[NDArray, bool]:
+    def _fit_ml(self, p: float) -> tuple[NDArray, bool, bool]:
         clone = self.clone
         clone._distribution = Tweedie(p)
         result = _solve_coefficients(
@@ -147,7 +155,7 @@ class _PowerProfile:
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
         eta = clone._dm.matvec(result.beta) + result.intercept + self.offset
         mu = clip_mu(clone._link.inverse(stabilize_eta(eta, clone._link)), clone._distribution)
-        return mu, bool(result.converged)
+        return mu, bool(result.converged), True
 
     def _prepare_reml(self, X, y, sample_weight, offset) -> None:
         clone = self.clone
@@ -159,7 +167,7 @@ class _PowerProfile:
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         self._fit = self._fit_reml
 
-    def _fit_reml(self, p: float) -> tuple[NDArray, bool]:
+    def _fit_reml(self, p: float) -> tuple[NDArray, bool, bool]:
         clone = self.clone
         clone.family = Tweedie(p)
         # The post-fit runtime parity check certifies published state; candidate
@@ -176,12 +184,11 @@ class _PowerProfile:
             reml_tol=_SEARCH_REML_TOL,
         )
         reml = clone._reml_result
-        # A model with no REML-eligible term makes fit_reml an ordinary fit.
-        converged = clone.result.converged and (reml is None or reml.converged)
         # The clone follows the model's retain_fit_state; a released fit keeps
         # its coefficients but not its fitted mean.
         mu = clone._fit_mu if clone._retain_fit_state else clone.predict(self.X, self.offset)
-        return mu, bool(converged)
+        # A model with no REML-eligible term makes fit_reml an ordinary fit.
+        return mu, bool(clone.result.converged), reml is None or bool(reml.converged)
 
 
 def _clone_profile_model(model, X, sample_weight):
@@ -286,6 +293,7 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         phi_hat=best.phi,
         nll=nll_hat,
         converged=search_converged and best.fit_converged,
+        _refusal=_winner_refusal(best, p_hat),
         fit_mode=fit_mode,
         search_fit_mode=fit_mode,
         evaluations=evaluations,
@@ -295,6 +303,28 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         _ll_scale=profile.n,
         _ci_bounds=_interval_bounds(p_hat, p_bounds),
     )
+
+
+def _winner_refusal(best: _Candidate, p_hat: float) -> str | None:
+    """Why no interval exists at p_hat: the winner's fit did not settle, per cause.
+
+    The interval inverts the searched curve from its value at p_hat, which is a
+    located optimum only if that fit converged (as master required).
+    """
+    if not best.pirls_converged:
+        return (
+            f"No likelihood-ratio interval for p: the coefficient fit at p_hat={p_hat:.6g} "
+            "stopped at its iteration limit, so the searched profile's value there is not an "
+            "optimum. Raise max_iter and estimate p again."
+        )
+    if not best.reml_converged:
+        return (
+            f"No likelihood-ratio interval for p: the candidate REML fit at p_hat={p_hat:.6g} "
+            "did not settle its smoothing parameters within the search's own budget, so the "
+            "searched profile's value there is not an optimum. search_fit_mode='fit' searches "
+            "p under ML and gives an interval."
+        )
+    return None
 
 
 def _search_warnings(
@@ -366,12 +396,14 @@ class TweedieProfileResult:
     _ci_bounds: tuple[float, float] = field(repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
     search_fit_mode: str | None = None
+    _refusal: str | None = field(default=None, repr=False)
 
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for p on the searched curve, with censoring flags.
 
         A censored side is recorded in ``warnings`` when first computed and
-        warned about on every call.
+        warned about on every call. Raises RuntimeError when the searched
+        winner's fit did not converge: its profile value is then no optimum.
         """
         interval = self._interval(alpha)
         for message in censoring_warnings(interval, alpha, "p", self._stopped_at):
@@ -379,21 +411,8 @@ class TweedieProfileResult:
         return interval
 
     def _interval_refusal(self) -> str | None:
-        """Why no interval exists: the searched winner's coefficient fit did not converge.
-
-        The interval inverts the searched curve from its value at p_hat, which
-        is a located optimum only if that fit converged (as master required).
-        """
-        if "fit_converged" not in self.evaluations:
-            return None
-        winner = self.evaluations.loc[self.evaluations["p"] == self.p_hat, "fit_converged"]
-        if winner.empty or bool(winner.iloc[0]):
-            return None
-        return (
-            f"No likelihood-ratio interval for p: the coefficient fit at p_hat={self.p_hat:.6g} "
-            "stopped at its iteration limit, so the searched profile's value there is not an "
-            "optimum. Raise max_iter and estimate p again."
-        )
+        """Why no interval exists, recorded by the search (`_winner_refusal`), or None."""
+        return self._refusal
 
     def _interval(self, alpha: float) -> Interval:
         """The interval, computed once and recorded; reports read it without a warning."""
