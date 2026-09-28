@@ -831,7 +831,7 @@ def prepare_tweedie_reml_scale_data(
     frequency = weight_semantics == FREQUENCY_WEIGHTS
     if not frequency and np.any(sample_weight <= 0.0):
         raise ValueError("Tweedie scale profiling requires strictly positive prior weights")
-    rows = TweedieRows.prepare(y, sample_weight, float(power), frequency=frequency)
+    rows = TweedieRows.profile(y, sample_weight, float(power), frequency=frequency)
     if rows.log_y.size == 0:
         raise ValueError(
             "Tweedie scale profiling requires at least one positive response; "

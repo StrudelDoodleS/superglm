@@ -14,6 +14,7 @@ from scipy.special import i1e
 import superglm._tweedie as density_module
 from superglm import SuperGLM
 from superglm._tweedie import (
+    NearPoissonDispersionError,
     TweedieRows,
     _corrected_saddlepoint,
     generate_tweedie_cpg,
@@ -22,6 +23,7 @@ from superglm._tweedie import (
     tweedie_logpdf,
     tweedie_logpdf_pair,
     tweedie_unit_deviance,
+    weighted_deviance,
 )
 from superglm._tweedie_series import series_moments
 from superglm.distributions import Tweedie
@@ -120,7 +122,41 @@ def test_the_ml_dispersion_admits_a_row_whose_unit_deviance_overflows():
     y, mu = _book(p=1.5, n=200, seed=3)
     y, mu = np.append(y, 1e308), np.append(mu, 1e-308)
     weights = np.append(np.ones(200), 1e-308)
+    # sum w d is that row's 3.9999999999999998626e154 (mpmath) plus a book below
+    # its rounding, formed from logs of magnitude up to |log w| + |log y| + |log mu|.
+    scale = 3 * abs(math.log(1e308))
+    assert weighted_deviance(y, mu, 1.5, weights) == pytest.approx(
+        3.9999999999999998626e154, rel=4 * EPS * scale
+    )
     assert math.isfinite(profile_phi_at(y, mu, weights, 1.5).phi)
+
+
+@pytest.mark.parametrize(
+    "y, mu, weight, phi, p, reference",
+    [
+        # w / phi = 1e-310 leaves the normal range while d is finite; near y = mu the
+        # direct d is exact to eps, where d(y / mu, 1) would lose eps / |y / mu - 1|.
+        (1e200, 1e200 * (1 + 1e-6), 1e-300, 1e10, 1.5, 4.9999949988806516701e-223),
+        # d = 2.2e308 overflows while y / mu = 1e302 does not: mu^(2-p) d(y / mu, 1).
+        (1e307, 1e5, 1e-10, 1.0, 1.05, 1.1246826503806956717e298),
+    ],
+)
+def test_the_scaled_deviance_is_accurate_outside_the_normal_range(y, mu, weight, phi, p, reference):
+    got = density_module._scaled_deviance(
+        np.array([y]), np.array([mu]), p, np.array([weight]), phi
+    )[0]
+    # w d / (2 phi) against 60-digit mpmath: the exponential of a sum of logs.
+    log_deviance = math.log(2.0) + math.log(reference) + math.log(phi) - math.log(weight)
+    scale = abs(log_deviance) + abs(math.log(weight)) + abs(math.log(phi)) + 1.0
+    assert got == pytest.approx(reference, rel=4 * EPS * scale, abs=0.0)
+
+
+def test_an_overflowing_weight_ratio_raises_no_runtime_warning():
+    # w / phi = 1e310: the row goes through logs, and quietly.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        value = tweedie_logpdf(np.ones(1), np.ones(1), 1e-300, 1.5, weights=np.array([1e10]))
+    assert np.isfinite(value[0])
 
 
 @pytest.mark.parametrize("p", [1.2, 1.5, 1.8, 1.95])
@@ -539,6 +575,103 @@ def test_the_lattice_comparison_makes_no_pass_where_no_row_bends_the_profile():
     newton = density_module._newton_log_phi(rows, deviance, 0.0, start)
     fresh = TweedieRows.prepare(y, np.ones_like(y), 1.05)
     assert solve_log_phi(fresh, deviance).n_passes == newton.n_passes
+
+
+def test_repeated_rows_collapse_into_counts_for_the_profile():
+    # Rounded responses repeat; their rows collapse, and the profile is the
+    # replicated rows' up to the summation order and the stop rule.
+    y, mu = _book(p=1.1, n=600, seed=12)
+    y = np.round(y, 1)
+    weights = np.ones_like(y)
+    deviance = float(np.sum(tweedie_unit_deviance(y, mu, 1.1)))
+    replicated = TweedieRows.prepare(y, weights, 1.1)
+    collapsed = TweedieRows.profile(y, weights, 1.1)
+    assert collapsed.log_y.size < replicated.log_y.size and collapsed.size == replicated.size
+    counted, summed = solve_log_phi(collapsed, deviance), solve_log_phi(replicated, deviance)
+    tol = density_module._NEWTON_STEP_TOL
+    assert abs(math.log(counted.phi / summed.phi)) <= 2.0 * tol
+    remainder = (summed.curvature + 0.5 * deviance / summed.phi) * tol**2
+    round_off = _criterion_round_off(replicated, deviance, 0.0, summed.phi)
+    assert abs(counted.criterion - summed.criterion) <= 2.0 * (remainder + round_off)
+
+
+def test_rows_without_a_repeat_keep_their_profile_bitwise():
+    y, _ = _book(p=1.5, n=300, seed=13)
+    weights = np.random.default_rng(13).uniform(0.5, 2.0, y.size)
+    prepared, profiled = TweedieRows.prepare(y, weights, 1.5), TweedieRows.profile(y, weights, 1.5)
+    assert profiled.count is None
+    np.testing.assert_array_equal(profiled.log_t_unit_phi, prepared.log_t_unit_phi)
+    np.testing.assert_array_equal(profiled.saturated_canonical, prepared.saturated_canonical)
+
+
+def test_a_power_too_close_to_one_is_refused_not_searched():
+    # At p = 1 + 1e-8 the comparison's grid would need about 1e12 row passes.
+    y = np.random.default_rng(1).poisson(1.3, 400).astype(float)
+    p = 1.0 + 1e-8
+    deviance = float(np.sum(tweedie_unit_deviance(y, np.full(y.size, y.mean()), p)))
+    with pytest.raises(NearPoissonDispersionError, match="too close to 1"):
+        solve_log_phi(TweedieRows.profile(y, np.ones(y.size), p), deviance)
+
+
+def test_each_group_is_sampled_four_times_per_its_own_period(monkeypatch):
+    # A singleton opens the scan's first stretch (band to j = 12.4) and a 400-row
+    # group joins it before it closes (band to j = 30.0): the stretch takes the
+    # finer group's step, 1 / (4 j), not its opener's.
+    p = 1.022323821143762
+    reps = [1, 400, 1, 1]
+    y = np.repeat(
+        [1.3282268467711957, 1.647160781221533, 0.35026059430826734, 319.9989853303057], reps
+    )
+    mu = np.repeat(
+        [0.8699897850055411, 1.3471297746888966, 0.7736905022225017, 306.4179282087071], reps
+    )
+    weights = np.repeat(
+        [0.0768496996044912, 0.7755868918100032, 5.967696664624229, 0.4575881655301412], reps
+    )
+    deviance = float(np.sum(weights * tweedie_unit_deviance(y, mu, p)))
+    rows = TweedieRows.profile(y, weights, p)
+    local = density_module._newton_log_phi(rows, deviance, 0.0, math.log(deviance / rows.size))
+    log_peak, sizes = rows.peak_groups
+    low, high = density_module._lattice_bands(p, 0.5 * deviance / local.phi, sizes)
+    lower, upper, _ = density_module._scan_window(rows, deviance, 0.0, local)
+    evaluated = []
+    saturated = TweedieRows.saturated
+
+    def recording(self, phi):
+        evaluated.append(math.log(phi))
+        return saturated(self, phi)
+
+    monkeypatch.setattr(TweedieRows, "saturated", recording)
+    solve_log_phi(rows, deviance)
+    points = np.sort(np.asarray(evaluated))
+    finest = 0.0
+    for log_j, j_low, j_high in zip(log_peak, low, high, strict=True):
+        if j_high == 0.0:
+            continue
+        start, stop = max(log_j - math.log(j_high), lower), min(log_j - math.log(j_low), upper)
+        if start >= stop:
+            continue
+        # The evaluated points from the last at or below start to the first at or above stop.
+        first = np.searchsorted(points, start, side="right") - 1
+        last = np.searchsorted(points, stop, side="left")
+        assert np.max(np.diff(points[first : last + 1])) <= 0.25 / j_high * (1.0 + 1e-9)
+        finest = max(finest, j_high)
+    # Non-vacuity: the stretch holds groups of different periods.
+    assert finest > 2.0 * np.min(high[high > 0.0])
+
+
+def test_the_band_reads_the_curvature_at_the_root_under_a_large_nullity():
+    # Ten equal rows at p = 1.4 with M = 9.5: the smooth curvature at the root is
+    # about (N - M) / 2 = 0.51, not max(N - M, N / 2) / 2 = 2.5, and only the
+    # former lets their shared lattice term (to j = 1.14) bend Q, so the comparison runs.
+    p, nullity = 1.4, 9.5
+    y, mu, weights = np.full(10, 2.0), np.full(10, 1.7), np.ones(10)
+    deviance = float(np.sum(tweedie_unit_deviance(y, mu, p)))
+    rows = TweedieRows.profile(y, weights, p)
+    newton = density_module._newton_log_phi(rows, deviance, nullity, math.log(deviance / 5.0))
+    solved = solve_log_phi(TweedieRows.profile(y, weights, p), deviance, nullity)
+    assert solved.n_passes > newton.n_passes
+    _assert_no_grid_point_below(rows, deviance, nullity, solved)
 
 
 def test_solve_log_phi_refuses_no_interior_optimum():

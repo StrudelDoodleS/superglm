@@ -1,6 +1,7 @@
 """Tweedie profile likelihood: density checks, p estimation and publication."""
 
 import inspect
+import math
 import pickle
 import warnings
 from types import SimpleNamespace
@@ -299,6 +300,22 @@ class TestMaximumLikelihoodPhi:
         # Master's pinned global optimum of the exact profile.
         np.testing.assert_allclose(solved.phi, 31.731271940671984, rtol=2e-7)
         np.testing.assert_allclose(solved.criterion / y.size, 185.18683913586867, atol=1e-9)
+
+    def test_a_power_too_close_to_one_is_skipped_as_infeasible(self):
+        """The power search routes around a power whose phi profile it cannot search."""
+        import pandas as pd
+
+        from superglm.profiling.tweedie import _PowerProfile
+
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=400)
+        y = rng.poisson(np.exp(0.3 + 0.2 * x)).astype(float)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x": Numeric()}
+        )
+        profile = _PowerProfile(model, pd.DataFrame({"x": x}), y, np.ones(y.size), None, "fit")
+        assert profile(1.0 + 1e-8) == math.inf
+        assert "too close to 1" in profile.infeasible[1.0 + 1e-8]
 
     def test_rows_sharing_a_peak_index_bend_the_profile_together(self):
         """Tiled 600 times, Q is 600 times the fixture's: the same minima, the same answer.

@@ -35,6 +35,12 @@ _SADDLE_REMAINDER = 1.0 / 360.0
 _NEWTON_MAX_STEPS = 60
 _NEWTON_MAX_STEP = 2.0
 _NEWTON_STEP_TOL = 1e-8
+# Row passes one lattice comparison may make, about five seconds of series work.
+# Its grid grows like 1 / (p - 1); past this bound the power is refused, not
+# searched. A pass costs about 35 us plus 0.1 us per row (measured from 6 to
+# 30,000 rows at p from 1.00001 to 1.5), so each is charged 500 rows more.
+_SCAN_WORK_LIMIT = float(1 << 26)
+_PASS_OVERHEAD_ROWS = 500
 _POISSON_LAM_MAX = float(np.iinfo(np.int64).max) - 10.0 * np.sqrt(float(np.iinfo(np.int64).max))
 
 
@@ -74,6 +80,27 @@ class TweedieRows:
                 return cls(p, a, log_t, log_y, canonical, weights[positive])
             w = weights[positive]
             return cls(p, a, log_t + (a + 1.0) * np.log(w), log_y, canonical * w, None)
+
+    @classmethod
+    def profile(
+        cls, y: NDArray, weights: NDArray, p: float, *, frequency: bool = False
+    ) -> TweedieRows:
+        """Rows for the dispersion profile, with repeated positive rows collapsed into counts.
+
+        Equal (y, w) rows, or equal y under frequency counts, give equal row
+        terms, so every series pass costs O(distinct rows). A book without a
+        repeated response keeps its rows, and its profile, bitwise unchanged.
+        """
+        rows = cls.prepare(y, weights, p, frequency=frequency)
+        positive = (y > 0.0) & (weights > 0.0) if frequency else y > 0.0
+        y_positive = y[positive]
+        if np.unique(y_positive).size == y_positive.size:
+            return rows
+        key = y_positive[:, None] if frequency else np.column_stack([y_positive, weights[positive]])
+        _, first, group = np.unique(key, axis=0, return_index=True, return_inverse=True)
+        count = np.bincount(group.reshape(-1), weights=rows.count, minlength=first.size)
+        canonical = rows.saturated_canonical[first]
+        return cls(p, rows.a, rows.log_t_unit_phi[first], rows.log_y[first], canonical, count)
 
     @property
     def size(self) -> float:
@@ -201,14 +228,22 @@ def solve_log_phi(rows: TweedieRows, deviance: float, nullity: float = 0.0) -> P
     score Q'(u) = -D e^-u / 2 + T(u) - M / 2, one series pass per step,
     safeguarded by bisection inside the sign-change bracket (Press et al.,
     rtsafe). Q is not convex near p = 1, where the density approaches the
-    Poisson lattice (Dunn & Smyth 2005, Sec. 8), so where a row's lattice
-    term can bend Q the Newton root is compared with every other local
-    minimum (`_lattice_scan`).
+    Poisson lattice (Dunn & Smyth 2005, Sec. 8), so where a group of rows
+    sharing a peak index can bend Q the Newton root is compared with every other
+    local minimum (`_lattice_scan`). Its model: rows share a phase only within an
+    exact group (near-harmonic groups, such as integer responses, are seen where
+    any is banded), the bending is measured against the curvature at the Newton
+    root, and Q' is monotone between banded stretches. A comparison that would
+    take more than _SCAN_WORK_LIMIT row passes raises NearPoissonDispersionError.
     """
     key = (deviance, nullity)
     if key not in rows.phi_solves:
         rows.phi_solves[key] = _global_log_phi(rows, deviance, nullity)
     return rows.phi_solves[key]
+
+
+class NearPoissonDispersionError(FloatingPointError):
+    """The dispersion profile is too close to the Poisson lattice to search globally."""
 
 
 def _global_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSolve:
@@ -262,13 +297,17 @@ def _lattice_scan(rows: TweedieRows, deviance: float, nullity: float, local: Phi
     group bends Q, Q' is monotone and its endpoints decide the sign change. Each
     - to + change is a bracket the Newton polishes.
     """
+    curvature = 0.5 * deviance / local.phi
+    # No group is larger than the book: if even that cannot bend Q, none can.
+    if _lattice_bands(rows.p, curvature, np.array([rows.size]))[1][0] == 0.0:
+        return local
     log_peak, sizes = rows.peak_groups
     distinct_sizes, of_size = np.unique(sizes, return_inverse=True)
-    low, high = _lattice_bands(rows.p, 0.5 * deviance / local.phi, distinct_sizes)
+    low, high = _lattice_bands(rows.p, curvature, distinct_sizes)
     banded = np.flatnonzero(high[of_size] > 0.0)
     if banded.size == 0:
         return local
-    lower, upper = _scan_window(rows, deviance, nullity, local)
+    lower, upper, rising_edge = _scan_window(rows, deviance, nullity, local)
     band_low, band_high = low[of_size][banded], high[of_size][banded]
     starts = log_peak[banded] - np.log(band_high)
     stops = log_peak[banded] - np.log(band_low)
@@ -283,9 +322,17 @@ def _lattice_scan(rows: TweedieRows, deviance: float, nullity: float, local: Phi
     opens = np.flatnonzero(np.r_[True, starts[1:] > reach[:-1]])
     closes = np.r_[opens[1:] - 1, starts.size - 1]
     steps = np.minimum.reduceat(0.25 / band_high[order], opens)
+    counts = np.ceil((reach[closes] - starts[opens]) / steps).astype(np.int64) + 1
+    work = float(np.sum(counts) + 2) * (rows.log_y.size + _PASS_OVERHEAD_ROWS)
+    if work > _SCAN_WORK_LIMIT:
+        raise NearPoissonDispersionError(
+            f"Tweedie p={rows.p:.10g} is too close to 1 for a global dispersion profile: its "
+            f"lattice comparison needs {work:.3g} row passes, over {_SCAN_WORK_LIMIT:.3g}. "
+            "Fit a Poisson family, or search p further from 1."
+        )
     points = [np.array([lower, upper])]
-    for start, stop, step in zip(starts[opens], reach[closes], steps, strict=True):
-        points.append(np.linspace(start, stop, int(math.ceil((stop - start) / step)) + 1))
+    for start, stop, count in zip(starts[opens], reach[closes], counts, strict=True):
+        points.append(np.linspace(start, stop, count))
     grid = np.unique(np.concatenate(points))
     u_local = math.log(local.phi)
     best, n_passes = local, local.n_passes
@@ -302,7 +349,7 @@ def _lattice_scan(rows: TweedieRows, deviance: float, nullity: float, local: Phi
             if polished.criterion < best.criterion:
                 best = polished
         previous_u, previous_score = u, score
-    if previous_score < 0.0:
+    if rising_edge and previous_score < 0.0:
         # Past `rising` Q' > 0, so a score still negative at the window's end puts
         # a minimum within round-off of it: once every row is down to one jump,
         # E J = 1 holds exactly and that edge is itself a root of Q'.
@@ -315,8 +362,9 @@ def _lattice_scan(rows: TweedieRows, deviance: float, nullity: float, local: Phi
 
 def _scan_window(
     rows: TweedieRows, deviance: float, nullity: float, local: PhiSolve
-) -> tuple[float, float]:
-    """An interval of u outside which Q exceeds the Newton minimum or rises.
+) -> tuple[float, float, bool]:
+    """An interval of u outside which Q exceeds the Newton minimum or rises, and whether
+    its upper end is the E J >= 1 edge rather than the Q-bound crossing.
 
     Given J = j >= 1 jumps, y is Gamma(j a, gamma), gamma = phi (p - 1) y^(p-1) / w
     at mu = y, whose peak density is largest at j = 1 for a >= 1, so
@@ -349,7 +397,7 @@ def _scan_window(
     u_local = math.log(local.phi)
     lower = _bound_crossing(excess, u_local, -1.0)
     upper = rising if slope <= 0.0 else min(rising, _bound_crossing(excess, u_local, 1.0))
-    return lower, max(upper, lower)
+    return lower, max(upper, lower), upper == rising
 
 
 def _bound_crossing(excess: Callable[[float], float], start: float, direction: float) -> float:
@@ -449,12 +497,19 @@ def _scaled_deviance(y, mu, p, weights, phi) -> NDArray:
     does not; those rows, and rows whose w / phi leaves the normal range, take
     the exponential of the term's logarithm.
     """
-    ratio = weights / phi
-    with np.errstate(over="ignore", invalid="ignore"):
-        scaled = tweedie_unit_deviance(y, mu, p) * (0.5 * ratio)
+    deviance = tweedie_unit_deviance(y, mu, p)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        ratio = weights / phi
+        scaled = deviance * (0.5 * ratio)
     extreme = np.flatnonzero(~np.isfinite(scaled) | ~(ratio >= _TINY))
     if extreme.size:
-        log_deviance = _log_unit_deviance(y[extreme], mu[extreme], p)
+        # A finite d keeps its own accuracy; only an overflowed d needs log d.
+        with np.errstate(divide="ignore"):
+            log_deviance = np.log(deviance[extreme])
+        overflowed = np.flatnonzero(~np.isfinite(deviance[extreme]))
+        log_deviance[overflowed] = _log_unit_deviance(
+            y[extreme][overflowed], mu[extreme][overflowed], p
+        )
         with np.errstate(over="ignore"):
             scaled[extreme] = np.exp(
                 log_deviance + np.log(weights[extreme]) - math.log(2.0) - math.log(phi)

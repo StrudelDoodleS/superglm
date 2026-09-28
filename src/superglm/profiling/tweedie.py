@@ -18,7 +18,13 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._tweedie import PhiSolve, TweedieRows, solve_log_phi, weighted_deviance
+from superglm._tweedie import (
+    NearPoissonDispersionError,
+    PhiSolve,
+    TweedieRows,
+    solve_log_phi,
+    weighted_deviance,
+)
 from superglm.distributions import Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import (
@@ -53,7 +59,7 @@ _CI_XTOL = 1e-4
 
 def profile_phi_at(y: NDArray, mu: NDArray, weights: NDArray, p: float) -> PhiSolve:
     """Maximum-likelihood phi at a fitted mean: Q with M = 0."""
-    return solve_log_phi(TweedieRows.prepare(y, weights, p), weighted_deviance(y, mu, p, weights))
+    return solve_log_phi(TweedieRows.profile(y, weights, p), weighted_deviance(y, mu, p, weights))
 
 
 @dataclass(frozen=True)
@@ -83,14 +89,14 @@ class _PowerProfile:
     def __call__(self, p: float) -> float:
         try:
             mu, fit_converged = self._fit(p)
-        except ObservedModeNotCertifiedError as exc:
+            solved = profile_phi_at(self.y, mu, self.w, p)
+        except (ObservedModeNotCertifiedError, NearPoissonDispersionError) as exc:
             # A REML candidate whose penalized mode cannot be differentiated
-            # through has no objective to report, so the power is scored
-            # infeasible and the search routes around it instead of failing on
-            # a point it did not need.
+            # through, or a power too close to 1 to profile phi globally, has no
+            # objective to report, so the power is scored infeasible and the
+            # search routes around it instead of failing on a point it did not need.
             self.infeasible[p] = str(exc).partition("\n")[0]
             return math.inf
-        solved = profile_phi_at(self.y, mu, self.w, p)
         nll = solved.criterion / self.n
         self.candidates[p] = _Candidate(solved.phi, fit_converged)
         if self.on_evaluation is not None:
@@ -349,9 +355,16 @@ class TweedieProfileResult:
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for p on the searched curve, with censoring flags.
 
-        A censored side is warned about, and recorded in ``warnings``, when it
-        is computed.
+        A censored side is recorded in ``warnings`` when first computed and
+        warned about on every call.
         """
+        interval = self._interval(alpha)
+        for message in censoring_warnings(interval, alpha, "p", self._stopped_at):
+            warn_caller(message)
+        return interval
+
+    def _interval(self, alpha: float) -> Interval:
+        """The interval, computed once and recorded; reports read it without a warning."""
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
             raise ValueError("alpha must be in (0, 1)")
@@ -366,10 +379,7 @@ class TweedieProfileResult:
                 xtol=_CI_XTOL,
             )
             self._ci_cache[alpha] = interval
-            censored = censoring_warnings(interval, alpha, "p", self._stopped_at)
-            self.warnings.extend(censored)
-            for message in censored:
-                warn_caller(message)
+            self.warnings.extend(censoring_warnings(interval, alpha, "p", self._stopped_at))
         return self._ci_cache[alpha]
 
     def _stopped_at(self, end: float) -> str:
