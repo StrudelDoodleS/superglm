@@ -117,6 +117,19 @@ and cancellation fixtures test certification, refusal and the stable
 observables instead. Performance and backend dispatch are tested separately
 from numerical correctness.
 
+## Pull request reviews
+
+A review finding, from a person or a bot, is a claim to check against the
+code, not an instruction. When the problem is real, react to the comment with
+👍, fix it with a regression test as above, reply on its thread with what
+changed and in which commit, and resolve the thread once the fix is pushed.
+When it is not real, or is deferred, reply with the evidence or with where the
+follow-up is recorded, and resolve the thread as well. A reply alone leaves
+the thread open, and a pull request merges only with every review thread
+resolved. A finding posted in a summary comment rather than a thread gets the
+same answer in one reply comment. GitHub resolves a thread only through the
+GraphQL `resolveReviewThread` mutation; the REST API cannot.
+
 ## Release impact and publishing
 
 Every pull request declares exactly one advisory impact in its body, with a
