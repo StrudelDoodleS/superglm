@@ -317,6 +317,23 @@ class TestMaximumLikelihoodPhi:
         assert profile(1.0 + 1e-8) == math.inf
         assert "too close to 1" in profile.infeasible[1.0 + 1e-8]
 
+    def test_a_search_with_every_power_refused_names_the_refusal_not_reml(self):
+        """Both bounds and every Brent point sit too close to 1 under plain ML fits."""
+        import pandas as pd
+
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=400)
+        y = rng.poisson(np.exp(0.3 + 0.2 * x)).astype(float)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x": Numeric()}
+        )
+        with pytest.raises(RuntimeError, match="No evaluated power") as raised:
+            model.estimate_p(
+                pd.DataFrame({"x": x}), y, fit_mode="fit", p_bounds=(1 + 1e-9, 1 + 1e-8)
+            )
+        assert "too close to 1" in str(raised.value)
+        assert "REML" not in str(raised.value)
+
     def test_rows_sharing_a_peak_index_bend_the_profile_together(self):
         """Tiled 600 times, Q is 600 times the fixture's: the same minima, the same answer.
 

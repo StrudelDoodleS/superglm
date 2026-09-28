@@ -239,9 +239,11 @@ def search_power(
     profile.on_evaluation = None
     if not profile.candidates:
         power, reason = next(iter(profile.infeasible.items()))
+        # A REML mode that cannot be certified, or a power too close to 1 to
+        # profile phi, under either fit mode.
         raise RuntimeError(
-            "REML could not certify a penalized coefficient mode at any evaluated power in "
-            f"[{p_bounds[0]:.6g}, {p_bounds[1]:.6g}]; the first refusal, at p={power:.6g}: {reason}"
+            f"No evaluated power in [{p_bounds[0]:.10g}, {p_bounds[1]:.10g}] was feasible; "
+            f"the first refusal, at p={power:.10g}: {reason}"
         )
     return _searched_result(profile, objective, fit_mode, p_bounds, search_converged)
 
