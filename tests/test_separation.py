@@ -5,6 +5,7 @@ iteration) and #341 (refuse, or at minimum loudly flag, instead of returning
 finite garbage on a separated design).
 """
 
+import re
 import warnings
 
 import numpy as np
@@ -241,6 +242,8 @@ def test_runtime_backstop_reports_the_expected_curvature_ratio():
         model.fit(df, y, sample_weight=w, record_diagnostics=True)
     message = next(str(c.message) for c in caught if issubclass(c.category, SeparationWarning))
     observed = model.result.iteration_log[-1].w_ratio
+    # The negative check reads the ratio the message reports, in this format.
+    assert re.search(r"ratio \d\.\de[+-]\d+", message)
     assert f"ratio {observed:.1e}" not in message
 
 

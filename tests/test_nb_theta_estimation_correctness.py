@@ -370,6 +370,24 @@ class TestJointConvergenceHonesty:
         assert result.converged is False
 
 
+class TestJointRefitLimit:
+    def test_an_exhausted_joint_refit_is_warned_about_and_recorded(self, monkeypatch):
+        """The hi-freq fixture's theta moves at the REML fit; a limit of no refits stops it."""
+        import superglm.model.fit_ops as fit_ops
+
+        monkeypatch.setattr(fit_ops, "_NB_JOINT_MAX_REFITS", 0)
+        data = pd.read_csv(FIXTURES / "nb_worst.csv")
+        model = SuperGLM(
+            features={"x": CubicRegressionSpline(n_knots=20)},
+            family=NegativeBinomial("auto"),
+        )
+        with pytest.warns(UserWarning, match="did not reach a joint fixed point"):
+            model.fit_reml(data[["x"]], data["y"].to_numpy(dtype=np.float64))
+        result = model._nb_profile_result
+        assert result.converged is False
+        assert any("did not reach a joint fixed point" in message for message in result.warnings)
+
+
 class TestThetaFrozenBeforeReml:
     """Finding B1: theta was calibrated before REML at the configured
     smoothing and never revisited, converting lack-of-fit at lambda2=0.1

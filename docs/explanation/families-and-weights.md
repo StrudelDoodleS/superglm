@@ -355,7 +355,9 @@ no-extra-CI-work path.
 An end of the interval that does not reach the likelihood-ratio cutoff stops
 where the search had to stop: at the widest range the interval may use, or
 next to a power where the fit failed. That end is marked censored in
-`result.warnings` and in the summary, since the interval may extend beyond it.
+`result.warnings` and in the summary, since the interval may extend beyond it,
+and `result.interval()` and `result.ci()` warn about it; the summary reports it
+without a warning.
 
 ### Search record and profile plot
 

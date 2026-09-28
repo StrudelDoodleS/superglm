@@ -1085,6 +1085,7 @@ def _refine_nb_theta_to_reml_fixed_point(
     weight_semantics = model_weight_semantics(model)
     rows = nb_seed.evaluations.to_dict("records")
     refits = 0
+    exhausted: list[str] = []
     joint_converged = False
     while True:
         solve = solve_theta(
@@ -1099,11 +1100,12 @@ def _refine_nb_theta_to_reml_fixed_point(
             joint_converged = True
             break
         if refits >= _NB_JOINT_MAX_REFITS:
-            warn_caller(
+            exhausted.append(
                 "NB2 theta / REML alternation did not reach a joint fixed "
                 f"point in {_NB_JOINT_MAX_REFITS} refits; publishing the last "
                 f"iterate theta={theta:g} with converged=False."
             )
+            warn_caller(exhausted[-1])
             break
         # Round to the same six significant digits the calibration estimate
         # publishes so family.theta and theta_hat stay exactly equal.
@@ -1130,7 +1132,7 @@ def _refine_nb_theta_to_reml_fixed_point(
         )
         rows.append({"theta": theta, "nll": nll})
 
-    warned = list(nb_seed.warnings)
+    warned = list(nb_seed.warnings) + exhausted
     if solve.at_bound:
         side = "lower" if solve.at_lower else "upper"
         warned.append(

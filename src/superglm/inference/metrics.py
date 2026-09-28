@@ -1589,7 +1589,7 @@ class ModelMetrics:
         # NB theta profile info
         nb_pr = getattr(self._model, "_nb_profile_result", None)
         if nb_pr is not None:
-            ci, ci_status = reported_interval(nb_pr.interval(alpha))
+            ci, ci_status = reported_interval(nb_pr._interval(alpha))
             model_info["nb_theta"] = nb_pr.theta_hat
             model_info["nb_theta_ci"] = ci
             model_info["nb_theta_ci_status"] = ci_status

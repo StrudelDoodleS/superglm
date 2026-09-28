@@ -1,6 +1,7 @@
 """Tests for Negative Binomial (NB2) distribution."""
 
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -563,10 +564,13 @@ class TestNB2AutoTheta:
         result = model.estimate_theta(X, y)
         assert result.converged and not result.warnings
 
-        with pytest.warns(UserWarning, match="censored at its upper end") as raised:
+        # The summary reports the censoring; it does not raise it.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=".*censored.*")
             summary = model.summary()
+        with pytest.warns(UserWarning, match="censored at its upper end") as raised:
+            interval = model._nb_profile_result.interval(0.05)
         assert raised[0].filename == __file__
-        interval = model._nb_profile_result.interval(0.05)
         assert interval.upper_censored and not interval.lower_censored
         assert interval.upper == pytest.approx(max(500.0, 100.0 * result.theta_hat), rel=1e-12)
         assert model._nb_profile_result.warnings == [
