@@ -379,6 +379,24 @@ class TestMaximumLikelihoodPhi:
         assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
         assert "] caution" in str(model.summary())
 
+    def test_an_unconverged_winner_is_disclosed_with_the_estimate(self):
+        """Without ci_alpha, not only once an interval is asked for."""
+        import pandas as pd
+
+        rng = np.random.default_rng(3)
+        x = rng.normal(size=500)
+        y = generate_tweedie_cpg(500, np.exp(0.5 + 0.8 * x), 1.2, 1.5, rng=rng)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x": Numeric()},
+            max_iter=1,
+            tol=1e-12,
+        )
+        with pytest.warns(UserWarning, match="raise max_iter"):
+            result = model.estimate_p(pd.DataFrame({"x": x}), y)
+        assert any("raise max_iter" in message for message in result.warnings)
+
     def test_an_unsettled_reml_winner_names_its_cause_and_keeps_the_interval(self, monkeypatch):
         """One smoothing-parameter iteration per candidate: max_iter cannot help there."""
         import pandas as pd

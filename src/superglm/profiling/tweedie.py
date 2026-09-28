@@ -278,6 +278,10 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         }
     )
     skipped, cautions = _search_warnings(objective.values, profile.infeasible, p_hat)
+    winner_caution = _winner_caution(best, p_hat)
+    if winner_caution is not None:
+        # Disclosed with the estimate, not only once an interval is asked for.
+        cautions.append(winner_caution)
     if not search_converged:
         # Brent ran out of steps: p_hat is the best power evaluated, not a located minimum.
         cautions.append(
@@ -293,7 +297,7 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         phi_hat=best.phi,
         nll=nll_hat,
         converged=search_converged and best.fit_converged,
-        _caution=_winner_caution(best, p_hat),
+        _caution=winner_caution,
         fit_mode=fit_mode,
         search_fit_mode=fit_mode,
         evaluations=evaluations,
@@ -314,14 +318,14 @@ def _winner_caution(best: _Candidate, p_hat: float) -> str | None:
     """
     if not best.pirls_converged:
         return (
-            f"The p interval rests on a coefficient fit at p_hat={p_hat:.6g} that stopped at "
-            "its iteration limit; raise max_iter for a settled profile value there."
+            f"p_hat={p_hat:.6g} rests on a coefficient fit that stopped at its iteration "
+            "limit, and so does its interval; raise max_iter for a settled profile value there."
         )
     if not best.reml_converged:
         return (
-            f"The p interval rests on a candidate REML fit at p_hat={p_hat:.6g} whose smoothing "
-            "parameters had not settled within the search's own budget; search_fit_mode='fit' "
-            "searches p under ML."
+            f"p_hat={p_hat:.6g} rests on a candidate REML fit whose smoothing parameters had "
+            "not settled within the search's own budget, and so does its interval; "
+            "search_fit_mode='fit' searches p under ML."
         )
     return None
 

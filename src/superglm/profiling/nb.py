@@ -403,7 +403,8 @@ def estimate_nb_theta(
         if settled or solve.at_bound
         else (
             f"theta_hat={theta_hat:g} is the alternation's last iterate after {maxiter} mean "
-            "fits, not the fixed-mean optimum; the theta interval is inverted from that optimum."
+            "fits, not the optimum at the published mean; the theta interval is inverted from "
+            "that optimum."
         )
     )
     return NBProfileResult(
@@ -481,9 +482,11 @@ class NBProfileResult:
     # The estimation bound theta_hat sits on ("lower"/"upper"), or None when interior.
     _bound_side: str | None = field(default=None, repr=False)
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
-    # Why theta_hat is not the fixed-mean profile's optimum, which the interval
-    # is then inverted from.
+    # Why theta_hat is not the published mean's profile optimum, which the
+    # interval is inverted from regardless.
     _caution: str | None = field(default=None, repr=False)
+    # (log theta, NLL) at that optimum, solved once per published mean.
+    _optimum_point: tuple[float, float] | None = field(default=None, repr=False)
 
     def _at_mean(self, y: NDArray, mu: NDArray, weights: NDArray) -> NBProfileResult:
         """The estimate restated at a fitted mean, whose NLL and interval it then describes."""
@@ -499,6 +502,7 @@ class NBProfileResult:
             _mu=mu,
             _weights=weights,
             _ci_cache={},
+            _optimum_point=None,
         )
 
     def _profile_nll(self, theta: float) -> float:
@@ -534,16 +538,18 @@ class NBProfileResult:
         where the published mean was fitted differently (a REML publication, or
         an alternation or joint refinement that stopped short).
         """
-        low, high = self._log_search_range()
-        root = solve_theta(
-            self._y,
-            self._mu,
-            self._weights,
-            self.theta_hat,
-            weight_semantics=self._weight_semantics,
-            bounds=(math.exp(low), math.exp(high)),
-        )
-        return math.log(root.theta), self._profile_nll(root.theta)
+        if self._optimum_point is None:
+            low, high = self._log_search_range()
+            root = solve_theta(
+                self._y,
+                self._mu,
+                self._weights,
+                self.theta_hat,
+                weight_semantics=self._weight_semantics,
+                bounds=(math.exp(low), math.exp(high)),
+            )
+            self._optimum_point = (math.log(root.theta), self._profile_nll(root.theta))
+        return self._optimum_point
 
     def _interval(self, alpha: float) -> Interval:
         """The interval, computed once and recorded; reports read it without a warning."""

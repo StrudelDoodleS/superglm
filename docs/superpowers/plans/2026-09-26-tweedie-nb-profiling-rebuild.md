@@ -2168,3 +2168,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `likelihood_ratio_interval(..., alpha=, scale=, rtol=)` is the same in Tasks 5, 6 and 8.
   - `_solve_coefficients(..., beta_init, intercept_init)` is the same in Tasks 6 and 8.
 - **Placeholders left deliberately:** Task 6's φ and CI tolerances are marked "derive before asserting", with the formula given, because their numeric value depends on the fixture's recorded curvature.
+
+## Review-round decisions (2026-09-28)
+
+- **Disclose imperfect convergence; never refuse on it (Max).** The project has been down the "REML not perfectly converged, refuse" road and it was wrong. Intervals whose winning fit did not settle are computed, and a caution names the cause: PIRLS at `max_iter`, a REML candidate whose smoothing loop did not settle within the search's own budget, or an NB alternation or joint refinement that stopped short. The caution is disclosed with the estimate and warned by `interval()`. Tests fail if a refusal is reintroduced.
+- **The θ interval is inverted from the published mean's profile optimum** (its score root), not from θ̂. θ̂ is that optimum only when the published mean is the alternation's, which a REML publication's mean is not. A caution is recorded when θ̂ lies outside its interval, and the interval's status shows "caution".
+- **The near-p = 1 dispersion comparison** groups rows that share a peak index, collapses repeated rows into counts, bounds its work at 2²⁶ row passes (`NearPoissonDispersionError`, which the search skips), and compares local minima up to the E J ≥ 1 edge.

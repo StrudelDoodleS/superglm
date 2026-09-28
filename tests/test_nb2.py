@@ -570,7 +570,7 @@ class TestNB2AutoTheta:
             penalty=GroupLasso(lambda1=0.0),
             features={"x": Numeric()},
         )
-        with pytest.warns(UserWarning, match="not the fixed-mean optimum"):
+        with pytest.warns(UserWarning, match="not the optimum at the published mean"):
             result = model.estimate_theta(X, y, ci_alpha=0.05)
         assert not result.converged
         published = model._nb_profile_result
@@ -586,7 +586,7 @@ class TestNB2AutoTheta:
         # which the unsettled theta_hat is not.
         assert math.exp(published._optimum()[0]) == pytest.approx(root, rel=4e-8)
         assert published.theta_hat != pytest.approx(root, rel=4e-8)
-        with pytest.warns(UserWarning, match="not the fixed-mean optimum"):
+        with pytest.warns(UserWarning, match="not the optimum at the published mean"):
             interval = published.interval(0.05)
         assert interval.lower < root < interval.upper
         assert "CI not computed" not in str(model.summary())
