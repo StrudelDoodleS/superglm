@@ -10,6 +10,7 @@ import pytest
 import scipy.sparse as sp
 
 import superglm.reml.objective as reml_objective
+import superglm.solvers._structured.selection as selection
 import superglm.solvers.irls_direct as irls_direct
 from superglm import generate_tweedie_cpg
 from superglm.distributions import (
@@ -756,13 +757,12 @@ def test_auto_backend_uses_measured_structured_crossover(
     assert decision.auto_cost_ratio == pytest.approx(expected_ratio)
 
 
-def test_auto_keeps_a_raw_year_border_off_the_single_level_factor() -> None:
-    """A pricing-shaped fit whose single level sits between the 0.05 and 0.75 ratios.
+def _pricing_fit(direct_solve: str):
+    """A pricing-shaped Poisson fit: raw year and vehicle value beside a 40-level region.
 
-    ScalarSchurFactor forms its border by subtraction and truncates on the
-    unscaled Q, so a raw year and a raw vehicle value beside a 40-level region
-    effect (ratio about 0.1) are refused at the REML bootstrap, and auto does not
-    retry a refusal on gram.  auto must fit this model exactly as gram does.
+    Its single-level cost ratio is about 0.1. ScalarSchurFactor forms its
+    border by subtraction and truncates on the unscaled Q, so it refuses these
+    raw columns at the REML bootstrap.
     """
     import pandas as pd
 
@@ -794,25 +794,53 @@ def test_auto_keeps_a_raw_year_border_off_the_single_level_factor() -> None:
             "region": [f"r{c:02d}" for c in region],
         }
     )
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        direct_solve=direct_solve,
+        features={
+            "age": Spline(n_knots=8),
+            "cover": Categorical(),
+            "region": RandomEffect(),
+            "year": Numeric(),
+            "value": Numeric(),
+        },
+    )
+    return model.fit_reml(frame, y, offset=np.log(exposure))
 
-    def fit(direct_solve: str):
-        model = SuperGLM(
-            family="poisson",
-            selection_penalty=0,
-            direct_solve=direct_solve,
-            features={
-                "age": Spline(n_knots=8),
-                "cover": Categorical(),
-                "region": RandomEffect(),
-                "year": Numeric(),
-                "value": Numeric(),
-            },
-        )
-        return model.fit_reml(frame, y, offset=np.log(exposure))
 
-    auto, gram = fit("auto"), fit("gram")
+def test_auto_keeps_a_raw_year_border_off_the_single_level_factor() -> None:
+    """The single level keeps the 0.05 bound, so auto sends this fit straight to gram."""
+    auto, gram = _pricing_fit("auto"), _pricing_fit("gram")
     assert auto.result.direct_backend == "gram"
     assert auto.result.deviance == gram.result.deviance
+
+
+def test_auto_refits_a_refused_structured_factor_on_gram(monkeypatch) -> None:
+    """A structured refusal under auto is a gram refit, not a failed fit.
+
+    With the single-level bound raised to this fit's ratio, auto selects
+    ScalarSchurFactor. On these raw columns its refusal is borderline in round-off
+    (it refuses in some runs and not in others), so the factor build is made to
+    refuse the way _reject_coupled_schur_null_space does. The refusal is retried
+    on gram, recorded as the fallback reason, and the REML driver stays on gram.
+    Forced 'structured' still raises.
+    """
+    message = "Structured term 'region' has a coupled rank-deficient Schur null space."
+
+    def refuse(system, operator):
+        raise np.linalg.LinAlgError(message)
+
+    monkeypatch.setattr(selection, "_AUTO_MAX_STRUCTURED_COST_RATIO", 0.75)
+    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refuse)
+    auto, gram = _pricing_fit("auto"), _pricing_fit("gram")
+    assert auto.result.direct_backend == "gram"
+    assert auto.result.direct_fallback_reason == message
+    # The refused bootstrap is refit on gram from the same start; later REML work
+    # stays on gram, so this is the gram fit to within its own tolerance.
+    assert auto.result.deviance == pytest.approx(gram.result.deviance, rel=gram._tol)
+    with pytest.raises(np.linalg.LinAlgError, match="Schur null space"):
+        _pricing_fit("structured")
 
 
 @pytest.mark.parametrize(

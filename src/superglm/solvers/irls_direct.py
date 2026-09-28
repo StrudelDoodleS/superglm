@@ -405,6 +405,25 @@ def _build_penalty_matrix(
     )
 
 
+class StructuredFactorRefusal(np.linalg.LinAlgError):
+    """A structured factor refused this design; under ``auto`` gram refits it."""
+
+
+def _structured_factor(system, operator):
+    """``build_augmented_structured_factor``, with a refusal raised as ``StructuredFactorRefusal``.
+
+    The factor refuses rather than truncate when it cannot certify its rank
+    decisions (a coupled Schur null space, a Cholesky residual over its bound);
+    the dense Gram decides the same design without that elimination.
+    """
+    try:
+        return build_augmented_structured_factor(system, operator)
+    except SumToZeroIdentifiabilityError:
+        raise
+    except np.linalg.LinAlgError as error:
+        raise StructuredFactorRefusal(str(error)) from error
+
+
 def _sqrt_penalty_augmented(S: NDArray, p: int) -> NDArray:
     """Build (p+1, p+1) augmented sqrt-penalty for QR solver.
 
@@ -550,7 +569,7 @@ def fit_irls_direct(
             raise ValueError(f"max_iter must be at least 1, got {max_iter}")
         try:
             result = run_once(direct_solve)
-        except SumToZeroIdentifiabilityError as error:
+        except (SumToZeroIdentifiabilityError, StructuredFactorRefusal) as error:
             if _fisher_data_reuse is not None:
                 _fisher_data_reuse.clear()
             if direct_solve != "auto":
@@ -1927,10 +1946,7 @@ def _fit_irls_direct_once(
                 _t_gram += time.perf_counter() - _t0
 
                 _t0 = time.perf_counter()
-                augmented_factor, rhs = build_augmented_structured_factor(
-                    structured_system,
-                    penalized_operator,
-                )
+                augmented_factor, rhs = _structured_factor(structured_system, penalized_operator)
                 beta_aug = augmented_factor.solve(rhs)
                 intercept = float(beta_aug[0])
                 beta = beta_aug[1:]
@@ -2949,10 +2965,7 @@ def _fit_irls_direct_once(
     if _use_structured:
         if structured_final is None or _final_penalized_operator is None:
             raise RuntimeError("Structured fit did not produce final coefficient blocks.")
-        augmented_factor, _ = build_augmented_structured_factor(
-            structured_final,
-            _final_penalized_operator,
-        )
+        augmented_factor, _ = _structured_factor(structured_final, _final_penalized_operator)
         if isinstance(augmented_factor, SumToZeroBlockFactor):
             structured_factor = ProfiledSumToZeroBlockFactor(
                 augmented_factor=augmented_factor,
