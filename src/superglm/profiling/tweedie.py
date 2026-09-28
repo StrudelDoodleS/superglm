@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 import math
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,6 +35,7 @@ from superglm.profiling._scalar import (
     likelihood_ratio_interval,
     minimize_profile,
     profile_plot,
+    warn_caller,
 )
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 
@@ -254,14 +254,17 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
             "fit_converged": [candidate.fit_converged for candidate in candidates],
         }
     )
-    messages = _search_warnings(objective.values, profile.infeasible, p_hat)
+    skipped, cautions = _search_warnings(objective.values, profile.infeasible, p_hat)
     if not search_converged:
         # Brent ran out of steps: p_hat is the best power evaluated, not a located minimum.
-        messages.append(
+        cautions.append(
             f"The power search stopped at its iteration limit; p_hat={p_hat:.6g} is the best "
             "evaluated power and the result reports converged=False."
         )
-        warnings.warn(messages[-1], UserWarning, stacklevel=3)
+    # A caution about p_hat is raised as well as recorded: a record alone is
+    # easily missed, and an unraised warning is no warning.
+    for caution in cautions:
+        warn_caller(caution)
     return TweedieProfileResult(
         p_hat=p_hat,
         phi_hat=best.phi,
@@ -269,7 +272,7 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         converged=search_converged and best.fit_converged,
         fit_mode=fit_mode,
         evaluations=evaluations,
-        warnings=messages,
+        warnings=skipped + cautions,
         search_nll=nll_hat,
         _objective=objective,
         _ll_scale=profile.n,
@@ -277,14 +280,17 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
     )
 
 
-def _search_warnings(values: dict[float, float], infeasible: dict[float, str], p_hat: float):
-    """Skipped powers, and every edge p_hat touches with nothing evaluated in between.
+def _search_warnings(
+    values: dict[float, float], infeasible: dict[float, str], p_hat: float
+) -> tuple[list[str], list[str]]:
+    """Skipped powers, and cautions for every edge p_hat touches with nothing beyond it.
 
     Brent evaluates only inside the bounds, so p_hat is a search bound exactly
     when it is the first or last evaluated power. An infeasible power next to
     p_hat leaves the profile beyond it unknown as well.
     """
-    warnings = [f"p={p:.6g} skipped as infeasible: {reason}" for p, reason in infeasible.items()]
+    skipped = [f"p={p:.6g} skipped as infeasible: {reason}" for p, reason in infeasible.items()]
+    cautions = []
     ordered = sorted(values)
     index = ordered.index(p_hat)
     if index in (0, len(ordered) - 1):
@@ -295,16 +301,16 @@ def _search_warnings(values: dict[float, float], infeasible: dict[float, str], p
             if index == 0
             else ""
         )
-        warnings.append(
+        cautions.append(
             f"p_hat={p_hat:.6g} is at a search bound; the optimum may lie beyond it{artefact}."
         )
-    warnings.extend(
+    cautions.extend(
         f"p_hat={p_hat:.6g} is next to p={p:.6g}, where the fit was infeasible; the optimum "
         "may lie beyond it, so p_hat is a censored estimate."
         for p in ordered[max(index - 1, 0) : index + 2]
         if math.isinf(values[p])
     )
-    return warnings
+    return skipped, cautions
 
 
 def _interval_bounds(p_hat: float, p_bounds: tuple[float, float]) -> tuple[float, float]:

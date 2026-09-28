@@ -289,12 +289,16 @@ class TestBoundaryCensoringWarning:
             return real_fit_reml(self, X, yv, **kwargs)
 
         monkeypatch.setattr(SuperGLM, "fit_reml", failing_above_13)
-        result = _model(features).estimate_p(
-            frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
-        )
+        with pytest.warns(UserWarning, match="censored estimate") as raised:
+            result = _model(features).estimate_p(
+                frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
+            )
 
         assert float(result.p_hat) <= 1.3
         assert any("censored estimate" in warning for warning in result.warnings)
+        # Raised at the caller's line, not inside superglm.
+        censored = [w for w in raised if "censored estimate" in str(w.message)]
+        assert censored[0].filename == __file__
 
 
 class TestCIAtTheCertifiabilityWall:

@@ -18,7 +18,6 @@ References
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
@@ -44,6 +43,7 @@ from superglm.profiling._scalar import (
     censoring_warnings,
     likelihood_ratio_interval,
     profile_plot,
+    warn_caller,
 )
 from superglm.reml.penalty_algebra import build_penalty_context
 from superglm.solvers.dispersion import (
@@ -414,7 +414,7 @@ def _warn_unsettled(solve, settled, bounds, theta_hat, maxiter) -> list[str]:
     messages = []
     if solve.at_bound:
         messages.append(_bound_message(solve, bounds, theta_hat))
-        warnings.warn(messages[-1], NBThetaBoundWarning, stacklevel=3)
+        warn_caller(messages[-1], NBThetaBoundWarning)
     if not settled:
         # MASS glm.nb warns when its alternation limit is reached; an unsettled
         # theta_hat is the last iterate, not the fixed point.
@@ -422,7 +422,7 @@ def _warn_unsettled(solve, settled, bounds, theta_hat, maxiter) -> list[str]:
             f"NB2 theta alternation did not settle in {maxiter} mean fits; "
             f"theta_hat={theta_hat:g} is the last iterate and the result reports converged=False."
         )
-        warnings.warn(messages[-1], UserWarning, stacklevel=3)
+        warn_caller(messages[-1])
     return messages
 
 
