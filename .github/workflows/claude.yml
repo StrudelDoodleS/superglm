@@ -18,11 +18,14 @@ permissions:
 jobs:
   claude-review:
     # Fork and Dependabot pull requests get no secrets, so they cannot run it.
+    # The action refuses bot actors, and a refused run would still cancel the
+    # review of the previous push in this pull request's concurrency group.
     if: |
       (github.event_name == 'pull_request' &&
        !github.event.pull_request.draft &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.user.login != 'dependabot[bot]') ||
+       github.event.pull_request.user.login != 'dependabot[bot]' &&
+       github.event.sender.type != 'Bot') ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
        contains(github.event.comment.body, '@claude')) ||
