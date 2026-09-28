@@ -46,6 +46,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.model.reml_finalize as reml_finalize
 from superglm import Categorical, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM, Tweedie
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import build_penalty_matrix
@@ -318,6 +319,56 @@ def test_a_damped_step_does_not_certify_the_fixed_point(monkeypatch) -> None:
     additions = (p + 3) * EPS / 2
     floor = additions / (1 - additions) * np.max(np.abs(S) @ np.abs(beta)) / scale
     assert np.max(np.abs(X.T @ score - S @ beta)) / scale <= PIRLS_TOL + 3 * floor
+
+
+@pytest.mark.parametrize(
+    ("family", "link", "certified"),
+    [
+        ("poisson", "log", True),
+        ("gamma", "log", True),
+        ("poisson", "sqrt", False),
+        ("binomial", "probit", False),
+    ],
+)
+def test_only_a_quadratic_terminal_refit_certifies_the_score(
+    monkeypatch, family: str, link: str, certified: bool
+) -> None:
+    """Fisher scoring off a canonical link contracts linearly to the certificate.
+
+    From the REML loop's objective stop, about sqrt(tol) from the fixed point, a
+    contraction rate above ~0.85 would spend the whole iteration budget reaching
+    1e-10 and publish a settled mode as unconverged.  So the certificate applies
+    where the steps are quadratic (a canonical link, or the observed-Newton
+    pairs), and every other pair keeps the objective stop it had before.
+    """
+    modes = []
+    original = reml_finalize.fit_irls_direct
+
+    def recording(*args, **kwargs):
+        if kwargs.get("trace_purpose") == "reml_final":
+            modes.append(kwargs["convergence"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(reml_finalize, "fit_irls_direct", recording)
+    frame, eta, exposure, _ = _frame(21)
+    rng = np.random.default_rng(22)
+    mean = np.exp(eta)
+    y = {
+        "poisson": lambda: rng.poisson(exposure * mean).astype(float),
+        "gamma": lambda: rng.gamma(3.0, mean / 3.0),
+        "binomial": lambda: (rng.uniform(size=len(eta)) < 1.0 / (1.0 + np.exp(-eta))).astype(float),
+    }[family]()
+    model = SuperGLM(
+        family=family,
+        link=link,
+        features={"x": Spline(n_knots=8), "cat": Categorical()},
+        selection_penalty=0,
+        discrete=True,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame[["x", "cat"]], y)
+    assert modes == ["score" if certified else "deviance"]
 
 
 def test_separated_level_is_not_walked_to_the_overflow_guard() -> None:

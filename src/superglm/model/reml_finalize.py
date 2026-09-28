@@ -71,6 +71,25 @@ from superglm.solvers.sum_to_zero import (
     ProfiledSumToZeroBlockFactor,
     SumToZeroBlockFactor,
 )
+from superglm.solvers.working_rows import supports_observed_newton
+
+
+def _discrete_terminal_is_quadratic(model) -> bool:
+    """Whether the discrete terminal refit's steps converge quadratically.
+
+    Fisher scoring is Newton on a canonical link.  Otherwise only the pairs
+    ``supports_observed_newton`` approves take Newton steps, and ``fit_irls_direct``
+    withholds them under linear constraints or a SCOP group.
+    """
+    family, link = model._distribution, model._link
+    try:
+        if classify_reml_curvature(family, link) == "fisher":
+            return True
+    except NotImplementedError:
+        return False
+    return supports_observed_newton(family, link) and not any(
+        group.constraints is not None or group.monotone_engine == "scop" for group in model._groups
+    )
 
 
 def _build_structured_linear_system_state(
@@ -472,10 +491,13 @@ def finalize_reml_fit(
         # Fisher scoring on a non-canonical link contracts only linearly, so an
         # objective-change stop certifies the coefficients to about sqrt(tol).
         # A discrete refit keeps Fisher geometry but certifies its fixed point
-        # to first order at the same tolerance: the score or the step.  Gamma/log
-        # reaches it by observed Newton; other families pay Fisher's linear
-        # rate, tens of iterations when a mode contracts slowly.
-        certified_terminal = observed_terminal or (model._discrete and not qp_passthrough)
+        # to first order at the same tolerance, the score or the step, where its
+        # steps get there quadratically.  Elsewhere Fisher's linear rate can
+        # exhaust the iteration budget and publish a settled mode as unconverged,
+        # so those fits keep the objective stop.
+        certified_terminal = observed_terminal or (
+            model._discrete and not qp_passthrough and _discrete_terminal_is_quadratic(model)
+        )
         final_tolerance = min(pirls_tol, 1e-10) if certified_terminal else pirls_tol
         final_convergence = "coefficients" if observed_terminal else "score"
         final_output = fit_irls_direct(
