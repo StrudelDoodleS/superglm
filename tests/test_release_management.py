@@ -241,6 +241,9 @@ def test_repository_guidance_pins_review_thread_handling() -> None:
     assert "resolve the thread once the fix is pushed" in text
     assert "A reply alone leaves the thread open." in text
     assert "Do not merge a pull request until every review thread is resolved" in text
+    assert "every finding without a thread has its reply." in text
+    assert "findings that have no thread of their own get one reply comment" in text
+    assert "The author then reopens that thread and answers there" in text
     assert "does not raise again a finding already answered with evidence" in text
     assert "says so in its summary comment with a link to the thread" in text
     assert "`resolveReviewThread`" in text

@@ -143,7 +143,8 @@ A reviewer does not raise again a finding already answered with evidence on a
 resolved thread. If it believes the evidence is wrong, it says so on that
 thread and reopens it. A reviewer that cannot reply on a thread, such as the
 Claude review workflow, says so in its summary comment with a link to the
-thread instead of opening a new one.
+thread instead of opening a new one. The author then reopens that thread and
+answers there, so the dispute holds the merge like any open thread.
 
 To resolve a thread programmatically, use the GraphQL `resolveReviewThread`
 mutation. It takes the thread's node ID from `pullRequest.reviewThreads`, not
