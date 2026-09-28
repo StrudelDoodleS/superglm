@@ -221,6 +221,29 @@ def test_runtime_backstop_warns_on_pinned_predictor():
     assert "'z'" in message  # the drifting group is named
 
 
+def test_runtime_backstop_reports_the_expected_curvature_ratio():
+    """Tweedie/log rows are observed-Newton; the gate compares the Fisher ratio.
+
+    The iteration log keeps the observed weights, which are the Fisher weights
+    times (2 - p) + (p - 1) y / mu, so their ratio is not the one the warning reports.
+    """
+    df, y, w = separated_numeric_design()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            features={"z": Numeric()},
+            max_iter=150,
+            convergence="coefficients",
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(df, y, sample_weight=w, record_diagnostics=True)
+    message = next(str(c.message) for c in caught if issubclass(c.category, SeparationWarning))
+    observed = model.result.iteration_log[-1].w_ratio
+    assert f"ratio {observed:.1e}" not in message
+
+
 def test_runtime_backstop_error_mode_refuses():
     df, y, w = separated_numeric_design()
     with warnings.catch_warnings():
