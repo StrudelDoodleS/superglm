@@ -1205,8 +1205,14 @@ def _solve_coefficients(
     convergence,
     beta_init=None,
     intercept_init=None,
+    reml_penalties=None,
 ):
-    """Apply the ordinary fit policy for selecting the coefficient solver."""
+    """Apply the ordinary fit policy for selecting the coefficient solver.
+
+    ``reml_penalties`` carries the penalty components of structured terms
+    (RandomEffect, FactorSmooth) to the direct solver, whose penalty-matrix
+    fallback omits them.
+    """
     if _uses_direct_solver(model, penalty, has_lambda1_targets):
         result, _ = fit_irls_direct(
             X=model._dm,
@@ -1226,6 +1232,7 @@ def _solve_coefficients(
             convergence=convergence,
             separation=getattr(model, "_separation", "warn"),
             weight_semantics=model_weight_semantics(model),
+            reml_penalties=reml_penalties,
         )
         return result
 

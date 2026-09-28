@@ -18,7 +18,13 @@ from superglm._frame import EagerFrame
 from superglm.distributions import resolve_distribution
 from superglm.features.numeric import Numeric
 from superglm.penalties.group_lasso import GroupLasso
-from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning, estimate_nb_theta
+from superglm.profiling.nb import (
+    NBProfileResult,
+    NBThetaBoundWarning,
+    estimate_nb_theta,
+    solve_theta,
+)
+from superglm.solvers.dispersion import PRIOR_WEIGHTS
 
 # =====================================================================
 # Helpers
@@ -846,6 +852,39 @@ class TestNB2AutoTheta:
         assert model.family.theta == "auto"
         assert model.theta_ > 0
         assert model.result.converged
+
+    @pytest.mark.parametrize("direct_solve", ["auto", "structured"])
+    def test_reml_theta_is_the_score_root_at_the_penalized_mean(self, direct_solve):
+        """The alternation's mean fits carry the RandomEffect penalty that fit_reml publishes."""
+        rng = np.random.default_rng(422)
+        g = np.repeat(np.arange(20), 10)
+        x = rng.normal(size=g.size)
+        mu = np.exp(0.1 + 0.2 * x + rng.normal(0.0, 0.8, 20)[g])
+        y = rng.negative_binomial(3.0, 3.0 / (3.0 + mu)).astype(float)
+        X = pd.DataFrame({"x": x, "g": g.astype(str)})
+        # The alternation penalises every REML component at spline_penalty; set
+        # equal to g's fixed lambda, fit_reml publishes the alternation's own mean.
+        model = SuperGLM(
+            family=NegativeBinomial(1.0),
+            selection_penalty=0.0,
+            spline_penalty=50.0,
+            direct_solve=direct_solve,
+            features={"x": Numeric(), "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(50.0))},
+        )
+
+        result = model.estimate_theta(X, y, fit_mode="reml", xatol=1e-8)
+
+        # theta_hat is the score root at that mean to the 1e-8 alternation tolerance.
+        root = solve_theta(
+            y,
+            model.predict(X),
+            np.ones(y.size),
+            result.theta_hat,
+            weight_semantics=PRIOR_WEIGHTS,
+            bounds=(1e-8, 1e8),
+        )
+        assert result.converged
+        assert root.theta == pytest.approx(result.theta_hat, rel=1e-6)
 
 
 # =====================================================================

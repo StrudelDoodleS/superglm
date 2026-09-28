@@ -37,6 +37,7 @@ from superglm.model.fit_ops import (
     _uses_direct_solver,
 )
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
+from superglm.model.reml_setup import collect_reml_groups
 from superglm.profiling._scalar import (
     Interval,
     RecordedObjective,
@@ -44,6 +45,7 @@ from superglm.profiling._scalar import (
     likelihood_ratio_interval,
     profile_plot,
 )
+from superglm.reml.penalty_algebra import build_penalty_context
 from superglm.solvers.dispersion import (
     FREQUENCY_WEIGHTS,
     PRIOR_WEIGHTS,
@@ -316,6 +318,12 @@ class _MeanFit:
         _reject_monotone_fit_conflicts(model, self.penalty, self.has_lambda1_targets)
         direct = _uses_direct_solver(model, self.penalty, self.has_lambda1_targets)
         self.tol = min(model._tol, _DIRECT_MEAN_FIT_TOL) if direct else model._tol
+        # Once per design: RandomEffect and FactorSmooth penalties reach the
+        # direct solver only as REML components.
+        reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices) if direct else []
+        self.reml_penalties = (
+            build_penalty_context(model._dm.group_matrices, reml_groups)[0] if reml_groups else None
+        )
         self.offset = np.zeros_like(self.y) if offset is None else offset
         self.warm_beta = self.warm_intercept = None
 
@@ -336,6 +344,7 @@ class _MeanFit:
             convergence=model._convergence,
             beta_init=self.warm_beta,
             intercept_init=self.warm_intercept,
+            reml_penalties=self.reml_penalties,
         )
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
         eta = stabilize_eta(
