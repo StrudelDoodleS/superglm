@@ -132,14 +132,18 @@ When it is not real, or is deferred, reply with the evidence or with where the
 follow-up is recorded, and resolve the thread as well. This applies to a
 person's finding too: the reply keeps the reasoning on the thread, and a
 reviewer who disagrees reopens it. A reply alone leaves the thread open.
-Do not merge a pull request until every review thread is resolved.
+Do not merge a pull request until every review thread is resolved and every
+finding without a thread has its reply.
 
-A summary comment's findings get one reply comment that answers each finding
-in turn. If any of them is real, put a 👍 on the summary comment.
+A summary comment's findings that have no thread of their own get one reply
+comment that answers each in turn. If any of them is real, put a 👍 on the
+summary comment.
 
 A reviewer does not raise again a finding already answered with evidence on a
-resolved thread. If the evidence is wrong, it replies on that thread and
-reopens it.
+resolved thread. If it believes the evidence is wrong, it says so on that
+thread and reopens it. A reviewer that cannot reply on a thread, such as the
+Claude review workflow, says so in its summary comment with a link to the
+thread instead of opening a new one.
 
 To resolve a thread programmatically, use the GraphQL `resolveReviewThread`
 mutation. It takes the thread's node ID from `pullRequest.reviewThreads`, not
