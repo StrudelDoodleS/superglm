@@ -49,7 +49,11 @@ from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
 from superglm.inference.summary_levels import validate_level_display
-from superglm.profiling._reporting import cached_tweedie_profile_ci
+from superglm.profiling._reporting import (
+    cached_tweedie_profile_ci,
+    profile_cautioned,
+    reported_interval,
+)
 
 _LIVE_WIDGETS: set[EditorWidget] = set()
 _LOGGER = logging.getLogger(__name__)
@@ -856,21 +860,20 @@ class EditorWidget:
         level_display: str,
         options: dict[str, Any],
     ) -> None:
-        def trace_callback(row: dict[str, Any]) -> None:
-            with self._profile_condition:
-                job = self._profile_jobs[job_id]
-                _merge_profile_trace_rows(job, [row])
-                self._profile_condition.notify_all()
-
         def progress_callback(phase: str, payload: dict[str, Any] | None = None) -> None:
+            payload = payload or {}
             with self._profile_condition:
                 job = self._profile_jobs[job_id]
                 job["phase"] = phase
-                if payload:
-                    if "profile_estimate" in payload:
-                        job["profile_estimate"] = _normalise_profile_estimate(
-                            payload["profile_estimate"]
-                        )
+                if "profile_estimate" in payload:
+                    job["profile_estimate"] = _normalise_profile_estimate(
+                        payload["profile_estimate"]
+                    )
+                # Live rows count the feasible candidates in search order, as
+                # the completed trace does.
+                trace = job["trace"]
+                for row in payload.get("profile_trace", ()):
+                    trace.append(jsonable({"step": len(trace), **row}))
                 self._profile_condition.notify_all()
 
         try:
@@ -878,7 +881,6 @@ class EditorWidget:
                 parameter,
                 level_display=level_display,
                 progress_callback=progress_callback,
-                trace_callback=trace_callback,
                 **options,
             )
         except BaseException as exc:
@@ -898,7 +900,7 @@ class EditorWidget:
 
         with self._profile_condition:
             job = self._profile_jobs[job_id]
-            _merge_profile_trace_rows(job, payload.get("profile_trace", []))
+            job["trace"] = payload["profile_trace"]
             job["status"] = "complete"
             job["phase"] = "complete"
             job["result"] = payload
@@ -1099,31 +1101,11 @@ def _close_live_widgets() -> None:
         widget.close()
 
 
-def _profile_trace_payload(row: dict[str, Any]) -> dict[str, Any]:
-    """Keep optimizer exception text local, without changing the profile result."""
-    payload = dict(row)
-    for field in ("phi_message", "phi_fallback_reason"):
-        detail = payload.pop(field, None)
-        if detail:
-            _LOGGER.debug("Editor profile diagnostic %s: %s", field, detail)
-    return jsonable(payload)
-
-
 def _profile_trace_rows(result: Any) -> list[dict[str, Any]]:
-    trace = getattr(result, "search_trace", None)
-    if trace is None:
-        cache = getattr(result, "cache", None)
-        if isinstance(cache, dict):
-            return [
-                {"step": i, "theta": theta, "nll": nll, "source": "profile"}
-                for i, (theta, nll) in enumerate(cache.items())
-            ]
-        return []
-    if hasattr(trace, "to_dict"):
-        rows = trace.to_dict("records")
-    else:
-        rows = list(trace)
-    return [_profile_trace_payload(row) for row in rows]
+    evaluations = result.evaluations
+    # An infeasible power has no objective to plot.
+    feasible = evaluations[np.isfinite(evaluations["nll"])]
+    return [jsonable({"step": step, **row}) for step, row in enumerate(feasible.to_dict("records"))]
 
 
 def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
@@ -1149,13 +1131,15 @@ def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
         cached_ci, ci_status = cached_tweedie_profile_ci(result, 0.05)
         if cached_ci is not None:
             ci_low, ci_high = cached_ci
-    else:
-        ci = getattr(result, "ci", None)
-        if callable(ci):
-            try:
-                ci_low, ci_high = ci(alpha=0.05)
-            except Exception:
-                ci_low, ci_high = None, None
+    elif name == "theta":
+        # The recorded interval keeps its censoring and caution, which ci()
+        # drops, and reading it raises no warning.
+        try:
+            (ci_low, ci_high), ci_status = reported_interval(
+                result._interval(0.05), caution=profile_cautioned(result, 0.05)
+            )
+        except Exception:
+            ci_status = "not computed"
 
     estimate = {
         "parameter": name,
@@ -1194,29 +1178,6 @@ def _normalise_profile_estimate(estimate: dict[str, Any]) -> dict[str, Any]:
 
 def _elapsed_ms(start: float, end: float) -> float:
     return max(0.0, (end - start) * 1000.0)
-
-
-def _merge_profile_trace_rows(job: dict[str, Any], rows: list[dict[str, Any]]) -> None:
-    trace = job.setdefault("trace", [])
-    seen = {_profile_trace_key(row) for row in trace}
-    for row in rows:
-        payload = _profile_trace_payload(row)
-        key = _profile_trace_key(payload)
-        if key in seen:
-            continue
-        trace.append(payload)
-        seen.add(key)
-
-
-def _profile_trace_key(row: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        row.get("step"),
-        row.get("p"),
-        row.get("theta"),
-        row.get("phi"),
-        row.get("nll"),
-        row.get("source"),
-    )
 
 
 atexit.register(_close_live_widgets)

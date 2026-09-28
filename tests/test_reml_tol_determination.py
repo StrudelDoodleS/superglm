@@ -344,7 +344,7 @@ class TestPublicationDispersion:
         likelihood/deviance. Both are claims about one search."""
         from superglm import Spline as _Spline
         from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
-        from superglm.profiling.tweedie import _profile_phi_detailed
+        from superglm.profiling.tweedie import profile_phi_at
 
         rng = np.random.default_rng(11)
         # 1500 rows keep the binned and public means ~1e-2 apart, and the
@@ -368,25 +368,7 @@ class TestPublicationDispersion:
         ones = np.ones(n)
 
         with subtests.test("the published phi is profiled at the public mean"):
-            edf = float(model.result.effective_df)
-            # Warm-start from the SEARCH winner's phi, not from the published
-            # answer: starting at result.phi_hat only proves the answer is a
-            # stationary point; starting where the old code would have
-            # published from proves the re-profile moved to the published
-            # fit's optimum.
-            trace = result.search_trace
-            gap = (trace["p"] - float(result.p_hat)).abs()
-            search_phi = float(trace.loc[gap.idxmin(), "phi"])
-            oracle = _profile_phi_detailed(
-                y_arr,
-                mu,
-                float(result.p_hat),
-                weights=ones,
-                df_resid=max(float(n) - edf, 1.0),
-                phi_method="mle",
-                phi_start=search_phi,
-            )
-
+            oracle = profile_phi_at(y_arr, mu, ones, float(result.p_hat))
             assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
 
         with subtests.test("the published statistics describe the public mean"):
@@ -437,208 +419,31 @@ class TestPublicationDispersion:
             assert set(seen[:-1]) == {1e-6}
             assert seen[-1] == 1e-9
 
-        for scenario in (
-            self._the_aggregate_judges_the_publication_refit_not_the_candidate,
-            self._a_troubled_reprofile_is_disclosed_on_the_result,
-            self._the_searched_density_provenance_survives_publication,
-            self._a_reprofile_rewrites_the_whole_dispersion_story,
-            self._a_published_boundary_dispersion_is_disclosed,
-        ):
-            with (
-                subtests.test(scenario.__name__.lstrip("_")),
-                pytest.MonkeyPatch.context() as monkeypatch,
-            ):
-                scenario(monkeypatch, frame, y, *copy.deepcopy((model, result)))
+        with subtests.test("the aggregate judges the publication refit, not the candidate"):
+            # Candidates run at the loose search bar and the publication runs
+            # tight, so the two can disagree on exactly the flat-lambda designs
+            # the tolerance split was built for; the candidate's green flags
+            # must not mask a stalled publication.
+            from superglm.model import profile_ops
 
-    @staticmethod
-    def _the_aggregate_judges_the_publication_refit_not_the_candidate(
-        monkeypatch, frame, y, model, result
-    ):
-        """fit/solver/reml convergence on the result must describe the
-        publication refit. Candidates run at the loose search bar and the
-        publication runs tight, so the two can disagree on exactly the
-        flat-lambda designs the tolerance split was built for -- and the
-        candidate's green flags must not mask a stalled publication."""
-
-        from superglm.model import profile_ops
-
-        assert result.converged and result.fit_converged
-        assert result.search_fit_converged is True
-
-        model._reml_result = _replace_dc(model._reml_result, converged=False)
-        mu = np.asarray(model.predict(frame), dtype=float)
-        profile_ops._reprofile_published_dispersion(
-            model, np.asarray(y, dtype=float), np.ones(len(y)), mu, result, "mle"
-        )
-
-        assert result.reml_converged is False
-        assert result.fit_converged is False
-        assert result.converged is False
-        # The searched winner's flag survives for the CI guard.
-        assert result.search_fit_converged is True
+            published, searched = copy.deepcopy((model, result))
+            assert searched.converged
+            published._reml_result = _replace_dc(published._reml_result, converged=False)
+            profile_ops._install_tweedie_profile(
+                published, X=frame, y=y, offset=None, result=searched
+            )
+            assert searched.converged is False
 
     def test_a_decoupled_publication_reports_its_reml_convergence(self):
-        """The docstring promises fit_converged covers REML and solver
-        convergence for a REML publication. A decoupled run's search is ML
-        (reml_converged=None there), but it publishes a REML fit -- the
-        published flags must describe that fit, not the ML candidates."""
+        """A decoupled run's search is ML, but it publishes a REML fit: the
+        published convergence must describe that fit, not the ML candidates."""
         frame, y, features = _small_search_fixture()
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         result = model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit")
 
-        assert result.reml_converged is True
-        assert result.fit_converged is True
-        assert result.search_fit_converged is True
+        assert result.fit_mode == "fit_reml"
+        assert model._reml_result is not None and model._reml_result.converged
         assert result.converged is True
-
-    @staticmethod
-    def _a_troubled_reprofile_is_disclosed_on_the_result(monkeypatch, frame, y, model, result):
-        """A boundary, fallback, or non-convergent published re-profile must
-        not hide behind the search's clean record."""
-        from dataclasses import replace as _replace
-
-        import superglm.profiling.tweedie as tweedie_module
-        from superglm.model import profile_ops
-
-        baseline = len(result.warnings)
-
-        real = tweedie_module._profile_phi_detailed
-
-        def troubled(*args, **kwargs):
-            return _replace(
-                real(*args, **kwargs),
-                converged=False,
-                used_fallback=True,
-                message="forced for the test",
-            )
-
-        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", troubled)
-        mu = np.asarray(model.predict(frame), dtype=float)
-        profile_ops._reprofile_published_dispersion(
-            model, np.asarray(y, dtype=float), np.ones(len(y)), mu, result, "mle"
-        )
-
-        assert not result.phi_converged
-        assert result.phi_used_fallback
-        assert len(result.warnings) == baseline + 1
-        assert "re-profile" in result.warnings[-1]
-
-    @staticmethod
-    def _the_searched_density_provenance_survives_publication(monkeypatch, frame, y, model, result):
-        """p_hat, search_nll, plots and the profile CI come from the
-        SEARCHED curve. When the search scored its winner with saddlepoint
-        density but the publication re-profile evaluates exactly, replacing
-        the density story wholesale would label an approximation-based
-        power estimate as exact -- the searched provenance survives beside
-        the published one, disclosed in warnings."""
-        from superglm.model import profile_ops
-
-        # Rewind to first-reprofile state with a saddlepoint-scored search.
-        result.search_nll = None
-        result.density_method = "saddlepoint"
-        result.density_exact = False
-        result.saddlepoint_fraction = 0.4
-        mu = np.asarray(model.predict(frame), dtype=float)
-        profile_ops._reprofile_published_dispersion(
-            model, np.asarray(y, dtype=float), np.ones(len(y)), mu, result, "mle"
-        )
-
-        # The live fields describe the published dispersion...
-        assert result.density_exact is True
-        # ...while the searched story survives beside it.
-        assert result.search_density_method == "saddlepoint"
-        assert result.search_density_exact is False
-        assert result.search_saddlepoint_fraction == pytest.approx(0.4)
-        assert any("saddlepoint" in w and "search" in w for w in result.warnings), result.warnings
-        # And reporting CONSUMES it: the method label qualifies the
-        # approximation-selected estimate, and the plot's selection-side
-        # provenance reads the searched story, not the publication's.
-        from superglm.profiling._reporting import tweedie_profile_method_label
-
-        assert "density approximation" in tweedie_profile_method_label(result)
-        assert result._selection_density_exact() is False
-
-    @staticmethod
-    def _a_reprofile_rewrites_the_whole_dispersion_story(monkeypatch, frame, y, model, result):
-        """The re-profile IS the published dispersion, so the aggregate
-        convergence flag, the density classification and the phi warnings
-        must all describe it -- not the search winner it replaced."""
-        from dataclasses import replace as _replace
-
-        import superglm.profiling.tweedie as tweedie_module
-        from superglm.model import profile_ops
-        from superglm.profiling.tweedie import _TweedieLogpdfDiagnostics
-
-        assert result.converged and result.phi_converged
-
-        # Stale entries from the search winner's phi: the rebuild must
-        # remove them, not stack publication entries on top of them.
-        result.warnings = list(result.warnings) + [
-            "Winning inner phi profile did not converge.",
-            "Winning phi estimate is at the lower dispersion boundary.",
-        ]
-
-        real = tweedie_module._profile_phi_detailed
-
-        def troubled(*args, **kwargs):
-            return _replace(
-                real(*args, **kwargs),
-                converged=False,
-                diagnostics=_TweedieLogpdfDiagnostics(n_positive=7, n_saddlepoint=7),
-                message="forced for the test",
-            )
-
-        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", troubled)
-        mu = np.asarray(model.predict(frame), dtype=float)
-        with pytest.warns(UserWarning):
-            profile_ops._reprofile_published_dispersion(
-                model, np.asarray(y, dtype=float), np.ones(len(y)), mu, result, "mle"
-            )
-
-        # The aggregate flag is recomputed from the published dispersion.
-        assert not result.phi_converged
-        assert not result.converged
-        assert result.converged == (
-            result.objective_finite
-            and result.outer_converged
-            and result.fit_converged
-            and result.phi_converged
-        )
-        # The density block classifies the re-profile's own evaluation.
-        assert result.density_method == "saddlepoint"
-        assert result.density_exact is False
-        assert result.n_saddlepoint == 7 and result.n_positive == 7
-        assert result.saddlepoint_fraction == pytest.approx(1.0)
-        # Search-phi warnings are gone; the entries describe the re-profile.
-        assert "Winning inner phi profile did not converge." not in result.warnings
-        assert not any(w.startswith("Winning phi estimate is at the ") for w in result.warnings)
-        assert any("Saddlepoint approximation used for 7/7" in w for w in result.warnings)
-        assert any("re-profile did not converge" in w for w in result.warnings)
-
-    @staticmethod
-    def _a_published_boundary_dispersion_is_disclosed(monkeypatch, frame, y, model, result):
-        """The published dispersion landing on the hard phi bound must not
-        be silent: label recomputed AND a warning entry on the result."""
-        from dataclasses import replace as _replace
-
-        import superglm.profiling.tweedie as tweedie_module
-        from superglm.model import profile_ops
-
-        assert result.phi_boundary == ""
-
-        real = tweedie_module._profile_phi_detailed
-
-        def pinned(*args, **kwargs):
-            return _replace(real(*args, **kwargs), lower_boundary=True)
-
-        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", pinned)
-        mu = np.asarray(model.predict(frame), dtype=float)
-        profile_ops._reprofile_published_dispersion(
-            model, np.asarray(y, dtype=float), np.ones(len(y)), mu, result, "mle"
-        )
-
-        assert result.phi_boundary == "lower"
-        assert any("dispersion boundary" in w for w in result.warnings)
 
     def test_coupled_publication_profiles_phi_against_the_published_fit(self):
         """The published phi must describe the published fit, not the candidate.
@@ -650,7 +455,7 @@ class TestPublicationDispersion:
         2026-09-23). Weights and an offset keep the re-profile's weighted,
         offset mean in play.
         """
-        from superglm.profiling.tweedie import _profile_phi_detailed
+        from superglm.profiling.tweedie import profile_phi_at
 
         frame, y, features = _small_search_fixture()
         rng = np.random.default_rng(12)
@@ -660,26 +465,15 @@ class TestPublicationDispersion:
         result = model.estimate_p(frame, y, sample_weight=weights, offset=offset, fit_mode="reml")
 
         mu = np.asarray(model.predict(frame, offset=offset), dtype=float)
-        edf = float(model.result.effective_df)
-        # Warm-start from the search winner's phi (what the old code would
-        # have published), so the oracle is independent of the answer.
-        trace = result.search_trace
-        gap = (trace["p"] - float(result.p_hat)).abs()
-        search_phi = float(trace.loc[gap.idxmin(), "phi"])
-        oracle = _profile_phi_detailed(
-            np.asarray(y, dtype=float),
-            mu,
-            float(result.p_hat),
-            weights=np.asarray(weights, dtype=float),
-            df_resid=max(float(len(y)) - edf, 1.0),
-            phi_method="mle",
-            phi_start=search_phi,
-        )
+        oracle = profile_phi_at(np.asarray(y, dtype=float), mu, weights, float(result.p_hat))
+        searched_phi = result.evaluations.set_index("p").loc[result.p_hat, "phi"]
 
-        assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
+        assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-12)
+        assert float(result.phi_hat) != float(searched_phi)
         # The searched objective's value survives for the CI and the plots,
         # and the published nll refers to the published dispersion.
-        assert result.search_nll is not None
+        assert np.isfinite(result.search_nll)
+        assert result.nll == pytest.approx(oracle.criterion / len(y), rel=1e-12)
         assert model.result.phi == pytest.approx(float(result.phi_hat), rel=1e-12)
 
 
@@ -692,36 +486,6 @@ class TestSearchPublishSplit:
         model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit")
 
         assert seen == [1e-9]
-
-    def test_ci_guard_judges_the_searched_winner_not_the_reprofile(self):
-        """ci() inverts the searched curve, so its guard must read the
-        searched winner's certification flags. The publication re-profile
-        overwrites objective_finite/phi_converged with its own dispersion
-        status; judging those would refuse a clean search because a
-        publication re-profile stalled on a curve the interval never
-        touches -- and accept a stalled search whenever the publication
-        re-profile happens to converge."""
-        frame, y, features = _small_search_fixture()
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit")
-
-        assert result.search_objective_finite is True
-        assert result.search_phi_converged is True
-
-        # A troubled PUBLICATION re-profile must not refuse an interval on
-        # the clean searched curve.
-        result.phi_converged = False
-        result.objective_finite = False
-        lo, hi = result.ci()
-        assert lo < float(result.p_hat) < hi
-
-        # A troubled SEARCH winner must refuse, however clean the
-        # publication re-profile looks.
-        result.phi_converged = True
-        result.objective_finite = True
-        result.search_phi_converged = False
-        with pytest.raises(RuntimeError, match="phi_converged"):
-            result.ci(alpha=0.10)
 
 
 class TestCertificationBar:
@@ -1364,7 +1128,7 @@ class TestPublicationREMLBudget:
         # One outer iteration can never satisfy the two-evaluation
         # convergence contract: the budget provably bound the refit.
         assert int(model._reml_result.n_reml_iter) == 1
-        assert result.reml_converged is False
+        assert result.converged is False
 
     def test_a_pure_ml_publication_refuses_the_reml_budget(self):
         frame, y, features = _small_search_fixture()

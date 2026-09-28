@@ -34,6 +34,7 @@ from superglm.editor.persistence import (
     serialize_validated_model,
 )
 from superglm.inference.summary import ModelSummary, _BasisDetailRow, _CoefRow
+from superglm.profiling._scalar import Interval
 
 
 def test_editor_demo_notebook_includes_k_adequacy_sweep():
@@ -69,9 +70,7 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert "discrete=True" in source
     assert "n_bins=512" in source
     assert "model.estimate_p(" in source
-    assert "tweedie_profile.search_trace" in source
-    assert 'method="brent"' in source
-    assert 'phi_method="mle"' in source
+    assert "tweedie_profile.evaluations" in source
     assert '"territory": Categorical(base="most_exposed")' in source
     assert 'terms=["age", "mileage", "region", "age_band", "territory"]' in source
     assert "## Collapse Sparse Categorical Levels" in source
@@ -1940,15 +1939,17 @@ def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
 
 
 @pytest.mark.parametrize(
-    ("phi_method", "expected_status"),
+    ("ci_cache", "expected_ci", "expected_status"),
     [
-        ("mle", "not computed"),
-        ("pearson", "unavailable for Pearson plug-in"),
+        ({}, None, "not computed"),
+        ({0.05: Interval(1.4, 1.7, False, False)}, [1.4, 1.7], "available"),
+        ({0.05: Interval(1.4, 1.7, True, False)}, [1.4, 1.7], "censored"),
     ],
 )
 def test_in_force_summary_never_computes_tweedie_ci(
     editor_model,
-    phi_method,
+    ci_cache,
+    expected_ci,
     expected_status,
 ):
     from superglm.editor.summaries import summary_payload
@@ -1961,12 +1962,9 @@ def test_in_force_summary_never_computes_tweedie_ci(
         p_hat=1.55,
         phi_hat=0.8,
         nll=11.0,
-        method="brent",
-        phi_method=phi_method,
-        density_exact=True,
-        _ci_cache={0.05: (1.4, 1.7)} if phi_method == "pearson" else {},
+        _ci_cache=ci_cache,
         ci=unexpected_ci,
-        ci_details=unexpected_ci,
+        interval=unexpected_ci,
     )
     session.model._summary_cache = None
     widget = SimpleNamespace(session=session)
@@ -1975,7 +1973,7 @@ def test_in_force_summary_never_computes_tweedie_ci(
 
     assert payload["available"] is True
     assert payload["compact"]["model"]["tweedie_p"] == 1.55
-    assert payload["compact"]["model"]["tweedie_p_ci"] is None
+    assert payload["compact"]["model"]["tweedie_p_ci"] == expected_ci
     assert payload["compact"]["model"]["tweedie_p_ci_status"] == expected_status
 
 
@@ -2758,7 +2756,6 @@ def test_compact_summary_carries_tweedie_ci_status_and_cached_interval():
             "tweedie_p": 1.55,
             "tweedie_p_ci": (1.4, 1.7),
             "tweedie_p_ci_status": "available",
-            "tweedie_p_method": "Profile MLE (Brent)",
         },
         _coef_rows=[],
     )
@@ -2767,7 +2764,7 @@ def test_compact_summary_carries_tweedie_ci_status_and_cached_interval():
 
     assert payload["model"]["tweedie_p_ci"] == [1.4, 1.7]
     assert payload["model"]["tweedie_p_ci_status"] == "available"
-    assert payload["model"]["tweedie_p_method"] == "Profile MLE (Brent)"
+    assert "tweedie_p_method" not in payload["model"]
 
 
 def test_collapse_selected_levels_across_existing_groups_preserves_remainders():
@@ -3265,17 +3262,20 @@ def test_profile_options_forward_search_fit_mode():
             "parameter": "tweedie_p",
             "fit_mode": "reml",
             "search_fit_mode": "fit",
+            "method": "grid",
+            "phi_method": "pearson",
+            "trace_iterations": True,
             "junk": "dropped",
         }
     )
 
-    assert options["search_fit_mode"] == "fit"
-    assert options["fit_mode"] == "reml"
-    assert "junk" not in options
+    # estimate_p has one search and one dispersion method; the removed
+    # selectors would be unexpected keywords.
+    assert options == {"fit_mode": "reml", "search_fit_mode": "fit"}
 
 
 def test_profile_options_filter_tweedie_only_keys_for_theta():
-    """search_fit_mode is Tweedie-only: estimate_nb_theta has no decoupled
+    """search_fit_mode is Tweedie-only: estimate_theta has no decoupled
     search, so a client that retains options while switching parameters must
     not crash the theta profile with an unexpected keyword. Unknown or empty
     parameters strip it too -- fail safe, never fail loud downstream."""
@@ -3346,9 +3346,8 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
 
     p_result = session.reprofile_distribution(
         "tweedie_p",
-        method="grid",
-        n_grid=7,
-        phi_method="pearson",
+        p_bounds=(1.2, 1.8),
+        xatol=0.002,
     )
     theta_result = session.reprofile_distribution("nb2_theta", theta_bounds=(0.2, 20.0))
 
@@ -3359,9 +3358,8 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
     assert calls[0]["X"] is X
     assert calls[0]["y"] is y
     assert calls[0]["kwargs"] == {
-        "method": "grid",
-        "n_grid": 7,
-        "phi_method": "pearson",
+        "p_bounds": (1.2, 1.8),
+        "xatol": 0.002,
         "fit_mode": "inherit",
     }
     assert calls[1]["parameter"] == "theta"
@@ -3388,13 +3386,7 @@ def test_reprofile_distribution_uses_cloned_in_force_model():
     original_intercept = model.result.intercept
     session = EditorSession.from_model(model, terms=["x"], train_data=(X, y, None))
 
-    session.reprofile_distribution(
-        "tweedie_p",
-        fit_mode="fit",
-        phi_method="pearson",
-        method="grid",
-        grid=np.array([1.25, 1.45]),
-    )
+    session.reprofile_distribution("tweedie_p", fit_mode="fit", p_bounds=(1.25, 1.45))
 
     assert session.model is not model
     assert session.reference_model is model
@@ -3424,12 +3416,7 @@ def test_reprofile_distribution_clears_collapse_history(editor_model, editor_fra
 
     monkeypatch.setattr(type(editor_model), "estimate_p", fake_estimate_p)
 
-    result = session.reprofile_distribution(
-        "tweedie_p",
-        method="grid",
-        grid=np.array([1.45]),
-        phi_method="pearson",
-    )
+    result = session.reprofile_distribution("tweedie_p", p_bounds=(1.4, 1.5))
 
     assert result == "p-result"
     assert session.model._editor_profile_marker == "profiled"
@@ -3447,75 +3434,25 @@ def test_reprofile_distribution_rejects_pending_manual_edits(editor_model, edito
     session.shift("x_spline", 0.1)
 
     with pytest.raises(RuntimeError, match="manual coefficient edits"):
-        session.reprofile_distribution(
-            "tweedie_p",
-            method="grid",
-            grid=np.array([1.25, 1.45]),
-            phi_method="pearson",
-        )
+        session.reprofile_distribution("tweedie_p", p_bounds=(1.25, 1.45))
 
 
-def test_tweedie_profile_trace_can_include_candidate_fit_curves():
-    rng = np.random.default_rng(20260706)
-    n = 120
-    x = rng.uniform(0.0, 1.0, n)
-    X = pd.DataFrame({"x": x})
-    mu = np.exp(0.2 + 0.4 * np.sin(2 * np.pi * x))
-    y = generate_tweedie_cpg(n, mu=mu, phi=0.5, p=1.45, rng=rng)
-    model = SuperGLM(
-        family=families.tweedie(p=1.3),
-        selection_penalty=0.0,
-        spline_penalty=0.1,
-        features={"x": Spline(n_knots=5)},
+def _unexpected_ci(*args, **kwargs):
+    raise AssertionError("editor payload must not evaluate a Tweedie profile CI")
+
+
+def _fake_tweedie_result(evaluations, ci_cache=None):
+    return SimpleNamespace(
+        p_hat=1.42,
+        phi_hat=0.3,
+        nll=0.12,
+        evaluations=pd.DataFrame(evaluations),
+        _ci_cache={} if ci_cache is None else ci_cache,
+        _caution=None,
+        _ci_cautions={},
+        ci=_unexpected_ci,
+        interval=_unexpected_ci,
     )
-
-    result = model.estimate_p(
-        X,
-        y,
-        fit_mode="fit",
-        phi_method="pearson",
-        method="grid",
-        grid=np.array([1.25, 1.45, 1.65]),
-        trace_iterations=True,
-    )
-
-    assert "fit_trace" in result.search_trace.columns
-    traces = result.search_trace["fit_trace"].tolist()
-    assert all(isinstance(trace, list) for trace in traces)
-    assert any(len(trace) >= 1 for trace in traces)
-    first_trace = next(trace for trace in traces if trace)
-    assert {"iteration", "loss"}.issubset(first_trace[0])
-
-
-def test_tweedie_reml_profile_trace_can_include_candidate_objective_curves():
-    rng = np.random.default_rng(20260707)
-    n = 120
-    x = rng.uniform(0.0, 1.0, n)
-    X = pd.DataFrame({"x": x})
-    mu = np.exp(0.2 + 0.4 * np.sin(2 * np.pi * x))
-    y = generate_tweedie_cpg(n, mu=mu, phi=0.5, p=1.45, rng=rng)
-    model = SuperGLM(
-        family=families.tweedie(p=1.3),
-        selection_penalty=0.0,
-        spline_penalty=0.1,
-        features={"x": Spline(n_knots=5)},
-    )
-    model.fit_reml(X, y, max_reml_iter=5)
-
-    result = model.estimate_p(
-        X,
-        y,
-        fit_mode="inherit",
-        phi_method="pearson",
-        method="grid",
-        grid=np.array([1.25, 1.45]),
-        trace_iterations=True,
-    )
-
-    traces = result.search_trace["fit_trace"].tolist()
-    assert all(isinstance(trace, list) for trace in traces)
-    assert any(len(trace) >= 1 for trace in traces)
-    assert set(result.search_trace["fit_trace_kind"]) == {"REML objective"}
 
 
 def test_widget_profile_distribution_forwards_options_and_returns_trace(
@@ -3530,30 +3467,19 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
     widget = session.widget()
     calls: list[dict[str, object]] = []
     summary_calls: list[dict[str, str]] = []
-
-    class FakeTrace:
-        def to_dict(self, orient):
-            assert orient == "records"
-            return [{"step": 0, "p": 1.42, "phi": 0.3, "nll": 0.12, "source": "brent"}]
-
-    class FakeResult:
-        p_hat = 1.42
-        phi_hat = 0.3
-        nll = 0.12
-        method = "brent"
-        phi_method = "mle"
-        density_exact = True
-        _ci_cache = {}
-        search_trace = FakeTrace()
-
-        def ci(self, alpha=0.05):
-            raise AssertionError("editor payload must not evaluate a Tweedie profile CI")
-
-        ci_details = ci
+    # The first power was infeasible: it has no objective to plot.
+    result = _fake_tweedie_result(
+        {
+            "p": [1.95, 1.42],
+            "nll": [np.inf, 0.12],
+            "phi": [np.nan, 0.3],
+            "fit_converged": [False, True],
+        }
+    )
 
     def fake_reprofile(parameter, **kwargs):
         calls.append({"parameter": parameter, "kwargs": kwargs})
-        return FakeResult()
+        return result
 
     def fake_summary(_widget, source, *, level_display="expanded"):
         summary_calls.append({"source": source, "level_display": level_display})
@@ -3568,26 +3494,15 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
     monkeypatch.setattr("superglm.editor.widget.summary_payload", fake_summary)
 
     try:
-        payload = widget._profile_distribution(
-            "tweedie_p",
-            level_display="grouped",
-            method="brent",
-            phi_method="mle",
-            xatol=0.002,
-        )
+        payload = widget._profile_distribution("tweedie_p", level_display="grouped", xatol=0.002)
     finally:
         widget.close()
 
-    assert calls == [
-        {
-            "parameter": "tweedie_p",
-            "kwargs": {"method": "brent", "phi_method": "mle", "xatol": 0.002},
-        }
-    ]
+    assert calls == [{"parameter": "tweedie_p", "kwargs": {"xatol": 0.002}}]
     assert summary_calls == [{"source": "in_force", "level_display": "grouped"}]
     assert payload["level_display"] == "grouped"
     assert payload["profile_trace"] == [
-        {"step": 0, "p": 1.42, "phi": 0.3, "nll": 0.12, "source": "brent"}
+        {"step": 0, "p": 1.42, "nll": 0.12, "phi": 0.3, "fit_converged": True}
     ]
     assert payload["profile_estimate"] == {
         "parameter": "p",
@@ -3603,21 +3518,14 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
 
 
 @pytest.mark.parametrize(
-    ("phi_method", "ci_cache", "expected_low", "expected_high", "expected_status"),
+    ("ci_cache", "expected_low", "expected_high", "expected_status"),
     [
-        ("mle", {}, None, None, "not computed"),
-        ("mle", {0.05: (1.31, 1.53)}, 1.31, 1.53, "available"),
-        (
-            "pearson",
-            {0.05: (1.31, 1.53)},
-            None,
-            None,
-            "unavailable for Pearson plug-in",
-        ),
+        ({}, None, None, "not computed"),
+        ({0.05: Interval(1.31, 1.53, False, False)}, 1.31, 1.53, "available"),
+        ({0.05: Interval(1.31, 1.53, False, True)}, 1.31, 1.53, "censored"),
     ],
 )
-def test_tweedie_editor_profile_payload_only_reads_valid_cached_mle_ci(
-    phi_method,
+def test_tweedie_editor_profile_payload_only_reads_the_cached_ci(
     ci_cache,
     expected_low,
     expected_high,
@@ -3625,20 +3533,7 @@ def test_tweedie_editor_profile_payload_only_reads_valid_cached_mle_ci(
 ):
     from superglm.editor.widget import _profile_estimate_payload
 
-    def unexpected_ci(*args, **kwargs):
-        raise AssertionError("editor payload must not evaluate a Tweedie profile CI")
-
-    result = SimpleNamespace(
-        p_hat=1.42,
-        phi_hat=0.3,
-        nll=0.12,
-        method="brent",
-        phi_method=phi_method,
-        density_exact=True,
-        _ci_cache=dict(ci_cache),
-        ci=unexpected_ci,
-        ci_details=unexpected_ci,
-    )
+    result = _fake_tweedie_result({"p": [], "nll": []}, ci_cache=dict(ci_cache))
 
     payload = _profile_estimate_payload(result, "tweedie_p")
 
@@ -3647,17 +3542,40 @@ def test_tweedie_editor_profile_payload_only_reads_valid_cached_mle_ci(
     assert payload["ci_status"] == expected_status
 
 
-def test_tweedie_editor_profile_payload_tolerates_legacy_missing_ci_state():
+def test_nb_editor_profile_payload_keeps_a_censored_side_without_a_warning():
+    import warnings
+
     from superglm.editor.widget import _profile_estimate_payload
 
-    payload = _profile_estimate_payload(
-        SimpleNamespace(p_hat=1.42, phi_hat=0.3, nll=0.12),
-        "tweedie_p",
+    # True theta 50 on 400 rows cannot reject Poisson: theta_hat is interior and
+    # the interval's upper side stops where its search stopped.
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 400)})
+    mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+    y = rng.negative_binomial(50.0, 50.0 / (50.0 + mu)).astype(float)
+    model = SuperGLM(
+        family=families.NegativeBinomial(theta="auto"),
+        selection_penalty=0,
+        features={"x": Numeric()},
     )
+    result = model.estimate_theta(X, y)
 
-    assert payload["ci_low"] is None
-    assert payload["ci_high"] is None
-    assert payload["ci_status"] == "not computed"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        payload = _profile_estimate_payload(result, "nb2_theta")
+
+    interval = result._interval(0.05)
+    assert interval.upper_censored
+    assert (payload["ci_low"], payload["ci_high"], payload["ci_status"]) == (
+        interval.lower,
+        interval.upper,
+        "censored",
+    )
+    # A caution on a censored interval is shown with it, not in its place.
+    cautioned = dataclasses.replace(result, _caution="theta_hat is the last iterate.")
+    assert _profile_estimate_payload(cautioned, "nb2_theta")["ci_status"] == (
+        "censored with caution"
+    )
 
 
 def test_widget_profile_distribution_job_reports_live_trace(
@@ -3670,19 +3588,20 @@ def test_widget_profile_distribution_job_reports_live_trace(
         train_data=(X, y, None),
     )
     widget = session.widget()
-
-    class FakeTrace:
-        def to_dict(self, orient):
-            assert orient == "records"
-            return [{"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"}]
-
-    class FakeResult:
-        search_trace = FakeTrace()
+    first_row_sent = threading.Event()
+    release_search = threading.Event()
+    rows = [
+        {"p": 1.3, "nll": 0.14, "phi": 0.22, "fit_converged": True},
+        {"p": 1.5, "nll": 0.1, "phi": 0.2, "fit_converged": True},
+    ]
 
     def fake_reprofile(parameter, **kwargs):
-        trace_callback = kwargs["trace_callback"]
-        trace_callback({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
-        return FakeResult()
+        progress = kwargs["progress_callback"]
+        progress("profiling", {"profile_trace": [rows[0]]})
+        first_row_sent.set()
+        assert release_search.wait(timeout=2.0)
+        progress("profiling", {"profile_trace": [rows[1]]})
+        return _fake_tweedie_result({key: [row[key] for row in rows] for key in rows[0]})
 
     def fake_summary(_widget, source, *, level_display="expanded"):
         return {
@@ -3697,24 +3616,25 @@ def test_widget_profile_distribution_job_reports_live_trace(
 
     try:
         started = widget._start_profile_distribution_job(
-            "tweedie_p",
-            level_display="grouped",
-            method="brent",
-            phi_method="mle",
-            xatol=0.001,
+            "tweedie_p", level_display="grouped", xatol=0.001
         )
         job_id = started["job_id"]
+        assert first_row_sent.wait(timeout=2.0)
+        running = widget._profile_distribution_status(job_id)
+        release_search.set()
         status = widget._profile_distribution_status(job_id, wait=True)
     finally:
+        release_search.set()
         widget.close()
 
-    assert started["status"] in {"running", "complete"}
+    # Rows arrive while the search runs, numbered as the completed trace numbers them.
+    assert running["status"] == "running"
+    assert running["phase"] == "profiling"
+    assert running["trace"] == [{"step": 0, **rows[0]}]
     assert status["status"] == "complete"
-    assert status["options"] == {"method": "brent", "phi_method": "mle", "xatol": 0.001}
-    assert status["trace"] == [
-        {"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"},
-        {"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"},
-    ]
+    assert status["options"] == {"xatol": 0.001}
+    assert status["trace"] == [{"step": 0, **rows[0]}, {"step": 1, **rows[1]}]
+    assert status["result"]["profile_trace"] == status["trace"]
     assert status["result"]["source"] == "in_force"
     assert status["result"]["level_display"] == "grouped"
 
@@ -3732,18 +3652,9 @@ def test_widget_profile_distribution_job_reports_finalizing_phase(
     summary_started = threading.Event()
     release_summary = threading.Event()
 
-    class FakeTrace:
-        def to_dict(self, orient):
-            assert orient == "records"
-            return [{"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"}]
-
-    class FakeResult:
-        search_trace = FakeTrace()
-
     def fake_reprofile(parameter, **kwargs):
-        trace_callback = kwargs["trace_callback"]
-        trace_callback({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
-        return FakeResult()
+        kwargs["progress_callback"]("profiling", {"profile_trace": [{"p": 1.3, "nll": 0.14}]})
+        return _fake_tweedie_result({"p": [1.3], "nll": [0.14]})
 
     def blocking_summary(_widget, source, *, level_display="expanded"):
         assert level_display == "expanded"
@@ -3755,12 +3666,7 @@ def test_widget_profile_distribution_job_reports_finalizing_phase(
     monkeypatch.setattr("superglm.editor.widget.summary_payload", blocking_summary)
 
     try:
-        started = widget._start_profile_distribution_job(
-            "tweedie_p",
-            method="brent",
-            phi_method="mle",
-            xatol=0.001,
-        )
+        started = widget._start_profile_distribution_job("tweedie_p", xatol=0.001)
         job_id = started["job_id"]
         assert summary_started.wait(timeout=2.0)
         status = widget._profile_distribution_status(job_id)
@@ -3772,7 +3678,7 @@ def test_widget_profile_distribution_job_reports_finalizing_phase(
 
     assert status["status"] == "running"
     assert status["phase"] == "finalizing"
-    assert status["trace"] == [{"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"}]
+    assert status["trace"] == [{"step": 0, "p": 1.3, "nll": 0.14}]
     assert complete["status"] == "complete"
     assert complete["phase"] == "complete"
 
@@ -3790,28 +3696,8 @@ def test_widget_profile_distribution_job_reports_best_parameter_and_refit_phase(
     refit_started = threading.Event()
     release_refit = threading.Event()
 
-    class FakeTrace:
-        def to_dict(self, orient):
-            assert orient == "records"
-            return [{"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"}]
-
-    class FakeResult:
-        p_hat = 1.5
-        phi_hat = 0.2
-        nll = 0.1
-        method = "brent"
-        phi_method = "mle"
-        density_exact = True
-        _ci_cache = {0.05: (1.4, 1.6)}
-        search_trace = FakeTrace()
-
-        def ci(self, alpha=0.05):
-            raise AssertionError("editor payload must not evaluate a Tweedie profile CI")
-
-        ci_details = ci
-
     def fake_reprofile(parameter, **kwargs):
-        kwargs["trace_callback"]({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
+        kwargs["progress_callback"]("profiling", {"profile_trace": [{"p": 1.3, "nll": 0.14}]})
         kwargs["progress_callback"](
             "best_found",
             {
@@ -3828,7 +3714,10 @@ def test_widget_profile_distribution_job_reports_best_parameter_and_refit_phase(
         kwargs["progress_callback"]("final_refit")
         refit_started.set()
         assert release_refit.wait(timeout=2.0)
-        return FakeResult()
+        return _fake_tweedie_result(
+            {"p": [1.3, 1.5], "nll": [0.14, 0.1]},
+            ci_cache={0.05: Interval(1.4, 1.6, False, False)},
+        )
 
     monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
     monkeypatch.setattr(
@@ -3842,12 +3731,7 @@ def test_widget_profile_distribution_job_reports_best_parameter_and_refit_phase(
     )
 
     try:
-        started = widget._start_profile_distribution_job(
-            "tweedie_p",
-            method="brent",
-            phi_method="mle",
-            xatol=0.001,
-        )
+        started = widget._start_profile_distribution_job("tweedie_p", xatol=0.001)
         job_id = started["job_id"]
         assert refit_started.wait(timeout=2.0)
         status = widget._profile_distribution_status(job_id)

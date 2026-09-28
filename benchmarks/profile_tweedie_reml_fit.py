@@ -4,18 +4,17 @@ Answers, with counters rather than guesses (refs #339 profiling work):
 
   * how many REML criterion evaluations (``reml_laml_objective``) one fit makes;
   * how many times ``profile_tweedie_reml_scale`` runs per fit;
-  * how many criterion evaluations each bounded Brent solve inside it takes
-    (``minimize_scalar`` nfev), plus bracket-expansion restarts, curvature
-    evaluations, and the phi-cache hit rate;
+  * how many of those solve for phi (the rest are answered by the rows' memo)
+    and how many Newton passes each solve takes;
   * how much wall time the whole scale-profile subsystem accounts for, split
-    into the Dunn-Smyth density passes and everything around them.
+    into the Dunn-Smyth series passes and everything around them.
 
 The probes are import-time monkeypatches on the consumer namespaces (the
 callers bind ``profile_tweedie_reml_scale`` by ``from ... import``, so
-patching ``superglm.reml.scale`` alone would count nothing).  On a tree whose
-``reml.scale`` has no Tweedie profiler (v0.28.0), the scale probes skip and
-the harness still counts criterion evaluations, so the same script drives
-both arms of an A/B.
+patching ``superglm.reml.scale`` alone would count nothing).  On a tree
+without the ``superglm._tweedie`` solver the scale probes skip and the harness
+still counts criterion evaluations; time an older tree with its own copy of
+this script for the probe counts.
 
 Workloads:
   * ``--dataset fremtpl2``: freMTPL2freq (public), y = ClaimNb/Exposure,
@@ -68,32 +67,13 @@ class Probes:
         self.laml_time = 0.0
         self.profile_calls = 0
         self.profile_time = 0.0
-        self.minimize_calls = 0
-        self.minimize_nfev: list[int] = []
-        self.per_profile_minimize: list[int] = []
-        self.per_profile_nfev: list[int] = []
-        self.sat_calls = 0
-        self.sat_cache_hits = 0
-        self.sat_time = 0.0
-        self.score_calls = 0
-        self.score_cache_hits = 0
-        self.score_time = 0.0
-        self.brentq_calls = 0
-        self.brentq_nfev: list[int] = []
-        self.density_calls = 0
-        self.density_calls_sat = 0
-        self.density_calls_score = 0
-        self.density_rows = 0
-        self.density_time = 0.0
-        self.density_time_sat = 0.0
-        self.density_time_score = 0.0
+        self.newton_passes: list[int] = []
+        self.series_calls = 0
+        self.series_rows = 0
+        self.series_time = 0.0
         self.prepare_calls = 0
         self.prepare_time = 0.0
-        self.pirls_calls = 0
         self.scale_probes_active = False
-        self._in_sat = False
-        self._in_score = False
-        self._in_profile = False
         self._in_laml = 0
 
     # -- installation -------------------------------------------------------
@@ -145,193 +125,85 @@ class Probes:
         import importlib
 
         try:
-            scale_mod = importlib.import_module("superglm.reml.scale")
+            tweedie_mod = importlib.import_module("superglm._tweedie")
         except ImportError:
-            return
-        orig_profile = getattr(scale_mod, "profile_tweedie_reml_scale", None)
-        if orig_profile is None:
-            return  # v0.28.0-shaped tree: no Tweedie scale profiler
+            return  # no single series solver on this tree
+        scale_mod = importlib.import_module("superglm.reml.scale")
         self.scale_probes_active = True
         probes = self
+        consumers = ("superglm.reml.objective", "superglm.reml.direct", "superglm.reml.discrete")
+        self._wrap(scale_mod, "profile_tweedie_reml_scale", consumers, "profile")
+        self._wrap(scale_mod, "prepare_tweedie_reml_scale_data", consumers, "prepare")
 
-        # minimize_scalar is resolved from scale.py's module globals at call
-        # time, so patching it there is enough.
-        orig_ms = scale_mod.minimize_scalar
+        # solve_log_phi calls _global_log_phi only when its memo misses; its
+        # n_passes counts every series pass, a lattice comparison's included.
+        orig_newton = tweedie_mod._global_log_phi
 
-        def counting_minimize(*args, **kwargs):
-            res = orig_ms(*args, **kwargs)
-            probes.minimize_calls += 1
-            probes.minimize_nfev.append(int(res.nfev))
-            return res
+        def counting_newton(*args, **kwargs):
+            solved = orig_newton(*args, **kwargs)
+            probes.newton_passes.append(solved.n_passes)
+            return solved
 
-        scale_mod.minimize_scalar = counting_minimize
+        tweedie_mod._global_log_phi = counting_newton
 
-        # brentq inside scale.py serves both the Gamma profiler and the
-        # 0.29.0 Tweedie score polish; count it only inside the Tweedie
-        # profile, with the objective wrapped so iteration counts are exact.
-        orig_brentq = scale_mod.brentq
+        orig_series = tweedie_mod.series_moments
 
-        def counting_brentq(f, *args, **kwargs):
-            if not probes._in_profile:
-                return orig_brentq(f, *args, **kwargs)
-            box = [0]
-
-            def counted(u):
-                box[0] += 1
-                return f(u)
-
-            try:
-                return orig_brentq(counted, *args, **kwargs)
-            finally:
-                probes.brentq_calls += 1
-                probes.brentq_nfev.append(box[0])
-
-        scale_mod.brentq = counting_brentq
-
-        def counting_profile(*args, **kwargs):
-            calls_before = probes.minimize_calls
-            nfev_before = sum(probes.minimize_nfev)
-            probes._in_profile = True
+        def counting_series(log_t, a, **kwargs):
             t0 = time.perf_counter()
             try:
-                return orig_profile(*args, **kwargs)
+                return orig_series(log_t, a, **kwargs)
             finally:
-                probes.profile_time += time.perf_counter() - t0
-                probes._in_profile = False
-                probes.profile_calls += 1
-                probes.per_profile_minimize.append(probes.minimize_calls - calls_before)
-                probes.per_profile_nfev.append(sum(probes.minimize_nfev) - nfev_before)
+                probes.series_time += time.perf_counter() - t0
+                probes.series_calls += 1
+                probes.series_rows += len(log_t)
 
-        for name in (
-            "superglm.reml.objective",
-            "superglm.reml.direct",
-            "superglm.reml.discrete",
-        ):
-            try:
-                mod = importlib.import_module(name)
-            except ImportError:
-                continue
-            if getattr(mod, "profile_tweedie_reml_scale", None) is orig_profile:
-                mod.profile_tweedie_reml_scale = counting_profile
-        scale_mod.profile_tweedie_reml_scale = counting_profile
+        tweedie_mod.series_moments = counting_series
 
-        orig_prepare = scale_mod.prepare_tweedie_reml_scale_data
+    def _wrap(self, owner, name: str, consumers: tuple[str, ...], counter: str) -> None:
+        """Count and time ``owner.name`` in every module that imported it by name."""
+        import importlib
 
-        def counting_prepare(*args, **kwargs):
+        orig = getattr(owner, name)
+        probes = self
+
+        def counting(*args, **kwargs):
             t0 = time.perf_counter()
             try:
-                return orig_prepare(*args, **kwargs)
+                return orig(*args, **kwargs)
             finally:
-                probes.prepare_time += time.perf_counter() - t0
-                probes.prepare_calls += 1
+                setattr(
+                    probes,
+                    f"{counter}_time",
+                    getattr(probes, f"{counter}_time") + time.perf_counter() - t0,
+                )
+                setattr(probes, f"{counter}_calls", getattr(probes, f"{counter}_calls") + 1)
 
-        for name in (
-            "superglm.reml.objective",
-            "superglm.reml.direct",
-            "superglm.reml.discrete",
-            "superglm.reml.scop_efs",
-        ):
-            try:
-                mod = importlib.import_module(name)
-            except ImportError:
-                continue
-            if getattr(mod, "prepare_tweedie_reml_scale_data", None) is orig_prepare:
-                mod.prepare_tweedie_reml_scale_data = counting_prepare
-        scale_mod.prepare_tweedie_reml_scale_data = counting_prepare
-
-        orig_sat = scale_mod.TweedieScaleProfileData.saturated_log_likelihood
-
-        def counting_sat(data, phi):
-            probes.sat_calls += 1
-            if float(phi) in data._saturated_cache:
-                probes.sat_cache_hits += 1
-            probes._in_sat = True
-            t0 = time.perf_counter()
-            try:
-                return orig_sat(data, phi)
-            finally:
-                probes.sat_time += time.perf_counter() - t0
-                probes._in_sat = False
-
-        scale_mod.TweedieScaleProfileData.saturated_log_likelihood = counting_sat
-
-        orig_score = getattr(scale_mod.TweedieScaleProfileData, "saturated_nll_log_phi_score", None)
-        if orig_score is not None:
-
-            def counting_score(data, phi):
-                probes.score_calls += 1
-                if float(phi) in data._saturated_score_cache:
-                    probes.score_cache_hits += 1
-                probes._in_score = True
-                t0 = time.perf_counter()
-                try:
-                    return orig_score(data, phi)
-                finally:
-                    probes.score_time += time.perf_counter() - t0
-                    probes._in_score = False
-
-            scale_mod.TweedieScaleProfileData.saturated_nll_log_phi_score = counting_score
-
-        tw = importlib.import_module("superglm.profiling.tweedie")
-        orig_eval = tw._evaluate_tweedie_density
-
-        def counting_eval(prepared, phi, **kwargs):
-            t0 = time.perf_counter()
-            try:
-                return orig_eval(prepared, phi, **kwargs)
-            finally:
-                dt = time.perf_counter() - t0
-                probes.density_calls += 1
-                probes.density_rows += len(prepared.y)
-                probes.density_time += dt
-                if probes._in_sat:
-                    probes.density_calls_sat += 1
-                    probes.density_time_sat += dt
-                if probes._in_score:
-                    probes.density_calls_score += 1
-                    probes.density_time_score += dt
-
-        tw._evaluate_tweedie_density = counting_eval
+        for module_name in consumers:
+            module = importlib.import_module(module_name)
+            if getattr(module, name, None) is orig:
+                setattr(module, name, counting)
+        setattr(owner, name, counting)
 
     # -- reporting ----------------------------------------------------------
 
     def summary(self) -> dict:
-        nfev = np.asarray(self.minimize_nfev, dtype=np.int64)
-        per_profile = np.asarray(self.per_profile_nfev, dtype=np.int64)
+        passes = np.asarray(self.newton_passes, dtype=np.int64)
         return {
             "laml_calls": self.laml_calls,
             "laml_time_s": round(self.laml_time, 4),
             "scale_probes_active": self.scale_probes_active,
             "profile_tweedie_reml_scale_calls": self.profile_calls,
             "profile_time_s": round(self.profile_time, 4),
-            "minimize_scalar_calls": self.minimize_calls,
-            "bracket_restarts": self.minimize_calls - self.profile_calls,
-            "minimize_nfev_total": int(nfev.sum()) if nfev.size else 0,
-            "minimize_nfev_per_solve": {
-                "min": int(nfev.min()) if nfev.size else 0,
-                "median": float(np.median(nfev)) if nfev.size else 0,
-                "max": int(nfev.max()) if nfev.size else 0,
+            "phi_newton_solves": int(passes.size),
+            "phi_solve_memo_hits": self.profile_calls - int(passes.size),
+            "newton_passes_per_solve": {
+                "min": int(passes.min()) if passes.size else 0,
+                "median": float(np.median(passes)) if passes.size else 0,
+                "max": int(passes.max()) if passes.size else 0,
             },
-            "nfev_per_profile_call": {
-                "min": int(per_profile.min()) if per_profile.size else 0,
-                "median": float(np.median(per_profile)) if per_profile.size else 0,
-                "max": int(per_profile.max()) if per_profile.size else 0,
-            },
-            "brentq_polish_calls": self.brentq_calls,
-            "brentq_polish_nfev_total": int(sum(self.brentq_nfev)),
-            "saturated_ll_calls": self.sat_calls,
-            "saturated_cache_hits": self.sat_cache_hits,
-            "saturated_time_s": round(self.sat_time, 4),
-            "score_calls": self.score_calls,
-            "score_cache_hits": self.score_cache_hits,
-            "score_time_s": round(self.score_time, 4),
-            "density_eval_calls": self.density_calls,
-            "density_eval_calls_from_value": self.density_calls_sat,
-            "density_eval_calls_from_score": self.density_calls_score,
-            "density_rows_evaluated": self.density_rows,
-            "density_time_s": round(self.density_time, 4),
-            "density_time_from_value_s": round(self.density_time_sat, 4),
-            "density_time_from_score_s": round(self.density_time_score, 4),
+            "series_passes": self.series_calls,
+            "series_rows_evaluated": self.series_rows,
+            "series_time_s": round(self.series_time, 4),
             "prepare_calls": self.prepare_calls,
             "prepare_time_s": round(self.prepare_time, 4),
         }
@@ -396,7 +268,7 @@ def load_synthetic(n_rows: int, seed: int = 7, signal: str = "weak"):
     flat criterion directions) that the original A/B's 400k case lived in;
     ``signal="strong"`` is the sharply identified regime (lambda < 1).
     """
-    from superglm.profiling.tweedie import generate_tweedie_cpg
+    from superglm import generate_tweedie_cpg
 
     rng = np.random.default_rng(seed)
     x1 = rng.uniform(0.0, 1.0, n_rows)
@@ -437,7 +309,7 @@ def build_synthetic_model(discrete: bool):
 
 
 def load_random_effect(n_rows: int, seed: int = 11):
-    from superglm.profiling.tweedie import generate_tweedie_cpg
+    from superglm import generate_tweedie_cpg
 
     rng = np.random.default_rng(seed)
     n_levels = 250
@@ -475,7 +347,7 @@ _BURN_PHI = 167.5
 
 
 def load_burn_cost(n_rows: int, seed: int = 2026):
-    from superglm.profiling.tweedie import generate_tweedie_cpg
+    from superglm import generate_tweedie_cpg
 
     if n_rows <= 0:
         n_rows = 67_000

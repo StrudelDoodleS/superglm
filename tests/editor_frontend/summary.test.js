@@ -115,8 +115,8 @@ function compactLevelSummary(levelDisplay, { hasLevelGroups = true } = {}) {
   };
 }
 
-/** @param {string} tweedieMethod */
-function compactTweedieSummaryMarkup(tweedieMethod) {
+/** @param {[number, number] | null} ci @param {string} ciStatus */
+function compactTweedieSummaryMarkup(ci, ciStatus) {
   const nodes = {
     summaryStatus: { textContent: "" },
     summaryNote: { textContent: "" },
@@ -132,9 +132,8 @@ function compactTweedieSummaryMarkup(tweedieMethod) {
         link: "Log",
         method: "PIRLS",
         tweedie_p: 1.55,
-        tweedie_p_ci: null,
-        tweedie_p_ci_status: "not computed",
-        tweedie_p_method: tweedieMethod
+        tweedie_p_ci: ci,
+        tweedie_p_ci_status: ciStatus
       },
       rows: []
     }
@@ -142,8 +141,12 @@ function compactTweedieSummaryMarkup(tweedieMethod) {
   return nodes.summaryFrame.innerHTML;
 }
 
-/** @param {string | undefined} ciStatus @param {string} [parameter] */
-async function completedProfileLegend(ciStatus, parameter = "tweedie_p") {
+/**
+ * @param {string | undefined} ciStatus
+ * @param {string} [parameter]
+ * @param {[number | null, number | null]} [ci]
+ */
+async function completedProfileLegend(ciStatus, parameter = "tweedie_p", ci = [null, null]) {
   const nodes = profileTraceNodes();
   const result = { available: false, label: "Profiled model", error: "No compact summary" };
   const isNb2 = parameter === "nb2_theta";
@@ -161,8 +164,8 @@ async function completedProfileLegend(ciStatus, parameter = "tweedie_p") {
         parameter: isNb2 ? "theta" : "p",
         label: isNb2 ? "theta_hat" : "p_hat",
         value: 1.55,
-        ci_low: null,
-        ci_high: null,
+        ci_low: ci[0],
+        ci_high: ci[1],
         ci_status: ciStatus
       },
       result
@@ -496,18 +499,25 @@ test("direct summary helpers default legacy callers to expanded", async () => {
   assert.equal(calls[0].level_display, "expanded");
 });
 
-for (const method of [
-  "Profile MLE (Brent)",
-  "Approximate profile (Brent; Pearson plug-in)",
-  "Profile MLE (Brent; density approximation)"
-]) {
-  test(`compact Tweedie summary renders the profile method: ${method}`, () => {
-    const markup = compactTweedieSummaryMarkup(method);
+test("compact Tweedie summary shows the interval and has no method fact", () => {
+  const markup = compactTweedieSummaryMarkup([1.4, 1.7], "available");
 
-    assert.match(markup, /Tweedie p method/);
-    assert.ok(markup.includes(method));
-  });
-}
+  assert.ok(markup.includes("[1.4, 1.7]"));
+  assert.doesNotMatch(markup, /censored/);
+  assert.doesNotMatch(markup, /Tweedie p method/);
+});
+
+test("compact Tweedie summary marks a censored interval", () => {
+  const markup = compactTweedieSummaryMarkup([1.6, 1.7], "censored");
+
+  assert.ok(markup.includes("[1.6, 1.7] censored"));
+});
+
+test("compact Tweedie summary says when no interval was computed", () => {
+  const markup = compactTweedieSummaryMarkup(null, "not computed");
+
+  assert.match(markup, /not computed/);
+});
 
 test("profile completion is accepted before the caller schedules new-revision evidence", async () => {
   /** @type {string[]} */
@@ -557,11 +567,10 @@ test("uncached Tweedie MLE profile reports that its CI was not computed", async 
   assert.doesNotMatch(nodes.profileTraceStatus.textContent, /profile CI/i);
 });
 
-test("Pearson plug-in profile reports that a likelihood-ratio CI is unavailable", async () => {
-  const nodes = await completedProfileLegend("unavailable for Pearson plug-in");
+test("censored Tweedie profile interval is marked censored", async () => {
+  const nodes = await completedProfileLegend("censored", "tweedie_p", [1.6, 1.7]);
 
-  assert.match(nodes.profileTraceLegend.innerHTML, /CI unavailable/);
-  assert.doesNotMatch(nodes.profileTraceLegend.innerHTML, /CI pending/);
+  assert.match(nodes.profileTraceLegend.innerHTML, /CI \[1\.6, 1\.7\] censored/);
 });
 
 test("NB2 profile keeps its pending CI wording until its interval is available", async () => {

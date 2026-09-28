@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -635,6 +635,11 @@ class SuperGLM:
 
         ``fit_reml()`` is the smoothness-selection path and does not support a
         selection penalty: configure ``selection_penalty=None`` or ``0.0``.
+        A Tweedie power within about 0.005 of 1, or further out for repeated
+        responses (whose rows share a lattice phase), makes the dispersion
+        profile multimodal; each of its solves then searches globally (seconds
+        per fit at p = 1.001 on 30,000 distinct rows), and a power too close to
+        1 for that search raises ``superglm.NearPoissonDispersionError``.
         It optimizes a Laplace approximate REML objective over per-term
         smoothing parameters. For sparse/group selection, use ``fit()`` or
         ``fit_path()``. To let REML shrink spline null spaces, use
@@ -1296,13 +1301,21 @@ class SuperGLM:
         *,
         fit_mode: str = "fit",
         search_fit_mode: str | None = None,
-        phi_method: str = "mle",
-        method: str = "auto",
+        p_bounds: tuple[float, float] = (1.05, 1.95),
+        xatol: float = 1e-3,
         ci_alpha: float | None = None,
         max_reml_iter: int | None = None,
-        **kwargs,
+        progress_callback: Callable[..., None] | None = None,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
+
+        At each candidate ``p`` the mean is refitted and ``phi`` is its
+        maximum-likelihood value at that mean; ``p`` minimises the resulting
+        profile negative log-likelihood by bounded Brent search (Dunn & Smyth
+        2005), and the published fit is refitted at the selected ``p``. The
+        search is local: if the profile has more than one interior minimum
+        in ``p_bounds``, it can return one that is not the global minimum,
+        with no warning. Only an estimate on a bound is flagged.
 
         Parameters
         ----------
@@ -1336,7 +1349,7 @@ class SuperGLM:
             fitted mean, so the returned estimates describe the model you get
             back. Selecting ``p`` under a different objective than the one that
             publishes it is an approximation -- on the synthetic benchmark
-            fixture it moved ``p_hat`` by 1.1e-7 while running about 3x faster
+            fixture it moved ``p_hat`` by 1.1e-6 while running about 1.8x faster
             -- so measure it on your own data before relying on it. A decoupled
             search also never meets the certifiable-region boundary a coupled
             REML search must route around (a coupled run warns when its optimum
@@ -1345,32 +1358,35 @@ class SuperGLM:
             ``superglm.PublicationModeError`` naming the ways out. Likelihood-ratio confidence intervals remain
             available either way; they invert the searched profile, so they
             describe the regime named by ``search_fit_mode``.
-        phi_method : {"pearson", "mle"}
-            How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
-            ``"mle"`` (default) maximizes the likelihood in ``phi``; the joint
-            fast path uses exact derivatives and defensive searches use a nested
-            scalar optimization. ``"pearson"`` is an explicit faster plug-in and
-            does not support likelihood-ratio confidence intervals.
-        method : {"auto", "joint_ml", "brent", "grid", "grid_refine", "profile_opt"}
-            Search strategy. ``"auto"`` (default) uses safeguarded exact joint
-            ML for ordinary MLE profiles and Brent otherwise. ``"joint_ml"``
-            explicitly requests that fast path within its stable ``p`` range and
-            falls back defensively otherwise. ``"brent"`` uses bounded scalar
-            optimisation. ``"grid"`` does exhaustive grid search.
-            ``"grid_refine"`` does a coarse grid + local Brent refinement.
-            ``"profile_opt"`` uses a general-purpose optimizer on
-            logit-transformed p.
+        p_bounds : tuple of float
+            Search interval for ``p``, strictly inside ``(1, 2)``. An estimate on
+            a bound is warned about and recorded in ``result.warnings``: a
+            maximum as ``p -> 1`` can be an artefact of rounded responses. Near
+            ``p = 1`` the dispersion profile is multimodal and its global search
+            grows like ``1 / (p - 1)``; a power whose search would exceed its
+            bound (``superglm.NearPoissonDispersionError``) is skipped as
+            infeasible and recorded.
+        xatol : float
+            Absolute resolution of the Brent search in ``p``.
         ci_alpha : float, optional
             Significance level for an explicitly requested likelihood-ratio
             profile confidence interval. For example, ``0.05`` computes a 95%
             interval and caches it for ``model.summary(alpha=0.05)``. The
-            default ``None`` performs no confidence-interval evaluations.
+            default ``None`` performs no confidence-interval evaluations. If
+            the searched winner's fit, or a fit the interval evaluates, did not
+            converge, the interval is still computed, and the cause is warned
+            and recorded in ``result.warnings``.
         max_reml_iter : int, optional
             Outer-iteration budget for the REML *publication* refit alone;
             candidate search fits keep their own budget. Requires
             ``fit_mode="reml"`` -- a pure-ML publication has no REML
             iteration to budget and refuses the parameter. The default
             ``None`` uses the ``fit_reml`` default of 20.
+        progress_callback : callable, optional
+            Called as ``progress_callback(phase, payload)``: ``"profiling"``
+            with ``{"profile_trace": [row]}`` for each feasible search
+            candidate, then ``"best_found"`` and ``"final_refit"`` with
+            ``{"profile_estimate": ...}``.
         """
         return profile_ops.estimate_p(
             self,
@@ -1380,11 +1396,11 @@ class SuperGLM:
             offset,
             fit_mode=fit_mode,
             search_fit_mode=search_fit_mode,
-            phi_method=phi_method,
-            method=method,
+            p_bounds=p_bounds,
+            xatol=xatol,
             ci_alpha=ci_alpha,
             max_reml_iter=max_reml_iter,
-            **kwargs,
+            progress_callback=progress_callback,
         )
 
     def estimate_theta(
@@ -1393,10 +1409,62 @@ class SuperGLM:
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
-        **kwargs,
+        *,
+        fit_mode: str = "fit",
+        theta_bounds: tuple[float, float] = (1e-8, 1e8),
+        xatol: float = 1e-2,
+        ci_alpha: float | None = None,
+        progress_callback: Callable[..., None] | None = None,
     ):
-        """Estimate NB theta via profile likelihood, refit, and return result."""
-        return profile_ops.estimate_theta(self, X, y, sample_weight, offset, **kwargs)
+        """Estimate NB2 theta via profile likelihood, refit, and return result.
+
+        The mean fit alternates with the root of the closed-form profile score
+        in theta at that mean (Venables & Ripley 2002, ch. 7.4; Lawless 1987)
+        until theta settles, and the published fit is refitted at the estimate.
+
+        Parameters
+        ----------
+        X : pandas or eager Polars DataFrame
+            Feature matrix. Lazy frames must be collected before fitting.
+        y : array-like
+            Count response.
+        sample_weight : array-like, optional
+            Observation weights, read under the model's ``weight_semantics``.
+        offset : array-like, optional
+            Offset added to the linear predictor.
+        fit_mode : {"fit", "reml", "inherit"}
+            Fitting regime for the published final fit. The alternation itself
+            uses ordinary fits.
+        theta_bounds : tuple of float
+            Search range for theta. An estimate on a bound warns with
+            ``NBThetaBoundWarning`` and reports ``converged=False``.
+        xatol : float
+            The alternation stops once theta moves by at most this fraction of
+            itself between successive mean fits.
+        ci_alpha : float, optional
+            Compute the ``1 - ci_alpha`` likelihood-ratio interval at the
+            published mean before returning. It is inverted from that mean's
+            own profile optimum; where theta_hat is not it (an alternation or
+            joint refinement that stopped short, or theta_hat outside that
+            interval), a caution is warned, recorded, and shown in the
+            interval's status.
+        progress_callback : callable, optional
+            Called as ``progress_callback(phase, payload)``: ``"profiling"``
+            with ``{"profile_trace": [row]}`` for each alternation step, then
+            ``"best_found"`` and ``"final_refit"`` with ``{"profile_estimate": ...}``.
+        """
+        return profile_ops.estimate_theta(
+            self,
+            X,
+            y,
+            sample_weight,
+            offset,
+            fit_mode=fit_mode,
+            theta_bounds=theta_bounds,
+            xatol=xatol,
+            ci_alpha=ci_alpha,
+            progress_callback=progress_callback,
+        )
 
     # ── Plotting ──────────────────────────────────────────────────
 

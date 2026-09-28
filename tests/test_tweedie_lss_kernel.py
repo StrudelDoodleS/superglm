@@ -11,8 +11,8 @@ import pytest
 from numba import njit  # type: ignore[import-untyped]
 from numba.core.caching import FunctionCache, NullCache  # type: ignore[import-untyped]
 from numba.core.dispatcher import Dispatcher  # type: ignore[import-untyped]
+from scipy.special import polygamma
 
-from superglm import _tweedie_profile_kernel as profile_kernel
 from tests._distributional_family_kernels import tweedie as tweedie_kernel
 from tests._tweedie_lss_oracles import (
     CENTERED_RHO_MOMENT_ORACLE,
@@ -957,7 +957,9 @@ def test_joint_digamma_trigamma_matches_existing_channels(value: float) -> None:
     digamma, trigamma = compiled_module._digamma_trigamma_positive(value)
 
     assert digamma == compiled_module._digamma_positive(value)
-    assert trigamma == profile_kernel._trigamma_positive(value)
+    # The dedicated trigamma channel lived in the deleted Tweedie profile
+    # kernel, bitwise equal to this one; its check against SciPy carries over.
+    assert trigamma == pytest.approx(float(polygamma(1, value)), rel=3e-14, abs=3e-14)
 
 
 def test_external_values_and_weight_identity_reject_required_compiled_mutations() -> None:

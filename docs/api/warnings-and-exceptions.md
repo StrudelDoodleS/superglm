@@ -9,6 +9,7 @@ silence. Each docstring says when it fires and what to do about it.
    :nosignatures:
 
    superglm.PublicationModeError
+   superglm.NearPoissonDispersionError
    superglm.RatingTableBaseNotRepresentableError
    superglm.SeparationError
    superglm.SeparationWarning

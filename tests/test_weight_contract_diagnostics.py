@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from superglm import Numeric, SuperGLM
+from superglm import Numeric, SuperGLM, tweedie_logpdf
 from superglm._frame import as_eager_frame
 from superglm.diagnostics.term_diagnostics import (
     _drop_term_holdout,
@@ -18,7 +18,6 @@ from superglm.diagnostics.term_diagnostics import (
     term_importance,
 )
 from superglm.distributions import Gaussian, NegativeBinomial, Tweedie
-from superglm.profiling.tweedie import tweedie_logpdf
 from superglm.stats.model_tests import vuong_test, zero_inflation_index
 
 

@@ -8,11 +8,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import SuperGLM, generate_tweedie_cpg
 from superglm.distributions import Gamma, NegativeBinomial, Tweedie
 from superglm.features.spline import CubicRegressionSpline
 from superglm.group_matrix import SparseSSPGroupMatrix
-from superglm.profiling.tweedie import generate_tweedie_cpg
 from superglm.reml import compute_dW_deta
 
 

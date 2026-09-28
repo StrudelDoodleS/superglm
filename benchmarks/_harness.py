@@ -8,7 +8,7 @@ import io
 import os
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -269,13 +269,3 @@ def dump_json(path: str | Path, payload: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-
-
-def dataclass_payload(obj: Any) -> dict[str, Any]:
-    """Convert a dataclass-like object into a JSON-serializable mapping."""
-    try:
-        return asdict(obj)
-    except TypeError:
-        if hasattr(obj, "__dict__"):
-            return dict(obj.__dict__)
-        raise

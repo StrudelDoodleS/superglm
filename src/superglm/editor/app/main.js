@@ -154,10 +154,6 @@ const profileDialogTitle = document.getElementById("profileDialogTitle");
 const profileDialogDescription = document.getElementById("profileDialogDescription");
 const profileDialogClose = document.getElementById("profileDialogClose");
 const profileOptions = document.getElementById("profileOptions");
-const profileMethodWrap = document.getElementById("profileMethodWrap");
-const profileMethod = document.getElementById("profileMethod");
-const profilePhiWrap = document.getElementById("profilePhiWrap");
-const profilePhiMethod = document.getElementById("profilePhiMethod");
 const profileTolerance = document.getElementById("profileTolerance");
 const profileRun = document.getElementById("profileRun");
 const profileProgress = document.getElementById("profileProgress");
@@ -448,10 +444,6 @@ function summaryNodes() {
     profileDialogDescription,
     profileRun,
     profileOptions,
-    profileMethodWrap,
-    profileMethod,
-    profilePhiWrap,
-    profilePhiMethod,
     profileTolerance,
     profileProgress,
     profileTraceStatus,

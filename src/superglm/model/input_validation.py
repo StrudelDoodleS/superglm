@@ -49,7 +49,6 @@ _UNIT_WEIGHT_TOLERANCE = 1e-9
 #: fitted family is indistinguishable from a fixed-theta one at evaluation --
 #: and at evaluation nothing is refitted, so nothing but the likelihood moves.
 THETA_FIXED = "fixed"  #: given constant, or an already-fitted model being scored
-THETA_PROFILED = "profiled"  #: profiled with mu held fixed (a standalone interval)
 THETA_ESTIMATED = "estimated"  #: profiled and fed back into IRLS (an auto fit)
 
 
@@ -66,14 +65,10 @@ def _interpolated_density_reach(family, *, theta_role: str) -> str:
         so only the reported likelihood moves.  Claiming that ``theta_hat`` and
         its interval are affected here is false twice over: a fixed-theta model
         has no ``theta_hat``, and an evaluation does not produce one.
-    ``THETA_PROFILED``
-        theta is profiled against the interpolated density with ``mu`` held
-        fixed, as in a standalone confidence interval.  The interval moves; the
-        coefficients cannot, because nothing is refitted.
     ``THETA_ESTIMATED``
         theta is profiled and then re-enters ``V(mu)``, the IRLS working
-        weights and the unit deviance, as in an auto-theta fit.  The estimates
-        move as well.
+        weights and the unit deviance, as in an auto-theta fit or
+        ``estimate_theta``.  The estimates move as well.
     """
     if not isinstance(family, NegativeBinomial):
         return " Coefficients, fitted means and deviance are unaffected."
@@ -88,16 +83,10 @@ def _interpolated_density_reach(family, *, theta_role: str) -> str:
             "interpolated factor is theta-dependent, so any profile of theta "
             "taken from this likelihood moves with it."
         )
-    if theta_role == THETA_ESTIMATED:
-        return (
-            " theta_hat is profiled from that interpolated density and then "
-            "enters the variance and the IRLS weights, so the coefficients, "
-            "fitted means and deviance move as well."
-        )
     return (
-        " The profiled theta and its interval are taken from that interpolated "
-        "density and move with it; coefficients, fitted means and deviance are "
-        "not, because mu is held fixed and nothing is refitted."
+        " theta_hat is profiled from that interpolated density and then "
+        "enters the variance and the IRLS weights, so the coefficients, "
+        "fitted means and deviance move as well."
     )
 
 
@@ -408,6 +397,7 @@ def validate_fit_input(
     weight_semantics: str,
     required_columns: Iterable[object],
     check_all_columns: bool = False,
+    theta_role: str | None = None,
 ) -> ValidatedFitInput:
     """Validate a public fit call before any feature is built or learned."""
     frame = as_eager_frame(X)
@@ -447,5 +437,5 @@ def validate_fit_input(
     # raised here would surface *instead of* the ValueError the caller needs to
     # see, reporting a quasi-likelihood for a negative Poisson response rather
     # than the negative response.
-    check_weight_contract(y_arr, weight_arr, family, weight_semantics)
+    check_weight_contract(y_arr, weight_arr, family, weight_semantics, theta_role=theta_role)
     return ValidatedFitInput(frame, y_arr, weight_arr, offset_arr)

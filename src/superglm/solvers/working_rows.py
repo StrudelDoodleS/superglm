@@ -37,7 +37,7 @@ def supports_observed_newton(distribution: object, link: object) -> bool:
     """Return whether an exact, positive observed-Newton row kernel is approved."""
     # Exact types are intentional: a subclass can change either likelihood or
     # inverse-link derivatives and must not inherit an unproved Hessian.
-    return type(distribution) is Gamma and type(link) is LogLink
+    return type(link) is LogLink and type(distribution) in (Gamma, Tweedie)
 
 
 def coefficient_initial_intercept(
@@ -242,40 +242,34 @@ def _fisher_rows(
     )
 
 
-def coefficient_working_rows(
-    *,
-    distribution: object,
-    link: object,
-    y: NDArray,
-    mu: NDArray,
-    eta: NDArray,
-    sample_weight: NDArray,
-    prefer_observed: bool,
-) -> CoefficientWorkingRows:
-    """Return Fisher rows or a guarded exact observed-Newton quadratic model.
+def _tweedie_log_observed_rows(
+    p: float, *, y: NDArray, mu: NDArray, eta: NDArray, sample_weight: NDArray
+) -> tuple[NDArray, NDArray]:
+    """Tweedie/log rows: ``-d2l/deta2`` and ``eta + score / curvature``.
 
-    Gamma/log has positive rowwise observed curvature
-    ``w * y / mu`` and score ``w * (y / mu - 1)``.  Applying their ratio in
-    the working response avoids forming a large score separately.  Any
-    non-finite or non-positive active row rejects the *whole* observed model;
-    mixing Fisher and observed rows would no longer be a Newton step for a
-    defined objective.
+    With ``V = mu**p`` and the log link, ``alpha = c / mu`` where
+    ``c = (2 - p) mu + (p - 1) y``, so ``W = w mu**(1 - p) c`` and
+    ``z = eta + (y - mu) / c``. For ``1 < p < 2`` and ``y >= 0``,
+    ``c >= (2 - p) mu > 0``: every row, zeros included, has positive
+    curvature (the row NLL is strictly convex in eta), so no negative-weight
+    handling is needed. At ``p = 2`` this is the Gamma/log kernel,
+    ``W = w y / mu`` and ``z = eta + (y - mu) / y``.
     """
-    y = np.asarray(y, dtype=np.float64)
-    mu = np.asarray(mu, dtype=np.float64)
-    eta = np.asarray(eta, dtype=np.float64)
-    sample_weight = np.asarray(sample_weight, dtype=np.float64)
-    if not prefer_observed or not supports_observed_newton(distribution, link):
-        return _fisher_rows(
-            distribution=distribution,
-            link=link,
-            y=y,
-            mu=mu,
-            eta=eta,
-            sample_weight=sample_weight,
-        )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        curvature = (2.0 - p) * mu + (p - 1.0) * y
+        weights = sample_weight * np.power(mu, 1.0 - p) * curvature
+        response = eta + (y - mu) / curvature
+    return weights, response
 
-    active = sample_weight > 0.0
+
+def _gamma_log_observed_rows(
+    *, y: NDArray, mu: NDArray, eta: NDArray, sample_weight: NDArray, active: NDArray
+) -> tuple[NDArray, NDArray]:
+    """Gamma/log rows: curvature ``w y / mu`` and score ``w (y / mu - 1)``.
+
+    Applying their ratio in the working response avoids forming a large score
+    separately.
+    """
     observed_weights = np.zeros_like(sample_weight)
     response = eta.copy()
     with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
@@ -304,9 +298,55 @@ def coefficient_working_rows(
                 )
             except _NumericalEvaluationError:
                 # The requested curvature itself does not fit. Leave the
-                # whole-model fallback below in charge of choosing Fisher.
+                # caller's whole-model fallback in charge of choosing Fisher.
                 observed_weights[index] = np.inf
 
+    return observed_weights, response
+
+
+def coefficient_working_rows(
+    *,
+    distribution: object,
+    link: object,
+    y: NDArray,
+    mu: NDArray,
+    eta: NDArray,
+    sample_weight: NDArray,
+    prefer_observed: bool,
+) -> CoefficientWorkingRows:
+    """Return Fisher rows or a guarded exact observed-Newton quadratic model.
+
+    The observed rows are Wood's (2011, JRSSB 73(1), section 3) full-Newton
+    PIRLS weights ``W = alpha * w / (V g'^2)`` and response
+    ``z = eta + (y - mu) g' / alpha``, with
+    ``alpha = 1 + (y - mu) (V'/V + g''/g')``; Fisher scoring is ``alpha = 1``.
+    Any non-finite or non-positive active row rejects the *whole* observed
+    model; mixing Fisher and observed rows would no longer be a Newton step for
+    a defined objective.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64)
+    eta = np.asarray(eta, dtype=np.float64)
+    sample_weight = np.asarray(sample_weight, dtype=np.float64)
+    if not prefer_observed or not supports_observed_newton(distribution, link):
+        return _fisher_rows(
+            distribution=distribution,
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=sample_weight,
+        )
+
+    active = sample_weight > 0.0
+    if type(distribution) is Tweedie:
+        observed_weights, response = _tweedie_log_observed_rows(
+            distribution.p, y=y, mu=mu, eta=eta, sample_weight=sample_weight
+        )
+    else:
+        observed_weights, response = _gamma_log_observed_rows(
+            y=y, mu=mu, eta=eta, sample_weight=sample_weight, active=active
+        )
     with np.errstate(over="ignore", invalid="ignore"):
         total_observed_weight = float(np.sum(observed_weights, dtype=np.float64))
     valid = bool(

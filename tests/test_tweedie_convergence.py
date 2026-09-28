@@ -10,12 +10,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import SuperGLM, generate_tweedie_cpg
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
-from superglm.profiling.tweedie import generate_tweedie_cpg
 
 
 class TestTweedieConvergence:

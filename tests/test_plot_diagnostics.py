@@ -382,7 +382,7 @@ class TestWeightContractDiagnostics:
             return np.zeros(n)
 
         monkeypatch.setattr(
-            "superglm.profiling.tweedie.generate_tweedie_cpg",
+            "superglm._tweedie.generate_tweedie_cpg",
             fake_generate,
         )
         mu = np.array([0.7, 1.3, 2.1])

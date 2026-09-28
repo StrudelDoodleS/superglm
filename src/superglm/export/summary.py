@@ -202,8 +202,8 @@ def _overview_rows(source: _CompactSummarySource) -> tuple[SummaryOverviewRow, .
                 SummaryOverviewRow("Distribution Profile", "NB2 Theta CI Upper", ci_upper),
                 SummaryOverviewRow(
                     "Distribution Profile",
-                    "NB2 Theta Method",
-                    str(info.get("nb_theta_method", "")),
+                    "NB2 Theta CI Status",
+                    str(info["nb_theta_ci_status"]),
                 ),
             ]
         )
@@ -224,11 +224,6 @@ def _overview_rows(source: _CompactSummarySource) -> tuple[SummaryOverviewRow, .
                 ),
                 SummaryOverviewRow(
                     "Distribution Profile", "Tweedie phi", _finite_float(info.get("tweedie_phi"))
-                ),
-                SummaryOverviewRow(
-                    "Distribution Profile",
-                    "Tweedie p Method",
-                    str(info.get("tweedie_p_method", "")),
                 ),
             ]
         )

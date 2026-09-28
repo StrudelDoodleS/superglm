@@ -1019,6 +1019,71 @@ class TestDirectSolverBasic:
             atol=2e-13,
         )
 
+    def test_tweedie_log_takes_observed_newton_steps_from_the_first_iteration(self):
+        """Tweedie/log PIRLS is full Newton throughout: quadratic, not Fisher's linear rate."""
+        from superglm._tweedie import generate_tweedie_cpg
+        from superglm.distributions import Tweedie
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(1818)
+        n = 4000
+        X_raw = rng.normal(size=(n, 3))
+        mu = np.exp(0.3 + X_raw @ np.array([0.4, -0.3, 0.2]))
+        # p near 2 has many small positive responses and the slowest Fisher
+        # contraction: observed/Fisher row curvature is (2-p) + (p-1) y/mu.
+        y = generate_tweedie_cpg(n, mu, 1.8, 1.8, rng=rng)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=3)
+        groups = [GroupSlice(name="x", start=0, end=3)]
+
+        def fit(use_observed_newton: bool):
+            profile: dict[str, float | int] = {}
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(n),
+                family=Tweedie(1.8),
+                link=LogLink(),
+                groups=groups,
+                lambda2=0.0,
+                tol=1e-10,
+                convergence="coefficients",
+                profile=profile,
+                _use_observed_newton=use_observed_newton,
+                weight_semantics="frequency",
+            )
+            return result, profile
+
+        newton, newton_profile = fit(True)
+        fisher, fisher_profile = fit(False)
+
+        assert newton.converged and fisher.converged
+        # Every iteration, the first included, used the observed rows.
+        assert newton_profile["irls_observed_newton_iters"] == newton.n_iter
+        assert "irls_observed_newton_iters" not in fisher_profile
+        assert newton.n_iter < fisher.n_iter
+
+        # Both stop on a last step s with |s_i| <= tol max(1, |b_i|). Near the mode
+        # Fisher scoring maps the error by G = I - F^-1 H (F, H the Fisher and
+        # observed information), so the error left after s is -(H^-1 F - I) s;
+        # Newton's is second order in s. Each fixed point also rounds by F^-1
+        # times the rounding of A'Wz, eps log2(n) sum |A| W |z|.
+        design = np.column_stack([np.ones(n), X_raw])
+        coefficients = np.r_[newton.intercept, newton.beta]
+        mu_hat = np.exp(design @ coefficients)
+        fisher_w = mu_hat ** (2.0 - 1.8)
+        observed_w = mu_hat ** (1.0 - 1.8) * ((2.0 - 1.8) * mu_hat + 0.8 * y)
+        fisher_info = design.T @ (fisher_w[:, None] * design)
+        observed_info = design.T @ (observed_w[:, None] * design)
+        contraction = np.linalg.solve(observed_info, fisher_info) - np.eye(4)
+        step_bound = 1e-10 * np.abs(contraction) @ np.maximum(1.0, np.abs(coefficients))
+        working = np.log(mu_hat) + (y - mu_hat) / mu_hat
+        eps = np.finfo(np.float64).eps
+        rounded = eps * np.log2(n) * np.abs(design).T @ np.abs(fisher_w * working)
+        round_off = 2.0 * np.abs(np.linalg.inv(fisher_info)) @ rounded
+        gap = np.abs(coefficients - np.r_[fisher.intercept, fisher.beta])
+        np.testing.assert_array_less(gap, step_bound + round_off)
+
     def test_gamma_log_observed_controller_rescues_then_falls_back_atomically(self, monkeypatch):
         """A Fisher rejection enables one observed attempt; its rejection restores Fisher."""
         import superglm.solvers.irls_direct as irls_direct

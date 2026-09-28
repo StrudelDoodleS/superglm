@@ -1,5 +1,8 @@
 """Tests for Negative Binomial (NB2) distribution."""
 
+import math
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -18,7 +21,13 @@ from superglm._frame import EagerFrame
 from superglm.distributions import resolve_distribution
 from superglm.features.numeric import Numeric
 from superglm.penalties.group_lasso import GroupLasso
-from superglm.profiling.nb import NBProfileResult, estimate_nb_theta
+from superglm.profiling.nb import (
+    NBProfileResult,
+    NBThetaBoundWarning,
+    estimate_nb_theta,
+    solve_theta,
+)
+from superglm.solvers.dispersion import PRIOR_WEIGHTS
 
 # =====================================================================
 # Helpers
@@ -218,6 +227,7 @@ class TestNB2ProfileTheta:
     ):
         from types import SimpleNamespace
 
+        from superglm.model import fit_ops
         from superglm.profiling import nb as nb_module
 
         X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
@@ -245,18 +255,13 @@ class TestNB2ProfileTheta:
             calls.append(("pirls", kwargs["penalty"].lambda1))
             return result_for(kwargs["X"])
 
-        monkeypatch.setattr(nb_module, "fit_irls_direct", fake_direct)
-        monkeypatch.setattr(nb_module, "fit_pirls", fake_pirls)
+        # The alternation's mean fits follow the ordinary fit policy's solver route.
+        monkeypatch.setattr(fit_ops, "fit_irls_direct", fake_direct)
+        monkeypatch.setattr(fit_ops, "fit_pirls", fake_pirls)
         monkeypatch.setattr(
             nb_module,
-            "_theta_ml",
-            lambda *args, **kwargs: nb_module._ThetaSolve(
-                theta=1.0,
-                converged=True,
-                at_lower=False,
-                at_upper=False,
-                n_score_evaluations=1,
-            ),
+            "solve_theta",
+            lambda *args, **kwargs: nb_module.ThetaSolve(theta=1.0, at_lower=False, at_upper=False),
         )
 
         estimate_nb_theta(model, X, y, maxiter=1)
@@ -291,7 +296,7 @@ class TestNB2ProfileTheta:
         assert isinstance(result, NBProfileResult)
         np.testing.assert_allclose(result.theta_hat, theta_true, atol=2.0)
 
-    def test_result_has_cache(self):
+    def test_result_records_each_alternation_step(self):
         rng = np.random.default_rng(42)
         n = 2000
         y = _generate_nb2(n, mu=5.0, theta=3.0, rng=rng)
@@ -304,8 +309,8 @@ class TestNB2ProfileTheta:
         )
 
         result = estimate_nb_theta(model, X, y, theta_bounds=(0.5, 15.0))
-        assert len(result.cache) >= 1  # alternating alg converges in few iters
-        assert result.n_evaluations >= 1
+        assert list(result.evaluations.columns) == ["theta", "nll"]
+        assert len(result.evaluations) >= 1  # alternating alg converges in few iters
 
     def test_family_must_be_nb(self):
         model = SuperGLM(
@@ -314,7 +319,7 @@ class TestNB2ProfileTheta:
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
         y = np.array([1.0, 2.0, 3.0])
         with pytest.raises(ValueError, match="NegativeBinomial"):
-            estimate_nb_theta(model, X, y)
+            model.estimate_theta(X, y)
 
     def test_design_matrix_error_restores_temporary_family(self, monkeypatch):
         model = SuperGLM(
@@ -334,6 +339,168 @@ class TestNB2ProfileTheta:
             estimate_nb_theta(model, X, y)
 
         assert model.family.theta == pytest.approx(2.5)
+
+
+def _prior_score_error_bound(y, mu, w, theta):
+    """Float64 error of the branch ``theta_score`` takes, plus the expansion's truncation.
+
+    A row's rounding scales with the terms it combines (``rounding``), so 8 eps
+    of their sizes bounds it; summing the n row values (``summands``) adds at
+    most n eps of their absolute total (Higham 2002, sec. 4.2). The expansion
+    also drops psi's 1/(120 z^4) term, which moves psi(a + b) - psi(a) by at
+    most 4 b / (120 a^5) for a = w theta, b = w y.
+    """
+    from scipy.special import digamma
+
+    eps = np.finfo(np.float64).eps
+    if theta * w.min() >= 1e5:
+        shifted = theta + y
+        x = (y - mu) / (theta + mu)
+        tail = np.abs(0.5 * y / (theta * shifted) / w) + np.abs(
+            (1.0 / theta**2 - 1.0 / shifted**2) / 12.0 / w**2
+        )
+        # log1p(x) - x cancels parts of size |x| to a value of size x^2 / 2.
+        rounding, summands = np.abs(x) + tail, np.abs(np.log1p(x) - x) + tail
+        truncation = 4.0 * (w * y) / (120.0 * (w * theta) ** 5)
+    else:
+        terms = np.stack(
+            [
+                digamma(w * (y + theta)),
+                -digamma(w * theta),
+                np.full_like(y, np.log(theta)),
+                np.ones_like(y),
+                -np.log(theta + mu),
+                -(y + theta) / (mu + theta),
+            ]
+        )
+        rounding, summands = np.abs(terms).sum(axis=0), np.abs(terms.sum(axis=0))
+        truncation = 0.0
+    return float(
+        np.sum(w * (8.0 * eps * rounding + truncation)) + y.size * eps * np.sum(w * summands)
+    )
+
+
+def _nb_profile(y, mu, weights, semantics):
+    from superglm.profiling.nb import nb_nll, solve_theta
+
+    theta = solve_theta(y, mu, weights, 1.0, weight_semantics=semantics, bounds=(1e-8, 1e8)).theta
+    return NBProfileResult(
+        theta,
+        nb_nll(y, mu, weights, theta, weight_semantics=semantics),
+        True,
+        _y=y,
+        _mu=mu,
+        _weights=weights,
+        _weight_semantics=semantics,
+    )
+
+
+class TestNB2WeightedProfile:
+    """Prior weights and frequency counts in the theta score and the interval."""
+
+    @pytest.mark.parametrize(
+        ("weights", "mu_range", "theta"),
+        [
+            pytest.param((0.5, 4.0), (0.5, 4.0), 1e6, id="expansion-w-theta-5e5"),
+            pytest.param((1e-4,), (5e3, 2e4), 1e5, id="direct-w-theta-10"),
+        ],
+    )
+    def test_prior_weight_score_is_the_exact_digamma_score(self, weights, mu_range, theta):
+        """Under prior weights the psi arguments are w (y + theta) and w theta.
+
+        The large-theta expansion's two psi corrections carry 1/w and 1/w^2,
+        and the switch to it follows the smallest psi argument w theta, not
+        theta: at w theta = 10 its dropped Bernoulli term is 1e5 times this
+        bound. Each count w y is Poisson, the regime a large theta describes.
+        """
+        mpmath = pytest.importorskip("mpmath")
+        from superglm.profiling.nb import theta_score
+
+        rng = np.random.default_rng(3)
+        n = 300
+        mu = rng.uniform(*mu_range, n)
+        w = rng.choice(weights, n)
+        y = rng.poisson(w * mu) / w
+        mpmath.mp.dps = 60
+        t = mpmath.mpf(theta)
+        exact = float(
+            sum(
+                mpmath.mpf(wi)
+                * (
+                    mpmath.digamma(mpmath.mpf(wi) * (mpmath.mpf(yi) + t))
+                    - mpmath.digamma(mpmath.mpf(wi) * t)
+                    + mpmath.log(t)
+                    + 1
+                    - mpmath.log(t + mpmath.mpf(mi))
+                    - (mpmath.mpf(yi) + t) / (mpmath.mpf(mi) + t)
+                )
+                for yi, mi, wi in zip(y, mu, w)
+            )
+        )
+
+        score = theta_score(y, mu, w, theta, weight_semantics="prior")
+
+        assert abs(score - exact) <= _prior_score_error_bound(y, mu, w, theta)
+
+    def test_frequency_counts_give_the_interval_of_the_replicated_rows(self):
+        """The likelihood-ratio scale is the total count, not the row count."""
+        rng = np.random.default_rng(17)
+        n = 400
+        mu = rng.uniform(1.0, 4.0, n)
+        y = _generate_nb2(n, mu=mu, theta=2.0, rng=rng)
+        counts = rng.integers(1, 5, n)
+        compressed = _nb_profile(y, mu, counts.astype(np.float64), "frequency")
+        replicated = _nb_profile(
+            np.repeat(y, counts), np.repeat(mu, counts), np.ones(counts.sum()), "frequency"
+        )
+
+        # Each endpoint is rooted to 1e-6 in log theta.
+        np.testing.assert_allclose(
+            np.log(compressed.ci(0.05)), np.log(replicated.ci(0.05)), rtol=0.0, atol=2e-6
+        )
+
+    def test_zero_prior_weights_leave_the_interval_as_if_their_rows_were_deleted(self):
+        rng = np.random.default_rng(19)
+        n = 400
+        mu = rng.uniform(1.0, 4.0, n)
+        y = _generate_nb2(n, mu=mu, theta=2.0, rng=rng)
+        weights = rng.uniform(0.5, 2.0, n)
+        weights[::4] = 0.0
+        carried = weights > 0.0
+        with_zeros = _nb_profile(y, mu, weights, "prior")
+        deleted = _nb_profile(y[carried], mu[carried], weights[carried], "prior")
+
+        # Each endpoint is rooted to 1e-6 in log theta.
+        np.testing.assert_allclose(
+            np.log(with_zeros.ci(0.05)), np.log(deleted.ci(0.05)), rtol=0.0, atol=2e-6
+        )
+
+    def test_a_round_off_lower_value_next_to_the_root_keeps_the_centre(self, monkeypatch):
+        """The profile's values carry summation round-off, which moves no centre."""
+        import superglm.profiling.nb as nb_module
+
+        rng = np.random.default_rng(17)
+        n = 400
+        mu = rng.uniform(1.0, 4.0, n)
+        y = _generate_nb2(n, mu=mu, theta=2.0, rng=rng)
+        result = _nb_profile(y, mu, np.ones(n), "frequency")
+        optimum = result._optimum()
+        shared = nb_module.likelihood_ratio_interval
+        bounds = []
+
+        def with_a_round_off_reading(objective, x_hat, nll_hat, search_range, **kwargs):
+            bounds.append(kwargs["error"](x_hat))
+            # Next to the root, read low by two units of round-off.
+            objective.values[x_hat + 1e-9] = nll_hat - 2.0 * np.finfo(float).eps * abs(nll_hat)
+            return shared(objective, x_hat, nll_hat, search_range, **kwargs)
+
+        monkeypatch.setattr(nb_module, "likelihood_ratio_interval", with_a_round_off_reading)
+        result.interval(0.05)
+
+        assert result._optimum() == optimum
+        assert result._ci_cautions[0.05] == []
+        # The recursive-summation bound over n rows, in the objective's units.
+        assert bounds == [n * np.finfo(float).eps * abs(optimum[1])]
 
 
 class TestNB2AutoTheta:
@@ -360,6 +527,211 @@ class TestNB2AutoTheta:
 
         assert profile_calls == []
 
+    def test_a_mutating_callback_cannot_rewrite_the_recorded_evaluations(self):
+        rng = np.random.default_rng(11)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 400)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = rng.negative_binomial(3.0, 3.0 / (3.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        seen = []
+
+        def vandal(row):
+            seen.append(dict(row))
+            row["theta"], row["nll"] = -1.0, float("nan")
+
+        result = estimate_nb_theta(model, X, y, on_evaluation=vandal)
+
+        assert seen
+        assert result.evaluations.to_dict("records") == seen
+
+    @pytest.mark.parametrize("bounds, side", [((0.5, 1.0), "upper"), ((20.0, 100.0), "lower")])
+    def test_interval_is_censored_at_the_estimation_bound_that_held_theta(self, bounds, side):
+        # True theta 4 lies outside both windows, so the estimate stops on a bound.
+        rng = np.random.default_rng(12)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 2000)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = rng.negative_binomial(4.0, 4.0 / (4.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        with pytest.warns(NBThetaBoundWarning):
+            result = model.estimate_theta(X, y, theta_bounds=bounds)
+        interval = result.interval(0.05)
+
+        held = bounds[0] if side == "lower" else bounds[1]
+        assert result.theta_hat == held
+        if side == "upper":
+            assert interval.upper == pytest.approx(held, rel=1e-12) and interval.upper_censored
+            assert interval.lower < held and not interval.lower_censored
+        else:
+            assert interval.lower == pytest.approx(held, rel=1e-12) and interval.lower_censored
+            assert interval.upper > held and not interval.upper_censored
+
+    def test_an_unsettled_alternation_inverts_from_the_fixed_mean_optimum(self, monkeypatch):
+        """One mean fit: theta_hat is the alternation's first iterate, not the optimum.
+
+        Imperfect convergence is disclosed, not refused: the interval is inverted
+        from the published mean's own profile optimum, and a caution says so.
+        """
+        import functools
+
+        import superglm.profiling.nb as nb_module
+
+        monkeypatch.setattr(
+            nb_module,
+            "estimate_nb_theta",
+            functools.partial(nb_module.estimate_nb_theta, maxiter=1),
+        )
+        rng = np.random.default_rng(7)
+        X = pd.DataFrame({"x": rng.normal(size=600)})
+        mu = np.exp(0.4 + 0.5 * X["x"].to_numpy())
+        y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        with pytest.warns(UserWarning, match="not the optimum at the published mean"):
+            result = model.estimate_theta(X, y, ci_alpha=0.05)
+        assert not result.converged
+        published = model._nb_profile_result
+        root = solve_theta(
+            published._y,
+            published._mu,
+            published._weights,
+            published.theta_hat,
+            weight_semantics=published._weight_semantics,
+            bounds=(1e-8, 1e8),
+        ).theta
+        # The interval is inverted from the fixed-mean score root, to its tolerance,
+        # which the unsettled theta_hat is not.
+        assert published._optimum()[0] == pytest.approx(root, rel=4e-8)
+        assert published.theta_hat != pytest.approx(root, rel=4e-8)
+        with pytest.warns(UserWarning, match="not the optimum at the published mean"):
+            interval = published.interval(0.05)
+        assert interval.lower < root < interval.upper
+        assert "CI not computed" not in str(model.summary())
+
+    def test_a_near_poisson_upper_side_is_reported_censored(self):
+        from superglm.export.summary import build_summary_export_payload
+
+        # True theta 50 on 400 rows: theta_hat is interior, but the data cannot
+        # reject Poisson, so the statistic stays under its cutoff up to the end
+        # of the searched range, max(500, 100 theta_hat).
+        rng = np.random.default_rng(3)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 400)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = rng.negative_binomial(50.0, 50.0 / (50.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        result = model.estimate_theta(X, y)
+        assert result.converged and not result.warnings
+
+        # The summary reports the censoring; it does not raise it.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=".*censored.*")
+            summary = model.summary()
+        with pytest.warns(UserWarning, match="censored at its upper end") as raised:
+            interval = model._nb_profile_result.interval(0.05)
+        assert raised[0].filename == __file__
+        assert interval.upper_censored and not interval.lower_censored
+        assert interval.upper == pytest.approx(max(500.0, 100.0 * result.theta_hat), rel=1e-12)
+        assert model._nb_profile_result.warnings == [
+            f"the 95% interval for theta is censored at its upper end theta={interval.upper:.6g}, "
+            "where its search stopped: the likelihood-ratio statistic does not reach its cutoff "
+            "there, so the interval may extend beyond it."
+        ]
+        assert summary._info["nb_theta_ci_status"] == "censored"
+        theta_row = next(line for line in str(summary).splitlines() if "Theta:" in line)
+        assert "] censored" in theta_row
+        assert "] censored" in summary._repr_html_()
+        assert model.metrics(X, y).summary()._info["nb_theta_ci_status"] == "censored"
+        overview = {
+            (row.section, row.metric): row.value
+            for row in build_summary_export_payload(model).overview
+        }
+        assert overview[("Distribution Profile", "NB2 Theta CI Status")] == "censored"
+
+    def test_theta_hat_outside_one_interval_cautions_that_interval_only(self):
+        """Whether theta_hat lies outside an interval depends on its level, so the
+        caution belongs to that interval: computing the 50% one first must not
+        mark the 95% one."""
+        from dataclasses import replace
+
+        from superglm.profiling._reporting import profile_cautioned, reported_interval
+
+        rng = np.random.default_rng(11)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 2000)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = _generate_nb2(2000, mu, 2.0, rng=rng)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"), selection_penalty=0, features={"x": Numeric()}
+        )
+        model.estimate_theta(X, y)
+        published = model._nb_profile_result
+        half, most = published._interval(0.5), published._interval(0.05)
+        assert not (half.upper_censored or most.upper_censored)
+        # A theta_hat past the 50% interval's upper end but inside the 95% one.
+        moved = replace(
+            published,
+            theta_hat=0.5 * (half.upper + most.upper),
+            warnings=[],
+            _ci_cache={},
+            _ci_cautions={},
+        )
+        moved._interval(0.5)
+        moved._interval(0.05)
+        assert profile_cautioned(moved, 0.5) and not profile_cautioned(moved, 0.05)
+        status = reported_interval(moved._interval(0.05), caution=profile_cautioned(moved, 0.05))
+        assert status[1] == "available"
+        assert [m for m in moved.warnings if "lies outside its 50% interval" in m]
+        assert not [m for m in moved.warnings if "lies outside its 95% interval" in m]
+
+    def test_an_alternation_out_of_steps_warns_and_reports_unconverged(self):
+        rng = np.random.default_rng(12)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 2000)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = rng.negative_binomial(4.0, 4.0 / (4.0 + mu)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        # The first step moves theta from its seed 1 to near 4, far past xatol.
+        with pytest.warns(UserWarning, match="did not settle in 1 mean fits") as caught:
+            result = estimate_nb_theta(model, X, y, maxiter=1)
+        assert not result.converged
+        assert result.warnings == [str(w.message) for w in caught]
+
+    @pytest.mark.parametrize("xatol", [0.0, -1e-3, np.nan, np.inf])
+    def test_invalid_xatol_is_rejected_before_profile_work(self, monkeypatch, xatol):
+        from superglm.profiling import nb as nb_module
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
+        y = np.resize(np.array([1.0, 2.0, 3.0]), len(X))
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+
+        def unexpected_profile(*args, **kwargs):
+            raise AssertionError("profile work must not start")
+
+        monkeypatch.setattr(nb_module, "estimate_nb_theta", unexpected_profile)
+
+        with pytest.raises(ValueError, match="xatol must be finite and strictly positive"):
+            model.estimate_theta(X, y, xatol=xatol)
+
     def test_estimate_theta_inherit_preserves_reml_final_refit(self, monkeypatch):
         X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 80)})
         y = np.resize(np.array([1.0, 2.0, 3.0, 4.0]), len(X))
@@ -369,12 +741,7 @@ class TestNB2AutoTheta:
             features={"x": Numeric()},
         )
         model._last_fit_meta = {"method": "fit_reml"}
-        result = NBProfileResult(
-            theta_hat=2.5,
-            nll=1.2,
-            n_evaluations=1,
-            converged=True,
-        )
+        result = NBProfileResult(theta_hat=2.5, nll=1.2, converged=True)
         configured_family = model._family_config
         configured_penalty = model._penalty_config
         configured_model = model._config
@@ -533,16 +900,16 @@ class TestNB2AutoTheta:
             spline_penalty=0.75,
             features={"x": Spline(n_knots=5)},
         )
-        from superglm.profiling import nb as nb_module
+        from superglm.model import fit_ops
 
-        real_fit_pirls = nb_module.fit_pirls
+        real_fit_pirls = fit_ops.fit_pirls
         seen_lambda2 = []
 
         def recording_fit_pirls(*args, **kwargs):
             seen_lambda2.append(kwargs.get("lambda2"))
             return real_fit_pirls(*args, **kwargs)
 
-        monkeypatch.setattr(nb_module, "fit_pirls", recording_fit_pirls)
+        monkeypatch.setattr(fit_ops, "fit_pirls", recording_fit_pirls)
 
         estimate_nb_theta(model, X, y, maxiter=1)
 
@@ -560,7 +927,7 @@ class TestNB2AutoTheta:
             features={"x": Numeric()},
         )
 
-        returned = model.estimate_theta(X, y, sample_weight=weights, maxiter=1)
+        returned = model.estimate_theta(X, y, sample_weight=weights)
         installed = model._nb_profile_result
         installed_y = installed._y.copy()
         installed_weights = installed._weights.copy()
@@ -572,12 +939,9 @@ class TestNB2AutoTheta:
         np.testing.assert_allclose(installed._mu, model._fit_mu, rtol=0.0, atol=0.0)
         for values in (installed._y, installed._mu, installed._weights):
             assert not values.flags.writeable
-            with pytest.raises(ValueError):
-                values.setflags(write=True)
-        with pytest.raises(AttributeError, match="published"):
-            returned.theta_hat = 99.0
-        with pytest.raises(TypeError):
-            returned.cache[99.0] = 0.0
+        # An interval computed through the returned result stays out of the model.
+        returned.interval(0.2)
+        assert 0.2 not in installed._ci_cache
 
         y[0] += 20.0
         weights[0] *= 20.0
@@ -603,6 +967,42 @@ class TestNB2AutoTheta:
         assert model.family.theta == "auto"
         assert model.theta_ > 0
         assert model.result.converged
+
+    @pytest.mark.parametrize("direct_solve", ["auto", "structured"])
+    def test_reml_theta_is_the_score_root_at_the_penalized_mean(self, direct_solve):
+        """The alternation's mean fits carry the RandomEffect penalty that fit_reml publishes."""
+        rng = np.random.default_rng(422)
+        g = np.repeat(np.arange(20), 10)
+        x = rng.normal(size=g.size)
+        mu = np.exp(0.1 + 0.2 * x + rng.normal(0.0, 0.8, 20)[g])
+        y = rng.negative_binomial(3.0, 3.0 / (3.0 + mu)).astype(float)
+        X = pd.DataFrame({"x": x, "g": g.astype(str)})
+        # The alternation penalises every REML component at spline_penalty; set
+        # equal to g's fixed lambda, fit_reml publishes the alternation's own mean.
+        model = SuperGLM(
+            family=NegativeBinomial(1.0),
+            selection_penalty=0.0,
+            spline_penalty=50.0,
+            direct_solve=direct_solve,
+            features={"x": Numeric(), "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(50.0))},
+        )
+
+        result = model.estimate_theta(X, y, fit_mode="reml", xatol=1e-8)
+
+        # theta_hat is the root at that mean rounded to six significant digits; the
+        # published mean sits at the rounded theta, which moves the root by less
+        # than the rounding itself (the alternation contracts), plus xatol.
+        rounding = 0.5 * 10.0 ** (math.floor(math.log10(result.theta_hat)) - 5) / result.theta_hat
+        root = solve_theta(
+            y,
+            model.predict(X),
+            np.ones(y.size),
+            result.theta_hat,
+            weight_semantics=PRIOR_WEIGHTS,
+            bounds=(1e-8, 1e8),
+        )
+        assert result.converged
+        assert root.theta == pytest.approx(result.theta_hat, rel=2.0 * rounding + 1e-8)
 
 
 # =====================================================================

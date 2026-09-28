@@ -164,8 +164,8 @@ nitpick_ignore_regex = [
     # ``TensorMarginalInfo`` under ``superglm.types``; ``EagerFrame``;
     # ``InteractionSpec`` and the ``TermInput`` alias under ``superglm.terms``;
     # the spline base classes and ``StructuralContrastRow`` under
-    # ``superglm.features``; ``Flavor`` under ``superglm.penalties.base``;
-    # ``_CPGRNG`` under ``superglm.profiling.tweedie``; and
+    # ``superglm.features``; ``Flavor`` under ``superglm.penalties.base``; the
+    # profile ``Interval`` record under ``superglm.profiling._scalar``; and
     # ``EditMaterializationRequest`` under ``superglm.editor``.
     (
         "py:class",
@@ -176,7 +176,7 @@ nitpick_ignore_regex = [
         r"|terms\.(InteractionSpec|TermInput)"
         r"|features\.(piecewise\.StructuralContrastRow|spline\._(B?SplineBase|IntegratedPenaltySpline))"
         r"|penalties\.base\.Flavor"
-        r"|profiling\.tweedie\._CPGRNG"
+        r"|profiling\._scalar\.Interval"
         r"|editor\.evaluation_cache\.EditMaterializationRequest)",
     ),
     # The ``superglm.families`` module page summarises its factory functions;

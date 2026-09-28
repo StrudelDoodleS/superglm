@@ -3242,8 +3242,12 @@ class TestModeCertificationRecovery:
             lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
         )
 
-        with pytest.raises(RuntimeError, match="p approaches 2"):
+        # The hint names the remedy (search p with estimate_p), not a conditioning
+        # story: near-2 refusals were a deviance-accuracy and Fisher-scoring defect.
+        with pytest.raises(RuntimeError, match=r"estimate_p\(\)") as caught:
             self._model(p=1.7).fit_reml(X, y, sample_weight=weights)
+        assert "worsen" not in caught.value.hint
+        assert "approaches 2" not in caught.value.hint
 
 
 class TestModeCertifiesAtTheRoundOffFloor:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from superglm.profiling.harness import (
+from benchmarks._harness import (
     SystemSample,
     flatten_system_sample,
     summarize_system_samples,

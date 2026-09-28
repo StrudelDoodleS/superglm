@@ -536,16 +536,14 @@ def _compute_fit_stats(
         )
 
     if isinstance(distribution, Tweedie):
-        from superglm.profiling.tweedie import (
-            _tweedie_logpdf_pair,
-        )
+        from superglm._tweedie import tweedie_logpdf_pair
 
         # The prior contract puts the weight inside the compound-Poisson
         # density; the frequency contract evaluates the unit-weight density and
         # counts each row w times.  The Pearson numerator below scales with the
         # weight under either reading, so only this pair moves.
         replication = weight_semantics == "frequency"
-        fitted_logpdf, null_logpdf = _tweedie_logpdf_pair(
+        fitted_logpdf, null_logpdf = tweedie_logpdf_pair(
             y,
             mu,
             null_mu,
@@ -617,7 +615,7 @@ def _required_fit_columns(model) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
-def _validate_entrypoint_input(model, X, y, sample_weight, offset):
+def _validate_entrypoint_input(model, X, y, sample_weight, offset, *, theta_role=None):
     distribution = resolve_distribution(configured_family(model))
     config = model._config
     validated = validate_fit_input(
@@ -629,6 +627,7 @@ def _validate_entrypoint_input(model, X, y, sample_weight, offset):
         required_columns=_required_fit_columns(model),
         check_all_columns=config.splines is not None and not config.feature_templates,
         weight_semantics=model_weight_semantics(model),
+        theta_role=theta_role,
     )
     if (
         not config.features_explicit
@@ -937,11 +936,7 @@ def _prime_fit_caches(
     model._fit_null_mu = null_mu
     nb_profile_result = getattr(model, "_nb_profile_result", None)
     if nb_profile_result is not None:
-        model._nb_profile_result = nb_profile_result._published_with_data(
-            y_arr,
-            mu,
-            model._fit_weights,
-        )
+        model._nb_profile_result = nb_profile_result._at_mean(y_arr, mu, model._fit_weights)
     model._fit_X_ref = X_ref
     model._fit_y_ref = y_ref
     model._fit_sample_weight_ref = sample_weight_ref
@@ -1010,17 +1005,7 @@ def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> No
     if isinstance(family, NegativeBinomial) and family.theta == "auto":
         from superglm.profiling.nb import estimate_nb_theta
 
-        # `fit` has already routed these arrays through validate_fit_input,
-        # and so through check_weight_contract. Checking again would report one
-        # condition twice from two source locations inside a single fit.
-        nb_result = estimate_nb_theta(
-            model,
-            X,
-            y,
-            sample_weight=sample_weight,
-            offset=offset,
-            contract_already_checked=True,
-        )
+        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
@@ -1070,13 +1055,15 @@ def _refine_nb_theta_to_reml_fixed_point(
     that is installed: on exit, ``family.theta`` is the theta of the final
     refit and the profile result is republished against its fitted mean.
     """
-    import warnings
 
+    import pandas as pd
+
+    from superglm.profiling._scalar import warn_caller
     from superglm.profiling.nb import (
-        NBProfileResult,
+        _THETA_DEFAULT_BOUNDS,
         NBThetaBoundWarning,
-        _theta_cache_key,
-        _theta_ml,
+        nb_nll,
+        solve_theta,
     )
 
     nb_seed = getattr(model, "_nb_profile_result", None)
@@ -1092,32 +1079,33 @@ def _refine_nb_theta_to_reml_fixed_point(
     theta = float(family.theta)
     # The joint alternation re-estimates theta against the same likelihood the
     # calibration estimate used. Resolving the contract once here keeps the
-    # score, the cached NLLs and the published result on one reading; letting
+    # score, the recorded NLLs and the published result on one reading; letting
     # any of them fall back to the parameter default would silently overwrite
     # a prior-contract theta with a frequency-contract one.
     weight_semantics = model_weight_semantics(model)
-    cache = dict(nb_seed.cache)
+    rows = nb_seed.evaluations.to_dict("records")
     refits = 0
+    exhausted: list[str] = []
     joint_converged = False
-    final_solve = None
     while True:
-        mu = model._fit_mu
-        weights = model._fit_weights
-        if mu is None or weights is None:  # pragma: no cover - retention contract
-            raise RuntimeError("NB joint refinement requires retained fit rows")
-        solve = _theta_ml(y_arr, mu, weights, theta, weight_semantics=weight_semantics)
-        final_solve = solve
+        solve = solve_theta(
+            y_arr,
+            model._fit_mu,
+            model._fit_weights,
+            theta,
+            weight_semantics=weight_semantics,
+            bounds=_THETA_DEFAULT_BOUNDS,
+        )
         if abs(solve.theta - theta) <= _NB_JOINT_RELATIVE_TOL * max(abs(theta), 1e-12):
             joint_converged = True
             break
         if refits >= _NB_JOINT_MAX_REFITS:
-            warnings.warn(
+            exhausted.append(
                 "NB2 theta / REML alternation did not reach a joint fixed "
                 f"point in {_NB_JOINT_MAX_REFITS} refits; publishing the last "
-                f"iterate theta={theta:g} with converged=False.",
-                UserWarning,
-                stacklevel=3,
+                f"iterate theta={theta:g} with converged=False."
             )
+            warn_caller(exhausted[-1])
             break
         # Round to the same six significant digits the calibration estimate
         # publishes so family.theta and theta_hat stay exactly equal.
@@ -1139,19 +1127,20 @@ def _refine_nb_theta_to_reml_fixed_point(
             durable_retain_fit_state=durable_retain_fit_state,
             **refit_kwargs,
         )
-        cache[_theta_cache_key(theta)] = _nb_joint_nll(y_arr, model, theta)
+        nll = nb_nll(
+            y_arr, model._fit_mu, model._fit_weights, theta, weight_semantics=weight_semantics
+        )
+        rows.append({"theta": theta, "nll": nll})
 
-    at_bound = final_solve is not None and final_solve.at_bound
-    if at_bound:
-        assert final_solve is not None
-        side = "lower" if final_solve.at_lower else "upper"
-        warnings.warn(
+    warned = list(nb_seed.warnings) + exhausted
+    if solve.at_bound:
+        side = "lower" if solve.at_lower else "upper"
+        warned.append(
             f"NB2 theta re-estimated at the REML fit sits on the {side} "
             "search bound; theta_hat is a constrained boundary value and the "
-            "profile result reports converged=False.",
-            NBThetaBoundWarning,
-            stacklevel=3,
+            "profile result reports converged=False."
         )
+        warn_caller(warned[-1], NBThetaBoundWarning)
     # The published flag must describe the PUBLISHED state. Theta being
     # stationary at an unfinished REML fit is not a joint fixed point: if the
     # final (warm-started) attempt exhausted max_reml_iter, lambda never
@@ -1160,38 +1149,53 @@ def _refine_nb_theta_to_reml_fixed_point(
     # remove - a clamped/unfinished estimate reporting success.
     final_reml = getattr(model, "_reml_result", None)
     reml_converged = bool(getattr(final_reml, "converged", False))
-    refreshed = NBProfileResult(
+    refreshed = replace(
+        nb_seed,
         theta_hat=theta,
-        nll=float(nb_seed.nll),
-        n_evaluations=int(nb_seed.n_evaluations) + refits,
-        converged=bool(nb_seed.converged) and joint_converged and not at_bound and reml_converged,
-        cache=cache,
-        _weight_semantics=weight_semantics,
+        converged=nb_seed.converged and joint_converged and not solve.at_bound and reml_converged,
+        evaluations=pd.DataFrame(rows, columns=["theta", "nll"]),
+        warnings=warned,
+        _bound_side=solve.side,
+        # Refits that stop short leave theta_hat off the score root at the
+        # published mean; the interval is inverted from that root instead.
+        _caution=(
+            f"theta_hat={theta:g} is where the theta / REML alternation stopped after "
+            f"{_NB_JOINT_MAX_REFITS} refits, not the optimum at the published mean; the theta "
+            "interval is inverted from that optimum."
+            if exhausted
+            else None
+        ),
     )
-    model._nb_profile_result = refreshed._published_with_data(
-        y_arr,
-        model._fit_mu,
-        model._fit_weights,
-    )
+    model._nb_profile_result = refreshed._at_mean(y_arr, model._fit_mu, model._fit_weights)
     if refits:
         logger.info(f"NB theta refined at the REML fit: {theta:.4f} after {refits} joint refit(s)")
     return debug_recorder
 
 
-def _nb_joint_nll(y_arr, model, theta: float) -> float:
-    """Weighted mean NB2 NLL of the current workspace fit at ``theta``.
+def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
+    """Refuse the monotone configurations no ordinary-fit solver honours, once the groups exist."""
+    # The constrained QP solver path ignores lambda1 — reject explicitly.
+    if (
+        any(g.monotone_engine is not None for g in model._groups)
+        and penalty.lambda1 is not None
+        and penalty.lambda1 > 0
+        and has_lambda1_targets
+    ):
+        raise NotImplementedError(
+            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
+            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
+        )
+    monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
+    if len(monotone_engines) > 1:
+        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
 
-    Read under the model's declared contract, so the cache this feeds cannot
-    mix a frequency-likelihood NLL into a prior-contract profile.
-    """
-    from superglm.profiling.nb import _nb2_nll
 
-    return _nb2_nll(
-        y_arr,
-        model._fit_mu,
-        model._fit_weights,
-        theta,
-        weight_semantics=model_weight_semantics(model),
+def _uses_direct_solver(model, penalty, has_lambda1_targets) -> bool:
+    """Whether `_solve_coefficients` takes the direct IRLS route rather than BCD."""
+    return (
+        any(group.constraints is not None for group in model._groups)
+        or any(group.monotone_engine == "scop" for group in model._groups)
+        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
     )
 
 
@@ -1208,17 +1212,17 @@ def _solve_coefficients(
     tol,
     record_diagnostics,
     convergence,
+    beta_init=None,
+    intercept_init=None,
+    reml_penalties=None,
 ):
-    """Apply the ordinary fit policy for selecting the coefficient solver."""
-    has_constraints = any(group.constraints is not None for group in model._groups)
-    has_scop = any(group.monotone_engine == "scop" for group in model._groups)
-    uses_direct_solver = (
-        has_constraints
-        or has_scop
-        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
-    )
+    """Apply the ordinary fit policy for selecting the coefficient solver.
 
-    if uses_direct_solver:
+    ``reml_penalties`` carries the penalty components of structured terms
+    (RandomEffect, FactorSmooth) to the direct solver, whose penalty-matrix
+    fallback omits them.
+    """
+    if _uses_direct_solver(model, penalty, has_lambda1_targets):
         result, _ = fit_irls_direct(
             X=model._dm,
             y=y,
@@ -1228,6 +1232,8 @@ def _solve_coefficients(
             groups=model._groups,
             lambda2=lambda2,
             offset=offset,
+            beta_init=beta_init,
+            intercept_init=intercept_init,
             max_iter=max_iter,
             tol=tol,
             record_diagnostics=record_diagnostics,
@@ -1235,6 +1241,7 @@ def _solve_coefficients(
             convergence=convergence,
             separation=getattr(model, "_separation", "warn"),
             weight_semantics=model_weight_semantics(model),
+            reml_penalties=reml_penalties,
         )
         return result
 
@@ -1247,6 +1254,8 @@ def _solve_coefficients(
         groups=model._groups,
         penalty=penalty,
         offset=offset,
+        beta_init=beta_init,
+        intercept_init=intercept_init,
         max_iter_outer=max_iter,
         tol=tol,
         active_set=model._active_set,
@@ -1353,23 +1362,7 @@ def _fit_in_workspace(
     # Invalidate cached properties from previous fit
     _clear_fit_inference_caches(model)
 
-    # Monotone fit-time constraints are incompatible with selection_penalty (lambda1).
-    # The constrained QP solver path ignores lambda1 — reject explicitly.
-    if (
-        any(g.monotone_engine is not None for g in model._groups)
-        and penalty.lambda1 is not None
-        and penalty.lambda1 > 0
-        and has_lambda1_targets
-    ):
-        raise NotImplementedError(
-            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
-            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
-        )
-
-    # Guard: SCOP + QP monotone engines cannot coexist in the same model.
-    _monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
-    if len(_monotone_engines) > 1:
-        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
+    _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets)
 
     model._result = _solve_coefficients(
         model,
