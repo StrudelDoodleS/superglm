@@ -2145,7 +2145,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - **Follow-ups, not changed.**
   - The regular deviance branch still reaches about 150 ε for 0.5 ≤ y/μ ≤ 2, which is harmless as merit noise.
   - `stopped_on_iteration_budget`'s docstring attributes a "period-2 round-off limit cycle" on burn-cost-scale Tweedie fits. It may have been this merit noise and should be re-measured.
-  - `mode_certification_hint` still tells Tweedie users that conditioning worsens toward p = 2.
+  - ~~`mode_certification_hint` still tells Tweedie users that conditioning worsens toward p = 2.~~ Fixed 2026-09-28: the claim is removed, and the hint keeps only the `estimate_p()` remedy.
 
 ---
 

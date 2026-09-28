@@ -884,9 +884,9 @@ def mode_certification_hint(distribution: Any) -> str:
     """
     if isinstance(distribution, Tweedie):
         return (
-            "Tweedie conditioning worsens as p approaches 2. `estimate_p()` scores "
-            "uncertifiable powers infeasible and searches the rest, rather than "
-            "requiring a workable p to be found by hand."
+            "`estimate_p()` scores powers whose mode cannot be certified as "
+            "infeasible and searches the rest, rather than requiring a workable p "
+            "to be found by hand."
         )
     return ""
 
