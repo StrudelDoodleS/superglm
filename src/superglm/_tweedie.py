@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import math
 import operator
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import lambertw
 
 from superglm._tweedie_series import _LOG_CUTOFF, series_moments
 
@@ -142,7 +144,7 @@ class PhiSolve:
     """Profiled dispersion: phi, Q at the optimum, Q'' in log phi and the series passes used.
 
     ``curvature`` is Q'' at the iterate before the last move, which is at most
-    the step tolerance from log phi.
+    the step tolerance from log phi. ``n_passes`` includes any lattice scan.
     """
 
     phi: float
@@ -158,15 +160,18 @@ def solve_log_phi(rows: TweedieRows, deviance: float, nullity: float = 0.0) -> P
     M = Mp give Wood (2011) Eq. 4's REML scale term. Newton on the analytic
     score Q'(u) = -D e^-u / 2 + T(u) - M / 2, one series pass per step,
     safeguarded by bisection inside the sign-change bracket (Press et al.,
-    rtsafe): no concavity result is known for the Tweedie dispersion profile.
+    rtsafe). Q is not convex near p = 1, where the density approaches the
+    Poisson lattice (Dunn & Smyth 2005, Sec. 8), so where a row's lattice
+    term can bend Q the Newton root is compared with every other local
+    minimum (`_lattice_scan`).
     """
     key = (deviance, nullity)
     if key not in rows.phi_solves:
-        rows.phi_solves[key] = _newton_log_phi(rows, deviance, nullity)
+        rows.phi_solves[key] = _global_log_phi(rows, deviance, nullity)
     return rows.phi_solves[key]
 
 
-def _newton_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSolve:
+def _global_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSolve:
     size = rows.size
     if not (math.isfinite(deviance) and deviance > 0.0):
         raise ValueError("Tweedie dispersion needs a positive finite deviance")
@@ -174,12 +179,153 @@ def _newton_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSo
     # minimum only if the upper-tail slope N/(p-1) - M/2 is positive.
     if 2.0 * size <= (rows.p - 1.0) * nullity:
         raise ValueError("Tweedie dispersion profile has no finite interior optimum")
+    # The saddlepoint density's root, where every positive row adds 1/2 to T.
+    smooth_size = max(size - nullity, 0.5 * size)
+    local = _newton_log_phi(rows, deviance, nullity, math.log(deviance / smooth_size))
+    band = _lattice_band(rows.p, smooth_size)
+    # The window's density bound needs gamma jumps of shape a >= 1 (p <= 1.5).
+    if band is None or rows.a < 1.0:
+        return local
+    return _lattice_scan(rows, deviance, nullity, local, band)
+
+
+def _lattice_band(p: float, smooth_size: float) -> tuple[float, float] | None:
+    """Peak indices whose lattice term can bend Q, or None where no row's can.
+
+    A row's density carries the Poisson-summation lattice term (as in
+    `saddlepoint_switch`) 2 exp(-2 pi^2 Var J) cos(2 pi j), Var J ~ j / (a + 1),
+    whose phase turns at rate 2 pi j per unit log phi, j = |c w| / ((a + 1) phi).
+    It bends Q by at most rho(j) = 8 pi^2 j^2 exp(-k j), k = 2 pi^2 / (a + 1),
+    and only for j >= 1: below one term of the series dominates and the phase
+    does not turn. The band is where rho reaches a quarter of the smooth
+    profile's curvature at its minimum, (N - M) / 2, a margin for the leading-
+    term model: the roots of j exp(-k j / 2) = c, c^2 = (N - M) / (64 pi^2),
+    are j = -(2 / k) W(-k c / 2) on the two real branches of Lambert's W.
+    """
+    k = 2.0 * math.pi**2 * (p - 1.0)
+    argument = -0.5 * k * math.sqrt(smooth_size / (64.0 * math.pi**2))
+    if argument <= -1.0 / math.e:
+        return None
+    top = -2.0 / k * float(lambertw(argument, -1).real)
+    if top < 1.0:
+        return None
+    return max(1.0, -2.0 / k * float(lambertw(argument, 0).real)), top
+
+
+def _lattice_scan(
+    rows: TweedieRows,
+    deviance: float,
+    nullity: float,
+    local: PhiSolve,
+    band: tuple[float, float],
+) -> PhiSolve:
+    """The lowest local minimum of Q inside the window that must hold the global one.
+
+    Q' is sampled four times per lattice period 1 / j wherever some row's peak
+    index lies in the band; between those stretches no row bends Q, Q' is
+    monotone and its endpoints decide the sign change. Each - to + change is a
+    bracket the Newton polishes.
+    """
+    lower, upper = _scan_window(rows, deviance, nullity, local)
+    band_low, band_high = band
+    # Row i's peak index is J_i e^-u; it lies in the band over this u-interval.
+    log_peak = np.log((rows.p - 1.0) * -rows.saturated_canonical)
+    starts, stops = log_peak - math.log(band_high), log_peak - math.log(band_low)
+    inside = (stops > lower) & (starts < upper)
+    if not np.any(inside):
+        # No row bends Q anywhere in the window: the Newton root is its minimum.
+        return local
+    order = np.argsort(starts[inside])
+    starts = np.maximum(starts[inside][order], lower)
+    reach = np.maximum.accumulate(np.minimum(stops[inside][order], upper))
+    # A start past every earlier stop opens a new piece of the union.
+    opens = np.r_[True, starts[1:] > reach[:-1]]
+    closes = np.flatnonzero(np.r_[opens[1:], True])
+    step = 0.25 / band_high
+    points = [np.array([lower, upper])]
+    for start, stop in zip(starts[opens], reach[closes], strict=True):
+        points.append(np.linspace(start, stop, int(math.ceil((stop - start) / step)) + 1))
+    grid = np.unique(np.concatenate(points))
+    u_local = math.log(local.phi)
+    best, n_passes = local, local.n_passes
+    previous_u, previous_score = -math.inf, 0.0
+    for u in grid:
+        half_deviance = 0.5 * deviance * math.exp(-u)
+        score = rows.saturated(math.exp(u))[1] - half_deviance - 0.5 * nullity
+        n_passes += 1
+        if previous_score < 0.0 <= score and not previous_u <= u_local <= u:
+            polished = _newton_log_phi(
+                rows, deviance, nullity, 0.5 * (previous_u + u), previous_u, u
+            )
+            n_passes += polished.n_passes
+            if polished.criterion < best.criterion:
+                best = polished
+        previous_u, previous_score = u, score
+    return replace(best, n_passes=n_passes)
+
+
+def _scan_window(
+    rows: TweedieRows, deviance: float, nullity: float, local: PhiSolve
+) -> tuple[float, float]:
+    """An interval of u outside which Q exceeds the Newton minimum or rises.
+
+    Given J = j >= 1 jumps, y is Gamma(j a, gamma), gamma = phi (p - 1) y^(p-1) / w
+    at mu = y, whose peak density is largest at j = 1 for a >= 1, so
+    l_sat <= -log gamma + (a - 1) log(a - 1) - (a - 1) - log Gamma(a). Summed, Q is
+    at least the convex D e^-u / 2 + (N - M / 2) u - B - (M / 2) log 2 pi. And
+    E J >= 1 gives T >= (a + 1) N - e^-u sum |c w|, so Q' > 0 past
+    log((D / 2 + sum |c w|) / ((a + 1) N - M / 2)).
+    """
+    p, a = rows.p, rows.a
+    count = np.ones_like(rows.log_y) if rows.count is None else rows.count
+    # log_t_unit_phi carries (a + 1) log w for prior weights and nothing for counts.
+    log_weight = (
+        rows.log_t_unit_phi - a * (rows.log_y - math.log(p - 1.0)) + math.log(2.0 - p)
+    ) / (a + 1.0)
+    peak = (a - 1.0) * math.log(a - 1.0) if a > 1.0 else 0.0
+    peak -= (a - 1.0) + math.lgamma(a)
+    bound = (
+        float(count @ (log_weight - math.log(p - 1.0) - (p - 1.0) * rows.log_y)) + rows.size * peak
+    )
+    slope = rows.size - 0.5 * nullity
+
+    def excess(u: float) -> float:
+        floor = 0.5 * deviance * math.exp(-u) + slope * u - bound
+        return floor - 0.5 * nullity * _LOG_TWO_PI - local.criterion
+
+    rising = math.log(
+        (0.5 * deviance - float(count @ rows.saturated_canonical))
+        / ((a + 1.0) * rows.size - 0.5 * nullity)
+    )
+    u_local = math.log(local.phi)
+    lower = _bound_crossing(excess, u_local, -1.0)
+    upper = rising if slope <= 0.0 else min(rising, _bound_crossing(excess, u_local, 1.0))
+    return lower, max(upper, lower)
+
+
+def _bound_crossing(excess: Callable[[float], float], start: float, direction: float) -> float:
+    """Where the convex ``excess`` turns positive walking from ``start``, to 1e-6 in u."""
+    inside, width = start, 1.0
+    while excess(start + direction * width) <= 0.0:
+        inside, width = start + direction * width, 2.0 * width
+    outside = start + direction * width
+    while abs(outside - inside) > 1e-6:
+        middle = 0.5 * (inside + outside)
+        inside, outside = (middle, outside) if excess(middle) <= 0.0 else (inside, middle)
+    return outside
+
+
+def _newton_log_phi(
+    rows: TweedieRows,
+    deviance: float,
+    nullity: float,
+    u: float,
+    lower: float = -math.inf,
+    upper: float = math.inf,
+) -> PhiSolve:
     # A bracket end is a point where the score's sign was seen. While one side
     # has none, every proposal lies on that side of u (a Newton step toward the
     # root or a 2-unit walk), so bisection never lands on an unevaluated limit.
-    lower, upper = -math.inf, math.inf
-    # The saddlepoint density's root, where every positive row adds 1/2 to T.
-    u = math.log(deviance / max(size - nullity, 0.5 * size))
     for n_passes in range(1, _NEWTON_MAX_STEPS + 1):
         saturated, saturated_score, saturated_slope = rows.saturated(math.exp(u))
         half_deviance = 0.5 * deviance * math.exp(-u)
@@ -189,13 +335,18 @@ def _newton_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSo
             upper = u
         else:
             lower = u
-        step = -score / curvature if curvature > 0.0 else math.copysign(_NEWTON_MAX_STEP, -score)
+        # A zero score made u the lower end, so the walk from it goes up.
+        walk = -_NEWTON_MAX_STEP if score > 0.0 else _NEWTON_MAX_STEP
+        step = -score / curvature if curvature > 0.0 else walk
         proposal = u + max(-_NEWTON_MAX_STEP, min(step, _NEWTON_MAX_STEP))
         # rtsafe tests the move actually taken, Newton or bisection: at large
         # modes the score's round-off keeps Newton steps above the tolerance
-        # after the sign-change bracket has already collapsed. The bracket test
-        # is inclusive because a zero score leaves u itself as the bracket end.
-        move = (proposal if lower <= proposal <= upper else 0.5 * (lower + upper)) - u
+        # after the sign-change bracket has already collapsed. A proposal on a
+        # bracket end bisects instead: near p = 1, a clipped Newton step and the
+        # walk from a point of negative curvature can land on each other's
+        # iterate and cycle. A zero score leaves u, its own bracket end, as the root.
+        inside = lower < proposal < upper or proposal == u
+        move = (proposal if inside else 0.5 * (lower + upper)) - u
         if curvature > 0.0 and abs(move) <= _NEWTON_STEP_TOL:
             # A converged Newton step or a collapsed bracket puts u + move within
             # the tolerance of the root; l_sat moves by -T per unit u, so carrying

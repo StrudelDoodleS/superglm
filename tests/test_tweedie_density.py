@@ -282,25 +282,49 @@ def _assert_root_within_the_step_tolerance(rows, deviance, nullity, solved):
     assert score(u - 2 * tol) < 0.0 < score(u + 2 * tol)
 
 
+def _criterion_round_off(rows, deviance, nullity, phi):
+    """Q rounds to 32 eps of its terms' magnitudes at phi.
+
+    The terms are log W, log y and c w / phi of summed rows, the logs of
+    saddlepoint rows, D / (2 phi) and the nullity term.
+    """
+    u = math.log(phi)
+    log_t = rows.log_t_unit_phi - (rows.a + 1.0) * u
+    summed = series_moments(log_t, rows.a, max_mode=saddlepoint_switch(rows.p))[0]
+    canonical = np.where(summed, rows.saturated_canonical / phi, 0.0)
+    log_w = rows.row_saturated(phi)[0] + rows.log_y - canonical
+    count = np.ones_like(rows.log_y) if rows.count is None else rows.count
+    magnitudes = float(count @ (np.abs(log_w) + np.abs(rows.log_y) + np.abs(canonical)))
+    magnitudes += 0.5 * deviance / phi + 0.5 * nullity * abs(math.log(2 * math.pi) + u)
+    return 32.0 * EPS * magnitudes
+
+
+def _assert_carried_criterion(rows, deviance, nullity, solved, direct):
+    """The solver's Q against a direct evaluation at its phi.
+
+    The solver carries l_sat to first order over its last move of at most the
+    step tolerance, leaving |T'| tol^2 / 2 with |T'| <= Q'' + D / (2 phi); both
+    values carry the round-off of Q at points that close together.
+    """
+    tol = density_module._NEWTON_STEP_TOL
+    remainder = (solved.curvature + 0.5 * deviance / solved.phi) * tol**2
+    round_off = 2.0 * _criterion_round_off(rows, deviance, nullity, solved.phi)
+    assert abs(solved.criterion - direct) <= remainder + round_off
+
+
 def _assert_value_minimiser(rows, deviance, nullity, solved, brute, xatol):
     """Placement against a value-only bounded Brent search of Q, and its cost.
 
-    Q rounds to 32 eps of its terms' magnitudes (log W, log y and c w / phi of
-    summed rows, the logs of saddlepoint rows, D / (2 phi) and the nullity term),
-    so a value-only search cannot place a minimum of curvature Q'' more finely
-    than sqrt(2 round-off / Q''); fminbound (Brent 1973) stops once its bracket
-    is within 2 (sqrt(eps) |x| + xatol / 3), and Newton on a step of the tolerance.
-    Each Newton pass and each reference value costs one series pass.
+    Q rounds to _criterion_round_off, so a value-only search cannot place a
+    minimum of curvature Q'' more finely than sqrt(2 round-off / Q''); fminbound
+    (Brent 1973) stops once its bracket is within 2 (sqrt(eps) |x| + xatol / 3),
+    and Newton on a step of the tolerance. Each Newton pass and each reference
+    value costs one series pass.
     """
     u = math.log(solved.phi)
-    log_t = rows.log_t_unit_phi - (rows.a + 1.0) * u
-    summed = series_moments(log_t, rows.a, max_mode=saddlepoint_switch(rows.p))[0]
-    canonical = np.where(summed, rows.saturated_canonical / solved.phi, 0.0)
-    log_w = rows.row_saturated(solved.phi)[0] + rows.log_y - canonical
-    magnitudes = np.sum(np.abs(log_w) + np.abs(rows.log_y) + np.abs(canonical))
-    magnitudes += 0.5 * deviance / solved.phi + 0.5 * nullity * abs(math.log(2 * math.pi) + u)
+    round_off = _criterion_round_off(rows, deviance, nullity, solved.phi)
     du = (
-        math.sqrt(2.0 * 32.0 * EPS * magnitudes / solved.curvature)
+        math.sqrt(2.0 * round_off / solved.curvature)
         + 2.0 * (math.sqrt(EPS) * abs(brute.x) + xatol / 3.0)
         + density_module._NEWTON_STEP_TOL
     )
@@ -325,7 +349,7 @@ def test_solve_log_phi_converges_with_rows_past_the_work_bound():
         criterion, bounds=(u - 1, u + 1), method="bounded", options={"xatol": 1e-10}
     )
     _assert_value_minimiser(rows, deviance, 0.0, solved, brute, 1e-10)
-    assert solved.criterion == pytest.approx(criterion(u), rel=1e-12)
+    _assert_carried_criterion(rows, deviance, 0.0, solved, criterion(u))
     _assert_root_within_the_step_tolerance(rows, deviance, 0.0, solved)
 
 
@@ -346,9 +370,67 @@ def test_solve_log_phi_is_the_profile_minimiser(p):
         options={"xatol": 1e-10},
     )
     _assert_value_minimiser(rows, deviance, 0.0, solved, brute, 1e-10)
-    assert solved.criterion == pytest.approx(criterion(math.log(solved.phi)), rel=1e-12)
+    _assert_carried_criterion(rows, deviance, 0.0, solved, criterion(math.log(solved.phi)))
     _assert_root_within_the_step_tolerance(rows, deviance, 0.0, solved)
     assert solved.curvature > 0
+
+
+def _near_one_book(p, n, seed, *, heavy):
+    """Draws near the Poisson lattice; heavy books spread weights and means over decades."""
+    rng = np.random.default_rng(seed)
+    spread = 2.0 if heavy else 0.5
+    mu = np.exp(rng.normal(0.0 if heavy else 1.0, spread, n))
+    phi = float(np.exp(rng.normal(0.0, 1.5))) if heavy else 2.0
+    y = generate_tweedie_cpg(n, mu=mu, phi=phi, p=p, rng=rng)
+    w = np.exp(rng.normal(0.0, 1.5, n)) if heavy else rng.uniform(0.5, 2.0, n)
+    return y, mu, w
+
+
+def test_newton_bisects_when_a_proposal_lands_on_a_bracket_end():
+    # At p = 1.018 the start's Newton step clips to -2 onto a point of negative
+    # curvature, whose 2-unit walk lands exactly on the start: a bracket test
+    # that admitted its ends took both moves and cycled to the 60-step limit.
+    y, mu, w = _near_one_book(1.018, 2000, 1, heavy=False)
+    rows = TweedieRows.prepare(y, w, 1.018)
+    deviance = float(np.sum(w * tweedie_unit_deviance(y, mu, 1.018)))
+    solved = solve_log_phi(rows, deviance)
+    _assert_root_within_the_step_tolerance(rows, deviance, 0.0, solved)
+
+
+@pytest.mark.parametrize("nullity", [0.0, 2.0])
+@pytest.mark.parametrize("p", [1.004, 1.02, 1.08, 1.2])
+def test_solve_log_phi_is_the_global_minimum_near_the_poisson_lattice(p, nullity):
+    """No point of a dense grid lies below the solution on small heavy-weight books.
+
+    The grid minimum bounds the global one from above, so the check is one-sided:
+    the solution may sit below it, never above by more than round-off.
+    """
+    for seed in range(4):
+        y, mu, w = _near_one_book(p, 12, seed, heavy=True)
+        fitted = mu * np.exp(np.random.default_rng(seed).normal(0.0, 0.3, y.size))
+        deviance = float(np.sum(w * tweedie_unit_deviance(y, fitted, p)))
+        rows = TweedieRows.prepare(y, w, p)
+        solved = solve_log_phi(rows, deviance, nullity)
+        grid = math.log(solved.phi) + np.linspace(-8.0, 8.0, 2001)
+        values = [_reml_scale_criterion(rows, deviance, nullity, u) for u in grid]
+        lowest = math.exp(grid[int(np.argmin(values))])
+        tol = density_module._NEWTON_STEP_TOL
+        slack = (solved.curvature + 0.5 * deviance / solved.phi) * tol**2
+        slack += 2.0 * _criterion_round_off(rows, deviance, nullity, solved.phi)
+        slack += _criterion_round_off(rows, deviance, nullity, lowest)
+        assert solved.criterion <= min(values) + slack
+
+
+def test_the_lattice_comparison_makes_no_pass_where_no_row_bends_the_profile():
+    # About 3000 positive rows at p = 1.05: a row's lattice term bends Q by at most
+    # 8 pi^2 j^2 exp(-2 pi^2 j (p - 1)) <= 44 there, below an eighth of N.
+    y, mu = _book(p=1.05)
+    deviance = float(np.sum(tweedie_unit_deviance(y, mu, 1.05)))
+    rows = TweedieRows.prepare(y, np.ones_like(y), 1.05)
+    start = math.log(deviance / rows.size)
+    newton = density_module._newton_log_phi(rows, deviance, 0.0, start)
+    fresh = TweedieRows.prepare(y, np.ones_like(y), 1.05)
+    assert solve_log_phi(fresh, deviance).n_passes == newton.n_passes
 
 
 def test_solve_log_phi_refuses_no_interior_optimum():
@@ -373,10 +455,8 @@ def test_solve_log_phi_with_a_nullity_is_the_reml_scale_minimiser():
     rows = TweedieRows.prepare(y, np.ones_like(y), 1.4)
     deviance, nullity = float(np.sum(tweedie_unit_deviance(y, mu, 1.4))) + 7.0, 12.0
     solved = solve_log_phi(rows, deviance, nullity)
-    u = math.log(solved.phi)
-    assert solved.criterion == pytest.approx(
-        _reml_scale_criterion(rows, deviance, nullity, u), rel=1e-12
-    )
+    direct = _reml_scale_criterion(rows, deviance, nullity, math.log(solved.phi))
+    _assert_carried_criterion(rows, deviance, nullity, solved, direct)
     _assert_root_within_the_step_tolerance(rows, deviance, nullity, solved)
 
 
@@ -406,8 +486,13 @@ def test_frequency_counts_solve_as_the_replicated_rows_at_a_nullity():
     counted = solve_log_phi(TweedieRows.prepare(y, counts, 1.5, frequency=True), deviance, nullity)
     replicated_rows = TweedieRows.prepare(np.repeat(y, 3), np.ones(3 * y.size), 1.5)
     replicated = solve_log_phi(replicated_rows, deviance, nullity)
-    assert counted.phi == pytest.approx(replicated.phi, rel=1e-12)
-    assert counted.criterion == pytest.approx(replicated.criterion, rel=1e-12)
+    # Each stop leaves log phi within the step tolerance of the root and Q within
+    # its carried remainder and round-off of the minimum.
+    tol = density_module._NEWTON_STEP_TOL
+    assert abs(math.log(counted.phi / replicated.phi)) <= 2.0 * tol
+    remainder = (replicated.curvature + 0.5 * deviance / replicated.phi) * tol**2
+    round_off = _criterion_round_off(replicated_rows, deviance, nullity, replicated.phi)
+    assert abs(counted.criterion - replicated.criterion) <= 2.0 * (remainder + round_off)
 
 
 @pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])
@@ -442,6 +527,27 @@ def test_solve_log_phi_stops_on_an_exact_root():
     rows = _UnitScoreRows(1.5, 1.0, np.zeros(2), np.zeros(2), np.zeros(2), None)
     solved = solve_log_phi(rows, 2.0)
     assert solved.phi == 1.0 and solved.n_passes == 1
+
+
+class _DoubleWellRows(TweedieRows):
+    """Q(u) = u^4 / 4 - u^2 / 2 at D = 2, M = 0: a local maximum at the start u = 0."""
+
+    def saturated(self, phi):
+        u = math.log(phi)
+        # l_sat = e^-u - Q, so T = e^-u + Q' and T' = Q'' - e^-u.
+        return (
+            math.exp(-u) - (u**4 / 4 - u**2 / 2),
+            math.exp(-u) + u**3 - u,
+            3 * u**2 - 1 - math.exp(-u),
+        )
+
+
+def test_solve_log_phi_walks_up_from_an_exact_stationary_point_of_negative_curvature():
+    # The score is exactly 0.0 at the start, making u the lower bracket end; a
+    # walk signed by -score went to u - 2, outside the bracket, and bisected to +inf.
+    rows = _DoubleWellRows(1.5, 1.0, np.zeros(2), np.zeros(2), np.zeros(2), None)
+    solved = solve_log_phi(rows, 2.0)
+    assert abs(math.log(solved.phi) - 1.0) <= 2.0 * density_module._NEWTON_STEP_TOL
 
 
 SCORE_NOISE = 1e-4
@@ -487,8 +593,12 @@ def test_a_repeated_solve_makes_no_series_pass(monkeypatch):
 def test_frequency_counts_equal_replicated_rows():
     y, _ = _book(p=1.4, n=300)
     counts = np.random.default_rng(2).integers(1, 4, y.size).astype(float)
-    counted = TweedieRows.prepare(y, counts, 1.4, frequency=True).saturated(1.3)
+    counted_rows = TweedieRows.prepare(y, counts, 1.4, frequency=True)
     replicated = TweedieRows.prepare(
         np.repeat(y, counts.astype(int)), np.ones(int(counts.sum())), 1.4
     ).saturated(1.3)
-    np.testing.assert_allclose(counted, replicated, rtol=1e-13)
+    # The same row values summed in two orders: each sum of n terms is within
+    # (n - 1) eps of the sum of their magnitudes (Higham 2002, Eq. 4.4).
+    magnitudes = counted_rows.count @ np.abs(np.asarray(counted_rows.row_saturated(1.3)).T)
+    bound = 2.0 * counted_rows.size * EPS * magnitudes
+    assert np.all(np.abs(np.subtract(counted_rows.saturated(1.3), replicated)) <= bound)

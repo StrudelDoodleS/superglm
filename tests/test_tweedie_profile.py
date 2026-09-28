@@ -283,17 +283,8 @@ class TestMaximumLikelihoodPhi:
         phi_hat = profile_phi_at(y, mu, np.ones(n), p).phi
         np.testing.assert_allclose(phi_hat, phi_true, rtol=0.12)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Follow-up: solve_log_phi's bracketed Newton settles on the local minimum at "
-            "phi = 35.94 (mean NLL 185.2336) of this bimodal near-p=1 profile; the global "
-            "minimum is at phi = 31.73 (185.1868). No uniqueness result is known for the "
-            "Tweedie dispersion profile (spec section 3)."
-        ),
-    )
     def test_near_one_multimodal_dispersion_reaches_the_global_minimum(self):
-        """Master compared the profile's local optima globally near p = 1."""
+        """The Newton root from the saddlepoint start is the local minimum at phi = 35.94."""
         p = 1.0181533410437358
         y = np.array([1.81787899, 11275.9262, 0.0, 0.00306563885, 0.0000232882792, 1.18207511])
         mu = np.array(
