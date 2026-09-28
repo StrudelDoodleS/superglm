@@ -307,3 +307,19 @@ def test_runtime_backstop_is_silent_when_the_budget_ends_mid_descent(monkeypatch
         and "budget" in str(w.message)
     ]
     assert exhaustion == [], f"budget exhaustion alone must not read as separation: {exhaustion}"
+
+
+def test_the_runtime_gate_reads_expected_curvature_under_observed_newton_rows():
+    """Tweedie/log observed rows are Fisher rows times (2 - p) + (p - 1) y / mu.
+
+    At equal means a response 1e13 times its mean spreads the observed weights
+    past the 1e12 bar while the expected curvature, which the bar was set on,
+    stays flat.
+    """
+    from superglm.links import LogLink
+    from superglm.solvers.irls_direct import _separation_weight_ratio
+
+    mu, eta, weights = np.ones(3), np.zeros(3), np.ones(3)
+    common = {"family": Tweedie(p=1.5), "link": LogLink(), "mu": mu, "eta": eta}
+    assert _separation_weight_ratio("observed", 1e13, weights=weights, **common) == 1.0
+    assert _separation_weight_ratio("fisher", 1e13, weights=weights, **common) == 1e13

@@ -139,6 +139,7 @@ from superglm.solvers.sum_to_zero import (
 from superglm.solvers.working_rows import (
     coefficient_initial_intercept,
     coefficient_working_rows,
+    fisher_working_weights,
     pearson_chi2,
     supports_observed_newton,
 )
@@ -355,6 +356,29 @@ def _solve_profiled_intercept_from_h_inv(
     intercept = float((sum_Wz - XtW1 @ h_z) / denom)
     beta = h_z - h_1 * intercept
     return beta, intercept
+
+
+def _separation_weight_ratio(
+    curvature_source: str,
+    w_ratio: float,
+    *,
+    family,
+    link,
+    mu: NDArray,
+    eta: NDArray,
+    weights: NDArray,
+) -> float:
+    """The working-weight ratio the separation bar was set on: expected curvature.
+
+    Observed rows scale each Fisher weight by alpha = 1 + (y - mu)(V'/V + g''/g'),
+    (2 - p) + (p - 1) y / mu for Tweedie/log, whose spread is not separation.
+    """
+    if curvature_source == "fisher":
+        return w_ratio
+    fisher = fisher_working_weights(
+        distribution=family, link=link, mu=mu, eta=eta, sample_weight=weights
+    )
+    return _positive_working_weight_stats(fisher)[2]
 
 
 def _build_penalty_matrix(
@@ -2557,7 +2581,16 @@ def _fit_irls_direct_once(
             format_runtime_message,
         )
 
-        if w_ratio > EXTREME_WEIGHT_RATIO:
+        separation_ratio = _separation_weight_ratio(
+            working_rows.curvature_source,
+            w_ratio,
+            family=family,
+            link=link,
+            mu=working_mu,
+            eta=working_eta,
+            weights=weights,
+        )
+        if separation_ratio > EXTREME_WEIGHT_RATIO:
             pinned = bool(np.any((eta != eta_unclipped) & (weights > 0)))
             exhausted_stagnant = (
                 not converged
@@ -2577,7 +2610,7 @@ def _fit_irls_direct_once(
                     for g in groups
                     if beta[g.sl].size and float(np.max(np.abs(beta[g.sl]))) >= max_abs - 2.0
                 ][:5]
-                message = format_runtime_message(w_ratio, it + 1, drifting, pinned)
+                message = format_runtime_message(separation_ratio, it + 1, drifting, pinned)
                 if separation == "error":
                     raise SeparationError(message)
                 warnings.warn(message, SeparationWarning, stacklevel=2)
