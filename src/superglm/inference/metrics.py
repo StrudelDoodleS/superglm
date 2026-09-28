@@ -267,6 +267,15 @@ class ModelMetrics:
         Observation weights / sample_weight.
     offset : array-like, optional
         Offset term.
+
+    Notes
+    -----
+    On the frame a model was fitted on, leverage and effective degrees of
+    freedom come from the fit itself.  Equal copies of that frame, or a pickled
+    model, are recognised as the training rows only when the model keeps a
+    structured or shape-constrained covariance.  Otherwise the metrics are
+    re-formed on the rows passed, which for a discrete fit can differ slightly
+    from its binned fit.
     """
 
     def __init__(
@@ -357,15 +366,23 @@ class ModelMetrics:
         else:
             # Identity misses the training rows after a pickle round trip or when
             # the caller passes equal copies; the guard's fingerprint of X, y,
-            # weights and offset recognises them by content, so the retained
-            # compact covariance still serves them instead of a dense refactor.
+            # weights and offset recognises them by content.  Only a fit whose
+            # metrics always read its retained covariance (structured or
+            # shape-constrained) then reads the fit design and weights with it;
+            # a dense fit re-forms every quantity on the supplied rows, since a
+            # discrete fit's weights and edf belong to its binned design.
+            keeps_fit_covariance = (
+                getattr(model, "_linear_system_state", None) is not None
+                or getattr(self._result, "scop_inference", None) is not None
+            )
             self._fit_geometry_matches = bool(
                 self._uses_fit_design
                 and fit_weights is not None
                 and np.shape(fit_weights) == np.shape(self._weights)
                 and np.array_equal(np.asarray(fit_weights), self._weights)
             ) or bool(
-                geometry_guard is not None
+                keeps_fit_covariance
+                and geometry_guard is not None
                 and geometry_guard.matches_training(self._X, self._y, self._weights, self._offset)
             )
         self._uses_compact_fit_inference = bool(

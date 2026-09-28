@@ -1090,14 +1090,15 @@ class NestedSchurFactor:
                 )
                 self._null, self._null_scaled = null, null_scaled
         # diag(Q^+ Q) = 1 - ||Z_s[j]||^2: what the identity routes read as
-        # diag(H^+ H) on the border of a truncated factor, mapped by R through
-        # the column Q^+ Q e_0 = e_0 - D_s Z_s Z_s[0]' / D_s[0].
-        self._retained_diagonal = 1.0 - np.sum(self._null_scaled**2, axis=1)
+        # diag(H^+ H) on the border of a truncated factor, mapped to the raw
+        # coordinates by _retained through the column Q^+ Q e_0 = e_0 - D_s Z_s
+        # Z_s[0]' / D_s[0].
+        self._retained_own = 1.0 - np.sum(self._null_scaled**2, axis=1)
+        self._retained_diagonal = self._retained_own
         if self.intercept:
-            column = -scale * (self._null_scaled @ self._null_scaled[0]) / scale[0]
-            column[0] += 1.0
-            self._retained_diagonal += self._center * column
-            self._retained_diagonal[0] -= self._center @ column
+            self._retained_column = -scale * (self._null_scaled @ self._null_scaled[0]) / scale[0]
+            self._retained_column[0] += 1.0
+            self._retained_diagonal = self._retained(np.zeros(q))
         self._logdet = float(sum(np.sum(np.log(pivot)) for pivot in pivots) + logdet_Q)
         self.rank = int(tree.n_nodes + q - self._null.shape[1])
         self.rank_truncated = self.rank < p
@@ -1552,7 +1553,7 @@ class NestedSchurFactor:
                 - 2.0 * np.sum((tree_solve[level] @ Q_inverse) * F)
                 + np.sum((F @ P) * F)
             )
-        weight = self._weight_delta(piece.a)
+        weight: list[Any] = [None] * (depth - 1) + [piece.a]
         for level in reversed(range(1, depth)):
             weight[level - 1] = _to_parent(tree, level, self._rho[level] ** 2 * weight[level])
         return _Prepared(
@@ -1667,28 +1668,42 @@ class NestedSchurFactor:
         )
         return diagonal
 
-    def _identity_diagonal(self) -> NDArray:
+    def _retained(self, center: NDArray) -> NDArray:
+        """``diag(H^+ H)`` on the border in the coordinates ``[1, X - 1 center']`` (intercept only).
+
+        ``R = I - e_0 (c - center)'`` maps the factor's coordinates there: border
+        entry ``j`` gains ``(c - center)_j N_j0`` and the intercept loses ``(c -
+        center)' N_b0``, with ``N = H^+ H`` and ``N_b0 = Q^+ Q e_0``.  Tree entries
+        stay 1: ``N_u0 = (F (I - Q^+ Q) e_0)_u = 0`` because the factor refuses a
+        coupled null space.  ``center = 0`` gives the raw coordinates.
+        """
+        offset = self._center - center
+        retained = self._retained_own + offset * self._retained_column
+        retained[0] -= offset @ self._retained_column
+        return retained
+
+    def _identity_diagonal(self, retained: NDArray) -> NDArray:
         """``diag(H^+ (H - S)) = diag(H^+ H) - diag(H^+ S)`` for the factor's own data operator.
 
-        ``diag(H^+ H)`` is 1 on the tree and ``_retained_diagonal`` on the
-        border (1 unless truncated).
+        ``diag(H^+ H)`` is 1 on the tree and ``retained`` on the border (1
+        unless truncated; ``_retained`` in the coordinates reported).
         """
         diagonal = self._inverse_diagonal()
         edf = np.empty(self.shape[0])
         edf[self.structured_indices] = (
             1.0 - np.concatenate(self._penalty) * diagonal[self.structured_indices]
         )
-        edf[self.small_indices] = self._retained_diagonal - np.sum(
+        edf[self.small_indices] = retained - np.sum(
             self._Q_inverse * self.operator.border_penalty, axis=1
         )
         return edf
 
-    def _identity_square_diagonal(self) -> NDArray:
+    def _identity_square_diagonal(self, retained: NDArray) -> NDArray:
         """``diag((H^+ (H - S))^2)`` through the penalty sandwich ``H^+ S H^+`` (§3.6).
 
         ``(P - H^+ S)^2 = P - 2 H^+ S + H^+ S H^+ S`` with the projector ``P =
         H^+ H`` (``H^+ S P = H^+ S`` because a truncated direction is
-        unpenalized), so the border reads ``_retained_diagonal`` in place of 1.
+        unpenalized), so the border reads ``retained`` in place of 1.
         Tree entries ``(H^-1 S H^-1)_uu = N_u + 2 W_u Q^-1 F_u' + F_u P F_u'`` with
         ``N_u = sum_v lambda_v Z_uv^2`` from the tree covariances (own,
         descendant, ancestor and incomparable nodes, O(n_nodes depth)), ``W =
@@ -1734,9 +1749,7 @@ class NestedSchurFactor:
             1.0 - 2.0 * lam_all * diagonal + lam_all * np.concatenate(sandwich)
         )
         result[self.small_indices] = (
-            self._retained_diagonal
-            - 2.0 * np.sum(Q_inverse * S_b, axis=1)
-            + np.sum(P * S_b, axis=1)
+            retained - 2.0 * np.sum(Q_inverse * S_b, axis=1) + np.sum(P * S_b, axis=1)
         )
         return result
 
@@ -1749,7 +1762,7 @@ class NestedSchurFactor:
         the sum of the identity-route ``inverse_operator_diagonal``.
         """
         if operator is self.operator.data:
-            return float(np.sum(self._identity_diagonal()))
+            return float(np.sum(self._identity_diagonal(self._retained_diagonal)))
         record = self._direction_of(None, 0.0, operator)
         value = 0.0 if record.piece is None else self._piece_trace(record.piece)
         return value + sum(_low_rank_trace(self.solve, piece) for piece in record.low_rank)
@@ -1767,7 +1780,7 @@ class NestedSchurFactor:
         entry ``j`` and ``-c' N_b0`` to the intercept.
         """
         if operator is self.operator.data:
-            return self._identity_diagonal()
+            return self._identity_diagonal(self._retained_diagonal)
         record = self._direction_of(None, 0.0, operator)
         diagonal = np.zeros(self.shape[0])
         if record.piece is not None:
@@ -1795,7 +1808,7 @@ class NestedSchurFactor:
         operator.
         """
         if operator is self.operator.data:
-            return self._identity_square_diagonal()
+            return self._identity_square_diagonal(self._retained_diagonal)
         self._pieces(operator)
         return _square_diagonal_by_columns(self.solve, operator.matvec, self.shape[0])
 
@@ -2011,6 +2024,14 @@ class ProfiledNestedSchurFactor:
         # the augmented factor's centre in slope coordinates (0 on the tree)
         self._center = np.zeros(p)
         self._center[self.small_indices] = augmented_factor._center[1:]
+        # diag(H_aug^+ H_aug) about the weighted means, whose slope entries are
+        # diag(H_c^+ H_c): the slope block of H_aug^+ is a generalized inverse of
+        # H_c, but when a truncated null vector touches the intercept, H_aug^+
+        # H_aug e0 != e0 and the raw slope entries exceed it by mean_x[j]
+        # (H_aug^+ H_aug)_(j+1, 0), the term the diagonal identity subtracts.
+        self._retained_about_mean = augmented_factor._retained(
+            np.r_[0.0, self.mean_x[self.small_indices]]
+        )
 
     @staticmethod
     def _shift_component(component: PenaltyComponent) -> PenaltyComponent:
@@ -2146,7 +2167,9 @@ class ProfiledNestedSchurFactor:
         """Return ``tr(H_c^-1 O_c)`` by the class-docstring identity."""
         centered, low_rank = self._pieces(operator)
         if self._is_centered_data(centered, low_rank):
-            return float(np.sum(self.augmented_factor._identity_diagonal()[1:]))
+            return float(
+                np.sum(self.augmented_factor._identity_diagonal(self._retained_about_mean)[1:])
+            )
         value = sum(_low_rank_trace(self.solve, piece) for piece in low_rank)
         if centered:
             piece = self.augmented_factor._merged_piece([self._augment(item) for item in centered])
@@ -2158,7 +2181,7 @@ class ProfiledNestedSchurFactor:
         """Return ``diag(H_c^-1 O_c)`` ``(p,)``; identity route for the centred data operator."""
         centered, low_rank = self._pieces(operator)
         if self._is_centered_data(centered, low_rank):
-            return self.augmented_factor._identity_diagonal()[1:]
+            return self.augmented_factor._identity_diagonal(self._retained_about_mean)[1:]
         diagonal = np.zeros(self.shape[0])
         for piece in low_rank:
             diagonal += _low_rank_diagonal(self.solve, piece)
@@ -2178,9 +2201,7 @@ class ProfiledNestedSchurFactor:
         """
         centered, low_rank = self._pieces(operator)
         if self._is_centered_data(centered, low_rank):
-            return self.augmented_factor._identity_square_diagonal()[1:]
-        if isinstance(operator, NestedDataOperator):
-            operator = self._centered_data
+            return self.augmented_factor._identity_square_diagonal(self._retained_about_mean)[1:]
         return _square_diagonal_by_columns(self.solve, operator.matvec, self.shape[0])
 
     def operator_cross_trace(

@@ -10,12 +10,16 @@ of the heaviest chain.
 The nesting cache entries (parent codes, the chain, the chain's tree) read
 only RandomEffect codes, so a lambda rebuild of the design carries them and
 the O(n) row tests run once per design, not once per REML outer iteration.
+
+The weight gate (section 3.7) admits a chain only for (family, link) pairs,
+matched by exact type, whose observed rows are non-negative in exact
+arithmetic over the family's parameter range.
 """
 
 from __future__ import annotations
 
 import warnings
-from itertools import chain, combinations
+from itertools import chain, combinations, product
 
 import numpy as np
 import pandas as pd
@@ -25,6 +29,7 @@ import scipy.sparse as sp
 import superglm.solvers._structured.layout as layout_module
 import superglm.solvers._structured.selection as selection
 from superglm import RandomEffect, Spline, SuperGLM
+from superglm.distributions import Gamma, NegativeBinomial, Tweedie
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -32,13 +37,26 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
 )
+from superglm.links import LogLink, NegativeBinomialLink, PowerLink, SqrtLink
+from superglm.reml.observed_geometry import (
+    _BUILTIN_REML_DISTRIBUTIONS,
+    _BUILTIN_REML_LINKS,
+    compute_observed_information_weights,
+)
 from superglm.solvers.structured import (
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
+    build_structured_system,
     find_nested_chain,
     get_structured_layout,
+    nested_chain_weights_admissible,
     nested_parent_codes,
+    resolve_structured_backend,
 )
-from superglm.types import GroupSlice
+from superglm.solvers.working_rows import supports_observed_newton
+from superglm.types import GroupSlice, PenaltyComponent
 
+EPS = np.finfo(np.float64).eps
 LEAF_LEVELS, OBSERVED_LEAVES = 60, 58
 
 
@@ -269,3 +287,150 @@ def test_the_row_nesting_tests_run_once_per_fit(discrete, monkeypatch) -> None:
     assert len(layouts) >= 2
     assert len(calls) == len(terms) - 1
     assert all(layout.tree is layouts[0].tree for layout in layouts)
+
+
+# ── The §3.7 weight gate ──────────────────────────────────────────────────
+
+
+def _signed_leaf_case(power: float):
+    """The review's fixture: Tweedie(power)/sqrt observed rows at eta = mu = 1.
+
+    Leaves (0, 0, 1, 2, 3) under roots ``leaf // 2``, x = (0, 1, -10, 10, -10)
+    and y = (0, 0.4, 1, 1, 1).
+    """
+    y = np.array([0.0, 0.4, 1.0, 1.0, 1.0])
+    leaf = np.array([0, 0, 1, 2, 3])
+    x = np.array([0.0, 1.0, -10.0, 10.0, -10.0])
+    ones = np.ones(len(y))
+    weights = compute_observed_information_weights(Tweedie(power), SqrtLink(), y, ones, ones, ones)
+    matrices = [
+        DenseGroupMatrix(x[:, None]),
+        RandomEffectGroupMatrix(leaf // 2, 2),
+        RandomEffectGroupMatrix(leaf, 4),
+    ]
+    groups = [
+        GroupSlice(name="x", start=0, end=1, penalized=False),
+        GroupSlice(name="root", start=1, end=3),
+        GroupSlice(name="leaf", start=3, end=7),
+    ]
+    return matrices, groups, weights
+
+
+@pytest.mark.parametrize(("power", "chained"), [(1.25, True), (1.5, True), (1.75, False)])
+def test_tweedie_sqrt_keeps_the_chain_only_while_its_rows_are_non_negative(power, chained):
+    """Tweedie/sqrt rows are ``2 mu^-p ((3 - 2p) mu + (2p - 1) y)``: negative at y = 0 past 3/2.
+
+    At p = 1.75 the rows are (-1, 1, 4, 4, 4), so the first leaf's mass cancels
+    to zero while its x moment is 1.  The nested row pass reads zero mass as
+    zero moments and gave logdet 15.75083 against the dense 15.78923; the
+    chain is declined there, and kept at 1.25 and at the boundary 1.5, where
+    the zero row is zero up to rounding.  Both backends are backward stable to
+    ``(n + p) eps`` of the absolute moments ``|X|' |W| |X| + S`` entrywise, so
+    by Weyl in the Jacobi-scaled metric the logdets differ by at most
+    ``2 p (n + p) eps ||A||_F / lambda_min``, ``A`` those moments scaled.
+    """
+    matrices, groups, weights = _signed_leaf_case(power)
+    lambdas = {"root": 0.1, "leaf": 6.0}
+    decision = resolve_structured_backend(
+        matrices,
+        groups,
+        direct_solve="structured",
+        coefficient_width=7,
+        row_weights=weights,
+        lambda2=lambdas,
+        family=Tweedie(power),
+        link=SqrtLink(),
+    )
+    assert decision.chain_group_indices == ((1, 2) if chained else (2,))
+    assert (decision.nested_fallback_reason is None) == chained
+    if not chained:
+        assert "negative at y = 0 for p > 1.5" in decision.nested_fallback_reason
+
+    layout = get_structured_layout(
+        DesignMatrix(matrices, n=len(weights), p=7),
+        groups,
+        dominant_group_index=decision.group_index,
+        chain_group_indices=decision.chain_group_indices,
+    )
+    system = build_structured_system(
+        matrices, groups, weights, weights, dominant_group_index=decision.group_index, layout=layout
+    )
+    components = [
+        PenaltyComponent(
+            name=group.name,
+            group_name=group.name,
+            group_index=index,
+            group_sl=group.sl,
+            omega_raw=None,
+            penalty_kind="identity",
+        )
+        for index, group in enumerate(groups)
+        if index
+    ]
+    penalized = build_penalized_structured_operator(
+        system, matrices, groups, lambdas, reml_penalties=components
+    )
+    factor, _ = build_augmented_structured_factor(system, penalized)
+
+    design = np.hstack([np.ones((len(weights), 1)), *(matrix.toarray() for matrix in matrices)])
+    ridge = np.diag([0.0, 0.0, 0.1, 0.1, 6.0, 6.0, 6.0, 6.0])
+    H = design.T @ (weights[:, None] * design) + ridge
+    moments = np.abs(design).T @ (np.abs(weights)[:, None] * np.abs(design)) + ridge
+    scale = 1.0 / np.sqrt(np.diag(H))
+    lambda_min = np.linalg.eigvalsh(scale[:, None] * H * scale[None, :])[0]
+    p = H.shape[0]
+    moments_norm = np.linalg.norm(scale[:, None] * moments * scale[None, :])
+    bound = 2 * p * (len(weights) + p) * EPS * moments_norm / lambda_min
+    assert abs(factor.logdet() - np.linalg.slogdet(H)[1]) <= bound
+
+
+def test_a_subclass_of_an_audited_family_declines_the_chain() -> None:
+    """Pairs match by exact type, since a subclass can change V (§3.7).
+
+    ``V = mu^3`` is the inverse Gaussian variance: its observed log-link rows
+    ``(2y - mu) / mu^2`` are negative for ``y < mu / 2``.  The subclass keeps
+    the name ``Gamma``, which a match on class names admitted.
+    """
+    cubic = type(
+        "Gamma",
+        (Gamma,),
+        {
+            "variance": lambda self, mu: mu**3,
+            "variance_derivative": lambda self, mu: 3.0 * mu**2,
+            "reml_curvature": lambda self, link: "observed",
+        },
+    )()
+    mu, ones = np.array([2.0]), np.ones(1)
+    rows = compute_observed_information_weights(
+        cubic, LogLink(), np.array([0.5]), mu, np.log(mu), ones
+    )
+    assert rows[0] < 0.0  # (2 y - mu) / mu^2 = -1/4
+    assert nested_chain_weights_admissible(Gamma(), LogLink())
+    assert not nested_chain_weights_admissible(cubic, LogLink())
+
+
+def test_every_observed_newton_pair_is_admitted_by_the_weight_gate() -> None:
+    """The discrete terminal refit feeds observed-Newton rows to the factor.
+
+    A discrete fit's REML curvature is Fisher, so the gate is never asked
+    about those rows: every built-in pair ``supports_observed_newton`` approves
+    must be one the gate admits.
+    """
+    parameters = {
+        NegativeBinomial: [(1.0,), ("auto",)],
+        Tweedie: [(1.25,), (1.75,)],
+        PowerLink: [(0.5,), (2.0,)],
+        NegativeBinomialLink: [(1.0,)],
+    }
+    families, links = (
+        [kind(*args) for kind in kinds for args in parameters.get(kind, [()])]
+        for kinds in (_BUILTIN_REML_DISTRIBUTIONS, _BUILTIN_REML_LINKS)
+    )
+    approved = [pair for pair in product(families, links) if supports_observed_newton(*pair)]
+    assert approved
+    declined = [
+        (type(family).__name__, type(link).__name__)
+        for family, link in approved
+        if not nested_chain_weights_admissible(family, link)
+    ]
+    assert declined == []

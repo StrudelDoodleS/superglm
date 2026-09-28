@@ -322,6 +322,29 @@ t t' / Σw²` and `diag(H_c⁻¹O_c)_j = (H_aug⁻¹O_aug)_{j+1,j+1} − mean_x[
 `H_aug⁻¹y` is one solve of the row-pass column `U'(O e_0) = Σ_ℓ V_ℓ`; the
 closed-form intercept quadratic of an earlier build is gone.
 
+On a truncated factor `H_aug⁺` replaces `H_aug⁻¹`. Its slope block `G` is a
+generalized inverse of `H_c` (the intercept block `Σw` is nonsingular), so
+every profiled quantity is the dense backend's up to the choice of
+generalized inverse, which moves no trace, no diagonal entry off the null
+support and no sum over it (Rao & Mitra 1971, Lemma 2.2.4 and Theorem 2.4.1).
+But `H_aug⁺` is not `e_0 e_0' / Σw + P G P'`: in the weighted-mean-centred
+coordinates it keeps an intercept-slope block `g` in the null space of `H_c`,
+and `H_aug⁺ H_aug e_0` has slope part `Σw g ≠ 0` whenever the null vector
+touches the intercept. The general routes apply the last identity, whose
+`mean_x[j] (H_aug⁺y)_{j+1}` term removes that part for the data operator (a
+copy of it, which misses the identity routes, gives the gram backend's EDF
+on the fixture below); the identity routes read `diag(H_aug⁺ H_aug)` directly
+and must take it about the weighted means (`NestedSchurFactor._retained`,
+`N_jj − (mean_x − c)_j N_j0` in the factor's coordinates), not in raw
+coordinates, whose slope entries exceed `diag(G H_c)` by `mean_x[j]
+(H_aug⁺ H_aug)_{j+1,0}`. On `year + age = 2013` (3,000 rows, a 4/12/60
+chain, Gaussian, fixed λ 3/5/8) the raw intercept entry is 0.4008903750 and
+the public fit's `effective_df` was 57.15638102155 against the gram
+backend's 56.55727139656; reading about the means gives 56.55727139656 at
+both aliases (2013 and 2020), and the profiled EDF and EDF1 match the gram
+backend to 4.3e-14 against a derived bound of 2.7e-6
+(`test_truncated_profiled_edf_is_the_dense_backends`).
+
 ### 3.7 Refusals and where rank decisions live
 
 - Working weights: correctness of the tree elimination needs only positive
@@ -331,7 +354,13 @@ closed-form intercept quadratic of an earlier build is gone.
   floor `γ_u = 10 ε (fan_u + 2) (|w_u| + Σ_{c ∈ ch(u)} |s_c| + λ_u)`, the
   analogue of today's `d ≤ 0` refusal in `ScalarSchurFactor` with the
   accumulated absolute mass as its scale; it never fires for `w ≥ 0` (there
-  `D_u ≥ λ_u > 0` exactly). A row-level test (`moments.py`'s
+  `D_u ≥ λ_u > 0` exactly). `w_u` is the node's own row weight, as the code
+  forms it: at a leaf the signed sum `ω_u = Σ_{r ∈ u} w_r`, so the scale is
+  `|Σ_r w_r|` with `fan_u = 0`, not the summed absolute row weight `Σ_r |w_r|`;
+  an internal node carries no rows (`w_u = 0`) and `fan_u` children. The two
+  scales agree for `w ≥ 0`; with signed rows the leaf floor is lower by at
+  most `40 ε Σ_r max(-w_r, 0)`, ε-level slack in a backstop that decides no
+  rank. A row-level test (`moments.py`'s
   `signed = any(w < 0)`) would trip on round-off-negative rows of families whose
   observed weights are non-negative in exact arithmetic, and would turn
   today's mid-line-search negative-row iterates on the observed-geometry path,
@@ -343,12 +372,21 @@ closed-form intercept quadratic of an earlier build is gone.
   and inverse, Tweedie(1.5)/log, NB2/log and Gaussian/identity; negative for
   Gaussian/log, sqrt and inverse, Gamma/identity and sqrt, Binomial/cauchit,
   Poisson/inverse, Tweedie/identity and inverse, and NB2/identity, sqrt and
-  inverse; Poisson/identity (−8.9e-16) and Tweedie/sqrt (−3.6e-15) are
-  negative only by rounding. `classify_reml_curvature` returns `observed` for
-  Tweedie/log and Gamma/log, the pricing families, whose rows are
-  non-negative. Selection declines the chain (today's single-level backend,
-  parents in the border) only for the (family, link) pairs with negative
-  weights in exact arithmetic, and for pairs not in the table until audited.
+  inverse; Poisson/identity (−8.9e-16) and Tweedie(1.5)/sqrt (−3.6e-15) are
+  negative only by rounding. That audit ran Tweedie at p = 1.5 only. In
+  closed form (review of #424, 2026-09-28) the Tweedie/sqrt observed row is
+  `2 w μ^-p ((3 − 2p) μ + (2p − 1) y)`, negative at `y = 0` exactly when
+  `p > 3/2` (p = 1.75 dropped a leaf's cross moment and moved the logdet by
+  0.038); Tweedie/log is `w μ^(1−p) ((2 − p) μ + (p − 1) y)`, non-negative
+  on the class's whole range. More generally, Tweedie with link `μ^q` is
+  non-negative iff `p ≤ 2 − q`, which is why a `PowerLink` stays unaudited.
+  `classify_reml_curvature` returns `observed` for Tweedie/log and
+  Gamma/log, the pricing families, whose rows are non-negative; the
+  canonical pairs are Fisher before the table is consulted. Selection
+  matches pairs by exact type, as `supports_observed_newton` does (a
+  subclass may change `V`), admits Tweedie/sqrt only for `p ≤ 3/2`, and
+  declines the chain (today's single-level backend, parents in the border)
+  for every other pair not in the audited table.
 - Non-strict or implicit nesting: for every consecutive pair of chain levels
   the number of distinct `(child, parent)` code pairs over the rows must equal
   the number of distinct observed child codes; otherwise refuse with the
@@ -493,6 +531,18 @@ factorization, `F` and `e`, the Takahashi scalars.
   RandomEffect codes, which a rebuild passes through unchanged; lifetime the
   lineage; no invalidation. The leaf row order is its one O(n) entry, 8 bytes
   per row, held as long as the fitted design (the cache is not pickled).
+  Measured 2026-09-28 on a 200,000-row Poisson fit with a 200/1,200/6,000
+  chain: `leaf_order` is 1.60 MB (int64), one array referenced by both the
+  `nested_tree` entry and the design's nested layout, so dropping the entry
+  alone frees nothing. With the whole layout cache cleared after the fit,
+  `metrics`, `summary` and `predict` ran, rebuilt no tree and predicted
+  identically: only fitting reads it. At 25.6M rows it is 204.8 MB, and
+  rebuilding it is one stable argsort (3.8 s on 25.6M codes, machine not
+  quiet) that a later refit or lambda rebuild of the design would pay. Dropping
+  both references after the final refit is the fit driver's call, not the
+  layout's, and is left open. The nested layout, like the single-level one,
+  also retains `dense_small_matrix`, the dense border (8 bytes per row per
+  dense column; 1.60 MB here, not shared with the design).
   Levels with a zero penalty leave the chain (section 3.7). A chain of length
   1 is today's scalar Schur backend; a chain of length ≥ 2 selects the nested
   factor. Terms not in the chain stay in the border. `StructuredGroupSelection`
@@ -517,7 +567,14 @@ factorization, `F` and `e`, the Takahashi scalars.
   cannot recalibrate the threshold region. As built, `auto` takes the cheaper
   of the single-level ratio `(b_1 / w)²` and the nested ratio `(b / w)² (1 +
   P n / w)`, `w = p + 1`, which prices the chain's row passes at `P` passes of
-  `n b²`, and uses it when it is at most 0.75. `P` is 0.08 on the one-pass row
+  `n b²`, and uses it when it is within its own bound: 0.75 for the chain,
+  0.05 for the single level. The single level was widened to 0.75 on
+  timings and returned to 0.05 on the review of #424: `ScalarSchurFactor`
+  still forms `Q` by subtraction and truncates on the unscaled `Q`, and at
+  ratios in (0.05, 0.75] it refused raw year and vehicle-value columns at
+  the REML bootstrap, where auto does not retry on gram (22 of 64
+  randomized fits raised; 7 more lost standard errors). It widens again
+  once it has this chain's centring, PSD-sum `Q` and scaled rank rules. `P` is 0.08 on the one-pass row
   pass of section 3.4, inside the bracket (0.035, 0.175) that the anchors
   recorded in `selection.py` measured on 2026-09-27; it was 2 on the two-read
   pass, whose bracket was (1.23, 401). REML derivative work per λ-trial

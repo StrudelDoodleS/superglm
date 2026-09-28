@@ -3415,3 +3415,138 @@ class TestBasisDetail:
                     rtol=1e-10,
                     err_msg=f"Basis SE mismatch for {g_name}[{br.basis_index}]",
                 )
+
+
+# ── Equal copies of the training rows ─────────────────────────────
+
+UNIT_ROUNDOFF = np.finfo(np.float64).eps / 2
+
+
+def _gamma(k: int) -> float:
+    return k * UNIT_ROUNDOFF / (1.0 - k * UNIT_ROUNDOFF)
+
+
+def _inverse_perturbation(H, spread: float, n: int) -> tuple[float, float]:
+    """Relative backward error ``beta`` of an assembled and inverted ``H``, and ``kappa_2(H)``.
+
+    ``n``-term weighted sums (weights within two roundings of each other) perturb
+    ``H`` by at most ``3 gamma_{n+4} spread`` in norm, with ``spread = sum_k w_k
+    ||x_k - a||^2`` about the anchor ``a`` of the centring (Higham 2002, Lemma 3.1;
+    Cauchy-Schwarz bounds the profiled products), and a backward-stable inverse adds
+    ``p gamma_{3p+1} ||H||`` (Thm 10.4 with ``trace H <= p ||H||``).
+    """
+    eigenvalues = np.linalg.eigvalsh(H)
+    p = H.shape[0]
+    beta = 3.0 * _gamma(n + 4) * spread / eigenvalues[-1] + p * _gamma(3 * p + 1)
+    return beta, eigenvalues[-1] / eigenvalues[0]
+
+
+def _hat_and_edf(design, W, penalty):
+    """Hat diagonal ``w_i x_i' H^-1 x_i`` (``H = X'WX + S``) and edf ``tr((G + S)^-1 G)``
+    (``G`` the intercept-profiled Gram) by dense solves, with bounds on their gap to any
+    other backward-stable evaluation of the same ``X``, ``W`` and ``S``.
+
+    To first order an inverse moves by ``kappa beta`` relatively (Higham 2002, §14.1),
+    so ``x' H^-1 x >= ||x||^2 / ||H||`` moves by ``kappa^2 beta`` of itself plus the row
+    products' ``p gamma_{2p} kappa`` and the product with ``w_i``, and the trace by
+    ``2 p kappa^2 beta + p gamma_p kappa``; two evaluations double each bound.
+    """
+    n, p = design.shape
+    H = design.T @ (W[:, None] * design) + penalty
+    hat = W * np.sum(design * np.linalg.solve(H, design.T).T, axis=1)
+    beta, kappa = _inverse_perturbation(H, np.sum(W * np.sum(design**2, axis=1)), n)
+    hat_gap = 2.0 * (kappa**2 * beta + p * _gamma(2 * p) * kappa + _gamma(2)) * hat
+    centred = design - design.T @ W / np.sum(W)
+    gram = centred.T @ (W[:, None] * centred)
+    edf = np.trace(np.linalg.solve(gram + penalty, gram))
+    spread = np.sum(W * np.sum((design - design[0]) ** 2, axis=1))
+    beta, kappa = _inverse_perturbation(gram + penalty, spread, n)
+    edf_gap = 2.0 * p * (2.0 * kappa**2 * beta + _gamma(p) * kappa)
+    return hat, edf, hat_gap, edf_gap
+
+
+def test_equal_copy_of_dense_discrete_rows_uses_one_exact_geometry():
+    """A dense fit keeps no covariance for rows it did not fit, and an equal copy of
+    the training rows is such a frame: leverage and edf come together from the exact
+    public design, the Fisher weights of its exact means and the fitted penalty,
+    never with the binned fit's working weights or edf.  The live frame keeps the fit
+    geometry: the binned design, its working weights and its retained edf."""
+    from superglm.inference.covariance import _active_penalty_matrix
+    from superglm.model.fit_state import fitted_lambda2
+
+    rng = np.random.default_rng(20260928)
+    x = rng.uniform(-3.0, 3.0, 600)
+    X = pd.DataFrame({"x": x})
+    y = rng.poisson(np.exp(0.2 + 0.5 * np.sin(x))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        discrete=True,
+        n_bins=8,
+        features={"x": Spline(n_knots=8)},
+    ).fit_reml(X, y)
+    penalty = _active_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        model._groups,
+        fitted_lambda2(model),
+        reml_penalties=model._reml_penalties,
+    )
+    tiny = np.finfo(np.float64).tiny
+
+    # Poisson log link with unit weights: the Fisher weight is the mean.
+    exact = np.asarray(model._specs["x"].transform(x), dtype=np.float64)
+    exact_hat, exact_edf, exact_hat_gap, exact_edf_gap = _hat_and_edf(
+        exact, model.predict(X), penalty
+    )
+    copy = model.metrics(X.copy(), y.copy())
+    np.testing.assert_array_less(np.abs(copy.leverage - exact_hat), exact_hat_gap + tiny)
+    assert abs(np.sum(copy._influence_edf[0]) - exact_edf) <= exact_edf_gap
+
+    live = model.metrics(X, y)
+    fit_hat, fit_edf, fit_hat_gap, fit_edf_gap = _hat_and_edf(
+        model._dm.toarray(), live._active_info[1], penalty
+    )
+    np.testing.assert_array_less(np.abs(live.leverage - fit_hat), fit_hat_gap + tiny)
+    assert abs(np.sum(live._influence_edf[0]) - fit_edf) <= fit_edf_gap
+    np.testing.assert_array_equal(live._influence_edf[0], model._fit_inference_info["edf"])
+
+    # The binned and exact geometries differ far beyond either evaluation's gap.
+    assert np.any(np.abs(exact_hat - fit_hat) > exact_hat_gap + fit_hat_gap)
+    assert abs(exact_edf - fit_edf) > exact_edf_gap + fit_edf_gap
+
+
+def test_equal_copy_of_shape_constrained_rows_reads_the_fit_geometry():
+    """A shape-constrained fit's metrics always read its retained covariance, so an
+    equal copy of the training rows (recognised by content) reads the fit design and
+    working weights with it, as the live frame does.  Zero prior weights centre the
+    fit's columns on the positive-weight rows while the public design centres them on
+    all rows, so the public design would not pair with that covariance."""
+    from superglm import Constraint
+    from superglm.features.spline import PSpline
+
+    rng = np.random.default_rng(20260928)
+    x = np.sort(rng.uniform(size=500))
+    X = pd.DataFrame({"x": x})
+    y = rng.poisson(np.exp(0.2 + 1.3 * x)).astype(float)
+    weights = rng.uniform(0.5, 1.5, len(x))
+    weights[:30] = 0.0
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=1.7,
+        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+    ).fit(X, y, sample_weight=weights)
+    assert model._solver_result.scop_inference is not None
+
+    live = model.metrics(X, y, sample_weight=weights)
+    copy = model.metrics(X.copy(), y.copy(), sample_weight=weights)
+    # Both read equal retained state; only the order of an at most n-term
+    # reduction can separate them.
+    rtol = len(y) * np.finfo(np.float64).eps
+    for actual, expected in (
+        (copy.leverage, live.leverage),
+        (copy._influence_edf[0], live._influence_edf[0]),
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=rtol, atol=rtol * np.max(expected))

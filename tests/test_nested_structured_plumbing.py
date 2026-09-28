@@ -921,7 +921,7 @@ def _augmented_factor(matrices, groups, weights, lambdas, components, chain):
     penalized = build_penalized_nested_operator(
         system, matrices, groups, lambdas, reml_penalties=components
     )
-    return layout, build_augmented_nested_factor(system, penalized)
+    return layout, system, build_augmented_nested_factor(system, penalized)[0]
 
 
 @pytest.mark.parametrize("weight_scale", [1.0, 1e6])
@@ -951,7 +951,7 @@ def test_the_row_pass_floor_nulls_a_column_carried_by_rounding_weights(weight_sc
     factors = []
     for value in (0.0, 1e-16, -1e-16):
         weights[rows] = value * largest
-        _, (factor, _) = _augmented_factor(
+        _, _, factor = _augmented_factor(
             matrices, case.groups, weights, _lambdas(), _components(case), CHAIN
         )
         factors.append(factor)
@@ -969,18 +969,14 @@ def test_the_row_pass_floor_nulls_a_column_carried_by_rounding_weights(weight_sc
         assert abs(factor.logdet() - reference.logdet()) <= bound
 
 
-@pytest.mark.parametrize("shift", [2020.0, 2013.0])
-def test_a_truncated_logdet_is_the_dense_backends_centred_pseudo_determinant(shift) -> None:
-    """``year + age = shift`` aliases the intercept; the logdet equals the gram backend's.
+def _year_age_alias(shift):
+    """``year + age = shift`` beside a 4/12/60 chain, which aliases the intercept.
 
-    At 2020 both columns are centred (``|mean| > sd``) and their null vector
-    misses the intercept; at 2013 age (mean 3.0, sd 3.2) is not, so the
-    centred null vector touches it.  The dense backend reports ``log sum_w +
-    log pdet(H_c)`` with ``H_c`` the weighted-mean-centred slope Hessian, a
-    pseudo-determinant that no choice of centre moves.  Both are backward
-    stable in their Jacobi-scaled metrics to ``(n + p) eps`` entrywise, so by
-    Weyl they differ by at most ``2 p^2 (n + p) eps / lambda_min`` over the
-    retained scaled spectrum of ``H_c``.
+    Returns the layout, the nested system, its augmented factor, the weights
+    and the weighted-mean-centred slope data Gram and Hessian ``H_c = gram +
+    S``.  At 2020 both columns are centred (``|mean| > sd``) and their null
+    vector misses the intercept; at 2013 age (mean 3.0, sd 3.2) is not, so the
+    centred null vector touches it.
     """
     rng = np.random.default_rng(5)
     n = 3000
@@ -1013,17 +1009,32 @@ def test_a_truncated_logdet_is_the_dense_backends_centred_pseudo_determinant(shi
         if index
     ]
     weights = np.exp(rng.normal(size=n))
-    layout, (factor, _) = _augmented_factor(
+    layout, system, factor = _augmented_factor(
         matrices, groups, weights, lambdas, components, (1, 2, 3)
     )
-    assert (layout.border_center[1] == 0.0) == (shift == 2013.0)
     design = np.hstack([matrix.toarray() for matrix in matrices])
     centered = design - (weights @ design) / np.sum(weights)
     ridge = np.concatenate(
         [np.zeros(2), *(np.full(groups[i].size, lambdas[groups[i].name]) for i in (1, 2, 3))]
     )
-    H = centered.T @ (weights[:, None] * centered) + np.diag(ridge)
-    H = 0.5 * (H + H.T)
+    gram = centered.T @ (weights[:, None] * centered)
+    gram = 0.5 * (gram + gram.T)
+    return layout, system, factor, weights, gram, gram + np.diag(ridge)
+
+
+@pytest.mark.parametrize("shift", [2020.0, 2013.0])
+def test_a_truncated_logdet_is_the_dense_backends_centred_pseudo_determinant(shift) -> None:
+    """The logdet on both aliases of ``year + age = shift`` equals the gram backend's.
+
+    The dense backend reports ``log sum_w + log pdet(H_c)``, a
+    pseudo-determinant that no choice of centre moves.  Both are backward
+    stable in their Jacobi-scaled metrics to ``(n + p) eps`` entrywise, so by
+    Weyl they differ by at most ``2 p^2 (n + p) eps / lambda_min`` over the
+    retained scaled spectrum of ``H_c``.
+    """
+    layout, _, factor, weights, _, H = _year_age_alias(shift)
+    assert (layout.border_center[1] == 0.0) == (shift == 2013.0)
+    n = len(weights)
     dense = decompose_gram(H)
     scale = 1.0 / np.sqrt(np.diag(H))
     retained = np.linalg.eigvalsh(scale[:, None] * H * scale[None, :])[1:]
@@ -1031,6 +1042,52 @@ def test_a_truncated_logdet_is_the_dense_backends_centred_pseudo_determinant(shi
     assert factor.rank == p - 1 and dense.rank == p - 2
     expected = np.log(np.sum(weights)) + dense.log_pdet
     assert abs(factor.logdet() - expected) <= 2 * p**2 * (n + p) * EPS / retained.min()
+
+
+@pytest.mark.parametrize("shift", [2020.0, 2013.0])
+def test_truncated_profiled_edf_is_the_dense_backends(shift) -> None:
+    """EDF and EDF1 of the profiled identity routes equal the gram backend's on both aliases.
+
+    The slope block of the augmented ``H^+`` is a generalized inverse of
+    ``H_c``, but at 2013 ``H^+ H e_0 != e_0`` (the witness), and the raw slope
+    diagonal exceeds ``diag(H_c^+ H_c)`` by ``mean_x[j] (H^+ H)_(j+1, 0)``
+    (0.599 of EDF).  Diagonal entries on the null support {year, age} depend
+    on the generalized inverse (the gram backend pivots one out); their sum,
+    every other entry and the traces do not (Rao & Mitra 1971, Lemma 2.2.4 and
+    Theorem 2.4.1).  With both backends backward stable to ``(n + p) eps``
+    entrywise (above), ``||E|| <= p (n + p) eps``: EDF is the rank less the
+    retained eigenvalues in [0, 1] of the scaled ``H^+ S``, each moved at most
+    ``||E|| / lambda_min`` (Weyl), and an entry of ``H^+`` at most ``||E|| /
+    lambda_min^2`` (first order), doubled for the two-entry support sum; both
+    for each backend, and EDF1 at most twice as sensitive.
+    """
+    _, system, factor, weights, gram, H = _year_age_alias(shift)
+    witness = factor.inverse_operator_diagonal(factor.operator.data)[0]
+    assert (witness < 0.5) == (shift == 2013.0)
+    data = system.operator
+    xtw = np.empty(data.shape[0])
+    xtw[data.small_indices], xtw[data.structured_indices] = system.xtw_small, system.xtw_structured
+    profiled = ProfiledNestedSchurFactor(
+        augmented_factor=factor, sum_w=system.sum_w, xtw=xtw, data_operator=data
+    )
+    dense = decompose_gram(H)
+    influence = np.column_stack([dense.solve(column) for column in gram.T])
+    scale = 1.0 / np.sqrt(np.diag(H))
+    retained = np.linalg.eigvalsh(scale[:, None] * H * scale[None, :])[1:]
+    p, n = H.shape[0], len(weights)
+    trace = 2 * p**2 * (n + p) * EPS / retained.min()
+    entry = 4 * p * (n + p) * EPS / retained.min() ** 2
+
+    def grouped(diagonal):
+        return np.r_[diagonal[:2].sum(), diagonal[2:]]
+
+    edf = profiled.inverse_operator_diagonal(data)
+    edf1 = profiled.inverse_operator_square_diagonal(data)
+    squared = influence @ influence
+    assert abs(profiled.trace_inverse_operator(data) - np.trace(influence)) <= trace
+    assert abs(np.sum(edf1) - np.trace(squared)) <= 2 * trace
+    assert np.all(np.abs(grouped(edf) - grouped(np.diag(influence))) <= entry)
+    assert np.all(np.abs(grouped(edf1) - grouped(np.diag(squared))) <= 2 * entry)
 
 
 # ── Standard errors of a large RandomEffect ───────────────────────────────

@@ -649,3 +649,64 @@ def test_a_parent_with_more_levels_than_the_block_cap_reports_standard_errors() 
     ones = np.ones(len(y))
     gap = _held_gap(nested, dense, y, offset, ones)
     assert _relative(nested_se, dense_se) <= 8 * _budget(nested, y, offset, ones, stopping_gap=gap)
+
+
+# ── Estimability ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("leaf_constant", [False, True])
+def test_border_estimability_is_invariant_to_a_column_offset(leaf_constant: bool) -> None:
+    """Adding a constant to a numeric column cannot change what the data identify.
+
+    The border's decision is taken on the Schur complement of the leaf block,
+    the within-leaf scatter (Lovell 1963).  The raw moments of
+    ``x = 1e7 + N(0, 1)`` are ``1e14`` times that scatter, beyond what a
+    float64 difference resolves, so the reduction runs on the rows ``x - c``
+    the leaf statistics hold (Chan, Golub & LeVeque 1983, §3); ``1e12`` is an
+    epoch-millisecond column.  A column constant within every leaf lies in the
+    span of the leaf indicators at any offset and stays non-estimable.  The
+    compact reduction is called directly: the public dispatcher's dense
+    fallback for narrow systems would hide a reduction that raises.
+    """
+    from superglm import Numeric
+    from superglm.solvers._structured.geometry import _nested_centered_estimability
+
+    rng = np.random.default_rng(0)
+    n, roots, leaves = 900, 10, 30
+    parent = np.concatenate([np.arange(roots), rng.integers(0, roots, leaves - roots)])
+    leaf = rng.integers(0, leaves, n)
+    spread = rng.normal(size=leaves)[leaf] if leaf_constant else rng.normal(size=n)
+    y = (
+        0.5 * spread
+        + rng.normal(0.0, 0.5, roots)[parent[leaf]]
+        + rng.normal(0.0, 0.3, leaves)[leaf]
+        + rng.normal(size=n)
+    )
+    frame = pd.DataFrame(
+        {
+            "root": np.array([f"r{code}" for code in parent[leaf]], dtype=object),
+            "leaf": np.array([f"l{code}" for code in leaf], dtype=object),
+        }
+    )
+    decisions = []
+    for offset in (0.0, 1e7, 1e12):
+        data = frame.assign(x=offset + spread)
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Numeric(), "root": RandomEffect(), "leaf": RandomEffect()},
+            selection_penalty=0,
+            direct_solve="structured",
+        )
+        model.fit_reml(data, y)
+        state = model._linear_system_state
+        assert model._reml_profile["structured_chain"] == ("root", "leaf")
+        assert isinstance(state.coefficient_factor, NestedSchurFactor)
+        operator = state.centered_data_operator
+        estimable = _nested_centered_estimability(operator, operator.raw)
+        x = next(group.sl for group in model._groups if group.name == "x")
+        assert bool(estimable[x][0]) is not leaf_constant
+        se = model.metrics(data, y).coefficient_se["x"]
+        assert bool(np.isfinite(se[0])) is not leaf_constant
+        decisions.append(estimable)
+    for decision in decisions[1:]:
+        np.testing.assert_array_equal(decision, decisions[0])

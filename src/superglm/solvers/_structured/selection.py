@@ -12,11 +12,13 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
 from superglm.group_matrix import (
     FactorSmoothGroupMatrix,
     GroupMatrix,
     RandomEffectGroupMatrix,
 )
+from superglm.links import CloglogLink, IdentityLink, LogLink, ProbitLink, SqrtLink
 from superglm.solvers._structured.overrides import (
     _factor_smooth_override_local_blocks,
     _structured_override_incompatibility,
@@ -80,7 +82,8 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # every PIRLS iterate and W-derivative operator (sections 3.4 and 3.6), dense
 # passes over the n rows that the other backends skip, priced as
 # _AUTO_NESTED_ROW_PASSES passes of n b^2: its ratio is (b / w)^2 (1 + passes n / w).
-# auto takes the cheaper structured candidate when its ratio is at most 0.75.
+# auto takes the cheapest candidate within its own bound: 0.75 for a chain, and
+# the August 2026 0.05 for the single level (see below the anchors).
 # Memory, w b against w^2, is at most the square root of that ratio, so it never
 # reverses the order; the dense fits below that hit the cap had peaked at 3.4 to
 # 24.0 GiB.
@@ -120,12 +123,22 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # gram (n=2,000: K=300 beside q=100 14.3 / 10.4; K=600 beside q=200 113 / 73.4).
 # The largest ratio measured ahead is 0.596; at 0.77 (n=200, K=4 beside q=28) the
 # two tie, so 0.75 keeps near-degenerate shapes dense.
-_AUTO_MAX_RANDOM_EFFECT_COST_RATIO = 0.75
+#
+# Those single-level timings are not yet a licence for the wider bound.
+# ScalarSchurFactor still forms Q by subtraction and truncates on the unscaled Q
+# (spec sections 3.7 and 8), and auto does not retry a refused factor on gram.
+# At ratios in (0.05, 0.75] it refused at the REML bootstrap (random-effect lambda
+# 1e-4) on a raw year or vehicle-value column (|mean| / sd above about 3e3) and on
+# a column aliased under prior weights near 1e2: 22 of 64 randomized fit_reml
+# fits raised LinAlgError where gram fitted, and 7 more lost standard errors of
+# estimable coefficients (2026-09-28).  The single level keeps 0.05 until it
+# gains the chain's centred, PSD-sum Q and Jacobi-scaled rank rules.
+_AUTO_MAX_NESTED_COST_RATIO = 0.75
 _AUTO_NESTED_ROW_PASSES = 0.08
-# FactorSmooth and sum-to-zero block geometries keep the August 2026 constant
-# bound on the factorization ratio (issue #343): synthetic "fs" and "sz" sweeps
-# then lost at mid ratio and won at tiny ratio, and section 5 leaves them as
-# they are.
+# The single level, FactorSmooth and sum-to-zero block geometries keep the
+# August 2026 constant bound on the factorization ratio (issue #343): synthetic
+# "fs" and "sz" sweeps then lost at mid ratio and won at tiny ratio, and section 5
+# leaves them as they are.
 _AUTO_MAX_STRUCTURED_COST_RATIO = 0.05
 
 
@@ -226,8 +239,10 @@ def _structured_auto_cost_decision(
     if isinstance(dominant_matrix, RandomEffectGroupMatrix):
         sizes = [groups[index].size for index in chain]
         ratios = _random_effect_auto_cost_ratios(dominant_matrix.shape[0], coefficient_width, sizes)
-        backend = min(ratios, key=ratios.__getitem__)
-        cost_ratio, bound = ratios[backend], _AUTO_MAX_RANDOM_EFFECT_COST_RATIO
+        bounds = {"single": _AUTO_MAX_STRUCTURED_COST_RATIO, "nested": _AUTO_MAX_NESTED_COST_RATIO}
+        admissible = [name for name, ratio in ratios.items() if ratio <= bounds[name]]
+        backend = min(admissible or ratios, key=ratios.__getitem__)
+        cost_ratio, bound = ratios[backend], bounds[backend]
         use_structured = coefficient_width >= _AUTO_MIN_COEFFICIENT_WIDTH and cost_ratio <= bound
         predicted = ", ".join(f"{name}={ratio:.3g}" for name, ratio in ratios.items())
         if backend == "single" and len(chain) >= 2:
@@ -544,30 +559,38 @@ def find_nested_chain(
     return (*chain, leaf_index)
 
 
-# §3.7 audit of the observed working weights (critic run ``wsign``): the pairs
-# whose rows are non-negative, plus two negative only by rounding.
+# §3.7: observed rows w0 (u²/V + (y - μ)(u² V'/V² - v/V)), u = dμ/dη and
+# v = d²μ/dη² (Wood, Pya and Säfken 2016, eq. 12), signed over the validated
+# response support.  Fisher rows w0 u²/V are never negative, and the canonical
+# pairs (Poisson/log, Binomial/logit, Gamma/inverse, Gaussian/identity) are
+# classified Fisher before this table.  Per observed pair:
+#   Binomial/probit, cloglog: the inverse link F and 1 - F are log-concave, so
+#     each row is convex in η (Pratt 1981).
+#   Gamma/log: w0 y/μ.  Poisson/identity: w0 y/μ², zero rows negative by rounding.
+#   NegativeBinomial/log: w0 θμ(θ + y)/(θ + μ)², θ > 0.
+#   Tweedie/log: w0 μ^(1-p) ((2 - p) μ + (p - 1) y), for every p in the class's (1, 2).
+#   Tweedie/sqrt: 2 w0 μ^(-p) ((3 - 2p) μ + (2p - 1) y), negative at y = 0 once
+#     p > 3/2, so it is admitted only up to that power.
+# Exact types: a subclass can change V or the inverse link.
 _NONNEGATIVE_OBSERVED_WEIGHT_PAIRS = frozenset(
     {
-        ("Poisson", "LogLink"),
-        ("Binomial", "LogitLink"),
-        ("Binomial", "ProbitLink"),
-        ("Binomial", "CloglogLink"),
-        ("Gamma", "LogLink"),
-        ("Gamma", "InverseLink"),
-        ("Tweedie", "LogLink"),
-        ("NegativeBinomial", "LogLink"),
-        ("Gaussian", "IdentityLink"),
-        ("Poisson", "IdentityLink"),
-        ("Tweedie", "SqrtLink"),
+        (Binomial, ProbitLink),
+        (Binomial, CloglogLink),
+        (Gamma, LogLink),
+        (Poisson, IdentityLink),
+        (NegativeBinomial, LogLink),
+        (Tweedie, LogLink),
     }
 )
+_TWEEDIE_SQRT_MAX_POWER = 1.5
 
 
 def nested_chain_weights_admissible(family, link) -> bool:
     """Return whether a nested chain may see this family's working weights (§3.7).
 
     Fisher curvature has non-negative weights.  Observed curvature is admitted
-    only for the audited pairs above; an unaudited or custom pair declines the
+    only for the audited pairs above, by exact type and within the derived
+    Tweedie/sqrt power range; an unaudited or custom pair declines the
     chain (the single-level backend keeps the parents in the border), which is
     safe and recorded.  ``None`` for either argument means Fisher weights.
     """
@@ -580,7 +603,10 @@ def nested_chain_weights_admissible(family, link) -> bool:
             return True
     except NotImplementedError:
         return False
-    return (type(family).__name__, type(link).__name__) in _NONNEGATIVE_OBSERVED_WEIGHT_PAIRS
+    pair = (type(family), type(link))
+    if pair == (Tweedie, SqrtLink):
+        return family.p <= _TWEEDIE_SQRT_MAX_POWER
+    return pair in _NONNEGATIVE_OBSERVED_WEIGHT_PAIRS
 
 
 def _zero_penalty_random_effects(
@@ -641,9 +667,13 @@ def _resolve_nested_chain(
         return chain, None
     names = [groups[index].name for index in chain]
     if not nested_chain_weights_admissible(family, link):
+        why = (
+            f"observed rows are negative at y = 0 for p > {_TWEEDIE_SQRT_MAX_POWER}"
+            if (type(family), type(link)) == (Tweedie, SqrtLink)
+            else "observed working weights are not audited non-negative"
+        )
         return (leaf_index,), (
-            f"nested chain {names!r} declined: {type(family).__name__}/{type(link).__name__} "
-            "observed working weights are not audited non-negative"
+            f"nested chain {names!r} declined: {type(family).__name__}/{type(link).__name__} {why}"
         )
     if S_override is not None:
         chain_indices = np.concatenate([np.arange(groups[g].start, groups[g].end) for g in chain])

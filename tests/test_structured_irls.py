@@ -704,15 +704,16 @@ def test_auto_records_dense_fallback_reason_for_constraints():
     [
         pytest.param(20, 4, False, id="small-total-width-stays-dense"),
         pytest.param(30, 4, True, id="measured-scalar-crossover"),
-        # Ratio ((q+1)/(p+1))**2 = 0.26 here, and 0.596 for issue #343's widest
-        # anchor (K=23 beside q=77).  #343 measured structured slower there in
-        # August 2026; since the structured Newton Hessian forms each product
-        # once, same-shape stand-ins measure it ahead (2026-09-27, selection.py).
-        pytest.param(20, 20, True, id="mid-ratio-border-goes-structured"),
-        pytest.param(23, 77, True, id="issue-343-widest-anchor-goes-structured"),
-        # Ratio 0.772, above the 0.75 bound: measured a tie at n=200.
+        # Ratio ((q+1)/(p+1))**2 = 0.26 here.  A real ~67k-row fit measured the
+        # structured backend ~1.7x SLOWER end to end at this shape class
+        # (issue #343): the factorization the ratio prices is a small minority
+        # of per-iteration work beside the shared O(n) moment build, so a wide
+        # dense border must stay on the dense path.
+        pytest.param(20, 20, False, id="wide-border-stays-dense"),
         pytest.param(4, 28, False, id="insufficient-schur-cost-reduction"),
-        # Ratio 0.0009: the dominant block spans nearly the whole width.
+        # Ratio 0.0009: the dominant block spans nearly the whole width.  This
+        # is the measured-win regime (1.5x-3.9x faster on real and synthetic
+        # fits) that the recalibrated bound must keep structured.
         pytest.param(300, 8, True, id="dominant-block-spans-width"),
     ],
 )
@@ -755,11 +756,70 @@ def test_auto_backend_uses_measured_structured_crossover(
     assert decision.auto_cost_ratio == pytest.approx(expected_ratio)
 
 
+def test_auto_keeps_a_raw_year_border_off_the_single_level_factor() -> None:
+    """A pricing-shaped fit whose single level sits between the 0.05 and 0.75 ratios.
+
+    ScalarSchurFactor forms its border by subtraction and truncates on the
+    unscaled Q, so a raw year and a raw vehicle value beside a 40-level region
+    effect (ratio about 0.1) are refused at the REML bootstrap, and auto does not
+    retry a refusal on gram.  auto must fit this model exactly as gram does.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, Numeric, RandomEffect, Spline, SuperGLM
+
+    rng = np.random.default_rng(7)
+    n, levels = 2000, 40
+    region = rng.integers(0, levels, n)
+    age = rng.uniform(18, 80, n)
+    cover = rng.integers(0, 5, n)
+    year = rng.integers(2010, 2021, n).astype(float)
+    value = np.exp(rng.normal(np.log(15000.0), 0.5, n))
+    exposure = rng.uniform(0.1, 1.0, n)
+    eta = (
+        -2.0
+        + 0.4 * np.exp(-(age - 18) / 10)
+        + np.array([0.0, 0.1, -0.1, 0.2, 0.05])[cover]
+        + 0.02 * (year - 2015)
+        + 0.1 * np.log(value / 15000.0)
+        + rng.normal(0.0, 0.2, levels)[region]
+    )
+    y = rng.poisson(exposure * np.exp(eta)).astype(float)
+    frame = pd.DataFrame(
+        {
+            "age": age,
+            "cover": [f"c{c}" for c in cover],
+            "year": year,
+            "value": value,
+            "region": [f"r{c:02d}" for c in region],
+        }
+    )
+
+    def fit(direct_solve: str):
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            direct_solve=direct_solve,
+            features={
+                "age": Spline(n_knots=8),
+                "cover": Categorical(),
+                "region": RandomEffect(),
+                "year": Numeric(),
+                "value": Numeric(),
+            },
+        )
+        return model.fit_reml(frame, y, offset=np.log(exposure))
+
+    auto, gram = fit("auto"), fit("gram")
+    assert auto.result.direct_backend == "gram"
+    assert auto.result.deviance == gram.result.deviance
+
+
 @pytest.mark.parametrize(
     ("dominant_width", "small_width", "expect_structured"),
     [
         pytest.param(300, 8, True, id="pick-structured"),
-        pytest.param(6, 60, False, id="decline-on-cost"),
+        pytest.param(20, 20, False, id="decline-on-cost"),
     ],
 )
 def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
@@ -774,7 +834,7 @@ def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
     recalibration against real workloads reads.
     """
     rng = np.random.default_rng(343)
-    n = 4 * (dominant_width + small_width)
+    n = 4 * dominant_width
     codes = np.asarray(np.arange(n) % dominant_width, dtype=np.intp)
     numeric = rng.normal(size=(n, small_width))
     y = 0.05 * numeric[:, 0] + rng.normal(scale=0.3, size=n)

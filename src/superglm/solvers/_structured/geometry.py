@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -259,18 +259,27 @@ def _nested_centered_estimability(
     """
     q, leaves = len(raw.small_indices), raw.tree.sizes[-1]
     leaf_indices = raw.structured_indices[raw.tree.offsets[-2] :]
-    reduced = np.concatenate((raw.small_indices, leaf_indices))
+    # Reduce on the rows x - c the leaf statistics were accumulated on (§3.4).
+    # The intercept shear [1, X] -> [1, X - 1 c'] changes neither the slope
+    # part of a null vector nor a centred column norm, so the decision is the
+    # same, but raw moments of a column with |mean| >> sd cancel to nothing in
+    # the Schur complement; the shift replaces that condition number
+    # |mean| / sd with |mean - c| / sd (Chan, Golub & LeVeque 1983, §3).  The
+    # border's X'w - (sum w) c is the sum of the shifted leaf crosses, and its
+    # centre is that over sum w, as the operator's own centre is xtw / sum_w.
+    shifted = replace(raw, leaf=replace(raw.leaf, center=np.zeros(q)))
+    border_cross = shifted.leaf.cross.sum(axis=0)
     leaf_operator = CenteredBlockOperator(
         raw=SymmetricBlockOperator(
-            A=raw.A,
-            C=raw.leaf.cross,
+            A=shifted.A,
+            C=shifted.leaf.cross,
             d=raw.leaf.weight,
             small_indices=np.arange(q),
             structured_indices=np.arange(q, q + leaves),
         ),
-        cross=operator.cross[reduced],
+        cross=np.concatenate((border_cross, operator.cross[leaf_indices])),
         total=operator.total,
-        center=operator.center[reduced],
+        center=np.concatenate((border_cross / operator.total, operator.center[leaf_indices])),
     )
     result = np.zeros(operator.shape[0], dtype=bool)
     result[raw.small_indices] = _independent_block_centered_estimability(leaf_operator)[:q]
