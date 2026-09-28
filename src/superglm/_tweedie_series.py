@@ -24,8 +24,8 @@ _MAX_SAFE_MODE = float(2**52)
 # below it for every p < 2 - 2e-9, so on that path it binds only nearer p = 2.
 MAX_ROW_TERMS = 1_000_000
 # lgamma(j + 1) + lgamma(a j) is shared by every row of one call. The accuracy
-# switch bounds it by 1.2-1.7 j* entries; this cap binds only where j* > 9e5,
-# p > 1.9999.
+# switch bounds it by 1.03-1.73 j* entries (the low end at the lattice floor as
+# p -> 1); this cap binds only where j* > 9e5, p > 1.9999.
 _TABLE_LIMIT = 1 << 20
 
 

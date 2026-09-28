@@ -29,7 +29,9 @@ def _simulate(p: float, seed: int, n: int = 20_000):
 def test_fit_reml_certifies_the_mode_near_p_two(seed, p):
     """Every one of these fits refused its mode (score 1e-9 to 3e-7 against 1e-9).
 
-    PIRLS line searches stalled on merit noise: the unit deviance lost
+    The data are the recovery simulation at true p = 1.8 for both powers: 1.8 and
+    1.9 are candidates the REML power search evaluates there, so the fit at 1.9
+    is deliberately misspecified. PIRLS line searches stalled on merit noise: the unit deviance lost
     eps * mu / y of accuracy on the many small positive responses p near 2
     produces, and the step test then fired on a damped step. fit_reml raises
     ObservedModeNotCertifiedError when the mode misses the bar.

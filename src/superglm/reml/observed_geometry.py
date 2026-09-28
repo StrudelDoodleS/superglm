@@ -781,8 +781,8 @@ class ObservedModeNotCertifiedError(RuntimeError):
     Raised where observed REML geometry needs implicit differentiation and the
     achieved mode score misses the certification bar. This is a statement about
     one ``(data, power, lambda)`` point, not about the model: a power search can
-    meet the bar comfortably across most of its range and miss it near a bound
-    where the working weights are worse conditioned. Callers that evaluate many
+    meet the bar comfortably across most of its range and miss it at isolated
+    powers. Callers that evaluate many
     such points should treat it as an infeasible point rather than a failure,
     which is why it is distinguishable from a bare ``RuntimeError``.
 

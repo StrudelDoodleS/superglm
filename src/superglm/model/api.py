@@ -1344,7 +1344,7 @@ class SuperGLM:
             fitted mean, so the returned estimates describe the model you get
             back. Selecting ``p`` under a different objective than the one that
             publishes it is an approximation -- on the synthetic benchmark
-            fixture it moved ``p_hat`` by 1.1e-7 while running about 3x faster
+            fixture it moved ``p_hat`` by 1.1e-6 while running about 1.8x faster
             -- so measure it on your own data before relying on it. A decoupled
             search also never meets the certifiable-region boundary a coupled
             REML search must route around (a coupled run warns when its optimum

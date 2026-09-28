@@ -314,8 +314,8 @@ wrong on the way:
 
 - **Agreement.** Selecting *p* under ML and publishing under REML is an
   approximation. On the synthetic benchmark fixture in
-  `benchmarks/tweedie_reml_search_cost.py` it moved *p̂* by 1.1e-7 and ran
-  about 3× faster, and across a synthetic sweep spanning a 600× range of
+  `benchmarks/tweedie_reml_search_cost.py` it moved *p̂* by 1.1e-6 and ran
+  about 1.8× faster, and across a synthetic sweep spanning a 600× range of
   fitted penalty strength the mode disagreement was uncorrelated with how
   strongly REML actually shrinks. That is evidence, not a guarantee —
   compare against `fit_mode="reml"` alone on your own data before adopting
