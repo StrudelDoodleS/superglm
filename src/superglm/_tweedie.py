@@ -412,24 +412,67 @@ def _saturated_rows(y, weights, phi, p) -> NDArray:
     return saturated
 
 
-def _log_density(saturated, weights, phi, deviance) -> NDArray:
-    # w d / (2 phi) through the effective dispersion phi / w, which is all the
-    # density depends on; where w / phi leaves the normal range, through logs.
+def _scaled_deviance(y, mu, p, weights, phi) -> NDArray:
+    """w d(y, mu) / (2 phi), through logs where a factor or the product overflows.
+
+    The density depends on phi / w alone, and d may overflow where w d / phi
+    does not; those rows, and rows whose w / phi leaves the normal range, take
+    the exponential of the term's logarithm.
+    """
     ratio = weights / phi
-    scaled = deviance * (0.5 * ratio)
-    extreme = np.flatnonzero(~(ratio >= _TINY) | ~np.isfinite(ratio))
-    with np.errstate(divide="ignore", over="ignore"):
-        scaled[extreme] = np.exp(
-            np.log(deviance[extreme]) + np.log(weights[extreme]) - math.log(2.0) - math.log(phi)
+    with np.errstate(over="ignore", invalid="ignore"):
+        scaled = tweedie_unit_deviance(y, mu, p) * (0.5 * ratio)
+    extreme = np.flatnonzero(~np.isfinite(scaled) | ~(ratio >= _TINY))
+    if extreme.size:
+        log_deviance = _log_unit_deviance(y[extreme], mu[extreme], p)
+        with np.errstate(over="ignore"):
+            scaled[extreme] = np.exp(
+                log_deviance + np.log(weights[extreme]) - math.log(2.0) - math.log(phi)
+            )
+    return scaled
+
+
+def _log_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
+    """log d(y, mu), finite where d itself overflows.
+
+    d is homogeneous of degree 2 - p, d(y, mu) = mu^(2-p) d(y / mu, 1), and
+    d(r, 1) is finite unless r nears overflow. There the half-deviance factors
+    as A (1 - B/A + C/A), A = y mu^(1-p) / (p - 1), with
+    B/A = (mu / y)^(p-1) / (2 - p) and C/A = (p - 1)(mu / y) / (2 - p) far below one.
+    """
+    log_mu = np.log(mu)
+    with np.errstate(over="ignore", divide="ignore"):
+        ratio = y / mu
+        log_deviance = (2.0 - p) * log_mu + np.log(
+            tweedie_unit_deviance(ratio, np.ones_like(ratio), p)
         )
-    return saturated - scaled
+    huge = np.flatnonzero(np.isposinf(log_deviance))
+    if huge.size:
+        log_y = np.log(y[huge])
+        log_mu_over_y = log_mu[huge] - log_y
+        correction = -np.expm1((p - 1.0) * log_mu_over_y - math.log(2.0 - p)) + np.exp(
+            math.log(p - 1.0) - math.log(2.0 - p) + log_mu_over_y
+        )
+        log_deviance[huge] = (
+            math.log(2.0)
+            + log_y
+            + (1.0 - p) * log_mu[huge]
+            - math.log(p - 1.0)
+            + np.log(correction)
+        )
+    return log_deviance
+
+
+def weighted_deviance(y, mu, p, weights) -> float:
+    """sum w d(y, mu), finite wherever every term is."""
+    return 2.0 * float(np.sum(_scaled_deviance(y, mu, p, weights, 1.0)))
 
 
 def tweedie_logpdf(y, mu, phi, p, weights=None) -> NDArray:
     """Row log densities of Tweedie(mu, phi / w, p), 1 < p < 2 (Dunn & Smyth 2005)."""
     y, mu, phi, p, weights = _density_arrays(y, mu, phi, p, weights)
     saturated = _saturated_rows(y, weights, phi, p)
-    return _log_density(saturated, weights, phi, tweedie_unit_deviance(y, mu, p))
+    return saturated - _scaled_deviance(y, mu, p, weights, phi)
 
 
 def tweedie_logpdf_pair(y, mu, null_mu, phi, p, *, weights=None) -> tuple[NDArray, NDArray]:
@@ -440,8 +483,8 @@ def tweedie_logpdf_pair(y, mu, null_mu, phi, p, *, weights=None) -> tuple[NDArra
         raise ValueError("null_mu must match mu and be finite and strictly positive")
     saturated = _saturated_rows(y, weights, phi, p)
     return (
-        _log_density(saturated, weights, phi, tweedie_unit_deviance(y, mu, p)),
-        _log_density(saturated, weights, phi, tweedie_unit_deviance(y, null_mu, p)),
+        saturated - _scaled_deviance(y, mu, p, weights, phi),
+        saturated - _scaled_deviance(y, null_mu, p, weights, phi),
     )
 
 

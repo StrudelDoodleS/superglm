@@ -89,6 +89,29 @@ def test_a_summed_row_whose_canonical_product_overflows_keeps_its_density():
     assert scaled[0] == pytest.approx(base[0], abs=2 * 2 * EPS * math.log(1e308) * (2 + 4))
 
 
+@pytest.mark.parametrize("p", [1.2, 1.5, 1.8])
+def test_log_density_is_finite_where_the_unit_deviance_overflows(p):
+    # At y / mu = 1e616, d = 2 y mu^(1-p) / (p - 1) (1 - B/A + C/A) overflows, with
+    # B/A = (mu / y)^(p-1) / (2 - p) and C/A below 1e-100. The weight brings w d / 2
+    # back to between e^143 and e^567, where |l_sat| is far below its rounding.
+    y, mu, w = 1e308, 1e-308, 1e-308
+    value = tweedie_logpdf(np.array([y]), np.array([mu]), 1.0, p, weights=np.array([w]))
+    expected = -math.exp(math.log(w) + math.log(y) + (1 - p) * math.log(mu) - math.log(p - 1))
+    # It is the exponential of a sum of logs of magnitude up to |log w| + |log y| + |log mu|.
+    scale = abs(math.log(w)) + abs(math.log(y)) + abs(math.log(mu))
+    assert value[0] == pytest.approx(expected, rel=4 * EPS * scale)
+
+
+def test_the_ml_dispersion_admits_a_row_whose_unit_deviance_overflows():
+    # The same row's w d = 4e154 is finite although d is not.
+    from superglm.profiling.tweedie import profile_phi_at
+
+    y, mu = _book(p=1.5, n=200, seed=3)
+    y, mu = np.append(y, 1e308), np.append(mu, 1e-308)
+    weights = np.append(np.ones(200), 1e-308)
+    assert math.isfinite(profile_phi_at(y, mu, weights, 1.5).phi)
+
+
 @pytest.mark.parametrize("p", [1.2, 1.5, 1.8, 1.95])
 def test_unit_deviance_is_accurate_below_half_the_mean(p):
     """0 < y < mu/2: y - mu is inexact there, so the log ratio must not come from 1 + delta.

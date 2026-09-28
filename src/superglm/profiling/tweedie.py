@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._tweedie import PhiSolve, TweedieRows, solve_log_phi, tweedie_unit_deviance
+from superglm._tweedie import PhiSolve, TweedieRows, solve_log_phi, weighted_deviance
 from superglm.distributions import Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import (
@@ -53,8 +53,7 @@ _CI_XTOL = 1e-4
 
 def profile_phi_at(y: NDArray, mu: NDArray, weights: NDArray, p: float) -> PhiSolve:
     """Maximum-likelihood phi at a fitted mean: Q with M = 0."""
-    deviance = float(np.sum(weights * tweedie_unit_deviance(y, mu, p)))
-    return solve_log_phi(TweedieRows.prepare(y, weights, p), deviance)
+    return solve_log_phi(TweedieRows.prepare(y, weights, p), weighted_deviance(y, mu, p, weights))
 
 
 @dataclass(frozen=True)
