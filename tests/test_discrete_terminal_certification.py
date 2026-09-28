@@ -11,7 +11,8 @@ now stops when either first-order certificate holds, as glum's IRLS stops on
 
 - the penalized score ``g = [1 X]' s - S beta``, ``s = w (y - mu) h' / V``,
   satisfies ``||g||_inf <= tau sum |s|``, the intercept column of the
-  pre-cancellation magnitude ``|X|' |s|``; or
+  pre-cancellation magnitude ``|X|' |s|``, or the rounding of ``S beta``,
+  ``gamma_m max(|S| |beta|)``, where that is larger; or
 - the step into the retained state satisfies ``|d_j| <= tau max(1, |beta_j|)``.
 
 Fisher scoring reaches the fixed point at a linear rate.  Gamma/log, whose
@@ -206,6 +207,62 @@ def test_score_mode_stops_no_later_than_the_step_rule() -> None:
     }
     assert results["score"].converged and results["coefficients"].converged
     assert results["score"].n_iter <= results["coefficients"].n_iter
+
+
+@pytest.mark.parametrize("family", ["poisson", "gamma"])
+def test_score_is_certified_no_finer_than_the_penalty_rounding(family: str) -> None:
+    """A tensor block's margin penalties cancel in ``S beta`` at the fixed point.
+
+    At lambda 1e10 the terms of ``S beta`` are about 1e10 times the score they
+    cancel to, so the score settles near ``eps max(|S| |beta|) / sum |s|``,
+    1e-9 here, and the step dithers above 1e-10 with it: without the rounding
+    floor neither certificate held in 30 iterations.  The accepted score must
+    still sit within that floor, recomputed here from the dense design.
+    """
+    rng = np.random.default_rng(3)
+    n = 2000
+    x, z = rng.uniform(size=n), rng.uniform(size=n)
+    eta = -0.5 + 0.8 * x - 0.6 * z + 1.5 * (x - 0.5) * (z - 0.5)
+    y = rng.poisson(np.exp(eta)) if family == "poisson" else rng.gamma(3.0, np.exp(eta) / 3.0)
+    model = SuperGLM(
+        family=family,
+        features={
+            name: Spline(kind="cr", n_knots=8, penalty="ssp", discrete=True) for name in "xz"
+        },
+        interactions=[("x", "z")],
+        selection_penalty=0,
+        discrete=True,
+    )
+    model.fit_reml(pd.DataFrame({"x": x, "z": z}), y, max_reml_iter=1)  # builds the design
+    lambdas = {name: 1e10 if ":" in name else 0.1 for name in model._reml_lambdas}
+    result = fit_irls_direct(
+        X=model._dm,
+        y=y,
+        weights=np.ones(n),
+        family=model._distribution,
+        link=model._link,
+        groups=model._groups,
+        lambda2=lambdas,
+        reml_penalties=model._reml_penalties,
+        max_iter=30,
+        tol=PIRLS_TOL,
+        convergence="score",
+        weight_semantics="prior",
+    )[0]
+    assert result.converged
+
+    dm, p = model._dm, model._dm.shape[1]
+    S = np.zeros((p + 1, p + 1))
+    S[:p, :p] = build_penalty_matrix(
+        dm.group_matrices, model._groups, lambdas, p, model._reml_penalties
+    )
+    beta = np.append(result.beta, result.intercept)
+    X, score, *_ = _rows(model, y, None, beta)
+    scale = np.sum(np.abs(score))
+    additions = (p + 3) * EPS / 2
+    floor = additions / (1 - additions) * np.max(np.abs(S) @ np.abs(beta)) / scale
+    # the solver's evaluation and this one each round by up to the floor
+    assert np.max(np.abs(X.T @ score - S @ beta)) / scale <= PIRLS_TOL + 3 * floor
 
 
 def test_separated_level_is_not_walked_to_the_overflow_guard() -> None:

@@ -15,6 +15,7 @@ from superglm.reml.penalty_algebra import (
     compute_logdet_s_derivatives,
     compute_logdet_s_plus,
     penalty_component_dense_matrix,
+    penalty_component_magnitude_matvec,
     penalty_component_matvec,
     penalty_component_quadratic,
     penalty_component_trace,
@@ -104,6 +105,11 @@ def test_sz_compact_vector_and_trace_algebra_matches_dense_oracle() -> None:
     np.testing.assert_allclose(
         penalty_component_matvec(component, beta, gm),
         omega @ beta,
+    )
+    contrast = np.abs(sum_to_zero_contrast(gm.n_levels))
+    np.testing.assert_allclose(
+        penalty_component_magnitude_matvec(component, np.abs(beta), gm),
+        np.kron(contrast.T @ contrast, np.abs(wiggle)) @ np.abs(beta),
     )
     assert penalty_component_trace(component, inverse_block, gm) == pytest.approx(
         np.trace(inverse_block @ omega)

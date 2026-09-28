@@ -14,6 +14,7 @@ from superglm.reml.penalty_algebra import (
     compute_logdet_s_derivatives,
     compute_logdet_s_plus,
     compute_total_penalty_rank,
+    penalty_component_magnitude_matvec,
     penalty_component_matvec,
     penalty_component_quadratic,
     penalty_component_trace,
@@ -87,6 +88,10 @@ def test_repeated_penalty_vector_algebra_matches_explicit_kronecker_reference() 
         np.testing.assert_allclose(
             penalty_component_matvec(component, beta, gm),
             omega @ beta,
+        )
+        np.testing.assert_allclose(
+            penalty_component_magnitude_matvec(component, np.abs(beta), gm),
+            np.abs(omega) @ np.abs(beta),
         )
         assert penalty_component_trace(component, inverse_block, gm) == pytest.approx(
             np.trace(inverse_block @ omega)

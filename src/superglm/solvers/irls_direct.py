@@ -763,21 +763,31 @@ def _fit_irls_direct_once(
     else:
         S = _build_penalty_matrix(gms, groups, lambda2, p, reml_penalties=reml_penalties)
 
-    def penalty_matvec(beta_values: NDArray) -> NDArray:
-        """Apply the fitted penalty without expanding an identity random-effect block."""
+    def penalty_matvec(beta_values: NDArray, *, magnitude: bool = False) -> NDArray:
+        """Apply the fitted penalty without expanding an identity random-effect block.
+
+        With ``magnitude``, return ``|S| |beta|``, the magnitude this product
+        sums, which bounds its rounding componentwise.
+        """
         values = np.asarray(beta_values, dtype=np.float64)
+        if magnitude:
+            values = np.abs(values)
         if S is not None:
-            return S @ values
+            return (np.abs(S) if magnitude else S) @ values
         if reml_penalties is None:  # pragma: no cover - validated above
             raise RuntimeError("Structured penalty components are unavailable.")
-        from superglm.reml.penalty_algebra import penalty_component_matvec
+        from superglm.reml.penalty_algebra import (
+            penalty_component_magnitude_matvec,
+            penalty_component_matvec,
+        )
 
+        apply = penalty_component_magnitude_matvec if magnitude else penalty_component_matvec
         product = np.zeros_like(values)
         for component in reml_penalties:
             lam = float(lambda2[component.name]) if isinstance(lambda2, dict) else float(lambda2)
             if lam == 0.0:
                 continue
-            product[component.group_sl] += lam * penalty_component_matvec(
+            product[component.group_sl] += lam * apply(
                 component,
                 values[component.group_sl],
                 gms[component.group_index],
@@ -790,8 +800,8 @@ def _fit_irls_direct_once(
 
     def relative_penalized_score(
         beta_values: NDArray, mu_values: NDArray, eta_values: NDArray
-    ) -> float:
-        """``||[1 X]' s - S beta||_inf / sum |s|`` for the row score ``s = W (z - eta)``.
+    ) -> tuple[float, float]:
+        """``||[1 X]' s - S beta||_inf / sum |s|`` for the row score ``s = W (z - eta)``, and its floor.
 
         The unconstrained penalized score, for the discrete terminal refit
         (``convergence="score"``).  ``s`` is the residual of this solver's own
@@ -802,6 +812,12 @@ def _fit_irls_direct_once(
         guard; a componentwise ``|g_j| / (|X|' |s|)_j`` stays 1 on such a level.
         The bar is the intercept column's, so a column whose entries are far
         below 1 (a Numeric in small units) is certified that much more loosely.
+
+        The floor is the rounding of ``S beta`` on the same scale,
+        ``gamma_m max(|S| |beta|)`` for ``m`` additions per entry (Higham 2002,
+        section 3.1).  At the fixed point ``S beta`` cancels to the size of the
+        score while its terms grow with lambda, so no iterate resolves the score
+        below this: a tensor block at lambda 1e10 settles near 1e-9.
         """
         rows = coefficient_working_rows(
             distribution=family,
@@ -815,7 +831,10 @@ def _fit_irls_direct_once(
         row_score = rows.weights * (rows.response - eta_values)
         slope_score = dm.rmatvec(row_score) - penalty_matvec(beta_values)
         largest = max(abs(float(np.sum(row_score))), float(np.max(np.abs(slope_score), initial=0)))
-        return largest / max(float(np.sum(np.abs(row_score))), np.finfo(np.float64).tiny)
+        scale = max(float(np.sum(np.abs(row_score))), np.finfo(np.float64).tiny)
+        additions = np.float64(beta_values.size + 2) * np.finfo(np.float64).eps / 2
+        penalty_size = float(np.max(penalty_matvec(beta_values, magnitude=True), initial=0))
+        return largest / scale, additions / (1 - additions) * penalty_size / scale
 
     trace_enabled = trace_run is not None and trace_run.enabled
     trace_basis_id = trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
@@ -2279,10 +2298,13 @@ def _fit_irls_direct_once(
                     )
                     coef_change = max(coef_change, latent_change)
                 convergence_value = coef_change
+                converged_this_iter = coef_change < tol
                 if convergence == "score":
-                    # The stronger of two first-order certificates of the fixed point.
-                    convergence_value = min(coef_change, relative_penalized_score(beta, mu, eta))
-                converged_this_iter = convergence_value < tol
+                    # The stronger of two first-order certificates of the fixed point,
+                    # the score resolved no finer than its own rounding.
+                    score, score_floor = relative_penalized_score(beta, mu, eta)
+                    convergence_value = min(coef_change, score)
+                    converged_this_iter = converged_this_iter or score < max(tol, score_floor)
             else:
                 objective = (
                     retained.deviance
