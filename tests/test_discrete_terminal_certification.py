@@ -49,7 +49,9 @@ import pytest
 from superglm import Categorical, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM, Tweedie
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import build_penalty_matrix
+from superglm.solvers import irls_direct
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.irls_state import _IRLSStepDecision
 
 EPS = np.finfo(np.float64).eps
 PIRLS_TOL = 1e-10
@@ -171,9 +173,9 @@ def test_discrete_terminal_fit_reaches_the_certified_fixed_point(family: str) ->
 def test_score_mode_stops_no_later_than_the_step_rule() -> None:
     """A column in large units makes ``tau sum |s|`` a strict bar on its score.
 
-    The stopping rule does not change the iterates, and ``"score"`` stops on
-    the smaller of the score ratio and the step, so on the same iterates it
-    stops no later than the step rule the exact path uses.
+    ``"score"`` stops on the smaller of the score ratio and the step, so on the
+    same Fisher iterates it stops no later than the step rule the exact path
+    uses.  Observed-Newton is off in both runs: it would change the iterates.
     """
     frame, y, _ = _response("gamma")
     frame = frame.assign(big=1e6 * np.random.default_rng(3).standard_normal(len(frame)))
@@ -202,6 +204,7 @@ def test_score_mode_stops_no_later_than_the_step_rule() -> None:
             tol=PIRLS_TOL,
             convergence=convergence,
             weight_semantics="prior",
+            _use_observed_newton=False,
         )[0]
         for convergence in ("score", "coefficients")
     }
@@ -262,6 +265,58 @@ def test_score_is_certified_no_finer_than_the_penalty_rounding(family: str) -> N
     additions = (p + 3) * EPS / 2
     floor = additions / (1 - additions) * np.max(np.abs(S) @ np.abs(beta)) / scale
     # the solver's evaluation and this one each round by up to the floor
+    assert np.max(np.abs(X.T @ score - S @ beta)) / scale <= PIRLS_TOL + 3 * floor
+
+
+def test_a_damped_step_does_not_certify_the_fixed_point(monkeypatch) -> None:
+    """A backtracked step is ``alpha d``, so its size says nothing about ``d``.
+
+    The first line search is forced to keep ``2^-40`` of the Fisher step from
+    zero coefficients: the step test reads about 1e-12 while the score is far
+    from zero.  The fit must go on until a certificate holds at the published
+    state, which the dense score recomputed here confirms.
+    """
+    frame, y, _ = _response("gamma")
+    model = _model("gamma", held=True)
+    model.fit_reml(frame, y)
+    original = irls_direct._select_irls_trial
+    forced = []
+
+    def damp_first(**kwargs):
+        if forced:
+            return original(**kwargs)
+        alpha = 2.0**-40
+        kwargs["evaluate_state"](alpha)
+        forced.append(alpha)
+        return _IRLSStepDecision(alpha=alpha, step_halvings=40, step_rejected=False)
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", damp_first)
+    lambdas = dict(model._reml_lambdas)
+    result = fit_irls_direct(
+        X=model._dm,
+        y=y,
+        weights=np.ones(len(y)),
+        family=model._distribution,
+        link=model._link,
+        groups=model._groups,
+        lambda2=lambdas,
+        reml_penalties=model._reml_penalties,
+        tol=PIRLS_TOL,
+        convergence="score",
+        weight_semantics="prior",
+    )[0]
+    assert forced and result.converged
+
+    dm, p = model._dm, model._dm.shape[1]
+    S = np.zeros((p + 1, p + 1))
+    S[:p, :p] = build_penalty_matrix(
+        dm.group_matrices, model._groups, lambdas, p, model._reml_penalties
+    )
+    beta = np.append(result.beta, result.intercept)
+    X, score, *_ = _rows(model, y, None, beta)
+    scale = np.sum(np.abs(score))
+    additions = (p + 3) * EPS / 2
+    floor = additions / (1 - additions) * np.max(np.abs(S) @ np.abs(beta)) / scale
     assert np.max(np.abs(X.T @ score - S @ beta)) / scale <= PIRLS_TOL + 3 * floor
 
 

@@ -2301,10 +2301,13 @@ def _fit_irls_direct_once(
                 converged_this_iter = coef_change < tol
                 if convergence == "score":
                     # The stronger of two first-order certificates of the fixed point,
-                    # the score resolved no finer than its own rounding.
+                    # the score resolved no finer than its own rounding.  A damped
+                    # step is only a fraction of the correction, so it certifies nothing.
                     score, score_floor = relative_penalized_score(beta, mu, eta)
                     convergence_value = min(coef_change, score)
-                    converged_this_iter = converged_this_iter or score < max(tol, score_floor)
+                    converged_this_iter = (converged_this_iter and n_halvings == 0) or score < max(
+                        tol, score_floor
+                    )
             else:
                 objective = (
                     retained.deviance

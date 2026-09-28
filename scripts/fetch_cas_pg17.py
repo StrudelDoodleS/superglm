@@ -229,6 +229,19 @@ def report(frame: pl.DataFrame, claims: pl.DataFrame) -> None:
     print(f"vehicle zeros {frame.select((pl.col(measured) == 0).sum()).row(0, named=True)}")
 
 
+def export_csv(raw_dir: Path) -> None:
+    """Export both pinned ``.rda`` tables to CSV with R."""
+    try:
+        subprocess.run(
+            ["Rscript", "-e", EXPORT_TO_CSV, str(raw_dir), POLICIES.name, CLAIMS.name],
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise FetchError("Rscript is not on PATH; the .rda export needs R") from exc
+    except subprocess.CalledProcessError as exc:
+        raise FetchError(f"the Rscript export exited with status {exc.returncode}") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -247,13 +260,11 @@ def main(argv: list[str] | None = None) -> int:
 
     raw_dir = args.raw_dir or args.dest / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    args.dest.mkdir(parents=True, exist_ok=True)
     try:
         fetch_pinned(POLICIES, raw_dir)
         fetch_pinned(CLAIMS, raw_dir)
-        subprocess.run(
-            ["Rscript", "-e", EXPORT_TO_CSV, str(raw_dir), POLICIES.name, CLAIMS.name],
-            check=True,
-        )
+        export_csv(raw_dir)
         policies = read_export(POLICIES, raw_dir)
         claims = link_claims(policies, read_export(CLAIMS, raw_dir))
     except FetchError as exc:
