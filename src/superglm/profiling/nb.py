@@ -498,7 +498,8 @@ class NBProfileResult:
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for theta on the fixed-mean profile, with censoring flags.
 
-        A censored side is also recorded in ``warnings`` when it is computed.
+        A censored side is warned about, and recorded in ``warnings``, when it
+        is computed.
         """
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
@@ -524,9 +525,12 @@ class NBProfileResult:
             self._ci_cache[alpha] = interval
             # Near-Poisson data leave the upper side censored: the statistic
             # stays under its cutoff all the way to the searched range's end.
-            self.warnings.extend(
-                censoring_warnings(interval, alpha, "theta", lambda _: "where its search stopped")
+            censored = censoring_warnings(
+                interval, alpha, "theta", lambda _: "where its search stopped"
             )
+            self.warnings.extend(censored)
+            for message in censored:
+                warn_caller(message)
         return self._ci_cache[alpha]
 
     def _log_search_range(self) -> tuple[float, float]:

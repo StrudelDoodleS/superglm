@@ -1,5 +1,7 @@
 """Tests for Negative Binomial (NB2) distribution."""
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -561,7 +563,9 @@ class TestNB2AutoTheta:
         result = model.estimate_theta(X, y)
         assert result.converged and not result.warnings
 
-        summary = model.summary()
+        with pytest.warns(UserWarning, match="censored at its upper end") as raised:
+            summary = model.summary()
+        assert raised[0].filename == __file__
         interval = model._nb_profile_result.interval(0.05)
         assert interval.upper_censored and not interval.lower_censored
         assert interval.upper == pytest.approx(max(500.0, 100.0 * result.theta_hat), rel=1e-12)
@@ -874,7 +878,10 @@ class TestNB2AutoTheta:
 
         result = model.estimate_theta(X, y, fit_mode="reml", xatol=1e-8)
 
-        # theta_hat is the score root at that mean to the 1e-8 alternation tolerance.
+        # theta_hat is the root at that mean rounded to six significant digits; the
+        # published mean sits at the rounded theta, which moves the root by less
+        # than the rounding itself (the alternation contracts), plus xatol.
+        rounding = 0.5 * 10.0 ** (math.floor(math.log10(result.theta_hat)) - 5) / result.theta_hat
         root = solve_theta(
             y,
             model.predict(X),
@@ -884,7 +891,7 @@ class TestNB2AutoTheta:
             bounds=(1e-8, 1e8),
         )
         assert result.converged
-        assert root.theta == pytest.approx(result.theta_hat, rel=1e-6)
+        assert root.theta == pytest.approx(result.theta_hat, rel=2.0 * rounding + 1e-8)
 
 
 # =====================================================================

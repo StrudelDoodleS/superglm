@@ -1355,8 +1355,8 @@ class SuperGLM:
             describe the regime named by ``search_fit_mode``.
         p_bounds : tuple of float
             Search interval for ``p``, strictly inside ``(1, 2)``. An estimate on
-            a bound is reported in ``result.warnings``: a maximum as ``p -> 1``
-            can be an artefact of rounded responses.
+            a bound is warned about and recorded in ``result.warnings``: a
+            maximum as ``p -> 1`` can be an artefact of rounded responses.
         xatol : float
             Absolute resolution of the Brent search in ``p``.
         ci_alpha : float, optional

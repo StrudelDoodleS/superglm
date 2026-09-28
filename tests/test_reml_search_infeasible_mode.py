@@ -299,6 +299,9 @@ class TestBoundaryCensoringWarning:
         # Raised at the caller's line, not inside superglm.
         censored = [w for w in raised if "censored estimate" in str(w.message)]
         assert censored[0].filename == __file__
+        # So is a censored side of the interval.
+        with pytest.warns(UserWarning, match="interval for p is censored"):
+            result.interval(0.05)
 
 
 class TestCIAtTheCertifiabilityWall:

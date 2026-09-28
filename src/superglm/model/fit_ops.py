@@ -1055,10 +1055,10 @@ def _refine_nb_theta_to_reml_fixed_point(
     that is installed: on exit, ``family.theta`` is the theta of the final
     refit and the profile result is republished against its fitted mean.
     """
-    import warnings
 
     import pandas as pd
 
+    from superglm.profiling._scalar import warn_caller
     from superglm.profiling.nb import (
         _THETA_DEFAULT_BOUNDS,
         NBThetaBoundWarning,
@@ -1099,12 +1099,10 @@ def _refine_nb_theta_to_reml_fixed_point(
             joint_converged = True
             break
         if refits >= _NB_JOINT_MAX_REFITS:
-            warnings.warn(
+            warn_caller(
                 "NB2 theta / REML alternation did not reach a joint fixed "
                 f"point in {_NB_JOINT_MAX_REFITS} refits; publishing the last "
-                f"iterate theta={theta:g} with converged=False.",
-                UserWarning,
-                stacklevel=3,
+                f"iterate theta={theta:g} with converged=False."
             )
             break
         # Round to the same six significant digits the calibration estimate
@@ -1140,7 +1138,7 @@ def _refine_nb_theta_to_reml_fixed_point(
             "search bound; theta_hat is a constrained boundary value and the "
             "profile result reports converged=False."
         )
-        warnings.warn(warned[-1], NBThetaBoundWarning, stacklevel=3)
+        warn_caller(warned[-1], NBThetaBoundWarning)
     # The published flag must describe the PUBLISHED state. Theta being
     # stationary at an unfinished REML fit is not a joint fixed point: if the
     # final (warm-started) attempt exhausted max_reml_iter, lambda never

@@ -349,7 +349,8 @@ class TweedieProfileResult:
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for p on the searched curve, with censoring flags.
 
-        A censored side is also recorded in ``warnings`` when it is computed.
+        A censored side is warned about, and recorded in ``warnings``, when it
+        is computed.
         """
         alpha = float(alpha)
         if not 0.0 < alpha < 1.0:
@@ -365,7 +366,10 @@ class TweedieProfileResult:
                 xtol=_CI_XTOL,
             )
             self._ci_cache[alpha] = interval
-            self.warnings.extend(censoring_warnings(interval, alpha, "p", self._stopped_at))
+            censored = censoring_warnings(interval, alpha, "p", self._stopped_at)
+            self.warnings.extend(censored)
+            for message in censored:
+                warn_caller(message)
         return self._ci_cache[alpha]
 
     def _stopped_at(self, end: float) -> str:
