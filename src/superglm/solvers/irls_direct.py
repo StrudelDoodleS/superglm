@@ -117,7 +117,12 @@ from superglm.solvers.structured import (
     BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
+    NestedDataOperator,
+    NestedPenalizedOperator,
+    NestedSchurFactor,
+    NestedStructuredSystem,
     ProfiledBlockSchurFactor,
+    ProfiledNestedSchurFactor,
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     ScalarStructuredSystem,
@@ -728,6 +733,9 @@ def _fit_irls_direct_once(
         row_weights=weights,
         lambda2=lambda2,
         S_override=S_override,
+        family=family,
+        link=link,
+        nesting_cache=getattr(dm, "_scalar_structured_layout_cache", None),
     )
     if structured_decision.use_structured and S_override is None and reml_penalties is None:
         reason = (
@@ -749,6 +757,7 @@ def _fit_irls_direct_once(
             dm,
             groups,
             dominant_group_index=_structured_group_index,
+            chain_group_indices=structured_decision.chain_group_indices,
         )
         if _use_structured and _structured_group_index is not None
         else None
@@ -780,21 +789,31 @@ def _fit_irls_direct_once(
     else:
         S = _build_penalty_matrix(gms, groups, lambda2, p, reml_penalties=reml_penalties)
 
-    def penalty_matvec(beta_values: NDArray) -> NDArray:
-        """Apply the fitted penalty without expanding an identity random-effect block."""
+    def penalty_matvec(beta_values: NDArray, *, magnitude: bool = False) -> NDArray:
+        """Apply the fitted penalty without expanding an identity random-effect block.
+
+        With ``magnitude``, return ``|S| |beta|``, the magnitude this product
+        sums, which bounds its rounding componentwise.
+        """
         values = np.asarray(beta_values, dtype=np.float64)
+        if magnitude:
+            values = np.abs(values)
         if S is not None:
-            return S @ values
+            return (np.abs(S) if magnitude else S) @ values
         if reml_penalties is None:  # pragma: no cover - validated above
             raise RuntimeError("Structured penalty components are unavailable.")
-        from superglm.reml.penalty_algebra import penalty_component_matvec
+        from superglm.reml.penalty_algebra import (
+            penalty_component_magnitude_matvec,
+            penalty_component_matvec,
+        )
 
+        apply = penalty_component_magnitude_matvec if magnitude else penalty_component_matvec
         product = np.zeros_like(values)
         for component in reml_penalties:
             lam = float(lambda2[component.name]) if isinstance(lambda2, dict) else float(lambda2)
             if lam == 0.0:
                 continue
-            product[component.group_sl] += lam * penalty_component_matvec(
+            product[component.group_sl] += lam * apply(
                 component,
                 values[component.group_sl],
                 gms[component.group_index],
@@ -804,6 +823,44 @@ def _fit_irls_direct_once(
     def penalty_quadratic(beta_values: NDArray) -> float:
         values = np.asarray(beta_values, dtype=np.float64)
         return float(values @ penalty_matvec(values))
+
+    def relative_penalized_score(
+        beta_values: NDArray, mu_values: NDArray, eta_values: NDArray
+    ) -> tuple[float, float]:
+        """``||[1 X]' s - S beta||_inf / sum |s|`` for the row score ``s = W (z - eta)``, and its floor.
+
+        The unconstrained penalized score, for the discrete terminal refit
+        (``convergence="score"``).  ``s`` is the residual of this solver's own
+        fixed-point equations, and ``sum |s|`` is the intercept column of
+        ``|X|' |s|``, the magnitude the score is summed from.  A level with no
+        finite coefficient has a score that vanishes with its fitted mass, so
+        this stops it where a step test would walk it to the link's overflow
+        guard; a componentwise ``|g_j| / (|X|' |s|)_j`` stays 1 on such a level.
+        The bar is the intercept column's, so a column whose entries are far
+        below 1 (a Numeric in small units) is certified that much more loosely.
+
+        The floor is the rounding of ``S beta`` on the same scale,
+        ``gamma_m max(|S| |beta|)`` for ``m`` additions per entry (Higham 2002,
+        section 3.1).  At the fixed point ``S beta`` cancels to the size of the
+        score while its terms grow with lambda, so no iterate resolves the score
+        below this: a tensor block at lambda 1e10 settles near 1e-9.
+        """
+        rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=mu_values,
+            eta=eta_values,
+            sample_weight=weights,
+            prefer_observed=False,
+        )
+        row_score = rows.weights * (rows.response - eta_values)
+        slope_score = dm.rmatvec(row_score) - penalty_matvec(beta_values)
+        largest = max(abs(float(np.sum(row_score))), float(np.max(np.abs(slope_score), initial=0)))
+        scale = max(float(np.sum(np.abs(row_score))), np.finfo(np.float64).tiny)
+        additions = np.float64(beta_values.size + 2) * np.finfo(np.float64).eps / 2
+        penalty_size = float(np.max(penalty_matvec(beta_values, magnitude=True), initial=0))
+        return largest / scale, additions / (1 - additions) * penalty_size / scale
 
     trace_enabled = trace_run is not None and trace_run.enabled
     trace_basis_id = trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
@@ -992,9 +1049,13 @@ def _fit_irls_direct_once(
     # where the Fisher weights vary, so no constant-weight Gram or Fisher-data
     # cache exists for it to invalidate. Gamma/log keeps Fisher first: its
     # constant Fisher weights reuse one weighted Gram that Newton would rebuild
-    # every iteration, and Newton remains its rejection rescue.
-    _observed_newton_active = _observed_newton_available and not _has_constant_irls_weights(
-        family, link
+    # every iteration, and Newton remains its rejection rescue. The discrete
+    # terminal refit (convergence="score") certifies the root of the penalized
+    # score, which Fisher reaches only linearly, so it takes Newton steps on
+    # Gamma/log too; its exported geometry is Fisher either way (``export_rows``),
+    # and the weighted-Gram cache is off while Newton runs.
+    _observed_newton_active = _observed_newton_available and (
+        not _has_constant_irls_weights(family, link) or convergence == "score"
     )
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
@@ -1190,7 +1251,10 @@ def _fit_irls_direct_once(
         # materializing an unused dense duplicate for numeric and low-cardinality fits.
         _tabmat_split = dm.tabmat_centering_split
     _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
-    _can_reuse_weighted_gram = _can_reuse_weighted_gram and not _use_structured
+    # Observed rows are not the constant Fisher weights this cache assumes.
+    _can_reuse_weighted_gram = (
+        _can_reuse_weighted_gram and not _use_structured and not _observed_newton_active
+    )
     dm.execution_plan.validate_group_spans(groups)
     _defer_raw_spline = (
         not dm.raw_spline_tabmat_plan_built
@@ -1413,13 +1477,26 @@ def _fit_irls_direct_once(
     t_start = time.perf_counter()
     converged = False
     XtWX_beta: (
-        NDArray | SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator | None
+        NDArray
+        | SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedDataOperator
+        | None
     ) = None
     _final_structured_system: (
-        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+        | None
     ) = None
     _final_penalized_operator: (
-        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator | None
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedPenalizedOperator
+        | None
     ) = None
 
     # Phase timing accumulators
@@ -1431,7 +1508,11 @@ def _fit_irls_direct_once(
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
     _last_working_structured: (
-        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+        | None
     ) = None
 
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
@@ -2229,7 +2310,7 @@ def _fit_irls_direct_once(
         dev_rel_change = None
         coef_change = None
         if np.isfinite(dev):
-            if convergence == "coefficients":
+            if convergence in ("coefficients", "score"):
                 coef_change = float(
                     np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
                 )
@@ -2252,8 +2333,17 @@ def _fit_irls_direct_once(
                         )
                     )
                     coef_change = max(coef_change, latent_change)
-                converged_this_iter = coef_change < tol
                 convergence_value = coef_change
+                converged_this_iter = coef_change < tol
+                if convergence == "score":
+                    # The stronger of two first-order certificates of the fixed point,
+                    # the score resolved no finer than its own rounding.  A damped
+                    # step is only a fraction of the correction, so it certifies nothing.
+                    score, score_floor = relative_penalized_score(beta, mu, eta)
+                    convergence_value = min(coef_change, score)
+                    converged_this_iter = (converged_this_iter and n_halvings == 0) or score < max(
+                        tol, score_floor
+                    )
             else:
                 objective = (
                     retained.deviance
@@ -2751,7 +2841,11 @@ def _fit_irls_direct_once(
     # moments in block form and never materializes the dominant K x K block.
     centered_final: CenteredSystem | None = None
     structured_final: (
-        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+        | None
     ) = None
     if _use_structured:
         if _return_working_system:
@@ -2845,7 +2939,11 @@ def _fit_irls_direct_once(
     # determinant measure, not the raw augmented pseudo-determinant.
     _t0 = time.perf_counter()
     structured_factor: (
-        ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor | None
+        ProfiledScalarSchurFactor
+        | ProfiledBlockSchurFactor
+        | ProfiledSumToZeroBlockFactor
+        | ProfiledNestedSchurFactor
+        | None
     ) = None
     reml_geometry_summary: REMLGeometrySummary | None = None
     if _use_structured:
@@ -2873,6 +2971,15 @@ def _fit_irls_direct_once(
                 sum_w=structured_final.sum_w,
                 xtw=XtW1,
             )
+        elif isinstance(augmented_factor, NestedSchurFactor) and isinstance(
+            structured_final, NestedStructuredSystem
+        ):
+            structured_factor = ProfiledNestedSchurFactor(
+                augmented_factor=augmented_factor,
+                sum_w=structured_final.sum_w,
+                xtw=XtW1,
+                data_operator=structured_final.operator,
+            )
         else:  # pragma: no cover - structured dispatch invariant
             raise TypeError("Unsupported structured factor geometry.")
         XtWX_beta = structured_final.operator
@@ -2895,7 +3002,10 @@ def _fit_irls_direct_once(
                     total=sum_W,
                     center=mean_x,
                 )
-                if isinstance(XtWX_beta, BlockSymmetricOperator | SumToZeroBlockOperator)
+                if isinstance(
+                    XtWX_beta,
+                    BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator,
+                )
                 else XtWX_beta
             )
             p_eff = 1.0 + structured_factor.trace_inverse_operator(edf_operator)
@@ -3021,6 +3131,12 @@ def _fit_irls_direct_once(
         record_auto_backend_decision(profile, direct_solve, structured_decision, log=False)
         if structured_factor is not None:
             profile["structured_dominant_group"] = structured_factor.dominant_group_name
+            profile["structured_chain"] = tuple(
+                groups[index].name for index in structured_decision.chain_group_indices
+            )
+            profile["structured_nested_fallback_reason"] = (
+                structured_decision.nested_fallback_reason
+            )
             profile["structured_minimum_local_diagonal"] = structured_factor.minimum_local_diagonal
             profile["structured_schur_condition"] = structured_factor.schur_condition_estimate
             profile["structured_used_dense_fallback"] = structured_factor.used_dense_fallback

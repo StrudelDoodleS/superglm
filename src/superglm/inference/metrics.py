@@ -268,6 +268,15 @@ class ModelMetrics:
         Observation weights / sample_weight.
     offset : array-like, optional
         Offset term.
+
+    Notes
+    -----
+    On the frame a model was fitted on, leverage and effective degrees of
+    freedom come from the fit itself.  Equal copies of that frame, or a pickled
+    model, are recognised as the training rows only when the model keeps a
+    structured or shape-constrained covariance.  Otherwise the metrics are
+    re-formed on the rows passed, which for a discrete fit can differ slightly
+    from its binned fit.
     """
 
     def __init__(
@@ -348,19 +357,34 @@ class ModelMetrics:
             and np.array_equal(self._offset, fit_offset_array)
         )
         fit_weights = getattr(model, "_fit_weights", None)
-        released_geometry_guard = getattr(model, "_fit_geometry_guard", None)
-        if self._dm is None and released_geometry_guard is not None:
-            self._fit_geometry_matches = released_geometry_guard.matches(
+        geometry_guard = getattr(model, "_fit_geometry_guard", None)
+        if self._dm is None and geometry_guard is not None:
+            self._fit_geometry_matches = geometry_guard.matches(
                 self._X,
                 self._weights,
                 self._offset,
             )
         else:
+            # Identity misses the training rows after a pickle round trip or when
+            # the caller passes equal copies; the guard's fingerprint of X, y,
+            # weights and offset recognises them by content.  Only a fit whose
+            # metrics always read its retained covariance (structured or
+            # shape-constrained) then reads the fit design and weights with it;
+            # a dense fit re-forms every quantity on the supplied rows, since a
+            # discrete fit's weights and edf belong to its binned design.
+            keeps_fit_covariance = (
+                getattr(model, "_linear_system_state", None) is not None
+                or getattr(self._result, "scop_inference", None) is not None
+            )
             self._fit_geometry_matches = bool(
                 self._uses_fit_design
                 and fit_weights is not None
                 and np.shape(fit_weights) == np.shape(self._weights)
                 and np.array_equal(np.asarray(fit_weights), self._weights)
+            ) or bool(
+                keeps_fit_covariance
+                and geometry_guard is not None
+                and geometry_guard.matches_training(self._X, self._y, self._weights, self._offset)
             )
         self._uses_compact_fit_inference = bool(
             (
@@ -838,7 +862,11 @@ class ModelMetrics:
             inverse = fit_inference["XtWX_inv"]
             augmented = fit_inference["XtWX_inv_aug"]
             active_groups = fit_inference["active_groups"]
-            if self._uses_fit_design:
+            # The fit's covariance pairs with the fit's design: rows matched by
+            # content are the training rows, and their public design is shifted
+            # from it (centred on all rows, the fit's on the positive-weight
+            # rows), which x' V x does not absorb.
+            if self._uses_fit_design or (self._dm is not None and self._fit_geometry_matches):
                 fit_X_a, _, _, _, _ = self._model._fit_active_info
                 X_a = fit_X_a
             else:
@@ -853,7 +881,15 @@ class ModelMetrics:
                         penalty=fitted_penalty(self._model),
                     )
                     self.__dict__["_coefficient_estimable"] = np.ones(len(beta), dtype=bool)
-                X_a = EvaluationDesign(self._model, self._X, selected_columns)
+                # A structured covariance keeps the fit's coordinates, whose columns
+                # sit ``intercept_shift`` above the public ones wherever zero prior
+                # weights moved the fit's centring; released rows are mapped back.
+                X_a = EvaluationDesign(
+                    self._model,
+                    self._X,
+                    selected_columns,
+                    shift=getattr(augmented, "intercept_shift", None),
+                )
             compact_estimable = fit_inference.get("coefficient_estimable")
             if compact_estimable is not None:
                 self.__dict__["_coefficient_estimable"] = compact_estimable
@@ -1271,6 +1307,7 @@ class ModelMetrics:
         from superglm.features.numeric import Numeric
         from superglm.features.ordered_categorical import OrderedCategorical
         from superglm.features.piecewise import Piecewise
+        from superglm.features.random_effect import RandomEffect
         from superglm.features.spline import _SplineBase
         from superglm.inference._term_covariance import feature_se_from_cov
 
@@ -1344,6 +1381,12 @@ class ModelMetrics:
 
         indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
         aug_indices = indices + 1  # offset by 1 for intercept row/col
+        if isinstance(spec, RandomEffect):
+            # One coefficient per level: the diagonal is the whole answer, and
+            # a compact covariance refuses the full block of a large term
+            # (every nested chain level counts against its cap, §6).
+            variance = phi * covariance_selected_diagonal(XtWX_inv_aug, aug_indices)
+            return {"se": np.sqrt(np.maximum(variance, 0.0))}
         Cov_g = phi * covariance_selected_block(XtWX_inv_aug, aug_indices)
 
         if isinstance(spec, _SplineBase):

@@ -1,6 +1,6 @@
 name = "superglm_adaptive_proofs"
 version = "0.1.0"
-defaultTargets = ["Certificate", "ProofTour", "InteractionOperator"]
+defaultTargets = ["Certificate", "ProofTour", "InteractionOperator", "NestedElimination"]
 
 [[require]]
 name = "mathlib"
@@ -15,3 +15,6 @@ name = "ProofTour"
 
 [[lean_lib]]
 name = "InteractionOperator"
+
+[[lean_lib]]
+name = "NestedElimination"

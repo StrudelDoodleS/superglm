@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import itertools
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import scipy.linalg
@@ -12,6 +15,9 @@ from superglm.factor_smooth_geometry import (
     adjoint_sum_to_zero_blocks,
     expand_sum_to_zero_blocks,
 )
+
+if TYPE_CHECKING:
+    from superglm.solvers._structured.nested import NestedDataOperator
 
 
 @dataclass(frozen=True)
@@ -245,7 +251,12 @@ class SumToZeroBlockOperator:
 class CenteredBlockOperator:
     """A block operator centered around a fixed weighted design mean."""
 
-    raw: SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator
+    raw: (
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedDataOperator
+    )
     cross: NDArray
     total: float
     center: NDArray
@@ -378,6 +389,8 @@ CompactSymmetricOperator = (
     | LowRankSymmetricOperator
     | SumBlockOperator
 )
+if TYPE_CHECKING:
+    CompactSymmetricOperator = CompactSymmetricOperator | NestedDataOperator
 
 
 @dataclass(frozen=True)
@@ -399,12 +412,16 @@ class _GeneralDiagonalLowRank:
     right: NDArray
 
 
-def _block_operator_dlr(operator: SymmetricBlockOperator) -> _DiagonalLowRank:
+def _block_operator_dlr(
+    operator: SymmetricBlockOperator,
+    *,
+    local_only: bool = False,
+) -> _DiagonalLowRank:
     p = operator.shape[0]
     q = len(operator.small_indices)
     diagonal = np.zeros(p, dtype=np.float64)
     diagonal[operator.structured_indices] = operator.d
-    if q == 0:
+    if q == 0 or local_only:
         return _DiagonalLowRank(
             diagonal=diagonal,
             basis=np.empty((p, 0)),
@@ -443,18 +460,34 @@ def _merge_dlr(parts: tuple[_DiagonalLowRank, ...]) -> _DiagonalLowRank:
     return _DiagonalLowRank(diagonal=diagonal, basis=basis, core=core)
 
 
-def _operator_dlr(operator: CompactSymmetricOperator) -> _DiagonalLowRank:
+def _operator_dlr(
+    operator: CompactSymmetricOperator,
+    *,
+    local_to: NDArray | None = None,
+) -> _DiagonalLowRank:
+    """Convert a compact operator to diagonal-plus-low-rank form.
+
+    ``local_to`` names a factor's structured indices, which every block
+    operator must share.  Their dense-small and cross blocks then never reach
+    the structured-by-structured block and are dropped, so the result agrees
+    with ``operator`` on that block alone -- all ``_dlr_cross_traces`` reads.
+    """
     if isinstance(operator, SumBlockOperator):
-        return _merge_dlr(tuple(_operator_dlr(item) for item in operator.operators))
+        return _merge_dlr(
+            tuple(_operator_dlr(item, local_to=local_to) for item in operator.operators)
+        )
     if isinstance(operator, LowRankSymmetricOperator):
         return _DiagonalLowRank(
             diagonal=np.zeros(operator.shape[0]),
             basis=operator.basis,
             core=operator.core,
         )
-    base = _block_operator_dlr(
-        operator.raw if isinstance(operator, CenteredBlockOperator) else operator
-    )
+    raw = operator.raw if isinstance(operator, CenteredBlockOperator) else operator
+    if local_to is not None and not np.array_equal(
+        np.sort(raw.structured_indices), np.sort(local_to)
+    ):
+        raise ValueError("Compact operator has a different structured block layout.")
+    base = _block_operator_dlr(raw, local_only=local_to is not None)
     if not isinstance(operator, CenteredBlockOperator):
         return base
     update_basis = np.column_stack((operator.cross, operator.center))
@@ -478,17 +511,18 @@ def _operator_dlr(operator: CompactSymmetricOperator) -> _DiagonalLowRank:
 
 def _trace_symmetric_dlr(left: _DiagonalLowRank, right: _DiagonalLowRank) -> float:
     value = float(left.diagonal @ right.diagonal)
+    # tr(AB) = sum(A * B.T): never form a square product just to read its trace.
     if right.core.size:
         value += float(
-            np.trace(right.core @ (right.basis.T @ (left.diagonal[:, None] * right.basis)))
+            np.sum(right.core * (right.basis.T @ (left.diagonal[:, None] * right.basis)).T)
         )
     if left.core.size:
         value += float(
-            np.trace(left.core @ (left.basis.T @ (right.diagonal[:, None] * left.basis)))
+            np.sum(left.core * (left.basis.T @ (right.diagonal[:, None] * left.basis)).T)
         )
     if left.core.size and right.core.size:
         overlap = left.basis.T @ right.basis
-        value += float(np.trace(left.core @ overlap @ right.core @ overlap.T))
+        value += float(np.sum((left.core @ overlap) * (right.core @ overlap.T).T))
     return value
 
 
@@ -552,17 +586,20 @@ def _trace_general_product(
     left: _GeneralDiagonalLowRank,
     right: _GeneralDiagonalLowRank,
 ) -> float:
+    # Each term is tr(AB) = sum(A * B.T) over the thin Gram products, so no
+    # square chained product is formed just to read its diagonal.
     value = float(left.diagonal @ right.diagonal)
     if right.core.size:
         value += float(
-            np.trace(right.core @ (right.right.T @ (left.diagonal[:, None] * right.left)))
+            np.sum(right.core * (right.right.T @ (left.diagonal[:, None] * right.left)).T)
         )
     if left.core.size:
-        value += float(np.trace(left.core @ (left.right.T @ (right.diagonal[:, None] * left.left))))
+        value += float(np.sum(left.core * (left.right.T @ (right.diagonal[:, None] * left.left)).T))
     if left.core.size and right.core.size:
         value += float(
-            np.trace(
-                left.core @ (left.right.T @ right.left) @ right.core @ (right.right.T @ left.left)
+            np.sum(
+                (left.core @ (left.right.T @ right.left))
+                * (right.core @ (right.right.T @ left.left)).T
             )
         )
     return value
@@ -611,12 +648,16 @@ def _apply_local_blocks(
     return result
 
 
-def _block_operator_bdlr(operator: BlockSymmetricOperator) -> _BlockDiagonalLowRank:
+def _block_operator_bdlr(
+    operator: BlockSymmetricOperator,
+    *,
+    local_only: bool = False,
+) -> _BlockDiagonalLowRank:
     p = operator.shape[0]
     q = len(operator.small_indices)
     has_small = bool(np.any(operator.A))
     has_cross = bool(np.any(operator.C))
-    if q == 0 or (not has_small and not has_cross):
+    if q == 0 or local_only or (not has_small and not has_cross):
         return _BlockDiagonalLowRank(
             blocks=operator.D,
             structured_indices=operator.structured_indices,
@@ -734,11 +775,21 @@ def _merge_bdlr(parts: tuple[_BlockDiagonalLowRank, ...]) -> _BlockDiagonalLowRa
 def _operator_bdlr(
     operator: CompactSymmetricOperator,
     structured_indices: NDArray,
+    *,
+    local_only: bool = False,
 ) -> _BlockDiagonalLowRank:
-    """Convert a compact operator to matching block-diagonal-plus-low-rank form."""
+    """Convert a compact operator to matching block-diagonal-plus-low-rank form.
+
+    ``local_only`` drops a block operator's dense-small and cross blocks,
+    which never reach the structured-by-structured block, as in
+    ``_operator_dlr``; sum-to-zero operators keep their exact full form.
+    """
     if isinstance(operator, SumBlockOperator):
         return _merge_bdlr(
-            tuple(_operator_bdlr(item, structured_indices) for item in operator.operators)
+            tuple(
+                _operator_bdlr(item, structured_indices, local_only=local_only)
+                for item in operator.operators
+            )
         )
     if isinstance(operator, LowRankSymmetricOperator):
         empty = _empty_block_part(operator.shape, structured_indices)
@@ -757,7 +808,7 @@ def _operator_bdlr(
     base = (
         _sum_to_zero_operator_bdlr(raw)
         if isinstance(raw, SumToZeroBlockOperator)
-        else _block_operator_bdlr(raw)
+        else _block_operator_bdlr(raw, local_only=local_only)
     )
     if not isinstance(operator, CenteredBlockOperator):
         return base
@@ -797,17 +848,17 @@ def _trace_symmetric_bdlr(
             left.structured_indices,
             right.basis,
         )
-        value += float(np.trace(right.core @ (right.basis.T @ left_applied)))
+        value += float(np.sum(right.core * (right.basis.T @ left_applied).T))
     if left.core.size:
         right_applied = _apply_local_blocks(
             right.blocks,
             right.structured_indices,
             left.basis,
         )
-        value += float(np.trace(left.core @ (left.basis.T @ right_applied)))
+        value += float(np.sum(left.core * (left.basis.T @ right_applied).T))
     if left.core.size and right.core.size:
         overlap = left.basis.T @ right.basis
-        value += float(np.trace(left.core @ overlap @ right.core @ overlap.T))
+        value += float(np.sum((left.core @ overlap) * (right.core @ overlap.T).T))
     return value
 
 
@@ -1002,21 +1053,132 @@ def _trace_general_bdlr_product(
             left.structured_indices,
             right.left,
         )
-        value += float(np.trace(right.core @ (right.right.T @ left_applied)))
+        value += float(np.sum(right.core * (right.right.T @ left_applied).T))
     if left.core.size:
         right_applied = _apply_local_blocks(
             right.blocks,
             right.structured_indices,
             left.left,
         )
-        value += float(np.trace(left.core @ (left.right.T @ right_applied)))
+        value += float(np.sum(left.core * (left.right.T @ right_applied).T))
     if left.core.size and right.core.size:
+        # tr(AB) = sum(A * B.T), as in _trace_general_product.
         value += float(
-            np.trace(
-                left.core @ (left.right.T @ right.left) @ right.core @ (right.right.T @ left.left)
+            np.sum(
+                (left.core @ (left.right.T @ right.left))
+                * (right.core @ (right.right.T @ left.left)).T
             )
         )
     return value
+
+
+def _direction_stacks(
+    basis: NDArray,
+    core: NDArray,
+    structured_indices: NDArray,
+    directions: Iterable[tuple[NDArray, _DiagonalLowRank | _BlockDiagonalLowRank]],
+) -> tuple[NDArray, NDArray, list]:
+    """Keep each ``W = O U`` on the structured rows, ``R U' W``, and O's local part."""
+    borders, cores, local_parts = [], [], []
+    for product, local in directions:
+        borders.append(product[structured_indices])
+        cores.append(core @ (basis.T @ product))
+        local_parts.append(local)
+    return np.stack(borders), np.stack(cores), local_parts
+
+
+def _pairwise_traces(parts: Sequence, trace: Callable[[Any, Any], float]) -> NDArray:
+    traces = np.empty((len(parts), len(parts)))
+    for i, j in itertools.combinations_with_replacement(range(len(parts)), 2):
+        traces[i, j] = traces[j, i] = trace(parts[i], parts[j])
+    return traces
+
+
+def _schur_cross_traces(
+    borders: NDArray,
+    weight: Callable[[NDArray], NDArray],
+    cores: NDArray,
+    local_traces: NDArray,
+) -> NDArray:
+    """Assemble every ``trace(Z O_i Z O_j)`` for ``Z = Z_local + U R U'``.
+
+    With ``W_i = O_i U`` and ``T_i = U' W_i`` each trace splits exactly into
+    ``tr(Z_local O_i Z_local O_j) + tr(R W_i' Z_local W_j) + tr(R W_j' Z_local W_i)
+    + tr(R T_i R T_j)``.  ``Z_local`` lives on the structured rows only, so the
+    middle pair needs just ``W`` there (``borders``) and ``Z_local W R``,
+    which ``weight`` forms one direction at a time so that only one is alive
+    beside the stack; ``cores`` holds ``R T_i``.  Every pair is then two inner
+    products, O(Kq + q^2), where re-forming both ``H^-1 O`` products per pair
+    (diagonal plus low rank of width 4q-5q) cost O(p q^2) Grams (Wood 2008,
+    Appendix C: store per-parameter products, read pairwise traces off them
+    with ``tr(AB) = sum(A * B')``).
+    """
+    m = len(cores)
+    flat = borders.reshape(m, -1)
+    border_traces = np.stack([flat @ weight(border).ravel() for border in borders])
+    core_traces = cores.reshape(m, -1) @ cores.transpose(0, 2, 1).reshape(m, -1).T
+    traces = local_traces + border_traces + border_traces.T + core_traces
+    return 0.5 * (traces + traces.T)
+
+
+def _dlr_cross_traces(
+    inverse: _DiagonalLowRank,
+    structured_indices: NDArray,
+    directions: Iterable[tuple[NDArray, _DiagonalLowRank]],
+) -> NDArray:
+    """Return ``trace(Z O_i Z O_j)`` for every pair, ``Z = diag(z) + U R U'``.
+
+    ``directions`` yields ``(O_i U, O_i's local part)`` once per direction; ``z``
+    is zero off ``structured_indices``.
+    """
+    borders, cores, local_parts = _direction_stacks(
+        inverse.basis, inverse.core, structured_indices, directions
+    )
+    z = inverse.diagonal
+    z_structured = z[structured_indices, None]
+    local = [
+        _GeneralDiagonalLowRank(
+            diagonal=z * part.diagonal,
+            left=z[:, None] * part.basis,
+            core=part.core,
+            right=part.basis,
+        )
+        for part in local_parts
+    ]
+    return _schur_cross_traces(
+        borders,
+        lambda border: z_structured * (border @ inverse.core),
+        cores,
+        _pairwise_traces(local, _trace_general_product),
+    )
+
+
+def _bdlr_cross_traces(
+    inverse: _BlockDiagonalLowRank,
+    directions: Iterable[tuple[NDArray, _BlockDiagonalLowRank]],
+) -> NDArray:
+    """Block-diagonal form of ``_dlr_cross_traces``: ``Z_local`` has dense local blocks."""
+    structured = inverse.structured_indices
+    borders, cores, local_parts = _direction_stacks(
+        inverse.basis, inverse.core, structured, directions
+    )
+    local = [
+        _GeneralBlockDiagonalLowRank(
+            blocks=inverse.blocks @ part.blocks,
+            structured_indices=structured,
+            left=_apply_local_blocks(inverse.blocks, structured, part.basis),
+            core=part.core,
+            right=part.basis,
+            shape=inverse.shape,
+        )
+        for part in local_parts
+    ]
+    return _schur_cross_traces(
+        borders,
+        lambda border: inverse.blocks @ (border @ inverse.core),
+        cores,
+        _pairwise_traces(local, _trace_general_bdlr_product),
+    )
 
 
 def materialize_compact_operator(operator: CompactSymmetricOperator) -> NDArray:
@@ -1028,6 +1190,8 @@ def compact_operator_diagonal(
     operator: CompactSymmetricOperator,
 ) -> NDArray:
     """Return an exact compact-operator diagonal in O(Kq + q²) memory."""
+    from superglm.solvers._structured.nested import NestedDataOperator
+
     if isinstance(operator, SumBlockOperator):
         return sum(
             (compact_operator_diagonal(item) for item in operator.operators),
@@ -1046,6 +1210,8 @@ def compact_operator_diagonal(
             axis1=1,
             axis2=2,
         )
+    elif isinstance(raw, NestedDataOperator):
+        diagonal[raw.structured_indices] = raw.diagonal()[raw.structured_indices]
     else:
         diagonal[raw.structured_indices] = raw.d
     if isinstance(operator, CenteredBlockOperator):

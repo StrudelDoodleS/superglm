@@ -21,8 +21,14 @@ from superglm.solvers._structured.factors import (
 )
 from superglm.solvers._structured.moments import (
     BlockStructuredSystem,
+    NestedStructuredSystem,
     ScalarStructuredSystem,
     SumToZeroBlockStructuredSystem,
+)
+from superglm.solvers._structured.nested import (
+    NestedPenalizedOperator,
+    NestedSchurFactor,
+    ProfiledNestedSchurFactor,
 )
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
@@ -60,6 +66,18 @@ class CachedBlockStructuredSolution:
     intercept: float
     factor: ProfiledBlockSchurFactor
     penalized_operator: BlockSymmetricOperator
+    log_det_H: float  # noqa: N815
+    hessian_rank: int
+
+
+@dataclass(frozen=True)
+class CachedNestedStructuredSolution:
+    """One lambda-only solve against cached nested-chain working moments."""
+
+    beta: NDArray
+    intercept: float
+    factor: ProfiledNestedSchurFactor
+    penalized_operator: NestedPenalizedOperator
     log_det_H: float  # noqa: N815
     hessian_rank: int
 
@@ -570,16 +588,139 @@ def build_penalized_sum_to_zero_operator(
     )
 
 
-def build_penalized_structured_operator(
-    system: (ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem),
+def _nested_penalty_terms(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    reml_penalties: list[PenaltyComponent] | None,
+    p: int,
+):
+    """Yield ``(name, indices, scale, omega)`` penalty terms; ``omega=None`` is identity.
+
+    The same terms, in the same order, that ``build_penalized_scalar_operator``
+    adds for compact components or, without them, for the legacy groups.
+    """
+    if reml_penalties is not None:
+        for component in reml_penalties:
+            lam = _lambda_for_component(lambda2, component.name)
+            if lam == 0.0:
+                continue
+            omega = (
+                None
+                if component.penalty_kind == "identity"
+                else _dense_component_omega(component, group_matrices[component.group_index])
+            )
+            yield component.name, _component_indices(component, p), lam, omega
+        return
+    for matrix, group in zip(group_matrices, groups, strict=True):
+        if not group.penalized:
+            continue
+        indices = np.arange(group.start, group.end, dtype=np.intp)
+        if isinstance(matrix, RandomEffectGroupMatrix):
+            lam = float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else lambda2
+            if lam != 0.0:
+                yield group.name, indices, float(lam), None
+            continue
+        block = _legacy_small_block_penalty(matrix, group, lambda2)
+        if block is not None:
+            yield group.name, indices, 1.0, block
+
+
+def build_penalized_nested_operator(
+    system: NestedStructuredSystem,
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
     S_override: NDArray | None = None,
-) -> SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator:
+) -> NestedPenalizedOperator:
+    """Assemble per-node ridges and the border penalty ``S_b`` of a nested system.
+
+    The placement rules are the scalar builder's with the whole chain in the
+    role of the dominant diagonal block: a chain term must be diagonal and
+    lands on the node penalties, a border term lands in ``S_b``, and a term
+    that straddles the two raises ``ValueError``.  An authoritative
+    ``S_override`` must be diagonal on the chain with no chain-to-border mass
+    (§3.7); its diagonal gives the per-node ``lambda_u``.  ``S_b`` is kept
+    apart from ``A``: the factor adds it to ``Q`` as its own PSD term (§3.4).
+    """
+    operator = system.operator
+    p, q = operator.shape[0], len(operator.small_indices)
+    border_penalty = np.zeros((q, q), dtype=np.float64)
+    node_penalty = np.zeros(operator.tree.n_nodes, dtype=np.float64)
+    if S_override is not None:
+        penalty = np.asarray(S_override, dtype=np.float64)
+        if penalty.shape != (p, p):
+            raise ValueError(f"S_override must have shape ({p}, {p}).")
+        incompatibility = _structured_override_incompatibility(
+            penalty,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+            geometry="random_effect",
+        )
+        if incompatibility is not None:
+            raise ValueError(f"Nested chain penalty: {incompatibility}")
+        border_penalty += penalty[np.ix_(operator.small_indices, operator.small_indices)]
+        node_penalty += np.diag(penalty)[operator.structured_indices]
+    else:
+        small_position = np.full(p, -1, dtype=np.intp)
+        small_position[operator.small_indices] = np.arange(q)
+        node_position = np.full(p, -1, dtype=np.intp)
+        node_position[operator.structured_indices] = np.arange(operator.tree.n_nodes)
+        for name, indices, scale, omega in _nested_penalty_terms(
+            group_matrices, groups, lambda2, reml_penalties, p
+        ):
+            local_small, local_node = small_position[indices], node_position[indices]
+            if np.all(local_small >= 0):
+                if omega is None:
+                    border_penalty[local_small, local_small] += scale
+                else:
+                    border_penalty[np.ix_(local_small, local_small)] += scale * omega
+            elif not np.all(local_node >= 0):
+                raise ValueError(
+                    f"Penalty component {name!r} crosses the nested chain and the border."
+                )
+            elif omega is not None:
+                raise ValueError(f"Nested chain penalty component {name!r} is not an identity.")
+            else:
+                node_penalty[local_node] += scale
+    return NestedPenalizedOperator(
+        data=operator,
+        node_penalty=operator.tree.split(node_penalty),
+        border_penalty=0.5 * (border_penalty + border_penalty.T),
+    )
+
+
+def build_penalized_structured_operator(
+    system: (
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+    ),
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+    S_override: NDArray | None = None,
+) -> (
+    SymmetricBlockOperator
+    | BlockSymmetricOperator
+    | SumToZeroBlockOperator
+    | NestedPenalizedOperator
+):
     """Dispatch compact penalty assembly by structured-system geometry."""
+    if isinstance(system, NestedStructuredSystem):
+        return build_penalized_nested_operator(
+            system,
+            group_matrices,
+            groups,
+            lambda2,
+            reml_penalties=reml_penalties,
+            S_override=S_override,
+        )
     if isinstance(system, SumToZeroBlockStructuredSystem):
         return build_penalized_sum_to_zero_operator(
             system,
@@ -757,11 +898,50 @@ def build_augmented_sum_to_zero_factor(
     return factor, rhs
 
 
+def build_augmented_nested_factor(
+    system: NestedStructuredSystem,
+    penalized: NestedPenalizedOperator,
+) -> tuple[NestedSchurFactor, NDArray]:
+    """Add the unpenalized intercept to a nested system; return its factor and RHS.
+
+    The augmentation is exact (``NestedPenalizedOperator.augmented``): the
+    intercept becomes border column 0 with leaf mean 1 and a zero penalty.
+    """
+    if penalized.data is not system.operator:
+        raise ValueError("The nested penalized operator must wrap the system's data operator.")
+    operator = system.operator
+    factor = NestedSchurFactor(
+        penalized.augmented(),
+        chain_group_names=system.chain_group_names,
+        chain_group_indices=system.chain_group_indices,
+        intercept=True,
+    )
+    rhs = np.empty(operator.shape[0] + 1, dtype=np.float64)
+    rhs[0] = system.sum_wz
+    rhs[operator.small_indices + 1] = system.xtwz_small
+    rhs[operator.structured_indices + 1] = system.xtwz_structured
+    return factor, rhs
+
+
 def build_augmented_structured_factor(
-    system: (ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem),
-    penalized_operator: (SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator),
+    system: (
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+    ),
+    penalized_operator: (
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedPenalizedOperator
+    ),
 ):
     """Dispatch intercept augmentation and Schur factorization."""
+    if isinstance(system, NestedStructuredSystem):
+        if not isinstance(penalized_operator, NestedPenalizedOperator):
+            raise TypeError("Nested structured systems require a nested penalized operator.")
+        return build_augmented_nested_factor(system, penalized_operator)
     if isinstance(system, SumToZeroBlockStructuredSystem):
         if not isinstance(penalized_operator, SumToZeroBlockOperator):
             raise TypeError("SZ structured systems require a sum-to-zero operator.")
@@ -885,8 +1065,50 @@ def solve_cached_sum_to_zero_structured(
     )
 
 
+def solve_cached_nested_structured(
+    system: NestedStructuredSystem,
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambdas: float | dict[str, float],
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+) -> CachedNestedStructuredSolution:
+    """Solve a lambda trial from cached nested working moments (no data pass)."""
+    penalized = build_penalized_nested_operator(
+        system,
+        group_matrices,
+        groups,
+        lambdas,
+        reml_penalties=reml_penalties,
+    )
+    augmented_factor, rhs = build_augmented_nested_factor(system, penalized)
+    coefficients = augmented_factor.solve(rhs)
+    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
+    xtw[system.operator.small_indices] = system.xtw_small
+    xtw[system.operator.structured_indices] = system.xtw_structured
+    factor = ProfiledNestedSchurFactor(
+        augmented_factor=augmented_factor,
+        sum_w=system.sum_w,
+        xtw=xtw,
+        data_operator=system.operator,
+    )
+    return CachedNestedStructuredSolution(
+        beta=coefficients[1:],
+        intercept=float(coefficients[0]),
+        factor=factor,
+        penalized_operator=penalized,
+        log_det_H=augmented_factor.logdet(),
+        hessian_rank=augmented_factor.rank,
+    )
+
+
 def solve_cached_structured(
-    system: (ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem),
+    system: (
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem
+    ),
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambdas: float | dict[str, float],
@@ -896,8 +1118,17 @@ def solve_cached_structured(
     CachedScalarStructuredSolution
     | CachedBlockStructuredSolution
     | CachedSumToZeroStructuredSolution
+    | CachedNestedStructuredSolution
 ):
     """Dispatch a cached lambda-only solve by dominant structured geometry."""
+    if isinstance(system, NestedStructuredSystem):
+        return solve_cached_nested_structured(
+            system,
+            group_matrices,
+            groups,
+            lambdas,
+            reml_penalties=reml_penalties,
+        )
     if isinstance(system, SumToZeroBlockStructuredSystem):
         return solve_cached_sum_to_zero_structured(
             system,

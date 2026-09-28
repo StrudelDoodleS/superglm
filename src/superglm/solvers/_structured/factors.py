@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
+from functools import cached_property, partial
+from typing import Any
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse
 from numpy.typing import NDArray
 
 from superglm.solvers._structured.geometry import (
@@ -15,9 +19,12 @@ from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
     CenteredBlockOperator,
     CompactSymmetricOperator,
+    SumBlockOperator,
     SymmetricBlockOperator,
+    _bdlr_cross_traces,
     _BlockDiagonalLowRank,
     _DiagonalLowRank,
+    _dlr_cross_traces,
     _general_bdlr_diagonal,
     _general_bdlr_square_diagonal,
     _general_dlr_diagonal,
@@ -26,6 +33,7 @@ from superglm.solvers._structured.operators import (
     _multiply_symmetric_dlr,
     _operator_bdlr,
     _operator_dlr,
+    _pairwise_traces,
     _trace_general_bdlr_product,
     _trace_general_product,
     _trace_symmetric_bdlr,
@@ -38,6 +46,21 @@ from superglm.types import PenaltyComponent
 def _schur_absolute_cutoff(reference_scale: float, width: int) -> float:
     """Return the absolute rank floor for a cancellation-prone Schur block."""
     return np.finfo(np.float64).eps * float(reference_scale) * max(int(width), 1) * 10.0
+
+
+def _schur_fallback_cutoff(A: NDArray, eliminated: NDArray, width: int) -> float:
+    """Return the SVD fallback's rank floor, scaled by the larger of ``A`` and the eliminated mass.
+
+    Only the fallback reads this floor.  The two spectral norms are full SVDs of
+    the border, so computing them for a Schur complement that Cholesky accepts
+    cost more than the factorization itself on wide borders.
+    """
+    reference_scale = max(
+        float(np.linalg.norm(A, ord=2)),
+        float(np.linalg.norm(eliminated, ord=2)),
+        1.0,
+    )
+    return _schur_absolute_cutoff(reference_scale, width)
 
 
 def _cancellation_pivot_floor(
@@ -118,6 +141,84 @@ def _reject_negative_schur_curvature(Q: NDArray, cutoff: float, *, term_name: st
         )
 
 
+# One REML Hessian direction: the penalty component, its lambda and the
+# optional W-derivative operator, together ``lambda * Omega + dH``.
+DerivativeDirection = tuple[PenaltyComponent, float, CompactSymmetricOperator | None]
+
+
+def _penalty_product(component: PenaltyComponent, scale: float, basis: NDArray) -> NDArray:
+    """Return ``scale * Omega @ basis`` touching only the penalty's own rows."""
+    size = basis.shape[0]
+    indices = _component_indices(component, size)
+    rows = basis[indices]
+    product = np.zeros_like(basis)
+    if component.penalty_kind == "identity":
+        product[indices] = scale * rows
+    elif component.penalty_kind == "repeated":
+        omega = np.asarray(component.omega_ssp, dtype=np.float64)
+        blocks = rows.reshape(int(component.repeat_count), omega.shape[0], rows.shape[1])
+        product[indices] = scale * (omega @ blocks).reshape(rows.shape)
+    else:
+        product[indices] = scale * (_component_omega(component, size) @ rows)
+    return product
+
+
+def _derivative_directions(
+    directions: Sequence[DerivativeDirection],
+    penalty_operator: Callable[[PenaltyComponent, float], CompactSymmetricOperator],
+    basis: NDArray,
+    local_form: Callable[[CompactSymmetricOperator], Any],
+) -> Iterator[tuple[NDArray, Any]]:
+    """Yield ``(O U, O's local part)`` once per direction ``O = scale * Omega + dH``."""
+    for component, scale, operator in directions:
+        product = _penalty_product(component, scale, basis)
+        combined = penalty_operator(component, scale)
+        if operator is not None:
+            product += operator.matvec(basis)
+            combined = SumBlockOperator((combined, operator))
+        yield product, local_form(combined)
+
+
+def _scalar_derivative_cross_traces(
+    factor: ScalarSchurFactor | ProfiledScalarSchurFactor,
+    directions: Sequence[DerivativeDirection],
+) -> NDArray:
+    if all(operator is None for _, _, operator in directions):
+        # Penalty-only directions are sparse, and their pairwise traces form no
+        # dense q x q piece per direction, which the batched form would.
+        return _pairwise_traces(
+            directions,
+            lambda left, right: factor.penalty_cross_trace(left[0], right[0], left[1], right[1]),
+        )
+    inverse = factor._inverse_dlr()
+    return _dlr_cross_traces(
+        inverse,
+        factor.structured_indices,
+        _derivative_directions(
+            directions,
+            factor._penalty_operator,
+            inverse.basis,
+            partial(_operator_dlr, local_to=factor.structured_indices),
+        ),
+    )
+
+
+def _block_derivative_cross_traces(
+    factor: BlockSchurFactor | ProfiledBlockSchurFactor,
+    directions: Sequence[DerivativeDirection],
+) -> NDArray:
+    inverse = factor._inverse_bdlr()
+    return _bdlr_cross_traces(
+        inverse,
+        _derivative_directions(
+            directions,
+            factor._penalty_operator,
+            inverse.basis,
+            partial(_operator_bdlr, structured_indices=inverse.structured_indices, local_only=True),
+        ),
+    )
+
+
 class ScalarSchurFactor:
     """Factorization of one diagonal random-effect block and a dense remainder."""
 
@@ -191,12 +292,6 @@ class ScalarSchurFactor:
         eliminated = self.C.T @ self._F
         Q = self.A - eliminated
         self._Q = 0.5 * (Q + Q.T)
-        schur_reference_scale = max(
-            float(np.linalg.norm(self.A, ord=2)) if q else 0.0,
-            float(np.linalg.norm(eliminated, ord=2)) if q else 0.0,
-            1.0,
-        )
-        absolute_cutoff = _schur_absolute_cutoff(schur_reference_scale, q)
         self._Q_cholesky: NDArray | None = None
         self._Q_svd: tuple[NDArray, NDArray, NDArray] | None = None
         self.used_dense_fallback = False
@@ -247,6 +342,7 @@ class ScalarSchurFactor:
                 self._Q_cholesky = None
                 self.used_dense_fallback = True
                 self.fallback_reason = f"Schur Cholesky fallback: {error}"
+                absolute_cutoff = _schur_fallback_cutoff(self.A, eliminated, q)
                 _reject_negative_schur_curvature(self._Q, absolute_cutoff, term_name=term_name)
                 U, singular_values, Vh = np.linalg.svd(self._Q, full_matrices=False)
                 threshold = (
@@ -429,6 +525,23 @@ class ScalarSchurFactor:
             )
         return diagonal
 
+    def row_quadratic_forms(self, rows: NDArray) -> NDArray:
+        """Return ``x_i' H^+ x_i`` for each row of ``rows`` ``(m, p)``, forming no ``K x K`` block.
+
+        ``H^+ = [[Q^+, -Q^+ F'], [-F Q^+, D^-1 + F Q^+ F']]``, so a row with dense
+        part ``a`` and random-effect part ``b`` gives ``b' D^-1 b + y' Q^+ y`` with
+        ``y = a - F' b``: the random-effect and fixed-effect halves of the hat
+        diagonal of Bates et al. (2015, eqs. 63-65).  O(nnz(b) q + m q^2).
+        """
+        values = scipy.sparse.csr_array(rows, dtype=np.float64)
+        if values.shape[1] != self.shape[0]:
+            raise ValueError(f"rows must have shape (m, {self.shape[0]}), got {values.shape}.")
+        local = values[:, self.structured_indices]
+        border = values[:, self.small_indices].toarray() - local @ self._F
+        return local.multiply(local) @ self._d_inv + np.sum(
+            (border @ self._Q_inverse()) * border, axis=1
+        )
+
     def trace_inverse_penalty(self, component: PenaltyComponent) -> float:
         """Return ``trace(H^-1 Omega)`` without expanding identity penalties."""
         indices = _component_indices(component, self.shape[0])
@@ -457,12 +570,12 @@ class ScalarSchurFactor:
 
         if left_is_dominant and right_is_dominant:
             Q_inverse = self._Q_inverse()
-            G = self._F.T @ self._F
+            inverse_gram = Q_inverse @ self._F_gram
             low_rank_diagonal = np.sum((self._F @ Q_inverse) * self._F, axis=1)
             trace_value = (
                 self._d_inv @ self._d_inv
                 + 2.0 * (self._d_inv @ low_rank_diagonal)
-                + np.trace(Q_inverse @ G @ Q_inverse @ G)
+                + np.sum(inverse_gram * inverse_gram.T)
             )
             return float(scale * trace_value)
 
@@ -481,11 +594,13 @@ class ScalarSchurFactor:
                     "penalty to lie wholly in the dense-small block."
                 )
             right_positions = self._small_position[right_indices]
-            inverse_b_right = -self._F @ self._Q_inverse()[:, right_positions]
-            cross_product = inverse_b_right.T @ inverse_b_right
-            if right.penalty_kind != "identity":
-                cross_product = cross_product @ _component_omega(right, self.shape[0])
-            return float(scale * np.trace(cross_product))
+            # (F Q^-1 e)'(F Q^-1 e) through the factor's Gram: O(q^2 k), not O(Kqk).
+            inverse_columns = self._Q_inverse()[:, right_positions]
+            cross_product = inverse_columns.T @ (self._F_gram @ inverse_columns)
+            if right.penalty_kind == "identity":
+                return float(scale * np.trace(cross_product))
+            omega = _component_omega(right, self.shape[0])
+            return float(scale * np.sum(cross_product * omega.T))
 
         selected = np.unique(np.concatenate([left_indices, right_indices]))
         inverse_selected = self.selected_inverse_block(selected)
@@ -499,7 +614,26 @@ class ScalarSchurFactor:
             right_left = right_left @ _component_omega(left, self.shape[0])
         if right.penalty_kind != "identity":
             left_right = left_right @ _component_omega(right, self.shape[0])
-        return float(scale * np.trace(right_left @ left_right))
+        return float(scale * np.sum(right_left * left_right.T))
+
+    @cached_property
+    def _F_gram(self) -> NDArray:
+        """``F'F`` for the dominant-identity traces.
+
+        Cache contract: owned by this factor and living exactly as long as it.
+        ``_F`` is fixed at construction, and any change of weights, lambdas,
+        basis or penalty target builds a new factor, so nothing invalidates it.
+        """
+        return self._F.T @ self._F
+
+    def derivative_cross_traces(self, directions: Sequence[DerivativeDirection]) -> NDArray:
+        """Return ``trace(H^-1 O_i H^-1 O_j)`` for every pair, ``O = scale * Omega + dH``.
+
+        Each ``H^-1 O_i`` enters through pieces formed once per call and shared
+        by every pair; see ``_schur_cross_traces``.  Penalty-only directions
+        keep the sparse pairwise ``penalty_cross_trace`` instead.
+        """
+        return _scalar_derivative_cross_traces(self, directions)
 
     def _inverse_dlr(self) -> _DiagonalLowRank:
         cached = self._inverse_dlr_cache
@@ -733,12 +867,6 @@ class BlockSchurFactor:
         eliminated = np.einsum("kiq,kir->qr", self.C, self._F, optimize=True)
         Q = self.A - eliminated
         self._Q = 0.5 * (Q + Q.T)
-        schur_reference_scale = max(
-            float(np.linalg.norm(self.A, ord=2)) if q else 0.0,
-            float(np.linalg.norm(eliminated, ord=2)) if q else 0.0,
-            1.0,
-        )
-        absolute_cutoff = _schur_absolute_cutoff(schur_reference_scale, q)
         self._Q_cholesky: NDArray | None = None
         self._Q_svd: tuple[NDArray, NDArray, NDArray] | None = None
         self.used_dense_fallback = False
@@ -789,6 +917,7 @@ class BlockSchurFactor:
                 self._Q_cholesky = None
                 self.used_dense_fallback = True
                 self.fallback_reason = f"Schur Cholesky fallback: {error}"
+                absolute_cutoff = _schur_fallback_cutoff(self.A, eliminated, q)
                 _reject_negative_schur_curvature(self._Q, absolute_cutoff, term_name=term_name)
                 U, singular_values, Vh = np.linalg.svd(self._Q, full_matrices=False)
                 threshold = (
@@ -1082,6 +1211,10 @@ class BlockSchurFactor:
             self._penalty_operator(right, right_scale),
         )
 
+    def derivative_cross_traces(self, directions: Sequence[DerivativeDirection]) -> NDArray:
+        """Return ``trace(H^-1 O_i H^-1 O_j)`` for every pair, ``O = scale * Omega + dH``."""
+        return _block_derivative_cross_traces(self, directions)
+
     def trace_inverse_operator(self, operator: CompactSymmetricOperator) -> float:
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
@@ -1313,22 +1446,31 @@ class ProfiledBlockSchurFactor:
             ),
         )
 
-    def penalty_operator_cross_trace(
+    def _penalty_operator(
         self,
         component: PenaltyComponent,
         scale: float,
-        operator: CompactSymmetricOperator,
-    ) -> float:
-        shifted = self._shift_component(component)
-        penalty = self.augmented_factor._penalty_operator(shifted, scale)
-        slope_penalty = BlockSymmetricOperator(
+    ) -> BlockSymmetricOperator:
+        penalty = self.augmented_factor._penalty_operator(self._shift_component(component), scale)
+        return BlockSymmetricOperator(
             A=penalty.A[1:, 1:],
             C=penalty.C[:, :, 1:],
             D=penalty.D,
             small_indices=self.small_indices,
             structured_indices=self.structured_indices,
         )
-        return self.operator_cross_trace(slope_penalty, operator)
+
+    def penalty_operator_cross_trace(
+        self,
+        component: PenaltyComponent,
+        scale: float,
+        operator: CompactSymmetricOperator,
+    ) -> float:
+        return self.operator_cross_trace(self._penalty_operator(component, scale), operator)
+
+    def derivative_cross_traces(self, directions: Sequence[DerivativeDirection]) -> NDArray:
+        """Return ``trace(H^-1 O_i H^-1 O_j)`` for every pair, ``O = scale * Omega + dH``."""
+        return _block_derivative_cross_traces(self, directions)
 
 
 class ProfiledScalarSchurFactor:
@@ -1563,3 +1705,7 @@ class ProfiledScalarSchurFactor:
             self._penalty_operator(component, scale),
             operator,
         )
+
+    def derivative_cross_traces(self, directions: Sequence[DerivativeDirection]) -> NDArray:
+        """Return ``trace(H^-1 O_i H^-1 O_j)`` for every pair, ``O = scale * Omega + dH``."""
+        return _scalar_derivative_cross_traces(self, directions)

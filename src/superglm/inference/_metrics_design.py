@@ -6,11 +6,12 @@ import operator
 from collections.abc import Iterator
 
 import numpy as np
+import scipy.sparse
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
-from superglm.group_matrix import DesignMatrix
+from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
 
 # Diagnostic algebra can keep the dense block, a shifted copy, a weighted copy,
 # and matrix-product workspaces live at the same time.  Budget five row-sized
@@ -214,12 +215,23 @@ def _exact_runtime_design_block(
 
 
 class EvaluationDesign:
-    """Lazy exact design on evaluation rows in public fitted coordinates."""
+    """Lazy exact design on evaluation rows in public fitted coordinates.
 
-    def __init__(self, model, X: FrameLike | EagerFrame, selected_columns: NDArray):
+    ``shift`` (one entry per selected column) is added to every row, which maps
+    public rows into the solver coordinates of a covariance retained in them.
+    """
+
+    def __init__(
+        self,
+        model,
+        X: FrameLike | EagerFrame,
+        selected_columns: NDArray,
+        shift: NDArray | None = None,
+    ):
         self._model = model
         self._X = as_eager_frame(X)
         self._selected_columns = np.asarray(selected_columns, dtype=np.intp)
+        self._shift = np.zeros(len(self._selected_columns)) if shift is None else shift
         self.n = len(self._X)
         self.p = len(self._selected_columns)
         self.shape = (self.n, self.p)
@@ -260,6 +272,7 @@ class EvaluationDesign:
                 X_chunk,
                 self._selected_columns,
             )
+            block += self._shift
             yield start, stop, block
 
     def toarray(self) -> NDArray:
@@ -333,9 +346,54 @@ def iter_dense_chunks(design: MetricsDesign) -> Iterator[tuple[int, int, NDArray
         yield start, stop, np.asarray(design.row_subset(rows).toarray(), dtype=np.float64)
 
 
+def iter_row_chunks(design: MetricsDesign) -> Iterator[tuple[int, int, NDArray]]:
+    """Yield row blocks for row-local algebra that accepts sparse rows.
+
+    A grouped design yields CSR blocks whose categorical and random-effect
+    groups stay one-hot, bounded by the stored entries per row instead of the
+    design width; other designs yield their bounded dense blocks.
+    """
+    if not isinstance(design, DesignMatrix):
+        yield from iter_dense_chunks(design)
+        return
+    matrices = design.group_matrices
+    stored = sum(1 if isinstance(gm, CategoricalGroupMatrix) else gm.shape[1] for gm in matrices)
+    chunk_rows = _bounded_chunk_rows(algebra_width=stored)
+    for start in range(0, design.n, chunk_rows):
+        stop = min(start + chunk_rows, design.n)
+        blocks = [_row_block(gm, start, stop) for gm in matrices]
+        yield start, stop, scipy.sparse.hstack(blocks, format="csr")
+
+
+def _row_block(gm, start: int, stop: int) -> scipy.sparse.csr_array:
+    """Rows ``start:stop`` of one design block; a one-hot block stays sparse from its codes."""
+    if isinstance(gm, CategoricalGroupMatrix):
+        return _one_hot_rows(gm.codes[start:stop], gm.n_levels)
+    return scipy.sparse.csr_array(gm.row_subset(np.arange(start, stop)).toarray())
+
+
+def _one_hot_rows(codes: NDArray, n_levels: int) -> scipy.sparse.csr_array:
+    """CSR one-hot rows of categorical codes; the base-level sink code stays empty."""
+    present = codes < n_levels
+    return scipy.sparse.csr_array(
+        (np.ones(np.count_nonzero(present)), (np.flatnonzero(present), codes[present])),
+        shape=(len(codes), n_levels),
+    )
+
+
 def quadratic_form_diagonal(design: MetricsDesign, matrix: NDArray) -> NDArray:
-    """Return row-wise ``x @ matrix @ x`` without retaining a dense design."""
+    """Return row-wise ``x @ matrix @ x`` without retaining a dense design.
+
+    A compact covariance with ``row_quadratic_forms`` evaluates sparse row
+    blocks from its factor, so its coefficient-by-coefficient matrix is never
+    formed.
+    """
     result = np.empty(design.shape[0], dtype=np.float64)
+    forms = getattr(matrix, "row_quadratic_forms", None)
+    if forms is not None:
+        for start, stop, block in iter_row_chunks(design):
+            result[start:stop] = forms(block)
+        return result
     for start, stop, block in iter_dense_chunks(design):
         result[start:stop] = np.sum((block @ matrix) * block, axis=1)
     return result

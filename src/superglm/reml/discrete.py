@@ -62,6 +62,7 @@ from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.solvers.structured import (
     BlockStructuredSystem,
+    NestedStructuredSystem,
     ScalarStructuredSystem,
     SumToZeroBlockStructuredSystem,
     record_auto_backend_decision,
@@ -402,6 +403,9 @@ def optimize_discrete_reml_cached_w(
         coefficient_width=p,
         row_weights=sample_weight,
         lambda2=lambdas,
+        family=distribution,
+        link=link,
+        nesting_cache=getattr(dm, "_scalar_structured_layout_cache", None),
     )
     use_structured = structured_decision.use_structured
     record_auto_backend_decision(profile, direct_solve, structured_decision)
@@ -757,7 +761,10 @@ def optimize_discrete_reml_cached_w(
         c_structured_system = cache.get("structured_system")
         if use_structured and not isinstance(
             c_structured_system,
-            ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+            ScalarStructuredSystem
+            | BlockStructuredSystem
+            | SumToZeroBlockStructuredSystem
+            | NestedStructuredSystem,
         ):
             raise RuntimeError("Structured discrete REML cache is missing its block system.")
         c_centered_XtWz = cache["centered_rhs"]
@@ -1224,7 +1231,10 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 if not isinstance(
                     c_structured_system,
-                    ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                    ScalarStructuredSystem
+                    | BlockStructuredSystem
+                    | SumToZeroBlockStructuredSystem
+                    | NestedStructuredSystem,
                 ):  # pragma: no cover - validated above
                     raise RuntimeError("Structured cached solve has no block system.")
                 cached_solution = solve_cached_structured(

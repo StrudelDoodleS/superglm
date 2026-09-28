@@ -1,19 +1,25 @@
 """Exact scalar Schur-factor algebra tests."""
 
 import importlib.util
+from collections import Counter
 from dataclasses import FrozenInstanceError
 from importlib import import_module
 
 import numpy as np
 import pytest
 
-from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
+from superglm.distributions import Poisson
+from superglm.reml.gradient import reml_direct_hessian
+from superglm.solvers._structured import factors as factors_module
+from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor, _component_omega
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
     BlockSchurFactor,
     BlockSymmetricOperator,
     CenteredBlockOperator,
     LowRankSymmetricOperator,
+    ProfiledBlockSchurFactor,
+    ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     SumBlockOperator,
     SymmetricBlockOperator,
@@ -310,6 +316,60 @@ def test_scalar_schur_uses_diagnostic_small_svd_fallback_for_singular_schur():
         factor.coefficient_estimable(),
         [True, False, True, True, True],
     )
+
+
+def _block_schur(A):
+    return BlockSchurFactor(
+        A=A,
+        C=np.zeros((2, 2, 2)),
+        D=np.broadcast_to(np.eye(2), (2, 2, 2)).copy(),
+        small_indices=np.array([0, 1], dtype=np.intp),
+        structured_indices=np.arange(2, 6, dtype=np.intp).reshape(2, 2),
+        term_name="x:group:fs",
+    )
+
+
+def test_schur_rank_floor_is_computed_only_on_the_svd_fallback(monkeypatch):
+    """The floor's two spectral norms are full SVDs of the border.
+
+    Built eagerly they dominated wide-border fits (a 4,000-column border spent
+    12 of 14 profile samples in them) while a Schur complement Cholesky accepts
+    never reads the floor.
+    """
+    factors = import_module("superglm.solvers._structured.factors")
+    real_cutoff = factors._schur_fallback_cutoff
+    calls = []
+
+    def counted(*args):
+        calls.append(args)
+        return real_cutoff(*args)
+
+    monkeypatch.setattr(factors, "_schur_fallback_cutoff", counted)
+    A, C, d, small_indices, structured_indices, H = _spd_scalar_blocks()
+    accepted = ScalarSchurFactor(
+        A=A,
+        C=C,
+        d=d,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+        term_name="broker",
+    )
+    accepted_block = _block_schur(np.eye(2))
+    assert not accepted.used_dense_fallback and not accepted_block.used_dense_fallback
+    assert calls == []
+
+    singular = ScalarSchurFactor(
+        A=np.diag([2.0, 0.0]),
+        C=np.zeros((3, 2)),
+        d=np.array([1.0, 1.5, 2.0]),
+        small_indices=np.array([0, 1], dtype=np.intp),
+        structured_indices=np.array([2, 3, 4], dtype=np.intp),
+        term_name="broker",
+    )
+    singular_block = _block_schur(np.diag([1.0, 0.0]))
+    assert singular.used_dense_fallback and singular_block.used_dense_fallback
+    assert len(calls) == 2
+    assert singular.rank == 4 and singular_block.rank == 5
 
 
 def test_scalar_schur_keeps_exact_tiny_decoupled_pivot():
@@ -713,6 +773,322 @@ def test_compact_centered_and_low_rank_operator_products_match_dense():
             np.trace(inverse @ identity_matrix @ inverse @ combined_dense),
             atol=2e-12,
         )
+
+
+def _penalty(name, group_sl, omega=None, **kind):
+    return PenaltyComponent(
+        name=name,
+        group_name=name,
+        group_index=0,
+        group_sl=group_sl,
+        omega_raw=omega,
+        omega_ssp=omega,
+        **kind,
+    )
+
+
+def _symmetric(rng, size):
+    values = rng.normal(size=(size, size))
+    return values + values.T
+
+
+def _scalar_directions(profiled: bool, operator_type=SymmetricBlockOperator):
+    """A scalar Schur factor, raw or intercept-profiled, and three REML directions."""
+    rng = np.random.default_rng(2609)
+    q, K = 3, 4
+    small_width = q + int(profiled)  # the augmented intercept joins the small block
+    C = rng.normal(scale=0.4, size=(K, small_width))
+    d = rng.uniform(1.0, 2.0, size=K)
+    root = rng.normal(size=(small_width, small_width))
+    A = root.T @ root + np.eye(small_width) + C.T @ (C / d[:, None])
+    factor = ScalarSchurFactor(
+        A=A,
+        C=C,
+        d=d,
+        small_indices=np.arange(small_width),
+        structured_indices=np.arange(small_width, small_width + K),
+        term_name="re",
+    )
+    if profiled:
+        factor = ProfiledScalarSchurFactor(
+            augmented_factor=factor, sum_w=A[0, 0], xtw=np.concatenate([A[0, 1:], C[:, 0]])
+        )
+
+    def operator():
+        return operator_type(
+            A=_symmetric(rng, q),
+            C=rng.normal(size=(K, q)),
+            d=rng.normal(size=K),
+            small_indices=factor.small_indices,
+            structured_indices=factor.structured_indices,
+        )
+
+    width = q + K
+    centered = CenteredBlockOperator(
+        raw=operator(), cross=rng.normal(size=width), total=-0.35, center=rng.normal(size=width)
+    )
+    low_rank = LowRankSymmetricOperator(
+        basis=rng.normal(size=(width, 2)), core=np.array([[0.3, -0.2], [-0.2, 0.5]])
+    )
+    return factor, [
+        (_penalty("spline", slice(0, 2), np.array([[1.5, 0.2], [0.2, 0.8]])), 2.0, operator()),
+        (
+            _penalty("ridge", slice(2, 3), penalty_kind="identity"),
+            0.7,
+            SumBlockOperator((centered, low_rank)),
+        ),
+        (_penalty("re", slice(q, width), penalty_kind="identity"), 3.1, None),
+    ]
+
+
+def _block_directions(profiled: bool, operator_type=BlockSymmetricOperator):
+    """A block Schur factor, raw or intercept-profiled, and three REML directions."""
+    rng = np.random.default_rng(2610)
+    n_levels, block_size, q = 4, 2, 3
+    small_width = q + int(profiled)  # the augmented intercept joins the small block
+    roots = rng.normal(size=(n_levels, block_size, block_size))
+    D = np.einsum("kji,kjl->kil", roots, roots) + np.eye(block_size)
+    C = rng.normal(scale=0.3, size=(n_levels, block_size, small_width))
+    root = rng.normal(size=(small_width, small_width))
+    A = root.T @ root + np.eye(small_width) + np.einsum("kiq,kir->qr", C, np.linalg.solve(D, C))
+    factor = BlockSchurFactor(
+        A=A,
+        C=C,
+        D=D,
+        small_indices=np.arange(small_width),
+        structured_indices=np.arange(small_width, small_width + n_levels * block_size).reshape(
+            n_levels, block_size
+        ),
+        term_name="fs",
+    )
+    if profiled:
+        factor = ProfiledBlockSchurFactor(
+            augmented_factor=factor,
+            sum_w=A[0, 0],
+            xtw=np.concatenate([A[0, 1:], C[:, :, 0].ravel()]),
+        )
+
+    def operator():
+        local = rng.normal(size=(n_levels, block_size, block_size))
+        return operator_type(
+            A=_symmetric(rng, q),
+            C=rng.normal(size=(n_levels, block_size, q)),
+            D=local + local.transpose(0, 2, 1),
+            small_indices=factor.small_indices,
+            structured_indices=factor.structured_indices,
+        )
+
+    width = q + n_levels * block_size
+    repeated = _penalty(
+        "fs",
+        slice(q, width),
+        np.diag([1.4, 0.0]),
+        penalty_kind="repeated",
+        repeat_count=n_levels,
+        block_width=block_size,
+    )
+    centered = CenteredBlockOperator(
+        raw=operator(), cross=rng.normal(size=width), total=1.1, center=rng.normal(size=width)
+    )
+    low_rank = LowRankSymmetricOperator(basis=rng.normal(size=(width, 2)), core=np.eye(2))
+    return factor, [
+        (repeated, 1.3, centered),
+        (
+            _penalty("small", slice(0, q), np.diag([0.4, 0.7, 1.0])),
+            0.6,
+            SumBlockOperator((operator(), low_rank)),
+        ),
+        (_penalty("ridge", slice(0, 2), penalty_kind="identity"), 2.2, None),
+    ]
+
+
+def _bare_block_directions():
+    """A block Schur factor with no dense-small block, and a repeated penalty."""
+    rng = np.random.default_rng(2611)
+    n_levels, block_size = 4, 2
+    width = n_levels * block_size
+    roots = rng.normal(size=(n_levels, block_size, block_size))
+    local = rng.normal(size=(n_levels, block_size, block_size))
+    layout = {
+        "small_indices": np.arange(0),
+        "structured_indices": np.arange(width).reshape(n_levels, block_size),
+    }
+    factor = BlockSchurFactor(
+        A=np.zeros((0, 0)),
+        C=np.zeros((n_levels, block_size, 0)),
+        D=np.einsum("kji,kjl->kil", roots, roots) + np.eye(block_size),
+        term_name="fs",
+        **layout,
+    )
+    operator = BlockSymmetricOperator(
+        A=np.zeros((0, 0)),
+        C=np.zeros((n_levels, block_size, 0)),
+        D=local + local.transpose(0, 2, 1),
+        **layout,
+    )
+    repeated = _penalty(
+        "fs",
+        slice(0, width),
+        np.diag([1.4, 0.0]),
+        penalty_kind="repeated",
+        repeat_count=n_levels,
+        block_width=block_size,
+    )
+    return factor, [
+        (repeated, 1.3, operator),
+        (_penalty("ridge", slice(0, width), penalty_kind="identity"), 0.4, None),
+    ]
+
+
+def _dense_direction(component, scale, operator, width):
+    matrix = np.zeros((width, width))
+    indices = np.arange(width)[component.group_sl]
+    if component.penalty_kind == "identity":
+        matrix[indices, indices] = scale
+    else:
+        matrix[np.ix_(indices, indices)] = scale * _component_omega(component, width)
+    return matrix if operator is None else matrix + materialize_compact_operator(operator)
+
+
+def _cross_trace_tolerance(factor, dense_directions):
+    """First-order float64 bound on tr(Z O_i Z O_j) evaluated two ways.
+
+    Every evaluation splits ``Z = Z_local + U R U'`` and accumulates inner
+    products no longer than ``p + q``, so each is within
+    ``gamma_{p+q} F_i F_j`` of the exact value, where
+    ``F = (||Z_local|| + ||U||^2 ||R||) ||O||_F`` bounds the Frobenius norms
+    of the split pieces (Higham 2002, eq. 3.13). The dense reference also
+    forms ``Z`` and two products: five gammas in all.
+    """
+    if hasattr(factor, "_inverse_bdlr"):
+        inverse = factor._inverse_bdlr()
+        local = np.max(np.linalg.norm(inverse.blocks, 2, axis=(1, 2)))
+    else:
+        inverse = factor._inverse_dlr()
+        local = np.max(np.abs(inverse.diagonal))
+    low_rank = (
+        np.linalg.norm(inverse.basis, 2) ** 2 * np.linalg.norm(inverse.core, 2)
+        if inverse.core.size
+        else 0.0
+    )
+    split = local + low_rank
+    norms = split * np.array([np.linalg.norm(matrix) for matrix in dense_directions])
+    n = factor.shape[0] + inverse.core.shape[0]
+    gamma = n * np.finfo(np.float64).eps / (1.0 - n * np.finfo(np.float64).eps)
+    return 5.0 * gamma * np.outer(norms, norms)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: _scalar_directions(profiled=False),
+        lambda: _scalar_directions(profiled=True),
+        lambda: _block_directions(profiled=False),
+        lambda: _block_directions(profiled=True),
+        _bare_block_directions,
+    ],
+    ids=["scalar", "profiled-scalar", "block", "profiled-block", "block-without-small"],
+)
+def test_derivative_cross_traces_match_dense_reference(build):
+    factor, directions = build()
+    width = factor.shape[0]
+    inverse = factor.solve(np.eye(width))
+    dense = [_dense_direction(*direction, width) for direction in directions]
+    expected = np.array(
+        [[np.trace(inverse @ left @ inverse @ right) for right in dense] for left in dense]
+    )
+
+    traces = factor.derivative_cross_traces(directions)
+
+    assert np.all(np.abs(traces - expected) <= _cross_trace_tolerance(factor, dense))
+
+
+def test_scalar_derivative_cross_traces_refuse_a_foreign_block_layout():
+    """The batched local trace drops each operator's small and cross blocks.
+
+    That is exact only when the operator shares the factor's structured
+    indices, so another layout is refused rather than traced wrongly.
+    """
+    factor, directions = _scalar_directions(profiled=False)
+    component, scale, _ = directions[0]
+    width = factor.shape[0]
+    foreign = SymmetricBlockOperator(
+        A=np.eye(width - 2),
+        C=np.ones((2, width - 2)),
+        d=np.ones(2),
+        small_indices=np.arange(width - 2),
+        structured_indices=np.arange(width - 2, width),
+    )
+
+    with pytest.raises(ValueError, match="structured block layout"):
+        factor.derivative_cross_traces([(component, scale, foreign)])
+
+
+@pytest.mark.parametrize(
+    ("build", "operator_type", "multiply", "with_operators"),
+    [
+        (_scalar_directions, SymmetricBlockOperator, "_multiply_symmetric_dlr", True),
+        (_block_directions, BlockSymmetricOperator, "_multiply_symmetric_bdlr", True),
+        (_block_directions, BlockSymmetricOperator, "_multiply_symmetric_bdlr", False),
+    ],
+    ids=["scalar", "block", "block-penalty-only"],
+)
+def test_structured_reml_hessian_forms_each_inverse_product_once(
+    monkeypatch, build, operator_type, multiply, with_operators
+):
+    """One ``H^-1 (lambda Omega + dH)`` product per direction per Hessian evaluation.
+
+    A product is counted where it is formed: a direction applying its
+    operator to the inverse basis, or a pairwise multiplication by the
+    inverse's compact form. The pairwise path formed up to six such products
+    for every pair of directions, and on block factors penalty-only pairs
+    formed two.
+    """
+    created, formed = [], []
+
+    class CountedOperator(operator_type):
+        def __post_init__(self):
+            super().__post_init__()
+            created.append(id(self))
+
+        def matvec(self, rhs):
+            formed.append(id(self))
+            return super().matvec(rhs)
+
+    pairwise_multiply = getattr(factors_module, multiply)
+
+    def counted_multiply(left, right):
+        formed.append("pairwise")
+        return pairwise_multiply(left, right)
+
+    monkeypatch.setattr(factors_module, multiply, counted_multiply)
+    factor, directions = build(profiled=True, operator_type=CountedOperator)
+    if not with_operators:
+        directions = [(component, scale, None) for component, scale, _ in directions]
+        created.clear()
+    penalties = [component for component, _, _ in directions]
+    lambdas = {component.name: scale for component, scale, _ in directions}
+    operators = {i: op for i, (_, _, op) in enumerate(directions) if op is not None}
+    common = {"gradient": np.zeros(len(penalties)), "reml_penalties": penalties}
+
+    hessian = reml_direct_hessian(
+        [], Poisson(), factor, lambdas, dH_extra=operators or None, **common
+    )
+
+    assert Counter(formed) == Counter(created)
+    width = factor.shape[0]
+    dense_operators = {i: materialize_compact_operator(op) for i, op in operators.items()}
+    dense_hessian = reml_direct_hessian(
+        [],
+        Poisson(),
+        factor.solve(np.eye(width)),
+        lambdas,
+        dH_extra=dense_operators or None,
+        **common,
+    )
+    dense_directions = [_dense_direction(*direction, width) for direction in directions]
+    tolerance = 0.5 * _cross_trace_tolerance(factor, dense_directions)
+    assert np.all(np.abs(hessian - dense_hessian) <= tolerance)
 
 
 def test_centered_independent_blocks_certify_local_factor_geometry(

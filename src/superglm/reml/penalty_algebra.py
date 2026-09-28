@@ -1186,6 +1186,35 @@ def penalty_component_matvec(
     return omega @ beta
 
 
+def penalty_component_magnitude_matvec(
+    component: PenaltyComponent,
+    beta_magnitude: NDArray,
+    group_matrix: GroupMatrix | None = None,
+) -> NDArray:
+    """Return ``|E|' |Omega| |E| |beta|``, the magnitude ``penalty_component_matvec`` sums.
+
+    ``beta_magnitude`` is ``|beta|`` and ``E`` the component's expansion (the
+    identity, ``[I; -1]`` for sum-to-zero, or the repeat).  Each entry that
+    routine forms rounds to within ``gamma_m`` times this for ``m`` additions
+    along its chain (Higham 2002, section 3.1), at most the group width plus two.
+    """
+    magnitude = np.asarray(beta_magnitude, dtype=np.float64)
+    if component.penalty_kind == "identity":
+        return magnitude.copy()
+    omega = np.abs(
+        np.asarray(_penalty_component_omega_ssp(component, group_matrix), dtype=np.float64)
+    )
+    if component.penalty_kind == "sum_to_zero":
+        n_levels, block_width = _sum_to_zero_penalty_geometry(component)
+        free = magnitude.reshape(n_levels - 1, block_width)
+        raw = np.concatenate((free, free.sum(axis=0, keepdims=True))) @ omega.T
+        return (raw[:-1] + raw[-1:]).ravel()
+    if component.penalty_kind == "repeated":
+        repeat_count, block_width = _repeated_penalty_geometry(component)
+        return (magnitude.reshape(repeat_count, block_width) @ omega.T).ravel()
+    return omega @ magnitude
+
+
 def penalty_component_trace(
     component: PenaltyComponent,
     inverse_block_or_diagonal: NDArray,

@@ -53,7 +53,12 @@ from superglm.solvers.structured import (
     BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
+    NestedDataOperator,
+    NestedPenalizedOperator,
+    NestedSchurFactor,
+    NestedStructuredSystem,
     ProfiledBlockSchurFactor,
+    ProfiledNestedSchurFactor,
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     ScalarStructuredSystem,
@@ -66,6 +71,25 @@ from superglm.solvers.sum_to_zero import (
     ProfiledSumToZeroBlockFactor,
     SumToZeroBlockFactor,
 )
+from superglm.solvers.working_rows import supports_observed_newton
+
+
+def _discrete_terminal_is_quadratic(model) -> bool:
+    """Whether the discrete terminal refit's steps converge quadratically.
+
+    Fisher scoring is Newton on a canonical link.  Otherwise only the pairs
+    ``supports_observed_newton`` approves take Newton steps, and ``fit_irls_direct``
+    withholds them under linear constraints or a SCOP group.
+    """
+    family, link = model._distribution, model._link
+    try:
+        if classify_reml_curvature(family, link) == "fisher":
+            return True
+    except NotImplementedError:
+        return False
+    return supports_observed_newton(family, link) and not any(
+        group.constraints is not None or group.monotone_engine == "scop" for group in model._groups
+    )
 
 
 def _build_structured_linear_system_state(
@@ -81,26 +105,47 @@ def _build_structured_linear_system_state(
     """Distill a final structured refit into compact persistent state."""
     if not isinstance(
         factor,
-        ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor,
+        ProfiledScalarSchurFactor
+        | ProfiledBlockSchurFactor
+        | ProfiledSumToZeroBlockFactor
+        | ProfiledNestedSchurFactor,
     ):
         return None
     system = cache.get("structured_system")
     penalized_operator = cache.get("penalized_operator")
     if not isinstance(
         system,
-        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+        ScalarStructuredSystem
+        | BlockStructuredSystem
+        | SumToZeroBlockStructuredSystem
+        | NestedStructuredSystem,
     ) or not isinstance(
         penalized_operator,
-        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator,
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedPenalizedOperator,
     ):
         raise RuntimeError("terminal structured refit omitted its compact system state")
     if not isinstance(
         data_operator,
-        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator,
+        SymmetricBlockOperator
+        | BlockSymmetricOperator
+        | SumToZeroBlockOperator
+        | NestedDataOperator,
     ):
         raise RuntimeError("terminal structured refit omitted its compact data operator")
 
-    if isinstance(penalized_operator, SumToZeroBlockOperator):
+    if isinstance(penalized_operator, NestedPenalizedOperator) and isinstance(
+        system, NestedStructuredSystem
+    ):
+        coefficient_factor = NestedSchurFactor(
+            penalized_operator,
+            chain_group_names=system.chain_group_names,
+            chain_group_indices=system.chain_group_indices,
+            intercept=False,
+        )
+    elif isinstance(penalized_operator, SumToZeroBlockOperator):
         coefficient_factor = SumToZeroBlockFactor(
             A=penalized_operator.A,
             C=penalized_operator.C,
@@ -156,8 +201,20 @@ def _build_structured_linear_system_state(
 
 
 def _structured_information_by_group(cache: dict) -> dict[int, np.ndarray]:
-    """Reuse dominant Fisher blocks already assembled by a structured refit."""
+    """Reuse dominant Fisher blocks already assembled by a structured refit.
+
+    Every nested chain level reports its node weights, the subtree sums of
+    the leaf information.
+    """
     system = cache.get("structured_system")
+    if isinstance(system, NestedStructuredSystem):
+        return dict(
+            zip(
+                system.chain_group_indices,
+                system.operator.tree.split(system.xtw_structured),
+                strict=True,
+            )
+        )
     if isinstance(system, ScalarStructuredSystem):
         return {system.dominant_group_index: system.operator.d}
     if isinstance(
@@ -166,6 +223,17 @@ def _structured_information_by_group(cache: dict) -> dict[int, np.ndarray]:
     ):
         return {system.dominant_group_index: system.operator.D}
     return {}
+
+
+def _structured_geometry_groups(
+    state: StructuredLinearSystemState | None,
+) -> tuple[int | None, tuple[int, ...]]:
+    """Return the leaf group index and the nested chain (``()`` for one level)."""
+    if state is None:
+        return None, ()
+    if isinstance(state.system, NestedStructuredSystem):
+        return state.system.chain_group_indices[-1], state.system.chain_group_indices
+    return state.system.dominant_group_index, ()
 
 
 def _build_reml_reporting_support_state(
@@ -420,7 +488,18 @@ def finalize_reml_fit(
             model._groups,
         )
         observed_terminal = terminal_curvature == "observed" and not qp_passthrough
-        final_tolerance = min(pirls_tol, 1e-10) if observed_terminal else pirls_tol
+        # Fisher scoring on a non-canonical link contracts only linearly, so an
+        # objective-change stop certifies the coefficients to about sqrt(tol).
+        # A discrete refit keeps Fisher geometry but certifies its fixed point
+        # to first order at the same tolerance, the score or the step, where its
+        # steps get there quadratically.  Elsewhere Fisher's linear rate can
+        # exhaust the iteration budget and publish a settled mode as unconverged,
+        # so those fits keep the objective stop.
+        certified_terminal = observed_terminal or (
+            model._discrete and not qp_passthrough and _discrete_terminal_is_quadratic(model)
+        )
+        final_tolerance = min(pirls_tol, 1e-10) if certified_terminal else pirls_tol
+        final_convergence = "coefficients" if observed_terminal else "score"
         final_output = fit_irls_direct(
             X=model._dm,
             y=y,
@@ -434,7 +513,7 @@ def finalize_reml_fit(
             intercept_init=float(best.pirls_result.intercept),
             max_iter=max_pirls_iter,
             tol=final_tolerance,
-            convergence="coefficients" if observed_terminal else "deviance",
+            convergence=final_convergence if certified_terminal else "deviance",
             return_xtwx=True,
             cache_out=final_cache,
             direct_solve=model._direct_solve,
@@ -478,6 +557,7 @@ def finalize_reml_fit(
             ProfiledScalarSchurFactor,
             ProfiledBlockSchurFactor,
             ProfiledSumToZeroBlockFactor,
+            ProfiledNestedSchurFactor,
         ),
     )
     # Profiled-family publication may retain rows transiently so it can
@@ -581,6 +661,9 @@ def finalize_reml_fit(
                 reml_penalties=reml_penalties,
             )
         )
+        structured_group_index, structured_chain = _structured_geometry_groups(
+            structured_linear_state
+        )
         geometry_start = _time.perf_counter()
         try:
             terminal_geometry = build_observed_reml_geometry(
@@ -597,11 +680,8 @@ def finalize_reml_fit(
                 groups=model._groups if structured_linear_state is not None else None,
                 lambdas=lambdas if structured_linear_state is not None else None,
                 reml_penalties=reml_penalties if structured_linear_state is not None else None,
-                structured_group_index=(
-                    structured_linear_state.system.dominant_group_index
-                    if structured_linear_state is not None
-                    else None
-                ),
+                structured_group_index=structured_group_index,
+                structured_chain_group_indices=structured_chain,
             )
         except ObservedGeometryInfeasibleError as exc:
             # The same retype the candidate gate in optimize_direct_reml makes,

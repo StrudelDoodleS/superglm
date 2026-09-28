@@ -756,6 +756,65 @@ def test_auto_backend_uses_measured_structured_crossover(
     assert decision.auto_cost_ratio == pytest.approx(expected_ratio)
 
 
+def test_auto_keeps_a_raw_year_border_off_the_single_level_factor() -> None:
+    """A pricing-shaped fit whose single level sits between the 0.05 and 0.75 ratios.
+
+    ScalarSchurFactor forms its border by subtraction and truncates on the
+    unscaled Q, so a raw year and a raw vehicle value beside a 40-level region
+    effect (ratio about 0.1) are refused at the REML bootstrap, and auto does not
+    retry a refusal on gram.  auto must fit this model exactly as gram does.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, Numeric, RandomEffect, Spline, SuperGLM
+
+    rng = np.random.default_rng(7)
+    n, levels = 2000, 40
+    region = rng.integers(0, levels, n)
+    age = rng.uniform(18, 80, n)
+    cover = rng.integers(0, 5, n)
+    year = rng.integers(2010, 2021, n).astype(float)
+    value = np.exp(rng.normal(np.log(15000.0), 0.5, n))
+    exposure = rng.uniform(0.1, 1.0, n)
+    eta = (
+        -2.0
+        + 0.4 * np.exp(-(age - 18) / 10)
+        + np.array([0.0, 0.1, -0.1, 0.2, 0.05])[cover]
+        + 0.02 * (year - 2015)
+        + 0.1 * np.log(value / 15000.0)
+        + rng.normal(0.0, 0.2, levels)[region]
+    )
+    y = rng.poisson(exposure * np.exp(eta)).astype(float)
+    frame = pd.DataFrame(
+        {
+            "age": age,
+            "cover": [f"c{c}" for c in cover],
+            "year": year,
+            "value": value,
+            "region": [f"r{c:02d}" for c in region],
+        }
+    )
+
+    def fit(direct_solve: str):
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            direct_solve=direct_solve,
+            features={
+                "age": Spline(n_knots=8),
+                "cover": Categorical(),
+                "region": RandomEffect(),
+                "year": Numeric(),
+                "value": Numeric(),
+            },
+        )
+        return model.fit_reml(frame, y, offset=np.log(exposure))
+
+    auto, gram = fit("auto"), fit("gram")
+    assert auto.result.direct_backend == "gram"
+    assert auto.result.deviance == gram.result.deviance
+
+
 @pytest.mark.parametrize(
     ("dominant_width", "small_width", "expect_structured"),
     [
