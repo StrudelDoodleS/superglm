@@ -339,13 +339,17 @@ wrong on the way:
 
 Likelihood-ratio confidence intervals remain available for either coupling,
 eagerly via `ci_alpha` or lazily via `result.ci()`. Imperfect convergence is
-disclosed, not refused: if the searched winner's fit did not converge, the
-interval is still computed and a caution naming the cause is warned and
-recorded in `result.warnings`. The interval inverts the
-profile that was searched, around that profile's own value at `p_hat`
-(recorded as `result.search_nll`), so it describes the regime named by
-`search_fit_mode`; `result.nll` describes the published fit's re-profiled
-dispersion. `profile_plot` measures against the same searched reference.
+disclosed, not refused. If the searched winner's fit did not converge, a
+caution naming the cause is warned and recorded in `result.warnings` when the
+search ends. If a fit the interval evaluates did not converge, its interval
+says so. Either way the interval is still computed. It inverts the profile that
+was searched, around that profile's own value at `p_hat` (recorded as
+`result.search_nll`), so it describes the regime named by `search_fit_mode`;
+`result.nll` describes the published fit's re-profiled dispersion. If the
+interval's own evaluations find a power below that value, `p_hat` was a local
+minimum: the interval is inverted from the lower power, and a caution says so.
+`profile_plot` measures against the same reference. Summaries show a cautioned
+interval as "caution", or "censored with caution" when it is also censored.
 
 ### Profile confidence interval
 

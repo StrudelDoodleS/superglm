@@ -304,6 +304,7 @@ def _searched_result(profile, objective, fit_mode, p_bounds, search_converged):
         warnings=skipped + cautions,
         search_nll=nll_hat,
         _objective=objective,
+        _candidates=profile.candidates,
         _ll_scale=profile.n,
         _ci_bounds=_interval_bounds(p_hat, p_bounds),
     )
@@ -383,7 +384,9 @@ class TweedieProfileResult:
     interval and the plot measure against. ``evaluations`` lists every searched
     power in order; an infeasible power has ``nll = inf``. ``fit_mode`` is the
     published fit's regime and ``search_fit_mode`` the searched profile's, which
-    ``search_nll``, the interval and the plot describe.
+    ``search_nll``, the interval and the plot describe. The interval is
+    inverted from the lowest point of that curve, which is ``p_hat`` unless an
+    interval's own evaluations found a lower one; a caution then says so.
     """
 
     p_hat: float
@@ -400,18 +403,31 @@ class TweedieProfileResult:
     _ci_cache: dict[float, Interval] = field(default_factory=dict, repr=False)
     search_fit_mode: str | None = None
     _caution: str | None = field(default=None, repr=False)
+    # Each searched power's fit, including those an interval evaluates later.
+    _candidates: dict[float, _Candidate] = field(default_factory=dict, repr=False)
+    # Cautions about one interval: what its own evaluations found.
+    _ci_cautions: dict[float, list[str]] = field(default_factory=dict, repr=False)
 
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for p on the searched curve, with censoring flags.
 
-        A censored side, and a winner whose fit did not settle, is recorded in
-        ``warnings`` when first computed and warned about on every call.
+        A censored side, a winner whose fit did not settle, and what the
+        interval's own evaluations found (a fit that did not settle, or a power
+        below p_hat's value) are recorded in ``warnings`` when first computed and
+        warned about on every call.
         """
         interval = self._interval(alpha)
-        cautions = censoring_warnings(interval, alpha, "p", self._stopped_at)
-        for message in [self._caution] * (self._caution is not None) + cautions:
+        for message in [self._caution] * (self._caution is not None) + self._interval_warnings(
+            alpha
+        ):
             warn_caller(message)
         return interval
+
+    def _interval_warnings(self, alpha: float) -> list[str]:
+        """What one computed interval adds to the estimate's own cautions."""
+        alpha = float(alpha)
+        censored = censoring_warnings(self._ci_cache[alpha], alpha, "p", self._stopped_at)
+        return self._ci_cautions[alpha] + censored
 
     def _interval(self, alpha: float) -> Interval:
         """The interval, computed once and recorded; reports read it without a warning."""
@@ -421,18 +437,52 @@ class TweedieProfileResult:
         if self._caution is not None and self._caution not in self.warnings:
             self.warnings.append(self._caution)
         if alpha not in self._ci_cache:
-            interval = likelihood_ratio_interval(
+            searched = set(self._objective.values)
+            interval, centre, centre_nll = likelihood_ratio_interval(
                 self._objective,
-                self.p_hat,
-                self.search_nll,
+                *self._objective.best(),
                 self._ci_bounds,
                 alpha=alpha,
                 scale=self._ll_scale,
                 xtol=_CI_XTOL,
             )
             self._ci_cache[alpha] = interval
-            self.warnings.extend(censoring_warnings(interval, alpha, "p", self._stopped_at))
+            self._ci_cautions[alpha] = self._evaluation_cautions(
+                alpha, [p for p in self._objective.values if p not in searched], centre, centre_nll
+            )
+            self.warnings.extend(self._interval_warnings(alpha))
         return self._ci_cache[alpha]
+
+    def _evaluation_cautions(self, alpha, evaluated, centre, centre_nll) -> list[str]:
+        """What an interval's own evaluations found: a lower power, or fits that did not settle."""
+        level = f"{100.0 * (1.0 - alpha):g}%"
+        cautions = []
+        if centre != self.p_hat:
+            drop = 2.0 * self._ll_scale * (self.search_nll - centre_nll)
+            cautions.append(
+                f"the {level} interval's search found p={centre:.6g} below p_hat={self.p_hat:.6g} "
+                f"on the searched curve, by {drop:.3g} in the likelihood-ratio statistic: p_hat "
+                "is a local minimum there, and the interval is inverted from that lower power."
+            )
+        # An infeasible power has no fit to report on.
+        fits = {p: self._candidates[p] for p in evaluated if p in self._candidates}
+        by_cause = (
+            (
+                [p for p, fit in fits.items() if not fit.pirls_converged],
+                "coefficient fits at p={} that stopped at their iteration limit; raise "
+                "max_iter for settled profile values there.",
+            ),
+            (
+                [p for p, fit in fits.items() if fit.pirls_converged and not fit.reml_converged],
+                "candidate REML fits at p={} whose smoothing parameters had not settled within "
+                "the search's own budget; search_fit_mode='fit' searches p under ML.",
+            ),
+        )
+        for powers, cause in by_cause:
+            if powers:
+                listed = ", ".join(f"{p:.6g}" for p in sorted(powers))
+                cautions.append(f"the {level} interval rests on " + cause.format(listed))
+        return cautions
 
     def _stopped_at(self, end: float) -> str:
         return "a search bound" if end in self._ci_bounds else "next to an infeasible power"
@@ -444,13 +494,18 @@ class TweedieProfileResult:
 
     def profile_plot(self, alpha: float = 0.05, ax=None):
         """Likelihood-ratio statistic over every evaluated power, with any computed interval."""
-        return profile_plot(
+        # Measured from the curve's lowest point, which the interval is inverted from.
+        centre, centre_nll = self._objective.best()
+        ax = profile_plot(
             self._objective.values,
-            self.p_hat,
-            self.search_nll,
+            centre,
+            centre_nll,
             scale=self._ll_scale,
             alpha=alpha,
             interval=self._ci_cache.get(float(alpha)),
             label="p",
             ax=ax,
         )
+        if centre != self.p_hat:
+            ax.axvline(self.p_hat, c="k", lw=1, ls=":")
+        return ax

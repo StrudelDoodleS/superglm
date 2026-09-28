@@ -491,8 +491,11 @@ class NBProfileResult:
     # Why theta_hat is not the published mean's profile optimum, which the
     # interval is inverted from regardless.
     _caution: str | None = field(default=None, repr=False)
-    # (log theta, NLL) at that optimum, solved once per published mean.
-    _optimum_point: tuple[float, float] | None = field(default=None, repr=False)
+    # (theta, NLL, whether theta is the end of the interval's range) at that
+    # optimum, solved once per published mean.
+    _optimum_point: tuple[float, float, bool] | None = field(default=None, repr=False)
+    # Cautions about one interval: theta_hat outside it, or a higher optimum it found.
+    _ci_cautions: dict[float, list[str]] = field(default_factory=dict, repr=False)
 
     def _at_mean(self, y: NDArray, mu: NDArray, weights: NDArray) -> NBProfileResult:
         """The estimate restated at a fitted mean, whose NLL and interval it then describes."""
@@ -509,6 +512,7 @@ class NBProfileResult:
             _weights=weights,
             _ci_cache={},
             _optimum_point=None,
+            _ci_cautions={},
         )
 
     def _profile_nll(self, theta: float) -> float:
@@ -528,16 +532,22 @@ class NBProfileResult:
         call; the interval is then inverted from that optimum.
         """
         interval = self._interval(alpha)
-        cautions = self._censoring(interval, alpha)
-        for message in [self._caution] * (self._caution is not None) + cautions:
+        for message in [self._caution] * (self._caution is not None) + self._interval_warnings(
+            alpha
+        ):
             warn_caller(message)
         return interval
 
-    def _censoring(self, interval: Interval, alpha: float) -> list[str]:
-        return censoring_warnings(interval, alpha, "theta", lambda _: "where its search stopped")
+    def _interval_warnings(self, alpha: float) -> list[str]:
+        """What one computed interval adds to the estimate's own caution."""
+        alpha = float(alpha)
+        censored = censoring_warnings(
+            self._ci_cache[alpha], alpha, "theta", lambda _: "where its search stopped"
+        )
+        return self._ci_cautions[alpha] + censored
 
     def _optimum(self) -> tuple[float, float]:
-        """log theta and NLL of the fixed-mean profile's maximum the interval inverts from.
+        """theta and NLL of the fixed-mean profile's maximum the interval inverts from.
 
         That is the score root at the published mean, one bracketed O(n) solve.
         theta_hat sits there only to the alternation's tolerance, and not at all
@@ -554,8 +564,9 @@ class NBProfileResult:
                 weight_semantics=self._weight_semantics,
                 bounds=(math.exp(low), math.exp(high)),
             )
-            self._optimum_point = (math.log(root.theta), self._profile_nll(root.theta))
-        return self._optimum_point
+            at_end = root.at_lower or root.at_upper
+            self._optimum_point = (root.theta, self._profile_nll(root.theta), at_end)
+        return self._optimum_point[:2]
 
     def _interval(self, alpha: float) -> Interval:
         """The interval, computed once and recorded; reports read it without a warning."""
@@ -565,12 +576,12 @@ class NBProfileResult:
         if self._caution is not None and self._caution not in self.warnings:
             self.warnings.append(self._caution)
         if alpha not in self._ci_cache:
-            log_optimum, optimum_nll = self._optimum()
+            optimum, optimum_nll = self._optimum()
             # Rooted in log theta: the range spans up to eighteen decades, and
             # an endpoint's own magnitude is its only yardstick.
-            found = likelihood_ratio_interval(
+            found, log_centre, centre_nll = likelihood_ratio_interval(
                 RecordedObjective(lambda log_theta: self._profile_nll(math.exp(log_theta))),
-                log_optimum,
+                math.log(optimum),
                 optimum_nll,
                 self._log_search_range(),
                 alpha=alpha,
@@ -584,17 +595,33 @@ class NBProfileResult:
                 found.upper_censored,
             )
             self._ci_cache[alpha] = interval
-            if self._caution is None and not interval.lower <= self.theta_hat <= interval.upper:
-                self._caution = (
-                    f"theta_hat={self.theta_hat:g} lies outside its interval "
-                    f"[{interval.lower:.4g}, {interval.upper:.4g}], which is inverted from the "
-                    f"published mean's profile optimum theta={math.exp(log_optimum):.6g}: that "
-                    "mean was not the one theta_hat was estimated at."
+            level = f"{100.0 * (1.0 - alpha):g}%"
+            cautions = []
+            if log_centre != math.log(optimum):
+                # The profile evaluated there, at exactly this float, is the new optimum.
+                self._optimum_point = (math.exp(log_centre), centre_nll, False)
+                cautions.append(
+                    f"the {level} interval's search found theta={math.exp(log_centre):.6g} "
+                    f"above the published mean's score root theta={optimum:.6g} on its profile "
+                    "likelihood; the interval is inverted from that higher point."
                 )
-                self.warnings.append(self._caution)
+            if not interval.lower <= self.theta_hat <= interval.upper:
+                centre, _, at_end = self._optimum_point
+                where = (
+                    f"at or beyond theta={centre:.6g}, where the interval's range ends"
+                    if at_end
+                    else f"theta={centre:.6g}"
+                )
+                cautions.append(
+                    f"theta_hat={self.theta_hat:g} lies outside its {level} interval "
+                    f"[{interval.lower:.4g}, {interval.upper:.4g}], which is inverted from the "
+                    f"published mean's profile optimum, {where}; theta_hat was estimated at a "
+                    "different mean, or before its alternation settled."
+                )
+            self._ci_cautions[alpha] = cautions
             # Near-Poisson data leave the upper side censored: the statistic
             # stays under its cutoff all the way to the searched range's end.
-            self.warnings.extend(self._censoring(interval, alpha))
+            self.warnings.extend(self._interval_warnings(alpha))
         return self._ci_cache[alpha]
 
     def _log_search_range(self) -> tuple[float, float]:
@@ -619,9 +646,9 @@ class NBProfileResult:
     def profile_plot(self, alpha: float = 0.05, ax=None):
         """Likelihood-ratio statistic on a 40-point log grid around the interval."""
         interval = self.interval(alpha)
-        # The statistic is measured from the optimum the interval was inverted from.
-        log_optimum, optimum_nll = self._optimum()
-        optimum = math.exp(log_optimum)
+        # The statistic is measured from the optimum the interval was inverted
+        # from, evaluated at that same float, so it is exactly zero there.
+        optimum, optimum_nll = self._optimum()
         # Each point is an O(n) likelihood; the grid reaches 30% of the
         # interval's log width past either end for context.
         low, high = math.log(interval.lower), math.log(interval.upper)
@@ -638,7 +665,7 @@ class NBProfileResult:
             label="theta",
             ax=ax,
         )
-        if self._caution is not None:
+        if self._caution is not None or self._ci_cautions[float(alpha)]:
             # theta_hat, where it is not the optimum the statistic is measured from.
             ax.axvline(self.theta_hat, c="k", lw=1, ls=":")
         ax.set_xscale("log")

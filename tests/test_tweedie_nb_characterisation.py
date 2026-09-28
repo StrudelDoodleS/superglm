@@ -594,8 +594,8 @@ def test_frequency_moment_start_is_free_of_the_counts_common_scale():
     start = _theta_moment_start(y, mu, np.full(4, 1e307), weight_semantics="frequency")
     # w / max w is exactly 1 here, so the two sums are the same floats.
     assert start == unit
-    # The score's own sum overflows at these counts; its sign, which is what
-    # brackets the root, survives.
+    # The score's own sum overflows at these counts; here its sign, which is
+    # what brackets the root, survives (rows of both signs overflowing would not).
     with np.errstate(over="ignore"):
         solved = solve_theta(
             y, mu, np.full(4, 1e307), start, weight_semantics="frequency", bounds=(1e-3, 1e6)
@@ -614,7 +614,7 @@ def test_estimate_theta_interval_is_the_crossing_at_the_published_mean(character
     from superglm.profiling.nb import nb_nll
 
     model, X, y = characterisation_case("nb_worst")
-    with pytest.warns(UserWarning, match="lies outside its interval"):
+    with pytest.warns(UserWarning, match="lies outside its 90% interval"):
         result = model.estimate_theta(X, y, fit_mode="reml", ci_alpha=0.1)
     installed = model._nb_profile_result
     assert result is not installed

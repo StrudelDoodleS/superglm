@@ -87,6 +87,25 @@ class TestGenerateTweedieCPG:
         actual_zero = np.mean(y == 0)
         np.testing.assert_allclose(actual_zero, expected_zero, atol=0.01)
 
+    @pytest.mark.parametrize(
+        ("poisson", "gamma", "message"),
+        [
+            # Fractional counts are no Poisson draw.
+            (lambda lam: lam, None, "rng.poisson"),
+            # One count broadcast over every row.
+            (lambda lam: np.int64(1), None, "rng.poisson"),
+            # One Gamma draw broadcast over every positive row.
+            (lambda lam: np.ones(lam.shape, dtype=np.int64), lambda k, scale: 1.0, "rng.gamma"),
+        ],
+    )
+    def test_a_supplied_sampler_that_does_not_draw_per_row_is_refused(
+        self, poisson, gamma, message
+    ):
+        real = np.random.default_rng(0)
+        rng = SimpleNamespace(poisson=poisson, gamma=gamma or real.gamma)
+        with pytest.raises(RuntimeError, match=message):
+            generate_tweedie_cpg(5, mu=2.0, phi=1.5, p=1.5, rng=rng)
+
 
 # =====================================================================
 # TestTweedieLogpdf
@@ -368,16 +387,66 @@ class TestMaximumLikelihoodPhi:
         with pytest.warns(UserWarning, match="raise max_iter"):
             result = model.estimate_p(pd.DataFrame({"x": x}), y, ci_alpha=0.05)
         assert not result.converged
-        # Recorded once, however often the interval is read.
-        assert sum("raise max_iter" in message for message in result.warnings) == 1
+        # Recorded once each, however often the interval is read: the winner's
+        # caution, and the interval's own for the powers it evaluated.
+        for caution in ("rests on a coefficient fit", "interval rests on coefficient fits at p="):
+            assert sum(caution in message for message in result.warnings) == 1
         with pytest.warns(UserWarning, match="raise max_iter"):
             interval = result.interval(0.05)
+        for caution in ("rests on a coefficient fit", "interval rests on coefficient fits at p="):
+            assert sum(caution in message for message in result.warnings) == 1
         assert interval.lower < result.p_hat < interval.upper
         # Reports show the interval with its caution, not as plainly available.
         from superglm.profiling._reporting import cached_tweedie_profile_ci
 
         assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
         assert "] caution" in str(model.summary())
+
+    @staticmethod
+    def _settled_search():
+        import pandas as pd
+
+        rng = np.random.default_rng(3)
+        x = rng.normal(size=500)
+        y = generate_tweedie_cpg(500, np.exp(0.5 + 0.8 * x), 1.2, 1.5, rng=rng)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x": Numeric()}
+        )
+        result = model.estimate_p(pd.DataFrame({"x": x}), y)
+        assert result.converged and not result.warnings
+        return result
+
+    def test_an_interval_resting_on_unsettled_probe_fits_says_so(self):
+        """The winner settled; only the powers the interval evaluates later do not."""
+        from superglm.profiling._reporting import cached_tweedie_profile_ci
+
+        result = self._settled_search()
+        profile = result._objective._objective
+        fit = profile._fit
+
+        def stopped_short(p):
+            mu, _, reml_converged = fit(p)
+            return mu, False, reml_converged
+
+        profile._fit = stopped_short
+        with pytest.warns(UserWarning, match="interval rests on coefficient fits at p="):
+            result.interval(0.05)
+        assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
+        # The estimate's own caution stays absent: the winner did settle.
+        assert result._caution is None
+
+    def test_an_interval_that_finds_a_lower_power_is_inverted_from_it(self):
+        """A searched point below p_hat's value makes p_hat a local minimum only."""
+        from superglm.profiling._reporting import cached_tweedie_profile_ci
+
+        result = self._settled_search()
+        lower = result.p_hat + 0.05
+        # As if an interval's evaluations had found it: slightly below p_hat's value.
+        result._objective.values[lower] = result.search_nll - 1e-4
+        with pytest.warns(UserWarning, match=f"found p={lower:.6g} below p_hat"):
+            interval = result.interval(0.05)
+        assert interval.lower < lower < interval.upper
+        assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
 
     def test_an_unconverged_winner_is_disclosed_with_the_estimate(self):
         """Without ci_alpha, not only once an interval is asked for."""
@@ -1286,10 +1355,12 @@ class TestEstimatePFitMode:
             alpha_value = float(alpha)
             ci_calls.append(alpha_value)
             result._ci_cache[alpha_value] = Interval(*expected_interval, False, False)
+            result._ci_cautions[alpha_value] = []
             return result._ci_cache[alpha_value]
 
         monkeypatch.setattr(tweedie_module, "search_power", lambda *args, **kwargs: result)
-        monkeypatch.setattr(result, "interval", compute_interval)
+        # estimate_p's eager interval reads the quiet accessor.
+        monkeypatch.setattr(result, "_interval", compute_interval)
 
         returned = model.estimate_p(X, y, ci_alpha=0.05)
         installed = model._tweedie_profile_result
@@ -1367,7 +1438,8 @@ class TestEstimatePFitMode:
             raise RuntimeError(f"CI failed at alpha={alpha}")
 
         monkeypatch.setattr(tweedie_module, "search_power", lambda *args, **kwargs: result)
-        monkeypatch.setattr(result, "interval", failing_interval)
+        # estimate_p's eager interval reads the quiet accessor.
+        monkeypatch.setattr(result, "_interval", failing_interval)
 
         with pytest.raises(RuntimeError, match="CI failed"):
             model.estimate_p(X, y, ci_alpha=0.05)

@@ -584,7 +584,7 @@ class TestNB2AutoTheta:
         ).theta
         # The interval is inverted from the fixed-mean score root, to its tolerance,
         # which the unsettled theta_hat is not.
-        assert math.exp(published._optimum()[0]) == pytest.approx(root, rel=4e-8)
+        assert published._optimum()[0] == pytest.approx(root, rel=4e-8)
         assert published.theta_hat != pytest.approx(root, rel=4e-8)
         with pytest.warns(UserWarning, match="not the optimum at the published mean"):
             interval = published.interval(0.05)
@@ -633,6 +633,41 @@ class TestNB2AutoTheta:
             for row in build_summary_export_payload(model).overview
         }
         assert overview[("Distribution Profile", "NB2 Theta CI Status")] == "censored"
+
+    def test_theta_hat_outside_one_interval_cautions_that_interval_only(self):
+        """Whether theta_hat lies outside an interval depends on its level, so the
+        caution belongs to that interval: computing the 50% one first must not
+        mark the 95% one."""
+        from dataclasses import replace
+
+        from superglm.profiling._reporting import profile_cautioned, reported_interval
+
+        rng = np.random.default_rng(11)
+        X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 2000)})
+        mu = np.exp(0.5 + 0.4 * X["x"].to_numpy())
+        y = _generate_nb2(2000, mu, 2.0, rng=rng)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"), selection_penalty=0, features={"x": Numeric()}
+        )
+        model.estimate_theta(X, y)
+        published = model._nb_profile_result
+        half, most = published._interval(0.5), published._interval(0.05)
+        assert not (half.upper_censored or most.upper_censored)
+        # A theta_hat past the 50% interval's upper end but inside the 95% one.
+        moved = replace(
+            published,
+            theta_hat=0.5 * (half.upper + most.upper),
+            warnings=[],
+            _ci_cache={},
+            _ci_cautions={},
+        )
+        moved._interval(0.5)
+        moved._interval(0.05)
+        assert profile_cautioned(moved, 0.5) and not profile_cautioned(moved, 0.05)
+        status = reported_interval(moved._interval(0.05), caution=profile_cautioned(moved, 0.05))
+        assert status[1] == "available"
+        assert [m for m in moved.warnings if "lies outside its 50% interval" in m]
+        assert not [m for m in moved.warnings if "lies outside its 95% interval" in m]
 
     def test_an_alternation_out_of_steps_warns_and_reports_unconverged(self):
         rng = np.random.default_rng(12)

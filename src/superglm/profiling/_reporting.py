@@ -4,22 +4,35 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-ProfileCIStatus = Literal["available", "censored", "caution", "not computed"]
+ProfileCIStatus = Literal[
+    "available", "censored", "caution", "censored with caution", "not computed"
+]
 
 
 def reported_interval(
     interval: Any, *, caution: bool = False
 ) -> tuple[tuple[float, float], ProfileCIStatus]:
     """``(lower, upper)`` and its status: "censored" when either side is where its
-    search stopped, "caution" when the estimate carries a caution the interval
-    rests on (``result.warnings`` says which), else "available".
+    search stopped, "caution" when the interval carries a caution
+    (``result.warnings`` says which), "censored with caution" for both, else
+    "available".
 
     A censored endpoint is not a likelihood-ratio crossing, so the interval
     may extend beyond it.
     """
     censored = interval.lower_censored or interval.upper_censored
-    status = "censored" if censored else "caution" if caution else "available"
+    if censored:
+        status = "censored with caution" if caution else "censored"
+    else:
+        status = "caution" if caution else "available"
     return (interval.lower, interval.upper), status
+
+
+def profile_cautioned(result: Any, alpha: float) -> bool:
+    """Whether the interval at ``alpha`` carries a caution: the estimate's own, or
+    one its computation found."""
+    cautions = getattr(result, "_ci_cautions", {}).get(float(alpha))
+    return getattr(result, "_caution", None) is not None or bool(cautions)
 
 
 def cached_tweedie_profile_ci(
@@ -33,7 +46,7 @@ def cached_tweedie_profile_ci(
     interval = result._ci_cache.get(float(alpha))
     if interval is None:
         return None, "not computed"
-    return reported_interval(interval, caution=getattr(result, "_caution", None) is not None)
+    return reported_interval(interval, caution=profile_cautioned(result, alpha))
 
 
 def tweedie_profile_report_identity(result: Any, alpha: float) -> tuple[Any, ...]:
@@ -45,6 +58,7 @@ def tweedie_profile_report_identity(result: Any, alpha: float) -> tuple[Any, ...
 __all__ = [
     "ProfileCIStatus",
     "cached_tweedie_profile_ci",
+    "profile_cautioned",
     "reported_interval",
     "tweedie_profile_report_identity",
 ]

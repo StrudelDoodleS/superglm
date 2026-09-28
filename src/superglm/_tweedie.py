@@ -18,7 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import digamma, gammaln, lambertw, polygamma
 
-from superglm._tweedie_series import _LOG_CUTOFF, series_moments
+from superglm._tweedie_series import _LOG_CUTOFF, log_peak_index, series_moments
 
 _LOG_TWO_PI = math.log(2.0 * math.pi)
 _EPS = float(np.finfo(np.float64).eps)
@@ -157,8 +157,9 @@ class TweedieRows:
         log_negative[~normal] = _log_negative_canonical(self.p, log_t[past][~normal])
         # Below the switch the series refuses a row only at its work bound, which
         # binds there only for 2 - p < 1.2e-9: those rows take the p -> 2 limit.
-        # The peak index is (p - 1) |c w / phi|.
-        capped = math.log(self.p - 1.0) + log_negative <= math.log(saddlepoint_switch(self.p))
+        # The kernel's own peak index decides which side of the switch a row is.
+        switch = math.log(saddlepoint_switch(self.p))
+        capped = log_peak_index(log_t[past], self.a) <= switch
         # An empty arm is skipped: its scipy calls cost as much as a small book's pass.
         for arm, taken in ((_corrected_saddlepoint, ~capped), (_gamma_limit, capped)):
             if not taken.any():
@@ -766,7 +767,13 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
 
 
 def generate_tweedie_cpg(n: int, mu, phi, p: float, rng=None) -> NDArray:
-    """Simulate Tweedie(mu, phi, p) as compound Poisson-gamma: N ~ Poisson, Y | N ~ Gamma."""
+    """Simulate Tweedie(mu, phi, p) as compound Poisson-gamma: N ~ Poisson, Y | N ~ Gamma.
+
+    ``rng`` is a numpy Generator, or any object whose ``poisson(lam)`` and
+    ``gamma(shape, scale=...)`` return one draw per element as numpy's do; the
+    draws are checked, since fractional counts or one draw broadcast over every
+    row would sample a different distribution.
+    """
     if isinstance(n, bool | np.bool_):
         raise TypeError("n must be a non-negative integer")
     n = operator.index(n)
@@ -789,11 +796,16 @@ def generate_tweedie_cpg(n: int, mu, phi, p: float, rng=None) -> NDArray:
     if not (np.all(np.isfinite(scale)) and np.all(scale > 0.0)):
         raise ValueError("the Gamma scale is not representable for these mu, phi and p")
     rng = np.random.default_rng() if rng is None else rng
-    counts = rng.poisson(rate)
+    counts = np.asarray(rng.poisson(rate))
+    if counts.shape != (n,) or counts.dtype.kind not in "iu" or np.any(counts < 0):
+        raise RuntimeError("rng.poisson must return one non-negative integer count per row")
     y = np.zeros(n, dtype=np.float64)
     positive = counts > 0
     if positive.any():
-        draws = rng.gamma((2.0 - p) / (p - 1.0) * counts[positive], scale=scale[positive])
+        raw = np.asarray(rng.gamma((2.0 - p) / (p - 1.0) * counts[positive], scale=scale[positive]))
+        if raw.shape != (int(np.count_nonzero(positive)),) or raw.dtype.kind not in "iuf":
+            raise RuntimeError("rng.gamma must return one real draw per positive count")
+        draws = raw.astype(np.float64)
         # A draw that is not a representable positive number would read as a
         # structural zero or an infinite claim; both corrupt the density's split.
         if not (np.all(np.isfinite(draws)) and np.all(draws > 0.0)):

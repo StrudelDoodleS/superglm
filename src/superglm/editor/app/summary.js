@@ -440,9 +440,11 @@ function profileEstimateCIText(estimate) {
 }
 
 // A censored side is where the search stopped, not a likelihood-ratio crossing;
-// a caution is an interval resting on a fit that had not settled.
+// a caution says the interval is not about the estimate as it stands.
+const MARKED_CI_STATUSES = new Set(["censored", "caution", "censored with caution"]);
+
 function profileCensoredSuffix(status) {
-  return status === "censored" || status === "caution" ? ` ${status}` : "";
+  return MARKED_CI_STATUSES.has(status) ? ` ${status}` : "";
 }
 
 function profileLegendItem({ color, label, detail, isBest }) {

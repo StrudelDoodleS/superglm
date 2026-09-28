@@ -339,6 +339,42 @@ def test_the_switch_is_continuous_within_both_bounds(p):
     assert series_moments(around, rows.a, max_mode=peak)[0].tolist() == [True, False]
 
 
+@pytest.mark.parametrize("p", [1.05, 1.5, 1.95])
+def test_rows_at_the_switch_take_the_arm_the_series_decided(p):
+    """A row the series refuses as past the switch takes the corrected saddlepoint.
+
+    The router reads the kernel's own peak index. An equivalent expression
+    rounds the other way at the switch on about 4% of rows within 64 ulps of it,
+    and sent them to the p -> 2 limit, about a/2 off here.
+    """
+    y, w = 1.7, 2.5
+    peak = saddlepoint_switch(p)
+    rows = TweedieRows.prepare(np.array([y]), np.array([w]), p)
+    phi = w * y ** (2 - p) / ((2 - p) * peak)
+    phis = [phi]
+    for direction in (0.0, math.inf):
+        step = phi
+        for _ in range(64):
+            step = float(np.nextafter(step, direction))
+            phis.append(step)
+    bounds = None
+    for value in phis:
+        got = rows.row_saturated(value)
+        canonical = rows.saturated_canonical / value
+        saddle = _corrected_saddlepoint(p, np.log(-canonical), rows.log_y)
+        if bounds is None:
+            _, _, _, var_j = series_moments(
+                rows.log_t_unit_phi - (rows.a + 1) * math.log(value), rows.a
+            )
+            bounds = np.add(
+                _series_bounds(p, y, w, value, peak, var_j[0]),
+                _saddle_bounds(p, y, peak, saddle[0][0]),
+            )
+        # Either arm is within both bounds of the saddlepoint at the switch.
+        for arm, closed_form, bound in zip(got, saddle, bounds, strict=True):
+            assert abs(arm[0] - closed_form[0]) <= bound
+
+
 def test_rows_past_the_switch_take_the_corrected_saddlepoint():
     # At p = 1.5 the peak index is 2 w sqrt(y) / phi: 4e10, 2e24 (past 2**52) and
     # 2e6, all past the switch near 1.3e3, so no series term is summed.
@@ -380,7 +416,8 @@ def test_rows_the_work_bound_refuses_below_the_switch_take_the_gamma_limit(row):
         s = shape * math.exp(-u)
         return a * s * ((math.log(s) - digamma(s)) ** 2 - polygamma(1, s)) / 2
 
-    # Central differences at step 1e-3 err by about 1e-7 of C, a few 1e-17 here.
+    # Central differences at step 1e-3 err by about 1e-7 of C, a few 1e-17 here,
+    # as does the neglected O(a^2) term of the expansion.
     step, centre = 1e-3, correction(0.0)
     up, down = correction(step), correction(-step)
     leading = (centre, -(up - down) / (2 * step), -(up - 2 * centre + down) / step**2)

@@ -3448,6 +3448,8 @@ def _fake_tweedie_result(evaluations, ci_cache=None):
         nll=0.12,
         evaluations=pd.DataFrame(evaluations),
         _ci_cache={} if ci_cache is None else ci_cache,
+        _caution=None,
+        _ci_cautions={},
         ci=_unexpected_ci,
         interval=_unexpected_ci,
     )
@@ -3568,6 +3570,11 @@ def test_nb_editor_profile_payload_keeps_a_censored_side_without_a_warning():
         interval.lower,
         interval.upper,
         "censored",
+    )
+    # A caution on a censored interval is shown with it, not in its place.
+    cautioned = dataclasses.replace(result, _caution="theta_hat is the last iterate.")
+    assert _profile_estimate_payload(cautioned, "nb2_theta")["ci_status"] == (
+        "censored with caution"
     )
 
 

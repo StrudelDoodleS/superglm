@@ -14,6 +14,7 @@ from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.model.fit_state import configured_family
 from superglm.model.input_validation import THETA_ESTIMATED
 from superglm.profiling._reporting import cached_tweedie_profile_ci
+from superglm.profiling._scalar import warn_caller
 from superglm.profiling.tweedie import profile_phi_at
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, model_weight_semantics
@@ -132,7 +133,10 @@ def estimate_p(
     )
     result.fit_mode = publish_mode
     if ci_alpha is not None:
-        result.interval(ci_alpha)
+        # The winner's caution was raised when the search ended; raise only the interval's own.
+        result._interval(ci_alpha)
+        for message in result._interval_warnings(ci_alpha):
+            warn_caller(message)
     # A fresh payload per phase: a callback may keep or annotate the first.
     report("best_found", {"profile_estimate": _tweedie_estimate_payload(result)})
     report("final_refit", {"profile_estimate": _tweedie_estimate_payload(result)})
@@ -391,6 +395,7 @@ def _detached_copy(result):
     """A copy that owns its interval cache and warnings, so later intervals stay apart."""
     detached = copy.copy(result)
     detached._ci_cache = dict(result._ci_cache)
+    detached._ci_cautions = dict(result._ci_cautions)
     detached.warnings = list(result.warnings)
     return detached
 

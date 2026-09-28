@@ -116,23 +116,34 @@ def likelihood_ratio_interval(
     alpha: float,
     scale: float,
     xtol: float,
-) -> Interval:
-    """{x : 2 scale (nll(x) - nll_hat) <= chi2_1(1 - alpha)} around x_hat (Venzon & Moolgavkar 1988).
+) -> tuple[Interval, float, float]:
+    """{x : 2 scale (nll(x) - nll_min) <= chi2_1(1 - alpha)} (Venzon & Moolgavkar 1988),
+    with the minimum it is measured from.
 
     Each side is one bracketed root of the excess over the cutoff, found to
     ``xtol``; a side with no crossing before its bound, or whose crossing is a
-    jump into infeasible points, is censored where it stopped.
+    jump into infeasible points, is censored where it stopped. A point either
+    side evaluates below ``nll_hat`` shows x_hat is not the minimum, so the
+    interval is inverted again from the lowest point recorded, until none is
+    lower. Like the search (`minimize_profile`), a side assumes one crossing:
+    a profile that dips back under the cutoff within one step of its outward
+    walk joins that dip to the interval, and nothing here detects it.
     """
-    cutoff = float(chi2.ppf(1.0 - alpha, 1))
-
-    def excess(x: float) -> float:
-        value = objective(x)
-        return 2.0 * scale * (value - nll_hat) - cutoff if math.isfinite(value) else _BARRIER
-
+    # The upper tail directly: 1 - alpha rounds to 1 for alpha below 1.1e-16.
+    cutoff = float(chi2.isf(alpha, 1))
     recorded = objective.values
-    lower, lower_censored = _interval_side(excess, recorded, x_hat, bounds[0], cutoff, xtol)
-    upper, upper_censored = _interval_side(excess, recorded, x_hat, bounds[1], cutoff, xtol)
-    return Interval(lower, upper, lower_censored, upper_censored)
+    while True:
+
+        def excess(x: float, nll_min: float = nll_hat) -> float:
+            value = objective(x)
+            return 2.0 * scale * (value - nll_min) - cutoff if math.isfinite(value) else _BARRIER
+
+        lower, lower_censored = _interval_side(excess, recorded, x_hat, bounds[0], cutoff, xtol)
+        upper, upper_censored = _interval_side(excess, recorded, x_hat, bounds[1], cutoff, xtol)
+        x_best, nll_best = objective.best()
+        if not nll_best < nll_hat:
+            return Interval(lower, upper, lower_censored, upper_censored), x_hat, nll_hat
+        x_hat, nll_hat = x_best, nll_best
 
 
 def _interval_side(excess, recorded, x_hat, bound, cutoff, xtol) -> tuple[float, bool]:
@@ -197,7 +208,7 @@ def profile_plot(values, x_hat, nll_hat, *, scale, alpha, interval, label, ax=No
         _, ax = plt.subplots(figsize=(6, 4))
     points = sorted((x, v) for x, v in values.items() if math.isfinite(v))
     ax.plot([x for x, _ in points], [2.0 * scale * (v - nll_hat) for _, v in points], "o-", ms=3)
-    ax.axhline(chi2.ppf(1.0 - alpha, 1), ls="--", c="grey", lw=1)
+    ax.axhline(chi2.isf(alpha, 1), ls="--", c="grey", lw=1)
     ax.axvline(x_hat, c="k", lw=1)
     if interval is not None:
         ax.axvspan(interval.lower, interval.upper, alpha=0.15)

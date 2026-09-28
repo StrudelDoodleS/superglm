@@ -116,6 +116,9 @@ def _display_method(method: Any) -> str:
     return "MLE" if method_str == "ML" else method_str
 
 
+_MARKED_CI_STATUSES = ("censored", "caution", "censored with caution")
+
+
 def _format_profile_estimate(
     estimate: Any,
     ci: Any,
@@ -124,8 +127,9 @@ def _format_profile_estimate(
     """Format a profile estimate without assuming an interval was computed."""
     if isinstance(ci, tuple | list) and len(ci) >= 2:
         # A censored side is where the search stopped, not a likelihood-ratio
-        # crossing; a caution is an interval resting on a fit that had not settled.
-        censored = f" {ci_status}" if ci_status in ("censored", "caution") else ""
+        # crossing; a caution says the interval is not about the estimate as it
+        # stands (``warnings`` says why).
+        censored = f" {ci_status}" if ci_status in _MARKED_CI_STATUSES else ""
         try:
             return f"{float(estimate):.3f} [{float(ci[0]):.3f}, {float(ci[1]):.3f}]{censored}"
         except (TypeError, ValueError, OverflowError):

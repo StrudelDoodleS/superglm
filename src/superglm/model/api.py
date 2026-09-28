@@ -1373,9 +1373,9 @@ class SuperGLM:
             profile confidence interval. For example, ``0.05`` computes a 95%
             interval and caches it for ``model.summary(alpha=0.05)``. The
             default ``None`` performs no confidence-interval evaluations. If
-            the searched winner's fit did not converge, the interval is still
-            computed from its profile value, and the cause is warned and
-            recorded in ``result.warnings``.
+            the searched winner's fit, or a fit the interval evaluates, did not
+            converge, the interval is still computed, and the cause is warned
+            and recorded in ``result.warnings``.
         max_reml_iter : int, optional
             Outer-iteration budget for the REML *publication* refit alone;
             candidate search fits keep their own budget. Requires
@@ -1445,8 +1445,8 @@ class SuperGLM:
             Compute the ``1 - ci_alpha`` likelihood-ratio interval at the
             published mean before returning. It is inverted from that mean's
             own profile optimum; where theta_hat is not it (an alternation or
-            joint refinement that stopped short, or theta_hat outside its
-            interval), a caution is warned, recorded, and shown as the
+            joint refinement that stopped short, or theta_hat outside that
+            interval), a caution is warned, recorded, and shown in the
             interval's status.
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``

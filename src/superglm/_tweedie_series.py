@@ -78,17 +78,25 @@ def _row_moments(log_t: float, a: float, mode: int, log_base: NDArray):
     return True, log_w, mode + mean_offset, variance
 
 
+def log_peak_index(log_t: NDArray, a: float) -> NDArray:
+    """log of each row's peak term index, (log t - a log a) / (a + 1).
+
+    The series refuses a row whose value passes its limit, so a caller that
+    routes refused rows computes the same floats here rather than an equivalent
+    expression that may round the other way at the limit.
+    """
+    return (np.asarray(log_t, dtype=np.float64) - a * math.log(a)) / (a + 1.0)
+
+
 @njit(cache=True)
-def _series_moments_kernel(log_t, a, log_max_mode, ok, log_w, mean_j, var_j) -> None:
+def _series_moments_kernel(log_t, log_mode, a, log_max_mode, ok, log_w, mean_j, var_j) -> None:
     a_plus_one = a + 1.0
-    a_log_a = a * math.log(a)
     modes = np.zeros(log_t.size, dtype=np.int64)  # 0 marks a row past log_max_mode
     table_size = 64
     for row in range(log_t.size):
-        log_mode = (log_t[row] - a_log_a) / a_plus_one
-        if log_mode > log_max_mode:
+        if log_mode[row] > log_max_mode:
             continue
-        mode = math.exp(log_mode)
+        mode = math.exp(log_mode[row])
         radius = math.sqrt(2.0 * _LOG_CUTOFF * mode / a_plus_one)
         modes[row] = max(1, int(math.floor(mode)))
         # A row's window is mode +- radius; one whose window sits entirely above
@@ -123,7 +131,8 @@ def series_moments(
     log_w = np.empty(log_t.size, dtype=np.float64)
     mean_j = np.empty(log_t.size, dtype=np.float64)
     var_j = np.empty(log_t.size, dtype=np.float64)
-    _series_moments_kernel(log_t, float(a), log_max_mode, ok, log_w, mean_j, var_j)
+    log_mode = log_peak_index(log_t, a)
+    _series_moments_kernel(log_t, log_mode, float(a), log_max_mode, ok, log_w, mean_j, var_j)
     return ok, log_w, mean_j, var_j
 
 

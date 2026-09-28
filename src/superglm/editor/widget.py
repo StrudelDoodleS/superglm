@@ -49,7 +49,11 @@ from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
 from superglm.inference.summary_levels import validate_level_display
-from superglm.profiling._reporting import cached_tweedie_profile_ci, reported_interval
+from superglm.profiling._reporting import (
+    cached_tweedie_profile_ci,
+    profile_cautioned,
+    reported_interval,
+)
 
 _LIVE_WIDGETS: set[EditorWidget] = set()
 _LOGGER = logging.getLogger(__name__)
@@ -1132,7 +1136,7 @@ def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
         # drops, and reading it raises no warning.
         try:
             (ci_low, ci_high), ci_status = reported_interval(
-                result._interval(0.05), caution=result._caution is not None
+                result._interval(0.05), caution=profile_cautioned(result, 0.05)
             )
         except Exception:
             ci_status = "not computed"
