@@ -99,9 +99,23 @@ native Windows and macOS runners. Derive algorithms and error bounds for the
 float64 operations actually performed, using stable scaling, factorizations
 and narrowly justified compensated reductions where they are needed. The
 replacement for an extended dtype is float64 analysis, not a custom
-arbitrary-precision layer. Higher-precision arithmetic belongs in independent
-test references, not in production fitting, and loosening a numerical check
-needs an analysis of why the old bound was wrong.
+arbitrary-precision layer. Higher precision (extended dtypes, exact rationals,
+mpmath) belongs only in independent test oracles: `tests/_exact_reference.py`,
+the `tests/_*oracle*.py` modules and references a test computes for itself. It
+never strengthens, accumulates or validates a production bound. Loosening a
+numerical check needs an analysis of why the old bound was wrong.
+
+Error analysis is written in the unit roundoff.
+`eps = np.finfo(np.float64).eps = 2**-52` is the spacing of float64 values at
+1.0; the unit roundoff `u = eps / 2 = 2**-53` is the bound in
+`fl(x op y) = (x op y)(1 + d)`, `|d| <= u`. Derivations use `u` and
+`gamma_n = n*u / (1 - n*u)` (Higham, *Accuracy and Stability of Numerical
+Algorithms*, 2nd ed., 2002, sections 2.2 and 3.1) and say which of `eps` and
+`u` they use. A bound computed in float64 is itself rounded, so it is
+accumulated outward, with `np.nextafter` toward `+inf` or a `gamma_n`
+inflation, to remain a true upper bound. `eps` is a relative scale: a tolerance
+is `u` times a magnitude and, where relevant, a conditioning or growth factor,
+never a bare absolute `eps`.
 
 A numerical portability fix needs native Windows and macOS regression
 coverage; a Linux simulation of the platform does not establish native
