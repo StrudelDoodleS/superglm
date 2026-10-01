@@ -184,7 +184,9 @@ def test_hits_refresh_rhs_penalty_and_changed_weights_rebuild(monkeypatch):
     assert entry.weights.nbytes == W.nbytes
     assert not np.shares_memory(entry.weights, W)
     assert not entry.weights.flags.writeable
-    assert len(entry.data) == 3 and entry.data[1].shape == (2,) and entry.data[2].shape == (2, 2)
+    # (sum_w, mean_x, gram, centre, remainder): no dense column, so no remainder
+    assert len(entry.data) == 5 and entry.data[1].shape == (2,) and entry.data[2].shape == (2, 2)
+    assert entry.data[3].shape == (2,) and entry.data[4] is None
 
 
 @pytest.mark.parametrize("location", [0.0, 2.0**20])
@@ -196,7 +198,7 @@ def test_data_hit_uses_both_rhs_authorities_and_current_validation(location):
     W = np.array([1.0, 2.0, 1.0, 1.0, 2.0, 1.0])
     z = np.array([3.0, -1.0, 2.0, -2.0, 1.0, 0.0])
     first = centered_system.build_centered_system(dm=dm, W=W, z_off=z, penalty=np.eye(2))
-    data = first.sum_w, first.mean_x, first.data_gram
+    data = first.sum_w, first.mean_x, first.data_gram, first.mean_hi, first.mean_lo
     changed = centered_system.build_centered_system(
         dm=dm, W=W, z_off=-z, penalty=3 * np.eye(2), _data=data
     )

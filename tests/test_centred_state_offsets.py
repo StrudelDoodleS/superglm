@@ -4,8 +4,9 @@ A ``Numeric`` column far from zero (an epoch time, an ID) makes the raw intercep
 ``alpha - c' beta`` cancel against ``X beta`` (one-engine design §3.8).  Each test
 translates such a column exactly (its values on a grid the offset represents)
 and checks that the fit, its REML, its certificates and its diagnostics read the
-same model as at no offset.  Every test fails on the code before #430 and
-under the mutation its docstring names.
+same model as at no offset.  Every test fails under the mutation its
+docstring names; every test but the review-edge guard of the unprofiled
+W-correction also fails on the code before #430.
 
 Bounds derive from dimensions, ``eps``, the REML stopping rule and the fits'
 own predictors (``mode_score.linear_predictor``, which reads the centred
@@ -453,30 +454,32 @@ def _translated_state(state: dict, shift: float) -> dict:
     return {**state, "dm": translated, "pirls_result": moved}
 
 
-def _correction_magnitude(state: dict) -> NDArray:
+def _correction_magnitude(state: dict, *, profiled: bool = True) -> NDArray:
     """``M_j``: the sum of the magnitudes both W-correction routes add, per penalty.
 
     Both routes sum, over rows, ``0.5 dW_i (x~_i' dbeta_j) (x~_i' H^-1 x~_i +
     1 / sum W)``; their rounding is at most ``gamma_k`` of ``M_j``, the same sum
     of magnitudes, ``x~`` the centred rows and ``dbeta_j = -H^-1 S_j beta``.
+    Without a profiled intercept the rows are raw and the ``1 / sum W`` term
+    is absent.
     """
     dm, result = state["dm"], state["pirls_result"]
     X = dm.toarray()
     eta = linear_predictor(dm, result, None)
     mu = 1.0 / (1.0 + np.exp(-eta))
     weights = mu * (1.0 - mu)
-    centred = X - (weights @ X) / weights.sum()
+    centred = X - (weights @ X) / weights.sum() if profiled else X
     dweights = np.abs(weights * (1.0 - 2.0 * mu))
     inverse = np.asarray(state["XtWX_S_inv"], dtype=np.float64)
     leverage = np.einsum("ij,jk,ik->i", np.abs(centred), np.abs(inverse), np.abs(centred))
+    intercept_term = 1.0 / weights.sum() if profiled else 0.0
     magnitudes = []
     for j in range(dm.p):
         penalty_beta = np.zeros(dm.p)
         penalty_beta[j] = 4.0 * result.beta[j]
         dbeta = np.abs(inverse @ penalty_beta)
         magnitudes.append(
-            0.5
-            * float(np.sum(dweights * (np.abs(centred) @ dbeta) * (leverage + 1.0 / weights.sum())))
+            0.5 * float(np.sum(dweights * (np.abs(centred) @ dbeta) * (leverage + intercept_term)))
         )
     return np.array(magnitudes)
 
@@ -533,6 +536,46 @@ def test_exact_reml_leverage_route_is_translation_invariant():
     base, shifted = fit(0.0), fit(1e16)
     assert shifted._reml_profile["direct_backend"] == "gram"
     _assert_same_reml(base, shifted)
+
+
+def test_without_a_profiled_intercept_the_weight_correction_centres_no_column():
+    """No profiled intercept (a bare inverse, no rank or geometry summary): no column is centred.
+
+    ``sum_w`` is then None and the operator is ``X`` itself, whatever a
+    column's type.  381bdd39 still centred the dense columns there about the
+    state's centre, mixing a profiled and an unprofiled intercept.  The same
+    column stored dense and sparse must give the same correction, to the
+    rounding of the sums over raw rows, ``4 gamma_{n+2p+5} M_j``.  Mutation:
+    the dense pair formed whatever ``sum_w``, divided by ``np.sum`` of the
+    weights.  This guards the review edge; master never centred here.
+    """
+    import dataclasses
+
+    from scipy import sparse
+
+    from superglm.group_matrix import SparseGroupMatrix
+    from superglm.reml.w_derivatives import reml_w_correction
+
+    state = _translated_state(_dense_binomial_state(1), 8.0)
+    bare = {
+        **state,
+        "pirls_result": dataclasses.replace(
+            state["pirls_result"], rank_info=None, reml_geometry=None
+        ),
+        "XtWX_S_inv": np.asarray(state["XtWX_S_inv"], dtype=np.float64),
+    }
+    dm = state["dm"]
+    values = dm.toarray()
+    stored_sparse = DesignMatrix(
+        [SparseGroupMatrix(sparse.csr_matrix(values[:, j : j + 1])) for j in range(dm.p)],
+        n=dm.n,
+        p=dm.p,
+    )
+    dense_reading = reml_w_correction(**bare)
+    sparse_reading = reml_w_correction(**{**bare, "dm": stored_sparse})
+    assert dense_reading is not None and sparse_reading is not None
+    bound = 4.0 * _gamma(dm.n + 2 * dm.p + 5) * _correction_magnitude(state, profiled=False)
+    np.testing.assert_array_less(np.abs(dense_reading[0] - sparse_reading[0]), bound)
 
 
 # ------------------------------------------------------ 5. drop-term holdout
@@ -665,25 +708,92 @@ def test_gram_and_qr_fits_are_translation_invariant_at_1e16(family, direct_solve
     np.testing.assert_array_less(np.abs(eta_shifted - eta_base), bound)
 
 
-@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
-def test_binomial_reml_on_the_gram_and_qr_paths_at_1e16(direct_solve):
-    """Binomial REML with a spline and a numeric column at 1e16, no random effect.
-
-    On the default (gram) route it ended ``line_search_failed``.  Mutation: as
-    the previous test.
-    """
-    fits = {}
-    for shift in (0.0, 1e16):
-        rng, eta, frame = _even_grid_frame(shift)
+def _gram_qr_reml(family: str, direct_solve: str, shift: float) -> SuperGLM:
+    """REML on ``Numeric(x) + Spline(s)`` from ``_even_grid_frame``, no random effect."""
+    rng, eta, frame = _even_grid_frame(shift)
+    if family == "gamma":
+        y = rng.gamma(3.0, np.exp(eta) / 3.0)
+    elif family == "gaussian":
+        y = np.exp(eta) + 0.5 * rng.normal(size=len(eta))
+    else:
         y = (rng.uniform(size=len(eta)) < 1.0 / (1.0 + np.exp(-eta))).astype(float)
-        model = SuperGLM(
-            family="binomial",
-            features={"x": Numeric(), "s": Spline(kind="ps", k=8)},
-            selection_penalty=0,
-            direct_solve=direct_solve,
+    model = SuperGLM(
+        family=family,
+        features={"x": Numeric(), "s": Spline(kind="ps", k=8)},
+        selection_penalty=0,
+        direct_solve=direct_solve,
+        **({"link": "log"} if family in ("gamma", "gaussian") else {}),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return model.fit_reml(frame.drop(columns="c"), y)
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+@pytest.mark.parametrize("family", ["binomial", "gamma", "gaussian"])
+def test_reml_on_the_gram_and_qr_paths_at_1e16(family, direct_solve):
+    """REML with a spline and a numeric column at 1e16, no random effect.
+
+    On the default (gram) route binomial ended ``line_search_failed``.
+    Gamma/log has constant Fisher weights, so PIRLS reuses the data Gram and
+    refreshes only the right-hand side, whose dense columns are read on
+    centred rows.  Gaussian/log has signed observed weights, so its REML
+    Hessian comes from the observed geometry's dense branch, which centres
+    rows about the pair.  Mutation: as the previous test, or the one-float
+    mean back in the right-hand-side refresh or in the observed geometry's
+    signed Gram.
+    """
+    _assert_same_reml(
+        _gram_qr_reml(family, direct_solve, 0.0), _gram_qr_reml(family, direct_solve, 1e16)
+    )
+
+
+def test_the_second_order_weight_correction_reads_the_centred_transpose(monkeypatch):
+    """``w_correction_order=2`` differentiates the weighted mean through ``X_c' a``.
+
+    That transpose was formed ``X' a - mean_x sum a``, which cancels ``c sum a``
+    at a column's offset (at 1e16 ``u c`` is 1, the column's spread 8).  It
+    reads the dense column on centred rows about the pair the direction
+    reads: on Sol's state translated by 1e16, every transpose the correction
+    forms equals ``sum ((x_i - c) - d) a_i`` on the exact rows to its
+    rounding, ``gamma_{n+2} sum |x~_i| |a_i|``.  A REML fit cannot show this:
+    the outer Hessian shapes only the steps, and the fit reaches the same
+    optimum.  Mutation: the raw ``centered_rmatvec``.
+    """
+    from fractions import Fraction
+
+    import superglm.reml.w_derivatives as w_derivatives
+
+    moved = _translated_state(_dense_binomial_state(1), 1e16)
+    directions, transposes = [], []
+    real_matvec = w_derivatives.dense_centred_matvec
+    real_rmatvec = w_derivatives.dense_centred_rmatvec
+
+    def matvec(dm, values, center, center_lo=None):
+        directions.append((np.copy(center), np.copy(center_lo)))
+        return real_matvec(dm, values, center, center_lo)
+
+    def rmatvec(dm, rows, center, center_lo=None):
+        result = real_rmatvec(dm, rows, center, center_lo)
+        transposes.append((np.copy(rows), np.copy(center), np.copy(center_lo), result))
+        return result
+
+    monkeypatch.setattr(w_derivatives, "dense_centred_matvec", matvec)
+    monkeypatch.setattr(w_derivatives, "dense_centred_rmatvec", rmatvec)
+    correction = w_derivatives.reml_w_correction(**moved, w_correction_order=2)
+    assert correction is not None and len(correction) == 3
+    assert directions and transposes
+    x = moved["dm"].toarray()[:, 0]
+    for rows, center, center_lo, result in transposes:
+        assert any(
+            np.array_equal(center, c) and np.array_equal(center_lo, lo) for c, lo in directions
         )
-        fits[shift] = _fit_reml(model, frame.drop(columns="c"), y)
-    _assert_same_reml(fits[0.0], fits[1e16])
+        exact = sum(
+            (Fraction(xi) - Fraction(center[0]) - Fraction(center_lo[0])) * Fraction(ai)
+            for xi, ai in zip(x.tolist(), rows.tolist(), strict=True)
+        )
+        magnitude = float(np.sum(np.abs((x - center[0]) - center_lo[0]) * np.abs(rows)))
+        assert abs(Fraction(float(result[0])) - exact) <= Fraction(_gamma(len(x) + 2) * magnitude)
 
 
 # ----------------------------------------------- 8. the null model's mean
