@@ -241,16 +241,23 @@ class TestREMLFiniteDifference:
         and the gradient check failed by 2e-4 (gamma) and 8e-4 (Tweedie).
         """
         import superglm.reml.objective as objective
+        import superglm.reml.penalty_algebra as penalty_algebra
         from superglm.reml.penalty_algebra import compute_penalty_nullity
 
-        nullities: list[float] = []
+        nullities: dict[str, list[float]] = {"fixture": [], "objective": []}
 
-        def recorded_nullity(*args, **kwargs):
-            value = compute_penalty_nullity(*args, **kwargs)
-            nullities.append(value)
-            return value
+        def recorder(source):
+            def recorded_nullity(*args, **kwargs):
+                value = compute_penalty_nullity(*args, **kwargs)
+                nullities[source].append(value)
+                return value
 
-        monkeypatch.setattr(objective, "compute_penalty_nullity", recorded_nullity)
+            return recorded_nullity
+
+        # The fixture imports compute_penalty_nullity when it runs; the
+        # objective module bound its own name at import.
+        monkeypatch.setattr(penalty_algebra, "compute_penalty_nullity", recorder("fixture"))
+        monkeypatch.setattr(objective, "compute_penalty_nullity", recorder("objective"))
         (
             m,
             y,
@@ -279,7 +286,7 @@ class TestREMLFiniteDifference:
                 XtWX=XtWX,
                 penalty_caches=penalty_caches,
             )
-        assert nullities == [3.0, 3.0, 3.0]
+        assert nullities == {"fixture": [3.0], "objective": [3.0, 3.0, 3.0]}
 
     @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
     def test_hessian_matches_fd(self, family):

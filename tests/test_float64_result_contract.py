@@ -7,10 +7,10 @@ effects and factor smooths, and ``fit()`` with an active selection penalty,
 which runs ``fit_pirls``. Every case runs twice, once as written and once with
 float32 features, response, ``sample_weight`` and ``offset``. The test walks
 what the fit publishes -- the public result, the REML result and profile,
-the retained linear-system and reporting-support state, ``diagnostics()``, ``iteration_diagnostics()`` where it was recorded, and
-``predict()`` -- and fails on any floating array, sparse matrix, pandas column
-or index, or NumPy scalar that is not float64 (complex values must be
-complex128). It also fails on any object it cannot look inside, so a new
+the retained linear-system and reporting-support state, ``diagnostics()``,
+``iteration_diagnostics()`` where it was recorded, and ``predict()`` -- and
+fails on any floating array, sparse matrix, pandas column or index, or NumPy
+scalar that is not float64 (complex values must be complex128). It also fails on any object it cannot look inside, so a new
 published type cannot hide a leaf. Integer and boolean arrays are index and
 mask data and are allowed; Python floats are binary64 by definition. SuperLSS
 fits are not covered here. No floating exception is needed today.
@@ -92,12 +92,15 @@ def _floating_leaves(value, path="", seen=None, found=None, opaque=None):
     Objects the walk cannot see inside are appended to ``opaque``; when it is
     not supplied, meeting one is an error, so the walk fails closed.
     """
-    seen = set() if seen is None else seen
+    # Visited objects stay referenced: a temporary child (a Series from
+    # DataFrame.items(), a lazily computed mapping value) is freed once its
+    # parent is done, and a later object may then reuse its id().
+    seen = {} if seen is None else seen
     found = [] if found is None else found
     scalar = value is None or isinstance(value, str | bytes | bool | int | float | complex)
     if scalar or isinstance(value, _CODE) or id(value) in seen:
         return found
-    seen.add(id(value))
+    seen[id(value)] = value
     dtype = getattr(value, "dtype", None)
     if not isinstance(value, pd.DataFrame) and getattr(dtype, "kind", None) in ("f", "c"):
         found.append((path, dtype))
@@ -296,6 +299,30 @@ _FLOAT32 = np.zeros(2, dtype=np.float32)
 def test_walk_reports_a_reduced_precision_leaf(value):
     leaves = _floating_leaves({"root": value})
     assert [dtype for _, dtype in leaves if dtype not in _BINARY64]
+
+
+class _FreshValues(Mapping):
+    """A mapping that builds a new holder on every lookup, as a lazy view would."""
+
+    def __init__(self, dtype):
+        self.dtype = dtype
+
+    def __getitem__(self, key):
+        return _Holder(np.zeros(2, dtype=self.dtype))
+
+    def __iter__(self):
+        return iter(["value"])
+
+    def __len__(self):
+        return 1
+
+
+def test_walk_keeps_temporaries_alive_so_a_reused_id_hides_no_leaf():
+    # With ids alone, the float32 holder reused the freed float64 holder's id
+    # and the walk skipped it.
+    value = {"a": _FreshValues(np.float64), "b": _FreshValues(np.float32)}
+    leaves = _floating_leaves(value)
+    assert ("['b']['value'].value", np.dtype(np.float32)) in leaves
 
 
 def test_walk_fails_closed_on_an_object_it_cannot_inspect():
