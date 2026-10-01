@@ -18,7 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 MAX_EXACT_VALUES = 5000
-_EPS = float(np.finfo(np.float64).eps)
+_U = float(np.finfo(np.float64).eps) / 2.0  # the unit roundoff, 2**-53
 _FACTOR_RTOL = 1e-6
 _TOLERANCE_CEILING = float(np.finfo(np.float64).max) / 4.0
 # Below this range the running moments w d and w d**2 stay finite for any band
@@ -204,7 +204,7 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], NDArray[np.float64]
     floor = 0
     for j in range(n):
         # d is exact for values within a factor two of s[j] (Sterbenz), and
-        # otherwise off by at most eps |d|.
+        # otherwise off by at most u |d|.
         d_all = s[j::-1] - s[j]
         t_all = tol[j::-1]
         lo = np.maximum.accumulate(d_all - t_all)
@@ -232,19 +232,21 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], NDArray[np.float64]
         wr = w[j::-1][:m]
         cw = np.cumsum(wr)
         mean = np.cumsum(wr * d) / cw
-        # The mean of k shifted values errs by at most about (k + 2) eps max|d|,
-        # and each window edge by eps times its own size (x + eps |x| is
-        # increasing, so that covers every d - t below lo and d + t above hi).
-        # Feasibility is then monotone in a widening factor, and a plateau
-        # (d = 0) merges whatever its tolerances.
+        # The mean of k shifted values errs by at most about (2k + 1) u max|d|,
+        # and each window edge by u max|d| from its d plus u times its own size.
+        # The margin takes 4 (k + 2) u max|d|, more than twice the first two,
+        # and 2 u times each edge's size (x + 2 u |x| is increasing, so that
+        # covers every d - t below lo and d + t above hi).  Feasibility is then
+        # monotone in a widening factor, and a plateau (d = 0) merges whatever
+        # its tolerances.
         length = np.arange(1, m + 1)
         max_d = np.maximum.accumulate(np.abs(d))
-        err = 2.0 * _EPS * (length + 2) * max_d
+        err = 4.0 * _U * (length + 2) * max_d
         # max_d starts at 0 and never falls: the underflow margin goes on every
         # band past the plateau, which has none.
         err[np.searchsorted(max_d, 0.0, side="right") :] += underflow
-        low_edge = lo[:m] + err + _EPS * np.abs(lo[:m])
-        high_edge = hi[:m] - err - _EPS * np.abs(hi[:m])
+        low_edge = lo[:m] + err + 2.0 * _U * np.abs(lo[:m])
+        high_edge = hi[:m] - err - 2.0 * _U * np.abs(hi[:m])
         # The bounds are exact, so this test is too: no rounding margin.
         low_band = np.maximum.accumulate(low_double[j::-1][:m])
         high_band = np.minimum.accumulate(high_double[j::-1][:m])

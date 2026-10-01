@@ -74,7 +74,10 @@ def test_two_obvious_bands():
     s = np.array([0.0, 0.05, 1.0, 1.05])
     result = exact_bands(s, np.ones(4), np.full(4, 0.1), max_bands=4)
     assert result.starts.tolist() == [0, 2]
-    np.testing.assert_allclose(result.factors, [0.025, 1.025], rtol=0, atol=4 * _EPS)
+    # Every step is exact but the last addition, so each factor is its band's
+    # exact mean rounded once: no tolerance.
+    means = [(Fraction(s[0]) + Fraction(s[1])) / 2, (Fraction(s[2]) + Fraction(s[3])) / 2]
+    assert result.factors.tolist() == [float(mean) for mean in means]
     assert result.tolerance_factor == 1.0
 
 
@@ -84,10 +87,9 @@ def test_every_value_is_within_its_tolerance_of_its_band():
     w = rng.uniform(0.1, 3.0, 60)
     tol = rng.uniform(0.01, 0.1, 60)
     result = exact_bands(s, w, tol, max_bands=60)
-    ends = np.append(result.starts[1:], 60)
-    for a, b, factor in zip(result.starts, ends, result.factors, strict=True):
-        slack = 4 * _EPS * (b - a) * (1.0 + np.abs(s[a:b]).max())
-        assert np.all(np.abs(s[a:b] - factor) <= tol[a:b] + slack)
+    # Every value is within its tolerance of its factor exactly, so the derived
+    # slack is zero.
+    assert _meets_exactly(s, result.starts, result.factors, tol)
 
 
 def test_constant_curve_with_zero_tolerance_is_one_band():
@@ -134,10 +136,9 @@ def test_a_small_cap_widens_the_tolerance_just_enough():
     assert result.tolerance_factor > 1.0
     tighter = result.tolerance_factor / (1.0 + 2e-6)
     assert len(_fewest_then_least(s, w, tighter * tol)[0]) > 5
-    ends = np.append(result.starts[1:], 50)
-    for a, b, factor in zip(result.starts, ends, result.factors, strict=True):
-        slack = 4 * _EPS * (b - a) * 2.0
-        assert np.all(np.abs(s[a:b] - factor) <= result.tolerance_factor * tol[a:b] + slack)
+    # Exactly within the widened tolerance, the double the solve used: no slack.
+    widened = result.tolerance_factor * tol
+    assert _meets_exactly(s, result.starts, result.factors, widened)
 
 
 def test_no_widening_when_the_cap_is_not_binding():
