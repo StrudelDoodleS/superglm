@@ -1554,8 +1554,10 @@ class SumToZeroTreeFactor:
         triangle on ``N_P`` beyond its ``d_t`` distinct rows (a level with no
         weight frees all of ``N_P``); the border part is the least-squares
         representation of the null-space functions over every level's
-        triangle, kept only when it reproduces them to within ``sqrt(eps)``
-        (else the border cannot represent them and there is no alias).
+        triangle, off the structural generators' columns (so the deflated
+        block is ``diag(G'SG, A'SA)``, below), kept only when it reproduces
+        them to within ``sqrt(eps)`` (else the border cannot represent them
+        and there is no alias).
         ``None`` without thin levels or penalty.
         """
         counts = getattr(system, "thin_counts", None)
@@ -1602,6 +1604,16 @@ class SumToZeroTreeFactor:
         diagonal = np.diag(G_BB)
         scale = np.zeros_like(diagonal)
         scale[diagonal > 0.0] = 1.0 / np.sqrt(diagonal[diagonal > 0.0])
+        # A structural generator's columns (a random effect's exposed levels,
+        # which sum to the intercept) stay out of the representation (scale 0,
+        # so U is exactly zero there).  With them the Gram is singular along the
+        # generator and the minimum-norm solution spread the constant onto the
+        # random effect, whose ridge then read as alias curvature that the
+        # deflation's reduction against the generator cancelled: an exactly
+        # singular ``a_NN`` deflated as identified (rank +1, log|H| off by 60).
+        generators = leaf.generators
+        if generators is not None:
+            scale[1:][np.any(generators.matrix != 0.0, axis=1)] = 0.0
         scaled = scipy.linalg.lstsq(
             scale[:, None] * G_BB * scale[None, :],
             scale[:, None] * G_BZ,
@@ -1650,6 +1662,16 @@ class SumToZeroTreeFactor:
             return None
         aliases = np.column_stack(columns)
         border = aliases[1 + c :]
+        # The certificate must hold for the block the deflation factors, the
+        # generators and these aliases together: a_NN = [G A]' S [G A].  A is
+        # exactly zero on G's columns (above) and the penalty is block diagonal
+        # by term, so G' S A is exactly zero, a_NN = diag(G'SG, A'SA), and the
+        # reduction against G (``_append_generators``) leaves A as it is: the
+        # test below on A'SA certifies the joint block.  A penalty that couples
+        # them would void that, and the aliases then stay with the pivoted
+        # factorization (truncated as data, as before the deflation existed).
+        if generators is not None and np.any(generators.matrix.T @ (S_b @ border) != 0.0):
+            return None
         curvature = border.T @ S_b @ border
         values, vectors = np.linalg.eigh(0.5 * (curvature + curvature.T))
         # the rounding of each combination's quadratic form, on its entries before

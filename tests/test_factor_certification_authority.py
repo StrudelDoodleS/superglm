@@ -1086,3 +1086,41 @@ def test_full_rank_ill_conditioned_geometry_is_certified_by_the_factor() -> None
         decomposition.pseudo_inverse(),
     )
     assert moved >= 1e-3
+
+
+def test_penalty_factor_keeps_each_blocks_resolved_curvature_and_no_rounding() -> None:
+    """The penalty's square root carries the curvature ``S`` certifies, block by block.
+
+    Three diagonal blocks, every entry exact: a ridge at ``1e-6``, an integer
+    second-difference penalty at ``1e10`` (an exact two-dimensional null
+    space), and an ``sz``-like block whose exactly zero rows (unpenalized
+    natural coordinates) interleave its penalized ones.  The factor has
+    exactly the rank of ``S``, nothing on the zero rows, and reproduces each
+    block to within twice its eigensolver resolution ``n_b eps ||S_b||_2``.
+    Fails on 6544d2bc, where one ``eigh`` of the whole matrix kept every
+    positive rounding eigenvalue (rows on the zero coordinates: the rounding
+    curvature that made an sz alias identified on gram).  Mutation: one bar
+    for the whole matrix, ``n eps ||S||_2``, drops the ridge beside the
+    ``1e10`` block, a curvature its own block resolves.
+    """
+    second = np.diff(np.eye(6), n=2, axis=0)
+    blocks = [
+        np.diag([1e-6, 2e-6, 3e-6]),
+        1e10 * (second.T @ second),
+        np.kron(np.array([[2.0, 1.0], [1.0, 2.0]]), np.diag([4.0, 1.0, 0.0])),
+    ]
+    ranks = (3, 4, 4)
+    S = np.zeros((15, 15))
+    starts = (0, 3, 9)
+    for start, block in zip(starts, blocks, strict=True):
+        S[start : start + len(block), start : start + len(block)] = block
+    R = penalty_factor(S)
+    assert R.shape == (sum(ranks), 15)
+    assert np.all(R[:, [11, 14]] == 0.0)
+    gram = R.T @ R
+    eps = float(np.finfo(np.float64).eps)
+    for start, block in zip(starts, blocks, strict=True):
+        span = slice(start, start + len(block))
+        norm = float(np.linalg.norm(block, 2))
+        assert np.linalg.norm(gram[span, span] - block, 2) <= 2.0 * len(block) * eps * norm
+        assert not np.any(gram[span, :start]) and not np.any(gram[span, span.stop :])

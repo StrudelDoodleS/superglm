@@ -178,12 +178,57 @@ def grouped_weighted_factor_rhs(
 
 
 def penalty_factor(penalty: NDArray) -> NDArray:
-    """Return a square factor whose cross-product is a PSD penalty matrix."""
-    if penalty.shape == (0, 0) or not np.any(penalty):
-        return np.empty((0, penalty.shape[0]))
-    eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (penalty + penalty.T))
-    positive = eigenvalues > 0.0
-    return np.sqrt(eigenvalues[positive])[:, None] * eigenvectors[:, positive].T
+    """Return a factor ``R`` with ``R'R`` the PSD penalty ``S`` to within ``eigh``'s resolution.
+
+    Every rank decision downstream counts a row of ``R`` along a data-null
+    direction as identifying it, so ``R`` keeps only the curvature ``S``
+    certifies.  An exactly zero row of ``S`` is an exact null and is left out.
+    The rest splits exactly into its contiguous diagonal blocks (no entry
+    couples them; a penalty is block diagonal by term), and each block keeps
+    the eigenpairs above its own eigensolver resolution ``n_b eps ||S_b||_2``
+    (*LAPACK Users' Guide*, 3rd ed., sec. 4.7; ``rank._eigensolver_relative_bar``,
+    the bar every rank cut in this package uses).  Below it an eigenvalue's
+    magnitude and sign are rounding, so dropping it moves ``R'R`` by less than
+    ``eigh``'s own backward error; keeping it (the former ``> 0.0`` test)
+    invented curvature along an exact null.  Measured: an ``sz`` term's
+    unpenalized natural coordinates (exactly zero rows) came out of one
+    ``eigh`` of the whole matrix at up to ``+5.3e-12`` against ``||S||_2 =
+    3.9e4``, which made a thin level's exact data-null alias identified on
+    gram (rank +1 against the structured solver; REML's smoothing parameters
+    up to 800x off).  Per block, because the bar scales with the block's own
+    norm: one global bar would drop a random effect's ridge at a smoothing
+    parameter of ``1e-3`` beside a spline at ``1e10``, a curvature the
+    eigensolver resolves within its block.
+    """
+    width = penalty.shape[0]
+    symmetric = 0.5 * (penalty + penalty.T)
+    if penalty.shape == (0, 0) or not np.any(symmetric):
+        return np.empty((0, width))
+    from superglm.solvers.rank import _eigensolver_relative_bar
+
+    support = np.flatnonzero(np.any(symmetric != 0.0, axis=1))
+    coupled = symmetric[np.ix_(support, support)] != 0.0
+    order = np.arange(len(support))
+    last = (len(support) - 1) - np.argmax(coupled[:, ::-1], axis=1)
+    ends = np.flatnonzero(np.maximum.accumulate(np.maximum(last, order)) == order) + 1
+    starts = np.concatenate(([0], ends[:-1]))
+    single = ends - starts == 1
+    # 1 x 1 blocks are their own eigenpairs, exactly: positive is above the bar
+    diagonal = support[starts[single]]
+    values = symmetric[diagonal, diagonal]
+    diagonal = diagonal[values > 0.0]
+    factor = np.zeros((len(diagonal), width))
+    factor[np.arange(len(diagonal)), diagonal] = np.sqrt(symmetric[diagonal, diagonal])
+    rows = [factor]
+    for start, stop in zip(starts[~single], ends[~single], strict=True):
+        columns = support[start:stop]
+        eigenvalues, eigenvectors = np.linalg.eigh(symmetric[np.ix_(columns, columns)])
+        bar = _eigensolver_relative_bar(len(columns)) * float(np.max(np.abs(eigenvalues)))
+        kept = eigenvalues > bar
+        block = np.zeros((int(np.count_nonzero(kept)), width))
+        block[:, columns] = np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T
+        rows.append(block)
+    return np.vstack(rows)
 
 
 def grouped_augmented_factor(

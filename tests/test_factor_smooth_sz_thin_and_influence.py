@@ -329,11 +329,12 @@ def _signed_aliased_frame(variant: str, response: str = "signed"):
     return frame, y, np.where(np.isin(g, ["g003", "g007"]), 0.0, 1.0)
 
 
-def _dense_log_pdet(model: SuperGLM, y, weight) -> tuple[float, float]:
+def _dense_log_pdet(model: SuperGLM, y, weight, rows: str = "signed") -> tuple[float, float]:
     """``log sum W + log pdet(H_c)`` at the published mode and rank, and its float64 bound.
 
     ``H_c = X'WX + S - X'W1 1'WX / sum W`` in the public coordinates with the
-    observed rows of a Gaussian log link, ``W = w mu (2 mu - y)``, assembled and
+    observed rows of a Gaussian log link, ``W = w mu (2 mu - y)`` (``rows=
+    "fisher"``: an identity link's, ``W = w``), assembled and
     diagonalized densely.  Each eigenvalue is within ``delta`` of the exact
     one (Weyl): the assembly's ``gamma_{n+2} || |X|'|W||X| || + gamma_p ||S||``
     (Higham 2002, section 3.5) and the symmetric eigensolver's ``p u ||H_c||``
@@ -347,9 +348,12 @@ def _dense_log_pdet(model: SuperGLM, y, weight) -> tuple[float, float]:
         dm.group_matrices, model._groups, model._reml_lambdas, p, model._reml_penalties
     )
     S = 0.5 * (S + S.T)
-    eta = np.clip(X @ model.result.beta + model.result.intercept, -80.0, 80.0)
-    mu = np.exp(eta)
-    W = weight * mu * (2.0 * mu - y)
+    if rows == "fisher":
+        W = np.asarray(weight, dtype=np.float64)
+    else:
+        eta = np.clip(X @ model.result.beta + model.result.intercept, -80.0, 80.0)
+        mu = np.exp(eta)
+        W = weight * mu * (2.0 * mu - y)
     total = float(np.sum(W))
     cross = X.T @ W
     H = X.T @ (W[:, None] * X) + S - np.outer(cross, cross) / total
@@ -492,6 +496,95 @@ def test_sz_deflated_alias_beside_exact_nulls_keeps_the_exact_pseudo_determinant
     reference, bound = _dense_log_pdet(model, y, weight)
     certificate = factor.border_certificate.logdet_bound
     assert abs(float(model.result.log_det_H) - reference) <= bound + certificate
+
+
+def _random_effect_model(direct_solve: str, lam: tuple[float, float, float]) -> SuperGLM:
+    """The aliased fixture's model with a ten-level random effect in the border, fixed lambdas."""
+    return SuperGLM(
+        family="gaussian",
+        features={
+            "x1": Numeric(),
+            "x10": Numeric(),
+            "cat": Categorical(),
+            "h": RandomEffect(lambda_policy=LambdaPolicy.fixed(lam[0])),
+            "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(lam[1])),
+        },
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="g",
+                basis="sz",
+                k=6,
+                lambda_policy={"wiggle": LambdaPolicy.fixed(lam[2])},
+            )
+        ],
+        selection_penalty=0,
+        direct_solve=direct_solve,
+    )
+
+
+def test_sz_thin_levels_beside_a_random_effect_keep_the_dense_rank() -> None:
+    """Two one-row levels beside a random effect: an exact alias is not deflated as curvature.
+
+    A random effect's levels sum to the intercept, so the least-squares
+    representation of a thin level's alias spread its constant onto them, and
+    their ridge read as the alias's penalty curvature.  The deflation then
+    reduced the alias against the random effect's generator, which cancels
+    that curvature, and factored an exactly singular ``a_NN``: rank +1 and
+    ``log|H|`` 64 below the dense value at fixed lambdas, silently (round-2
+    review, P1; under Poisson REML the smoothing parameters went to their
+    lower bounds with edf -927).  The generator's columns now stay out of the
+    representation, so the deflated block is ``diag(G'SG, A'SA)`` and the
+    alias certificate holds for it.  Demonstration: 6544d2bc publishes rank
+    203 here against the dense 202.
+    """
+    frame, y, weight = _signed_aliased_frame("one_row", response="fisher")
+    rng = np.random.default_rng(11)
+    frame["h"] = np.array([f"h{v}" for v in rng.integers(0, 10, len(frame))], dtype=object)
+    lam = (2462.0, 566.8, 16.28)
+    models = {
+        solve: _fit(_random_effect_model(solve, lam), frame, y, weight)
+        for solve in ("auto", "gram")
+    }
+    auto = models["auto"]
+    assert auto._reml_profile["direct_backend"] == "structured"
+    assert int(auto.result.reml_hessian_rank) == int(models["gram"].result.reml_hessian_rank)
+    reference, bound = _dense_log_pdet(auto, y, weight, rows="fisher")
+    certificate = auto._linear_system_state.augmented_factor.border_certificate.logdet_bound
+    assert abs(float(auto.result.log_det_H) - reference) <= bound + certificate
+    assert float(auto.result.effective_df) > 0.0
+
+
+def test_gram_counts_no_rounding_curvature_along_an_sz_alias() -> None:
+    """gram's factor route on two one-row levels: the exact alias stays a null.
+
+    The augmented factor stacked ``sqrt`` of every positive eigenvalue of the
+    whole penalty, rounding included.  sz's natural coordinates leave its
+    unpenalized polynomial rows exactly zero, and one ``eigh`` of the whole
+    matrix returned them at up to ``+5e-12`` against ``||S||_2 = 4e4``: that
+    rounding curvature identified the thin levels' exact data-null alias, so
+    gram's rank was one above the structured solver's and the dense
+    pseudo-determinant's (round-2 review, P1; REML's smoothing parameters
+    ended up to 800x off, and auto picks gram for small sz models).
+    ``penalty_factor`` now keeps each block's eigenpairs above its
+    eigensolver resolution.  Demonstration: 6544d2bc's gram publishes rank
+    193 here against 192.
+    """
+    frame, y, weight = _signed_aliased_frame("one_row", response="fisher")
+    models = {
+        solve: _fit(
+            _model("gaussian", solve, lam=128.0, numerics=("x1", "x10"), main_lam=1e4),
+            frame,
+            y,
+            weight,
+        )
+        for solve in ("gram", "structured")
+    }
+    gram = models["gram"]
+    assert gram._reml_profile["direct_backend"] == "gram"
+    assert int(gram.result.reml_hessian_rank) == int(models["structured"].result.reml_hessian_rank)
+    reference, bound = _dense_log_pdet(gram, y, weight, rows="fisher")
+    assert abs(float(gram.result.log_det_H) - reference) <= bound
 
 
 # ------------------------------------------------------------------ leverage
