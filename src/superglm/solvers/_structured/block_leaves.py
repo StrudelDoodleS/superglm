@@ -95,6 +95,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._blas_threads import narrow_kernel_blas_threads
+from superglm._numba_compile import collect_after_compile
 from superglm.solvers._structured.border import (
     BorderCertificate,
     BorderGenerators,
@@ -1549,6 +1550,9 @@ def build_factor_smooth_leaf_system(
             )
         ):
             return system
+    # a kernel compiled since the last build left frames, and the dead systems
+    # they reach, in reference cycles: free them before forming a new stack
+    collect_after_compile()
     # LAPACK inside the pass runs on one BLAS thread under the automatic policy
     # (a wide fit re-capped at the leaf's width), so its bits do not depend on it
     basis = layout.dominant.factor_basis

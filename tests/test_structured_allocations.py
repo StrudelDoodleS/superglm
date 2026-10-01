@@ -391,6 +391,102 @@ def test_an_fs_leaf_pass_forms_no_stack_beyond_what_the_step_reads(_wide_border_
     assert built.leaf.triangles is None
 
 
+def test_the_fs_build_after_a_compile_frees_the_stack_the_compile_pinned(
+    _wide_border_fs_fit, monkeypatch
+):
+    """#432 (cold numba cache): one collection at the next build frees a compile's stack.
+
+    Numba's type inference keeps the overload failures it meets in reference
+    cycles whose frames reach every frame on the stack at the compile, so a
+    factor built while its kernel compiled kept its construction frame, the
+    leaf data and the signed pseudo-rows (one stack, ``8 K p^2`` bytes) until
+    a full collection, which a fit rarely reaches.  Numba keeps them only
+    while its overload resolution is cold in the process, so the factor's
+    caller keeps such a failure itself; an uncached copy of the trial kernel
+    makes the factor compile it.  Automatic collection is held off (the
+    collector stays enabled), so only the build's own collection can free
+    the cycle.  The next build after the compile frees the stack, and a build
+    with no compile since collects nothing.  Fails without
+    ``collect_after_compile`` (the stack outlives both builds) and without the
+    compile listener (no collection).
+    """
+    import gc
+    import weakref
+
+    import numba
+
+    from superglm import _numba_compile
+    from superglm.solvers._structured import block_leaves
+    from superglm.solvers.structured import get_structured_layout
+
+    model, _ = _wide_border_fs_fit
+    K, k = _WIDE["K"], _WIDE["k"]
+    system = model._linear_system_state.system
+    layout = get_structured_layout(
+        model._dm, model._groups, dominant_group_index=system.dominant_group_index
+    )
+    n = model._dm.n
+    rng = np.random.default_rng(5)
+    kernel = block_leaves._signed_trials
+    options = {
+        key: value
+        for key, value in kernel.targetoptions.items()
+        if key not in ("cache", "nopython")
+    }
+    monkeypatch.setattr(block_leaves, "_signed_trials", numba.njit(**options)(kernel.py_func))
+    q = len(system.operator.small_indices)
+    layout_cache = model._dm._structured_layout_cache
+
+    def build():
+        return block_leaves.build_factor_smooth_leaf_system(
+            layout, rng.uniform(0.5, 1.5, n), rng.normal(size=n), signed=True
+        )
+
+    collections = []
+
+    def count(phase, info):
+        if phase == "start" and info["generation"] == 2:
+            collections.append(phase)
+
+    block_leaves.release_leaf_memo(layout_cache)
+    _numba_compile.collect_after_compile()  # whatever compiled before this test
+    gc.collect()
+    thresholds = gc.get_threshold()
+    gc.set_threshold(0)  # no automatic collection; the collector stays enabled
+    gc.callbacks.append(count)
+
+    def construct(built):
+        penalized = block_leaves.FactorSmoothPenalizedOperator.with_penalties(
+            built.operator, np.eye(q), np.broadcast_to(np.eye(k), (K, k, k))
+        )
+        factor = block_leaves.FactorSmoothLeafFactor(built, penalized)  # compiles the kernel
+        try:
+            raise RuntimeError("an overload failure numba keeps")
+        except RuntimeError as failure:
+            kept = failure  # kept -> its traceback -> this frame -> kept
+        return factor.rank == factor.shape[0] and kept is not None
+
+    try:
+        built = build()
+        rows = built.leaf.pseudo_rows
+        stack = weakref.ref(rows if rows.base is None else rows.base)
+        del rows
+        assert construct(built)
+        del built
+        block_leaves.release_leaf_memo(layout_cache)
+        pinned = stack() is not None
+        build()
+        block_leaves.release_leaf_memo(layout_cache)
+        build()
+        block_leaves.release_leaf_memo(layout_cache)
+    finally:
+        gc.callbacks.remove(count)
+        gc.set_threshold(*thresholds)
+    assert pinned
+    assert stack() is None
+    assert len(collections) == 1
+
+
 @pytest.fixture(scope="module")
 def _wide_border_sz_fit():
     """A REML fit (smoothing parameters held) of an sz term beside a 60-level categorical."""
