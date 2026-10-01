@@ -23,7 +23,7 @@ class TestREMLFiniteDifference:
         """Build a fitted model with two CRS splines for FD checks."""
         from superglm.group_matrix import DiscretizedSSPGroupMatrix
         from superglm.reml import build_penalty_caches
-        from superglm.reml.penalty_algebra import compute_penalty_nullity
+        from superglm.reml.penalty_algebra import coerce_reml_penalties, compute_penalty_nullity
         from superglm.solvers.irls_direct import (
             _build_penalty_matrix,
             fit_irls_direct,
@@ -76,6 +76,17 @@ class TestREMLFiniteDifference:
                 penalty_ranks[g.name] = float(np.sum(eigv > 1e-8 * max(eigv.max(), 1e-12)))
 
         penalty_caches = build_penalty_caches(m._dm.group_matrices, reml_groups)
+        # Rank the penalty from its components, as fit_reml does, and store
+        # them where fit_reml stores them so the objective ranks the same way.
+        # The assembled lambda-weighted S cannot be ranked: its two structural
+        # zero eigenvalues come out of the assembly as round-off near 1e-10,
+        # and their sign, which differs between BLAS kernels and platforms,
+        # would decide whether M_p is 1, 2 or 3.
+        m._reml_penalties = coerce_reml_penalties(
+            reml_groups=reml_groups,
+            group_matrices=m._dm.group_matrices,
+            penalty_caches=penalty_caches,
+        )
 
         pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
             X=m._dm,
@@ -94,7 +105,12 @@ class TestREMLFiniteDifference:
         S = _build_penalty_matrix(m._dm.group_matrices, m._groups, lambdas, p_dim)
         pq = float(pirls_result.beta @ S @ pirls_result.beta)
         assert pirls_result.reml_hessian_rank is not None
-        M_p = compute_penalty_nullity(S, hessian_rank=pirls_result.reml_hessian_rank)
+        M_p = compute_penalty_nullity(
+            hessian_rank=pirls_result.reml_hessian_rank,
+            penalties=m._reml_penalties,
+            lambdas=lambdas,
+            coefficient_width=p_dim,
+        )
         phi_hat = 1.0
         phi_hat, inverse_phi_derivative = TestREMLFiniteDifference._dispatch_phi(
             m, y, sample_weight, pirls_result, pq, M_p, n
@@ -213,6 +229,58 @@ class TestREMLFiniteDifference:
 
         np.testing.assert_allclose(grad, fd_grad, rtol=1e-5, atol=1e-8)
 
+    @pytest.mark.parametrize("family", ["gamma", "tweedie"])
+    def test_fixture_takes_the_penalty_nullity_from_its_components(self, family, monkeypatch):
+        """The fixture and its objective both use the structural ``M_p = 3``.
+
+        Each centred CRS smooth keeps one linear null direction, and the
+        intercept adds one more. Read off the assembled ``S`` instead, the two
+        null eigenvalues are round-off of either sign, so ``M_p`` came out as 1
+        with x86 FMA kernels, 3 with SSE kernels and 2 on Linux ARM64. On
+        ARM64 the fixture's dispersion and the objective's then disagreed,
+        and the gradient check failed by 2e-4 (gamma) and 8e-4 (Tweedie).
+        """
+        import superglm.reml.objective as objective
+        from superglm.reml.penalty_algebra import compute_penalty_nullity
+
+        nullities: list[float] = []
+
+        def recorded_nullity(*args, **kwargs):
+            value = compute_penalty_nullity(*args, **kwargs)
+            nullities.append(value)
+            return value
+
+        monkeypatch.setattr(objective, "compute_penalty_nullity", recorded_nullity)
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            _reml_groups,
+            _penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            _XtWX_S_inv,
+            XtWX,
+            _phi_hat,
+            _inverse_phi_derivative,
+            _n,
+        ) = self._setup_model(family)
+        assert m._reml_penalties is not None
+        for scale in (1.0, np.exp(1e-5), np.exp(-1e-5)):
+            perturbed = {name: value * scale for name, value in lambdas.items()}
+            m._reml_laml_objective(
+                y,
+                pirls_result,
+                perturbed,
+                sample_weight,
+                offset_arr,
+                XtWX=XtWX,
+                penalty_caches=penalty_caches,
+            )
+        assert nullities == [3.0, 3.0, 3.0]
+
     @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
     def test_hessian_matches_fd(self, family):
         """Approximate outer Hessian matches full outer FD to within ~5%.
@@ -299,8 +367,10 @@ class TestREMLFiniteDifference:
                     pq_pert = float(result_pert.beta @ S_pert @ result_pert.beta)
                     assert result_pert.reml_hessian_rank is not None
                     M_p = compute_penalty_nullity(
-                        S_pert,
                         hessian_rank=result_pert.reml_hessian_rank,
+                        penalties=m._reml_penalties,
+                        lambdas=lam_pert,
+                        coefficient_width=p_dim,
                     )
                     phi_pert, _ = self._dispatch_phi(
                         m, y, sample_weight, result_pert, pq_pert, M_p, n
@@ -732,8 +802,10 @@ class TestREMLFiniteDifference:
                     pq_pert = float(result_pert.beta @ S_pert @ result_pert.beta)
                     assert result_pert.reml_hessian_rank is not None
                     M_p = compute_penalty_nullity(
-                        S_pert,
                         hessian_rank=result_pert.reml_hessian_rank,
+                        penalties=m._reml_penalties,
+                        lambdas=lam_pert,
+                        coefficient_width=p_dim,
                     )
                     phi_pert, _ = self._dispatch_phi(
                         m, y, sample_weight, result_pert, pq_pert, M_p, n
