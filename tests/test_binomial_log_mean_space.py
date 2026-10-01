@@ -630,6 +630,53 @@ def test_subnormal_weights_never_certify_a_wrong_maximum(direct_solve: str) -> N
             )
 
 
+@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
+@pytest.mark.parametrize("weight", [1e-317, 1e-310])
+def test_a_subnormal_weight_level_publishes_finite_degrees_of_freedom(
+    weight: float, direct_solve: str
+) -> None:
+    """The extreme sweep's crash: level a at a subnormal weight under offset +10, level b at 1.
+
+    The effective degrees of freedom are ``diag((D + S)^+ D)``, and at a data
+    scale of 1e-317 the pseudo-inverse overflowed: d1496789 raised "fit
+    candidate scalar results must be finite" on 74 such sweep fits.  The
+    trace is invariant under scaling ``D`` and ``S`` jointly, so an
+    overflowed trace is formed again in scaled units.  The fit publishes.
+    Without a penalty the slope's centred system is 1 x 1 with ``D = H``
+    exactly, so its trace is ``h / h`` to the few roundings of a 1 x 1
+    pseudo-inverse and product (a square root, a square, a division and a
+    product); with the intercept's 1 the total is 2 within ``8u``.  Level b,
+    which the certificate pins through its own column's relative score, is
+    within the certified ``5 bar`` of log 1/2 whenever the fit says
+    converged.
+    """
+    offset = np.array([10.0, 10.0, -0.5, -0.5])
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        weight_semantics="frequency",
+        features={"g": Categorical(base="first")},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(
+            pd.DataFrame({"g": ["a", "a", "b", "b"]}),
+            np.array([0.0, 1.0, 0.0, 1.0]),
+            offset=offset,
+            sample_weight=np.array([weight, weight, 1.0, 1.0]),
+        )
+    edf = float(model.result.effective_df)
+    assert np.isfinite(edf)
+    assert abs(edf - 2.0) <= 8.0 * _U
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept + offset
+    assert (
+        not model.result.converged
+        or abs(float(eta[2]) - np.log(0.5)) <= 5.1 * MODE_CERTIFICATION_BAR
+    )
+
+
 def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates() -> None:
     """Sol's #437 fixture: an increasing PSpline (SCOP) with a constant offset of +2.
 

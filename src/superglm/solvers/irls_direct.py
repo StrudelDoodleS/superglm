@@ -333,14 +333,6 @@ def _evaluate_scop_trial(
     return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
-# The range in which a symmetric eigensolver runs unscaled: LAPACK's dsyev
-# scales a matrix whose norm lies outside [sqrt(smlnum), sqrt(1 / smlnum)],
-# smlnum = safmin / eps, before it starts (LAPACK Users' Guide, 3rd ed.,
-# section 4.4; dsyev.f, BSD-3).
-_SAFE_SMALL_NORM = math.sqrt(float(np.finfo(np.float64).tiny) / float(np.finfo(np.float64).eps))
-_SAFE_LARGE_NORM = 1.0 / _SAFE_SMALL_NORM
-
-
 def _feature_edf(
     centered: CenteredSystem,
     decomposition: RankDecomposition,
@@ -352,22 +344,27 @@ def _feature_edf(
     Hessian ``decomposition`` factors.  The trace is invariant under scaling
     ``D`` and ``S`` jointly by one constant, but the pseudo-inverse is not: at
     a data scale ``s`` its entries are of order ``1 / s``, which overflows
-    once ``s`` falls below about ``1 / max float`` (subnormal weights give
-    ``s ~ 1e-317``).  When the Hessian's largest entry lies outside the
-    eigensolver's safe range, ``D`` and ``S`` are first multiplied by the one
-    power of two that brings that entry into ``[1/2, 1)``, exact for normal
-    and subnormal entries alike, and the scaled Hessian is factored again
-    (``factor(exponent)`` when its Gram is not authoritative).  Both are
-    positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D +
-    S)``: the scaled penalty is at most 1 and cannot overflow; a penalty that
-    dominates the data leaves ``D``'s scaled entries small and the trace near
-    its limit, 0.  Inside the range nothing is scaled, so the result is the
-    unscaled computation bit for bit.
+    once ``s`` falls below ``1 / max float``, about 5.6e-309 (subnormal
+    weights give ``s ~ 1e-317``).  The unscaled trace is formed first and,
+    when every entry is finite, returned as it is: the unscaled computation,
+    bit for bit, with no scan of the Hessian.  Otherwise the pseudo-inverse
+    overflowed, and ``D`` and ``S`` are multiplied by the one power of two
+    that brings the Hessian's largest entry into ``[1/2, 1)``, exact for
+    normal and subnormal entries alike, and the scaled Hessian is factored
+    again (``factor(exponent)`` when its Gram is not authoritative).  Both
+    are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
+    + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
+    that dominates the data leaves ``D``'s scaled entries small and the
+    trace near its limit, 0.
     """
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        unscaled = np.diag(decomposition.pseudo_inverse() @ centered.data_gram).copy()
+    if np.all(np.isfinite(unscaled)):
+        return unscaled
     hessian = centered.hessian
     largest = float(np.max(np.abs(hessian), initial=0.0))
-    if largest == 0.0 or _SAFE_SMALL_NORM <= largest <= _SAFE_LARGE_NORM:
-        return np.diag(decomposition.pseudo_inverse() @ centered.data_gram).copy()
+    if largest == 0.0 or not math.isfinite(largest):
+        return unscaled
     exponent = math.frexp(largest)[1]
     scaled = decompose_gram_if_authoritative(np.ldexp(hessian, -exponent))
     if scaled is None:
