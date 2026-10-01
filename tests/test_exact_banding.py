@@ -59,10 +59,13 @@ def test_matches_exhaustive_search_on_random_curves():
         count, sse = _brute_force(s, w, tol)
         # sse sums w (s - factor)**2 at the published factors, to relative
         # gamma_(n + 5); the brute force sums w (s - mean)**2 at np.average's
-        # means, to gamma_(n + 4).  Both sums are at most about sum(w s^2), so for
-        # n <= 10 they differ by under 15 eps sum(w s^2), plus each side's
-        # W (factor - mean)**2, which is second order in eps.  256 eps covers both.
-        scale = 256 * _EPS * (1.0 + float(np.sum(w * s * s)))
+        # means, to gamma_(n + 4).  The curves are continuous draws, so no two
+        # bandings tie at rounding level and both pick the same one.  Each sum is
+        # at most sum(w s^2) plus its W (factor - mean)**2, which is second order
+        # in u = 2**-53, so for n <= 10 they differ by under gamma_15 + gamma_14,
+        # 29 u to first order, times sum(w s^2).  32 u covers that and the
+        # second-order terms.  Nothing here nears underflow: no absolute term.
+        scale = 32 * 2.0**-53 * float(np.sum(w * s * s))
         assert len(result.starts) == count
         assert abs(result.sse - sse) <= scale
 
@@ -363,12 +366,26 @@ def _sse_gamma(n):
 
 
 def _sse_underflow(n, scale):
-    return n * Fraction(2) ** -1073 * Fraction(scale)
+    """The terms' underflow, in the units of ``w``, and the rescale's into the subnormals."""
+    return n * Fraction(2) ** -1073 * Fraction(scale) + Fraction(2) ** -1075
 
 
 def _sse_error_bound(exact, n, scale):
     """The documented bound on ``sse`` about its exact value."""
     return _sse_gamma(n) * exact + _sse_underflow(n, scale)
+
+
+def test_a_rescale_into_the_subnormals_stays_inside_the_bound():
+    # Every step is exact up to the normalised error, 2**-1041.  The rescale by
+    # fl(1/3072) = fl(1/3) * 2**-10 gives 2796202.67 * 2**-1074, which rounds to
+    # 2796203 * 2**-1074: a third of 2**-1074 off, about 250 times the terms'
+    # underflow allowance, n * 2**-1073 * fl(1/3072).
+    s, w = np.array([0.0, 2.0**-520]), np.full(2, 1.0 / 3072.0)
+    result = exact_bands(s, w, np.ones(2), max_bands=1)
+    exact = _exact_sse(s, w, result)
+    error = abs(Fraction(result.sse) - exact)
+    assert error > _sse_gamma(2) * exact + 2 * Fraction(2) ** -1073 * Fraction(w.max())
+    assert error <= _sse_error_bound(exact, len(s), w.max())
 
 
 def test_an_error_lost_to_cancelling_moments_is_still_refused():
@@ -421,7 +438,11 @@ def _published_oracle(s, w, tol):
     odd multiples of 2**-11, every band sum is exact, so each factor here is
     the one exact_bands computes.  An exact mean on a tolerance edge would need
     a band weight divisible by 2**11 units of 2**-7, and seven values weigh at
-    most 896, so the acceptance test decides as exact arithmetic does.
+    most 896, so every exact mean is at least 2**-11 / 896, about 5e-7, from
+    every edge.  The acceptance margin and the computed mean's rounding are
+    under 3e-14 here (k <= 7, |d| <= 6), so every mean clears the margin by
+    about seven orders of magnitude and the acceptance test decides as exact
+    arithmetic does.
     """
     n = len(s)
     w = w / w.max()
@@ -457,9 +478,9 @@ def _published_oracle(s, w, tol):
 def test_the_published_factors_error_is_least_over_every_banding():
     """An exhaustive oracle where the factor's rounding moves it by up to half the spread.
 
-    The doubles near 2**52 are a unit apart, so the clip and the rounding move
-    factors by whole fractions of a band's spread, and the weight on that move
-    decides which banding is best.
+    The doubles from 2**52 up are a unit apart and those just below it half a
+    unit apart, so the clip and the rounding move factors by whole fractions of
+    a band's spread, and the weight on that move decides which banding is best.
     """
     rng = np.random.default_rng(47)
     for _ in range(400):

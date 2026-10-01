@@ -42,9 +42,10 @@ class ExactBanding:
         the tolerance being the double the solve used: ``tol`` itself, or when
         widened ``min(fl(tolerance_factor * tol), largest double / 4)``.  An unmoved
         factor differs from the exact mean by its final rounding, half an ulp,
-        plus about ``k * eps`` times the band's spread and
-        :func:`_underflow_margin`; a moved one by less than one ulp more.  A
-        band whose tolerances leave no double between them is never formed.
+        plus about ``2 k u`` times the band's spread, with ``u = 2**-53`` the
+        unit roundoff, and :func:`_underflow_margin`; a moved one by less than
+        one ulp more.  A band whose tolerances leave no double between them is
+        never formed.
     tolerance_factor : float
         Multiplier applied to the tolerances: 1.0 unless ``max_bands`` forced
         a wider limit.
@@ -52,10 +53,12 @@ class ExactBanding:
         Weighted squared error of the published factors, the sum of
         ``w * (s - factor)**2`` in the units of ``w``.  It is summed directly
         from nonnegative terms, so its relative error is at most
-        ``(n + 5) u / (1 - (n + 5) u)``, with ``u = 2**-53`` (Higham 2002,
-        Lemma 3.1 and section 4.2), plus ``n * 2**-1073`` times the largest
-        weight from underflow.  It is always finite: weights that would put it
-        past the largest double are refused.
+        ``(n + 5) u / (1 - (n + 5) u)`` (Higham 2002, Lemma 3.1 and section
+        4.2), plus two absolute terms from underflow: ``n * 2**-1073`` times
+        the largest weight from the terms, and ``2**-1075`` from the final
+        rescale by the largest weight, which can round into the subnormals.
+        It is always finite: weights that would put it past the largest double
+        are refused.
     """
 
     starts: NDArray[np.intp]
@@ -179,8 +182,8 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], NDArray[np.float64]
     Its cost is its squared error at that factor, ``M2 + W (factor - mean)**2``,
     where ``M2``, the squared error about the mean, is kept for every open
     start by West's (1979) weighted update as each end is added.  That
-    update's rounding grows like ``k kappa eps`` in the band's condition
-    number, where the running moments' grew like ``k kappa**2 eps`` (Chan,
+    update's rounding grows like ``k kappa u`` in the band's condition
+    number, where the running moments' grew like ``k kappa**2 u`` (Chan,
     Golub and LeVeque 1983, Table 1).  The objective is the published
     factors' error, a sum over bands each fixed by its own values, so the
     principle of optimality holds for it.
