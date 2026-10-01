@@ -500,13 +500,17 @@ def test_compiled_dot2_callers_keep_ieee_rounding(kernel_name):
 
 
 def test_solver_penalty_value_uses_the_compensated_form_and_its_range_fallback():
-    from superglm.distributional.solver.solver import _half_penalty_quadratic
+    from superglm.distributional.solver.solver import _half_penalty_quadratic, _penalty_entries
     from superglm.reml._compensated import _dot2_quadratic_form
 
     penalty, coefficients = _capped_difference_penalty()
     value, success = _dot2_quadratic_form(*_nonzero_entries(penalty), coefficients)
     assert success
     assert _half_penalty_quadratic(penalty, coefficients) == 0.5 * value
+    # The solver context builds the entries once; passing them changes nothing.
+    entries = _penalty_entries(penalty)
+    assert not any(array.flags.writeable for array in entries)
+    assert _half_penalty_quadratic(penalty, coefficients, entries) == 0.5 * value
     # A subnormal coefficient is outside Dot2's normal range: the naive form.
     tiny = coefficients.copy()
     tiny[0] = np.nextafter(0.0, 1.0)
