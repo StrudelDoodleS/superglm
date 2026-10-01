@@ -92,3 +92,107 @@ def _dot2_selected(left, right, indices):
             values[index] = value
             success[index] = True
     return values, success
+
+
+def _native_operand(values) -> np.ndarray:
+    """``values`` as the read-only C-contiguous float64 array every native call passes.
+
+    Numba compiles one specialisation per layout and write flag, so callers
+    passing their own arrays would compile several. This is the one form
+    :func:`_warmup_compensated` compiles; contiguous input is viewed, not copied.
+    """
+    array = np.ascontiguousarray(values, dtype=np.float64).view()
+    array.flags.writeable = False
+    return array
+
+
+def _nonzero_entries(matrix) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``matrix``'s nonzero rows, columns and values in row-major order.
+
+    The operand form :func:`_dot2_quadratic_form` is compiled for: read-only and
+    C-contiguous. ``np.nonzero`` returns strided views of one buffer when there
+    are two or more nonzeros and contiguous ones otherwise, and Numba compiles
+    one specialisation per layout, so the indices are made contiguous here.
+    """
+    rows, columns = (np.ascontiguousarray(index) for index in np.nonzero(matrix))
+    entries = np.array(np.asarray(matrix)[rows, columns], dtype=np.float64)
+    for array in (rows, columns, entries):
+        array.flags.writeable = False
+    return rows, columns, entries
+
+
+def _warmup_compensated() -> None:
+    """Compile the Dot2 kernels for the operands their callers pass."""
+    matrix = _native_operand(np.eye(2))
+    _dot2_selected(matrix, matrix, np.zeros((2, 2), dtype=np.int64))
+    _dot2_value(matrix[0], matrix[1])
+    # The SuperLSS penalty value: the entries its solver context builds.
+    _dot2_quadratic_form(*_nonzero_entries(matrix), matrix[0])
+
+
+@njit(cache=True, fastmath=False)
+def _dot2_quadratic_form(rows, columns, entries, vector):
+    """Evaluate ``x' A x`` as ``Dot2(x, A x)`` with each row of ``A x`` from Dot2.
+
+    ``A`` is given by its nonzero entries in row-major order, as ``np.nonzero``
+    returns them. A zero term leaves the Dot2 state unchanged (its TwoProduct
+    and TwoSum errors are zero), so skipping zeros gives the dense recurrence's
+    value up to the sign of a zero result, at a cost proportional to the
+    nonzeros of a block-diagonal penalty. By Proposition 5.5 of Ogita, Rump and
+    Oishi (2005), without underflow, each row ``v_i`` of ``k_i`` terms is within
+    ``u |(A x)_i| + gamma_k_i**2 (|A| |x|)_i`` of ``(A x)_i``, and the outer
+    product is within ``u |x' v| + gamma_m**2 |x|' |v|`` of ``x' v``, so the
+    result is within ``u |x' A x| + u |x|' |A x| + 2 gamma_n**2 |x|' |A| |x|``
+    to first order, ``n`` the order of ``A``. False requests the caller's
+    fallback, as ``_dot2_value`` does.
+
+    Each row's Dot2 and the outer Dot2 run as the same recurrence as
+    ``_dot2_value``, operation for operation, but the outer one advances as
+    each row finishes, so the kernel allocates nothing: no per-row gather and
+    no scratch sized by the nonzeros, which a dense block makes ``p**2``.
+    """
+    count = len(entries)
+    if count == 0:
+        return 0.0, True
+    outer_product = 0.0
+    outer_correction = 0.0
+    start = 0
+    while start < count:
+        row = rows[start]
+        product, correction, success = _two_product_split(entries[start], vector[columns[start]])
+        if not success:
+            return 0.0, False
+        stop = start + 1
+        while stop < count and rows[stop] == row:
+            term, term_error, success = _two_product_split(entries[stop], vector[columns[stop]])
+            if not success:
+                return 0.0, False
+            updated = product + term
+            recovered = updated - product
+            addition_error = (product - (updated - recovered)) + (term - recovered)
+            correction += addition_error + term_error
+            product = updated
+            if not math.isfinite(product) or not math.isfinite(correction):
+                return 0.0, False
+            stop += 1
+        row_value = product + correction
+        if not math.isfinite(row_value):
+            return 0.0, False
+        if start == 0:
+            outer_product, outer_correction, success = _two_product_split(vector[row], row_value)
+            if not success:
+                return 0.0, False
+        else:
+            term, term_error, success = _two_product_split(vector[row], row_value)
+            if not success:
+                return 0.0, False
+            updated = outer_product + term
+            recovered = updated - outer_product
+            addition_error = (outer_product - (updated - recovered)) + (term - recovered)
+            outer_correction += addition_error + term_error
+            outer_product = updated
+            if not math.isfinite(outer_product) or not math.isfinite(outer_correction):
+                return 0.0, False
+        start = stop
+    value = outer_product + outer_correction
+    return value, math.isfinite(value)

@@ -145,6 +145,43 @@ def test_changed_raw_family_or_source_metadata_constructs_a_fresh_support(change
     assert _evaluate(target) == _evaluate(_build(raw, target_map, **options))
 
 
+def _build_single(omega, coordinate_map, source=None, **metadata):
+    group = SimpleNamespace(name="single", sl=slice(0, 3), size=3)
+    matrix = SimpleNamespace(R_inv=coordinate_map, omega=omega, **metadata)
+    kwargs = {} if source is None else {"_reuse_raw_from": source}
+    return algebra.build_penalty_context([matrix], [(0, group)], **kwargs)[0]
+
+
+@pytest.mark.parametrize("change", ["none", "raw", "dtype", "metadata", "mutated support"])
+def test_single_penalty_reuses_only_its_own_raw_family(change):
+    from superglm.types import LambdaPolicy
+
+    raw, target_map = _inputs()
+    omega = sum(raw)
+    source = _build_single(omega, np.diag([1.0, 2.0, 4.0]))
+    algebra._compute_penalty_logdet_evaluation({"single": 2.0}, source)
+    old = algebra._context_geometry(source)
+    assert old.coordinate_map is not None
+    options = {}
+    if change == "raw":
+        omega = 2 * omega
+    elif change == "dtype":
+        omega = omega.astype(np.float32)
+    elif change == "metadata":
+        options["lambda_policies"] = {"single": LambdaPolicy.fixed(2.0)}
+    elif change == "mutated support":
+        array = old.support.component_roots[0]
+        array.setflags(write=True)
+        array.flat[0] += 0.125
+        array.setflags(write=False)
+    target = _build_single(omega, target_map, source, **options)
+    assert (algebra._context_geometry(target).support is old.support) is (change == "none")
+    expected = _build_single(omega, target_map, **options)
+    assert algebra._compute_penalty_logdet_evaluation({"single": 2.0}, target) == (
+        algebra._compute_penalty_logdet_evaluation({"single": 2.0}, expected)
+    )
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -247,6 +284,54 @@ def test_fit_local_receipts_are_dropped_when_the_context_is_copied(method):
     target = _build(raw, target_map, copied)
     assert algebra._context_geometry(target).support is not restored.support
     assert _evaluate(target) == _evaluate(_build(raw, target_map))
+
+
+def test_non_direct_finalization_keeps_no_raw_receipts():
+    from superglm.model import reml_finalize
+
+    raw, target_map = _inputs()
+    source = _build(raw, np.eye(3))
+    group = SimpleNamespace(name="shared", sl=slice(0, 3), size=3)
+    target_matrix = SimpleNamespace(
+        R_inv=target_map,
+        omega=sum(raw),
+        omega_components=list(zip(("a", "b", "c"), raw, strict=True)),
+    )
+
+    class ReachedTerminalContextError(Exception):
+        pass
+
+    class Model(SimpleNamespace):
+        # Stop once finalization has published its terminal penalty context.
+        def __setattr__(self, name, value):
+            super().__setattr__(name, value)
+            if name == "_reml_result":
+                raise ReachedTerminalContextError
+
+    model = Model(_dm=SimpleNamespace(group_matrices=[target_matrix]), _groups=[group])
+    best = SimpleNamespace(pirls_result=None, lambdas=_values())
+    with pytest.raises(ReachedTerminalContextError):
+        reml_finalize.finalize_reml_fit(
+            model,
+            best=best,
+            use_direct=False,
+            reml_groups=[(0, group)],
+            reml_penalties=source,
+            y=np.zeros(4),
+            sample_weight=np.ones(4),
+            offset=None,
+            offset_arr=np.zeros(4),
+            max_pirls_iter=10,
+            pirls_tol=1e-9,
+            qp_passthrough=False,
+            qp_saved_state=None,
+            profile={},
+            total_start=0,
+            compute_fit_stats=lambda *_args: None,
+        )
+    geometry = algebra._context_geometry(model._reml_penalties)
+    assert geometry.coordinate_map is not None
+    assert geometry.raw_family is None and geometry.raw_summary is None
 
 
 def test_finalization_passes_the_optimizer_family_to_the_new_ssp_context(monkeypatch):

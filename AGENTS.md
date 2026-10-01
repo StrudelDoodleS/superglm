@@ -92,26 +92,70 @@ implementation to an outdated assumption.
 ## Numerical policy
 
 Production numerical code targets portable IEEE binary64 (`numpy.float64`) on
-Linux, Windows and macOS. Do not depend on `longdouble`, `float96`, `float128`
-or any platform-specific mantissa or exponent range: those types differ
-between platforms and compilers, and the failures they cause surface only on
-native Windows and macOS runners. Derive algorithms and error bounds for the
+Linux, Windows and macOS, on x86-64 and ARM64. Do not depend on `longdouble`,
+`float96`, `float128` or any platform-specific mantissa or exponent range.
+`np.longdouble` is float64 on Windows and macOS ARM64, the x87 80-bit format on
+Linux x86-64 and IEEE binary128 (emulated in software) on Linux ARM64, so code
+that relies on it answers differently on each, and the failure surfaces only on
+that platform's native runner. Derive algorithms and error bounds for the
 float64 operations actually performed, using stable scaling, factorizations
-and narrowly justified compensated reductions where they are needed. The
-replacement for an extended dtype is float64 analysis, not a custom
-arbitrary-precision layer. Higher-precision arithmetic belongs in independent
-test references, not in production fitting, and loosening a numerical check
-needs an analysis of why the old bound was wrong.
+and narrowly justified compensated reductions where they are needed.
+Error-free transformations (TwoSum, TwoProduct), compensated dot products such
+as Dot2 (Ogita, Rump and Oishi, *Accurate Sum and Dot Product*, SIAM J. Sci.
+Comput. 26(6), 2005) and `math.fsum` are float64 arithmetic, and may compute
+or accumulate a production value or bound. The replacement for an extended
+dtype is float64 analysis, not a custom arbitrary-precision layer:
 
-A numerical portability fix needs native Windows and macOS regression
-coverage; a Linux simulation of the platform does not establish native
-compatibility. Compare complete-fit cost before accepting the change.
+- Extended hardware dtypes (`longdouble`, `float96`, `float128`) are banned in
+  production code.
+- Exact rational arithmetic (`fractions.Fraction`, exact integers) is allowed
+  in production only to produce a correctly rounded float64 value that float64
+  arithmetic cannot evaluate, as on an exponent-range or cancellation path. Each
+  exact result is rounded to float64 once, and everything after that is
+  ordinary float64 analysed as such. It never computes, strengthens or
+  validates an error bound. The current uses are in `solvers/rank.py`,
+  `distributions.py`, `distributional/solver/derivatives.py` and
+  `_group_matrix/_group_matrix_kernels.py`.
+- Higher-precision validation (extended dtypes, exact rationals, mpmath)
+  belongs in independent test oracles: `tests/_exact_reference.py`, the
+  `tests/_*oracle*.py` modules and references a test computes for itself.
+
+Loosening a numerical check needs an analysis of why the old bound was wrong.
+
+Error analysis is written in the unit roundoff.
+`eps = np.finfo(np.float64).eps = 2**-52` is the spacing of float64 values at
+1.0, and the unit roundoff `u = eps / 2 = 2**-53` bounds the relative error of
+one rounding. Derivations are written in `u` and `gamma_n = n*u / (1 - n*u)`
+(Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed., 2002,
+sections 2.2 and 3.1); a formula quoted from a source written in `eps` says so.
+The standard model `fl(x op y) = (x op y)(1 + d)`, `|d| <= u`, holds only when
+no underflow or overflow occurs. Under gradual underflow a product or quotient
+also carries an absolute error, `fl(x op y) = (x op y)(1 + d) + e` with
+`|e| <= 2**-1075` (half the subnormal spacing) and `d*e = 0`, while a sum or
+difference that underflows is exact (Demmel, *Underflow and the Reliability of
+Numerical Software*, SIAM J. Sci. Stat. Comput. 5(4), 1984; Ogita, Rump and
+Oishi, section 2). Overflow has no finite error bound. Code that can reach
+either range scales its operands by powers of two, which is exact, to keep
+intermediates normal, or carries the absolute term in its bound, and it checks
+that the result is finite. A bound computed in float64 is itself rounded, so
+it is accumulated outward to remain a true upper bound: with `np.nextafter`
+toward `+inf` after every rounded operation, which is valid while each
+operation is nondecreasing in its operands (sums and products of nonnegative
+terms), or with a `gamma_k` inflation whose `k` counts every rounding,
+including those that form and apply the factor. One `nextafter` covers one
+rounding, not a chain of them. A tolerance is `u` times a magnitude and, where
+relevant, a conditioning or growth factor, never a bare absolute `eps`.
+
+A numerical portability fix needs native Windows, macOS and Linux ARM64
+regression coverage; a simulation of the platform on another one does not
+establish native compatibility. Compare complete-fit cost before accepting the
+change.
 
 Tests assert what the mathematics certifies. Boundary tests check invariants
 such as rank, subspace, residual, reconstruction, prediction or backward
 error, never the sign or magnitude of BLAS/LAPACK round-off, which varies by
-driver and machine. Tolerances derive from dimensions, dtype epsilon, norms
-and conditioning or error bounds, not from what passed locally.
+driver and machine. Tolerances derive from dimensions, the unit roundoff `u`,
+norms and conditioning or error bounds, not from what passed locally.
 Coefficient-forward accuracy is tested on well-conditioned fixtures; near-rank
 and cancellation fixtures test certification, refusal and the stable
 observables instead. Performance and backend dispatch are tested separately

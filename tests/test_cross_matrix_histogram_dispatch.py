@@ -121,24 +121,23 @@ def test_short_discrete_cross_expands_only_bounded_support_panels(monkeypatch):
     right, _ = _group("ssp", n=n, bins=257, width=5, seed=41)
     budget = 9 * (7 + 5) * np.dtype(float).itemsize
     monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
-    panels = []
-    original = algebra._expand_support_rows
+    aggregates = []
+    original = algebra._support_weighted_bincount_2d
 
-    def recorded(support, indices):
-        panels.append((len(indices), support.shape[1]))
-        return original(support, indices)
+    def recorded(out, bin_idx, weights, support, support_idx, col_start):
+        aggregates.append((out.shape, len(bin_idx), support.shape[1]))
+        return original(out, bin_idx, weights, support, support_idx, col_start)
 
-    monkeypatch.setattr(algebra, "_expand_support_rows", recorded)
+    monkeypatch.setattr(algebra, "_support_weighted_bincount_2d", recorded)
     _plan(left, right, n).cross_moment(np.linspace(-2.0, 1.0, n))
-    assert panels
-    assert len(panels) % 2 == 0
-    assert sum(rows for rows, _ in panels[::2]) == n
-    assert sum(rows for rows, _ in panels[1::2]) == n
-    for (left_rows, left_width), (right_rows, right_width) in zip(
-        panels[::2], panels[1::2], strict=True
-    ):
-        assert left_rows == right_rows
-        assert left_rows * (left_width + right_width) * np.dtype(float).itemsize <= budget
+    assert aggregates
+    # One side's rows, every one in each column pass, are added onto the other
+    # side's support compacted to the rows it holds: never more than n rows,
+    # and as many columns per pass as the budget allows, at least one.
+    assert sum(shape[1] for shape, _, _ in aggregates) == aggregates[0][2]
+    for (rows, columns), added, _ in aggregates:
+        assert added == n and rows <= n
+        assert columns == 1 or rows * columns * np.dtype(float).itemsize <= budget
 
 
 def test_histogram_cell_ceiling_still_overrides_favorable_compression(monkeypatch):

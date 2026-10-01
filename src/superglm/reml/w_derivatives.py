@@ -95,6 +95,18 @@ def _leverage_gradient_rhs(
     return result
 
 
+def _centered_signed_moments(moments, row_weights: NDArray, mean_x: NDArray) -> NDArray:
+    """``X_c' diag(row_weights) X_c`` from raw signed moments about ``mean_x``."""
+    if moments.xtw is None:
+        raise RuntimeError("centered signed moments omitted X'W1")
+    sum_weights = float(np.sum(row_weights, dtype=np.float64))
+    result = moments.gram
+    result = result - np.outer(moments.xtw, mean_x)
+    result = result - np.outer(mean_x, moments.xtw)
+    result = result + sum_weights * np.outer(mean_x, mean_x)
+    return 0.5 * (result + result.T)
+
+
 def _missing_w_derivative_methods(link: Any, distribution: Any) -> list[str]:
     """Second-order methods the W(rho) correction needs and this pair lacks."""
     missing: list[str] = []
@@ -532,6 +544,23 @@ def reml_w_correction(
         grad_correction[:] = rhs @ -factor.solve(penalty_rhs)
         return grad_correction, None
 
+    batch_moments = (
+        type(dm) is DesignMatrix
+        and type(factor) is DenseHessianFactor
+        and w_correction_order == 1
+        and m > 1
+        and not use_stable_signed_gram
+    )
+    # Factors cannot change between these first-order directions. Public moment
+    # calls and later correction calls still start with fresh numerical state.
+    fixed_support = dm.execution_plan._fixed_support_cache() if batch_moments else None
+    # Directions batch only where none keeps its own support projections:
+    # beside that shared owner, which projects each support once for all, or
+    # when no group projects one. Otherwise every direction would build its
+    # own and keep it until the batch returns, which the budget below omits.
+    batch_moments = batch_moments and (
+        fixed_support is not None or dm.execution_plan._projects_no_support()
+    )
     batch_size = 0
     if (
         use_stable_signed_gram
@@ -544,6 +573,14 @@ def reml_w_correction(
         batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
         if batch_size < 2:
             batch_size = 0
+    elif batch_moments:
+        # One row pass per block serves every direction: retained weights and
+        # their stacked copy, the raw moments, and the centred outputs. Support
+        # projections, if any, are the shared owner's, held once for all.
+        bytes_per_direction = np.dtype(np.float64).itemsize * (2 * dm.n + 3 * p * p)
+        batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
+        if batch_size < 2:
+            batch_size = 0
     stable_gram_rhs = (
         np.zeros(dm.n, dtype=np.float64)
         if use_stable_signed_gram and not batch_size and structured_group_index is None
@@ -552,22 +589,17 @@ def reml_w_correction(
     pending: list[tuple[int, NDArray, float]] = []
     fs_pending: list[tuple[int, NDArray]] = []
     fs_layout = structured_layout if isinstance(structured_layout, FactorSmoothLeafLayout) else None
-    # Factors cannot change between these first-order directions. Public moment
-    # calls and later correction calls still start with fresh numerical state.
-    fixed_support = (
-        dm.execution_plan._fixed_support_cache()
-        if type(dm) is DesignMatrix
-        and type(factor) is DenseHessianFactor
-        and w_correction_order == 1
-        and m > 1
-        and not use_stable_signed_gram
-        else None
-    )
 
     def flush_signed_grams() -> None:
-        grams = centered_signed_grams(
-            dm=dm, weights=[weights for _, weights, _ in pending], mean_x=mean_x
-        )
+        weights = [row_weights for _, row_weights, _ in pending]
+        if use_stable_signed_gram:
+            grams = centered_signed_grams(dm=dm, weights=weights, mean_x=mean_x)
+        else:
+            moments = dm.execution_plan._signed_moments_channels(weights, fixed_support)
+            grams = [
+                _centered_signed_moments(channel, row_weights, mean_x)
+                for channel, row_weights in zip(moments, weights, strict=True)
+            ]
         for (i, _, dsum_w_j), C_j in zip(pending, grams, strict=True):
             grad_correction[i] = 0.5 * float(np.sum(factor.inverse * C_j))
             if sum_w is not None:
@@ -627,14 +659,7 @@ def reml_w_correction(
             if fixed_support is None
             else dm.execution_plan._signed_moments_fixed_support(row_weights, fixed_support)
         )
-        if moments.xtw is None:
-            raise RuntimeError("centered signed moments omitted X'W1")
-        sum_weights = float(np.sum(row_weights, dtype=np.float64))
-        result = moments.gram
-        result = result - np.outer(moments.xtw, mean_x)
-        result = result - np.outer(mean_x, moments.xtw)
-        result = result + sum_weights * np.outer(mean_x, mean_x)
-        return 0.5 * (result + result.T)
+        return _centered_signed_moments(moments, row_weights, mean_x)
 
     # Pre-compute d2W/deta2 for second-order path
     d2W_deta2: NDArray | None = None

@@ -71,7 +71,9 @@ import superglm
 import superglm._group_matrix._group_matrix_kernels as group_kernels
 import superglm._tweedie_series as tweedie_series
 import superglm.distributional.kernels._tweedie_numba as tweedie_numba
+import superglm.reml._compensated as compensated
 from numba.core.registry import CPUDispatcher
+from superglm.reml import multi_penalty
 
 dispatchers = {}
 for module in (tweedie_numba, group_kernels):
@@ -88,6 +90,8 @@ for module in (tweedie_numba, group_kernels):
 dispatchers["superglm._tweedie_series._series_moments_kernel"] = (
     tweedie_series._series_moments_kernel
 )
+for name in ("_dot2_quadratic_form", "_dot2_selected", "_dot2_value"):
+    dispatchers[f"{compensated.__name__}.{name}"] = getattr(compensated, name)
 assert dispatchers
 assert inspect.signature(superglm.warmup).parameters == {}
 assert all(not dispatcher.nopython_signatures for dispatcher in dispatchers.values())
@@ -106,6 +110,17 @@ def readonly(*arrays):
 superglm.warmup()
 compiled = signatures()
 assert all(compiled.values()), [name for name, signatures in compiled.items() if not signatures]
+
+# The SuperLSS penalty value passes one operand form, whatever its coefficients' flags.
+from superglm.distributional.solver.solver import _half_penalty_quadratic, _penalty_entries
+
+# np.nonzero's index layout differs with the nonzero count: none, one and several.
+for diagonal, expected in (([0.0, 0.0, 0.0], 0.0), ([0.0, 2.0, 0.0], 4.0), ([0.0, 2.0, 3.0], 17.5)):
+    penalty = np.diag(diagonal)
+    entries = _penalty_entries(penalty)
+    for coefficients in (np.array([1.0, 2.0, 3.0]), readonly(np.array([1.0, 2.0, 3.0]))[0]):
+        assert _half_penalty_quadratic(penalty, coefficients, entries) == expected
+assert signatures() == compiled, "the penalty value compiled a new layout after public warmup"
 
 for values in (
     np.ones((3, 4)),
@@ -168,6 +183,16 @@ group_kernels._pattern_support_summaries(
     pair_offsets,
     right_sizes,
 )
+assert signatures() == compiled
+
+# Dot2 refinement passes one operand form, whatever its callers' layouts and flags.
+rng = np.random.default_rng(0)
+left, right = rng.normal(size=(3, 300)), rng.normal(size=(300, 2))
+for first in (left, readonly(left.copy())[0], np.asfortranarray(left)):
+    for second in (right, readonly(right.copy())[0]):
+        multi_penalty._refine_product(first, second, *multi_penalty._matmul_enclosed(first, second))
+        multi_penalty._compensated_dot(first[0], second[:, 0])
+        multi_penalty._compensated_dot(first[0], np.ascontiguousarray(second[:, 1]))
 assert signatures() == compiled
 
 superglm.warmup()
