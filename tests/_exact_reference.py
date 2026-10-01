@@ -1,8 +1,10 @@
 """Platform-independent exact references for numerical test oracles.
 
-``np.longdouble`` is float64 on Windows and macOS ARM, so it cannot serve as a
-higher-precision reference there. These helpers use only float64 error-free
-transformations, whose exactness is a property of IEEE binary64 itself:
+``np.longdouble`` is float64 on Windows and macOS ARM64, the x87 80-bit format
+on Linux x86-64 and IEEE binary128 on Linux ARM64, so it is no
+platform-independent higher-precision reference. These helpers use only float64
+error-free transformations, whose exactness is a property of IEEE binary64
+itself:
 
 * TwoSum (Knuth) and TwoProduct (Dekker's product with Veltkamp's split), as
   Algorithms 3.1-3.3 of Ogita, Rump and Oishi, "Accurate Sum and Dot Product",
