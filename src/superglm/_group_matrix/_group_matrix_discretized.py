@@ -97,12 +97,15 @@ class DiscretizedSSPGroupMatrix:
         *,
         _support: NDArray | None = None,
         _support_factors_in_range: bool = False,
+        _bin_sums: NDArray | None = None,
     ) -> tuple[NDArray, NDArray, NDArray]:
         """Compute gram(W), rmatvec(W), rmatvec(Wz) with shared bincount.
 
         Returns (gram, XtW, XtWz) — single O(n) pass for both aggregations.
         Factor certification is private to the execution layer's same-call
         native-float64 check; weights and RHS always retain their own checks.
+        A batched caller whose ``Wz`` is ``W`` passes W's bin sums, formed in
+        a pass shared with its other weight vectors, as ``_bin_sums``.
         """
         factors = () if _support_factors_in_range else (self.B_unique, self.R_inv)
         if _ssp_gram_needs_exact(*factors, W, Wz):
@@ -110,7 +113,10 @@ class DiscretizedSSPGroupMatrix:
                 self.B_unique, self.R_inv, W, Wz, bin_indices=self.bin_idx
             )
             return gram, cast(NDArray, xtw), cast(NDArray, xtwz)
-        W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
+        if _bin_sums is None:
+            W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
+        else:
+            W_agg = Wz_agg = _bin_sums
         if self.B_unique.dtype != np.float64 or self.R_inv.dtype != np.float64:
             raw = self.B_unique.T @ (self.B_unique * W_agg[:, None])
             return (

@@ -114,14 +114,11 @@ def _enclosed_root_gram(root: NDArray, error: NDArray) -> tuple[NDArray, NDArray
 
 
 def _context_product(left: NDArray, right: NDArray, *, refine: bool) -> tuple[NDArray, NDArray]:
-    from superglm.reml.multi_penalty import _compensated_dot, _matmul_enclosed
+    from superglm.reml.multi_penalty import _matmul_enclosed, _refine_product
 
     value, error = _matmul_enclosed(left, right)
     if refine:
-        for row, column in np.ndindex(value.shape):
-            corrected, bound = _compensated_dot(left[row], right[:, column])
-            if bound < error[row, column]:
-                value[row, column], error[row, column] = corrected, bound
+        _refine_product(left, right, value, error)
     return value, error
 
 
@@ -235,11 +232,11 @@ def _support_coordinate_volume(
     derivatives; it does not introduce independent component-root errors.
     """
     from superglm.reml.multi_penalty import (
-        _compensated_dot,
         _finite_double,
         _gamma,
         _matmul_enclosed,
         _positive_product,
+        _refine_product,
         _triangular_solve,
         _upper,
     )
@@ -252,10 +249,7 @@ def _support_coordinate_volume(
     basis = support.Q_plus
     mapped, mapped_error = _matmul_enclosed(coordinate_map.T, basis)
     if _refine:
-        for row, column in np.ndindex(mapped.shape):
-            value, error = _compensated_dot(coordinate_map[:, row], basis[:, column])
-            if error < mapped_error[row, column]:
-                mapped[row, column], mapped_error[row, column] = value, error
+        _refine_product(coordinate_map.T, basis, mapped, mapped_error)
     _, upper = scipy.linalg.qr(mapped, mode="economic", check_finite=False)
     if upper.shape != (rank, rank) or np.any(np.diag(upper) == 0):
         raise PenaltyNumericalError("SSP coordinate map does not preserve penalty support")

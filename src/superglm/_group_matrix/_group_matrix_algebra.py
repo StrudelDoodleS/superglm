@@ -15,6 +15,11 @@ from ._group_matrix_kernels import (
     _cell_hist_raw_kron,
     _csr_row_chunk,
     _csr_weighted_bincount,
+    _csr_weighted_bincount_channels,
+    _csr_weighted_cross,
+    _csr_weighted_cross_channels,
+    _csr_weighted_gram,
+    _csr_weighted_gram_channels,
     _disc_disc_2d_hist,
     _disc_disc_2d_hist_channels,
     _fused_2d_bincount_2,
@@ -22,6 +27,7 @@ from ._group_matrix_kernels import (
     _operand_exponent_bounds,
     _tensor_operand_in_reassociation_range,
     _weighted_bincount_2d,
+    _weighted_hist_channels,
 )
 
 if TYPE_CHECKING:
@@ -54,6 +60,11 @@ _MAX_CROSS_EXPANSION_BYTES = 64 << 20
 # them bounds a row count from one block against a width from the other.  That
 # product is what the aggregate allocates, so it needs its own ceiling.
 _MAX_AGGREGATE_CELLS = _MAX_CROSS_EXPANSION_BYTES // 8
+
+# Ceiling on one multi-channel row-pass result: cells times channels. Wider
+# results take the channels in groups, a group of one being the single-weight
+# kernel itself, so large histograms keep their established cost.
+_CHANNEL_PASS_BYTES = 1 << 20
 
 
 def _aggregate_column_chunk(n_bins: int, n_cols: int) -> int:
@@ -132,11 +143,63 @@ def _cross_support(
     return (gm.B_unique @ gm.R_inv if project is None else project(gm)), None
 
 
+class _ChannelBatch:
+    """Weight vectors assembled together, so one row pass serves every channel.
+
+    Owned by one batched moments call. A multi-channel result is keyed by its
+    kernel and the identity of its fixed operands, retains those operands, and
+    lives until :meth:`release`, which the caller runs after every block: no
+    weighted summary outlives the block that formed it.
+    """
+
+    __slots__ = ("weights", "_block", "_results")
+
+    def __init__(self, weights) -> None:
+        self.weights = tuple(weights)
+        self._block: NDArray | None = None
+        self._results: dict[tuple, tuple[tuple, int, int, NDArray]] = {}
+
+    def channel(self, key, operands, cells: int, channel: int, single, multi) -> NDArray:
+        """One channel's C-order slice of a pass over a group of channels.
+
+        ``multi(block, start, width)`` returns, along a trailing axis, the
+        single-weight results for channels ``start:start + width`` of the
+        C-order ``(n, m)`` block. Channels request a key in ascending order,
+        so a group starts at the first channel to ask and holds as many as
+        ``_CHANNEL_PASS_BYTES`` allows; a group of one calls ``single()``.
+        """
+        entry = self._results.get(key)
+        if entry is None or not entry[1] <= channel < entry[2]:
+            width = self.width(cells, channel)
+            if width < 2:
+                return single()
+            if self._block is None:
+                self._block = np.stack(self.weights, axis=1)
+            entry = (operands, channel, channel + width, multi(self._block, channel, width))
+            self._results[key] = entry
+        return np.ascontiguousarray(entry[3][..., channel - entry[1]])
+
+    def width(self, cells: int, channel: int) -> int:
+        """How many channels a pass over ``cells`` formed at ``channel`` holds: 1 is single."""
+        width = min(len(self.weights) - channel, _CHANNEL_PASS_BYTES // max(8 * cells, 1))
+        return width if width >= 2 else 1
+
+    def release(self, caches) -> None:
+        """Drop this block's summaries, and the weighted state its caches kept."""
+        self._results.clear()
+        for cache in caches:
+            cache._hist2d.clear()
+            cache.release_channel_buffers()
+
+
 class _BlockWeightCache:
     """Per-block-assembly cache for weighted discrete summaries."""
 
     __slots__ = (
+        "_batch",
+        "_channel",
         "_hist2d",
+        "_hist_orientation",
         "_profile",
         "_channel_scratch",
         "_cell_weights",
@@ -148,7 +211,10 @@ class _BlockWeightCache:
     )
 
     def __init__(self, profile: dict[str, Any] | None = None) -> None:
+        self._batch: _ChannelBatch | None = None
+        self._channel = 0
         self._hist2d: dict[tuple[int, int, int, int, int], NDArray] = {}
+        self._hist_orientation: dict[tuple[int, int, int, int, int], bool] = {}
         self._profile = profile
         self._channel_scratch = np.empty(0)
         self._cell_weights: dict[tuple[int, int], NDArray] = {}
@@ -158,16 +224,41 @@ class _BlockWeightCache:
         self._support_ranges: dict[int, tuple[NDArray, tuple[int, int]]] = {}
         self._cell_orders: dict[DiscretizedTensorGroupMatrix, tuple[NDArray, NDArray]] = {}
 
-    def for_new_weights(self) -> _BlockWeightCache:
+    def for_new_weights(
+        self, batch: _ChannelBatch | None = None, channel: int = 0
+    ) -> _BlockWeightCache:
         """Share only fixed factors within one synchronous derivative call.
 
         The caller owns unchanged built-in groups for the whole call. Weighted
         products, range checks and scratch are fresh for every direction.
+        A batched call also names the direction's channel in ``batch``.
         """
         child = _BlockWeightCache(self._profile)
         child._supports = self._supports
         child._support_ranges = self._support_ranges
+        child._batch = batch
+        child._channel = channel
         return child
+
+    def channel_pass(self, W: NDArray, key, operands, cells: int, single, multi) -> NDArray:
+        """``single()``, or W's slice of one row pass over the batch's channels.
+
+        ``multi`` must give, along a trailing channel axis, exactly what
+        ``single`` gives for each channel: the multi-channel kernels add each
+        channel's rows in the single-weight order. Weights that are not this
+        cache's channel, such as row subsets, take ``single`` unchanged.
+        """
+        batch = self._batch
+        if batch is None or W is not batch.weights[self._channel]:
+            return single()
+        return batch.channel(key, operands, cells, self._channel, single, multi)
+
+    def channel_width(self, W: NDArray, cells: int) -> int:
+        """How many channels a :meth:`channel_pass` for W would form: 1 when unbatched."""
+        batch = self._batch
+        if batch is None or W is not batch.weights[self._channel]:
+            return 1
+        return batch.width(cells, self._channel)
 
     def weight_range(self, W: NDArray) -> tuple[bool, tuple[int, int]]:
         """Reuse the legacy guard and cross-bound contributions for row weights.
@@ -223,9 +314,43 @@ class _BlockWeightCache:
         """
         result = self._sparse_grams.get(gm)
         if result is None:
-            result = gm._gram_with_projection(weights)
+            result = (
+                gm._gram_with_projection(weights)
+                if self._batch is None
+                else gm._gram_with_projection(weights, _csr_gram=self._csr_gram)
+            )
             self._sparse_grams[gm] = result
         return result
+
+    def _csr_gram(self, data, indices, indptr, W, p, absolute_weights=False) -> NDArray:
+        """``_csr_weighted_gram``, one pass shared by batched channels."""
+        absolute = bool(absolute_weights)
+        return self.channel_pass(
+            W,
+            ("csr_gram", id(data), id(indices), id(indptr), int(p), absolute),
+            (data, indices, indptr),
+            int(p) * int(p),
+            lambda: _csr_weighted_gram(data, indices, indptr, W, p, absolute_weights),
+            lambda block, start, width: _csr_weighted_gram_channels(
+                data, indices, indptr, block, start, width, p, absolute
+            ),
+        )
+
+    def batch_bin_sums(self, idx: NDArray, W: NDArray, n_bins: int) -> NDArray | None:
+        """``np.bincount(idx, W, minlength=n_bins)`` for a batched channel, else None."""
+        batch = self._batch
+        if batch is None or W is not batch.weights[self._channel]:
+            return None
+        return batch.channel(
+            ("bins", id(idx), int(n_bins)),
+            (idx,),
+            int(n_bins),
+            self._channel,
+            lambda: np.bincount(idx, weights=W, minlength=n_bins),
+            lambda block, start, width: _weighted_hist_channels(
+                idx, None, block, start, width, n_bins, 1
+            )[:, 0],
+        )
 
     def solver_support(self, gm: DiscretizedSSPGroupMatrix) -> NDArray:
         """Project each live support once within this synchronous assembly.
@@ -302,12 +427,33 @@ class _BlockWeightCache:
             _profile_count(self._profile, "block_hist2d_reuses")
             return hist
 
+        if self._batch is not None:
+            return self._batched_hist(key, rev_key, idx_a, idx_b, W, n_a, n_b)
+
         t0 = perf_counter() if self._profile is not None else 0.0
         hist = _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
         _profile_elapsed(self._profile, "block_hist2d_s", t0)
         _profile_count(self._profile, "block_hist2d_builds")
         self._hist2d[key] = hist
         return hist
+
+    def _batched_hist(self, key, rev_key, idx_a, idx_b, W, n_a, n_b) -> NDArray:
+        """Form a batched channel's grid, again wherever one assembly would reuse it.
+
+        Batched channels retain no grids: one copy per channel would multiply
+        the assembly's footprint by the channels. ``_hist_orientation`` records
+        whether each key's retained grid would have been a transpose, so a
+        repeated request returns the values and array layout reuse would.
+        """
+        formed = self._hist_orientation
+        transposed = formed.get(key, rev_key in formed and not formed[rev_key])
+        formed[key] = transposed
+        if transposed:
+            idx_a, idx_b, n_a, n_b = idx_b, idx_a, n_b, n_a
+        hist = _weighted_hist(
+            self, idx_a, idx_b, W, n_a, n_b, lambda: _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
+        )
+        return hist.T if transposed else hist
 
     def tensor_w_grid(self, gm: DiscretizedTensorGroupMatrix, W: NDArray) -> NDArray:
         return self.disc_disc_hist(gm.idx1, gm.idx2, W, gm.n_bins1, gm.n_bins2)
@@ -326,6 +472,8 @@ class _BlockWeightCache:
             _profile_count(self._profile, "block_hist2d_builds")
             self._hist2d[w_key] = w_grid
             self._hist2d[wz_key] = wz_grid
+            if self._batch is not None:
+                self._hist_orientation[w_key] = self._hist_orientation[wz_key] = False
             return w_grid, wz_grid
 
         if w_grid is None:
@@ -333,6 +481,28 @@ class _BlockWeightCache:
         if wz_grid is None:
             wz_grid = self.disc_disc_hist(gm.idx1, gm.idx2, Wz, gm.n_bins1, gm.n_bins2)
         return w_grid, wz_grid
+
+
+def _channel_pass(cache, W: NDArray, key, operands, cells: int, single, multi) -> NDArray:
+    """:meth:`_BlockWeightCache.channel_pass`, or ``single()`` without a cache."""
+    if cache is None:
+        return single()
+    return cache.channel_pass(W, key, operands, cells, single, multi)
+
+
+def _weighted_hist(cache, idx_a, idx_b, W, n_a: int, n_b: int, single) -> NDArray:
+    """``single()``, a weighted index-pair histogram, shared by batched channels."""
+    return _channel_pass(
+        cache,
+        W,
+        ("hist", id(idx_a), id(idx_b), int(n_a), int(n_b)),
+        (idx_a, idx_b),
+        int(n_a) * int(n_b),
+        single,
+        lambda block, start, width: _weighted_hist_channels(
+            idx_a, idx_b, block, start, width, n_a, n_b
+        ),
+    )
 
 
 def _runtime_group_matrix_types():
@@ -422,7 +592,15 @@ def _agg_by_bin(
     from ..group_matrix import FactorSmoothGroupMatrix
 
     if isinstance(gm, CategoricalGroupMatrix):
-        return _cat_weighted_bincount(gm.codes, bin_idx, W, n_bins, gm.n_levels)
+        return _weighted_hist(
+            cache,
+            bin_idx,
+            gm.codes,
+            W,
+            n_bins,
+            gm.n_levels,
+            lambda: _cat_weighted_bincount(gm.codes, bin_idx, W, n_bins, gm.n_levels),
+        )
     if isinstance(gm, SparseGroupMatrix):
         return _csr_weighted_bincount(
             np.asarray(gm.M.data, dtype=np.float64),
@@ -438,8 +616,17 @@ def _agg_by_bin(
             local_cache = _BlockWeightCache() if cache is None else cache
             if local_cache.sparse_gram(gm, W)[1]:
                 return _aggregate_group_matrix_columns(gm, bin_idx, W, n_bins)
-        B_agg = _csr_weighted_bincount(
-            gm._data, gm._indices, gm._indptr, gm._p_b, bin_idx, W, n_bins
+        data, indices, indptr = gm._data, gm._indices, gm._indptr
+        B_agg = _channel_pass(
+            cache,
+            W,
+            ("csr_bins", id(data), id(indices), id(indptr), id(bin_idx), int(n_bins)),
+            (data, indices, indptr, bin_idx),
+            int(n_bins) * gm._p_b,
+            lambda: _csr_weighted_bincount(data, indices, indptr, gm._p_b, bin_idx, W, n_bins),
+            lambda block, start, width: _csr_weighted_bincount_channels(
+                data, indices, indptr, gm._p_b, bin_idx, block, start, width, n_bins
+            ),
         )
         return B_agg @ gm.R_inv
     if isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
@@ -1190,8 +1377,7 @@ def _chunked_support_bincount_2d(
     """``_weighted_bincount_2d`` over support-indexed rows, expanded in chunks.
 
     The aggregation is a sum over rows, so partitioning the rows partitions the
-    sum.  Chunking matters here for the same reason it does in
-    :func:`_support_support_raw_cross`: a lossless support bounds the number of
+    sum.  Chunking matters because a lossless support bounds the number of
     DISTINCT rows, not the number of observation rows the level owns, so
     materialising the level in one go is unbounded in ``n``.
 
@@ -1212,8 +1398,8 @@ def _chunked_support_bincount_2d(
         stop = min(start + chunk, n_rows)
         block = _expand_support_rows(B_unique, support_idx[start:stop])
         out += _weighted_bincount_2d(bin_idx[start:stop], weights[start:stop], block, int(n_bins))
-        # See _support_support_raw_cross: the next expansion is evaluated before
-        # the name is rebound, so without this the ceiling is 2x the budget.
+        # The next expansion is evaluated before the name is rebound, so
+        # without this the ceiling is 2x the budget.
         del block
     return out
 
@@ -1315,40 +1501,46 @@ def _support_support_raw_cross(
 
     The 2-D weight histogram both callers prefer costs ``n_bins_i * n_bins_j``
     cells, which is bounded only when the supports are bins.  A lossless
-    support is bounded by the row count instead, so on wide supports this
-    contracts over the shared rows and lets BLAS do the work.
+    support is bounded by the row count instead, so this aggregates one
+    block's weighted rows onto the other block's support index and contracts
+    the two compact arrays: Li and Wood's (2020) right or left accumulation
+    (Algorithms 2 and 3), on the side their operation count favours.  Work is
+    ``n * p_a + n_b * p_i * p_j`` rather than ``n * p_i * p_j`` for expanding
+    both sides; the shapes alone choose the side.
 
-    Chunked over rows, because the row count is exactly what a lossless support
-    does NOT bound: expanding both sides in one go costs
-    ``n_rows * (p_i + p_j) * 8`` bytes, which for a dominant level on a large
-    book runs to hundreds of MB per call, inside solver iterations.  The cap
-    that routes here bounds cells; without this it would only move the memory
-    rather than bound it.  Accumulating in chunks keeps the transient at
-    ``max_bytes`` regardless of row count, and the contraction is a sum over
-    rows so partitioning it changes nothing but summation order.
+    Neither transient grows with the row count: the gather is chunked by
+    ``max_bytes`` in :func:`_chunked_support_bincount_2d`, and the aggregate
+    (rows from one block, columns from the other) is built at most
+    ``_MAX_AGGREGATE_CELLS`` at a time.  The peak is therefore about three
+    times the 64 MiB budget, whatever ``n``: the aggregate (up to
+    ``_MAX_AGGREGATE_CELLS`` float64 cells), each chunk's
+    ``_weighted_bincount_2d`` result of the same size before it is added in,
+    and the gathered rows (up to ``max_bytes``).  Aggregating reorders the
+    sum over rows, so each entry is within ``gamma(n + n_b + chunks)`` of the
+    exact product relative to ``sum_r |B_i| |W| |B_j|`` (Higham 2002, eq. 3.5).
     """
-    budget = _MAX_CROSS_EXPANSION_BYTES if max_bytes is None else max_bytes
-    p_i = int(B_unique_i.shape[1])
-    p_j = int(B_unique_j.shape[1])
-    out = np.zeros((p_i, p_j), dtype=np.float64)
     n_rows = int(W_rows.shape[0])
+    n_i, p_i = B_unique_i.shape
+    n_j, p_j = B_unique_j.shape
+    aggregate_i = n_rows * p_i + n_j * p_i * p_j <= n_rows * p_j + n_i * p_i * p_j
+    B_a, idx_a, B_b, idx_b = (
+        (B_unique_i, bin_idx_i, B_unique_j, bin_idx_j)
+        if aggregate_i
+        else (B_unique_j, bin_idx_j, B_unique_i, bin_idx_i)
+    )
+    n_b, p_a = int(B_b.shape[0]), int(B_a.shape[1])
+    raw = np.zeros((p_a, int(B_b.shape[1])), dtype=np.float64)
     if n_rows == 0:
-        return out
-    chunk = min(n_rows, _cross_expansion_chunk_rows(p_i, p_j, budget))
-    for start in range(0, n_rows, chunk):
-        stop = min(start + chunk, n_rows)
-        left = _expand_support_rows(B_unique_i, bin_idx_i[start:stop])
-        right = _expand_support_rows(B_unique_j, bin_idx_j[start:stop])
-        # Fancy indexing already returned a fresh array, so scaling it in place
-        # keeps the live count at two blocks rather than three.
-        right *= W_rows[start:stop, None]
-        out += left.T @ right
-        # Released explicitly: the next iteration's expansion is evaluated
-        # BEFORE its name is rebound, so without this the previous pair is
-        # still referenced at the allocation instant and the real ceiling is
-        # 1.5x the budget rather than 1x.
-        del left, right
-    return out
+        return raw if aggregate_i else raw.T
+    step = _aggregate_column_chunk(n_b, p_a)
+    for start in range(0, p_a, step):
+        columns = slice(start, min(p_a, start + step))
+        aggregate = _chunked_support_bincount_2d(
+            idx_b, W_rows, B_a[:, columns], idx_a, n_b, max_bytes
+        )
+        raw[columns] = aggregate.T @ B_b
+        del aggregate
+    return raw if aggregate_i else raw.T
 
 
 def _cross_gram_categorical_spline_categorical(
@@ -1668,9 +1860,10 @@ def _cross_gram_sparse_ssp(
         return None
     k_i, k_j = B_i.shape[1], B_j.shape[1]
     p_i, p_j = gm_i.shape[1], gm_j.shape[1]
-    # Conservatively allow two weighted payloads and an index copy, four
-    # row-pointer/work arrays, three raw value/index buffers including dense
-    # conversion, and both mapped outputs. No n-by-solver-width array exists.
+    # For the fully stored routes' SciPy/NumPy products, conservatively allow
+    # two weighted payloads and an index copy, four row-pointer/work arrays,
+    # three raw value/index buffers including dense conversion, and both
+    # mapped outputs. No n-by-solver-width array exists.
     transient_bytes = (
         24 * max(B_i.data.size, B_j.data.size)
         + 32 * (n + 1)
@@ -1711,21 +1904,52 @@ def _cross_gram_sparse_ssp(
             result += first.T @ second
             del first, second
         return result
-    if transient_bytes > _MAX_CROSS_EXPANSION_BYTES:
-        return None
     dense_i, dense_j = _full_csr_values(left), _full_csr_values(right)
+    fully_stored = dense_i is not None or dense_j is not None
+    if fully_stored and transient_bytes > _MAX_CROSS_EXPANSION_BYTES:
+        return None
     if dense_j is not None and (dense_i is None or left.nnz <= right.nnz):
         weighted = _weighted_row_chunk(left, W, 0, n)
         raw = np.asarray(weighted.T @ dense_j)
     elif dense_i is not None:
         weighted = _weighted_row_chunk(right, W, 0, n)
         raw = np.asarray(weighted.T @ dense_i).T
-    elif left.nnz <= right.nnz:
-        weighted = _weighted_row_chunk(left, W, 0, n)
-        raw = (weighted.T @ right).toarray()
     else:
-        weighted = _weighted_row_chunk(right, W, 0, n)
-        raw = (weighted.T @ left).toarray().T
+        # One serial pass replaces the weighted copy, transposes and SpGEMM
+        # passes, with their per-entry row order. Nothing it allocates grows
+        # with n: the budget is its p-by-q result, times the channels of a
+        # batched pass, and a pass that does not fit leaves this channel on
+        # the single-weight kernel.
+        weight_left = left.nnz <= right.nnz
+        first, second = (left, right) if weight_left else (right, left)
+        a, b = (
+            (first.data, first.indices, first.indptr),
+            (second.data, second.indices, second.indptr),
+        )
+        p, q = first.shape[1], second.shape[1]
+        if 8 * p * q > _MAX_CROSS_EXPANSION_BYTES:
+            return None
+
+        def single() -> NDArray:
+            return _csr_weighted_cross(a[0], a[1], a[2], b[0], b[1], b[2], W, p, q)
+
+        if 8 * p * q * cache.channel_width(W, p * q) > _MAX_CROSS_EXPANSION_BYTES:
+            raw = single()
+        else:
+            # Every call's CSR views are new objects: key on the live bases.
+            bases = (B_i, B_j) if weight_left else (B_j, B_i)
+            raw = cache.channel_pass(
+                W,
+                ("csr_cross", id(bases[0]), id(bases[1])),
+                bases,
+                p * q,
+                single,
+                lambda block, start, width: _csr_weighted_cross_channels(
+                    a[0], a[1], a[2], b[0], b[1], b[2], block, start, width, p, q
+                ),
+            )
+        if not weight_left:
+            raw = raw.T
     return R_i.T @ raw @ R_j
 
 
@@ -2076,7 +2300,17 @@ def _cross_gram(
     # Cat × cat: weighted crosstab — O(n) with no dense allocation.
     if isinstance(gm_i, CategoricalGroupMatrix) and isinstance(gm_j, CategoricalGroupMatrix):
         t0 = perf_counter() if profile is not None else 0.0
-        result = _cat_cat_weighted_crosstab(gm_i.codes, gm_j.codes, W, gm_i.n_levels, gm_j.n_levels)
+        result = _weighted_hist(
+            cache,
+            gm_i.codes,
+            gm_j.codes,
+            W,
+            gm_i.n_levels,
+            gm_j.n_levels,
+            lambda: _cat_cat_weighted_crosstab(
+                gm_i.codes, gm_j.codes, W, gm_i.n_levels, gm_j.n_levels
+            ),
+        )
         _profile_elapsed(profile, "block_cross_cat_cat_s", t0)
         return result
 

@@ -10,6 +10,7 @@ from scipy import sparse
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix import _group_matrix_centered
+from superglm._group_matrix import _group_matrix_kernels as kernels
 from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
@@ -401,7 +402,7 @@ def test_derivative_reuse_keeps_custom_and_dtype_fallback(monkeypatch, storage, 
 def test_derivative_weighted_cache_sharing_mutation_is_detected(monkeypatch):
     kwargs = _correction_fixture(p=3, shift=0, storage="mixed")
     # Reusing the weighted sparse Gram is wrong even though the design is fixed.
-    monkeypatch.setattr(algebra._BlockWeightCache, "for_new_weights", lambda self: self)
+    monkeypatch.setattr(algebra._BlockWeightCache, "for_new_weights", lambda self, *_: self)
     correction = w_derivatives.reml_w_correction(**kwargs)
     with pytest.raises(AssertionError):
         _assert_poisson_correction(kwargs, correction)
@@ -436,3 +437,274 @@ def test_fixed_support_moments_keep_weight_validation(weights):
     owner = plan._fixed_support_cache()
     with pytest.raises(ValueError):
         plan._signed_moments_fixed_support(weights, owner)
+
+
+def _order_sensitive(rng, n, m):
+    """Signed weights over twelve decades: another summation order changes the bits."""
+    return rng.normal(size=(n, m)) * 10.0 ** rng.integers(-6, 7, size=(n, m))
+
+
+def _channel_kernel_cases(rows):
+    """Each single-weight row pass beside its channel kernel, over ``rows`` of one fixture."""
+    rng = np.random.default_rng(8801)
+    n = 400
+    bins_a, bins_b = rng.integers(0, 6, n)[rows], rng.integers(0, 4, n)[rows]
+    codes = rng.integers(0, 4, n)[rows]  # three levels and their sink code
+    other = rng.integers(0, 3, n)[rows]
+    bases = []
+    for width in (5, 4):
+        values = rng.normal(size=(n, width))
+        values[rng.random(size=values.shape) < 0.5] = 0.0
+        bases.append(sparse.csr_matrix(values[rows]))
+    csr = (bases[0].data, bases[0].indices, bases[0].indptr)
+    pair = (*csr, bases[1].data, bases[1].indices, bases[1].indptr)
+    return {
+        "hist": (
+            lambda w: kernels._disc_disc_2d_hist(bins_a, bins_b, w, 6, 4),
+            lambda W, s, k: kernels._weighted_hist_channels(bins_a, bins_b, W, s, k, 6, 4),
+        ),
+        "categorical": (
+            lambda w: kernels._cat_weighted_bincount(codes, bins_a, w, 6, 3),
+            lambda W, s, k: kernels._weighted_hist_channels(bins_a, codes, W, s, k, 6, 3),
+        ),
+        "crosstab": (
+            lambda w: kernels._cat_cat_weighted_crosstab(codes, other, w, 3, 2),
+            lambda W, s, k: kernels._weighted_hist_channels(codes, other, W, s, k, 3, 2),
+        ),
+        "bincount": (
+            lambda w: np.bincount(codes, weights=w, minlength=4),
+            lambda W, s, k: kernels._weighted_hist_channels(codes, None, W, s, k, 4, 1)[:, 0],
+        ),
+        "csr_gram": (
+            lambda w: kernels._csr_weighted_gram(*csr, w, 5),
+            lambda W, s, k: kernels._csr_weighted_gram_channels(*csr, W, s, k, 5, False),
+        ),
+        "csr_energy": (
+            lambda w: kernels._csr_weighted_gram(*csr, w, 5, True),
+            lambda W, s, k: kernels._csr_weighted_gram_channels(*csr, W, s, k, 5, True),
+        ),
+        "csr_cross": (
+            lambda w: kernels._csr_weighted_cross(*pair, w, 5, 4),
+            lambda W, s, k: kernels._csr_weighted_cross_channels(*pair, W, s, k, 5, 4),
+        ),
+        "csr_bincount": (
+            lambda w: kernels._csr_weighted_bincount(*csr, 5, bins_a, w, 6),
+            lambda W, s, k: kernels._csr_weighted_bincount_channels(*csr, 5, bins_a, W, s, k, 6),
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "hist",
+        "categorical",
+        "crosstab",
+        "bincount",
+        "csr_gram",
+        "csr_energy",
+        "csr_cross",
+        "csr_bincount",
+    ],
+)
+def test_channel_kernels_repeat_each_single_weight_sum_bitwise(case):
+    block = _order_sensitive(np.random.default_rng(8803), 400, 5)
+    single, multi = _channel_kernel_cases(slice(None))[case]
+    result = multi(block, 1, 3)
+    assert result.shape[-1] == 3
+    for channel in range(3):
+        expected = single(np.ascontiguousarray(block[:, 1 + channel]))
+        np.testing.assert_array_equal(result[..., channel], expected)
+    # Control: the same terms added in reverse row order give other bits, so
+    # equality above certifies each channel's row order, not just its value.
+    weights = np.ascontiguousarray(block[:, 1])
+    reverse = _channel_kernel_cases(slice(None, None, -1))[case][0]
+    assert not np.array_equal(reverse(weights[::-1].copy()), single(weights))
+
+
+def _channel_design(n=500):
+    """Every batched block: support grids, categoricals, sparse SSP and a dense fallback."""
+    rng = np.random.default_rng(8810)
+
+    def support(bins, width):
+        B, R = rng.normal(size=(bins, width)), rng.normal(size=(width, width - 1))
+        return SupportCompressedSSPGroupMatrix(B, R, rng.integers(0, bins, n))
+
+    def spline(width):
+        values = rng.normal(size=(n, width))
+        values[rng.random(size=values.shape) < 0.5] = 0.0
+        return SparseSSPGroupMatrix(sparse.csr_matrix(values), rng.normal(size=(width, width - 1)))
+
+    groups = [
+        support(9, 4),
+        CategoricalGroupMatrix(rng.integers(-1, 3, n), n_levels=3),
+        support(11, 3),
+        spline(5),
+        CategoricalGroupMatrix(rng.integers(-1, 4, n), n_levels=4),
+        spline(4),
+        DenseGroupMatrix(rng.normal(size=(n, 2))),
+    ]
+    return DesignMatrix(groups, n=n, p=sum(g.shape[1] for g in groups))
+
+
+_CHANNEL_KERNELS = (
+    "_weighted_hist_channels",
+    "_csr_weighted_gram_channels",
+    "_csr_weighted_cross_channels",
+    "_csr_weighted_bincount_channels",
+)
+
+
+def _record_channel_passes(monkeypatch):
+    """Record each channel kernel call as (kernel, first channel, channel count)."""
+    passes = []
+    for name in _CHANNEL_KERNELS:
+        kernel = getattr(algebra, name)
+
+        def recorded(*args, _name=name, _kernel=kernel):
+            block = next(i for i, a in enumerate(args) if getattr(a, "ndim", 0) == 2)
+            passes.append((_name, args[block + 1], args[block + 2]))
+            return _kernel(*args)
+
+        monkeypatch.setattr(algebra, name, recorded)
+    return passes
+
+
+@pytest.mark.parametrize("fixed_support", [True, False])
+def test_batched_moments_equal_each_direction_bitwise(monkeypatch, fixed_support):
+    dm = _channel_design()
+    plan = dm.execution_plan
+    directions = list(_order_sensitive(np.random.default_rng(8811), dm.n, 4).T.copy())
+    owner = plan._fixed_support_cache() if fixed_support else None
+    assert (owner is not None) is fixed_support
+
+    def serial():
+        return [
+            plan._signed_moments_fixed_support(w, plan._fixed_support_cache())
+            if fixed_support
+            else plan.moments(w, include_xtw=True, signed=True)
+            for w in directions
+        ]
+
+    expected = serial()
+    passes = _record_channel_passes(monkeypatch)
+    actual = plan._signed_moments_channels(directions, owner)
+    for got, want in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(got.gram, want.gram)
+        np.testing.assert_array_equal(got.xtw, want.xtw)
+        assert got.xt_rhs == ()
+    # Every batched kernel ran, each pass serving all four directions at once.
+    assert {name for name, _, _ in passes} == set(_CHANNEL_KERNELS)
+    assert {(start, width) for _, start, width in passes} == {(0, 4)}
+
+
+def test_channel_groups_follow_the_pass_budget(monkeypatch):
+    dm = _channel_design()
+    plan = dm.execution_plan
+    directions = list(_order_sensitive(np.random.default_rng(8812), dm.n, 5).T.copy())
+    expected = [plan.moments(w, include_xtw=True, signed=True) for w in directions]
+    grids = []
+    kernel = algebra._weighted_hist_channels
+
+    def recorded(idx_a, idx_b, W, start, width, n_a, n_b):
+        if (n_a, n_b) == (9, 11):
+            grids.append((start, width))
+        return kernel(idx_a, idx_b, W, start, width, n_a, n_b)
+
+    monkeypatch.setattr(algebra, "_weighted_hist_channels", recorded)
+    # The 9-by-11 support grid fits two channels; its fifth takes the single kernel.
+    monkeypatch.setattr(algebra, "_CHANNEL_PASS_BYTES", 2 * 8 * 99)
+    actual = plan._signed_moments_channels(directions, None)
+    assert grids == [(0, 2), (2, 2)]
+    for got, want in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(got.gram, want.gram)
+    # Below one channel every block keeps its single-weight kernel.
+    monkeypatch.setattr(algebra, "_CHANNEL_PASS_BYTES", 0)
+    passes = _record_channel_passes(monkeypatch)
+    actual = plan._signed_moments_channels(directions, None)
+    assert passes == []
+    for got, want in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(got.gram, want.gram)
+
+
+def test_batched_grids_reform_the_layout_that_reuse_returns():
+    rng = np.random.default_rng(8813)
+    idx_a, idx_b = rng.integers(0, 5, 64), rng.integers(0, 7, 64)
+    W, other = _order_sensitive(rng, 64, 2).T.copy()
+    plain = algebra._BlockWeightCache()
+    batch = algebra._ChannelBatch([W, other])
+    cache = algebra._BlockWeightCache().for_new_weights(batch, 0)
+    for first, second in (((idx_a, idx_b, 5, 7), (idx_b, idx_a, 7, 5)),) * 2:
+        want = [plain.disc_disc_hist(*first[:2], W, *first[2:])]
+        want.append(plain.disc_disc_hist(*second[:2], W, *second[2:]))
+        got = [cache.disc_disc_hist(*first[:2], W, *first[2:])]
+        batch.release([cache])  # A batched channel keeps no grid between blocks.
+        got.append(cache.disc_disc_hist(*second[:2], W, *second[2:]))
+        batch.release([cache])
+        for g, w in zip(got, want, strict=True):
+            np.testing.assert_array_equal(g, w)
+            assert (g.flags.c_contiguous, g.flags.f_contiguous) == (
+                w.flags.c_contiguous,
+                w.flags.f_contiguous,
+            )
+    assert not want[1].flags.c_contiguous  # Reuse returned the retained grid's transpose.
+    assert not cache._hist2d
+    # Weights outside the batch, such as a derived vector, keep their own pass.
+    third = _order_sensitive(rng, 64, 1)[:, 0]
+    np.testing.assert_array_equal(
+        cache.disc_disc_hist(idx_a, idx_b, third, 5, 7),
+        kernels._disc_disc_2d_hist(idx_a, idx_b, third, 5, 7),
+    )
+
+
+def test_batched_bin_sums_keep_same_size_indices_apart_within_a_block(monkeypatch):
+    rng = np.random.default_rng(8814)
+    first, second = rng.integers(0, 6, 64), rng.integers(0, 6, 64)
+    W, other = _order_sensitive(rng, 64, 2).T.copy()
+    passes, kernel = [], algebra._weighted_hist_channels
+    monkeypatch.setattr(
+        algebra, "_weighted_hist_channels", lambda *a: passes.append(a[0]) or kernel(*a)
+    )
+    batch = algebra._ChannelBatch([W, other])
+    caches = [algebra._BlockWeightCache().for_new_weights(batch, c) for c in range(2)]
+    # Both indices have six bins; each channel's second request must not
+    # return the first index's pass.
+    for cache, weights in zip(caches, (W, other), strict=True):
+        for idx in (first, second):
+            np.testing.assert_array_equal(
+                cache.batch_bin_sums(idx, weights, 6), np.bincount(idx, weights, minlength=6)
+            )
+    batch.release(caches)
+    # One two-channel pass per index.
+    assert len(passes) == 2 and passes[0] is first and passes[1] is second
+
+
+@pytest.mark.parametrize("per_call", [None, 2])
+def test_moment_route_requests_the_directions_together(monkeypatch, per_call):
+    kwargs = _correction_fixture(p=3, shift=0, storage="mixed")
+    dm = kwargs["dm"]
+    monkeypatch.setattr(w_derivatives, "_SIGNED_GRAM_BATCH_BYTES", 1)
+    expected = w_derivatives.reml_w_correction(**kwargs)
+    monkeypatch.undo()
+    if per_call is not None:
+        bytes_per_direction = np.dtype(np.float64).itemsize * (2 * dm.n + 3 * dm.p * dm.p)
+        monkeypatch.setattr(
+            w_derivatives, "_SIGNED_GRAM_BATCH_BYTES", per_call * bytes_per_direction
+        )
+    plan_type = type(dm.execution_plan)
+    original = plan_type._signed_moments_channels
+    requests = []
+
+    def recorded(plan, weights, owner):
+        requests.append(len(weights))
+        return original(plan, weights, owner)
+
+    monkeypatch.setattr(plan_type, "_signed_moments_channels", recorded)
+    actual = w_derivatives.reml_w_correction(**kwargs)
+    assert actual is not None and expected is not None
+    assert requests == ([3] if per_call is None else [2, 1])
+    np.testing.assert_array_equal(actual[0], expected[0])
+    grams, reference = actual[1], expected[1]
+    assert grams is not None and reference is not None
+    for i in range(3):
+        np.testing.assert_array_equal(grams[i], reference[i])

@@ -258,6 +258,79 @@ def _csr_weighted_gram(data, indices, indptr, W, p, absolute_weights=False):
     return result
 
 
+@njit(cache=True)
+def _csr_weighted_gram_channels(data, indices, indptr, W, start, width, p, absolute_weights):
+    """``_csr_weighted_gram`` of ``W[:, start + c]`` in ``result[:, :, c]``.
+
+    One row pass serves ``width`` channels. Each channel's entries receive
+    the same products in the same row and pair order as the single kernel.
+    """
+    result = np.zeros((p, p, width))
+    w = np.empty(width)
+    va = np.empty(width)
+    for i in range(W.shape[0]):
+        for c in range(width):
+            w[c] = abs(W[i, start + c]) if absolute_weights else W[i, start + c]
+        end = indptr[i + 1]
+        for a in range(indptr[i], end):
+            data_a = data[a]
+            for c in range(width):
+                va[c] = data_a * w[c]
+            for b in range(a, end):
+                data_b = data[b]
+                upper = result[indices[a], indices[b]]
+                if a == b:
+                    for c in range(width):
+                        upper[c] += va[c] * data_b
+                else:
+                    lower = result[indices[b], indices[a]]
+                    for c in range(width):
+                        prod = va[c] * data_b
+                        upper[c] += prod
+                        lower[c] += prod
+    return result
+
+
+@njit(cache=True)
+def _csr_weighted_cross(data, indices, indptr, other_data, other_indices, other_indptr, W, p, q):
+    """B.T @ diag(W) @ C for two CSR blocks over shared rows, weighting B.
+
+    Each entry adds fl(fl(W[i] * B[i, a]) * C[i, b]) over rows in ascending
+    order, as SciPy's Gustavson product of the weighted transpose does.
+    """
+    result = np.zeros((p, q))
+    for i in range(len(W)):
+        w = W[i]
+        for a in range(indptr[i], indptr[i + 1]):
+            ja = indices[a]
+            va = w * data[a]
+            for b in range(other_indptr[i], other_indptr[i + 1]):
+                result[ja, other_indices[b]] += va * other_data[b]
+    return result
+
+
+@njit(cache=True)
+def _csr_weighted_cross_channels(
+    data, indices, indptr, other_data, other_indices, other_indptr, W, start, width, p, q
+):
+    """``_csr_weighted_cross`` of ``W[:, start + c]`` in ``result[:, :, c]``."""
+    result = np.zeros((p, q, width))
+    va = np.empty(width)
+    for i in range(W.shape[0]):
+        w = W[i, start : start + width]
+        for a in range(indptr[i], indptr[i + 1]):
+            data_a = data[a]
+            for c in range(width):
+                va[c] = w[c] * data_a
+            row = result[indices[a]]
+            for b in range(other_indptr[i], other_indptr[i + 1]):
+                cell = row[other_indices[b]]
+                data_b = other_data[b]
+                for c in range(width):
+                    cell[c] += va[c] * data_b
+    return result
+
+
 def _csr_row_chunk(csr, start: int, stop: int, *, data=None):
     """CSR rows with shared entries and owned, rebased row pointers.
 
@@ -303,12 +376,55 @@ def _csr_weighted_bincount(data, indices, indptr, n_cols, bin_idx, W, n_bins):
 
 
 @njit(cache=True)
+def _csr_weighted_bincount_channels(
+    data, indices, indptr, n_cols, bin_idx, W, start, width, n_bins
+):
+    """``_csr_weighted_bincount`` of ``W[:, start + c]`` in ``result[:, :, c]``."""
+    result = np.zeros((n_bins, n_cols, width))
+    for row in range(W.shape[0]):
+        w = W[row, start : start + width]
+        cells = result[bin_idx[row]]
+        for ptr in range(indptr[row], indptr[row + 1]):
+            cell = cells[indices[ptr]]
+            value = data[ptr]
+            for c in range(width):
+                cell[c] += w[c] * value
+    return result
+
+
+@njit(cache=True)
 def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
     """Fused 2D histogram for disc-disc cross-gram."""
     n = len(W)
     result = np.zeros((n_bins_i, n_bins_j))
     for obs in range(n):
         result[bin_idx_i[obs], bin_idx_j[obs]] += W[obs]
+    return result
+
+
+@njit(cache=True)
+def _weighted_hist_channels(idx_a, idx_b, W, start, width, n_a, n_b):
+    """Weighted 2-D histograms of ``W[:, start + c]`` in ``result[:, :, c]``.
+
+    One row pass serves ``width`` channels: each sums its weights over the
+    rows with an index pair in ascending row order, the additions of
+    ``_disc_disc_2d_hist``, ``_cat_weighted_bincount``,
+    ``_cat_cat_weighted_crosstab`` and ``np.bincount``. Rows whose index
+    reaches ``n_a`` or ``n_b`` are skipped, as those kernels skip categorical
+    sink codes. ``idx_b=None`` compiles the one-index bincount (``n_b == 1``).
+    """
+    result = np.zeros((n_a, n_b, width))
+    for row in range(W.shape[0]):
+        a = idx_a[row]
+        if idx_b is None:
+            b = 0
+        else:
+            b = idx_b[row]
+        if a < n_a and b < n_b:
+            cell = result[a, b]
+            w = W[row, start : start + width]
+            for c in range(width):
+                cell[c] += w[c]
     return result
 
 
@@ -772,6 +888,20 @@ def _warmup_group_matrix_kernels() -> None:
 
     _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2)
     _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2, absolute_weights=True)
+    _csr_weighted_cross(
+        values, csr_indices, csr_indptr, values, csr_indices, csr_indptr, values, 2, 2
+    )
+    # Batched W-derivative moments pass an (n, m) C-order block of directions.
+    for absolute in (False, True):
+        _csr_weighted_gram_channels(values, csr_indices, csr_indptr, matrix, 0, 2, 2, absolute)
+    _csr_weighted_cross_channels(
+        values, csr_indices, csr_indptr, values, csr_indices, csr_indptr, matrix, 0, 2, 2, 2
+    )
+    _csr_weighted_bincount_channels(values, csr_indices, csr_indptr, 2, codes, matrix, 0, 2, 2)
+    for first in (codes, frozen_codes):
+        _weighted_hist_channels(first, None, matrix, 0, 2, 2, 1)
+        for second in (codes, frozen_codes):
+            _weighted_hist_channels(first, second, matrix, 0, 2, 2, 2)
     _weighted_bincount_2d(codes, values, matrix, 2)
     _csr_weighted_bincount(values, csr_indices, csr_indptr, 2, codes, values, 2)
     _disc_disc_2d_hist(codes, codes, values, 2, 2)

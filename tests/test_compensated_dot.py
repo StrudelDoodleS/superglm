@@ -390,3 +390,94 @@ def test_refinement_retains_scalar_range_fallback(monkeypatch, without_fma, root
         assert abs(Fraction.from_float(action[row, column]) - exact) <= Fraction.from_float(
             error[row, column]
         )
+
+
+def _entrywise_refinement(left, right, value, error):
+    """The entry-by-entry Dot2 loop that ``_refine_product`` batches."""
+    from superglm.reml import multi_penalty as module
+
+    for row, column in np.ndindex(value.shape):
+        corrected, bound = module._compensated_dot(left[row], right[:, column])
+        if bound < error[row, column]:
+            value[row, column], error[row, column] = corrected, bound
+
+
+@pytest.mark.parametrize("inner", [3, 300], ids=["scalar-batch", "native-batch"])
+def test_batched_product_refinement_reproduces_the_entrywise_loop(monkeypatch, inner):
+    from superglm.reml import multi_penalty as module
+
+    rng = np.random.default_rng(9120 + inner)
+    left = np.ldexp(rng.normal(size=(6, inner)), rng.integers(-40, 41, size=(6, inner)))
+    right = np.ldexp(rng.normal(size=(inner, 5)), rng.integers(-40, 41, size=(inner, 5)))
+    left[0, 0] = 3 * np.nextafter(0.0, 1.0)  # outside the native range: scalar fallback
+    # A zero row's native enclosure, 2k + 1 subnormals, is tighter than Dot2's
+    # 5k: its entries must keep the native value and bound.
+    left[1] = 0.0
+    native = module._matmul_enclosed(left, right)
+    batched = tuple(array.copy() for array in native)
+    entrywise = tuple(array.copy() for array in native)
+    original, calls = module._compensated_dot, []
+    monkeypatch.setattr(module, "_compensated_dot", lambda *a: calls.append(1) or original(*a))
+    module._refine_product(left, right, *batched)
+    assert len(calls) == (5 if inner == 300 else 0)  # only row 0 leaves the native batch
+    _entrywise_refinement(left, right, *entrywise)
+    # Same Dot2 recurrence in the same order, same adoption: identical values.
+    np.testing.assert_array_equal(batched[0], entrywise[0])
+    assert np.any(batched[0] != native[0])
+    np.testing.assert_array_equal(batched[1][1], native[1][1])
+    # Enclosures differ only through |left| @ |right|, enclosed once (batched)
+    # or per entry. Each evaluation of the Proposition 5.5 formula rounds at
+    # most seven times, so the difference is bounded by the magnitude change.
+    shared = module._positive_product(np.abs(left), np.abs(right))
+    single = np.array(
+        [
+            [
+                module._positive_product(np.abs(x)[None, :], np.abs(y)[:, None])[0, 0]
+                for y in right.T
+            ]
+            for x in left
+        ]
+    )
+    squared = np.float64(module._gamma(inner)) ** 2
+    largest = np.maximum(batched[1], entrywise[1])
+    allowed = 2 * squared * np.abs(shared - single) + 3 * module._gamma(7) * largest
+    assert np.all(np.abs(batched[1] - entrywise[1]) <= allowed)
+    for row, column in np.ndindex(batched[0].shape):
+        exact = _exact_dot(left[row], right[:, column])
+        assert abs(Fraction.from_float(batched[0][row, column]) - exact) <= Fraction.from_float(
+            batched[1][row, column]
+        )
+
+
+def test_refined_support_volume_is_one_batch_with_the_entrywise_value(monkeypatch):
+    from types import SimpleNamespace
+
+    from superglm.reml import multi_penalty as module
+    from superglm.reml import penalty_algebra as algebra
+
+    width = 20
+    second = np.diff(np.eye(width), 2, axis=0)
+    first = np.diff(np.eye(width)[:10], 1, axis=0)
+    raw = [second.T @ second, first.T @ first]  # rank 19: constants are unpenalized
+    rng = np.random.default_rng(3319)
+    coordinate_map = np.linalg.qr(rng.normal(size=(width, width)))[0] * rng.uniform(1, 2, width)
+    group = SimpleNamespace(name="shared", sl=slice(0, width), size=width)
+    matrix = SimpleNamespace(
+        R_inv=coordinate_map,
+        omega=sum(raw),
+        omega_components=[("a", raw[0]), ("b", raw[1])],
+    )
+    components, _, _ = algebra.build_penalty_context([matrix], [(0, group)])
+    geometry = algebra._context_geometry(components)
+    assert geometry is not None and geometry.coordinate_map is not None
+    support, mapping = geometry.get_support(), geometry.coordinate_map
+    original, calls = module._compensated_dot, []
+    monkeypatch.setattr(module, "_compensated_dot", lambda *a: calls.append(1) or original(*a))
+    unrefined = algebra._support_coordinate_volume(support, mapping)
+    batched = algebra._support_coordinate_volume(support, mapping, _refine=True)
+    assert calls == []  # every normal-range entry refined in one native batch
+    monkeypatch.setattr(module, "_refine_product", _entrywise_refinement)
+    entrywise = algebra._support_coordinate_volume(support, mapping, _refine=True)
+    assert len(calls) == width * support.rank
+    assert batched[0] == entrywise[0]
+    assert 0 <= batched[1] <= unrefined[1]

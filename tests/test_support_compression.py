@@ -1070,12 +1070,48 @@ def test_expanded_cross_gram_is_chunked_by_bytes(monkeypatch):
     np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
 
     assert expanded_rows, "expected the fallback to expand support rows"
-    allowed = algebra._cross_expansion_chunk_rows(p_i, p_j, budget)
+    allowed = algebra._cross_expansion_chunk_rows(p_i, 0, budget)  # p_i == p_j
     assert max(expanded_rows) <= allowed, (
         f"expanded {max(expanded_rows)} rows at once against a {allowed}-row budget"
     )
-    assert max(expanded_rows) * (p_i + p_j) * 8 <= budget
-    assert sum(expanded_rows) == 2 * n_rows  # both sides, every row, exactly once
+    assert max(expanded_rows) * p_i * 8 <= budget
+    assert sum(expanded_rows) == n_rows  # one side, every row, exactly once
+
+
+def test_support_cross_aggregates_the_narrow_side_within_its_rounding_bound(monkeypatch):
+    """Li and Wood (2020): gather one block's rows onto the other's support.
+
+    Shaped like a many-valued main effect beside a wide tensor: only the narrow
+    side is gathered. Aggregating reorders the row sum, so the claim is the
+    forward bound gamma(n + n_b + chunks) * sum_r |B_i||W||B_j| (Higham 2002, eq. 3.5).
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from tests._exact_reference import exact_weighted_gram
+
+    gen = np.random.default_rng(45)
+    n_rows, n_i, n_j = 30_000, 2_400, 1_300
+    b_i = gen.normal(size=(n_i, 9))
+    b_j = gen.normal(size=(n_j, 40))
+    idx_i = gen.integers(0, n_i, n_rows).astype(np.intp)
+    idx_j = gen.integers(0, n_j, n_rows).astype(np.intp)
+    weights = gen.normal(0.0, 1.0, n_rows)  # signed, as REML passes
+    gathered = []
+    original = algebra._expand_support_rows
+
+    def spy(B_unique, bin_idx):
+        gathered.append((int(np.size(bin_idx)), int(B_unique.shape[1])))
+        return original(B_unique, bin_idx)
+
+    monkeypatch.setattr(algebra, "_expand_support_rows", spy)
+    actual = algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights)
+    assert gathered == [(n_rows, 9)]
+    x, y = b_i[idx_i], b_j[idx_j]
+    unit = np.finfo(float).eps / 2
+    count = n_rows + n_j + 1
+    gamma = count * unit / (1 - count * unit)
+    magnitude = exact_weighted_gram(np.abs(x), np.abs(y), np.abs(weights))
+    error = np.abs(actual - exact_weighted_gram(x, y, weights))
+    assert np.all(error <= (gamma + 2 * unit) * magnitude)
 
 
 def test_expanded_cross_gram_chunking_matches_the_unchunked_contraction():

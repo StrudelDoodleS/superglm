@@ -131,14 +131,11 @@ def test_short_discrete_cross_expands_only_bounded_support_panels(monkeypatch):
     monkeypatch.setattr(algebra, "_expand_support_rows", recorded)
     _plan(left, right, n).cross_moment(np.linspace(-2.0, 1.0, n))
     assert panels
-    assert len(panels) % 2 == 0
-    assert sum(rows for rows, _ in panels[::2]) == n
-    assert sum(rows for rows, _ in panels[1::2]) == n
-    for (left_rows, left_width), (right_rows, right_width) in zip(
-        panels[::2], panels[1::2], strict=True
-    ):
-        assert left_rows == right_rows
-        assert left_rows * (left_width + right_width) * np.dtype(float).itemsize <= budget
+    # One side is gathered, every row once, onto the other side's support.
+    assert sum(rows for rows, _ in panels) == n
+    assert len({width for _, width in panels}) == 1
+    for rows, width in panels:
+        assert rows * width * np.dtype(float).itemsize <= budget
 
 
 def test_histogram_cell_ceiling_still_overrides_favorable_compression(monkeypatch):

@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 
 from ._group_matrix_algebra import (
     _BlockWeightCache,
+    _ChannelBatch,
     _cross_gram,
     _gram_any_sign,
     _profile_count,
@@ -150,6 +151,9 @@ class MatrixExecutionPlan:
             for group in self.group_matrices
         )
         self._sparse_mask = tuple(type(group) is runtime_types[6] for group in self.group_matrices)
+        self._categorical_mask = tuple(
+            type(group) is runtime_types[0] for group in self.group_matrices
+        )
         self._layout_frozen = True
 
     def _ordinary_partition_decision(self) -> OrdinaryPartitionDecision:
@@ -324,6 +328,66 @@ class MatrixExecutionPlan:
             _cache=owner.for_new_weights(),
         )
 
+    def _signed_moments_channels(
+        self, weights, owner: _BlockWeightCache | None
+    ) -> list[WeightedMoments]:
+        """Signed moments with ``X'W`` for several weight vectors at once.
+
+        Entry ``c`` equals ``_signed_moments_fixed_support(weights[c], owner)``
+        bit for bit, or ``moments(weights[c], include_xtw=True, signed=True)``
+        without an owner. Every channel runs the same block dispatch with its
+        own fresh cache; the batch only lets the row passes those blocks reach
+        serve all channels at once, each channel adding its rows in the
+        single-weight order. Blocks are formed one after another for every
+        channel, and a block's shared summaries are released before the next.
+        """
+        if len(weights) < 2 or self._ordinary_indices:
+            return [
+                self.moments(W, include_xtw=True, signed=True)
+                if owner is None
+                else self._signed_moments_fixed_support(W, owner)
+                for W in weights
+            ]
+        channels = [self._validated_weights(W, (), signed=True)[0] for W in weights]
+        batch = _ChannelBatch(channels)
+        caches = [
+            (_BlockWeightCache() if owner is None else owner).for_new_weights(batch, channel)
+            for channel in range(len(channels))
+        ]
+        grams = [np.zeros((self.p, self.p), dtype=np.float64) for _W in channels]
+        xtws = [np.zeros(self.p, dtype=np.float64) for _W in channels]
+        for left_index, (left_span, left_group) in enumerate(self._group_entries):
+            for W, cache, gram, xtw in zip(channels, caches, grams, xtws, strict=True):
+                self._diagonal_block(left_index, W, (), gram, xtw, [], True, cache, None)
+            batch.release(caches)
+            for right_index in range(left_index + 1, self._n_groups):
+                right_span, right_group = self._group_entries[right_index]
+                for W, cache, gram in zip(channels, caches, grams, strict=True):
+                    cross = _cross_gram(left_group, right_group, W, cache, None)
+                    gram[left_span.columns, right_span.columns] = cross
+                    gram[right_span.columns, left_span.columns] = cross.T
+                batch.release(caches)
+        return [
+            WeightedMoments(gram=gram, xtw=xtw, xt_rhs=())
+            for gram, xtw in zip(grams, xtws, strict=True)
+        ]
+
+    def _validated_weights(
+        self, weights: NDArray, rhs: tuple[NDArray, ...], *, signed: bool
+    ) -> tuple[NDArray, tuple[NDArray, ...]]:
+        """Coerce public moment inputs and check their shapes and domains."""
+        W = np.asarray(weights, dtype=np.float64)
+        rhs_vectors = tuple(np.asarray(vector, dtype=np.float64) for vector in rhs)
+        if W.shape != (self.n,) or any(vector.shape != (self.n,) for vector in rhs_vectors):
+            raise ValueError("weights and right-hand-side vectors must match the plan row count")
+        if not np.all(np.isfinite(W)) or any(
+            not np.all(np.isfinite(vector)) for vector in rhs_vectors
+        ):
+            raise ValueError("weights and right-hand-side vectors must be finite")
+        if not signed and np.any(W < 0.0):
+            raise ValueError("negative weights require signed=True")
+        return W, rhs_vectors
+
     def _moments_prevalidated(
         self,
         weights: NDArray,
@@ -352,6 +416,88 @@ class MatrixExecutionPlan:
             _cache=_cache,
         )
 
+    def _diagonal_block(
+        self, left_index, W, rhs_vectors, gram, xtw, xt_rhs, signed, cache, profile
+    ) -> None:
+        """Write one group's diagonal Gram block and its transpose products."""
+        left_span, left_group = self._group_entries[left_index]
+        columns = left_span.columns
+        diagonal_start = perf_counter() if profile is not None else 0.0
+        fusion_vector = rhs_vectors[0] if rhs_vectors else (W if xtw is not None else None)
+        # Preserve the exact source-factor route before evaluating a
+        # support product that may itself overflow or cancel to NaN.
+        support = None
+        support_factors_in_range = (
+            self._support_mask[left_index]
+            and left_group.B_unique.dtype == left_group.R_inv.dtype == np.float64
+            and not _ssp_gram_needs_exact(left_group.B_unique, left_group.R_inv)
+        )
+        if support_factors_in_range:
+            support = cache.solver_support(left_group)
+        if fusion_vector is not None and self._fused_mask[left_index]:
+            if self._tensor_mask[left_index]:
+                w_grid, rhs_grid = cache.tensor_w_wz_grid(left_group, W, fusion_vector)
+                group_gram, group_xtw, group_rhs = left_group.gram_rmatvec_from_grids(
+                    w_grid, rhs_grid
+                )
+            elif self._support_mask[left_index]:
+                # A batched channel's bin sums come from a pass shared by all.
+                bin_sums = (
+                    cache.batch_bin_sums(left_group.bin_idx, W, left_group.n_bins)
+                    if fusion_vector is W
+                    else None
+                )
+                shared = {} if bin_sums is None else {"_bin_sums": bin_sums}
+                group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(
+                    W,
+                    fusion_vector,
+                    _support=support,
+                    _support_factors_in_range=support_factors_in_range,
+                    **shared,
+                )
+            else:
+                group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(W, fusion_vector)
+            gram[columns, columns] = group_gram
+            if xtw is not None:
+                xtw[columns] = group_xtw
+            if rhs_vectors:
+                xt_rhs[0][columns] = group_rhs
+            remaining_rhs = zip(xt_rhs[1:], rhs_vectors[1:], strict=True)
+        else:
+            # A batched channel sums a categorical's levels once for both
+            # products, each of which forms the same bincount on its own.
+            level_sums = (
+                cache.batch_bin_sums(left_group.codes, W, left_group.n_levels + 1)
+                if self._categorical_mask[left_index]
+                else None
+            )
+            if level_sums is not None:
+                level_sums = level_sums[: left_group.n_levels]
+                gram[columns, columns] = np.diag(level_sums)
+            elif self._support_mask[left_index]:
+                gram[columns, columns] = left_group.gram(
+                    W, _support=support, _support_factors_in_range=support_factors_in_range
+                )
+            elif self._sparse_mask[left_index]:
+                gram[columns, columns] = cache.sparse_gram(left_group, W)[0]
+            else:
+                gram[columns, columns] = (
+                    _gram_any_sign(left_group, W) if signed else left_group.gram(W)
+                )
+            if xtw is not None:
+                xtw[columns] = left_group.rmatvec(W) if level_sums is None else level_sums
+            remaining_rhs = zip(xt_rhs, rhs_vectors, strict=True)
+        for target, vector in remaining_rhs:
+            target[columns] = left_group.rmatvec(vector)
+        if profile is not None:
+            if self._tensor_mask[left_index]:
+                diagonal_profile_key = "block_diag_tensor_s"
+            elif self._fused_mask[left_index]:
+                diagonal_profile_key = "block_diag_discrete_ssp_s"
+            else:
+                diagonal_profile_key = "block_diag_other_s"
+            _profile_elapsed(profile, diagonal_profile_key, diagonal_start)
+
     def _moments_impl(
         self,
         weights: NDArray,
@@ -373,18 +519,7 @@ class MatrixExecutionPlan:
         A supplied cache must belong to this same synchronous weighted assembly.
         """
         if validate_inputs:
-            W = np.asarray(weights, dtype=np.float64)
-            rhs_vectors = tuple(np.asarray(vector, dtype=np.float64) for vector in rhs)
-            if W.shape != (self.n,) or any(vector.shape != (self.n,) for vector in rhs_vectors):
-                raise ValueError(
-                    "weights and right-hand-side vectors must match the plan row count"
-                )
-            if not np.all(np.isfinite(W)) or any(
-                not np.all(np.isfinite(vector)) for vector in rhs_vectors
-            ):
-                raise ValueError("weights and right-hand-side vectors must be finite")
-            if not signed and np.any(W < 0.0):
-                raise ValueError("negative weights require signed=True")
+            W, rhs_vectors = self._validated_weights(weights, rhs, signed=signed)
         else:
             W = weights
             rhs_vectors = rhs
@@ -457,65 +592,9 @@ class MatrixExecutionPlan:
         for left_index, (left_span, left_group) in enumerate(self._group_entries):
             left_is_ordinary = ordinary_split is not None and self._ordinary_mask[left_index]
             if not left_is_ordinary:
-                columns = left_span.columns
-                diagonal_start = perf_counter() if profile is not None else 0.0
-                fusion_vector = rhs_vectors[0] if rhs_vectors else (W if xtw is not None else None)
-                # Preserve the exact source-factor route before evaluating a
-                # support product that may itself overflow or cancel to NaN.
-                support = None
-                support_factors_in_range = (
-                    self._support_mask[left_index]
-                    and left_group.B_unique.dtype == left_group.R_inv.dtype == np.float64
-                    and not _ssp_gram_needs_exact(left_group.B_unique, left_group.R_inv)
+                self._diagonal_block(
+                    left_index, W, rhs_vectors, gram, xtw, xt_rhs, signed, cache, profile
                 )
-                if support_factors_in_range:
-                    support = cache.solver_support(left_group)
-                if fusion_vector is not None and self._fused_mask[left_index]:
-                    if self._tensor_mask[left_index]:
-                        w_grid, rhs_grid = cache.tensor_w_wz_grid(left_group, W, fusion_vector)
-                        group_gram, group_xtw, group_rhs = left_group.gram_rmatvec_from_grids(
-                            w_grid, rhs_grid
-                        )
-                    elif self._support_mask[left_index]:
-                        group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(
-                            W,
-                            fusion_vector,
-                            _support=support,
-                            _support_factors_in_range=support_factors_in_range,
-                        )
-                    else:
-                        group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(W, fusion_vector)
-                    gram[columns, columns] = group_gram
-                    if xtw is not None:
-                        xtw[columns] = group_xtw
-                    if rhs_vectors:
-                        xt_rhs[0][columns] = group_rhs
-                    remaining_rhs = zip(xt_rhs[1:], rhs_vectors[1:], strict=True)
-                else:
-                    if self._support_mask[left_index]:
-                        gram[columns, columns] = left_group.gram(
-                            W, _support=support, _support_factors_in_range=support_factors_in_range
-                        )
-                    elif self._sparse_mask[left_index]:
-                        gram[columns, columns] = cache.sparse_gram(left_group, W)[0]
-                    else:
-                        gram[columns, columns] = (
-                            _gram_any_sign(left_group, W) if signed else left_group.gram(W)
-                        )
-                    if xtw is not None:
-                        xtw[columns] = left_group.rmatvec(W)
-                    remaining_rhs = zip(xt_rhs, rhs_vectors, strict=True)
-                for target, vector in remaining_rhs:
-                    target[columns] = left_group.rmatvec(vector)
-                if profile is not None:
-                    if self._tensor_mask[left_index]:
-                        diagonal_profile_key = "block_diag_tensor_s"
-                    elif self._fused_mask[left_index]:
-                        diagonal_profile_key = "block_diag_discrete_ssp_s"
-                    else:
-                        diagonal_profile_key = "block_diag_other_s"
-                    _profile_elapsed(profile, diagonal_profile_key, diagonal_start)
-
             for right_index in range(left_index + 1, self._n_groups):
                 right_span, right_group = self._group_entries[right_index]
                 if left_is_ordinary and self._ordinary_mask[right_index]:

@@ -16,7 +16,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.reml._compensated import _dot2_selected, _dot2_value
+from superglm.reml._compensated import _dot2_selected, _dot2_value, _native_operand
 from superglm.reml.penalty_support import (
     PenaltyNumericalError,
     _finite_double,
@@ -482,21 +482,8 @@ def _reference_root_actions(
                 # rounded weighted H magnitude. Build it once per component.
                 # All reuse ends here: a changed root, weight or J recomputes.
                 dot_magnitude = _positive_product(np.abs(root), np.abs(J))
-                if len(selected) * root.shape[1] >= _DOT2_NATIVE_MIN_WORK:
-                    dots, success = _dot2_selected(np.asarray(root, dtype=np.float64), J, selected)
-                else:
-                    # Keep shared enclosures for tiny batches without paying
-                    # native-kernel startup or revalidating every scalar dot.
-                    dots = np.array([_python_dot2_value(root[r], J[:, c]) for r, c in selected])
-                    success = np.isfinite(dots)
+                dots, dot_error, success = _dot2_entries(root, J, selected, dot_magnitude)
                 row, column = selected.T
-                unit, inner = _UNIT_ROUNDOFF, root.shape[1]
-                dot_error = (
-                    unit * np.abs(dots)
-                    + np.float64(_gamma(inner)) ** 2 * dot_magnitude[row, column]
-                    + 5 * inner * _SMALLEST_SUBNORMAL
-                ) / (1 - unit)
-                dot_error = _upper(dot_error / (1 - _gamma(12, _UNIT_ROUNDOFF)))
                 scale = np.sqrt(weight)
                 scale_error = _gamma(1, _UNIT_ROUNDOFF) * abs(scale) + _SMALLEST_SUBNORMAL
                 scaled = scale * dots
@@ -585,7 +572,11 @@ def _compensated_dot(left: NDArray, right: NDArray) -> tuple[float, float]:
     x = _finite_double(left, "compensated operand")
     y = _finite_double(right, "compensated operand")
     magnitude = float(_positive_product(np.abs(x)[None, :], np.abs(y)[:, None])[0, 0])
-    value, compiled = _dot2_value(x, y) if len(x) >= _DOT2_NATIVE_MIN_WORK else (0.0, False)
+    value, compiled = (
+        _dot2_value(_native_operand(x), _native_operand(y))
+        if len(x) >= _DOT2_NATIVE_MIN_WORK
+        else (0.0, False)
+    )
     if not compiled:
         value = _python_dot2_value(x, y)
     if not math.isfinite(value):
@@ -598,6 +589,60 @@ def _compensated_dot(left: NDArray, right: NDArray) -> tuple[float, float]:
         + 5 * count * _SMALLEST_SUBNORMAL
     ) / (1 - unit)
     return value, float(_upper(error / (1 - _gamma(12, _UNIT_ROUNDOFF))))
+
+
+def _dot2_entries(
+    left: NDArray, right: NDArray, selected: NDArray, magnitude: NDArray
+) -> tuple[NDArray, NDArray, NDArray]:
+    """``_compensated_dot`` of the selected ``left @ right`` entries, batched.
+
+    Each value is the scalar recurrence's value. Each enclosure is its formula,
+    with ``magnitude`` enclosing ``|left| @ |right|`` for all entries at once.
+    Entries flagged False need the scalar ``_compensated_dot`` range fallback.
+    """
+    if len(selected) * left.shape[1] >= _DOT2_NATIVE_MIN_WORK:
+        dots, success = _dot2_selected(
+            _native_operand(left),
+            _native_operand(right),
+            np.ascontiguousarray(selected, dtype=np.int64),
+        )
+    else:
+        # Keep shared enclosures for tiny batches without paying
+        # native-kernel startup or revalidating every scalar dot.
+        dots = np.array([_python_dot2_value(left[r], right[:, c]) for r, c in selected])
+        success = np.isfinite(dots)
+    row, column = selected.T
+    unit, inner = _UNIT_ROUNDOFF, left.shape[1]
+    dot_error = (
+        unit * np.abs(dots)
+        + np.float64(_gamma(inner)) ** 2 * magnitude[row, column]
+        + 5 * inner * _SMALLEST_SUBNORMAL
+    ) / (1 - unit)
+    return dots, _upper(dot_error / (1 - _gamma(12, _UNIT_ROUNDOFF))), success
+
+
+def _refine_product(left: NDArray, right: NDArray, value: NDArray, error: NDArray) -> None:
+    """Adopt every ``left @ right`` Dot2 entry whose enclosure is sharper, in place.
+
+    Replaces an entry-by-entry ``_compensated_dot`` loop with the same values
+    and exceptions. Only the shared ``|left| @ |right|`` bound's rounding differs.
+    """
+    selected = np.argwhere(np.ones(value.shape, dtype=bool))
+    try:
+        magnitude = _positive_product(np.abs(left), np.abs(right))
+        dots, bounds, success = _dot2_entries(left, right, selected, magnitude)
+    except PenaltyNumericalError:
+        # The scalar loop below reproduces the entry that cannot be enclosed.
+        dots = bounds = np.zeros(len(selected))
+        success = np.zeros(len(selected), dtype=bool)
+    row, column = selected.T
+    use = success & (bounds < error[row, column])
+    value[row[use], column[use]] = dots[use]
+    error[row[use], column[use]] = bounds[use]
+    for r, c in selected[~success]:
+        corrected, bound = _compensated_dot(left[r], right[:, c])
+        if bound < error[r, c]:
+            value[r, c], error[r, c] = corrected, bound
 
 
 def _squared_norm_enclosed(value: NDArray, error: NDArray) -> tuple[float, float]:
