@@ -57,8 +57,11 @@ def test_matches_exhaustive_search_on_random_curves():
         tol[rng.random(n) < 0.15] = 0.0
         result = exact_bands(s, w, tol, max_bands=n)
         count, sse = _brute_force(s, w, tol)
-        # Each band cost is sum(w s^2) - W m^2; its rounding is a small multiple
-        # of eps * sum(w s^2), and n <= 10 values bound the multiple by 256.
+        # sse sums w (s - factor)**2 at the published factors, to relative
+        # gamma_(n + 5); the brute force sums w (s - mean)**2 at np.average's
+        # means, to gamma_(n + 4).  Both sums are at most about sum(w s^2), so for
+        # n <= 10 they differ by under 15 eps sum(w s^2), plus each side's
+        # W (factor - mean)**2, which is second order in eps.  256 eps covers both.
         scale = 256 * _EPS * (1.0 + float(np.sum(w * s * s)))
         assert len(result.starts) == count
         assert abs(result.sse - sse) <= scale
@@ -409,6 +412,81 @@ def test_bands_are_costed_at_the_factors_they_publish():
     assert result.starts.tolist() == [0, 1]
     assert result.factors.tolist() == [big + 2.0, big + 1.0]
     assert result.sse == 8.0
+
+
+def _published_oracle(s, w, tol):
+    """Least (band count, exact error at the published factors) over every banding.
+
+    For integer curves near 2**52, weights 2**0 to 2**7 and tolerances that are
+    odd multiples of 2**-11, every band sum is exact, so each factor here is
+    the one exact_bands computes.  An exact mean on a tolerance edge would need
+    a band weight divisible by 2**11 units of 2**-7, and seven values weigh at
+    most 896, so the acceptance test decides as exact arithmetic does.
+    """
+    n = len(s)
+    w = w / w.max()
+    low, high = _representable_bounds(s, tol)
+    cost = {}
+    for a, b in itertools.combinations(range(n + 1), 2):
+        band = slice(a, b)
+        masses = list(map(Fraction, w[band]))
+        mean = sum(m * Fraction(v) for m, v in zip(masses, s[band])) / sum(masses)
+        if b - a > 1 and (
+            any(abs(Fraction(v) - mean) > Fraction(t) for v, t in zip(s[band], tol[band]))
+            or low[band].max() > high[band].min()
+        ):
+            continue
+        moment = weight = 0.0
+        for value, mass in zip(s[band], w[band]):
+            moment += mass * (value - s[a])
+            weight += mass
+        factor = min(max(s[a] + moment / weight, low[band].max()), high[band].min())
+        cost[a, b] = sum(
+            Fraction(m) * (Fraction(v) - Fraction(factor)) ** 2 for v, m in zip(s[band], w[band])
+        )
+    best = None
+    for r in range(n):
+        for cuts in itertools.combinations(range(1, n), r):
+            bands = list(zip((0, *cuts), (*cuts, n)))
+            if all(band in cost for band in bands):
+                total = (len(bands), sum(cost[band] for band in bands))
+                best = total if best is None or total < best else best
+    return best
+
+
+def test_the_published_factors_error_is_least_over_every_banding():
+    """An exhaustive oracle where the factor's rounding moves it by up to half the spread.
+
+    The doubles near 2**52 are a unit apart, so the clip and the rounding move
+    factors by whole fractions of a band's spread, and the weight on that move
+    decides which banding is best.
+    """
+    rng = np.random.default_rng(47)
+    for _ in range(400):
+        n = int(rng.integers(2, 8))
+        s = 2.0**52 + np.cumsum(rng.integers(-1, 2, n)).astype(float)
+        w = 2.0 ** rng.integers(0, 8, n).astype(float)
+        tol = (2.0 * rng.integers(0, 2048, n) + 1.0) / 2048.0
+        result = exact_bands(s, w, tol, max_bands=n)
+        count, error = _published_oracle(s, w, tol)
+        scaled = _exact_sse(s, w / w.max(), result)
+        assert (len(result.starts), scaled) == (count, error)
+        assert Fraction(result.sse) == scaled * Fraction(w.max())
+
+
+def test_a_factors_rounding_counts_with_its_bands_weight():
+    # The doubles here are the integers.  {B+1, B+2}, weighing 16 and 2, has mean
+    # B + 1 1/9 and publishes B + 1; {B+2, B+3}, weighing 2 and 1, has mean
+    # B + 2 1/3 and publishes B + 2.  At their factors the bandings split after
+    # the first value and after the second err by 1 and 2.  Costing the move from
+    # mean to factor without its band's weight overstated the light band's move,
+    # and chose the second.
+    big = 2.0**52
+    s = big + np.array([1.0, 2.0, 3.0])
+    result = exact_bands(s, np.array([16.0, 2.0, 1.0]), np.array([127.0, 97.0, 79.0]) / 64.0, 3)
+    assert result.starts.tolist() == [0, 1]
+    assert result.factors.tolist() == [big + 1.0, big + 2.0]
+    assert result.sse == 1.0
 
 
 def test_the_reported_error_is_the_published_factors_error_within_its_bound():
@@ -874,6 +952,22 @@ def test_weights_near_the_largest_double_still_export_one_band(heavy_book, heavy
         model, df, y=y, sample_weight=weights, n_bins=1, bin_strategy="exact"
     )
     assert len(next(b for b in payload.main_effects if b.name == "x").table) == 1
+
+
+@pytest.mark.parametrize(("lightest", "heaviest"), [(1e-310, 1.0), (1e-30, 1e300)])
+def test_a_weight_span_past_a_double_is_refused_by_name_from_the_export(
+    heavy_book, lightest, heaviest
+):
+    # Dividing by the largest weight before exact_bands underflowed: under
+    # np.seterr(under="raise") a FloatingPointError, not exact_bands' refusal, and
+    # a ratio below 2**-1074 reached exact_bands as a zero weight.
+    model, df, y = heavy_book
+    x = df["x"].to_numpy()
+    weights = np.ones(len(df))
+    weights[x == 0.0] = lightest
+    weights[x == x.max()] = heaviest
+    with np.errstate(under="raise"), pytest.raises(ValueError, match="span more than a double"):
+        model.discretization_impact(df, y, sample_weight=weights, bin_strategy="exact")
 
 
 def test_exact_tables_export_the_certified_factors(banded_model, monkeypatch):

@@ -329,7 +329,13 @@ def _exact_edges(
     # Only the weights' ratios set the bands, and exact_bands divides by the
     # largest itself, so this changes no band; it keeps the banding's squared
     # error, which no export reads, from refusing weights near the largest double.
-    banding = exact_bands(curve, weight / weight.max(), tol, max_bands)
+    # A ratio below 2**-1022 underflows here, and exact_bands refuses it with its
+    # own message: the underflow must not raise first under a caller's np.seterr,
+    # and a ratio that reaches zero keeps the raw weights so the refusal names
+    # the span rather than a zero weight.
+    with np.errstate(under="ignore"):
+        normalised = weight / weight.max()
+    banding = exact_bands(curve, normalised if normalised.min() > 0.0 else weight, tol, max_bands)
     edges = np.append(values[banding.starts], values[-1])
     ends = np.append(banding.starts[1:], len(values))
     # Band minus curve, so the relative error is the band factor's against the curve's.
@@ -341,7 +347,7 @@ def _exact_edges(
         "tolerance_factor": banding.tolerance_factor,
         "worst_error": float(relative.max()),
         "worst_error_se": float(in_se.max()),
-        "mean_error": float(np.average(relative, weights=weight / weight.max())),
+        "mean_error": float(np.average(relative, weights=normalised)),
     }
     return edges, diagnostics, banding.factors
 

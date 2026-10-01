@@ -219,7 +219,8 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], NDArray[np.float64]
         after = before + w[j]
         gap = x - np.divide(moment[open_starts], before, out=np.zeros(m), where=before > 0.0)
         # West's increment w[j] * before / after, ordered so that its first
-        # product is at least half the smaller weight and cannot underflow.
+        # product is at least half the smaller weight, so it loses at most one
+        # bit to underflow.
         lighter = np.minimum(before, w[j])
         square[open_starts] += lighter * (np.maximum(before, w[j]) / after) * gap * gap
         moment[open_starts] += w[j] * x
