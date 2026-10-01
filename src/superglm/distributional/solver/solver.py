@@ -66,6 +66,7 @@ from superglm.distributional.weights import (
 )
 from superglm.links import IdentityLink, Link, LogLink
 from superglm.reml._compensated import _dot2_quadratic_form, _native_operand
+from superglm.reml._compensated import _nonzero_entries as _penalty_entries
 from superglm.solvers.rank import (
     RankDecomposition,
     decompose_gram,
@@ -975,17 +976,6 @@ def _measured_geometry(
 ) -> DenseJointGeometry:
     with measure_phase(phase_recorder, "curvature_gradient_assembly"):
         return _geometry(context, state, source)
-
-
-def _penalty_entries(
-    penalty: NDArray,
-) -> tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64]]:
-    """The nonzero entries of ``penalty`` in row-major order, read-only."""
-    rows, columns = np.nonzero(penalty)
-    entries = np.array(penalty[rows, columns], dtype=np.float64)
-    for array in (rows, columns, entries):
-        array.setflags(write=False)
-    return rows, columns, entries
 
 
 def _half_penalty_quadratic(
