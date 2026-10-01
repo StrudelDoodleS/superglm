@@ -189,9 +189,9 @@ def penalty_factor(penalty: NDArray) -> NDArray:
     the eigenpairs of ``A_b`` above its eigensolver resolution ``n_b eps
     ||A_b||_2`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.7;
     ``rank._eigensolver_relative_bar``, the floor of the Gram route's rank cut,
-    which equilibrates the same way) plus its formation error ``n_b
-    gamma_(2 n_b + 7)`` (``_equilibrated_block_root``, #434), and maps the
-    root back, ``R_b = W^(1/2) V' D^(-1)``.  ``R_b'R_b = D^(-1) (A_b)_+ D^(-1)`` is the projection of
+    which equilibrates the same way; accumulated outward, ``_outward_cut``),
+    and maps the root back, ``R_b = W^(1/2) V' D^(-1)``.  ``R_b'R_b = D^(-1)
+    (A_b)_+ D^(-1)`` is the projection of
     ``S_b`` onto the PSD cone in the norm ``||D X D||_F`` (Higham 2002, IMA J.
     Numer. Anal. 22, Thm 3.2), less the eigenvalues below the bar.
 
@@ -257,33 +257,47 @@ def _block_root(block: NDArray) -> NDArray:
     from superglm.solvers.rank import _eigensolver_relative_bar
 
     eigenvalues, eigenvectors = np.linalg.eigh(block)
-    bar = _eigensolver_relative_bar(len(block)) * float(np.max(np.abs(eigenvalues)))
+    bar = _outward_cut(_eigensolver_relative_bar(len(block)), np.max(np.abs(eigenvalues)))
     kept = eigenvalues > bar
     return np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T
+
+
+def _outward_cut(relative: float, norm: float) -> float:
+    """``relative * norm`` rounded up: an upper bound on the exact product.
+
+    ``relative`` (``n eps``) is exact, so the product is one rounding, and
+    one ``nextafter`` toward ``+inf`` covers it (Codex review of #440): an
+    eigenvalue at the bar is never kept on the product's downward rounding.
+    """
+    return float(np.nextafter(relative * float(norm), np.inf))
 
 
 def _equilibrated_block_root(block: NDArray) -> NDArray | None:
     """``penalty_factor``'s root of a coupled block, cut on its Jacobi equilibration.
 
-    The cut is the eigensolver's resolution plus the block's formation error
-    (#434), the two perturbations that move an eigenvalue of the computed
-    ``A_b = D S_b D`` from the exact one (Weyl).  Every penalty this package
-    forms is a sum over at most three components of ``lambda_t G_t``, each
-    ``G_t`` the Gram of a transported root (``ssp_penalty_matrix``,
-    ``_enclosed_root_gram``) or an eigen reconstruction ``V Lambda V'``
-    (``_canonicalize_ssp_penalty``) whose entries are inner products of at
-    most the raw width ``<= 2 n_b`` terms.  Such an entry rounds within
-    ``gamma_m`` of ``sum_t lambda_t |G_t|_ij <= sqrt(S_ii S_jj)`` (Higham 2002,
-    eq. 3.5; Cauchy-Schwarz, twice), ``m = 2 n_b + 7`` counting the inner
-    product, its ``lambda``, the symmetrization, the component sum and the
-    equilibration's square root and two quotients, so ``|dA_ij| <= gamma_m``
-    and ``||dA||_2 <= n_b gamma_m``.  An exact null of the construction
-    stays below that, at every lambda.
+    The cut is the eigensolver's resolution ``n_b eps ||A_b||_2``, accumulated
+    outward (``_outward_cut``).  The block's formation error is controlled
+    where the block is formed, not in the cut: every penalty this package
+    forms is a sum of ``lambda_t G_t`` with ``G_t`` the Gram of a root
+    (``ssp_penalty_matrix``, ``_enclosed_root_gram``), an eigen
+    reconstruction ``V Lambda V'`` (``_canonicalize_ssp_penalty``) or an exact
+    integer or Kronecker form, so an exact null of the construction is an
+    exact null of the rank-``r`` Gram and only rounding, entrywise within
+    ``gamma_m sqrt(S_ii S_jj)`` (Higham 2002, eq. 3.5 and Cauchy-Schwarz),
+    lifts it.  The worst case of that rounding, ``n_b gamma_m`` in ``||dA||_2``
+    (coherent rounding in every entry), is not what the arithmetic delivers:
+    across 7,000 random and structured Gram-form blocks the largest rounding
+    eigenvalue was 0.15 of the eigensolver's cut, while a cut at the worst
+    case dropped real curvature the eigensolver resolves (Opus review of
+    #440: a coupled second-difference block at ``1e10`` beside ``1e-2`` kept
+    58 of 60 rows, a 529-column REML tensor 507 of 528, ``D_3'D_3`` at
+    ``k = 300`` 296 of 297), and so did ``sqrt(n_b) gamma_m`` (137 of 138
+    on a Kronecker sum at ``1e11``).
 
     ``None`` where the block is not PSD at that resolution: a non-positive
     diagonal, or an eigenvalue of ``D S_b D`` below ``-max(100 eps ||D S_b
     D||_2, cut)``, the bar ``rank.decompose_gram`` refuses as materially
-    indefinite (or the block's own rounding, if larger).
+    indefinite.
     """
     from superglm.solvers.rank import _EPS, _eigensolver_relative_bar
 
@@ -299,10 +313,7 @@ def _equilibrated_block_root(block: NDArray) -> NDArray | None:
         return None
     eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
     norm = float(np.max(np.abs(eigenvalues)))
-    width = len(block)
-    terms = 2 * width + 7
-    formation = width * terms * (_EPS / 2.0) / (1.0 - terms * (_EPS / 2.0))
-    cut = _eigensolver_relative_bar(width) * norm + formation
+    cut = _outward_cut(_eigensolver_relative_bar(len(block)), norm)
     if eigenvalues[0] < -max(100.0 * _EPS * norm, cut):
         return None
     kept = eigenvalues > cut

@@ -2480,7 +2480,7 @@ def _matrix_penalty_rank(penalty_matrix: NDArray) -> int:
     """Numerical rank fallback for an already assembled PSD penalty: its root's.
 
     The root is ``penalty_factor``'s, cut block by block on the Jacobi
-    equilibration at the eigensolver's resolution plus the formation error, as
+    equilibration at its eigensolver resolution ``n_b eps ||A_b||_2``, as
     every factor route's penalty root is.  A cut at ``eps ||S||_2`` of the
     whole matrix sat on the rounding of an exact null once the penalty is
     formed as the Gram of its root (``ssp_penalty_matrix``, #434): the count

@@ -1221,33 +1221,118 @@ def test_penalty_factor_cuts_a_graded_block_on_its_equilibration() -> None:
     assert abs(float(model.result.effective_df) - edf) <= bound
 
 
-def test_penalty_factor_cuts_a_null_within_the_blocks_formation_error() -> None:
-    """A null lifted above the eigensolver's cut by formation rounding stays out of the root (#434).
+def _second_difference(k: int, order: int = 2) -> np.ndarray:
+    D = np.diff(np.eye(k), n=order, axis=0)
+    return D.T @ D
 
-    ``S = I - (1 - delta) 11'/n`` is the centring penalty ``I - 11'/n`` (rank
-    ``n - 1``) with every entry moved by ``delta / n``, within the entrywise
-    formation error ``gamma_m sqrt(S_ii S_jj)`` the cut allows a formed block
-    (``m = 2n + 7``, ``_equilibrated_block_root``) for ``delta = n gamma_m /
-    2``: the coherent rounding that bound admits along a flat null.  The null
-    comes out at about ``delta`` (scaled), above the eigensolver's resolution
-    ``n eps ||A||_2`` and below the formation error ``n gamma_m``, and the
-    root keeps ``n - 1`` rows.  Fails on a2a909ef, whose cut was the
-    eigensolver's alone (``n`` rows; Claude review of #425, Low).  Mutation:
-    no formation term.
-    """
-    eps = float(np.finfo(np.float64).eps)
-    n = 12
-    terms = 2 * n + 7
-    gamma = terms * (eps / 2.0) / (1.0 - terms * (eps / 2.0))
-    delta = 0.5 * n * gamma
-    S = np.eye(n) - (1.0 - delta) * np.ones((n, n)) / n
+
+def _coupled_graded_block(lam2: float) -> np.ndarray:
+    """``1e10 D'D (x) I + lam2 I (x) Q' M Q``: a coupled second-difference margin, rank 60 of 64."""
+    k = 8
+    rotation, _ = np.linalg.qr(np.random.default_rng(0).normal(size=(k, k)))
+    margin = np.diag(np.r_[0.0, 0.0, np.linspace(1.0, 50.0, k - 2)])
+    S = 1e10 * np.kron(_second_difference(k), np.eye(k)) + lam2 * np.kron(
+        np.eye(k), rotation.T @ margin @ rotation
+    )
+    return 0.5 * (S + S.T)
+
+
+def _kronecker_sum(k: int, ratio: float) -> np.ndarray:
+    S = ratio * np.kron(_second_difference(k), np.eye(k)) + np.kron(
+        np.eye(k), _second_difference(k)
+    )
+    return 0.5 * (S + S.T)
+
+
+def _resolved_modes(S: np.ndarray) -> int:
+    """Eigenvalues of the Jacobi equilibration above its eigensolver resolution ``n eps ||A||_2``."""
     scale = np.sqrt(np.diag(S))
-    values = np.linalg.eigvalsh(S / np.outer(scale, scale))
-    assert values[0] > n * eps * values[-1]  # the eigensolver's cut alone keeps it
-    assert values[0] < n * gamma
-    R = penalty_factor(S)
-    assert R.shape == (n - 1, n)
-    assert np.all(np.abs(R @ np.ones(n)) <= n * gamma)
+    values = np.linalg.eigvalsh(0.5 * (S / np.outer(scale, scale) + (S / np.outer(scale, scale)).T))
+    cut = len(S) * float(np.finfo(np.float64).eps) * float(np.max(np.abs(values)))
+    return int(np.count_nonzero(values > cut))
+
+
+@pytest.mark.parametrize(
+    ("S", "rank"),
+    [
+        (_coupled_graded_block(1e-1), 60),
+        (_coupled_graded_block(1e-2), 60),
+        (_coupled_graded_block(1e-3), None),
+        (_kronecker_sum(8, 1e11), 60),
+        (_kronecker_sum(12, 1e10), 140),
+        (_kronecker_sum(12, 1e11), None),
+        (_second_difference(300, 3), 297),
+        (_second_difference(200, 4), None),
+    ],
+    ids=[
+        "coupled-1e-1",
+        "coupled-1e-2",
+        "coupled-1e-3",
+        "kron8-1e11",
+        "kron12-1e10",
+        "kron12-1e11",
+        "d3-k300",
+        "d4-k200",
+    ],
+)
+def test_penalty_factor_keeps_every_mode_its_eigensolver_resolves(S, rank) -> None:
+    """A coupled graded block keeps each mode above its eigensolver resolution, and no other.
+
+    One coupled block per case (no diagonal margin splits it): a coupled
+    second-difference margin at ``1e10`` beside a rotated one, Kronecker sums
+    of second differences at ratios ``1e10`` and ``1e11``, and exact integer
+    ``D_m'D_m``.  The root keeps exactly the eigenvalues of ``A = D S D``
+    above ``n eps ||A||_2``; on these the kept ones sit at least 4 times
+    above it and the dropped ones below it.  Where every mode is resolved the
+    count is the exact rank.  Fails on b5080877, whose cut added the
+    worst-case formation term ``n gamma_(2n+7)``: 58 and 52 rows on the
+    coupled block at ``1e-2`` and ``1e-3``, 137 of 140 on the Kronecker sum,
+    296 of 297 on ``D_3'D_3`` (Opus review of #440, P2).  Mutation: the cut
+    raised to ``n gamma_(2n+7)`` or ``sqrt(n) gamma_(2n+7)`` above the
+    eigensolver's.
+    """
+    rows = penalty_factor(S).shape[0]
+    assert rows == _resolved_modes(S)
+    if rank is not None:
+        assert rows == rank
+
+
+def test_penalty_factor_keeps_a_reml_tensors_curvature_at_extreme_lambdas() -> None:
+    """A 529-column REML tensor penalty keeps its 528 resolved modes at lambdas REML can reach.
+
+    ``build_penalty_matrix`` of an ``nk = 20`` tensor at ``(1e8, 1e-6)`` and
+    ``(1e10, 1e-4)``, inside REML's ``[1e-6, 1e10]`` clip.  b5080877 kept 507
+    rows (the formation term in the cut, Opus review of #440, P2).
+    """
+    import warnings
+
+    from superglm import Spline
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    rng = np.random.default_rng(1)
+    n = 4000
+    x1, x2 = rng.uniform(size=n), rng.uniform(size=n)
+    mu = np.sin(2 * np.pi * x1) + np.cos(2 * np.pi * x2) + 2.0 * (x1 - 0.5) * np.sin(4 * np.pi * x2)
+    frame = pd.DataFrame({"x1": x1, "x2": x2})
+    model = SuperGLM(
+        family="gaussian",
+        features={"x1": Spline(n_knots=20), "x2": Spline(n_knots=20)},
+        interactions=[("x1", "x2")],
+        selection_penalty=0,
+        direct_solve="gram",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, mu + rng.normal(0, 0.3, n), max_reml_iter=1)
+    group = next(group for group in model._groups if group.name == "x1:x2")
+    for lam1, lam2 in ((1e8, 1e-6), (1e10, 1e-4)):
+        lambdas = {"x1": 1.0, "x2": 1.0, "x1:x2:margin_x1": lam1, "x1:x2:margin_x2": lam2}
+        S = build_penalty_matrix(
+            model._dm.group_matrices, model._groups, lambdas, model._dm.p, model._reml_penalties
+        )
+        block = S[group.sl, group.sl]
+        rows = penalty_factor(block).shape[0]
+        assert rows == _resolved_modes(block) == block.shape[0] - 1
 
 
 def test_penalty_factor_keeps_a_graded_tensor_blocks_curvature() -> None:
@@ -1256,8 +1341,8 @@ def test_penalty_factor_keeps_a_graded_tensor_blocks_curvature() -> None:
     ``1e10 D1 (x) I + lambda2 I (x) Q'D2 Q`` (diagonal margins with two exact
     nulls each, the second rotated) has exact rank ``60`` of ``64`` at
     ``lambda2 = 1e-3`` and ``1e-5``.  The unscaled cut ``n eps ||S||_2`` of
-    623230ac kept 58 and 48; the formation term of the scaled cut (#434)
-    must not lose any either.
+    623230ac kept 58 and 48.  The diagonal margins split it into eight
+    blocks; the coupled cases are the test above.
     """
     rng = np.random.default_rng(0)
     k = 8
