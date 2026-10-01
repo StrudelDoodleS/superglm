@@ -434,11 +434,16 @@ def _quadratic_form_error_bound(matrix, vector):
     return exact, bound
 
 
+def _nonzero_entries(matrix):
+    rows, columns = np.nonzero(matrix)
+    return rows, columns, matrix[rows, columns]
+
+
 def test_quadratic_form_resolves_a_capped_penalty_and_rejects_the_plain_product():
     from superglm.reml._compensated import _dot2_quadratic_form
 
     penalty, coefficients = _capped_difference_penalty()
-    value, success = _dot2_quadratic_form(penalty, coefficients)
+    value, success = _dot2_quadratic_form(*_nonzero_entries(penalty), coefficients)
     exact, bound = _quadratic_form_error_bound(penalty, coefficients)
     assert success
     assert abs(Fraction.from_float(value) - exact) <= bound
@@ -447,16 +452,63 @@ def test_quadratic_form_resolves_a_capped_penalty_and_rejects_the_plain_product(
     assert abs(Fraction.from_float(plain) - exact) > bound
 
 
+def test_quadratic_form_over_nonzeros_matches_the_dense_recurrence():
+    """Skipping zero entries leaves every Dot2 state unchanged, so the values agree."""
+    from superglm.reml._compensated import _dot2_quadratic_form, _dot2_value
+
+    capped, coefficients = _capped_difference_penalty()
+    width = len(coefficients)
+    penalty = np.zeros((2 * width + 2, 2 * width + 2))
+    # Unpenalized intercepts at 0 and width + 1; two penalized blocks.
+    penalty[1 : width + 1, 1 : width + 1] = capped
+    penalty[width + 2 :, width + 2 :] = 0.5 / 1.0e10 * capped
+    vector = np.concatenate(([2.5], coefficients, [-1.5], coefficients[::-1]))
+    rows = np.array([_dot2_value(row, vector)[0] for row in penalty])
+    dense, dense_success = _dot2_value(vector, rows)
+    value, success = _dot2_quadratic_form(*_nonzero_entries(penalty), vector)
+    assert success and dense_success
+    assert value == dense
+    assert _dot2_quadratic_form(*_nonzero_entries(np.zeros((3, 3))), np.ones(3)) == (0.0, True)
+
+
+@pytest.mark.parametrize("kernel_name", ["_dot2_quadratic_form", "_dot2_selected"])
+def test_compiled_dot2_callers_keep_ieee_rounding(kernel_name):
+    import superglm.reml._compensated as compensated
+
+    kernel = getattr(compensated, kernel_name)
+    penalty, coefficients = _capped_difference_penalty()
+    if kernel_name == "_dot2_quadratic_form":
+        kernel(*_nonzero_entries(penalty), coefficients)
+    else:
+        kernel(penalty, coefficients[:, None].copy(), np.array([[0, 0], [1, 0]]))
+    assert kernel.targetoptions.get("fastmath", False) is False
+    # Recompile once so IR inspection is meaningful even after a disk-cache hit.
+    kernel.recompile()
+    llvm = kernel.inspect_llvm(kernel.signatures[0])
+    arithmetic = [
+        line
+        for line in llvm.splitlines()
+        if any(f"= {op} " in line for op in ("fadd", "fsub", "fmul"))
+    ]
+    assert arithmetic
+    assert all(
+        not any(flag in line.split() for flag in ("fast", "contract", "reassoc"))
+        for line in arithmetic
+    )
+    assert "llvm.fma." not in llvm
+    assert "llvm.fmuladd." not in llvm
+
+
 def test_solver_penalty_value_uses_the_compensated_form_and_its_range_fallback():
     from superglm.distributional.solver.solver import _half_penalty_quadratic
     from superglm.reml._compensated import _dot2_quadratic_form
 
     penalty, coefficients = _capped_difference_penalty()
-    value, success = _dot2_quadratic_form(penalty, coefficients)
+    value, success = _dot2_quadratic_form(*_nonzero_entries(penalty), coefficients)
     assert success
     assert _half_penalty_quadratic(penalty, coefficients) == 0.5 * value
     # A subnormal coefficient is outside Dot2's normal range: the naive form.
     tiny = coefficients.copy()
     tiny[0] = np.nextafter(0.0, 1.0)
-    assert not _dot2_quadratic_form(penalty, tiny)[1]
+    assert not _dot2_quadratic_form(*_nonzero_entries(penalty), tiny)[1]
     assert _half_penalty_quadratic(penalty, tiny) == 0.5 * float(tiny @ penalty @ tiny)

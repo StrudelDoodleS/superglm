@@ -966,19 +966,27 @@ def _measured_geometry(
 def _half_penalty_quadratic(penalty: NDArray, coefficients: NDArray) -> float:
     """Return ``0.5 * b' P b`` without the naive form's cancellation noise.
 
-    The naive form is accurate only to ``gamma_n |b|' |P| |b|``. With a
-    smoothing parameter at its cap, ``P`` scales a penalty whose null space
-    holds O(1) coefficients, so the terms reach ``1e11`` while ``b' P b`` is
-    near ``1e-9``; that error then exceeds the objective change of a Newton
-    step, and whether the line search accepts the step follows the sign of
-    round-off, which differs between BLAS kernels and platforms. Dot2 rows and
-    a Dot2 outer product bound the error by ``u |b' P b| + u |b|' |P b|`` plus
-    a ``gamma_n**2`` term (see ``_dot2_quadratic_form``). An operand or product
-    outside the normal range falls back to the naive form.
+    The naive form makes two length-``n`` reductions and is accurate only to
+    ``gamma_2n |b|' |P| |b|`` to first order. With a smoothing parameter at its
+    cap, ``P`` scales a penalty whose null space holds O(1) coefficients, so
+    the terms reach ``1e11`` while ``b' P b`` is near ``1e-9``; that error then
+    exceeds the objective change of a Newton step, and whether the line search
+    accepts the step follows the sign of round-off, which differs between BLAS
+    kernels and platforms. Dot2 rows and a Dot2 outer product, over the
+    nonzero entries of ``P``, bound the error by ``u |b' P b| + u |b|' |P b|``
+    plus a ``gamma_n**2`` term (see ``_dot2_quadratic_form``). An operand or
+    product outside the normal range falls back to the naive form.
+
+    The penalized score keeps the plain ``P @ b``. Its error,
+    ``gamma_n (|P| |b|)_i`` per row, is the same order as the change of up to
+    ``2u (|P| |b|)_i`` that one unit in the last place of each coefficient makes
+    to ``(P b)_i``, so no representable ``b`` has a smaller score at a cap.
+    There, stationarity is certified through the Newton decrement, not the score.
     """
     values = np.ascontiguousarray(coefficients, dtype=np.float64)
     matrix = np.ascontiguousarray(penalty, dtype=np.float64)
-    quadratic, valid = _dot2_quadratic_form(matrix, values)
+    rows, columns = np.nonzero(matrix)
+    quadratic, valid = _dot2_quadratic_form(rows, columns, matrix[rows, columns], values)
     if not valid:
         quadratic = values @ matrix @ values
     return 0.5 * float(quadratic)

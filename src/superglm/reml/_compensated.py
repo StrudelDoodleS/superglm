@@ -95,19 +95,35 @@ def _dot2_selected(left, right, indices):
 
 
 @njit(cache=True, fastmath=False)
-def _dot2_quadratic_form(matrix, vector):
+def _dot2_quadratic_form(rows, columns, entries, vector):
     """Evaluate ``x' A x`` as ``Dot2(x, A x)`` with each row of ``A x`` from Dot2.
 
-    By Proposition 5.5 of Ogita, Rump and Oishi (2005), without underflow,
-    ``|v_i - (A x)_i| <= u |(A x)_i| + gamma_n**2 (|A| |x|)_i`` for each row
-    and ``|res - x' v| <= u |x' v| + gamma_n**2 |x|' |v|``, so the result is
-    within ``u |x' A x| + u |x|' |A x| + 2 gamma_n**2 |x|' |A| |x|`` to first
-    order. False requests the caller's fallback, as ``_dot2_value`` does.
+    ``A`` is given by its nonzero entries in row-major order, as ``np.nonzero``
+    returns them. A zero term leaves the Dot2 state unchanged (its TwoProduct
+    and TwoSum errors are zero), so skipping zeros gives the dense recurrence's
+    value up to the sign of a zero result, at a cost proportional to the
+    nonzeros of a block-diagonal penalty. By Proposition 5.5 of Ogita, Rump and
+    Oishi (2005), without underflow, each row ``v_i`` of ``k_i`` terms is within
+    ``u |(A x)_i| + gamma_k_i**2 (|A| |x|)_i`` of ``(A x)_i``, and the outer
+    product is within ``u |x' v| + gamma_m**2 |x|' |v|`` of ``x' v``, so the
+    result is within ``u |x' A x| + u |x|' |A x| + 2 gamma_n**2 |x|' |A| |x|``
+    to first order, ``n`` the order of ``A``. False requests the caller's
+    fallback, as ``_dot2_value`` does.
     """
-    rows = np.empty(len(vector), dtype=np.float64)
-    for row in range(len(vector)):
-        value, valid = _dot2_value(matrix[row], vector)
+    count = len(entries)
+    row_values = np.empty(count, dtype=np.float64)
+    row_weights = np.empty(count, dtype=np.float64)
+    used = 0
+    start = 0
+    while start < count:
+        stop = start + 1
+        while stop < count and rows[stop] == rows[start]:
+            stop += 1
+        value, valid = _dot2_value(entries[start:stop], vector[columns[start:stop]])
         if not valid:
             return 0.0, False
-        rows[row] = value
-    return _dot2_value(vector, rows)
+        row_values[used] = value
+        row_weights[used] = vector[rows[start]]
+        used += 1
+        start = stop
+    return _dot2_value(row_weights[:used], row_values[:used])
