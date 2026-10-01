@@ -447,8 +447,14 @@ def test_quadratic_form_resolves_a_capped_penalty_and_rejects_the_plain_product(
     exact, bound = _quadratic_form_error_bound(penalty, coefficients)
     assert success
     assert abs(Fraction.from_float(value) - exact) <= bound
-    # Mutation control: the plain product cannot satisfy the bound.
-    plain = float(coefficients @ penalty @ coefficients)
+    # Mutation control: the plain product cannot satisfy the bound. It is summed
+    # in a fixed recursive order, so IEEE arithmetic alone decides this, not BLAS.
+    plain = 0.0
+    for x_i, row in zip(coefficients.tolist(), penalty.tolist(), strict=True):
+        row_value = 0.0
+        for p_ij, x_j in zip(row, coefficients.tolist(), strict=True):
+            row_value = row_value + p_ij * x_j
+        plain = plain + x_i * row_value
     assert abs(Fraction.from_float(plain) - exact) > bound
 
 

@@ -70,6 +70,8 @@ def _children(value):
             return [*pairs, *((f"[{index}]", item) for index, item in enumerate(value))]
         return pairs
     if isinstance(value, np.ndarray | np.generic) or sp.issparse(value):
+        if getattr(value.dtype, "names", None):
+            return [(f"[{name!r}]", value[name]) for name in value.dtype.names]
         if value.dtype.kind != "O":
             return []
         return [(f"[{index}]", item) for index, item in enumerate(value.flat)]
@@ -283,6 +285,7 @@ _FLOAT32 = np.zeros(2, dtype=np.float32)
         pd.Series(pd.Categorical(_FLOAT32)),
         _SlottedHolder(_FLOAT32),
         _CallableHolder(_FLOAT32),
+        np.zeros(2, dtype=[("a", np.float32)]),
     ],
     ids=[
         "dataclass",
@@ -295,6 +298,7 @@ _FLOAT32 = np.zeros(2, dtype=np.float32)
         "categorical",
         "slots",
         "callable_instance",
+        "structured",
     ],
 )
 def test_walk_reports_a_reduced_precision_leaf(value):
