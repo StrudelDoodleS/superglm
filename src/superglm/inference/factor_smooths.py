@@ -162,6 +162,47 @@ def _stored_support(
     return _support_from_retained_design(model, group)
 
 
+def _population_deviations(
+    spec: FactorSmooth,
+    blocks: NDArray,
+    raw_inverse_blocks: NDArray,
+    covariance,
+    public_group_indices: NDArray,
+) -> tuple[NDArray, NDArray]:
+    """Each ``sz`` level's deviation from the population curve as predicted, and its covariance.
+
+    ``predict(level) - predict(population)`` is ``b(x)' d_t`` with ``d_t =
+    Q_t (beta_t - c)`` (#432, ``FactorSmooth._identified_blocks``): ``Q_t =
+    I - Pi_t`` for a thin level with weight, ``0`` for one without, ``I`` for
+    every other level, and ``c = C theta`` the population offset
+    (``_population_contrast``).  So ``cov(d_t) = Q_t (S_tt - X_t - X_t' +
+    S_cc) Q_t'`` with ``X_t = cov(beta_t, c)`` and ``S_cc = cov(c)``, all from
+    one product of the covariance with ``C'`` (``k`` columns).
+    """
+    from superglm.inference._term_covariance import _covariance_apply
+
+    identified, offset = spec._identified_blocks(blocks)
+    deviations = identified - offset[None, :]
+    contrast = spec._population_contrast()
+    n_levels, k = blocks.shape
+    lifted = np.zeros((covariance.shape[0], k))
+    lifted[public_group_indices] = np.asarray(contrast).T
+    product = np.asarray(_covariance_apply(covariance, lifted), dtype=np.float64)
+    offset_covariance = lifted.T @ product
+    free = product[public_group_indices].reshape(n_levels - 1, k, k)
+    cross = np.concatenate([free, -free.sum(axis=0, keepdims=True)])
+    covariances = (
+        raw_inverse_blocks - cross - np.transpose(cross, (0, 2, 1)) + offset_covariance[None]
+    )
+    keep = np.broadcast_to(np.eye(k), (n_levels, k, k)).copy()
+    weightless = set(spec._weightless_levels)
+    for level, directions in zip(spec._unidentified_levels, spec._free_directions, strict=True):
+        free_part = np.asarray(directions, dtype=np.float64)
+        keep[level] = 0.0 if level in weightless else np.eye(k) - free_part @ free_part.T
+    covariances = keep @ covariances @ np.transpose(keep, (0, 2, 1))
+    return deviations, 0.5 * (covariances + np.transpose(covariances, (0, 2, 1)))
+
+
 def _grid_values(spec: FactorSmooth, grid: int | NDArray | None) -> NDArray:
     if spec._spline is None:
         raise RuntimeError("FactorSmooth marginal state is unavailable.")
@@ -190,6 +231,9 @@ def factor_smooth_result(
     """Build compact per-level inference for one fitted factor smooth."""
     if model._result is None:
         raise RuntimeError("factor_smooth() requires a fitted model")
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
     if not 0.0 < confidence_level < 1.0:
         raise ValueError("confidence_level must lie strictly between 0 and 1")
     group, spec = _resolve_factor_smooth(model, name)
@@ -434,6 +478,18 @@ def factor_smooth_result(
         # residual across raw levels so the attribution remains symmetric and
         # sums exactly to the fitted term EDF.
         level_edf += edf_reconciliation
+        # The curves are each level's deviation from the population curve as
+        # predicted (#432): with levels left out of the population, the
+        # fit's coordinates are one arbitrary point of an alias family.
+        deviations, level_covariances = coefficients, raw_inverse_blocks
+        if spec._has_population_offset:
+            deviations, level_covariances = _population_deviations(
+                spec,
+                coefficients,
+                raw_inverse_blocks,
+                inference["XtWX_inv_aug"],
+                public_group_indices,
+            )
         table = pd.DataFrame(
             {
                 "level": spec._levels,
@@ -442,7 +498,7 @@ def factor_smooth_result(
                 "information_trace": information_trace,
                 "information_rank": information_rank,
                 "effective_df": level_edf,
-                "coefficient_norm": np.linalg.norm(coefficients, axis=1),
+                "coefficient_norm": np.linalg.norm(deviations, axis=1),
                 "has_information": has_information,
                 "sufficient_support": sufficient_support,
             }
@@ -450,8 +506,8 @@ def factor_smooth_result(
 
         curve_frames = []
         for level_index in selected_level_indices:
-            covariance = phi * raw_inverse_blocks[int(level_index)]
-            effect = basis @ coefficients[int(level_index)]
+            covariance = phi * level_covariances[int(level_index)]
+            effect = basis @ deviations[int(level_index)]
             variance = np.einsum(
                 "ij,jk,ik->i",
                 basis,
@@ -485,6 +541,12 @@ def factor_smooth_result(
             "level_edf_numerical_reconciliation": float(edf_reconciliation),
             **common_diagnostics,
         }
+        if spec._has_population_offset:
+            diagnostics["population_convention"] = spec._population_convention
+            diagnostics["thin_levels"] = list(spec._unidentified_level_names)
+            diagnostics["separated_levels"] = [
+                spec._levels[code] for code in spec._separated_levels
+            ]
 
     return FactorSmoothResult(
         name=group.name,

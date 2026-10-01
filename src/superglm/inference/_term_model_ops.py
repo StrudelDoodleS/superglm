@@ -18,6 +18,29 @@ if TYPE_CHECKING:
     from superglm.types import GroupSlice
 
 
+def with_population_curve(
+    raw: dict[str, Any], name: Any, interaction_specs: Any, groups: Any, beta: NDArray
+) -> dict[str, Any]:
+    """A main-effect curve shifted onto its ``sz`` terms' population curve (#432).
+
+    With ``sz`` levels left out of the population the curve the model
+    predicts for the population is ``main(x) + b(x)' c``
+    (``factor_smooth.population_curve_shift``), so the reported curve is that
+    one; a curve no ``sz`` term moves is returned as it is.
+    """
+    from superglm.features.factor_smooth import population_curve_shift
+
+    if "x" not in raw or "log_relativity" not in raw:
+        return raw
+    shift = population_curve_shift(name, raw["x"], interaction_specs, groups, beta)
+    if shift is None:
+        return raw
+    shifted = dict(raw)
+    shifted["log_relativity"] = np.asarray(raw["log_relativity"], dtype=np.float64) + shift
+    shifted["relativity"] = np.exp(shifted["log_relativity"])
+    return shifted
+
+
 def relativities(
     feature_order: list[str],
     interaction_order: list[str],
@@ -43,7 +66,8 @@ def relativities(
         fgroups = _feature_groups(name)
         beta_combined = np.concatenate([result.beta[g.sl] for g in fgroups])
         if name in specs:
-            return cast(dict[str, Any], specs[name].reconstruct(beta_combined))
+            raw = cast(dict[str, Any], specs[name].reconstruct(beta_combined))
+            return with_population_curve(raw, name, interaction_specs, groups, result.beta)
         if name in interaction_specs:
             return cast(dict[str, Any], interaction_specs[name].reconstruct(beta_combined))
         raise KeyError(f"Feature not found: {name}")

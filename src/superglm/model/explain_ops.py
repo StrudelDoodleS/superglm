@@ -159,6 +159,9 @@ def relativities(model, with_se=False, centering="native"):
     if getattr(model, "_editor_inference_stale", False) and with_se:
         warnings.warn(_EDITOR_STALE_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
         with_se = False
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
     frames = _relativities(
         model._feature_order,
         model._interaction_order,

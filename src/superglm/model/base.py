@@ -403,7 +403,7 @@ def _score_unidentified_factor_smooth(
     *,
     population: bool,
 ) -> tuple[NDArray[np.floating], tuple]:
-    """An ``sz`` term with unidentified levels, each predicted at the population value (#432)."""
+    """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``)."""
     left_name, right_name = term["parent_names"]
     left_spec, right_spec = term.get("parent_specs", (None, None))
     spec = term["spec"]
@@ -517,8 +517,18 @@ def _predict_eta(
     fast_discrete: bool,
     random_effects: str,
     stabilize: bool = True,
+    fitted: bool = False,
+    warn: bool = True,
 ) -> NDArray[np.floating]:
-    """Predict the raw or stabilized linear predictor on canonical blocks."""
+    """Predict the raw or stabilized linear predictor on canonical blocks.
+
+    ``fitted`` scores every term at the fit's own coefficients, the fit's
+    linear predictor on its training rows, for the library's evaluations of
+    the fit (screening's working score, random-effect reporting, the
+    discretization deltas); ``predict`` instead treats ``sz`` levels the data
+    identify only in part (#432, ``FactorSmooth._identified_blocks``), and
+    warns of them unless ``warn`` is false.
+    """
     if random_effects not in ("conditional", "population"):
         raise ValueError(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
@@ -562,10 +572,14 @@ def _predict_eta(
             continue
         eta += score(term)
 
+    if not fitted:
+        from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+        _ensure_factor_smooth_levels_recorded(model)
     unidentified: list[str] = []
     for term in plan["interactions"]:
         spec = term["spec"]
-        if isinstance(spec, FactorSmooth) and getattr(spec, "_unidentified_levels", ()):
+        if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
             contribution, named = _score_unidentified_factor_smooth(
                 term, frame, beta_all, population=random_effects == "population"
             )
@@ -581,11 +595,12 @@ def _predict_eta(
             )
             continue
         eta += score(term)
-    if unidentified:
+    if unidentified and warn:
         warnings.warn(
-            "FactorSmooth basis='sz' levels the training data could not identify (no weight, "
-            "or fewer distinct x values than the penalty's null space) are predicted at the "
-            "population value, their deviation set to zero: " + "; ".join(unidentified) + ".",
+            "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than the "
+            "penalty's null space keep the curve their rows identify and follow the population "
+            "curve's shape where their rows say nothing; levels without weight are predicted at "
+            "the population value: " + "; ".join(unidentified) + ".",
             UserWarning,
             stacklevel=_PREDICTION_WARNING_STACKLEVEL,
         )
@@ -602,14 +617,21 @@ def predict_eta_exact(
     offset: NDArray | None = None,
     *,
     random_effects: str = "conditional",
+    fitted: bool = False,
+    warn: bool = True,
 ) -> NDArray[np.floating]:
-    """Predict the stabilized linear predictor through the exact canonical contract."""
+    """Predict the stabilized linear predictor through the exact canonical contract.
+
+    ``fitted`` and ``warn`` as ``_predict_eta``'s.
+    """
     return _predict_eta(
         model,
         X,
         offset,
         fast_discrete=False,
         random_effects=random_effects,
+        fitted=fitted,
+        warn=warn,
     )
 
 
@@ -659,11 +681,12 @@ def predict_exact(
     offset: NDArray | None = None,
     *,
     random_effects: str = "conditional",
+    warn: bool = True,
 ) -> NDArray:
     """Predict the response mean through the exact canonical contract."""
     return _eta_to_mu(
         model,
-        predict_eta_exact(model, X, offset, random_effects=random_effects),
+        predict_eta_exact(model, X, offset, random_effects=random_effects, warn=warn),
     )
 
 

@@ -143,6 +143,71 @@ def _shifted_sums(rows, a, reference, out):  # pragma: no cover - compiled
 
 
 @njit(cache=True)
+def _first_distinct_level_rows(
+    data, indices, indptr, codes, weights, n_levels, cap
+):  # pragma: no cover
+    """Each level's first ``cap`` distinct basis rows of positive weight, in row order.
+
+    ``_distinct_level_rows`` on the rows as they are (no level sort, no copy of
+    the basis): ``count[l]`` is the level's number of distinct rows, stopped at
+    ``cap``, and ``first[l, :count[l]]`` their row indices.  A level that has
+    its ``cap`` rows costs one comparison per further row.
+    """
+    width = max(cap, 1)
+    count = np.zeros(n_levels, np.int64)
+    first = np.full((n_levels, width), -1, np.int64)
+    for r in range(len(codes)):
+        if not weights[r] > 0.0:
+            continue
+        level = codes[r]
+        held = count[level]
+        if held >= cap:
+            continue
+        new = True
+        for t in range(held):
+            q = first[level, t]
+            a0, a1, b0, b1 = indptr[r], indptr[r + 1], indptr[q], indptr[q + 1]
+            if a1 - a0 != b1 - b0:
+                continue
+            same = True
+            for u in range(a1 - a0):
+                if indices[a0 + u] != indices[b0 + u] or data[a0 + u] != data[b0 + u]:
+                    same = False
+                    break
+            if same:
+                new = False
+                break
+        if new:
+            first[level, held] = r
+            count[level] = held + 1
+    return count, first
+
+
+@njit(cache=True)
+def _first_distinct_level_bins(bins, codes, weights, n_levels, cap):  # pragma: no cover
+    """``_first_distinct_level_rows`` for a discrete term, whose distinct rows are its bins."""
+    width = max(cap, 1)
+    count = np.zeros(n_levels, np.int64)
+    first = np.full((n_levels, width), -1, np.int64)
+    for r in range(len(codes)):
+        if not weights[r] > 0.0:
+            continue
+        level = codes[r]
+        held = count[level]
+        if held >= cap:
+            continue
+        new = True
+        for t in range(held):
+            if bins[first[level, t]] == bins[r]:
+                new = False
+                break
+        if new:
+            first[level, held] = r
+            count[level] = held + 1
+    return count, first
+
+
+@njit(cache=True)
 def _distinct_level_rows(data, indices, indptr, starts, weights, cap):  # pragma: no cover
     """Each level's count of distinct basis rows of positive weight, stopped at ``cap``.
 

@@ -882,7 +882,8 @@ def screen_interactions(
     # The stabilized predictor directly, NOT link(predict(X)): for a
     # non-injective link (sqrt) the round trip maps eta to |eta| and flips
     # the sign of every negative-eta row's score.
-    eta = np.asarray(model._predict_eta_exact(X, offset), dtype=np.float64)
+    # The fit's own predictor: the working score at the base fit (#440 review)
+    eta = np.asarray(model._predict_eta_exact(X, offset, fitted=True), dtype=np.float64)
     mu = np.asarray(link.inverse(eta), dtype=np.float64)
     score = working_score(y, mu, eta, weights, distribution, link)
     from superglm.solvers.working_rows import fisher_working_weights, pearson_chi2

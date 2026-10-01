@@ -72,6 +72,66 @@ def _scatter_centered_variance(
     return mean_centered_variance(variance, cross, float(weights @ column))
 
 
+def _population_curve_se(
+    spline_spec,
+    name: Hashable,
+    feature_groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    Cov_active,
+    interaction_specs: Mapping[Any, Any],
+    *,
+    n_points: int,
+    center: bool,
+) -> NDArray | None:
+    """The errors of a main-effect curve shifted onto its ``sz`` population curve (#432).
+
+    The reported curve is ``f(x) = M(x) gamma + sum_terms b(x)' C theta``
+    (``_term_model_ops.with_population_curve``; ``C`` each term's
+    ``FactorSmooth._population_contrast`` on its coefficients ``theta``), so
+    ``var f = diag(M V_mm M') + 2 diag(M V_m. L B') + diag(B L' V L B')``
+    with ``L`` the terms' ``C'`` placed in their rows: one product of the
+    covariance with ``L``, ``k`` columns a term.  ``center`` reports ``f -
+    mean f``, whose map is ``M`` and ``B`` less their column means.  None when
+    no ``sz`` term moves the curve, or the curve or a term is inactive.
+    """
+    from superglm.features.factor_smooth import population_curve_terms
+
+    terms = population_curve_terms(name, interaction_specs)
+    active_subs = [ag for ag in active_groups if ag.feature_name == name]
+    if not terms or not active_subs:
+        return None
+    term_groups = []
+    for key, term in terms:
+        group = next((ag for ag in active_groups if ag.feature_name == key), None)
+        if group is None:
+            return None
+        term_groups.append((group, term))
+    indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+    x_grid = np.linspace(spline_spec._lo, spline_spec._hi, n_points)
+    M = np.asarray(spline_spec.transform(x_grid), dtype=np.float64)
+    M = M[:, _active_subgroup_columns(name, feature_groups, active_subs)]
+    lifted = np.zeros((Cov_active.shape[0], sum(term.k for _, term in term_groups)))
+    bases = []
+    column = 0
+    for group, term in term_groups:
+        contrast = np.asarray(term._population_contrast(), dtype=np.float64)
+        lifted[group.start : group.end, column : column + term.k] = contrast.T
+        bases.append(term.marginal_basis(x_grid))
+        column += term.k
+    B = np.concatenate(bases, axis=1)
+    if center:
+        M = M - M.mean(axis=0)
+        B = B - B.mean(axis=0)
+    product = np.asarray(_covariance_apply(Cov_active, lifted), dtype=np.float64)
+    Cov_g = np.asarray(Cov_active[np.ix_(indices, indices)], dtype=np.float64)
+    variance = (
+        np.sum((M @ Cov_g) * M, axis=1)
+        + 2.0 * np.sum((M @ product[indices]) * B, axis=1)
+        + np.sum((B @ (lifted.T @ product)) * B, axis=1)
+    )
+    return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+
+
 def feature_se_from_cov(
     name: Hashable,
     Cov_active: NDArray,
@@ -181,6 +241,18 @@ def feature_se_from_cov(
     Cov_g = Cov_active[np.ix_(indices, indices)]
 
     if isinstance(spec, _SplineBase):
+        shifted = _population_curve_se(
+            spec,
+            name,
+            feature_groups,
+            active_groups,
+            Cov_active,
+            interaction_specs,
+            n_points=n_points,
+            center=center,
+        )
+        if shifted is not None:
+            return shifted
         return _spline_se(
             spec,
             name,

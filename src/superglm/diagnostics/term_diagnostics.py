@@ -326,8 +326,19 @@ def _drop_term_holdout(
     eta_raw = np.full(n_val, model.result.intercept, dtype=np.float64)
     eta_raw += offset_arr
     contributions: dict[str, NDArray[np.floating]] = {}
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
     for term in terms:
-        contribution = base._score_prediction_term_exact(term, X_val, beta)
+        spec = term["spec"]
+        if isinstance(spec, FactorSmooth) and spec._has_population_offset:
+            # as ``predict`` scores it (#432): thin and unseen levels from the population
+            contribution, _ = base._score_unidentified_factor_smooth(
+                term, X_val, beta, population=False
+            )
+        else:
+            contribution = base._score_prediction_term_exact(term, X_val, beta)
         contributions[term["name"]] = contribution
         eta_raw += contribution
 

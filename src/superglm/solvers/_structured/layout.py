@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from typing import NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -551,41 +552,99 @@ def _distinct_level_counts(
     return _distinct_level_rows(data, indices, indptr, starts, ordered_weights, cap)
 
 
-def sz_unidentified_levels(
-    dominant: FactorSmoothGroupMatrix, prior_weights: NDArray | None
-) -> tuple[tuple[int, ...], NDArray]:
-    """The ``sz`` levels the data leave unidentified, and the penalty's null space ``N_P``.
+class SzLevelRows(NamedTuple):
+    """What an ``sz`` term's design and prior weights identify of each level (#432).
 
-    A level whose rows of positive weight hold fewer distinct ``x`` values than
-    the dimension ``m`` of ``N_P`` (none, for a level without weight) cannot
-    tell part of its polynomial deviation from the main effect: the rule
-    ``thin_level_counts`` applies, on the same kernel.  Backend independent:
-    it reads the design and the prior weights alone, so a gram fit records
-    the levels an ``sz`` balance tree names.
+    ``null_space`` is the level penalty's null space ``N_P`` ``(k, m)``;
+    ``thin`` the levels whose rows of positive weight hold fewer than ``m``
+    distinct ``x`` values (``weightless``: none); ``free[i]`` the ``(k, f)``
+    orthonormal directions of ``N_P`` that ``thin[i]``'s rows do not see (all
+    of ``N_P`` for a weightless level).
+    """
+
+    null_space: NDArray
+    thin: tuple[int, ...]
+    free: tuple[NDArray, ...]
+    weightless: tuple[int, ...]
+
+
+def first_distinct_level_rows(
+    dominant: FactorSmoothGroupMatrix, weights: NDArray, cap: int
+) -> tuple[NDArray, NDArray]:
+    """``(count, first)``: each level's first ``cap`` distinct rows of positive weight.
+
+    The rule ``thin_level_counts`` applies (distinct basis rows, bit for bit;
+    a discrete term's bins), on the rows in their own order: no level sort
+    and no copy of the basis.
+    """
+    from superglm.solvers._structured.leaf_kernels import (
+        _first_distinct_level_bins,
+        _first_distinct_level_rows,
+    )
+
+    held = np.ascontiguousarray(weights, dtype=np.float64)
+    codes = np.ascontiguousarray(dominant.codes, dtype=np.int64)
+    if dominant.is_discrete:
+        bins = np.ascontiguousarray(dominant.bin_idx, dtype=np.int64)
+        return _first_distinct_level_bins(bins, codes, held, int(dominant.n_levels), int(cap))
+    return _first_distinct_level_rows(
+        dominant._data,
+        dominant._indices,
+        dominant._indptr,
+        codes,
+        held,
+        int(dominant.n_levels),
+        int(cap),
+    )
+
+
+def level_natural_rows(dominant: FactorSmoothGroupMatrix, rows: NDArray) -> NDArray:
+    """The term's natural basis ``b(x)'`` on the given design rows, ``(len(rows), k)``."""
+    selected = np.asarray(rows, dtype=np.intp)
+    if dominant.is_discrete:
+        raw = dominant.B_unique[dominant.bin_idx[selected]]
+    else:
+        raw = dominant.B[selected].toarray()
+    return np.asarray(raw @ dominant.natural_map, dtype=np.float64)
+
+
+def sz_level_identification(
+    dominant: FactorSmoothGroupMatrix, prior_weights: NDArray | None
+) -> SzLevelRows:
+    """The ``sz`` levels the data identify only in part, and the directions they leave free.
+
+    A level whose rows of positive weight hold ``d < m`` distinct ``x``
+    values cannot tell the directions of ``N_P`` its rows do not see from the
+    main effect: the trailing ``m - d`` right singular vectors of its distinct
+    rows on ``N_P`` (``_penalized_aliases`` takes the same ``f``), all of
+    ``N_P`` without weight.  Backend independent: it reads the design and the
+    prior weights alone, so a gram fit records what the balance tree names.
     """
     null_space = _sz_penalty_null_space(dominant)
     null_space.setflags(write=False)
     nullity = null_space.shape[1]
     if not nullity:
-        return (), null_space
-    codes = dominant.codes
+        return SzLevelRows(null_space, (), (), ())
     weights = (
-        np.ones(len(codes)) if prior_weights is None else np.asarray(prior_weights, np.float64)
+        np.ones(len(dominant.codes))
+        if prior_weights is None
+        else np.asarray(prior_weights, dtype=np.float64)
     )
-    order, starts = _level_order(codes, dominant.n_levels)
-    if dominant.is_discrete:
-        source: tuple[NDArray, ...] = (np.ascontiguousarray(dominant.bin_idx[order]),)
-    else:
-        csr = dominant.B[order]
-        source = (
-            np.ascontiguousarray(csr.data, dtype=np.float64),
-            np.ascontiguousarray(csr.indices, dtype=np.int64),
-            np.ascontiguousarray(csr.indptr, dtype=np.int64),
-        )
-    distinct = _distinct_level_counts(
-        dominant, source, starts, np.ascontiguousarray(weights[order]), nullity
-    )
-    return tuple(int(level) for level in np.flatnonzero(distinct < nullity)), null_space
+    count, first = first_distinct_level_rows(dominant, weights, nullity)
+    thin = tuple(int(level) for level in np.flatnonzero(count < nullity))
+    free = []
+    for level in thin:
+        distinct = int(count[level])
+        if not distinct:
+            free.append(null_space)
+            continue
+        seen = level_natural_rows(dominant, first[level, :distinct]) @ null_space
+        right = np.linalg.svd(seen, full_matrices=True)[2]
+        directions = np.ascontiguousarray(null_space @ right[distinct:].T)
+        directions.setflags(write=False)
+        free.append(directions)
+    weightless = tuple(level for level in thin if not count[level])
+    return SzLevelRows(null_space, thin, tuple(free), weightless)
 
 
 def _level_order(codes: NDArray, n_levels: int) -> tuple[NDArray, NDArray]:

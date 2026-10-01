@@ -711,7 +711,7 @@ def _clear_reml_state(model) -> None:
     model._reml_profile = None
 
 
-def _store_fit_arrays(model, sample_weight, offset):
+def _store_fit_arrays(model, sample_weight, offset, y=None):
     """Persist training weights/offset arrays on the model and return them."""
     model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
@@ -721,24 +721,116 @@ def _store_fit_arrays(model, sample_weight, offset):
     # "weighted fit whose arrays were released" and refuse to silently
     # substitute unit weights in the latter case.
     model._fit_used_weights = bool(np.any(model._fit_weights != 1.0))
-    _record_unidentified_factor_smooth_levels(model, model._fit_weights)
+    _record_unidentified_factor_smooth_levels(model, model._fit_weights, y)
     return model._fit_weights, model._fit_offset
 
 
-def _record_unidentified_factor_smooth_levels(model, sample_weight) -> None:
-    """Record, on each ``sz`` FactorSmooth spec, the levels this design leaves unidentified (#432).
+# _record_unidentified_factor_smooth_levels <- _store_fit_arrays <- the fit
+# entry point in this module <- the public method: a fit-time warning names
+# the caller of ``fit``, ``fit_reml`` or ``fit_path``.
+_FIT_WARNING_STACKLEVEL = 5
 
-    Read from the built design and the prior weights, for every backend, so
-    prediction treats the levels alike whichever solver fitted them.
+
+def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, stacklevel=None):
+    """Record, on each ``sz`` FactorSmooth spec, what this design identifies of its levels (#432).
+
+    Read from the built design, the prior weights and the response, for
+    every backend, so prediction treats the levels alike whichever solver
+    fitted them.  Levels whose unpenalized line separates the response are
+    named in a ``SeparationWarning`` (never refused: the population curve
+    leaves them out, ``FactorSmooth._population_map``), unless the model's
+    ``separation`` is ``"ignore"``; a population fixed by the canonical
+    convention, or by separated lines alone, is named in a ``UserWarning``.
     """
+    import warnings
+
+    from superglm.diagnostics.separation import (
+        SeparationWarning,
+        format_factor_smooth_separation,
+        response_boundaries,
+    )
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.group_matrix import FactorSmoothGroupMatrix
 
+    level = _FIT_WARNING_STACKLEVEL if stacklevel is None else stacklevel
+    boundaries = () if y is None else response_boundaries(model._distribution, model._link)
+    mode = getattr(model, "_separation", "warn")
     specs = getattr(model, "_interaction_specs", {}) or {}
     for group, matrix in zip(model._groups, model._dm.group_matrices, strict=True):
         spec = specs.get(group.name)
-        if isinstance(spec, FactorSmooth) and isinstance(matrix, FactorSmoothGroupMatrix):
-            spec._record_unidentified_levels(matrix, sample_weight)
+        if not (isinstance(spec, FactorSmooth) and isinstance(matrix, FactorSmoothGroupMatrix)):
+            continue
+        separated = spec._record_unidentified_levels(matrix, sample_weight, y, boundaries)
+        if separated and mode != "ignore":
+            labels = [spec._levels[code] for code in separated]
+            warnings.warn(
+                format_factor_smooth_separation(group.name, labels, len(spec._levels)),
+                SeparationWarning,
+                stacklevel=level,
+            )
+        convention = spec._population_convention
+        if convention == "canonical":
+            warnings.warn(
+                f"FactorSmooth {group.name!r} (basis='sz'): every level holds fewer distinct x "
+                "values than the penalty's null space, so no level identifies the population "
+                "curve. Its polynomial part is fixed by convention (each level's unidentified "
+                "polynomial part zero); away from the levels' own x values the population curve, "
+                "and every level's curve, still follow the fit's point along the main effect's "
+                "unpenalized curve wherever that curve is not a polynomial. Predictions on the "
+                "training rows reproduce the fit.",
+                UserWarning,
+                stacklevel=level,
+            )
+        elif convention == "separated_mean":
+            warnings.warn(
+                f"FactorSmooth {group.name!r} (basis='sz'): every level the data identify has "
+                "an unpenalized line that separates the response, so the population curve is "
+                "their mean and moves with how far the fit walked those lines.",
+                UserWarning,
+                stacklevel=level,
+            )
+
+
+def _ensure_factor_smooth_levels_recorded(model) -> None:
+    """Record the ``sz`` levels of a model saved before the record existed (#440 review).
+
+    A pickle from v0.35.0 or earlier carries no record and would predict its
+    thin levels at the fit's arbitrary point.  The fit's design and prior
+    weights, which such a model keeps, rebuild it at the first prediction;
+    its response is not kept, so separated lines stay in its population.
+    Without them the model cannot be repaired and says so.
+    """
+    import warnings
+
+    from superglm.features.factor_smooth import FactorSmooth
+
+    specs = getattr(model, "_interaction_specs", {}) or {}
+    stale = [
+        spec
+        for spec in specs.values()
+        if isinstance(spec, FactorSmooth)
+        and spec.basis == "sz"
+        and getattr(spec, "_free_directions", None) is None
+    ]
+    if not stale:
+        return
+    if getattr(model, "_dm", None) is not None and getattr(model, "_fit_weights", None) is not None:
+        _record_unidentified_factor_smooth_levels(model, model._fit_weights)
+        return
+    for spec in stale:
+        spec._unidentified_levels = ()
+        spec._free_directions = ()
+        spec._weightless_levels = ()
+        spec._separated_levels = ()
+        spec._population_null_space = None
+    warnings.warn(
+        "This model was saved before superglm recorded which FactorSmooth basis='sz' levels "
+        "its data identify, and it no longer holds its fit design: thin levels are predicted "
+        "at the fit's coefficients as before. Refit it to predict them from what their rows "
+        "identify.",
+        UserWarning,
+        stacklevel=4,
+    )
 
 
 def _make_reml_debug_recorder(
@@ -1391,7 +1483,7 @@ def _fit_in_workspace(
 
     y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
 
-    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
+    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset, y)
 
     resolve_selection_penalty_for_fit(model, penalty, y, sample_weight)
     has_lambda1_targets = model_has_lambda1_targets(model)
@@ -1538,7 +1630,7 @@ def _fit_path_in_workspace(
     y, sample_weight, offset = model_build_design_matrix(
         model, X, y, sample_weight, offset, selection_active=True
     )
-    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
+    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset, y)
     _clear_fit_inference_caches(model)
     _clear_reml_state(model)
 
@@ -1809,7 +1901,7 @@ def _fit_reml_in_workspace(
         y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
     _profile["dm_build_s"] = _time.perf_counter() - _t0
 
-    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
+    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset, y)
     _clear_fit_inference_caches(model)
 
     reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)

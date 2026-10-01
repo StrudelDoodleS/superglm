@@ -115,6 +115,9 @@ def summary(
 
     if model._fit_stats is None:
         raise RuntimeError("No fit stats — call fit() or fit_reml() first.")
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
 
     fs = model._fit_stats
     res = model.result
@@ -762,8 +765,13 @@ def reconstruct_feature(model, name: str) -> dict[str, Any]:
             f"and an interaction. Use the feature or interaction spec "
             f"directly to disambiguate."
         )
+    from superglm.inference._term_model_ops import with_population_curve
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
     if in_main:
-        return cast(dict[str, Any], model._specs[name].reconstruct(beta_combined))
+        raw = cast(dict[str, Any], model._specs[name].reconstruct(beta_combined))
+        return with_population_curve(raw, name, model._interaction_specs, model._groups, res.beta)
     if in_inter:
         return cast(dict[str, Any], model._interaction_specs[name].reconstruct(beta_combined))
     raise KeyError(f"Feature not found: {name}")
