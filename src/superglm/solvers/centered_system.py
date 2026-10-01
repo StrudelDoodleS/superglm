@@ -13,12 +13,12 @@ from superglm._group_matrix._group_matrix_centered import (
     _try_raw_spline_tabmat_centering,
     _try_tabmat_centering,
     centered_gram_rhs,
-    centered_rhs,
     packed_centered_gram_rhs,
     stable_centered_gram_rhs,
     try_raw_moment_centering,
 )
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+from superglm.solvers.mode_score import dense_centred_rmatvec, dense_columns
 
 _FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
 _FACTOR_CHUNK_ROWS = 8192
@@ -41,6 +41,18 @@ class CenteredSystem:
     rhs: NDArray
     penalty: NDArray
     hessian: NDArray
+    # The centre the rows were taken about as an exact pair, ``(x - mean_hi) -
+    # mean_lo`` (``weighted_mean_pair``): a dense column's anchor and its small
+    # remainder, ``mean_x`` and zero elsewhere.  ``None`` for a system formed
+    # from raw moments, whose rows are centred about ``mean_x`` alone.
+    mean_hi: NDArray | None = None
+    mean_lo: NDArray | None = None
+
+    def centre_pair(self) -> tuple[NDArray, NDArray | None]:
+        """``(hi, lo)`` for centring rows as ``(x - hi) - lo`` (``lo`` ``None``: ``x - mean_x``)."""
+        if self.mean_hi is None or self.mean_lo is None:
+            return self.mean_x, None
+        return self.mean_hi, self.mean_lo
 
     def raw_weighted_moments(self) -> tuple[NDArray, NDArray, NDArray, float]:
         """Recover raw Gram/RHS moments from the stable centered system."""
@@ -98,13 +110,22 @@ class _InitialDataReuse:
         state.eligible = self.after.eligible
         state.raw_spline_eligible = self.after.raw_spline_eligible
         state.raw_moment_eligible = self.after.raw_moment_eligible
-        return _attach_centered_penalty(*self.data, penalty)
+        *data, mean_hi, mean_lo = self.data
+        return _attach_centered_penalty(*data, penalty, mean_hi=mean_hi, mean_lo=mean_lo)
 
     def remember(self, key, W, z_off, before, after, system):
         self.key = key
         self.weights, self.response = _freeze(W), _freeze(z_off)
         self.before, self.after = replace(before), replace(after)
-        self.data = (system.sum_w, system.mean_x, system.mean_z, system.data_gram, system.rhs)
+        self.data = (
+            system.sum_w,
+            system.mean_x,
+            system.mean_z,
+            system.data_gram,
+            system.rhs,
+            system.mean_hi,
+            system.mean_lo,
+        )
 
 
 @dataclass
@@ -134,7 +155,7 @@ class _FisherDataReuse:
 
     def remember(self, W, system):
         self.weights = _freeze(W)
-        self.data = (system.sum_w, system.mean_x, system.data_gram)
+        self.data = (system.sum_w, system.mean_x, system.data_gram, system.mean_hi, system.mean_lo)
 
 
 def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
@@ -152,11 +173,14 @@ def grouped_weighted_factor(
     W: NDArray,
     *,
     center: NDArray | None = None,
+    center_lo: NDArray | None = None,
 ) -> NDArray:
     """Return a streaming weighted QR factor without retaining all design rows."""
     from superglm.solvers.rank import streamed_weighted_factor
 
-    return streamed_weighted_factor(iter_grouped_design_chunks(dm), W, center=center)
+    return streamed_weighted_factor(
+        iter_grouped_design_chunks(dm), W, center=center, center_lo=center_lo
+    )
 
 
 def grouped_weighted_factor_rhs(
@@ -165,6 +189,7 @@ def grouped_weighted_factor_rhs(
     response: NDArray,
     *,
     center: NDArray | None = None,
+    center_lo: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Return a bounded weighted QR factor and its transformed response."""
     from superglm.solvers.rank import streamed_weighted_factor_rhs
@@ -174,6 +199,7 @@ def grouped_weighted_factor_rhs(
         W,
         response,
         center=center,
+        center_lo=center_lo,
     )
 
 
@@ -296,9 +322,10 @@ def grouped_augmented_factor(
     penalty: NDArray,
     *,
     center: NDArray | None = None,
+    center_lo: NDArray | None = None,
 ) -> NDArray:
     """Return the bounded weighted-design factor augmented by ``sqrt(S)``."""
-    data_factor = grouped_weighted_factor(dm, W, center=center)
+    data_factor = grouped_weighted_factor(dm, W, center=center, center_lo=center_lo)
     smooth_factor = penalty_factor(penalty)
     return data_factor if smooth_factor.shape[0] == 0 else np.vstack((data_factor, smooth_factor))
 
@@ -310,6 +337,7 @@ def grouped_augmented_factor_rhs(
     *,
     response: NDArray,
     center: NDArray | None = None,
+    center_lo: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Return one compact QR of the weighted data, penalty, and response."""
     data_factor, transformed_rhs = grouped_weighted_factor_rhs(
@@ -317,6 +345,7 @@ def grouped_augmented_factor_rhs(
         W,
         response,
         center=center,
+        center_lo=center_lo,
     )
     smooth_factor = penalty_factor(penalty)
     if smooth_factor.shape[0] == 0:
@@ -335,33 +364,45 @@ def refresh_centered_rhs(
     z_off: NDArray,
 ) -> CenteredSystem:
     """Reuse an invariant centered Gram while refreshing its working RHS."""
-    data = _refresh_centered_data_rhs(
-        dm=dm, W=W, z_off=z_off, data=(system.sum_w, system.mean_x, system.data_gram)
+    sum_w, mean_x, mean_z, data_gram, rhs, mean_hi, mean_lo = _refresh_centered_data_rhs(
+        dm=dm,
+        W=W,
+        z_off=z_off,
+        data=(system.sum_w, system.mean_x, system.data_gram, system.mean_hi, system.mean_lo),
     )
-    return CenteredSystem(*data, penalty=system.penalty, hessian=system.hessian)
+    return CenteredSystem(
+        sum_w=sum_w,
+        mean_x=mean_x,
+        mean_z=mean_z,
+        data_gram=data_gram,
+        rhs=rhs,
+        penalty=system.penalty,
+        hessian=system.hessian,
+        mean_hi=mean_hi,
+        mean_lo=mean_lo,
+    )
 
 
 def _refresh_centered_data_rhs(*, dm, W, z_off, data):
-    sum_w, mean_x, data_gram = data
+    """``(X - 1 m')' W (z - mean_z)`` for a cached Gram, by column type.
+
+    Every column takes its transpose product less ``mean_x`` times the sum of
+    ``W (z - mean_z)``, which is zero to its rounding; a ``DenseGroupMatrix``
+    column, whose entries its type does not bound, is centred row by row about
+    the system's exact centre pair (``centre_pair``) instead, so a column's
+    offset never multiplies that rounding (issue #430).
+    """
+    sum_w, mean_x, data_gram, mean_hi, mean_lo = data
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
-    centered_scale = np.sqrt(np.maximum(np.diag(data_gram), 0.0) / sum_w)
-    max_fast_ratio = np.finfo(float).eps ** -0.25
-    well_scaled = np.all(
-        (np.abs(mean_x) <= max_fast_ratio * centered_scale)
-        | ((mean_x == 0.0) & (centered_scale == 0.0))
-    )
-    if well_scaled:
-        weighted_z = W * z_centered
-        rhs = dm.rmatvec(weighted_z) - mean_x * float(np.sum(weighted_z))
-    else:
-        rhs = centered_rhs(
-            dm=dm,
-            W=W,
-            mean_x=mean_x,
-            z_centered=z_centered,
-        )
-    return sum_w, mean_x, mean_z, data_gram, _freeze(rhs)
+    weighted_z = W * z_centered
+    rhs = dm.rmatvec(weighted_z) - mean_x * float(np.sum(weighted_z))
+    dense = dense_columns(dm)
+    if np.any(dense):
+        centre = mean_x if mean_hi is None else mean_hi
+        centred = dense_centred_rmatvec(dm, weighted_z, centre, mean_lo)
+        rhs = np.where(dense, centred, rhs)
+    return sum_w, mean_x, mean_z, data_gram, _freeze(rhs), mean_hi, mean_lo
 
 
 def build_centered_system(
@@ -392,9 +433,10 @@ def build_centered_system(
     if not np.isfinite(sum_w) or sum_w <= 0.0:
         raise ValueError("working weights must have a positive finite sum")
     if _data is not None:
-        return _attach_centered_penalty(
-            *_refresh_centered_data_rhs(dm=dm, W=W, z_off=z_off, data=_data), penalty
+        *refreshed, mean_hi, mean_lo = _refresh_centered_data_rhs(
+            dm=dm, W=W, z_off=z_off, data=_data
         )
+        return _attach_centered_penalty(*refreshed, penalty, mean_hi=mean_hi, mean_lo=mean_lo)
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
     packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
@@ -485,37 +527,48 @@ def build_centered_system(
             profile["centered_raw_moment_hits"] = profile.get("centered_raw_moment_hits", 0) + 1
 
     if packed is None:
-        mean_x = shifted_weighted_mean(dm, W, sum_w)
+        mean_x, mean_hi, mean_lo = weighted_mean_pair(dm, W, sum_w)
         data_gram, rhs = centered_gram_rhs(
             dm=dm,
             W=W,
-            mean_x=mean_x,
+            mean_x=mean_hi,
             z_centered=z_centered,
+            mean_lo=mean_lo,
         )
-    else:
-        mean_x, data_gram, rhs = packed
+        return _attach_centered_penalty(
+            sum_w, mean_x, mean_z, data_gram, rhs, penalty, mean_hi=mean_hi, mean_lo=mean_lo
+        )
+    mean_x, data_gram, rhs = packed
     return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
 
 
-def shifted_weighted_mean(dm: DesignMatrix, W: NDArray, sum_w: float) -> NDArray:
-    """``sum W x / sum W`` per column, each dense column taken about one of its own rows.
+def weighted_mean_pair(
+    dm: DesignMatrix, W: NDArray, sum_w: float
+) -> tuple[NDArray, NDArray, NDArray | None]:
+    """``(mean_x, hi, lo)``: the weighted column mean and the exact pair it rounds.
 
     One-engine design §3.2 applied to gram's centred system: a
-    ``DenseGroupMatrix`` column is averaged as ``x_ref + sum W (x - x_ref) /
-    sum W`` with ``x_ref`` the first row of positive weight, so a column
-    constant on its weighted rows has mean exactly ``x_ref`` and centres to
-    exact zeros.  The unshifted ``sum W x / sum W`` rounds to ``x (1 + d)``,
-    ``|d| <~ n eps``, and leaves a centred diagonal ``sum W (x d)^2`` at the
-    rounding level whose Jacobi-scaled rank decision then keeps or drops the
-    direction with the rounding of each iterate's weights: the REML objective
-    moved by ``~log(eps^2)/2 ~ 30`` between iterates while its gradient did not
-    (stage-1 verifier, the Gamma/log constant-column fit).  Every other column
-    type has entries bounded by its type and keeps ``rmatvec``.
+    ``DenseGroupMatrix`` column's mean is ``hi + lo`` with ``hi = x_ref``, the
+    first row of positive weight (exact), and ``lo = sum W (x - x_ref) / sum
+    W`` formed on rows differenced from it, so a column constant on its
+    weighted rows centres to exact zeros (the unshifted ``sum W x / sum W``
+    left a rounding-level centred diagonal whose rank decision moved the REML
+    objective by ~30 between iterates: stage-1 verifier, the Gamma/log
+    constant-column fit).  Rows are centred as ``(x - hi) - lo``, which rounds
+    at the column's spread; ``x - mean_x`` with ``mean_x = fl(hi + lo)``
+    rounds at ``u |mean|`` and adds ``sum W d d'`` (``d`` that rounding) to
+    the profiled Gram, which at a 1e16 offset moved a Gaussian fit's eta by
+    1e-3 (issue #430).  Every other column, bounded by its type, has ``hi =
+    mean_x = X'W / sum W`` and ``lo = 0``; ``lo`` is ``None`` for a design
+    without a dense column.
     """
     mean = dm.rmatvec(W) / sum_w
+    hi = mean.copy()
+    lo = np.zeros_like(mean)
     positive = np.flatnonzero(np.asarray(W) > 0.0)
-    if not positive.size:
-        return mean
+    has_dense = any(type(matrix) is DenseGroupMatrix for matrix in dm.group_matrices)
+    if not positive.size or not has_dense:
+        return mean, hi, None
     reference = int(positive[0])
     offset = 0
     for matrix in dm.group_matrices:
@@ -527,12 +580,16 @@ def shifted_weighted_mean(dm: DesignMatrix, W: NDArray, sum_w: float) -> NDArray
             for start in range(0, dm.n, _FACTOR_CHUNK_ROWS):
                 stop = min(start + _FACTOR_CHUNK_ROWS, dm.n)
                 total += (values[start:stop] - anchor).T @ W[start:stop]
+            hi[offset : offset + width] = anchor
+            lo[offset : offset + width] = total / sum_w
             mean[offset : offset + width] = anchor + total / sum_w
         offset += width
-    return mean
+    return mean, hi, lo
 
 
-def _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty):
+def _attach_centered_penalty(
+    sum_w, mean_x, mean_z, data_gram, rhs, penalty, *, mean_hi=None, mean_lo=None
+):
     """Attach a fresh trial penalty using the same numerical checks on every path."""
     penalty_symmetric = 0.5 * (penalty + penalty.T)
     hessian = data_gram + penalty_symmetric
@@ -563,6 +620,8 @@ def _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty):
         rhs=_freeze(rhs),
         penalty=_freeze(penalty_symmetric),
         hessian=_freeze(hessian),
+        mean_hi=None if mean_hi is None else _freeze(mean_hi),
+        mean_lo=None if mean_lo is None else _freeze(mean_lo),
     )
 
 

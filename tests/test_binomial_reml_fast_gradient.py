@@ -165,9 +165,21 @@ def _translated_geometry_case(translation: float):
 
 
 def _scalar_centered_correction(common) -> np.ndarray:
-    """Reference the leverage identity with scalar compensated reductions."""
+    """Reference the leverage identity with scalar compensated reductions.
+
+    Rows are centred as the fixture's geometry centres them, ``(x - x_0) -
+    d`` with ``d`` the compensated mean difference: about the rounded
+    ``mean_x`` the reference itself would carry ``u |translation|`` into
+    every row (issue #430).
+    """
     geometry = common["geometry"]
-    centered = common["dm"].toarray() - geometry.mean_x
+    design = common["dm"].toarray()
+    differences = design - design[0]
+    weights = np.asarray(geometry.weights, dtype=np.float64)
+    mean_difference = np.array(
+        [math.fsum(weights * differences[:, j]) for j in range(design.shape[1])]
+    ) / float(geometry.sum_w)
+    centered = differences - mean_difference
     inverse = common["XtWX_S_inv"]
     leverage = np.array(
         [

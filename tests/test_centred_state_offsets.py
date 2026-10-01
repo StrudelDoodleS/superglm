@@ -19,6 +19,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+from numpy.typing import NDArray
 
 from superglm import (
     Categorical,
@@ -30,6 +31,7 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.solvers.mode_score import linear_predictor
 from tests.test_factor_smooth_sz_thin_and_influence import _frame, _model, _penalized_objective
 
@@ -352,6 +354,187 @@ def test_exact_reml_weight_derivative_reads_the_centred_direction(family):
     _assert_same_reml(fit(0.0), fit(1e16))
 
 
+def _dense_binomial_state(columns: int) -> dict:
+    """Sol's reproduction: even-integer columns, binomial/logit, an identity penalty each at 4."""
+    from superglm.distributions import Binomial
+    from superglm.links import LogitLink
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.types import GroupSlice, PenaltyComponent
+
+    rng = np.random.default_rng(10)
+    n = 2400
+    X = 2.0 * rng.integers(-4, 5, size=(n, columns)).astype(float)
+    signal = 0.5 + X @ np.full(columns, 0.1)
+    y = (rng.uniform(size=n) < 1.0 / (1.0 + np.exp(-signal))).astype(float)
+    dm = DesignMatrix([DenseGroupMatrix(X[:, j : j + 1]) for j in range(columns)], n=n, p=columns)
+    groups = [GroupSlice(name=f"x{j}", start=j, end=j + 1) for j in range(columns)]
+    penalties = [
+        PenaltyComponent(
+            name=g.name,
+            group_name=g.name,
+            group_index=j,
+            group_sl=slice(j, j + 1),
+            omega_raw=np.ones((1, 1)),
+            omega_ssp=np.ones((1, 1)),
+            rank=1.0,
+            log_det_omega_plus=0.0,
+            eigvals_omega=np.ones(1),
+        )
+        for j, g in enumerate(groups)
+    ]
+    lambdas = {g.name: 4.0 for g in groups}
+    weights = np.ones(n)
+    result, inverse, _ = fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Binomial(),
+        link=LogitLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=np.zeros(n),
+        return_xtwx=True,
+        reml_penalties=penalties,
+        weight_semantics="frequency",
+    )
+    assert result.converged
+    return {
+        "dm": dm,
+        "link": LogitLink(),
+        "groups": groups,
+        "pirls_result": result,
+        "XtWX_S_inv": inverse,
+        "lambdas": lambdas,
+        "sample_weight": weights,
+        "offset_arr": np.zeros(n),
+        "distribution": Binomial(),
+        "reml_penalties": penalties,
+    }
+
+
+def _translated_state(state: dict, shift: float) -> dict:
+    """The same converged state read with every column translated by ``shift``.
+
+    The slope inverse is translation invariant; the state's centre is the
+    translated design's own (``prior_weighted_centre``), its centred
+    intercept carried to it exactly, and the stored working means translated
+    as a fit at that offset rounds them.
+    """
+    import dataclasses
+    import math
+
+    from superglm.solvers.mode_score import prior_weighted_centre
+
+    dm = state["dm"]
+    values = dm.toarray()
+    translated = DesignMatrix(
+        [DenseGroupMatrix(values[:, j : j + 1] + shift) for j in range(dm.p)], n=dm.n, p=dm.p
+    )
+    result = state["pirls_result"]
+    centre = prior_weighted_centre(translated, state["sample_weight"])
+    beta = np.asarray(result.beta, dtype=np.float64)
+    alpha = float(result.centred_intercept) + math.fsum(
+        ((centre - shift) - result.state_center) * beta
+    )
+    rank_info = result.rank_info
+    if rank_info is not None:
+        rank_info = dataclasses.replace(rank_info, mean_x=rank_info.mean_x + shift)
+    summary = result.reml_geometry
+    if summary is not None:
+        summary = dataclasses.replace(summary, mean_x=summary.mean_x + shift)
+    moved = dataclasses.replace(
+        result,
+        state_center=centre,
+        centred_intercept=alpha,
+        intercept=alpha - math.fsum(centre * beta),
+        rank_info=rank_info,
+        reml_geometry=summary,
+    )
+    return {**state, "dm": translated, "pirls_result": moved}
+
+
+def _correction_magnitude(state: dict) -> NDArray:
+    """``M_j``: the sum of the magnitudes both W-correction routes add, per penalty.
+
+    Both routes sum, over rows, ``0.5 dW_i (x~_i' dbeta_j) (x~_i' H^-1 x~_i +
+    1 / sum W)``; their rounding is at most ``gamma_k`` of ``M_j``, the same sum
+    of magnitudes, ``x~`` the centred rows and ``dbeta_j = -H^-1 S_j beta``.
+    """
+    dm, result = state["dm"], state["pirls_result"]
+    X = dm.toarray()
+    eta = linear_predictor(dm, result, None)
+    mu = 1.0 / (1.0 + np.exp(-eta))
+    weights = mu * (1.0 - mu)
+    centred = X - (weights @ X) / weights.sum()
+    dweights = np.abs(weights * (1.0 - 2.0 * mu))
+    inverse = np.asarray(state["XtWX_S_inv"], dtype=np.float64)
+    leverage = np.einsum("ij,jk,ik->i", np.abs(centred), np.abs(inverse), np.abs(centred))
+    magnitudes = []
+    for j in range(dm.p):
+        penalty_beta = np.zeros(dm.p)
+        penalty_beta[j] = 4.0 * result.beta[j]
+        dbeta = np.abs(inverse @ penalty_beta)
+        magnitudes.append(
+            0.5
+            * float(np.sum(dweights * (np.abs(centred) @ dbeta) * (leverage + 1.0 / weights.sum())))
+        )
+    return np.array(magnitudes)
+
+
+@pytest.mark.parametrize("columns", [1, 4])
+@pytest.mark.parametrize("route", ["ordinary", "leverage"])
+def test_the_weight_correction_centres_its_grams_and_leverage_rows(columns, route):
+    """The W(rho) correction's signed Grams and leverage rows read the exact centre pair.
+
+    Sol's reproduction: the same converged binomial/logit state, its columns
+    translated exactly by 1e16.  The derivative Grams and
+    ``_leverage_gradient_rhs`` centred rows about the rounded ``mean_x``: the
+    correction moved 9.2% (ordinary route) and 17.1% (leverage route, the
+    default for binomial/logit exact REML with four or more penalties).
+    Centred as ``(x - c) - d`` the two readings agree to the rounding of the
+    sums, ``4 gamma_{n+2p+5} M_j`` (``_correction_magnitude``).  Mutation:
+    ``mean_lo`` dropped from ``centered_signed_grams`` or from
+    ``_leverage_gradient_rhs``.
+    """
+    from superglm.reml.w_derivatives import reml_w_correction
+
+    state = _dense_binomial_state(columns)
+    moved = _translated_state(state, 1e16)
+    leverage = route == "leverage"
+    base = reml_w_correction(**state, gradient_only=leverage)
+    shifted = reml_w_correction(**moved, gradient_only=leverage)
+    assert base is not None and shifted is not None
+    n, p = state["dm"].n, state["dm"].p
+    bound = 4.0 * _gamma(n + 2 * p + 5) * _correction_magnitude(state)
+    np.testing.assert_array_less(np.abs(shifted[0] - base[0]), bound)
+
+
+def test_exact_reml_leverage_route_is_translation_invariant():
+    """Binomial/logit exact REML with four penalties (the leverage route) at a 1e16 offset.
+
+    A numeric column on the even-integer grid beside four P-splines, no
+    random effect, so the gram backend's dense factor and ``gradient_only``
+    W-correction run.  Mutation: as the previous test, or the gram rows
+    centred about the rounded ``mean_x``.
+    """
+    rng = np.random.default_rng(11)
+    n = 2400
+    z = 2.0 * rng.integers(-4, 5, n)
+    s = rng.uniform(size=(n, 4))
+    eta = 0.2 + 0.1 * z + 0.6 * np.sin(2 * np.pi * s).sum(axis=1)
+    y = (rng.uniform(size=n) < 1.0 / (1.0 + np.exp(-eta))).astype(float)
+
+    def fit(shift: float) -> SuperGLM:
+        features = {"x": Numeric(), **{f"s{j}": Spline(kind="ps", k=8) for j in range(4)}}
+        frame = pd.DataFrame({"x": shift + z, **{f"s{j}": s[:, j] for j in range(4)}})
+        model = SuperGLM(family="binomial", features=features, selection_penalty=0)
+        return _fit_reml(model, frame, y)
+
+    base, shifted = fit(0.0), fit(1e16)
+    assert shifted._reml_profile["direct_backend"] == "gram"
+    _assert_same_reml(base, shifted)
+
+
 # ------------------------------------------------------ 5. drop-term holdout
 def test_holdout_drop_term_reads_the_public_predictor():
     """``term_drop_diagnostics(mode="holdout")`` scores the fit's centred predictor (item 5).
@@ -418,54 +601,89 @@ def test_a_folded_compensated_intercept_still_predicts_the_fit(base):
     assert model.metrics(X, y).deviance == 0.0
 
 
-# ------------------------------------------- 7. the gram path's intercept
-@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
-@pytest.mark.parametrize("family", ["poisson", "gamma"])
-def test_gram_and_qr_intercepts_read_the_working_means_about_the_centre(family, direct_solve):
-    """The gram and QR iterations' ``alpha = mean_z - (mean_x - c)' beta`` (item 7).
+# ------------------------------------- 7. the gram and QR paths at 1e16
+def _even_grid_frame(shift: float):
+    """An even-integer column (exact at 1e16) beside a four-level categorical."""
+    rng = np.random.default_rng(1)
+    n = 2400
+    z = 2.0 * rng.integers(-4, 5, n)
+    s = rng.uniform(size=n)
+    c = rng.integers(0, 4, n)
+    eta = 0.3 + 0.1 * z + 0.4 * np.sin(2 * np.pi * s) + 0.1 * c
+    frame = pd.DataFrame(
+        {"x": shift + z, "s": s, "c": np.array([f"c{k}" for k in c], dtype=object)}
+    )
+    return rng, eta, frame
 
-    ``mean_x`` of a column at ``s`` rounds at ``u s``, so ``mean_x - c`` erred
-    by ``u s |beta|`` in every row's eta (2.7e-12 at 1e6; 4e-8 here at 1e10):
-    a non-Gaussian fit has no compensated intercept to absorb it.  The column
-    is now differenced from ``c`` before its weighted sum
-    (``mode_score.centre_offset_mean``), and the translated fit runs the same
-    centred arithmetic, so the two predictors agree to the forward error of
-    the solves, ``gamma_n kappa(H) max|eta|`` with ``kappa`` the centred
-    Hessian's condition; QR is backward stable too, so one bound covers both
-    branches.  Mutation: ``centered.mean_x - _state_center`` in ``irls_direct``'s
-    gram branch, or in its QR branch.
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_gram_and_qr_fits_are_translation_invariant_at_1e16(family, direct_solve):
+    """The gram and QR systems centre a dense column about an exact pair (items 1 and 7).
+
+    Both formed the profiled Gram (gram) or the QR's data block (QR) on rows
+    ``x - mean_x``, ``mean_x`` the one-float weighted mean.  It rounds at ``u
+    s`` at an offset ``s``, which adds ``sum W d d'`` to the Gram (``d`` that
+    rounding): at 1e16 a Gaussian fit's eta moved 1.1e-3 while reporting
+    converged and a Poisson fit ended ``step_rejected``.  The rows are now
+    ``(x - x_ref) - lo`` (``centered_system.weighted_mean_pair``): ``x - x_ref``
+    is the same exact difference at every offset and ``lo`` is formed on it,
+    so the two fits' centred systems agree to rounding and the ``(u s /
+    sigma)^2`` term is gone.  Their predictors then agree to the forward error
+    of the solves, ``gamma_n kappa(H) max|eta|``, ``kappa`` the centred
+    Hessian's condition; the intercept reads ``mean_x - c`` on centred rows
+    too (``centre_offset_mean``).  Mutation: ``mean_lo`` dropped in
+    ``build_centered_system`` (gram) or ``_centred_rows`` (QR).
     """
-    rng = np.random.default_rng(7)
-    n = 3000
-    z = np.round(rng.normal(size=n) * 2.0**19) / 2.0**19  # exact beside 1e10
-    cat = rng.integers(0, 5, n)
-    eta = 0.3 + 0.3 * z + 0.2 * (cat - 2)
-    if family == "poisson":
-        y = rng.poisson(np.exp(eta)).astype(float)
-    else:
-        y = rng.gamma(3.0, np.exp(eta) / 3.0)
-    labels = np.array([f"c{c}" for c in cat], dtype=object)
     fits = {}
-    for shift in (0.0, 1e10):
+    for shift in (0.0, 1e16):
+        rng, eta, frame = _even_grid_frame(shift)
+        if family == "poisson":
+            y = rng.poisson(np.exp(eta)).astype(float)
+        else:
+            y = 3.0 + eta + 0.3 * rng.normal(size=len(eta))
         model = SuperGLM(
             family=family,
-            features={"x": Numeric(), "cat": Categorical()},
+            features={"x": Numeric(), "c": Categorical()},
             selection_penalty=0.0,
             direct_solve=direct_solve,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            fits[shift] = model.fit(pd.DataFrame({"x": shift + z, "cat": labels}), y)
-    base, shifted = fits[0.0], fits[1e10]
-    solver = base._solver_pirls_result()
-    assert shifted._solver_pirls_result().n_iter == solver.n_iter
+            fits[shift] = model.fit(frame.drop(columns="s"), y)
+    base, shifted = fits[0.0], fits[1e16]
+    solver, shifted_solver = base._solver_pirls_result(), shifted._solver_pirls_result()
+    assert solver.converged and shifted_solver.converged
+    assert shifted_solver.termination_reason == solver.termination_reason
     eta_base = linear_predictor(base._dm, solver, None)
-    eta_shifted = linear_predictor(shifted._dm, shifted._solver_pirls_result(), None)
+    eta_shifted = linear_predictor(shifted._dm, shifted_solver, None)
+    n = len(eta_base)
     weights = np.exp(eta_base) if family == "poisson" else np.ones(n)
     design = np.column_stack([np.ones(n), np.asarray(base._dm.toarray(), dtype=np.float64)])
     kappa = float(np.linalg.cond(design.T @ (weights[:, None] * design)))
     bound = _gamma(n) * kappa * float(np.max(np.abs(eta_base)))
     np.testing.assert_array_less(np.abs(eta_shifted - eta_base), bound)
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+def test_binomial_reml_on_the_gram_and_qr_paths_at_1e16(direct_solve):
+    """Binomial REML with a spline and a numeric column at 1e16, no random effect.
+
+    On the default (gram) route it ended ``line_search_failed``.  Mutation: as
+    the previous test.
+    """
+    fits = {}
+    for shift in (0.0, 1e16):
+        rng, eta, frame = _even_grid_frame(shift)
+        y = (rng.uniform(size=len(eta)) < 1.0 / (1.0 + np.exp(-eta))).astype(float)
+        model = SuperGLM(
+            family="binomial",
+            features={"x": Numeric(), "s": Spline(kind="ps", k=8)},
+            selection_penalty=0,
+            direct_solve=direct_solve,
+        )
+        fits[shift] = _fit_reml(model, frame.drop(columns="c"), y)
+    _assert_same_reml(fits[0.0], fits[1e16])
 
 
 # ----------------------------------------------- 8. the null model's mean
@@ -486,3 +704,33 @@ def test_the_null_deviance_reads_a_correctly_rounded_mean(base):
     y = np.where(x == 0.0, base, adjacent)
     model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()}).fit(X, y)
     assert model.metrics(X, y).null_deviance == 50.0 * (adjacent - base) ** 2
+
+
+@pytest.mark.parametrize(
+    "values, weights",
+    [
+        ([0.0, 1.0, 1.0], [5e-324] * 3),
+        ([1e300, -1e300, 1.0], [1.0] * 3),
+    ],
+    ids=["subnormal_weights", "wide_range"],
+)
+def test_the_compensated_mean_scales_its_weights_and_keeps_its_error_terms(values, weights):
+    """``compensated_weighted_mean`` on subnormal weights and on values of +-1e300.
+
+    Scaling the weights by a power of two is exact, so each scaled weight here
+    is 1/2 and every product ``W v``, ``W h`` and ``W e`` is exact; ``fsum``
+    rounds each sum once, so the mean is within one rounding of the division
+    and one of the final addition, ``2 u |m*|``, of the exact rational mean.
+    The unscaled products rounded the subnormal weights to zero (0.333 for
+    2/3), and summing ``W (h + e)`` absorbed each error term before the sum
+    (0.556 for 1/3).  Mutations: drop the scaling, or sum ``W (h + e)``.
+    """
+    from fractions import Fraction
+
+    from superglm.solvers.mode_score import compensated_weighted_mean
+
+    exact = sum(Fraction(w) * Fraction(v) for v, w in zip(values, weights, strict=True)) / sum(
+        Fraction(w) for w in weights
+    )
+    mean = compensated_weighted_mean(np.array(values), np.array(weights))
+    assert abs(Fraction(mean) - exact) <= 2 * Fraction(_U) * abs(exact)

@@ -17,7 +17,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import (
-    _raw_centering_well_scaled,
     centered_gram_rhs,
     centered_signed_grams,
 )
@@ -57,7 +56,6 @@ from superglm.solvers.structured import (
     build_block_structured_system,
     build_nested_structured_system,
     centred_data_operator,
-    compact_operator_diagonal,
     get_nested_structured_layout,
     get_structured_layout,
     structured_design_matvec,
@@ -75,8 +73,14 @@ def _leverage_gradient_rhs(
     mean_x: NDArray,
     row_weights: NDArray,
     sum_w: float,
+    mean_lo: NDArray | None = None,
 ) -> NDArray:
-    """Accumulate X_c' times the exact leverage-gradient row channel."""
+    """Accumulate X_c' times the exact leverage-gradient row channel.
+
+    Rows are centred as ``(x - mean_x) - mean_lo`` when the centre is an exact
+    pair (``centered_system.weighted_mean_pair``): a dense column at an offset
+    centred about its rounded mean carried ``u |c|`` into every row.
+    """
     result = np.zeros(dm.p, dtype=np.float64)
     compensation = np.zeros(dm.p, dtype=np.float64)
     for start, stop, design in iter_grouped_design_chunks(dm):
@@ -86,6 +90,8 @@ def _leverage_gradient_rhs(
             continue
         centered = design[active]
         centered -= mean_x
+        if mean_lo is not None:
+            centered -= mean_lo
         scaled = centered * np.sqrt(np.abs(weights[active]))[:, None]
         weighted_leverage = np.sign(weights[active]) * np.einsum(
             "ij,ij->i",
@@ -416,16 +422,6 @@ def reml_w_correction(
         sum_w: float | None = float(geometry.sum_w)
         if mean_x.shape != (p,):
             raise ValueError("observed REML geometry does not match the coefficient space")
-        centered_diagonal = (
-            np.diag(geometry.centered_data_gram)
-            if isinstance(geometry.centered_data_gram, np.ndarray)
-            else compact_operator_diagonal(geometry.centered_data_gram)
-        )
-        with np.errstate(invalid="ignore", divide="ignore"):
-            centered_scale = np.sqrt(np.abs(centered_diagonal) / sum_w)
-        use_stable_signed_gram = not np.all(
-            np.isfinite(centered_scale)
-        ) or not _raw_centering_well_scaled(mean_x, centered_scale)
     elif pirls_result.rank_info is not None:
         mean_x = np.asarray(pirls_result.rank_info.mean_x, dtype=np.float64)
         if mean_x.shape != (p,):
@@ -433,20 +429,9 @@ def reml_w_correction(
         sum_w = float(pirls_result.rank_info.sum_w)
         if not np.isfinite(sum_w) or sum_w <= 0.0:
             raise ValueError("PIRLS rank metadata has an invalid working-weight sum")
-        use_stable_signed_gram = False
-        rank_data = getattr(pirls_result.rank_info, "data", None)
-        column_scale = getattr(rank_data, "column_scale", None)
-        if column_scale is not None:
-            centered_scale = np.asarray(column_scale, dtype=np.float64) / np.sqrt(sum_w)
-            if centered_scale.shape == mean_x.shape:
-                use_stable_signed_gram = not _raw_centering_well_scaled(
-                    mean_x,
-                    centered_scale,
-                )
     elif pirls_result.reml_geometry is not None:
         # In-loop fits skip rank metadata; the geometry summary carries the
-        # same centered moments and the same data-gram column scales, so the
-        # signed-gram stability policy sees identical inputs.
+        # same centered moments.
         summary = pirls_result.reml_geometry
         mean_x = np.asarray(summary.mean_x, dtype=np.float64)
         if mean_x.shape != (p,):
@@ -454,10 +439,6 @@ def reml_w_correction(
         sum_w = float(summary.sum_w)
         if not np.isfinite(sum_w) or sum_w <= 0.0:
             raise ValueError("PIRLS geometry summary has an invalid working-weight sum")
-        centered_scale = np.asarray(summary.column_scale, dtype=np.float64) / np.sqrt(sum_w)
-        use_stable_signed_gram = centered_scale.shape == mean_x.shape and (
-            not _raw_centering_well_scaled(mean_x, centered_scale)
-        )
     else:
         factor_mean = getattr(factor, "mean_x", None)
         factor_sum_w = getattr(factor, "sum_w", None)
@@ -467,20 +448,24 @@ def reml_w_correction(
         else:
             mean_x = np.asarray(factor_mean, dtype=np.float64)
             sum_w = float(factor_sum_w)
-        use_stable_signed_gram = False
 
-    # Every dense column is applied about the fit's state centre, by type
-    # (issue #430): ``X dbeta - mean_x' dbeta`` formed raw cancels ``c' dbeta``
-    # at a column's offset, ``u |c' dbeta|`` in every row's ``deta`` (at 1e16
-    # exact REML ended line_search_failed with lambda 1e-4 off).  The offset
-    # ``mean_x - c`` is formed on centred rows with the weights ``mean_x``
-    # carries: the geometry's, else the Fisher weights at the mode.
+    # Every dense column is centred about an exact pair, by type (issue #430):
+    # ``(x - c) - d`` with ``c`` the fit's state centre (else the first row) and
+    # ``d = sum W (x - c) / sum W`` formed on centred rows with the weights
+    # ``mean_x`` carries -- the geometry's, else the Fisher weights at the mode
+    # -- and its own ``sum_w``.  About the rounded ``mean_x`` the direction
+    # ``X dbeta - mean_x' dbeta``, the signed Grams and the leverage rows all
+    # cancel ``c' dbeta`` at a column's offset (at 1e16 the correction was 9.2%
+    # off, 17.1% on the leverage route, and exact REML ended
+    # line_search_failed).  Without a profiled intercept (``sum_w`` None) the
+    # operator is not centred and the pair is not formed.  The pair decides the
+    # signed-Gram route by type: centred rows beside a dense column, raw
+    # moments, whose entries their type bounds, otherwise.
     dense = dense_columns(dm)
     state_center = getattr(pirls_result, "state_center", None)
-    dense_centre: NDArray | None = None
-    dense_offset_mean: NDArray | None = None
-    if state_center is not None and np.any(dense):
-        dense_centre = np.where(dense, np.asarray(state_center, dtype=np.float64), 0.0)
+    centre_hi = mean_x
+    centre_lo: NDArray | None = None
+    if sum_w is not None and np.any(dense):
         mean_weights = (
             np.asarray(geometry.weights, dtype=np.float64)
             if geometry is not None
@@ -494,15 +479,24 @@ def reml_w_correction(
                 ),
             )
         )
-        dense_offset_mean = np.where(
-            dense,
-            centre_offset_mean(dm, mean_weights, float(np.sum(mean_weights)), dense_centre, mean_x),
-            0.0,
-        )
+        if state_center is not None:
+            anchor = np.asarray(state_center, dtype=np.float64)
+        else:
+            # a row that carries weight: a weightless row may sit anywhere
+            weighted = np.flatnonzero(mean_weights != 0.0)
+            row = int(weighted[0]) if weighted.size else 0
+            anchor = np.asarray(
+                dm.row_subset(np.array([row], dtype=np.intp)).toarray()[0], dtype=float
+            )
+        dense_anchor = np.where(dense, anchor, 0.0)
+        offset_mean = centre_offset_mean(dm, mean_weights, sum_w, dense_anchor, mean_x)
+        centre_hi = np.where(dense, dense_anchor, mean_x)
+        centre_lo = np.where(dense, offset_mean, 0.0)
+    use_stable_signed_gram = centre_lo is not None
 
     def centered_matvec(values: NDArray) -> NDArray:
         """Apply the profiled-intercept design ``X - 1 mean_x'``."""
-        rest = values if dense_centre is None else np.where(dense, 0.0, values)
+        rest = values if centre_lo is None else np.where(dense, 0.0, values)
         design_values = (
             dm.matvec(rest)
             if structured_layout is None
@@ -513,11 +507,9 @@ def reml_w_correction(
             )
         )
         product = design_values - float(mean_x @ rest)
-        if dense_centre is None or dense_offset_mean is None:
+        if centre_lo is None:
             return product
-        return product + (
-            dense_centred_matvec(dm, values, dense_centre) - float(dense_offset_mean @ values)
-        )
+        return product + dense_centred_matvec(dm, values, centre_hi, centre_lo)
 
     def centered_rmatvec(values: NDArray) -> NDArray:
         """Apply the transpose of the profiled-intercept design."""
@@ -532,10 +524,9 @@ def reml_w_correction(
         )
         total = float(np.sum(values, dtype=np.float64))
         product = transpose_values - mean_x * total
-        if dense_centre is None or dense_offset_mean is None:
+        if centre_lo is None:
             return product
-        centred = dense_centred_rmatvec(dm, values, dense_centre) - dense_offset_mean * total
-        return np.where(dense, centred, product)
+        return np.where(dense, dense_centred_rmatvec(dm, values, centre_hi, centre_lo), product)
 
     structured_group_index: int | None = None
     structured_layout = None
@@ -577,9 +568,10 @@ def reml_w_correction(
         rhs = _leverage_gradient_rhs(
             dm,
             factor.inverse,
-            mean_x,
+            centre_hi,
             dW_deta,
             sum_w,
+            mean_lo=centre_lo,
         )
         penalty_rhs = np.zeros((p, m), dtype=np.float64)
         for i, pc in enumerate(penalties):
@@ -642,7 +634,9 @@ def reml_w_correction(
     def flush_signed_grams() -> None:
         weights = [row_weights for _, row_weights, _ in pending]
         if use_stable_signed_gram:
-            grams = centered_signed_grams(dm=dm, weights=weights, mean_x=mean_x)
+            grams = centered_signed_grams(
+                dm=dm, weights=weights, mean_x=centre_hi, mean_lo=centre_lo
+            )
         else:
             moments = dm.execution_plan._signed_moments_channels(weights, fixed_support)
             grams = [
@@ -699,8 +693,9 @@ def reml_w_correction(
             result, _ = centered_gram_rhs(
                 dm=dm,
                 W=row_weights,
-                mean_x=mean_x,
+                mean_x=centre_hi,
                 z_centered=stable_gram_rhs,
+                mean_lo=centre_lo,
             )
             return result
         moments = (

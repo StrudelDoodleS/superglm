@@ -55,6 +55,7 @@ from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
     centre_offset_mean,
     centred_matvec,
+    dense_columns,
     linear_predictor,
     penalized_mode_residual,
 )
@@ -1116,10 +1117,32 @@ def total_penalty_magnitude_matvec(
     return product
 
 
-def _stable_signed_mean(dm: DesignMatrix, weights: NDArray, sum_w: float) -> NDArray:
-    """Compute a signed weighted mean without subtracting large raw moments."""
+def _stable_signed_mean_pair(
+    dm: DesignMatrix, weights: NDArray, sum_w: float
+) -> tuple[NDArray, NDArray, NDArray | None]:
+    """``(mean_x, hi, lo)``: a signed weighted mean and, on dense columns, its exact pair.
+
+    The mean is accumulated about the first row, ``anchor + total / sum_w``,
+    without subtracting large raw moments.  A ``DenseGroupMatrix`` column keeps
+    the pair ``(anchor, total / sum_w)`` so its rows centre as ``(x - hi) -
+    lo`` (``centered_system.weighted_mean_pair``, issue #430); every other
+    column centres about the rounded mean, ``lo = 0``.  ``lo`` is ``None``
+    without a dense column.
+    """
+    anchor, offset_mean = _stable_signed_offset(dm, weights, sum_w)
+    mean = anchor + offset_mean
+    dense = dense_columns(dm)
+    if not np.any(dense):
+        return mean, mean, None
+    return mean, np.where(dense, anchor, mean), np.where(dense, offset_mean, 0.0)
+
+
+def _stable_signed_offset(
+    dm: DesignMatrix, weights: NDArray, sum_w: float
+) -> tuple[NDArray, NDArray]:
+    """``(anchor, sum w (x - anchor) / sum w)`` about the first row, compensated."""
     if dm.p == 0:
-        return np.zeros(0, dtype=np.float64)
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
     anchor = np.asarray(dm.row_subset(np.array([0], dtype=np.intp)).toarray()[0], dtype=float)
     total = np.zeros(dm.p, dtype=np.float64)
     compensation = np.zeros(dm.p, dtype=np.float64)
@@ -1133,7 +1156,7 @@ def _stable_signed_mean(dm: DesignMatrix, weights: NDArray, sum_w: float) -> NDA
         updated = total + corrected
         compensation[...] = (updated - total) - corrected
         total[...] = updated
-    return anchor + total / sum_w
+    return anchor, total / sum_w
 
 
 def schur_curvature_is_negative(eigenvalues: NDArray, certificate) -> bool:
@@ -1467,20 +1490,22 @@ def build_observed_reml_geometry(
                 "observed working weights do not define a centered system at these coefficients"
             ) from error
         mean_x = centered.mean_x
+        centre, centre_lo = centered.centre_pair()
         data_gram = centered.data_gram
         hessian = centered.hessian
     else:
         if penalty is None:  # pragma: no cover - dense branch invariant
             raise RuntimeError("Dense observed geometry is missing its penalty.")
-        mean_x = _stable_signed_mean(dm, observed_w, sum_w)
+        mean_x, centre, centre_lo = _stable_signed_mean_pair(dm, observed_w, sum_w)
         # No retype seam on this branch: `centered_gram_rhs` validates shapes
         # only -- two row counts and a column count this function supplies
         # itself -- so it has nothing iterate-conditioned left to refuse.
         data_gram, _ = centered_gram_rhs(
             dm=dm,
             W=observed_w,
-            mean_x=mean_x,
+            mean_x=centre,
             z_centered=np.zeros(dm.n, dtype=np.float64),
+            mean_lo=centre_lo,
         )
         hessian = 0.5 * (data_gram + data_gram.T) + penalty
 
@@ -1502,7 +1527,8 @@ def build_observed_reml_geometry(
                     dm,
                     observed_w,
                     penalty,
-                    center=mean_x,
+                    center=centre,
+                    center_lo=centre_lo,
                 )
             )
         except ValueError as error:

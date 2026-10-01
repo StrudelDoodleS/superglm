@@ -49,10 +49,15 @@ def _gram_bound(centered, weights):
     return 8 * gamma * (np.abs(centered).T @ (np.abs(weights)[:, None] * np.abs(centered)))
 
 
-def _serial_signed_grams(*, dm, weights, mean_x, chunk_size=8192):
+def _serial_signed_grams(*, dm, weights, mean_x, chunk_size=8192, mean_lo=None):
     return [
         centered_gram_rhs(
-            dm=dm, W=w, mean_x=mean_x, z_centered=np.zeros(dm.n), chunk_size=chunk_size
+            dm=dm,
+            W=w,
+            mean_x=mean_x,
+            z_centered=np.zeros(dm.n),
+            chunk_size=chunk_size,
+            mean_lo=mean_lo,
         )[0]
         for w in weights
     ]
@@ -291,11 +296,15 @@ def test_only_second_order_computes_mean_derivative_transposes(monkeypatch, orde
 
 
 @pytest.mark.parametrize(
-    "route", ["well_scaled", "single", "second_order", "small_budget", "gradient_only"]
+    "route", ["no_dense", "single", "second_order", "small_budget", "gradient_only"]
 )
 def test_other_routes_do_not_batch_signed_grams(monkeypatch, route):
-    kwargs = _correction_fixture(
-        p=1 if route == "single" else 2, shift=0 if route == "well_scaled" else 1e8
+    # The centred-row kernel runs by type, beside a dense column at any offset;
+    # a design without one keeps the execution plan's signed moments.
+    kwargs = (
+        _correction_fixture(p=3, shift=0, storage="mixed")
+        if route == "no_dense"
+        else _correction_fixture(p=1 if route == "single" else 2, shift=1e8)
     )
     if route == "small_budget":
         monkeypatch.setattr(w_derivatives, "_SIGNED_GRAM_BATCH_BYTES", 1)

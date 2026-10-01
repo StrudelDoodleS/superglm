@@ -369,12 +369,21 @@ def dense_columns(dm: DesignMatrix) -> NDArray:
     return mask
 
 
-def dense_centred_matvec(dm: DesignMatrix, values: NDArray, center: NDArray) -> NDArray:
+def _dense_rows(matrix, start, stop, centre, centre_lo):
+    """Rows ``start:stop`` of a dense block, ``(x - c) - c_lo`` (``c_lo`` ``None``: ``x - c``)."""
+    rows = matrix.M[start:stop] - centre
+    return rows if centre_lo is None else rows - centre_lo
+
+
+def dense_centred_matvec(
+    dm: DesignMatrix, values: NDArray, center: NDArray, center_lo: NDArray | None = None
+) -> NDArray:
     """``(X_d - 1 c_d') v_d`` over the ``DenseGroupMatrix`` blocks only, centred row by row.
 
     The dense blocks' share of ``centred_matvec`` in its fixed chunks, for a
     caller that applies every other block through its own (structured)
-    product.
+    product.  ``center_lo`` makes the centre an exact pair, rows ``(x - c) -
+    c_lo`` (``centered_system.weighted_mean_pair``).
     """
     result = np.zeros(dm.n)
     values = np.asarray(values, dtype=np.float64)
@@ -384,15 +393,21 @@ def dense_centred_matvec(dm: DesignMatrix, values: NDArray, center: NDArray) -> 
         if type(matrix) is DenseGroupMatrix:
             part = values[offset : offset + width]
             centre = center[offset : offset + width]
-            for lo in range(0, dm.n, _CHUNK):
-                hi = min(lo + _CHUNK, dm.n)
-                result[lo:hi] += (matrix.M[lo:hi] - centre) @ part
+            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            for start in range(0, dm.n, _CHUNK):
+                stop = min(start + _CHUNK, dm.n)
+                result[start:stop] += _dense_rows(matrix, start, stop, centre, centre_lo) @ part
         offset += width
     return result
 
 
-def dense_centred_rmatvec(dm: DesignMatrix, rows: NDArray, center: NDArray) -> NDArray:
-    """``(X_d - 1 c_d')' r`` on the ``DenseGroupMatrix`` columns (zero elsewhere), centred row by row."""
+def dense_centred_rmatvec(
+    dm: DesignMatrix, rows: NDArray, center: NDArray, center_lo: NDArray | None = None
+) -> NDArray:
+    """``(X_d - 1 c_d')' r`` on the ``DenseGroupMatrix`` columns (zero elsewhere), centred row by row.
+
+    ``center_lo`` as ``dense_centred_matvec``.
+    """
     result = np.zeros(dm.p)
     rows = np.asarray(rows, dtype=np.float64)
     offset = 0
@@ -400,10 +415,12 @@ def dense_centred_rmatvec(dm: DesignMatrix, rows: NDArray, center: NDArray) -> N
         width = matrix.shape[1]
         if type(matrix) is DenseGroupMatrix:
             centre = center[offset : offset + width]
+            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
             accumulated = np.zeros(width)
-            for lo in range(0, dm.n, _CHUNK):
-                hi = min(lo + _CHUNK, dm.n)
-                accumulated += (matrix.M[lo:hi] - centre).T @ rows[lo:hi]
+            for start in range(0, dm.n, _CHUNK):
+                stop = min(start + _CHUNK, dm.n)
+                block = _dense_rows(matrix, start, stop, centre, centre_lo)
+                accumulated += block.T @ rows[start:stop]
             result[offset : offset + width] = accumulated
         offset += width
     return result
@@ -483,28 +500,41 @@ def two_sum(a, b):
 
 
 def compensated_weighted_mean(values: NDArray, weights: NDArray) -> float:
-    """``sum w v / sum w`` refined once with an error-free residual (``centred_intercept_remainder``).
+    """``m* = sum w v / sum w``, refined once with an exact residual, the sums compensated.
 
-    ``m0 = np.average(v, w)`` (pairwise or BLAS summation) errs by up to
-    ``gamma_n mean_w |v|``, which on a two-level sample of adjacent floats
-    is 1.5 ulp: the midpoint ``m*`` is no float, and ``m0`` landed an ulp
-    beyond either neighbour.  One step of iterative refinement with the
-    residual formed by TwoSum (``v - m0 = h + e`` exactly) returns ``m0 + d``,
-    ``d = sum w (h + e) / sum w``:
+    The weights are first scaled by ``2^-e``, ``e`` the exponent of the largest
+    (``frexp``), which is exact and puts every product in range: a subnormal
+    weight no longer rounds ``w v`` to zero.  With ``W`` the scaled weights,
+    ``T = fsum(W)``, ``m0 = fsum(W v) / T`` and the residual formed exactly by
+    TwoSum, ``v - m0 = h + e``, the correction sums the heads and the errors
+    as separate terms of one ``math.fsum`` (Shewchuk; correctly rounded), so
+    an error term is never absorbed into its own head before the sum (it
+    was, and the ``1e300, -1e300, 1`` sample returned 0.556):
 
-        |m - m*| <= u |m*| + gamma_{n+2} sum w |v - m0| / sum w + O(u^2) mean_w |v|,
+        m = fl(m0 + fl(fsum(W h, W e) / T)),
+        |m - m*| <= u |m*| + gamma_4 sum w |v - m0| / sum w + 4 n 2^-1075,
 
-    which scales with the values' spread about their mean, not with ``|m|``.
-    On the adjacent-float sample every quantity is exact and ``m`` is ``m*``
-    correctly rounded.  ``m0`` when the residual is not finite.
+    the last term the absolute error of products that underflow (``u`` the
+    unit roundoff, Higham 2002 §2.2; Demmel 1984 for gradual underflow).  It
+    scales with the values' spread about the mean, not with ``|m|``: on two
+    levels of adjacent floats every quantity is exact and ``m`` is ``m*``
+    correctly rounded.  Falls back to ``np.average`` when a sum overflows.
     """
     v = np.asarray(values, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)
-    first = float(np.average(v, weights=w))
-    head, error = two_sum(v, -first)
-    with np.errstate(over="ignore", invalid="ignore"):
-        correction = float(np.sum(w * head + w * error)) / float(np.sum(w))
-    return first + correction if math.isfinite(correction) else first
+    largest = float(np.max(w, initial=0.0))
+    if not largest > 0.0 or not math.isfinite(largest):
+        return float(np.average(v, weights=w))
+    scaled = np.ldexp(w, -math.frexp(largest)[1])
+    try:
+        total = math.fsum(scaled)
+        first = math.fsum(scaled * v) / total
+        head, error = two_sum(v, -first)
+        correction = math.fsum(np.concatenate((scaled * head, scaled * error))) / total
+    except OverflowError:
+        return float(np.average(v, weights=w))
+    mean = first + correction
+    return mean if math.isfinite(mean) else float(np.average(v, weights=w))
 
 
 def centred_intercept_remainder(

@@ -324,6 +324,19 @@ def _evaluate_scop_trial(
     return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
+def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
+    """``X`` centred about the system's exact centre pair, ``(X - hi) - lo``.
+
+    A dense column at an offset is centred about its anchor exactly and then
+    by the small remainder (``centered_system.weighted_mean_pair``); about the
+    rounded ``mean_x`` the QR's data block would carry ``sqrt(W) d`` per row,
+    ``d`` that rounding (issue #430).
+    """
+    centre, centre_lo = system.centre_pair()
+    rows = X - centre
+    return rows if centre_lo is None else rows - centre_lo
+
+
 def _structured_score_centre(
     system, factor, dm: DesignMatrix, W: NDArray, state_center: NDArray | None
 ) -> tuple:
@@ -1790,12 +1803,14 @@ def _fit_irls_direct_once(
         ):
             return cached
 
+        centre, centre_lo = system.centre_pair()
         if response is None:
             factor = grouped_augmented_factor(
                 dm,
                 W_current,
                 system.penalty,
-                center=system.mean_x,
+                center=centre,
+                center_lo=centre_lo,
             )
             transformed_rhs = None
         else:
@@ -1804,7 +1819,8 @@ def _fit_irls_direct_once(
                 W_current,
                 system.penalty,
                 response=response,
-                center=system.mean_x,
+                center=centre,
+                center_lo=centre_lo,
             )
         factor_decomposition = decompose_factor(
             factor,
@@ -2090,7 +2106,7 @@ def _fit_irls_direct_once(
             z_off = z - offset
             centered = get_centered_system(W, z_off)
             _last_working_centered = centered
-            A_data = sqrtW[:, None] * (_X_full - centered.mean_x)
+            A_data = sqrtW[:, None] * _centred_rows(_X_full, centered)
             A = np.vstack([A_data, _L_aug[1:, 1:]])
             rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(p)])
             iteration_rank = decompose_factor(A, retain_factor_solve=True)
@@ -3635,7 +3651,7 @@ def _fit_irls_direct_once(
                 raise RuntimeError("fit statistics require generic REML geometry")
             if _use_qr:
                 sqrtW = np.sqrt(W)
-                A_data_final = sqrtW[:, None] * (_X_full - centered_final.mean_x)
+                A_data_final = sqrtW[:, None] * _centred_rows(_X_full, centered_final)
                 data_rank = decompose_factor(A_data_final) if compute_rank_info else None
                 augmented_rank = reml_slope_rank
             else:
@@ -3656,11 +3672,13 @@ def _fit_irls_direct_once(
                         certification = certify_centered_factor(centered_final, W)
                         data_rank = certification.decomposition
                     else:
+                        final_centre, final_centre_lo = centered_final.centre_pair()
                         data_rank = decompose_factor(
                             grouped_weighted_factor(
                                 dm,
                                 W,
-                                center=centered_final.mean_x,
+                                center=final_centre,
+                                center_lo=final_centre_lo,
                             )
                         )
                 augmented_rank = reml_slope_rank
