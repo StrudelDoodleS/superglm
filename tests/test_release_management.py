@@ -249,6 +249,28 @@ def test_repository_guidance_pins_review_thread_handling() -> None:
     assert "`resolveReviewThread`" in text
 
 
+def test_repository_guidance_pins_the_numerical_policy() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    section = agents.split("## Numerical policy", maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+    # Whitespace is normalised, so a sentence survives any rewrapping.
+    text = " ".join(section.split())
+
+    assert "IEEE binary128 (emulated in software) on Linux ARM64" in text
+    assert "are banned in production code" in text
+    assert "only to produce a correctly rounded float64 value" in text
+    assert "It never computes, strengthens or validates an error bound." in text
+    assert "Higher-precision validation (extended dtypes, exact rationals, mpmath)" in text
+    assert "a formula quoted from a source written in `eps` says so" in text
+    assert "holds only when no underflow or overflow occurs" in text
+    assert "`|e| <= 2**-1075`" in text
+    assert "Overflow has no finite error bound." in text
+    assert "One `nextafter` covers one rounding, not a chain of them." in text
+    assert "including those that form and apply the factor" in text
+    assert "never a bare absolute `eps`" in text
+    assert "native Windows, macOS and Linux ARM64 regression coverage" in text
+    assert "dtype epsilon" not in text
+
+
 def test_pull_request_template_records_impact_as_advice() -> None:
     template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
 

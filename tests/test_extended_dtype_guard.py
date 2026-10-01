@@ -1,8 +1,9 @@
 """Production numerics must not name a platform-dependent extended dtype.
 
-``np.longdouble`` is float64 on Windows and macOS ARM and 80-bit elsewhere, so
-code that relies on it behaves differently per platform (see AGENTS.md,
-"Numerical policy"). Tests may still use extended types as inputs.
+``np.longdouble`` is float64 on Windows and macOS ARM64, the x87 80-bit format
+on Linux x86-64 and IEEE binary128 on Linux ARM64, so code that relies on it
+behaves differently per platform (see AGENTS.md, "Numerical policy"). Tests may
+still use extended types as inputs.
 """
 
 import ast

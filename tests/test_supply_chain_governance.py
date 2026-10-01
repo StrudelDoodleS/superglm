@@ -240,7 +240,7 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert '      - ".test_durations"' in header
 
     cases = _compatibility_cases(compatibility_job)
-    assert len(cases) == 16
+    assert len(cases) == 20
     assert set(cases) == {
         (version, os, group, label, suffix)
         for version, os, suffix in (
@@ -248,6 +248,7 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
             ("3.14", "ubuntu-latest", ""),
             ("3.13", "windows-2025", " · Windows"),
             ("3.13", "macos-15", " · macOS ARM64"),
+            ("3.13", "ubuntu-24.04-arm", " · Linux ARM64"),
         )
         for group, label in enumerate("ABCD", start=1)
     }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import weakref
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal, cast
 
 import numpy as np
@@ -65,6 +65,8 @@ from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
 )
 from superglm.links import IdentityLink, Link, LogLink
+from superglm.reml._compensated import _dot2_quadratic_form, _native_operand
+from superglm.reml._compensated import _nonzero_entries as _penalty_entries
 from superglm.solvers.rank import (
     RankDecomposition,
     decompose_gram,
@@ -100,6 +102,15 @@ class _SolverContext:
     dense_matrices: tuple[NDArray[np.float64], ...] | None
     coefficient_face: PenaltyFace | None
     likelihood_cache: _LikelihoodCache | None = None
+    # The penalty's nonzero entries in row-major order. Derived, never passed:
+    # __post_init__ rebuilds them with every context, including one that
+    # dataclasses.replace derives with a new penalty.
+    penalty_entries: tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64]] = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "penalty_entries", _penalty_entries(self.penalty))
 
 
 @dataclass(frozen=True)
@@ -637,13 +648,14 @@ def _validated_context(
         matrix.shape[0] != n_observations for matrix in dense_matrices
     ):
         raise ValueError("memoised dense matrices do not match the layout")
+    penalty_matrix = _readonly(penalty_matrix)
     return _SolverContext(
         family=family,
         fisher_family=fisher_family,
         layout=layout,
         response=response,
         likelihood_plan=root_likelihood_plan,
-        penalty=_readonly(penalty_matrix),
+        penalty=penalty_matrix,
         links=links,
         coefficient_curvature=coefficient_curvature,
         chunk_size=resolved_chunk_size,
@@ -693,7 +705,9 @@ def _evaluate_state_unmeasured(
                 chunk_size=context.chunk_size,
                 likelihood_cache=context.likelihood_cache,
             )
-            penalty_value = 0.5 * float(coefficient_values @ context.penalty @ coefficient_values)
+            penalty_value = _half_penalty_quadratic(
+                context.penalty, coefficient_values, context.penalty_entries
+            )
             penalized_optimizing = likelihood.optimizing_log_likelihood - penalty_value
             penalized_reported = likelihood.log_likelihood - penalty_value
             if not np.isfinite(penalized_optimizing) or not np.isfinite(penalized_reported):
@@ -756,7 +770,9 @@ def _evaluate_state_unmeasured(
         )
         carrier = float(np.sum(natural.parameter_independent_carrier, dtype=np.float64))
         log_likelihood = float(optimizing_log_likelihood + carrier)
-        penalty_value = 0.5 * float(coefficient_values @ context.penalty @ coefficient_values)
+        penalty_value = _half_penalty_quadratic(
+            context.penalty, coefficient_values, context.penalty_entries
+        )
         penalized_optimizing = optimizing_log_likelihood - penalty_value
         penalized_reported = log_likelihood - penalty_value
         if not np.isfinite(penalized_optimizing) or not np.isfinite(penalized_reported):
@@ -835,7 +851,7 @@ def _evaluate_fused_trial(
             )
     except chunking._TrialDerivativeError:
         return None
-    penalty_value = 0.5 * float(values @ context.penalty @ values)
+    penalty_value = _half_penalty_quadratic(context.penalty, values, context.penalty_entries)
     optimizing = likelihood.optimizing_log_likelihood - penalty_value
     reported = likelihood.log_likelihood - penalty_value
     if not np.isfinite(optimizing) or not np.isfinite(reported):
@@ -960,6 +976,50 @@ def _measured_geometry(
 ) -> DenseJointGeometry:
     with measure_phase(phase_recorder, "curvature_gradient_assembly"):
         return _geometry(context, state, source)
+
+
+def _half_penalty_quadratic(
+    penalty: NDArray,
+    coefficients: NDArray,
+    entries: tuple[NDArray, NDArray, NDArray] | None = None,
+) -> float:
+    """Return ``0.5 * b' P b`` without the naive form's cancellation noise.
+
+    ``entries`` are ``P``'s nonzero entries from ``_penalty_entries``; the
+    solver context builds them once per solve. Zero products and their sums
+    are exact, so the naive form's error, to first order, is
+    ``gamma_k |b|' |P| |b|``, with ``k`` the most nonzeros in a row of ``P``
+    plus the number of nonzero rows. With a smoothing parameter at its cap,
+    ``P`` scales a penalty whose null space holds O(1) coefficients, so the
+    terms reach ``1e11`` while ``b' P b`` is near ``1e-9``; that error then
+    exceeds the objective change of a Newton step, and whether the line search
+    accepts the step follows the sign of round-off, which differs between BLAS
+    kernels and platforms. Dot2 rows and a Dot2 outer product, over the nonzero entries of
+    ``P``, bound the error by ``u |b' P b| + u |b|' |P b|`` plus a
+    ``gamma_n**2`` term (see ``_dot2_quadratic_form``). An operand or product
+    outside the normal range falls back to the naive form.
+
+    The penalized score keeps the plain ``P @ b``. Its row ``i`` errs by at
+    most ``gamma_k_i (|P| |b|)_i``, ``k_i`` the nonzeros in that row (at most a
+    penalty block's width), which is the order of the change of up to
+    ``2u (|P| |b|)_i`` that one unit in the last place of each coefficient makes
+    to ``(P b)_i``. So at a cap the score of a representable ``b`` cannot in
+    general be resolved below that level, and stationarity there is certified
+    through the Newton decrement, not the score.
+    """
+    values = _native_operand(coefficients)
+    matrix = np.asarray(penalty, dtype=np.float64)
+    if values.ndim != 1 or matrix.shape != (values.size, values.size):
+        # The kernel indexes the coefficients without bounds checks, so a pair
+        # that does not conform takes the plain form, which raises numpy's own
+        # ValueError, exactly as the penalty value did before the kernel.
+        return 0.5 * float(values @ matrix @ values)
+    if entries is None:
+        entries = _penalty_entries(matrix)
+    quadratic, valid = _dot2_quadratic_form(*entries, values)
+    if not valid:
+        quadratic = values @ matrix @ values
+    return 0.5 * float(quadratic)
 
 
 def _relative_score(score: NDArray, objective: float) -> float:
@@ -1594,7 +1654,7 @@ def _reuse_observed_initial_result(
         score_data = record.score_data
         data_curvature = record.data_curvature
 
-    penalty_value = 0.5 * float(coefficients @ context.penalty @ coefficients)
+    penalty_value = _half_penalty_quadratic(context.penalty, coefficients, context.penalty_entries)
     penalized_optimizing = float(optimizing - penalty_value)
     penalized_reported = float(source.log_likelihood - penalty_value)
     score_penalized = score_data - context.penalty @ coefficients
@@ -1894,7 +1954,9 @@ def _fit_dense_fixed_lambda_core(
             terminal_reduced_rank = curvature.decomposition
             terminal_rank = face.lift_rank_decomposition(terminal_reduced_rank)
         terminal_score_geometry = observed_geometry
-        penalty_value = 0.5 * float(state.coefficients @ context.penalty @ state.coefficients)
+        penalty_value = _half_penalty_quadratic(
+            context.penalty, state.coefficients, context.penalty_entries
+        )
         if context.chunk_size is None:
             if state.eta is None or state.theta is None:
                 raise RuntimeError("dense terminal state is missing predictor values")
