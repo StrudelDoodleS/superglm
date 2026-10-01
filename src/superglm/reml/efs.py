@@ -190,6 +190,7 @@ def optimize_efs_reml(
     penalties, penalty_caches, penalty_ranks = build_penalty_context(
         dm.group_matrices,
         reml_groups,
+        _reuse_raw_from=penalties,
     )
     warm_beta = _map_beta_between_bases(boot_result.beta, old_gms, dm.group_matrices, groups)
     warm_intercept = float(boot_result.intercept)
@@ -410,6 +411,7 @@ def optimize_efs_reml(
             penalties, penalty_caches, penalty_ranks = build_penalty_context(
                 dm.group_matrices,
                 reml_groups,
+                _reuse_raw_from=penalties,
             )
             cheap_iter = False
         else:
@@ -422,7 +424,9 @@ def optimize_efs_reml(
     if cheap_iter and converged:
         dm = rebuild_dm(lambdas, sample_weight)
         # R_inv changed -> refresh caches and penalties for the objective computation
-        penalties, penalty_caches, _ = build_penalty_context(dm.group_matrices, reml_groups)
+        penalties, penalty_caches, _ = build_penalty_context(
+            dm.group_matrices, reml_groups, _reuse_raw_from=penalties
+        )
 
     final_result = fit_pirls(
         X=dm,

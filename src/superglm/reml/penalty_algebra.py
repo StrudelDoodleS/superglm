@@ -809,6 +809,12 @@ class _PenaltyGroupGeometry:
             return self.last_evaluation
         if self.coordinate_map is not None and np.any(values == 0):
             try:
+                if not self.ssp_roots:
+                    # A single-component raw target transports its root only
+                    # when a face needs it; the logdet never evaluates one.
+                    self.ssp_roots, self.ssp_root_errors = _ssp_component_roots(
+                        self.get_support(), self.coordinate_map
+                    )
                 result = self._evaluate_face(values)
             except PenaltyNumericalError:
                 if self.ssp_refined:
@@ -912,6 +918,7 @@ def _attach_context_geometry(
     ssp_roots=(),
     ssp_errors=(),
     raw_family=None,
+    volume=None,
 ) -> None:
     if not grouped or any(component.omega_ssp is None for component in grouped):
         return
@@ -937,7 +944,12 @@ def _attach_context_geometry(
     if coordinate_map is not None:
         # Rank queries also rely on injectivity; certify it before exposing
         # the raw rank through this context, independently of positive weights.
-        geometry.volume = _support_coordinate_volume(support, geometry.coordinate_map)
+        # A caller may pass the volume it already certified on this map.
+        geometry.volume = (
+            _support_coordinate_volume(support, geometry.coordinate_map)
+            if volume is None
+            else volume
+        )
         geometry.volume_activity = tuple(True for _ in grouped)
     for component in grouped:
         component._penalty_geometry = geometry
@@ -1860,7 +1872,7 @@ def build_penalty_components(
         group_components: list[PenaltyComponent] = []
         raw_support = None
         raw_coordinate_map = None
-        raw_family = reused_geometry = None
+        raw_family = reused_geometry = raw_volume = None
         group_ssp_roots = group_ssp_errors = ()
         matrix_errors = []
 
@@ -2062,6 +2074,21 @@ def build_penalty_components(
                     lambda_policy=lp_map.get(g.name) or lp_map.get("_default"),
                 )
             )
+            raw = (
+                None
+                if force_solver_rank
+                else _single_penalty_raw_family(gm, group_components, rank, _reuse_raw_from)
+            )
+            if raw is not None:
+                (
+                    raw_support,
+                    raw_family,
+                    reused_geometry,
+                    raw_coordinate_map,
+                    group_ssp_roots,
+                    group_ssp_errors,
+                    raw_volume,
+                ) = raw
         _attach_context_geometry(
             group_components,
             support=raw_support,
@@ -2070,6 +2097,7 @@ def build_penalty_components(
             ssp_roots=group_ssp_roots,
             ssp_errors=group_ssp_errors,
             raw_family=raw_family,
+            volume=raw_volume,
         )
         if can_cache_group and _reuse_fixed_from is None:
             # Only the cache-backed producer needs handoff authority. Entry
@@ -2423,6 +2451,71 @@ def compute_logdet_s_derivatives(
     return evaluation.gradient, evaluation.hessian
 
 
+def _single_penalty_raw_family(gm, grouped, declared_rank, source):
+    """Select one dense penalty on its raw basis, independently of the SSP map.
+
+    The solver penalty is ``C.T @ Omega @ C`` for the group's SSP coordinate
+    map ``C = R_inv``, which discrete REML and EFS rebuild whenever lambda
+    changes. With ``U`` an orthonormal basis of range(Omega) and
+    ``Omega = U L U.T``, the nonzero eigenvalues of ``C.T U L U.T C`` are those
+    of ``L^1/2 U.T C C.T U L^1/2``, because ``AB`` and ``BA`` share their nonzero
+    spectrum. Hence, whenever ``U.T C`` has full row rank,
+
+        log pdet(C.T Omega C) = log pdet(Omega) + log det(U.T C C.T U),
+
+    the congruence case of Cauchy-Binet for pseudo-determinants (Knill 2014,
+    Linear Algebra Appl. 459). The rank and first term depend on Omega alone;
+    ``_support_coordinate_volume`` certifies the second term and the
+    injectivity for each map. This is the multi-penalty raw-support path
+    applied to a single component; the stored solver penalty is unchanged.
+
+    ``source`` is the previous context of the same fit (``_reuse_raw_from``).
+    Its raw support transfers only through ``_RawPenaltyFamilyReceipt``, and
+    its unit-weight summary only through ``_RawPenaltySummaryReceipt``. They
+    bind the raw penalty values, dtype and shape, the component descriptor and
+    lambda policy, the read-only support values and the penalty arithmetic
+    (rank policy, unit roundoff and kernel identities). The map-dependent
+    volume, and the transported root when a face needs it, are rebuilt for
+    every map, so lambda, weights and basis never transfer.
+
+    Returns ``None``, leaving the group on its solver-space support, when the
+    map is not a finite float64 injection of the raw coordinates, the raw
+    support or volume cannot be certified, or the raw rank differs from the
+    declared solver rank.
+    """
+    from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support
+
+    omega = getattr(gm, "omega", None)
+    coordinate_map = getattr(gm, "R_inv", None)
+    if omega is None or coordinate_map is None or len(grouped) != 1:
+        return None
+    omega, coordinate_map = np.asarray(omega), np.asarray(coordinate_map)
+    if (
+        omega.dtype != np.float64
+        or coordinate_map.dtype != np.float64
+        or coordinate_map.shape != (omega.shape[0], grouped[0].omega_ssp.shape[0])
+        or not np.all(np.isfinite(coordinate_map))
+        # An identity map already is the raw basis; its support stays lazy.
+        or np.array_equal(coordinate_map, np.eye(*coordinate_map.shape))
+    ):
+        return None
+    reused = _reusable_raw_geometry(source, grouped)
+    try:
+        if reused is None:
+            support = _penalty_support([omega])
+            family = _RawPenaltyFamilyReceipt.capture(support, grouped)
+        else:
+            support, family = reused.support, reused.raw_family
+        if support.rank != declared_rank:
+            return None
+        volume = _support_coordinate_volume(support, coordinate_map)
+    except (PenaltyNumericalError, ValueError):
+        return None
+    # The transported root is only needed by a zero-weight face, which
+    # ``_PenaltyGroupGeometry.evaluate`` builds on demand.
+    return support, family, reused, coordinate_map, (), (), volume
+
+
 def _compute_penalty_logdet_evaluation(
     lambdas: dict[str, float],
     penalties: list[PenaltyComponent],
@@ -2500,27 +2593,29 @@ def _compute_penalty_logdet_evaluation(
             # analytic affine log-lambda identity. Its derivatives are exact.
             support = geometry.get_support() if geometry is not None else _penalty_support(matrices)
             log_weight = math.log(float(group_values[0]))
+            # A raw-support context adds its certified SSP coordinate volume;
+            # a solver-space support has none.
+            volume = volume_error = 0.0
             try:
-                result = (
-                    geometry.evaluate(np.ones(1))[0]
-                    if geometry is not None
-                    else _evaluate_penalty_support(support, np.ones(1))
-                )
+                if geometry is not None:
+                    result, volume, volume_error = geometry.evaluate(np.ones(1))
+                else:
+                    result = _evaluate_penalty_support(support, np.ones(1))
             except PenaltyNumericalError as exc:
                 if str(exc) != "required dense penalty inverse is not representable":
                     raise
                 # The actual weighted system may have a representable inverse
                 # even when a component's arbitrary units make P^-1 overflow.
-                result = (
-                    geometry.evaluate(group_values)[0]
-                    if geometry is not None
-                    else _evaluate_penalty_support(support, group_values)
-                )
+                if geometry is not None:
+                    result, volume, volume_error = geometry.evaluate(group_values)
+                else:
+                    result = _evaluate_penalty_support(support, group_values)
                 log_weight = 0.0
             group_rank = repeat * result.rank
             term = math.fsum(
                 [
                     repeat * result.logdet_s_plus,
+                    repeat * volume,
                     result.rank * extra_volume,
                     group_rank * log_weight,
                 ]
@@ -2532,11 +2627,12 @@ def _compute_penalty_logdet_evaluation(
             if certificate is None:
                 raise ValueError("penalty evaluation did not provide arithmetic evidence")
             log_errors.append(
-                repeat * certificate.logdet_error
+                repeat * (certificate.logdet_error + volume_error)
                 + 8
                 * unit
                 * (
                     abs(repeat * result.logdet_s_plus)
+                    + abs(repeat * volume)
                     + abs(result.rank * extra_volume)
                     + abs(group_rank * log_weight)
                 )
