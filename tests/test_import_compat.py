@@ -90,7 +90,7 @@ for module in (tweedie_numba, group_kernels):
 dispatchers["superglm._tweedie_series._series_moments_kernel"] = (
     tweedie_series._series_moments_kernel
 )
-for name in ("_dot2_selected", "_dot2_value"):
+for name in ("_dot2_quadratic_form", "_dot2_selected", "_dot2_value"):
     dispatchers[f"{compensated.__name__}.{name}"] = getattr(compensated, name)
 assert dispatchers
 assert inspect.signature(superglm.warmup).parameters == {}
@@ -110,6 +110,15 @@ def readonly(*arrays):
 superglm.warmup()
 compiled = signatures()
 assert all(compiled.values()), [name for name, signatures in compiled.items() if not signatures]
+
+# The SuperLSS penalty value passes one operand form, whatever its coefficients' flags.
+from superglm.distributional.solver.solver import _half_penalty_quadratic, _penalty_entries
+
+penalty = np.diag([0.0, 2.0, 3.0])
+entries = _penalty_entries(penalty)
+for coefficients in (np.array([1.0, 2.0, 3.0]), readonly(np.array([1.0, 2.0, 3.0]))[0]):
+    assert _half_penalty_quadratic(penalty, coefficients, entries) == 17.5
+assert signatures() == compiled, "the penalty value compiled a new layout after public warmup"
 
 for values in (
     np.ones((3, 4)),

@@ -65,7 +65,7 @@ from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
 )
 from superglm.links import IdentityLink, Link, LogLink
-from superglm.reml._compensated import _dot2_quadratic_form
+from superglm.reml._compensated import _dot2_quadratic_form, _native_operand
 from superglm.solvers.rank import (
     RankDecomposition,
     decompose_gram,
@@ -1017,7 +1017,7 @@ def _half_penalty_quadratic(
     general be resolved below that level, and stationarity there is certified
     through the Newton decrement, not the score.
     """
-    values = np.ascontiguousarray(coefficients, dtype=np.float64)
+    values = _native_operand(coefficients)
     if entries is None:
         entries = _penalty_entries(penalty)
     quadratic, valid = _dot2_quadratic_form(*entries, values)

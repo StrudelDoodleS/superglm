@@ -107,10 +107,15 @@ def _native_operand(values) -> np.ndarray:
 
 
 def _warmup_compensated() -> None:
-    """Compile both Dot2 kernels for the operands their callers pass."""
+    """Compile the Dot2 kernels for the operands their callers pass."""
     matrix = _native_operand(np.eye(2))
     _dot2_selected(matrix, matrix, np.zeros((2, 2), dtype=np.int64))
     _dot2_value(matrix[0], matrix[1])
+    # The SuperLSS penalty value: read-only np.nonzero entries, read-only vector.
+    rows, columns = np.nonzero(matrix)
+    rows.setflags(write=False)
+    columns.setflags(write=False)
+    _dot2_quadratic_form(rows, columns, _native_operand(matrix[rows, columns]), matrix[0])
 
 
 @njit(cache=True, fastmath=False)
