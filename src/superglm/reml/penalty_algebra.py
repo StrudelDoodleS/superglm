@@ -618,14 +618,50 @@ class _RawPenaltySummaryReceipt:
         )
 
 
-def _reusable_raw_geometry(source, target):
+@dataclass(frozen=True)
+class _RawPenaltyRefusalReceipt:
+    """A refused single-penalty raw attempt that later contexts need not repeat.
+
+    It binds the same raw inputs and penalty arithmetic as the family receipt.
+    The group keeps its solver-space support for the rest of the fit, so each
+    later context costs the solver-space work plus this comparison.
+    """
+
+    inputs: tuple
+    arithmetic: tuple
+
+    @classmethod
+    def capture(cls, grouped):
+        return cls(_raw_family_inputs(grouped), _raw_penalty_arithmetic())
+
+    def matches(self, source, target) -> bool:
+        return bool(
+            self.arithmetic == _raw_penalty_arithmetic()
+            and self.inputs == _raw_family_inputs(source) == _raw_family_inputs(target)
+        )
+
+
+def _source_group_geometry(source, target):
     if not source:
-        return None
+        return None, []
     indices = _group_penalties(list(source)).get(target[0].group_name, [])
     originals = [source[index] for index in indices]
-    if not originals:
+    return (_context_geometry(originals) if originals else None), originals
+
+
+def _reusable_raw_refusal(source, target):
+    geometry, originals = _source_group_geometry(source, target)
+    if (
+        geometry is None
+        or geometry.raw_refusal is None
+        or not geometry.raw_refusal.matches(originals, target)
+    ):
         return None
-    geometry = _context_geometry(originals)
+    return geometry.raw_refusal
+
+
+def _reusable_raw_geometry(source, target):
+    geometry, originals = _source_group_geometry(source, target)
     if (
         geometry is None
         or geometry.coordinate_map is None
@@ -766,6 +802,7 @@ class _PenaltyGroupGeometry:
     volume: tuple[float, float] | None = None
     raw_family: _RawPenaltyFamilyReceipt | None = None
     raw_summary: _RawPenaltySummaryReceipt | None = None
+    raw_refusal: _RawPenaltyRefusalReceipt | None = None
     fixed_inputs: _FixedPenaltyInputs | None = None
     fixed_family: _RawPenaltyFamilyReceipt | None = None
 
@@ -773,9 +810,25 @@ class _PenaltyGroupGeometry:
         # Function identities certify this fit's arithmetic. Pickle resolves
         # names in the loading process, so it cannot retain that receipt.
         state = self.__dict__.copy()
-        state["raw_family"] = state["raw_summary"] = None
+        state["raw_family"] = state["raw_summary"] = state["raw_refusal"] = None
         state["fixed_inputs"] = state["fixed_family"] = None
         return state
+
+    def __setstate__(self, state: dict) -> None:
+        # Pickle protocols below 5 and deepcopy restore these owned arrays as
+        # writeable, and _context_geometry rejects a writeable matrix, so a
+        # reloaded model would switch to the solver-space support. They were
+        # read-only when saved and this restore is their only writer.
+        self.__dict__.update(state)
+        for array in (
+            *self.matrices,
+            self.coordinate_map,
+            *self.matrix_error_bounds,
+            *self.ssp_roots,
+            *self.ssp_root_errors,
+        ):
+            if array is not None:
+                array.setflags(write=False)
 
     def get_support(self):
         from superglm.reml.penalty_support import _penalty_support
@@ -809,12 +862,6 @@ class _PenaltyGroupGeometry:
             return self.last_evaluation
         if self.coordinate_map is not None and np.any(values == 0):
             try:
-                if not self.ssp_roots:
-                    # A single-component raw target transports its root only
-                    # when a face needs it; the logdet never evaluates one.
-                    self.ssp_roots, self.ssp_root_errors = _ssp_component_roots(
-                        self.get_support(), self.coordinate_map
-                    )
                 result = self._evaluate_face(values)
             except PenaltyNumericalError:
                 if self.ssp_refined:
@@ -953,6 +1000,19 @@ def _attach_context_geometry(
         geometry.volume_activity = tuple(True for _ in grouped)
     for component in grouped:
         component._penalty_geometry = geometry
+
+
+def _release_raw_reuse_receipts(components: Sequence[PenaltyComponent] | None) -> None:
+    """Drop raw handoff receipts from a context that no later context reuses.
+
+    Receipts carry byte copies of the raw support for the next REML context of
+    the same fit. A fitted model's final context keeps its geometry, map and
+    volume, but no handoff authority.
+    """
+    for component in components or ():
+        geometry = getattr(component, "_penalty_geometry", None)
+        if geometry is not None:
+            geometry.raw_family = geometry.raw_summary = geometry.raw_refusal = None
 
 
 def _rebind_penalty_context(
@@ -1872,7 +1932,7 @@ def build_penalty_components(
         group_components: list[PenaltyComponent] = []
         raw_support = None
         raw_coordinate_map = None
-        raw_family = reused_geometry = raw_volume = None
+        raw_family = reused_geometry = raw_volume = raw_refusal = None
         group_ssp_roots = group_ssp_errors = ()
         matrix_errors = []
 
@@ -2079,6 +2139,8 @@ def build_penalty_components(
                 if force_solver_rank
                 else _single_penalty_raw_family(gm, group_components, rank, _reuse_raw_from)
             )
+            if isinstance(raw, _RawPenaltyRefusalReceipt):
+                raw_refusal, raw = raw, None
             if raw is not None:
                 (
                     raw_support,
@@ -2099,6 +2161,8 @@ def build_penalty_components(
             raw_family=raw_family,
             volume=raw_volume,
         )
+        if raw_refusal is not None:
+            _context_geometry(group_components).raw_refusal = raw_refusal
         if can_cache_group and _reuse_fixed_from is None:
             # Only the cache-backed producer needs handoff authority. Entry
             # descriptors and handoff destinations, including fresh fallbacks,
@@ -2465,23 +2529,28 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source):
 
     the congruence case of Cauchy-Binet for pseudo-determinants (Knill 2014,
     Linear Algebra Appl. 459). The rank and first term depend on Omega alone;
-    ``_support_coordinate_volume`` certifies the second term and the
-    injectivity for each map. This is the multi-penalty raw-support path
-    applied to a single component; the stored solver penalty is unchanged.
+    ``_support_coordinate_volume`` certifies the second term and that ``U.T C``
+    has full row rank for each map. The stored solver penalty is unchanged,
+    and ``_solver_penalty_agreement`` certifies, for every map, that the raw
+    target and the stored penalty share their rank and adds the Weyl term
+    between their log pseudo-determinants to the volume's error.
 
     ``source`` is the previous context of the same fit (``_reuse_raw_from``).
     Its raw support transfers only through ``_RawPenaltyFamilyReceipt``, and
     its unit-weight summary only through ``_RawPenaltySummaryReceipt``. They
     bind the raw penalty values, dtype and shape, the component descriptor and
     lambda policy, the read-only support values and the penalty arithmetic
-    (rank policy, unit roundoff and kernel identities). The map-dependent
-    volume, and the transported root when a face needs it, are rebuilt for
-    every map, so lambda, weights and basis never transfer.
+    (rank policy, unit roundoff and kernel identities). The volume, transported
+    root and agreement are rebuilt for every map, so lambda, weights and basis
+    never transfer.
 
-    Returns ``None``, leaving the group on its solver-space support, when the
-    map is not a finite float64 injection of the raw coordinates, the raw
-    support or volume cannot be certified, or the raw rank differs from the
-    declared solver rank.
+    Returns ``None`` when the cheap map checks decline (non-float64 inputs,
+    inconsistent shapes, a non-finite map, or ``np.eye``, which is either the
+    raw basis or a coordinate truncation). Returns a
+    ``_RawPenaltyRefusalReceipt`` when the raw support cannot be selected, its
+    rank differs from the declared solver rank, or the volume or agreement
+    cannot be certified; later contexts of the fit then skip the attempt.
+    Either way the group keeps its solver-space support.
     """
     from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support
 
@@ -2490,30 +2559,124 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source):
     if omega is None or coordinate_map is None or len(grouped) != 1:
         return None
     omega, coordinate_map = np.asarray(omega), np.asarray(coordinate_map)
+    stored = grouped[0].omega_ssp
     if (
         omega.dtype != np.float64
         or coordinate_map.dtype != np.float64
-        or coordinate_map.shape != (omega.shape[0], grouped[0].omega_ssp.shape[0])
+        or coordinate_map.shape != (omega.shape[0], stored.shape[0])
         or not np.all(np.isfinite(coordinate_map))
-        # An identity map already is the raw basis; its support stays lazy.
         or np.array_equal(coordinate_map, np.eye(*coordinate_map.shape))
     ):
         return None
     reused = _reusable_raw_geometry(source, grouped)
-    try:
-        if reused is None:
+    if reused is None:
+        refusal = _reusable_raw_refusal(source, grouped)
+        if refusal is not None:
+            return refusal
+        try:
             support = _penalty_support([omega])
-            family = _RawPenaltyFamilyReceipt.capture(support, grouped)
-        else:
-            support, family = reused.support, reused.raw_family
-        if support.rank != declared_rank:
-            return None
-        volume = _support_coordinate_volume(support, coordinate_map)
-    except (PenaltyNumericalError, ValueError):
-        return None
-    # The transported root is only needed by a zero-weight face, which
-    # ``_PenaltyGroupGeometry.evaluate`` builds on demand.
-    return support, family, reused, coordinate_map, (), (), volume
+        except (PenaltyNumericalError, ValueError):
+            # Its ValueErrors are the raw matrix's own admissibility checks
+            # (symmetry, semidefiniteness), which the solver-space path never
+            # applies to the raw penalty, so they refuse rather than fail.
+            return _RawPenaltyRefusalReceipt.capture(grouped)
+        family = _RawPenaltyFamilyReceipt.capture(support, grouped)
+    else:
+        support, family = reused.support, reused.raw_family
+    if support.rank != declared_rank:
+        return _RawPenaltyRefusalReceipt.capture(grouped)
+    try:
+        volume, volume_error = _support_coordinate_volume(support, coordinate_map)
+        roots, errors = _ssp_component_roots(support, coordinate_map)
+        agreement = _solver_penalty_agreement(support, stored, roots[0], errors[0])
+    except PenaltyNumericalError:
+        return _RawPenaltyRefusalReceipt.capture(grouped)
+    volume_error = float(_enclosed_bound_sum(volume_error, agreement))
+    return support, family, reused, coordinate_map, roots, errors, (volume, volume_error)
+
+
+def _solver_penalty_agreement(support, stored: NDArray, root: NDArray, root_error: NDArray):
+    """Bound the stored solver penalty's log pseudo-determinant by the raw target's.
+
+    The raw path evaluates ``log pdet(X)`` for ``X = Y.T @ Y``, where
+    ``Y = R P C`` carries the selected raw root ``R`` through the exact
+    projector ``P`` onto range(Q_plus) and the SSP map ``C``; ``root`` encloses
+    ``Y`` within ``root_error`` (``_ssp_component_roots``). PIRLS, log|H| and
+    beta' S beta use the stored ``omega_ssp`` ``S`` instead, a separately
+    rounded and truncated congruence.
+
+    With ``eps >= ||S - X||_2`` and ``0 < mu <= lambda_r(X)``, Weyl's
+    inequality ``max_i |lambda_i(S) - lambda_i(X)| <= ||S - X||_2`` (Weyl
+    1912; Horn and Johnson, Matrix Analysis, 2nd ed., 2013, section 4.3)
+    leaves ``S`` with exactly ``r`` eigenvalues of at least ``mu - eps`` and
+    the rest in ``[-eps, eps]`` when ``2 eps < mu``. The retained rank is then
+    the stored penalty's across that gap and, with ``x = eps / mu``,
+
+        |log pdet_r(S) - log pdet(X)| <= r * -log(1 - x) <= r x / (1 - x).
+
+    ``eps`` is the Frobenius norm of an elementwise enclosure of
+    ``|S - G| + |G - X|``, where ``G`` is the rounded Gram of ``root``
+    (Higham 2002, section 3.5). ``mu`` whitens ``Y.T``: for the triangular
+    ``T`` with ``||T.T Y Y.T T - I||_2 <= eta < 1``, every nonzero eigenvalue
+    of ``X``, an eigenvalue of ``Y Y.T``, is at least
+    ``(1 - eta) / ||T||_2**2``, and ``||T||_2**2 <= || |T|.T |T| ||_inf``
+    (compare Rump, BIT 51(2), 2011, for verified smallest singular values).
+
+    The raw path only stands in for the solver-space support, so it is
+    admitted when ``x <= sqrt(eps)``, the shared factor rank resolution, which
+    keeps the second-order term ``x**2`` at or below machine epsilon, and when
+    ``mu - eps`` clears the shared Gram rank bar for ``S``. Returns the bound
+    above; raises ``PenaltyNumericalError`` otherwise.
+    """
+    from superglm.reml.multi_penalty import (
+        _finite_double,
+        _gamma,
+        _matmul_enclosed,
+        _norm_upper,
+        _positive_product,
+        _triangular_solve,
+        _upper,
+    )
+    from superglm.reml.penalty_support import PenaltyNumericalError
+    from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
+
+    rank, tiny = support.rank, np.nextafter(0.0, 1.0)
+    if rank == 0 or root.shape[0] != rank:
+        raise PenaltyNumericalError("raw target rows do not match its selected rank")
+    gram, gram_error = _enclosed_root_gram(root, root_error)
+    difference = np.asarray(stored, dtype=np.float64) - gram
+    eps = _norm_upper(
+        _enclosed_bound_sum(np.abs(difference), _gamma(1) * np.abs(difference) + tiny, gram_error)
+    )
+    _, upper = scipy.linalg.qr(root.T, mode="economic", check_finite=False)
+    if upper.shape != (rank, rank) or np.any(np.diag(upper) == 0):
+        raise PenaltyNumericalError("raw target loses a direction under the SSP map")
+    triangular = _finite_double(
+        _triangular_solve(upper[::-1, ::-1], np.eye(rank)[::-1])[::-1],
+        "solver agreement preconditioner",
+    )
+    whitened, arithmetic = _matmul_enclosed(root.T, triangular)
+    action_error = _enclosed_bound_sum(
+        arithmetic, _positive_product(root_error.T, np.abs(triangular))
+    )
+    whitened_gram, whitened_error = _enclosed_root_gram(whitened, action_error)
+    defect = whitened_gram - np.eye(rank)
+    eta = _norm_upper(
+        _enclosed_bound_sum(np.abs(defect), _gamma(1) * np.abs(defect) + tiny, whitened_error)
+    )
+    if eta >= 1:
+        raise PenaltyNumericalError("raw target's smallest retained eigenvalue is unresolved")
+    absolute = np.abs(triangular)
+    norm_squared = np.max(_enclosed_bound_sum(*_positive_product(absolute.T, absolute).T))
+    mu = float((1 - eta) / norm_squared * (1 - _gamma(4)))
+    if not mu > 0:
+        raise PenaltyNumericalError("raw target's smallest retained eigenvalue is unresolved")
+    x = float(_upper(eps / mu / (1 - _gamma(1))))
+    bar = max(SHARED_RANK_POLICY.gram_rcond, _eigensolver_relative_bar(len(stored)))
+    cutoff = float(_upper(bar * _norm_upper(stored) / (1 - _gamma(2))))
+    if x > SHARED_RANK_POLICY.factor_rcond or (mu - eps) * (1 - _gamma(1)) <= cutoff:
+        raise PenaltyNumericalError("stored solver penalty does not agree with its raw target")
+    return float(_upper(rank * x / (1 - x) / (1 - _gamma(4))))
 
 
 def _compute_penalty_logdet_evaluation(
@@ -2593,8 +2756,9 @@ def _compute_penalty_logdet_evaluation(
             # analytic affine log-lambda identity. Its derivatives are exact.
             support = geometry.get_support() if geometry is not None else _penalty_support(matrices)
             log_weight = math.log(float(group_values[0]))
-            # A raw-support context adds its certified SSP coordinate volume;
-            # a solver-space support has none.
+            # A raw-support context adds its certified SSP coordinate volume,
+            # whose error includes the Weyl term to the stored solver penalty;
+            # a solver-space support has neither.
             volume = volume_error = 0.0
             try:
                 if geometry is not None:

@@ -145,6 +145,43 @@ def test_changed_raw_family_or_source_metadata_constructs_a_fresh_support(change
     assert _evaluate(target) == _evaluate(_build(raw, target_map, **options))
 
 
+def _build_single(omega, coordinate_map, source=None, **metadata):
+    group = SimpleNamespace(name="single", sl=slice(0, 3), size=3)
+    matrix = SimpleNamespace(R_inv=coordinate_map, omega=omega, **metadata)
+    kwargs = {} if source is None else {"_reuse_raw_from": source}
+    return algebra.build_penalty_context([matrix], [(0, group)], **kwargs)[0]
+
+
+@pytest.mark.parametrize("change", ["none", "raw", "dtype", "metadata", "mutated support"])
+def test_single_penalty_reuses_only_its_own_raw_family(change):
+    from superglm.types import LambdaPolicy
+
+    raw, target_map = _inputs()
+    omega = sum(raw)
+    source = _build_single(omega, np.diag([1.0, 2.0, 4.0]))
+    algebra._compute_penalty_logdet_evaluation({"single": 2.0}, source)
+    old = algebra._context_geometry(source)
+    assert old.coordinate_map is not None
+    options = {}
+    if change == "raw":
+        omega = 2 * omega
+    elif change == "dtype":
+        omega = omega.astype(np.float32)
+    elif change == "metadata":
+        options["lambda_policies"] = {"single": LambdaPolicy.fixed(2.0)}
+    elif change == "mutated support":
+        array = old.support.component_roots[0]
+        array.setflags(write=True)
+        array.flat[0] += 0.125
+        array.setflags(write=False)
+    target = _build_single(omega, target_map, source, **options)
+    assert (algebra._context_geometry(target).support is old.support) is (change == "none")
+    expected = _build_single(omega, target_map, **options)
+    assert algebra._compute_penalty_logdet_evaluation({"single": 2.0}, target) == (
+        algebra._compute_penalty_logdet_evaluation({"single": 2.0}, expected)
+    )
+
+
 @pytest.mark.parametrize(
     "field",
     [

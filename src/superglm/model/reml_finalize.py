@@ -31,6 +31,7 @@ from superglm.reml.observed_geometry import (
     stopped_on_iteration_budget,
 )
 from superglm.reml.penalty_algebra import (
+    _release_raw_reuse_receipts,
     build_penalty_context,
     build_penalty_matrix,
     build_tensor_pair_logdet_summaries,
@@ -440,6 +441,7 @@ def finalize_reml_fit(
 
     if not use_direct:
         reml_penalties, _, _ = build_penalty_context(model._dm.group_matrices, reml_groups)
+        _release_raw_reuse_receipts(reml_penalties)
     model._reml_penalties = reml_penalties
     model._reml_result = best
     lambdas = best.lambdas
@@ -475,6 +477,8 @@ def finalize_reml_fit(
             _reuse_raw_from=reml_penalties,
             _reuse_fixed_from=reml_penalties,
         )
+        # The terminal context is the fitted model's; no later context reuses it.
+        _release_raw_reuse_receipts(reml_penalties)
         model._reml_penalties = reml_penalties
         if getattr(best, "reml_penalties", None) is not None:
             # The carrier must not keep obsolete optimizer owners and their

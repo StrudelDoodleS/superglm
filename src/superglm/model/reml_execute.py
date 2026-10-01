@@ -12,6 +12,7 @@ from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.reml_setup import promote_estimated_scop_lambdas
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+from superglm.reml.penalty_algebra import _release_raw_reuse_receipts
 from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 
@@ -190,6 +191,7 @@ def run_fixed_monotone_reml(
     model._result = result
     model._reml_lambdas = lambdas
     model._reml_penalties = reml_penalties
+    _release_raw_reuse_receipts(reml_penalties)
 
     eta = model._dm.matvec(result.beta) + result.intercept
     if offset is not None:
@@ -281,6 +283,7 @@ def run_scop_efs_reml(
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
     model._reml_penalties = best.reml_penalties if best.reml_penalties else reml_penalties
+    _release_raw_reuse_receipts(model._reml_penalties)
     model._reml_result = best
 
     eta = model._dm.matvec(best.pirls_result.beta) + best.pirls_result.intercept
