@@ -25,16 +25,27 @@ from superglm.links import IdentityLink, Link, LogitLink, LogLink, SqrtLink
 
 @dataclass(frozen=True)
 class CoefficientWorkingRows:
-    """One coherent quadratic model for a direct coefficient update."""
+    """One coherent quadratic model for a direct coefficient update.
+
+    ``rejection_reason`` is set when the declared rows cannot form a step at
+    these coefficients (a non-finite observed row or total): the caller
+    rejects the step, never substitutes another curvature (one-engine design
+    §3.11).
+    """
 
     weights: NDArray
     response: NDArray
     curvature_source: Literal["fisher", "observed"]
-    fallback_reason: str | None = None
+    rejection_reason: str | None = None
 
 
 def supports_observed_newton(distribution: object, link: object) -> bool:
-    """Return whether an exact, positive observed-Newton row kernel is approved."""
+    """Return whether the family/link declares exact observed-Newton rows for PIRLS.
+
+    The declaration is by exact type and is the whole curvature choice: a fit
+    whose pair is declared takes observed rows on every iteration its route
+    allows, whatever their values (one-engine design §3.11).
+    """
     # Exact types are intentional: a subclass can change either likelihood or
     # inverse-link derivatives and must not inherit an unproved Hessian.
     return type(link) is LogLink and type(distribution) in (Gamma, Tweedie)
@@ -151,7 +162,6 @@ def _fisher_rows(
     mu: NDArray,
     eta: NDArray,
     sample_weight: NDArray,
-    fallback_reason: str | None = None,
 ) -> CoefficientWorkingRows:
     if type(distribution) is Poisson and type(link) is SqrtLink:
         # Analytically, μ=η² and V(μ)=μ cancel from the Fisher geometry:
@@ -191,7 +201,6 @@ def _fisher_rows(
             weights=np.asarray(weights, dtype=np.float64),
             response=np.asarray(response, dtype=np.float64),
             curvature_source="fisher",
-            fallback_reason=fallback_reason,
         )
 
     # For the exact Gaussian/identity pair the Fisher rows reduce algebraically
@@ -203,7 +212,6 @@ def _fisher_rows(
             weights=np.array(sample_weight, dtype=np.float64, copy=True),
             response=np.array(y, dtype=np.float64, copy=True),
             curvature_source="fisher",
-            fallback_reason=fallback_reason,
         )
     if type(distribution) is Gamma and type(link) is LogLink:
         # V(mu)=mu**2 and dmu/deta=mu cancel exactly. Multiplying the
@@ -217,7 +225,6 @@ def _fisher_rows(
             weights=np.array(sample_weight, dtype=np.float64, copy=True),
             response=response,
             curvature_source="fisher",
-            fallback_reason=fallback_reason,
         )
     reuse_mean = type(link) is LogLink and type(distribution) in (
         Poisson,
@@ -233,12 +240,19 @@ def _fisher_rows(
         sample_weight=sample_weight,
         dmu_deta=dmu_deta,
     )
-    response = eta + (y - mu) / dmu_deta
+    # A row of zero working weight carries no information and its score
+    # w (y - mu) h' / V is exactly zero with it, so its product with the
+    # response must be too (Wood, Pya & Saefken 2016, section 3.3: the least
+    # squares step needs only w z, finite where z is not).  Where h' = 0 (a
+    # square-root link at eta = 0) z itself is infinite and 0 * z would be
+    # NaN; the row takes z = eta, whose products with its weight are zeros.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        response = eta + (y - mu) / dmu_deta
+    response = np.where(weights == 0.0, eta, response)
     return CoefficientWorkingRows(
         weights=np.asarray(weights, dtype=np.float64),
         response=np.asarray(response, dtype=np.float64),
         curvature_source="fisher",
-        fallback_reason=fallback_reason,
     )
 
 
@@ -297,8 +311,8 @@ def _gamma_log_observed_rows(
                     (float(sample_weight[index]), float(y[index])), (float(mu[index]),)
                 )
             except _NumericalEvaluationError:
-                # The requested curvature itself does not fit. Leave the
-                # caller's whole-model fallback in charge of choosing Fisher.
+                # The requested curvature itself does not fit: the rows are
+                # marked non-finite and the caller rejects the step.
                 observed_weights[index] = np.inf
 
     return observed_weights, response
@@ -314,15 +328,18 @@ def coefficient_working_rows(
     sample_weight: NDArray,
     prefer_observed: bool,
 ) -> CoefficientWorkingRows:
-    """Return Fisher rows or a guarded exact observed-Newton quadratic model.
+    """Return the declared rows: Fisher, or the exact observed-Newton quadratic model.
 
     The observed rows are Wood's (2011, JRSSB 73(1), section 3) full-Newton
     PIRLS weights ``W = alpha * w / (V g'^2)`` and response
     ``z = eta + (y - mu) g' / alpha``, with
     ``alpha = 1 + (y - mu) (V'/V + g''/g')``; Fisher scoring is ``alpha = 1``.
-    Any non-finite or non-positive active row rejects the *whole* observed
-    model; mixing Fisher and observed rows would no longer be a Newton step for
-    a defined objective.
+    Which one a fit takes is chosen by the caller from the family and link
+    (``prefer_observed`` with a pair ``supports_observed_newton`` declares),
+    never from the rows' values (one-engine design §3.11): an observed row may
+    be zero, and the solver accepts signed rows.  Only finiteness remains a
+    condition: a non-finite observed row or total sets ``rejection_reason``,
+    and the caller rejects the step rather than mix in another curvature.
     """
     y = np.asarray(y, dtype=np.float64)
     mu = np.asarray(mu, dtype=np.float64)
@@ -349,27 +366,16 @@ def coefficient_working_rows(
         )
     with np.errstate(over="ignore", invalid="ignore"):
         total_observed_weight = float(np.sum(observed_weights, dtype=np.float64))
-    valid = bool(
+    finite = bool(
         np.all(np.isfinite(observed_weights))
         and np.all(np.isfinite(response))
-        and np.all(observed_weights[active] > 0.0)
         and np.isfinite(total_observed_weight)
-        and total_observed_weight > 0.0
     )
-    if not valid:
-        return _fisher_rows(
-            distribution=distribution,
-            link=link,
-            y=y,
-            mu=mu,
-            eta=eta,
-            sample_weight=sample_weight,
-            fallback_reason="invalid_observed_rows",
-        )
     return CoefficientWorkingRows(
         weights=observed_weights,
         response=response,
         curvature_source="observed",
+        rejection_reason=None if finite else "nonfinite_observed_rows",
     )
 
 

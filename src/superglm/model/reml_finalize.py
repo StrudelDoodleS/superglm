@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time as _time
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -18,15 +19,20 @@ from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
 from superglm.model.reml_setup import restore_qp_constraints
 from superglm.model.reml_state import update_reml_r_inv
+from superglm.reml.identified import (
+    IdentifiedLaplace,
+    WeakIdentificationWarning,
+    coefficient_labels,
+    final_mode_weak_slopes,
+    laplace_excluded_coefficients,
+)
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
     ObservedGeometryInfeasibleError,
-    ObservedModeNotCertifiedError,
     ObservedModeNotConvergedError,
     build_observed_reml_geometry,
     classify_reml_curvature,
     mode_certification_hint,
-    observed_mode_certification_bar,
     observed_penalized_mode_score,
     stopped_on_iteration_budget,
 )
@@ -48,48 +54,22 @@ from superglm.reml.scale import (
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.mode_score import linear_predictor, mode_certification_bar
 from superglm.solvers.structured import (
-    BlockSchurFactor,
-    BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
+    FactorSmoothLeafSystem,
     NestedDataOperator,
     NestedPenalizedOperator,
-    NestedSchurFactor,
     NestedStructuredSystem,
-    ProfiledBlockSchurFactor,
+    ProfiledFactorSmoothLeafFactor,
     ProfiledNestedSchurFactor,
-    ProfiledScalarSchurFactor,
-    ScalarSchurFactor,
-    ScalarStructuredSystem,
+    ProfiledSumToZeroTreeFactor,
     StructuredLinearSystemState,
     SumToZeroBlockOperator,
-    SumToZeroBlockStructuredSystem,
-    SymmetricBlockOperator,
+    SumToZeroLeafSystem,
+    centred_data_operator,
 )
-from superglm.solvers.sum_to_zero import (
-    ProfiledSumToZeroBlockFactor,
-    SumToZeroBlockFactor,
-)
-from superglm.solvers.working_rows import supports_observed_newton
-
-
-def _discrete_terminal_is_quadratic(model) -> bool:
-    """Whether the discrete terminal refit's steps converge quadratically.
-
-    Fisher scoring is Newton on a canonical link.  Otherwise only the pairs
-    ``supports_observed_newton`` approves take Newton steps, and ``fit_irls_direct``
-    withholds them under linear constraints or a SCOP group.
-    """
-    family, link = model._distribution, model._link
-    try:
-        if classify_reml_curvature(family, link) == "fisher":
-            return True
-    except NotImplementedError:
-        return False
-    return supports_observed_newton(family, link) and not any(
-        group.constraints is not None or group.monotone_engine == "scop" for group in model._groups
-    )
 
 
 def _build_structured_linear_system_state(
@@ -105,98 +85,55 @@ def _build_structured_linear_system_state(
     """Distill a final structured refit into compact persistent state."""
     if not isinstance(
         factor,
-        ProfiledScalarSchurFactor
-        | ProfiledBlockSchurFactor
-        | ProfiledSumToZeroBlockFactor
-        | ProfiledNestedSchurFactor,
+        ProfiledFactorSmoothLeafFactor | ProfiledSumToZeroTreeFactor | ProfiledNestedSchurFactor,
     ):
         return None
     system = cache.get("structured_system")
     penalized_operator = cache.get("penalized_operator")
     if not isinstance(
         system,
-        ScalarStructuredSystem
-        | BlockStructuredSystem
-        | SumToZeroBlockStructuredSystem
-        | NestedStructuredSystem,
+        FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem,
     ) or not isinstance(
         penalized_operator,
-        SymmetricBlockOperator
-        | BlockSymmetricOperator
-        | SumToZeroBlockOperator
-        | NestedPenalizedOperator,
+        BlockSymmetricOperator | SumToZeroBlockOperator | NestedPenalizedOperator,
     ):
         raise RuntimeError("terminal structured refit omitted its compact system state")
     if not isinstance(
         data_operator,
-        SymmetricBlockOperator
-        | BlockSymmetricOperator
-        | SumToZeroBlockOperator
-        | NestedDataOperator,
+        BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator,
     ):
         raise RuntimeError("terminal structured refit omitted its compact data operator")
 
-    if isinstance(penalized_operator, NestedPenalizedOperator) and isinstance(
-        system, NestedStructuredSystem
-    ):
-        coefficient_factor = NestedSchurFactor(
-            penalized_operator,
-            chain_group_names=system.chain_group_names,
-            chain_group_indices=system.chain_group_indices,
-            intercept=False,
-        )
-    elif isinstance(penalized_operator, SumToZeroBlockOperator):
-        coefficient_factor = SumToZeroBlockFactor(
-            A=penalized_operator.A,
-            C=penalized_operator.C,
-            D=penalized_operator.D,
-            small_indices=penalized_operator.small_indices,
-            structured_indices=penalized_operator.structured_indices,
-            term_name=system.dominant_group_name,
-            level_labels=system.level_labels,
-        )
-    elif isinstance(penalized_operator, BlockSymmetricOperator):
-        coefficient_factor = BlockSchurFactor(
-            A=penalized_operator.A,
-            C=penalized_operator.C,
-            D=penalized_operator.D,
-            small_indices=penalized_operator.small_indices,
-            structured_indices=penalized_operator.structured_indices,
-            term_name=system.dominant_group_name,
+    # No raw-coordinate coefficient factor and no view derived from one (design
+    # §3.6, §3.10): the slope covariance is M_ss, the slope block of the
+    # augmented inverse, which ``profiled_factor`` serves.
+    if isinstance(system, FactorSmoothLeafSystem | SumToZeroLeafSystem):
+        if data_operator is not system.operator:
+            raise RuntimeError("terminal structured refit's data operator is not its system's")
+        # on the c0-shifted moments (design §3.2): the estimability, the column
+        # scales and the small data factor read its numbers
+        centered_data_operator = centred_data_operator(
+            system, row_column_norm=cache.get("structured_row_column_norm")
         )
     else:
-        coefficient_factor = ScalarSchurFactor(
-            A=penalized_operator.A,
-            C=penalized_operator.C,
-            d=penalized_operator.d,
-            small_indices=penalized_operator.small_indices,
-            structured_indices=penalized_operator.structured_indices,
-            term_name=system.dominant_group_name,
+        xtw = np.empty(system.operator.shape[0], dtype=np.float64)
+        xtw[system.operator.small_indices] = system.xtw_small
+        xtw[system.operator.structured_indices] = system.xtw_structured
+        centered_data_operator = CenteredBlockOperator(
+            raw=data_operator,
+            cross=xtw,
+            total=system.sum_w,
+            center=xtw / system.sum_w,
+            row_column_norm=cache.get("structured_row_column_norm"),
         )
-    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
-    xtw[system.operator.small_indices] = system.xtw_small
-    xtw[system.operator.structured_indices] = system.xtw_structured
-    centered_data_operator = CenteredBlockOperator(
-        raw=data_operator,
-        cross=xtw,
-        total=system.sum_w,
-        center=xtw / system.sum_w,
-        raw_structured_cross=(
-            system.raw_xtw_structured
-            if isinstance(system, SumToZeroBlockStructuredSystem)
-            else None
-        ),
-    )
 
     return StructuredLinearSystemState(
-        coefficient_factor=coefficient_factor,
         profiled_factor=factor,
         augmented_factor=factor.augmented_factor,
         system=system,
         penalized_operator=penalized_operator,
         centered_data_operator=centered_data_operator,
         support_totals=support_totals,
-        fallback_reason=getattr(factor, "fallback_reason", None),
     )
 
 
@@ -215,11 +152,9 @@ def _structured_information_by_group(cache: dict) -> dict[int, np.ndarray]:
                 strict=True,
             )
         )
-    if isinstance(system, ScalarStructuredSystem):
-        return {system.dominant_group_index: system.operator.d}
     if isinstance(
         system,
-        BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+        FactorSmoothLeafSystem | SumToZeroLeafSystem,
     ):
         return {system.dominant_group_index: system.operator.D}
     return {}
@@ -383,6 +318,7 @@ def maybe_qp_passthrough_refit(
     max_pirls_iter,
     pirls_tol,
     reml_penalties,
+    direct_solve: str,
     trace_run: TraceRun | None = None,
 ):
     """Run the constrained post-REML refit for QP passthrough flows when needed."""
@@ -404,13 +340,116 @@ def maybe_qp_passthrough_refit(
         max_iter=max_pirls_iter,
         tol=pirls_tol,
         convergence="deviance",
-        direct_solve=model._direct_solve,
+        direct_solve=direct_solve,
         reml_penalties=reml_penalties,
         trace_run=trace_run,
         trace_purpose="reml_qp_final",
         weight_semantics=model_weight_semantics(model),
     )
     return qp_output[0]
+
+
+def _disclose_thin_levels(profile: dict, factor) -> None:
+    """Name the ``sz`` levels too thin to identify their polynomial deviation (decision 4).
+
+    A level with fewer than ``m`` distinct weighted ``x`` values (the penalty's
+    null space) beside the required global Spline makes an exact alias of the
+    main effect's polynomial with that level's deviation, and a level with no
+    weight lets the others' constants reproduce the intercept.  The balance
+    tree keeps the level and truncates the alias (one-engine design §3.5):
+    ``profile["structured_thin_levels"]`` and one ``UserWarning`` name it.
+    """
+    levels = tuple(getattr(factor, "thin_levels", ()) or ())
+    if not levels:
+        return
+    profile["structured_thin_levels"] = levels
+    names = ", ".join(str(level) for level in levels)
+    warnings.warn(
+        f"FactorSmooth term {factor.dominant_group_name!r} (basis='sz') has levels with fewer "
+        f"distinct x values than its penalty's null space, or no weight: {names}. Each such "
+        "level's deviation is aliased with the main effect along the polynomial the penalty "
+        "does not shrink; the fit keeps the level and leaves that direction unestimated.",
+        UserWarning,
+        stacklevel=4,
+    )
+
+
+def _disclose_weak_identification(
+    model,
+    *,
+    profile: dict,
+    identified: IdentifiedLaplace,
+    result,
+    factor,
+    sample_weight,
+    offset_arr,
+    lambdas,
+    reml_penalties,
+    at_mode: bool,
+) -> None:
+    """Publish every weakly identified slope of a finished REML fit (design §3.9).
+
+    Once per fit, for every family and backend of the direct REML engine: the
+    §3.9 test at the final mode from its Fisher rows
+    (``reml.identified.final_mode_weak_slopes``; ``at_mode``, not for a
+    constrained QP refit, whose mode its QP certifies), the slopes the
+    Laplace approximation left out, the directions the border factor
+    truncated as weakly identified and those the observed certificate
+    flagged.  The fit keeps them all; ``profile["reml_weakly_identified"]``
+    holds the slope indices, ``model.diagnostics()`` their names, and a
+    ``WeakIdentificationWarning`` names them once.
+    """
+    flagged: set[int] = set()
+    if at_mode:
+        flagged.update(
+            int(index)
+            for index in final_mode_weak_slopes(
+                dm=model._dm,
+                distribution=model._distribution,
+                link=model._link,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                result=result,
+                lambdas=lambdas,
+                penalties=reml_penalties,
+            )
+        )
+    flagged.update(int(index) for index in identified.excluded)
+    # A factor that tells the columns a weak direction names from those it
+    # moves (an sz balance tree) discloses the named ones; the certificate
+    # left every moved column ungated, so its own flags count beyond those.
+    moved = {int(index) for index in getattr(factor, "weakly_identified_slopes", ()) or ()}
+    named = getattr(factor, "weakly_identified_named_slopes", None)
+    flagged.update(moved if named is None else (int(index) for index in named))
+    _disclose_thin_levels(profile, factor)
+    flagged.update(
+        int(index)
+        for index in profile.get("reml_terminal_weakly_identified", ()) or ()
+        if int(index) not in moved
+    )
+    indices = tuple(sorted(flagged))
+    labels = coefficient_labels(model._groups, indices)
+    profile["reml_weakly_identified"] = indices
+    profile["reml_weakly_identified_labels"] = labels
+    profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.excluded)
+    excluded_labels = coefficient_labels(
+        model._groups, tuple(int(index) for index in identified.excluded)
+    )
+    profile["reml_laplace_excluded_labels"] = excluded_labels
+    if labels:
+        left_out = (
+            f" Left out of smoothing-parameter selection: {', '.join(excluded_labels)}."
+            if excluded_labels
+            else " None of them is left out of smoothing-parameter selection."
+        )
+        warnings.warn(
+            "These coefficients carry information only at the noise level of the data "
+            "(a factor level or column with little or no weight, observations or "
+            f"information): {', '.join(labels)}. They stay in the model, and their "
+            f"estimates and standard errors carry little information.{left_out}",
+            WeakIdentificationWarning,
+            stacklevel=4,
+        )
 
 
 def finalize_reml_fit(
@@ -453,9 +492,15 @@ def finalize_reml_fit(
     converged = best.converged
 
     solver_result = best.pirls_result
+    # The terminal refit takes the backend the optimizer did: one decision
+    # from the model's terms (``resolve_structured_backend``), never switched.
+    direct_solve = model._direct_solve
     final_xtwx = None
     final_factor = None
     final_cache: dict = {}
+    # Whether the terminal refit met the mode certificate (None: a route the
+    # certificate does not judge -- constrained, SCOP, QP passthrough).
+    terminal_certified: bool | None = None
     terminal_curvature = None
     if use_direct:
         terminal_curvature = best.curvature_source
@@ -466,6 +511,10 @@ def finalize_reml_fit(
                 else classify_reml_curvature(model._distribution, model._link)
             )
         best.curvature_source = terminal_curvature
+    # The Laplace approximation's identified part (design §3.9,
+    # ``reml.identified``): the terminal objective leaves out the same slopes
+    # the optimizer's did, so it scores the state it publishes consistently.
+    identified = IdentifiedLaplace()
     if use_direct:
         old_gms = model._dm.group_matrices
         model._dm = rebuild_dm_with_lambdas(model, lambdas, sample_weight)
@@ -487,19 +536,34 @@ def finalize_reml_fit(
             model._dm.group_matrices,
             model._groups,
         )
+        if not qp_passthrough:
+            identified = IdentifiedLaplace(
+                laplace_excluded_coefficients(model._dm, sample_weight, reml_penalties)
+            )
         observed_terminal = terminal_curvature == "observed" and not qp_passthrough
-        # Fisher scoring on a non-canonical link contracts only linearly, so an
-        # objective-change stop certifies the coefficients to about sqrt(tol).
-        # A discrete refit keeps Fisher geometry but certifies its fixed point
-        # to first order at the same tolerance, the score or the step, where its
-        # steps get there quadratically.  Elsewhere Fisher's linear rate can
-        # exhaust the iteration budget and publish a settled mode as unconverged,
-        # so those fits keep the objective stop.
-        certified_terminal = observed_terminal or (
-            model._discrete and not qp_passthrough and _discrete_terminal_is_quadratic(model)
+        # One-engine design §3.8: the terminal refit of every route auto uses,
+        # exact and discrete, gram and structured, stops on the certificate's
+        # own centred score over the identified coefficients, at the one bar
+        # (``mode_score.MODE_CERTIFICATION_BAR``).  An objective change is
+        # blind to a coefficient whose rows carry a small share of the
+        # likelihood (a level driven towards its penalty bound, a tiny-lambda
+        # direction), whose log-curvature still enters log|H| at full weight,
+        # so the published objective described a point short of the mode
+        # (stage-0 verifier census: raw_1e8 binomial, 21.3 above it; the
+        # discrete terminal's unconstrained score left raw_1e8 binomial 16
+        # above gram's, stage-1 verifier).  The bar is set by what the REML
+        # criterion needs, so Fisher's linear rate on a non-canonical link
+        # reaches it; a refit that does not is published as not converged,
+        # never refused.  A linearly constrained or SCOP mode is certified by
+        # its inner QP/KKT state and keeps the objective stop.
+        shaped = any(
+            getattr(group, "constraints", None) is not None
+            or getattr(group, "monotone_engine", None) == "scop"
+            for group in model._groups
         )
+        certified_terminal = observed_terminal or (not qp_passthrough and not shaped)
         final_tolerance = min(pirls_tol, 1e-10) if certified_terminal else pirls_tol
-        final_convergence = "coefficients" if observed_terminal else "score"
+        terminal_bar = mode_certification_bar(profile.get("reml_tol_resolved"))
         final_output = fit_irls_direct(
             X=model._dm,
             y=y,
@@ -513,18 +577,22 @@ def finalize_reml_fit(
             intercept_init=float(best.pirls_result.intercept),
             max_iter=max_pirls_iter,
             tol=final_tolerance,
-            convergence=final_convergence if certified_terminal else "deviance",
+            convergence="mode_score" if certified_terminal else "deviance",
             return_xtwx=True,
             cache_out=final_cache,
-            direct_solve=model._direct_solve,
+            direct_solve=direct_solve,
             reml_penalties=reml_penalties,
             trace_run=trace_run,
             trace_purpose="reml_final",
             weight_semantics=model_weight_semantics(model),
+            _laplace_excluded=tuple(int(index) for index in identified.excluded),
+            _mode_bar=terminal_bar,
         )
         if len(final_output) != 3:  # pragma: no cover - return_xtwx contract
             raise RuntimeError("terminal direct REML refit omitted its working Gram")
         solver_result, final_factor, final_xtwx = final_output
+        if certified_terminal:
+            terminal_certified = bool(solver_result.converged)
 
     final_pirls = maybe_qp_passthrough_refit(
         model,
@@ -538,6 +606,7 @@ def finalize_reml_fit(
         max_pirls_iter=max_pirls_iter,
         pirls_tol=pirls_tol,
         reml_penalties=reml_penalties,
+        direct_solve=direct_solve,
         trace_run=trace_run,
     )
     # Typed for the same routing contract as the candidate-side gate in
@@ -554,9 +623,8 @@ def finalize_reml_fit(
     structured_terminal = not qp_passthrough and isinstance(
         final_factor,
         (
-            ProfiledScalarSchurFactor,
-            ProfiledBlockSchurFactor,
-            ProfiledSumToZeroBlockFactor,
+            ProfiledFactorSmoothLeafFactor,
+            ProfiledSumToZeroTreeFactor,
             ProfiledNestedSchurFactor,
         ),
     )
@@ -639,13 +707,10 @@ def finalize_reml_fit(
     if terminal_curvature == "observed" and not qp_passthrough:
         if not final_pirls.converged and not stopped_on_iteration_budget(final_pirls):
             # Typed: to a power search this is one more point with no usable
-            # penalized mode. The terminal refit runs at the FINAL lambda,
-            # which differs from every trial lambda, so this door is reachable
-            # even for a point whose candidate fits all certified. It warm
-            # starts at the same 1e-10 step bar, so it is exposed to the same
-            # round-off floor as the candidate gate and defers to the same
-            # certificate below. No draw reaching it has been produced; the
-            # two gates are kept identical rather than left to diverge.
+            # penalized mode. Only a structural failure (a non-finite
+            # deviance, an infeasible or KKT-incomplete constrained mode)
+            # lands here; a mode short of the certificate is published as
+            # not converged (``terminal_certified``), as at the candidate gate.
             raise ObservedModeNotConvergedError(
                 "terminal observed REML refit did not converge to a penalized coefficient mode",
                 hint=mode_certification_hint(model._distribution),
@@ -676,7 +741,8 @@ def finalize_reml_fit(
                 result=final_pirls,
                 penalty=S_final,
                 derivative_order=0,
-                compute_inverse=False,
+                # the identified part's determinant reads (H^-1)_WW
+                compute_inverse=bool(identified),
                 groups=model._groups if structured_linear_state is not None else None,
                 lambdas=lambdas if structured_linear_state is not None else None,
                 reml_penalties=reml_penalties if structured_linear_state is not None else None,
@@ -708,6 +774,7 @@ def finalize_reml_fit(
                 infeasible_detail="terminal observed geometry refused the penalized mode",
             ) from exc
         profile["reml_terminal_observed_geometry_s"] = _time.perf_counter() - geometry_start
+        objective_geometry = identified.geometry(terminal_geometry)
         try:
             mode_score = observed_penalized_mode_score(
                 dm=model._dm,
@@ -720,6 +787,8 @@ def finalize_reml_fit(
                 geometry=terminal_geometry,
                 lambdas=lambdas if structured_linear_state is not None else None,
                 reml_penalties=reml_penalties if structured_linear_state is not None else None,
+                excluded=identified.excluded,
+                bar=terminal_bar,
             )
         except ObservedGeometryInfeasibleError as exc:
             # The score carries the same exposure as the build above: a score
@@ -734,43 +803,21 @@ def finalize_reml_fit(
                 hint=mode_certification_hint(model._distribution),
                 infeasible_detail="terminal observed mode score refused the penalized mode",
             ) from exc
-        # The same fixed bar the candidate gate uses: a point that certified
-        # during the search cannot fail publication because the caller
-        # tightened pirls_tol below the observed-geometry ceiling.
-        terminal_mode_tolerance = observed_mode_certification_bar()
+        # The certificate is the terminal PIRLS's own stop residual
+        # (``final_pirls.converged`` under ``convergence="mode_score"``); the
+        # geometry's score here is published as a diagnostic, never gated.
         profile["reml_terminal_observed_mode_residual"] = mode_score.relative_max
-        if mode_score.relative_max > terminal_mode_tolerance:
-            # Typed for the same reason as the candidate-fit gate in
-            # optimize_direct_reml: a power search must be able to score this
-            # point infeasible instead of dying on it.
-            raise ObservedModeNotCertifiedError(
-                mode_score.relative_max,
-                terminal_mode_tolerance,
-                hint=mode_certification_hint(model._distribution),
-            )
+        # §3.8, §3.9: disclose a binding floor and every coefficient flagged
+        # weakly identified and kept (slope indices), which the certificate
+        # did not gate.
+        profile["reml_terminal_mode_floor_binding"] = mode_score.floor_binding
+        profile["reml_terminal_weakly_identified"] = mode_score.weakly_identified
+        profile["reml_terminal_raw_mode_residual"] = mode_score.raw_relative_max
         final_pirls = replace(
             final_pirls,
             log_det_H=terminal_geometry.log_det_H,
             reml_hessian_rank=terminal_geometry.hessian_rank,
         )
-        if not final_pirls.converged:
-            # Reachable only because the certificate above declined to raise:
-            # this mode's KKT residual cleared observed_mode_certification_bar(),
-            # a fixed constant no caller tolerance can move. Relabelling it
-            # converged strengthens the published claim over the step-length
-            # verdict the flag normally carries, so every reader of the
-            # published result now agrees with the certificate that admitted
-            # the fit. The distinct reason is load-bearing -- nothing may read
-            # this as the step test having fired -- and the guard keeps that
-            # name off a refit that did converge by step length. fit_state.py
-            # rewrites the same pair under its own synthetic reason when a
-            # coefficient revision invalidates a mode; the two copies published
-            # below are this same object, so public and solver stay consistent.
-            final_pirls = replace(
-                final_pirls,
-                converged=True,
-                termination_reason="mode_certified",
-            )
         terminal_value = reml_laml_objective(
             model._dm,
             model._distribution,
@@ -782,8 +829,8 @@ def finalize_reml_fit(
             sample_weight,
             offset_arr,
             XtWX=final_xtwx,
-            log_det_H=terminal_geometry.log_det_H,
-            hessian_rank=terminal_geometry.hessian_rank,
+            log_det_H=objective_geometry.log_det_H,
+            hessian_rank=objective_geometry.hessian_rank,
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
@@ -827,8 +874,8 @@ def finalize_reml_fit(
             sample_weight,
             offset_arr,
             XtWX=final_xtwx,
-            log_det_H=final_pirls.log_det_H,
-            hessian_rank=final_pirls.reml_hessian_rank,
+            log_det_H=identified.log_det(final_factor, final_pirls.log_det_H),
+            hessian_rank=identified.rank(final_pirls.reml_hessian_rank, final_factor),
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
@@ -896,19 +943,37 @@ def finalize_reml_fit(
     corrected = replace(final_pirls, phi=phi_fixed)
     model._result = corrected
     model._reml_result.pirls_result = corrected
+    _disclose_weak_identification(
+        model,
+        profile=profile,
+        identified=identified,
+        result=corrected,
+        factor=final_factor,
+        sample_weight=sample_weight,
+        offset_arr=offset_arr,
+        lambdas=lambdas,
+        reml_penalties=reml_penalties,
+        at_mode=use_direct and not qp_passthrough,
+    )
     model._reporting_support_state = reporting_state
     model._linear_system_state = structured_linear_state
 
     update_reml_r_inv(model, reml_groups, lambdas)
 
+    if terminal_certified is not None:
+        # Owner decision 3 (2026-09-30): a terminal mode that stays short of
+        # the certificate is published as not converged, never refused.
+        profile["reml_terminal_mode_certified"] = terminal_certified
+        profile["reml_terminal_mode_termination"] = solver_result.termination_reason
+        if not terminal_certified:
+            converged = False
+            best.converged = False
     profile["total_s"] = _time.perf_counter() - total_start
     profile["n_reml_iter"] = n_reml_iter
     profile["converged"] = converged
     model._reml_profile = profile
 
-    eta = model._dm.matvec(model._result.beta) + model._result.intercept
-    if offset is not None:
-        eta = eta + offset
+    eta = linear_predictor(model._dm, model._result, offset)
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 

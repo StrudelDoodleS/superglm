@@ -16,11 +16,11 @@ from superglm.group_matrix import (
     SparseGroupMatrix,
 )
 from superglm.solvers.structured import (
-    BlockStructuredSystem,
-    SumToZeroBlockStructuredSystem,
+    FactorSmoothLeafSystem,
+    SumToZeroLeafSystem,
     build_block_structured_system,
     build_structured_system,
-    get_block_structured_layout,
+    get_structured_layout,
     materialize_compact_operator,
     select_structured_group,
     structured_design_matvec,
@@ -278,7 +278,7 @@ def test_generic_structured_builder_dispatches_factor_smooth(discrete: bool) -> 
         dominant_group_index=dominant_index,
     )
 
-    assert isinstance(system, BlockStructuredSystem)
+    assert isinstance(system, FactorSmoothLeafSystem)
 
 
 @pytest.mark.parametrize("discrete", [False, True])
@@ -304,10 +304,9 @@ def test_sum_to_zero_structured_system_keeps_raw_blocks_and_public_moments(
     xtw = reference.T @ W
     xtwz = reference.T @ Wz
 
-    assert isinstance(system, SumToZeroBlockStructuredSystem)
+    assert isinstance(system, SumToZeroLeafSystem)
     assert system.operator.D.shape == (6, 4, 4)
     assert system.raw_xtw_structured.shape == (6, 4)
-    assert system.raw_xtwz_structured.shape == (6, 4)
     np.testing.assert_allclose(materialize_compact_operator(system.operator), gram, atol=2e-11)
     np.testing.assert_allclose(
         system.xtw_structured.ravel(),
@@ -332,10 +331,10 @@ def test_structured_selection_prefers_wider_factor_smooth_over_secondary_random_
     assert selection.group_name == groups[dominant_index].name
 
 
-def test_block_layout_is_reused_and_design_products_preserve_global_order() -> None:
+def test_leaf_layout_is_reused_and_design_products_preserve_global_order() -> None:
     rng, dm, groups, dominant_index = _design(discrete=False)
-    layout = get_block_structured_layout(dm, groups, dominant_group_index=dominant_index)
-    again = get_block_structured_layout(dm, groups, dominant_group_index=dominant_index)
+    layout = get_structured_layout(dm, groups, dominant_group_index=dominant_index)
+    again = get_structured_layout(dm, groups, dominant_group_index=dominant_index)
     beta = rng.normal(size=dm.p)
     rows = rng.normal(size=dm.n)
 

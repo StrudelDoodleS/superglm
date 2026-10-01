@@ -18,7 +18,7 @@ from superglm._group_matrix._group_matrix_centered import (
     stable_centered_gram_rhs,
     try_raw_moment_centering,
 )
-from superglm.group_matrix import DesignMatrix
+from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 
 _FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
 _FACTOR_CHUNK_ROWS = 8192
@@ -381,7 +381,7 @@ def build_centered_system(
             profile["centered_raw_moment_hits"] = profile.get("centered_raw_moment_hits", 0) + 1
 
     if packed is None:
-        mean_x = dm.rmatvec(W) / sum_w
+        mean_x = shifted_weighted_mean(dm, W, sum_w)
         data_gram, rhs = centered_gram_rhs(
             dm=dm,
             W=W,
@@ -391,6 +391,41 @@ def build_centered_system(
     else:
         mean_x, data_gram, rhs = packed
     return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
+
+
+def shifted_weighted_mean(dm: DesignMatrix, W: NDArray, sum_w: float) -> NDArray:
+    """``sum W x / sum W`` per column, each dense column taken about one of its own rows.
+
+    One-engine design §3.2 applied to gram's centred system: a
+    ``DenseGroupMatrix`` column is averaged as ``x_ref + sum W (x - x_ref) /
+    sum W`` with ``x_ref`` the first row of positive weight, so a column
+    constant on its weighted rows has mean exactly ``x_ref`` and centres to
+    exact zeros.  The unshifted ``sum W x / sum W`` rounds to ``x (1 + d)``,
+    ``|d| <~ n eps``, and leaves a centred diagonal ``sum W (x d)^2`` at the
+    rounding level whose Jacobi-scaled rank decision then keeps or drops the
+    direction with the rounding of each iterate's weights: the REML objective
+    moved by ``~log(eps^2)/2 ~ 30`` between iterates while its gradient did not
+    (stage-1 verifier, the Gamma/log constant-column fit).  Every other column
+    type has entries bounded by its type and keeps ``rmatvec``.
+    """
+    mean = dm.rmatvec(W) / sum_w
+    positive = np.flatnonzero(np.asarray(W) > 0.0)
+    if not positive.size:
+        return mean
+    reference = int(positive[0])
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            values = matrix.M
+            anchor = np.asarray(values[reference], dtype=np.float64)
+            total = np.zeros(width, dtype=np.float64)
+            for start in range(0, dm.n, _FACTOR_CHUNK_ROWS):
+                stop = min(start + _FACTOR_CHUNK_ROWS, dm.n)
+                total += (values[start:stop] - anchor).T @ W[start:stop]
+            mean[offset : offset + width] = anchor + total / sum_w
+        offset += width
+    return mean
 
 
 def _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty):

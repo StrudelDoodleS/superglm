@@ -114,8 +114,6 @@ STRUCTURED_PROFILE_KEYS = (
     "structured_dominant_group",
     "structured_auto_selected",
     "structured_auto_cost_ratio",
-    "structured_used_dense_fallback",
-    "structured_fallback_reason",
     "structured_schur_condition",
 )
 

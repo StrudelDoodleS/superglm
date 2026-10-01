@@ -14,6 +14,7 @@ from superglm.inference.covariance import (
     StructuredSlopeCovarianceAccessor,
 )
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
+from superglm.model.retired_state import retained_linear_state
 from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram,
@@ -23,6 +24,7 @@ from superglm.solvers.rank import (
 )
 from superglm.solvers.structured import (
     CenteredBlockOperator,
+    ProfiledSumToZeroTreeFactor,
     StructuredLinearSystemState,
     centered_operator_coefficient_estimable,
 )
@@ -319,8 +321,9 @@ def _structured_covariance_state(
         state.profiled_factor,
         intercept_shift=shift,
     )
-    coefficient = StructuredSlopeCovarianceAccessor(state.coefficient_factor)
-    return coefficient, augmented, active_groups
+    # The slope covariance M_ss, the slope block of the augmented inverse
+    # (design §3.6): no raw-coordinate coefficient factor exists.
+    return augmented.slopes, augmented, active_groups
 
 
 def coef_covariance(model):
@@ -339,7 +342,7 @@ def coef_covariance(model):
         mapped_covariance = np.asarray(scop_inference.augmented_inverse)[1:, 1:]
         covariance = solver.phi * mapped_covariance[np.ix_(selected, selected)]
         return covariance, active_groups
-    linear_state = getattr(model, "_linear_system_state", None)
+    linear_state = retained_linear_state(model)
     if isinstance(linear_state, StructuredLinearSystemState):
         _, augmented, active_groups = _structured_covariance_state(model, linear_state)
         return augmented.scaled(solver.phi).slopes, active_groups
@@ -373,7 +376,7 @@ def fit_active_info(model):
         ]
         augmented = _public_augmented_covariance(model, augmented, active_groups)
         return X_active, W, inverse, augmented, active_groups
-    linear_state = getattr(model, "_linear_system_state", None)
+    linear_state = retained_linear_state(model)
     if isinstance(linear_state, StructuredLinearSystemState):
         inverse, augmented, active_groups = _structured_covariance_state(
             model,
@@ -472,7 +475,7 @@ def fit_inference_info(model):
             "group_edf_map": dict(scop_inference.group_edf),
             "coefficient_estimable": coefficient_estimable,
         }
-    linear_state = getattr(model, "_linear_system_state", None)
+    linear_state = retained_linear_state(model)
     if isinstance(linear_state, StructuredLinearSystemState):
         inverse, augmented, active_groups = _structured_covariance_state(
             model,
@@ -495,8 +498,12 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": group_edf_map,
-            "coefficient_estimable": centered_operator_coefficient_estimable(
-                linear_state.centered_data_operator
+            # an sz factor reads the data's null space on the balance tree of
+            # the data (SumToZeroTreeFactor.coefficient_estimable)
+            "coefficient_estimable": (
+                linear_state.profiled_factor.coefficient_estimable()
+                if isinstance(linear_state.profiled_factor, ProfiledSumToZeroTreeFactor)
+                else centered_operator_coefficient_estimable(linear_state.centered_data_operator)
             ),
             "structured_covariance": True,
         }

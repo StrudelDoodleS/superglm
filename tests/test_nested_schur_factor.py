@@ -37,6 +37,7 @@ from superglm.solvers._structured.nested import (
     NestedSchurFactor,
     NestedTree,
     ProfiledNestedSchurFactor,
+    _weighted_scatter,
 )
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
@@ -203,10 +204,14 @@ def _bincols(index, values, size):
 
 def _center(fx):
     """The builder's global centre, the rule of ``border_center``: the mean of each
-    column whose offset exceeds its spread, 0 elsewhere and on the intercept column 0."""
+    column whose offset exceeds its spread, 0 elsewhere, on the crossed one-hot
+    columns and on the intercept column 0."""
     mean, spread = fx["X"].mean(axis=0), fx["X"].std(axis=0)
     center = np.where(np.abs(mean) > spread, mean, 0.0)
     center[:1] = 0.0
+    for name, columns, _ in fx["border_components"]:
+        if name == "crossed":
+            center[columns] = 0.0
     return center
 
 
@@ -556,6 +561,11 @@ def _case(name):
     Q = _product(_product((R[0].T, R[1]), _inverse_pair(_block(Hinv, border, border))), R)
     refs["Q"] = _floats(Q)
     refs["kappa_s"] = _scaled_condition(refs["Q"])
+    # the intercept-profiled Q the factor decides rank on (the super-root
+    # eliminates the intercept first): the inverse of Q^-1's rest block
+    rest = range(1, q)
+    refs["Q_profiled"] = _floats(_inverse_pair(_block(_inverse_pair(Q), rest, rest)))
+    refs["kappa_profiled"] = _scaled_condition(refs["Q_profiled"])
     refs["gamma_tree"], refs["gamma_border"] = _bounds(fx, q, refs["kappa_s"])
     refs["pivots"] = _exact_pivots(H_frac, fx, k)
     everything = range(p)
@@ -797,7 +807,7 @@ def test_pivots_logdet_and_inverse_diagonal(name):
     gamma_tree, gamma_border = refs["gamma_tree"], refs["gamma_border"]
     k, q, p = refs["k"], refs["q"], refs["p"]
     assert isinstance(factor, HessianFactor) and isinstance(factor, DerivativeCrossTraceFactor)
-    assert factor.rank == p and not factor.rank_truncated and not factor.used_dense_fallback
+    assert factor.rank == p and not factor.rank_truncated
     assert factor.shape == (p, p) and factor.backend == "structured"
     assert factor.dominant_group_name == factor.chain_group_names[-1]
     exact_min = refs["pivots"].min()
@@ -826,22 +836,30 @@ def test_pivots_logdet_and_inverse_diagonal(name):
         scale = np.sqrt(np.outer(np.diag(exact_block), np.diag(exact_block)))
         assert np.all(np.abs(block - exact_block) <= gamma * scale)
     assert np.all(factor.coefficient_estimable())
-    # Every rank decision reads Q_s = D_s Q D_s (§3.7).  The PSD sum knows Q to
-    # gamma_Q sqrt(Q_ii Q_jj) per entry (§3.4, §8), and the float D_s adds
-    # gamma_Q, so Q_s is within 2 gamma_Q plus three roundings of the exact one.
-    # Plain (unshifted) parent means leave eps |m| noise in d = m_c - m_p on a
-    # column constant within the parent and break this before any observable.
-    exact_Q = refs["Q"]
+    # Every rank decision reads Q_s = D_s Q D_s (§3.7) of the intercept-profiled
+    # Q, the super-root having eliminated the intercept (one-engine design
+    # §3.1).  The PSD sum knows Q to gamma_Q sqrt(Q_ii Q_jj) per entry (§3.4,
+    # §8), and the float D_s adds gamma_Q, so Q_s is within 2 gamma_Q plus three
+    # roundings of the exact one.  Plain (unshifted) parent means leave eps |m|
+    # noise in d = m_c - m_p on a column constant within the parent and break
+    # this before any observable.
+    exact_Q = refs["Q_profiled"]
     scale = 1.0 / np.sqrt(np.diag(exact_Q))
     gamma_Q = gamma_border / (q * refs["kappa_s"])
-    Q_scaled_error = np.abs(factor._Q_scaled - scale[:, None] * exact_Q * scale[None, :])
+    Q_scaled_error = np.abs(factor._scaled_matrix - scale[:, None] * exact_Q * scale[None, :])
     assert np.all(Q_scaled_error <= 2 * gamma_Q + 3 * EPS)
     eigenvalues = factor.scaled_schur_eigenvalues()
-    assert eigenvalues.shape == (q,) and eigenvalues[0] > 0 and np.all(np.diff(eigenvalues) >= 0)
+    assert eigenvalues.shape == (q - 1,) and eigenvalues[0] > 0
+    assert np.all(np.diff(eigenvalues) >= 0)
     # Q_s is known to gamma_Q per entry and lambda_min(Q_s) >= 1 / kappa_s, so
     # the eigenvalue ratio is within a few gamma_border of the exact kappa_s.
+    kappa = refs["kappa_profiled"]
     ratio = eigenvalues[-1] / eigenvalues[0]
-    assert abs(ratio - refs["kappa_s"]) <= 4 * gamma_border * refs["kappa_s"]
+    assert abs(ratio - kappa) <= 4 * (q - 1) * kappa * gamma_Q * kappa
+    # one path: no fallback, a Rump-verified full retained rank (§3.6)
+    certificate = factor.border_certificate
+    assert certificate.rank == q - 1 and certificate.decrements == 0
+    assert np.isnan(certificate.trailing_bound) and not certificate.directions
 
 
 @pytest.mark.parametrize("name", MAIN)
@@ -1082,6 +1100,43 @@ def test_profiled_factor_against_the_exact_centred_reference(name):
     assert np.array_equal(profiled.scaled_schur_eigenvalues(), augmented.scaled_schur_eigenvalues())
 
 
+def test_a_profiled_direction_does_not_keep_its_augmented_leaf_copies():
+    """A slope direction's ``[1 | X]`` operator only forms its record's piece.
+
+    ``derivative_cross_traces`` holds every direction's record through the
+    whole cross matrix; records that kept their augmented operators held two
+    ``(K, q + 1)`` leaf copies per weight-derivative direction, about 54 MiB of
+    big_K25000's peak (T7).  With the collector off, the augmented operator
+    must go when the call returns, and the traces must not change.
+    """
+    import gc
+    import weakref
+
+    refs, profiled, data, C1, C2, levels, border, crossed = _profiled_case(PROFILED[0])
+    directions = [(levels[0], refs["fx"]["lam"][0], C1), (None, 0.0, C2)]
+    expected = profiled.derivative_cross_traces(directions)
+    held = []
+    augment = profiled._augment
+
+    def spy(operator):
+        augmented = augment(operator)
+        held.append(weakref.ref(augmented))
+        return augmented
+
+    profiled._augment = spy
+    gc.collect()
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        records = [profiled._direction(*direction) for direction in directions]
+        assert len(held) == 2
+        assert all(reference() is None for reference in held)
+        np.testing.assert_array_equal(profiled._cross_matrix(records), expected)
+    finally:
+        if enabled:
+            gc.enable()
+
+
 @pytest.mark.parametrize("name", PROFILED)
 def test_profiled_derivative_cross_traces(name):
     refs, profiled, data, C1, C2, levels, border, crossed = _profiled_case(name)
@@ -1120,44 +1175,43 @@ def test_profiled_derivative_cross_traces(name):
             )
 
 
-def test_coefficient_factor_without_intercept_matches_the_exact_inverse():
-    refs, _, penalized, *_ = _augmented_case("F1")
-    fx = refs["fx"]
-    factor = _factor(fx, intercept=False)
-    gamma_tree, gamma_border = refs["gamma_tree"], refs["gamma_border"]
-    gamma = 4 * (gamma_tree + gamma_border)
-    p, Hinv = refs["p"], refs["Hinv_f"]
-    assert not factor.intercept and factor.rank == p
-    diagonal = factor.selected_inverse_diagonal(np.arange(p))
-    assert np.all(np.abs(diagonal - np.diag(Hinv)) <= (gamma_tree + gamma_border) * np.diag(Hinv))
-    indices = np.array([2, 7, refs["k"], refs["k"] + 4])
-    block = factor.selected_inverse_block(indices)
-    exact = Hinv[np.ix_(indices, indices)]
-    scale = np.sqrt(np.outer(np.diag(exact), np.diag(exact)))
-    assert np.all(np.abs(block - exact) <= gamma * scale)
-    rhs = np.random.default_rng(2).normal(size=p)
-    solution = factor.solve(rhs)
-    _certified_solve(penalized, solution, rhs, refs["H_f"], Hinv, gamma)
-    assert np.all(np.abs(solution - Hinv @ rhs) <= gamma * (np.abs(Hinv) @ np.abs(rhs)))
-    assert (
-        abs(factor.logdet() - refs["logdet"]) <= refs["k"] * gamma_tree + refs["q"] * gamma_border
-    )
+def test_the_raw_coordinate_factor_is_retired():
+    """No raw-coordinate coefficient factor exists (one-engine design §3.6, §3.10).
+
+    The slope covariance is ``M_ss``, the slope block of the augmented
+    inverse; a factor without the intercept to absorb the border centre is a
+    ``ValueError``, not a second route.
+    """
+    fx = _make_fixture(**FIXTURES["F1"])
+    with pytest.raises(ValueError, match="raw-coordinate nested factor") as raised:
+        _factor(fx, intercept=False)
+    # a user-facing message does not cite the design document
+    assert "design" not in str(raised.value)
 
 
-def test_chain_only_factor_with_an_empty_border():
+def test_chain_only_factor_with_an_intercept_border():
+    """A chain beside the intercept alone: the super-root is the whole border (§3.1).
+
+    The profiled border is empty, so the factor is the tree recursion plus the
+    super-root pivot ``D_0 = sum_r s_r``; every quantity is checked against the
+    exact rational ``H_aug``.
+    """
     fx = _make_fixture(seed=1, sizes=[3, 7, 16], n=600, lam=[0.7, 0.05, 3.0], width=0)
+    fx["X"] = np.ones((len(fx["w"]), 1))
+    fx["S_b"], fx["Omega_b"] = np.zeros((1, 1)), np.zeros((1, 1))
     tree = _tree(fx)
     data = _operator(fx, tree, fx["w"])
     penalized = _penalized(fx, data)
     factor = NestedSchurFactor(
-        penalized, chain_group_names=CHAIN[:3], chain_group_indices=(0, 1, 2), intercept=False
+        penalized, chain_group_names=CHAIN[:3], chain_group_indices=(0, 1, 2), intercept=True
     )
     M = _incidence(fx)
     k = tree.n_nodes
-    H = _pair(_fraction_sum(_fraction_gram(fx, fx["w"], M), _fraction_penalty(fx, k, 0)))
+    H = _pair(_fraction_sum(_fraction_gram(fx, fx["w"], M), _fraction_penalty(fx, k, 1)))
     Hinv = _inverse_pair(H)
     Hinv_f = _floats(Hinv)
-    gamma_tree, _ = _bounds(fx, 0, 1.0)
+    gamma_tree, _ = _bounds(fx, 1, 1.0)
+    k = k + 1  # the intercept sits beside the nodes in every check below
     assert factor.shape == (k, k) and factor.rank == k and factor.schur_condition_estimate == 1.0
     assert abs(factor.logdet() - _log_det(H)) <= k * gamma_tree
     diagonal = factor.selected_inverse_diagonal(np.arange(k))
@@ -1178,7 +1232,7 @@ def test_chain_only_factor_with_an_empty_border():
             value = factor.penalty_cross_trace(levels[lev_i], levels[lev_j], 1.0, 1.0)
             assert abs(value - exact) <= 4 * gamma_tree * scale
     edf = factor.inverse_operator_diagonal(data)
-    S = _floats(_pair(_fraction_penalty(fx, k, 0)))
+    S = _floats(_pair(_fraction_penalty(fx, k - 1, 1)))
     assert np.all(np.abs(edf - (1.0 - np.diag(Hinv_f @ S))) <= 2 * gamma_tree)
     assert np.all(factor.coefficient_estimable())
     assert factor.scaled_schur_eigenvalues().shape == (0,)
@@ -1192,8 +1246,14 @@ def test_rank_deficient_border_is_truncated_by_exactly_one_direction(name):
     factor = _factor(fx)
     k, q, p = refs["k"], refs["q"], refs["p"]
     pair = [k + fx["duplicate"], p - 1]
-    assert factor.used_dense_fallback and factor.rank_truncated
+    assert factor.rank_truncated
     assert factor.rank == p - 1 and factor.schur_condition_estimate == float("inf")
+    # §3.6 step 5: the one truncated direction is disclosed on the duplicated
+    # pair (rest coordinates sit one after the intercept), unpenalized, so an
+    # alias and not a weakly identified direction
+    certificate = factor.border_certificate
+    assert len(certificate.directions) == 1 and not certificate.weak.any()
+    assert sorted(certificate.directions[0] + 1) == sorted([fx["duplicate"], q - 1])
     estimable = np.ones(p, dtype=bool)
     estimable[pair] = False
     assert np.array_equal(factor.coefficient_estimable(), estimable)
@@ -1244,7 +1304,7 @@ def test_rank_deficient_border_is_truncated_by_exactly_one_direction(name):
     HS_f = _floats(HS)
     scale = 1.0 + 2.0 * np.abs(_diagonal(HS)) + np.sum(np.abs(HS_f) * np.abs(HS_f).T, axis=1)
     assert np.all(np.abs(edf1 - edf1_exact) <= (4 * gamma_tree + 4 * gamma_border) * scale)
-    scaled_border = solution[k:] / factor._scale
+    scaled_border = solution[k:] * factor._border_root
     assert abs(scaled_border @ null[k:]) <= gamma * np.linalg.norm(scaled_border) * np.sqrt(2.0)
 
 
@@ -1256,15 +1316,15 @@ def _with_border_column(fx, column):
 
 
 def test_a_truncated_factor_maps_its_centred_null_to_raw_coordinates():
-    """A centred null direction that touches the intercept is mapped by ``R`` (§3.7).
+    """A null direction that touches the intercept in raw coordinates is mapped by ``R`` (§3.7).
 
-    A column that is 5 on the weighted rows and 0 on the zero-weight ones is
-    centred at its row mean ``c``, so its centred null is ``e_j - (5 - c) e_0``:
-    ``diag(H^+ H)`` on the border must be the raw ``R Q^+ Q R^-1`` that the
-    factor's own solves give, not the centred one (they differ by 3.7 here).
-    A column that is 0 on the weighted rows and 7 on the (majority of)
-    zero-weight rows has the raw null ``e_j``: the intercept stays estimable
-    although the centred null touches it.
+    A column that is 5 on the weighted rows and 0 on the zero-weight ones has
+    the raw null ``e_j - 5 e_0``; ``diag(H^+ H)`` on the border must be what the
+    factor's own solves give.  A column that is 0 on the weighted rows and 7 on
+    the (majority of) zero-weight rows has the raw null ``e_j``: the intercept
+    stays estimable.  The fixture's centre is the old spread rule's, a
+    different ``c`` from the prior-weighted one; the factor is exact algebra
+    for any fixed centre.
     """
     fx = _make_fixture(**FIXTURES["F1"])
     fx = _with_border_column(fx, np.where(fx["w"] != 0.0, 5.0, 0.0))
@@ -1285,7 +1345,7 @@ def test_a_truncated_factor_maps_its_centred_null_to_raw_coordinates():
     fx = _make_fixture(**(FIXTURES["F1"] | dict(zero_leaves=tuple(range(4, 16)))))
     fx = _with_border_column(fx, np.where(fx["w"] != 0.0, 0.0, 7.0))
     factor = _factor(fx)
-    assert factor.rank == factor.shape[0] - 1 and factor._null_scaled[0, 0] != 0.0
+    assert factor.rank == factor.shape[0] - 1
     estimable = factor.coefficient_estimable()[factor.small_indices]
     assert np.array_equal(estimable, [True] * 5 + [False])
 
@@ -1376,7 +1436,7 @@ def test_a_border_column_carried_by_rounding_weights_is_an_exact_null_direction(
     assert reference.rank_truncated and reference.rank == p - 1
     assert not reference.coefficient_estimable()[p - 1]
     for factor in factors[1:]:
-        assert factor.rank == p - 1 and factor.used_dense_fallback
+        assert factor.rank == p - 1
         assert np.array_equal(factor.coefficient_estimable(), reference.coefficient_estimable())
         assert abs(factor.logdet() - reference.logdet()) <= 8 * EPS * abs(reference.logdet())
         # the two rows moved every other statistic by at most 1e-16 of their weight
@@ -1442,15 +1502,16 @@ def test_refusals_by_the_iterate_are_linalg_errors():
             structured_indices=data.structured_indices,
         )
 
-    # signed leaf weights driving a pivot to or below its cancellation floor
-    # gamma_u = 10 eps (fan_u + 2) (|w_u| + lambda_u): exactly zero, and then
-    # positive at half the floor (w_0 = -lambda (1 - 20 eps) leaves the pivot
-    # 20 eps lambda against a floor of 40 eps lambda), which a zero floor would
-    # accept at the leaf and refuse only at its parent
+    # signed leaf weights driving a pivot to or within its certified
+    # uncertainty E_u + 4 eps (|w_u| + lambda_u) (signed-rows note §4.4, with
+    # E_u = gamma_Q |w_u| for statistics that carry no error mass): exactly
+    # zero, and then positive but inside it (w_0 = -lambda (1 - 20 eps) leaves
+    # the pivot 20 eps lambda against more than gamma_Q lambda), which a zero
+    # floor would accept at the leaf and refuse only at its parent
     signed = np.array(stats.weight)
     for weight in (-fx["lam"][-1], -fx["lam"][-1] * (1.0 - 20.0 * EPS)):
         signed[0] = weight
-        with pytest.raises(np.linalg.LinAlgError, match="'variant'.*cancellation floor"):
+        with pytest.raises(np.linalg.LinAlgError, match="'variant'.*certified uncertainty"):
             NestedSchurFactor(
                 _penalized(fx, with_weight(signed)),
                 chain_group_names=CHAIN[:3],
@@ -1473,11 +1534,9 @@ def test_refusals_by_the_iterate_are_linalg_errors():
 @pytest.mark.parametrize("lam", [(1.0, 1.0, 0.0), (0.0, 1.0, 1.0), (1.0, 0.0, 1.0)])
 def test_a_whole_level_without_penalty_is_intercept_aliasing(lam):
     fx = _make_fixture(seed=1, sizes=[3, 7, 16], n=600, lam=lam, zero_leaves=(), extra=(0, 0, 0))
+    # the super-root pivot sum_r s_r is exactly zero: the intercept is aliased
     with pytest.raises(np.linalg.LinAlgError, match="aliased with the fitted intercept"):
         _factor(fx, intercept=True)
-    # the coefficient factor of the same design refuses the coupled null space instead
-    with pytest.raises(np.linalg.LinAlgError, match="coupled"):
-        _factor(fx, intercept=False)
 
 
 def test_malformed_calls_are_value_errors_and_foreign_operators_type_errors():
@@ -1696,3 +1755,79 @@ def test_no_dense_node_or_coefficient_matrix_is_formed():
     # the smallest dense square a wrong route could form is (K_leaf, K_leaf)
     dense_bytes = 8 * sizes[-1] ** 2
     assert peak < 0.05 * dense_bytes, (peak, dense_bytes, p)
+
+
+def test_border_penalty_traces_read_only_their_own_rows_and_columns():
+    """A two-column border penalty beside a 300-column crossed block forms no ``q x q`` array.
+
+    Embedded in border coordinates the penalty and its products with ``Q^-1``
+    are ``(q, q)``; on its own rows and columns every trace reads ``(k, q)``
+    blocks at most.  Their values against the exact references are
+    ``test_penalty_traces_and_pairs``.
+    """
+    fx = _make_fixture(
+        seed=13, sizes=[2000], n=4000, lam=[0.5], extra=(0,), zero_leaves=(), crossed=300
+    )
+    factor = _factor(fx)
+    levels, border, crossed = _components(fx, factor.structured_indices.size)
+    q = factor.small_indices.size
+    factor.penalty_cross_trace(levels[0], levels[0], 1.0, 1.0)  # caches G_I and the level pair
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    factor.trace_inverse_penalty(border)
+    factor.penalty_cross_trace(border, border, 1.0, 1.0)
+    factor.penalty_cross_trace(levels[0], border, 1.0, 1.0)
+    factor.penalty_cross_trace(border, crossed[0], 1.0, 1.0)
+    factor.derivative_cross_traces([(levels[0], 0.5, None), (border, 1.0, None)])
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 8 * q * q, (peak, q)
+
+
+def test_the_between_node_scatter_skips_the_exact_zeros_of_indicator_columns():
+    """``values' diag(s) values`` with its random-effect columns sparse equals the dense
+    product without its copy.
+
+    Both routes sum the same nonzero products, each within ``gamma_K sum_l
+    |s_l d_li d_lj|`` of the exact entry (one more rounding for the weight), so
+    they differ by twice that; a column with no nonzero keeps exact zeros.  The
+    route is the columns' type (``indicator``), never their fill: without
+    indicator columns it is the dense product itself, and a fully dense
+    column marked as one gives the same sums.  The sparse route never forms
+    the ``(K, q)`` weighted copy the dense product needs.
+    """
+    rng = np.random.default_rng(14)
+    K, q = 20000, 300
+    values = np.zeros((K, q))
+    values[:, :10] = rng.normal(size=(K, 10))
+    values[rng.integers(0, K, 3 * K), rng.integers(10, q - 1, 3 * K)] = rng.normal(size=3 * K)
+    weight = rng.exponential(size=K)
+    weight[::11] = 0.0
+    indicator = np.arange(q) >= 10
+    dense = (weight[:, None] * values).T @ values
+    scatter, mass = _weighted_scatter(values, weight, indicator)
+    bound = 2 * (K + 2) * EPS * ((weight[:, None] * np.abs(values)).T @ np.abs(values))
+    assert np.all(np.abs(scatter - dense) <= bound)
+    # the absolute mass is the diagonal of the same sum with |weight| (here weight >= 0)
+    assert np.all(np.abs(mass - np.diag(dense)) <= np.diag(bound))
+    np.testing.assert_array_equal(scatter[-1], 0.0)
+    np.testing.assert_array_equal(scatter[:, -1], 0.0)
+    for plain in (None, np.zeros(q, dtype=bool)):
+        np.testing.assert_array_equal(_weighted_scatter(values, weight, plain)[0], dense)
+    marked = np.arange(q) < 12  # ten dense columns and two sparse ones marked
+    assert np.all(np.abs(_weighted_scatter(values, weight, marked)[0] - dense) <= bound)
+    # a centre on the dense columns centres their slice only: the product of
+    # the centred values, the one-hot columns keeping their exact zeros
+    center = np.where(indicator, 0.0, rng.normal(size=q))
+    centred = values - center
+    expected = (weight[:, None] * centred).T @ centred
+    centred_bound = 2 * (K + 3) * EPS * ((weight[:, None] * np.abs(centred)).T @ np.abs(centred))
+    shifted, shifted_mass = _weighted_scatter(values, weight, indicator, center=center)
+    assert np.all(np.abs(shifted - expected) <= centred_bound)
+    assert np.all(np.abs(shifted_mass - np.diag(expected)) <= np.diag(centred_bound))
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    _weighted_scatter(values, weight, indicator, center=center)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 0.5 * 8 * K * q, (peak, 8 * K * q)

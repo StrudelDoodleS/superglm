@@ -17,8 +17,6 @@ assembly -- stayed, because those two are its callers.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import numpy as np
 from numpy.typing import NDArray
 
@@ -28,13 +26,12 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
+from superglm.solvers._structured.balance_tree import ProfiledSumToZeroTreeFactor
 from superglm.solvers.hessian_factor import HessianFactor, _expanded_component_omega
 from superglm.solvers.structured import (
-    ProfiledBlockSchurFactor,
+    ProfiledFactorSmoothLeafFactor,
     ProfiledNestedSchurFactor,
-    ProfiledScalarSchurFactor,
 )
-from superglm.solvers.sum_to_zero import ProfiledSumToZeroBlockFactor
 from superglm.types import GroupSlice
 
 
@@ -92,18 +89,6 @@ class StructuredSlopeCovarianceAccessor:
     def solve(self, rhs: NDArray) -> NDArray:
         return self.scale * self.factor.solve(rhs)
 
-    @property
-    def row_quadratic_forms(self) -> Callable[[NDArray], NDArray] | None:
-        """Row-wise ``x_i' V x_i`` from the factor's structured pieces.
-
-        ``None`` for block and sum-to-zero factors, which have no row method and
-        keep the bounded selected-block route.
-        """
-        row_forms = getattr(self.factor, "row_quadratic_forms", None)
-        if row_forms is None:
-            return None
-        return lambda rows: self.scale * row_forms(rows)
-
     def trace(self) -> float:
         indices = np.arange(self.shape[0], dtype=np.intp)
         return float(np.sum(self.selected_diagonal(indices)))
@@ -151,10 +136,7 @@ class StructuredCovarianceAccessor:
     def __init__(
         self,
         factor: (
-            ProfiledScalarSchurFactor
-            | ProfiledBlockSchurFactor
-            | ProfiledSumToZeroBlockFactor
-            | ProfiledNestedSchurFactor
+            ProfiledFactorSmoothLeafFactor | ProfiledSumToZeroTreeFactor | ProfiledNestedSchurFactor
         ),
         *,
         intercept_shift: NDArray | None = None,
@@ -346,7 +328,7 @@ def covariance_factor_smooth_raw_level_block(
         isinstance(covariance, StructuredCovarianceAccessor)
         and isinstance(
             covariance.factor,
-            ProfiledSumToZeroBlockFactor,
+            ProfiledSumToZeroTreeFactor,
         )
         and (term_name is None or covariance.factor.dominant_group_name == term_name)
     ):

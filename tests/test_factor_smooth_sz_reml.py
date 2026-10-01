@@ -15,8 +15,11 @@ from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import build_observed_reml_geometry
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.structured import BlockStructuredLayout, materialize_compact_operator
-from superglm.solvers.sum_to_zero import ProfiledSumToZeroBlockFactor
+from superglm.solvers.structured import (
+    FactorSmoothLeafLayout,
+    ProfiledSumToZeroTreeFactor,
+    materialize_compact_operator,
+)
 
 
 def _data(family: str):
@@ -127,7 +130,7 @@ def test_fixed_lambda_sz_structured_fit_matches_dense(
     }
     assert isinstance(
         structured._linear_system_state.profiled_factor,
-        ProfiledSumToZeroBlockFactor,
+        ProfiledSumToZeroTreeFactor,
     )
 
 
@@ -503,14 +506,15 @@ def test_sz_structured_fit_uses_tabmat_small_partition_without_dense_dominant(
         runtime_validation="skip",
     )
 
+    # the balance tree's leaf layout (one-engine design §3.5): its row pass
+    # writes the border rows in level order and never densifies the term
     layout = next(
         layout
-        for layout in model._dm._scalar_structured_layout_cache.values()
-        if isinstance(layout, BlockStructuredLayout)
+        for layout in model._dm._structured_layout_cache.values()
+        if isinstance(layout, FactorSmoothLeafLayout)
     )
-    assert layout.small_execution_plan is not None
-    assert layout.small_execution_plan.ordinary_indices
-    assert layout.small_execution_plan._ordinary_split_built
+    assert layout.dominant.factor_basis == "sz"
+    assert layout.leaf_count == layout.n_levels + 1
     assert model.result.direct_backend == "structured"
     assert dense_penalty_shapes <= {(8, 8)}
     assert support_dimensions == {(8, 7), (6, 4)}

@@ -2,29 +2,28 @@
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm.group_matrix import (
-    FactorSmoothGroupMatrix,
     GroupMatrix,
-    RandomEffectGroupMatrix,
 )
-from superglm.solvers._structured.factors import (
-    BlockSchurFactor,
-    ProfiledBlockSchurFactor,
-    ProfiledScalarSchurFactor,
-    ScalarSchurFactor,
+from superglm.solvers._structured.balance_tree import (
+    ProfiledSumToZeroTreeFactor,
+    SumToZeroLeafSystem,
+    SumToZeroPenalizedOperator,
+    SumToZeroTreeFactor,
 )
-from superglm.solvers._structured.moments import (
-    BlockStructuredSystem,
-    NestedStructuredSystem,
-    ScalarStructuredSystem,
-    SumToZeroBlockStructuredSystem,
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafFactor,
+    FactorSmoothLeafSystem,
+    FactorSmoothPenalizedOperator,
+    ProfiledFactorSmoothLeafFactor,
 )
+from superglm.solvers._structured.moments import NestedStructuredSystem
 from superglm.solvers._structured.nested import (
     NestedPenalizedOperator,
     NestedSchurFactor,
@@ -32,8 +31,6 @@ from superglm.solvers._structured.nested import (
 )
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
-    SumToZeroBlockOperator,
-    SymmetricBlockOperator,
 )
 from superglm.solvers._structured.overrides import (
     _factor_smooth_override_local_blocks,
@@ -42,30 +39,15 @@ from superglm.solvers._structured.overrides import (
 from superglm.solvers.hessian_factor import _component_indices
 from superglm.types import GroupSlice, PenaltyComponent
 
-if TYPE_CHECKING:
-    from superglm.solvers.sum_to_zero import ProfiledSumToZeroBlockFactor
-
-
-@dataclass(frozen=True)
-class CachedScalarStructuredSolution:
-    """One lambda-only solve against cached structured working moments."""
-
-    beta: NDArray
-    intercept: float
-    factor: ProfiledScalarSchurFactor
-    penalized_operator: SymmetricBlockOperator
-    log_det_H: float  # noqa: N815
-    hessian_rank: int
-
 
 @dataclass(frozen=True)
 class CachedBlockStructuredSolution:
-    """One lambda-only solve against cached factor-smooth working moments."""
+    """One lambda-only solve against a cached ``fs`` leaf system."""
 
     beta: NDArray
     intercept: float
-    factor: ProfiledBlockSchurFactor
-    penalized_operator: BlockSymmetricOperator
+    factor: ProfiledFactorSmoothLeafFactor
+    penalized_operator: FactorSmoothPenalizedOperator
     log_det_H: float  # noqa: N815
     hessian_rank: int
 
@@ -88,10 +70,16 @@ class CachedSumToZeroStructuredSolution:
 
     beta: NDArray
     intercept: float
-    factor: ProfiledSumToZeroBlockFactor
-    penalized_operator: SumToZeroBlockOperator
+    factor: ProfiledSumToZeroTreeFactor
+    penalized_operator: SumToZeroPenalizedOperator
     log_det_H: float  # noqa: N815
     hessian_rank: int
+
+
+_PENALTIES_REQUIRED = (
+    "A structured penalized operator needs the fit's compact penalty components "
+    "(reml_penalties) or an authoritative S_override."
+)
 
 
 def _lambda_for_component(
@@ -99,40 +87,6 @@ def _lambda_for_component(
     name: str,
 ) -> float:
     return float(lambda2[name]) if isinstance(lambda2, dict) else float(lambda2)
-
-
-def _legacy_small_block_penalty(
-    matrix: GroupMatrix,
-    group: GroupSlice,
-    lambda2: float | dict[str, float],
-) -> NDArray | None:
-    """Solver-space penalty block for one generic small-partition group.
-
-    Legacy (``reml_penalties is None``) assembly: multi-penalty groups
-    resolve per-component lambdas by component name, mirroring
-    ``reml.penalty_algebra.build_penalty_matrix``.
-    """
-    if not hasattr(matrix, "R_inv"):
-        return None
-    omega_components = getattr(matrix, "omega_components", None)
-    if omega_components is not None:
-        from superglm.reml.penalty_algebra import resolve_component_lambda
-
-        block: NDArray | None = None
-        for suffix, omega_j in omega_components:
-            lam_j = resolve_component_lambda(lambda2, group.name, suffix)
-            if lam_j == 0.0:
-                continue
-            term = lam_j * np.asarray(matrix.R_inv.T @ omega_j @ matrix.R_inv, dtype=np.float64)
-            block = term if block is None else block + term
-        return block
-    lam = float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else float(lambda2)
-    if lam == 0.0:
-        return None
-    omega_raw = getattr(matrix, "omega", None)
-    if omega_raw is None:
-        return None
-    return lam * np.asarray(matrix.R_inv.T @ omega_raw @ matrix.R_inv, dtype=np.float64)
 
 
 def _dense_component_omega(
@@ -149,143 +103,25 @@ def _dense_component_omega(
     )
 
 
-def build_penalized_scalar_operator(
-    system: ScalarStructuredSystem,
-    group_matrices: list[GroupMatrix],
-    groups: list[GroupSlice],
-    lambda2: float | dict[str, float],
-    *,
-    reml_penalties: list[PenaltyComponent] | None = None,
-    S_override: NDArray | None = None,
-) -> SymmetricBlockOperator:
-    """Add block penalties to a structured Gram without forming a full penalty matrix."""
-    operator = system.operator
-    p = operator.shape[0]
-    A = np.array(operator.A, copy=True)
-    d = np.array(operator.d, copy=True)
-    small_position = np.full(p, -1, dtype=np.intp)
-    small_position[operator.small_indices] = np.arange(len(operator.small_indices))
-    structured_position = np.full(p, -1, dtype=np.intp)
-    structured_position[operator.structured_indices] = np.arange(len(operator.structured_indices))
-
-    if S_override is not None:
-        penalty = np.asarray(S_override, dtype=np.float64)
-        if penalty.shape != (p, p):
-            raise ValueError(f"S_override must have shape ({p}, {p}).")
-        incompatibility = _structured_override_incompatibility(
-            penalty,
-            small_indices=operator.small_indices,
-            structured_indices=operator.structured_indices,
-            geometry="random_effect",
-        )
-        if incompatibility is not None:
-            raise ValueError(incompatibility)
-        A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
-        structured_penalty = penalty[
-            np.ix_(operator.structured_indices, operator.structured_indices)
-        ]
-        d += np.diag(structured_penalty)
-        return SymmetricBlockOperator(
-            A=A,
-            C=operator.C,
-            d=d,
-            small_indices=operator.small_indices,
-            structured_indices=operator.structured_indices,
-        )
-
-    if reml_penalties is not None:
-        for component in reml_penalties:
-            lam = _lambda_for_component(lambda2, component.name)
-            if lam == 0.0:
-                continue
-            indices = _component_indices(component, p)
-            local_small = small_position[indices]
-            local_structured = structured_position[indices]
-            wholly_small = np.all(local_small >= 0)
-            wholly_structured = np.all(local_structured >= 0)
-            if not wholly_small and not wholly_structured:
-                raise ValueError(
-                    f"Penalty component {component.name!r} crosses structured partitions."
-                )
-            if component.penalty_kind == "identity":
-                if wholly_small:
-                    A[local_small, local_small] += lam
-                else:
-                    d[local_structured] += lam
-                continue
-
-            omega = _dense_component_omega(
-                component,
-                group_matrices[component.group_index],
-            )
-            if omega.shape != (len(indices), len(indices)):
-                raise ValueError(
-                    f"Penalty component {component.name!r} has shape {omega.shape}; "
-                    f"expected ({len(indices)}, {len(indices)})."
-                )
-            if wholly_small:
-                A[np.ix_(local_small, local_small)] += lam * omega
-                continue
-            off_diagonal = omega - np.diag(np.diag(omega))
-            if np.any(np.abs(off_diagonal) > 1e-12):
-                raise ValueError(f"Dominant penalty component {component.name!r} is not diagonal.")
-            d[local_structured] += lam * np.diag(omega)
-    else:
-        for group_index, (matrix, group) in enumerate(zip(group_matrices, groups, strict=True)):
-            if not group.penalized:
-                continue
-            indices = np.arange(group.start, group.end, dtype=np.intp)
-            local_small = small_position[indices]
-            local_structured = structured_position[indices]
-            if isinstance(matrix, RandomEffectGroupMatrix):
-                lam = (
-                    float(lambda2.get(group.name, 0.0))
-                    if isinstance(lambda2, dict)
-                    else float(lambda2)
-                )
-                if lam == 0.0:
-                    continue
-                if np.all(local_small >= 0):
-                    A[local_small, local_small] += lam
-                elif np.all(local_structured >= 0):
-                    d[local_structured] += lam
-                else:
-                    raise ValueError(
-                        f"RandomEffect group {group.name!r} crosses structured partitions."
-                    )
-                continue
-            block = _legacy_small_block_penalty(matrix, group, lambda2)
-            if block is None:
-                continue
-            if not np.all(local_small >= 0):
-                raise ValueError(
-                    f"Penalty geometry for dominant group index {group_index} is unsupported."
-                )
-            A[np.ix_(local_small, local_small)] += block
-
-    return SymmetricBlockOperator(
-        A=A,
-        C=operator.C,
-        d=d,
-        small_indices=operator.small_indices,
-        structured_indices=operator.structured_indices,
-    )
-
-
 def build_penalized_block_operator(
-    system: BlockStructuredSystem,
+    system: FactorSmoothLeafSystem,
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
     S_override: NDArray | None = None,
-) -> BlockSymmetricOperator:
-    """Add compact penalties to a factor-smooth block Gram."""
+) -> FactorSmoothPenalizedOperator:
+    """Add compact penalties to an ``fs`` system's moment operator, keeping them apart.
+
+    ``A`` and ``D`` below are the penalty parts alone; the returned operator
+    carries them as ``penalty_small`` and ``penalty_local`` (the square roots
+    the factor takes) beside the penalized moments every trace reads.
+    """
     operator = system.operator
     p = operator.shape[0]
-    A = np.array(operator.A, copy=True)
-    D = np.array(operator.D, copy=True)
+    A = np.zeros_like(operator.A)
+    D = np.zeros_like(operator.D)
     small_position = np.full(p, -1, dtype=np.intp)
     small_position[operator.small_indices] = np.arange(len(operator.small_indices))
     structured_position = np.full(p, -1, dtype=np.intp)
@@ -311,143 +147,103 @@ def build_penalized_block_operator(
             operator.structured_indices,
             sum_to_zero=False,
         )
-        return BlockSymmetricOperator(
-            A=A,
-            C=operator.C,
-            D=D,
-            small_indices=operator.small_indices,
-            structured_indices=operator.structured_indices,
-        )
+        return _penalized_leaf_operator(operator, A, D)
 
-    if reml_penalties is not None:
-        for component in reml_penalties:
-            lam = _lambda_for_component(lambda2, component.name)
-            if lam == 0.0:
-                continue
-            indices = _component_indices(component, p)
-            local_small = small_position[indices]
-            local_structured = structured_position[indices]
-            wholly_small = np.all(local_small >= 0)
-            wholly_structured = np.all(local_structured >= 0)
-            if not wholly_small and not wholly_structured:
-                raise ValueError(
-                    f"Penalty component {component.name!r} crosses structured partitions."
-                )
-            if component.penalty_kind == "identity":
-                if wholly_small:
-                    A[local_small, local_small] += lam
-                else:
-                    levels = local_structured // operator.block_size
-                    coordinates = local_structured % operator.block_size
-                    D[levels, coordinates, coordinates] += lam
-                continue
-            if component.penalty_kind == "repeated":
-                if not wholly_structured:
-                    raise ValueError(
-                        f"Repeated penalty component {component.name!r} must lie in "
-                        "the dominant factor-smooth block."
-                    )
-                if (
-                    component.repeat_count != operator.n_levels
-                    or component.block_width != operator.block_size
-                    or not np.array_equal(
-                        indices.reshape(operator.n_levels, operator.block_size),
-                        operator.structured_indices,
-                    )
-                ):
-                    raise ValueError(
-                        f"Repeated penalty component {component.name!r} does not match "
-                        "the dominant factor-smooth geometry."
-                    )
-                omega = np.asarray(component.omega_ssp, dtype=np.float64)
-                if omega.shape != (operator.block_size, operator.block_size):
-                    raise ValueError(
-                        f"Repeated penalty component {component.name!r} has shape "
-                        f"{omega.shape}; expected "
-                        f"({operator.block_size}, {operator.block_size})."
-                    )
-                D += lam * omega[None, :, :]
-                continue
-
-            omega = _dense_component_omega(
-                component,
-                group_matrices[component.group_index],
-            )
-            if omega.shape != (len(indices), len(indices)):
-                raise ValueError(
-                    f"Penalty component {component.name!r} has shape {omega.shape}; "
-                    f"expected ({len(indices)}, {len(indices)})."
-                )
-            if not wholly_small:
-                raise ValueError(
-                    f"Dense penalty component {component.name!r} cannot span the "
-                    "dominant factor-smooth block."
-                )
-            A[np.ix_(local_small, local_small)] += lam * omega
-    else:
-        for group_index, (matrix, group) in enumerate(zip(group_matrices, groups, strict=True)):
-            if not group.penalized:
-                continue
-            indices = np.arange(group.start, group.end, dtype=np.intp)
-            local_small = small_position[indices]
-            local_structured = structured_position[indices]
-            if isinstance(matrix, FactorSmoothGroupMatrix):
-                if not np.all(local_structured >= 0):
-                    raise ValueError(
-                        f"FactorSmooth group {group.name!r} is not the dominant block."
-                    )
-                from superglm.reml.penalty_algebra import resolve_component_lambda
-
-                for suffix, omega in matrix.repeated_penalty_components:
-                    lam = resolve_component_lambda(lambda2, group.name, suffix)
-                    D += lam * np.asarray(omega, dtype=np.float64)[None, :, :]
-                continue
-            if isinstance(matrix, RandomEffectGroupMatrix):
-                lam = (
-                    float(lambda2.get(group.name, 0.0))
-                    if isinstance(lambda2, dict)
-                    else float(lambda2)
-                )
-                if lam == 0.0:
-                    continue
-                if not np.all(local_small >= 0):
-                    raise ValueError(
-                        f"RandomEffect group {group.name!r} crosses structured partitions."
-                    )
+    if reml_penalties is None:
+        raise ValueError(_PENALTIES_REQUIRED)
+    for component in reml_penalties:
+        lam = _lambda_for_component(lambda2, component.name)
+        if lam == 0.0:
+            continue
+        indices = _component_indices(component, p)
+        local_small = small_position[indices]
+        local_structured = structured_position[indices]
+        wholly_small = np.all(local_small >= 0)
+        wholly_structured = np.all(local_structured >= 0)
+        if not wholly_small and not wholly_structured:
+            raise ValueError(f"Penalty component {component.name!r} crosses structured partitions.")
+        if component.penalty_kind == "identity":
+            if wholly_small:
                 A[local_small, local_small] += lam
-                continue
-            block = _legacy_small_block_penalty(matrix, group, lambda2)
-            if block is None:
-                continue
-            if not np.all(local_small >= 0):
+            else:
+                levels = local_structured // operator.block_size
+                coordinates = local_structured % operator.block_size
+                D[levels, coordinates, coordinates] += lam
+            continue
+        if component.penalty_kind == "repeated":
+            if not wholly_structured:
                 raise ValueError(
-                    f"Penalty geometry for dominant group index {group_index} is unsupported."
+                    f"Repeated penalty component {component.name!r} must lie in "
+                    "the dominant factor-smooth block."
                 )
-            A[np.ix_(local_small, local_small)] += block
+            if (
+                component.repeat_count != operator.n_levels
+                or component.block_width != operator.block_size
+                or not np.array_equal(
+                    indices.reshape(operator.n_levels, operator.block_size),
+                    operator.structured_indices,
+                )
+            ):
+                raise ValueError(
+                    f"Repeated penalty component {component.name!r} does not match "
+                    "the dominant factor-smooth geometry."
+                )
+            omega = np.asarray(component.omega_ssp, dtype=np.float64)
+            if omega.shape != (operator.block_size, operator.block_size):
+                raise ValueError(
+                    f"Repeated penalty component {component.name!r} has shape "
+                    f"{omega.shape}; expected "
+                    f"({operator.block_size}, {operator.block_size})."
+                )
+            D += lam * omega[None, :, :]
+            continue
 
-    return BlockSymmetricOperator(
-        A=A,
-        C=operator.C,
-        D=D,
-        small_indices=operator.small_indices,
-        structured_indices=operator.structured_indices,
-    )
+        omega = _dense_component_omega(
+            component,
+            group_matrices[component.group_index],
+        )
+        if omega.shape != (len(indices), len(indices)):
+            raise ValueError(
+                f"Penalty component {component.name!r} has shape {omega.shape}; "
+                f"expected ({len(indices)}, {len(indices)})."
+            )
+        if not wholly_small:
+            raise ValueError(
+                f"Dense penalty component {component.name!r} cannot span the "
+                "dominant factor-smooth block."
+            )
+        A[np.ix_(local_small, local_small)] += lam * omega
+
+    return _penalized_leaf_operator(operator, A, D)
+
+
+def _penalized_leaf_operator(
+    operator: BlockSymmetricOperator, A: NDArray, D: NDArray
+) -> FactorSmoothPenalizedOperator:
+    """The moments plus the penalty parts ``A``, ``D``, with the parts kept for the factor."""
+    return FactorSmoothPenalizedOperator.with_penalties(operator, A, D)
 
 
 def build_penalized_sum_to_zero_operator(
-    system: SumToZeroBlockStructuredSystem,
+    system: SumToZeroLeafSystem,
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
     S_override: NDArray | None = None,
-) -> SumToZeroBlockOperator:
-    """Add public penalties to their symmetric raw all-level SZ geometry."""
+) -> SumToZeroPenalizedOperator:
+    """Add public penalties to their all-level ``sz`` geometry, keeping the penalty parts apart.
+
+    ``A`` and ``D`` below are the penalty parts alone (``D`` one block per
+    level, all ``K``): the returned operator carries them as
+    ``penalty_small``/``penalty_local``, the square roots the balance tree
+    takes, beside the penalized moments every trace reads.
+    """
     operator = system.operator
     p = operator.shape[0]
-    A = np.array(operator.A, copy=True)
-    D = np.array(operator.D, copy=True)
+    A = np.zeros_like(operator.A)
+    D = np.zeros_like(operator.D)
     small_position = np.full(p, -1, dtype=np.intp)
     small_position[operator.small_indices] = np.arange(len(operator.small_indices))
     structured_position = np.full(p, -1, dtype=np.intp)
@@ -473,157 +269,83 @@ def build_penalized_sum_to_zero_operator(
             operator.structured_indices,
             sum_to_zero=True,
         )
-        return SumToZeroBlockOperator(
-            A=A,
-            C=operator.C,
-            D=D,
-            small_indices=operator.small_indices,
-            structured_indices=operator.structured_indices,
+        return SumToZeroPenalizedOperator.with_penalties(operator, A, D)
+
+    if reml_penalties is None:
+        raise ValueError(_PENALTIES_REQUIRED)
+    for component in reml_penalties:
+        lam = _lambda_for_component(lambda2, component.name)
+        if lam == 0.0:
+            continue
+        indices = _component_indices(component, p)
+        local_small = small_position[indices]
+        local_structured = structured_position[indices]
+        wholly_small = np.all(local_small >= 0)
+        wholly_structured = np.all(local_structured >= 0)
+        if not wholly_small and not wholly_structured:
+            raise ValueError(f"Penalty component {component.name!r} crosses structured partitions.")
+        if component.penalty_kind == "identity":
+            if not wholly_small:
+                raise ValueError("The dominant SZ block accepts only a sum-to-zero penalty.")
+            A[local_small, local_small] += lam
+            continue
+        if component.penalty_kind == "sum_to_zero":
+            if (
+                not wholly_structured
+                or component.repeat_count != operator.n_levels
+                or component.block_width != operator.block_size
+                or not np.array_equal(
+                    indices.reshape(operator.n_levels - 1, operator.block_size),
+                    operator.structured_indices,
+                )
+            ):
+                raise ValueError(
+                    f"Sum-to-zero penalty component {component.name!r} does not "
+                    "match the dominant SZ geometry."
+                )
+            omega = np.asarray(component.omega_ssp, dtype=np.float64)
+            if omega.shape != (operator.block_size, operator.block_size):
+                raise ValueError(
+                    f"Sum-to-zero penalty component {component.name!r} has the wrong local shape."
+                )
+            D += lam * omega[None, :, :]
+            continue
+        if wholly_structured:
+            raise ValueError("The dominant SZ block accepts only penalty_kind='sum_to_zero'.")
+        omega = _dense_component_omega(
+            component,
+            group_matrices[component.group_index],
         )
-
-    if reml_penalties is not None:
-        for component in reml_penalties:
-            lam = _lambda_for_component(lambda2, component.name)
-            if lam == 0.0:
-                continue
-            indices = _component_indices(component, p)
-            local_small = small_position[indices]
-            local_structured = structured_position[indices]
-            wholly_small = np.all(local_small >= 0)
-            wholly_structured = np.all(local_structured >= 0)
-            if not wholly_small and not wholly_structured:
-                raise ValueError(
-                    f"Penalty component {component.name!r} crosses structured partitions."
-                )
-            if component.penalty_kind == "identity":
-                if not wholly_small:
-                    raise ValueError("The dominant SZ block accepts only a sum-to-zero penalty.")
-                A[local_small, local_small] += lam
-                continue
-            if component.penalty_kind == "sum_to_zero":
-                if (
-                    not wholly_structured
-                    or component.repeat_count != operator.n_levels
-                    or component.block_width != operator.block_size
-                    or not np.array_equal(
-                        indices.reshape(operator.n_levels - 1, operator.block_size),
-                        operator.structured_indices,
-                    )
-                ):
-                    raise ValueError(
-                        f"Sum-to-zero penalty component {component.name!r} does not "
-                        "match the dominant SZ geometry."
-                    )
-                omega = np.asarray(component.omega_ssp, dtype=np.float64)
-                if omega.shape != (operator.block_size, operator.block_size):
-                    raise ValueError(
-                        f"Sum-to-zero penalty component {component.name!r} has "
-                        "the wrong local shape."
-                    )
-                D += lam * omega[None, :, :]
-                continue
-            if wholly_structured:
-                raise ValueError("The dominant SZ block accepts only penalty_kind='sum_to_zero'.")
-            omega = _dense_component_omega(
-                component,
-                group_matrices[component.group_index],
+        if omega.shape != (len(indices), len(indices)):
+            raise ValueError(
+                f"Penalty component {component.name!r} has shape {omega.shape}; "
+                f"expected ({len(indices)}, {len(indices)})."
             )
-            if omega.shape != (len(indices), len(indices)):
-                raise ValueError(
-                    f"Penalty component {component.name!r} has shape {omega.shape}; "
-                    f"expected ({len(indices)}, {len(indices)})."
-                )
-            A[np.ix_(local_small, local_small)] += lam * omega
-    else:
-        for group_index, (matrix, group) in enumerate(zip(group_matrices, groups, strict=True)):
-            if not group.penalized:
-                continue
-            indices = np.arange(group.start, group.end, dtype=np.intp)
-            local_small = small_position[indices]
-            local_structured = structured_position[indices]
-            if isinstance(matrix, FactorSmoothGroupMatrix):
-                if (
-                    matrix.factor_basis != "sz"
-                    or not np.all(local_structured >= 0)
-                    or len(matrix.repeated_penalty_components) != 1
-                ):
-                    raise ValueError(
-                        f"FactorSmooth group {group.name!r} does not match the dominant SZ block."
-                    )
-                from superglm.reml.penalty_algebra import resolve_component_lambda
+        A[np.ix_(local_small, local_small)] += lam * omega
 
-                suffix, omega = matrix.repeated_penalty_components[0]
-                lam = resolve_component_lambda(lambda2, group.name, suffix)
-                D += lam * np.asarray(omega, dtype=np.float64)[None, :, :]
-                continue
-            if isinstance(matrix, RandomEffectGroupMatrix):
-                lam = (
-                    float(lambda2.get(group.name, 0.0))
-                    if isinstance(lambda2, dict)
-                    else float(lambda2)
-                )
-                if lam == 0.0:
-                    continue
-                if not np.all(local_small >= 0):
-                    raise ValueError(
-                        f"RandomEffect group {group.name!r} crosses structured partitions."
-                    )
-                A[local_small, local_small] += lam
-                continue
-            block = _legacy_small_block_penalty(matrix, group, lambda2)
-            if block is None:
-                continue
-            if not np.all(local_small >= 0):
-                raise ValueError(
-                    f"Penalty geometry for dominant group index {group_index} is unsupported."
-                )
-            A[np.ix_(local_small, local_small)] += block
-
-    return SumToZeroBlockOperator(
-        A=A,
-        C=operator.C,
-        D=D,
-        small_indices=operator.small_indices,
-        structured_indices=operator.structured_indices,
-    )
+    return SumToZeroPenalizedOperator.with_penalties(operator, A, D)
 
 
 def _nested_penalty_terms(
     group_matrices: list[GroupMatrix],
-    groups: list[GroupSlice],
     lambda2: float | dict[str, float],
-    reml_penalties: list[PenaltyComponent] | None,
+    reml_penalties: list[PenaltyComponent],
     p: int,
 ):
-    """Yield ``(name, indices, scale, omega)`` penalty terms; ``omega=None`` is identity.
+    """Yield ``(name, indices, scale, omega)`` for each compact penalty component.
 
-    The same terms, in the same order, that ``build_penalized_scalar_operator``
-    adds for compact components or, without them, for the legacy groups.
+    ``omega=None`` is an identity; a component whose lambda is zero is skipped.
     """
-    if reml_penalties is not None:
-        for component in reml_penalties:
-            lam = _lambda_for_component(lambda2, component.name)
-            if lam == 0.0:
-                continue
-            omega = (
-                None
-                if component.penalty_kind == "identity"
-                else _dense_component_omega(component, group_matrices[component.group_index])
-            )
-            yield component.name, _component_indices(component, p), lam, omega
-        return
-    for matrix, group in zip(group_matrices, groups, strict=True):
-        if not group.penalized:
+    for component in reml_penalties:
+        lam = _lambda_for_component(lambda2, component.name)
+        if lam == 0.0:
             continue
-        indices = np.arange(group.start, group.end, dtype=np.intp)
-        if isinstance(matrix, RandomEffectGroupMatrix):
-            lam = float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else lambda2
-            if lam != 0.0:
-                yield group.name, indices, float(lam), None
-            continue
-        block = _legacy_small_block_penalty(matrix, group, lambda2)
-        if block is not None:
-            yield group.name, indices, 1.0, block
+        omega = (
+            None
+            if component.penalty_kind == "identity"
+            else _dense_component_omega(component, group_matrices[component.group_index])
+        )
+        yield component.name, _component_indices(component, p), lam, omega
 
 
 def build_penalized_nested_operator(
@@ -637,10 +359,9 @@ def build_penalized_nested_operator(
 ) -> NestedPenalizedOperator:
     """Assemble per-node ridges and the border penalty ``S_b`` of a nested system.
 
-    The placement rules are the scalar builder's with the whole chain in the
-    role of the dominant diagonal block: a chain term must be diagonal and
-    lands on the node penalties, a border term lands in ``S_b``, and a term
-    that straddles the two raises ``ValueError``.  An authoritative
+    The whole chain is the dominant diagonal block: a chain term must be
+    diagonal and lands on the node penalties, a border term lands in ``S_b``,
+    and a term that straddles the two raises ``ValueError``.  An authoritative
     ``S_override`` must be diagonal on the chain with no chain-to-border mass
     (§3.7); its diagonal gives the per-node ``lambda_u``.  ``S_b`` is kept
     apart from ``A``: the factor adds it to ``Q`` as its own PSD term (§3.4).
@@ -664,12 +385,14 @@ def build_penalized_nested_operator(
         border_penalty += penalty[np.ix_(operator.small_indices, operator.small_indices)]
         node_penalty += np.diag(penalty)[operator.structured_indices]
     else:
+        if reml_penalties is None:
+            raise ValueError(_PENALTIES_REQUIRED)
         small_position = np.full(p, -1, dtype=np.intp)
         small_position[operator.small_indices] = np.arange(q)
         node_position = np.full(p, -1, dtype=np.intp)
         node_position[operator.structured_indices] = np.arange(operator.tree.n_nodes)
         for name, indices, scale, omega in _nested_penalty_terms(
-            group_matrices, groups, lambda2, reml_penalties, p
+            group_matrices, lambda2, reml_penalties, p
         ):
             local_small, local_node = small_position[indices], node_position[indices]
             if np.all(local_small >= 0):
@@ -693,24 +416,14 @@ def build_penalized_nested_operator(
 
 
 def build_penalized_structured_operator(
-    system: (
-        ScalarStructuredSystem
-        | BlockStructuredSystem
-        | SumToZeroBlockStructuredSystem
-        | NestedStructuredSystem
-    ),
+    system: FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem,
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
     S_override: NDArray | None = None,
-) -> (
-    SymmetricBlockOperator
-    | BlockSymmetricOperator
-    | SumToZeroBlockOperator
-    | NestedPenalizedOperator
-):
+) -> FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator | NestedPenalizedOperator:
     """Dispatch compact penalty assembly by structured-system geometry."""
     if isinstance(system, NestedStructuredSystem):
         return build_penalized_nested_operator(
@@ -721,7 +434,7 @@ def build_penalized_structured_operator(
             reml_penalties=reml_penalties,
             S_override=S_override,
         )
-    if isinstance(system, SumToZeroBlockStructuredSystem):
+    if isinstance(system, SumToZeroLeafSystem):
         return build_penalized_sum_to_zero_operator(
             system,
             group_matrices,
@@ -730,7 +443,7 @@ def build_penalized_structured_operator(
             reml_penalties=reml_penalties,
             S_override=S_override,
         )
-    if isinstance(system, BlockStructuredSystem):
+    if isinstance(system, FactorSmoothLeafSystem):
         return build_penalized_block_operator(
             system,
             group_matrices,
@@ -739,106 +452,43 @@ def build_penalized_structured_operator(
             reml_penalties=reml_penalties,
             S_override=S_override,
         )
-    return build_penalized_scalar_operator(
-        system,
-        group_matrices,
-        groups,
-        lambda2,
-        reml_penalties=reml_penalties,
-        S_override=S_override,
-    )
-
-
-def build_augmented_scalar_factor(
-    system: ScalarStructuredSystem,
-    penalized_operator: SymmetricBlockOperator,
-) -> tuple[ScalarSchurFactor, NDArray]:
-    """Add the unpenalized intercept and return its Schur factor and global RHS."""
-    operator = system.operator
-    if not np.array_equal(
-        penalized_operator.small_indices,
-        operator.small_indices,
-    ) or not np.array_equal(
-        penalized_operator.structured_indices,
-        operator.structured_indices,
-    ):
-        raise ValueError("Penalized and unpenalized operators must use identical partitions.")
-
-    q = len(operator.small_indices)
-    p = operator.shape[0]
-    A_augmented = np.empty((q + 1, q + 1), dtype=np.float64)
-    A_augmented[0, 0] = system.sum_w
-    A_augmented[0, 1:] = system.xtw_small
-    A_augmented[1:, 0] = system.xtw_small
-    A_augmented[1:, 1:] = penalized_operator.A
-    C_augmented = np.empty((len(operator.structured_indices), q + 1))
-    C_augmented[:, 0] = system.xtw_structured
-    C_augmented[:, 1:] = operator.C
-    small_indices = np.concatenate(
-        [
-            np.array([0], dtype=np.intp),
-            operator.small_indices + 1,
-        ]
-    )
-    structured_indices = operator.structured_indices + 1
-    factor = ScalarSchurFactor(
-        A=A_augmented,
-        C=C_augmented,
-        d=penalized_operator.d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name=system.dominant_group_name,
-    )
-    rhs = np.empty(p + 1, dtype=np.float64)
-    rhs[0] = system.sum_wz
-    rhs[operator.small_indices + 1] = system.xtwz_small
-    rhs[operator.structured_indices + 1] = system.xtwz_structured
-    return factor, rhs
+    raise TypeError(f"Unsupported structured system {type(system).__name__}.")
 
 
 def build_augmented_block_factor(
-    system: BlockStructuredSystem,
-    penalized_operator: BlockSymmetricOperator,
-) -> tuple[BlockSchurFactor, NDArray]:
-    """Add the intercept to a factor-smooth block system and factor it."""
-    operator = system.operator
-    if not np.array_equal(
-        penalized_operator.small_indices,
-        operator.small_indices,
-    ) or not np.array_equal(
-        penalized_operator.structured_indices,
-        operator.structured_indices,
-    ):
-        raise ValueError("Penalized and unpenalized operators must use identical partitions.")
+    system: FactorSmoothLeafSystem,
+    penalized_operator: FactorSmoothPenalizedOperator,
+) -> tuple[FactorSmoothLeafFactor, NDArray]:
+    """Factor an ``fs`` leaf system with the intercept as its super-root; return it and the raw RHS.
 
-    q = len(operator.small_indices)
-    p = operator.shape[0]
-    A_augmented = np.empty((q + 1, q + 1), dtype=np.float64)
-    A_augmented[0, 0] = system.sum_w
-    A_augmented[0, 1:] = system.xtw_small
-    A_augmented[1:, 0] = system.xtw_small
-    A_augmented[1:, 1:] = penalized_operator.A
-    C_augmented = np.empty(
-        (operator.n_levels, operator.block_size, q + 1),
-        dtype=np.float64,
-    )
-    C_augmented[:, :, 0] = system.xtw_structured
-    C_augmented[:, :, 1:] = operator.C
-    small_indices = np.concatenate(
-        [
-            np.array([0], dtype=np.intp),
-            operator.small_indices + 1,
+    The factor solves the normal equations from the right-hand side inside its
+    leaf factorization (``FactorSmoothLeafFactor.solve_data``); the raw RHS is
+    returned for callers that add a further right-hand side.  The last factor
+    built on the system is reused for bitwise the same penalty parts (perf
+    F1); the memo holds it weakly, so a system and its factor form no
+    reference cycle (perf F17).
+    """
+    operator = system.operator
+    if not np.array_equal(penalized_operator.small_indices, operator.small_indices):
+        raise ValueError("Penalized and unpenalized operators must use identical partitions.")
+    factor = None
+    if penalized_operator.penalty_small is None or penalized_operator.penalty_local is None:
+        raise ValueError("An fs factor needs the penalized operator's penalty parts.")
+    for small, local, held in system.factor_memo:
+        if np.array_equal(small, penalized_operator.penalty_small) and np.array_equal(
+            local, penalized_operator.penalty_local
+        ):
+            factor = held()
+    if factor is None:
+        factor = FactorSmoothLeafFactor(system, penalized_operator)
+        system.factor_memo[:] = [
+            (
+                np.array(penalized_operator.penalty_small, copy=True),
+                np.array(penalized_operator.penalty_local, copy=True),
+                weakref.ref(factor),
+            )
         ]
-    )
-    structured_indices = operator.structured_indices + 1
-    factor = BlockSchurFactor(
-        A=A_augmented,
-        C=C_augmented,
-        D=penalized_operator.D,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name=system.dominant_group_name,
-    )
+    p = operator.shape[0]
     rhs = np.empty(p + 1, dtype=np.float64)
     rhs[0] = system.sum_wz
     rhs[operator.small_indices + 1] = system.xtwz_small
@@ -847,50 +497,39 @@ def build_augmented_block_factor(
 
 
 def build_augmented_sum_to_zero_factor(
-    system: SumToZeroBlockStructuredSystem,
-    penalized_operator: SumToZeroBlockOperator,
-):
-    """Add the intercept and factor an SZ system in raw symmetric geometry."""
-    from superglm.solvers.sum_to_zero import SumToZeroBlockFactor
+    system: SumToZeroLeafSystem,
+    penalized_operator: SumToZeroPenalizedOperator,
+) -> tuple[SumToZeroTreeFactor, NDArray]:
+    """Factor an ``sz`` leaf system on the balance tree, the intercept its super-root.
 
+    The factor solves the normal equations from the right-hand side inside its
+    leaf factorization (``SumToZeroTreeFactor.solve_data``); the raw RHS is
+    returned for callers that add a further right-hand side.  The last factor
+    built on the system is reused for bitwise the same penalty parts (as the
+    fs factor, perf F1); the memo holds it weakly, so a system and its factor
+    form no reference cycle (perf F17).
+    """
     operator = system.operator
-    if not np.array_equal(
-        penalized_operator.small_indices,
-        operator.small_indices,
-    ) or not np.array_equal(
-        penalized_operator.structured_indices,
-        operator.structured_indices,
-    ):
+    if not np.array_equal(penalized_operator.small_indices, operator.small_indices):
         raise ValueError("Penalized and unpenalized operators must use identical partitions.")
-    q = len(operator.small_indices)
+    if penalized_operator.penalty_small is None or penalized_operator.penalty_local is None:
+        raise ValueError("An sz factor needs the penalized operator's penalty parts.")
+    factor = None
+    for small, local, held in system.factor_memo:
+        if np.array_equal(small, penalized_operator.penalty_small) and np.array_equal(
+            local, penalized_operator.penalty_local
+        ):
+            factor = held()
+    if factor is None:
+        factor = SumToZeroTreeFactor(system, penalized_operator)
+        system.factor_memo[:] = [
+            (
+                np.array(penalized_operator.penalty_small, copy=True),
+                np.array(penalized_operator.penalty_local, copy=True),
+                weakref.ref(factor),
+            )
+        ]
     p = operator.shape[0]
-    A_augmented = np.empty((q + 1, q + 1), dtype=np.float64)
-    A_augmented[0, 0] = system.sum_w
-    A_augmented[0, 1:] = system.xtw_small
-    A_augmented[1:, 0] = system.xtw_small
-    A_augmented[1:, 1:] = penalized_operator.A
-    C_augmented = np.empty(
-        (operator.n_levels, operator.block_size, q + 1),
-        dtype=np.float64,
-    )
-    C_augmented[:, :, 0] = system.raw_xtw_structured
-    C_augmented[:, :, 1:] = operator.C
-    small_indices = np.concatenate(
-        (
-            np.array([0], dtype=np.intp),
-            operator.small_indices + 1,
-        )
-    )
-    structured_indices = operator.structured_indices + 1
-    factor = SumToZeroBlockFactor(
-        A=A_augmented,
-        C=C_augmented,
-        D=penalized_operator.D,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name=system.dominant_group_name,
-        level_labels=system.level_labels,
-    )
     rhs = np.empty(p + 1, dtype=np.float64)
     rhs[0] = system.sum_wz
     rhs[operator.small_indices + 1] = system.xtwz_small
@@ -923,18 +562,46 @@ def build_augmented_nested_factor(
     return factor, rhs
 
 
+def solve_augmented_normal_equations(
+    system, factor, rhs: NDArray, *, centred: bool = False, extra: NDArray | None = None
+) -> NDArray:
+    """Solve the augmented normal equations ``H [b_0; b] = [1 X]' W z`` of a structured system.
+
+    A nested factor takes its data-side solve with the border right-hand side
+    in its centred coordinates (``NestedSchurFactor.solve_data``,
+    ``NestedStructuredSystem.xtwz_small_centred``); with ``centred`` its
+    first entry is then the centred intercept ``alpha`` about the factor's
+    border centre instead of the raw one.  Every other factor takes its
+    ``solve`` (``centred`` does not apply to it).  ``extra`` ``(p + 1,)``, zero
+    in the intercept entry, is a further right-hand side (a Levenberg shift's
+    ``E beta``, design §3.11): it is not data, so it takes the factor's full
+    solve beside the data-side one.
+    """
+    if (
+        isinstance(factor, FactorSmoothLeafFactor) and isinstance(system, FactorSmoothLeafSystem)
+    ) or (isinstance(factor, SumToZeroTreeFactor) and isinstance(system, SumToZeroLeafSystem)):
+        solution = factor.solve_data(centred=centred)
+        if extra is not None:
+            solution = solution + factor.solve(extra)
+        return solution
+    if isinstance(factor, NestedSchurFactor) and isinstance(system, NestedStructuredSystem):
+        border_rhs = system.xtwz_small_centred
+        border = None if border_rhs is None else np.concatenate(([system.sum_wz], border_rhs))
+        solution = factor.solve_data(rhs, border_centred=border, centred=centred)
+        if extra is not None:
+            solution = solution + factor.solve(extra, centred=centred)
+        return solution
+    if extra is not None:
+        rhs = rhs + extra
+    if centred:
+        raise ValueError("Only a nested factor solves in centred coordinates.")
+    return factor.solve(rhs)
+
+
 def build_augmented_structured_factor(
-    system: (
-        ScalarStructuredSystem
-        | BlockStructuredSystem
-        | SumToZeroBlockStructuredSystem
-        | NestedStructuredSystem
-    ),
+    system: FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem,
     penalized_operator: (
-        SymmetricBlockOperator
-        | BlockSymmetricOperator
-        | SumToZeroBlockOperator
-        | NestedPenalizedOperator
+        FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator | NestedPenalizedOperator
     ),
 ):
     """Dispatch intercept augmentation and Schur factorization."""
@@ -942,64 +609,26 @@ def build_augmented_structured_factor(
         if not isinstance(penalized_operator, NestedPenalizedOperator):
             raise TypeError("Nested structured systems require a nested penalized operator.")
         return build_augmented_nested_factor(system, penalized_operator)
-    if isinstance(system, SumToZeroBlockStructuredSystem):
-        if not isinstance(penalized_operator, SumToZeroBlockOperator):
-            raise TypeError("SZ structured systems require a sum-to-zero operator.")
+    if isinstance(system, SumToZeroLeafSystem):
+        if not isinstance(penalized_operator, SumToZeroPenalizedOperator):
+            raise TypeError("sz leaf systems require the sz penalized operator.")
         return build_augmented_sum_to_zero_factor(system, penalized_operator)
-    if isinstance(system, BlockStructuredSystem):
-        if not isinstance(penalized_operator, BlockSymmetricOperator):
-            raise TypeError("Block structured systems require a block penalized operator.")
+    if isinstance(system, FactorSmoothLeafSystem):
+        if not isinstance(penalized_operator, FactorSmoothPenalizedOperator):
+            raise TypeError("fs leaf systems require the fs penalized operator.")
         return build_augmented_block_factor(system, penalized_operator)
-    if not isinstance(penalized_operator, SymmetricBlockOperator):
-        raise TypeError("Scalar structured systems require a scalar penalized operator.")
-    return build_augmented_scalar_factor(system, penalized_operator)
-
-
-def solve_cached_scalar_structured(
-    system: ScalarStructuredSystem,
-    group_matrices: list[GroupMatrix],
-    groups: list[GroupSlice],
-    lambdas: float | dict[str, float],
-    *,
-    reml_penalties: list[PenaltyComponent] | None = None,
-) -> CachedScalarStructuredSolution:
-    """Solve a lambda trial from cached working sufficient statistics."""
-    penalized = build_penalized_scalar_operator(
-        system,
-        group_matrices,
-        groups,
-        lambdas,
-        reml_penalties=reml_penalties,
-    )
-    augmented_factor, rhs = build_augmented_scalar_factor(system, penalized)
-    coefficients = augmented_factor.solve(rhs)
-    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
-    xtw[system.operator.small_indices] = system.xtw_small
-    xtw[system.operator.structured_indices] = system.xtw_structured
-    factor = ProfiledScalarSchurFactor(
-        augmented_factor=augmented_factor,
-        sum_w=system.sum_w,
-        xtw=xtw,
-    )
-    return CachedScalarStructuredSolution(
-        beta=coefficients[1:],
-        intercept=float(coefficients[0]),
-        factor=factor,
-        penalized_operator=penalized,
-        log_det_H=augmented_factor.logdet(),
-        hessian_rank=augmented_factor.rank,
-    )
+    raise TypeError(f"Unsupported structured system {type(system).__name__}.")
 
 
 def solve_cached_block_structured(
-    system: BlockStructuredSystem,
+    system: FactorSmoothLeafSystem,
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambdas: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
 ) -> CachedBlockStructuredSolution:
-    """Solve a factor-smooth lambda trial from cached working moments."""
+    """Solve a factor-smooth lambda trial from a cached ``fs`` leaf system (no data pass)."""
     penalized = build_penalized_block_operator(
         system,
         group_matrices,
@@ -1008,11 +637,11 @@ def solve_cached_block_structured(
         reml_penalties=reml_penalties,
     )
     augmented_factor, rhs = build_augmented_block_factor(system, penalized)
-    coefficients = augmented_factor.solve(rhs)
+    coefficients = solve_augmented_normal_equations(system, augmented_factor, rhs)
     xtw = np.empty(system.operator.shape[0], dtype=np.float64)
     xtw[system.operator.small_indices] = system.xtw_small
     xtw[system.operator.structured_indices] = system.xtw_structured
-    factor = ProfiledBlockSchurFactor(
+    factor = ProfiledFactorSmoothLeafFactor(
         augmented_factor=augmented_factor,
         sum_w=system.sum_w,
         xtw=xtw,
@@ -1028,16 +657,14 @@ def solve_cached_block_structured(
 
 
 def solve_cached_sum_to_zero_structured(
-    system: SumToZeroBlockStructuredSystem,
+    system: SumToZeroLeafSystem,
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambdas: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
 ) -> CachedSumToZeroStructuredSolution:
-    """Solve an SZ lambda trial from cached raw/public sufficient statistics."""
-    from superglm.solvers.sum_to_zero import ProfiledSumToZeroBlockFactor
-
+    """Solve an ``sz`` lambda trial from a cached leaf system on the balance tree (no data pass)."""
     penalized = build_penalized_sum_to_zero_operator(
         system,
         group_matrices,
@@ -1046,11 +673,11 @@ def solve_cached_sum_to_zero_structured(
         reml_penalties=reml_penalties,
     )
     augmented_factor, rhs = build_augmented_sum_to_zero_factor(system, penalized)
-    coefficients = augmented_factor.solve(rhs)
+    coefficients = solve_augmented_normal_equations(system, augmented_factor, rhs)
     xtw = np.empty(system.operator.shape[0], dtype=np.float64)
     xtw[system.operator.small_indices] = system.xtw_small
     xtw[system.operator.structured_indices] = system.xtw_structured
-    factor = ProfiledSumToZeroBlockFactor(
+    factor = ProfiledSumToZeroTreeFactor(
         augmented_factor=augmented_factor,
         sum_w=system.sum_w,
         xtw=xtw,
@@ -1082,7 +709,7 @@ def solve_cached_nested_structured(
         reml_penalties=reml_penalties,
     )
     augmented_factor, rhs = build_augmented_nested_factor(system, penalized)
-    coefficients = augmented_factor.solve(rhs)
+    coefficients = solve_augmented_normal_equations(system, augmented_factor, rhs)
     xtw = np.empty(system.operator.shape[0], dtype=np.float64)
     xtw[system.operator.small_indices] = system.xtw_small
     xtw[system.operator.structured_indices] = system.xtw_structured
@@ -1103,20 +730,14 @@ def solve_cached_nested_structured(
 
 
 def solve_cached_structured(
-    system: (
-        ScalarStructuredSystem
-        | BlockStructuredSystem
-        | SumToZeroBlockStructuredSystem
-        | NestedStructuredSystem
-    ),
+    system: FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem,
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambdas: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
 ) -> (
-    CachedScalarStructuredSolution
-    | CachedBlockStructuredSolution
+    CachedBlockStructuredSolution
     | CachedSumToZeroStructuredSolution
     | CachedNestedStructuredSolution
 ):
@@ -1129,7 +750,7 @@ def solve_cached_structured(
             lambdas,
             reml_penalties=reml_penalties,
         )
-    if isinstance(system, SumToZeroBlockStructuredSystem):
+    if isinstance(system, SumToZeroLeafSystem):
         return solve_cached_sum_to_zero_structured(
             system,
             group_matrices,
@@ -1137,7 +758,7 @@ def solve_cached_structured(
             lambdas,
             reml_penalties=reml_penalties,
         )
-    if isinstance(system, BlockStructuredSystem):
+    if isinstance(system, FactorSmoothLeafSystem):
         return solve_cached_block_structured(
             system,
             group_matrices,
@@ -1145,10 +766,4 @@ def solve_cached_structured(
             lambdas,
             reml_penalties=reml_penalties,
         )
-    return solve_cached_scalar_structured(
-        system,
-        group_matrices,
-        groups,
-        lambdas,
-        reml_penalties=reml_penalties,
-    )
+    raise TypeError(f"Unsupported structured system {type(system).__name__}.")

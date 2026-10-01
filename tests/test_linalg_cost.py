@@ -235,10 +235,12 @@ def test_the_registry_covers_every_routine_superglm_calls():
                 for name in (part.strip().split(" as ")[0] for part in match.split(",")):
                     used[module_name].add(name)
 
-    # Not routines: the exception class, and the submodule that the rank
-    # solver reaches through to call a LAPACK driver directly.  That call is
-    # genuinely below the registry and no rebinding can see it.
-    ignored = {"LinAlgError", "lapack", "blas", "interpolative"}
+    # Not routines: the exception class, and the submodules that the rank
+    # solver and the fs leaf kernels (``solvers/_structured/block_leaves.py``,
+    # LAPACK's dgeqrf/dorgqr called from numba by symbol) reach through to call
+    # a LAPACK driver directly.  Those calls are genuinely below the registry
+    # and no rebinding can see them.
+    ignored = {"LinAlgError", "lapack", "blas", "interpolative", "cython_lapack"}
     registered = {
         "numpy.linalg": set(NUMPY_ROUTINES),
         "scipy.linalg": set(SCIPY_ROUTINES),

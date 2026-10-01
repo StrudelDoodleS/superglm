@@ -1,4 +1,4 @@
-"""Exact IRLS parity for the scalar structured backend."""
+"""Exact IRLS parity for the structured backend on a single random effect (a chain of one)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
+import superglm.model.reml_finalize as reml_finalize
+import superglm.reml.direct as direct_reml
+import superglm.reml.discrete as discrete_reml
 import superglm.reml.objective as reml_objective
+import superglm.solvers._structured.moments as moments
 import superglm.solvers._structured.selection as selection
 import superglm.solvers.irls_direct as irls_direct
 from superglm import generate_tweedie_cpg
@@ -34,7 +38,9 @@ from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.structured import (
-    SymmetricBlockOperator,
+    NestedDataOperator,
+    NestedSchurFactor,
+    ProfiledNestedSchurFactor,
     materialize_compact_operator,
     resolve_structured_backend,
 )
@@ -47,10 +53,10 @@ from superglm.types import (
 
 def _structured_problem(
     response_factory: Callable[[np.random.Generator, np.ndarray, np.ndarray], np.ndarray],
+    n_levels: int = 24,
 ):
     rng = np.random.default_rng(701)
     n = 420
-    n_levels = 24
     codes = rng.integers(0, n_levels, size=n, dtype=np.intp)
     numeric = rng.normal(size=(n, 2))
     offset = rng.normal(scale=0.08, size=n)
@@ -209,28 +215,24 @@ def test_forced_structured_exact_irls_matches_dense_oracle(
     assert structured_result.n_iter == dense_result.n_iter
     assert structured_result.converged == dense_result.converged
     assert isinstance(structured_factor, HessianFactor)
-    assert isinstance(structured_operator, SymmetricBlockOperator)
+    # The lone random effect is a chain of one on the nested factor.
+    assert isinstance(structured_operator, NestedDataOperator)
     np.testing.assert_allclose(
         structured_factor.solve(np.eye(dm.p)),
         dense_factor,
         rtol=2e-8,
         atol=2e-9,
     )
-    materialized_operator = np.zeros_like(dense_gram)
-    small = structured_operator.small_indices
-    dominant = structured_operator.structured_indices
-    materialized_operator[np.ix_(small, small)] = structured_operator.A
-    materialized_operator[np.ix_(dominant, small)] = structured_operator.C
-    materialized_operator[np.ix_(small, dominant)] = structured_operator.C.T
-    materialized_operator[dominant, dominant] = structured_operator.d
     # The dense centered-system reconstruction can leave cancellation dust in
     # analytically zero off-diagonal cells of the one-hot block.
-    np.testing.assert_allclose(materialized_operator, dense_gram, atol=2e-14)
+    np.testing.assert_allclose(
+        materialize_compact_operator(structured_operator), dense_gram, atol=2e-14
+    )
 
     assert structured_result.direct_backend == "structured"
     assert structured_profile["direct_backend"] == "structured"
     assert "XtWX" not in structured_cache
-    assert isinstance(structured_cache["structured_operator"], SymmetricBlockOperator)
+    assert isinstance(structured_cache["structured_operator"], NestedDataOperator)
 
 
 def test_forced_structured_avoids_dense_gram_and_penalty_builders(monkeypatch):
@@ -609,9 +611,12 @@ def test_structured_override_is_authoritative_for_zero_lambda_eligibility(
 
 
 @pytest.mark.parametrize("unsupported_geometry", ["dominant_correlation", "cross_block"])
-def test_auto_falls_back_for_incompatible_authoritative_override(
-    unsupported_geometry: str,
-):
+def test_auto_takes_gram_for_an_incompatible_authoritative_override(unsupported_geometry: str):
+    """An override coupling the leaf to the border is a structural decision.
+
+    auto fits gram with the override named as the reason, whatever the
+    machine's memory; forced 'structured' is ineligible.
+    """
     base_dm, _base_groups, _penalties, y, weights, offset = _structured_problem(_gaussian_response)
     n_levels = 40
     dm = DesignMatrix(
@@ -638,7 +643,7 @@ def test_auto_falls_back_for_incompatible_authoritative_override(
         penalty[dominant[0], 1] = 1.0e-3
         penalty[1, dominant[0]] = 1.0e-3
 
-    automatic, _ = irls_direct.fit_irls_direct(
+    arguments = dict(
         X=dm,
         y=y,
         weights=weights,
@@ -647,29 +652,18 @@ def test_auto_falls_back_for_incompatible_authoritative_override(
         groups=groups,
         lambda2=0.0,
         offset=offset,
-        direct_solve="auto",
         S_override=penalty,
         tol=1.0e-11,
         weight_semantics="frequency",
     )
-    gram, _ = irls_direct.fit_irls_direct(
-        X=dm,
-        y=y,
-        weights=weights,
-        family=Gaussian(),
-        link=IdentityLink(),
-        groups=groups,
-        lambda2=0.0,
-        offset=offset,
-        direct_solve="gram",
-        S_override=penalty,
-        tol=1.0e-11,
-        weight_semantics="frequency",
-    )
+    automatic, _ = irls_direct.fit_irls_direct(direct_solve="auto", **arguments)
+    gram, _ = irls_direct.fit_irls_direct(direct_solve="gram", **arguments)
 
     assert automatic.direct_backend == "gram"
     assert "S_override" in automatic.direct_fallback_reason
     np.testing.assert_allclose(automatic.beta, gram.beta, atol=2.0e-9)
+    with pytest.raises(ValueError, match="ineligible"):
+        irls_direct.fit_irls_direct(direct_solve="structured", **arguments)
 
 
 def test_auto_records_dense_fallback_reason_for_constraints():
@@ -700,30 +694,37 @@ def test_auto_records_dense_fallback_reason_for_constraints():
     assert profile["direct_fallback_reason"] == result.direct_fallback_reason
 
 
+def _chain_of_one_ratio(n: int, small_width: int, dominant_width: int) -> float:
+    """The chain-of-one cost ratio ``((q+1)/(p+1))^2 (1 + passes n / (p+1))``."""
+    width = small_width + dominant_width + 1
+    return ((small_width + 1) / width) ** 2 * (1.0 + selection._AUTO_NESTED_ROW_PASSES * n / width)
+
+
 @pytest.mark.parametrize(
-    ("dominant_width", "small_width", "expected_structured"),
+    ("dominant_width", "small_width", "n", "expected_structured"),
     [
-        pytest.param(20, 4, False, id="small-total-width-stays-dense"),
-        pytest.param(30, 4, True, id="measured-scalar-crossover"),
-        # Ratio ((q+1)/(p+1))**2 = 0.26 here.  A real ~67k-row fit measured the
-        # structured backend ~1.7x SLOWER end to end at this shape class
-        # (issue #343): the factorization the ratio prices is a small minority
-        # of per-iteration work beside the shared O(n) moment build, so a wide
-        # dense border must stay on the dense path.
-        pytest.param(20, 20, False, id="wide-border-stays-dense"),
-        pytest.param(4, 28, False, id="insufficient-schur-cost-reduction"),
-        # Ratio 0.0009: the dominant block spans nearly the whole width.  This
+        pytest.param(20, 4, 80, False, id="small-total-width-stays-dense"),
+        pytest.param(30, 4, 80, True, id="measured-scalar-crossover"),
+        # Factorization ratio ((q+1)/(p+1))**2 = 0.26 here.  A real ~67k-row fit
+        # measured the structured backend ~1.7x SLOWER end to end at this shape
+        # class (issue #343): the factorization the ratio prices is a small
+        # minority of per-iteration work beside the O(n) moment build, which
+        # the chain's row passes now price, so a wide border beside many rows
+        # stays on the dense path.
+        pytest.param(20, 20, 67_000, False, id="wide-border-stays-dense"),
+        pytest.param(4, 28, 80, False, id="insufficient-schur-cost-reduction"),
+        # Ratio 0.001: the dominant block spans nearly the whole width.  This
         # is the measured-win regime (1.5x-3.9x faster on real and synthetic
         # fits) that the recalibrated bound must keep structured.
-        pytest.param(300, 8, True, id="dominant-block-spans-width"),
+        pytest.param(300, 8, 600, True, id="dominant-block-spans-width"),
     ],
 )
 def test_auto_backend_uses_measured_structured_crossover(
     dominant_width: int,
     small_width: int,
+    n: int,
     expected_structured: bool,
 ):
-    n = max(80, dominant_width * 2)
     matrices = [
         DenseGroupMatrix(np.ones((n, small_width))),
         RandomEffectGroupMatrix(np.arange(n) % dominant_width, dominant_width),
@@ -752,24 +753,30 @@ def test_auto_backend_uses_measured_structured_crossover(
     else:
         assert "crossover" in decision.fallback_reason
     # Either way the cost model ran, and its prediction must be published for
-    # calibration.  For the scalar geometry it has closed form ((q+1)/(p+1))^2.
-    expected_ratio = ((small_width + 1) / (small_width + dominant_width + 1)) ** 2
+    # calibration: the lone level is priced as a chain of one.
+    expected_ratio = _chain_of_one_ratio(n, small_width, dominant_width)
     assert decision.auto_cost_ratio == pytest.approx(expected_ratio)
 
 
-def _pricing_fit(direct_solve: str):
+PRICING_REML_TOL = 1e-8
+_REFUSAL = "Structured term 'region' has a coupled rank-deficient Schur null space."
+
+
+def _pricing_fit(
+    direct_solve: str, discrete: bool = False, family="poisson", link=None, levels: int = 40
+):
     """A pricing-shaped Poisson fit: raw year and vehicle value beside a 40-level region.
 
-    Its single-level cost ratio is about 0.1. ScalarSchurFactor forms its
-    border by subtraction and truncates on the unscaled Q, so it refuses these
-    raw columns at the REML bootstrap.
+    The retired ScalarSchurFactor formed its border by subtraction and truncated
+    on the unscaled Q, so it refused these raw columns at the REML bootstrap.  Another
+    ``family`` fits a positive severity on the same rows.
     """
     import pandas as pd
 
     from superglm import Categorical, Numeric, RandomEffect, Spline, SuperGLM
 
     rng = np.random.default_rng(7)
-    n, levels = 2000, 40
+    n = 2000
     region = rng.integers(0, levels, n)
     age = rng.uniform(18, 80, n)
     cover = rng.integers(0, 5, n)
@@ -784,7 +791,10 @@ def _pricing_fit(direct_solve: str):
         + 0.1 * np.log(value / 15000.0)
         + rng.normal(0.0, 0.2, levels)[region]
     )
-    y = rng.poisson(exposure * np.exp(eta)).astype(float)
+    if family == "poisson":
+        y, offset = rng.poisson(exposure * np.exp(eta)).astype(float), np.log(exposure)
+    else:
+        y, offset = np.exp(eta + 2.0) * rng.gamma(4.0, 0.25, n), None
     frame = pd.DataFrame(
         {
             "age": age,
@@ -795,9 +805,11 @@ def _pricing_fit(direct_solve: str):
         }
     )
     model = SuperGLM(
-        family="poisson",
+        family=family,
+        link=link,
         selection_penalty=0,
         direct_solve=direct_solve,
+        discrete=discrete,
         features={
             "age": Spline(n_knots=8),
             "cover": Categorical(),
@@ -806,53 +818,306 @@ def _pricing_fit(direct_solve: str):
             "value": Numeric(),
         },
     )
-    return model.fit_reml(frame, y, offset=np.log(exposure))
+    return model.fit_reml(frame, y, offset=offset, reml_tol=PRICING_REML_TOL)
 
 
-def test_auto_keeps_a_raw_year_border_off_the_single_level_factor() -> None:
-    """The single level keeps the 0.05 bound, so auto sends this fit straight to gram."""
-    auto, gram = _pricing_fit("auto"), _pricing_fit("gram")
-    assert auto.result.direct_backend == "gram"
-    assert auto.result.deviance == gram.result.deviance
+def _refusing_builder(monkeypatch, refuses: Callable[[int], bool]) -> list:
+    """Make the structured factor build refuse on the calls ``refuses`` names (1-based).
 
-
-def test_auto_refits_a_refused_structured_factor_on_gram(monkeypatch) -> None:
-    """A structured refusal under auto is a gram refit, not a failed fit.
-
-    With the single-level bound raised to this fit's ratio, auto selects
-    ScalarSchurFactor. On these raw columns its refusal is borderline in round-off
-    (it refuses in some runs and not in others), so the factor build is made to
-    refuse the way _reject_coupled_schur_null_space does. The refusal is retried
-    on gram, recorded as the fallback reason, and the REML driver stays on gram.
-    Forced 'structured' still raises.
+    It refuses as a factor does, with ``np.linalg.LinAlgError``; the other
+    calls build normally.  Returns the call log.
     """
-    message = "Structured term 'region' has a coupled rank-deficient Schur null space."
+    build = irls_direct.build_augmented_structured_factor
+    calls: list = []
 
-    def refuse(system, operator):
-        raise np.linalg.LinAlgError(message)
+    def refusing(system, operator):
+        calls.append(None)
+        if refuses(len(calls)):
+            raise np.linalg.LinAlgError(_REFUSAL)
+        return build(system, operator)
 
-    monkeypatch.setattr(selection, "_AUTO_MAX_STRUCTURED_COST_RATIO", 0.75)
-    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refuse)
-    auto, gram = _pricing_fit("auto"), _pricing_fit("gram")
-    assert auto.result.direct_backend == "gram"
-    assert auto.result.direct_fallback_reason == message
-    # The refused bootstrap is refit on gram from the same start; later REML work
-    # stays on gram, so this is the gram fit to within its own tolerance.
-    assert auto.result.deviance == pytest.approx(gram.result.deviance, rel=gram._tol)
-    with pytest.raises(np.linalg.LinAlgError, match="Schur null space"):
-        _pricing_fit("structured")
+    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refusing)
+    return calls
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_auto_fits_a_raw_year_border_on_the_chain_of_one(discrete: bool) -> None:
+    """A lone random effect is a chain of one on NestedSchurFactor.
+
+    The chain centres the border, sums its Schur complement from PSD pieces and
+    takes its rank decisions on the Jacobi-scaled complement, so the raw columns
+    the retired scalar factor refused fit with no fallback, bitwise as forced
+    'structured'.  Both backends' REML fits converge on one surface, so their
+    objectives differ by at most reml_tol (1 + |V|).
+    """
+    auto, forced, gram = (_pricing_fit(solve, discrete) for solve in ("auto", "structured", "gram"))
+    assert auto.result.direct_backend == "structured"
+    assert auto.result.direct_fallback_reason is None
+    assert isinstance(auto._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
+    assert auto._reml_profile["structured_chain"] == ("region",)
+    assert auto.result.deviance == forced.result.deviance
+    assert auto._reml_lambdas == forced._reml_lambdas
+    assert auto._reml_result.converged and gram._reml_result.converged
+    objective = gram._reml_result.objective
+    bound = PRICING_REML_TOL * (1.0 + abs(objective))
+    assert abs(auto._reml_result.objective - objective) <= bound
+
+
+def _backend_calls(monkeypatch) -> list[str]:
+    """Record the ``direct_solve`` of every direct IRLS fit a model fit makes."""
+    calls: list[str] = []
+    fit_once = irls_direct._fit_irls_direct_once
+
+    def spy(**kwargs):
+        calls.append(kwargs["direct_solve"])
+        return fit_once(**kwargs)
+
+    monkeypatch.setattr(irls_direct, "_fit_irls_direct_once", spy)
+    return calls
+
+
+def _assert_clear_error(error: pytest.ExceptionInfo, cause: str) -> None:
+    """The one error an engine that cannot proceed raises (design §6, decision 6)."""
+    message = str(error.value)
+    assert isinstance(error.value, irls_direct.StructuredSolverError)
+    assert isinstance(error.value, np.linalg.LinAlgError)
+    assert cause.rstrip(".") in message
+    assert "direct_solve='gram'" in message
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "structured"])
+def test_a_refused_structured_factor_stops_the_fit_with_one_clear_error(
+    monkeypatch, direct_solve: str
+) -> None:
+    """Every structured build refuses: the fit raises, naming the cause, and no
+    other solver runs (the #425 retry onto gram is deleted, design §15 stage 4).
+
+    Mutation: restoring the retry turns auto into a gram fit, and the error and
+    the single-backend call log both fail.
+    """
+    _refusing_builder(monkeypatch, lambda call: True)
+    calls = _backend_calls(monkeypatch)
+    with pytest.raises(np.linalg.LinAlgError) as refused:
+        _pricing_fit(direct_solve)
+    _assert_clear_error(refused, _REFUSAL)
+    assert calls == [direct_solve]
+    assert _pricing_fit("gram").result.direct_backend == "gram"
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_a_refusal_at_the_reml_bootstrap_is_not_latched_onto_gram(
+    monkeypatch, discrete: bool
+) -> None:
+    """Only the bootstrap's first build refuses: auto stops there with the clear
+    error; no later REML fit or terminal refit runs on gram (the latches are
+    deleted)."""
+    modes: dict[str, list[str]] = {"driver": [], "finalize": []}
+    driver = discrete_reml if discrete else direct_reml
+    for name, module in (("driver", driver), ("finalize", reml_finalize)):
+
+        def spy(*args, _fit=module.fit_irls_direct, _modes=modes[name], **kwargs):
+            _modes.append(kwargs["direct_solve"])
+            return _fit(*args, **kwargs)
+
+        monkeypatch.setattr(module, "fit_irls_direct", spy)
+    _refusing_builder(monkeypatch, lambda call: call == 1)
+    with pytest.raises(np.linalg.LinAlgError) as refused:
+        _pricing_fit("auto", discrete)
+    _assert_clear_error(refused, _REFUSAL)
+    assert modes == {"driver": ["auto"], "finalize": []}
+
+
+def _auto_irls(**overrides):
+    """fit_irls_direct on a 60-level Poisson problem that auto sends to the chain of one."""
+    dm, groups, penalties, y, weights, offset = _structured_problem(_poisson_response, n_levels=60)
+    arguments = dict(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Poisson(),
+        link=LogLink(),
+        groups=groups,
+        lambda2={"policy": 2.75},
+        offset=offset,
+        tol=1e-10,
+        direct_solve="auto",
+        reml_penalties=penalties,
+        weight_semantics="prior",
+    )
+    return irls_direct.fit_irls_direct(**(arguments | overrides))
+
+
+def test_a_refusal_at_the_terminal_build_raises_after_the_iterations(monkeypatch) -> None:
+    """The factor refuses only at the terminal build, after the iterations converged:
+    the clear error, with no second fit on any backend."""
+    calls = _refusing_builder(monkeypatch, lambda call: False)
+    _auto_irls()
+    terminal = len(calls)
+    _refusing_builder(monkeypatch, lambda call: call == terminal)
+    backends = _backend_calls(monkeypatch)
+    with pytest.raises(np.linalg.LinAlgError) as refused:
+        _auto_irls(cache_out={}, profile={})
+    _assert_clear_error(refused, _REFUSAL)
+    assert backends == ["auto"]
 
 
 @pytest.mark.parametrize(
-    ("dominant_width", "small_width", "expect_structured"),
+    ("owner", "method"),
     [
-        pytest.param(300, 8, True, id="pick-structured"),
-        pytest.param(20, 20, False, id="decline-on-cost"),
+        # PIRLS solves its data-derived Newton system through solve_data
+        pytest.param(NestedSchurFactor, "solve_data", id="solve"),
+        pytest.param(NestedSchurFactor, "logdet", id="logdet"),
+        pytest.param(ProfiledNestedSchurFactor, "trace_inverse_operator", id="selected-inverse"),
+    ],
+)
+@pytest.mark.parametrize("direct_solve", ["auto", "structured"])
+def test_a_refusal_after_the_factor_build_raises_under_every_mode(
+    monkeypatch, owner, method, direct_solve
+) -> None:
+    """A solve or selected inverse that is not representable refuses after the build."""
+    message = "Structured term 'policy' solve is not representable."
+
+    def refuse(self, *args, **kwargs):
+        raise np.linalg.LinAlgError(message)
+
+    monkeypatch.setattr(owner, method, refuse)
+    backends = _backend_calls(monkeypatch)
+    with pytest.raises(np.linalg.LinAlgError) as refused:
+        _auto_irls(direct_solve=direct_solve)
+    _assert_clear_error(refused, message)
+    assert backends == [direct_solve]
+
+
+def test_a_refused_discrete_trial_is_rejected_with_a_shorter_step(monkeypatch) -> None:
+    """The discrete line search's cached structured solve refuses its first trial.
+
+    A refused trial supplies no objective: it is rejected, counted and the step
+    halved, under every ``direct_solve`` alike (one path per model class), and
+    the fit completes on the structured backend -- auto bitwise the forced fit.
+    Mutation: raising the error for 'structured' only fails the forced fit.
+    """
+    solve = discrete_reml.solve_cached_structured
+    calls: list = []
+
+    def refuse_first(*args, **kwargs):
+        calls.append(None)
+        if len(calls) == 1:
+            raise np.linalg.LinAlgError(_REFUSAL)
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(discrete_reml, "solve_cached_structured", refuse_first)
+    fits = {}
+    for direct_solve in ("auto", "structured"):
+        calls.clear()
+        fits[direct_solve] = _pricing_fit(direct_solve, discrete=True)
+        assert fits[direct_solve]._reml_profile["reml_n_refused_structured_trials"] == 1
+        assert fits[direct_solve].result.direct_backend == "structured"
+        assert fits[direct_solve]._reml_result.converged
+    assert fits["auto"].result.deviance == fits["structured"].result.deviance
+    assert fits["auto"]._reml_lambdas == fits["structured"]._reml_lambdas
+
+
+# Families whose observed rows are signed: Gaussian/log rows w mu (2 mu - y) are
+# negative for y > 2 mu, Tweedie(1.75)/sqrt rows at y < mu / 5.  The chain
+# factors them (one-engine design §3.3), so no family declines it.
+_SIGNED_FAMILIES = [
+    pytest.param("gaussian", "log", "Gaussian with a log link", id="gaussian-log"),
+    pytest.param(Tweedie(1.75), "sqrt", "Tweedie with a sqrt link", id="tweedie-sqrt"),
+]
+
+
+@pytest.fixture
+def nested_factor_rows(monkeypatch) -> list[float]:
+    """The smallest working row of every nested data system built for a factor.
+
+    ``mean=None`` is a factor's own system, a PIRLS iterate's or the observed
+    REML geometry's; a W-derivative operator passes its factor's leaf means and
+    is signed by construction (§3.6).
+    """
+    rows: list[float] = []
+    build = moments.build_nested_structured_system
+
+    def spy(group_matrices, groups, W, Wz, *, layout, mean=None, **kwargs):
+        if mean is None:
+            rows.append(float(np.min(W)))
+        return build(group_matrices, groups, W, Wz, layout=layout, mean=mean, **kwargs)
+
+    monkeypatch.setattr(moments, "build_nested_structured_system", spy)
+    return rows
+
+
+@pytest.mark.parametrize(("family", "link", "named"), _SIGNED_FAMILIES)
+def test_auto_fits_a_signed_observed_family_on_the_chain_of_one(
+    nested_factor_rows, family, link, named
+) -> None:
+    """The exact path's observed REML curvature reaches the chain of one as signed rows.
+
+    auto prices the chain ahead of gram and keeps it for these families, with
+    no fallback reason (the family table that sent them to gram is gone,
+    design §3.3).  Both backends converge on one REML surface, so the
+    objectives differ by at most ``reml_tol (1 + |V|)``.
+    """
+    auto = _pricing_fit("auto", False, family, link)
+    gram = _pricing_fit("gram", False, family, link)
+    profile = auto._reml_profile
+    assert profile["structured_auto_cost_ratio"] <= selection._AUTO_MAX_NESTED_COST_RATIO
+    assert auto.result.direct_backend == "structured"
+    assert auto.result.direct_fallback_reason is None
+    assert isinstance(auto._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
+    assert profile["structured_chain"] == ("region",)
+    assert nested_factor_rows
+    if named.startswith("Gaussian"):
+        # the observed geometry handed the factor its negative rows
+        assert min(nested_factor_rows) < 0.0
+    assert auto._reml_result.converged and gram._reml_result.converged
+    objective = gram._reml_result.objective
+    assert abs(auto._reml_result.objective - objective) <= PRICING_REML_TOL * (1.0 + abs(objective))
+
+
+@pytest.mark.parametrize(("family", "link", "named"), _SIGNED_FAMILIES)
+def test_discrete_fits_a_signed_observed_family_on_the_chain_of_one(family, link, named) -> None:
+    """Discrete REML keeps the chain for a family with signed observed rows.
+
+    No fallback reason, bitwise the forced structured fit, and both backends
+    converge on one REML surface, so the objectives differ by at most
+    reml_tol (1 + |V|).
+    """
+    auto = _pricing_fit("auto", True, family, link)
+    forced = _pricing_fit("structured", True, family, link)
+    gram = _pricing_fit("gram", True, family, link)
+    assert auto.result.direct_backend == "structured"
+    assert auto.result.direct_fallback_reason is None
+    assert isinstance(auto._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
+    assert auto._reml_profile["structured_chain"] == ("region",)
+    assert auto.result.deviance == forced.result.deviance
+    assert auto._reml_lambdas == forced._reml_lambdas
+    assert auto._reml_result.converged and gram._reml_result.converged
+    objective = gram._reml_result.objective
+    assert abs(auto._reml_result.objective - objective) <= PRICING_REML_TOL * (1.0 + abs(objective))
+
+
+def test_a_signed_family_below_the_crossover_takes_gram_by_size() -> None:
+    """A signed-row family on a model gram wins by cost: the size reason alone.
+
+    Four levels leave the model below the structured crossover, so the chain
+    is never priced ahead of gram; the family plays no part in the decision.
+    """
+    auto = _pricing_fit("auto", False, "gaussian", "log", 4)
+    assert auto.result.direct_backend == "gram"
+    assert "crossover" in auto.result.direct_fallback_reason
+
+
+@pytest.mark.parametrize(
+    ("dominant_width", "small_width", "n", "expect_structured"),
+    [
+        pytest.param(300, 8, 1_200, True, id="pick-structured"),
+        pytest.param(20, 20, 2_000, False, id="decline-on-cost"),
     ],
 )
 def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
     dominant_width: int,
     small_width: int,
+    n: int,
     expect_structured: bool,
 ):
     """Issue #343: every automatic cost decision lands in the fit profile.
@@ -862,7 +1127,6 @@ def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
     recalibration against real workloads reads.
     """
     rng = np.random.default_rng(343)
-    n = 4 * dominant_width
     codes = np.asarray(np.arange(n) % dominant_width, dtype=np.intp)
     numeric = rng.normal(size=(n, small_width))
     y = 0.05 * numeric[:, 0] + rng.normal(scale=0.3, size=n)
@@ -909,7 +1173,7 @@ def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
     expected_backend = "structured" if expect_structured else "gram"
     assert result.direct_backend == expected_backend
     assert profile["structured_auto_selected"] is expect_structured
-    expected_ratio = ((small_width + 1) / (small_width + dominant_width + 1)) ** 2
+    expected_ratio = _chain_of_one_ratio(n, small_width, dominant_width)
     assert profile["structured_auto_cost_ratio"] == pytest.approx(expected_ratio)
 
 
@@ -1006,7 +1270,7 @@ def test_reml_driver_emits_one_info_line_per_structured_auto_pick(caplog, discre
     assert profile["structured_auto_selected"] is True
     q = 4
     observed_levels = frame["grp"].nunique()
-    expected_ratio = ((q + 1) / (observed_levels + q + 1)) ** 2
+    expected_ratio = _chain_of_one_ratio(n, q, observed_levels)
     assert profile["structured_auto_cost_ratio"] == pytest.approx(expected_ratio)
     picks = [r for r in caplog.records if "chose the structured backend" in r.message]
     assert len(picks) == 1
@@ -1325,57 +1589,10 @@ def test_structured_reml_objective_uses_compact_penalty_and_gram(monkeypatch):
 
 
 class TestStructuredPenaltyBuilderComponentLambdas:
-    """The legacy (``reml_penalties=None``) branches of the structured penalty
-    builders must resolve component-named lambdas for multi-penalty groups,
-    matching the dense assembly sites fixed on this branch. These branches are
-    defensive today (``fit_irls_direct`` refuses structured dispatch without
-    ``reml_penalties``), but the builders are exported and must agree with the
-    dense semantics."""
-
-    def _system_with_multipenalty_small_block(self):
-        import scipy.sparse as sp
-
-        from superglm.group_matrix import SparseSSPGroupMatrix
-        from superglm.solvers.structured import build_structured_system
-
-        rng = np.random.default_rng(11)
-        n = 200
-        n_levels = 40
-        codes = rng.integers(0, n_levels, size=n, dtype=np.intp)
-        B = rng.normal(size=(n, 3))
-        gm_small = SparseSSPGroupMatrix(sp.csr_matrix(B), np.eye(3))
-        U1 = rng.normal(size=(3, 2))
-        U2 = rng.normal(size=(3, 1))
-        omega_1 = U1 @ U1.T
-        omega_2 = U2 @ U2.T
-        gm_small.omega = omega_1 + omega_2
-        gm_small.omega_components = [("m1", omega_1), ("m2", omega_2)]
-        matrices = [gm_small, RandomEffectGroupMatrix(codes, n_levels)]
-        groups = [
-            GroupSlice(name="s", start=0, end=3, penalized=True),
-            GroupSlice(name="policy", start=3, end=3 + n_levels, penalized=True),
-        ]
-        W = rng.uniform(0.5, 1.5, size=n)
-        Wz = rng.normal(size=n)
-        system = build_structured_system(matrices, groups, W, Wz, dominant_group_index=1)
-        return system, matrices, groups, omega_1, omega_2
-
-    def test_scalar_builder_applies_component_named_lambdas(self):
-        from superglm.solvers.structured import build_penalized_scalar_operator
-
-        system, matrices, groups, omega_1, omega_2 = self._system_with_multipenalty_small_block()
-        lambdas = {"s:m1": 2.0, "s:m2": 3.0, "policy": 1.5}
-        penalized = build_penalized_scalar_operator(system, matrices, groups, lambdas)
-
-        base = np.asarray(system.operator.A, dtype=np.float64)
-        small_position = {
-            int(idx): pos for pos, idx in enumerate(np.asarray(system.operator.small_indices))
-        }
-        local = [small_position[i] for i in range(3)]
-        expected_block = base[np.ix_(local, local)] + 2.0 * omega_1 + 3.0 * omega_2
-        np.testing.assert_allclose(
-            np.asarray(penalized.A)[np.ix_(local, local)], expected_block, rtol=1e-12
-        )
+    """The ``fs``, ``sz`` and nested penalty builders take the fit's compact
+    penalty components (or an override) and refuse to guess without them: the
+    group-by-group assembly they carried for callers without components had no
+    production caller left."""
 
     def _system_with_fs_dominant(self, factor_basis):
         import scipy.sparse as sp
@@ -1405,33 +1622,19 @@ class TestStructuredPenaltyBuilderComponentLambdas:
         system = build_structured_system(matrices, groups, W, Wz, dominant_group_index=1)
         return system, matrices, groups, omega_1, omega_2
 
-    def _assert_small_block_penalized(self, system, penalized, omega_1, omega_2):
-        base = np.asarray(system.operator.A, dtype=np.float64)
-        small_position = {
-            int(idx): pos for pos, idx in enumerate(np.asarray(system.operator.small_indices))
-        }
-        local = [small_position[i] for i in range(3)]
-        expected_block = base[np.ix_(local, local)] + 2.0 * omega_1 + 3.0 * omega_2
-        np.testing.assert_allclose(
-            np.asarray(penalized.A)[np.ix_(local, local)], expected_block, rtol=1e-12
+    @pytest.mark.parametrize("factor_basis", ["fs", "sz"])
+    def test_leaf_builders_require_the_compact_penalty_components(self, factor_basis):
+        from superglm.solvers.structured import (
+            build_penalized_block_operator,
+            build_penalized_sum_to_zero_operator,
         )
 
-    def test_block_builder_applies_component_named_lambdas(self):
-        from superglm.solvers._structured.moments import BlockStructuredSystem
-        from superglm.solvers.structured import build_penalized_block_operator
-
-        system, matrices, groups, omega_1, omega_2 = self._system_with_fs_dominant("fs")
-        assert isinstance(system, BlockStructuredSystem)
+        system, matrices, groups, _omega_1, _omega_2 = self._system_with_fs_dominant(factor_basis)
+        build = (
+            build_penalized_block_operator
+            if factor_basis == "fs"
+            else build_penalized_sum_to_zero_operator
+        )
         lambdas = {"s:m1": 2.0, "s:m2": 3.0, "f": 1.5}
-        penalized = build_penalized_block_operator(system, matrices, groups, lambdas)
-        self._assert_small_block_penalized(system, penalized, omega_1, omega_2)
-
-    def test_sum_to_zero_builder_applies_component_named_lambdas(self):
-        from superglm.solvers._structured.moments import SumToZeroBlockStructuredSystem
-        from superglm.solvers.structured import build_penalized_sum_to_zero_operator
-
-        system, matrices, groups, omega_1, omega_2 = self._system_with_fs_dominant("sz")
-        assert isinstance(system, SumToZeroBlockStructuredSystem)
-        lambdas = {"s:m1": 2.0, "s:m2": 3.0, "f": 1.5}
-        penalized = build_penalized_sum_to_zero_operator(system, matrices, groups, lambdas)
-        self._assert_small_block_penalized(system, penalized, omega_1, omega_2)
+        with pytest.raises(ValueError, match="reml_penalties"):
+            build(system, matrices, groups, lambdas)

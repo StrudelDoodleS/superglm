@@ -1084,10 +1084,17 @@ class TestDirectSolverBasic:
         gap = np.abs(coefficients - np.r_[fisher.intercept, fisher.beta])
         np.testing.assert_array_less(gap, step_bound + round_off)
 
-    def test_gamma_log_observed_controller_rescues_then_falls_back_atomically(self, monkeypatch):
-        """A Fisher rejection enables one observed attempt; its rejection restores Fisher."""
+    @pytest.mark.parametrize(
+        ("family_name", "declared"), [("gamma", False), ("tweedie", True)], ids=["gamma", "tweedie"]
+    )
+    def test_the_curvature_is_the_pairs_declaration_and_never_switches(
+        self, monkeypatch, family_name, declared
+    ):
+        """One-engine design §3.11: Gamma/log takes Fisher rows and Tweedie/log
+        observed rows on every iteration; a rejected step ends the fit in the
+        same curvature, with no observed rescue and no Fisher latch."""
         import superglm.solvers.irls_direct as irls_direct
-        from superglm.distributions import Gamma
+        from superglm.distributions import Gamma, Tweedie
         from superglm.links import LogLink
         from superglm.solvers.irls_state import _IRLSStepDecision
 
@@ -1109,22 +1116,22 @@ class TestDirectSolverBasic:
         original_select = irls_direct._select_irls_trial
         selection_calls = 0
 
-        def reject_first_fisher_and_observed(*args, **kwargs):
+        def reject_the_second_proposal(*args, **kwargs):
             nonlocal selection_calls
             selection_calls += 1
-            if selection_calls <= 2:
+            if selection_calls == 2:
                 return _IRLSStepDecision(0.0, 0, True, trials_attempted=21)
             return original_select(*args, **kwargs)
 
         monkeypatch.setattr(irls_direct, "coefficient_working_rows", recording_rows)
-        monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_first_fisher_and_observed)
+        monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_the_second_proposal)
 
         profile: dict[str, float | int] = {}
-        result, final_inverse = irls_direct.fit_irls_direct(
+        result, _ = irls_direct.fit_irls_direct(
             X=dm,
             y=y,
             weights=np.ones(n),
-            family=Gamma(),
+            family=Gamma() if family_name == "gamma" else Tweedie(p=1.5),
             link=LogLink(),
             groups=groups,
             lambda2=0.0,
@@ -1135,21 +1142,104 @@ class TestDirectSolverBasic:
             weight_semantics="frequency",
         )
 
-        assert curvature_requests[:3] == [False, True, False]
-        assert profile["irls_observed_newton_rescues"] == 1
-        assert profile["irls_observed_newton_iters"] == 1
-        assert profile["irls_observed_newton_rejections"] == 1
-        assert result.converged
+        # Gamma/log never asks for observed rows (no rescue); Tweedie/log takes
+        # them on both iterations the loop runs (no Fisher latch)
+        assert (True in curvature_requests) is declared
+        assert profile.get("irls_observed_newton_iters", 0) == (2 if declared else 0)
+        assert not any(key.startswith("irls_observed_newton_re") for key in profile)
+        assert "irls_observed_newton_fallbacks" not in profile
         assert result.iteration_log is not None
-        assert result.iteration_log[0].termination_reason == "curvature_rescue"
-        assert result.iteration_log[1].termination_reason == "curvature_fallback"
-        centered_X = X_raw - np.mean(X_raw, axis=0)
-        np.testing.assert_allclose(
-            final_inverse,
-            np.linalg.inv(centered_X.T @ centered_X),
-            rtol=2e-12,
-            atol=2e-13,
+        assert [row.termination_reason for row in result.iteration_log] == [
+            "continue",
+            "step_rejected",
+        ]
+
+    @staticmethod
+    def _tweedie_log_problem():
+        rng = np.random.default_rng(459)
+        n = 160
+        X_raw = rng.normal(size=(n, 3))
+        mu = np.exp(0.1 + X_raw @ np.array([0.2, -0.3, 0.4]))
+        y = rng.gamma(shape=2.0, scale=mu / 2.0)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=3)
+        return dm, y, [GroupSlice(name="x", start=0, end=3)]
+
+    def test_a_trial_without_finite_observed_rows_is_rejected_by_the_line_search(self, monkeypatch):
+        """One-engine design §3.11: finiteness is the one condition observed rows
+        keep, so a full step to a state whose rows the declared curvature cannot
+        form is halved, never accepted and never answered with Fisher rows."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Tweedie
+        from superglm.links import LogLink
+        from superglm.solvers.working_rows import CoefficientWorkingRows
+
+        dm, y, groups = self._tweedie_log_problem()
+        original_rows = irls_direct.coefficient_working_rows
+        committed_eta: list[np.ndarray] = []
+
+        def rows(*args, **kwargs):
+            result = original_rows(*args, **kwargs)
+            if kwargs["prefer_observed"] and not committed_eta:
+                committed_eta.append(np.array(kwargs["eta"]))
+                return result
+            if kwargs["prefer_observed"] and not np.array_equal(kwargs["eta"], committed_eta[0]):
+                # every state other than the start is declared unrepresentable
+                weights = np.array(result.weights)
+                weights[0] = np.inf
+                return CoefficientWorkingRows(
+                    weights, result.response, "observed", "nonfinite_observed_rows"
+                )
+            return result
+
+        monkeypatch.setattr(irls_direct, "coefficient_working_rows", rows)
+        result, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(dm.n),
+            family=Tweedie(p=1.5),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.0,
+            max_iter=5,
+            record_diagnostics=True,
+            weight_semantics="frequency",
         )
+        first = result.iteration_log[0]
+        assert first.step_rejected
+        assert first.trials_attempted > 1
+        assert first.termination_reason == "step_rejected"
+
+    def test_non_finite_observed_rows_at_the_start_raise(self, monkeypatch):
+        """No Fisher substitute: a declared observed pair whose rows are not finite
+        at the starting coefficients has no step, and says so."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Tweedie
+        from superglm.links import LogLink
+        from superglm.solvers.working_rows import CoefficientWorkingRows
+
+        dm, y, groups = self._tweedie_log_problem()
+        original_rows = irls_direct.coefficient_working_rows
+
+        def rows(*args, **kwargs):
+            result = original_rows(*args, **kwargs)
+            if kwargs["prefer_observed"]:
+                return CoefficientWorkingRows(
+                    result.weights, result.response, "observed", "nonfinite_observed_rows"
+                )
+            return result
+
+        monkeypatch.setattr(irls_direct, "coefficient_working_rows", rows)
+        with pytest.raises(ValueError, match="observed-Newton rows .* not finite"):
+            irls_direct.fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(dm.n),
+                family=Tweedie(p=1.5),
+                link=LogLink(),
+                groups=groups,
+                lambda2=0.0,
+                weight_semantics="frequency",
+            )
 
     def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
         """Large constrained fits dispatch raw moments through their cached plan."""

@@ -847,6 +847,7 @@ def _process_info(
                 info.cat_codes,
                 info.n_cols,
                 lambda_policies=info.lambda_policies,
+                nested_in=info.random_effect_nested_in,
             )
         elif info.cat_codes is not None:
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
@@ -1297,5 +1298,5 @@ def rebuild_design_matrix_with_lambdas(
     rebuilt = DesignMatrix(new_gms, dm.n, dm.p)
     rebuilt._centered_pattern_plan = dm._centered_pattern_plan
     # RandomEffect matrices pass through unchanged, so their nesting tests do too.
-    carry_nesting_cache(dm._scalar_structured_layout_cache, rebuilt._scalar_structured_layout_cache)
+    carry_nesting_cache(dm._structured_layout_cache, rebuilt._structured_layout_cache)
     return rebuilt

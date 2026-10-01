@@ -242,6 +242,23 @@ def _claim_free_categorical_levels(values: NDArray, spec, positive: NDArray, val
     return len(levels(valid) - levels(positive))
 
 
+def _check_random_effect_nesting(model, X) -> None:
+    """Validate declared nesting and name near-nested pairs on the training rows (§3.13).
+
+    ``RandomEffect(nested_in=)`` is checked here, where the training rows are
+    first bound: a row that breaks it is an error.  An undeclared pair that
+    nests on all but a few rows is named once, in a warning that never changes
+    the fit (``features.random_effect.near_nesting_notes``).
+    """
+    import warnings
+
+    from superglm.features.random_effect import near_nesting_notes, validate_declared_nesting
+
+    validate_declared_nesting(model._specs, X.column_array)
+    for note in near_nesting_notes(model._specs, X.column_array):
+        warnings.warn(note, UserWarning, stacklevel=4)
+
+
 def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     """Detect REML random effects beside separating unpenalised categoricals.
 
@@ -1617,6 +1634,7 @@ def fit_reml(
     sample_weight_ref = sample_weight
     offset_ref = offset
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
+    _check_random_effect_nesting(model, X)
     # Governed by the same seam as the other separation diagnostics, so a
     # caller filtering on SeparationWarning catches all three and
     # ``separation="ignore"`` quiets all three.

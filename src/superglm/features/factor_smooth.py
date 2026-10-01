@@ -462,17 +462,21 @@ class FactorSmooth:
                 "FactorSmooth marginal basis is rank deficient; use more distinct "
                 "numeric values or a smaller k, or choose a suitable non-smooth feature."
             )
-        if self.basis == "fs":
-            natural_map, components = _natural_parameterization_from_r(
-                qr_r,
-                penalty,
-                rank=self.k - self.m,
-                n_rows=len(x),
-                normalization_mass=normalization_mass,
-            )
-        else:
-            natural_map = np.eye(self.k, dtype=np.float64)
-            components = (("wiggle", penalty),)
+        natural_map, components = _natural_parameterization_from_r(
+            qr_r,
+            penalty,
+            rank=self.k - self.m,
+            n_rows=len(x),
+            normalization_mass=normalization_mass,
+        )
+        if self.basis == "sz":
+            # One-engine design §3.5, decision 5: sz takes fs's natural
+            # parameterization.  Its sum-to-zero constraint is coefficientwise,
+            # so the same per-level change of basis preserves it; the wiggle
+            # penalty becomes diagonal (its square root exact) and the
+            # polynomial null coordinates separate.  sz penalizes the wiggle
+            # component alone, as before: the null coordinates stay unpenalized.
+            components = components[:1]
         self._spline = spline
         self._natural_map = natural_map
         self._base_penalty_components = components

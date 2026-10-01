@@ -29,22 +29,28 @@ from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
     penalty_component_matvec,
 )
+from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
 from superglm.solvers.centered_system import iter_grouped_design_chunks
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
     HessianFactor,
     as_hessian_factor,
 )
+from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.structured import (
     CenteredBlockOperator,
     CompactSymmetricOperator,
+    FactorSmoothLeafLayout,
     LowRankSymmetricOperator,
     NestedStructuredLayout,
+    ProfiledFactorSmoothLeafFactor,
     ProfiledNestedSchurFactor,
+    ProfiledSumToZeroTreeFactor,
     SumBlockOperator,
+    build_block_structured_system,
     build_nested_structured_system,
-    build_structured_system,
+    centred_data_operator,
     compact_operator_diagonal,
     get_nested_structured_layout,
     get_structured_layout,
@@ -352,10 +358,7 @@ def reml_w_correction(
         penalty_caches=penalty_caches,
     )
     if geometry is None:
-        eta = stabilize_eta(
-            dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
-            link,
-        )
+        eta = stabilize_eta(linear_predictor(dm, pirls_result, offset_arr), link)
         mu = clip_mu(link.inverse(eta), distribution)
         dW_deta = compute_dW_deta(link, distribution, mu, eta, sample_weight)
     else:
@@ -476,6 +479,7 @@ def reml_w_correction(
     structured_group_index: int | None = None
     structured_layout = None
     signed_leaf_mean: NDArray | None = None
+    signed_leaf_center: NDArray | None = None
     signed_center = mean_x
     if isinstance(factor, ProfiledNestedSchurFactor):
         # A nested factor is found by its chain, never by its leaf name, and
@@ -488,6 +492,7 @@ def reml_w_correction(
             chain_group_indices=factor.chain_group_indices,
         )
         signed_leaf_mean = factor.data_operator.leaf.mean
+        signed_leaf_center = factor.data_operator.leaf.center
         signed_center = factor.mean_x
     elif not isinstance(factor, DenseHessianFactor):
         dominant_name = getattr(factor, "dominant_group_name", None)
@@ -545,6 +550,8 @@ def reml_w_correction(
         else None
     )
     pending: list[tuple[int, NDArray, float]] = []
+    fs_pending: list[tuple[int, NDArray]] = []
+    fs_layout = structured_layout if isinstance(structured_layout, FactorSmoothLeafLayout) else None
     # Factors cannot change between these first-order directions. Public moment
     # calls and later correction calls still start with fresh numerical state.
     fixed_support = (
@@ -578,12 +585,16 @@ def reml_w_correction(
                     list(dm.group_matrices),
                     groups,
                     row_weights,
-                    np.zeros_like(row_weights),
+                    None,
                     layout=structured_layout,
                     mean=signed_leaf_mean,
+                    center=signed_leaf_center,
                 )
                 if isinstance(structured_layout, NestedStructuredLayout)
-                else build_structured_system(
+                # a FactorSmooth term's weight-derivative operators only enter
+                # traces: the moment kernel, never the leaf factorization
+                # (design §3.4, F5)
+                else build_block_structured_system(
                     list(dm.group_matrices),
                     groups,
                     row_weights,
@@ -668,25 +679,28 @@ def reml_w_correction(
                 flush_signed_grams()
             continue
 
-        # C_j = X_c'diag(a_j)X_c -- dW contribution to the
-        # profiled-intercept Hessian.
-        C_j = centered_signed_gram(a_j)
-
-        # Profiled-determinant gradient: centered-Hessian trace plus the
-        # scalar 0.5 * log(sum(W)) derivative below.
-        if isinstance(C_j, np.ndarray):
-            if not isinstance(factor, DenseHessianFactor):  # pragma: no cover - branch invariant
-                raise RuntimeError("Structured derivative Gram unexpectedly materialized.")
-            grad_correction[i] = 0.5 * float(np.sum(factor.inverse * C_j))
+        if fs_layout is not None:
+            # every direction's operator from one multi-weight moment pass (below)
+            fs_pending.append((i, a_j))
         else:
-            grad_correction[i] = 0.5 * factor.trace_inverse_operator(C_j)
+            # C_j = X_c'diag(a_j)X_c -- dW contribution to the
+            # profiled-intercept Hessian.
+            C_j = centered_signed_gram(a_j)
+
+            # Profiled-determinant gradient: centered-Hessian trace plus the
+            # scalar 0.5 * log(sum(W)) derivative below.
+            if isinstance(C_j, np.ndarray):
+                if not isinstance(factor, DenseHessianFactor):  # pragma: no cover - invariant
+                    raise RuntimeError("Structured derivative Gram unexpectedly materialized.")
+                grad_correction[i] = 0.5 * float(np.sum(factor.inverse * C_j))
+            else:
+                grad_correction[i] = 0.5 * factor.trace_inverse_operator(C_j)
+            dH_extra[i] = C_j
         dsum_w_j = float(np.sum(a_j, dtype=np.float64))
         if sum_w is not None:
             # The fitted determinant is log(sum(W)) + log|H_c| after
             # profiling the intercept, so its scalar factor varies with W.
             grad_correction[i] += 0.5 * dsum_w_j / sum_w
-
-        dH_extra[i] = C_j
 
         if w_correction_order >= 2:
             # Mean-derivative outer products enter only at second order;
@@ -700,6 +714,23 @@ def reml_w_correction(
 
     if pending:
         flush_signed_grams()
+    if fs_pending and fs_layout is not None:
+        # One pass over the rows forms every direction's moments (perf F5):
+        # sandwich products for traces, never a factorization (design §3.4).
+        # They are formed on the rows shifted by the fit's c0 and centred on
+        # the fit's own shifted mean, so a large-offset column's centred block
+        # does not cancel to noise (design §3.2; the centring is shift-invariant).
+        if not isinstance(factor, ProfiledFactorSmoothLeafFactor | ProfiledSumToZeroTreeFactor):
+            raise RuntimeError("An fs or sz weight derivative needs its profiled leaf factor.")
+        fit_system = factor.augmented_factor.system
+        fit_centre = centred_data_operator(fit_system).center
+        moment_sets = factor_smooth_moment_operators(
+            fs_layout, [a for _, a in fs_pending], center=fit_system.leaf.center
+        )
+        for (i, _), (raw, cross, total) in zip(fs_pending, moment_sets, strict=True):
+            C_j = CenteredBlockOperator(raw=raw, cross=cross, total=total, center=fit_centre)
+            grad_correction[i] += 0.5 * factor.trace_inverse_operator(C_j)
+            dH_extra[i] = C_j
 
     # -- Second-order Hessian cross-terms (Wood 2011, Section 3.5.1) --
     #

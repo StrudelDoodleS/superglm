@@ -8,6 +8,7 @@ canonical links and differ for non-canonical links such as Gamma/log.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -15,11 +16,7 @@ from typing import Any, Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_centered import (
-    _raw_centering_well_scaled,
-    centered_gram_rhs,
-    centered_rhs,
-)
+from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
 from superglm.distributions import (
     _VARIANCE_FLOOR,
     Binomial,
@@ -45,34 +42,41 @@ from superglm.links import (
     SqrtLink,
     stabilize_eta,
 )
-from superglm.reml.penalty_algebra import total_penalty_matvec
+from superglm.reml.penalty_algebra import (
+    penalty_component_magnitude_matvec,
+    total_penalty_matvec,
+)
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     build_centered_system,
     grouped_augmented_factor,
 )
 from superglm.solvers.hessian_factor import HessianFactor
+from superglm.solvers.mode_score import linear_predictor, penalized_mode_residual
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
-    BlockSchurFactor,
+    BlockSymmetricOperator,
     CenteredBlockOperator,
     CompactSymmetricOperator,
+    FactorSmoothLeafFactor,
+    FactorSmoothLeafSystem,
+    FactorSmoothPenalizedOperator,
     NestedSchurFactor,
     NestedStructuredSystem,
-    ProfiledBlockSchurFactor,
+    ProfiledFactorSmoothLeafFactor,
     ProfiledNestedSchurFactor,
-    ProfiledScalarSchurFactor,
-    ScalarSchurFactor,
+    ProfiledSumToZeroTreeFactor,
+    SumToZeroBlockOperator,
+    SumToZeroLeafSystem,
+    SumToZeroPenalizedOperator,
+    SumToZeroTreeFactor,
     build_augmented_structured_factor,
     build_penalized_structured_operator,
     build_structured_system,
+    centred_data_operator,
     compact_operator_diagonal,
     get_structured_layout,
-)
-from superglm.solvers.sum_to_zero import (
-    ProfiledSumToZeroBlockFactor,
-    SumToZeroBlockFactor,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -363,6 +367,50 @@ def compute_observed_information_weights(
         sample_weight,
         derivative_order=0,
     )[0]
+
+
+def observed_row_error_scale(
+    distribution: Any,
+    link: Any,
+    y: NDArray,
+    mu: NDArray,
+    eta: NDArray,
+    sample_weight: NDArray,
+    observed: NDArray,
+) -> NDArray:
+    """Per-row scale ``e_r >= |w_r|`` of the rounding in the observed rows ``observed``.
+
+    One-engine design §3.3 and signed-rows note §1: an observed row is formed
+    as ``w0 (u^2/V + (y - mu) (a - b))`` with ``a = u^2 V'/V^2`` and ``b =
+    v/V``, so its computed value is accurate to a few ulps of ``w0 (|u^2/V| +
+    |y - mu| (|a| + |b|))``, not of ``|w|``: where the terms cancel (``a - b``
+    vanishes identically on a canonical pair, the whole row on a zero weight)
+    the rounding sits at the scale of the terms.
+    The closed-form log-link rows of ``_compute_observed_row_bundle`` are sums
+    of non-negative terms, so there ``e = w``.  The factor charges its running
+    error bound with ``sum_r e_r`` (``moments._nested_pass``).  Never below
+    ``|observed|``, so the scale bounds the row itself.
+    """
+    y, mu, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
+    observed = np.asarray(observed, dtype=np.float64)
+    magnitude = np.abs(observed)
+    if type(link) is LogLink and type(distribution) in (Gamma, Poisson, Tweedie):
+        return magnitude
+    if (
+        type(link) is LogLink
+        and type(distribution) is NegativeBinomial
+        and distribution.theta != "auto"
+    ):
+        return magnitude
+    u = np.asarray(link.deriv_inverse(eta), dtype=np.float64)
+    v = np.asarray(link.deriv2_inverse(eta), dtype=np.float64)
+    variance = np.maximum(np.asarray(distribution.variance(mu), dtype=np.float64), _VARIANCE_FLOOR)
+    variance_prime = np.asarray(distribution.variance_derivative(mu), dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        fisher = u**2 / variance
+        terms = np.abs(u**2 * variance_prime / variance**2) + np.abs(v / variance)
+        scale = sample_weight * (np.abs(fisher) + np.abs(y - mu) * terms)
+    return np.maximum(scale, magnitude)
 
 
 REMLCurvature = Literal["fisher", "observed"]
@@ -687,12 +735,26 @@ class ObservedREMLGeometry:
 
 @dataclass(frozen=True)
 class ObservedModeScore:
-    """Penalized likelihood score and a unitless KKT residual."""
+    """Penalized likelihood score and a unitless KKT residual (one-engine design §3.8, §3.9).
+
+    ``relative_max`` is the certificate's score: the fixed bar times the
+    largest ``relative / bar_effective`` over the intercept and the identified
+    slopes, so it exceeds ``observed_mode_certification_bar()`` exactly when
+    the mode is not certified (``mode_score.ModeResidual.ratio``).
+    ``raw_relative_max`` is the largest relative score over every coefficient,
+    weakly identified ones included; ``weakly_identified`` holds the slope
+    indices flagged and kept (§3.9); ``floor_binding`` says a derived
+    backward-error floor raised the bar for an identified coefficient, which
+    the fit discloses.
+    """
 
     intercept: float
     slopes: NDArray
     max_abs: float
     relative_max: float
+    raw_relative_max: float = 0.0
+    weakly_identified: tuple[int, ...] = ()
+    floor_binding: bool = False
 
 
 # Observed geometry differentiates implicitly through the penalized mode, so
@@ -702,62 +764,41 @@ OBSERVED_PIRLS_TOL_CEILING = 1e-10
 
 
 def observed_mode_certification_bar() -> float:
-    """The fixed bar an observed-geometry penalized mode must meet.
+    """The fixed bar a penalized mode must meet: ``mode_score.MODE_CERTIFICATION_BAR``.
 
-    10x the ceiling PIRLS solves to under observed geometry, floored at
-    100*eps. Deliberately a constant with no tolerance parameter: the
-    achieved score is set by conditioning, and ``ObservedModeNotCertifiedError``
-    promises that changing ``tol`` cannot move the bar -- a promise that must
-    hold at the candidate gate and the terminal publication refit alike, or a
-    point that certified as a candidate fails publication solely because the
-    caller tightened ``pirls_tol`` below the ceiling.
-
-    Floored at 100*eps, so unlike the SCOP certification bar
-    (reml/scop_efs.py) the floor arm here is live -- do not generalise the
-    #184 deletion to this expression.
+    One bar for the PIRLS stop and the certificate on every route (one-engine
+    design §3.8; its derivation is in ``solvers.mode_score``).  Deliberately a
+    constant with no tolerance parameter: the achieved score is set by
+    conditioning, so changing ``tol`` cannot move the bar -- a point that
+    certified as a candidate cannot fail publication solely because the
+    caller tightened ``pirls_tol``.
     """
-    return max(10.0 * OBSERVED_PIRLS_TOL_CEILING, 100.0 * np.finfo(float).eps)
+    from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR
+
+    return MODE_CERTIFICATION_BAR
 
 
 def stopped_on_iteration_budget(result: Any) -> bool:
-    """Did PIRLS stop only because it ran out of iterations?
+    """Did PIRLS stop short of its certificate without a structural failure?
 
-    ``converged`` is a STEP-LENGTH verdict: it fires when
-    ``max|dbeta| / max(1, |beta|)`` drops below the tolerance, which under
-    observed geometry is pinned to ``OBSERVED_PIRLS_TOL_CEILING``. That
-    threshold can sit below the round-off floor of the iteration map -- on a
-    burn-cost-scale Tweedie fit the attainable floor was measured 9x to 646x
-    above it. There the iterate reaches the mode, enters a period-2 round-off
-    limit cycle between two adjacent floating-point states, and the step test
-    can never fire however long it runs; the loop exits on ``max_iter``
-    reporting a mode it is in fact sitting exactly on.
-
-    A step-length test cannot separate convergence from stagnation, so it is
-    the secondary criterion wherever both exist. The authority here is
-    ``observed_penalized_mode_score`` against
-    ``observed_mode_certification_bar()`` -- a KKT residual, which is the
-    primary test and fails closed (a mid-descent mode scores 1e-1 to 1e-4
-    against the 1e-9 bar). So a budget-exhausted iterate is handed to the
-    certificate rather than refused ahead of it.
+    PIRLS stops on the certificate's own score (``convergence="mode_score"``,
+    one-engine design §3.8), so ``converged`` IS the certificate at the mode
+    it returns.  It can stop short of the bar two ways that say nothing
+    structural about the point: the iteration budget ran out
+    (``"max_iter"``), the objective line search found no descent left
+    (``"step_rejected"``), or the score stopped contracting
+    (``"score_stagnated"``): the last two are where an iterate at its
+    limiting accuracy ends.  Both hand an uncertified mode on, and the caller
+    discloses it as not converged; it is never refused (owner decision 3,
+    2026-09-30).
 
     Every OTHER termination reason names something the mode score cannot
     judge -- an infeasible constrained mode, a missing inner-QP KKT
-    certificate, a non-finite deviance, a rejected step, a curvature
-    switch -- and keeps its own door.
+    certificate, a non-finite deviance -- and keeps its own door.
 
-    ``reml/scop_efs.py`` runs the same ceiling under the same criterion but
-    deliberately does NOT defer: item 2c retired the rule that specially
-    accepted a non-converged inner fit there, because PR #176 removed its cause
-    instead of working around it. That gate is left standing, on measurement --
-    922 SCOP inner fits at this tolerance, none exhausted. The likely reason is
-    structural rather than lucky: the stall needs a FULLY penalised block, whose
-    lambda bootstraps near zero so the candidate warm starts already at its own
-    mode with no descent phase, and a shape constraint keeps an unpenalised null
-    space (which is also why ``sz`` never stalled where ``fs`` did). Its refusal
-    now names the floor so a floor-limited rejection is not read as a fit that
-    would not settle.
+    ``reml/scop_efs.py`` runs its own criterion and does not defer here.
     """
-    return result.termination_reason == "max_iter"
+    return result.termination_reason in ("max_iter", "step_rejected", "score_stagnated")
 
 
 class ObservedGeometryInfeasibleError(ValueError):
@@ -887,7 +928,7 @@ def mode_certification_hint(distribution: Any) -> str:
     """
     if isinstance(distribution, Tweedie):
         return (
-            "`estimate_p()` scores powers whose mode cannot be certified as "
+            "`estimate_p()` scores powers where PIRLS reaches no penalized mode as "
             "infeasible and searches the rest, rather than requiring a workable p "
             "to be found by hand."
         )
@@ -915,6 +956,8 @@ def observed_penalized_mode_score(
     geometry: ObservedREMLGeometry,
     lambdas: dict[str, float] | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
+    excluded: NDArray | tuple[int, ...] = (),
+    bar: float | None = None,
 ) -> ObservedModeScore:
     """Evaluate the full penalized score at a proposed Laplace mode.
 
@@ -922,7 +965,13 @@ def observed_penalized_mode_score(
     deviance-change stopping rule alone does not certify that the root is
     accurate enough for implicit differentiation.  This residual is evaluated
     from the retained coefficients and is scale-relative in both intercept and
-    slope equations.
+    slope equations, by ``mode_score.penalized_mode_residual``: centred rows by
+    type, a derived backward-error floor per coefficient, and the weakly
+    identified coefficients (and those the geometry's factor truncated as
+    such) flagged, kept and left out of the certificate (one-engine design
+    §3.8, §3.9).  PIRLS stops on the same quantity (``convergence="mode_score"``).
+    ``excluded`` adds the slopes the fit's Laplace approximation leaves out
+    (``reml.identified``) to that class.
     """
     y = np.asarray(y, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
@@ -954,7 +1003,6 @@ def observed_penalized_mode_score(
     if not np.all(np.isfinite(row_score)):
         raise ObservedGeometryInfeasibleError("penalized mode score is not finite")
 
-    intercept_score = float(np.sum(row_score, dtype=np.float64))
     centered_diagonal = (
         np.diag(geometry.centered_data_gram)
         if isinstance(geometry.centered_data_gram, np.ndarray)
@@ -962,60 +1010,83 @@ def observed_penalized_mode_score(
     )
     with np.errstate(invalid="ignore", divide="ignore"):
         centered_scale = np.sqrt(np.abs(centered_diagonal) / geometry.sum_w)
-    raw_centering_safe = np.all(np.isfinite(centered_scale)) and _raw_centering_well_scaled(
-        geometry.mean_x,
-        centered_scale,
-    )
-    if raw_centering_safe:
-        data_slope_score = dm.rmatvec(row_score) - geometry.mean_x * intercept_score
+    centered_scale = np.where(np.isfinite(centered_scale), centered_scale, 0.0)
+    beta = np.asarray(result.beta, dtype=np.float64)
+    group_matrices = list(dm.group_matrices)
+    if penalty is not None:
+        penalty_score = penalty @ beta
+        penalty_magnitude = np.abs(penalty) @ np.abs(beta)
+        penalty_curvature = np.diag(penalty).astype(np.float64, copy=True)
     else:
-        data_slope_score = centered_rhs(
-            dm=dm,
-            W=np.ones(dm.n, dtype=np.float64),
-            mean_x=geometry.mean_x,
-            z_centered=row_score,
+        assert lambdas is not None and reml_penalties is not None
+        penalty_score = total_penalty_matvec(beta, lambdas, reml_penalties, group_matrices)
+        penalty_magnitude = total_penalty_magnitude_matvec(
+            beta, lambdas, reml_penalties, group_matrices
         )
-    penalty_score = (
-        penalty @ result.beta
-        if penalty is not None
-        else total_penalty_matvec(
-            result.beta,
-            lambdas,
-            reml_penalties,
-            list(dm.group_matrices),
-        )
+        from superglm.reml.identified import penalty_diagonal
+
+        penalty_curvature = penalty_diagonal(dm.p, lambdas, reml_penalties)
+
+    mean_x = np.asarray(geometry.mean_x, dtype=np.float64)
+    fisher = np.maximum(sample_weight * dmu_deta**2 / variance, 0.0)
+    fisher = np.where(np.isfinite(fisher), fisher, 0.0)
+    factor = geometry.hessian_inverse
+    excluded_indices = tuple(getattr(factor, "weakly_identified_slopes", ()) or ())
+    excluded_mask = np.zeros(dm.p, dtype=bool)
+    excluded_mask[list(excluded_indices)] = True
+    excluded_mask[np.asarray(excluded, dtype=np.intp)] = True
+    bar = observed_mode_certification_bar() if bar is None else float(bar)
+    residual = penalized_mode_residual(
+        dm=dm,
+        row_score=row_score,
+        fisher_weights=fisher,
+        positive_prior=sample_weight > 0.0,
+        mean_x=mean_x,
+        centered_scale=centered_scale,
+        alpha=float(result.intercept) + float(mean_x @ beta),
+        eta_tilde=dm.matvec(beta) - float(mean_x @ beta),
+        penalty_score=penalty_score,
+        penalty_magnitude=penalty_magnitude,
+        penalty_curvature=penalty_curvature,
+        sum_w=float(geometry.sum_w),
+        bar=bar,
+        excluded=excluded_mask,
     )
-    slope_score = data_slope_score - penalty_score
+    slope_score = residual.slope_score
     max_abs = max(
-        abs(intercept_score),
+        abs(residual.intercept_score),
         float(np.max(np.abs(slope_score), initial=0.0)),
     )
-    tiny = np.finfo(np.float64).tiny
-    intercept_scale = max(
-        tiny,
-        float(np.sum(np.abs(row_score), dtype=np.float64)),
-    )
-    # Normalize by a pre-cancellation bound, not by ``data_slope_score``
-    # itself.  At a converged mode that aggregate is (nearly) zero, so using
-    # it as its own denominator turns any round-off residue into a relative
-    # error of one.  The absolute row-score mass times the centered predictor
-    # scale has the right score units and is invariant to feature translation
-    # and to a common rescaling of observation weights.
-    slope_scale = np.maximum(
-        tiny,
-        intercept_scale * centered_scale + np.abs(penalty_score),
-    )
-    slope_relative_max = float(np.max(np.abs(slope_score) / slope_scale, initial=0.0))
-    relative_max = max(
-        abs(intercept_score) / intercept_scale,
-        slope_relative_max,
-    )
     return ObservedModeScore(
-        intercept=intercept_score,
+        intercept=residual.intercept_score,
         slopes=_readonly(slope_score),
         max_abs=max_abs,
-        relative_max=relative_max,
+        relative_max=bar * residual.ratio(),
+        raw_relative_max=float(np.max(residual.relative, initial=0.0)),
+        weakly_identified=tuple(int(index) for index in np.flatnonzero(residual.excluded)),
+        floor_binding=residual.floor_binding,
     )
+
+
+def total_penalty_magnitude_matvec(
+    beta: NDArray,
+    lambdas: float | dict[str, float],
+    penalties: list[PenaltyComponent],
+    group_matrices: list,
+) -> NDArray:
+    """``|S| |beta|`` from compact components, the magnitude ``total_penalty_matvec`` sums."""
+    magnitude = np.abs(np.asarray(beta, dtype=np.float64))
+    product = np.zeros_like(magnitude)
+    for component in penalties:
+        lam = lambdas[component.name] if isinstance(lambdas, dict) else lambdas
+        if lam == 0:
+            continue
+        product[component.group_sl] += abs(float(lam)) * penalty_component_magnitude_matvec(
+            component,
+            magnitude[component.group_sl],
+            group_matrices[component.group_index],
+        )
+    return product
 
 
 def _stable_signed_mean(dm: DesignMatrix, weights: NDArray, sum_w: float) -> NDArray:
@@ -1062,10 +1133,11 @@ def build_observed_reml_geometry(
     Non-negative observed rows use the shared centered-system execution layer,
     including its Tabmat/discrete kernels.  The uncommon negative-row case
     uses bounded, compensated centered chunks; the final penalized curvature
-    must still be positive semidefinite for a valid Laplace mode.  A nested
-    chain (``structured_chain_group_indices`` of length >= 2, ending with
-    ``structured_group_index``) builds the nested factor through the same
-    refusal seams.
+    must still be positive semidefinite for a valid Laplace mode.  A random
+    effect's nested chain (``structured_chain_group_indices``, ending with
+    ``structured_group_index``; a lone level is a chain of one) builds the
+    nested factor through the same refusal seams; a FactorSmooth term needs
+    no chain.
     """
     y = np.asarray(y, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
@@ -1106,7 +1178,7 @@ def build_observed_reml_geometry(
     if not np.isfinite(result.intercept):
         raise ObservedGeometryInfeasibleError("result.intercept must be finite")
 
-    eta = stabilize_eta(dm.matvec(beta) + result.intercept + offset_arr, link)
+    eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
     mu = clip_mu(link.inverse(eta), distribution)
     observed_w, weight_derivative, weight_second_derivative = _compute_observed_row_bundle(
         distribution,
@@ -1149,6 +1221,11 @@ def build_observed_reml_geometry(
                 np.zeros(dm.n, dtype=np.float64),
                 dominant_group_index=structured_group_index,
                 layout=structured_layout,
+                prior_weights=sample_weight,
+                signed=True,
+                error=observed_row_error_scale(
+                    distribution, link, y, mu, eta, sample_weight, observed_w
+                ),
             )
         except np.linalg.LinAlgError as error:
             raise ObservedGeometryInfeasibleError(
@@ -1190,18 +1267,38 @@ def build_observed_reml_geometry(
         xtw[system.operator.small_indices] = system.xtw_small
         xtw[system.operator.structured_indices] = system.xtw_structured
         mean_x = xtw / system.sum_w
-        data_gram = CenteredBlockOperator(
-            raw=system.operator,
-            cross=xtw,
-            total=system.sum_w,
-            center=mean_x,
-        )
-        hessian = CenteredBlockOperator(
-            raw=penalized,
-            cross=xtw,
-            total=system.sum_w,
-            center=mean_x,
-        )
+        if isinstance(system, FactorSmoothLeafSystem | SumToZeroLeafSystem):
+            # on the c0-shifted moments (design §3.2): the mode score's centred
+            # scale reads this diagonal, which the raw moments cancel to noise
+            # for a column with a large offset
+            data_gram = centred_data_operator(system)
+            raw = data_gram.raw
+            small, local = (
+                getattr(penalized, "penalty_small", None),
+                getattr(penalized, "penalty_local", None),
+            )
+            if small is None or local is None:  # pragma: no cover - built with its parts
+                raise TypeError("An fs or sz system's penalized operator keeps its penalty parts.")
+            if isinstance(raw, SumToZeroBlockOperator):
+                penalized_raw = SumToZeroPenalizedOperator.with_penalties(raw, small, local)
+            elif isinstance(raw, BlockSymmetricOperator):
+                penalized_raw = FactorSmoothPenalizedOperator.with_penalties(raw, small, local)
+            else:  # pragma: no cover - structured dispatch invariant
+                raise TypeError("An fs or sz centred data operator is a block operator.")
+            hessian = dataclasses.replace(data_gram, raw=penalized_raw)
+        else:
+            data_gram = CenteredBlockOperator(
+                raw=system.operator,
+                cross=xtw,
+                total=system.sum_w,
+                center=mean_x,
+            )
+            hessian = CenteredBlockOperator(
+                raw=penalized,
+                cross=xtw,
+                total=system.sum_w,
+                center=mean_x,
+            )
         # This construction is where the structured path actually refuses an
         # iterate: the sum-to-zero and Schur factors reject a level whose local
         # curvature is negative or non-finite while they are being built, before
@@ -1232,78 +1329,56 @@ def build_observed_reml_geometry(
                 "terminal observed REML coefficient Hessian is indefinite; "
                 "the fitted coefficients do not define a valid Laplace mode"
             ) from error
-        if isinstance(augmented_factor, SumToZeroBlockFactor):
-            # Reached only if a factor that built cleanly still reports itself
-            # indefinite. Nothing sets this False today, so the refusal above is
-            # the live signal on this path; the check is kept as the seam a
-            # future factor would use to fail without raising.
-            if not augmented_factor.public_positive_definite:
-                raise ObservedGeometryInfeasibleError(
-                    "terminal observed REML coefficient Hessian is indefinite; "
-                    "the fitted coefficients do not define a valid Laplace mode"
-                )
-            profiled_factor = ProfiledSumToZeroBlockFactor(
+        # The unsupported-geometry guard runs ahead of the eigencheck, so an
+        # unrecognised factor reaches the TypeError that names it rather than
+        # an AttributeError.  Every factor exposes its curvature on the
+        # Jacobi-scaled Schur complement where its rank decisions are taken
+        # (§3.7).
+        if not isinstance(  # pragma: no cover - structured dispatch invariant
+            augmented_factor,
+            FactorSmoothLeafFactor | SumToZeroTreeFactor | NestedSchurFactor,
+        ):
+            raise TypeError("Unsupported structured observed factor geometry.")
+        try:
+            schur_eigenvalues = augmented_factor.scaled_schur_eigenvalues()
+        except np.linalg.LinAlgError as error:
+            # An eigensolver that will not converge on this Schur complement
+            # is a statement about the iterate's curvature, not about the
+            # call, so it scores the point infeasible rather than escaping.
+            raise ObservedGeometryInfeasibleError(
+                "observed REML Schur complement has no usable eigendecomposition "
+                "at the fitted coefficients"
+            ) from error
+        schur_scale = max(
+            float(np.max(np.abs(schur_eigenvalues), initial=0.0)),
+            1.0,
+        )
+        if np.any(schur_eigenvalues < -1e-10 * schur_scale):
+            raise ObservedGeometryInfeasibleError(
+                "terminal observed REML coefficient Hessian is indefinite; "
+                "the fitted coefficients do not define a valid Laplace mode"
+            )
+        if isinstance(augmented_factor, FactorSmoothLeafFactor):
+            profiled_factor = ProfiledFactorSmoothLeafFactor(
                 augmented_factor=augmented_factor,
                 sum_w=system.sum_w,
                 xtw=xtw,
             )
-        else:
-            # The eigencheck below reads `_Q`, which only the two Schur factors
-            # carry, so the unsupported-geometry guard has to run ahead of it.
-            # Dispatching afterwards would let an unrecognised factor die on an
-            # AttributeError about a private attribute instead of reaching the
-            # TypeError that exists to name what came back.  The nested factor
-            # exposes its curvature publicly, on the Jacobi-scaled Schur
-            # complement where its rank decisions are taken (§3.7).
-            if not isinstance(  # pragma: no cover - structured dispatch invariant
-                augmented_factor,
-                BlockSchurFactor | ScalarSchurFactor | NestedSchurFactor,
-            ):
-                raise TypeError("Unsupported structured observed factor geometry.")
-            try:
-                schur_eigenvalues = (
-                    augmented_factor.scaled_schur_eigenvalues()
-                    if isinstance(augmented_factor, NestedSchurFactor)
-                    else np.linalg.eigvalsh(augmented_factor._Q)
-                )
-            except np.linalg.LinAlgError as error:
-                # An eigensolver that will not converge on this Schur complement
-                # is a statement about the iterate's curvature, not about the
-                # call, so it scores the point infeasible rather than escaping.
-                raise ObservedGeometryInfeasibleError(
-                    "observed REML Schur complement has no usable eigendecomposition "
-                    "at the fitted coefficients"
-                ) from error
-            schur_scale = max(
-                float(np.max(np.abs(schur_eigenvalues), initial=0.0)),
-                1.0,
+        elif isinstance(augmented_factor, SumToZeroTreeFactor):
+            profiled_factor = ProfiledSumToZeroTreeFactor(
+                augmented_factor=augmented_factor,
+                sum_w=system.sum_w,
+                xtw=xtw,
             )
-            if np.any(schur_eigenvalues < -1e-10 * schur_scale):
-                raise ObservedGeometryInfeasibleError(
-                    "terminal observed REML coefficient Hessian is indefinite; "
-                    "the fitted coefficients do not define a valid Laplace mode"
-                )
-            if isinstance(augmented_factor, BlockSchurFactor):
-                profiled_factor = ProfiledBlockSchurFactor(
-                    augmented_factor=augmented_factor,
-                    sum_w=system.sum_w,
-                    xtw=xtw,
-                )
-            elif isinstance(augmented_factor, ScalarSchurFactor):
-                profiled_factor = ProfiledScalarSchurFactor(
-                    augmented_factor=augmented_factor,
-                    sum_w=system.sum_w,
-                    xtw=xtw,
-                )
-            elif isinstance(system, NestedStructuredSystem):
-                profiled_factor = ProfiledNestedSchurFactor(
-                    augmented_factor=augmented_factor,
-                    sum_w=system.sum_w,
-                    xtw=xtw,
-                    data_operator=system.operator,
-                )
-            else:  # pragma: no cover - structured dispatch invariant
-                raise TypeError("Unsupported structured observed factor geometry.")
+        elif isinstance(system, NestedStructuredSystem):
+            profiled_factor = ProfiledNestedSchurFactor(
+                augmented_factor=augmented_factor,
+                sum_w=system.sum_w,
+                xtw=xtw,
+                data_operator=system.operator,
+            )
+        else:  # pragma: no cover - structured dispatch invariant
+            raise TypeError("Unsupported structured observed factor geometry.")
         return ObservedREMLGeometry(
             eta=_readonly(eta),
             mu=_readonly(mu),

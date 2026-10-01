@@ -33,6 +33,9 @@ class SolverState:
     basis_id: int | None = None
     lambdas: tuple[tuple[str, object], ...] = ()
     dispersion: float | None = None
+    # the centred intercept alpha of a solver that keeps its state centred
+    # (one-engine design §3.8); ``intercept`` is then its raw reading
+    centred_intercept: float | None = None
 
 
 # Migration alias retained while direct IRLS and downstream private callers

@@ -349,7 +349,9 @@ def optimize_reml_best(
                 penalty_ranks,
                 lambdas,
                 max_reml_iter=1,
-                reml_tol=1.0,
+                # every lambda fixed: one evaluation, whose modes certify at
+                # the resolved tolerance's bar (``mode_score``)
+                reml_tol=reml_tol,
                 verbose=verbose,
                 penalty_caches=penalty_caches,
                 profile=profile,

@@ -105,6 +105,78 @@ def allow_wide_design(p: int) -> None:
     _release_current_scope()
 
 
+def keep_narrow_cap(width: int) -> None:
+    """Re-arm the automatic cap in a wide fit whose dense kernels all act on ``width`` (perf F7).
+
+    ``allow_wide_design`` releases the cap on the design width, before any
+    route is chosen.  The fs leaf route never factorizes a matrix wider than
+    its border, so below the break-even its fit keeps the single thread:
+    faster for those kernels, and its result then does not depend on the BLAS
+    thread count (design §14 T4).  A nested chain is not re-capped: its parent
+    levels' blocks are wider than its border, and pg17_E_discrete ran 1.5x
+    master's time on default threads with the cap re-armed.  Called once the
+    route is known; the fit's scope then ends as a narrow one.
+    """
+    global _registration, _wide_scopes
+    if width >= _WIDE_DESIGN_THRESHOLD or not _auto_policy():
+        return
+    stack = _scope_stack()
+    scope = stack[-1] if stack else None
+    limit = _resolve_limit()
+    if scope is None or not scope["wide"] or limit is None:
+        return
+    from threadpoolctl import threadpool_limits
+
+    with _scope_lock:
+        scope["wide"] = False
+        _wide_scopes -= 1
+        if _wide_scopes == 0 and _registration is None:
+            _registration = threadpool_limits(limits=limit, user_api="blas")
+
+
+@contextmanager
+def narrow_kernel_blas_threads(width: int):
+    """Re-cap BLAS to one thread around dense kernels of ``width`` below the break-even.
+
+    A wide design releases the automatic cap for its whole fit
+    (``allow_wide_design``), but the dense LAPACK kernels of a structured
+    factor's border act on the border width, not the design's; below the
+    same measured break-even the single thread wins for them too (a border
+    of 1,045 columns inside a 16,851-column fit: threaded ``potrf`` 40-110
+    ms against 10 ms).  Only the automatic policy caps, and only inside a
+    fit whose scope released the cap; an explicit integer or ``native``, a
+    kernel at or above the break-even, or a call outside a fit is left
+    alone.  The kernels then run on one thread whatever the pool, so their
+    results do not depend on the thread count.
+    """
+    stack = _scope_stack()
+    if width >= _WIDE_DESIGN_THRESHOLD or not stack or not stack[-1]["wide"] or not _auto_policy():
+        yield
+        return
+    with _narrow_controller().limit(limits=1, user_api="blas"):
+        yield
+
+
+_NARROW_CONTROLLER = None
+
+
+def _narrow_controller():
+    """One ``ThreadpoolController`` for every narrow re-cap (perf scout F13).
+
+    ``threadpool_limits`` scans the loaded libraries on every entry (0.4 ms);
+    a controller created once, after numpy's and scipy's BLAS have loaded (a
+    wide fit is running when this is first called), limits in microseconds.
+    Owner: this module; lifetime: the process; invalidation: none (the pools it
+    found stay loaded).
+    """
+    global _NARROW_CONTROLLER
+    if _NARROW_CONTROLLER is None:
+        from threadpoolctl import ThreadpoolController
+
+        _NARROW_CONTROLLER = ThreadpoolController()
+    return _NARROW_CONTROLLER
+
+
 def _resolve_limit() -> int | None:
     """Thread cap for solver BLAS calls, or None to leave BLAS untouched."""
     raw = os.environ.get(_ENV_VAR, "auto").strip().lower()

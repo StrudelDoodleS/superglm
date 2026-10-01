@@ -44,7 +44,8 @@ from benchmarks.rank_deficient_complete_fit import (
 from threadpoolctl import threadpool_limits
 
 import superglm
-from superglm.solvers import constrained_qp, scop_newton, sum_to_zero
+from superglm.solvers import constrained_qp, scop_newton
+from superglm.solvers._structured import balance_tree
 
 CASES = ("qp", "qp_binding", "scop_single", "scop_joint_discrete", "sum_to_zero")
 CASE_DESCRIPTIONS = {
@@ -187,9 +188,10 @@ def _solver_dispatch(sampler=None):
         scop_newton.scop_joint_newton_step.__code__: "scop_joint_newton_step",
         scop_newton._compute_cross_gram.__code__: "scop_cross_gram",
         scop_newton._disc_disc_2d_hist.__code__: "discrete_cross_histogram",
-        sum_to_zero.SumToZeroBlockFactor.__init__.__code__: "SumToZeroBlockFactor.__init__",
-        sum_to_zero.SumToZeroBlockFactor.solve.__code__: "SumToZeroBlockFactor.solve",
-        sum_to_zero.ProfiledSumToZeroBlockFactor.solve.__code__: "ProfiledSumToZeroBlockFactor.solve",
+        balance_tree.SumToZeroTreeFactor.__init__.__code__: "SumToZeroTreeFactor.__init__",
+        balance_tree.SumToZeroTreeFactor.solve.__code__: "SumToZeroTreeFactor.solve",
+        balance_tree.SumToZeroTreeFactor.solve_data.__code__: "SumToZeroTreeFactor.solve_data",
+        balance_tree.ProfiledSumToZeroTreeFactor.solve.__code__: "ProfiledSumToZeroTreeFactor.solve",
     }
     receipt = {
         "status": "instrumented, unmeasured",
@@ -262,10 +264,10 @@ def _solver_dispatch(sampler=None):
             elif name == "discrete_cross_histogram" and result is not None:
                 if frame.f_back.f_code is scop_newton._compute_cross_gram.__code__:
                     receipt["scop_cross_histogram_returns"] += 1
-            elif name == "SumToZeroBlockFactor.__init__":
+            elif name == "SumToZeroTreeFactor.__init__":
                 item = _attributes(
                     local["self"],
-                    ("rank", "shape", "n_levels", "block_size", "used_dense_fallback", "_logdet"),
+                    ("rank", "shape", "n_levels", "block_size", "_logdet"),
                 )
                 receipt["sum_to_zero_factors"].append(_json_value(item))
         except Exception as error:
@@ -300,7 +302,7 @@ def _dispatch_requirements(case, dispatch):
         requirements["factor_rank_published"] = any(
             item["rank"] is not None for item in dispatch["sum_to_zero_factors"]
         )
-        for name in ("SumToZeroBlockFactor.solve", "ProfiledSumToZeroBlockFactor.solve"):
+        for name in ("SumToZeroTreeFactor.solve_data", "ProfiledSumToZeroTreeFactor.solve"):
             requirements[f"{name}_returned"] = dispatch["returned_calls"][name] > 0
     return requirements
 

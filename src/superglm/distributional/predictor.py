@@ -16,6 +16,7 @@ from superglm._frame import EagerFrame
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
+from superglm.features.random_effect import validate_declared_nesting
 from superglm.group_matrix import (
     CrossMatrixExecutionPlan,
     DesignMatrix,
@@ -504,6 +505,9 @@ def compile_predictors(
         zip(parameter_tuple, predictor_tuple, strict=True)
     ):
         link = resolve_predictor_link(parameter, predictor)
+        # RandomEffect(nested_in=) is a statement about the training rows,
+        # checked where they are first bound (one-engine design §3.13).
+        validate_declared_nesting(predictor.features, X.column_array)
         compiled = compile_predictor_design(
             X,
             weights,

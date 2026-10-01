@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 
 import numpy as np
@@ -13,7 +14,15 @@ import superglm.reml.direct as direct_reml
 import superglm.reml.discrete as discrete_reml
 import superglm.solvers._structured.selection as structured_selection
 import superglm.solvers.irls_direct as irls_direct
-from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
+from superglm import (
+    Categorical,
+    FactorSmooth,
+    LambdaPolicy,
+    Numeric,
+    RandomEffect,
+    Spline,
+    SuperGLM,
+)
 from superglm.distributions import Gamma, Gaussian, Poisson
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -29,7 +38,8 @@ from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.structured import (
     BlockSymmetricOperator,
-    ProfiledBlockSchurFactor,
+    FactorSmoothLeafFactor,
+    ProfiledFactorSmoothLeafFactor,
     StructuredLinearSystemState,
     materialize_compact_operator,
     resolve_structured_backend,
@@ -273,7 +283,6 @@ def test_sz_resolution_never_runs_local_feasibility_scans(monkeypatch) -> None:
         [group],
         direct_solve="auto",
         coefficient_width=matrix.shape[1],
-        row_weights=weights,
         lambda2={f"{group.name}:wiggle": 1.0},
         S_override=override,
     )
@@ -285,7 +294,6 @@ def test_sz_resolution_never_runs_local_feasibility_scans(monkeypatch) -> None:
         [group],
         direct_solve="structured",
         coefficient_width=matrix.shape[1],
-        row_weights=weights,
         lambda2={f"{group.name}:wiggle": 1.0},
         S_override=override,
     )
@@ -312,11 +320,14 @@ def test_sz_lambda_resolution_never_runs_local_feasibility_scan(monkeypatch) -> 
         [group],
         direct_solve="auto",
         coefficient_width=matrix.shape[1],
-        row_weights=np.ones(matrix.shape[0]),
         lambda2={f"{group.name}:wiggle": 1.0},
     )
 
+    # Priced ahead of gram, auto takes the balance tree (one-engine design
+    # §3.5) on the size rule alone: no row, weight or lambda is read.
+    assert decision.auto_cost_ratio <= structured_selection._AUTO_MAX_STRUCTURED_COST_RATIO
     assert decision.use_structured
+    assert decision.fallback_reason is None
 
 
 def test_authoritative_sz_override_uses_global_tiny_weight_rank() -> None:
@@ -365,27 +376,26 @@ def test_authoritative_sz_override_uses_global_tiny_weight_rank() -> None:
         weight_semantics="frequency",
     )
 
-    assert automatic.direct_backend == "gram"
-    assert "globally unidentifiable" in automatic.direct_fallback_reason
-    np.testing.assert_allclose(automatic.beta, gram.beta, atol=3.0e-8)
-    with pytest.raises(np.linalg.LinAlgError, match="globally unidentifiable"):
-        irls_direct.fit_irls_direct(
-            X=dm,
-            y=y,
-            weights=weights,
-            family=Gaussian(),
-            link=IdentityLink(),
-            groups=groups,
-            lambda2=lambdas,
-            offset=offset,
-            direct_solve="structured",
-            S_override=override,
-            tol=1.0e-10,
-            weight_semantics="frequency",
-        )
+    # The balance tree fits it (one-engine design §3.5): the level of weight
+    # 1e-20 has noise-level information, and the rows that carry weight fit
+    # as gram's do.
+    assert automatic.direct_backend == "structured"
+    assert automatic.direct_fallback_reason is None
+    live = weights > np.finfo(float).eps * np.max(weights)
+    fitted = dm.matvec(automatic.beta) + automatic.intercept
+    reference = dm.matvec(gram.beta) + gram.intercept
+    np.testing.assert_allclose(fitted[live], reference[live], atol=3.0e-8)
 
 
-def test_factor_smooth_feasibility_cache_includes_lambda_scales() -> None:
+def test_factor_smooth_routing_reads_neither_weights_nor_lambda_values() -> None:
+    """No data-dependent route (one-engine design §3.4, §5, requirement 4).
+
+    The retired moment factor needed a data check that sent an fs term to gram
+    when a level's weighted local block was numerically singular (here: a
+    basis column with no rows beside a lambda of 1e-20).  The leaf factor takes
+    that pivot from the penalty's square root, so the decision is the same for
+    every lambda, and the resolver takes no row weights at all.
+    """
     n_levels = 20
     local_basis = np.tile(
         np.array([[0.0, 1.0], [0.0, 2.0]]),
@@ -397,36 +407,19 @@ def test_factor_smooth_feasibility_cache_includes_lambda_scales() -> None:
         local_basis=local_basis,
         repeated_penalty_components=(("wiggle", np.diag([1.0, 0.0])),),
     )
-    weights = np.ones(matrix.shape[0])
-    moderate = resolve_structured_backend(
-        [matrix],
-        [group],
-        direct_solve="auto",
-        coefficient_width=matrix.shape[1],
-        row_weights=weights,
-        lambda2={f"{group.name}:wiggle": 1.0},
-    )
-    tiny = resolve_structured_backend(
-        [matrix],
-        [group],
-        direct_solve="auto",
-        coefficient_width=matrix.shape[1],
-        row_weights=weights,
-        lambda2={f"{group.name}:wiggle": 1.0e-20},
-    )
-
-    assert moderate.use_structured
-    assert not tiny.use_structured
-    assert "singular local block" in tiny.fallback_reason
-    with pytest.raises(ValueError, match="singular local block"):
+    decisions = [
         resolve_structured_backend(
             [matrix],
             [group],
-            direct_solve="structured",
+            direct_solve=mode,
             coefficient_width=matrix.shape[1],
-            row_weights=weights,
-            lambda2={f"{group.name}:wiggle": 1.0e-20},
+            lambda2={f"{group.name}:wiggle": lam},
         )
+        for mode in ("auto", "structured")
+        for lam in (1.0, 1.0e-20)
+    ]
+    assert all(decision.use_structured for decision in decisions)
+    assert {decision.fallback_reason for decision in decisions} == {None}
 
 
 @pytest.mark.parametrize("factor_basis", ["fs", "sz"])
@@ -462,7 +455,8 @@ def test_authoritative_factor_smooth_override_supersedes_stale_zero_lambdas(
         groups=groups,
         lambda2=stale_lambdas,
         offset=offset,
-        direct_solve="auto",
+        # Auto fits SZ on gram; forced structured runs its solver.
+        direct_solve="auto" if factor_basis == "fs" else "structured",
         S_override=override,
         tol=1.0e-10,
         weight_semantics="frequency",
@@ -598,7 +592,7 @@ def test_sz_locally_singular_but_globally_identifiable_remains_structured() -> N
         groups=[group],
         lambda2=lambdas,
         offset=offset,
-        direct_solve="auto",
+        direct_solve="structured",
         S_override=override,
         tol=1.0e-10,
         weight_semantics="frequency",
@@ -654,7 +648,8 @@ def test_authoritative_factor_smooth_override_roundoff_asymmetry_matches_gram(
         groups=groups,
         lambda2=lambdas,
         offset=offset,
-        direct_solve="auto",
+        # Auto fits SZ on gram; forced structured runs its solver.
+        direct_solve="auto" if factor_basis == "fs" else "structured",
         S_override=override,
         tol=1.0e-10,
         weight_semantics="frequency",
@@ -745,7 +740,7 @@ def test_forced_factor_smooth_structured_irls_matches_dense(
     assert result.log_det_H == pytest.approx(dense_result.log_det_H, rel=3e-9, abs=3e-9)
     assert result.n_iter == dense_result.n_iter
     assert result.converged == dense_result.converged
-    assert isinstance(factor, ProfiledBlockSchurFactor)
+    assert isinstance(factor, ProfiledFactorSmoothLeafFactor)
     assert isinstance(data_operator, BlockSymmetricOperator)
     np.testing.assert_allclose(
         factor.solve(np.eye(dm.p)),
@@ -1123,7 +1118,7 @@ def test_factor_smooth_exact_reml_matches_dense_end_to_end(family: str) -> None:
     assert isinstance(structured._linear_system_state, StructuredLinearSystemState)
     assert isinstance(
         structured._linear_system_state.profiled_factor,
-        ProfiledBlockSchurFactor,
+        ProfiledFactorSmoothLeafFactor,
     )
 
 
@@ -1188,7 +1183,7 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
     ("basis", "fallback_reason"),
     [
         ("fs", "zero penalty component"),
-        ("sz", "globally unidentifiable"),
+        ("sz", "basis='sz'"),
     ],
 )
 @pytest.mark.parametrize("discrete", [False, True])
@@ -1248,35 +1243,45 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
         runtime_validation="skip",
     )
 
-    assert model.result.direct_backend == "gram"
-    assert fallback_reason in model.result.direct_fallback_reason
-    if basis == "sz":
-        gram = SuperGLM(**model_kwargs, direct_solve="gram").fit_reml(
-            X,
-            y,
-            sample_weight=sample_weight,
-            offset=offset,
-            runtime_validation="skip",
-        )
-        np.testing.assert_allclose(model.predict(X), gram.predict(X), atol=2.0e-8)
-        with pytest.raises(np.linalg.LinAlgError, match="globally unidentifiable"):
-            SuperGLM(**model_kwargs, direct_solve="structured").fit_reml(
-                X,
-                y,
-                sample_weight=sample_weight,
-                offset=offset,
-                runtime_validation="skip",
-            )
+    if basis == "fs":
+        assert model.result.direct_backend == "gram"
+        assert fallback_reason in model.result.direct_fallback_reason
+        return
+    # sz: the weightless last level lets the other levels' constants reproduce
+    # the intercept exactly.  The balance tree defers the super-root pivot and
+    # truncates that alias in the border (one-engine design §3.5, decisions
+    # 3 and 4), names the level, and fits the weighted rows as gram does.
+    assert model.result.direct_backend == "structured"
+    assert model.result.direct_fallback_reason is None
+    factor = model._linear_system_state.augmented_factor
+    assert factor._super_deferred and factor.rank_truncated
+    assert factor.thin_levels == (f"g{n_levels - 1}",)
+    gram = SuperGLM(**model_kwargs, direct_solve="gram").fit_reml(
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+        runtime_validation="skip",
+    )
+    live = sample_weight > 0.0
+    np.testing.assert_allclose(model.predict(X)[live], gram.predict(X)[live], atol=2.0e-8)
 
 
 @pytest.mark.parametrize("discrete", [False, True])
-def test_reml_latches_runtime_sz_fallback_after_bootstrap(
+def test_reml_never_latches_a_later_fit_onto_gram(
     monkeypatch: pytest.MonkeyPatch,
     discrete: bool,
 ) -> None:
+    """The REML drivers take one backend decision and keep it (the latch is deleted).
+
+    One PIRLS result is doctored to come back on gram with a reason, as the
+    retired refusal retry produced: every later candidate, trial and final fit
+    still asks for ``direct_solve="auto"``.  Mutation: restoring
+    ``latch_runtime_backend`` turns the later modes into "gram".
+    """
     dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
         _gaussian_response,
-        factor_basis="sz",
+        factor_basis="fs",
     )
     reml_groups = [
         (group_index, group) for group_index, group in enumerate(groups) if group.penalized
@@ -1285,25 +1290,17 @@ def test_reml_latches_runtime_sz_fallback_after_bootstrap(
     optimizer_module = discrete_reml if discrete else direct_reml
     original_fit = optimizer_module.fit_irls_direct
     direct_modes: list[str] = []
-    fallback_reason = "synthetic globally unidentifiable SZ candidate"
 
-    def delayed_runtime_fallback(*args, **kwargs):
+    def doctored(*args, **kwargs):
         direct_modes.append(kwargs["direct_solve"])
         np.testing.assert_allclose(kwargs["offset"], offset)
-        if len(direct_modes) == 2:
-            gram_kwargs = dict(kwargs)
-            gram_kwargs["direct_solve"] = "gram"
-            gram_kwargs["S_override"] = None
-            result = original_fit(*args, **gram_kwargs)
-            result[0].direct_fallback_reason = fallback_reason
-            return result
-        return original_fit(*args, **kwargs)
+        result = original_fit(*args, **kwargs)
+        if len(direct_modes) == 1:
+            result[0].direct_backend = "gram"
+            result[0].direct_fallback_reason = "synthetic refused FactorSmooth candidate"
+        return result
 
-    monkeypatch.setattr(
-        optimizer_module,
-        "fit_irls_direct",
-        delayed_runtime_fallback,
-    )
+    monkeypatch.setattr(optimizer_module, "fit_irls_direct", doctored)
     result = direct_reml.optimize_direct_reml(
         dm=dm,
         distribution=Gaussian(),
@@ -1325,10 +1322,9 @@ def test_reml_latches_runtime_sz_fallback_after_bootstrap(
         weight_semantics="frequency",
     )
 
-    assert direct_modes[:2] == ["auto", "auto"]
-    assert all(mode == "gram" for mode in direct_modes[2:])
-    assert result.pirls_result.direct_backend == "gram"
-    assert result.pirls_result.direct_fallback_reason == fallback_reason
+    assert len(direct_modes) > 1 and set(direct_modes) == {"auto"}
+    assert result.pirls_result.direct_backend == "structured"
+    assert result.pirls_result.direct_fallback_reason is None
 
 
 def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:
@@ -1544,3 +1540,197 @@ def test_single_factor_smooth_dominates_wider_random_effect(basis: str):
     np.testing.assert_allclose(structured.predict(X), gram.predict(X), atol=3e-8)
     assert auto.result.deviance == pytest.approx(gram.result.deviance, abs=2e-8)
     assert structured.result.deviance == pytest.approx(gram.result.deviance, abs=2e-8)
+
+
+def _thin_level_fit(basis: str, direct_solve: str, discrete: bool, lam, weight: float):
+    """A 30-level, k = 6 Gaussian factor smooth, its components fixed at ``lam``.
+
+    The levels' row counts are gamma-distributed, so under ``lam`` near 1e-7
+    beside weights near 1e4 one level's local block is left pinned by the
+    penalty alone (kappa(D_l) up to 1e10); ``lam=None`` estimates every
+    lambda by REML.
+    """
+    rng = np.random.default_rng(3)
+    n, levels, n_cat = 4000, 30, 8
+    popularity = rng.gamma(2.0, size=levels)
+    g = rng.choice(levels, size=n, p=popularity / popularity.sum())
+    cat = rng.integers(0, n_cat, n)
+    x, x1, x10 = rng.uniform(size=n), rng.normal(size=n), 10.0 + rng.normal(size=n)
+    eta = (
+        0.2
+        + 0.3 * x1
+        + 0.05 * (x10 - 10)
+        + rng.normal(0, 0.2, n_cat)[cat]
+        + rng.normal(0, 0.3, levels)[g]
+        + rng.normal(0, 0.3, levels)[g] * (x - 0.5)
+        + 0.3 * np.sin(2 * np.pi * x) * (1.0 + rng.normal(0, 0.3, levels)[g])
+    )
+    y = eta + rng.normal(0, 0.5, n)
+    frame = pd.DataFrame(
+        {"x": x, "x1": x1, "x10": x10, "cat": [f"c{c:02d}" for c in cat], "g": g.astype(str)}
+    )
+    features = {"x1": Numeric(), "x10": Numeric(), "cat": Categorical()}
+    if basis == "sz":
+        features["x"] = Spline(n_knots=6)
+    names = ["wiggle"] + (["null_0", "null_1"] if basis == "fs" else [])
+    policy = None if lam is None else {name: LambdaPolicy.fixed(lam) for name in names}
+    model = SuperGLM(
+        family="gaussian",
+        features=features,
+        interactions=[FactorSmooth("x", group="g", basis=basis, k=6, lambda_policy=policy)],
+        selection_penalty=0,
+        direct_solve=direct_solve,
+        discrete=discrete,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y, sample_weight=np.full(n, weight), pirls_tol=1e-10, reml_tol=1e-9)
+    return model, [str(item.message) for item in caught if item.category is UserWarning]
+
+
+def _square_root_logdet(model, weight: float) -> tuple[float, float]:
+    """``log|H_aug|`` by one Householder QR of ``[sqrt(w) [1 X]; S^1/2]`` and its first-order bound.
+
+    An independent square-root reference (Higham 2002, Theorem 19.4: the
+    computed triangle is exact for rows perturbed columnwise by ``gamma``):
+    ``|d log det| <= 2 gamma sum_j ||a_j|| ||A H^-1 e_j|| = 2 gamma sum_j
+    sqrt(H_jj (H^-1)_jj)``, with ``gamma = gamma_{2 m n}`` (the theorem's
+    constant taken as 2).  ``S^1/2`` is taken per penalty block (one per
+    FactorSmooth level), so no block's rounding is scaled by another's norm.
+    """
+    dm = model._dm
+    X = dm.toarray()
+    n, p = X.shape
+    S = build_penalty_matrix(
+        dm.group_matrices, model._groups, model._reml_lambdas, p, model._reml_penalties
+    )
+    blocks = []
+    for group, matrix in zip(model._groups, dm.group_matrices, strict=True):
+        width = (
+            matrix.block_size
+            if isinstance(matrix, FactorSmoothGroupMatrix)
+            else group.end - group.start
+        )
+        for start in range(group.start, group.end, width):
+            columns = slice(start, start + width)
+            block = S[columns, columns]
+            if not np.any(block):
+                continue
+            lam, vectors = np.linalg.eigh(0.5 * (block + block.T))
+            root = np.zeros((width, p + 1))
+            root[:, 1 + start : 1 + start + width] = (
+                np.sqrt(np.maximum(lam, 0.0))[:, None] * vectors.T
+            )
+            blocks.append(root)
+    rows = np.sqrt(np.full(n, weight))[:, None] * np.hstack([np.ones((n, 1)), X])
+    stacked = np.vstack([rows, *blocks])
+    R = np.linalg.qr(stacked, mode="r")
+    logdet = 2.0 * float(np.sum(np.log(np.abs(np.diag(R)))))
+    inverse_rows = np.linalg.solve(R.T, np.eye(p + 1))
+    column_norms = np.linalg.norm(stacked, axis=0)
+    m, width = stacked.shape
+    gamma = 2 * m * width * np.finfo(float).eps / 2
+    bound = 2.0 * gamma * float(np.sum(column_norms * np.linalg.norm(inverse_rows, axis=0)))
+    return logdet, bound
+
+
+def test_fs_leaf_factor_resolves_the_pivot_the_moment_factor_refused() -> None:
+    """The level blocks come from the rows, so a penalty-pinned direction keeps its pivot.
+
+    At lambda 1e-7 under weights 1e4 one level's local block has kappa near
+    8.6e9.  The retired moment factor (``BlockSchurFactor``) formed ``Q`` by
+    subtraction and either published ``log|H|`` 4.57 off or refused, and auto
+    refitted on gram.  The fs leaf factor (one-engine design §3.4) takes the
+    level triangle from a QR of the rows and the penalty's square root inside
+    the per-lambda QR: structured and auto both fit on it, with ``log|H|``
+    within the first-order bound of a dense square-root reference.  At REML
+    lambdas on the same rows it matches gram.
+    """
+    structured, _ = _thin_level_fit("fs", "structured", True, 1e-7, 1e4)
+    auto, _ = _thin_level_fit("fs", "auto", True, 1e-7, 1e4)
+    assert structured.result.direct_backend == "structured"
+    assert auto.result.direct_backend == "structured"
+    assert auto.result.log_det_H == structured.result.log_det_H
+    reference, bound = _square_root_logdet(structured, 1e4)
+    published = structured.result.log_det_H
+    assert abs(published - reference) <= 2.0 * bound, (published, reference, bound)
+
+
+def test_sz_balance_tree_resolves_the_fit_the_block_factor_got_wrong() -> None:
+    """basis='sz' under auto runs the balance tree (one-engine design §3.5).
+
+    At lambda 1e-9 under weights 1e4 one level's block is pinned by the
+    penalty alone; the retired range-space ``SumToZeroBlockFactor`` returned
+    fitted values 1.4e-2 off gram's there with no refusal, and auto sent
+    every sz term to gram.  The tree's pivots are Schur complements of the
+    constrained Hessian, never worse conditioned than it: ``log|H|`` and the
+    edf lie within the first-order bounds of a dense square-root reference.
+    """
+    structured, _ = _thin_level_fit("sz", "structured", False, 1e-9, 1e4)
+    auto, _ = _thin_level_fit("sz", "auto", False, 1e-9, 1e4)
+    assert structured.result.direct_backend == "structured"
+    assert auto.result.direct_backend == "structured"
+    assert auto.result.direct_fallback_reason is None
+    assert auto.result.log_det_H == structured.result.log_det_H
+    reference, bound = _square_root_logdet(structured, 1e4)
+    published = structured.result.log_det_H
+    assert abs(published - reference) <= 2.0 * bound, (published, reference, bound)
+    reference, bound = _square_root_edf(structured, 1e4)
+    published = structured.result.effective_df
+    assert abs(published - reference) <= bound, (published, reference, bound)
+
+
+def _square_root_edf(model, weight: float) -> tuple[float, float]:
+    """``edf = p_aug - tr(H^-1 S) = p_aug - ||S^1/2 R^-1||_F^2`` from the dense square-root triangle.
+
+    First-order bound (Higham 2002, Theorem 19.4 as in ``_square_root_logdet``):
+    ``H + E`` with ``E = A'dA + dA'A`` moves the trace by ``tr(H^-1 E H^-1 S)``,
+    at most ``2 gamma sum_j ||a_j|| ||A H^-1 S H^-1 e_j||``.
+    """
+    dm = model._dm
+    X = dm.toarray()
+    n, p = X.shape
+    S = build_penalty_matrix(
+        dm.group_matrices, model._groups, model._reml_lambdas, p, model._reml_penalties
+    )
+    S_aug = np.zeros((p + 1, p + 1))
+    S_aug[1:, 1:] = S
+    rows = np.sqrt(np.full(n, weight))[:, None] * np.hstack([np.ones((n, 1)), X])
+    lam, vectors = np.linalg.eigh(S_aug)
+    root = np.sqrt(np.maximum(lam, 0.0))[:, None] * vectors.T
+    stacked = np.vstack([rows, root])
+    R = np.linalg.qr(stacked, mode="r")
+    W = np.linalg.solve(R.T, root.T)  # R^-T S^1/2'
+    trace = float(np.sum(W**2))
+    Hinv = np.linalg.solve(R, np.linalg.solve(R.T, np.eye(p + 1)))
+    sandwich = stacked @ (Hinv @ S_aug @ Hinv)
+    m, width = stacked.shape
+    gamma = m * width * np.finfo(float).eps
+    bound = (
+        2.0
+        * gamma
+        * float(np.sum(np.linalg.norm(stacked, axis=0) * np.linalg.norm(sandwich, axis=0)))
+    )
+    return (p + 1) - trace, bound
+
+
+def test_fs_edf_is_the_identity_route_not_the_moment_trace() -> None:
+    """``edf = 1 + tr(M_ss X_c'WX_c)`` from the centred factor, through ``diag(H^+ (H - S))``.
+
+    ``M_ss`` is the same in raw and centred coordinates, but formed from the
+    raw ``F`` and ``Q^+`` it carries the columns' offsets (``x10`` sits at 10)
+    into directions only lambda pins: at lambda 1e-9 beside weights 1e4 the
+    edf came out 0.25 high (measured; 187.25 against 187.00).  Mutation: the
+    profiled factor's slope inverse from the raw ``F`` and ``Q^+``.
+    """
+    structured, _ = _thin_level_fit("fs", "structured", False, 1e-9, 1e4)
+    reference, bound = _square_root_edf(structured, 1e4)
+    published = structured.result.effective_df
+    assert abs(published - reference) <= bound, (published, reference, bound)
+
+    structured, _ = _thin_level_fit("fs", "structured", True, None, 1.0)
+    gram, _ = _thin_level_fit("fs", "gram", True, None, 1.0)
+    factor = structured._linear_system_state.augmented_factor
+    assert isinstance(factor, FactorSmoothLeafFactor)
+    objective = gram._reml_result.objective
+    assert abs(structured._reml_result.objective - objective) <= 1e-9 * (1.0 + abs(objective))

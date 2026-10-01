@@ -7,7 +7,7 @@ model or a fixed-penalty sparse model.
 |---|---|---|
 | Standard spline pricing model | `fit_reml()` with `selection_penalty=0` | Automatic smoothness selection and clean GAM-style inference |
 | Large-`n` spline pricing model | `fit_reml(discrete=True)` | Same modeling story, cheaper outer iterations |
-| High-cardinality random effect or factor smooth | `fit_reml()` with `direct_solve="auto"` | Compact scalar/block/constrained fitting with automatic small-model fallback |
+| High-cardinality random effect or factor smooth | `fit_reml()` with `direct_solve="auto"` | A compact solver for large terms, chosen from the model's size |
 | Smooth shrinkage inside REML | `fit_reml()` with `select=True` on spline terms | mgcv-style double-penalty shrinkage |
 | Sparse screening / compression | `fit()` with `selection_penalty > 0` | Fixed-penalty sparse model rather than REML smoothness selection |
 | Regularisation path analysis | `fit_path()` | Warm-started lambda path for fixed-penalty models |
@@ -66,12 +66,50 @@ This is the preferred production path for large spline-heavy frequency models.
 `RandomEffect` and `FactorSmooth` retain their exact factor levels on this
 path; only the continuous spline support is binned.
 
+## When a REML fit counts as converged
+
+A REML fit stops only when the solver can check that it has reached the best
+coefficients for the chosen smoothing, to the accuracy the smoothing search
+needs. Earlier releases could stop a few steps early and still report the fit
+as converged. This trades some speed for results you can rely on.
+
+- **Some numbers move slightly.** The smoothing of a nearly flat smooth, and a
+  term's effective degrees of freedom, can differ a little from earlier
+  releases. The new values are the ones the check confirms.
+- **Some fits take longer.** On a claim-frequency model with 77,000 rows and
+  a random effect for 942 vehicle models nested in 87 makes, the check made
+  the fit about a quarter slower.
+- **A fit that cannot be checked says so.** It is returned, not refused, and
+  `model.reml_diagnostics()["converged"]` reads `False`.
+- **Barely identified coefficients are left out of the check.** A
+  `WeakIdentificationWarning` names them.
+
+### When a coefficient is barely identified
+
+`WeakIdentificationWarning` means some coefficients carry information only at
+the noise level of the data. Each belongs to a factor level or column with
+little or no weight, few rows, or little information.
+
+- **What it means.** The data pin these coefficients down no better than the
+  rounding of the calculation, so their estimates and standard errors carry
+  little information.
+- **What the fit does.** It keeps them in the model and names them in the
+  warning and in `model.diagnostics()`.
+- **What it leaves out.** Coefficients at the noise level do not take part in
+  choosing the smoothing.
+- **What to do.** Drop the column or merge the level, or give its rows more
+  data or weight. If those coefficients do not matter to you, you can leave
+  them.
+
 ## Structured credibility terms
 
-`RandomEffect` and `FactorSmooth` are REML-only terms. Their dominant
-categorical block remains compact, and `direct_solve="auto"` chooses between
-the ordinary Gram solver and a scalar, block, or sum-to-zero constrained solver
-from the fitted geometry.
+`RandomEffect` and `FactorSmooth` are REML-only terms. With
+`direct_solve="auto"`, a model whose random effect or factor smooth is large
+enough is fitted with a compact solver, which never builds the full matrix for
+that term. A smaller model uses the ordinary Gram solver. The choice depends
+only on the model's terms and their sizes. It never depends on the data's
+values, the weights, or how the fit is going, so the same model always takes
+the same solver.
 
 ```python
 model = SuperGLM(
@@ -88,10 +126,41 @@ model = SuperGLM(
 model.fit_reml(df, y, offset=np.log(df["Exposure"]))
 ```
 
-The structured path supports one dominant credibility block plus narrow dense
-features, global splines, and secondary random effects. See
-[Credibility terms](../explanation/credibility-as-smoothing.md) for model semantics and the French motor
-example.
+The compact solver handles one large credibility term beside narrow dense
+features, global splines and other random effects. It works with every family
+and link, and with both `basis="fs"` and `basis="sz"` factor smooths. See
+[Credibility terms](../explanation/credibility-as-smoothing.md) for model
+semantics and the French motor example.
+
+- **The reason for Gram is recorded.** When `direct_solve="auto"` uses the
+  Gram solver, `model.result.direct_fallback_reason` says why.
+- **Small models use Gram.** Below a size set by the number of rows and
+  columns, the compact solver does not pay off.
+- **Shape constraints use Gram.** A model with a monotone or other
+  constrained term is fitted with the Gram solver.
+- **Two factor smooths use Gram.** The compact solver takes one factor smooth
+  per model.
+- **A fit never switches solver.** If the compact solver cannot finish a fit,
+  the fit stops with an error that says what went wrong. This should not
+  happen for a model the data can identify.
+- **`direct_solve="gram"` fits the same model with the ordinary solver.** Use
+  it if the compact solver ever stops with that error.
+- **`direct_solve="structured"` forces the compact solver.** It stops with an
+  error on a model the compact solver does not handle.
+
+### Nested grouping factors
+
+- **Nesting is found from the data.** If every `region` level appears under a
+  single `country` level, the two random effects are fitted together as one
+  hierarchy.
+- **You can declare it.** `RandomEffect(nested_in="country")` on `region`
+  states the hierarchy. The fit checks it and stops with an error that names
+  any row that breaks it.
+- **A near miss is reported.** If all but a few rows nest, a warning names
+  those rows and the fit treats the two random effects as crossed. Fix the
+  rows and declare `nested_in` to fit them as a hierarchy.
+
+### Factor smooths with `basis="sz"`
 
 For `basis="sz"`, configure the matching global spline explicitly:
 
@@ -115,78 +184,8 @@ model = SuperGLM(
 model.fit_reml(df, y, offset=np.log(exposure))
 ```
 
-Tabmat handles the ordinary dense, sparse, and categorical partition and the
-dense-small side of this solve. The dominant factor smooth stays in compact
-`codes + shared basis` form and uses compiled raw sufficient-statistic
-kernels. This avoids expanding $Kk$ columns into a generic sparse block and
-then paying for its full weighted sandwich products.
-
-### Measured SZ performance
-
-These measurements were taken on 2026-07-25 with Python 3.13.11, NumPy 2.4.2,
-nonuniform weights, Poisson REML, and `direct_solve="structured"`. Clean wall
-times exclude cProfile and tracemalloc. They describe this machine and these
-model geometries, not a universal performance promise.
-
-| Mode | Rows | Groups | `k` | Coefficients | REML iterations | Median clean wall | Peak Python allocation | Sampled process RSS | Numerical check |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Exact | 6,000 | 50 | 6 | 304 | 7, converged | 2.47 s (3 runs) | 3.50 MiB | 383 MiB | $2.3\times10^{-13}$ |
-| Discrete | 20,000 | 300 | 10 | 3,003 | 12, converged | 2.97 s (3 runs) | 24.23 MiB | 498 MiB | stable prediction checksum |
-| Discrete | 1,000,000 | 300 | 10 | 3,003 | 5, converged | 4.47 s (5 runs) | 250.19 MiB | 789 MiB | $3.7\times10^{-8}$ from the pre-optimization checksum |
-
-Allocation stacks were collected in separate three-REML-iteration passes; the
-iteration count changes runtime, not the compact matrix dimensions that set
-their peak. The million-row allocation run had a 59.10 MiB sampled RSS delta;
-its RSS peak includes the interpreter, input data, and retained model state.
-Exact parity is the maximum absolute prediction difference from a
-same-iteration dense Gram fit. The discrete cases were structured-only to
-avoid the dense $3{,}003^2$ allocation.
-
-The million-row case previously took a 7.67 s median at the same five REML
-iterations. Compact `(group, spline-bin)` aggregation and batched dense/global
-spline crosses reduced that median by 41.7%. At 20,000 rows the same retained
-path reduced the 7.69 s reference by 61.3%, so there is no small-fit crossover
-penalty in this measured geometry.
-
-A bounded private-chunk Numba reduction was also tested with 1, 2, 4, and 8
-configured threads. Its apparent two-thread improvement did not repeat:
-a reversed five-run sweep measured 4.57 s at two threads versus 4.51 s on the
-serial path. The parallel layer was therefore discarded. The retained
-FactorSmooth cell reductions are serial and do not change global Numba or BLAS
-thread settings.
-
-With BLAS fixed to one thread, a five-repetition exact sweep at 2,000 rows,
-`k=6`, and four ordinary numeric columns bracketed the crossover:
-
-| Groups | Coefficients | Dense median | Structured median |
-|---:|---:|---:|---:|
-| 4 | 28 | 0.075 s | 0.146 s |
-| 8 | 52 | 0.086 s | 0.211 s |
-| 16 | 100 | 0.188 s | 0.225 s |
-| 32 | 196 | 0.435 s | 0.280 s |
-
-So the measured crossover lies between 16 and 32 groups for this case.
-`direct_solve="auto"` remains the recommendation because the crossover moves
-with row count, spline width, family, and hardware.
-
-The million-row whole-fit cProfile changed as follows:
-
-| Stack | Before cell aggregation | Retained path |
-|---|---:|---:|
-| Whole profiled fit | 7.92 s | 4.67 s |
-| `fit_irls_direct` | 5.50 s | 2.36 s |
-| `build_block_structured_system` | 3.91 s / 14 calls | 0.77 s / 14 calls |
-| Legacy FactorSmooth dense cross | 2.42 s / 182 calls | absent |
-| FactorSmooth sufficient statistics | 0.78 s / 14 calls | 0.10 s / 14 calls |
-| Batched FactorSmooth dense-cell cross | absent | 0.23 s / 56 calls |
-
-This is the intended hybrid: Tabmat still assembles the heterogeneous ordinary
-small partition, while compiled SZ kernels aggregate the large grouped spline
-block and staged batched matrix products contract compact cells. No
-observation-by-factor-smooth matrix is materialized. Dense ordinary blocks and
-global discretized splines sharing the FactorSmooth bin map use the optimized
-cross path; unsupported or mismatched small groups retain the existing compact
-fallback.
+The factor smooth stays in its compact form, the level codes and one shared
+basis, so no matrix with a column per level and basis function is built.
 
 ## `select=True` Versus `selection_penalty > 0`
 

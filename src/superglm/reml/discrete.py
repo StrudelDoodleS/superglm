@@ -11,6 +11,7 @@ References
 
 from __future__ import annotations
 
+import math
 import time as _time
 from typing import Any
 
@@ -34,6 +35,7 @@ from superglm.reml.convergence import (
     trial_counts_as_precision_evidence,
 )
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
+from superglm.reml.identified import IdentifiedLaplace, laplace_excluded_coefficients
 from superglm.reml.objective import (
     REMLObjectiveEvaluation,
     reml_laml_objective,
@@ -57,14 +59,18 @@ from superglm.reml.scale import (
     profile_tweedie_reml_scale,
 )
 from superglm.solvers.hessian_factor import as_hessian_factor
-from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.irls_direct import (
+    StructuredSolverError,
+    _structured_solver_errors,
+    fit_irls_direct,
+)
+from superglm.solvers.mode_score import centred_matvec, prior_weighted_centre
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.solvers.structured import (
-    BlockStructuredSystem,
+    FactorSmoothLeafSystem,
     NestedStructuredSystem,
-    ScalarStructuredSystem,
-    SumToZeroBlockStructuredSystem,
+    SumToZeroLeafSystem,
     record_auto_backend_decision,
     resolve_structured_backend,
     solve_cached_structured,
@@ -396,16 +402,21 @@ def optimize_discrete_reml_cached_w(
         estimated_mask = np.ones(m, dtype=bool)
     log_lo, log_hi = np.log(1e-6), np.log(1e10)
     p = dm.p
+    # The Laplace approximation's identified part (design §3.9,
+    # ``reml.identified``): decided once, from the design and prior weights.
+    identified = IdentifiedLaplace(laplace_excluded_coefficients(dm, sample_weight, penalties))
+    # The cached trials' linear predictor about the fixed prior-weighted
+    # centre (one-engine design §3.8), as every PIRLS state is: a column
+    # translated by 1e10 otherwise costs eta ~1e-6 per row in X beta against
+    # the raw intercept, and the true objective that accepts a trial with it.
+    trial_centre = prior_weighted_centre(dm, sample_weight)
     structured_decision = resolve_structured_backend(
         list(dm.group_matrices),
         groups,
         direct_solve=direct_solve,
         coefficient_width=p,
-        row_weights=sample_weight,
         lambda2=lambdas,
-        family=distribution,
-        link=link,
-        nesting_cache=getattr(dm, "_scalar_structured_layout_cache", None),
+        nesting_cache=getattr(dm, "_structured_layout_cache", None),
     )
     use_structured = structured_decision.use_structured
     record_auto_backend_decision(profile, direct_solve, structured_decision)
@@ -426,43 +437,16 @@ def optimize_discrete_reml_cached_w(
     termination_reason = "max_reml_iter"
     all_lambdas_fixed = not bool(np.any(estimated_mask))
 
-    _n_pirls_steps = 0
     _n_newton_steps = 0
     _n_linesearch_evals = 0
     _n_structured_cache_solves = 0
     _n_block_structured_cache_solves = 0
     _n_linesearch_full_evals = 0
     _n_dead_line_searches = 0
+    _n_refused_structured_trials = 0
     _outer_step_stats: list[dict[str, Any]] = []
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
-    structured_runtime_fallback_reason: str | None = None
-
-    def latch_runtime_backend(
-        pirls_result: PIRLSResult,
-        lambda_values: dict[str, float],
-        penalty: NDArray | None,
-        *,
-        design: DesignMatrix,
-        penalty_components: list[PenaltyComponent],
-    ) -> NDArray | None:
-        """Pin later REML work to Gram after an automatic structured retry."""
-        nonlocal direct_solve, structured_runtime_fallback_reason, use_structured
-        if not use_structured or pirls_result.direct_backend == "structured":
-            return penalty
-        use_structured = False
-        direct_solve = "gram"
-        structured_runtime_fallback_reason = pirls_result.direct_fallback_reason
-        if penalty is not None:
-            return penalty
-        return build_penalty_matrix(
-            list(design.group_matrices),
-            groups,
-            lambda_values,
-            design.p,
-            reml_penalties=penalty_components,
-        )
-
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
     # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
@@ -524,13 +508,6 @@ def optimize_discrete_reml_cached_w(
         weight_semantics=weight_semantics,
     )
     _t_pirls += _time.perf_counter() - _pirls_start
-    S_boot = latch_runtime_backend(
-        boot_result,
-        boot_lambdas,
-        S_boot,
-        design=dm_boot,
-        penalty_components=penalties_boot,
-    )
     dm = dm_boot
     penalties = penalties_boot
     penalty_caches = penalty_caches_boot
@@ -544,7 +521,6 @@ def optimize_discrete_reml_cached_w(
         cache=penalty_context_cache,
     )
     _t_tensor_summary += _time.perf_counter() - _t0
-    _n_pirls_steps += boot_result.n_iter
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
     warm_deviance = float(boot_result.deviance)
@@ -739,14 +715,6 @@ def optimize_discrete_reml_cached_w(
             weight_semantics=weight_semantics,
         )
         _t_pirls += _time.perf_counter() - _t0
-        S_cand = latch_runtime_backend(
-            pirls_result,
-            cand_lambdas,
-            S_cand,
-            design=dm,
-            penalty_components=penalties,
-        )
-        _n_pirls_steps += 1
         # The candidate is ONE working-model update. Its own convergence
         # flag says whether that update changed anything: when it did not,
         # the working model has settled at these lambdas and the next
@@ -757,14 +725,14 @@ def optimize_discrete_reml_cached_w(
         warm_intercept = float(pirls_result.intercept)
         warm_deviance = float(pirls_result.deviance)
 
+        # the identified part of the Laplace approximation (design §3.9)
+        full_inverse = XtWX_S_inv
+        XtWX_S_inv = identified.inverse(full_inverse)
         c_centered_XtWX = cache.get("centered_XtWX")
         c_structured_system = cache.get("structured_system")
         if use_structured and not isinstance(
             c_structured_system,
-            ScalarStructuredSystem
-            | BlockStructuredSystem
-            | SumToZeroBlockStructuredSystem
-            | NestedStructuredSystem,
+            FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem,
         ):
             raise RuntimeError("Structured discrete REML cache is missing its block system.")
         c_centered_XtWz = cache["centered_rhs"]
@@ -789,7 +757,12 @@ def optimize_discrete_reml_cached_w(
             offset_arr,
             XtWX=XtWX,
             penalty_caches=penalty_caches,
-            log_det_H=pirls_result.log_det_H,
+            log_det_H=identified.log_det(full_inverse, pirls_result.log_det_H),
+            hessian_rank=(
+                identified.rank(pirls_result.reml_hessian_rank, full_inverse)
+                if identified
+                else None
+            ),
             S_override=S_cand,
             reml_penalties=penalties,
             tensor_pair_evaluations=cand_tensor_pair_evals,
@@ -1231,23 +1204,36 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 if not isinstance(
                     c_structured_system,
-                    ScalarStructuredSystem
-                    | BlockStructuredSystem
-                    | SumToZeroBlockStructuredSystem
-                    | NestedStructuredSystem,
+                    FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem,
                 ):  # pragma: no cover - validated above
                     raise RuntimeError("Structured cached solve has no block system.")
-                cached_solution = solve_cached_structured(
-                    c_structured_system,
-                    list(dm.group_matrices),
-                    groups,
-                    trial_lambdas,
-                    reml_penalties=penalties,
-                )
+                try:
+                    with _structured_solver_errors():
+                        cached_solution = solve_cached_structured(
+                            c_structured_system,
+                            list(dm.group_matrices),
+                            groups,
+                            trial_lambdas,
+                            reml_penalties=penalties,
+                        )
+                except StructuredSolverError:
+                    # A trial the factor cannot certify supplies no objective:
+                    # keep the retained state and try a shorter step towards
+                    # it, under every direct_solve, as the exact engine does
+                    # for a trial whose geometry is infeasible.  No other
+                    # solver is tried; a candidate the factor refuses raises.
+                    _n_refused_structured_trials += 1
+                    step *= 0.5
+                    halving_count += 1
+                    continue
                 beta_trial = cached_solution.beta
                 intercept_trial = cached_solution.intercept
                 log_det_H_trial = cached_solution.log_det_H
                 hessian_rank_trial = cached_solution.hessian_rank
+                if identified:
+                    trial_factor = getattr(cached_solution, "factor", None)
+                    log_det_H_trial = identified.log_det(trial_factor, log_det_H_trial)
+                    hessian_rank_trial = identified.rank(hessian_rank_trial, trial_factor)
             else:
                 if c_centered_XtWX is None or S_trial is None:
                     raise RuntimeError("Dense cached solve is missing matrix geometry.")
@@ -1261,6 +1247,12 @@ def optimize_discrete_reml_cached_w(
                         c_mean_z,
                     )
                 )
+                if identified:
+                    log_det_H_trial, restricted = identified.log_det_of_hessian(
+                        c_centered_XtWX + S_trial, log_det_H_trial
+                    )
+                    if restricted:
+                        hessian_rank_trial = int(hessian_rank_trial) - int(identified.excluded.size)
             cached_solve_elapsed = _time.perf_counter() - _tls0
             _t_linesearch_solve += cached_solve_elapsed
             if use_structured:
@@ -1268,13 +1260,17 @@ def optimize_discrete_reml_cached_w(
                 _n_structured_cache_solves += 1
                 if isinstance(
                     c_structured_system,
-                    BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                    FactorSmoothLeafSystem | SumToZeroLeafSystem,
                 ):
                     _t_block_structured_cache_solve += cached_solve_elapsed
                     _n_block_structured_cache_solves += 1
 
             # Only the true objective can accept this trial.
-            eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)
+            centred_intercept_trial = intercept_trial + math.fsum(trial_centre * beta_trial)
+            eta_trial = stabilize_eta(
+                centred_intercept_trial + centred_matvec(dm, beta_trial, trial_centre) + offset_arr,
+                link,
+            )
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
             dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
             trial_pirls = PIRLSResult(
@@ -1287,6 +1283,8 @@ def optimize_discrete_reml_cached_w(
                 effective_df=0.0,
                 log_det_H=log_det_H_trial,
                 reml_hessian_rank=hessian_rank_trial,
+                centred_intercept=centred_intercept_trial,
+                state_center=trial_centre,
             )
             trial_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
                 tensor_pair_summaries, trial_lambdas
@@ -1560,13 +1558,6 @@ def optimize_discrete_reml_cached_w(
         weight_semantics=weight_semantics,
     )
     _t_pirls += _time.perf_counter() - _t0
-    S_final = latch_runtime_backend(
-        final_result,
-        final_lambdas,
-        S_final,
-        design=dm,
-        penalty_components=penalties,
-    )
     _t0 = _time.perf_counter()
     final_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
         tensor_pair_summaries, final_lambdas
@@ -1583,7 +1574,10 @@ def optimize_discrete_reml_cached_w(
         offset_arr,
         XtWX=final_xtwx,
         penalty_caches=penalty_caches,
-        log_det_H=final_result.log_det_H,
+        log_det_H=identified.log_det(final_inv, final_result.log_det_H),
+        hessian_rank=(
+            identified.rank(final_result.reml_hessian_rank, final_inv) if identified else None
+        ),
         S_override=S_final,
         reml_penalties=penalties,
         tensor_pair_evaluations=final_tensor_pair_evals,
@@ -1600,13 +1594,9 @@ def optimize_discrete_reml_cached_w(
     best_obj = final_obj
     best_lambdas = final_lambdas.copy()
     best_pirls = final_result
-    if structured_runtime_fallback_reason is not None:
-        best_pirls.direct_fallback_reason = structured_runtime_fallback_reason
     lambda_history.append(final_lambdas.copy())
 
     if profile is not None:
-        if structured_runtime_fallback_reason is not None:
-            profile["direct_fallback_reason"] = structured_runtime_fallback_reason
         if _bootstrap_component_stats:
             profile["reml_bootstrap_summary"] = {
                 "boot_phi": float(boot_phi),
@@ -1652,8 +1642,10 @@ def optimize_discrete_reml_cached_w(
         profile["reml_n_linesearch_fits"] = _n_linesearch_evals
         profile["reml_n_linesearch_full_evals"] = _n_linesearch_full_evals
         profile["reml_n_dead_line_searches"] = _n_dead_line_searches
+        profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
         profile["reml_n_outer_iter"] = poi_iter + 1
         profile["reml_n_analytical_iters"] = _n_newton_steps
+        profile["reml_laplace_exclusion_unsupported"] = int(identified.unsupported)
         if _outer_step_stats:
             profile["reml_outer_step_stats"] = _outer_step_stats
 

@@ -191,17 +191,16 @@ class REMLGeometrySummary:
 # string reaching the consumers that switch on the field. ``continue`` is the
 # sentinel: it labels an iteration that ended without ending the loop, so it
 # reaches the per-iteration diagnostics and the trace but never a result, which
-# carries only a reason that actually ended the fit. ``mode_certified`` is the
-# member neither loop writes -- the terminal REML refit stamps it when a mode
-# that exhausted its iteration budget clears its KKT certificate anyway. The
-# gap runs the other way exactly once, and deliberately: the fitted-state
+# carries only a reason that actually ended the fit. ``score_stagnated`` ends a
+# ``convergence="mode_score"`` solve whose certificate score stopped
+# contracting short of its bar (``irls_direct``: the iterate is at its
+# limiting accuracy; the mode is published as not converged, never refused).
+# The gap runs the other way exactly once, and deliberately: the fitted-state
 # invalidation path stamps a synthetic marker of its own over the field through
 # a dynamic ``setattr`` this annotation cannot see, and that records a revision
 # rather than a reason a loop stopped, so it stays out of the vocabulary even
 # though the field does hold it at runtime.
 type TerminationReason = Literal[
-    "curvature_fallback",
-    "curvature_rescue",
     "constraint_infeasible",
     "constraint_kkt_incomplete",
     "step_rejected",
@@ -209,7 +208,7 @@ type TerminationReason = Literal[
     "converged",
     "max_iter",
     "continue",
-    "mode_certified",
+    "score_stagnated",
 ]
 
 # The same vocabulary at runtime, for consumers that enumerate the reasons
@@ -300,11 +299,20 @@ class PIRLSResult:
     basis_id: int | None = None
     termination_reason: TerminationReason | None = None
     direct_backend: str | None = None
+    # Why direct_solve="auto" took gram for these terms (a structural decision,
+    # ``StructuredBackendDecision.fallback_reason``); never a runtime switch.
     direct_fallback_reason: str | None = None
     # Terminal SCOP geometry is retained separately because covariance uses
     # expected Fisher curvature while EDF uses the full-Newton latent Hessian.
     scop_geometry: object | None = None
     scop_inference: object | None = None
+    # The centred PIRLS state (one-engine design §3.8): ``eta = centred_intercept
+    # + (X - 1 state_center') beta + offset`` (``mode_score.linear_predictor``),
+    # free of a column's offset; ``intercept = centred_intercept -
+    # state_center' beta`` is its raw-coordinate reading.  ``None`` where the
+    # solver kept the raw intercept.
+    centred_intercept: float | None = None
+    state_center: NDArray | None = None
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):

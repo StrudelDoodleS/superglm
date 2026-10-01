@@ -140,15 +140,19 @@ class SuperGLM:
             Use active-set cycling in the BCD solver.
         direct_solve : {"auto", "gram", "qr", "structured"}
             Strategy for the direct IRLS solver (lambda1=0).
-            ``"auto"`` selects compact structured elimination for eligible
-            random-effect and factor-smooth terms above the measured crossover,
-            otherwise using Gram. A globally unidentifiable SZ system also
-            retries on Gram with an explicit recorded reason. ``"gram"`` forces
-            the gram path. ``"qr"`` uses QR on the
+            ``"auto"`` selects compact structured elimination for random-effect
+            and factor-smooth (``basis="fs"`` or ``"sz"``) terms above the
+            measured size crossover, otherwise using Gram; the choice reads the
+            model's terms and their sizes, never the data's values or weights,
+            and ``result.direct_fallback_reason`` says why Gram was chosen.  A
+            fit never switches solver: when the structured solver cannot
+            proceed, the fit stops with an error that names the cause, and
+            ``"gram"`` fits the model with the dense solver instead.
+            ``"gram"`` forces the gram path. ``"qr"`` uses QR on the
             materialised weighted design matrix — backward-stable but
             O(n·p²) per iteration.  Intended for smaller datasets.
             ``"structured"`` forces structured elimination for an eligible
-            random-effect, FS, or SZ block.
+            random-effect, FS, or SZ block, and raises for any other model.
         discrete : bool
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]
@@ -265,6 +269,26 @@ class SuperGLM:
             group_pricing=group_pricing,
             weight_semantics=weight_semantics,
         )
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore a pickle; a retained solver state naming a retired class is dropped.
+
+        Such a model loads and predicts as saved, and its first inference call
+        rebuilds the linear system with the current engine
+        (``superglm.model.retired_state``).  A v0.35.0 Tweedie model's REML
+        memo is dropped, and so is a summary v0.35.0 cached after
+        ``estimate_theta``.
+        """
+        self.__dict__.update(state)
+        from superglm.model.retired_state import (
+            mark_retired_linear_state,
+            release_retired_tweedie_state,
+            release_v0_35_nb_summaries,
+        )
+
+        mark_retired_linear_state(self)
+        release_retired_tweedie_state(self)
+        release_v0_35_nb_summaries(self)
 
     def __repr__(self) -> str:
         family = type(self._distribution).__name__ if self._distribution else self.family

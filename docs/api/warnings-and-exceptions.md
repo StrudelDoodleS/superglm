@@ -13,6 +13,8 @@ silence. Each docstring says when it fires and what to do about it.
    superglm.RatingTableBaseNotRepresentableError
    superglm.SeparationError
    superglm.SeparationWarning
+   superglm.WeakIdentificationWarning
+   superglm.StructuredSolverError
    superglm.NBThetaBoundWarning
    superglm.FractionalFrequencyWeightWarning
    superglm.PriorWeightLatticeWarning
