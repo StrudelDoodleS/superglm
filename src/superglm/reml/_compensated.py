@@ -145,21 +145,54 @@ def _dot2_quadratic_form(rows, columns, entries, vector):
     result is within ``u |x' A x| + u |x|' |A x| + 2 gamma_n**2 |x|' |A| |x|``
     to first order, ``n`` the order of ``A``. False requests the caller's
     fallback, as ``_dot2_value`` does.
+
+    Each row's Dot2 and the outer Dot2 run as the same recurrence as
+    ``_dot2_value``, operation for operation, but the outer one advances as
+    each row finishes, so the kernel allocates nothing: no per-row gather and
+    no scratch sized by the nonzeros, which a dense block makes ``p**2``.
     """
     count = len(entries)
-    row_values = np.empty(count, dtype=np.float64)
-    row_weights = np.empty(count, dtype=np.float64)
-    used = 0
+    if count == 0:
+        return 0.0, True
+    outer_product = 0.0
+    outer_correction = 0.0
     start = 0
     while start < count:
-        stop = start + 1
-        while stop < count and rows[stop] == rows[start]:
-            stop += 1
-        value, valid = _dot2_value(entries[start:stop], vector[columns[start:stop]])
-        if not valid:
+        row = rows[start]
+        product, correction, success = _two_product_split(entries[start], vector[columns[start]])
+        if not success:
             return 0.0, False
-        row_values[used] = value
-        row_weights[used] = vector[rows[start]]
-        used += 1
+        stop = start + 1
+        while stop < count and rows[stop] == row:
+            term, term_error, success = _two_product_split(entries[stop], vector[columns[stop]])
+            if not success:
+                return 0.0, False
+            updated = product + term
+            recovered = updated - product
+            addition_error = (product - (updated - recovered)) + (term - recovered)
+            correction += addition_error + term_error
+            product = updated
+            if not math.isfinite(product) or not math.isfinite(correction):
+                return 0.0, False
+            stop += 1
+        row_value = product + correction
+        if not math.isfinite(row_value):
+            return 0.0, False
+        if start == 0:
+            outer_product, outer_correction, success = _two_product_split(vector[row], row_value)
+            if not success:
+                return 0.0, False
+        else:
+            term, term_error, success = _two_product_split(vector[row], row_value)
+            if not success:
+                return 0.0, False
+            updated = outer_product + term
+            recovered = updated - outer_product
+            addition_error = (outer_product - (updated - recovered)) + (term - recovered)
+            outer_correction += addition_error + term_error
+            outer_product = updated
+            if not math.isfinite(outer_product) or not math.isfinite(outer_correction):
+                return 0.0, False
         start = stop
-    return _dot2_value(row_weights[:used], row_values[:used])
+    value = outer_product + outer_correction
+    return value, math.isfinite(value)

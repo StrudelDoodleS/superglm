@@ -597,6 +597,56 @@ def test_quadratic_form_over_nonzeros_matches_the_dense_recurrence():
     assert _dot2_quadratic_form(*_nonzero_entries(np.zeros((3, 3))), np.ones(3)) == (0.0, True)
 
 
+@pytest.mark.parametrize("seed", range(6))
+def test_quadratic_form_matches_its_row_then_outer_dot2_composition(seed):
+    """The streamed kernel is Dot2 per row, then Dot2 over the rows, bit for bit."""
+    from superglm.reml._compensated import _dot2_quadratic_form, _dot2_value, _nonzero_entries
+
+    rng = np.random.default_rng(seed)
+    width = int(rng.integers(1, 40))
+    density = (0.0, 0.1, 0.5, 1.0, 0.3, 1.0)[seed]
+    matrix = np.ldexp(rng.normal(size=(width, width)), rng.integers(-30, 31, size=(width, width)))
+    matrix[rng.uniform(size=matrix.shape) >= density] = 0.0
+    vector = np.ldexp(rng.normal(size=width), rng.integers(-30, 31, size=width))
+    if seed == 5:
+        vector[0] = np.nextafter(0.0, 1.0)  # outside Dot2's range: both refuse
+    rows, columns, entries = _nonzero_entries(matrix)
+    row_values, row_weights, valid = [], [], True
+    start = 0
+    while start < len(entries):
+        stop = start + int(np.count_nonzero(rows[start:] == rows[start]))
+        value, success = _dot2_value(entries[start:stop].copy(), vector[columns[start:stop]])
+        valid = valid and success
+        row_values.append(value)
+        row_weights.append(vector[rows[start]])
+        start = stop
+    reference, outer_success = _dot2_value(np.array(row_weights), np.array(row_values))
+    value, success = _dot2_quadratic_form(rows, columns, entries, vector)
+    assert success == (valid and outer_success)
+    if success:
+        assert value == reference
+    else:
+        assert value == 0.0
+
+
+def test_quadratic_form_allocates_no_scratch():
+    """Nothing in the compiled kernel allocates, whatever the penalty's nonzero count.
+
+    The kernel used to allocate two arrays the length of the nonzeros (``p**2``
+    for a dense block) and gather each row's coefficients on every call.
+    """
+    from superglm.reml._compensated import _dot2_quadratic_form, _nonzero_entries
+
+    penalty, coefficients = _capped_difference_penalty()
+    vector = np.ascontiguousarray(coefficients)
+    vector.flags.writeable = False
+    _dot2_quadratic_form(*_nonzero_entries(penalty), vector)
+    # Recompile once so IR inspection is meaningful even after a disk-cache hit.
+    _dot2_quadratic_form.recompile()
+    for signature in _dot2_quadratic_form.signatures:
+        assert "NRT_MemInfo_alloc" not in _dot2_quadratic_form.inspect_llvm(signature)
+
+
 @pytest.mark.parametrize("kernel_name", ["_dot2_quadratic_form", "_dot2_selected"])
 def test_compiled_dot2_callers_keep_ieee_rounding(kernel_name):
     import superglm.reml._compensated as compensated
