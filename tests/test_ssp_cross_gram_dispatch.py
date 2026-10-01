@@ -145,7 +145,7 @@ def test_raw_cross_dispatch_bypasses_columns_and_observation_expansion(kind, rev
         actual = algebra._cross_gram(left, right, weights, profile=profile)
     assert profile.get("block_cross_ssp_ssp_calls") == 1
     assert profile.get("block_cross_fallback_s", 0) == 0
-    assert bool(allocations) == (kind == "sparse")
+    assert not allocations  # the sparse pair no longer densifies an SpGEMM product
     _assert_target(actual, left, right, weights)
 
 
@@ -158,6 +158,117 @@ def test_cross_matches_exact_live_factor_target_with_signed_and_zero_weights(kin
         weights[1::2] *= -1
     _assert_target(algebra._cross_gram(left, right, weights), left, right, weights)
     _assert_target(algebra._cross_gram(right, left, weights), right, left, weights)
+
+
+def _csr_pair(n, rng):
+    """Banded SSP bases of widths 9 and 7, with 3 and 4 entries per row."""
+    groups = []
+    for width, per_row in ((9, 3), (7, 4)):
+        start = np.arange(n) * (width - per_row + 1) // n
+        basis = sp.csr_matrix(
+            (
+                np.ldexp(rng.normal(size=n * per_row), rng.integers(-20, 21, n * per_row)),
+                (np.repeat(np.arange(n), per_row), (start[:, None] + np.arange(per_row)).ravel()),
+            ),
+            shape=(n, width),
+        )
+        groups.append(SparseSSPGroupMatrix(basis, rng.normal(size=(width, width - 1))))
+    return groups
+
+
+def _ordered_weighted_cross(first, second, weights):
+    """``first.T @ diag(weights) @ second``, adding fl(fl(w * b) * c) row by row from zero."""
+    raw = np.zeros((first.shape[1], second.shape[1]))
+    for row in range(first.shape[0]):
+        weight = float(weights[row])
+        for a in range(first.indptr[row], first.indptr[row + 1]):
+            scaled = weight * float(first.data[a])
+            for b in range(second.indptr[row], second.indptr[row + 1]):
+                raw[first.indices[a], second.indices[b]] += scaled * float(second.data[b])
+    return raw
+
+
+@pytest.mark.parametrize("weight_right", [False, True])
+def test_sparse_raw_cross_adds_rows_in_order_within_the_spgemm_bound(weight_right, monkeypatch):
+    """One serial CSR pass weights the sparser basis and adds rows in ascending order."""
+    rng = np.random.default_rng(4410)
+    n = 4_000
+    groups = _csr_pair(n, rng)
+    left, right = groups[::-1] if weight_right else groups
+    weights = np.ldexp(rng.normal(size=n), rng.integers(-10, 11, n))
+    small, large = (right, left) if weight_right else (left, right)
+    assert small.B.nnz < large.B.nnz
+    raw = _ordered_weighted_cross(small.B, large.B, weights)
+    expected = left.R_inv.T @ (raw.T if weight_right else raw) @ right.R_inv
+    original, calls = algebra._csr_weighted_cross, []
+    monkeypatch.setattr(algebra, "_csr_weighted_cross", lambda *a: calls.append(1) or original(*a))
+    np.testing.assert_array_equal(algebra._cross_gram(left, right, weights), expected)
+    assert calls == [1]
+    # SciPy's product of the weighted copy may contract its multiply-add into
+    # an FMA, so it is held to the forward bound, not to bits. Every entry of
+    # either evaluation sums at most n rounded products w * b * c, in any
+    # order and with or without FMA; each term carries at most n + 1 rounding
+    # factors, so both lie within gamma_(n+1) * sum |w||b||c| of the exact
+    # entry (Higham 2002, Lemma 3.1 and eqs. 3.4-3.5). All terms here are in
+    # the normal range, where that model holds.
+    spgemm = (algebra._weighted_row_chunk(small.B, weights, 0, n).T @ large.B).toarray()
+    # The positive sum rounds to at least (1 - gamma_(n+1)) times its exact value.
+    magnitude = _ordered_weighted_cross(abs(small.B), abs(large.B), np.abs(weights))
+    unit = Fraction(1, 2**53)
+    gamma = (n + 1) * unit / (1 - (n + 1) * unit)
+    for index in np.ndindex(raw.shape):
+        difference = abs(Fraction(float(raw[index])) - Fraction(float(spgemm[index])))
+        assert difference <= 2 * gamma * Fraction(float(magnitude[index])) / (1 - gamma)
+
+
+def _record_calls(monkeypatch, names, log):
+    for name in names:
+        kernel = getattr(algebra, name)
+        monkeypatch.setattr(
+            algebra,
+            name,
+            lambda *a, _name=name, _kernel=kernel, **k: log.append(_name) or _kernel(*a, **k),
+        )
+
+
+@pytest.mark.parametrize("channels", [1, 3])
+def test_sparse_raw_cross_budgets_its_result_not_the_rows(channels, monkeypatch):
+    """Past the SpGEMM buffers' row budget, the serial pass runs within p * q * 8 per channel."""
+    rng = np.random.default_rng(4411)
+    n = 20_000
+    left, right = _csr_pair(n, rng)
+    directions = list(rng.uniform(0.5, 2.0, size=(channels, n)))
+    weights = directions[0]
+    expected = algebra._cross_gram(left, right, weights)
+    p, q = left.B.shape[1], right.B.shape[1]  # the sparser left basis is weighted
+    need = 8 * p * q * channels
+    # The replaced SpGEMM gate charged these row terms, which grow with n:
+    # here they exceed the result's budget a thousandfold.
+    assert 24 * right.B.nnz + 32 * (n + 1) > 1000 * need
+    names = ("_csr_weighted_cross", "_csr_weighted_cross_channels", "_cross_gram_by_columns")
+
+    def dispatch(budget):
+        log = []
+        with monkeypatch.context() as patch:
+            patch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+            _record_calls(patch, names, log)
+            cache = (
+                algebra._BlockWeightCache().for_new_weights(algebra._ChannelBatch(directions), 0)
+                if channels > 1
+                else None
+            )
+            return algebra._cross_gram(left, right, weights, cache), log
+
+    result, log = dispatch(need)
+    assert log == ["_csr_weighted_cross" if channels == 1 else "_csr_weighted_cross_channels"]
+    np.testing.assert_array_equal(result, expected)
+    if channels > 1:
+        # A pass wider than the budget leaves this channel on the single kernel.
+        result, log = dispatch(need - 1)
+        assert log == ["_csr_weighted_cross"]
+        np.testing.assert_array_equal(result, expected)
+    _, log = dispatch(8 * p * q - 1)
+    assert log == ["_cross_gram_by_columns"]
 
 
 def test_cross_reads_live_B_and_R_after_public_and_private_mutations():
