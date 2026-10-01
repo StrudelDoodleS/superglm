@@ -859,16 +859,28 @@ def _clear_level_records(spec) -> None:
     spec._population_null_space = None
 
 
-def test_library_evaluations_read_the_fits_own_predictor() -> None:
-    """Screening, random-effect reporting and the discretization deltas read the fit (Claude review).
+def test_library_evaluations_read_the_fits_own_predictor(monkeypatch) -> None:
+    """Library evaluations read the fit on its rows and ``predict``'s rule off them (Claude reviews).
 
-    They evaluate the fit on its training rows through the predictor, and on
-    b5080877 met the thin-level rule there: the same-x level's rows took the
-    population value, so the working residuals at them held the level's whole
-    effect, away from the fit.  They now read the fit's own coefficients,
-    exactly as with no level recorded, and raise no ``predict`` warning.
-    Demonstration: each table moves when the rule is applied to them.
+    On b5080877 screening, random-effect reporting and the discretization
+    baseline met the thin-level rule on the training rows, where it then
+    replaced the same-x level's fit with the population value.  The rule now
+    keeps that fit, and:
+
+    - ``random_effects()``, whose rows are the training rows by its guard,
+      reads the fit's own coefficients: its table is bit for bit the one with
+      no level recorded;
+    - screening and the discretization baseline read ``predict``'s predictor
+      (the Claude review of 52c6b730: the fit's raw coordinates gave a new
+      frame's thin levels the alias's arbitrary point back), checked on a
+      frame whose same-x level sits at a new ``x``;
+    - none of them raises ``predict``'s warning.
+
+    Mutations: the ``fitted`` switch ignored; screening on the fit's coordinates.
     """
+    import superglm.model.screening_ops as screening_ops
+    from superglm.model import base
+
     frame, y, weight = _signed_aliased_frame("same_x", response="fisher")
     rng = np.random.default_rng(11)
     frame["h"] = np.array([f"h{v}" for v in rng.integers(0, 10, len(frame))], dtype=object)
@@ -876,18 +888,14 @@ def test_library_evaluations_read_the_fits_own_predictor() -> None:
     spec = model._interaction_specs["x:g:sz"]
     assert spec._unidentified_level_names == ("g005",)
 
-    def evaluate() -> list[pd.DataFrame]:
+    def reported() -> pd.DataFrame:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            tables = [
-                model.screen_interactions(frame, y, candidates=[("x1", "cat")]),
-                model.random_effects("h", X=frame, y=y, sample_weight=weight).table,
-                model.discretization_impact(frame, y, weight, features=["x"]).tables["x"],
-            ]
+            table = model.random_effects("h", X=frame, y=y, sample_weight=weight).table
         assert not _thin_warnings(caught)
-        return tables
+        return table
 
-    recorded = evaluate()
+    recorded = reported()
     held = {
         name: getattr(spec, name)
         for name in (
@@ -900,12 +908,30 @@ def test_library_evaluations_read_the_fits_own_predictor() -> None:
     }
     _clear_level_records(spec)
     try:
-        cleared = evaluate()
+        cleared = reported()
     finally:
         for name, value in held.items():
             setattr(spec, name, value)
-    for left, right in zip(recorded, cleared, strict=True):
-        pd.testing.assert_frame_equal(left, right, check_exact=True)
+    pd.testing.assert_frame_equal(recorded, cleared, check_exact=True)
+
+    moved = frame.copy()
+    moved.loc[moved["g"] == "g005", "x"] = 0.8
+    seen = []
+    original = screening_ops.working_score
+
+    def capture(y_, mu, eta, *args, **kwargs):
+        seen.append(np.array(eta, copy=True))
+        return original(y_, mu, eta, *args, **kwargs)
+
+    monkeypatch.setattr(screening_ops, "working_score", capture)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.screen_interactions(moved, y, weight, candidates=[("x1", "cat")])
+        impact = model.discretization_impact(moved, y, weight, features=["x"])
+    assert not _thin_warnings(caught)
+    expected = base.predict_eta_exact(model, moved, warn=False)
+    assert seen and np.array_equal(seen[0], expected)
+    assert np.array_equal(impact.original_predictions, base.predict_exact(model, moved, warn=False))
 
 
 def _separated_poisson():

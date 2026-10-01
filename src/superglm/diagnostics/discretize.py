@@ -946,8 +946,9 @@ def discretization_impact(
     )
     frame.require_columns(tuple(required))
     validate_x_columns(frame, required)
-    # the fit's coefficients, as the per-term deltas below read them (#440 review)
-    eta_orig = base.predict_eta_exact(model, frame, offset=offset, fitted=True)
+    # predict's predictor, without its warning (#440 review): the deltas below
+    # read only the binned main effects and continuous interactions
+    eta_orig = base.predict_eta_exact(model, frame, offset=offset, warn=False)
     original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
 
     # For each target feature, compute the delta (binned - smooth)
