@@ -1021,7 +1021,10 @@ def test_unsafe_mixed_discrete_preflight_locks_out_raw_route(
 
     assert state.eligible is False
     assert preflight_calls == 1
-    assert row_subset_calls == 2
+    # The builder's fallback for this design centres the dense columns about
+    # their exact pair beside the packed spline and categorical blocks, so no
+    # stable row chunk is materialized (issue #430).
+    assert row_subset_calls == 0
     assert np.all(np.isfinite(first.data_gram))
     np.testing.assert_array_equal(second.data_gram, first.data_gram)
     np.testing.assert_array_equal(second.rhs, first.rhs)

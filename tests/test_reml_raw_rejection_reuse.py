@@ -144,10 +144,10 @@ def test_bonus_malus_cubic_qp_representation_is_eligible(attempts):
         assert result.converged
         np.testing.assert_array_equal(result.beta, np.zeros(dm.p))
         assert result.intercept == 0.0
-    # The Numeric column is a DenseGroupMatrix, which never takes a raw-moment
-    # rung (issue #430): the design centres about the exact pair on every fit,
-    # so there is no rejection to carry.
-    assert attempts == []
+    # The ill-located Numeric is a DenseGroupMatrix, which never enters a raw
+    # rung (issue #430): it is centred about its exact pair, and the spline's
+    # bounded raw moments, accepted, are all the rung sees.
+    assert attempts and all(attempts)
 
 
 def test_optimizer_owns_one_rejection_but_outside_refits_stay_fresh(attempts, monkeypatch):

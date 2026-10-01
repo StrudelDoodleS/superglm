@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
@@ -20,6 +21,7 @@ from superglm._group_matrix._group_matrix_centered import (
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.solvers.mode_score import (
     corrected_two_pass_pair,
+    dense_centred_matvec,
     dense_centred_rmatvec,
     dense_columns,
 )
@@ -443,20 +445,85 @@ def build_centered_system(
         return _attach_centered_penalty(*refreshed, penalty, mean_hi=mean_hi, mean_lo=mean_lo)
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
-    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
     # A ``DenseGroupMatrix`` column, the one type whose entries its type does
-    # not bound, never takes a raw-moment rung: each subtracts ``sum W x x'``
+    # not bound, never enters a raw-moment rung: each subtracts ``sum W x x'``
     # and ``(X'W)(X'W)' / sum W`` under a value certificate
     # (``_raw_centering_well_scaled``), so the arithmetic changed with the
     # column's location (offset 0: the raw-moment rung; offset 10: the exact
-    # pair).  Such a design takes the exact pair below on every fit; the
-    # packed and raw-spline rungs admit no dense column by their own types.
-    raw_rungs = not np.any(dense_columns(dm))
-    if (
-        packed is None
-        and raw_rungs
-        and (tabmat_state is None or tabmat_state.eligible is not False)
-    ):
+    # pair).  The rest of the design keeps the rungs: they run on its bounded
+    # columns, and the dense columns join them centred about their exact pair
+    # (``_attach_dense_split``).  A design with no bounded column, or whose
+    # bounded part every rung rejects, takes the exact pair throughout.
+    if not np.any(dense_columns(dm)):
+        packed = _raw_rung_system(
+            dm=dm,
+            W=W,
+            z_centered=z_centered,
+            sum_w=sum_w,
+            tabmat_split=tabmat_split,
+            tabmat_state=tabmat_state,
+            profile=profile,
+            force_chunked=_force_chunked,
+        )
+        if packed is not None:
+            mean_x, data_gram, rhs = packed
+            return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
+    else:
+        split = _dense_split(dm)
+        if split.bounded.p:
+            packed = _raw_rung_system(
+                dm=split.bounded,
+                W=W,
+                z_centered=z_centered,
+                sum_w=sum_w,
+                tabmat_split=(
+                    None if tabmat_split is None else split.bounded.tabmat_centering_split
+                ),
+                tabmat_state=tabmat_state,
+                profile=profile,
+                force_chunked=_force_chunked,
+            )
+            if packed is not None:
+                return _attach_dense_split(
+                    split,
+                    W=W,
+                    z_centered=z_centered,
+                    sum_w=sum_w,
+                    mean_z=mean_z,
+                    packed=packed,
+                    penalty=penalty,
+                )
+
+    mean_x, mean_hi, mean_lo = weighted_mean_pair(dm, W, sum_w)
+    data_gram, rhs = centered_gram_rhs(
+        dm=dm,
+        W=W,
+        mean_x=mean_hi,
+        z_centered=z_centered,
+        mean_lo=mean_lo,
+    )
+    return _attach_centered_penalty(
+        sum_w, mean_x, mean_z, data_gram, rhs, penalty, mean_hi=mean_hi, mean_lo=mean_lo
+    )
+
+
+def _raw_rung_system(
+    *,
+    dm: DesignMatrix,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    tabmat_split,
+    tabmat_state: TabmatCenteringState | None,
+    profile: dict | None,
+    force_chunked: bool,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """``(mean_x, data_gram, rhs)`` from the first raw rung that accepts ``dm``, else ``None``.
+
+    Called only with a design free of ``DenseGroupMatrix`` columns.
+    """
+    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+    if packed is None and (tabmat_state is None or tabmat_state.eligible is not False):
         mixed_attempted, mixed = _try_mixed_discrete_centering(
             dm=dm,
             W=W,
@@ -497,7 +564,6 @@ def build_centered_system(
                 )
     if (
         packed is None
-        and raw_rungs
         and tabmat_split is not None
         and (tabmat_state is None or tabmat_state.eligible is not False)
     ):
@@ -520,8 +586,7 @@ def build_centered_system(
     # accelerated rungs do, so the moments are not recomputed every iteration.
     if (
         packed is None
-        and raw_rungs
-        and not _force_chunked
+        and not force_chunked
         and (
             tabmat_state is None
             # `eligible is False` means a preflight already certified this
@@ -543,21 +608,108 @@ def build_centered_system(
             tabmat_state.raw_moment_eligible = packed is not None
         if packed is not None and profile is not None:
             profile["centered_raw_moment_hits"] = profile.get("centered_raw_moment_hits", 0) + 1
+    return packed
 
-    if packed is None:
-        mean_x, mean_hi, mean_lo = weighted_mean_pair(dm, W, sum_w)
-        data_gram, rhs = centered_gram_rhs(
-            dm=dm,
-            W=W,
-            mean_x=mean_hi,
-            z_centered=z_centered,
-            mean_lo=mean_lo,
-        )
-        return _attach_centered_penalty(
-            sum_w, mean_x, mean_z, data_gram, rhs, penalty, mean_hi=mean_hi, mean_lo=mean_lo
-        )
-    mean_x, data_gram, rhs = packed
-    return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
+
+@dataclass(frozen=True)
+class _DenseSplit:
+    """A design's ``DenseGroupMatrix`` groups and its other (bounded) groups, as two designs."""
+
+    dense: DesignMatrix
+    bounded: DesignMatrix
+    dense_index: NDArray
+    bounded_index: NDArray
+
+
+# One split per design, built on first use and dropped with the design: the
+# bounded design owns its own rung caches (execution plan, Tabmat split,
+# bin-space plan), so they persist across a fit's iterations.
+_DENSE_SPLITS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _dense_split(dm: DesignMatrix) -> _DenseSplit:
+    split = _DENSE_SPLITS.get(dm)
+    if split is not None:
+        return split
+    dense_groups, bounded_groups = [], []
+    dense_index: list[int] = []
+    bounded_index: list[int] = []
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        columns = range(offset, offset + width)
+        if type(matrix) is DenseGroupMatrix:
+            dense_groups.append(matrix)
+            dense_index.extend(columns)
+        else:
+            bounded_groups.append(matrix)
+            bounded_index.extend(columns)
+        offset += width
+    split = _DenseSplit(
+        dense=DesignMatrix(dense_groups, n=dm.n, p=len(dense_index)),
+        bounded=DesignMatrix(bounded_groups, n=dm.n, p=len(bounded_index)),
+        dense_index=np.asarray(dense_index, dtype=np.intp),
+        bounded_index=np.asarray(bounded_index, dtype=np.intp),
+    )
+    _DENSE_SPLITS[dm] = split
+    return split
+
+
+def _attach_dense_split(
+    split: _DenseSplit,
+    *,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    mean_z: float,
+    packed: tuple[NDArray, NDArray, NDArray],
+    penalty: NDArray,
+) -> CenteredSystem:
+    """The centred system from a raw rung on the bounded columns and the exact pair on the dense ones.
+
+    The dense block ``D~' W D~`` and its right-hand side come from rows
+    ``(x - hi) - lo`` (``centered_gram_rhs``).  The cross block is ``N~' W
+    D~ = N' (W D~) - m_N (1' W D~)``: one transpose product of the bounded
+    design per dense column, with ``1' W D~`` zero to rounding, so the
+    bounded columns' raw values never meet a dense column's offset.  The
+    bounded block is the rung's own.
+    """
+    mean_bounded, gram_bounded, rhs_bounded = packed
+    pair = dense_mean_pair(split.dense, W, sum_w)
+    if pair is None:  # pragma: no cover - the split holds a dense column
+        raise RuntimeError("A dense split formed no centre pair.")
+    hi, lo = pair
+    gram_dense, rhs_dense = centered_gram_rhs(
+        dm=split.dense, W=W, mean_x=hi, z_centered=z_centered, mean_lo=lo
+    )
+    dense_width = split.dense.p
+    cross = np.empty((split.bounded.p, dense_width), dtype=np.float64)
+    unit = np.zeros(dense_width, dtype=np.float64)
+    for column in range(dense_width):
+        unit[column] = 1.0
+        weighted = W * dense_centred_matvec(split.dense, unit, hi, lo)
+        unit[column] = 0.0
+        cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(np.sum(weighted))
+    p = dense_width + split.bounded.p
+    dense_index, bounded_index = split.dense_index, split.bounded_index
+    data_gram = np.empty((p, p), dtype=np.float64)
+    data_gram[np.ix_(bounded_index, bounded_index)] = gram_bounded
+    data_gram[np.ix_(dense_index, dense_index)] = gram_dense
+    data_gram[np.ix_(bounded_index, dense_index)] = cross
+    data_gram[np.ix_(dense_index, bounded_index)] = cross.T
+    rhs = np.empty(p, dtype=np.float64)
+    rhs[bounded_index] = rhs_bounded
+    rhs[dense_index] = rhs_dense
+    mean_x = np.empty(p, dtype=np.float64)
+    mean_x[bounded_index] = mean_bounded
+    mean_x[dense_index] = hi + lo
+    mean_hi = mean_x.copy()
+    mean_hi[dense_index] = hi
+    mean_lo = np.zeros(p, dtype=np.float64)
+    mean_lo[dense_index] = lo
+    return _attach_centered_penalty(
+        sum_w, mean_x, mean_z, data_gram, rhs, penalty, mean_hi=mean_hi, mean_lo=mean_lo
+    )
 
 
 def dense_mean_pair(dm: DesignMatrix, W: NDArray, sum_w: float) -> tuple[NDArray, NDArray] | None:
