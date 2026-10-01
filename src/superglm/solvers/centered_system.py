@@ -189,8 +189,9 @@ def penalty_factor(penalty: NDArray) -> NDArray:
     the eigenpairs of ``A_b`` above its eigensolver resolution ``n_b eps
     ||A_b||_2`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.7;
     ``rank._eigensolver_relative_bar``, the floor of the Gram route's rank cut,
-    which equilibrates the same way), and maps the root back, ``R_b = W^(1/2)
-    V' D^(-1)``.  ``R_b'R_b = D^(-1) (A_b)_+ D^(-1)`` is the projection of
+    which equilibrates the same way) plus its formation error ``n_b
+    gamma_(2 n_b + 7)`` (``_equilibrated_block_root``, #434), and maps the
+    root back, ``R_b = W^(1/2) V' D^(-1)``.  ``R_b'R_b = D^(-1) (A_b)_+ D^(-1)`` is the projection of
     ``S_b`` onto the PSD cone in the norm ``||D X D||_F`` (Higham 2002, IMA J.
     Numer. Anal. 22, Thm 3.2), less the eigenvalues below the bar.
 
@@ -264,10 +265,25 @@ def _block_root(block: NDArray) -> NDArray:
 def _equilibrated_block_root(block: NDArray) -> NDArray | None:
     """``penalty_factor``'s root of a coupled block, cut on its Jacobi equilibration.
 
+    The cut is the eigensolver's resolution plus the block's formation error
+    (#434), the two perturbations that move an eigenvalue of the computed
+    ``A_b = D S_b D`` from the exact one (Weyl).  Every penalty this package
+    forms is a sum over at most three components of ``lambda_t G_t``, each
+    ``G_t`` the Gram of a transported root (``ssp_penalty_matrix``,
+    ``_enclosed_root_gram``) or an eigen reconstruction ``V Lambda V'``
+    (``_canonicalize_ssp_penalty``) whose entries are inner products of at
+    most the raw width ``<= 2 n_b`` terms.  Such an entry rounds within
+    ``gamma_m`` of ``sum_t lambda_t |G_t|_ij <= sqrt(S_ii S_jj)`` (Higham 2002,
+    eq. 3.5; Cauchy-Schwarz, twice), ``m = 2 n_b + 7`` counting the inner
+    product, its ``lambda``, the symmetrization, the component sum and the
+    equilibration's square root and two quotients, so ``|dA_ij| <= gamma_m``
+    and ``||dA||_2 <= n_b gamma_m``.  An exact null of the construction
+    stays below that, at every lambda.
+
     ``None`` where the block is not PSD at that resolution: a non-positive
-    diagonal, or an eigenvalue of ``D S_b D`` below ``-max(100 eps, n eps)
-    ||D S_b D||_2``, the bar ``rank.decompose_gram`` refuses as materially
-    indefinite.
+    diagonal, or an eigenvalue of ``D S_b D`` below ``-max(100 eps ||D S_b
+    D||_2, cut)``, the bar ``rank.decompose_gram`` refuses as materially
+    indefinite (or the block's own rounding, if larger).
     """
     from superglm.solvers.rank import _EPS, _eigensolver_relative_bar
 
@@ -283,10 +299,13 @@ def _equilibrated_block_root(block: NDArray) -> NDArray | None:
         return None
     eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
     norm = float(np.max(np.abs(eigenvalues)))
-    bar = _eigensolver_relative_bar(len(block))
-    if eigenvalues[0] < -max(100.0 * _EPS, bar) * norm:
+    width = len(block)
+    terms = 2 * width + 7
+    formation = width * terms * (_EPS / 2.0) / (1.0 - terms * (_EPS / 2.0))
+    cut = _eigensolver_relative_bar(width) * norm + formation
+    if eigenvalues[0] < -max(100.0 * _EPS * norm, cut):
         return None
-    kept = eigenvalues > bar * norm
+    kept = eigenvalues > cut
     return np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T * scale[None, :]
 
 

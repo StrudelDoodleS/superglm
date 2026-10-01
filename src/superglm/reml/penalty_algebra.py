@@ -1779,6 +1779,33 @@ def resolve_component_lambda(
     return float(lambda2.get(f"{group_name}:{suffix}", lambda2.get(group_name, 0.0)))
 
 
+def ssp_penalty_matrix(coordinate_map: NDArray, omega: NDArray) -> NDArray:
+    """``C' Omega C``, formed as the Gram ``(B C)'(B C)`` of a transported root ``B'B = Omega``.
+
+    ``penalty_factor`` decides the penalty's rank from the formed matrix, so
+    the formation has to keep the construction's null space.  The congruence
+    ``C' Omega C`` rounds within ``gamma_k |C|'|Omega||C|`` (Higham 2002,
+    *Accuracy and Stability of Numerical Algorithms*, eq. 3.13), which
+    cancellation in ``C`` (a basis whitened on clustered data) makes far
+    larger than the result: an exact null of ``Omega`` came out as a scaled
+    eigenvalue of ``1.2e-14`` against a cut of ``8.9e-16``, and a data-null
+    direction counted as identified (#434; that block's componentwise bound
+    was ``6.7e-11``).  The Gram of a root with ``r = rank(Omega)`` rows has
+    rank at most ``r`` exactly, and it rounds within ``gamma_r |BC|'|BC|``,
+    at most ``gamma_r sqrt(S_ii S_jj)`` (Higham eq. 3.5 and Cauchy-Schwarz:
+    a sum of squares keeps its relative accuracy), the scaled model
+    ``penalty_factor`` cuts on.  ``B`` is ``penalty_factor``'s root of the
+    raw ``Omega`` (formed without a congruence), so its rank is decided on
+    ``Omega``'s own Jacobi equilibration, as every penalty root is.
+    """
+    from superglm.solvers.centered_system import penalty_factor
+
+    coordinate_map = np.asarray(coordinate_map, dtype=np.float64)
+    transported = penalty_factor(np.asarray(omega, dtype=np.float64)) @ coordinate_map
+    gram = transported.T @ transported
+    return 0.5 * (gram + gram.T)
+
+
 def build_penalty_matrix(
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
@@ -1813,7 +1840,9 @@ def build_penalty_matrix(
                 S[pc.group_sl, pc.group_sl] += lam * penalty_component_dense_matrix(pc, gm)
                 continue
             omega_ssp = (
-                pc.omega_ssp if pc.omega_ssp is not None else (gm.R_inv.T @ pc.omega_raw @ gm.R_inv)
+                pc.omega_ssp
+                if pc.omega_ssp is not None
+                else ssp_penalty_matrix(gm.R_inv, pc.omega_raw)
             )
             S[pc.group_sl, pc.group_sl] += lam * omega_ssp
 
@@ -1844,7 +1873,7 @@ def build_penalty_matrix(
                     lam_j = resolve_component_lambda(lambda2, g.name, suffix)
                     if lam_j == 0:
                         continue
-                    S[g.sl, g.sl] += lam_j * (gm.R_inv.T @ omega_j @ gm.R_inv)
+                    S[g.sl, g.sl] += lam_j * ssp_penalty_matrix(gm.R_inv, omega_j)
                 continue
             lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
             if lam_g == 0:
@@ -1852,7 +1881,7 @@ def build_penalty_matrix(
             omega = gm.omega
             if omega is None:
                 continue
-            S[g.sl, g.sl] += lam_g * gm.R_inv.T @ omega @ gm.R_inv
+            S[g.sl, g.sl] += lam_g * ssp_penalty_matrix(gm.R_inv, omega)
         elif g.scop_reparameterization is not None:
             lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
             if lam_g == 0:
@@ -2448,14 +2477,23 @@ def compute_total_penalty_rank(
 
 
 def _matrix_penalty_rank(penalty_matrix: NDArray) -> int:
-    """Numerical rank fallback for an already assembled PSD penalty."""
-    from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_factor
+    """Numerical rank fallback for an already assembled PSD penalty: its root's.
+
+    The root is ``penalty_factor``'s, cut block by block on the Jacobi
+    equilibration at the eigensolver's resolution plus the formation error, as
+    every factor route's penalty root is.  A cut at ``eps ||S||_2`` of the
+    whole matrix sat on the rounding of an exact null once the penalty is
+    formed as the Gram of its root (``ssp_penalty_matrix``, #434): the count
+    then changed between ``lambda e^(+-1e-5)``.
+    """
+    from superglm.solvers.centered_system import penalty_factor
+    from superglm.solvers.rank import decompose_factor
 
     penalty_matrix = np.asarray(penalty_matrix, dtype=np.float64)
     if penalty_matrix.ndim != 2 or penalty_matrix.shape[0] != penalty_matrix.shape[1]:
         raise ValueError("penalty_matrix must be square")
     symmetric = 0.5 * (penalty_matrix + penalty_matrix.T)
-    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    eigenvalues = np.linalg.eigvalsh(symmetric)
     scale = max(
         float(np.max(np.abs(eigenvalues), initial=0.0)),
         np.finfo(np.float64).tiny,
@@ -2463,14 +2501,7 @@ def _matrix_penalty_rank(penalty_matrix: NDArray) -> int:
     negative_tolerance = 1e-10 * scale
     if eigenvalues.size and eigenvalues[0] < -negative_tolerance:
         raise ValueError("penalty_matrix must be positive semidefinite")
-    spectral_cutoff = SHARED_RANK_POLICY.gram_rcond * scale
-    positive = eigenvalues > spectral_cutoff
-    penalty_factor = (
-        np.sqrt(eigenvalues[positive])[:, None] * eigenvectors[:, positive].T
-        if np.any(positive)
-        else np.empty((0, penalty_matrix.shape[0]))
-    )
-    return decompose_factor(penalty_factor).rank
+    return decompose_factor(penalty_factor(symmetric)).rank
 
 
 def _structural_active_penalty_rank(
