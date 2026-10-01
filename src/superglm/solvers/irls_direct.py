@@ -48,6 +48,7 @@ from superglm.distributions import (
     NegativeBinomial,
     Poisson,
     Tweedie,
+    clip_mu,
 )
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -60,7 +61,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
-from superglm.links import IdentityLink, Link, LogitLink, LogLink
+from superglm.links import IdentityLink, Link, LogitLink, LogLink, stabilize_eta
 from superglm.solvers._structured.block_leaves import factor_smooth_prior_statistics
 from superglm.solvers.centered_system import (
     CenteredSystem,
@@ -100,6 +101,7 @@ from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
     MODE_RESOLVE_CAP,
     ModeResidual,
+    centred_intercept_remainder,
     centred_matvec,
     penalized_mode_residual,
     prior_weighted_centre,
@@ -723,6 +725,7 @@ def fit_irls_direct(
     _fisher_data_reuse: _FisherDataReuse | None = None,
     _laplace_excluded: tuple[int, ...] = (),
     _mode_bar: float | None = None,
+    _compensate_centred_intercept: bool = True,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS (see ``_fit_irls_direct_once``).
 
@@ -778,6 +781,7 @@ def fit_irls_direct(
             _fisher_data_reuse=_fisher_data_reuse,
             _laplace_excluded=_laplace_excluded,
             _mode_bar=_mode_bar,
+            _compensate_centred_intercept=_compensate_centred_intercept,
         )
         return result
     finally:
@@ -829,6 +833,7 @@ def _fit_irls_direct_once(
     _fisher_data_reuse: _FisherDataReuse | None = None,
     _laplace_excluded: tuple[int, ...] = (),
     _mode_bar: float | None = None,
+    _compensate_centred_intercept: bool = True,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -886,6 +891,14 @@ def _fit_irls_direct_once(
         Internal optimization switch. If False, omit EDF and scale summaries
         that the fREML outer loop does not consume. The authoritative final
         fit must leave this True.
+    _compensate_centred_intercept : bool
+        Internal switch for in-loop REML fits that compute statistics (the
+        bootstrap, and traced candidates and trials): False keeps their eta
+        the solver's ``alpha + X~ beta`` bit for bit.  With it and
+        ``_compute_fit_statistics`` True, a centred Gaussian identity fit
+        publishes its intercept as the compensated pair ``(alpha, alpha_lo)``
+        (``mode_score.centred_intercept_remainder``) and its deviance and
+        scale at that predictor.
     _compute_reml_geometry : bool
         Internal SCOP-candidate switch. If False, omit the generic profiled
         slope inverse, determinant, and rank because the caller replaces them
@@ -3044,6 +3057,33 @@ def _fit_irls_direct_once(
     t_elapsed = time.perf_counter() - t_start
     logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
 
+    # A published Gaussian identity fit carries its centred intercept as the
+    # compensated pair (alpha, alpha_lo): alpha's weighted mean rounds by a
+    # kernel-dependent ulp or more, and alpha + (x - c) beta ties at every row
+    # when alpha* is the midpoint of two adjacent floats, so a one-ulp signal
+    # between two levels collapsed on some BLAS kernels.  The deviance and
+    # scale published below are the compensated predictor's, the eta every
+    # consumer reads (``mode_score.linear_predictor``).
+    centred_intercept_lo: float | None = None
+    if (
+        _compensate_centred_intercept
+        and _compute_fit_statistics
+        and retained.centred_intercept is not None
+        and _state_center is not None
+        and type(family) is Gaussian
+        and type(link) is IdentityLink
+    ):
+        contribution = centred_matvec(dm, beta, _state_center)
+        centred_intercept_lo = centred_intercept_remainder(
+            y, weights, offset, retained.centred_intercept, contribution
+        )
+        if centred_intercept_lo is not None:
+            contribution += centred_intercept_lo
+            eta_unclipped = (retained.centred_intercept + contribution) + offset
+            eta = stabilize_eta(eta_unclipped, link)
+            mu = clip_mu(link.inverse(eta), family)
+            dev = float(np.sum(weights * family.deviance_unit(y, mu)))
+
     # Runtime separation backstop (issue #341).  Two terminal signatures mark
     # a coefficient that walked toward +/-infinity instead of converging:
     #
@@ -3632,6 +3672,7 @@ def _fit_irls_direct_once(
         direct_fallback_reason=_direct_fallback_reason,
         centred_intercept=retained.centred_intercept,
         state_center=None if retained.centred_intercept is None else _state_center,
+        centred_intercept_lo=centred_intercept_lo,
         mean_space_boundary_rows=_boundary_rows,
     )
 

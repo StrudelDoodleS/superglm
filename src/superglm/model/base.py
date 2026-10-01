@@ -390,20 +390,43 @@ def _score_prediction_term_exact(
     )
 
 
-def prediction_centred_state(result) -> tuple[float, NDArray | None]:
-    """The intercept and column centre a public result's predictor starts from.
+def prediction_centred_state(result) -> tuple[float, NDArray | None, float | None]:
+    """The intercept, column centre and intercept remainder a public result's predictor starts from.
 
-    ``(centred_intercept, state_center)`` when the result carries its fit's
-    centred state (one-engine design §3.8; read into the public coordinates
-    by ``runtime_canonicalize._public_centred_state``), else the raw
-    ``(intercept, None)``: a model saved before the state existed, or one
-    whose coefficients were revised after the fit, predicts as before.
+    ``(centred_intercept, state_center, centred_intercept_lo)`` when the
+    result carries its fit's centred state (one-engine design §3.8; read into
+    the public coordinates by ``runtime_canonicalize._public_centred_state``),
+    the remainder ``None`` unless the fit published a compensated intercept
+    (``mode_score.centred_intercept_remainder``), else the raw ``(intercept,
+    None, None)``: a model saved before the state existed, or one whose
+    coefficients were revised after the fit, predicts as before.
     """
     alpha = getattr(result, "centred_intercept", None)
     centre = getattr(result, "state_center", None)
     if alpha is None or centre is None:
-        return float(result.intercept), None
-    return float(alpha), np.asarray(centre, dtype=np.float64)
+        return float(result.intercept), None, None
+    alpha_lo = getattr(result, "centred_intercept_lo", None)
+    return (
+        float(alpha),
+        np.asarray(centre, dtype=np.float64),
+        None if alpha_lo is None else float(alpha_lo),
+    )
+
+
+def start_eta(n: int, intercept: float, intercept_lo: float | None) -> NDArray[np.float64]:
+    """The accumulator a predictor's term contributions are added to.
+
+    The intercept itself, or for a compensated pair its remainder: the terms
+    and ``alpha_lo`` add at their own scale and ``finish_eta`` adds ``alpha``
+    once, ``alpha + (sum_t score_t + alpha_lo)`` as ``linear_predictor``
+    evaluates the fit.
+    """
+    return np.full(n, intercept if intercept_lo is None else intercept_lo, dtype=np.float64)
+
+
+def finish_eta(eta: NDArray, intercept: float, intercept_lo: float | None) -> NDArray:
+    """Close ``start_eta``'s accumulator: add a compensated pair's ``alpha`` last."""
+    return eta if intercept_lo is None else intercept + eta
 
 
 def scores_centred(spec) -> bool:
@@ -496,8 +519,8 @@ def _predict_eta(
     # The fit's centred predictor (one-engine design §3.8) when it carries one:
     # a dense column's offset would otherwise cancel between X beta and the
     # raw intercept and return the rounding the fit avoided.
-    intercept, centre = prediction_centred_state(model.result)
-    eta = np.full(len(frame), intercept, dtype=np.float64)
+    intercept, centre, intercept_lo = prediction_centred_state(model.result)
+    eta = start_eta(len(frame), intercept, intercept_lo)
 
     scorer = _score_prediction_term_fast_discrete if fast_discrete else _score_prediction_term_exact
 
@@ -526,6 +549,7 @@ def _predict_eta(
             continue
         eta += score(term)
 
+    eta = finish_eta(eta, intercept, intercept_lo)
     if offset is not None:
         eta = eta + offset
     return stabilize_eta(eta, model._link) if stabilize else eta

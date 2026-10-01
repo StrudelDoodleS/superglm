@@ -314,6 +314,11 @@ class PIRLSResult:
     # solver kept the raw intercept.
     centred_intercept: float | None = None
     state_center: NDArray | None = None
+    # A published Gaussian identity fit's ``alpha_lo``: the predictor is the
+    # compensated pair ``centred_intercept + ((X - 1 state_center') beta +
+    # centred_intercept_lo)`` (``mode_score.centred_intercept_remainder``).
+    # ``None`` for every other fit, which evaluates as before.
+    centred_intercept_lo: float | None = None
     # Positive-weight rows the returned state holds at the boundary of the
     # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
     # only with ``termination_reason == "mean_space_boundary"``.

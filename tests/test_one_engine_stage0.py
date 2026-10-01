@@ -832,6 +832,37 @@ def test_every_reading_of_a_fit_uses_its_centred_predictor(family):
     np.testing.assert_allclose(_solver_space_working_weights(model), expected, rtol=4 * u, atol=0)
 
 
+@pytest.mark.parametrize("base", [3e-8, 1e100])
+def test_the_compensated_intercept_reproduces_an_adjacent_float_fit_exactly(base):
+    """A Gaussian identity fit publishes ``alpha + ((X - 1 c') beta + alpha_lo)``.
+
+    Levels ``y = base`` and ``nextafter(base)`` on ``x`` in {0, 1}: ``c = 1/2``,
+    ``beta`` is one ulp and ``alpha*`` is their midpoint, which no float holds.
+    The float ``alpha`` (a BLAS weighted mean, kernel dependent) plus
+    ``(x - c) beta = +/- half an ulp`` ties at every row, so both rows round
+    to one even neighbour, or to two values two ulps apart.  Every quantity
+    of the remainder is an exact multiple of half an ulp here, so
+    ``alpha_lo = alpha* - alpha`` and each row's ``(x - c) beta + alpha_lo``
+    are exact and the predictor returns ``y`` itself: the fit, prediction and
+    metrics read a zero deviance on every kernel.  Fails without the
+    remainder, and with the raw ``X beta + intercept``, whose intercept is
+    already ``alpha`` rounded.
+    """
+    from superglm.solvers.mode_score import linear_predictor
+
+    x = np.tile([0.0, 1.0], 50)
+    X = pd.DataFrame({"x": x})
+    y = np.where(x == 0.0, base, np.nextafter(base, np.inf))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()}).fit(X, y)
+
+    solver = model._solver_pirls_result()
+    assert solver.centred_intercept_lo is not None
+    np.testing.assert_array_equal(linear_predictor(model._dm, solver, None), y)
+    np.testing.assert_array_equal(model.predict(X), y)
+    assert solver.deviance == 0.0
+    assert model.metrics(X, y).deviance == 0.0
+
+
 def test_a_fit_without_a_dense_column_keeps_its_raw_predictor():
     """Only a dense column needs the centre: without one the public result carries no
     centred state and predictions are the raw ``intercept + sum_t score_t`` as before."""

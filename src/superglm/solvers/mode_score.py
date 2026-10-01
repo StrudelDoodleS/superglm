@@ -389,19 +389,81 @@ def prior_weighted_centre(dm: DesignMatrix, prior_weights: NDArray) -> NDArray:
     return centre
 
 
+def two_sum(a, b):
+    """Knuth's TwoSum: ``s = fl(a + b)`` and its rounding error, ``a + b = s + e`` exactly.
+
+    Branch-free and exact for any finite operands, also under underflow, with
+    ``|e| <= u |s|`` (Ogita, Rump & Oishi 2005, Algorithm 3.1 and Theorem 3.4).
+    """
+    s = a + b
+    b_virtual = s - a
+    return s, (a - (s - b_virtual)) + (b - b_virtual)
+
+
+def centred_intercept_remainder(
+    y: NDArray,
+    weights: NDArray,
+    offset: NDArray | None,
+    alpha: float,
+    contribution: NDArray,
+) -> float | None:
+    """``alpha_lo``: the compensated remainder of a Gaussian identity fit's centred intercept.
+
+    With the slopes' centred contribution ``t = centred_matvec(...)`` as
+    evaluated, the intercept that zeros the intercept score is ``alpha* =
+    sum w (y - o - t) / sum w`` (the intercept is never penalized).  The
+    fit's float ``alpha`` misses it by the forward error of the weighted means
+    that formed it (BLAS dots, whose summation order is kernel dependent),
+    and by at least the half ulp ``alpha*`` loses when it is not representable
+    (the midpoint of two adjacent floats).  One step of iterative refinement
+    with the residual formed error-free (Demmel et al. 2009 for least squares)
+    recovers it: ``y - o`` and ``- alpha`` are TwoSums, so the residual ``d =
+    y - o - alpha - t`` rounds at its own size, and
+
+        |alpha + alpha_lo - alpha*| <= gamma_{n+3} sum w |d| / sum w
+                                       + gamma_n |alpha_lo| + O(u^2) mean_w |y - o|,
+
+    which scales with the residuals, not with ``|eta|`` as ``alpha``'s own
+    error does.  ``None`` when there is no positive weight or the residual
+    overflows, and the predictor stays ``alpha + t``.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    total = float(np.sum(w))
+    if not total > 0.0:
+        return None
+    response = np.asarray(y, dtype=np.float64)
+    tail = 0.0
+    if offset is not None and np.any(offset):
+        response, tail = two_sum(response, -np.asarray(offset, dtype=np.float64))
+    head, error = two_sum(response, -float(alpha))
+    residual = (head - contribution) + (error + tail)
+    with np.errstate(over="ignore", invalid="ignore"):
+        remainder = float(np.sum(w * residual)) / total
+    return remainder if math.isfinite(remainder) else None
+
+
 def linear_predictor(dm: DesignMatrix, result, offset: NDArray | None) -> NDArray:
     """The unclipped ``eta`` of a PIRLS result, from its centred state when it carries one.
 
     ``alpha + X~ beta + offset`` (``centred_matvec``) when the result records
     ``centred_intercept`` and ``state_center``; ``X beta + intercept +
-    offset`` otherwise.  ``offset`` ``None`` adds nothing.
+    offset`` otherwise.  A published Gaussian identity fit also carries the
+    intercept's remainder ``alpha_lo`` (``centred_intercept_remainder``) and
+    evaluates the compensated pair as ``alpha + (X~ beta + alpha_lo)``: the
+    remainder joins the rows at their own scale before the one rounding at
+    ``|eta|``, so ``|eta - eta*| <= u |eta*| + u |X~ beta + alpha_lo|`` plus
+    the remainder's bound.  ``offset`` ``None`` adds nothing.
     """
     alpha = getattr(result, "centred_intercept", None)
     center = getattr(result, "state_center", None)
     if alpha is None or center is None:
         eta = dm.matvec(result.beta) + result.intercept
     else:
-        eta = alpha + centred_matvec(dm, result.beta, center)
+        eta = centred_matvec(dm, result.beta, center)
+        alpha_lo = getattr(result, "centred_intercept_lo", None)
+        if alpha_lo is not None:
+            eta += alpha_lo
+        eta = alpha + eta
     return eta if offset is None else eta + offset
 
 

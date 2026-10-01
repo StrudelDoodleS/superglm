@@ -507,7 +507,7 @@ def invalidate_revised_coefficient_mode(model) -> None:
             if hasattr(result, field_name):
                 setattr(result, field_name, value)
         if not keep_centred:
-            for field_name in ("centred_intercept", "state_center"):
+            for field_name in ("centred_intercept", "state_center", "centred_intercept_lo"):
                 if hasattr(result, field_name):
                     setattr(result, field_name, None)
         updated.add(id(result))
