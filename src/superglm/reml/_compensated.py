@@ -94,6 +94,25 @@ def _dot2_selected(left, right, indices):
     return values, success
 
 
+def _native_operand(values) -> np.ndarray:
+    """``values`` as the read-only C-contiguous float64 array every native call passes.
+
+    Numba compiles one specialisation per layout and write flag, so callers
+    passing their own arrays would compile several. This is the one form
+    :func:`_warmup_compensated` compiles; contiguous input is viewed, not copied.
+    """
+    array = np.ascontiguousarray(values, dtype=np.float64).view()
+    array.flags.writeable = False
+    return array
+
+
+def _warmup_compensated() -> None:
+    """Compile both Dot2 kernels for the operands their callers pass."""
+    matrix = _native_operand(np.eye(2))
+    _dot2_selected(matrix, matrix, np.zeros((2, 2), dtype=np.int64))
+    _dot2_value(matrix[0], matrix[1])
+
+
 @njit(cache=True, fastmath=False)
 def _dot2_quadratic_form(rows, columns, entries, vector):
     """Evaluate ``x' A x`` as ``Dot2(x, A x)`` with each row of ``A x`` from Dot2.

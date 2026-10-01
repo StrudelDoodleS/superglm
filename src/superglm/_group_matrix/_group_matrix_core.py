@@ -713,8 +713,13 @@ class SparseSSPGroupMatrix:
     def gram(self, W: NDArray) -> NDArray:
         return self._gram_with_projection(W)[0]
 
-    def _gram_with_projection(self, W: NDArray) -> tuple[NDArray, bool]:
-        """Return the Gram and whether cross products need projected rows."""
+    def _gram_with_projection(self, W: NDArray, *, _csr_gram=None) -> tuple[NDArray, bool]:
+        """Return the Gram and whether cross products need projected rows.
+
+        ``_csr_gram`` stands in for ``_csr_weighted_gram`` with its values: a
+        batched assembly's shared pass over several weight vectors.
+        """
+        csr_gram = _csr_weighted_gram if _csr_gram is None else _csr_gram
         if _ssp_gram_needs_exact(self._data, self.R_inv, W):
             raw_basis = sp.csr_matrix(
                 (self._data, self._indices, self._indptr),
@@ -743,7 +748,7 @@ class SparseSSPGroupMatrix:
             if raw_basis.has_canonical_format:
                 raw_gram = _saturated_ssp_gram(raw_basis, W)
         if raw_gram is None:
-            raw_gram = _csr_weighted_gram(self._data, self._indices, self._indptr, W, self._p_b)
+            raw_gram = csr_gram(self._data, self._indices, self._indptr, W, self._p_b)
         else:
             # Match the CSR kernel's upper-triangle orientation and exact
             # raw symmetry; copying adds no rounding to the weighted dots.
@@ -758,9 +763,7 @@ class SparseSSPGroupMatrix:
                 # Its absolute error scale is X'|W|X, not |diag(X'WX)|.
                 # Only flagged mixed-sign calls need this companion pass;
                 # take abs per row rather than allocating another W vector.
-                energy_raw = _csr_weighted_gram(
-                    self._data, self._indices, self._indptr, W, self._p_b, True
-                )
+                energy_raw = csr_gram(self._data, self._indices, self._indptr, W, self._p_b, True)
                 energy = self.R_inv.T @ energy_raw @ self.R_inv
                 if not _ssp_projection_cancels(energy_raw, self.R_inv, energy):
                     return gram, False
