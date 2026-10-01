@@ -2,11 +2,12 @@
 
 AGENTS.md, "Numerical policy": production numerics target float64 on every
 platform. Each case below fits a small model on one representative route:
-``fit_reml`` on five routes, and ``fit()`` with an active selection penalty,
+``fit_reml`` on seven routes, two of them the structured engine for random
+effects and factor smooths, and ``fit()`` with an active selection penalty,
 which runs ``fit_pirls``. Every case runs twice, once as written and once with
 float32 features, response, ``sample_weight`` and ``offset``. The test walks
 what the fit publishes -- the public result, the REML result and profile,
-``diagnostics()``, ``iteration_diagnostics()`` where it was recorded, and
+the retained linear-system and reporting-support state, ``diagnostics()``, ``iteration_diagnostics()`` where it was recorded, and
 ``predict()`` -- and fails on any floating array, sparse matrix, pandas column
 or index, or NumPy scalar that is not float64 (complex values must be
 complex128). It also fails on any object it cannot look inside, so a new
@@ -24,7 +25,16 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from superglm import Constraint, PSpline, RandomEffect, Spline, SuperGLM, Tweedie
+from superglm import (
+    Constraint,
+    FactorSmooth,
+    PSpline,
+    RandomEffect,
+    Spline,
+    SuperGLM,
+    Tweedie,
+)
+from superglm.solvers._structured.state import StructuredLinearSystemState
 
 _BINARY64 = (np.dtype(np.float64), np.dtype(np.complex128))
 # Code, not data: nothing a fit publishes is stored inside these.
@@ -121,6 +131,28 @@ def _poisson_random_effect():
     return model, X, rng.poisson(np.exp(0.3 * x + rng.normal(0, 0.3, 6)[group]))
 
 
+def _poisson_random_effect_structured():
+    # Too narrow for direct_solve="auto" to choose the structured engine.
+    _, X, y = _poisson_random_effect()
+    features = {"x": Spline(n_knots=6), "g": RandomEffect()}
+    model = SuperGLM(
+        family="poisson", selection_penalty=0, features=features, direct_solve="structured"
+    )
+    return model, X, y
+
+
+def _gaussian_factor_smooth_structured():
+    rng, x, group = _frame(5)
+    X = pd.DataFrame({"x": x, "g": pd.Categorical(group.astype(str))})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
+        direct_solve="structured",
+    )
+    return model, X, np.sin(2 * np.pi * x) + 0.2 * group + rng.normal(0, 0.3, x.size)
+
+
 def _tweedie_smooth():
     rng, x, _ = _frame(2)
     counts = rng.poisson(0.8 * np.exp(0.5 * x))
@@ -153,6 +185,8 @@ def _gaussian_selection():
 CASES = {
     "gaussian_smooth": _gaussian_smooth,
     "poisson_random_effect": _poisson_random_effect,
+    "poisson_random_effect_structured": _poisson_random_effect_structured,
+    "gaussian_factor_smooth_structured": _gaussian_factor_smooth_structured,
     "tweedie_smooth": _tweedie_smooth,
     "gamma_discrete": _gamma_discrete,
     "gaussian_increasing_scop": _gaussian_increasing,
@@ -185,6 +219,8 @@ def test_fit_publishes_only_binary64_floating_values(case, inputs):
         "result": model.result,
         "reml_result": model._reml_result,
         "profile": model._reml_profile,
+        "linear_system": model._linear_system_state,
+        "reporting_support": model._reporting_support_state,
         "diagnostics": model.diagnostics(),
         "predict": model.predict(X, offset=extra.get("offset")),
     }
@@ -197,6 +233,9 @@ def test_fit_publishes_only_binary64_floating_values(case, inputs):
     # The walk must reach the coefficients inside the result dataclass, and the
     # selection case must reach the fit_pirls rank metadata.
     assert "['result'].beta" in paths and "['predict']" in paths
+    if case.endswith("_structured"):
+        assert isinstance(model._linear_system_state, StructuredLinearSystemState)
+        assert any(path.startswith("['linear_system']") for path in paths)
     if selection:
         assert model.selection_penalty > 0 and model._reml_result is None
         assert "['result'].rank_info.feature_edf" in paths
