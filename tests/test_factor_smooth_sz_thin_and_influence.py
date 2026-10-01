@@ -600,22 +600,132 @@ def test_sz_aliased_levels_converge_beside_a_laplace_excluded_column(monkeypatch
     assert model._reml_result.termination_reason != "line_search_failed"
 
 
+def _penalty_root(model: SuperGLM, p: int) -> tuple[np.ndarray, float]:
+    """``R`` with ``R'R = S``, and its blocks' eigensolver backward error ``sum 2 p_k u ||S_k||_2``.
+
+    An ``sz`` block is ``kron([I; -1'], omega^1/2)``: its ``omega`` is diagonal
+    (the natural parameterization), so its root is exact to ``u`` entrywise.  A
+    dense block's root comes from its eigendecomposition, exact for ``S_k``
+    perturbed by ``p_k u ||S_k||`` and by as much again for the clipped
+    negative eigenvalues.
+    """
+    rows, backward = [], 0.0
+    for component in model._reml_penalties:
+        lam = model._reml_lambdas[component.name]
+        omega = lam * np.asarray(component.omega_ssp, dtype=np.float64)
+        if component.penalty_kind == "sum_to_zero":
+            assert np.array_equal(omega, np.diag(np.diag(omega)))
+            K = component.repeat_count
+            contrast = np.vstack((np.eye(K - 1), -np.ones((1, K - 1))))
+            block = np.kron(contrast, np.diag(np.sqrt(np.diag(omega))))
+        else:
+            assert component.penalty_kind == "dense"
+            values, vectors = np.linalg.eigh(omega)
+            block = np.sqrt(np.clip(values, 0.0, None))[:, None] * vectors.T
+            backward += 2.0 * len(values) * _U * float(np.max(np.abs(values)))
+        root = np.zeros((block.shape[0], p))
+        root[:, component.group_sl] = block
+        rows.append(root)
+    return np.vstack(rows), backward
+
+
+def _dense_cross_trace(model: SuperGLM, X, W, rates, rank: int) -> tuple[float, float]:
+    """``t = tr(H^+ C H^+ C)`` from square roots, and a bound ``beta`` on ``sqrt(t)``'s error.
+
+    ``H = A'A``, ``A = [W^1/2 X_c; R]`` (Fisher rows centred on their weighted
+    mean ``c``, ``R'R = S``), and ``C = G'JG``, ``G = |a|^1/2 X_c``, ``J =
+    sign(a)``.  Householder QR of ``A``, then the SVD ``U s V'`` of its
+    triangle, give ``t = ||F'JF||_F^2``, ``F = G V_r / s_r``, at the factor's
+    rank ``r``.  ``t`` is invariant under ``H, C -> B'HB, B'CB`` for any
+    invertible ``B``, so ``V_r`` may span any complement of ``H``'s exact
+    nulls once ``C`` annihilates them too.  No Gram is formed: the alias
+    (``s_r`` near ``1e-6``) costs ``kappa(A)``, not ``kappa(A)^2 = 1e16``.
+
+    Rounding perturbs the square roots.  ``dA = (gamma_mp + gamma_2) ||A||_F
+    + p u s_1 + sqrt(sum W) ||dc||``: Householder QR column by column (Higham
+    2002, Theorem 19.4, its constant taken as 1 as in Connolly & Higham 2022,
+    section 7), the entries, the SVD (``p u ||A||_2``, its factors orthogonal
+    to ``p u``) and the computed mean, ``||dc|| <= gamma_(2n+1) || |X|'W || /
+    sum W``.  ``dG = (gamma_2 + gamma_p sqrt(p)) ||G||_F + sqrt(sum |a|)
+    ||dc||``, the second term the product ``G V_r``.  Each costs ``1 /
+    sigma``, ``sigma^2 = (s_r - dA)^2 - dS`` a lower bound on the exact
+    ``s_r^2`` (Weyl; ``dS`` from ``_penalty_root``): ``rho = dA / sigma``,
+    ``rho_G = dG / sigma``.  The weights' relative rounding ``delta`` (the
+    predictor's ``gamma_(p+1) (|X||b| + |b_0|)``, with ``|X||b|`` up to
+    ``1e6`` here, then ``exp``, the products and ``W^1/2``) costs no ``1 /
+    sigma``: ``c`` stays a weighted mean and ``W^1/2 X_c H^-1/2`` has norm 1,
+    so ``H`` moves by ``2 delta`` and ``C`` by ``delta ||F||_F^2 + 2 w phi +
+    w^2`` (``w = delta kappa / (1 - delta)``, ``kappa^2 = sum |a| / sum W``,
+    ``phi >= ||G H^-1/2||_2``) in the scaling below.  So the computed ``H``
+    is ``H^1/2 (I + E) H^1/2`` with ``||E|| <= eta = (1 + 2 delta)(1 + 2 rho
+    + rho^2 + 2 p u + dS / sigma^2) - 1``, and ``M = H^-1/2 C H^-1/2`` moves by
+    ``dM <=`` the weights' term plus ``(1 + 2 delta)(2 phi rho_G + rho_G^2 +
+    gamma_(n+4) ||F||_F^2)`` (the last ``F'JF``).  With ``K = (I + E)^-1/2``
+    the computed trace is ``||K (M + dM) K||_F^2``, so its square root is
+    within ``(eta sqrt(t) + dM) / (1 - eta)`` of ``sqrt(t)``; with ``sqrt(t)``
+    taken from the computed one, ``beta = (eta sqrt(t~) + dM) / (1 - 2 eta)``,
+    plus the final sum's ``2 gamma_(r^2) sqrt(t~)``.
+    """
+    n, p = X.shape
+    total = float(np.sum(W))
+    Xc = X - (X.T @ W) / total
+    root, dS = _penalty_root(model, p)
+    A = np.vstack((np.sqrt(W)[:, None] * Xc, root))
+    G = np.sqrt(np.abs(rates))[:, None] * Xc
+    _, s, Vt = np.linalg.svd(np.linalg.qr(A, mode="r"))
+    F = (G @ Vt[:rank].T) / s[:rank]
+    M = F.T @ (np.sign(rates)[:, None] * F)
+    reference = float(np.sum(M * M))
+
+    predictor = np.abs(X) @ np.abs(model.result.beta) + abs(float(model.result.intercept))
+    delta = math.expm1(2.0 * _gamma(p + 1) * float(np.max(predictor))) * (1.0 + _gamma(9))
+    delta += _gamma(9)
+    dc = _gamma(2 * n + 1) * float(np.linalg.norm(np.abs(X).T @ W)) / total
+    absolute = float(np.sum(np.abs(rates)))
+    dA = (_gamma(A.shape[0] * p) + _gamma(2)) * float(np.linalg.norm(A)) + p * _U * s[0]
+    dA += math.sqrt(total) * dc
+    dG = (_gamma(2) + _gamma(p) * math.sqrt(p)) * float(np.linalg.norm(G))
+    dG += math.sqrt(absolute) * dc
+    assert np.all(s[rank:] <= dA)  # the factor's truncated directions: exact nulls
+    assert s[rank - 1] > dA and (s[rank - 1] - dA) ** 2 > dS
+    sigma = math.sqrt((s[rank - 1] - dA) ** 2 - dS)
+    rho, rho_G = dA / sigma, dG / sigma
+    eta = (1.0 + 2.0 * delta) * (1.0 + 2.0 * rho + rho * rho + 2.0 * p * _U + dS / sigma**2) - 1.0
+    assert eta < 0.5
+    phi = (float(np.linalg.norm(F, 2)) + rho_G) * math.sqrt(1.0 + eta)
+    frobenius = (float(np.linalg.norm(F)) + rho_G) ** 2 * (1.0 + eta)
+    w = delta * math.sqrt(absolute / total) / (1.0 - delta)
+    dM = delta * frobenius + 2.0 * w * phi + w * w
+    dM += (1.0 + 2.0 * delta) * (2.0 * phi * rho_G + rho_G**2 + _gamma(n + 4) * frobenius)
+    root_t = math.sqrt(reference)
+    beta = (eta * root_t + dM) / (1.0 - 2.0 * eta) + 2.0 * _gamma(rank * rank) * root_t
+    return reference, beta
+
+
 @pytest.mark.parametrize(
     ("variant", "lam_x"), [("same_x", 8e-4), ("same_x", 1e-4), ("one_row", 1e-4)]
 )
 def test_an_sz_weight_derivative_cross_trace_survives_the_alias_variance(variant, lam_x) -> None:
-    """``tr(H^-1 C H^-1 C)`` of a centred weight-derivative operator stays a sum of squares (#432 d).
+    """``tr(H^+ C H^+ C)`` of a centred weight-derivative operator is the dense trace (#432 d).
 
     The REML Hessian traces each weight-derivative operator ``C`` (centred:
     ``J' O J`` over ``[1, X]``) against the profiled sz factor.  With
     ``lambda_x`` small a thin level's penalized alias has a variance of
     ``1e11`` to ``1e12``, and ``C`` vanishes along it; held as raw moments
     plus a rank-two centring, the two parts met that variance separately and
-    the trace cancelled to their rounding: ``-6.2e4``, ``-3.4e7`` and
-    ``-5.9e7`` here against dense ``8.2e4``, ``8.2e4`` and ``7.2e4``.  It is
-    ``||H^-1/2 C H^-1/2||_F^2``, never negative, and ``_trace_form`` (the
-    intercept column per level, each part annihilating the alias) keeps it
-    so.  Mutation: ``_trace_form`` returning ``self._form(operator)``.
+    the trace cancelled to their rounding.  ``_trace_form`` (the intercept
+    column per level, each part annihilating the alias) keeps the dense
+    trace.  The reference (``_dense_cross_trace``) is within ``beta`` of the
+    exact trace in its square root and the factor is allowed as much, so
+    ``|t - t_ref| <= 2 beta (2 sqrt(t_ref) + 2 beta)``: here ``7e-5``,
+    ``1e-4`` and ``2e-3`` against ``0.48``, ``1.8`` and ``1.8``.  Mutation
+    (``_trace_form`` returning ``self._form(operator)``): ``-1.0e5``,
+    ``-1.05e7`` and ``+4.7e7``; origin/master: ``-3.0e5``, ``+1.3e7`` and
+    ``-2.5e7``: the positive two would pass a check of the sign alone.  The
+    rates vanish where ``W`` does, as ``dW/drho = 2 W deta/drho`` does on a
+    log link's Fisher rows: ``C`` then annihilates every exact null of ``H``
+    (``one_row``'s level below the link's range has ``W = 0``), so every
+    generalized inverse gives the one trace.
     """
     from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
     from superglm.solvers._structured.operators import CenteredBlockOperator
@@ -627,10 +737,14 @@ def test_an_sz_weight_derivative_cross_trace_survives_the_alias_variance(variant
     model = _fit(model, frame, y, weight)
     factor = model._linear_system_state.profiled_factor
     system = factor.augmented_factor.system
+    assert not system.leaf.signed  # the terminal refit's rows are Fisher's, W = w mu^2
+    X = np.asarray(model._dm.toarray(), dtype=np.float64)
+    mu = np.exp(X @ model.result.beta + model.result.intercept)
+    W = weight * mu * mu
+    rates = np.random.default_rng(0).normal(size=len(W)) * W
     layout = get_structured_layout(
         model._dm, model._groups, dominant_group_index=system.dominant_group_index
     )
-    rates = np.random.default_rng(0).normal(size=model._dm.n) * weight
     ((raw, cross, total, level),) = factor_smooth_moment_operators(
         layout, [rates], center=system.leaf.center, level_cross=True
     )
@@ -641,7 +755,10 @@ def test_an_sz_weight_derivative_cross_trace_survives_the_alias_variance(variant
         center=centred_data_operator(system).center,
         raw_structured_cross=level,
     )
-    assert factor.operator_cross_trace(operator, operator) > 0.0
+    reference, beta = _dense_cross_trace(model, X, W, rates, factor.rank)
+    both = 2.0 * beta
+    error = factor.operator_cross_trace(operator, operator) - reference
+    assert abs(error) <= both * (2.0 * math.sqrt(reference) + both)
 
 
 @pytest.mark.threads
