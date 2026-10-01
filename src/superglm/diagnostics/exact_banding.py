@@ -18,7 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 MAX_EXACT_VALUES = 5000
-_U = float(np.finfo(np.float64).eps) / 2.0  # the unit roundoff, 2**-53
+_UNIT_ROUNDOFF = 2.0**-53
 _FACTOR_RTOL = 1e-6
 _TOLERANCE_CEILING = float(np.finfo(np.float64).max) / 4.0
 # Below this range the running moments w d and w d**2 stay finite for any band
@@ -236,17 +236,23 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], NDArray[np.float64]
         # and each window edge by u max|d| from its d plus u times its own size.
         # The margin takes 4 (k + 2) u max|d|, more than twice the first two,
         # and 2 u times each edge's size (x + 2 u |x| is increasing, so that
-        # covers every d - t below lo and d + t above hi).  Feasibility is then
-        # monotone in a widening factor, and a plateau (d = 0) merges whatever
-        # its tolerances.
+        # covers every d - t below lo and d + t above hi).  The two additions
+        # that form low_edge and high_edge can round that 2 u |edge| term away;
+        # err's own roundings are second order.  The (2k + 6) u max|d| left
+        # after the first two errors covers the edge's u |edge| instead wherever
+        # it decides the band: the mean is within max|d| of zero, so an edge
+        # within (2k + 5) max|d| of the mean is within (2k + 6) max|d| of zero,
+        # and an edge further from the mean is far past its own rounding.
+        # Feasibility is then monotone in a widening factor, and a plateau
+        # (d = 0) merges whatever its tolerances.
         length = np.arange(1, m + 1)
         max_d = np.maximum.accumulate(np.abs(d))
-        err = 4.0 * _U * (length + 2) * max_d
+        err = 4.0 * _UNIT_ROUNDOFF * (length + 2) * max_d
         # max_d starts at 0 and never falls: the underflow margin goes on every
         # band past the plateau, which has none.
         err[np.searchsorted(max_d, 0.0, side="right") :] += underflow
-        low_edge = lo[:m] + err + 2.0 * _U * np.abs(lo[:m])
-        high_edge = hi[:m] - err - 2.0 * _U * np.abs(hi[:m])
+        low_edge = lo[:m] + err + 2.0 * _UNIT_ROUNDOFF * np.abs(lo[:m])
+        high_edge = hi[:m] - err - 2.0 * _UNIT_ROUNDOFF * np.abs(hi[:m])
         # The bounds are exact, so this test is too: no rounding margin.
         low_band = np.maximum.accumulate(low_double[j::-1][:m])
         high_band = np.minimum.accumulate(high_double[j::-1][:m])
