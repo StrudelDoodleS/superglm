@@ -65,9 +65,16 @@ def test_sz_construction_matches_mgcv_sorted_contrast_coordinates(
         construction["design_dim"],
     )
 
+    # sz takes fs's natural parameterization (one-engine design §3.5, decision
+    # 5): the public columns are mgcv's contrast columns times the per-level
+    # natural map N, and the penalty mgcv's under the same change of basis.
+    natural = np.asarray(info.factor_smooth_transform, dtype=np.float64)
+    public_map = np.kron(np.eye(len(spec._levels) - 1), natural)
+    spread = float(np.max(np.sum(np.abs(natural), axis=0)))
+
     assert list(spec._levels) == construction["levels"]
     assert info.n_cols == 18
-    np.testing.assert_allclose(design, reference_design, rtol=0.0, atol=2e-10)
+    np.testing.assert_allclose(design, reference_design @ public_map, rtol=0.0, atol=2e-10 * spread)
 
     assert [name for name, _omega in info.repeated_penalty_components] == ["wiggle"]
     local_penalty = np.asarray(info.repeated_penalty_components[0][1], dtype=np.float64)
@@ -78,9 +85,9 @@ def test_sz_construction_matches_mgcv_sorted_contrast_coordinates(
     )
     np.testing.assert_allclose(
         public_penalty / construction["penalty_scale"],
-        reference_penalty,
+        public_map.T @ reference_penalty @ public_map,
         rtol=0.0,
-        atol=2e-10,
+        atol=2e-10 * spread * spread,
     )
     assert np.linalg.matrix_rank(public_penalty) == construction["penalty_rank"]
     assert (
@@ -98,9 +105,9 @@ def test_sz_construction_matches_mgcv_sorted_contrast_coordinates(
     )
     np.testing.assert_allclose(
         prediction_design,
-        reference_prediction,
+        reference_prediction @ public_map,
         rtol=0.0,
-        atol=2e-10,
+        atol=2e-10 * spread,
     )
 
     beta = np.linspace(-0.4, 0.7, info.n_cols)

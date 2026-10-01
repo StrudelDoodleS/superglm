@@ -15,6 +15,7 @@ from superglm.factor_smooth_geometry import (
     adjoint_sum_to_zero_blocks,
     expand_sum_to_zero_blocks,
 )
+from superglm.solvers._structured.retired import module_getattr
 
 if TYPE_CHECKING:
     from superglm.solvers._structured.nested import NestedDataOperator
@@ -121,11 +122,16 @@ class BlockSymmetricOperator:
         if not np.allclose(self.D, self.D.transpose(0, 2, 1), rtol=0.0, atol=1e-13):
             raise ValueError("Every local D block must be symmetric.")
         all_indices = np.concatenate([self.small_indices, self.structured_indices.ravel()])
-        if len(np.unique(all_indices)) != len(all_indices):
-            raise ValueError("small_indices and structured_indices must be disjoint.")
-        if not np.array_equal(np.sort(all_indices), np.arange(len(all_indices))):
-            raise ValueError("Structured index partitions must cover every coefficient once.")
-        object.__setattr__(self, "shape", (len(all_indices), len(all_indices)))
+        size = len(all_indices)
+        # O(p) partition test (perf F6), in the order and with the verdicts of a
+        # unique count then a sort: duplicates first, then coverage of 0..p-1.
+        if size:
+            low = int(all_indices.min())
+            if np.any(np.bincount(all_indices - low) > 1):
+                raise ValueError("small_indices and structured_indices must be disjoint.")
+            if low != 0 or int(all_indices.max()) != size - 1:
+                raise ValueError("Structured index partitions must cover every coefficient once.")
+        object.__setattr__(self, "shape", (size, size))
 
     @property
     def n_levels(self) -> int:
@@ -261,6 +267,9 @@ class CenteredBlockOperator:
     total: float
     center: NDArray
     raw_structured_cross: NDArray | None = None
+    # Centred column norms taken from the rows where the moments cancel below
+    # round-off, NaN elsewhere (geometry.cancelled_column_row_norms).
+    row_column_norm: NDArray | None = None
     shape: tuple[int, int] = field(init=False)
 
     def __post_init__(self):
@@ -273,6 +282,12 @@ class CenteredBlockOperator:
         center.setflags(write=False)
         object.__setattr__(self, "cross", cross)
         object.__setattr__(self, "center", center)
+        if self.row_column_norm is not None:
+            row_column_norm = np.array(self.row_column_norm, dtype=np.float64, copy=True)
+            if row_column_norm.shape != (p,):
+                raise ValueError("row_column_norm must match the coefficient width.")
+            row_column_norm.setflags(write=False)
+            object.__setattr__(self, "row_column_norm", row_column_norm)
         if self.raw_structured_cross is not None:
             raw_structured_cross = np.array(
                 self.raw_structured_cross,
@@ -391,218 +406,6 @@ CompactSymmetricOperator = (
 )
 if TYPE_CHECKING:
     CompactSymmetricOperator = CompactSymmetricOperator | NestedDataOperator
-
-
-@dataclass(frozen=True)
-class _DiagonalLowRank:
-    """Internal exact ``diag(d) + U R U.T`` representation."""
-
-    diagonal: NDArray
-    basis: NDArray
-    core: NDArray
-
-
-@dataclass(frozen=True)
-class _GeneralDiagonalLowRank:
-    """Internal exact ``diag(d) + L M R.T`` representation."""
-
-    diagonal: NDArray
-    left: NDArray
-    core: NDArray
-    right: NDArray
-
-
-def _block_operator_dlr(
-    operator: SymmetricBlockOperator,
-    *,
-    local_only: bool = False,
-) -> _DiagonalLowRank:
-    p = operator.shape[0]
-    q = len(operator.small_indices)
-    diagonal = np.zeros(p, dtype=np.float64)
-    diagonal[operator.structured_indices] = operator.d
-    if q == 0 or local_only:
-        return _DiagonalLowRank(
-            diagonal=diagonal,
-            basis=np.empty((p, 0)),
-            core=np.empty((0, 0)),
-        )
-    small_basis = np.zeros((p, q), dtype=np.float64)
-    small_basis[operator.small_indices] = np.eye(q)
-    cross_basis = np.zeros((p, q), dtype=np.float64)
-    cross_basis[operator.structured_indices] = operator.C
-    basis = np.column_stack((small_basis, cross_basis))
-    core = np.block(
-        [
-            [operator.A, np.eye(q)],
-            [np.eye(q), np.zeros((q, q))],
-        ]
-    )
-    return _DiagonalLowRank(diagonal=diagonal, basis=basis, core=core)
-
-
-def _merge_dlr(parts: tuple[_DiagonalLowRank, ...]) -> _DiagonalLowRank:
-    if not parts:
-        raise ValueError("At least one diagonal-low-rank part is required.")
-    diagonal = sum(
-        (part.diagonal for part in parts),
-        start=np.zeros_like(parts[0].diagonal),
-    )
-    ranks = [part.core.shape[0] for part in parts]
-    if not any(ranks):
-        return _DiagonalLowRank(
-            diagonal=diagonal,
-            basis=np.empty((len(diagonal), 0)),
-            core=np.empty((0, 0)),
-        )
-    basis = np.column_stack([part.basis for part in parts if part.core.shape[0]])
-    core = scipy.linalg.block_diag(*[part.core for part in parts if part.core.shape[0]])
-    return _DiagonalLowRank(diagonal=diagonal, basis=basis, core=core)
-
-
-def _operator_dlr(
-    operator: CompactSymmetricOperator,
-    *,
-    local_to: NDArray | None = None,
-) -> _DiagonalLowRank:
-    """Convert a compact operator to diagonal-plus-low-rank form.
-
-    ``local_to`` names a factor's structured indices, which every block
-    operator must share.  Their dense-small and cross blocks then never reach
-    the structured-by-structured block and are dropped, so the result agrees
-    with ``operator`` on that block alone -- all ``_dlr_cross_traces`` reads.
-    """
-    if isinstance(operator, SumBlockOperator):
-        return _merge_dlr(
-            tuple(_operator_dlr(item, local_to=local_to) for item in operator.operators)
-        )
-    if isinstance(operator, LowRankSymmetricOperator):
-        return _DiagonalLowRank(
-            diagonal=np.zeros(operator.shape[0]),
-            basis=operator.basis,
-            core=operator.core,
-        )
-    raw = operator.raw if isinstance(operator, CenteredBlockOperator) else operator
-    if local_to is not None and not np.array_equal(
-        np.sort(raw.structured_indices), np.sort(local_to)
-    ):
-        raise ValueError("Compact operator has a different structured block layout.")
-    base = _block_operator_dlr(raw, local_only=local_to is not None)
-    if not isinstance(operator, CenteredBlockOperator):
-        return base
-    update_basis = np.column_stack((operator.cross, operator.center))
-    update_core = np.array(
-        [
-            [0.0, -1.0],
-            [-1.0, operator.total],
-        ]
-    )
-    return _merge_dlr(
-        (
-            base,
-            _DiagonalLowRank(
-                diagonal=np.zeros(operator.shape[0]),
-                basis=update_basis,
-                core=update_core,
-            ),
-        )
-    )
-
-
-def _trace_symmetric_dlr(left: _DiagonalLowRank, right: _DiagonalLowRank) -> float:
-    value = float(left.diagonal @ right.diagonal)
-    # tr(AB) = sum(A * B.T): never form a square product just to read its trace.
-    if right.core.size:
-        value += float(
-            np.sum(right.core * (right.basis.T @ (left.diagonal[:, None] * right.basis)).T)
-        )
-    if left.core.size:
-        value += float(
-            np.sum(left.core * (left.basis.T @ (right.diagonal[:, None] * left.basis)).T)
-        )
-    if left.core.size and right.core.size:
-        overlap = left.basis.T @ right.basis
-        value += float(np.sum((left.core @ overlap) * (right.core @ overlap.T).T))
-    return value
-
-
-def _multiply_symmetric_dlr(
-    left: _DiagonalLowRank,
-    right: _DiagonalLowRank,
-) -> _GeneralDiagonalLowRank:
-    diagonal = left.diagonal * right.diagonal
-    left_parts: list[NDArray] = []
-    core_parts: list[NDArray] = []
-    right_parts: list[NDArray] = []
-    if right.core.size:
-        left_parts.append(left.diagonal[:, None] * right.basis)
-        core_parts.append(right.core)
-        right_parts.append(right.basis)
-    if left.core.size:
-        left_parts.append(left.basis)
-        core_parts.append(left.core)
-        right_parts.append(right.diagonal[:, None] * left.basis)
-    if left.core.size and right.core.size:
-        left_parts.append(left.basis)
-        core_parts.append(left.core @ (left.basis.T @ right.basis) @ right.core)
-        right_parts.append(right.basis)
-    if not core_parts:
-        empty = np.empty((len(diagonal), 0))
-        return _GeneralDiagonalLowRank(
-            diagonal=diagonal,
-            left=empty,
-            core=np.empty((0, 0)),
-            right=empty,
-        )
-    return _GeneralDiagonalLowRank(
-        diagonal=diagonal,
-        left=np.column_stack(left_parts),
-        core=scipy.linalg.block_diag(*core_parts),
-        right=np.column_stack(right_parts),
-    )
-
-
-def _general_dlr_diagonal(operator: _GeneralDiagonalLowRank) -> NDArray:
-    """Return the diagonal of a general diagonal-plus-low-rank operator."""
-    diagonal = np.array(operator.diagonal, dtype=np.float64, copy=True)
-    if operator.core.size:
-        diagonal += np.sum((operator.left @ operator.core) * operator.right, axis=1)
-    return diagonal
-
-
-def _general_dlr_square_diagonal(operator: _GeneralDiagonalLowRank) -> NDArray:
-    """Return the diagonal of the square of a general DLR operator."""
-    diagonal = np.square(operator.diagonal)
-    if not operator.core.size:
-        return diagonal
-    low_diagonal = np.sum((operator.left @ operator.core) * operator.right, axis=1)
-    diagonal += 2.0 * operator.diagonal * low_diagonal
-    square_left = operator.left @ operator.core @ (operator.right.T @ operator.left) @ operator.core
-    diagonal += np.sum(square_left * operator.right, axis=1)
-    return diagonal
-
-
-def _trace_general_product(
-    left: _GeneralDiagonalLowRank,
-    right: _GeneralDiagonalLowRank,
-) -> float:
-    # Each term is tr(AB) = sum(A * B.T) over the thin Gram products, so no
-    # square chained product is formed just to read its diagonal.
-    value = float(left.diagonal @ right.diagonal)
-    if right.core.size:
-        value += float(
-            np.sum(right.core * (right.right.T @ (left.diagonal[:, None] * right.left)).T)
-        )
-    if left.core.size:
-        value += float(np.sum(left.core * (left.right.T @ (right.diagonal[:, None] * left.left)).T))
-    if left.core.size and right.core.size:
-        value += float(
-            np.sum(
-                (left.core @ (left.right.T @ right.left))
-                * (right.core @ (right.right.T @ left.left)).T
-            )
-        )
-    return value
 
 
 @dataclass(frozen=True)
@@ -781,8 +584,9 @@ def _operator_bdlr(
     """Convert a compact operator to matching block-diagonal-plus-low-rank form.
 
     ``local_only`` drops a block operator's dense-small and cross blocks,
-    which never reach the structured-by-structured block, as in
-    ``_operator_dlr``; sum-to-zero operators keep their exact full form.
+    which never reach the structured-by-structured block, so the result agrees
+    with ``operator`` on that block alone -- all ``_bdlr_cross_traces`` reads;
+    sum-to-zero operators keep their exact full form.
     """
     if isinstance(operator, SumBlockOperator):
         return _merge_bdlr(
@@ -914,82 +718,6 @@ def _multiply_symmetric_bdlr(
     )
 
 
-def _multiply_symmetric_bdlr_coalesced(
-    left: _BlockDiagonalLowRank,
-    right: _BlockDiagonalLowRank,
-) -> _GeneralBlockDiagonalLowRank:
-    """Multiply BDLR operators while coalescing repeated low-rank bases."""
-    if left.shape != right.shape or not np.array_equal(
-        left.structured_indices,
-        right.structured_indices,
-    ):
-        raise ValueError("Block-diagonal-low-rank layouts must match.")
-    blocks = np.einsum("kij,kjl->kil", left.blocks, right.blocks, optimize=True)
-    if not left.core.size and not right.core.size:
-        empty = np.empty((left.shape[0], 0))
-        return _GeneralBlockDiagonalLowRank(
-            blocks=blocks,
-            structured_indices=left.structured_indices,
-            left=empty,
-            core=np.empty((0, 0)),
-            right=empty,
-            shape=left.shape,
-        )
-    if not left.core.size:
-        return _GeneralBlockDiagonalLowRank(
-            blocks=blocks,
-            structured_indices=left.structured_indices,
-            left=_apply_local_blocks(
-                left.blocks,
-                left.structured_indices,
-                right.basis,
-            ),
-            core=right.core,
-            right=right.basis,
-            shape=left.shape,
-        )
-    right_local_left = _apply_local_blocks(
-        right.blocks,
-        right.structured_indices,
-        left.basis,
-        transpose=True,
-    )
-    if not right.core.size:
-        return _GeneralBlockDiagonalLowRank(
-            blocks=blocks,
-            structured_indices=left.structured_indices,
-            left=left.basis,
-            core=left.core,
-            right=right_local_left,
-            shape=left.shape,
-        )
-
-    # In (B + U R U') (D + V S V'), coalesce the two occurrences
-    # of U and V instead of representing the three updates independently.
-    left_local_right = _apply_local_blocks(
-        left.blocks,
-        left.structured_indices,
-        right.basis,
-    )
-    left_width = left.core.shape[0]
-    right_width = right.core.shape[0]
-    core = np.zeros(
-        (right_width + left_width, right_width + left_width),
-        dtype=np.float64,
-    )
-    core[:right_width, :right_width] = right.core
-    core[right_width:, :right_width] = left.core @ (left.basis.T @ right.basis) @ right.core
-    core[right_width:, right_width:] = left.core
-    return _GeneralBlockDiagonalLowRank(
-        blocks=blocks,
-        structured_indices=left.structured_indices,
-        left=np.column_stack((left_local_right, left.basis)),
-        core=core,
-        right=np.column_stack((right.basis, right_local_left)),
-        shape=left.shape,
-    )
-
-
 def _general_bdlr_diagonal(operator: _GeneralBlockDiagonalLowRank) -> NDArray:
     diagonal = np.zeros(operator.shape[0], dtype=np.float64)
     diagonal[operator.structured_indices] = np.diagonal(
@@ -1062,7 +790,7 @@ def _trace_general_bdlr_product(
         )
         value += float(np.sum(left.core * (left.right.T @ right_applied).T))
     if left.core.size and right.core.size:
-        # tr(AB) = sum(A * B.T), as in _trace_general_product.
+        # tr(AB) = sum(A * B.T): never form a square product to read its trace.
         value += float(
             np.sum(
                 (left.core @ (left.right.T @ right.left))
@@ -1076,7 +804,7 @@ def _direction_stacks(
     basis: NDArray,
     core: NDArray,
     structured_indices: NDArray,
-    directions: Iterable[tuple[NDArray, _DiagonalLowRank | _BlockDiagonalLowRank]],
+    directions: Iterable[tuple[NDArray, _BlockDiagonalLowRank]],
 ) -> tuple[NDArray, NDArray, list]:
     """Keep each ``W = O U`` on the structured rows, ``R U' W``, and O's local part."""
     borders, cores, local_parts = [], [], []
@@ -1121,43 +849,15 @@ def _schur_cross_traces(
     return 0.5 * (traces + traces.T)
 
 
-def _dlr_cross_traces(
-    inverse: _DiagonalLowRank,
-    structured_indices: NDArray,
-    directions: Iterable[tuple[NDArray, _DiagonalLowRank]],
-) -> NDArray:
-    """Return ``trace(Z O_i Z O_j)`` for every pair, ``Z = diag(z) + U R U'``.
-
-    ``directions`` yields ``(O_i U, O_i's local part)`` once per direction; ``z``
-    is zero off ``structured_indices``.
-    """
-    borders, cores, local_parts = _direction_stacks(
-        inverse.basis, inverse.core, structured_indices, directions
-    )
-    z = inverse.diagonal
-    z_structured = z[structured_indices, None]
-    local = [
-        _GeneralDiagonalLowRank(
-            diagonal=z * part.diagonal,
-            left=z[:, None] * part.basis,
-            core=part.core,
-            right=part.basis,
-        )
-        for part in local_parts
-    ]
-    return _schur_cross_traces(
-        borders,
-        lambda border: z_structured * (border @ inverse.core),
-        cores,
-        _pairwise_traces(local, _trace_general_product),
-    )
-
-
 def _bdlr_cross_traces(
     inverse: _BlockDiagonalLowRank,
     directions: Iterable[tuple[NDArray, _BlockDiagonalLowRank]],
 ) -> NDArray:
-    """Block-diagonal form of ``_dlr_cross_traces``: ``Z_local`` has dense local blocks."""
+    """Return ``trace(Z O_i Z O_j)`` for every pair, ``Z = blockdiag(Z_k) + U R U'``.
+
+    ``directions`` yields ``(O_i U, O_i's local part)`` once per direction;
+    ``Z_local`` has dense local blocks on the structured rows.
+    """
     structured = inverse.structured_indices
     borders, cores, local_parts = _direction_stacks(
         inverse.basis, inverse.core, structured, directions
@@ -1201,7 +901,11 @@ def compact_operator_diagonal(
         return np.sum((operator.basis @ operator.core) * operator.basis, axis=1)
     raw = operator.raw if isinstance(operator, CenteredBlockOperator) else operator
     diagonal = np.empty(raw.shape[0], dtype=np.float64)
-    diagonal[raw.small_indices] = np.diag(raw.A)
+    if isinstance(raw, NestedDataOperator) and isinstance(operator, CenteredBlockOperator):
+        # the border entries come from the leaf statistics below; never form A
+        diagonal[raw.small_indices] = 0.0
+    else:
+        diagonal[raw.small_indices] = np.diag(raw.A)
     if isinstance(raw, BlockSymmetricOperator):
         diagonal[raw.structured_indices] = np.diagonal(raw.D, axis1=1, axis2=2)
     elif isinstance(raw, SumToZeroBlockOperator):
@@ -1211,11 +915,31 @@ def compact_operator_diagonal(
             axis2=2,
         )
     elif isinstance(raw, NestedDataOperator):
-        diagonal[raw.structured_indices] = raw.diagonal()[raw.structured_indices]
+        diagonal[raw.structured_indices] = np.concatenate(raw.tree.subtree_sum(raw.leaf.weight))
     else:
         diagonal[raw.structured_indices] = raw.d
     if isinstance(operator, CenteredBlockOperator):
-        diagonal = (
+        centred = (
             diagonal - 2.0 * operator.cross * operator.center + operator.total * operator.center**2
         )
+        if isinstance(raw, NestedDataOperator):
+            # The border rows' own centre c (design §3.2) keeps the offsets out:
+            # sum a (x - m)^2 = sum a (x - c)^2 - 2 (m - c) sum a (x - c) + (m - c)^2 sum a,
+            # every term free of the columns' offsets, where the raw identity
+            # above subtracts moments of size |x|^2.
+            leaf = raw.leaf
+            about = np.diag(leaf.within) + leaf.weight @ leaf.mean**2
+            sums = leaf.weight @ leaf.mean
+            if leaf.deviation is not None:
+                about = about + 2.0 * np.sum(leaf.deviation * leaf.mean, axis=0)
+                sums = sums + np.sum(leaf.deviation, axis=0)
+            shift = operator.center[raw.small_indices] - leaf.center
+            centred[raw.small_indices] = about - 2.0 * shift * sums + operator.total * shift**2
+        diagonal = centred
     return diagonal
+
+
+# Retired by the one engine (design §3.12): the scalar factor's diagonal-plus-
+# low-rank inverse, which a model saved by v0.35.0 pickles.  Importable at its
+# pickled path as an inert stand-in; release 0.37.0 may drop it.
+__getattr__ = module_getattr(__name__, frozenset({"_DiagonalLowRank"}))

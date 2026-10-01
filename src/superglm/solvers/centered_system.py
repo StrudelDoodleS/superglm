@@ -18,7 +18,7 @@ from superglm._group_matrix._group_matrix_centered import (
     stable_centered_gram_rhs,
     try_raw_moment_centering,
 )
-from superglm.group_matrix import DesignMatrix
+from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 
 _FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
 _FACTOR_CHUNK_ROWS = 8192
@@ -178,12 +178,116 @@ def grouped_weighted_factor_rhs(
 
 
 def penalty_factor(penalty: NDArray) -> NDArray:
-    """Return a square factor whose cross-product is a PSD penalty matrix."""
-    if penalty.shape == (0, 0) or not np.any(penalty):
-        return np.empty((0, penalty.shape[0]))
-    eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (penalty + penalty.T))
-    positive = eigenvalues > 0.0
-    return np.sqrt(eigenvalues[positive])[:, None] * eigenvectors[:, positive].T
+    """Return a factor ``R`` with ``R'R`` the PSD penalty ``S`` to within its own resolution.
+
+    Every rank decision downstream counts a row of ``R`` along a data-null
+    direction as identifying it, so ``R`` keeps only the curvature ``S``
+    certifies.  An exactly zero row of ``S`` is an exact null and is left out.
+    The rest splits exactly into its contiguous diagonal blocks (no entry
+    couples them; a penalty is block diagonal by term).  Each block is
+    Jacobi-equilibrated, ``A_b = D S_b D`` with ``D = diag(S_b)^(-1/2)``, keeps
+    the eigenpairs of ``A_b`` above its eigensolver resolution ``n_b eps
+    ||A_b||_2`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.7;
+    ``rank._eigensolver_relative_bar``, the floor of the Gram route's rank cut,
+    which equilibrates the same way), and maps the root back, ``R_b = W^(1/2)
+    V' D^(-1)``.  ``R_b'R_b = D^(-1) (A_b)_+ D^(-1)`` is the projection of
+    ``S_b`` onto the PSD cone in the norm ``||D X D||_F`` (Higham 2002, IMA J.
+    Numer. Anal. 22, Thm 3.2), less the eigenvalues below the bar.
+
+    Below the bar an eigenvalue's magnitude and sign are rounding; keeping it
+    (the former ``> 0.0`` test) invented curvature along an exact null.
+    Measured: an ``sz`` term's unpenalized natural coordinates (exactly zero
+    rows) came out of one ``eigh`` of the whole matrix at up to ``+5.3e-12``
+    against ``||S||_2 = 3.9e4``, which made a thin level's exact data-null
+    alias identified on gram (rank +1 against the structured solver).
+
+    The cut is on ``A_b``, not ``S_b``, so no coordinate's units decide its
+    rank.  A sum of PSD terms (``lambda_j D_j'D_j``, a natural
+    parameterization, a Kronecker sum) is rounded entrywise within ``gamma_n
+    sqrt(S_ii S_jj)`` (the dot-product bound and Cauchy-Schwarz), the scaled
+    perturbation under which ``S``'s eigenvalues are determined to relative
+    accuracy ``||A^-1||_2`` times its size, however graded ``S`` is (Demmel &
+    Veselic 1992, SIAM J. Matrix Anal. Appl. 13(4); Drmac 2020,
+    arXiv:2006.02753, Thms 3.7 and 3.11), and Jacobi scaling is within a
+    factor ``n`` of the best diagonal scaling (van der Sluis 1969, Numer.
+    Math. 14; Drmac, Thm 3.12).  The unscaled cut ``n_b eps ||S_b||_2``
+    dropped the ``1e-6`` mode of ``[[1e10, 1e-10], [1e-10, 1e-6]]`` (bar
+    ``4.4e-6``), whose ``A_b`` is the identity to ``1e-12``, and gram then
+    rejected every step of a fit with that penalty.
+
+    A block that is not PSD at its scaled resolution has no scaled model:
+    a nonzero row on a non-positive diagonal, or an eigenvalue of ``A_b``
+    below ``decompose_gram``'s materially-indefinite bar.  Its small entries
+    are not known to be data rather than rounding (Drmac, sec. 3.3), so it
+    keeps the eigenpairs above ``n_b eps ||S_b||_2`` of ``S_b`` itself.
+    """
+    width = penalty.shape[0]
+    symmetric = 0.5 * (penalty + penalty.T)
+    if penalty.shape == (0, 0) or not np.any(symmetric):
+        return np.empty((0, width))
+    support = np.flatnonzero(np.any(symmetric != 0.0, axis=1))
+    coupled = symmetric[np.ix_(support, support)] != 0.0
+    order = np.arange(len(support))
+    last = (len(support) - 1) - np.argmax(coupled[:, ::-1], axis=1)
+    ends = np.flatnonzero(np.maximum.accumulate(np.maximum(last, order)) == order) + 1
+    starts = np.concatenate(([0], ends[:-1]))
+    single = ends - starts == 1
+    # 1 x 1 blocks are their own eigenpairs, exactly: positive is above the bar
+    diagonal = support[starts[single]]
+    values = symmetric[diagonal, diagonal]
+    diagonal = diagonal[values > 0.0]
+    factor = np.zeros((len(diagonal), width))
+    factor[np.arange(len(diagonal)), diagonal] = np.sqrt(symmetric[diagonal, diagonal])
+    rows = [factor]
+    for start, stop in zip(starts[~single], ends[~single], strict=True):
+        columns = support[start:stop]
+        block = symmetric[np.ix_(columns, columns)]
+        root = _equilibrated_block_root(block)
+        if root is None:
+            root = _block_root(block)
+        embedded = np.zeros((root.shape[0], width))
+        embedded[:, columns] = root
+        rows.append(embedded)
+    return np.vstack(rows)
+
+
+def _block_root(block: NDArray) -> NDArray:
+    """The eigenpairs of ``block`` above ``n eps ||block||_2``, as a root."""
+    from superglm.solvers.rank import _eigensolver_relative_bar
+
+    eigenvalues, eigenvectors = np.linalg.eigh(block)
+    bar = _eigensolver_relative_bar(len(block)) * float(np.max(np.abs(eigenvalues)))
+    kept = eigenvalues > bar
+    return np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T
+
+
+def _equilibrated_block_root(block: NDArray) -> NDArray | None:
+    """``penalty_factor``'s root of a coupled block, cut on its Jacobi equilibration.
+
+    ``None`` where the block is not PSD at that resolution: a non-positive
+    diagonal, or an eigenvalue of ``D S_b D`` below ``-max(100 eps, n eps)
+    ||D S_b D||_2``, the bar ``rank.decompose_gram`` refuses as materially
+    indefinite.
+    """
+    from superglm.solvers.rank import _EPS, _eigensolver_relative_bar
+
+    diagonal = np.diag(block)
+    if not np.all(diagonal > 0.0):
+        return None
+    scale = np.sqrt(diagonal)
+    # |S_ij| / s_i <= s_j on a PSD block, so only an indefinite one overflows
+    with np.errstate(over="ignore"):
+        equilibrated = (block / scale[:, None]) / scale[None, :]
+    equilibrated = 0.5 * (equilibrated + equilibrated.T)
+    if not np.all(np.isfinite(equilibrated)):
+        return None
+    eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
+    norm = float(np.max(np.abs(eigenvalues)))
+    bar = _eigensolver_relative_bar(len(block))
+    if eigenvalues[0] < -max(100.0 * _EPS, bar) * norm:
+        return None
+    kept = eigenvalues > bar * norm
+    return np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T * scale[None, :]
 
 
 def grouped_augmented_factor(
@@ -381,7 +485,7 @@ def build_centered_system(
             profile["centered_raw_moment_hits"] = profile.get("centered_raw_moment_hits", 0) + 1
 
     if packed is None:
-        mean_x = dm.rmatvec(W) / sum_w
+        mean_x = shifted_weighted_mean(dm, W, sum_w)
         data_gram, rhs = centered_gram_rhs(
             dm=dm,
             W=W,
@@ -391,6 +495,41 @@ def build_centered_system(
     else:
         mean_x, data_gram, rhs = packed
     return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
+
+
+def shifted_weighted_mean(dm: DesignMatrix, W: NDArray, sum_w: float) -> NDArray:
+    """``sum W x / sum W`` per column, each dense column taken about one of its own rows.
+
+    One-engine design §3.2 applied to gram's centred system: a
+    ``DenseGroupMatrix`` column is averaged as ``x_ref + sum W (x - x_ref) /
+    sum W`` with ``x_ref`` the first row of positive weight, so a column
+    constant on its weighted rows has mean exactly ``x_ref`` and centres to
+    exact zeros.  The unshifted ``sum W x / sum W`` rounds to ``x (1 + d)``,
+    ``|d| <~ n eps``, and leaves a centred diagonal ``sum W (x d)^2`` at the
+    rounding level whose Jacobi-scaled rank decision then keeps or drops the
+    direction with the rounding of each iterate's weights: the REML objective
+    moved by ``~log(eps^2)/2 ~ 30`` between iterates while its gradient did not
+    (stage-1 verifier, the Gamma/log constant-column fit).  Every other column
+    type has entries bounded by its type and keeps ``rmatvec``.
+    """
+    mean = dm.rmatvec(W) / sum_w
+    positive = np.flatnonzero(np.asarray(W) > 0.0)
+    if not positive.size:
+        return mean
+    reference = int(positive[0])
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            values = matrix.M
+            anchor = np.asarray(values[reference], dtype=np.float64)
+            total = np.zeros(width, dtype=np.float64)
+            for start in range(0, dm.n, _FACTOR_CHUNK_ROWS):
+                stop = min(start + _FACTOR_CHUNK_ROWS, dm.n)
+                total += (values[start:stop] - anchor).T @ W[start:stop]
+            mean[offset : offset + width] = anchor + total / sum_w
+        offset += width
+    return mean
 
 
 def _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty):

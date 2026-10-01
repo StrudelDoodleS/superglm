@@ -82,10 +82,42 @@ def test_sz_build_has_k_minus_one_blocks_and_one_wiggle_component() -> None:
     assert info.n_cols == 12
     assert info.factor_smooth_factor_basis == "sz"
     assert info.factor_smooth_n_levels == 3
-    np.testing.assert_array_equal(info.factor_smooth_transform, np.eye(6))
     assert info.repeated_penalty_components is not None
     assert [name for name, _ in info.repeated_penalty_components] == ["wiggle"]
     assert info.repeated_penalty_components[0][1].shape == (6, 6)
+
+
+def test_sz_takes_the_fs_natural_parameterization() -> None:
+    """One-engine design §3.5, decision 5: sz on fs's natural parameterization.
+
+    The same per-level change of basis as fs (its natural map), under which
+    the raw second-difference penalty is exactly the diagonal wiggle
+    component, zero on the ``m`` polynomial coordinates, and the column space
+    is the raw basis's.  sz keeps the wiggle component alone.
+    """
+    x = np.tile(np.linspace(-1.0, 1.0, 12), 3)
+    group = np.repeat(["a", "b", "c"], 12)
+    sz = FactorSmooth("x", group="g", basis="sz", k=6, m=2)
+    fs = FactorSmooth("x", group="g", basis="fs", k=6, m=2)
+    info = sz.build(x, group, {})
+    fs_info = fs.build(x, group, {})
+
+    np.testing.assert_array_equal(info.factor_smooth_transform, fs_info.factor_smooth_transform)
+    wiggle = info.repeated_penalty_components[0][1]
+    np.testing.assert_array_equal(wiggle, fs_info.repeated_penalty_components[0][1])
+    assert np.count_nonzero(np.diag(wiggle)) == 4
+    np.testing.assert_array_equal(wiggle, np.diag(np.diag(wiggle)))
+    raw_penalty = sz._spline._build_penalty()
+    natural = info.factor_smooth_transform
+    transformed = natural.T @ raw_penalty @ natural
+    # |dP| <= gamma_k-sized products of |N|'|P||N| (Higham 2002, §3.5)
+    tolerance = (
+        4
+        * 6
+        * np.finfo(float).eps
+        * np.max(np.abs(natural).T @ np.abs(raw_penalty) @ np.abs(natural))
+    )
+    np.testing.assert_allclose(transformed, wiggle, rtol=0.0, atol=tolerance)
 
 
 def test_sz_transform_and_score_sum_to_zero_over_levels() -> None:

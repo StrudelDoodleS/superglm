@@ -2,33 +2,70 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from functools import cached_property
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.group_matrix import (
+    CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
+    DiscretizedSSPGroupMatrix,
     FactorSmoothGroupMatrix,
     GroupMatrix,
     RandomEffectGroupMatrix,
+    SparseSSPGroupMatrix,
 )
-from superglm.solvers._structured.nested import NestedStructuredLayout, NestedTree
+from superglm.solvers._structured.nested import (
+    _TABLE_TYPES,
+    LeafRows,
+    NestedStructuredLayout,
+    NestedTree,
+    _leaf_codes,
+    _lineage_entry,
+)
 from superglm.solvers._structured.selection import (
     cached_nested_parent_codes,
     shared_nesting_cache,
 )
 from superglm.types import GroupSlice
 
+# Border blocks whose rows an ``fs`` leaf pass writes as one-hot codes, by
+# exact type: a categorical (its base level a zero row) and a random effect.
+_FS_ONE_HOT_TYPES = (CategoricalGroupMatrix, RandomEffectGroupMatrix)
 
-@dataclass(frozen=True)
-class ScalarStructuredLayout:
-    """Cached coefficient partitions and small-block execution plan."""
+
+@dataclass(frozen=True, eq=False)
+class FactorSmoothLeafLayout:
+    """Design partition of one ``fs`` FactorSmooth term beside its border (one-engine design §3.4).
+
+    A depth-1 block tree under the super-root: each FactorSmooth level is a
+    leaf carrying ``k`` coefficients, and every other group joins the border
+    (``_border_partition``).  ``leaf_order`` holds the rows sorted by level
+    (stable) and ``leaf_starts`` ``(K + 1,)`` each level's start in it, so a
+    level's rows are contiguous in the leaf pass.  ``leaf_rows`` writes every
+    border block as dense rows in that order (one-hot blocks from their
+    codes, so no border block is densified whole), and ``basis_table`` is a
+    discrete term's support rows in the natural basis.  The border fields
+    (``small_*``, ``local_groups``, ``dense_small_matrix``) are
+    ``_border_partition``'s; ``indicator_columns`` is all
+    ``False`` (no border block takes cells here) and ``sparse_indicators`` is
+    empty, the attributes the shared border-row helpers read.
+
+    Caches (the cached properties and the lineage entries): the cached
+    properties are owned by this immutable layout, which lives in its design's
+    layout cache and is never pickled; the lineage entries by the shared
+    nesting cache.  They depend on the design only (codes, basis, border
+    matrices; prior weights for the centres), never on a working weight,
+    lambda or penalty; the leaf memo alone is keyed by the exact working rows.
+    """
 
     dominant_group_index: int
     dominant_group_name: str
+    dominant: FactorSmoothGroupMatrix
     small_group_indices: tuple[int, ...]
     small_matrices: tuple[GroupMatrix, ...]
     local_groups: tuple[GroupSlice, ...]
@@ -36,9 +73,17 @@ class ScalarStructuredLayout:
     structured_indices: NDArray
     dense_small_matrix: NDArray | None
     small_execution_plan: MatrixExecutionPlan | None
+    leaf_order: NDArray
+    leaf_starts: NDArray
+    # The lineage's nesting cache (``selection.shared_nesting_cache``): the level
+    # order, the sorted basis, the support table, the prior-weight centres and
+    # the leaf memo live there (``block_leaves._lineage_slot``), matched on the
+    # objects they depend on (``lineage_sources``), so a lambda rebuild of the
+    # design that keeps them shares them.
+    lineage_cache: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        for name in ("small_indices", "structured_indices"):
+        for name in ("small_indices", "structured_indices", "leaf_order", "leaf_starts"):
             values = np.array(getattr(self, name), dtype=np.intp, copy=True)
             values.setflags(write=False)
             object.__setattr__(self, name, values)
@@ -47,30 +92,230 @@ class ScalarStructuredLayout:
             dense.setflags(write=False)
             object.__setattr__(self, "dense_small_matrix", dense)
 
+    @property
+    def n_levels(self) -> int:
+        return int(self.dominant.coefficient_levels)
 
-@dataclass(frozen=True)
-class BlockStructuredLayout:
-    """Cached coefficient partitions for one dominant factor-smooth block."""
+    @property
+    def leaf_count(self) -> int:
+        """Every level of the term (``sz``: ``K``, one more than its public levels)."""
+        return int(self.dominant.n_levels)
 
-    dominant_group_index: int
-    dominant_group_name: str
-    small_group_indices: tuple[int, ...]
-    small_matrices: tuple[GroupMatrix, ...]
-    local_groups: tuple[GroupSlice, ...]
-    small_indices: NDArray
-    structured_indices: NDArray
-    dense_small_matrix: NDArray | None
-    small_execution_plan: MatrixExecutionPlan | None
+    @property
+    def block_size(self) -> int:
+        return int(self.dominant.block_size)
 
-    def __post_init__(self) -> None:
-        for name in ("small_indices", "structured_indices"):
-            values = np.array(getattr(self, name), dtype=np.intp, copy=True)
-            values.setflags(write=False)
-            object.__setattr__(self, name, values)
+    @property
+    def width(self) -> int:
+        return len(self.small_indices)
+
+    @property
+    def sparse_indicators(self) -> tuple:
+        return ()
+
+    def thin_levels(self, prior_weights: NDArray | None) -> tuple:
+        """The ``sz`` levels with fewer than ``m`` distinct weighted ``x`` values (design decision 4).
+
+        Beside the required global Spline such a level makes an exact alias of
+        the main-effect polynomial (the penalty's null space, dimension ``m``)
+        with its deviation: flagged and kept, never refused.  Distinct ``x``
+        values are distinct basis rows among the level's rows of positive
+        prior weight.  A disclosure only: it routes nothing.  Held in the
+        lineage cache, keyed by the sources and the prior weights.
+        """
+        levels, _ = self.thin_level_counts(prior_weights)
+        return tuple(self.dominant.levels[level] for level in levels)
+
+    def thin_level_counts(self, prior_weights: NDArray | None) -> tuple[NDArray, NDArray]:
+        """``(levels, distinct)``: the thin levels' codes and their distinct weighted ``x`` counts.
+
+        The structure ``thin_levels`` names, by code: the balance tree builds
+        each thin level's exact data-null directions from it (``balance_tree``,
+        the penalized aliases).  Held in the lineage cache, keyed by the
+        sources and the prior weights.
+        """
+        dominant = self.dominant
+        n = len(self.leaf_order)
+        weights = (
+            np.ones(n) if prior_weights is None else np.asarray(prior_weights, dtype=np.float64)
+        )
+        slot = self.lineage_cache.setdefault(("sz_slot", "thin_counts"), [])
+        sources = self.lineage_sources
+        for held_sources, held, value in slot:
+            if (
+                len(held_sources) == len(sources)
+                and all(a is b for a, b in zip(held_sources, sources, strict=True))
+                and np.array_equal(held, weights)
+            ):
+                return value
+        omega = sum(
+            np.asarray(matrix, dtype=np.float64)
+            for _, matrix in dominant.repeated_penalty_components
+        )
+        spectrum = np.linalg.eigvalsh(0.5 * (omega + np.transpose(omega)))
+        nullity = int(
+            np.count_nonzero(spectrum <= len(spectrum) * np.finfo(np.float64).eps * spectrum[-1])
+        )
+        from superglm.solvers._structured.leaf_kernels import _distinct_level_rows
+
+        ordered = np.ascontiguousarray(weights[self.leaf_order])
+        source = self.sorted_basis
+        if dominant.is_discrete:
+            bins = source[0]
+            data, indices, indptr = np.zeros(len(bins)), bins, np.arange(len(bins) + 1)
+        else:
+            data, indices, indptr = source
+        distinct = _distinct_level_rows(data, indices, indptr, self.leaf_starts, ordered, nullity)
+        thin = np.flatnonzero(distinct < nullity).astype(np.intp)
+        value = (thin, np.asarray(distinct[thin], dtype=np.intp))
+        for array in value:
+            array.setflags(write=False)
+        slot.insert(0, (sources, np.array(weights, copy=True), value))
+        del slot[2:]
+        return value
+
+    @cached_property
+    def indicator_columns(self) -> NDArray:
+        mask = np.zeros(len(self.small_indices), dtype=bool)
+        mask.setflags(write=False)
+        return mask
+
+    @cached_property
+    def one_hot_columns(self) -> NDArray:
+        """``(q,)`` bool: the border columns of one-hot blocks (``_FS_ONE_HOT_TYPES``), by type."""
+        mask = np.zeros(len(self.small_indices), dtype=bool)
+        offset = 0
+        for matrix in self.small_matrices:
+            width = matrix.shape[1]
+            if type(matrix) in _FS_ONE_HOT_TYPES:
+                mask[offset : offset + width] = True
+            offset += width
+        mask.setflags(write=False)
+        return mask
+
+    @cached_property
+    def basis_table(self) -> NDArray | None:
+        """A discrete term's support rows in the natural basis ``B_unique @ natural_map``; else ``None``.
+
+        Held in the lineage cache (keyed by the two arrays), so a lambda
+        rebuild of the design that keeps them reuses it.
+        """
+        if not self.dominant.is_discrete:
+            return None
+        support, natural = self.dominant.B_unique, self.dominant.natural_map
+
+        def build() -> NDArray:
+            table = np.ascontiguousarray(np.asarray(support, dtype=np.float64) @ natural)
+            table.setflags(write=False)
+            return table
+
+        return _lineage_entry(self.lineage_cache, "fs_basis_table", (support, natural), 0, build)
+
+    @property
+    def lineage_sources(self) -> tuple:
+        """The objects the leaf data depend on besides the working rows (lineage-cache keys).
+
+        The term's codes and basis arrays and every border matrix: a lambda
+        rebuild of the design that passes them through unchanged shares every
+        design-only cache and the leaf memo; one that re-creates any of them
+        (an SSP border block re-parameterized) misses, correctly.
+        """
+        dominant = self.dominant
+        basis = (dominant.B_unique, dominant.bin_idx) if dominant.is_discrete else (dominant.B,)
+        return (dominant.codes, dominant.natural_map, *basis, *self.small_matrices)
+
+    @cached_property
+    def leaf_levels(self) -> NDArray:
+        """``(n,)`` intp: each row's level in level order (the leaf pass's segment codes)."""
+        counts = np.diff(self.leaf_starts)
+        levels = np.repeat(np.arange(len(counts), dtype=np.intp), counts)
+        levels.setflags(write=False)
+        return levels
+
+    @cached_property
+    def sorted_basis(self) -> tuple[NDArray, ...]:
+        """The term's basis in level order: ``(data, indices, indptr)`` of the exact CSR
+        rows, or ``(bins,)`` of a discrete term; a permuted copy of the stored basis
+        (same size), read sequentially by the leaf pass."""
+        order = self.leaf_order
+        dominant = self.dominant
+        if dominant.is_discrete:
+            source = dominant.bin_idx
+
+            def build_bins() -> tuple[NDArray, ...]:
+                bins = np.ascontiguousarray(np.asarray(source, dtype=np.intp)[order])
+                bins.setflags(write=False)
+                return (bins,)
+
+            return _lineage_entry(
+                self.lineage_cache, "fs_sorted_bins", (source, order), 0, build_bins
+            )
+        basis = dominant.B
+        if basis is None:  # pragma: no cover - an exact term always holds its CSR basis
+            raise RuntimeError("An exact FactorSmooth term has no CSR basis.")
+
+        def build_csr() -> tuple[NDArray, ...]:
+            csr = basis[order]
+            arrays = (
+                np.ascontiguousarray(csr.data, dtype=np.float64),
+                np.ascontiguousarray(csr.indices, dtype=np.int64),
+                np.ascontiguousarray(csr.indptr, dtype=np.int64),
+            )
+            for array in arrays:
+                array.setflags(write=False)
+            return arrays
+
+        return _lineage_entry(self.lineage_cache, "fs_sorted_csr", (basis, order), 0, build_csr)
+
+    @cached_property
+    def leaf_rows(self) -> LeafRows:
+        """How the leaf pass forms the dense border rows in level order (``nested.LeafRows``).
+
+        Every border block is included; blocks are told apart by exact type,
+        never by their data, as ``NestedStructuredLayout.leaf_rows`` does.
+        """
+        order = self.leaf_order
+        empty = np.zeros(0, dtype=np.intp)
         if self.dense_small_matrix is not None:
-            dense = np.asarray(self.dense_small_matrix, dtype=np.float64)
-            dense.setflags(write=False)
-            object.__setattr__(self, "dense_small_matrix", dense)
+            gathered = ((0, self.dense_small_matrix),)
+            codes = np.zeros((len(order), 0), dtype=np.int32)
+            return LeafRows(codes, np.zeros(0), empty, empty, empty, empty, empty, gathered)
+        tables, one_hot, gathered, sparse, generic, column = [], [], [], [], [], 0
+        for matrix in self.small_matrices:
+            kind = type(matrix)
+            if isinstance(matrix, DiscretizedSSPGroupMatrix) and kind in _TABLE_TYPES:
+                table = np.asarray(matrix.B_unique @ matrix.R_inv, dtype=np.float64)
+                tables.append((column, matrix.bin_idx, table))
+            elif isinstance(matrix, CategoricalGroupMatrix) and kind in _FS_ONE_HOT_TYPES:
+                one_hot.append((column, matrix.codes, matrix.shape[1]))
+            elif isinstance(matrix, DenseGroupMatrix) and kind is DenseGroupMatrix:
+                gathered.append((column, matrix.M))
+            elif isinstance(matrix, SparseSSPGroupMatrix) and kind is SparseSSPGroupMatrix:
+                basis = np.ascontiguousarray(matrix.R_inv, dtype=np.float64)
+                sparse.append((column, matrix.B[order], basis))
+            else:
+                generic.append((column, matrix))
+            column += matrix.shape[1]
+        sources = tuple(values for _, values, _ in tables + one_hot)
+        codes = _lineage_entry(
+            self.lineage_cache,
+            "leaf_codes",
+            (*sources, order),
+            0,
+            lambda: _leaf_codes(sources, order),
+        )
+        return LeafRows(
+            codes=codes,
+            tables=np.concatenate([np.ravel(table) for *_, table in tables] + [np.zeros(0)]),
+            table_start=np.cumsum([0] + [table.size for *_, table in tables])[:-1].astype(np.intp),
+            table_width=np.array([table.shape[1] for *_, table in tables], dtype=np.intp),
+            table_column=np.array([column for column, *_ in tables], dtype=np.intp),
+            one_hot_width=np.array([width for *_, width in one_hot], dtype=np.intp),
+            one_hot_column=np.array([column for column, *_ in one_hot], dtype=np.intp),
+            gathered=tuple(gathered),
+            sparse=tuple(sparse),
+            generic=tuple(generic),
+        )
 
 
 _MAX_FUSED_DENSE_SMALL_WIDTH = 32
@@ -158,37 +403,6 @@ def _border_partition(
     }
 
 
-def build_scalar_structured_layout(
-    group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
-    groups: list[GroupSlice],
-    *,
-    dominant_group_index: int,
-) -> ScalarStructuredLayout:
-    """Build immutable partitions and one reusable small-block moment plan."""
-    if len(group_matrices) != len(groups):
-        raise ValueError("group_matrices and groups must have the same length.")
-    if not 0 <= dominant_group_index < len(group_matrices):
-        raise IndexError("dominant_group_index is outside group_matrices.")
-    dominant = group_matrices[dominant_group_index]
-    if not isinstance(dominant, RandomEffectGroupMatrix):
-        raise ValueError("The dominant structured group must be a RandomEffectGroupMatrix.")
-
-    dominant_group = groups[dominant_group_index]
-    if dominant_group.size != dominant.n_levels:
-        raise ValueError("The dominant group slice does not match its random-effect width.")
-    structured_indices = np.arange(
-        dominant_group.start,
-        dominant_group.end,
-        dtype=np.intp,
-    )
-    return ScalarStructuredLayout(
-        dominant_group_index=dominant_group_index,
-        dominant_group_name=dominant_group.name,
-        structured_indices=structured_indices,
-        **_border_partition(group_matrices, groups, (dominant_group_index,), dominant.shape[0]),
-    )
-
-
 def build_nested_structured_layout(
     group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
     groups: list[GroupSlice],
@@ -208,8 +422,8 @@ def build_nested_structured_layout(
     rebuild, while the border is rebuilt.
     """
     chain = tuple(int(index) for index in chain_group_indices)
-    if len(chain) < 2:
-        raise ValueError("A nested chain needs at least two RandomEffect groups.")
+    if not chain:
+        raise ValueError("A nested chain needs at least one RandomEffect group.")
     if len(group_matrices) != len(groups):
         raise ValueError("group_matrices and groups must have the same length.")
     members: dict[int, RandomEffectGroupMatrix] = {}
@@ -235,6 +449,7 @@ def build_nested_structured_layout(
         leaf_order=leaf_order,
         leaf_starts=leaf_starts,
         **_border_partition(group_matrices, groups, chain, members[chain[-1]].shape[0]),
+        lineage_cache=cache,
     )
 
 
@@ -267,79 +482,81 @@ def _nested_tree(
     return tree, order, starts
 
 
-def get_scalar_structured_layout(
-    dm: DesignMatrix,
-    groups: list[GroupSlice],
-    *,
-    dominant_group_index: int,
-) -> ScalarStructuredLayout:
-    """Return a DesignMatrix-owned layout reused across REML candidate fits."""
-    signature = (
-        dominant_group_index,
-        tuple((group.name, group.start, group.end) for group in groups),
-    )
-    cache = dm._scalar_structured_layout_cache
-    layout = cache.get(signature)
-    if layout is None:
-        layout = build_scalar_structured_layout(
-            dm.group_matrices,
-            groups,
-            dominant_group_index=dominant_group_index,
-        )
-        cache[signature] = layout
-    return layout
-
-
-def build_block_structured_layout(
+def build_factor_smooth_leaf_layout(
     group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
     groups: list[GroupSlice],
     *,
     dominant_group_index: int,
-) -> BlockStructuredLayout:
-    """Build immutable partitions for one dominant factor-smooth term."""
+    nesting_cache: dict | None = None,
+) -> FactorSmoothLeafLayout:
+    """Build the ``fs`` leaf layout: border partition, level order and level starts.
+
+    The level order reads only the term's codes, so it is held in the
+    lineage's nesting cache (``_lineage_entry``) and outlives a lambda rebuild.
+    """
     if len(group_matrices) != len(groups):
         raise ValueError("group_matrices and groups must have the same length.")
     if not 0 <= dominant_group_index < len(group_matrices):
         raise IndexError("dominant_group_index is outside group_matrices.")
     dominant = group_matrices[dominant_group_index]
     if not isinstance(dominant, FactorSmoothGroupMatrix):
-        raise ValueError("The dominant block group must be a FactorSmoothGroupMatrix.")
+        raise ValueError("The leaf layout needs a FactorSmoothGroupMatrix.")
     dominant_group = groups[dominant_group_index]
     if dominant_group.size != dominant.coefficient_levels * dominant.block_size:
         raise ValueError("The dominant group slice does not match its factor-smooth width.")
-
-    structured_indices = np.arange(
-        dominant_group.start,
-        dominant_group.end,
-        dtype=np.intp,
-    ).reshape(dominant.coefficient_levels, dominant.block_size)
-    return BlockStructuredLayout(
+    cache = {} if nesting_cache is None else nesting_cache
+    codes = dominant.codes
+    order, starts = _lineage_entry(
+        cache,
+        "fs_level_order",
+        (codes,),
+        dominant.n_levels,
+        lambda: _level_order(codes, dominant.n_levels),
+    )
+    structured_indices = np.arange(dominant_group.start, dominant_group.end, dtype=np.intp).reshape(
+        dominant.coefficient_levels, dominant.block_size
+    )
+    return FactorSmoothLeafLayout(
         dominant_group_index=dominant_group_index,
         dominant_group_name=dominant_group.name,
+        dominant=dominant,
         structured_indices=structured_indices,
+        leaf_order=order,
+        leaf_starts=starts,
+        lineage_cache=cache,
         **_border_partition(group_matrices, groups, (dominant_group_index,), dominant.shape[0]),
     )
 
 
-def get_block_structured_layout(
+def _level_order(codes: NDArray, n_levels: int) -> tuple[NDArray, NDArray]:
+    """The rows in stable level order and each level's start ``(K + 1,)``."""
+    order = np.argsort(codes, kind="stable")
+    starts = np.concatenate(([0], np.cumsum(np.bincount(codes, minlength=n_levels))))
+    for array in (order, starts):
+        array.setflags(write=False)
+    return order, starts
+
+
+def get_factor_smooth_leaf_layout(
     dm: DesignMatrix,
     groups: list[GroupSlice],
     *,
     dominant_group_index: int,
-) -> BlockStructuredLayout:
-    """Return a DesignMatrix-owned block layout reused across REML trials."""
+) -> FactorSmoothLeafLayout:
+    """Return the DesignMatrix-owned ``fs`` leaf layout reused across REML trials."""
     signature = (
-        "block",
+        "fs_leaf",
         dominant_group_index,
         tuple((group.name, group.start, group.end) for group in groups),
     )
-    cache = dm._scalar_structured_layout_cache
+    cache = dm._structured_layout_cache
     layout = cache.get(signature)
     if layout is None:
-        layout = build_block_structured_layout(
+        layout = build_factor_smooth_leaf_layout(
             dm.group_matrices,
             groups,
             dominant_group_index=dominant_group_index,
+            nesting_cache=shared_nesting_cache(cache),
         )
         cache[signature] = layout
     return layout
@@ -361,7 +578,7 @@ def get_nested_structured_layout(
         tuple(chain_group_indices),
         tuple((group.name, group.start, group.end) for group in groups),
     )
-    cache = dm._scalar_structured_layout_cache
+    cache = dm._structured_layout_cache
     layout = cache.get(signature)
     if layout is None:
         layout = build_nested_structured_layout(
@@ -380,26 +597,28 @@ def get_structured_layout(
     *,
     dominant_group_index: int,
     chain_group_indices: tuple[int, ...] = (),
-) -> ScalarStructuredLayout | BlockStructuredLayout | NestedStructuredLayout:
-    """Dispatch layout construction by dominant matrix type or nested chain."""
-    if len(chain_group_indices) >= 2:
-        return get_nested_structured_layout(dm, groups, chain_group_indices=chain_group_indices)
+) -> FactorSmoothLeafLayout | NestedStructuredLayout:
+    """Dispatch layout construction by dominant matrix type.
+
+    A FactorSmooth term takes its leaf layout (``fs`` block leaves, or the
+    ``sz`` balance tree over the same leaves); a RandomEffect leaf takes the
+    layout of its nested chain, which ``resolve_structured_backend`` resolves
+    (a lone level is a chain of one).
+    """
     dominant = dm.group_matrices[dominant_group_index]
     if isinstance(dominant, FactorSmoothGroupMatrix):
-        return get_block_structured_layout(
-            dm,
-            groups,
-            dominant_group_index=dominant_group_index,
+        # fs: a depth-1 block tree; sz: the balance tree over the same leaves (§3.4, §3.5)
+        return get_factor_smooth_leaf_layout(dm, groups, dominant_group_index=dominant_group_index)
+    if not chain_group_indices:
+        raise ValueError(
+            "A RandomEffect structured layout needs its nested chain; a lone random "
+            "effect is a chain of one (resolve_structured_backend)."
         )
-    return get_scalar_structured_layout(
-        dm,
-        groups,
-        dominant_group_index=dominant_group_index,
-    )
+    return get_nested_structured_layout(dm, groups, chain_group_indices=chain_group_indices)
 
 
 def _structured_row_matrix(
-    layout: ScalarStructuredLayout | BlockStructuredLayout | NestedStructuredLayout,
+    layout: FactorSmoothLeafLayout | NestedStructuredLayout,
     group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
 ) -> RandomEffectGroupMatrix | FactorSmoothGroupMatrix:
     """Return the structured group whose codes touch rows (a nested chain's leaf)."""
@@ -415,7 +634,7 @@ def _structured_row_matrix(
 
 
 def structured_design_matvec(
-    layout: ScalarStructuredLayout | BlockStructuredLayout | NestedStructuredLayout,
+    layout: FactorSmoothLeafLayout | NestedStructuredLayout,
     group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
     beta: NDArray,
 ) -> NDArray:
@@ -450,7 +669,7 @@ def structured_design_matvec(
 
 
 def structured_design_rmatvec(
-    layout: ScalarStructuredLayout | BlockStructuredLayout | NestedStructuredLayout,
+    layout: FactorSmoothLeafLayout | NestedStructuredLayout,
     group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
     rows: NDArray,
 ) -> NDArray:

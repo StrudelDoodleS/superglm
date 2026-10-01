@@ -307,6 +307,7 @@ def test_finalization_passes_the_optimizer_family_to_the_new_ssp_context(monkeyp
         _distribution=None,
         _link=None,
     )
+    # The optimizer's PIRLSResult, as far as finalize reads it.
     mode = SimpleNamespace(beta=np.zeros(3), intercept=0.0)
     best = SimpleNamespace(
         pirls_result=mode,
@@ -318,7 +319,7 @@ def test_finalization_passes_the_optimizer_family_to_the_new_ssp_context(monkeyp
     monkeypatch.setattr(
         reml_finalize,
         "rebuild_dm_with_lambdas",
-        lambda *_args: SimpleNamespace(group_matrices=[target_matrix]),
+        lambda *_args: SimpleNamespace(group_matrices=[target_matrix], p=3),
     )
     monkeypatch.setattr(reml_finalize, "_map_beta_between_bases", lambda beta, *_args: beta)
     monkeypatch.setattr(reml_finalize, "model_weight_semantics", lambda _model: "frequency")

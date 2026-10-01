@@ -279,20 +279,30 @@ def test_sz_sparse_levels_keep_other_global_smooth_in_summary_and_reconstruction
     assert np.all(np.isfinite(reconstructed["log_relativity"]))
 
 
-def test_sz_structured_estimability_uses_centered_data_geometry():
+def test_sz_structured_estimability_is_the_data_s():
+    """A two-row level: estimability reads the data alone, as the dense solver's rule.
+
+    The level's data pin only two of its six coordinates.  The penalty
+    identifies the rest, so the Hessian ``H = X'WX + S`` is nonsingular, but
+    a coefficient is estimable only when no null vector of the data ``[1, X]``
+    moves it, and the sum-to-zero constraint spreads the level's free
+    directions over every level and the main effect.  The structured fit's
+    estimability is that set exactly: the column-equilibrated SVD's null
+    vectors (below ``max(n, p) eps`` of the largest singular value, the
+    ``dgesdd`` backward error) and the dense solver's.  Mutation: the fit's
+    own (penalized) aliases deciding estimability, which reported every
+    coefficient estimable.
+    """
     X, y = _data()
     rare = X["segment"] == "omega"
     keep = ~rare
     keep[np.flatnonzero(rare)[:2]] = True
     X = X.loc[keep].reset_index(drop=True)
     y = y[keep.to_numpy()]
-
-    def model(direct_solve: str) -> SuperGLM:
-        return SuperGLM(
+    models = {
+        solve: SuperGLM(
             family="gaussian",
-            features={
-                "x": Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2)),
-            },
+            features={"x": Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2))},
             interactions=[
                 FactorSmooth(
                     "x",
@@ -303,17 +313,27 @@ def test_sz_structured_estimability_uses_centered_data_geometry():
                 )
             ],
             selection_penalty=0.0,
-            direct_solve=direct_solve,
+            direct_solve=solve,
         ).fit_reml(X, y, runtime_validation="skip")
-
-    dense = model("gram")
-    structured = model("structured")
-
-    np.testing.assert_array_equal(
-        structured._fit_inference_info["coefficient_estimable"],
-        dense._fit_inference_info["coefficient_estimable"],
-    )
-    assert not np.any(structured._fit_inference_info["coefficient_estimable"])
+        for solve in ("structured", "gram")
+    }
+    structured = models["structured"]
+    assert structured._reml_profile["direct_backend"] == "structured"
+    estimable = structured._fit_inference_info["coefficient_estimable"]
+    eps = np.finfo(float).eps
+    A = np.column_stack((np.ones(structured._dm.n), structured._dm.toarray()))
+    A = A / np.linalg.norm(A, axis=0)
+    _, singular, rows = np.linalg.svd(A, full_matrices=False)
+    null = rows[singular <= max(A.shape) * eps * singular[0]]
+    structural = np.any(np.abs(null[:, 1:]) > np.sqrt(eps), axis=0)
+    assert np.any(structural)
+    np.testing.assert_array_equal(estimable, ~structural)
+    for solve, model in models.items():
+        se = model.metrics(X, y).coefficient_se
+        mask = np.concatenate(
+            [np.isnan(np.atleast_1d(np.asarray(se[g.name], dtype=float))) for g in model._groups]
+        )
+        np.testing.assert_array_equal(mask, structural, err_msg=solve)
 
 
 def test_sz_summary_uses_one_structured_group_row():

@@ -381,22 +381,56 @@ def _one_hot_rows(codes: NDArray, n_levels: int) -> scipy.sparse.csr_array:
     )
 
 
-def quadratic_form_diagonal(design: MetricsDesign, matrix: NDArray) -> NDArray:
-    """Return row-wise ``x @ matrix @ x`` without retaining a dense design.
+def quadratic_form_diagonal(
+    design: MetricsDesign, matrix: NDArray, *, center: NDArray | None = None
+) -> NDArray:
+    """Return row-wise ``(x - center) @ matrix @ (x - center)`` without retaining a dense design."""
+    result = np.empty(design.shape[0], dtype=np.float64)
+    for start, stop, block in iter_dense_chunks(design):
+        rows = block if center is None else block - center
+        result[start:stop] = np.sum((rows @ matrix) * rows, axis=1)
+    return result
 
-    A compact covariance with ``row_quadratic_forms`` evaluates sparse row
-    blocks from its factor, so its coefficient-by-coefficient matrix is never
-    formed.
+
+def augmented_row_quadratic_forms(design: MetricsDesign, forms) -> NDArray:
+    """Return ``[1, x_i] H_aug^+ [1, x_i]'`` per row from an augmented factor's row forms.
+
+    ``forms`` is the augmented factor's ``row_quadratic_forms``, whose first
+    coordinate is the intercept; each row block gains a leading column of
+    ones and keeps its sparse one-hot groups.
     """
     result = np.empty(design.shape[0], dtype=np.float64)
-    forms = getattr(matrix, "row_quadratic_forms", None)
-    if forms is not None:
-        for start, stop, block in iter_row_chunks(design):
-            result[start:stop] = forms(block)
-        return result
-    for start, stop, block in iter_dense_chunks(design):
-        result[start:stop] = np.sum((block @ matrix) * block, axis=1)
+    for start, stop, block in iter_row_chunks(design):
+        ones = np.ones((stop - start, 1))
+        if scipy.sparse.issparse(block):
+            rows = scipy.sparse.hstack((scipy.sparse.csr_array(ones), block), format="csr")
+        else:
+            rows = np.hstack((ones, np.asarray(block, dtype=np.float64)))
+        result[start:stop] = forms(rows)
     return result
+
+
+def weighted_center(design: MetricsDesign, W: NDArray) -> NDArray:
+    """Working-weighted column means in the shifted form, ``x_ref + sum W (x - x_ref) / sum W``.
+
+    ``x_ref`` is the first row with a nonzero weight, so the rounding scales
+    with the columns' spread about it rather than their offset (Chan, Golub
+    and LeVeque 1983); rows before it carry zero weight and add nothing.
+    """
+    W = np.asarray(W, dtype=np.float64)
+    anchor = None
+    total = np.zeros(design.shape[1], dtype=np.float64)
+    for start, stop, block in iter_dense_chunks(design):
+        weights = W[start:stop]
+        if anchor is None:
+            weighted = np.flatnonzero(weights != 0.0)
+            if not weighted.size:
+                continue
+            anchor = np.array(block[weighted[0]], dtype=np.float64, copy=True)
+        total += (block - anchor).T @ weights
+    if anchor is None:
+        return total
+    return anchor + total / float(np.sum(W))
 
 
 def weighted_moments(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArray, NDArray]:

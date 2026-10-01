@@ -192,6 +192,12 @@ Consequently `regional_deviation.collapsed` is `None`, and its table reports
 support, information, EDF, and coefficient norms without `credibility` or
 `shrinkage` columns.
 
+The `sz` coefficients use the same coordinates as `fs`: for each level, the
+coordinates in which the wiggle penalty is diagonal, then the unpenalized
+polynomial coordinates. They are not the B-spline coefficients of the curve,
+so compare levels through `model.factor_smooth(...)` rather than through raw
+coefficients.
+
 SZ requires the matching global `Spline`. It is not a generic
 `SplineCategorical` interaction: `SplineCategorical` is reference-coded and
 unpooled, while SZ uses all levels symmetrically with an exact sum-to-zero
@@ -220,11 +226,17 @@ Missing group values always fail.
 
 ## Exact, discrete, and structured fitting
 
-These terms use compact group matrices alongside tabmat-backed narrow design
-blocks. The structured solver factors the small dense part once. RE and FS use
-independent scalar or $k \times k$ local blocks; SZ uses raw all-level blocks
-plus a small equality-constrained border. It does not form the full
-$(Kk)^2$ FS or $((K-1)k)^2$ SZ Hessian.
+These terms use compact group matrices beside the model's other columns. The
+structured solver never forms the full matrix for the large term. It
+eliminates the term's levels first and then solves the small dense part that
+remains:
+
+- **Random effects form a tree.** A lone random effect is a tree of one level.
+  Nested random effects, such as vehicle models within makes, form a tree of
+  several levels.
+- **`basis="fs"` factor smooths** give each level its own small block.
+- **`basis="sz"` factor smooths** combine their levels through a balanced
+  binary tree, which keeps the level curves summing to zero.
 
 ```python
 model = SuperGLM(
@@ -241,28 +253,30 @@ model = SuperGLM(
 model.fit_reml(train, y, offset=offset)
 ```
 
-`direct_solve="auto"` retains Gram fitting for small terms and switches to the
-structured backend at the measured crossover, which is reached only when the
-structured term spans the large majority of the coefficient width: the
-factorization saving has to clear the per-iteration moment work both backends
-share, so a wide random effect beside an equally wide dense border fits faster
-on Gram and stays there. `direct_solve="structured"`
-requires eligible geometry and is useful for reproducible benchmarking.
-Locally rank-deficient SZ levels remain eligible because the exact
-sum-to-zero constraint can make the full system identifiable. If that global
-constrained system is still unidentifiable, `"auto"` retries on Gram and
-records the reason; forced `"structured"` raises the global identifiability
-error.
+`direct_solve="auto"` keeps the Gram solver for small terms and uses the
+structured solver above a size crossover. The crossover is reached only when
+the structured term spans most of the coefficient columns: a wide random
+effect beside an equally wide dense border fits faster on Gram. The choice
+reads only the model's terms, their sizes, and which grouping levels sit inside
+which others.
+
+- **A fit never switches solver.** If the structured solver cannot finish a
+  fit, the fit stops with an error that names the cause.
+- **`direct_solve="gram"` fits the same model with the dense solver.**
+- **`direct_solve="structured"` forces the structured solver.** It is useful
+  for reproducible benchmarking.
+- **A thinly observed `sz` level is kept.** A level with fewer distinct values
+  than its smooth's unpenalized part stays in the model.
+- **Its standard errors can be missing.** Such a level can leave every
+  standard error of the term and of its main effect missing (NaN).
+- **The structured solver names the level.** It names such a level in a
+  warning. The Gram solver fits the same model without that warning.
+
 `discrete=True` bins the continuous spline support and reuses cached
 sufficient statistics across REML iterations; factor identities and the SZ
-constraint remain exact.
-
-Tabmat still owns ordinary dense, sparse, and categorical blocks and the
-dense-small side of the structured system. Factor smooths retain a more
-compact `codes + shared basis` representation with compiled raw-moment
-kernels. Expanding the dominant term into a generic tabmat sparse block would
-increase storage and weighted sandwich-product work; the structured solver
-combines the two representations at their natural boundary.
+constraint remain exact. The large term keeps its compact form, the level
+codes and one shared basis, so no matrix with a column per level and basis
+function is built.
 
 ## Real French motor example
 

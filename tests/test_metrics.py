@@ -321,8 +321,14 @@ class TestMetricsCaching:
         expected_inverse = np.linalg.inv(
             expected_design.T @ (working_weights[:, None] * expected_design)
         )
+        # leverage is the influence diagonal with the intercept, w_i a_i' H_aug^-1 a_i
+        # with a_i = [1, x_i], of the evaluation rows (one-engine design §3.10)
+        augmented_design = np.hstack((np.ones((len(x_eval), 1)), expected_design))
+        augmented_inverse = np.linalg.inv(
+            augmented_design.T @ (working_weights[:, None] * augmented_design)
+        )
         expected_leverage = working_weights * np.sum(
-            (expected_design @ expected_inverse) * expected_design,
+            (augmented_design @ augmented_inverse) * augmented_design,
             axis=1,
         )
 
@@ -620,7 +626,12 @@ class TestMetricsCaching:
         for name in ("x1", "x2"):
             assert not rows[name].estimable
             assert np.isnan(rows[name].se)
-        assert metrics.leverage.sum() == pytest.approx(1.0, rel=1e-10, abs=1e-10)
+        # the influence diagonal sums to the edf with the intercept: 1 + one slope.
+        # The alias is truncated, so the retained slope block is one-dimensional
+        # and each row's quadratic form rounds within 8 u of its value; the sum
+        # of n non-negative terms adds gamma_n (Higham 2002, section 3.1).
+        roundings = (len(metrics.leverage) + 8) * np.finfo(float).eps / 2
+        assert metrics.leverage.sum() == pytest.approx(2.0, rel=roundings, abs=0.0)
 
     @pytest.mark.parametrize("alias_scale", [1.0, 1e4, 1e6, 1e8])
     def test_evaluation_alias_rank_is_stable_across_column_scales(self, alias_scale):
@@ -641,7 +652,12 @@ class TestMetricsCaching:
         for name in ("x1", "x2"):
             assert not rows[name].estimable
             assert np.isnan(rows[name].se)
-        assert metrics.leverage.sum() == pytest.approx(1.0, rel=1e-10, abs=1e-10)
+        # the influence diagonal sums to the edf with the intercept: 1 + one slope.
+        # The alias is truncated, so the retained slope block is one-dimensional
+        # and each row's quadratic form rounds within 8 u of its value; the sum
+        # of n non-negative terms adds gamma_n (Higham 2002, section 3.1).
+        roundings = (len(metrics.leverage) + 8) * np.finfo(float).eps / 2
+        assert metrics.leverage.sum() == pytest.approx(2.0, rel=roundings, abs=0.0)
 
     def test_evaluation_missing_category_marks_level_nonestimable(self):
         """Categorical rows propagate evaluation-rank loss into the estimable flag."""
@@ -3224,25 +3240,42 @@ def _inverse_perturbation(H, spread: float, n: int) -> tuple[float, float]:
 
 
 def _hat_and_edf(design, W, penalty):
-    """Hat diagonal ``w_i x_i' H^-1 x_i`` (``H = X'WX + S``) and edf ``tr((G + S)^-1 G)``
-    (``G`` the intercept-profiled Gram) by dense solves, with bounds on their gap to any
-    other backward-stable evaluation of the same ``X``, ``W`` and ``S``.
+    """Influence diagonal ``w_i a_i' H_aug^-1 a_i`` (``a_i = [1, x_i]``, one-engine design
+    §3.10) and edf ``tr((G + S)^-1 G)`` (``G`` the intercept-profiled Gram) by dense
+    solves, with bounds on their gap to any other backward-stable evaluation of the same
+    ``X``, ``W`` and ``S``.
 
-    To first order an inverse moves by ``kappa beta`` relatively (Higham 2002, §14.1),
-    so ``x' H^-1 x >= ||x||^2 / ||H||`` moves by ``kappa^2 beta`` of itself plus the row
-    products' ``p gamma_{2p} kappa`` and the product with ``w_i``, and the trace by
-    ``2 p kappa^2 beta + p gamma_p kappa``; two evaluations double each bound.
+    ``a' H_aug^-1 a = 1 / sum w + x~' (G + S)^-1 x~`` with ``x~`` centred on the
+    weighted mean.  To first order an inverse moves by ``kappa beta`` relatively
+    (Higham 2002, §14.1), so ``x~' (G + S)^-1 x~`` moves by ``kappa^2 beta`` of itself
+    plus the row products' ``p gamma_{2p} kappa`` and the product with ``w_i``; a
+    centre off by ``e`` moves it by at most ``2 sqrt(e' M e x~' M x~) + e' M e`` with
+    ``e' M e <= ||e||^2 / lambda_min``, and ``||e||`` is at most ``gamma_{n+3}`` of the
+    rows' weighted absolute spread plus one rounding of the centre and of each
+    difference (Higham 2002, Lemma 3.1); ``w_i / sum w`` carries ``gamma_{n+1}``.
+    The trace moves by ``2 p kappa^2 beta + p gamma_p kappa``.  Two evaluations
+    double each bound.
     """
     n, p = design.shape
-    H = design.T @ (W[:, None] * design) + penalty
-    hat = W * np.sum(design * np.linalg.solve(H, design.T).T, axis=1)
-    beta, kappa = _inverse_perturbation(H, np.sum(W * np.sum(design**2, axis=1)), n)
-    hat_gap = 2.0 * (kappa**2 * beta + p * _gamma(2 * p) * kappa + _gamma(2)) * hat
-    centred = design - design.T @ W / np.sum(W)
+    total = np.sum(W)
+    center = design.T @ W / total
+    centred = design - center
     gram = centred.T @ (W[:, None] * centred)
-    edf = np.trace(np.linalg.solve(gram + penalty, gram))
+    H = gram + penalty
+    forms = np.sum(centred * np.linalg.solve(H, centred.T).T, axis=1)
+    hat = W / total + W * forms
     spread = np.sum(W * np.sum((design - design[0]) ** 2, axis=1))
-    beta, kappa = _inverse_perturbation(gram + penalty, spread, n)
+    beta, kappa = _inverse_perturbation(H, spread, n)
+    reach = np.abs(design - design[0]).T @ W / total
+    error = _gamma(n + 3) * reach + UNIT_ROUNDOFF * np.abs(center)
+    shift = np.sum((error + UNIT_ROUNDOFF * np.abs(centred)) ** 2, axis=1)
+    shift = shift / np.linalg.eigvalsh(H)[0]
+    hat_gap = 2.0 * (
+        (kappa**2 * beta + p * _gamma(2 * p) * kappa + _gamma(2)) * W * forms
+        + W * (2.0 * np.sqrt(shift * forms) + shift)
+        + _gamma(n + 1) * W / total
+    )
+    edf = np.trace(np.linalg.solve(H, gram))
     edf_gap = 2.0 * p * (2.0 * kappa**2 * beta + _gamma(p) * kappa)
     return hat, edf, hat_gap, edf_gap
 

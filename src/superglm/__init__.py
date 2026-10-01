@@ -134,7 +134,9 @@ from superglm.plotting import plot_term_comparison
 from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning
 from superglm.profiling.tweedie import TweedieProfileResult
 from superglm.reml import REMLResult
+from superglm.reml.identified import WeakIdentificationWarning
 from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
+from superglm.solvers.irls_direct import StructuredSolverError
 from superglm.stats.davies import psum_chisq, satterthwaite
 from superglm.stats.model_tests import (
     DispersionTestResult,
@@ -286,6 +288,8 @@ __all__ = [
     "InteractionInference",
     "SeparationError",
     "SeparationWarning",
+    "WeakIdentificationWarning",
+    "StructuredSolverError",
     "SplineRedundancyReport",
     "cross_validate",
     "CrossValidationResult",

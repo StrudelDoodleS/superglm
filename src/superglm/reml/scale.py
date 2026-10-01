@@ -924,3 +924,17 @@ __all__ = [
     "profile_gaussian_reml_scale",
     "profile_tweedie_reml_scale",
 ]
+
+# v0.35.0 kept its Tweedie saturated-density memo in this class, and a fitted
+# REML model pickles it (``REMLResult.tweedie_scale_data``).  The name stays
+# importable as an inert stand-in (PEP 562) so such a model loads;
+# ``SuperGLM.__setstate__`` drops it (``model.retired_state``).
+_RETIRED_V0_35 = frozenset({"TweedieScaleProfileData"})
+
+
+def __getattr__(name: str):
+    if name in _RETIRED_V0_35:
+        from superglm.solvers._structured.retired import retired_class
+
+        return retired_class(__name__, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

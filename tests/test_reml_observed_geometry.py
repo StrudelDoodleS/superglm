@@ -36,6 +36,7 @@ from superglm.reml.observed_geometry import (
     compute_observed_dW_deta,
     compute_observed_information_weights,
     observed_penalized_mode_score,
+    schur_curvature_is_negative,
 )
 from superglm.reml.scale import prepare_gamma_reml_scale_data
 from superglm.reml.w_derivatives import reml_w_correction
@@ -1100,6 +1101,30 @@ def test_signed_observed_geometry_matches_augmented_hessian() -> None:
     )
 
 
+def test_the_structured_indefiniteness_gate_is_the_border_certificate_s_floor() -> None:
+    """The observed-geometry gate refuses exactly the curvature the border certificate calls material.
+
+    A scaled eigenvalue below minus ``tau + 2 n eps ||Q_s||_2`` (the factor's
+    certified uncertainty plus the eigensolver's rounding) is negative
+    curvature; one above it is within what the factor truncates as a null.
+    The certificates come from ``factor_border`` itself: identity blocks whose
+    bound ``U`` sets ``tau = c_R(3) + u_s``.  A hand-set ``-1e-10 max(|eig|, 1)``
+    fails both cases: it refuses ``-tau / 2`` when ``tau`` is 1.5e-9 (a null the
+    factor certified) and accepts ``-1e-11`` when ``tau`` is 1e-15 (curvature
+    10^4 times beyond it).
+    """
+    from superglm.solvers._structured.border import factor_border
+
+    wide = factor_border(np.eye(3), np.zeros((3, 3)), np.full(3, 5e-10), None, term_name="probe")
+    tight = factor_border(np.eye(3), np.zeros((3, 3)), np.full(3, 1e-16), None, term_name="probe")
+    tau_wide, tau_tight = wide.certificate.tau, tight.certificate.tau
+    assert tau_wide > 1e-9 and tau_tight < 1e-14
+    assert not schur_curvature_is_negative(np.array([-tau_wide / 2, 1.0, 1.0]), wide.certificate)
+    assert schur_curvature_is_negative(np.array([-2 * tau_wide, 1.0, 1.0]), wide.certificate)
+    assert schur_curvature_is_negative(np.array([-1e-11, 1.0, 1.0]), tight.certificate)
+    assert not schur_curvature_is_negative(np.array([-tau_tight / 2, 1.0, 1.0]), tight.certificate)
+
+
 def test_observed_geometry_rejects_indefinite_penalty_and_total_curvature() -> None:
     X = np.arange(-3.0, 4.0)[:, None]
     dm = DesignMatrix([DenseGroupMatrix(X)], n=len(X), p=1)
@@ -1131,9 +1156,7 @@ def test_observed_geometry_rejects_indefinite_penalty_and_total_curvature() -> N
             penalty=np.array([[-100.0]]),
         )
 
-    with pytest.raises(
-        ValueError, match="terminal observed REML coefficient Hessian is indefinite"
-    ):
+    with pytest.raises(ValueError, match="observed REML coefficient Hessian is indefinite"):
         build_observed_reml_geometry(
             dm=dm,
             distribution=Binomial(),
@@ -1380,6 +1403,35 @@ def test_a_contract_bug_in_the_mode_score_stays_a_bare_value_error() -> None:
 
     assert not isinstance(excinfo.value, ObservedGeometryInfeasibleError)
     assert "slope coordinates" in str(excinfo.value)
+
+
+def test_a_constant_column_scores_no_more_than_its_mean_rounding_leaks() -> None:
+    """A column equal to 3 is the intercept's alias.  A centred operator gives it
+    an exactly zero diagonal, and a weighted mean one ulp off 3 leaves it the
+    slope score ``(3 - mean_x) sum(r)``: the intercept score times rounding.
+    Normalised by ``tiny`` that scored above 1e270 and refused a mode gram
+    certifies; at the centring's ``n eps |mean_x|`` resolution the column adds
+    nothing beyond what the intercept already scores."""
+    n = 40
+    x = np.linspace(-1.0, 1.0, n)
+    dm = DesignMatrix([DenseGroupMatrix(np.column_stack([x, np.full(n, 3.0)]))], n=n, p=2)
+    y = np.exp(0.2 + 0.4 * x) * (1.0 + 0.3 * np.sin(7.0 * x))
+    weights = np.ones(n)
+    arguments = {"dm": dm, "distribution": Gamma(), "link": LogLink(), "y": y}
+    arguments |= {"sample_weight": weights, "result": _result(np.array([0.35, 0.0]), 0.15)}
+    arguments["penalty"] = np.zeros((2, 2))
+    geometry = build_observed_reml_geometry(**arguments, offset_arr=np.zeros(n))
+    gram = geometry.centered_data_gram.copy()
+    gram[1, :] = gram[:, 1] = 0.0
+    exact = replace(geometry, centered_data_gram=gram, mean_x=np.array([geometry.mean_x[0], 3.0]))
+    shifted = replace(exact, mean_x=np.array([geometry.mean_x[0], np.nextafter(3.0, 0.0)]))
+
+    reference = observed_penalized_mode_score(**arguments, geometry=exact)
+    score = observed_penalized_mode_score(**arguments, geometry=shifted)
+
+    assert reference.slopes[1] == 0.0
+    assert score.slopes[1] != 0.0
+    assert score.relative_max <= reference.relative_max
 
 
 def test_gamma_observed_total_gradient_matches_refitted_laml_finite_difference() -> None:
@@ -2019,7 +2071,9 @@ def test_fit_reml_gamma_uses_observed_main_and_objective_only_trial_geometry(
     assert any(
         not compute_inverse and derivative_order == 0 for compute_inverse, derivative_order in calls
     )
-    assert model._reml_profile["reml_observed_mode_residual_accepted_max"] < 1e-9
+    # the certificate is the PIRLS stop residual; the geometry's score is its diagnostic
+    assert model._reml_profile["reml_terminal_mode_certified"] is True
+    assert np.isfinite(model._reml_profile["reml_observed_mode_residual_accepted_max"])
     assert model._reml_profile["reml_observed_mode_rejected_trial_count"] >= 0
     assert model._reml_profile["reml_observed_mode_residual_rejected_trial_max"] >= 0.0
     assert model._reml_profile["reml_w_correction_order"] == 1
@@ -2733,6 +2787,7 @@ def test_a_structural_refusal_from_the_structured_factor_is_not_relabelled(
             lambdas=model._reml_lambdas,
             reml_penalties=model._reml_penalties,
             structured_group_index=structured_index,
+            structured_chain_group_indices=(structured_index,),
             compute_inverse=False,
         )
 
@@ -2750,8 +2805,8 @@ def test_a_structural_refusal_from_the_structured_factor_is_not_relabelled(
     monkeypatch.setattr(
         observed_geometry,
         "build_augmented_structured_factor",
-        # The scalar builder's own diagnostic for an operator whose partitions
-        # do not agree with the system it augments.
+        # A builder's diagnostic for an operator whose partitions do not
+        # agree with the system it augments.
         refuse(ValueError("Penalized and unpenalized operators must use identical partitions.")),
     )
     with pytest.raises(ValueError) as structural:
@@ -3061,18 +3116,28 @@ class TestModeCertificationRecovery:
         numeric = [w for w in caught if "invalid value" in str(w.message)]
         assert not numeric, f"infeasible scores reached the optimizer as non-finite: {numeric}"
 
-    def test_all_powers_infeasible_reports_the_range_not_a_keyerror(self, monkeypatch):
-        """If nothing is certifiable, say so; do not fail looking up a cache."""
+    @staticmethod
+    def _refusing_geometry(monkeypatch):
+        """Every observed-geometry build refuses its mode: no mode to certify.
+
+        A mode short of the certificate's bar is published as not converged,
+        never refused (owner decision 3, 2026-09-30); what still refuses a
+        point is a structural failure, such as the geometry refusing the mode.
+        """
         import superglm.reml.direct as direct_module
+        from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
 
+        def refuse(**kwargs):
+            raise ObservedGeometryInfeasibleError("observed rows are not finite here")
+
+        monkeypatch.setattr(direct_module, "build_observed_reml_geometry", refuse)
+
+    def test_all_powers_infeasible_reports_the_range_not_a_keyerror(self, monkeypatch):
+        """If no power has a mode, say so; do not fail looking up a cache."""
         X, y, weights = self._tweedie_fixture()
-        monkeypatch.setattr(
-            direct_module,
-            "observed_penalized_mode_score",
-            lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
-        )
+        self._refusing_geometry(monkeypatch)
 
-        with pytest.raises(RuntimeError, match="could not certify"):
+        with pytest.raises(RuntimeError, match="was feasible"):
             self._model().estimate_p(
                 X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
             )
@@ -3205,15 +3270,10 @@ class TestModeCertificationRecovery:
         """Observed geometry is the default branch, so this reaches many families."""
         import pandas as pd
 
-        import superglm.reml.direct as direct_module
         from superglm import SuperGLM
         from superglm.features.spline import Spline
 
-        monkeypatch.setattr(
-            direct_module,
-            "observed_penalized_mode_score",
-            lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
-        )
+        self._refusing_geometry(monkeypatch)
         rng = np.random.default_rng(20260807)
         x = np.linspace(0.1, 1.0, 300)
         X = pd.DataFrame({"x": x})
@@ -3227,20 +3287,13 @@ class TestModeCertificationRecovery:
             gamma_model.fit_reml(X, y)
 
         message = str(gamma_error.value)
-        assert "could not certify" in message
-        assert "does not move it" in message
+        assert "refused the penalized coefficient mode" in message
         assert "Tweedie" not in message
         assert "estimate_p" not in message
 
     def test_tweedie_message_names_the_parameter_the_caller_can_change(self, monkeypatch):
-        import superglm.reml.direct as direct_module
-
         X, y, weights = self._tweedie_fixture()
-        monkeypatch.setattr(
-            direct_module,
-            "observed_penalized_mode_score",
-            lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
-        )
+        self._refusing_geometry(monkeypatch)
 
         # The hint names the remedy (search p with estimate_p), not a conditioning
         # story: near-2 refusals were a deviance-accuracy and Fisher-scoring defect.
@@ -3357,7 +3410,7 @@ class TestModeCertifiesAtTheRoundOffFloor:
             def recording(*args, **kwargs):
                 output = original(*args, **kwargs)
                 result = output[0] if isinstance(output, tuple) else output
-                if kwargs.get("convergence") == "coefficients":
+                if kwargs.get("convergence") == "mode_score":
                     records.append((kwargs.get("trace_purpose"), result.termination_reason))
                 return output
 
@@ -3386,19 +3439,17 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert np.all(np.isfinite(model.predict(frame, offset=offset)))
 
     def test_budget_exhausted_pirls_defers_to_the_certificate(self, monkeypatch):
-        """A budget verdict cannot veto a coefficient mode that certifies.
+        """A budget verdict is not a refusal.
 
-        Range-safe working weights let this fixture converge within the old
-        eight-iteration budget. Pin the candidate verdict instead of requiring
-        a particular iteration count. Coefficients and KKT evidence remain
-        those of the real fit, as in the terminal-publication control below.
-        The mutation at the end proves that removing deferral refuses the fit.
+        PIRLS stops on the certificate's own score (one-engine design §3.8),
+        so its ``converged`` flag is the certificate.  A candidate that ran out
+        of budget carries no certified mode: it cannot authorise a convergence
+        exit, but the fit goes on and publishes (owner decision 3,
+        2026-09-30).  The mutation at the end proves that removing the
+        deferral refuses the fit.
         """
         import superglm.reml.direct as direct_module
-        from superglm.reml.observed_geometry import (
-            ObservedModeNotConvergedError,
-            observed_mode_certification_bar,
-        )
+        from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 
         original = direct_module.fit_irls_direct
 
@@ -3427,10 +3478,10 @@ class TestModeCertifiesAtTheRoundOffFloor:
             "the candidate verdict must exercise budget-exhaustion deferral; "
             f"PIRLS; budget-exhausted purposes: {sorted(stalled_purposes)}"
         )
-        assert model.reml_diagnostics()["converged"] is True
+        # the uncertified candidates authorise no convergence exit; the published
+        # mode is the terminal refit's, which certifies
+        assert model._reml_profile["reml_terminal_mode_certified"] is True
         assert np.all(np.isfinite(model.predict(frame, offset=offset)))
-        residual = model._reml_profile["reml_terminal_observed_mode_residual"]
-        assert residual <= observed_mode_certification_bar()
 
         monkeypatch.setattr(direct_module, "stopped_on_iteration_budget", lambda result: False)
         with pytest.raises(ObservedModeNotConvergedError):
@@ -3455,55 +3506,53 @@ class TestModeCertifiesAtTheRoundOffFloor:
         )
 
     def test_the_published_mode_is_certified_not_merely_accepted(self):
-        """Deferring to the certificate must mean the certificate ran and passed."""
-        from superglm.reml.observed_geometry import observed_mode_certification_bar
-
+        """Publishing a converged fit means the certificate ran and passed."""
         frame, y, weight, offset = self._burn_cost_fixture(seed=0)
         model = self._model()
         model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
 
-        residual = model._reml_profile["reml_terminal_observed_mode_residual"]
-        assert residual <= observed_mode_certification_bar()
+        assert model._reml_profile["reml_terminal_mode_certified"] is True
+        assert model.reml_diagnostics()["converged"] is True
 
-    def test_an_uncertifiable_mode_is_still_refused(self, monkeypatch):
-        """Fail-closed: the certificate, not the step test, is what guards the gate."""
+    def test_the_geometry_score_is_a_diagnostic_never_a_refusal(self, monkeypatch):
+        """The certificate is PIRLS's own residual; the geometry's score only reports.
+
+        Mutation: gating on the geometry's score again (a 1e-3 score refused the
+        fit with ``ObservedModeNotCertifiedError``).
+        """
         import superglm.reml.direct as direct_module
-        from superglm.reml.observed_geometry import (
-            ObservedModeNotCertifiedError,
-            ObservedModeNotConvergedError,
-        )
 
         frame, y, weight, offset = self._burn_cost_fixture(seed=0)
-        monkeypatch.setattr(
-            direct_module,
-            "observed_penalized_mode_score",
-            lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
-        )
-        with pytest.raises(ObservedModeNotCertifiedError) as excinfo:
-            self._model().fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
-        # ObservedModeNotConvergedError SUBCLASSES the error asserted above, so
-        # a bare raises() cannot tell the certificate's refusal from the gate's
-        # own, and passes against the unfixed code.
-        assert not isinstance(excinfo.value, ObservedModeNotConvergedError)
-        assert "certify the penalized coefficient mode" in str(excinfo.value)
+        original = direct_module.observed_penalized_mode_score
+
+        def poor_score(**kwargs):
+            return replace(original(**kwargs), relative_max=1.0e-3)
+
+        monkeypatch.setattr(direct_module, "observed_penalized_mode_score", poor_score)
+        model = self._model()
+        model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+        assert model.reml_diagnostics()["converged"] is True
+        assert model._reml_profile["reml_observed_mode_residual_accepted_max"] == 1.0e-3
 
     def test_only_budget_exhaustion_defers_to_the_certificate(self):
-        """Every other termination reason names something the score cannot judge."""
+        """A stop short of the bar defers; every other reason names something the score cannot judge."""
         from superglm.reml.observed_geometry import stopped_on_iteration_budget
         from superglm.solvers.pirls import PIRLS_TERMINATION_REASONS
 
         def ended(reason):
             return stopped_on_iteration_budget(SimpleNamespace(termination_reason=reason))
 
-        assert "max_iter" in PIRLS_TERMINATION_REASONS
-        assert ended("max_iter")
+        deferring = {"max_iter", "step_rejected", "score_stagnated"}
+        assert deferring <= PIRLS_TERMINATION_REASONS
+        for reason in deferring:
+            assert ended(reason), reason
         # Read out of the solver's own exported vocabulary rather than copied
         # into a tuple here. The copy claimed a reason added to PIRLS could not
         # silently change which door it takes, and it could: a scratch build
         # carrying a real new literal left this green. What is pinned is only
         # that every OTHER declared reason takes the non-deferring door --
         # that the vocabulary is complete is the solver's own assertion.
-        for reason in (*sorted(PIRLS_TERMINATION_REASONS - {"max_iter"}), None):
+        for reason in (*sorted(PIRLS_TERMINATION_REASONS - deferring), None):
             assert not ended(reason), reason
 
     def test_no_solver_writes_a_termination_reason_the_vocabulary_omits(self):
@@ -3634,18 +3683,15 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert match is not None, f"no Converged row in the rendered summary:\n{rendered}"
         return match.group(1)
 
-    def test_a_certified_budget_exhausted_publication_reads_converged(self, monkeypatch):
-        """What the certificate admitted, every reader of the fit must report.
+    def test_an_uncertified_publication_reads_not_converged_everywhere(self, monkeypatch):
+        """What the certificate did not admit, every reader of the fit must report.
 
-        The gate lets a budget-exhausted terminal refit publish, and the
-        published result then carried PIRLS's step-length verdict on a mode the
-        certificate had just passed. ``summary()``, ``metrics().summary()`` and
-        the telemetry payload all read that flag, so a fit admitted on its KKT
-        residual reported itself unconverged while its own REML diagnostics
-        said the opposite.
+        PIRLS's ``converged`` flag is the certificate, so a budget-exhausted
+        terminal refit publishes a mode short of the bar: never refused (owner
+        decision 3, 2026-09-30), and ``summary()``, ``metrics().summary()``,
+        the telemetry payload and the REML diagnostics all say it did not
+        converge.
         """
-        from superglm.reml.observed_geometry import observed_mode_certification_bar
-
         frame, y, weight, offset = self._burn_cost_fixture(seed=0)
         reached = self._stamped_terminal_refit(
             monkeypatch, converged=False, termination_reason="max_iter"
@@ -3653,37 +3699,23 @@ class TestModeCertifiesAtTheRoundOffFloor:
         model = self._model()
         model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
 
-        assert reached, "the terminal publication refit never ran, so nothing was relabelled"
-        # Pinned to the certificate, not merely to the branch: the relabelled
-        # claim is defensible only because this residual cleared the fixed bar.
-        residual = model._reml_profile["reml_terminal_observed_mode_residual"]
-        assert residual <= observed_mode_certification_bar()
-
-        assert model.result.converged is True
-        assert model.result.termination_reason == "mode_certified"
+        assert reached, "the terminal publication refit never ran"
+        assert model._reml_profile["reml_terminal_mode_certified"] is False
+        assert model.result.converged is False
+        assert model.result.termination_reason == "max_iter"
         # A candidate whose public and solver copies disagree on this flag is
-        # refused at fit-state validation, so the relabel has to reach both.
+        # refused at fit-state validation, so the verdict has to reach both.
         assert bool(model._result.converged) is bool(model._solver_result.converged)
         assert model._result.termination_reason == model._solver_result.termination_reason
+        assert model.reml_diagnostics()["converged"] is False
 
-        assert model.training_telemetry()["fit"]["converged"] is True
+        assert model.training_telemetry()["fit"]["converged"] is False
         metrics = model.metrics(frame, y, sample_weight=weight, offset=offset)
-        # The two summaries reach the flag by different routes -- one through
-        # the REML loop's verdict, one through the published PIRLS result --
-        # which is how they came to print opposite answers for one fit.
-        assert self._reported_convergence(model.summary()) == "True"
-        assert self._reported_convergence(metrics.summary()) == "True"
+        assert self._reported_convergence(model.summary()) == "False"
+        assert self._reported_convergence(metrics.summary()) == "False"
 
     def test_a_terminal_refit_that_converged_keeps_its_own_reason(self, monkeypatch):
-        """The relabel is conditioned on the step test having failed, not on the gate.
-
-        ``mode_certified`` names one situation -- a mode the step test never
-        passed, published because the certificate did -- and it stops naming it
-        the moment it is stamped on refits that converged normally. The verdict
-        here is pinned rather than changed: every terminal refit measured on
-        this fixture already reported exactly this, so the stamp only fixes the
-        branch's input on a stack where that stops being true.
-        """
+        """A certified terminal refit publishes its own verdict unchanged."""
         frame, y, weight, offset = self._burn_cost_fixture(seed=0)
         reached = self._stamped_terminal_refit(
             monkeypatch, converged=True, termination_reason="converged"
@@ -3735,12 +3767,14 @@ class TestModeCertifiesAtTheRoundOffFloor:
     def test_a_factor_smooth_certifies_at_its_round_off_stall(self):
         """``fs`` failed where ``sz`` fit, on identical data through one gate.
 
-        Reported separately from the RandomEffect symptom; the same predicate
-        closes both. Only ``fs`` is run: ``sz`` never stalls here (no
-        budget-exhausted PIRLS call at 60k or 6k rows, measured 2026-09-23),
-        so it never reaches the deferral and passed against the unfixed gate.
-        The size is load-bearing: the stall appeared at 60k and 30k rows and
-        not at 20k or 10k, so a smaller frame stops regressing anything.
+        Reported separately from the RandomEffect symptom. Only ``fs`` is run:
+        ``sz`` never stalled here. The size is load-bearing: the stall appeared
+        at 60k and 30k rows and not at 20k or 10k. PIRLS stalled at the
+        round-off floor of its coefficient-step rule; it now stops on the
+        certificate's own score in centred coordinates (one-engine design
+        §3.8), so every observed gate, the candidate, the line search and the
+        terminal refit, stops converged on the quantity that certifies it,
+        and the published mode certifies.
         """
         from superglm import Categorical, FactorSmooth, Spline, SuperGLM
 
@@ -3766,7 +3800,10 @@ class TestModeCertifiesAtTheRoundOffFloor:
         with self._recording_pirls() as records:
             model.fit_reml(frame[columns], y, sample_weight=weight, offset=offset)
 
+        from superglm.reml.observed_geometry import observed_mode_certification_bar
+
         assert model.reml_diagnostics()["converged"] is True
-        assert any(reason == "max_iter" for _, reason in records), (
-            "the fs fixture no longer reaches the stall it exists to regress"
-        )
+        assert {purpose for purpose, _ in records} >= {"reml_candidate", "reml_final"}
+        assert all(reason == "converged" for _, reason in records), records
+        residual = model._reml_profile["reml_terminal_observed_mode_residual"]
+        assert residual <= observed_mode_certification_bar()

@@ -209,7 +209,10 @@ def test_unapproved_family_link_pairs_retain_fisher_scoring() -> None:
     assert gamma_identity.curvature_source == "fisher"
 
 
-def test_invalid_observed_rows_fall_back_atomically_to_fisher() -> None:
+def test_non_finite_observed_rows_keep_their_curvature_and_reject_the_step() -> None:
+    """One-engine design §3.11: the curvature is the pair's declaration, so an
+    unrepresentable observed row marks the rows for rejection rather than swap
+    in Fisher rows."""
     y = np.array([2.0, 1.0])
     mu = np.ones(2)
     eta = np.log(mu)
@@ -225,10 +228,27 @@ def test_invalid_observed_rows_fall_back_atomically_to_fisher() -> None:
         prefer_observed=True,
     )
 
-    assert rows.curvature_source == "fisher"
-    assert rows.fallback_reason == "invalid_observed_rows"
-    assert np.all(np.isfinite(rows.weights))
-    assert np.all(np.isfinite(rows.response))
+    assert rows.curvature_source == "observed"
+    assert rows.rejection_reason == "nonfinite_observed_rows"
+    assert not np.all(np.isfinite(rows.weights))
+
+
+def test_zero_observed_rows_are_a_valid_newton_model() -> None:
+    """The ``> 0`` condition is gone: an observed row that underflows to zero
+    keeps the observed model, with no rejection (design §3.11)."""
+    # w y / mu = 5e-324 * 2 / 4 rounds to zero
+    rows = coefficient_working_rows(
+        distribution=Gamma(),
+        link=LogLink(),
+        y=np.array([2.0, 2.0]),
+        mu=np.array([4.0, 1.0]),
+        eta=np.log(np.array([4.0, 1.0])),
+        sample_weight=np.array([5.0e-324, 1.0]),
+        prefer_observed=True,
+    )
+    assert rows.weights[0] == 0.0
+    assert rows.curvature_source == "observed"
+    assert rows.rejection_reason is None
 
 
 def test_poisson_sqrt_exact_zero_uses_structural_fisher_limit() -> None:
@@ -340,3 +360,29 @@ def test_poisson_sqrt_initial_intercept_preserves_tiny_response_mean() -> None:
         np.average(y, weights=weights),
         rel=2.0e-16,
     )
+
+
+def test_a_zero_weight_fisher_row_contributes_exact_zeros_at_a_sqrt_cusp() -> None:
+    """Tweedie/sqrt at ``eta = 0`` has ``h' = 0``: its Fisher weight is 0 and the
+    textbook response ``eta + (y - mu) / h'`` is infinite, so ``W z`` was NaN and
+    poisoned every normal-equations sum (the chain's solve then refused the
+    iterate and ``auto`` refit it on gram).  The row carries no information,
+    and its score ``w (y - mu) h' / V`` is exactly zero, so ``W z`` and ``W (z -
+    eta)`` must be too (Wood, Pya & Saefken 2016, §3.3: only ``w z`` is needed).
+    """
+    eta = np.array([0.0, 0.0, 0.5])
+    mu = np.maximum(eta**2, 1e-50)
+    rows = coefficient_working_rows(
+        distribution=Tweedie(p=1.75),
+        link=SqrtLink(),
+        y=np.array([0.0, 2.0, 1.0]),
+        mu=mu,
+        eta=eta,
+        sample_weight=np.ones(3),
+        prefer_observed=False,
+    )
+    assert np.array_equal(rows.weights[:2], [0.0, 0.0])
+    assert np.all(np.isfinite(rows.response))
+    np.testing.assert_array_equal((rows.weights * rows.response)[:2], [0.0, 0.0])
+    np.testing.assert_array_equal((rows.weights * (rows.response - eta))[:2], [0.0, 0.0])
+    assert rows.response[2] == eta[2] + (1.0 - mu[2]) / (2.0 * eta[2])

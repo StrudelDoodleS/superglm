@@ -21,6 +21,7 @@ from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
 from superglm.solvers.dispersion import model_weight_semantics
+from superglm.solvers.mode_score import linear_predictor
 
 if TYPE_CHECKING:
     from superglm._frame import FrameLike
@@ -625,10 +626,7 @@ def _refresh_fit_statistics(
         solver_result = (
             model._solver_pirls_result() if model._solver_result is not None else model.result
         )
-        eta = model._dm.matvec(solver_result.beta) + solver_result.intercept
-        if offset_arr is not None:
-            eta = eta + offset_arr
-        eta = stabilize_eta(eta, model._link)
+        eta = stabilize_eta(linear_predictor(model._dm, solver_result, offset_arr), model._link)
         mu = clip_mu(model._link.inverse(eta), model._distribution)
     else:
         model._fit_stats = None

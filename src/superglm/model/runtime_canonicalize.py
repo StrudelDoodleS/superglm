@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
@@ -12,6 +13,7 @@ from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributions import clip_mu
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.links import stabilize_eta
+from superglm.solvers.mode_score import linear_predictor, two_sum
 from superglm.solvers.pirls import PIRLSResult
 
 _RUNTIME_MEAN_CHUNK_SIZE = 8192
@@ -356,8 +358,17 @@ def _live_public_runtime_state(
 
     plan = base._build_prediction_plan(model)
     beta_all = public_result.beta
-    eta = np.full(len(frame), public_result.intercept, dtype=np.float64)
+    # eta through the published scoring contract (``base._predict_eta``): a
+    # term whose dense columns keep a centre enters centred; the per-term
+    # contributions stay raw, since their means are what canonicalization moves.
+    intercept, centre, intercept_lo = base.prediction_centred_state(public_result)
+    eta = base.start_eta(len(frame), intercept, intercept_lo)
     contributions: dict[str, NDArray[np.float64]] = {}
+
+    def published(term: dict[str, Any], contribution: NDArray[np.float64]) -> NDArray:
+        if centre is not None and np.any(centre[term["beta_idx"]] != 0.0):
+            return base._centred_term_contribution(term, frame, beta_all, centre[term["beta_idx"]])
+        return contribution
 
     for term in plan["features"]:
         if term["name"] in model._interaction_specs:
@@ -369,7 +380,7 @@ def _live_public_runtime_state(
             dtype=np.float64,
         ).ravel()
         contributions[term["name"]] = contribution
-        eta += contribution
+        eta += published(term, contribution)
 
     for term in plan["interactions"]:
         if term["name"] in model._specs:
@@ -388,8 +399,9 @@ def _live_public_runtime_state(
             dtype=np.float64,
         ).ravel()
         contributions[term["name"]] = contribution
-        eta += contribution
+        eta += published(term, contribution)
 
+    eta = base.finish_eta(eta, intercept, intercept_lo)
     if model._fit_offset is not None:
         eta = eta + model._fit_offset
 
@@ -406,10 +418,7 @@ def _compute_public_parity_diagnostics(
     intercept_shift: float,
 ) -> tuple[CanonicalizationDiagnostics, dict[str, float]]:
     """Compute diagnostics from the live public runtime state."""
-    eta_before = model._dm.matvec(solver.beta) + float(solver.intercept)
-    if model._fit_offset is not None:
-        eta_before = eta_before + model._fit_offset
-    eta_before = stabilize_eta(eta_before, model._link)
+    eta_before = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
     mu_before = clip_mu(model._link.inverse(eta_before), model._distribution)
 
     contributions_after, eta_after, mu_after = _live_public_runtime_state(model, public_result)
@@ -443,12 +452,79 @@ def _solver_to_public_state(
     return None, False
 
 
+def _public_centred_state(
+    model,
+    solver: PIRLSResult,
+    term_states: dict[str, dict[str, Any]],
+) -> tuple[float | None, NDArray[np.float64] | None, float | None]:
+    """The solver's centred state ``(alpha, c, alpha_lo)`` read in the public coordinates.
+
+    The fit's predictor is ``eta = alpha + (X - 1 c') beta`` (one-engine
+    design §3.8, ``mode_score.linear_predictor``), free of the cancellation a
+    dense column's offset forces between ``X beta`` and the raw intercept.
+    Prediction differences a column about its centre only where the term
+    scores its raw columns that way (``base.scores_centred``: a numeric
+    column, or the product of two, the columns that can sit at an offset far
+    above their spread), on a ``DenseGroupMatrix`` block.  Every other
+    column's entries are bounded by its basis, so its ``(m - c)' beta`` is
+    folded into ``alpha`` once here and it is scored as it is, ``m`` the
+    training means a materialized public term's columns lose
+    (``_apply_r_inv_centering``).  Exact algebra: ``alpha_pub + (X_pub - 1
+    c_pub') beta`` is the solver's predictor.  A compensated solver intercept
+    ``(alpha, alpha_lo)`` keeps its remainder, plus the rounding of the fold
+    (a TwoSum).  ``(None, None, None)`` when the solver carries no centred
+    state or no such column keeps a centre, so the model predicts from its raw
+    intercept exactly as before.
+    """
+    from superglm.group_matrix import DenseGroupMatrix
+    from superglm.model.base import scores_centred
+
+    alpha = getattr(solver, "centred_intercept", None)
+    centre = getattr(solver, "state_center", None)
+    dm = getattr(model, "_dm", None)
+    if alpha is None or centre is None or dm is None:
+        return None, None, None
+    centre = np.asarray(centre, dtype=np.float64)
+    beta = np.asarray(solver.beta, dtype=np.float64)
+    dense = np.zeros(centre.size, dtype=bool)
+    start = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        dense[start : start + width] = type(matrix) is DenseGroupMatrix
+        start += width
+    differenced = np.zeros(centre.size, dtype=bool)
+    specs = {**model._specs, **model._interaction_specs}
+    for group in model._groups:
+        if scores_centred(specs.get(group.feature_name)):
+            differenced[group.start : group.end] = True
+    shifts = np.zeros(centre.size, dtype=np.float64)
+    for term_state in term_states.values():
+        if not term_state["applied_to_public_model"]:
+            continue
+        for group_state in term_state["groups"]:
+            lo, hi = group_state["solver_slice"]
+            shifts[lo:hi] = np.asarray(group_state["column_means"], dtype=np.float64)
+    public_centre = np.where(dense & differenced & (centre != 0.0), centre - shifts, 0.0)
+    if not np.any(public_centre != 0.0):
+        return None, None, None
+    folded = public_centre == 0.0
+    fold = math.fsum((shifts[folded] - centre[folded]) * beta[folded])
+    alpha_lo = getattr(solver, "centred_intercept_lo", None)
+    if alpha_lo is None:
+        return float(alpha) + fold, public_centre, None
+    alpha_public, fold_error = two_sum(float(alpha), fold)
+    return alpha_public, public_centre, float(alpha_lo) + fold_error
+
+
 def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSResult:
     """Build the public PIRLS result from the private solver fit."""
     public_result = replace(
         solver,
         beta=np.asarray(solver.beta, dtype=np.float64).copy(),
         intercept=float(solver.intercept) + float(state["intercept_shift"]),
+        centred_intercept=state.get("centred_intercept"),
+        state_center=state.get("state_center"),
+        centred_intercept_lo=state.get("centred_intercept_lo"),
     )
     if hasattr(solver, "scop_states"):
         public_result.scop_states = solver.scop_states
@@ -462,7 +538,15 @@ def canonicalize_fitted_model(model, *, validate: bool = True) -> None:
     solver = model._solver_pirls_result()
     term_states, public_intercept_shift = _compile_runtime_terms(model, solver)
 
-    state = {"intercept_shift": float(public_intercept_shift)}
+    centred_intercept, state_center, centred_intercept_lo = _public_centred_state(
+        model, solver, term_states
+    )
+    state = {
+        "intercept_shift": float(public_intercept_shift),
+        "centred_intercept": centred_intercept,
+        "state_center": state_center,
+        "centred_intercept_lo": centred_intercept_lo,
+    }
     public_result = _build_public_result(solver, state)
     if validate:
         diagnostics, live_term_means_after = _compute_public_parity_diagnostics(

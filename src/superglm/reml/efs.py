@@ -50,6 +50,7 @@ from superglm.reml.penalty_algebra import (
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.solvers.irls_direct import _safe_decompose_H
+from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.pirls import fit_pirls
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
@@ -136,10 +137,7 @@ def optimize_efs_reml(
     )
 
     # Compute W and X'WX from bootstrap fit
-    boot_eta = stabilize_eta(
-        dm.matvec(boot_result.beta) + boot_result.intercept + offset_arr,
-        link,
-    )
+    boot_eta = stabilize_eta(linear_predictor(dm, boot_result, offset_arr), link)
     boot_mu = clip_mu(link.inverse(boot_eta), distribution)
     boot_W = fisher_working_weights(
         distribution=distribution,
@@ -243,7 +241,7 @@ def optimize_efs_reml(
             last_pirls_iters = pirls_result.n_iter
 
             # Compute IRLS weights and cache X'WX
-            eta = stabilize_eta(dm.matvec(beta) + intercept + offset_arr, link)
+            eta = stabilize_eta(linear_predictor(dm, pirls_result, offset_arr), link)
             mu = clip_mu(link.inverse(eta), distribution)
             W = fisher_working_weights(
                 distribution=distribution,
