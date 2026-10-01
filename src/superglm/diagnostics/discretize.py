@@ -326,7 +326,10 @@ def _exact_edges(
     # above the finite relative cap, so the minimum is the cap either way.
     with np.errstate(over="ignore"):
         tol = np.minimum(band_se * se, np.log1p(band_max_error))
-    banding = exact_bands(curve, weight, tol, max_bands)
+    # Only the weights' ratios set the bands, and exact_bands divides by the
+    # largest itself, so this changes no band; it keeps the banding's squared
+    # error, which no export reads, from refusing weights near the largest double.
+    banding = exact_bands(curve, weight / weight.max(), tol, max_bands)
     edges = np.append(values[banding.starts], values[-1])
     ends = np.append(banding.starts[1:], len(values))
     # Band minus curve, so the relative error is the band factor's against the curve's.

@@ -17,6 +17,7 @@ from superglm.diagnostics.discretize import (
 from superglm.diagnostics.exact_banding import (
     MAX_EXACT_VALUES,
     _fewest_then_least,
+    _representable_bounds,
     exact_bands,
 )
 from superglm.export._ppform import extract_ppform
@@ -338,6 +339,151 @@ def test_weights_whose_squared_error_passes_the_largest_double_are_refused():
         exact_bands(s, np.full(2, 8e307), tol, max_bands=1)
     # The refusal is the double's limit, not a cap on large weights.
     assert exact_bands(s, np.full(2, 1e306), tol, max_bands=1).sse == pytest.approx(5e307)
+
+
+_MAX = float(np.finfo(np.float64).max)
+_U = Fraction(1, 2**53)
+
+
+def _exact_sse(s, w, result):
+    """The published factors' weighted squared error, in exact arithmetic."""
+    band = np.repeat(result.factors, np.diff(np.append(result.starts, len(s))))
+    return sum(
+        Fraction(weight) * (Fraction(value) - Fraction(factor)) ** 2
+        for value, weight, factor in zip(s, w, band, strict=True)
+    )
+
+
+def _sse_gamma(n):
+    """gamma_(n + 5): the five roundings of a term w (s - f)**2, n - 1 to sum, one to rescale."""
+    return (n + 5) * _U / (1 - (n + 5) * _U)
+
+
+def _sse_underflow(n, scale):
+    return n * Fraction(2) ** -1073 * Fraction(scale)
+
+
+def _sse_error_bound(exact, n, scale):
+    """The documented bound on ``sse`` about its exact value."""
+    return _sse_gamma(n) * exact + _sse_underflow(n, scale)
+
+
+def test_an_error_lost_to_cancelling_moments_is_still_refused():
+    # About the light value, the running moments gave 4e16 - 4e16 = 0, so an error
+    # of about four times the largest double came back as 0 and passed the check.
+    with pytest.raises(ValueError, match="past the largest double"):
+        exact_bands(
+            np.array([0.0, 2e8]), np.array([_MAX, 1e-16 * _MAX]), np.full(2, 3e8), max_bands=1
+        )
+
+
+def test_cancelling_moments_cannot_refuse_a_finite_error():
+    # The running moments gave a scaled error of 4 against a true 0.02, and the
+    # refusal fired on an error of about 2e306.
+    s, w = np.array([1e8, 1e8 + 0.2, 0.0]), np.array([1e308, 1e308, 1e208])
+    result = exact_bands(s, w, np.full(3, 2e8), max_bands=1)
+    exact = _exact_sse(s, w, result)
+    assert abs(Fraction(result.sse) - exact) <= _sse_error_bound(exact, len(s), 1e308)
+
+
+def test_cancelling_moments_cannot_choose_the_banding():
+    # About the light value 2e8, the band {0, 2e8} cancelled to an error of 0
+    # where it is 4, and so beat {2e8, 2e8 + 1}, whose error is 1e-16.
+    result = exact_bands(
+        np.array([0.0, 2e8, 2e8 + 1.0]),
+        np.array([1.0, 1e-16, 1.0]),
+        np.array([1.0, 3e8, 1.0]),
+        max_bands=2,
+    )
+    assert result.starts.tolist() == [0, 1]
+
+
+def test_bands_are_costed_at_the_factors_they_publish():
+    # The doubles here are the integers.  The first band's mean, B + 1.375, rounds
+    # to B + 1, which misses the 0.95 at B + 2, so it publishes B + 2: an error
+    # of 10, not the 3.75 about its mean that chose it.  The other two-band
+    # banding publishes B + 2 and B + 1, at an error of 8.
+    big = 2.0**52
+    s, w = big + np.array([2.0, 1.0, 1.0, 0.0]), np.array([6.0, 6.0, 4.0, 8.0])
+    result = exact_bands(s, w, np.array([0.95, 2.0, 2.0, 2.0]), max_bands=4)
+    assert result.starts.tolist() == [0, 1]
+    assert result.factors.tolist() == [big + 2.0, big + 1.0]
+    assert result.sse == 8.0
+
+
+def test_the_reported_error_is_the_published_factors_error_within_its_bound():
+    """Rounding-level and ordinary curves, weights spanning up to 1e250 and up to 1e307.
+
+    A refusal must be one the exact error justifies: past the largest double,
+    less the same bound.
+    """
+    rng = np.random.default_rng(41)
+    refused = 0
+    for _ in range(300):
+        k = int(rng.integers(1, 9))
+        level = float(rng.choice([0.0, 100.0, 1e8, 2.0**52]))
+        s = level + np.cumsum(rng.normal(0.0, float(rng.choice([1e-12, 1e-3, 1.0, 1e3])), k))
+        span = float(rng.choice([6.0, 250.0]))
+        w = 10.0 ** rng.uniform(-span, 0.0, k) * 10.0 ** float(rng.choice([0.0, 300.0, 307.0]))
+        tol = np.abs(rng.normal(0.0, 2.0 * float(np.ptp(s)) + np.spacing(level), k))
+        cap = int(rng.integers(1, k + 1))
+        try:
+            result = exact_bands(s, w, tol, max_bands=cap)
+        except ValueError as refusal:
+            assert "past the largest double" in str(refusal)
+            refused += 1
+            # A power of two changes no band, so this gives the refused factors.
+            power = 2.0 ** int(np.frexp(w.max())[1])
+            exact = _exact_sse(s, w, exact_bands(s, w / power, tol, max_bands=cap))
+            # The product rounds to inf from 2**1024 - 2**970, halfway past the largest.
+            reach = exact * (1 + _sse_gamma(k)) + _sse_underflow(k, w.max())
+            assert reach >= Fraction(2) ** 1024 - Fraction(2) ** 970
+            continue
+        exact = _exact_sse(s, w, result)
+        assert abs(Fraction(result.sse) - exact) <= _sse_error_bound(exact, k, w.max())
+    assert 0 < refused < 300
+
+
+def _check_representable_bounds(s, tol):
+    s, tol = np.asarray(s, dtype=np.float64), np.asarray(tol, dtype=np.float64)
+    with np.errstate(all="raise"):
+        low, high = _representable_bounds(s, tol)
+    with np.errstate(over="ignore", under="ignore"):  # the neighbours past each end
+        under_low, over_high = np.nextafter(low, -np.inf), np.nextafter(high, np.inf)
+    for value, limit, least, greatest, under, over in zip(
+        s, tol, low, high, under_low, over_high, strict=True
+    ):
+        below, above = Fraction(value) - Fraction(limit), Fraction(value) + Fraction(limit)
+        # The least double at or above s - tol: the double just under it is below.
+        assert Fraction(least) >= below
+        assert np.isinf(under) or Fraction(under) < below
+        # The greatest double at or below s + tol: the double just over it is above.
+        assert Fraction(greatest) <= above
+        assert np.isinf(over) or Fraction(over) > above
+
+
+def test_the_representable_bounds_are_exact():
+    """Each bound against exact arithmetic, where it decides something.
+
+    tol above |s| is where Fast2Sum needs the larger magnitude first; then
+    subnormal sums, sums that overflow, half-ulp ties and near-cancelling pairs.
+    """
+    rng = np.random.default_rng(43)
+    n = 400
+    spread = 10.0 ** rng.integers(-300, 300, n).astype(float)
+    s = rng.normal(0.0, 1.0, n) * spread
+    pairs = [
+        (s, np.abs(rng.normal(0.0, 1.0, n)) * 10.0 ** rng.integers(-320, 300, n).astype(float)),
+        (s, np.minimum(np.abs(s) * 10.0 ** rng.uniform(0.1, 30.0, n), _MAX)),  # tol > |s|
+        (s, np.abs(s) * (1.0 + rng.integers(-3, 4, n) * 2.0**-52)),  # near-cancelling
+        (s, np.spacing(np.abs(s)) / 2.0),  # half-ulp ties above |s|
+        (s, np.spacing(np.nextafter(np.abs(s), 0.0)) / 2.0),  # and below
+        (rng.integers(-(2**20), 2**20, n) * 2.0**-1074, rng.integers(0, 2**20, n) * 2.0**-1074),
+        ([-1e308, -_MAX, _MAX, 1e308, 1.0], [1e308, _MAX, _MAX, 1e308, _MAX]),  # overflow
+        ([0.0, -0.0, 1.0, 1e-20], [0.0, 0.0, 0.0, 1.0]),
+    ]
+    for values, limits in pairs:
+        _check_representable_bounds(values, limits)
 
 
 @pytest.fixture(scope="module")
@@ -695,6 +841,39 @@ def test_a_weight_near_the_largest_double_keeps_the_table_finite(strategy):
         df, y, sample_weight=weights, n_bins=150, bin_strategy=strategy
     )
     assert np.isfinite(result.tables["x"]["log_relativity"]).all()
+
+
+@pytest.fixture(scope="module")
+def heavy_book():
+    """The book of test_a_weight_near_the_largest_double_keeps_the_table_finite."""
+    rng = np.random.default_rng(11)
+    x = rng.integers(0, 21, 3000).astype(float) / 20.0
+    y = rng.poisson(np.exp(-1.0 + 4.0 * x)).astype(float)
+    df = pd.DataFrame({"x": x})
+    model = SuperGLM(features={"x": Spline(n_knots=6)}, weight_semantics="frequency").fit(df, y)
+    return model, df, y
+
+
+@pytest.mark.parametrize("heavy", ["two rows at 8e307", "every row at 5e304"])
+def test_weights_near_the_largest_double_still_export_one_band(heavy_book, heavy):
+    # The weight sums are finite, but the banding's squared error in their units
+    # is not, and refusing it stopped exports that never read it.
+    model, df, y = heavy_book
+    x = df["x"].to_numpy()
+    if heavy == "two rows at 8e307":
+        weights = np.ones(len(df))
+        weights[[np.flatnonzero(x == 0.0)[0], np.flatnonzero(x == x.max())[0]]] = 8e307
+    else:
+        weights = np.full(len(df), 5e304)
+    impact = model.discretization_impact(
+        df, y, sample_weight=weights, n_bins=1, bin_strategy="exact"
+    )
+    assert len(impact.tables["x"]) == 1
+    assert np.isfinite(impact.tables["x"]["log_relativity"]).all()
+    payload = build_rating_table_payload(
+        model, df, y=y, sample_weight=weights, n_bins=1, bin_strategy="exact"
+    )
+    assert len(next(b for b in payload.main_effects if b.name == "x").table) == 1
 
 
 def test_exact_tables_export_the_certified_factors(banded_model, monkeypatch):

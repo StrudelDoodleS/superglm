@@ -35,24 +35,27 @@ class ExactBanding:
     starts : NDArray
         Index of each band's first value, ascending, starting at 0.
     factors : NDArray
-        Weighted mean of the curve in each band, as a double that meets every
-        tolerance in the band (times ``tolerance_factor``) exactly.  The mean
-        is evaluated in the frame of the band's first value; if that double
-        misses a tolerance, the factor is the nearest double that meets them
-        all.  It can differ from the exact mean by about ``k * eps`` times the
-        band's spread plus :func:`_underflow_margin`, or by one unit in the
-        last place when it had to move.  A band whose tolerances leave no
-        double between them is never formed.
+        The double each band publishes: its weighted mean, summed value by
+        value in the frame of the band's first value and added back to it,
+        then moved, if it misses a tolerance, to the nearest double that meets
+        them all.  Every value is within its tolerance of its factor exactly,
+        the tolerance being the double the solve used: ``tol`` itself, or when
+        widened ``min(fl(tolerance_factor * tol), largest double / 4)``.  An unmoved
+        factor differs from the exact mean by its final rounding, half an ulp,
+        plus about ``k * eps`` times the band's spread and
+        :func:`_underflow_margin`; a moved one by less than one ulp more.  A
+        band whose tolerances leave no double between them is never formed.
     tolerance_factor : float
         Multiplier applied to the tolerances: 1.0 unless ``max_bands`` forced
         a wider limit.
     sse : float
-        Weighted squared error of the banding, in the units of ``w``.  It is
-        formed from running moments about each band's last value, so it loses
-        accuracy when that value sits far from the band's mean relative to the
-        band's spread; it only orders bandings with the fewest bands, never
-        their count.  It is always finite: weights that would put it past the
-        largest double are refused.
+        Weighted squared error of the published factors, the sum of
+        ``w * (s - factor)**2`` in the units of ``w``.  It is summed directly
+        from nonnegative terms, so its relative error is at most
+        ``(n + 5) u / (1 - (n + 5) u)``, with ``u = 2**-53`` (Higham 2002,
+        Lemma 3.1 and section 4.2), plus ``n * 2**-1073`` times the largest
+        weight from underflow.  It is always finite: weights that would put it
+        past the largest double are refused.
     """
 
     starts: NDArray[np.intp]
@@ -74,8 +77,9 @@ def exact_bands(s, w, tol, max_bands: int) -> ExactBanding:
     w : array
         Positive weight of each value.
     tol : array
-        Nonnegative tolerance of each value: its band's weighted mean must lie
-        within ``tol`` of it.  A single value is always its own mean.
+        Nonnegative tolerance of each value: its band's factor, the band's
+        weighted mean as a double, must lie within ``tol`` of it.  A single
+        value is always its own factor.
     max_bands : int
         Largest number of bands allowed.  When the tolerances need more, they
         are all widened by the smallest factor that fits, reported as
@@ -87,8 +91,8 @@ def exact_bands(s, w, tol, max_bands: int) -> ExactBanding:
         For invalid inputs, for tolerances no banding within ``max_bands`` can
         meet, and when the banding's weighted squared error is past the
         largest double, as it can be for weights near it.  Only the weights'
-        ratios set the bands, so dividing them by a common factor gives the
-        same bands.
+        ratios set the bands, so dividing them all by a power of two that
+        keeps them normal gives the same bands.
     """
     s, w, tol = _validated(s, w, tol, max_bands)
     # Only ratios of weights matter; scaling by the largest keeps w * d finite.
@@ -101,36 +105,21 @@ def exact_bands(s, w, tol, max_bands: int) -> ExactBanding:
             "exact banding weights span more than a double can average: the smallest "
             "is below 2**-1022 of the largest"
         )
-    starts, sse = _fewest_then_least(s, w, tol)
-    factor, used = 1.0, tol
+    starts, factors = _fewest_then_least(s, w, tol)
+    factor = 1.0
     if len(starts) > max_bands:
-        factor, (starts, sse) = _smallest_fitting_factor(s, w, tol, max_bands)
-        used = _widened(tol, factor)
-    if math.isinf(sse * scale):
-        # A Python float product: it overflows to inf silently, under any np.seterr.
+        factor, (starts, factors) = _smallest_fitting_factor(s, w, tol, max_bands)
+    normalised = _squared_error(s, w, starts, factors)
+    # A Python float product: it overflows to inf silently, under any np.seterr.
+    sse = normalised * scale
+    if math.isinf(sse):
         raise ValueError(
             f"exact banding weights are too large: the banding's weighted squared error, "
-            f"{sse:.6g} times the largest weight {scale:.6g}, is past the largest double. "
-            "Only the weights' ratios set the bands, so divide them by a common factor."
+            f"{normalised:.6g} times the largest weight {scale:.6g}, is past the largest "
+            "double. Only the weights' ratios set the bands, so divide them all by a power "
+            "of two near the largest, which leaves the bands unchanged."
         )
-    ends = np.append(starts[1:], len(s))
-    low, high = _representable_bounds(s, used)
-    # Averaged in the band's own frame, so the factor carries its final rounding
-    # rather than one scaled by the curve's level.  That rounding can still land
-    # outside a tolerance, so the factor is held to the doubles inside them all;
-    # the solve forms a band only when there is one.
-    factors = np.array(
-        [
-            np.clip(
-                s[a] + np.average(s[a:b] - s[a], weights=w[a:b]),
-                low[a:b].max(),
-                high[a:b].min(),
-            )
-            for a, b in zip(starts, ends, strict=True)
-        ],
-        dtype=np.float64,
-    )
-    return ExactBanding(starts=starts, factors=factors, tolerance_factor=factor, sse=sse * scale)
+    return ExactBanding(starts=starts, factors=factors, tolerance_factor=factor, sse=sse)
 
 
 def _validated(s, w, tol, max_bands):
@@ -163,11 +152,12 @@ def _validated(s, w, tol, max_bands):
     return s, w, tol
 
 
-def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
-    """Fewest bands meeting ``tol``, then least weighted squared error.
+def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], NDArray[np.float64]]:
+    """Fewest bands meeting ``tol``, then least weighted squared error at their factors.
 
-    ``count[j]`` and ``sse[j]`` describe the best banding of the first ``j``
-    values.  For each end ``j`` the candidate starts run leftwards until the
+    Returns each band's start and the factor it publishes.  ``count[j]`` and
+    ``sse[j]`` describe the best banding of the first ``j`` values.  For each
+    end ``j`` the candidate starts run leftwards until the
     tolerance window ``[max(s - tol), min(s + tol)]`` empties; the window only
     shrinks as a band grows, so every longer band is infeasible too.  Memory is
     O(n); the window scan is O(n) per end, so a solve is O(n^2).
@@ -183,14 +173,32 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
     A band also needs a double that meets every tolerance in it, to carry as
     its factor.  The exact mean can fall between two doubles that each miss
     one tolerance, and such a band is not formed.
+
+    A band's factor is its weighted mean, summed value by value in the frame
+    of its first value, added back to that value and held to those doubles.
+    Its cost is its squared error at that factor, ``M2 + W (factor - mean)**2``,
+    where ``M2``, the squared error about the mean, is kept for every open
+    start by West's (1979) weighted update as each end is added.  That
+    update's rounding grows like ``k kappa eps`` in the band's condition
+    number, where the running moments' grew like ``k kappa**2 eps`` (Chan,
+    Golub and LeVeque 1983, Table 1).  The objective is the published
+    factors' error, a sum over bands each fixed by its own values, so the
+    principle of optimality holds for it.
     """
     n = len(s)
     count = np.zeros(n + 1, dtype=np.int64)
     sse = np.zeros(n + 1, dtype=np.float64)
     start = np.zeros(n, dtype=np.intp)
+    published = np.zeros(n, dtype=np.float64)
     never = np.iinfo(np.int64).max
     underflow = _underflow_margin(w)
     low_double, high_double = _representable_bounds(s, tol)
+    # Per start a, the band [a, j] so far: its weight, its first moment about
+    # s[a], and its squared error about its mean.
+    weight = np.zeros(n, dtype=np.float64)
+    moment = np.zeros(n, dtype=np.float64)
+    square = np.zeros(n, dtype=np.float64)
+    floor = 0
     for j in range(n):
         # d is exact for values within a factor two of s[j] (Sterbenz), and
         # otherwise off by at most eps |d|.
@@ -200,11 +208,26 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
         hi = np.minimum.accumulate(d_all + t_all)
         closed = lo > hi
         m = int(np.argmax(closed)) if closed.any() else j + 1
+        # A window that has closed stays closed as its band grows, exactly; the
+        # floor keeps it closed where rounding would reopen it, so every open
+        # start's sums hold its whole band.
+        floor = max(floor, j - m + 1)
+        m = j - floor + 1
+        open_starts = slice(floor, j + 1)
+        x = s[j] - s[open_starts]  # value j in each open start's frame
+        before = weight[open_starts]
+        after = before + w[j]
+        gap = x - np.divide(moment[open_starts], before, out=np.zeros(m), where=before > 0.0)
+        # West's increment w[j] * before / after, ordered so that its first
+        # product is at least half the smaller weight and cannot underflow.
+        lighter = np.minimum(before, w[j])
+        square[open_starts] += lighter * (np.maximum(before, w[j]) / after) * gap * gap
+        moment[open_starts] += w[j] * x
+        weight[open_starts] = after
         d = d_all[:m]
         wr = w[j::-1][:m]
         cw = np.cumsum(wr)
         mean = np.cumsum(wr * d) / cw
-        cost = np.maximum(np.cumsum(wr * d * d) - cw * mean * mean, 0.0)
         # The mean of k shifted values errs by at most about (k + 2) eps max|d|,
         # and each window edge by eps times its own size (x + eps |x| is
         # increasing, so that covers every d - t below lo and d + t above hi).
@@ -219,12 +242,16 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
         low_edge = lo[:m] + err + _EPS * np.abs(lo[:m])
         high_edge = hi[:m] - err - _EPS * np.abs(hi[:m])
         # The bounds are exact, so this test is too: no rounding margin.
-        has_double = np.maximum.accumulate(low_double[j::-1][:m]) <= np.minimum.accumulate(
-            high_double[j::-1][:m]
-        )
-        ok = (low_edge <= mean) & (mean <= high_edge) & has_double
+        low_band = np.maximum.accumulate(low_double[j::-1][:m])
+        high_band = np.minimum.accumulate(high_double[j::-1][:m])
+        ok = (low_edge <= mean) & (mean <= high_edge) & (low_band <= high_band)
         ok[0] = True  # a single value is its own mean
         first = j - np.arange(m)
+        band_weight = weight[open_starts][::-1]
+        shift = moment[open_starts][::-1] / band_weight
+        factor = np.clip(s[first] + shift, low_band, high_band)
+        miss = (factor - s[first]) - shift
+        cost = square[open_starts][::-1] + band_weight * miss * miss
         candidate = np.where(ok, count[first] + 1, never)
         fewest = candidate.min()
         total = np.where(candidate == fewest, sse[first] + cost, np.inf)
@@ -232,12 +259,28 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
         count[j + 1] = fewest
         sse[j + 1] = total[k]
         start[j] = first[k]
+        published[j] = factor[k]
     starts: list[int] = []
+    factors: list[float] = []
     j = n - 1
     while j >= 0:
         starts.append(int(start[j]))
+        factors.append(float(published[j]))
         j = int(start[j]) - 1
-    return np.array(starts[::-1], dtype=np.intp), float(sse[n])
+    return np.array(starts[::-1], dtype=np.intp), np.array(factors[::-1], dtype=np.float64)
+
+
+def _squared_error(s, w, starts, factors) -> float:
+    """Weighted squared error of ``s`` about its bands' factors, summed directly.
+
+    Each term ``w (s - factor)**2`` is nonnegative and carries a relative error
+    of at most ``gamma_4``, its difference entering twice, so no cancellation
+    can occur; summing n of them in any order adds at most ``gamma_(n - 1)``
+    (Higham 2002, Lemma 3.1 and eq. 4.4).  The sum's relative error is at most
+    ``gamma_(n + 3)``, plus underflow.
+    """
+    gap = s - np.repeat(factors, np.diff(np.append(starts, len(s))))
+    return float(np.sum(w * gap * gap))
 
 
 def _underflow_margin(w) -> float:
@@ -292,9 +335,9 @@ def _widened(tol, factor: float):
 
 
 def _banding_within(s, w, tol, factor: float, max_bands: int):
-    """The banding at ``factor * tol`` if it fits ``max_bands``, else None."""
-    starts, sse = _fewest_then_least(s, w, _widened(tol, factor))
-    return (starts, sse) if len(starts) <= max_bands else None
+    """The banding (starts, factors) at ``factor * tol`` if it fits ``max_bands``, else None."""
+    banding = _fewest_then_least(s, w, _widened(tol, factor))
+    return banding if len(banding[0]) <= max_bands else None
 
 
 def _smallest_fitting_factor(s, w, tol, max_bands: int):
@@ -302,12 +345,15 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
 
     Returns the factor and that banding.  Widening every tolerance only enlarges
     each feasible set (float64 rounding is monotone), so the fewest-band count
-    never rises with the factor and bisection applies.  At ``2 * reach / tau``,
-    with ``reach`` the curve's range plus :func:`_underflow_margin` and ``tau``
-    the least positive tolerance, every positive-tolerance window holds every
+    never rises with the factor and bisection applies.  The search starts at
+    ``2 * reach / tau``, with ``reach`` the curve's range plus
+    :func:`_underflow_margin` and ``tau`` the least positive tolerance.  When
+    that is a double, every positive-tolerance window there holds every
     possible band mean and every value of the curve, so a double as well, and
-    no larger factor fits more; if that fails, zero tolerances are what stand
-    in the way.  The bisection is geometric, so a factor near 1e30 takes about
+    no larger multiplier fits more: if it fails, zero tolerances are what stand
+    in the way.  When it is past the largest double, the search starts at the
+    largest double instead, and failing there means no multiplier a double can
+    hold fits.  The bisection is geometric, so a factor near 1e30 takes about
     thirty solves.
     """
     positive = tol[tol > 0.0]
@@ -323,8 +369,9 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
     banding = _banding_within(s, w, tol, upper, max_bands)
     if banding is None:
         raise ValueError(
-            f"cannot fit {len(s)} values into {max_bands} bands at any tolerance a double "
-            "can hold: values with zero or vanishingly small tolerance cannot share a band"
+            f"cannot fit {len(s)} values into {max_bands} bands at any tolerance multiplier "
+            "a double can hold: values with zero or vanishingly small tolerance cannot share "
+            "a band"
         )
     lower = 1.0
     while upper / lower - 1.0 > _FACTOR_RTOL:
