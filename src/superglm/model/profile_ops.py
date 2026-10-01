@@ -127,6 +127,7 @@ def estimate_p(
     references = {"X_ref": X, "y_ref": y, "sample_weight_ref": sample_weight, "offset_ref": offset}
     validated = fit_ops._validate_entrypoint_input(model, X, y, sample_weight, offset)
     X, y, sample_weight, offset = validated
+    fit_ops._check_random_effect_nesting(model, X)
     _refuse_replication_weights(model, sample_weight)
     result = _search_power_privately(
         model, validated, fit_mode=search_mode, p_bounds=p_bounds, xatol=xatol, report=report
@@ -516,6 +517,7 @@ def estimate_theta(
     validated = fit_ops._validate_entrypoint_input(
         model, X, y, sample_weight, offset, theta_role=THETA_ESTIMATED
     )
+    fit_ops._check_random_effect_nesting(model, validated[0])
     result = _search_theta_privately(
         model, validated, theta_bounds=theta_bounds, xatol=xatol, report=report
     )

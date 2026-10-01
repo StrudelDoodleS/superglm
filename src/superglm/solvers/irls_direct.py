@@ -19,14 +19,18 @@ shared B matrices between select=True subgroups vanishes entirely.
 from __future__ import annotations
 
 import logging
+import math
 import time
 import warnings
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
 
 import superglm.solvers.scop_exact_support as scop_exact_support
+from superglm._blas_threads import keep_narrow_cap
 from superglm._fit_trace import TraceRun
 from superglm._group_matrix._group_matrix_centered import (
     _raw_centering_well_scaled,
@@ -44,6 +48,7 @@ from superglm.distributions import (
     NegativeBinomial,
     Poisson,
     Tweedie,
+    clip_mu,
 )
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -56,7 +61,8 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
-from superglm.links import IdentityLink, Link, LogitLink, LogLink
+from superglm.links import IdentityLink, Link, LogitLink, LogLink, stabilize_eta
+from superglm.solvers._structured.block_leaves import factor_smooth_prior_statistics
 from superglm.solvers.centered_system import (
     CenteredSystem,
     TabmatCenteringState,
@@ -88,6 +94,18 @@ from superglm.solvers.irls_state import (
     _select_irls_trial,
     _stable_penalized_deviance_delta,
     _state_is_finite,
+    mean_space_boundary_rows,
+    mean_space_violation,
+)
+from superglm.solvers.mode_score import (
+    MODE_CERTIFICATION_BAR,
+    MODE_RESOLVE_CAP,
+    ModeResidual,
+    centred_intercept_remainder,
+    centred_matvec,
+    penalized_mode_residual,
+    prior_weighted_centre,
+    stagnation_window,
 )
 from superglm.solvers.pirls import (
     IterationDiagnostics,
@@ -113,33 +131,35 @@ from superglm.solvers.scop_newton import (
     scop_newton_step,
 )
 from superglm.solvers.structured import (
-    BlockSchurFactor,
-    BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
+    FactorSmoothLeafFactor,
+    FactorSmoothLeafLayout,
+    FactorSmoothLeafSystem,
+    FactorSmoothPenalizedOperator,
     NestedDataOperator,
     NestedPenalizedOperator,
     NestedSchurFactor,
+    NestedStructuredLayout,
     NestedStructuredSystem,
-    ProfiledBlockSchurFactor,
+    ProfiledFactorSmoothLeafFactor,
     ProfiledNestedSchurFactor,
-    ProfiledScalarSchurFactor,
-    ScalarSchurFactor,
-    ScalarStructuredSystem,
+    ProfiledSumToZeroTreeFactor,
     SumToZeroBlockOperator,
-    SumToZeroBlockStructuredSystem,
-    SymmetricBlockOperator,
+    SumToZeroLeafSystem,
+    SumToZeroPenalizedOperator,
+    SumToZeroTreeFactor,
     build_augmented_structured_factor,
     build_penalized_structured_operator,
     build_structured_system,
+    cancelled_column_row_norms,
+    centred_data_operator,
+    compact_operator_diagonal,
     get_structured_layout,
+    nested_prior_statistics,
     record_auto_backend_decision,
     resolve_structured_backend,
-)
-from superglm.solvers.sum_to_zero import (
-    ProfiledSumToZeroBlockFactor,
-    SumToZeroBlockFactor,
-    SumToZeroIdentifiabilityError,
+    solve_augmented_normal_equations,
 )
 from superglm.solvers.working_rows import (
     coefficient_initial_intercept,
@@ -302,6 +322,29 @@ def _evaluate_scop_trial(
     return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
+def _structured_score_centre(system, factor) -> tuple:
+    """``(mean_x, sum_w, centred diagonal, weakly identified slopes)`` of a structured solve.
+
+    The centring the certificate's score is formed about (``mode_residual``):
+    the working-weighted means of the system, its centred data diagonal
+    (offset-free for a nested chain, ``compact_operator_diagonal``), and the
+    slopes the factor truncated as weakly identified (one-engine design §3.6
+    step 5, §3.9).
+    """
+    operator = system.operator
+    xtw = np.empty(operator.shape[0], dtype=np.float64)
+    xtw[operator.small_indices] = system.xtw_small
+    xtw[operator.structured_indices] = system.xtw_structured
+    mean_x = xtw / system.sum_w
+    # an fs or sz system centres its c0-shifted moments (design §3.2), so a
+    # large-offset column's centred diagonal does not cancel to noise
+    diagonal = compact_operator_diagonal(centred_data_operator(system))
+    excluded = tuple(
+        index - 1 for index in getattr(factor, "weakly_identified_coefficients", ()) if index > 0
+    )
+    return mean_x, float(system.sum_w), diagonal, excluded
+
+
 def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
     """Return True when PIRLS weights are independent of ``mu``.
 
@@ -405,6 +448,191 @@ def _build_penalty_matrix(
     )
 
 
+class StructuredSolverError(np.linalg.LinAlgError):
+    """The structured solver cannot proceed with this fit.
+
+    Raised in place of a structured factor's ``np.linalg.LinAlgError``, whose
+    message it carries: the term, the tree node or border column, and the
+    certificate or bound that failed (a tree pivot within its certified
+    uncertainty, material negative Schur curvature, a retained border block
+    that is not positive definite, exact intercept aliasing, non-finite
+    statistics, a solve or selected inverse that is not representable).  No
+    other solver is tried, under any ``direct_solve``: for a model its data
+    identify this should not happen, and ``direct_solve="gram"`` fits the
+    model with the dense solver instead.
+    """
+
+
+@contextmanager
+def _structured_solver_errors():
+    """Raise a structured factor's ``np.linalg.LinAlgError`` as ``StructuredSolverError``.
+
+    Wraps every structured factor operation of a fit: the build and ``solve``
+    at each iterate, the terminal build, ``logdet`` and
+    ``trace_inverse_operator``, and the discrete line search's cached solve.
+    The factors refuse with ``np.linalg.LinAlgError`` rather than truncate
+    when they cannot certify a rank decision or represent a result.
+    """
+    try:
+        yield
+    except StructuredSolverError:
+        raise
+    except np.linalg.LinAlgError as error:
+        raise StructuredSolverError(
+            f"The structured solver cannot proceed: {str(error).rstrip('.')}. This should "
+            "not happen for a model its data identify; direct_solve='gram' fits it with "
+            "the dense solver instead."
+        ) from error
+
+
+# Levenberg shifts of an observed iterate the structured factor refuses as not
+# positive definite (one-engine design §3.11): Wood, Pya & Saefken (2016, JASA,
+# section 3.1.2) factor the Jacobi-preconditioned Hessian H' + eps I "with
+# increasing eps, starting from zero, until positive definiteness is obtained";
+# in unscaled coordinates that adds eps |H_ii| to each diagonal entry.  The
+# sequence is fixed, so the shift an iterate takes is a function of the
+# iterate alone; the perturbation does not move the converged mode.
+_LEVENBERG_SHIFTS = tuple(10.0**power for power in range(-8, 9, 2))
+
+
+def _levenberg_shifted_operator(
+    penalized: NestedPenalizedOperator, shift: float
+) -> tuple[NestedPenalizedOperator, NDArray]:
+    """``penalized`` with ``E = shift diag(scale)`` added, and ``diag(E)`` ``(p,)``.
+
+    The scale of a tree node is ``sum_{leaves under u} e_l + lambda_u`` (the
+    leaves' weight-error mass, never below ``|H_uu|``, so a node whose signed
+    weights cancel still moves) and of a border column ``|H_jj|``; the shift
+    goes into the node penalties and the border penalty's diagonal, the parts
+    of ``H`` the factor adds as they are.
+    """
+    data = penalized.data
+    leaf = data.leaf
+    mass = np.abs(leaf.weight) if leaf.error_mass is None else leaf.error_mass
+    tree_scale = data.tree.subtree_sum(mass)
+    node_shift = tuple(
+        shift * (scale + lam) for lam, scale in zip(penalized.node_penalty, tree_scale, strict=True)
+    )
+    node_penalty = tuple(
+        lam + step for lam, step in zip(penalized.node_penalty, node_shift, strict=True)
+    )
+    border_shift = shift * np.abs(np.diag(data.A) + np.diag(penalized.border_penalty))
+    border_penalty = np.array(penalized.border_penalty, dtype=np.float64, copy=True)
+    border_penalty[np.diag_indices_from(border_penalty)] += border_shift
+    diagonal = np.empty(data.shape[0])
+    diagonal[data.structured_indices] = np.concatenate(node_shift)
+    diagonal[data.small_indices] = border_shift
+    operator = NestedPenalizedOperator(
+        data=data, node_penalty=node_penalty, border_penalty=border_penalty
+    )
+    return operator, diagonal
+
+
+def _levenberg_shifted_leaf_operator(
+    penalized: FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator,
+    shift: float,
+    system: FactorSmoothLeafSystem | SumToZeroLeafSystem,
+) -> tuple[
+    FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator,
+    NDArray | Callable[[NDArray], NDArray],
+]:
+    """An ``fs`` (or ``sz``) operator with ``E = shift diag(scale)`` added, and ``diag(E)`` ``(p,)``.
+
+    A level coordinate's scale is its rows' weight-error mass (the error
+    Gram's diagonal of signed rows, else ``|D_jj|``) plus its penalty, never
+    below ``|H_jj|``; a border column's is ``|H_jj|``.  The shift goes into
+    the penalty parts the factor takes as square roots.  For ``sz`` the
+    level shift is a per-level penalty of the level space (every one of the
+    ``K`` levels), which the balance tree takes at its leaves; its public
+    diagonal is the level's shift plus the last level's.
+    """
+    leaf = system.leaf
+    k = leaf.block_size
+    local = np.array(penalized.penalty_local, dtype=np.float64, copy=True)
+    small = np.array(penalized.penalty_small, dtype=np.float64, copy=True)
+    if leaf.error_diagonal is not None:
+        mass = leaf.error_diagonal[:, :k]
+    else:
+        mass = np.abs(np.diagonal(system.operator.D, axis1=1, axis2=2))
+    local_shift = shift * (mass + np.abs(np.diagonal(local, axis1=1, axis2=2)))
+    border_shift = shift * np.abs(np.diag(penalized.A))
+    index = np.arange(k)
+    local[:, index, index] += local_shift
+    small[np.diag_indices_from(small)] += border_shift
+    operator = type(penalized)(
+        A=system.operator.A + small,
+        C=system.operator.C,
+        D=system.operator.D + local,
+        small_indices=penalized.small_indices,
+        structured_indices=penalized.structured_indices,
+        penalty_small=small,
+        penalty_local=local,
+    )
+    structured = penalized.structured_indices
+    if isinstance(penalized, SumToZeroPenalizedOperator):
+        # E is diagonal in level space: E_pub beta = C' E_lev C beta, C = [I; -1']
+        def apply(beta: NDArray) -> NDArray:
+            levels = np.concatenate((beta[structured], -np.sum(beta[structured], axis=0)[None]))
+            shifted = local_shift * levels
+            out = np.empty_like(beta)
+            out[structured] = shifted[:-1] - shifted[-1:]
+            out[penalized.small_indices] = border_shift * beta[penalized.small_indices]
+            return out
+
+        return operator, apply
+    diagonal = np.empty(penalized.shape[0])
+    diagonal[structured] = local_shift
+    diagonal[penalized.small_indices] = border_shift
+    return operator, diagonal
+
+
+def _build_iterate_factor(system, penalized_operator, *, observed: bool):
+    """Factor one PIRLS iterate's structured system; return ``(factor, rhs, shift, diag(E))``.
+
+    An ``sz`` shift is diagonal in level space, not in the public coordinates:
+    its ``diag(E)`` is then a callable ``beta -> E beta``.
+
+    Fisher rows are never refused for curvature (a structured refusal of them
+    propagates).  An observed nested iterate the factor refuses (a tree pivot
+    within its certified uncertainty, material negative border curvature)
+    takes the smallest Levenberg shift of ``_LEVENBERG_SHIFTS`` whose factor
+    certifies.  When none does, the unshifted refusal propagates, since it
+    names the iterate's own cause; the largest shift's refusal is attached
+    to it as a note.  The shifted Newton step ``(H + E)^-1 g`` from ``beta``
+    is the normal-equations solve with ``E beta`` added to the right-hand
+    side (the caller's part).
+    """
+    try:
+        factor, rhs = build_augmented_structured_factor(system, penalized_operator)
+        return factor, rhs, 0.0, None
+    except np.linalg.LinAlgError as error:
+        if not observed or not isinstance(
+            penalized_operator,
+            NestedPenalizedOperator | FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator,
+        ):
+            raise
+        refusal = error
+    shifted_refusal: np.linalg.LinAlgError | None = None
+    for shift in _LEVENBERG_SHIFTS:
+        if isinstance(
+            penalized_operator, FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator
+        ):
+            shifted, diagonal = _levenberg_shifted_leaf_operator(penalized_operator, shift, system)
+        else:
+            shifted, diagonal = _levenberg_shifted_operator(penalized_operator, shift)
+        try:
+            factor, rhs = build_augmented_structured_factor(system, shifted)
+            return factor, rhs, shift, diagonal
+        except np.linalg.LinAlgError as error:
+            shifted_refusal = error
+    if shifted_refusal is not None:
+        refusal.add_note(
+            f"No Levenberg shift up to {_LEVENBERG_SHIFTS[-1]:g} certified the iterate either; "
+            f"the largest shift's factor refused with: {shifted_refusal}"
+        )
+    raise refusal
+
+
 def _sqrt_penalty_augmented(S: NDArray, p: int) -> NDArray:
     """Build (p+1, p+1) augmented sqrt-penalty for QR solver.
 
@@ -495,13 +723,22 @@ def fit_irls_direct(
     _initial_data_reuse: _InitialDataReuse | None = None,
     _raw_moment_policy: TabmatCenteringState | None = None,
     _fisher_data_reuse: _FisherDataReuse | None = None,
+    _laplace_excluded: tuple[int, ...] = (),
+    _mode_bar: float | None = None,
+    _compensate_centred_intercept: bool = True,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
-    """Fit by direct IRLS, retrying automatic globally-ineligible SZ fits on Gram."""
+    """Fit by direct IRLS (see ``_fit_irls_direct_once``).
 
-    def run_once(
-        resolved_direct_solve: str,
-    ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
-        return _fit_irls_direct_once(
+    A structured factor that cannot proceed raises ``StructuredSolverError``
+    under every ``direct_solve`` (one-engine design §6, decision 6): no fit is
+    rerun on another solver.  A Fisher-data reuse cache is cleared when the
+    fit fails or ends unconverged.
+    """
+    result = None
+    try:
+        if max_iter < 1:
+            raise ValueError(f"max_iter must be at least 1, got {max_iter}")
+        result = _fit_irls_direct_once(
             X=X,
             y=y,
             weights=weights,
@@ -518,7 +755,7 @@ def fit_irls_direct(
             profile=profile,
             cache_out=cache_out,
             record_diagnostics=record_diagnostics,
-            direct_solve=resolved_direct_solve,
+            direct_solve=direct_solve,
             convergence=convergence,
             S_override=S_override,
             reml_penalties=reml_penalties,
@@ -542,24 +779,10 @@ def fit_irls_direct(
             _initial_data_reuse=_initial_data_reuse,
             _raw_moment_policy=_raw_moment_policy,
             _fisher_data_reuse=_fisher_data_reuse,
+            _laplace_excluded=_laplace_excluded,
+            _mode_bar=_mode_bar,
+            _compensate_centred_intercept=_compensate_centred_intercept,
         )
-
-    result = None
-    try:
-        if max_iter < 1:
-            raise ValueError(f"max_iter must be at least 1, got {max_iter}")
-        try:
-            result = run_once(direct_solve)
-        except SumToZeroIdentifiabilityError as error:
-            if _fisher_data_reuse is not None:
-                _fisher_data_reuse.clear()
-            if direct_solve != "auto":
-                raise
-            fallback_reason = str(error)
-            result = run_once("gram")
-            result[0].direct_fallback_reason = fallback_reason
-            if profile is not None:
-                profile["direct_fallback_reason"] = fallback_reason
         return result
     finally:
         if _fisher_data_reuse is not None and (result is None or not result[0].converged):
@@ -608,6 +831,9 @@ def _fit_irls_direct_once(
     _initial_data_reuse: _InitialDataReuse | None = None,
     _raw_moment_policy: TabmatCenteringState | None = None,
     _fisher_data_reuse: _FisherDataReuse | None = None,
+    _laplace_excluded: tuple[int, ...] = (),
+    _mode_bar: float | None = None,
+    _compensate_centred_intercept: bool = True,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -665,6 +891,14 @@ def _fit_irls_direct_once(
         Internal optimization switch. If False, omit EDF and scale summaries
         that the fREML outer loop does not consume. The authoritative final
         fit must leave this True.
+    _compensate_centred_intercept : bool
+        Internal switch for in-loop REML fits that compute statistics (the
+        bootstrap, and traced candidates and trials): False keeps their eta
+        the solver's ``alpha + X~ beta`` bit for bit.  With it and
+        ``_compute_fit_statistics`` True, a centred Gaussian identity fit
+        publishes its intercept as the compensated pair ``(alpha, alpha_lo)``
+        (``mode_score.centred_intercept_remainder``) and its deviance and
+        scale at that predictor.
     _compute_reml_geometry : bool
         Internal SCOP-candidate switch. If False, omit the generic profiled
         slope inverse, determinant, and rank because the caller replaces them
@@ -672,11 +906,10 @@ def _fit_irls_direct_once(
         retained rank metadata and fit statistics to be disabled. Public and
         terminal fits must leave this True.
     _use_observed_newton : bool
-        Internal curvature-controller switch. When enabled, an ordinary
-        Tweedie/log fit takes exact observed-Newton steps from its first
-        iteration, and a Gamma/log fit switches to them only after an atomic
-        Fisher proposal rejection. A rejected observed proposal restores Fisher
-        scoring for the rest of the fit. Unsupported, constrained, SCOP, and
+        Internal curvature switch. When enabled, an ordinary Tweedie/log fit
+        takes exact observed-Newton steps on every iteration, and a Gamma/log
+        fit keeps Fisher scoring; no rejected step switches the curvature
+        (one-engine design §3.11). Unsupported, constrained, SCOP, and
         cached-working-system routes retain Fisher scoring. Public callers
         should leave this True.
     _deviance_init : float, optional
@@ -730,12 +963,9 @@ def _fit_irls_direct_once(
         groups,
         direct_solve=direct_solve,
         coefficient_width=p,
-        row_weights=weights,
         lambda2=lambda2,
         S_override=S_override,
-        family=family,
-        link=link,
-        nesting_cache=getattr(dm, "_scalar_structured_layout_cache", None),
+        nesting_cache=getattr(dm, "_structured_layout_cache", None),
     )
     if structured_decision.use_structured and S_override is None and reml_penalties is None:
         reason = (
@@ -762,6 +992,24 @@ def _fit_irls_direct_once(
         if _use_structured and _structured_group_index is not None
         else None
     )
+    if isinstance(_structured_layout, FactorSmoothLeafLayout):
+        # every dense kernel of the fs leaf route acts on its border (perf F7);
+        # a nested chain's parent blocks are not border-wide and keep the release
+        keep_narrow_cap(len(_structured_layout.small_indices) + 1)
+    # One-engine design §3.8: a nested chain's PIRLS state is (alpha, beta)
+    # about the fixed prior-weighted border centre c0 of its factor (0 on the
+    # tree), so no eta is ever formed by cancelling X beta against a raw
+    # intercept that absorbs a column's offset.
+    _state_center: NDArray | None = None
+    if isinstance(_structured_layout, NestedStructuredLayout):
+        border_center, _ = nested_prior_statistics(_structured_layout, weights)
+        _state_center = np.zeros(p)
+        _state_center[_structured_layout.small_indices] = border_center
+    elif isinstance(_structured_layout, FactorSmoothLeafLayout):
+        # The same state for an fs term (design §3.4): (alpha, beta) about its c0.
+        border_center, _ = factor_smooth_prior_statistics(_structured_layout, weights)
+        _state_center = np.zeros(p)
+        _state_center[_structured_layout.small_indices] = border_center
 
     if offset is None:
         offset = np.zeros(n)
@@ -820,31 +1068,39 @@ def _fit_irls_direct_once(
             )
         return product
 
+    def penalty_curvature() -> NDArray:
+        """``diag(S)``: the dense penalty's diagonal, or the components' without forming ``S``."""
+        if S is not None:
+            return np.diag(S).astype(np.float64, copy=True)
+        from superglm.reml.identified import penalty_diagonal
+
+        lambdas = (
+            lambda2
+            if isinstance(lambda2, dict)
+            else {component.name: float(lambda2) for component in reml_penalties or ()}
+        )
+        return penalty_diagonal(p, lambdas, reml_penalties)
+
+    # diag(S), formed once per call on first use by the mode score (S is fixed)
+    _penalty_curvature: list[NDArray] = []
+
     def penalty_quadratic(beta_values: NDArray) -> float:
         values = np.asarray(beta_values, dtype=np.float64)
         return float(values @ penalty_matvec(values))
 
-    def relative_penalized_score(
-        beta_values: NDArray, mu_values: NDArray, eta_values: NDArray
-    ) -> tuple[float, float]:
-        """``||[1 X]' s - S beta||_inf / sum |s|`` for the row score ``s = W (z - eta)``, and its floor.
+    def mode_residual(
+        beta_values: NDArray, intercept_value: float, mu_values: NDArray, eta_values: NDArray
+    ) -> ModeResidual:
+        """The observed-REML certificate's score at an iterate (``convergence="mode_score"``).
 
-        The unconstrained penalized score, for the discrete terminal refit
-        (``convergence="score"``).  ``s`` is the residual of this solver's own
-        fixed-point equations, and ``sum |s|`` is the intercept column of
-        ``|X|' |s|``, the magnitude the score is summed from.  A level with no
-        finite coefficient has a score that vanishes with its fitted mass, so
-        this stops it where a step test would walk it to the link's overflow
-        guard; a componentwise ``|g_j| / (|X|' |s|)_j`` stays 1 on such a level.
-        The bar is the intercept column's, so a column whose entries are far
-        below 1 (a Numeric in small units) is certified that much more loosely.
-
-        The floor is the rounding of ``S beta`` on the same scale,
-        ``gamma_m max(|S| |beta|)`` for ``m`` additions per entry (Higham 2002,
-        section 3.1).  At the fixed point ``S beta`` cancels to the size of the
-        score while its terms grow with lambda, so no iterate resolves the score
-        below this: a tensor block at lambda 1e10 settles near 1e-9.
+        The row score from Fisher rows (the score itself does not depend on
+        the curvature the rows carry), centred on the system the last solve
+        linearised about (``_score_centre``), its floors and weak tests
+        resolved once every relative score is within ``MODE_RESOLVE_CAP``
+        (``solvers.mode_score``).
         """
+        assert _score_centre is not None
+        mean_x, sum_w, diagonal, excluded_indices = _score_centre
         rows = coefficient_working_rows(
             distribution=family,
             link=link,
@@ -854,13 +1110,33 @@ def _fit_irls_direct_once(
             sample_weight=weights,
             prefer_observed=False,
         )
-        row_score = rows.weights * (rows.response - eta_values)
-        slope_score = dm.rmatvec(row_score) - penalty_matvec(beta_values)
-        largest = max(abs(float(np.sum(row_score))), float(np.max(np.abs(slope_score), initial=0)))
-        scale = max(float(np.sum(np.abs(row_score))), np.finfo(np.float64).tiny)
-        additions = np.float64(beta_values.size + 2) * np.finfo(np.float64).eps / 2
-        penalty_size = float(np.max(penalty_matvec(beta_values, magnitude=True), initial=0))
-        return largest / scale, additions / (1 - additions) * penalty_size / scale
+        with np.errstate(invalid="ignore", divide="ignore"):
+            scale = np.sqrt(np.abs(diagonal) / sum_w)
+        excluded = np.zeros(p, dtype=bool)
+        excluded[list(excluded_indices)] = True
+        # the slopes the REML fit's Laplace approximation leaves out
+        # (``reml.identified``, design §3.9): flagged and kept, never gated
+        excluded[list(_laplace_excluded)] = True
+        shift = float(mean_x @ beta_values)
+        if not _penalty_curvature:
+            _penalty_curvature.append(penalty_curvature())
+        return penalized_mode_residual(
+            dm=dm,
+            row_score=rows.weights * (rows.response - eta_values),
+            fisher_weights=rows.weights,
+            positive_prior=weights > 0.0,
+            mean_x=mean_x,
+            centered_scale=np.where(np.isfinite(scale), scale, 0.0),
+            alpha=float(intercept_value) + shift,
+            eta_tilde=eta_values - offset - float(intercept_value) - shift,
+            penalty_score=penalty_matvec(beta_values),
+            penalty_magnitude=penalty_matvec(beta_values, magnitude=True),
+            penalty_curvature=_penalty_curvature[0],
+            sum_w=sum_w,
+            bar=mode_bar,
+            excluded=excluded,
+            resolve_cap=MODE_RESOLVE_CAP,
+        )
 
     trace_enabled = trace_run is not None and trace_run.enabled
     trace_basis_id = trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
@@ -920,6 +1196,7 @@ def _fit_irls_direct_once(
         eta_unclipped: NDArray | None = None,
         enclosing_proposal_state_id: int | None = None,
         emit_trace: bool = True,
+        centred_intercept: float | None = None,
     ) -> _IRLSState:
         if trace_enabled:
             assert trace_run is not None
@@ -928,6 +1205,19 @@ def _fit_irls_direct_once(
         else:
             state_id = None
             evaluation_id = None
+        if _state_center is not None:
+            # One-engine design §3.8: the state is (alpha, beta) about the fixed
+            # prior-weighted centre, eta = alpha + X~ beta + offset, and the raw
+            # intercept is only its reading; a state entering from raw
+            # coordinates (the start, a warm start) is centred once.
+            shift = math.fsum(_state_center * np.asarray(beta_values, dtype=np.float64))
+            if centred_intercept is None:
+                centred_intercept = float(intercept_value) + shift
+            if eta_unclipped is None:
+                eta_unclipped = (
+                    centred_intercept + centred_matvec(dm, beta_values, _state_center) + offset
+                )
+            intercept_value = centred_intercept - shift
         state = _evaluate_irls_state(
             dm,
             y,
@@ -949,6 +1239,8 @@ def _fit_irls_direct_once(
                 state,
                 penalized_deviance=float(state.deviance + penalty_quadratic(state.beta)),
             )
+        if centred_intercept is not None:
+            state = replace(state, centred_intercept=float(centred_intercept))
         if emit_trace:
             emit_evaluation(
                 state,
@@ -1021,6 +1313,21 @@ def _fit_irls_direct_once(
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    if (
+        _state_center is None
+        and not _use_structured
+        and not has_constraints
+        and not _has_scop
+        and hasattr(dm, "group_matrices")
+    ):
+        # The nested chain's centred state on gram's centred system too: eta
+        # about the fixed prior-weighted centre, so a column at 1e8
+        # contributes rows of its spread, not of its offset, and the
+        # objective the line search compares keeps its digits (stage-1
+        # verifier: a raw-1e8 column left the penalized deviance noisy at
+        # 1e-11 relative, so no Newton step near the mode was accepted and
+        # the score stalled at 1e-6).
+        _state_center = prior_weighted_centre(dm, weights)
     _scop_curvature = "fisher"
     if _has_scop:
         from superglm.reml.observed_geometry import classify_scop_reml_curvature
@@ -1035,27 +1342,30 @@ def _fit_irls_direct_once(
             "omitting generic REML geometry requires rank metadata and fit statistics "
             "to be disabled"
         )
-    _observed_newton_available = bool(
-        _use_observed_newton
-        and not has_constraints
-        and not _has_scop
-        and not _return_working_system
-        and supports_observed_newton(family, link)
-    )
     # Laplace-approximate REML is built on the observed Hessian, so its PIRLS
     # runs on full-Newton weights (Wood 2011, JRSSB 73(1), section 3; Wood, Pya
     # & Saefken 2016, JASA, section 3.3): Fisher scoring shares the mode but
     # converges only linearly under a non-canonical link. Newton starts only
     # where the Fisher weights vary, so no constant-weight Gram or Fisher-data
-    # cache exists for it to invalidate. Gamma/log keeps Fisher first: its
-    # constant Fisher weights reuse one weighted Gram that Newton would rebuild
-    # every iteration, and Newton remains its rejection rescue. The discrete
-    # terminal refit (convergence="score") certifies the root of the penalized
-    # score, which Fisher reaches only linearly, so it takes Newton steps on
-    # Gamma/log too; its exported geometry is Fisher either way (``export_rows``),
-    # and the weighted-Gram cache is off while Newton runs.
-    _observed_newton_active = _observed_newton_available and (
-        not _has_constant_irls_weights(family, link) or convergence == "score"
+    # cache exists for it to invalidate. Gamma/log keeps Fisher: its constant
+    # Fisher weights reuse one weighted Gram that Newton would rebuild every
+    # iteration; the mode certificate's bar is set by the REML tolerance
+    # (``mode_score.mode_certification_bar``), which Fisher's linear rate
+    # reaches.  The exported geometry is Fisher either way (``export_rows``),
+    # and the weighted-Gram cache is off while Newton runs.  The curvature is
+    # decided here, once, from the family, the link and the route (one-engine
+    # design §3.11): no iterate switches it.
+    # An observed iterate whose Hessian the structured factor refuses as not
+    # positive definite takes a Levenberg shift inside the same curvature
+    # (``_levenberg_shifted_operator``), and a trial whose observed rows are
+    # not finite is rejected by the line search.
+    _observed_newton_active = bool(
+        _use_observed_newton
+        and not has_constraints
+        and not _has_scop
+        and not _return_working_system
+        and supports_observed_newton(family, link)
+        and not _has_constant_irls_weights(family, link)
     )
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
@@ -1477,26 +1787,10 @@ def _fit_irls_direct_once(
     t_start = time.perf_counter()
     converged = False
     XtWX_beta: (
-        NDArray
-        | SymmetricBlockOperator
-        | BlockSymmetricOperator
-        | SumToZeroBlockOperator
-        | NestedDataOperator
-        | None
-    ) = None
-    _final_structured_system: (
-        ScalarStructuredSystem
-        | BlockStructuredSystem
-        | SumToZeroBlockStructuredSystem
-        | NestedStructuredSystem
-        | None
+        NDArray | BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator | None
     ) = None
     _final_penalized_operator: (
-        SymmetricBlockOperator
-        | BlockSymmetricOperator
-        | SumToZeroBlockOperator
-        | NestedPenalizedOperator
-        | None
+        FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator | NestedPenalizedOperator | None
     ) = None
 
     # Phase timing accumulators
@@ -1508,13 +1802,27 @@ def _fit_irls_direct_once(
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
     _last_working_structured: (
-        ScalarStructuredSystem
-        | BlockStructuredSystem
-        | SumToZeroBlockStructuredSystem
-        | NestedStructuredSystem
-        | None
+        FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
     ) = None
+    # convergence="mode_score": the centring of the certificate's score at the
+    # iterate each solve linearised about -- (mean_x, sum_w, centred diagonal,
+    # coefficients the factor truncated as weakly identified) -- or None on a
+    # route that forms no centred system (SCOP, linear constraints), which
+    # keeps the coefficient-step test.
+    _score_centre: tuple | None = None
+    _last_mode_residual: ModeResidual | None = None
+    # the certificate ratio at every iterate of a mode_score solve, for the
+    # stagnation stop
+    _mode_ratios: list[float] = []
+    # the certificate's bar (``mode_score.mode_certification_bar``): the REML
+    # fit passes the one its stopping tolerance needs
+    mode_bar = MODE_CERTIFICATION_BAR if _mode_bar is None else float(_mode_bar)
+    _stagnation_window = stagnation_window(max_iter, mode_bar)
+    score_stagnated = False
 
+    # The family's mean space, when the link's inverse can leave it (declared
+    # by the family and link, ``irls_state.mean_space_violation``).
+    _mean_space_invalid = mean_space_violation(family, link)
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
     committed = evaluate_state(
         beta,
@@ -1678,6 +1986,7 @@ def _fit_irls_direct_once(
         rank_truncated: bool | None = None
         used_rank_certification = False
         scop_proposal_eta_unclipped: NDArray | None = None
+        proposal_centred_intercept: float | None = None
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
@@ -1692,23 +2001,16 @@ def _fit_irls_direct_once(
         )
         W = working_rows.weights
         z = working_rows.response
-        if working_rows.fallback_reason is not None:
-            if _fisher_data_reuse is not None:
-                _fisher_data_reuse.clear()
-            # Once exact observed rows fail their fit-wide safety contract,
-            # keep all later proposals on one coherent Fisher-scoring route.
-            _observed_newton_active = False
-            _observed_newton_available = False
-            _can_reuse_weighted_gram = (
-                _has_constant_irls_weights(family, link) and not _use_structured
+        if working_rows.rejection_reason is not None:
+            # Every accepted trial of an observed fit had finite rows (the
+            # line search rejects the others), so only the entry state can
+            # get here: the declared curvature has no step to take.
+            raise ValueError(
+                "IRLS direct cannot start: the observed-Newton rows of "
+                f"{type(family).__name__} with a {type(link).__name__} are not finite at "
+                "the starting coefficients."
             )
-            _constant_centered_cache = None
-            _constant_centered_z = None
-            if profile is not None:
-                profile["irls_observed_newton_fallbacks"] = (
-                    profile.get("irls_observed_newton_fallbacks", 0) + 1
-                )
-        elif working_rows.curvature_source == "observed" and profile is not None:
+        if working_rows.curvature_source == "observed" and profile is not None:
             profile["irls_observed_newton_iters"] = profile.get("irls_observed_newton_iters", 0) + 1
         working_eta_unclipped = eta_unclipped
         working_eta = eta
@@ -1738,9 +2040,16 @@ def _fit_irls_direct_once(
             iteration_rank = decompose_factor(A, retain_factor_solve=True)
             beta = iteration_rank.solve_factor_rhs(rhs_qr)
             intercept = centered.mean_z - float(centered.mean_x @ beta)
+            if _state_center is not None:
+                proposal_centred_intercept = centered.mean_z - math.fsum(
+                    (centered.mean_x - _state_center) * beta
+                )
+                intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
             _cond_est = iteration_rank.pre_truncation_condition
             _used_svd = iteration_rank.used_svd_fallback
             rank_truncated = iteration_rank.rank_truncated
+            if convergence == "mode_score":
+                _score_centre = (centered.mean_x, centered.sum_w, np.diag(centered.data_gram), ())
             _t_solve += time.perf_counter() - _t0
         else:
             # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
@@ -1909,9 +2218,10 @@ def _fit_irls_direct_once(
                     groups,
                     W,
                     Wz,
+                    signed=working_rows.curvature_source == "observed",
                     dominant_group_index=_structured_group_index,
-                    tabmat_split=_tabmat_split,
                     layout=_structured_layout,
+                    prior_weights=weights,
                 )
                 penalized_operator = build_penalized_structured_operator(
                     structured_system,
@@ -1922,21 +2232,98 @@ def _fit_irls_direct_once(
                     S_override=S_override,
                 )
                 _last_working_structured = structured_system
-                _final_structured_system = structured_system
                 _final_penalized_operator = penalized_operator
                 _t_gram += time.perf_counter() - _t0
 
                 _t0 = time.perf_counter()
-                augmented_factor, rhs = build_augmented_structured_factor(
-                    structured_system,
-                    penalized_operator,
-                )
-                beta_aug = augmented_factor.solve(rhs)
-                intercept = float(beta_aug[0])
+                with _structured_solver_errors():
+                    augmented_factor, rhs, levenberg_shift, shift_diagonal = _build_iterate_factor(
+                        structured_system,
+                        penalized_operator,
+                        observed=working_rows.curvature_source == "observed",
+                    )
+                    beta_aug = solve_augmented_normal_equations(
+                        structured_system,
+                        augmented_factor,
+                        rhs,
+                        centred=_state_center is not None,
+                        extra=(
+                            None
+                            if shift_diagonal is None
+                            else np.concatenate(
+                                (
+                                    [0.0],
+                                    shift_diagonal(committed.beta)
+                                    if callable(shift_diagonal)
+                                    else shift_diagonal * committed.beta,
+                                )
+                            )
+                        ),
+                    )
+                if levenberg_shift and profile is not None:
+                    profile["irls_levenberg_shifts"] = profile.get("irls_levenberg_shifts", 0) + 1
+                    profile["irls_levenberg_max_shift"] = max(
+                        float(profile.get("irls_levenberg_max_shift", 0.0)), levenberg_shift
+                    )
                 beta = beta_aug[1:]
-                _used_svd = augmented_factor.used_dense_fallback
+                if _state_center is not None:
+                    # the solve's intercept is the centred alpha about the same c0
+                    proposal_centred_intercept = float(beta_aug[0])
+                    intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
+                else:
+                    intercept = float(beta_aug[0])
+                if augmented_factor.rank_truncated and isinstance(
+                    augmented_factor, SumToZeroTreeFactor
+                ):
+                    # A truncated factor is a generalized inverse, and its
+                    # normal-equations solution ``H^+ [1 X]'Wz`` is the minimum-norm
+                    # representative: it resets the iterate's component along every
+                    # truncated direction on each step.  Along an ``sz`` level whose
+                    # rows the likelihood drives to the link's boundary (a one-row
+                    # level with a response below a log link's range: no finite
+                    # mode, Geyer 2009, Theorem 4) the direction is truncated once
+                    # its rows' working weight falls to its rounding, and the reset
+                    # moves those rows' eta arbitrarily far (+2844 from -20.7 on
+                    # the stage-4 fixture); step halving then stalls every other
+                    # coefficient and PIRLS ends uncertified.  The Gauss-Newton
+                    # step of a rank-deficient problem is the minimum-norm
+                    # *increment* (Pes & Rodriguez 2021, arXiv 2101.07560, eqs.
+                    # 1.2-1.4; the Newton step of Wood, Pya & Safken 2016, section
+                    # 3.1.2): ``Delta = H^+ g``, ``g = [1 X]' W (z - eta) - [0; S
+                    # beta]``, the shifted factor's under a Levenberg shift, which
+                    # leaves the iterate where it is along the truncated directions.
+                    # Projecting the iterate onto the null space on every step (the
+                    # minimal-norm variant, ibid. section 2, and in effect the
+                    # solve above) is safe only along exact nulls; along a direction
+                    # truncated as rank but carrying data it raises the residual,
+                    # the failure they analyse.  Along an exact null (data and
+                    # penalty both leave it free) the iterate keeps its component:
+                    # no fitted value or penalty moves along it.  In exact
+                    # arithmetic the same step as the solve above whenever nothing
+                    # is truncated.
+                    residual_rows = W * (z - eta)
+                    gradient = np.empty(p + 1, dtype=np.float64)
+                    gradient[0] = float(np.sum(residual_rows))
+                    gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
+                    # the increment's intercept entry in the state's own coordinate:
+                    # alpha about the centre when the state is centred (round 1's
+                    # centred state; the raw intercept would cancel at a large
+                    # column offset), else the raw intercept
+                    increment = augmented_factor.solve(gradient, centred=_state_center is not None)
+                    beta = committed.beta + increment[1:]
+                    if _state_center is not None:
+                        assert committed.centred_intercept is not None
+                        proposal_centred_intercept = float(committed.centred_intercept) + float(
+                            increment[0]
+                        )
+                        intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
+                    else:
+                        intercept = float(committed.intercept) + float(increment[0])
+                _used_svd = False  # one path: the engine has no SVD fallback
                 _cond_est = augmented_factor.schur_condition_estimate
                 rank_truncated = augmented_factor.rank_truncated
+                if convergence == "mode_score":
+                    _score_centre = _structured_score_centre(structured_system, augmented_factor)
                 _t_solve += time.perf_counter() - _t0
             elif not has_constraints:
                 centered = get_centered_system(W, z_off)
@@ -1963,9 +2350,23 @@ def _fit_irls_direct_once(
                     else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
                 )
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
+                if _state_center is not None:
+                    # the intercept about the state's centre, from the offset
+                    # of the working mean to it: no raw-scale cancellation
+                    proposal_centred_intercept = centered.mean_z - math.fsum(
+                        (centered.mean_x - _state_center) * beta
+                    )
+                    intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
                 _cond_est = iteration_rank.pre_truncation_condition
                 _used_svd = iteration_rank.used_svd_fallback
                 rank_truncated = iteration_rank.rank_truncated
+                if convergence == "mode_score":
+                    _score_centre = (
+                        centered.mean_x,
+                        centered.sum_w,
+                        np.diag(centered.data_gram),
+                        (),
+                    )
                 _t_solve += time.perf_counter() - _t0
             else:
                 centered = get_centered_system(W, z_off)
@@ -2171,6 +2572,7 @@ def _fit_irls_direct_once(
                 phase="proposal",
                 iteration=it + 1,
                 alpha=1.0,
+                centred_intercept=proposal_centred_intercept,
             )
             trial_cache: dict[float, _IRLSState] = {1.0: proposal}
             trial_directions: tuple[NDArray, float, NDArray] | None = None
@@ -2187,6 +2589,14 @@ def _fit_irls_direct_once(
                 beta_trial = committed.beta + alpha * beta_direction
                 intercept_trial = committed.intercept + alpha * intercept_direction
                 eta_trial = committed.eta_unclipped + alpha * eta_direction
+                centred_trial = None
+                if (
+                    committed.centred_intercept is not None
+                    and proposal.centred_intercept is not None
+                ):
+                    centred_trial = committed.centred_intercept + alpha * (
+                        proposal.centred_intercept - committed.centred_intercept
+                    )
                 candidate = evaluate_state(
                     beta_trial,
                     intercept_trial,
@@ -2195,6 +2605,7 @@ def _fit_irls_direct_once(
                     alpha=alpha,
                     eta_unclipped=eta_trial,
                     enclosing_proposal_state_id=proposal.state_id,
+                    centred_intercept=centred_trial,
                 )
                 trial_cache[alpha] = candidate
                 return candidate
@@ -2202,6 +2613,23 @@ def _fit_irls_direct_once(
             committed_constraints_feasible = True
             proposal_constraints_feasible = True
             constraint_trial_is_invalid = None
+            if _observed_newton_active:
+                # one-engine design §3.11: finiteness is the one condition the
+                # declared observed rows keep; a trial without finite rows is
+                # not a state the next Newton step can start from
+
+                def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
+                    rows = coefficient_working_rows(
+                        distribution=family,
+                        link=link,
+                        y=y,
+                        mu=candidate.mu,
+                        eta=candidate.eta,
+                        sample_weight=weights,
+                        prefer_observed=True,
+                    )
+                    return rows.rejection_reason is not None
+
             if has_constraints:
                 if A_all is None or b_all is None:  # pragma: no cover - construction invariant
                     raise RuntimeError("constrained fit omitted its aggregate constraint system")
@@ -2229,11 +2657,25 @@ def _fit_irls_direct_once(
                         abs_A=abs_A_all,
                     )
 
+            trial_is_invalid = constraint_trial_is_invalid
+            if _mean_space_invalid is not None and not _mean_space_invalid(
+                committed.eta_unclipped, weights
+            ):
+                # A feasible committed state keeps every accepted trial in the
+                # family's mean space (``mean_space_violation``).
+                def trial_is_invalid(
+                    candidate: _IRLSState, other=constraint_trial_is_invalid
+                ) -> bool:
+                    assert _mean_space_invalid is not None
+                    if _mean_space_invalid(candidate.eta_unclipped, weights):
+                        return True
+                    return other is not None and other(candidate)
+
             decision = _select_irls_trial(
                 committed=committed,
                 proposal=proposal,
                 evaluate_state=evaluate_trial,
-                invalid_state=constraint_trial_is_invalid,
+                invalid_state=trial_is_invalid,
                 max_halving=max_halving,
                 extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                     committed=committed,
@@ -2310,7 +2752,31 @@ def _fit_irls_direct_once(
         dev_rel_change = None
         coef_change = None
         if np.isfinite(dev):
-            if convergence in ("coefficients", "score"):
+            if convergence == "mode_score" and _score_centre is not None:
+                # One-engine design §3.8: stop on the certificate's own score,
+                # in centred coordinates over the identified coefficients,
+                # once it meets the bar the certificate reads (no margin: the
+                # certificate is this residual, ``mode_score``).  The step
+                # length, with its raw intercept, is only reported.
+                coef_change = float(
+                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0)
+                )
+                residual = mode_residual(beta, intercept, mu, eta)
+                convergence_value = mode_bar * residual.ratio()
+                converged_this_iter = residual.ratio() <= 1.0
+                _last_mode_residual = residual
+                _mode_ratios.append(residual.ratio())
+                # The score stopped contracting (``stagnation_window``):
+                # the iterate is at its limiting accuracy, so the solve ends
+                # uncertified and the caller discloses it.
+                score_stagnated = (
+                    not converged_this_iter
+                    and residual.resolved
+                    and len(_mode_ratios) > _stagnation_window
+                    and min(_mode_ratios[-_stagnation_window:])
+                    > 0.5 * min(_mode_ratios[:-_stagnation_window])
+                )
+            elif convergence in ("coefficients", "mode_score"):
                 coef_change = float(
                     np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
                 )
@@ -2335,15 +2801,6 @@ def _fit_irls_direct_once(
                     coef_change = max(coef_change, latent_change)
                 convergence_value = coef_change
                 converged_this_iter = coef_change < tol
-                if convergence == "score":
-                    # The stronger of two first-order certificates of the fixed point,
-                    # the score resolved no finer than its own rounding.  A damped
-                    # step is only a fraction of the correction, so it certifies nothing.
-                    score, score_floor = relative_penalized_score(beta, mu, eta)
-                    convergence_value = min(coef_change, score)
-                    converged_this_iter = (converged_this_iter and n_halvings == 0) or score < max(
-                        tol, score_floor
-                    )
             else:
                 objective = (
                     retained.deviance
@@ -2388,15 +2845,6 @@ def _fit_irls_direct_once(
             if not retained_qp_converged:
                 converged_this_iter = False
 
-        curvature_rescue_activated = bool(
-            step_rejected
-            and _observed_newton_available
-            and not _observed_newton_active
-            and it + 1 < max_iter
-        )
-        fisher_fallback_activated = bool(
-            step_rejected and _observed_newton_active and it + 1 < max_iter
-        )
         terminal_constraint_infeasible = bool(
             not constraints_feasible_this_iter
             and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
@@ -2407,11 +2855,7 @@ def _fit_irls_direct_once(
             and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
         )
 
-        if fisher_fallback_activated:
-            termination_reason = "curvature_fallback"
-        elif curvature_rescue_activated:
-            termination_reason = "curvature_rescue"
-        elif terminal_constraint_infeasible:
+        if terminal_constraint_infeasible:
             termination_reason = "constraint_infeasible"
         elif terminal_constraint_kkt_incomplete:
             termination_reason = "constraint_kkt_incomplete"
@@ -2421,6 +2865,8 @@ def _fit_irls_direct_once(
             termination_reason = "nonfinite_deviance"
         elif converged_this_iter:
             termination_reason = "converged"
+        elif score_stagnated:
+            termination_reason = "score_stagnated"
         elif it + 1 == max_iter:
             termination_reason = "max_iter"
         else:
@@ -2446,8 +2892,6 @@ def _fit_irls_direct_once(
                     "convergence_tolerance": tol,
                     "termination_reason": termination_reason,
                     "working_curvature": working_rows.curvature_source,
-                    "curvature_rescue_activated": curvature_rescue_activated,
-                    "curvature_fallback_activated": fisher_fallback_activated,
                 },
                 channel="pirls",
                 purpose=trace_purpose,
@@ -2585,57 +3029,23 @@ def _fit_irls_direct_once(
                     "used_svd_fallback": bool(_used_svd),
                     "has_scop": bool(_has_scop),
                     "working_curvature": working_rows.curvature_source,
-                    "curvature_rescue_activated": bool(curvature_rescue_activated),
-                    "curvature_fallback_activated": bool(fisher_fallback_activated),
                 },
             )
 
-        if step_rejected and not (curvature_rescue_activated or fisher_fallback_activated):
+        if step_rejected:
             logger.warning(
                 "IRLS direct rejected all trial steps at iter=%d; restored committed state",
                 it + 1,
             )
             break
 
-        if curvature_rescue_activated:
-            if _fisher_data_reuse is not None:
-                _fisher_data_reuse.clear()
-            _observed_newton_active = True
-            _can_reuse_weighted_gram = False
-            _constant_centered_cache = None
-            _constant_centered_z = None
-            if profile is not None:
-                profile["irls_observed_newton_rescues"] = (
-                    profile.get("irls_observed_newton_rescues", 0) + 1
-                )
-            logger.info(
-                "IRLS direct switching coefficient proposals to observed "
-                "Newton curvature after iteration %d",
-                it + 1,
-            )
-        elif fisher_fallback_activated:
-            if _fisher_data_reuse is not None:
-                _fisher_data_reuse.clear()
-            _observed_newton_active = False
-            _observed_newton_available = False
-            _can_reuse_weighted_gram = _has_constant_irls_weights(family, link)
-            _constant_centered_cache = None
-            _constant_centered_z = None
-            if profile is not None:
-                profile["irls_observed_newton_rejections"] = (
-                    profile.get("irls_observed_newton_rejections", 0) + 1
-                )
-            logger.info(
-                "IRLS direct rejected an observed-Newton proposal at iteration %d; "
-                "restoring Fisher scoring",
-                it + 1,
-            )
-
         committed = retained
         if _has_scop:
             scop_committed = retained_scop
         if converged_this_iter:
             converged = True
+            break
+        if score_stagnated:
             break
         dev_prev = dev
         objective_prev = (
@@ -2646,6 +3056,33 @@ def _fit_irls_direct_once(
 
     t_elapsed = time.perf_counter() - t_start
     logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
+
+    # A published Gaussian identity fit carries its centred intercept as the
+    # compensated pair (alpha, alpha_lo): alpha's weighted mean rounds by a
+    # kernel-dependent ulp or more, and alpha + (x - c) beta ties at every row
+    # when alpha* is the midpoint of two adjacent floats, so a one-ulp signal
+    # between two levels collapsed on some BLAS kernels.  The deviance and
+    # scale published below are the compensated predictor's, the eta every
+    # consumer reads (``mode_score.linear_predictor``).
+    centred_intercept_lo: float | None = None
+    if (
+        _compensate_centred_intercept
+        and _compute_fit_statistics
+        and retained.centred_intercept is not None
+        and _state_center is not None
+        and type(family) is Gaussian
+        and type(link) is IdentityLink
+    ):
+        contribution = centred_matvec(dm, beta, _state_center)
+        centred_intercept_lo = centred_intercept_remainder(
+            y, weights, offset, retained.centred_intercept, contribution
+        )
+        if centred_intercept_lo is not None:
+            contribution += centred_intercept_lo
+            eta_unclipped = (retained.centred_intercept + contribution) + offset
+            eta = stabilize_eta(eta_unclipped, link)
+            mu = clip_mu(link.inverse(eta), family)
+            dev = float(np.sum(weights * family.deviance_unit(y, mu)))
 
     # Runtime separation backstop (issue #341).  Two terminal signatures mark
     # a coefficient that walked toward +/-infinity instead of converging:
@@ -2725,6 +3162,24 @@ def _fit_irls_direct_once(
                 "fit_irls_direct: retained coefficient mode has no complete "
                 "constrained-QP KKT certificate; fit is not converged."
             )
+
+    # A returned state with rows at the mean-space boundary is not a mode of
+    # the model: their capped mean makes the deviance flat there, and the
+    # maximum it approaches is constrained, not stationary.  It is never
+    # converged, whatever stopped the loop (``mean_space_boundary_rows``).
+    _boundary_rows = (
+        0
+        if _mean_space_invalid is None
+        else mean_space_boundary_rows(family, link, eta_unclipped, weights)
+    )
+    if _boundary_rows:
+        converged = False
+        termination_reason = "mean_space_boundary"
+        logger.info(
+            "fit_irls_direct: %d row(s) at the boundary of the family's mean space; "
+            "the penalized maximum is constrained, fit is not converged.",
+            _boundary_rows,
+        )
 
     if _has_scop:
         # Final Gram and SCOP Hessian caches must describe the retained model,
@@ -2835,17 +3290,26 @@ def _fit_irls_direct_once(
         profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
         profile["irls_calls"] = profile.get("irls_calls", 0) + 1
         profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
+        if _boundary_rows:
+            profile["irls_mean_space_boundary_calls"] = (
+                profile.get("irls_mean_space_boundary_calls", 0) + 1
+            )
+        if _last_mode_residual is not None:
+            # §3.8, §3.9: the stop rule's last score, whether a derived floor
+            # bound it, and the slopes it flagged weakly identified and kept.
+            profile["irls_mode_score"] = mode_bar * _last_mode_residual.ratio()
+            profile["irls_mode_bar"] = mode_bar
+            profile["irls_mode_floor_binding"] = _last_mode_residual.floor_binding
+            profile["irls_mode_weakly_identified"] = tuple(
+                int(index) for index in np.flatnonzero(_last_mode_residual.excluded)
+            )
 
     # Preserve the raw coefficient-space payload used by REML separately from
     # the centered inference system. The structured path retains the same
     # moments in block form and never materializes the dominant K x K block.
     centered_final: CenteredSystem | None = None
     structured_final: (
-        ScalarStructuredSystem
-        | BlockStructuredSystem
-        | SumToZeroBlockStructuredSystem
-        | NestedStructuredSystem
-        | None
+        FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
     ) = None
     if _use_structured:
         if _return_working_system:
@@ -2861,11 +3325,11 @@ def _fit_irls_direct_once(
                 groups,
                 W,
                 W * z_off,
+                signed=export_rows.curvature_source == "observed",
                 dominant_group_index=_structured_group_index,
-                tabmat_split=_tabmat_split,
                 layout=_structured_layout,
+                prior_weights=weights,
             )
-        _final_structured_system = structured_final
         _final_penalized_operator = build_penalized_structured_operator(
             structured_final,
             gms,
@@ -2912,11 +3376,20 @@ def _fit_irls_direct_once(
             cache_out["penalized_operator"] = _final_penalized_operator
             cache_out["xtwz_small"] = structured_final.xtwz_small
             cache_out["xtwz_structured"] = structured_final.xtwz_structured
+            if not _return_working_system and isinstance(structured_final, FactorSmoothLeafSystem):
+                # The retained estimability rule reads these (a nested chain
+                # certifies its border on its own leaf-shifted moments).
+                cache_out["structured_row_column_norm"] = cancelled_column_row_norms(
+                    centred_data_operator(structured_final), dm, W
+                )
         else:
             if centered_final is None or XtWX is None:  # pragma: no cover - branch invariant
                 raise RuntimeError("Dense fit did not produce a centered system.")
             cache_out["XtWX"] = XtWX
             cache_out["centered_XtWX"] = centered_final.data_gram
+            # the matrix the slope decomposition was taken of (the identified
+            # part of the Laplace approximation restricts it, ``reml.identified``)
+            cache_out["centered_hessian"] = centered_final.hessian
         cache_out["XtWz"] = XtWz
         cache_out["XtW1"] = XtW1
         cache_out["sum_W"] = sum_W
@@ -2939,9 +3412,8 @@ def _fit_irls_direct_once(
     # determinant measure, not the raw augmented pseudo-determinant.
     _t0 = time.perf_counter()
     structured_factor: (
-        ProfiledScalarSchurFactor
-        | ProfiledBlockSchurFactor
-        | ProfiledSumToZeroBlockFactor
+        ProfiledFactorSmoothLeafFactor
+        | ProfiledSumToZeroTreeFactor
         | ProfiledNestedSchurFactor
         | None
     ) = None
@@ -2949,24 +3421,18 @@ def _fit_irls_direct_once(
     if _use_structured:
         if structured_final is None or _final_penalized_operator is None:
             raise RuntimeError("Structured fit did not produce final coefficient blocks.")
-        augmented_factor, _ = build_augmented_structured_factor(
-            structured_final,
-            _final_penalized_operator,
-        )
-        if isinstance(augmented_factor, SumToZeroBlockFactor):
-            structured_factor = ProfiledSumToZeroBlockFactor(
+        with _structured_solver_errors():
+            augmented_factor, _ = build_augmented_structured_factor(
+                structured_final, _final_penalized_operator
+            )
+        if isinstance(augmented_factor, SumToZeroTreeFactor):
+            structured_factor = ProfiledSumToZeroTreeFactor(
                 augmented_factor=augmented_factor,
                 sum_w=structured_final.sum_w,
                 xtw=XtW1,
             )
-        elif isinstance(augmented_factor, BlockSchurFactor):
-            structured_factor = ProfiledBlockSchurFactor(
-                augmented_factor=augmented_factor,
-                sum_w=structured_final.sum_w,
-                xtw=XtW1,
-            )
-        elif isinstance(augmented_factor, ScalarSchurFactor):
-            structured_factor = ProfiledScalarSchurFactor(
+        elif isinstance(augmented_factor, FactorSmoothLeafFactor):
+            structured_factor = ProfiledFactorSmoothLeafFactor(
                 augmented_factor=augmented_factor,
                 sum_w=structured_final.sum_w,
                 xtw=XtW1,
@@ -2985,7 +3451,8 @@ def _fit_irls_direct_once(
         XtWX_beta = structured_final.operator
         if _compute_reml_geometry:
             XtWX_S_inv_beta: NDArray | HessianFactor = structured_factor
-            log_det_H: float | None = augmented_factor.logdet()
+            with _structured_solver_errors():
+                log_det_H: float | None = augmented_factor.logdet()
             reml_hessian_rank: int | None = augmented_factor.rank
         else:
             XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
@@ -3008,7 +3475,8 @@ def _fit_irls_direct_once(
                 )
                 else XtWX_beta
             )
-            p_eff = 1.0 + structured_factor.trace_inverse_operator(edf_operator)
+            with _structured_solver_errors():
+                p_eff = 1.0 + structured_factor.trace_inverse_operator(edf_operator)
         else:
             p_eff = 0.0
         # Structured retained-fit inference consumes the factor directly. A
@@ -3069,8 +3537,15 @@ def _fit_irls_direct_once(
                 data_rank = decompose_factor(A_data_final) if compute_rank_info else None
                 augmented_rank = reml_slope_rank
             else:
+                # The export rows are Fisher (``prefer_observed=False``), whose
+                # weights are nonnegative: the data Gram is PSD by construction,
+                # so a negative eigenvalue at its null is formation rounding and
+                # sends the rank to the factor below instead of raising.
                 data_rank = (
-                    decompose_gram_if_authoritative(centered_final.data_gram)
+                    decompose_gram_if_authoritative(
+                        centered_final.data_gram,
+                        psd_by_construction=not _return_working_system,
+                    )
                     if compute_rank_info
                     else None
                 )
@@ -3137,10 +3612,20 @@ def _fit_irls_direct_once(
             profile["structured_nested_fallback_reason"] = (
                 structured_decision.nested_fallback_reason
             )
+            border_certificate = getattr(structured_factor, "border_certificate", None)
+            if border_certificate is not None:
+                # §3.6 step 5: every null direction the border factorization
+                # truncated, disclosed with its certificate.
+                profile["structured_border_rank"] = border_certificate.rank
+                profile["structured_border_tau"] = border_certificate.tau
+                profile["structured_border_verification_decrements"] = border_certificate.decrements
+                profile["structured_border_trailing_bound"] = border_certificate.trailing_bound
+                profile["structured_border_deflated"] = border_certificate.deflated
+                profile["structured_weakly_identified"] = tuple(
+                    getattr(structured_factor, "weakly_identified_slopes", ())
+                )
             profile["structured_minimum_local_diagonal"] = structured_factor.minimum_local_diagonal
             profile["structured_schur_condition"] = structured_factor.schur_condition_estimate
-            profile["structured_used_dense_fallback"] = structured_factor.used_dense_fallback
-            profile["structured_fallback_reason"] = structured_factor.fallback_reason
 
     # Pearson-based phi for estimated-scale families.  The numerator is the
     # same under either weight contract; only the denominator's likelihood
@@ -3185,6 +3670,10 @@ def _fit_irls_direct_once(
         termination_reason=termination_reason,
         direct_backend=_resolved_direct_backend,
         direct_fallback_reason=_direct_fallback_reason,
+        centred_intercept=retained.centred_intercept,
+        state_center=None if retained.centred_intercept is None else _state_center,
+        centred_intercept_lo=centred_intercept_lo,
+        mean_space_boundary_rows=_boundary_rows,
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.

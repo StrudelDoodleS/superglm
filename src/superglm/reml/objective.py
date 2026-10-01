@@ -35,9 +35,10 @@ from superglm.reml.scale import (
 )
 from superglm.reml.scop_geometry import decompose_on_scop_resolved_range
 from superglm.solvers.dispersion import dispersion_likelihood_size, validate_weight_semantics
+from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_gram
-from superglm.solvers.structured import SymmetricBlockOperator
+from superglm.solvers.structured import CompactSymmetricOperator
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -63,7 +64,7 @@ def reml_laml_objective(
     lambdas: dict[str, float],
     sample_weight: NDArray,
     offset_arr: NDArray,
-    XtWX: NDArray | SymmetricBlockOperator | None = None,
+    XtWX: NDArray | CompactSymmetricOperator | None = None,
     XtW1: NDArray | None = None,
     sum_W: float | None = None,
     penalty_caches: dict | None = None,
@@ -136,7 +137,7 @@ def reml_laml_objective(
         and (S_override is not None or reml_penalties is not None)
     )
     if XtWX is None and not retained_geometry_complete:
-        eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
+        eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
         mu = clip_mu(link.inverse(eta), distribution)
         W = fisher_working_weights(
             distribution=distribution,
@@ -405,7 +406,7 @@ def reml_laml_objective(
         nll = 0.5 * result.deviance
     else:
         if mu is None:
-            eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
+            eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
             mu = clip_mu(link.inverse(eta), distribution)
         nll = -distribution.log_likelihood(y, mu, sample_weight, phi=1.0)
     evaluation = REMLObjectiveEvaluation(

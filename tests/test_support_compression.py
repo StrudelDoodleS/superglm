@@ -1238,11 +1238,11 @@ def test_every_agg_by_bin_caller_is_guarded():
     """Every caller of ``_agg_by_bin``, whatever its enclosing function is named.
 
     The first version of this audit walked only functions named ``_cross_gram``.
-    ``_random_effect_cross_gram`` calls ``_agg_by_bin`` directly, so a
-    high-cardinality random effect beside a wide raw-basis SSP term allocated
-    ``n_levels x p_b`` with the audit green -- the scope hole was pre-declared as
-    "syntactic and single-module" and found inside the hour. Scope is now every
-    function in the module.
+    A random-effect cross (since retired with the scalar factor) called
+    ``_agg_by_bin`` directly, so a high-cardinality random effect beside a wide
+    raw-basis SSP term allocated ``n_levels x p_b`` with the audit green -- the
+    scope hole was pre-declared as "syntactic and single-module" and found
+    inside the hour. Scope is now every function in the module.
     """
     import ast
     import pathlib

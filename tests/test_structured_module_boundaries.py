@@ -44,23 +44,32 @@ def test_estimability_geometry_has_internal_owner() -> None:
         (
             "_bounded_centered_estimability",
             "_orthonormal_column_span",
-            "_sum_to_zero_public_null_geometry",
-            "_certified_ritz_discarded",
             "centered_operator_coefficient_estimable",
         ),
     )
 
 
-def test_schur_factors_have_internal_owner() -> None:
-    _assert_owned(
-        "factors",
-        (
-            "ScalarSchurFactor",
-            "BlockSchurFactor",
-            "ProfiledBlockSchurFactor",
-            "ProfiledScalarSchurFactor",
-        ),
-    )
+def test_structured_factors_have_internal_owners() -> None:
+    _assert_owned("nested", ("NestedSchurFactor", "ProfiledNestedSchurFactor"))
+    _assert_owned("block_leaves", ("FactorSmoothLeafFactor", "ProfiledFactorSmoothLeafFactor"))
+    _assert_owned("balance_tree", ("SumToZeroTreeFactor", "ProfiledSumToZeroTreeFactor"))
+
+
+def test_retired_factor_names_are_not_on_the_facade() -> None:
+    """The retired factor families stay importable only at their pickled paths (§3.12)."""
+    from superglm.solvers._structured import factors, retired
+
+    for name in ("ScalarSchurFactor", "ProfiledScalarSchurFactor", "BlockSchurFactor"):
+        assert not hasattr(structured, name)
+        assert issubclass(getattr(factors, name), retired.RetiredStructuredState)
+
+
+def test_the_explicit_row_leaf_builder_is_a_test_fixture() -> None:
+    """Nothing in the engine builds a leaf system from explicit rows, so the
+    builder the factor tests use lives with them (``tests/_leaf_systems.py``)."""
+    from superglm.solvers._structured import block_leaves
+
+    assert not hasattr(block_leaves, "leaf_system_from_rows")
 
 
 def test_backend_selection_has_internal_owner() -> None:
@@ -79,8 +88,7 @@ def test_structured_layouts_have_internal_owner() -> None:
     _assert_owned(
         "layout",
         (
-            "ScalarStructuredLayout",
-            "BlockStructuredLayout",
+            "FactorSmoothLeafLayout",
             "get_structured_layout",
             "structured_design_matvec",
             "structured_design_rmatvec",
@@ -92,10 +100,9 @@ def test_structured_moments_have_internal_owner() -> None:
     _assert_owned(
         "moments",
         (
-            "ScalarStructuredSystem",
-            "BlockStructuredSystem",
-            "SumToZeroBlockStructuredSystem",
-            "build_scalar_structured_system",
+            "NestedStructuredSystem",
+            "FactorSmoothMomentSystem",
+            "SumToZeroMomentSystem",
             "build_block_structured_system",
             "build_structured_system",
         ),
@@ -106,7 +113,7 @@ def test_penalized_assembly_has_internal_owner() -> None:
     _assert_owned(
         "assembly",
         (
-            "CachedScalarStructuredSolution",
+            "CachedNestedStructuredSolution",
             "CachedBlockStructuredSolution",
             "CachedSumToZeroStructuredSolution",
             "build_penalized_structured_operator",

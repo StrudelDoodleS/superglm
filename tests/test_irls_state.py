@@ -974,9 +974,12 @@ def test_direct_nonfinite_full_trial_can_accept_safe_half_step() -> None:
 
 
 def test_direct_backtracking_reuses_the_endpoint_linear_predictor(monkeypatch) -> None:
+    import superglm.solvers.irls_direct as irls_direct_module
+
     n = 6
     dm = DesignMatrix([DenseGroupMatrix(np.zeros((n, 1)))], n=n, p=1)
     original_matvec = dm.matvec
+    original_centred = irls_direct_module.centred_matvec
     matvec_calls = 0
 
     def counted_matvec(beta: np.ndarray) -> np.ndarray:
@@ -984,7 +987,14 @@ def test_direct_backtracking_reuses_the_endpoint_linear_predictor(monkeypatch) -
         matvec_calls += 1
         return original_matvec(beta)
 
+    def counted_centred(design, beta, center):
+        # the centred PIRLS state forms eta about its fixed centre (design §3.8)
+        nonlocal matvec_calls
+        matvec_calls += 1
+        return original_centred(design, beta, center)
+
     monkeypatch.setattr(dm, "matvec", counted_matvec)
+    monkeypatch.setattr(irls_direct_module, "centred_matvec", counted_centred)
 
     def deviance_for_mean(mu: float) -> float:
         if np.isclose(mu, 0.0):

@@ -18,6 +18,7 @@ from superglm.inference.covariance import (
     covariance_factor_smooth_raw_level_block,
     covariance_selected_block,
 )
+from superglm.model.retired_state import retained_linear_state
 from superglm.model.state_ops import _solver_space_working_weights
 from superglm.solvers.structured import (
     FactorSmoothLevelSupport,
@@ -153,7 +154,7 @@ def _stored_support(
         support = reporting.support_totals.get(group.name)
         if isinstance(support, FactorSmoothLevelSupport):
             return support
-    state = getattr(model, "_linear_system_state", None)
+    state = retained_linear_state(model)
     if isinstance(state, StructuredLinearSystemState):
         support = state.support_totals.get(group.name)
         if isinstance(support, FactorSmoothLevelSupport):

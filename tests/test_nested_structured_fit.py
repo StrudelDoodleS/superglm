@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from fractions import Fraction
 from functools import cache
 
 import numpy as np
@@ -71,6 +72,7 @@ import scipy.linalg
 from superglm import (
     Categorical,
     LambdaPolicy,
+    Numeric,
     RandomEffect,
     Spline,
     SuperGLM,
@@ -82,10 +84,10 @@ from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.mode_score import mode_certification_bar
 from superglm.solvers.structured import (
     NestedSchurFactor,
     ProfiledNestedSchurFactor,
-    ProfiledScalarSchurFactor,
 )
 
 EPS = np.finfo(np.float64).eps
@@ -95,7 +97,7 @@ CHAIN = ("make", "model", "variant")
 TERMS = ("x", "cat", "crossed", *CHAIN)
 PENALIZED = ("x", "crossed", *CHAIN)
 # response seeds with an interior REML optimum at every level (see ``_data``)
-SEEDS = {"poisson": 8, "gamma": 1, "tweedie": 2, "binomial": 3}
+SEEDS = {"poisson": 8, "gamma": 1, "tweedie": 2, "binomial": 3, "gausslog": 4}
 FAMILIES = tuple(SEEDS)
 
 
@@ -168,6 +170,11 @@ def _response(family: str):
         counts = rng.poisson(0.8 * exposure * mean)
         y = np.array([rng.gamma(2.0, 0.6, count).sum() for count in counts])
         return frame, y, np.log(exposure), np.ones(len(y))
+    if family == "gausslog":
+        # Gaussian with a log link: observed rows w mu (2 mu - y) are negative
+        # wherever y > 2 mu, so the chain factors signed rows (design §3.3)
+        # (about 3% of the rows here)
+        return frame, mean + rng.normal(0.0, 0.2, len(eta)), None, weight
     probability = 1.0 / (1.0 + np.exp(-(eta + 0.3)))
     return frame, (rng.uniform(size=len(eta)) < probability).astype(float), None, weight
 
@@ -183,7 +190,11 @@ def _holdout(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _family(name: str):
-    return Tweedie(p=1.5) if name == "tweedie" else name
+    return {"tweedie": Tweedie(p=1.5), "gausslog": "gaussian"}.get(name, name)
+
+
+def _link(name: str) -> str | None:
+    return "log" if name == "gausslog" else None
 
 
 def _fit(
@@ -205,6 +216,7 @@ def _fit(
     }
     model = SuperGLM(
         family=_family(family),
+        link=_link(family),
         features=features,
         selection_penalty=0,
         direct_solve=direct_solve,
@@ -287,6 +299,37 @@ def _fixed_point_gap(model: SuperGLM, y, offset, weight) -> float:
     return float(np.max(gap)) / max(1.0, float(np.max(np.abs(beta))))
 
 
+def _certified_gap(model: SuperGLM, y, offset, weight) -> float:
+    """What the mode certificate lets ``_fixed_point_gap`` be at a published mode.
+
+    PIRLS stops once ``|g_0| <= bar sum |s|`` and ``|g_j| <= bar (zeta
+    sqrt(D_jj + S_jj) + |S beta|_j)``, ``zeta = sum |s| / sqrt(sum W_F)``,
+    ``D_jj = sum W_F x~_j^2`` (``solvers.mode_score``), with ``bar`` the
+    certificate's bar for the fit's REML tolerance: the same first-order map
+    through ``|H_O^-1|``, with the score's evaluation error added as in
+    ``_fixed_point_gap``.
+    """
+    X, S, beta, mu, slope, fisher, residual = _pirls_rows(model, y, offset, weight)
+    observed = fisher - residual
+    inverse = np.linalg.inv(X.T @ (observed[:, None] * X) + S)
+    score = weight * (y - mu) * slope
+    bar = mode_certification_bar(model._reml_profile["reml_tol_resolved"])
+    total = float(np.sum(np.abs(score)))
+    slopes = X[:, :-1]
+    centred = slopes - (fisher @ slopes) / np.sum(fisher)
+    zeta = total / np.sqrt(np.sum(fisher))
+    certified = bar * np.append(
+        zeta * np.sqrt(fisher @ centred**2 + np.diag(S)[:-1]) + np.abs(S[:-1, :-1] @ beta[:-1]),
+        total,
+    )
+    offset_size = 0.0 if offset is None else np.abs(offset)
+    d_eta = (np.count_nonzero(X, axis=1) + 1) * EPS * (np.abs(X) @ np.abs(beta) + offset_size)
+    rows = np.abs(observed) * d_eta + 16 * EPS * weight * np.abs(slope) * (np.abs(y) + np.abs(mu))
+    error = np.abs(X).T @ (rows + 2 * EPS * np.abs(score)) + 2 * EPS * np.abs(S) @ np.abs(beta)
+    gap = np.abs(inverse) @ (certified + error)
+    return float(np.max(gap)) / max(1.0, float(np.max(np.abs(beta))))
+
+
 def _held_gap(nested: SuperGLM, dense: SuperGLM, y, offset, weight) -> float:
     """The larger bounded distance to the fixed point of two fits held at the same lambdas."""
     return max(_fixed_point_gap(model, y, offset, weight) for model in (nested, dense))
@@ -325,7 +368,7 @@ def _assert_nested(model: SuperGLM) -> None:
     assert profile["structured_nested_fallback_reason"] is None
     state = model._linear_system_state
     assert isinstance(state.profiled_factor, ProfiledNestedSchurFactor)
-    assert isinstance(state.coefficient_factor, NestedSchurFactor)
+    assert isinstance(state.augmented_factor, NestedSchurFactor)
     assert state.profiled_factor.chain_group_names == CHAIN
     # the retained state's edf and edf1 take the O(k) identity route: the
     # centred data operator wraps the factor's own data operator by identity
@@ -396,11 +439,47 @@ def test_nested_fit_reproduces_the_dense_fit(family: str, discrete: bool) -> Non
         # REML fit is the dense fit at its own smoothing parameters; the two
         # come by different paths, so each must have reached the fixed point
         assert abs(dense_held._reml_result.objective - objective) <= bound
+        certified = max(_certified_gap(model, y, offset, weight) for model in (nested, dense_held))
         for model in (nested, dense_held):
-            assert _fixed_point_gap(model, y, offset, weight) <= PIRLS_TOL
-        budget = _budget(nested_held, y, offset, weight, stopping_gap=PIRLS_TOL)
+            assert _fixed_point_gap(model, y, offset, weight) <= certified
+        budget = _budget(nested_held, y, offset, weight, stopping_gap=certified)
         _assert_same_fit(nested, dense_held, frame, y, offset, weight, budget)
     assert isinstance(str(nested_held.summary()), str)
+
+
+def test_a_discrete_fit_converges_whichever_way_its_trial_objectives_round(monkeypatch) -> None:
+    """The discrete line search does not ask the objective for digits it lacks.
+
+    Near the optimum a Newton step predicts a decrease ``-g'd`` far below the
+    stopping rule's resolution ``tau (1 + |V|)`` (1.7e-14 here, below one ulp
+    of ``V = 40.76``), so whether its trial objective lands above or below the
+    candidate's is rounding.  On OpenBLAS's Haswell kernels the Gamma/log
+    discrete gram fit's trials landed above: a strict ``trial < obj`` halved to
+    steps of 2^-24 chosen by rounding until the budget ran out with ``|g|``
+    at 1.9e-7 against a bar of 4.2e-8 (CI py3.14 D; Linux ARM64 in #427).
+    Every cached trial objective is raised here by ``64 eps (1 + |V|)``, a
+    rounding-level error the objective's sums carry, and the fit must still
+    converge, to the unperturbed fit's optimum within ``tau (1 + |V|)``.
+    Mutation: the strict ``trial_obj < obj`` acceptance (the fit stops at the
+    iteration budget, not converged).
+    """
+    import superglm.reml.discrete as discrete_module
+
+    reference = _fit("gamma", "gram", discrete=True)
+    assert reference._reml_result.converged
+    original = discrete_module.reml_laml_objective
+
+    def rounded_up(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if args[5].n_iter == 0 and isinstance(value, float):  # a cached line-search trial
+            return value + 64.0 * EPS * (1.0 + abs(value))
+        return value
+
+    monkeypatch.setattr(discrete_module, "reml_laml_objective", rounded_up)
+    perturbed = _fit("gamma", "gram", discrete=True)
+    assert perturbed._reml_result.converged
+    objective = reference._reml_result.objective
+    assert abs(perturbed._reml_result.objective - objective) <= REML_TOL * (1.0 + abs(objective))
 
 
 @pytest.mark.parametrize("lam", [1e-6, 1e10], ids=["nearly_free", "nearly_zero"])
@@ -471,7 +550,8 @@ def test_aliased_border_categoricals_publish_the_dense_effective_df() -> None:
     nested, dense = fits["structured"], fits["gram"]
     _assert_nested(nested)
     factor = nested._linear_system_state.profiled_factor
-    assert factor.used_dense_fallback and factor.rank_truncated
+    # the border is factored by the verified pivoted Cholesky, never a dense fallback
+    assert factor.rank_truncated
     nullity = factor.shape[0] - factor.rank
     assert nullity > 0
     budget = _retained_budget(nested)
@@ -574,34 +654,12 @@ def test_reml_derivatives_with_weight_derivatives_match_the_dense_ones(family: s
 # ── Routing ───────────────────────────────────────────────────────────────
 
 
-def test_gaussian_log_declines_the_chain_and_keeps_the_single_level_backend() -> None:
-    """Observed Gaussian/log weights can be negative (§3.7): the chain is declined, recorded."""
-    frame, eta, _, weight = _data()
-    y = np.exp(eta) * (1.0 + 0.2 * np.random.default_rng(9).normal(size=len(eta)))
-    model = SuperGLM(
-        family="gaussian",
-        link="log",
-        features={
-            "x": Spline(n_knots=8),
-            "cat": Categorical(),
-            **{name: RandomEffect() for name in ("crossed", *CHAIN)},
-        },
-        selection_penalty=0,
-        direct_solve="structured",
-    )
-    model.fit_reml(frame, y, sample_weight=weight, pirls_tol=PIRLS_TOL, reml_tol=REML_TOL)
-    profile = model._reml_profile
-    assert profile["direct_backend"] == "structured"
-    assert profile["structured_chain"] == ("variant",)
-    assert "Gaussian/LogLink" in profile["structured_nested_fallback_reason"]
-    assert isinstance(model._linear_system_state.profiled_factor, ProfiledScalarSchurFactor)
-
-
 def test_implicit_nesting_is_not_chained() -> None:
     """Variant labels reused under several models are crossed by their counts (§3.7).
 
     Each label now names two variants of different models, so the variant term
-    is still the largest random effect but no function of the model code.
+    is still the largest random effect but no function of the model code: it is
+    a chain of one.
     """
     frame, y, offset, weight = _response("poisson")
     codes = pd.factorize(frame["variant"], sort=True)[0]
@@ -609,7 +667,7 @@ def test_implicit_nesting_is_not_chained() -> None:
     assert implicit.groupby("variant")["model"].nunique().max() > 1
     model = _fit("poisson", "structured", data=(implicit, y, offset, weight))
     assert model._reml_profile["structured_chain"] == ("variant",)
-    assert isinstance(model._linear_system_state.profiled_factor, ProfiledScalarSchurFactor)
+    assert isinstance(model._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
 
 
 def test_a_parent_with_more_levels_than_the_block_cap_reports_standard_errors() -> None:
@@ -700,7 +758,7 @@ def test_border_estimability_is_invariant_to_a_column_offset(leaf_constant: bool
         model.fit_reml(data, y)
         state = model._linear_system_state
         assert model._reml_profile["structured_chain"] == ("root", "leaf")
-        assert isinstance(state.coefficient_factor, NestedSchurFactor)
+        assert isinstance(state.augmented_factor, NestedSchurFactor)
         operator = state.centered_data_operator
         estimable = _nested_centered_estimability(operator, operator.raw)
         x = next(group.sl for group in model._groups if group.name == "x")
@@ -710,3 +768,309 @@ def test_border_estimability_is_invariant_to_a_column_offset(leaf_constant: bool
         decisions.append(estimable)
     for decision in decisions[1:]:
         np.testing.assert_array_equal(decision, decisions[0])
+
+
+# ── A chain of one ────────────────────────────────────────────────────────
+#
+# A lone random effect is a chain of one on NestedSchurFactor.  These fixtures
+# are the classes on which the retired ScalarSchurFactor refused or erred (selection.py):
+# aliased or constant border columns, extreme lambda times weight, and a
+# column offset.  Gaussian/identity fits at fixed lambda make PIRLS one exact
+# solve (rho = 0, no stopping gap), so the backends differ only by rounding.
+
+LONE_LEVELS = 30
+
+
+@cache
+def _lone_level_data(extra: str | None = None, seed: int = 3):
+    """One random effect of 30 declared levels (one never observed, two with zero
+    weight) beside a normal column, a column of mean 10, a level attribute and a
+    12-level categorical; ``extra`` adds one border column."""
+    rng = np.random.default_rng(seed)
+    n = 1500
+    popularity = rng.gamma(1.5, size=LONE_LEVELS - 1)
+    g = rng.choice(LONE_LEVELS - 1, size=n, p=popularity / popularity.sum())
+    cat = rng.integers(0, 12, n)
+    x1, x10 = rng.normal(size=n), 10.0 + rng.normal(size=n)
+    attribute = rng.normal(size=LONE_LEVELS)[g]
+    frame = pd.DataFrame(
+        {
+            "x1": x1,
+            "x10": x10,
+            "attr": attribute,
+            "cat": np.array([f"c{c:02d}" for c in cat], dtype=object),
+            "g": np.array([f"g{c:02d}" for c in g], dtype=object),
+        }
+    )
+    eta = (
+        0.2
+        + 0.3 * x1
+        + 0.05 * (x10 - 10.0)
+        + 0.2 * attribute
+        + rng.normal(0.0, 0.2, 12)[cat]
+        + rng.normal(0.0, 0.3, LONE_LEVELS)[g]
+    )
+    columns = {
+        None: {},
+        "duplicate": {"x1dup": x1.copy()},
+        "alias": {"catval": 0.5 * cat - 1.0},
+        "constant": {"const": np.full(n, 3.0)},
+        "offset": {"x1": 1e6 + x1},
+    }[extra]
+    frame = frame.assign(**columns)
+    weight = np.where(np.isin(g, np.unique(g)[[3, 7]]), 0.0, 1.0)
+    y = eta + rng.normal(0.0, 0.5, n)
+    return frame, y, weight
+
+
+def _lone_level_fit(extra, direct_solve, lam, weight_scale=1.0, *, data=None, link=None):
+    """A fit of ``_lone_level_data(extra)``, or of ``data``, a binary response
+    under ``link``."""
+    frame, y, weight = _lone_level_data(extra) if data is None else data
+    numerics = [name for name in frame.columns if name not in ("cat", "g")]
+    model = SuperGLM(
+        family="gaussian" if link is None else "binomial",
+        link=link,
+        features={
+            **{name: Numeric() for name in numerics},
+            "cat": Categorical(),
+            "g": RandomEffect(
+                levels=[f"g{c:02d}" for c in range(LONE_LEVELS)],
+                lambda_policy=LambdaPolicy.fixed(lam),
+            ),
+        },
+        selection_penalty=0,
+        direct_solve=direct_solve,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y, sample_weight=weight * weight_scale, pirls_tol=PIRLS_TOL)
+    return model
+
+
+def _centred_rows(model: SuperGLM, weight) -> tuple[np.ndarray, np.ndarray]:
+    """The design less its weighted column means, by the shifted two-pass form (a
+    constant column is exactly zero), and ``H_c = X_c' W X_c + S``."""
+    dm = model._dm
+    X = dm.toarray()
+    shifted = X - X[np.flatnonzero(weight)[0]]
+    Xc = shifted - (weight @ shifted) / np.sum(weight)
+    S = build_penalty_matrix(
+        dm.group_matrices, model._groups, model._reml_lambdas, dm.shape[1], model._reml_penalties
+    )
+    return Xc, Xc.T @ (weight[:, None] * Xc) + S
+
+
+def _centred_budget(chain: SuperGLM, weight) -> tuple[float, float]:
+    """``(gamma, budget)``: the same-lambda bound on ``eta`` in centred coordinates.
+
+    ``gamma = 2 (p + 1 + k) eps kappa_s(H_c)`` and ``|d eta| <= gamma max(1,
+    ||beta||_inf) (1 + ||X_c||_inf)``, as ``_budget``, but ``kappa_s`` is that of
+    the intercept-profiled ``H_c`` both backends solve, not of the augmented
+    ``H``, whose Jacobi scaling a column offset of 1e6 conditions by its mean.
+    It is taken over the retained spectrum, the rank the fit reports; exactly
+    zero centred columns (a constant) carry no curvature and are left out.
+    """
+    Xc, H = _centred_rows(chain, weight)
+    live = np.diag(H) > 0.0
+    scale = 1.0 / np.sqrt(np.diag(H)[live])
+    eigenvalues = np.linalg.eigvalsh(scale[:, None] * H[np.ix_(live, live)] * scale[None, :])
+    retained = eigenvalues[-(chain.result.reml_hessian_rank - 1) :]
+    p = H.shape[0] + 1
+    gamma = 2.0 * (p + LONE_LEVELS) * EPS * float(retained[-1] / retained[0])
+    beta = max(1.0, float(np.max(np.abs(chain.result.beta))))
+    return gamma, gamma * beta * (1.0 + float(np.max(np.abs(Xc).sum(axis=1))))
+
+
+def _assert_chain_of_one_is_gram(chain: SuperGLM, gram: SuperGLM, extra, weight) -> None:
+    """The chain of one and gram at one lambda: rank, estimability and every fitted
+    value.  The objective and the pseudo-determinant take ``4 budget``, as
+    ``_assert_same_fit``; ``log|H|`` does not depend on the fit here, so its
+    retained eigenvalues move by ``gamma / 2`` relatively at most, each."""
+    assert isinstance(chain._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
+    assert chain._reml_profile["structured_chain"] == ("g",)
+    assert chain.result.direct_fallback_reason is None
+    assert chain.result.reml_hessian_rank == gram.result.reml_hessian_rank
+    frame, y, _ = _lone_level_data(extra)
+    gamma, budget = _centred_budget(chain, weight)
+    # each prediction also rounds its own sum X beta + alpha, whose terms a column
+    # offset makes large: (m + 1) eps (|X| |beta| + |alpha|) per row, m its nonzeros
+    X = chain._dm.toarray()
+    evaluation = sum(
+        (np.count_nonzero(X, axis=1) + 1)
+        * EPS
+        * (np.abs(X) @ np.abs(model.result.beta) + abs(model.result.intercept))
+        for model in (chain, gram)
+    )
+    assert np.all(np.abs(chain.predict(frame) - gram.predict(frame)) <= budget + evaluation)
+    objective = gram._reml_result.objective
+    assert abs(chain._reml_result.objective - objective) <= 4 * budget * (1.0 + abs(objective))
+    rank = gram.result.reml_hessian_rank
+    assert abs(chain.result.log_det_H - gram.result.log_det_H) <= rank * gamma
+    chain_metrics = chain.metrics(frame, y, sample_weight=weight)
+    gram_metrics = gram.metrics(frame, y, sample_weight=weight)
+    np.testing.assert_array_equal(
+        chain_metrics._current_coefficient_estimable, gram_metrics._current_coefficient_estimable
+    )
+
+
+def _lone_level_pair(extra, lam, weight_scale=1.0):
+    fits = [_lone_level_fit(extra, solve, lam, weight_scale) for solve in ("auto", "gram")]
+    return (*fits, _lone_level_data(extra)[2] * weight_scale)
+
+
+@pytest.mark.parametrize(
+    ("extra", "weight_scale"),
+    [pytest.param("duplicate", 1e2, id="duplicate-x1e2"), pytest.param("alias", 1.0, id="alias")],
+)
+def test_a_chain_of_one_decides_an_aliased_border_as_gram_does(extra, weight_scale) -> None:
+    """A duplicated column under weights x1e2, and a numeric that is a function of
+    the categorical: the border has one exact null direction.  The chain forms Q
+    as a sum of PSD pieces and decides rank on the Jacobi-scaled Q, so it keeps
+    nullity 1 and gram's estimability where the retired scalar factor, forming Q by
+    subtraction, refused 12 of 22 and 20 of 44 such fits."""
+    chain, gram, weight = _lone_level_pair(extra, 0.7, weight_scale)
+    width = chain._dm.shape[1] + 1
+    assert width - chain.result.reml_hessian_rank == 1
+    _assert_chain_of_one_is_gram(chain, gram, extra, weight)
+
+
+@pytest.mark.parametrize("lam", [0.7, 1e8], ids=["moderate", "nearly-zero"])
+def test_a_chain_of_one_drops_a_constant_column_as_gram_does(lam) -> None:
+    """A column equal to 3 is the intercept's alias.  The chain reduces the border on
+    the rows less the global centre, where the column is exactly zero: it is
+    non-estimable and nothing else is, as in gram, and the objective carries no
+    pseudo-determinant offset (the retired scalar factor's was 0.5 ln(1 + 3^2) = 1.1513)."""
+    chain, gram, weight = _lone_level_pair("constant", lam)
+    const = next(group.sl for group in chain._groups if group.name == "const")
+    frame, y, _ = _lone_level_data("constant")
+    estimable = chain.metrics(frame, y, sample_weight=weight)._current_coefficient_estimable
+    assert not estimable[const][0]
+    _assert_chain_of_one_is_gram(chain, gram, "constant", weight)
+
+
+def test_a_chain_of_one_certifies_an_observed_mode_beside_a_constant_column() -> None:
+    """Binomial/probit, whose observed rows reach the mode score, beside the
+    constant column.  The chain's centred operator gives the column an exactly
+    zero diagonal, so its score is ``(3 - mean_x) sum(r)``, the weighted mean's
+    rounding times the intercept score; normalised by ``tiny`` it scored 5.4e28
+    and auto raised ObservedModeNotCertifiedError where gram fits.  Normalised
+    at the centring's resolution it certifies, and the fit is gram's on the
+    model without the column, whose objective it must meet to
+    ``reml_tol (1 + |V|)``."""
+    frame, latent, weight = _lone_level_data("constant", seed=4)
+    y = (latent > 0.2).astype(float)  # the latent-variable form of a probit response
+    reduced = frame.drop(columns="const")
+    chain = _lone_level_fit(None, "auto", 0.7, data=(frame, y, weight), link="probit")
+    gram = _lone_level_fit(None, "gram", 0.7, data=(reduced, y, weight), link="probit")
+    assert isinstance(chain._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
+    assert chain.result.direct_fallback_reason is None
+    assert chain.result.reml_hessian_rank == gram.result.reml_hessian_rank
+    objective = gram._reml_result.objective
+    assert abs(chain._reml_result.objective - objective) <= REML_TOL * (1.0 + abs(objective))
+    estimable = chain.metrics(frame, y, sample_weight=weight)._current_coefficient_estimable
+    const = next(group.sl for group in chain._groups if group.name == "const")
+    assert not estimable[const][0]
+    np.testing.assert_array_equal(
+        np.delete(estimable, const),
+        gram.metrics(reduced, y, sample_weight=weight)._current_coefficient_estimable,
+    )
+
+
+def test_a_chain_of_one_fits_a_column_offset_by_a_million() -> None:
+    """``1e6 + x``: the raw moments carry the offset, which the chain's global centre
+    removes before any leaf statistic is formed (Chan, Golub & LeVeque 1983).  The
+    retired scalar factor refused 16 of 16 such fits."""
+    chain, gram, weight = _lone_level_pair("offset", 0.7)
+    _assert_chain_of_one_is_gram(chain, gram, "offset", weight)
+
+
+def _dyadic(values: np.ndarray) -> tuple[np.ndarray, int]:
+    """``(N, e)`` with ``values = N / 2^e`` exactly, ``N`` Python integers."""
+    exponent = max(
+        float(value).as_integer_ratio()[1].bit_length() - 1 for value in np.unique(values)
+    )
+    return np.array(
+        [int(Fraction(float(value)) * 2**exponent) for value in values.ravel()], dtype=object
+    ).reshape(values.shape), exponent
+
+
+def _exact_logdet_and_edf(model: SuperGLM, weight) -> tuple[float, float, float]:
+    """``log|H_aug|``, the edf and ``kappa_s`` of the centred border Schur complement,
+    from the float64 rows in exact integer arithmetic.
+
+    Every float64 is dyadic, so ``H_aug = [X 1]' W [X 1] + blockdiag(S, 0)`` is an
+    integer matrix over one power of two.  Fraction-free Gauss-Jordan (Bareiss
+    1968) gives its determinant and adjugate; the edf is ``p + 1 - tr(H_aug^-1
+    S_aug)``, the slope block of ``H_aug^-1`` being ``H_c^-1``.  ``Q`` eliminates
+    the random effect's diagonal block, centred at the weighted column means.
+    """
+    dm = model._dm
+    X = np.hstack([dm.toarray(), np.ones((dm.shape[0], 1))])
+    size = X.shape[1]
+    S = np.zeros((size, size))
+    S[:-1, :-1] = build_penalty_matrix(
+        dm.group_matrices, model._groups, model._reml_lambdas, size - 1, model._reml_penalties
+    )
+    (Xi, ex), (wi, ew), (Si, es) = _dyadic(X), _dyadic(weight), _dyadic(S)
+    total = max(2 * ex + ew, es)
+    H = (Xi.T @ (wi[:, None] * Xi)) * 2 ** (total - 2 * ex - ew) + Si * 2 ** (total - es)
+    M = [list(row) + [int(i == j) for j in range(size)] for i, row in enumerate(H.tolist())]
+    previous = 1
+    for k in range(size):
+        pivot = M[k][k]
+        for i in range(size):
+            if i != k:
+                factor = M[i][k]
+                M[i] = [(a * pivot - factor * b) // previous for a, b in zip(M[i], M[k])]
+        previous = pivot
+    adjugate = np.array([row[size:] for row in M], dtype=object)
+    logdet = math.log(previous) - size * total * math.log(2.0)
+    trace = Fraction(int((adjugate * Si.T).sum()) * 2 ** (total - es), previous)
+    level = next(group.sl for group in model._groups if group.name == "g")
+    tree = np.arange(level.start, level.stop)
+    border = np.setdiff1d(np.arange(size), tree)
+    Q = [
+        [
+            Fraction(H[i, j]) - sum(Fraction(H[i, t] * H[j, t], H[t, t]) for t in tree)
+            for j in border
+        ]
+        for i in border
+    ]
+    # the intercept, last, is sheared onto the weighted column means (its own is 0)
+    mean = [Fraction(H[-1, j], H[-1, -1]) for j in border[:-1]] + [Fraction(0)]
+    R = np.array(
+        [[Fraction(int(i == j)) for j in range(len(border))] for i in range(len(border))],
+        dtype=object,
+    )
+    R[-1] -= np.array(mean, dtype=object)
+    Qc = R.T @ np.array(Q, dtype=object) @ R
+    Qc = np.array([[float(value) for value in row] for row in Qc])
+    scale = 1.0 / np.sqrt(np.diag(Qc))
+    kappa = float(np.linalg.cond(scale[:, None] * Qc * scale[None, :]))
+    return logdet, float(size - trace), kappa
+
+
+def test_a_chain_of_one_is_exact_at_a_tiny_lambda_under_large_weights() -> None:
+    """lambda = 1e-8 on the random effect under weights x1e4.  The intercept's Schur
+    pivot is ``sum_l w_l lambda / (w_l + lambda)``, about ``K lambda``: formed by
+    subtraction it cancels to a relative 1e-2, which the retired scalar factor refused
+    and gram's Cholesky of the augmented H carries into log|H|.  The chain sums
+    it from positive terms.  Bounds as in ``test_nested_schur_factor.py``:
+    ``gamma_tree = n_tree eps`` for the per-level sums (the largest level's rows
+    and four operations), ``gamma_Q = (n + k + q + 10) eps`` for the PSD-sum Q
+    and ``gamma_border = q kappa_s(Q) gamma_Q``; ``log|H|`` takes ``k gamma_tree +
+    q gamma_border`` and the edf, a sum of ``p + 1`` terms at most 1, ``(p + 1)
+    (gamma_tree + gamma_border)``.
+    """
+    chain = _lone_level_fit(None, "auto", 1e-8, weight_scale=1e4)
+    assert isinstance(chain._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
+    frame, _, weight = _lone_level_data(None)
+    logdet, edf, kappa = _exact_logdet_and_edf(chain, weight * 1e4)
+    n, size = len(frame), chain._dm.shape[1] + 1
+    q = size - LONE_LEVELS
+    rows = int(np.max(np.bincount(pd.factorize(frame["g"])[0])))
+    gamma_tree = (rows + 4) * EPS
+    gamma_border = q * kappa * (n + LONE_LEVELS + q + 10) * EPS
+    assert abs(chain.result.log_det_H - logdet) <= LONE_LEVELS * gamma_tree + q * gamma_border
+    assert abs(chain.result.effective_df - edf) <= size * (gamma_tree + gamma_border)

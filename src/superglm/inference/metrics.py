@@ -14,9 +14,11 @@ from superglm.distributions import weighted_log_likelihood
 from superglm.inference._metrics_design import (
     EvaluationDesign,
     MetricsDesign,
+    augmented_row_quadratic_forms,
     factor_from_gram,
     iter_dense_chunks,
     quadratic_form_diagonal,
+    weighted_center,
     weighted_moments,
 )
 from superglm.inference.coef_tables import build_basis_detail, build_coef_rows  # noqa: F401
@@ -29,6 +31,7 @@ from superglm.inference.covariance import (  # noqa: F401
 )
 from superglm.inference.summary import ModelSummary, _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
+from superglm.model.retired_state import retained_linear_state
 from superglm.model.state_ops import (
     _public_augmented_covariance,
     _rank_active_state,
@@ -373,7 +376,7 @@ class ModelMetrics:
             # a dense fit re-forms every quantity on the supplied rows, since a
             # discrete fit's weights and edf belong to its binned design.
             keeps_fit_covariance = (
-                getattr(model, "_linear_system_state", None) is not None
+                retained_linear_state(model) is not None
                 or getattr(self._result, "scop_inference", None) is not None
             )
             self._fit_geometry_matches = bool(
@@ -392,10 +395,7 @@ class ModelMetrics:
                 and "_fit_inference_info" in model.__dict__
                 and self._fit_geometry_matches
             )
-            or (
-                getattr(model, "_linear_system_state", None) is not None
-                and self._fit_geometry_matches
-            )
+            or (retained_linear_state(model) is not None and self._fit_geometry_matches)
         )
 
         if _mu is not None:
@@ -491,9 +491,10 @@ class ModelMetrics:
         from superglm.links import stabilize_eta
 
         if self._uses_fit_design:
+            from superglm.solvers.mode_score import linear_predictor
+
             solver = self._model._solver_pirls_result()
-            eta = self._dm.matvec(solver.beta) + solver.intercept + self._offset
-            eta = stabilize_eta(eta, self._link)
+            eta = stabilize_eta(linear_predictor(self._dm, solver, self._offset), self._link)
         else:
             from superglm.model import base
 
@@ -1068,18 +1069,38 @@ class ModelMetrics:
 
     @cached_property
     def _hat_diag(self) -> NDArray:
-        """Hat matrix diagonal h_i via active-column inversion."""
-        X_a, W, XtWX_inv, _, _ = self._active_info
+        """Hat matrix diagonal: the influence-matrix diagonal with the intercept.
 
-        if X_a.shape[1] == 0:
+        One-engine design §3.10, definition (A): ``h_i = w_i a_i' H_aug^+ a_i``
+        with ``a_i = [1, x_i]``, which is exactly ``w_i / sum w + w_i x~_i'
+        M_ss x~_i`` for ``x~`` centred on the working-weighted mean and
+        ``M_ss`` the slope block of ``H_aug^+``, the inverse of the intercept's
+        Schur complement.  It is invariant to a shift of any column, its sum
+        is the model's edf, and it is the ``h`` of the residual variance
+        ``phi (1 - h_i)`` that Cook's distance and the standardized residuals
+        assume.  A structured fit whose augmented factor has row quadratic
+        forms evaluates ``a_i' H_aug^+ a_i`` in the factor's centred
+        coordinates, sparse rows at a time; every other covariance takes
+        ``M_ss`` on rows centred on the shifted working-weighted mean
+        (``weighted_center``), so the centring rounds at the columns' spread,
+        not their offset.
+        """
+        X_a, W, _, augmented, _ = self._active_info
+        W = np.asarray(W, dtype=np.float64)
+        sum_w = float(np.sum(W))
+        if sum_w <= 0.0:
             return np.zeros(self.n_obs)
-
-        # h_i = W_i * x_i' XtWX_inv x_i = W * rowsum((X_a @ XtWX_inv) * X_a)
-        if hasattr(X_a, "row_subset") or isinstance(X_a, EvaluationDesign):
-            h = W * quadratic_form_diagonal(X_a, XtWX_inv)
+        if X_a.shape[1] == 0:
+            return np.clip(W / sum_w, 0.0, 1.0)
+        factor = getattr(augmented, "augmented_factor", None)
+        forms = getattr(factor, "row_quadratic_forms", None)
+        if forms is not None:
+            h = W * augmented_row_quadratic_forms(X_a, forms)
         else:
-            Q = X_a @ XtWX_inv
-            h = W * np.sum(Q * X_a, axis=1)
+            slopes = getattr(augmented, "slopes", None)
+            slopes = np.asarray(augmented)[1:, 1:] if slopes is None else np.asarray(slopes)
+            center = weighted_center(X_a, W)
+            h = W / sum_w + W * quadratic_form_diagonal(X_a, slopes, center=center)
         return np.clip(h, 0.0, 1.0)
 
     @property
@@ -1088,7 +1109,8 @@ class ModelMetrics:
 
         This is the influence of one weighted cell as represented in the
         compressed design, not the leverage of each literal expanded copy.
-        ``sum(h)`` is approximately effective_df - 1 (excluding the intercept).
+        It includes the intercept: ``sum(h)`` is the effective degrees of
+        freedom, and every value is invariant to a shift of a column.
         """
         return self._hat_diag
 

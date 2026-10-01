@@ -1,4 +1,4 @@
-"""Exact scalar Schur-factor algebra tests."""
+"""Structured operator, estimability and factor-protocol algebra tests."""
 
 import importlib.util
 from collections import Counter
@@ -10,26 +10,28 @@ import pytest
 
 from superglm.distributions import Poisson
 from superglm.reml.gradient import reml_direct_hessian
-from superglm.solvers._structured import factors as factors_module
+from superglm.solvers._structured import block_leaves as leaves_module
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafFactor,
+    FactorSmoothPenalizedOperator,
+    ProfiledFactorSmoothLeafFactor,
+)
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor, _component_omega
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
-    BlockSchurFactor,
     BlockSymmetricOperator,
     CenteredBlockOperator,
     LowRankSymmetricOperator,
-    ProfiledBlockSchurFactor,
-    ProfiledScalarSchurFactor,
-    ScalarSchurFactor,
     SumBlockOperator,
     SymmetricBlockOperator,
     centered_operator_coefficient_estimable,
     materialize_compact_operator,
 )
 from superglm.types import PenaltyComponent
+from tests._leaf_systems import leaf_system_from_rows
 
 
-def _spd_scalar_blocks():
+def _spd_blocks():
     rng = np.random.default_rng(519)
     small_indices = np.array([0, 2, 6], dtype=np.intp)
     structured_indices = np.array([1, 3, 4, 5], dtype=np.intp)
@@ -108,7 +110,7 @@ def test_a_non_finite_low_rank_part_is_refused_as_curvature(part, bad) -> None:
     Before the guard a NaN core failed ``allclose`` against its own transpose
     and was refused as *asymmetric* -- the right refusal under the wrong name --
     while an inf core passed it (matching infs compare equal) and was accepted
-    outright, carrying a non-finite low-rank update into ``_operator_dlr``. The
+    outright, carrying a non-finite low-rank update into ``_operator_bdlr``. The
     NaN arm alone would pin only the ordering, leaving the silent-acceptance
     case free to come back.
     """
@@ -122,56 +124,6 @@ def test_a_non_finite_low_rank_part_is_refused_as_curvature(part, bad) -> None:
 
     with pytest.raises(np.linalg.LinAlgError, match="must be finite"):
         LowRankSymmetricOperator(basis=basis, core=core)
-
-
-@pytest.mark.parametrize("block", ["A", "C"])
-def test_a_non_finite_scalar_schur_block_is_refused_rather_than_absorbed(block) -> None:
-    """An inf in A or C used to build a factor carrying a nan scale.
-
-    Only ``d`` was guarded. ``np.linalg.norm(..., ord=2)`` returns nan for an
-    inf rather than raising, so nothing downstream refused either -- the factor
-    was constructed and the nan travelled into the REML criterion as a logdet.
-    That is worse than a refusal of the wrong class: a wrong class still stops
-    something, while a nan logdet quietly distorts smoothing-parameter
-    selection with every accuracy metric left looking healthy.
-    """
-    A, C, d, _, _, _ = _spd_scalar_blocks()
-    if block == "A":
-        A = A.copy()
-        A[0, 0] = np.inf
-    else:
-        C = C.copy()
-        C[0, 0] = np.inf
-
-    with pytest.raises(np.linalg.LinAlgError, match="non-finite"):
-        ScalarSchurFactor(
-            A=A,
-            C=C,
-            d=d,
-            small_indices=np.arange(3, dtype=np.intp),
-            structured_indices=np.arange(3, 7, dtype=np.intp),
-            term_name="broker",
-        )
-
-
-def _contiguous_scalar_factor():
-    A, C, d, _, _, _ = _spd_scalar_blocks()
-    small_indices = np.arange(3, dtype=np.intp)
-    structured_indices = np.arange(3, 7, dtype=np.intp)
-    H = np.zeros((7, 7))
-    H[np.ix_(small_indices, small_indices)] = A
-    H[np.ix_(structured_indices, small_indices)] = C
-    H[np.ix_(small_indices, structured_indices)] = C.T
-    H[structured_indices, structured_indices] = d
-    factor = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name="broker",
-    )
-    return factor, H
 
 
 def test_structured_solver_module_exists():
@@ -189,331 +141,14 @@ def test_dense_hessian_factor_and_protocol_are_available():
     assert hasattr(factors, "DenseHessianFactor")
 
 
-def test_scalar_schur_factor_is_available():
-    structured = import_module("superglm.solvers.structured")
-
-    assert hasattr(structured, "ScalarSchurFactor")
-
-
 def test_symmetric_block_operator_is_available():
     structured = import_module("superglm.solvers.structured")
 
     assert hasattr(structured, "SymmetricBlockOperator")
 
 
-def test_scalar_schur_solve_and_logdet_match_dense_factorization():
-    A, C, d, small_indices, structured_indices, H = _spd_scalar_blocks()
-    factor = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name="broker",
-    )
-    rhs = np.arange(1.0, 8.0)
-    rhs_matrix = np.column_stack([rhs, rhs[::-1]])
-
-    np.testing.assert_allclose(factor.solve(rhs), np.linalg.solve(H, rhs))
-    np.testing.assert_allclose(factor.solve(rhs_matrix), np.linalg.solve(H, rhs_matrix))
-    np.testing.assert_allclose(factor.logdet(), np.linalg.slogdet(H)[1])
-    assert factor.shape == H.shape
-    assert factor.backend == "structured"
-    assert isinstance(factor, HessianFactor)
-    assert factor.dominant_group_name == "broker"
-    assert factor.minimum_local_diagonal == pytest.approx(np.min(d))
-    assert np.isfinite(factor.schur_condition_estimate)
-    assert factor.fallback_reason is None
-    assert not factor.used_dense_fallback
-
-
-def test_scalar_schur_supports_no_dense_small_block():
-    d = np.array([1.2, 2.3, 4.1])
-    indices = np.arange(3, dtype=np.intp)
-    factor = ScalarSchurFactor(
-        A=np.empty((0, 0)),
-        C=np.empty((3, 0)),
-        d=d,
-        small_indices=np.array([], dtype=np.intp),
-        structured_indices=indices,
-        term_name="policy",
-    )
-    rhs = np.array([0.5, -2.0, 3.0])
-    identity = PenaltyComponent(
-        name="policy",
-        group_name="policy",
-        group_index=0,
-        group_sl=slice(0, 3),
-        omega_raw=None,
-        penalty_kind="identity",
-    )
-
-    np.testing.assert_allclose(factor.solve(rhs), rhs / d)
-    np.testing.assert_allclose(factor.logdet(), np.sum(np.log(d)))
-    np.testing.assert_allclose(factor.selected_inverse_diagonal(indices), 1.0 / d)
-    np.testing.assert_allclose(factor.trace_inverse_penalty(identity), np.sum(1.0 / d))
-    assert not factor.used_dense_fallback
-
-
-def test_scalar_schur_supports_one_dense_small_column():
-    A = np.array([[2.5]])
-    C = np.array([[0.2], [-0.1], [0.3]])
-    d = np.array([1.4, 1.7, 2.1])
-    small_indices = np.array([2], dtype=np.intp)
-    structured_indices = np.array([0, 1, 3], dtype=np.intp)
-    H = np.zeros((4, 4))
-    H[np.ix_(small_indices, small_indices)] = A
-    H[np.ix_(structured_indices, small_indices)] = C
-    H[np.ix_(small_indices, structured_indices)] = C.T
-    H[structured_indices, structured_indices] = d
-    factor = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name="territory",
-    )
-
-    rhs = np.arange(1.0, 5.0)
-    np.testing.assert_allclose(factor.solve(rhs), np.linalg.solve(H, rhs))
-    np.testing.assert_allclose(factor.logdet(), np.linalg.slogdet(H)[1])
-
-
-def test_scalar_schur_diagnostics_name_invalid_local_diagonal_and_value():
-    with pytest.raises(
-        np.linalg.LinAlgError,
-        match=r"broker.*minimum local diagonal.*-0.25",
-    ):
-        ScalarSchurFactor(
-            A=np.array([[1.0]]),
-            C=np.array([[0.1], [0.2]]),
-            d=np.array([1.0, -0.25]),
-            small_indices=np.array([0], dtype=np.intp),
-            structured_indices=np.array([1, 2], dtype=np.intp),
-            term_name="broker",
-        )
-
-
-def test_scalar_schur_uses_diagnostic_small_svd_fallback_for_singular_schur():
-    factor = ScalarSchurFactor(
-        A=np.diag([2.0, 0.0]),
-        C=np.zeros((3, 2)),
-        d=np.array([1.0, 1.5, 2.0]),
-        small_indices=np.array([0, 1], dtype=np.intp),
-        structured_indices=np.array([2, 3, 4], dtype=np.intp),
-        term_name="broker",
-    )
-    H = np.diag([2.0, 0.0, 1.0, 1.5, 2.0])
-    rhs = np.arange(1.0, 6.0)
-
-    np.testing.assert_allclose(factor.solve(rhs), np.linalg.pinv(H) @ rhs)
-    np.testing.assert_allclose(factor.logdet(), np.log(2.0) + np.log(1.5) + np.log(2.0))
-    assert factor.used_dense_fallback
-    assert "Cholesky" in factor.fallback_reason
-    assert np.isinf(factor.schur_condition_estimate)
-    np.testing.assert_array_equal(
-        factor.coefficient_estimable(),
-        [True, False, True, True, True],
-    )
-
-
-def _block_schur(A):
-    return BlockSchurFactor(
-        A=A,
-        C=np.zeros((2, 2, 2)),
-        D=np.broadcast_to(np.eye(2), (2, 2, 2)).copy(),
-        small_indices=np.array([0, 1], dtype=np.intp),
-        structured_indices=np.arange(2, 6, dtype=np.intp).reshape(2, 2),
-        term_name="x:group:fs",
-    )
-
-
-def test_schur_rank_floor_is_computed_only_on_the_svd_fallback(monkeypatch):
-    """The floor's two spectral norms are full SVDs of the border.
-
-    Built eagerly they dominated wide-border fits (a 4,000-column border spent
-    12 of 14 profile samples in them) while a Schur complement Cholesky accepts
-    never reads the floor.
-    """
-    factors = import_module("superglm.solvers._structured.factors")
-    real_cutoff = factors._schur_fallback_cutoff
-    calls = []
-
-    def counted(*args):
-        calls.append(args)
-        return real_cutoff(*args)
-
-    monkeypatch.setattr(factors, "_schur_fallback_cutoff", counted)
-    A, C, d, small_indices, structured_indices, H = _spd_scalar_blocks()
-    accepted = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name="broker",
-    )
-    accepted_block = _block_schur(np.eye(2))
-    assert not accepted.used_dense_fallback and not accepted_block.used_dense_fallback
-    assert calls == []
-
-    singular = ScalarSchurFactor(
-        A=np.diag([2.0, 0.0]),
-        C=np.zeros((3, 2)),
-        d=np.array([1.0, 1.5, 2.0]),
-        small_indices=np.array([0, 1], dtype=np.intp),
-        structured_indices=np.array([2, 3, 4], dtype=np.intp),
-        term_name="broker",
-    )
-    singular_block = _block_schur(np.diag([1.0, 0.0]))
-    assert singular.used_dense_fallback and singular_block.used_dense_fallback
-    assert len(calls) == 2
-    assert singular.rank == 4 and singular_block.rank == 5
-
-
-def test_scalar_schur_keeps_exact_tiny_decoupled_pivot():
-    """A pivot that is merely tiny is not cancellation residue.
-
-    One ordinary-block column carries a near-zero decoupled diagonal entry --
-    the working-Gram signature of an unpenalized level whose weights have
-    collapsed under separation, nested inside one heavy local level.  Its
-    Schur pivot equals its own diagonal exactly (nothing large is subtracted
-    at that coordinate), so the factorization must keep the Cholesky path,
-    full rank, and the exact positive-definite log-determinant even though
-    the pivot sits far below any floor scaled by the global norms.
-    """
-    rng = np.random.default_rng(11)
-    q, k = 6, 12
-    M = rng.standard_normal((q + 3, q))
-    A = (M.T @ M + np.diag(np.full(q, 50.0))) * 1e4
-    tiny = 1e-9
-    A[-1, :] = 0.0
-    A[:, -1] = 0.0
-    A[-1, -1] = tiny
-    d = rng.uniform(1e3, 1e5, k)
-    C = rng.standard_normal((k, q)) * np.sqrt(d)[:, None] * 1e-2
-    C[:, -1] = 0.0
-    C[0, -1] = tiny
-
-    factor = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=np.arange(q, dtype=np.intp),
-        structured_indices=np.arange(q, q + k, dtype=np.intp),
-        term_name="collapsed",
-    )
-    H = np.zeros((q + k, q + k))
-    H[:q, :q] = A
-    H[q:, q:] = np.diag(d)
-    H[q:, :q] = C
-    H[:q, q:] = C.T
-    sign, expected_logdet = np.linalg.slogdet(H)
-
-    assert not factor.used_dense_fallback
-    assert factor.rank == q + k
-    assert not factor.rank_truncated
-    assert sign > 0
-    assert factor.logdet() == pytest.approx(expected_logdet, rel=1e-9)
-    assert bool(np.all(factor.coefficient_estimable()))
-
-
-def test_scalar_schur_rejects_cancellation_created_coupled_null_space():
-    rng = np.random.default_rng(0)
-    d = 10.0 ** rng.uniform(-6.0, 6.0, 42)
-    C = d[:, None]
-    A = np.array([[np.sum(d)]])
-
-    with pytest.raises(
-        np.linalg.LinAlgError,
-        match="coupled rank-deficient Schur null space",
-    ):
-        ScalarSchurFactor(
-            A=A,
-            C=C,
-            d=d,
-            small_indices=np.array([0], dtype=np.intp),
-            structured_indices=np.arange(1, len(d) + 1, dtype=np.intp),
-            term_name="group",
-        )
-
-
-def test_block_schur_rejects_cancellation_created_coupled_null_space():
-    rng = np.random.default_rng(0)
-    d = 10.0 ** rng.uniform(-6.0, 6.0, 42)
-    C = d[:, None, None]
-    D = d[:, None, None]
-    A = np.array([[np.sum(d)]])
-
-    with pytest.raises(
-        np.linalg.LinAlgError,
-        match="coupled rank-deficient Schur null space",
-    ):
-        BlockSchurFactor(
-            A=A,
-            C=C,
-            D=D,
-            small_indices=np.array([0], dtype=np.intp),
-            structured_indices=np.arange(1, len(d) + 1, dtype=np.intp)[:, None],
-            term_name="factor_smooth",
-        )
-
-
-def test_block_schur_keeps_exact_tiny_decoupled_pivot():
-    """A block-path pivot that is merely tiny is not cancellation residue.
-
-    Block twin of the scalar keep test above: one ordinary-block column
-    carries a near-zero decoupled diagonal entry, so its Schur pivot equals
-    its own diagonal exactly and nothing large is subtracted at that
-    coordinate.  The factorization must keep the Cholesky path, full rank,
-    and the exact positive-definite log-determinant even though the pivot
-    sits far below any floor scaled by the global norms; a global floor
-    reroutes this geometry to the truncating SVD fallback, which drops the
-    direction and publishes the wrong log-determinant.
-    """
-    rng = np.random.default_rng(11)
-    q, k, b = 6, 8, 3
-    M = rng.standard_normal((q + 3, q))
-    A = (M.T @ M + np.diag(np.full(q, 50.0))) * 1e4
-    tiny = 1e-9
-    A[-1, :] = 0.0
-    A[:, -1] = 0.0
-    A[-1, -1] = tiny
-    X = rng.standard_normal((k, b, b + 2))
-    D = np.einsum("kij,klj->kil", X, X) * 1e3 + np.eye(b)[None, :, :] * 1e3
-    C = rng.standard_normal((k, b, q)) * 10.0
-    C[:, :, -1] = 0.0
-    C[0, 0, -1] = tiny
-
-    factor = BlockSchurFactor(
-        A=A,
-        C=C,
-        D=D,
-        small_indices=np.arange(q, dtype=np.intp),
-        structured_indices=np.arange(q, q + k * b, dtype=np.intp).reshape(k, b),
-        term_name="collapsed_block",
-    )
-    n = q + k * b
-    H = np.zeros((n, n))
-    H[:q, :q] = A
-    for level in range(k):
-        start = q + level * b
-        H[start : start + b, start : start + b] = D[level]
-        H[start : start + b, :q] = C[level]
-        H[:q, start : start + b] = C[level].T
-    sign, expected_logdet = np.linalg.slogdet(H)
-
-    assert not factor.used_dense_fallback
-    assert factor.rank == n
-    assert not factor.rank_truncated
-    assert sign > 0
-    assert factor.logdet() == pytest.approx(expected_logdet, rel=1e-9)
-    assert bool(np.all(factor.coefficient_estimable()))
-
-
 def test_symmetric_block_operator_is_frozen_and_owns_read_only_arrays():
-    A, C, d, small_indices, structured_indices, _ = _spd_scalar_blocks()
+    A, C, d, small_indices, structured_indices, _ = _spd_blocks()
     operator = SymmetricBlockOperator(
         A=A,
         C=C,
@@ -529,7 +164,7 @@ def test_symmetric_block_operator_is_frozen_and_owns_read_only_arrays():
 
 
 def test_dense_hessian_factor_wraps_existing_inverse_contract():
-    _, _, _, _, _, H = _spd_scalar_blocks()
+    _, _, _, _, _, H = _spd_blocks()
     inverse = np.linalg.inv(H)
     logdet = np.linalg.slogdet(H)[1]
     factor = DenseHessianFactor(inverse=inverse, log_det=logdet)
@@ -550,102 +185,10 @@ def test_dense_hessian_factor_wraps_existing_inverse_contract():
     assert factor.backend == "dense"
 
 
-def test_scalar_schur_selected_inverse_blocks_and_diagonal_match_dense_inverse():
-    A, C, d, small_indices, structured_indices, H = _spd_scalar_blocks()
-    factor = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name="broker",
-    )
-    inverse = np.linalg.inv(H)
-
-    for selected in (
-        np.array([0, 2, 6]),
-        np.array([1, 4]),
-        np.array([0, 1, 4, 6]),
-    ):
-        np.testing.assert_allclose(
-            factor.selected_inverse_block(selected),
-            inverse[np.ix_(selected, selected)],
-        )
-
-    selected_diagonal = np.array([5, 0, 3, 2], dtype=np.intp)
-    np.testing.assert_allclose(
-        factor.selected_inverse_diagonal(selected_diagonal),
-        np.diag(inverse)[selected_diagonal],
-    )
-
-
-def test_scalar_schur_refuses_large_structured_inverse_block():
-    A, C, d, small_indices, structured_indices, _ = _spd_scalar_blocks()
-    factor = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name="broker",
-        max_structured_inverse_block=2,
-    )
-
-    with pytest.raises(ValueError, match="request its diagonal"):
-        factor.selected_inverse_block(structured_indices[:3])
-
-
-def test_scalar_schur_trace_inverse_operator_matches_dense_arbitrary_sign_matrix():
-    A, C, d, small_indices, structured_indices, H = _spd_scalar_blocks()
-    factor = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        term_name="broker",
-    )
-    operator_A = np.array(
-        [
-            [0.5, -0.2, 0.1],
-            [-0.2, -0.3, 0.4],
-            [0.1, 0.4, 0.2],
-        ]
-    )
-    operator_C = np.array(
-        [
-            [0.2, -0.1, 0.0],
-            [-0.3, 0.2, 0.1],
-            [0.1, 0.0, -0.2],
-            [0.4, -0.1, 0.3],
-        ]
-    )
-    operator_d = np.array([0.3, -0.2, 0.5, -0.4])
-    operator = SymmetricBlockOperator(
-        A=operator_A,
-        C=operator_C,
-        d=operator_d,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-    )
-    dense_operator = np.zeros_like(H)
-    dense_operator[np.ix_(small_indices, small_indices)] = operator_A
-    dense_operator[np.ix_(structured_indices, small_indices)] = operator_C
-    dense_operator[np.ix_(small_indices, structured_indices)] = operator_C.T
-    dense_operator[structured_indices, structured_indices] = operator_d
-
-    expected = np.trace(np.linalg.inv(H) @ dense_operator)
-    dense_factor = DenseHessianFactor(
-        inverse=np.linalg.inv(H),
-        log_det=np.linalg.slogdet(H)[1],
-    )
-
-    np.testing.assert_allclose(factor.trace_inverse_operator(operator), expected)
-    np.testing.assert_allclose(dense_factor.trace_inverse_operator(operator), expected)
-
-
-def test_dense_and_structured_penalty_traces_match_materialized_formulas():
-    structured_factor, H = _contiguous_scalar_factor()
+def test_dense_penalty_traces_match_materialized_formulas():
+    """The dense factor's penalty traces; each structured factor pins its own
+    against a dense reference in its module's tests."""
+    *_, H = _spd_blocks()
     inverse = np.linalg.inv(H)
     dense_factor = DenseHessianFactor(inverse=inverse, log_det=np.linalg.slogdet(H)[1])
     identity = PenaltyComponent(
@@ -675,7 +218,7 @@ def test_dense_and_structured_penalty_traces_match_materialized_formulas():
     expected_identity_self = np.trace(inverse @ identity_matrix @ inverse @ identity_matrix)
     expected_cross = np.trace(inverse @ identity_matrix @ inverse @ dense_matrix)
 
-    for factor in (dense_factor, structured_factor):
+    for factor in (dense_factor,):
         np.testing.assert_allclose(
             factor.trace_inverse_penalty(identity),
             expected_identity_trace,
@@ -695,7 +238,8 @@ def test_dense_and_structured_penalty_traces_match_materialized_formulas():
 
 
 def test_compact_centered_and_low_rank_operator_products_match_dense():
-    structured_factor, H = _contiguous_scalar_factor()
+    """Compact operators applied through the dense factor match their materialized forms."""
+    *_, H = _spd_blocks()
     inverse = np.linalg.inv(H)
     dense_factor = DenseHessianFactor(
         inverse=inverse,
@@ -746,7 +290,7 @@ def test_compact_centered_and_low_rank_operator_products_match_dense():
     )
     identity_matrix = np.diag([0.0, 0.0, 0.0, 1.7, 1.7, 1.7, 1.7])
 
-    for factor in (dense_factor, structured_factor):
+    for factor in (dense_factor,):
         np.testing.assert_allclose(
             factor.trace_inverse_operator(combined),
             np.trace(inverse @ combined_dense),
@@ -792,96 +336,58 @@ def _symmetric(rng, size):
     return values + values.T
 
 
-def _scalar_directions(profiled: bool, operator_type=SymmetricBlockOperator):
-    """A scalar Schur factor, raw or intercept-profiled, and three REML directions."""
-    rng = np.random.default_rng(2609)
-    q, K = 3, 4
-    small_width = q + int(profiled)  # the augmented intercept joins the small block
-    C = rng.normal(scale=0.4, size=(K, small_width))
-    d = rng.uniform(1.0, 2.0, size=K)
-    root = rng.normal(size=(small_width, small_width))
-    A = root.T @ root + np.eye(small_width) + C.T @ (C / d[:, None])
-    factor = ScalarSchurFactor(
-        A=A,
-        C=C,
-        d=d,
-        small_indices=np.arange(small_width),
-        structured_indices=np.arange(small_width, small_width + K),
-        term_name="re",
+def _leaf_factor(rng, n_levels: int, block_size: int, q: int, profiled: bool):
+    """An fs leaf factor from random rows (augmented, or its intercept-profiled view)."""
+    per_level = 7
+    levels = np.repeat(np.arange(n_levels), per_level)
+    n = len(levels)
+    system = leaf_system_from_rows(
+        rng.normal(size=(n, block_size)),
+        rng.normal(size=(n, q)),
+        levels,
+        rng.uniform(0.5, 2.0, size=n),
+        rng.normal(size=n),
+        n_levels=n_levels,
+        small_indices=np.arange(q),
+        structured_indices=np.arange(q, q + n_levels * block_size).reshape(n_levels, block_size),
     )
-    if profiled:
-        factor = ProfiledScalarSchurFactor(
-            augmented_factor=factor, sum_w=A[0, 0], xtw=np.concatenate([A[0, 1:], C[:, 0]])
-        )
-
-    def operator():
-        return operator_type(
-            A=_symmetric(rng, q),
-            C=rng.normal(size=(K, q)),
-            d=rng.normal(size=K),
-            small_indices=factor.small_indices,
-            structured_indices=factor.structured_indices,
-        )
-
-    width = q + K
-    centered = CenteredBlockOperator(
-        raw=operator(), cross=rng.normal(size=width), total=-0.35, center=rng.normal(size=width)
+    local = rng.normal(size=(n_levels, block_size, block_size))
+    penalized = FactorSmoothPenalizedOperator.with_penalties(
+        system.operator,
+        0.3 * np.eye(q),
+        np.einsum("kji,kjl->kil", local, local) + 0.5 * np.eye(block_size),
     )
-    low_rank = LowRankSymmetricOperator(
-        basis=rng.normal(size=(width, 2)), core=np.array([[0.3, -0.2], [-0.2, 0.5]])
-    )
-    return factor, [
-        (_penalty("spline", slice(0, 2), np.array([[1.5, 0.2], [0.2, 0.8]])), 2.0, operator()),
-        (
-            _penalty("ridge", slice(2, 3), penalty_kind="identity"),
-            0.7,
-            SumBlockOperator((centered, low_rank)),
-        ),
-        (_penalty("re", slice(q, width), penalty_kind="identity"), 3.1, None),
-    ]
+    factor = FactorSmoothLeafFactor(system, penalized)
+    if not profiled:
+        return factor
+    xtw = np.empty(system.operator.shape[0])
+    xtw[system.operator.small_indices] = system.xtw_small
+    xtw[system.operator.structured_indices] = system.xtw_structured
+    return ProfiledFactorSmoothLeafFactor(augmented_factor=factor, sum_w=system.sum_w, xtw=xtw)
 
 
 def _block_directions(profiled: bool, operator_type=BlockSymmetricOperator):
-    """A block Schur factor, raw or intercept-profiled, and three REML directions."""
+    """An fs leaf factor, augmented or intercept-profiled, and three REML directions."""
     rng = np.random.default_rng(2610)
     n_levels, block_size, q = 4, 2, 3
-    small_width = q + int(profiled)  # the augmented intercept joins the small block
-    roots = rng.normal(size=(n_levels, block_size, block_size))
-    D = np.einsum("kji,kjl->kil", roots, roots) + np.eye(block_size)
-    C = rng.normal(scale=0.3, size=(n_levels, block_size, small_width))
-    root = rng.normal(size=(small_width, small_width))
-    A = root.T @ root + np.eye(small_width) + np.einsum("kiq,kir->qr", C, np.linalg.solve(D, C))
-    factor = BlockSchurFactor(
-        A=A,
-        C=C,
-        D=D,
-        small_indices=np.arange(small_width),
-        structured_indices=np.arange(small_width, small_width + n_levels * block_size).reshape(
-            n_levels, block_size
-        ),
-        term_name="fs",
-    )
-    if profiled:
-        factor = ProfiledBlockSchurFactor(
-            augmented_factor=factor,
-            sum_w=A[0, 0],
-            xtw=np.concatenate([A[0, 1:], C[:, :, 0].ravel()]),
-        )
+    factor = _leaf_factor(rng, n_levels, block_size, q, profiled)
+    small = len(factor.small_indices)
+    first = int(np.min(factor.structured_indices))
 
     def operator():
         local = rng.normal(size=(n_levels, block_size, block_size))
         return operator_type(
-            A=_symmetric(rng, q),
-            C=rng.normal(size=(n_levels, block_size, q)),
+            A=_symmetric(rng, small),
+            C=rng.normal(size=(n_levels, block_size, small)),
             D=local + local.transpose(0, 2, 1),
             small_indices=factor.small_indices,
             structured_indices=factor.structured_indices,
         )
 
-    width = q + n_levels * block_size
+    width = factor.shape[0]
     repeated = _penalty(
         "fs",
-        slice(q, width),
+        slice(first, width),
         np.diag([1.4, 0.0]),
         penalty_kind="repeated",
         repeat_count=n_levels,
@@ -903,32 +409,22 @@ def _block_directions(profiled: bool, operator_type=BlockSymmetricOperator):
 
 
 def _bare_block_directions():
-    """A block Schur factor with no dense-small block, and a repeated penalty."""
+    """An fs leaf factor with no border but the intercept, and a repeated penalty."""
     rng = np.random.default_rng(2611)
     n_levels, block_size = 4, 2
-    width = n_levels * block_size
-    roots = rng.normal(size=(n_levels, block_size, block_size))
+    factor = _leaf_factor(rng, n_levels, block_size, 0, profiled=False)
+    width = factor.shape[0]
     local = rng.normal(size=(n_levels, block_size, block_size))
-    layout = {
-        "small_indices": np.arange(0),
-        "structured_indices": np.arange(width).reshape(n_levels, block_size),
-    }
-    factor = BlockSchurFactor(
-        A=np.zeros((0, 0)),
-        C=np.zeros((n_levels, block_size, 0)),
-        D=np.einsum("kji,kjl->kil", roots, roots) + np.eye(block_size),
-        term_name="fs",
-        **layout,
-    )
     operator = BlockSymmetricOperator(
-        A=np.zeros((0, 0)),
-        C=np.zeros((n_levels, block_size, 0)),
+        A=np.zeros((1, 1)),
+        C=np.zeros((n_levels, block_size, 1)),
         D=local + local.transpose(0, 2, 1),
-        **layout,
+        small_indices=factor.small_indices,
+        structured_indices=factor.structured_indices,
     )
     repeated = _penalty(
         "fs",
-        slice(0, width),
+        slice(1, width),
         np.diag([1.4, 0.0]),
         penalty_kind="repeated",
         repeat_count=n_levels,
@@ -936,7 +432,7 @@ def _bare_block_directions():
     )
     return factor, [
         (repeated, 1.3, operator),
-        (_penalty("ridge", slice(0, width), penalty_kind="identity"), 0.4, None),
+        (_penalty("ridge", slice(1, width), penalty_kind="identity"), 0.4, None),
     ]
 
 
@@ -960,12 +456,8 @@ def _cross_trace_tolerance(factor, dense_directions):
     of the split pieces (Higham 2002, eq. 3.13). The dense reference also
     forms ``Z`` and two products: five gammas in all.
     """
-    if hasattr(factor, "_inverse_bdlr"):
-        inverse = factor._inverse_bdlr()
-        local = np.max(np.linalg.norm(inverse.blocks, 2, axis=(1, 2)))
-    else:
-        inverse = factor._inverse_dlr()
-        local = np.max(np.abs(inverse.diagonal))
+    inverse = factor._inverse_bdlr()
+    local = np.max(np.linalg.norm(inverse.blocks, 2, axis=(1, 2)))
     low_rank = (
         np.linalg.norm(inverse.basis, 2) ** 2 * np.linalg.norm(inverse.core, 2)
         if inverse.core.size
@@ -981,13 +473,11 @@ def _cross_trace_tolerance(factor, dense_directions):
 @pytest.mark.parametrize(
     "build",
     [
-        lambda: _scalar_directions(profiled=False),
-        lambda: _scalar_directions(profiled=True),
         lambda: _block_directions(profiled=False),
         lambda: _block_directions(profiled=True),
         _bare_block_directions,
     ],
-    ids=["scalar", "profiled-scalar", "block", "profiled-block", "block-without-small"],
+    ids=["block", "profiled-block", "block-without-small"],
 )
 def test_derivative_cross_traces_match_dense_reference(build):
     factor, directions = build()
@@ -1003,35 +493,13 @@ def test_derivative_cross_traces_match_dense_reference(build):
     assert np.all(np.abs(traces - expected) <= _cross_trace_tolerance(factor, dense))
 
 
-def test_scalar_derivative_cross_traces_refuse_a_foreign_block_layout():
-    """The batched local trace drops each operator's small and cross blocks.
-
-    That is exact only when the operator shares the factor's structured
-    indices, so another layout is refused rather than traced wrongly.
-    """
-    factor, directions = _scalar_directions(profiled=False)
-    component, scale, _ = directions[0]
-    width = factor.shape[0]
-    foreign = SymmetricBlockOperator(
-        A=np.eye(width - 2),
-        C=np.ones((2, width - 2)),
-        d=np.ones(2),
-        small_indices=np.arange(width - 2),
-        structured_indices=np.arange(width - 2, width),
-    )
-
-    with pytest.raises(ValueError, match="structured block layout"):
-        factor.derivative_cross_traces([(component, scale, foreign)])
-
-
 @pytest.mark.parametrize(
     ("build", "operator_type", "multiply", "with_operators"),
     [
-        (_scalar_directions, SymmetricBlockOperator, "_multiply_symmetric_dlr", True),
         (_block_directions, BlockSymmetricOperator, "_multiply_symmetric_bdlr", True),
         (_block_directions, BlockSymmetricOperator, "_multiply_symmetric_bdlr", False),
     ],
-    ids=["scalar", "block", "block-penalty-only"],
+    ids=["block", "block-penalty-only"],
 )
 def test_structured_reml_hessian_forms_each_inverse_product_once(
     monkeypatch, build, operator_type, multiply, with_operators
@@ -1055,13 +523,14 @@ def test_structured_reml_hessian_forms_each_inverse_product_once(
             formed.append(id(self))
             return super().matvec(rhs)
 
-    pairwise_multiply = getattr(factors_module, multiply)
+    module = leaves_module
+    pairwise_multiply = getattr(module, multiply)
 
     def counted_multiply(left, right):
         formed.append("pairwise")
         return pairwise_multiply(left, right)
 
-    monkeypatch.setattr(factors_module, multiply, counted_multiply)
+    monkeypatch.setattr(module, multiply, counted_multiply)
     factor, directions = build(profiled=True, operator_type=CountedOperator)
     if not with_operators:
         directions = [(component, scale, None) for component, scale, _ in directions]
@@ -1127,6 +596,34 @@ def test_centered_independent_blocks_certify_local_factor_geometry(
     assert decompose_factor(local_factor).rank == 3
     assert needs_factor_certification(preliminary)
     assert np.count_nonzero(expected.coefficient_estimable()) == small.shape[1]
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_centered_estimability_survives_a_near_singular_level() -> None:
+    """One level whose data block is singular to ~6e-13 (equilibrated) must not
+    blank the rest.  Its block is full rank under the shared rule (the singular
+    value ratio 8e-7 is above ``sqrt(eps)``), so ``decompose_factor`` calls every
+    coefficient estimable.  A formed inverse of that block leaves a KKT residual
+    of order ``kappa u |C|`` (Higham 2002 §14.1), which the reduced Schur
+    complement's a posteriori bound carried into a null space covering every
+    small column, so every standard error was NaN; refined local solves
+    (``_refined_local_solves``) keep the residual at ``u (|D||X| + |C|)``.
+    """
+    rng = np.random.default_rng(0)
+    local_factors = rng.normal(size=(6, 12, 4))
+    near = local_factors[0]
+    near[:, -1] = near[:, :-1] @ np.array([0.5, -1.0, 2.0]) + 3e-6 * rng.normal(size=12)
+    small = rng.normal(size=(72, 2))
+    operator, public_design = _independent_centered_operator(local_factors, small)
+    block = operator.raw.D[0]
+    scale = 1.0 / np.sqrt(np.diag(block))
+    assert np.linalg.eigvalsh(scale[:, None] * block * scale[None, :])[0] < 1e-12
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+
+    assert np.all(expected.coefficient_estimable())
     np.testing.assert_array_equal(
         centered_operator_coefficient_estimable(operator),
         expected.coefficient_estimable(),

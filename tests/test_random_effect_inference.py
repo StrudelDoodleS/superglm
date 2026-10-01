@@ -420,7 +420,7 @@ def test_structured_summary_marks_dense_small_aliases_nonestimable():
 
     state = model._linear_system_state
     assert isinstance(state, StructuredLinearSystemState)
-    assert state.coefficient_factor.rank < state.coefficient_factor.shape[0]
+    assert state.profiled_factor.rank < state.profiled_factor.shape[0]
     rows = {row.name: row for row in model.summary()._coef_rows}
     for name in ("x", "duplicate"):
         assert not rows[name].estimable
@@ -494,7 +494,7 @@ def test_released_structured_state_keeps_compact_factors_and_support():
         structured.__dict__["_fit_inference_info"]["XtWX_inv_aug"],
         StructuredCovarianceAccessor,
     )
-    assert state.coefficient_factor.shape == (len(structured.result.beta),) * 2
+    assert state.profiled_factor.shape == (len(structured.result.beta),) * 2
     assert state.augmented_factor.shape == (len(structured.result.beta) + 1,) * 2
     assert state.backend == "structured"
     assert "broker" in state.support_totals
@@ -523,7 +523,6 @@ def test_structured_state_has_no_dominant_square_array():
             state,
             state.system,
             state.system.operator,
-            state.coefficient_factor,
             state.augmented_factor,
         )
         for value in vars(owner).values()
@@ -716,29 +715,36 @@ def test_retained_random_effect_report_rejects_mutated_fit_rows():
 
 
 @pytest.mark.parametrize("discrete", [False, True])
-def test_auto_falls_back_for_unpenalized_zero_weight_random_effect_level(discrete: bool):
+def test_auto_takes_gram_for_an_unpenalized_random_effect_whatever_its_weights(discrete: bool):
+    """A random effect the user fixed at zero penalty is aliased with the intercept:
+    gram by that specification alone, with the same reason whether or not a level
+    has zero weight (the resolver reads no weights, one-engine design §6)."""
     rng = np.random.default_rng(20260726)
     n_levels = 40
     codes = np.repeat(np.arange(n_levels), 5)
     X = pd.DataFrame({"group": np.array([f"g{code}" for code in codes], dtype=object)})
     y = rng.normal(size=len(codes))
-    sample_weight = np.ones(len(codes))
-    sample_weight[codes == n_levels - 1] = 0.0
-    model = SuperGLM(
-        family="gaussian",
-        features={"group": RandomEffect(lambda_policy=LambdaPolicy.off())},
-        selection_penalty=0.0,
-        direct_solve="auto",
-        discrete=discrete,
-    ).fit_reml(
-        X,
-        y,
-        sample_weight=sample_weight,
-        runtime_validation="skip",
-    )
-
-    assert model.result.direct_backend == "gram"
-    assert "zero total weight" in model.result.direct_fallback_reason
+    reasons = []
+    for weightless_level in (False, True):
+        sample_weight = np.ones(len(codes))
+        if weightless_level:
+            sample_weight[codes == n_levels - 1] = 0.0
+        model = SuperGLM(
+            family="gaussian",
+            features={"group": RandomEffect(lambda_policy=LambdaPolicy.off())},
+            selection_penalty=0.0,
+            direct_solve="auto",
+            discrete=discrete,
+        ).fit_reml(
+            X,
+            y,
+            sample_weight=sample_weight,
+            runtime_validation="skip",
+        )
+        assert model.result.direct_backend == "gram"
+        reasons.append(model.result.direct_fallback_reason)
+    assert reasons[0] == reasons[1]
+    assert "zero penalty" in reasons[0] and "weight" not in reasons[0]
 
 
 def test_unpenalized_random_effect_intercept_alias_falls_back_or_rejects():

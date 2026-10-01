@@ -49,6 +49,7 @@ from superglm.profiling._scalar import (
     warn_caller,
 )
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+from superglm.solvers.mode_score import linear_predictor
 
 # Candidate REML fits only rank powers; the published refit at p_hat runs at the
 # tight publication default. At this bar a candidate's mean NLL was within
@@ -205,7 +206,7 @@ class _PowerProfile:
             intercept_init=self.warm_intercept,
         )
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
-        eta = clone._dm.matvec(result.beta) + result.intercept + self.offset
+        eta = linear_predictor(clone._dm, result, self.offset)
         mu = clip_mu(clone._link.inverse(stabilize_eta(eta, clone._link)), clone._distribution)
         return mu, bool(result.converged), None
 
@@ -216,6 +217,8 @@ class _PowerProfile:
         # (fit_ops._fetch_or_build_design) since the design does not depend on p.
         clone._suppress_reporting_support = True
         clone._profile_design_cache = {}
+        # estimate_p checked the rows' random-effect nesting once at its entry
+        clone._random_effect_nesting_checked = True
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         # fit_reml refuses a selection penalty.
         self.selecting = False
@@ -462,6 +465,18 @@ class TweedieProfileResult:
     # Cautions about one interval: what its own evaluations found.
     _ci_cautions: dict[float, list[str]] = field(default_factory=dict, repr=False)
 
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore a pickle; a result saved by superglm 0.35.0 is restated in this layout.
+
+        One path for a result pickled on its own (what ``estimate_p`` returns)
+        and for one inside a saved model (`restate_v0_35_profile_result`).
+        """
+        if "search_trace" in state:
+            restated = restate_v0_35_profile_result(state)
+            self.__class__ = type(restated)
+            state = vars(restated)
+        self.__dict__.update(state)
+
     def interval(self, alpha: float = 0.05) -> Interval:
         """Likelihood-ratio interval for p on the searched curve, with censoring flags.
 
@@ -586,3 +601,134 @@ class TweedieProfileResult:
         if centre != self.p_hat:
             ax.axvline(self.p_hat, c="k", lw=1, ls=":")
         return ax
+
+
+@dataclass
+class SavedTweedieProfileResult(TweedieProfileResult):
+    """A Tweedie power estimate saved by superglm v0.35.0, restated in the current layout.
+
+    It keeps what v0.35.0 reported: ``p_hat``, ``phi_hat``, ``nll``, the
+    searched powers (``evaluations``) and every interval computed before it
+    was saved.  The profile search that would evaluate new powers was
+    retired with v0.35.0's code, so an interval at another ``alpha`` needs a
+    new ``estimate_p``; a value from the current engine is never mixed into
+    v0.35.0's curve.
+    """
+
+    def _interval(self, alpha: float) -> Interval:
+        alpha = float(alpha)
+        if alpha not in self._ci_cache:
+            raise RuntimeError(
+                f"This Tweedie power estimate was saved by superglm 0.35.0, which computed "
+                f"its interval only at alpha in {sorted(self._ci_cache)}; its profile search "
+                "has been retired, so call estimate_p again to compute an interval at "
+                f"alpha={alpha:g}."
+            )
+        return super()._interval(alpha)
+
+    def _centre(self) -> tuple[float, float]:
+        return self.p_hat, self.search_nll
+
+
+def _retired_v0_35_search(p: float) -> float:
+    """The objective of a restated v0.35.0 profile: its search cannot evaluate new powers."""
+    raise RuntimeError(
+        f"The profile search saved by superglm 0.35.0 has been retired; p={p:g} cannot be "
+        "evaluated on it, so call estimate_p again."
+    )
+
+
+def restate_v0_35_profile_result(fields_: dict[str, Any]) -> SavedTweedieProfileResult:
+    """The current layout of a ``TweedieProfileResult`` unpickled from v0.35.0.
+
+    ``fields_`` is the pickled state.  v0.35.0 recorded the searched powers in
+    ``search_trace``, each interval as a ``(lower, upper)`` tuple in
+    ``_ci_cache`` and its endpoints' status in ``_ci_details_cache`` (now inert
+    stand-ins, ``__getattr__`` below).  An endpoint is censored unless its
+    status was ``"root_found"``, the only one v0.35.0 located as a
+    likelihood-ratio crossing.
+    """
+    trace = fields_["search_trace"]
+    values = dict(zip(trace["p"].astype(float), trace["nll"].astype(float), strict=True))
+    objective = RecordedObjective(_retired_v0_35_search)
+    objective.values.update(values)
+    intervals: dict[float, Interval] = {}
+    cautions: dict[float, list[str]] = {}
+    details_cache = fields_.get("_ci_details_cache") or {}
+    for alpha, bounds in (fields_.get("_ci_cache") or {}).items():
+        details = getattr(details_cache.get(alpha), "_retired_state", None)
+        if not isinstance(details, dict):
+            continue
+        status = [getattr(details[side], "_retired_state", {}) for side in ("lower", "upper")]
+        intervals[float(alpha)] = Interval(
+            float(bounds[0]),
+            float(bounds[1]),
+            status[0].get("status") != "root_found",
+            status[1].get("status") != "root_found",
+        )
+        cautions[float(alpha)] = [str(message) for message in details.get("warnings", ())]
+    search_nll = fields_.get("search_nll")
+    ci_lower, ci_upper = fields_["_ci_p_range"]
+    return SavedTweedieProfileResult(
+        p_hat=float(fields_["p_hat"]),
+        phi_hat=float(fields_["phi_hat"]),
+        nll=float(fields_["nll"]),
+        converged=bool(fields_["converged"]),
+        fit_mode=str(fields_["fit_mode"]),
+        search_fit_mode=fields_.get("search_fit_mode"),
+        evaluations=pd.DataFrame(
+            {
+                "p": trace["p"].astype(float).to_numpy(),
+                "nll": trace["nll"].astype(float).to_numpy(),
+                "phi": trace["phi"].astype(float).to_numpy(),
+                "fit_converged": trace["fit_converged"].astype(bool).to_numpy(),
+            }
+        ),
+        warnings=list(fields_.get("warnings") or ()),
+        search_nll=float(fields_["nll"] if search_nll is None else search_nll),
+        _objective=objective,
+        _ll_scale=float(fields_["_ll_scale"]),
+        _ci_bounds=(float(ci_lower), float(ci_upper)),
+        _ci_cache=intervals,
+        _ci_cautions=cautions,
+    )
+
+
+# v0.35.0's profile search, density and interval classes, which a model saved
+# after estimate_p pickles (its TweedieProfileResult binds the search's
+# methods).  The names stay importable as inert stand-ins (PEP 562) so such a
+# result loads, on its own or in a model; ``TweedieProfileResult.__setstate__``
+# restates it (``restate_v0_35_profile_result``).
+_RETIRED_V0_35 = frozenset(
+    {
+        "TweedieProfileCIDensityProvenance",
+        "TweedieProfileCIDetails",
+        "TweedieProfileCIEndpoint",
+        "TweedieProfileCIEvaluation",
+        "_CIDensityAggregate",
+        "_CPGRNG",
+        "_DensitySummary",
+        "_ExactPhiNewtonOutcome",
+        "_PhiBoundedResult",
+        "_PhiBranchMask",
+        "_PhiCandidate",
+        "_PhiEvaluationCache",
+        "_PhiProfilePoint",
+        "_PhiProfileResult",
+        "_PhiScoreSearchResult",
+        "_PreparedTweedieDensity",
+        "_ProfileContext",
+        "_ProfileContextREML",
+        "_ProfileEvaluation",
+        "_TweedieDensityEvaluation",
+        "_TweedieLogpdfDiagnostics",
+    }
+)
+
+
+def __getattr__(name: str):
+    if name in _RETIRED_V0_35:
+        from superglm.solvers._structured.retired import RetiredSearchState, retired_class
+
+        return retired_class(__name__, name, RetiredSearchState)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

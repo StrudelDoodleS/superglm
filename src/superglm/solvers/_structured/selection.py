@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,13 +11,11 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
 from superglm.group_matrix import (
     FactorSmoothGroupMatrix,
     GroupMatrix,
     RandomEffectGroupMatrix,
 )
-from superglm.links import CloglogLink, IdentityLink, LogLink, ProbitLink, SqrtLink
 from superglm.solvers._structured.overrides import (
     _factor_smooth_override_local_blocks,
     _structured_override_incompatibility,
@@ -30,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StructuredGroupSelection:
-    """Dominant structured group choice or a recorded dense-fallback reason.
+    """Dominant structured group choice, or why the model's terms take gram.
 
     ``chain_group_indices`` is ``()`` when no group was selected and
     ``(group_index,)`` otherwise; the nested chain is resolved later, by
@@ -47,18 +44,25 @@ class StructuredGroupSelection:
 class StructuredBackendDecision:
     """Resolved direct backend and the selected dominant block.
 
+    Every field is decided by the model's terms, their sizes and penalties
+    and the call's configuration, never by values, weights or a caught error
+    (one-engine design §6).  ``fallback_reason`` says why ``auto`` takes gram
+    for these terms (below the size crossover, constraints, no structured
+    term); a fit never switches solver after this decision.
+
     ``auto_cost_ratio`` carries the crossover model's predicted
     structured/dense cost ratio whenever ``direct_solve="auto"``
     reached the cost comparison, for either outcome.  It is ``None`` for
-    forced backends and for eligibility (non-cost) fallbacks.  Callers put it
+    forced backends and for eligibility (non-cost) decisions.  Callers put it
     in the fit profile beside the realized timings so the crossover constants
     can be recalibrated against real fits (issue #343).
 
-    ``chain_group_indices`` is ``()`` without a structured group, ``(g,)`` for
-    one dominant block (scalar Schur or FactorSmooth), and for ``len >= 2`` a
-    nested RandomEffect chain, coarsest to finest, with ``[-1] == group_index``
-    (the leaf).  ``nested_fallback_reason`` says why a detected chain was
-    declined to the single-level backend.
+    ``chain_group_indices`` is, for a RandomEffect leaf, its nested chain,
+    coarsest to finest, with ``[-1] == group_index`` (``(g,)``, a chain of one,
+    for a lone random effect); ``(g,)`` for a FactorSmooth block; ``()``
+    without a structured group.  ``nested_fallback_reason`` says why a
+    detected chain was declined to its leaf alone (an override that couples
+    it to the border).
     """
 
     use_structured: bool
@@ -72,7 +76,7 @@ class StructuredBackendDecision:
 
 _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # RandomEffect crossover, re-measured 2026-09-27 after the Schur rank floor
-# moved to the SVD fallback, the structured Newton Hessian started forming each
+# changed, the structured Newton Hessian started forming each
 # H^-1 O product once, and nested chains gained their own factor
 # (notes/research/2026-09-26-nested-random-effect-elimination.md, section 5).
 # With w = p + 1, a structured backend that leaves a border of b columns costs
@@ -82,8 +86,8 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # every PIRLS iterate and W-derivative operator (sections 3.4 and 3.6), dense
 # passes over the n rows that the other backends skip, priced as
 # _AUTO_NESTED_ROW_PASSES passes of n b^2: its ratio is (b / w)^2 (1 + passes n / w).
-# auto takes the cheapest candidate within its own bound: 0.75 for a chain, and
-# the August 2026 0.05 for the single level (see below the anchors).
+# auto prices every RandomEffect leaf as its chain, a lone level as a chain of
+# one, within 0.75.
 # Memory, w b against w^2, is at most the square root of that ratio, so it never
 # reverses the order; the dense fits below that hit the cap had peaked at 3.4 to
 # 24.0 GiB.
@@ -91,7 +95,9 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # Anchors: complete fit_reml fits, one per process, every thread pool pinned to
 # one, 1-minute load under 2.5; wall seconds, ">300" is the cap.  Rows marked *
 # re-measured single against nested on the one-pass row pass (2026-09-27, load
-# 1.9 to 3.4, ABBA means of four fits a side; pg17 C exact one pair):
+# 1.9 to 3.4, ABBA means of four fits a side; pg17 C exact one pair).  "single"
+# is the single-level Schur factor (ScalarSchurFactor), retired in one-engine
+# stage 4; its columns are the calibration evidence, not a route:
 #
 #   shape                          n        p       chain            gram  single  nested
 #   pg17 C exact, 5k-row sample *  3,885    562     51/407           13.7     8.2     4.0
@@ -101,17 +107,18 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 #   dvsa C discrete, 200k rows *   157,593  4,008   223/3,749        >300     3.0     3.0
 #   dvsa D discrete, 20k rows      15,794   3,862   91/1,332/2,404   >300    42.4     1.6
 #   dvsa D discrete, 200k rows     157,593  10,046  223/3,749/6,038  >300    >300     6.1
-#   pg17 E discrete (crossed leaf) 77,014   16,850  15,717           >300   135.7        -
+#   pg17 E discrete (crossed leaf) 77,014   16,850  15,717           >300   125.3   100.0
 #   pg17 B exact                   77,014   191     87               16.9    13.8        -
 #
-# The chain's extra passes decide between the structured backends.  Each anchor
-# fixes the passes at which the two ratios tie; the order measured puts the
-# price in the bracket (0.035, 0.175): below it pg17 C, where 87 parent nodes
-# sit beside 77k rows, would take the slower chain (1.4x exact, 1.8x discrete),
-# above it the pg17 5k sample (2.0x) and then DVSA C exact (1.5x, from 1.06
-# passes) would keep their parents in the border, and DVSA D only above 400.
-# 0.08 sits at the bracket's geometric middle.  The two-read pass it replaced,
-# with its formed border Gram, was priced at 2 inside (1.23, 401).
+# The chain's extra passes were priced when a single level still ran the scalar
+# factor, between it and the chain.  Each anchor fixed the passes at which
+# the two ratios tie; the order measured put the price in the bracket (0.035,
+# 0.175): below it pg17 C, where 87 parent nodes sit beside 77k rows, took the
+# slower chain (1.4x exact, 1.8x discrete), above it the pg17 5k sample (2.0x)
+# and then DVSA C exact (1.5x, from 1.06 passes) kept their parents in the
+# border, and DVSA D only above 400.  0.08 sits at the bracket's geometric
+# middle.  The two-read pass it replaced, with its formed border Gram, was
+# priced at 2 inside (1.23, 401).
 #
 # The August 2026 bound of 0.05 (issue #343) was set on a ~67k-row Tweedie(1.5)
 # log-link pricing workload that is not in the repository, where the structured
@@ -124,40 +131,42 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # The largest ratio measured ahead is 0.596; at 0.77 (n=200, K=4 beside q=28) the
 # two tie, so 0.75 keeps near-degenerate shapes dense.
 #
-# Those single-level timings are not yet a licence for the wider bound.
-# ScalarSchurFactor still forms Q by subtraction and truncates on the unscaled Q
-# (spec sections 3.7 and 8), and auto does not retry a refused factor on gram.
-# At ratios in (0.05, 0.75] it refused at the REML bootstrap (random-effect lambda
-# 1e-4) on a raw year or vehicle-value column (|mean| / sd above about 3e3) and on
-# a column aliased under prior weights near 1e2: 22 of 64 randomized fit_reml
-# fits raised LinAlgError where gram fitted, and 7 more lost standard errors of
-# estimable coefficients (2026-09-28).  The single level keeps 0.05 until it
-# gains the chain's centred, PSD-sum Q and Jacobi-scaled rank rules.
+# A lone level is a chain of one on NestedSchurFactor: the scalar factor formed
+# Q by subtraction and truncated on the unscaled Q (spec sections 3.7 and 8),
+# and at ratios in (0.05, 0.75] it refused 22 of 64 randomized fit_reml fits on
+# raw year or vehicle-value columns and aliases under prior weights near 1e2
+# (2026-09-28), where the chain of one refused none of 202.  Priced as a chain,
+# the #343 shapes (K <= 105 beside 67k rows) stay on gram.
+#
+# No chain is declined for its family, link, working rows or the machine's
+# memory: the chain factors signed observed rows (one-engine design §3.3), and
+# a leaf whose override couples it to the border takes gram by that structure
+# alone, as a constrained or SCOP term does.
 _AUTO_MAX_NESTED_COST_RATIO = 0.75
 _AUTO_NESTED_ROW_PASSES = 0.08
-# The single level, FactorSmooth and sum-to-zero block geometries keep the
-# August 2026 constant bound on the factorization ratio (issue #343): synthetic
-# "fs" and "sz" sweeps then lost at mid ratio and won at tiny ratio, and section 5
-# leaves them as they are.
+# FactorSmooth and sum-to-zero blocks keep the August 2026 constant bound on the
+# factorization ratio (issue #343): synthetic "fs" and "sz" sweeps then lost at
+# mid ratio and won at tiny ratio, and section 5 leaves them as they are.  A
+# sum-to-zero block priced within it takes the balance tree (one-engine design
+# §3.5), which replaced SumToZeroBlockFactor: that range-space factor refused
+# every exactly rank-deficient design and returned inexact fits at tiny lambda
+# under large weights without refusing (2026-09-29).
 _AUTO_MAX_STRUCTURED_COST_RATIO = 0.05
 
 
-def _random_effect_auto_cost_ratios(
+def _random_effect_auto_cost_ratio(
     n_rows: int,
     coefficient_width: int,
     level_sizes: Sequence[int],
-) -> dict[str, float]:
-    """Predicted structured/dense cost ratio of each backend for a RandomEffect leaf.
+) -> float:
+    """Predicted structured/dense cost ratio of a RandomEffect leaf's chain.
 
-    ``level_sizes`` runs coarsest to finest, one entry without a chain; the
-    model and its anchors are the comment above.
+    ``level_sizes`` runs coarsest to finest over the chain, one entry for a
+    chain of one; the model and its anchors are the comment above.
     """
     width = coefficient_width + 1
-    ratios = {"single": ((width - level_sizes[-1]) / width) ** 2}
-    if len(level_sizes) >= 2:
-        border = width - sum(level_sizes)
-        ratios["nested"] = (border / width) ** 2 * (1.0 + _AUTO_NESTED_ROW_PASSES * n_rows / width)
-    return ratios
+    border = width - sum(level_sizes)
+    return (border / width) ** 2 * (1.0 + _AUTO_NESTED_ROW_PASSES * n_rows / width)
 
 
 def _block_structured_auto_is_beneficial(
@@ -230,30 +239,20 @@ def _structured_auto_cost_decision(
 ) -> StructuredBackendDecision:
     """Return the measured automatic crossover decision for one selected block.
 
-    A RandomEffect leaf compares the cheaper of the single-level and, on a
-    chain, the nested backend with gram; a chain declined for the single level
-    says why in ``nested_fallback_reason``.
+    A RandomEffect leaf compares its chain, a chain of one included, with
+    gram.
     """
     small_size = coefficient_width - dominant_matrix.shape[1]
     bound = _AUTO_MAX_STRUCTURED_COST_RATIO
     if isinstance(dominant_matrix, RandomEffectGroupMatrix):
         sizes = [groups[index].size for index in chain]
-        ratios = _random_effect_auto_cost_ratios(dominant_matrix.shape[0], coefficient_width, sizes)
-        bounds = {"single": _AUTO_MAX_STRUCTURED_COST_RATIO, "nested": _AUTO_MAX_NESTED_COST_RATIO}
-        admissible = [name for name, ratio in ratios.items() if ratio <= bounds[name]]
-        backend = min(admissible or ratios, key=ratios.__getitem__)
-        cost_ratio, bound = ratios[backend], bounds[backend]
+        cost_ratio = _random_effect_auto_cost_ratio(
+            dominant_matrix.shape[0], coefficient_width, sizes
+        )
+        bound = _AUTO_MAX_NESTED_COST_RATIO
         use_structured = coefficient_width >= _AUTO_MIN_COEFFICIENT_WIDTH and cost_ratio <= bound
-        predicted = ", ".join(f"{name}={ratio:.3g}" for name, ratio in ratios.items())
-        if backend == "single" and len(chain) >= 2:
-            names = [groups[index].name for index in chain]
-            nested_fallback_reason = (
-                f"nested chain {names!r} declined: auto predicts the single-level "
-                f"backend cheaper (cost ratios {predicted})"
-            )
-            chain = chain[-1:]
         geometry_name = "RandomEffect"
-        dimensions = f"n={dominant_matrix.shape[0]}, levels={sizes}, cost ratios {predicted}"
+        dimensions = f"n={dominant_matrix.shape[0]}, levels={sizes}"
     elif isinstance(dominant_matrix, FactorSmoothGroupMatrix):
         if dominant_matrix.factor_basis == "sz":
             use_structured, cost_ratio = _sum_to_zero_structured_auto_is_beneficial(
@@ -396,15 +395,14 @@ def select_structured_group(
 
     dominant_group = groups[dominant_index]
     dominant_matrix = group_matrices[dominant_index]
-    if dominant_group.size != dominant_matrix.shape[1]:
+    if dominant_group.size != dominant_matrix.shape[1]:  # pragma: no cover - design invariant
         term_kind = (
             "FactorSmooth"
             if isinstance(dominant_matrix, FactorSmoothGroupMatrix)
             else "RandomEffect"
         )
-        return _selection_failure(
-            f"{term_kind} group {dominant_group.name!r} has inconsistent coefficient geometry",
-            mode,
+        raise RuntimeError(
+            f"{term_kind} group {dominant_group.name!r} has inconsistent coefficient geometry."
         )
     return StructuredGroupSelection(
         group_index=dominant_index,
@@ -444,7 +442,7 @@ def _group_spans(groups: list[GroupSlice]) -> tuple[tuple[str, int, int], ...]:
 # The nesting cache holds the pair tests (``nested_parent``), the chains
 # (``nested_chain``) and the chains' trees with their leaf row orders
 # (``nested_tree``); every key carries its group indices and the group spans.
-# It is one dictionary, stored in a design's ``_scalar_structured_layout_cache``
+# It is one dictionary, stored in a design's ``_structured_layout_cache``
 # and shared by reference with every lambda rebuild of that design
 # (``carry_nesting_cache``), so the pair tests' O(n) row passes and the leaf
 # argsort run once per design lineage, not once per REML outer iteration or
@@ -486,6 +484,29 @@ def cached_nested_parent_codes(
     return cache[key]
 
 
+def _declared_ancestors(
+    random_effects: dict[int, RandomEffectGroupMatrix],
+    groups: list[GroupSlice],
+    leaf_index: int,
+) -> frozenset[int]:
+    """The RandomEffect terms the leaf is declared nested in, transitively (§3.13).
+
+    Follows ``RandomEffect(nested_in=)`` from the leaf through each declared
+    parent's own declaration, by feature name; a name that is not a
+    RandomEffect term of this design ends the walk.
+    """
+    by_name = {groups[index].feature_name: index for index in random_effects}
+    ancestors: list[int] = []
+    parent = random_effects[leaf_index].declared_parent
+    while parent is not None and parent in by_name and by_name[parent] not in ancestors:
+        index = by_name[parent]
+        if index == leaf_index:
+            break
+        ancestors.append(index)
+        parent = random_effects[index].declared_parent
+    return frozenset(ancestors)
+
+
 def find_nested_chain(
     group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
     groups: list[GroupSlice],
@@ -500,10 +521,14 @@ def find_nested_chain(
     each remaining RandomEffect term takes one row test against the leaf (the
     count test of §3.7).  Nesting is a partial order on the passing terms and
     every totally ordered subset of them is a valid chain; the rule takes the
-    one with the most levels, a heaviest path found by dynamic programming
-    from the coarsest term.  A crossed term, or a coarsening of the leaf
-    crossed with its hierarchy, stays in the border unless its chain carries
-    more levels.  Ties go to the chain met first, finest term first.
+    one that holds the most of the leaf's declared ancestors
+    (``RandomEffect(nested_in=)``, one-engine design §3.13: a declared
+    hierarchy is always used) and then the most levels, a heaviest path found
+    by dynamic programming from the coarsest term.  A crossed term, or a
+    coarsening of the leaf crossed with its hierarchy, stays in the border
+    unless its chain carries more levels.  Ties go to the chain met first,
+    finest term first.  Without declarations the rule reads the level-code
+    pattern alone, as a sparse Cholesky's symbolic analysis does.
 
     Terms are ordered finest first by observed levels, then levels, then
     index, which puts every coarsening after its refinements and orders
@@ -521,6 +546,7 @@ def find_nested_chain(
         if isinstance(matrix, RandomEffectGroupMatrix)
     }
     leaf = random_effects[leaf_index]
+    declared = _declared_ancestors(random_effects, groups, leaf_index)
     candidate_maps = {
         index: cached_nested_parent_codes(random_effects, groups, leaf_index, index, cache)
         for index, matrix in random_effects.items()
@@ -546,67 +572,24 @@ def find_nested_chain(
         (("nested_parent", child, parent, spans), codes)
         for (child, parent), codes in parents.items()
     )
-    # best[t]: (levels, chain coarsest to finest) of the heaviest chain ending at t
-    best: dict[int, tuple[int, tuple[int, ...]]] = {}
+    # best[t]: (declared ancestors, levels, chain coarsest to finest) of the
+    # heaviest chain ending at t
+    best: dict[int, tuple[int, int, tuple[int, ...]]] = {}
     for child in reversed(order):
-        levels, above = max(
+        n_declared, levels, above = max(
             (best[parent] for parent in order if parents.get((child, parent)) is not None),
-            key=lambda entry: entry[0],
-            default=(0, ()),
+            key=lambda entry: entry[:2],
+            default=(0, 0, ()),
         )
-        best[child] = (levels + random_effects[child].n_levels, (*above, child))
-    _, chain = max((best[index] for index in order), key=lambda entry: entry[0], default=(0, ()))
+        best[child] = (
+            n_declared + (child in declared),
+            levels + random_effects[child].n_levels,
+            (*above, child),
+        )
+    _, _, chain = max(
+        (best[index] for index in order), key=lambda entry: entry[:2], default=(0, 0, ())
+    )
     return (*chain, leaf_index)
-
-
-# §3.7: observed rows w0 (u²/V + (y - μ)(u² V'/V² - v/V)), u = dμ/dη and
-# v = d²μ/dη² (Wood, Pya and Säfken 2016, eq. 12), signed over the validated
-# response support.  Fisher rows w0 u²/V are never negative, and the canonical
-# pairs (Poisson/log, Binomial/logit, Gamma/inverse, Gaussian/identity) are
-# classified Fisher before this table.  Per observed pair:
-#   Binomial/probit, cloglog: the inverse link F and 1 - F are log-concave, so
-#     each row is convex in η (Pratt 1981).
-#   Gamma/log: w0 y/μ.  Poisson/identity: w0 y/μ², zero rows negative by rounding.
-#   NegativeBinomial/log: w0 θμ(θ + y)/(θ + μ)², θ > 0.
-#   Tweedie/log: w0 μ^(1-p) ((2 - p) μ + (p - 1) y), for every p in the class's (1, 2).
-#   Tweedie/sqrt: 2 w0 μ^(-p) ((3 - 2p) μ + (2p - 1) y), negative at y = 0 once
-#     p > 3/2, so it is admitted only up to that power.
-# Exact types: a subclass can change V or the inverse link.
-_NONNEGATIVE_OBSERVED_WEIGHT_PAIRS = frozenset(
-    {
-        (Binomial, ProbitLink),
-        (Binomial, CloglogLink),
-        (Gamma, LogLink),
-        (Poisson, IdentityLink),
-        (NegativeBinomial, LogLink),
-        (Tweedie, LogLink),
-    }
-)
-_TWEEDIE_SQRT_MAX_POWER = 1.5
-
-
-def nested_chain_weights_admissible(family, link) -> bool:
-    """Return whether a nested chain may see this family's working weights (§3.7).
-
-    Fisher curvature has non-negative weights.  Observed curvature is admitted
-    only for the audited pairs above, by exact type and within the derived
-    Tweedie/sqrt power range; an unaudited or custom pair declines the
-    chain (the single-level backend keeps the parents in the border), which is
-    safe and recorded.  ``None`` for either argument means Fisher weights.
-    """
-    if family is None or link is None:
-        return True
-    from superglm.reml.observed_geometry import classify_reml_curvature
-
-    try:
-        if classify_reml_curvature(family, link) != "observed":
-            return True
-    except NotImplementedError:
-        return False
-    pair = (type(family), type(link))
-    if pair == (Tweedie, SqrtLink):
-        return family.p <= _TWEEDIE_SQRT_MAX_POWER
-    return pair in _NONNEGATIVE_OBSERVED_WEIGHT_PAIRS
 
 
 def _zero_penalty_random_effects(
@@ -647,11 +630,16 @@ def _resolve_nested_chain(
     coefficient_width: int,
     lambda2: float | dict[str, float] | None,
     S_override: NDArray | None,
-    family,
-    link,
     cache: dict,
 ) -> tuple[tuple[int, ...], str | None]:
-    """Return the chain for a RandomEffect leaf and why a found chain was declined."""
+    """Return the chain for a RandomEffect leaf and why a found chain was declined.
+
+    A lone leaf is a chain of one.  The chain never depends on the family,
+    the link or the rows: signed working rows keep it (one-engine design
+    §3.3).  An override that is not diagonal on a longer chain declines it to
+    its leaf.  An override coupling the leaf itself to the border is the
+    dominant block's own ineligibility.
+    """
     excluded = _zero_penalty_random_effects(group_matrices, groups, lambda2, S_override)
     chain_key = ("nested_chain", leaf_index, tuple(sorted(excluded)), _group_spans(groups))
     if chain_key not in cache:
@@ -663,19 +651,8 @@ def _resolve_nested_chain(
             cache=cache,
         )
     chain = cache[chain_key]
-    if len(chain) < 2:
-        return chain, None
     names = [groups[index].name for index in chain]
-    if not nested_chain_weights_admissible(family, link):
-        why = (
-            f"observed rows are negative at y = 0 for p > {_TWEEDIE_SQRT_MAX_POWER}"
-            if (type(family), type(link)) == (Tweedie, SqrtLink)
-            else "observed working weights are not audited non-negative"
-        )
-        return (leaf_index,), (
-            f"nested chain {names!r} declined: {type(family).__name__}/{type(link).__name__} {why}"
-        )
-    if S_override is not None:
+    if S_override is not None and len(chain) >= 2:
         chain_indices = np.concatenate([np.arange(groups[g].start, groups[g].end) for g in chain])
         border = np.ones(coefficient_width, dtype=bool)
         border[chain_indices] = False
@@ -701,86 +678,15 @@ def _factor_smooth_component_lambda(
     return resolve_component_lambda(lambda2, group_name, suffix)
 
 
-def _factor_smooth_local_penalty(
-    matrix: FactorSmoothGroupMatrix,
-    group_name: str,
-    lambda2: float | dict[str, float],
-) -> tuple[NDArray, tuple[tuple[str, float], ...]]:
-    """Build the exact lambda-scaled local penalty and its cache identity."""
-    local_penalty = np.zeros((matrix.block_size, matrix.block_size), dtype=np.float64)
-    resolved_components: list[tuple[str, float]] = []
-    for suffix, omega in matrix.repeated_penalty_components:
-        lam = _factor_smooth_component_lambda(group_name, suffix, lambda2)
-        resolved_components.append((suffix, lam))
-        values = np.asarray(omega, dtype=np.float64)
-        local_penalty += lam * (0.5 * (values + values.T))
-    return local_penalty, tuple(resolved_components)
-
-
-def _factor_smooth_singular_local_level(
-    matrix: FactorSmoothGroupMatrix,
-    row_weights: NDArray,
-    local_penalty: NDArray,
-    penalty_identity: tuple[tuple[str, float], ...],
-) -> int | None:
-    """Return the first numerically singular weighted local block, if any."""
-    weights = np.asarray(row_weights, dtype=np.float64)
-    if weights.shape != (matrix.shape[0],):
-        raise ValueError("row_weights must match the structured design row count.")
-    contiguous_weights = np.ascontiguousarray(weights)
-    weight_digest = hashlib.blake2b(
-        contiguous_weights.data,
-        digest_size=16,
-    ).digest()
-    cache_key = (penalty_identity, weight_digest)
-    if getattr(matrix, "_structured_feasibility_key", None) == cache_key:
-        return getattr(matrix, "_structured_feasibility_level", None)
-
-    information, _xtw, _rhs = matrix.factor_smooth_sufficient_stats(
-        weights,
-        np.zeros_like(weights),
-    )
-    local_blocks = np.asarray(information, dtype=np.float64) + local_penalty[None, :, :]
-    singular_level = _first_singular_factor_smooth_block(local_blocks)
-    matrix._structured_feasibility_level = singular_level
-    matrix._structured_feasibility_key = cache_key
-    return singular_level
-
-
-def _first_singular_factor_smooth_block(
-    local_blocks: NDArray,
-    *,
-    scale_floor: float = 1.0,
-) -> int | None:
+def _first_singular_factor_smooth_block(local_blocks: NDArray) -> int | None:
     """Return the first local block that is not numerically positive definite."""
     symmetric = 0.5 * (local_blocks + local_blocks.transpose(0, 2, 1))
     eigenvalues = np.linalg.eigvalsh(symmetric)
     block_size = local_blocks.shape[1]
-    scales = np.maximum(np.max(np.abs(eigenvalues), axis=1), scale_floor)
+    scales = np.max(np.abs(eigenvalues), axis=1)
     thresholds = np.finfo(np.float64).eps * max(block_size, 1) * scales * 10.0
     singular = eigenvalues[:, 0] <= thresholds
     return int(np.flatnonzero(singular)[0]) if np.any(singular) else None
-
-
-def _factor_smooth_override_singular_local_level(
-    matrix: FactorSmoothGroupMatrix,
-    row_weights: NDArray,
-    local_penalties: NDArray,
-) -> int | None:
-    """Check override-defined local blocks against positive-weight row support."""
-    weights = np.asarray(row_weights, dtype=np.float64)
-    if weights.shape != (matrix.shape[0],):
-        raise ValueError("row_weights must match the structured design row count.")
-    expected_shape = (matrix.n_levels, matrix.block_size, matrix.block_size)
-    if local_penalties.shape != expected_shape:
-        raise ValueError(f"FactorSmooth override local penalties must have shape {expected_shape}.")
-    information, _xtw, _rhs = matrix.factor_smooth_sufficient_stats(
-        weights,
-        np.zeros_like(weights),
-    )
-    return _first_singular_factor_smooth_block(
-        np.asarray(information, dtype=np.float64) + local_penalties
-    )
 
 
 def _backend_ineligibility(
@@ -818,22 +724,25 @@ def resolve_structured_backend(
     *,
     direct_solve: str,
     coefficient_width: int,
-    row_weights: NDArray | None = None,
     lambda2: float | dict[str, float] | None = None,
     S_override: NDArray | None = None,
-    family=None,
-    link=None,
     nesting_cache: dict | None = None,
 ) -> StructuredBackendDecision:
     """Resolve forced/automatic structured use once for a direct fit.
 
     A RandomEffect leaf grows a nested chain (Rule B, §5) over the other
-    RandomEffect terms with a non-zero penalty.  The chain is declined to the
-    single-level backend, with ``nested_fallback_reason``, when the family's
-    working weights are not audited non-negative or an authoritative
-    ``S_override`` is not diagonal on the chain (§3.7), or under ``auto`` when
-    the cost model predicts the single level cheaper; the leaf's own checks
-    are unchanged.  ``nesting_cache`` is the design's layout cache.
+    RandomEffect terms with a non-zero penalty; a lone leaf is a chain of one.
+    The decision reads the model's terms, their sizes and penalties, never
+    values, weights, the family, the link or the sign of the working rows:
+    the chain factors signed rows (one-engine design §3.3, §6).  The chain is
+    declined to its leaf, with ``nested_fallback_reason``, when an
+    authoritative ``S_override`` is not diagonal on it (§3.7).  Under
+    ``auto`` a term the structured solvers do not take by structure -- an
+    override coupling the leaf to the border, a zero penalty on the leaf, a
+    zero FactorSmooth component -- is fitted on gram, with the reason in
+    ``fallback_reason``; ``direct_solve="structured"`` raises instead.  A
+    ``basis="sz"`` FactorSmooth takes the balance tree on the size rule alone.
+    ``nesting_cache`` is the design's layout cache.
     """
     if direct_solve not in ("auto", "structured"):
         return StructuredBackendDecision(
@@ -866,8 +775,6 @@ def resolve_structured_backend(
             coefficient_width=coefficient_width,
             lambda2=lambda2,
             S_override=S_override,
-            family=family,
-            link=link,
             cache=shared_nesting_cache(nesting_cache),
         )
     auto_cost_decision = (
@@ -946,33 +853,15 @@ def resolve_structured_backend(
     if isinstance(dominant_matrix, RandomEffectGroupMatrix) and (
         lambda2 is not None or S_override is not None
     ):
-        override_diagonal: NDArray | None = None
         if override_penalty is not None:
-            override_diagonal = np.diag(override_penalty[dominant_group.sl, dominant_group.sl])
-            has_dominant_penalty = bool(np.any(override_diagonal > 0.0))
+            has_dominant_penalty = bool(
+                np.any(np.diag(override_penalty[dominant_group.sl, dominant_group.sl]) > 0.0)
+            )
         elif isinstance(lambda2, dict):
             has_dominant_penalty = float(lambda2.get(group_name, 0.0)) != 0.0
         else:
             has_dominant_penalty = lambda2 is not None and float(lambda2) != 0.0
         if not has_dominant_penalty:
-            if row_weights is not None:
-                weights = np.asarray(row_weights, dtype=np.float64)
-                if weights.shape != (dominant_matrix.shape[0],):
-                    raise ValueError("row_weights must match the structured design row count.")
-                level_weight = np.bincount(
-                    dominant_matrix.codes,
-                    weights=weights,
-                    minlength=dominant_matrix.n_levels,
-                )
-                if np.any(level_weight <= 0.0):
-                    return _backend_ineligibility(
-                        (
-                            f"RandomEffect group {group_name!r} has a level with "
-                            "zero total weight and zero penalty"
-                        ),
-                        mode,
-                        selection,
-                    )
             return _backend_ineligibility(
                 (
                     f"RandomEffect group {group_name!r} has zero penalty and is "
@@ -981,32 +870,13 @@ def resolve_structured_backend(
                 mode,
                 selection,
             )
-        if row_weights is not None and override_diagonal is not None:
-            weights = np.asarray(row_weights, dtype=np.float64)
-            if weights.shape != (dominant_matrix.shape[0],):
-                raise ValueError("row_weights must match the structured design row count.")
-            level_weight = np.bincount(
-                dominant_matrix.codes,
-                weights=weights,
-                minlength=dominant_matrix.n_levels,
-            )
-            if np.any(level_weight + override_diagonal <= 0.0):
-                return _backend_ineligibility(
-                    (
-                        f"RandomEffect group {group_name!r} has non-positive local "
-                        "information under the authoritative S_override"
-                    ),
-                    mode,
-                    selection,
-                )
     if (
         isinstance(dominant_matrix, FactorSmoothGroupMatrix)
         and dominant_matrix.factor_basis != "sz"
     ):
         if override_local_penalties is not None:
             structurally_singular_level = _first_singular_factor_smooth_block(
-                override_local_penalties,
-                scale_floor=0.0,
+                override_local_penalties
             )
             if structurally_singular_level is not None:
                 level_label = dominant_matrix.levels[structurally_singular_level]
@@ -1020,33 +890,11 @@ def resolve_structured_backend(
                     mode,
                     selection,
                 )
-            numerically_singular_level = _first_singular_factor_smooth_block(
-                override_local_penalties
-            )
-            if row_weights is not None and numerically_singular_level is not None:
-                if auto_cost_decision is not None and not auto_cost_decision.use_structured:
-                    return auto_cost_decision
-                singular_level = _factor_smooth_override_singular_local_level(
-                    dominant_matrix,
-                    row_weights,
-                    override_local_penalties,
-                )
-                if singular_level is not None:
-                    level_label = dominant_matrix.levels[singular_level]
-                    return _backend_ineligibility(
-                        (
-                            f"FactorSmooth group {group_name!r} has a singular local block "
-                            f"for level {level_label!r} under the authoritative S_override"
-                        ),
-                        mode,
-                        selection,
-                    )
+            # No data-dependent check follows (one-engine design §3.4, §5): the fs
+            # leaf factor takes each level's pivot block from the rows with the
+            # penalty's square root inside, so a nearly singular block is resolved
+            # (and its pivot certified) rather than routed away on its weights.
         elif lambda2 is not None:
-            local_penalty, penalty_identity = _factor_smooth_local_penalty(
-                dominant_matrix,
-                group_name,
-                lambda2,
-            )
             zero_component = _factor_smooth_zero_penalty_component(
                 dominant_matrix,
                 group_name,
@@ -1062,29 +910,6 @@ def resolve_structured_backend(
                     mode,
                     selection,
                 )
-            numerically_singular_penalty = (
-                _first_singular_factor_smooth_block(local_penalty[None, :, :]) is not None
-            )
-            if row_weights is not None and numerically_singular_penalty:
-                if auto_cost_decision is not None and not auto_cost_decision.use_structured:
-                    return auto_cost_decision
-                singular_level = _factor_smooth_singular_local_level(
-                    dominant_matrix,
-                    row_weights,
-                    local_penalty,
-                    penalty_identity,
-                )
-                if singular_level is not None:
-                    level_label = dominant_matrix.levels[singular_level]
-                    return _backend_ineligibility(
-                        (
-                            f"FactorSmooth group {group_name!r} has a singular local block "
-                            f"for level {level_label!r} under the requested weights "
-                            "and penalties"
-                        ),
-                        mode,
-                        selection,
-                    )
     if mode == "structured":
         return StructuredBackendDecision(
             use_structured=True,
@@ -1096,4 +921,6 @@ def resolve_structured_backend(
         )
     if auto_cost_decision is None:  # pragma: no cover - mode invariant
         raise RuntimeError("automatic structured resolution omitted its cost decision")
+    # A basis="sz" FactorSmooth takes the balance tree (one-engine design §3.5)
+    # on the same size rule as fs: no route reads its weights, lambdas or data.
     return auto_cost_decision

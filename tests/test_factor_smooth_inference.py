@@ -454,3 +454,43 @@ def test_factor_smooth_upper_boundary_reports_collapse() -> None:
     assert report.collapsed
     assert all(report.at_upper_boundary.values())
     assert report.table["collapsed"].all()
+
+
+def test_factor_smooth_standard_errors_survive_a_near_singular_level() -> None:
+    """Forty levels of 10-23 rows with k=5: one level's data block is singular
+    to ~1e-13 (equilibrated), yet full rank under the shared rule.  Its formed
+    local inverse used to inflate the reduced Schur complement's a posteriori
+    bound past every eigenvalue, so auto reported NaN for every coefficient,
+    the numeric column ``z`` included; gram reports ``z`` and most of the smooth.
+    The refined local solves keep auto's NaN set inside what the shared rule
+    can resolve: every coefficient gram leaves NaN stays NaN, and ``z`` and all
+    but at most one level's coefficients are reported.
+    """
+    rng = np.random.default_rng(5102)
+    n, n_levels = 600, 40
+    codes = rng.integers(0, n_levels, n)
+    x = rng.uniform(size=n)
+    z = rng.normal(size=n)
+    y = 0.2 * z + 0.4 * np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n_levels)[codes]
+    y = y + rng.normal(0, 0.4, n)
+    X = pd.DataFrame({"x": x, "z": z, "g": np.array([f"g{c:02d}" for c in codes], dtype=object)})
+    se = {}
+    for direct_solve in ("gram", "auto"):
+        model = SuperGLM(
+            family="gaussian",
+            features={"z": Numeric()},
+            interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
+            selection_penalty=0.0,
+            direct_solve=direct_solve,
+        )
+        model.fit_reml(X, y)
+        se[direct_solve] = {
+            term: np.asarray(value, dtype=float)
+            for term, value in model.metrics(X, y).coefficient_se.items()
+        }
+    assert np.all(np.isfinite(se["gram"]["z"]))
+    assert np.all(np.isfinite(se["auto"]["z"]))
+    gram_nan = np.isnan(se["gram"]["x:g:fs"]).reshape(n_levels, 5)
+    auto_nan = np.isnan(se["auto"]["x:g:fs"]).reshape(n_levels, 5)
+    assert np.all(auto_nan[gram_nan])
+    assert np.count_nonzero((auto_nan & ~gram_nan).any(axis=1)) <= 1

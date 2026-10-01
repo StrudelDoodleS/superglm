@@ -1161,7 +1161,43 @@ def penalty_component_quadratic(
         repeat_count, block_width = _repeated_penalty_geometry(component)
         blocks = beta.reshape(repeat_count, block_width)
         return float(np.einsum("ki,ij,kj->", blocks, omega, blocks, optimize=True))
+    rank = int(round(float(component.rank)))
+    if omega is not None and 0 < rank < omega.shape[0]:
+        values, vectors = _penalty_range_basis(component, omega, rank)
+        projection = vectors.T @ beta
+        return float(np.sum(values * projection * projection))
     return float(beta @ omega @ beta)
+
+
+def _penalty_range_basis(
+    component: PenaltyComponent, omega: NDArray, rank: int
+) -> tuple[NDArray, NDArray]:
+    """The ``rank`` largest eigenpairs of a dense rank-deficient penalty, its range.
+
+    ``beta' Omega beta`` is evaluated over the penalty's range, the rank fixed
+    by the component (``log |S|_+`` sums the same positive eigenvalues): the
+    rank is pre-computed once, so the penalty and its pseudo-determinant
+    agree at every lambda (Wood, Pya & Safken 2016, arXiv 1511.03864, section
+    3.1.1).  The dense product instead charged ``lambda`` times the rounding
+    of the null space's eigenvalue (``1.6e-15`` in a reparametrised main
+    spline) times the squared null-space coefficient: about one unit of the
+    REML objective at lambda 1e10 beside a 222 coefficient (an ``sz`` term
+    beside weightless levels), so the objective became noise wherever REML
+    drove the smoothing parameter up, and REML wandered to its bound.  Owner:
+    the component, for its stored solver-space penalty (``omega_ssp``) once
+    frozen read-only (``_frozen_array``), keyed on that array and the rank;
+    lifetime: the component's; invalidation: another ``omega_ssp`` or rank.
+    A penalty formed from a group matrix's current reparametrisation, or
+    still writeable, is decomposed on each call.
+    """
+    cached = getattr(component, "_range_basis", None)
+    if cached is not None and cached[0] is omega and cached[2].shape[1] == rank:
+        return cached[1], cached[2]
+    values, vectors = np.linalg.eigh(0.5 * (omega + omega.T))
+    values, vectors = np.ascontiguousarray(values[-rank:]), np.ascontiguousarray(vectors[:, -rank:])
+    if omega is component.omega_ssp and not omega.flags.writeable:
+        component._range_basis = (omega, values, vectors)  # ty: ignore[unresolved-attribute] -- per-component cache, as _penalty_geometry
+    return values, vectors
 
 
 def penalty_component_matvec(

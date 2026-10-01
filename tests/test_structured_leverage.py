@@ -1,6 +1,8 @@
 """Leverage of structured random-effect fits from the factor's pieces.
 
-``h_i = w_i x_i' H^+ x_i`` splits into a random-effect part, a tree solve over
+Leverage is the influence diagonal with the intercept, ``h_i = w_i a_i' H_aug^+
+a_i`` with ``a_i = [1, x_i]`` (one-engine design §3.10, definition (A)).
+``a' H^+ a`` splits into a random-effect part, a tree solve over
 the row's reach, and a border part ``y' Q^+ y`` with ``y = a - F' b`` (Bates et
 al. 2015, eqs. 63-65), so no ``K x K`` inverse block is formed.  The references
 are dense Cholesky solves of ``X'WX + S`` assembled from the design, never from
@@ -102,9 +104,8 @@ def _cholesky_forms(H, rows):
     return forms, 2.0 * gamma * p / growth / smallest * np.abs(forms)
 
 
-def _augmented(model, H, W):
-    """``[1, X]' W [1, X] + diag(0, S)``."""
-    X = model._dm.toarray()
+def _augmented(X, H, W):
+    """``[1, X]' W [1, X] + diag(0, S)`` from the rows ``X`` and ``H = X'WX + S``."""
     augmented = np.empty((H.shape[0] + 1, H.shape[0] + 1))
     augmented[0, 0] = np.sum(W)
     augmented[0, 1:] = augmented[1:, 0] = X.T @ W
@@ -114,10 +115,11 @@ def _augmented(model, H, W):
 
 @pytest.mark.parametrize("kind", ["single", "nested"])
 def test_row_forms_match_a_dense_cholesky_solve(kind):
-    """The coefficient factor, the intercept-augmented factor (whose nested form
-    applies ``R'`` to a centred border) and the covariance view on the fit rows,
-    rows whose levels leave any root-to-leaf path, and a zero row, against dense
-    Cholesky solves of the assembled system."""
+    """The intercept-augmented factor's row forms (its nested form applies ``R'``
+    to a centred border) on the fit rows ``[1, x]``, rows whose levels leave any
+    root-to-leaf path, and a zero row, against dense Cholesky solves of the
+    assembled augmented system.  No raw-coordinate coefficient factor exists
+    (design §3.6); leverage reads these forms."""
     model, X, y, weights, offset = _fit(kind)
     state = model._linear_system_state
     W = model.metrics(X, y, sample_weight=weights, offset=offset)._active_info[1]
@@ -125,19 +127,14 @@ def test_row_forms_match_a_dense_cholesky_solve(kind):
     rng = np.random.default_rng(5)
     scattered = rng.normal(size=(40, X.shape[1])) * (rng.uniform(size=(40, X.shape[1])) < 0.05)
     rows = np.vstack((X, scattered, np.zeros((1, X.shape[1]))))
-    ones = np.hstack((np.ones((len(rows), 1)), rows))
-    slopes = model._fit_inference_info["XtWX_inv"].scaled(2.0)
-    cases = [
-        (state.coefficient_factor.row_quadratic_forms(rows), H, rows),
-        (state.augmented_factor.row_quadratic_forms(ones), _augmented(model, H, W), ones),
-        (0.5 * slopes.row_quadratic_forms(rows), H, rows),
-    ]
+    ones = np.vstack((np.hstack((np.ones((len(rows), 1)), rows)), np.zeros((1, X.shape[1] + 1))))
+    assert not hasattr(state, "coefficient_factor")
     if kind == "nested":
         assert np.any(state.augmented_factor._center != 0.0)
-    for actual, matrix, reference_rows in cases:
-        expected, bound = _cholesky_forms(matrix, reference_rows)
-        np.testing.assert_array_less(np.abs(actual - expected), bound + np.finfo(float).tiny)
-    assert cases[0][0][-1] == 0.0
+    actual = state.augmented_factor.row_quadratic_forms(ones)
+    expected, bound = _cholesky_forms(_augmented(X, H, W), ones)
+    np.testing.assert_array_less(np.abs(actual - expected), bound + np.finfo(float).tiny)
+    assert actual[-1] == 0.0
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
@@ -145,12 +142,13 @@ def test_row_forms_match_a_dense_cholesky_solve(kind):
 def test_leverage_is_the_hat_diagonal_on_live_copied_and_pickled_models(kind, discrete):
     """More tree nodes than the inverse-block cap: leverage returns, zero-weight rows
     have zero leverage, and the live, equal-copy and pickled routes all give the
-    dense hat diagonal of the fit design."""
+    dense influence diagonal ``w_i a_i' H_aug^-1 a_i`` of the fit design."""
     model, X, y, weights, offset = _fit(kind, discrete=discrete)
     live = model.metrics(X, y, sample_weight=weights, offset=offset)
     W = live._active_info[1]
     design, H = _dense_hessian(model, W)
-    expected, bound = _cholesky_forms(H, design)
+    ones = np.hstack((np.ones((len(design), 1)), design))
+    expected, bound = _cholesky_forms(_augmented(design, H, W), ones)
     clone = pickle.loads(pickle.dumps(model))
     routes = {
         "live": live,
@@ -174,7 +172,7 @@ def test_a_released_model_evaluates_the_fit_rows(kind):
     ``B R'``, which the fit canonicalized as ``R' = R - 1 m'`` with its training
     column means ``m``.  With zero prior weights ``m`` is not the fit's centring,
     so leverage must read the fit's rows ``B (R' + 1 m')`` against the retained
-    ``X'WX + S``.  Both come from one fit: exactly they differ by ``(sum_l B_l -
+    augmented ``[1, X]'W[1, X] + diag(0, S)``.  Both come from one fit: exactly they differ by ``(sum_l B_l -
     1) m``, and in floating point by the roundings of two ``k``-term products of
     a nonnegative ``B``, a sum and an addition, within ``3 gamma_{k+1} B (|R'| +
     |m|)`` (the inner-product bound ``gamma_k |x|' |y|``, Higham 2002, ch. 3) and
@@ -200,7 +198,8 @@ def test_a_released_model_evaluates_the_fit_rows(kind):
     np.testing.assert_array_less(np.abs(rows[:, spline] - basis @ (public + means)), bound)
     operator = model._linear_system_state.penalized_operator
     H = operator.matvec(np.eye(operator.shape[0]))
-    expected, bound = _cholesky_forms(0.5 * (H + H.T), rows)
+    augmented = _augmented(rows, 0.5 * (H + H.T), W)
+    expected, bound = _cholesky_forms(augmented, np.hstack((np.ones((len(rows), 1)), rows)))
     np.testing.assert_array_less(
         np.abs(metrics.leverage - np.clip(W * expected, 0.0, 1.0)),
         W * bound + np.finfo(float).tiny,
@@ -212,7 +211,7 @@ def test_leverage_at_scale_forms_no_coefficient_block(monkeypatch):
     inverse block or a dense covariance, and its traced peak stays below one
     ``K x K`` float64 block; the small fixtures above check the values."""
     model, X, y, weights, offset = _fit("3440", n=60_000)
-    factor = model._linear_system_state.coefficient_factor
+    factor = model._linear_system_state.augmented_factor
     metrics = model.metrics(X, y, sample_weight=weights, offset=offset)
     covariance = metrics._active_info[2]
 

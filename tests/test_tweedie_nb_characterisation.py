@@ -98,7 +98,15 @@ def test_reml_phi_matches_master(row):
         model.fit_reml(X, y)
     # The master saturated likelihood used the series (or i1e at p=1.5) to <=1e-13;
     # phi moves by that over the profile curvature, well under 1e-9 relative.
-    assert model.result.phi == pytest.approx(row["phi"], rel=1e-9)
+    # Each fit also stops within reml_tol (1 + |V|) of its criterion's stationary
+    # point, and phi's curvature there is (n - edf) / 2 in log phi, so the two
+    # fits' log phi can differ by twice that over the curvature: master
+    # over-solved its PIRLS, this fit certifies its mode at the bar the REML
+    # tolerance needs (one-engine design §3.8).
+    tolerance = model._reml_profile["reml_tol_resolved"]
+    objective = abs(model._reml_result.objective)
+    resolved = 4.0 * tolerance * (1.0 + objective) / (len(y) - model.result.effective_df)
+    assert model.result.phi == pytest.approx(row["phi"], rel=1e-9 + resolved)
 
 
 def _brent_reach(p: float) -> float:
@@ -146,10 +154,15 @@ def _candidate_determination(model, result, X, y, fit_mode: str) -> float:
 
     ML candidates start from the previous candidate and stop once their
     objective changes by under tol relative, so the deviance term D / (2 phi n)
-    carries that much; REML candidates start cold and repeat master's exactly.
+    carries that much.  REML candidates stop at the search's own tolerance
+    (``reml_tol = 1e-6``), and every PIRLS inside them certifies its mode at
+    the bar that tolerance needs (one-engine design §3.8), not at master's
+    fixed 1e-10: a candidate's value is known to the error the search itself
+    records for it (``_Candidate.error``), at ``p_hat`` and at master's.
     """
     if fit_mode != "fit":
-        return 0.0
+        errors = [candidate.error for candidate in result._candidates.values()]
+        return max(error for error in errors if math.isfinite(error))
     mu = np.asarray(model.predict(X), dtype=np.float64)
     deviance = float(np.sum(tweedie_unit_deviance(np.asarray(y, float), mu, result.p_hat)))
     return model._tol * deviance / (2.0 * result.phi_hat * len(y))
@@ -504,14 +517,24 @@ def _assert_crossings_from_the_optimum(result, alpha, n):
 @pytest.mark.parametrize(
     "row", FIXTURE["estimate_theta_refused"], ids=lambda r: f"{r['case']}-{r['fit_mode']}"
 )
-def test_estimate_theta_refusals_match_master(row, characterisation_case):
-    from superglm import PublicationModeError
+def test_estimate_theta_master_refusals_now_publish(row, characterisation_case):
+    """Master refused this publication refit at theta = 1e8 on a 1e-9 mode bar.
 
+    Its relative mode score was 1.9e-9 (the fixture's recorded message): the
+    knife edge the owner retired on 2026-09-30.  The certificate's bar is now
+    what the REML tolerance needs and a mode short of it is published as not
+    converged, never refused; here the refit certifies, and the search's own
+    boundary disclosure stands: theta at its upper bound, ``converged=False``
+    and an ``NBThetaBoundWarning``.
+    """
     model, X, y = characterisation_case(row["case"])
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", NBThetaBoundWarning)
-        with pytest.raises(PublicationModeError, match="theta=1e\\+08"):
-            model.estimate_theta(X, y, fit_mode=row["fit_mode"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = model.estimate_theta(X, y, fit_mode=row["fit_mode"])
+    assert result.theta_hat == 1e8
+    assert result.converged is False
+    assert any(issubclass(w.category, NBThetaBoundWarning) for w in caught)
+    assert model._reml_profile["reml_terminal_mode_certified"] is True
 
 
 def _nb_log_density_50_digits(mpmath, y: float, mu: float, theta: float) -> float:

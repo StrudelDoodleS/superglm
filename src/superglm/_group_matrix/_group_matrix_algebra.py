@@ -33,7 +33,6 @@ if TYPE_CHECKING:
         DiscretizedTensorGroupMatrix,
         FactorSmoothGroupMatrix,
         GroupMatrix,
-        RandomEffectGroupMatrix,
         SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     )
@@ -518,29 +517,6 @@ def _aggregate_group_matrix_columns(
         )
         unit[column] = 0.0
     return result
-
-
-def _random_effect_cross_gram(
-    random_effect: RandomEffectGroupMatrix,
-    other: GroupMatrix,
-    W: NDArray,
-    cache: _BlockWeightCache | None = None,
-) -> NDArray:
-    """Return ``X_re.T @ diag(W) @ X_other`` by direct level aggregation."""
-    # Guarded like every other _agg_by_bin caller.  The output is
-    # (n_levels, width-of-other) -- cross-shaped, and a high-cardinality random
-    # effect beside a wide raw-basis SSP term is the case that reaches it.  An
-    # earlier audit only inspected functions named _cross_gram, so this call sat
-    # outside its scope entirely.
-    if not _agg_by_bin_fits(other, random_effect.n_levels):
-        return _cross_gram_by_columns(random_effect, other, W)
-    return _agg_by_bin(
-        other,
-        random_effect.codes,
-        W,
-        random_effect.n_levels,
-        cache,
-    )
 
 
 def _cross_gram_tensor_tensor(
