@@ -94,12 +94,9 @@ from superglm.solvers.irls_state import (
     _select_irls_trial,
     _stable_penalized_deviance_delta,
     _state_is_finite,
-    _state_merit,
     interior_start_intercept,
     mean_space_boundary_rows,
-    mean_space_heading_rows,
     mean_space_violation,
-    merit_resolution,
 )
 from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
@@ -1031,8 +1028,8 @@ def _fit_irls_direct_once(
         )
     if mean_space_violation(family, link) is not None:
         # The domain guard below keeps every accepted state inside the mean
-        # space only from an interior start, and the default intercept is
-        # chosen before the offset: lower it until the start is interior
+        # space only from a start inside it, and the default intercept is
+        # chosen before the offset: lower it until the start is inside
         # (``irls_state.interior_start_intercept``).
         start_intercept = interior_start_intercept(
             family,
@@ -1845,11 +1842,6 @@ def _fit_irls_direct_once(
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
     _mean_space_invalid = mean_space_violation(family, link)
-    # Rows that ended the loop at, or still heading for, that boundary, and
-    # the last proposal's step in eta (``irls_state.mean_space_heading_rows``).
-    _mean_space_stop_rows = 0
-    _mean_space_heading_last = 0
-    _mean_space_previous_step: NDArray | None = None
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
     committed = evaluate_state(
         beta,
@@ -2847,44 +2839,6 @@ def _fit_irls_direct_once(
             convergence_value = None
         if step_rejected:
             converged_this_iter = False
-        if _mean_space_invalid is not None and not step_rejected and np.isfinite(dev):
-            # The maximum is on the mean-space boundary once a row's mean is
-            # indistinguishable from one, or once the event rows the iteration
-            # is carrying there (``mean_space_heading_rows``) have less
-            # deviance left to shed than the objective resolves, so that no
-            # line search can move them.  No later state is a mode: stop.  A
-            # convergence test that passes while a row is heading there passed
-            # on the shrinking steps of the approach, not at a mode.
-            _mean_space_stop_rows = mean_space_boundary_rows(
-                family, link, retained.eta_unclipped, weights
-            )
-            step = proposal_state.eta_unclipped - committed.eta_unclipped
-            heading = mean_space_heading_rows(
-                family,
-                link,
-                y,
-                committed.eta_unclipped,
-                step,
-                _mean_space_previous_step,
-                weights,
-            )
-            _mean_space_previous_step = step
-            _mean_space_heading_last = int(np.count_nonzero(heading))
-            if not _mean_space_stop_rows and np.any(heading):
-                stake = 2.0 * float(
-                    np.sum(weights[heading] * np.abs(retained.eta_unclipped[heading]))
-                )
-                merit = _state_merit(retained)
-                resolution = merit_resolution(merit, objective_merit_scale)
-                if n_halvings:
-                    # the line search could not take the proposal: below the
-                    # stop rule's own resolution the stake is not worth a step
-                    rule_tol = mode_bar if convergence == "mode_score" else tol
-                    resolution = max(resolution, rule_tol * max(objective_merit_scale, abs(merit)))
-                if converged_this_iter or stake <= resolution:
-                    _mean_space_stop_rows = int(np.count_nonzero(heading))
-            if _mean_space_stop_rows:
-                converged_this_iter = False
 
         constraints_feasible_this_iter = True
         if has_constraints:
@@ -2928,8 +2882,6 @@ def _fit_irls_direct_once(
             termination_reason = "step_rejected"
         elif not np.isfinite(dev):
             termination_reason = "nonfinite_deviance"
-        elif _mean_space_stop_rows:
-            termination_reason = "mean_space_boundary"
         elif converged_this_iter:
             termination_reason = "converged"
         elif score_stagnated:
@@ -3112,7 +3064,7 @@ def _fit_irls_direct_once(
         if converged_this_iter:
             converged = True
             break
-        if score_stagnated or _mean_space_stop_rows:
+        if score_stagnated:
             break
         dev_prev = dev
         objective_prev = (
@@ -3148,24 +3100,8 @@ def _fit_irls_direct_once(
             contribution += centred_intercept_lo
             eta_unclipped = (retained.centred_intercept + contribution) + offset
             eta = stabilize_eta(eta_unclipped, link)
-            mu = clip_mu(link.inverse(eta), family, link)
+            mu = clip_mu(link.inverse(eta), family)
             dev = float(np.sum(weights * family.deviance_unit(y, mu)))
-
-    # A returned state with rows at the mean-space boundary is not a mode of
-    # the model: the maximum it approaches is constrained, not stationary.  It
-    # is never converged, whatever stopped the loop: rows at the boundary or
-    # carried there when the loop stopped (``mean_space_boundary_rows``,
-    # ``mean_space_heading_rows``), and an unconverged fit whose last
-    # proposal still carried event rows there.  Its extreme working weights
-    # are the boundary's, not a coefficient drifting to infinity, so the
-    # separation backstop below does not speak for it.
-    _boundary_rows = (
-        0
-        if _mean_space_invalid is None
-        else _mean_space_stop_rows
-        or mean_space_boundary_rows(family, link, eta_unclipped, weights)
-        or (0 if converged else _mean_space_heading_last)
-    )
 
     # Runtime separation backstop (issue #341).  Two terminal signatures mark
     # a coefficient that walked toward +/-infinity instead of converging:
@@ -3182,7 +3118,7 @@ def _fit_irls_direct_once(
     # starts; this catches what the design scan cannot see (non-categorical
     # indicator structure), promoting a debug-level log line to a named
     # warning or, in strict mode, an error.
-    if separation != "ignore" and np.isfinite(dev) and not _boundary_rows:
+    if separation != "ignore" and np.isfinite(dev):
         from superglm.diagnostics.separation import (
             EXTREME_WEIGHT_RATIO,
             STAGNANT_DEVIANCE_DELTA,
@@ -3246,11 +3182,18 @@ def _fit_irls_direct_once(
                 "constrained-QP KKT certificate; fit is not converged."
             )
 
-    # A state at the mean-space boundary (``_boundary_rows``, before the
-    # separation backstop) is not converged; a constraint failure already
-    # recorded keeps its own reason.
+    # A returned state with rows at the mean-space boundary is not a mode of
+    # the model: their capped mean makes the deviance flat there, and the
+    # maximum it approaches is constrained, not stationary.  It is never
+    # converged, whatever stopped the loop (``mean_space_boundary_rows``).
+    _boundary_rows = (
+        0
+        if _mean_space_invalid is None
+        else mean_space_boundary_rows(family, link, eta_unclipped, weights)
+    )
     if _boundary_rows:
         converged = False
+        # a constraint failure already recorded keeps its own reason
         if termination_reason not in ("constraint_infeasible", "constraint_kkt_incomplete"):
             termination_reason = "mean_space_boundary"
         logger.info(

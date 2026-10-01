@@ -128,7 +128,7 @@ def build_reporting_support_state(
     from superglm.solvers.mode_score import linear_predictor
 
     full_eta = stabilize_eta(linear_predictor(dm, result, offset), link)
-    mu = clip_mu(link.inverse(full_eta), distribution, link)
+    mu = clip_mu(link.inverse(full_eta), distribution)
     working_weights = fisher_working_weights(
         distribution=distribution,
         link=link,

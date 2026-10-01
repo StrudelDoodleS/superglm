@@ -138,7 +138,7 @@ def reml_laml_objective(
     )
     if XtWX is None and not retained_geometry_complete:
         eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
-        mu = clip_mu(link.inverse(eta), distribution, link)
+        mu = clip_mu(link.inverse(eta), distribution)
         W = fisher_working_weights(
             distribution=distribution,
             link=link,
@@ -407,7 +407,7 @@ def reml_laml_objective(
     else:
         if mu is None:
             eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
-            mu = clip_mu(link.inverse(eta), distribution, link)
+            mu = clip_mu(link.inverse(eta), distribution)
         nll = -distribution.log_likelihood(y, mu, sample_weight, phi=1.0)
     evaluation = REMLObjectiveEvaluation(
         value=float(nll + 0.5 * (penalty_quad + logdet_m - logdet_s)),

@@ -499,7 +499,7 @@ class ModelMetrics:
             from superglm.model import base
 
             eta = base.predict_eta_exact(self._model, self._X, offset=self._offset)
-        mu = clip_mu(self._link.inverse(eta), self._family, self._link)
+        mu = clip_mu(self._link.inverse(eta), self._family)
         return eta, mu
 
     # ── Scalar properties ─────────────────────────────────────────

@@ -212,17 +212,17 @@ def _compute_d2W_deta2_fd(
     does not provide ``deriv3_inverse`` or ``variance_second_derivative``.
     """
     eps = 1e-5
-    mu_base = clip_mu(link.inverse(eta), distribution, link)
+    mu_base = clip_mu(link.inverse(eta), distribution)
     dW_base = compute_dW_deta(link, distribution, mu_base, eta, sample_weight)
     if dW_base is None:
         return None
 
     eta_plus = eta + eps
-    mu_plus = clip_mu(link.inverse(eta_plus), distribution, link)
+    mu_plus = clip_mu(link.inverse(eta_plus), distribution)
     dW_plus = compute_dW_deta(link, distribution, mu_plus, eta_plus, sample_weight)
 
     eta_minus = eta - eps
-    mu_minus = clip_mu(link.inverse(eta_minus), distribution, link)
+    mu_minus = clip_mu(link.inverse(eta_minus), distribution)
     dW_minus = compute_dW_deta(link, distribution, mu_minus, eta_minus, sample_weight)
 
     if dW_plus is None or dW_minus is None:
@@ -359,7 +359,7 @@ def reml_w_correction(
     )
     if geometry is None:
         eta = stabilize_eta(linear_predictor(dm, pirls_result, offset_arr), link)
-        mu = clip_mu(link.inverse(eta), distribution, link)
+        mu = clip_mu(link.inverse(eta), distribution)
         dW_deta = compute_dW_deta(link, distribution, mu, eta, sample_weight)
     else:
         if geometry.eta.shape != (dm.n,) or geometry.mu.shape != (dm.n,):

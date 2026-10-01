@@ -222,7 +222,7 @@ def test_alternate_log_link_uses_the_derivative_before_mean_clipping():
     """Binomial/log must not substitute its clipped mean for exp(eta)."""
     family, link = Binomial(), LogLink()
     eta = np.array([np.log(2.0)])
-    mu = clip_mu(link.inverse(eta), family, link)
+    mu = clip_mu(link.inverse(eta), family)
     rows = coefficient_working_rows(
         distribution=family,
         link=link,

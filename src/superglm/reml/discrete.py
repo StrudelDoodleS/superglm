@@ -1315,7 +1315,7 @@ def optimize_discrete_reml_cached_w(
                 centred_intercept_trial + centred_matvec(dm, beta_trial, trial_centre) + offset_arr,
                 link,
             )
-            mu_trial = clip_mu(link.inverse(eta_trial), distribution, link)
+            mu_trial = clip_mu(link.inverse(eta_trial), distribution)
             dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
             trial_pirls = PIRLSResult(
                 beta=beta_trial,

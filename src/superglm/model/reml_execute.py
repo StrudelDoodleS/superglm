@@ -193,7 +193,7 @@ def run_fixed_monotone_reml(
     model._reml_penalties = reml_penalties
 
     eta = stabilize_eta(linear_predictor(model._dm, result, offset), model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
         y,
@@ -282,7 +282,7 @@ def run_scop_efs_reml(
     model._reml_result = best
 
     eta = stabilize_eta(linear_predictor(model._dm, best.pirls_result, offset), model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
         y,

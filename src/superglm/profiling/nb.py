@@ -356,7 +356,7 @@ class _MeanFit:
         )
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
         eta = stabilize_eta(linear_predictor(model._dm, result, self.offset), model._link)
-        return clip_mu(model._link.inverse(eta), model._distribution, model._link)
+        return clip_mu(model._link.inverse(eta), model._distribution)
 
 
 def estimate_nb_theta(

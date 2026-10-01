@@ -406,7 +406,7 @@ def _live_public_runtime_state(
         eta = eta + model._fit_offset
 
     eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
     return contributions, eta, mu
 
 
@@ -419,7 +419,7 @@ def _compute_public_parity_diagnostics(
 ) -> tuple[CanonicalizationDiagnostics, dict[str, float]]:
     """Compute diagnostics from the live public runtime state."""
     eta_before = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
-    mu_before = clip_mu(model._link.inverse(eta_before), model._distribution, model._link)
+    mu_before = clip_mu(model._link.inverse(eta_before), model._distribution)
 
     contributions_after, eta_after, mu_after = _live_public_runtime_state(model, public_result)
     live_term_means_after = {

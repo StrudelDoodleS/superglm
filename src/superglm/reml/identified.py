@@ -486,7 +486,7 @@ def final_mode_weak_slopes(
 
     weights = np.asarray(sample_weight, dtype=np.float64)
     eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
-    mu = clip_mu(link.inverse(eta), distribution, link)
+    mu = clip_mu(link.inverse(eta), distribution)
     fisher = fisher_working_weights(
         distribution=distribution, link=link, mu=mu, eta=eta, sample_weight=weights
     )

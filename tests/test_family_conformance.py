@@ -434,7 +434,7 @@ def test_the_observed_geometry_on_the_chain_is_exact(family, link, lam) -> None:
         structured_chain_group_indices=(2, 3, 4),
     )
     eta = stabilize_eta(linear_predictor(dm, result, None), link)
-    mu = clip_mu(link.inverse(eta), family, link)
+    mu = clip_mu(link.inverse(eta), family)
     rows = compute_observed_information_weights(family, link, y, mu, eta, sample_weight)
     S = build_penalty_matrix(dm.group_matrices, groups, lambdas, dm.p, components)
     X = dm.toarray()

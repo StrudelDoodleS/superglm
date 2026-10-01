@@ -987,7 +987,7 @@ def finalize_reml_fit(
 
     eta = linear_predictor(model._dm, model._result, offset)
     eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
         y,

@@ -319,11 +319,10 @@ class PIRLSResult:
     # centred_intercept_lo)`` (``mode_score.centred_intercept_remainder``).
     # ``None`` for every other fit, which evaluates as before.
     centred_intercept_lo: float | None = None
-    # Positive-weight rows the returned state holds at, or was still carrying
-    # to, the boundary of the family's mean space
-    # (``irls_state.mean_space_boundary_rows`` and ``mean_space_heading_rows``);
-    # nonzero only with ``termination_reason == "mean_space_boundary"``, or
-    # with a constraint failure's reason, which it does not overwrite.
+    # Positive-weight rows the returned state holds at the boundary of the
+    # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
+    # only with ``termination_reason == "mean_space_boundary"``, or with a
+    # constraint failure's reason, which it does not overwrite.
     mean_space_boundary_rows: int = 0
 
     def __setattr__(self, name: str, value: object) -> None:

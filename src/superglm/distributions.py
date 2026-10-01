@@ -12,17 +12,12 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import betaln, gammaln
 
-from superglm.links import LogLink
-
 # ── Numerical guard constants for positive-mean families ─────────
 _POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean (replaces 0.1 pseudo-response)
 _POSITIVE_MU_MIN = 1e-50  # clip_mu lower bound (log → eta ≈ -115)
 _POSITIVE_MU_MAX = 1e50  # clip_mu upper bound (log → eta ≈ +115)
 _VARIANCE_FLOOR = 1e-100  # V(mu) floor for IRLS working weights
 _FLOAT64_MIN_NORMAL = np.finfo(np.float64).tiny
-# The largest float64 below one: ``log(1 - mu)`` is finite for every mean up to
-# it, so it is the binomial log-likelihood's own guard against ``log(0)``.
-_FLOAT64_BELOW_ONE = float(np.nextafter(1.0, 0.0))
 
 
 def _poisson_half_deviance(y: NDArray, mu: NDArray) -> NDArray:
@@ -487,13 +482,13 @@ class Binomial:
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Bernoulli unit deviance: 2[y log(y/μ) + (1-y) log((1-y)/(1-μ))]."""
-        mu_safe = np.clip(mu, 1e-15, _FLOAT64_BELOW_ONE)
+        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
         # For Bernoulli y in {0,1}: d = -2[y·log(μ) + (1-y)·log(1-μ)]
         return -2 * (y * np.log(mu_safe) + (1 - y) * np.log(1 - mu_safe))
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Bernoulli log-likelihood."""
-        mu_safe = np.clip(mu, 1e-15, _FLOAT64_BELOW_ONE)
+        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
         ll = y * np.log(mu_safe) + (1 - y) * np.log(1 - mu_safe)
         return float(np.sum(weights * ll))
 
@@ -660,26 +655,13 @@ def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:
     return max(y_bar, _POSITIVE_INIT_MIN)
 
 
-def clip_mu(mu: NDArray, family: Distribution, link: object = None) -> NDArray:
+def clip_mu(mu: NDArray, family: Distribution) -> NDArray:
     """Clip predicted means to a valid range for the family.
 
     For positive-mean families, the bounds must be wide enough that the
     IRLS can converge for near-separated categorical levels.
-
-    A binomial mean under the log link is capped at the largest float64 below
-    one, not at ``1 - 1e-7``: the log-binomial parameter space is every
-    ``eta < 0`` (``irls_state.mean_space_violation``), and its maximum can sit
-    at any probability below one, so a cap inside the space would make the
-    likelihood flat where it is not.  Only a mean that rounds to one or to
-    the largest float below it, where ``1 - mu`` carries no digit of
-    ``-eta``, meets the cap (the cap ``1 - 2^-53`` of Schwendinger, Gruen &
-    Hornik 2021, Comput. Stat. 36, appendix A.3.5).  Pass ``link`` wherever
-    the mean comes from a linear predictor; every other family and link is
-    clipped as before.
     """
     if isinstance(family, Binomial):
-        if isinstance(link, LogLink):
-            return np.clip(mu, 1e-7, _FLOAT64_BELOW_ONE)
         return np.clip(mu, 1e-7, 1 - 1e-7)
     if isinstance(family, Gaussian):
         return mu
@@ -780,7 +762,7 @@ def prior_weight_log_density(
         # y in {0, 1} the binomial coefficient is exactly 1, so the prior and
         # frequency forms coincide; the general expression is kept because it
         # is what makes that agreement a derivation rather than a coincidence.
-        mu_safe = np.clip(mu, 1e-15, _FLOAT64_BELOW_ONE)
+        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
         wy = w * y
         contribution = (
             gammaln(w + 1.0)

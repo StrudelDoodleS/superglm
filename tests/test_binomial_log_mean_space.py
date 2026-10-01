@@ -22,16 +22,12 @@ import pytest
 
 from superglm import Categorical, LambdaPolicy, Numeric, RandomEffect, SuperGLM
 from superglm.diagnostics.separation import SeparationWarning
-from superglm.distributions import Binomial, Gamma, Poisson, clip_mu
+from superglm.distributions import Binomial, Gamma, Poisson
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import CauchitLink, CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.irls_state import (
-    mean_space_boundary_rows,
-    mean_space_heading_rows,
-    mean_space_violation,
-)
+from superglm.solvers.irls_state import mean_space_boundary_rows, mean_space_violation
 from superglm.solvers.mode_score import mode_certification_bar
 from superglm.types import GroupSlice, LinearConstraintSet
 
@@ -95,50 +91,10 @@ def test_only_a_link_that_leaves_the_mean_space_declares_a_boundary() -> None:
     # eta = 0 is mu = 1: outside, unless the row carries no likelihood
     assert violates(np.array([0.0]), np.ones(1))
     assert not violates(np.array([-1e-300, 0.0]), np.array([1.0, 0.0]))
-
-
-def test_the_boundary_is_where_float64_cannot_tell_eta_from_zero() -> None:
-    """Not the old clip at ``1 - 1e-7`` (#431 d): every ``eta < 0`` is inside the space.
-
-    Under the log link a binomial mean keeps its value up to the largest float
-    below one; only a mean that rounds there or to one is capped, and only
-    such a row is on the boundary by its position.  Every other family and
-    link keeps the ``[1e-7, 1 - 1e-7]`` clip.  An event row is heading for the
-    boundary when Aitken's extrapolation of its proposal steps puts its limit
-    at least halfway to ``eta = 0``, whatever its multiplier: a geometric
-    approach with ratio ``0.92`` is, a contraction onto ``eta = -1e-3`` is
-    not, and neither is a non-event row.
-    """
-    below_one = 1.0 - _U
-    near = np.array([1.0 - 1e-8, 1.0, 1.0 - 1e-12])
-    assert np.array_equal(
-        clip_mu(near, Binomial(), LogLink()), [1.0 - 1e-8, below_one, 1.0 - 1e-12]
-    )
-    assert np.array_equal(clip_mu(near, Binomial(), LogitLink()), np.full(3, 1.0 - 1e-7))
-    assert np.array_equal(clip_mu(near, Binomial()), np.full(3, 1.0 - 1e-7))
-    # the old cap's edge and far inside it are interior; a mean that rounds to
-    # one is not, and a zero-weight row never counts
-    eta = np.array([np.log1p(-1e-7), np.log1p(-1e-12), -(2.0**-60), 0.0])
-    weights = np.array([1.0, 1.0, 1.0, 0.0])
-    assert mean_space_boundary_rows(Binomial(), LogLink(), eta, weights) == 1
-    assert mean_space_boundary_rows(Binomial(), LogitLink(), eta, weights) == 0
-    # rows at eta = -1e-3: a multiplier of 0.08 steps 0.08 of the distance each
-    # time (limit 0), a contraction at ratio 0.1 onto -1e-3 + 1e-6 does not
-    # head anywhere, nor does the same step on a non-event row
-    eta = np.full(3, -1e-3)
-    step = np.array([0.08e-3, 0.9e-7, 0.08e-3])
-    previous = np.array([0.08e-3 / 0.92, 0.9e-6, 0.08e-3 / 0.92])
-    y, weights = np.array([1.0, 1.0, 0.0]), np.ones(3)
-    heading = mean_space_heading_rows(Binomial(), LogLink(), y, eta, step, previous, weights)
-    assert heading.tolist() == [True, False, False]
-    assert not np.any(
-        mean_space_heading_rows(Binomial(), LogitLink(), y, eta, step, previous, weights)
-    )
-    # without a previous step, only a proposal covering half the distance heads
-    heading = mean_space_heading_rows(Binomial(), LogLink(), y, eta, step, None, weights)
-    assert not np.any(heading)
-    heading = mean_space_heading_rows(Binomial(), LogLink(), y, eta, 7.0 * step, None, weights)
-    assert heading.tolist() == [True, False, False]
+    # the boundary rows are the rows clip_mu caps, exp(eta) >= 1 - 1e-7
+    cap = np.log1p(-1e-7)
+    eta = np.array([cap, np.nextafter(cap, -np.inf), 0.0])
+    assert mean_space_boundary_rows(Binomial(), LogLink(), eta, np.array([1.0, 1.0, 0.0])) == 1
 
 
 def test_a_near_unpenalized_fit_stops_at_the_boundary_and_says_so() -> None:
@@ -168,47 +124,8 @@ def test_a_near_unpenalized_fit_stops_at_the_boundary_and_says_so() -> None:
     assert float(eta.max()) < 0.0
     assert not result.converged
     assert result.termination_reason == "mean_space_boundary"
-    # the rows reported are among the four one-row event levels, the only
-    # rows whose maximum is on the boundary at this penalty
-    assert 1 <= result.mean_space_boundary_rows <= 4
-
-
-def test_a_deviance_stop_on_the_approach_to_the_boundary_is_not_a_mode() -> None:
-    """A loose stop that fires on the shrinking steps toward ``eta = 0`` is not converged.
-
-    A one-row event level's score ``w - lambda b`` vanishes at ``b = 1 /
-    lambda``, which puts its row at ``eta = c + 1 / lambda`` with ``c ~ -1.9``
-    from the rest of the model: positive below ``lambda ~ 0.53``, so at 0.2
-    and 0.5 the maximum is on the boundary, approached geometrically at the
-    ratio ``lambda |c|`` (0.38, 0.95).  The deviance test stops on those steps
-    with the row still at ``eta ~ -3e-5`` (0.2) or ``-4e-2`` (0.5), where
-    ``1 - 1e-7`` never reached; at ``lambda = 1`` every row is interior and
-    the same stop is a mode.
-    """
-    model = _fit("gram")
-    X, y = _thin_event_levels()
-    verdicts = {}
-    for lam in (0.2, 0.5, 1.0):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            result, _ = fit_irls_direct(
-                X=model._dm,
-                y=y,
-                weights=np.ones(len(y)),
-                family=Binomial(),
-                link=LogLink(),
-                groups=model._groups,
-                lambda2={name: lam for name in model._reml_result.lambdas},
-                reml_penalties=model._reml_penalties,
-                direct_solve="gram",
-                weight_semantics="prior",
-                convergence="deviance",
-                tol=1e-6,
-            )
-        verdicts[lam] = (result.converged, result.termination_reason)
-    assert verdicts[0.2] == (False, "mean_space_boundary")
-    assert verdicts[0.5] == (False, "mean_space_boundary")
-    assert verdicts[1.0] == (True, "converged")
+    assert result.mean_space_boundary_rows == int(np.count_nonzero(eta >= np.log1p(-1e-7)))
+    assert result.mean_space_boundary_rows >= 1
 
 
 def test_reml_reaches_the_interior_maximum_on_both_backends() -> None:
@@ -227,13 +144,36 @@ def test_reml_reaches_the_interior_maximum_on_both_backends() -> None:
     assert abs(objectives[0] - objectives[1]) <= 2.0 * tolerance * (1.0 + abs(objectives[0]))
 
 
+def test_reml_says_why_a_maximum_on_the_boundary_has_no_criterion() -> None:
+    """An unpenalized level whose rows are all events is at probability one at every lambda."""
+    rng = np.random.default_rng(3)
+    n = 3000
+    region = rng.choice(["A", "B", "C"], n)
+    p = np.where(region == "A", 0.30, np.where(region == "B", 0.10, 1.0))
+    y = (rng.random(n) < p).astype(np.float64)
+    X = pd.DataFrame(
+        {
+            "region": region,
+            "x": rng.uniform(size=n),
+            "g": [f"g{c}" for c in rng.integers(0, 40, n)],
+        }
+    )
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        features={"region": Categorical(base="first"), "x": Numeric(), "g": RandomEffect()},
+    )
+    with pytest.raises(ObservedModeNotConvergedError, match="no interior maximum"):
+        model.fit_reml(X, y)
+
+
 def test_a_constraint_failure_keeps_its_reason_at_the_boundary() -> None:
     """The boundary does not overwrite a constrained solve's own failure (#431, P3).
 
     Ten event rows started ``1e-8`` from the boundary under ``beta >= 0``: the
     one permitted iteration is halved, so the inner QP's KKT certificate is
-    incomplete, and the rows are still heading for ``eta = 0``.  Both are
-    reported, the constraint failure as the reason.
+    incomplete, and the rows end inside the ``1 - 1e-7`` boundary band.  Both
+    are reported, the constraint failure as the reason.
     """
     x = np.linspace(0.1, 1.0, 10)[:, None]
     groups = [
@@ -264,29 +204,6 @@ def test_a_constraint_failure_keeps_its_reason_at_the_boundary() -> None:
     assert not result.converged
     assert result.termination_reason == "constraint_kkt_incomplete"
     assert result.mean_space_boundary_rows == len(x)
-
-
-def test_reml_says_why_a_maximum_on_the_boundary_has_no_criterion() -> None:
-    """An unpenalized level whose rows are all events is at probability one at every lambda."""
-    rng = np.random.default_rng(3)
-    n = 3000
-    region = rng.choice(["A", "B", "C"], n)
-    p = np.where(region == "A", 0.30, np.where(region == "B", 0.10, 1.0))
-    y = (rng.random(n) < p).astype(np.float64)
-    X = pd.DataFrame(
-        {
-            "region": region,
-            "x": rng.uniform(size=n),
-            "g": [f"g{c}" for c in rng.integers(0, 40, n)],
-        }
-    )
-    model = SuperGLM(
-        family="binomial",
-        link="log",
-        features={"region": Categorical(base="first"), "x": Numeric(), "g": RandomEffect()},
-    )
-    with pytest.raises(ObservedModeNotConvergedError, match="no interior maximum"):
-        model.fit_reml(X, y)
 
 
 def _offset_fit(offset: float, *, plain: bool, direct_solve: str) -> SuperGLM:
@@ -371,14 +288,21 @@ def _frequency_weighted_events(*, plain: bool, direct_solve: str) -> SuperGLM:
     return model
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="#431 (d): the 1 - 1e-7 clip is still the boundary; redone in #431",
+)
 @pytest.mark.parametrize("direct_solve", ["auto", "gram"])
 def test_an_interior_maximum_above_the_old_clip_is_reached(direct_solve: str) -> None:
-    """``p = 9e7 / (9e7 + 1)`` is interior (#431 d), and the fit reaches it.
+    """``p = 9e7 / (9e7 + 1)`` is interior (#431 d), and the fit should reach it.
+
+    Not yet: the boundary rule still treats every probability at or above
+    ``1 - 1e-7`` as the boundary.  Kept as the target of the #431 redo.
 
     Both levels hold the same data, so the penalized maximum has a zero
     random effect and an intercept solving the score equation
     ``S(eta) = 18e7 - 2 p / (1 - p) = 0``: ``eta* = -log1p(1 / 9e7)``, above
-    the old clip's ``log1p(-1e-7)``, which called it the boundary.  The
+    the clip's ``log1p(-1e-7)``, which calls it the boundary.  The
     certified mode has ``|S| <= bar sum |s|`` with ``sum |s| = 18e7 + 2 p /
     (1 - p)`` and ``|S'| = 2 p / (1 - p)^2``, so it lies within ``bar sum |s|
     / |S'|`` of ``eta*``.  The score is evaluated at ``p = fl(exp(eta))``,

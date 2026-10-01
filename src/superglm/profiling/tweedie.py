@@ -207,9 +207,7 @@ class _PowerProfile:
         )
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
         eta = linear_predictor(clone._dm, result, self.offset)
-        mu = clip_mu(
-            clone._link.inverse(stabilize_eta(eta, clone._link)), clone._distribution, clone._link
-        )
+        mu = clip_mu(clone._link.inverse(stabilize_eta(eta, clone._link)), clone._distribution)
         return mu, bool(result.converged), None
 
     def _prepare_reml(self, X, y, sample_weight, offset) -> None:

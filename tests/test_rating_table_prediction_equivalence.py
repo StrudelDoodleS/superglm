@@ -1717,8 +1717,7 @@ def test_a_saturated_export_frame_stops_the_export():
 def test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like():
     """``clip_mu`` bounds a binomial mean, so the family is refused, not the frame.
 
-    ``clip_mu`` clamps a ``Binomial`` mean into [1e-7, 1 - 1e-7], or under a log
-    link from 1e-7 to the largest float below one.  For the
+    ``clip_mu`` clamps a ``Binomial`` mean into [1e-7, 1 - 1e-7].  For the
     positive families the band is [1e-50, 1e50], which the eta clip already sits
     strictly inside -- ``exp(+/-80)`` is [1.8e-35, 5.5e34] -- and ``Gaussian`` is
     not clamped, so ``Binomial`` is the only family a log link can reach it with.
@@ -1731,7 +1730,7 @@ def test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like():
     But the refusal is by FAMILY, and the second fixture below is why.  A
     binomial whose every fitted mean sits inside the clamp exports with nothing
     to complain about, and then breaks on a row rated later: the usable band is
-    ``-16.118 <= eta < 0``, a mere 20.1% of the ``[-80, 0]`` a log link
+    ``-16.118 <= eta <= -1.0e-7``, a mere 20.1% of the ``[-80, 0]`` a log link
     permits, and ``mu > 1`` out of sample is the characteristic hazard of
     log-binomial regression rather than an exotic corner.  A frame-scoped gate
     would have passed that model and shipped the workbook.
@@ -1787,7 +1786,7 @@ def test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like():
     assert dose_at_one > 1.0, "the fitted frame stays under mu = 1, as intended"
     far = pd.DataFrame({"dose": [dose_at_one * 2.0]})
     assert float(np.exp(predict_eta_raw_exact(benign, far))[0]) > 1.0
-    assert float(benign.predict(far)[0]) < 1.0
+    assert float(benign.predict(far)[0]) <= 1.0 - 1e-7
 
     with pytest.raises(ValueError, match="not supported for Binomial"):
         build_rating_table_payload(benign, X2, y2, n_bins=10, impact_bins=(10,))

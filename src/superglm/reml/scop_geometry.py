@@ -205,7 +205,7 @@ def scop_penalized_mode_score(
         if not np.all(np.isfinite(eta_raw)):
             raise ObservedGeometryInfeasibleError("SCOP mode-score eta must be finite")
     eta = stabilize_eta(eta_raw, link)
-    mu = clip_mu(link.inverse(eta), distribution, link)
+    mu = clip_mu(link.inverse(eta), distribution)
     variance = np.maximum(
         np.asarray(distribution.variance(mu), dtype=np.float64),
         _VARIANCE_FLOOR,
@@ -968,7 +968,7 @@ def build_observed_scop_joint_geometry(
         if eta_raw.shape != y.shape or not np.all(np.isfinite(eta_raw)):
             raise ValueError("retained SCOP eta must be finite and match the design rows")
     eta = stabilize_eta(eta_raw, link)
-    mu = clip_mu(link.inverse(eta), distribution, link)
+    mu = clip_mu(link.inverse(eta), distribution)
     observed_weights = compute_scop_observed_information_weights(
         distribution,
         link,

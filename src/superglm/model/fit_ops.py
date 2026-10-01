@@ -501,7 +501,7 @@ def _compute_null_mu(
             weight_semantics=weight_semantics,
         )
         eta_null = stabilize_eta(null_result.intercept + offset, link)
-        return clip_mu(link.inverse(eta_null), distribution, link)
+        return clip_mu(link.inverse(eta_null), distribution)
 
     y_bar = float(np.average(y, weights=weights))
     if isinstance(distribution, Binomial):
@@ -518,7 +518,7 @@ def _compute_null_mu(
     b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
     for _ in range(25):
         eta_null = stabilize_eta(b0 + offset, link)
-        mu_null = clip_mu(link.inverse(eta_null), distribution, link)
+        mu_null = clip_mu(link.inverse(eta_null), distribution)
         dmu = link.deriv_inverse(eta_null)
         V = distribution.variance(mu_null)
         score = float(np.sum(weights * (y - mu_null) * dmu / V))
@@ -529,7 +529,7 @@ def _compute_null_mu(
             break
 
     eta_null = stabilize_eta(b0 + offset, link)
-    return clip_mu(link.inverse(eta_null), distribution, link)
+    return clip_mu(link.inverse(eta_null), distribution)
 
 
 def _compute_fit_stats(
@@ -942,7 +942,7 @@ def _prime_fit_caches(
         eta = stabilize_eta(
             linear_predictor(model._dm, fit_space_result, model._fit_offset), model._link
         )
-        mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
     if null_mu is None:
         null_mu = _compute_null_mu(
             y_arr,
@@ -1404,7 +1404,7 @@ def _fit_in_workspace(
         model._result = replace(model._result, phi=1.0)
 
     eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     null_mu = _compute_null_mu(
         y,
@@ -1551,7 +1551,7 @@ def _fit_path_in_workspace(
     model._result = result
 
     eta = stabilize_eta(linear_predictor(model._dm, result, offset), model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
     null_mu = _compute_null_mu(
         y,
         sample_weight,
@@ -1828,7 +1828,7 @@ def _fit_reml_in_workspace(
             convergence=model._convergence,
         )
         eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
-        mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
         null_mu = _compute_null_mu(
             y,
             sample_weight,

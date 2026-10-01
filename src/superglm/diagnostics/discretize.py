@@ -938,8 +938,7 @@ def discretization_impact(
     frame.require_columns(tuple(required))
     validate_x_columns(frame, required)
     eta_orig = base.predict_eta_exact(model, frame, offset=offset)
-    link = model._link
-    original_predictions = clip_mu(link.inverse(eta_orig), model._distribution, link)
+    original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
 
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
@@ -1112,9 +1111,8 @@ def discretization_impact(
         )
 
     # Discretized predictions
-    link = model._link
-    eta_disc = stabilize_eta(eta_orig + total_delta, link)
-    predictions = clip_mu(link.inverse(eta_disc), model._distribution, link)
+    eta_disc = stabilize_eta(eta_orig + total_delta, model._link)
+    predictions = clip_mu(model._link.inverse(eta_disc), model._distribution)
 
     # Compute metrics
     dist = model._distribution

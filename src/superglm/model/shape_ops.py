@@ -316,7 +316,7 @@ def _profile_repaired_intercept(
     def evaluate(shift: float) -> tuple[float, float, float, float]:
         eta_safe = stabilize_eta(eta_base + shift, model._link)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            mu = clip_mu(model._link.inverse(eta_safe), model._distribution, model._link)
+            mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
             deviance_units = np.asarray(
                 model._distribution.deviance_unit(y_arr, mu),
                 dtype=np.float64,
@@ -425,7 +425,7 @@ def _shape_candidate_objective(
 
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         eta_safe = stabilize_eta(eta, model._link)
-        mu = clip_mu(model._link.inverse(eta_safe), model._distribution, model._link)
+        mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
         deviance_units = np.asarray(model._distribution.deviance_unit(y, mu), dtype=np.float64)
     if not np.all(np.isfinite(mu)) or not np.all(np.isfinite(deviance_units)):
         raise RuntimeError(
