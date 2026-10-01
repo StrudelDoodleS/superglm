@@ -398,9 +398,13 @@ def weighted_column_centring(
     ``penalized_mode_residual`` scales a score by, formed from given working
     weights instead of a solve's centred system.  The means take one
     transpose product, a dense column's anchored at its first positive-weight
-    row (``prior_weighted_centre``).  A one-hot column's diagonal is in
-    closed form; every other column's comes from its own entries
-    (``column_sums``).  Zeros when no weight is positive.
+    row (``prior_weighted_centre``).  The diagonal takes one pass per block:
+    a one-hot block in closed form, a dense block centred row by row in
+    fixed chunks, a factor-smooth ``fs`` block through its level sums
+    (``column_sums``), and any other block, whose entries its type bounds,
+    from its weighted Gram's diagonal less ``sum_w mean^2`` (clamped at 0; a
+    cancelled diagonal is the centring resolution ``penalized_mode_residual``
+    already floors).  Zeros when no weight is positive.
     """
     w = np.asarray(weights, dtype=np.float64)
     sum_w = float(np.sum(w))
@@ -423,10 +427,35 @@ def weighted_column_centring(
     diagonal[one_hot] = (
         on_weight[one_hot] * (1.0 - centre) ** 2 + (sum_w - on_weight[one_hot]) * centre**2
     )
-    other = np.flatnonzero(~one_hot)
-    if other.size:
+    # every other block in one pass of its own: a dense block centred row by
+    # row in fixed chunks, an fs block through its level sums, and any other
+    # block (entries bounded by its type) from its weighted Gram's diagonal
+    # less sum_w mean^2 -- never a design product per column
+    factor_smooth: list[NDArray] = []
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        columns = slice(offset, offset + width)
+        offset += width
+        if isinstance(matrix, CategoricalGroupMatrix):
+            continue
+        if type(matrix) is DenseGroupMatrix:
+            values = matrix.M
+            centre = mean_x[columns]
+            accumulated = np.zeros(width)
+            for lo in range(0, dm.n, _CHUNK):
+                hi = min(lo + _CHUNK, dm.n)
+                accumulated += w[lo:hi] @ (values[lo:hi] - centre) ** 2
+            diagonal[columns] = accumulated
+        elif isinstance(matrix, FactorSmoothGroupMatrix) and matrix.factor_basis == "fs":
+            factor_smooth.append(np.arange(columns.start, columns.stop))
+        else:
+            raw = np.diag(np.asarray(matrix.gram(w), dtype=np.float64))
+            diagonal[columns] = np.maximum(raw - sum_w * mean_x[columns] ** 2, 0.0)
+    if factor_smooth:
+        chosen = np.concatenate(factor_smooth)
         zeros = np.zeros(dm.n)
-        diagonal[other] = column_sums(dm, other, mean_x, (zeros, zeros, w), positive_prior)[2]
+        diagonal[chosen] = column_sums(dm, chosen, mean_x, (zeros, zeros, w), positive_prior)[2]
     return mean_x, sum_w, diagonal
 
 
@@ -517,7 +546,9 @@ class ModeResidual:
     it.  ``weak`` ``(p,)`` marks the weakly identified coefficients this
     evaluation found and ``excluded`` those plus the ones the caller excluded.
     ``resolved`` says every coefficient that missed the fixed bar had its floor
-    and weak test evaluated.
+    and weak test evaluated.  ``scale`` ``(p + 1,)`` holds the denominators of
+    ``relative`` (``sum |s|`` for the intercept, then each slope's), each in
+    its coordinate's own units.
     """
 
     intercept_score: float
@@ -528,6 +559,7 @@ class ModeResidual:
     excluded: NDArray
     resolved: bool
     bar: float
+    scale: NDArray | None = None
 
     def ratio(self) -> float:
         """``max relative / bar_effective`` over the intercept and the identified slopes."""
@@ -559,6 +591,7 @@ def penalized_mode_residual(
     bar: float,
     excluded: NDArray | None = None,
     resolve_cap: float = float("inf"),
+    column_shift: NDArray | None = None,
 ) -> ModeResidual:
     """Evaluate the shared relative score (module docstring) at one iterate.
 
@@ -571,20 +604,41 @@ def penalized_mode_residual(
     coefficient that misses the fixed bar: one-hot columns in closed form from
     transpose products, every other column from its own entries (one design
     product each).
+
+    ``column_shift`` (``(p,)`` even non-negative integers, ``None`` for none)
+    puts slope ``j`` in its own units: every data-side quantity of the column
+    (its score, curvature, floors' sums and the weak test's weight) is
+    multiplied by ``2^-shift_j``, and ``zeta`` by ``2^(-shift_j / 2)``, while
+    ``penalty_*`` arrive already in those units.  Each relative score is a
+    ratio of quantities of one degree in the weights and the penalty taken
+    together, so the shift leaves it unchanged; it only keeps a penalty far
+    larger than the data's scale from overflowing beside it.  The powers of
+    two are exact, and the even shift keeps ``zeta``'s square root exact.
     """
     n, p = dm.n, dm.p
     total = float(np.sum(row_score))
     absolute = np.abs(row_score)
     intercept_scale = max(_TINY, float(np.sum(absolute)))
-    slope_score = centred_data_score(dm, row_score, mean_x) - penalty_score
+
+    def shifted(values, columns=slice(None)):
+        if column_shift is None:
+            return values
+        return np.ldexp(np.asarray(values, dtype=np.float64), -np.asarray(column_shift)[columns])
+
+    slope_score = shifted(centred_data_score(dm, row_score, mean_x)) - penalty_score
     resolution = n * _EPS * np.abs(mean_x)
     root_weight = math.sqrt(max(float(sum_w), _TINY))
     zeta = intercept_scale / root_weight
+    column_zeta = (
+        zeta
+        if column_shift is None
+        else np.ldexp(np.full(p, zeta), -(np.asarray(column_shift) // 2))
+    )
     curvature_root = np.sqrt(
-        (np.maximum(centered_scale, resolution) * root_weight) ** 2
+        shifted((np.maximum(centered_scale, resolution) * root_weight) ** 2)
         + np.maximum(np.asarray(penalty_curvature, dtype=np.float64), 0.0)
     )
-    slope_scale = np.maximum(_TINY, zeta * curvature_root + np.abs(penalty_score))
+    slope_scale = np.maximum(_TINY, column_zeta * curvature_root + np.abs(penalty_score))
     relative = np.concatenate(([abs(total) / intercept_scale], np.abs(slope_score) / slope_scale))
     bar_effective = np.full(p + 1, float(bar))
     weak = np.zeros(p, dtype=bool)
@@ -636,6 +690,10 @@ def penalized_mode_residual(
                 )
                 evaluation[~one_hot], represented[~one_hot] = sums[0], sums[1]
                 curvature[~one_hot], mass[~one_hot] = sums[2], sums[3]
+            evaluation = shifted(evaluation, slopes)
+            represented = shifted(represented, slopes)
+            curvature = shifted(curvature, slopes)
+            largest_column = shifted(np.full(len(slopes), largest), slopes)
             magnitude = penalty_magnitude[slopes]
             floor = (
                 gamma_rows * evaluation
@@ -644,7 +702,7 @@ def penalized_mode_residual(
             ) / slope_scale[slopes]
             bar_effective[slopes + 1] = np.maximum(bar, floor)
             diagonal = np.asarray(penalty_curvature, dtype=np.float64)[slopes]
-            weak[slopes] = curvature + diagonal <= _gamma(row_count) * largest * mass
+            weak[slopes] = curvature + diagonal <= _gamma(row_count) * largest_column * mass
     return ModeResidual(
         intercept_score=total,
         slope_score=slope_score,
@@ -654,6 +712,7 @@ def penalized_mode_residual(
         excluded=excluded | weak,
         resolved=resolved,
         bar=float(bar),
+        scale=np.concatenate(([intercept_scale], slope_scale)),
     )
 
 

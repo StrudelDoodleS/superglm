@@ -256,39 +256,44 @@ def mean_space_newton_rows(
     return curvature, score
 
 
+def mean_space_log_likelihood_rows(y: NDArray, weights: NDArray, eta_unclipped: NDArray) -> NDArray:
+    """Each row's binomial/log log-likelihood ``w [y eta + (1 - y) log(1 - e^eta)]`` at the unclipped eta.
+
+    The model's own likelihood, up to the saturated term: ``clip_mu``'s band
+    does not enter, so a row below its floor still counts.  ``log(1 -
+    e^eta)`` is Maechler's (2012) ``log1mexp``, ``log(-expm1(eta))`` above
+    ``-log 2`` and ``log1p(-exp(eta))`` below, each branch evaluated on its
+    own non-event rows only.  Zero on a zero-weight row.
+    """
+    eta = np.asarray(eta_unclipped, dtype=np.float64)
+    response = np.asarray(y, dtype=np.float64)
+    prior = np.asarray(weights, dtype=np.float64)
+    rows = np.zeros_like(eta)
+    carried = prior > 0.0
+    near = carried & (response < 1.0) & (eta > -math.log(2.0))
+    far = carried & (response < 1.0) & ~near
+    complement = np.zeros_like(eta)
+    with np.errstate(divide="ignore", invalid="ignore", under="ignore"):
+        complement[near] = np.log(-np.expm1(eta[near]))
+        complement[far] = np.log1p(-np.exp(eta[far]))
+        rows[carried] = prior[carried] * (
+            response[carried] * eta[carried] + (1.0 - response[carried]) * complement[carried]
+        )
+    return rows
+
+
 def mean_space_deviance_delta(
     y: NDArray, weights: NDArray, candidate_eta: NDArray, committed_eta: NDArray
 ) -> float:
-    """``D(candidate) - D(committed)``: the binomial/log deviance difference of two unclipped predictors.
+    """``D(candidate) - D(committed)`` of the binomial/log deviance, ``-2`` times the rows' log-likelihood change.
 
-    The model's own deviance, ``-2 sum w [y eta + (1 - y) log(1 - e^eta)]``
-    up to the saturated term, which cancels.  ``clip_mu``'s band does not
-    enter, so a row below its floor still counts.  ``log(1 - e^eta)`` is
-    Maechler's (2012) ``log1mexp``: ``log(-expm1(eta))`` above ``-log 2``,
-    ``log1p(-exp(eta))`` below, and each row's difference is formed before
-    the compensated sum.
+    Each row's difference is formed first (``mean_space_log_likelihood_rows``)
+    and summed pairwise (``np.sum``).
     """
-    response = np.asarray(y, dtype=np.float64)
-    prior = np.asarray(weights, dtype=np.float64)
-    carried = prior > 0.0
-
-    def log1mexp(eta: NDArray) -> NDArray:
-        with np.errstate(divide="ignore", invalid="ignore", under="ignore"):
-            return np.where(eta > -math.log(2.0), np.log(-np.expm1(eta)), np.log1p(-np.exp(eta)))
-
-    candidate = np.asarray(candidate_eta, dtype=np.float64)[carried]
-    committed = np.asarray(committed_eta, dtype=np.float64)[carried]
-    events = response[carried]
-    with np.errstate(invalid="ignore", over="ignore"):
-        rows = (
-            -2.0
-            * prior[carried]
-            * (
-                events * (candidate - committed)
-                + (1.0 - events) * (log1mexp(candidate) - log1mexp(committed))
-            )
-        )
-    return math.fsum(rows.tolist())
+    change = mean_space_log_likelihood_rows(
+        y, weights, candidate_eta
+    ) - mean_space_log_likelihood_rows(y, weights, committed_eta)
+    return float(-2.0 * np.sum(change))
 
 
 def interior_start_intercept(

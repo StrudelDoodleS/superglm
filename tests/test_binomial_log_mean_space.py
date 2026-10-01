@@ -14,6 +14,7 @@ start or says why none exists.
 
 from __future__ import annotations
 
+import math
 import warnings
 from types import SimpleNamespace
 
@@ -46,7 +47,11 @@ from superglm.solvers.irls_state import (
     mean_space_score_rows,
     mean_space_violation,
 )
-from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR, mode_certification_bar
+from superglm.solvers.mode_score import (
+    MODE_CERTIFICATION_BAR,
+    mode_certification_bar,
+    weighted_column_centring,
+)
 
 _U = 2.0**-53  # unit roundoff, and the spacing of float64 just below one
 _EPS = 2.0**-52  # machine epsilon, the spacing of float64 above one
@@ -482,6 +487,57 @@ def test_an_event_row_below_the_floor_reaches_the_models_maximum(direct_solve: s
     assert np.max(np.abs(etas[0] - etas[1])) <= 2.0 * bound
 
 
+@pytest.mark.parametrize("constrained", [False, True])
+def test_newton_steps_run_on_the_dense_and_constrained_routes(constrained: bool) -> None:
+    """claude's event-row fixture through ``fit_irls_direct``, with and without ``beta >= 0``.
+
+    The unconstrained fit takes the dense route's increment step; with a
+    hard constraint it takes the QP route, whose Newton system carries the
+    score in its right-hand side.  Both must run Newton iterations (the
+    profile counts them) and reach the model's maximum, the constraint
+    inactive there (the slope is positive).
+    """
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    rng = np.random.default_rng(0)
+    x = np.append(rng.uniform(-1.0, 1.0, 200), 0.3)
+    y = np.append((rng.uniform(size=200) < 0.2).astype(np.float64), 1.0)
+    offset = np.append(np.full(200, 2.0), -25.0)
+    groups = [
+        GroupSlice(
+            "x",
+            0,
+            1,
+            constraints=LinearConstraintSet(A=np.eye(1), b=np.zeros(1)) if constrained else None,
+            monotone_engine="qp" if constrained else None,
+        )
+    ]
+    profile: dict = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(x[:, None])], n=201, p=1),
+            y,
+            np.ones(201),
+            Binomial(),
+            LogLink(),
+            groups,
+            lambda2=0.0,
+            offset=offset,
+            weight_semantics="frequency",
+            profile=profile,
+        )
+    assert result.converged
+    assert profile["irls_mean_space_newton_iters"] > 0
+    design = np.column_stack([np.ones_like(x), x])
+    theta = _log_binomial_maximum(design, y, offset)
+    eta = x * result.beta[0] + result.intercept + offset
+    assert np.max(np.abs(eta - (design @ theta + offset))) <= _certified_eta_bound(
+        design, y, offset, theta
+    )
+
+
 def _random_offset_fixture(seed: int):
     """Opus's #437 random sweep (``rand_sweep.py``): probabilities near one, offsets in [-0.5, 1)."""
     rng = np.random.default_rng(seed)
@@ -566,8 +622,12 @@ def test_subnormal_weights_never_certify_a_wrong_maximum(direct_solve: str) -> N
             assert model.result.converged
             assert float(np.max(np.abs(eta - np.log(0.5)))) <= 5.1 * MODE_CERTIFICATION_BAR
         else:
-            assert not model.result.converged
-            assert float(np.max(np.abs(eta - np.log(0.5)))) > 1.0
+            # fewer than 53 bits and underflowing working weights: never a
+            # certified wrong maximum
+            assert (
+                not model.result.converged
+                or float(np.max(np.abs(eta - np.log(0.5)))) <= 5.1 * MODE_CERTIFICATION_BAR
+            )
 
 
 def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates() -> None:
@@ -635,38 +695,337 @@ def test_a_constraints_units_do_not_change_the_certificate(scale: float) -> None
         )
     assert result.converged
     assert result.beta[0] == 0.0
-    assert abs(result.intercept - (np.log(0.5) - 2.0)) <= 8.0 * _EPS * 3.0
+    # certified: with beta = 0 every row shares eta, the intercept's score is
+    # c (1 - p / (1 - p)) for c events and c non-events, sum|s| = 2c and its
+    # slope in eta 2c / (1 - p) = 4c at p = 1/2, so eta is within bar / 2 of
+    # log(1/2), doubled for the curvature's change along the way, plus the
+    # intercept's own rounding, u |intercept|
+    bound = MODE_CERTIFICATION_BAR + _U * abs(np.log(0.5) - 2.0)
+    assert abs(result.intercept - (np.log(0.5) - 2.0)) <= bound
 
 
 @pytest.mark.parametrize("direct_solve", ["auto", "gram"])
 def test_a_constrained_lowered_fit_is_certified_with_its_multipliers(direct_solve: str) -> None:
-    """An increasing spline on a probability that rises then falls, offset by +1.5.
+    """Non-negative step increments on a probability that rises then falls, offset by +1.5.
 
-    The lowered start brings the fit under the binomial/log certificate, and
-    its maximum has active monotonicity constraints: the penalized score is
-    balanced by their multipliers, ``G + A' m = 0`` with ``m >= 0``, not
-    zero.  The certificate tests that residual (without the multipliers this
-    fit ended ``score_stagnated``) and accepts the mode the no-offset fit
-    reaches, its deviance within the deviance stop's tolerance of it.
+    Four step columns ``x > 0.2, 0.4, 0.6, 0.8`` with ``beta >= 0``
+    (``A = I``) and no penalty: the falling half pushes the last two
+    increments against their bound, so two constraints are active at the
+    maximum.  The lowered start brings the fit under the binomial/log
+    certificate, which tests ``G + A' m`` with ``m >= 0`` there; without the
+    multipliers it refused this fit.  Checked against the KKT conditions
+    directly, from the true score ``s`` and Fisher weights ``W`` of the
+    returned eta, each to the bar the certificate holds it to: the
+    intercept's score within ``bar sum|s|``; an inactive increment's centred
+    score within ``bar zeta sqrt(D_jj)`` (``zeta = sum|s| / sqrt(sum W)``,
+    ``D_jj = sum W (x_j - mean_j)^2``); an active one's no more than that
+    above zero, its multiplier ``-G_j`` non-negative.  The no-offset fit
+    starts inside, stops on master's rule, and holds the same active set.
     """
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.types import GroupSlice, LinearConstraintSet
+
     rng = np.random.default_rng(5)
     n = 400
     x = rng.uniform(0.0, 1.0, n)
     y = (rng.uniform(size=n) < 0.1 + 0.3 * np.sin(np.pi * x)).astype(np.float64)
-    deviances = []
+    steps = (x[:, None] > np.array([0.2, 0.4, 0.6, 0.8])[None, :]).astype(np.float64)
+    k = steps.shape[1]
+    actives = []
     for shift in (0.0, 1.5):
-        model = SuperGLM(
-            family="binomial",
-            link="log",
-            selection_penalty=0.0,
-            direct_solve=direct_solve,
-            features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
+        groups = [
+            GroupSlice(
+                "steps",
+                0,
+                k,
+                constraints=LinearConstraintSet(A=np.eye(k), b=np.zeros(k)),
+                monotone_engine="qp",
+            )
+        ]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result, _ = fit_irls_direct(
+                DesignMatrix([DenseGroupMatrix(steps)], n=n, p=k),
+                y,
+                np.ones(n),
+                Binomial(),
+                LogLink(),
+                groups,
+                lambda2=0.0,
+                offset=np.full(n, shift),
+                direct_solve=direct_solve,
+                weight_semantics="frequency",
+            )
+        assert result.converged
+        assert result.termination_reason == "converged"
+        beta = np.asarray(result.beta)
+        assert np.all(beta >= 0.0)
+        # at its bound to the rounding of the iterate the QP solved for
+        active = np.flatnonzero(beta <= 4.0 * _EPS * float(np.sum(np.abs(beta))))
+        actives.append(active.tolist())
+        if shift == 0.0:
+            continue
+        assert active.size >= 1
+        eta = steps @ beta + result.intercept + shift
+        score, fisher = mean_space_score_rows(y, np.ones(n), eta)
+        size = float(np.sum(np.abs(score)))
+        mean = steps.T @ fisher / float(np.sum(fisher))
+        centred = steps - mean
+        gradient = centred.T @ score
+        scale = size / np.sqrt(float(np.sum(fisher))) * np.sqrt(fisher @ centred**2)
+        bar = MODE_CERTIFICATION_BAR
+        assert abs(float(np.sum(score))) <= bar * size
+        inactive = np.setdiff1d(np.arange(k), active)
+        assert np.all(np.abs(gradient[inactive]) <= bar * scale[inactive])
+        assert np.all(gradient[active] <= bar * scale[active])
+    assert actives[0] == actives[1]
+
+
+def test_the_weighted_centring_matches_its_definition_on_each_block_type() -> None:
+    """``weighted_column_centring`` against ``sum w (x - mean)^2`` formed column by column.
+
+    The function forms the diagonal one pass per block (a dense block in
+    chunks, a spline block from its weighted Gram, a one-hot block in closed
+    form); the reference forms every column through a design product and
+    sums with ``math.fsum``.  A dense column carries an offset of ``1e6``,
+    which the chunked pass centres before squaring.  Tolerances: ``n``
+    roundings of each summed term, ``8 n eps sum w x~^2``, plus for a dense
+    column the mean's own rounding, ``eps max|x|`` on each of its ``sum w
+    |x~|`` terms; a raw-moment block's terms are ``sum w x^2``.
+    """
+    rng = np.random.default_rng(11)
+    n = 300
+    frame = pd.DataFrame(
+        {
+            "a": rng.normal(size=n),
+            "b": 1e6 + rng.uniform(size=n),
+            "g": rng.choice(["p", "q", "r"], n),
+            "s": rng.uniform(size=n),
+        }
+    )
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "a": Numeric(),
+            "b": Numeric(),
+            "g": Categorical(),
+            "s": BSplineSmooth(n_knots=6),
+        },
+    )
+    model.fit(frame, rng.poisson(1.0, n).astype(np.float64))
+    dm = model._dm
+    weights = rng.uniform(0.1, 2.0, n)
+    mean_x, sum_w, diagonal = weighted_column_centring(dm, weights, weights > 0.0)
+    dense = np.concatenate(
+        [np.full(m.shape[1], type(m).__name__ == "DenseGroupMatrix") for m in dm.group_matrices]
+    )
+    for j in range(dm.p):
+        unit = np.zeros(dm.p)
+        unit[j] = 1.0
+        column = np.asarray(dm.matvec(unit), dtype=np.float64)
+        mean = math.fsum(weights * column) / math.fsum(weights)
+        centred = column - mean
+        expected = math.fsum(weights * centred**2)
+        terms = 8.0 * n * _EPS * math.fsum(weights * (centred**2 if dense[j] else column**2))
+        if dense[j]:
+            terms += (
+                4.0 * _EPS * float(np.max(np.abs(column))) * math.fsum(weights * np.abs(centred))
+            )
+        assert abs(diagonal[j] - expected) <= terms
+        assert abs(mean_x[j] - mean) <= 4.0 * n * _EPS * float(np.max(np.abs(column)))
+    assert sum_w == pytest.approx(float(np.sum(weights)), rel=4.0 * n * _EPS)
+
+
+def test_weight_and_penalty_scales_never_certify_a_wrong_maximum() -> None:
+    """Sol's #437 fixture under every weight scale times penalty scale, subnormal weights too.
+
+    Intercept and slope ``x = (-1, -1, 1, 1)``, ``y = (0, 1, 0, 1)``, offsets
+    ``(2, 2, 3, 3)`` (a lowered start), weights ``w`` and penalty ``s`` on
+    the slope.  The maximum depends only on ``r = s / w``; the reference
+    solves it by Newton's method on the exact score, with ``r`` taken as 0
+    below 1e-30 and as 1e30 above 1e30, where the slope's maximum no longer
+    moves at float64 resolution.  d1496789 certified a wrong point at ``w =
+    1e-100, s = 1e300`` (one global power of two had sent the data to zero
+    beside the penalty).  Every certified fit must sit within the
+    certificate's bound of the reference, doubled because the penalty's own
+    term in a slope's scale is bounded at the maximum by the data score it
+    balances.  At normal weights every fit is certified; at the smallest
+    subnormal weight, whose rows carry one bit, the fit may only refuse.
+    """
+    x = np.array([-1.0, -1.0, 1.0, 1.0])
+    y = np.array([0.0, 1.0, 0.0, 1.0])
+    offset = np.array([2.0, 2.0, 3.0, 3.0])
+    design = np.column_stack([np.ones(4), x])
+
+    def reference(ratio: float) -> np.ndarray:
+        theta = np.array([-4.0, 0.0])
+        for _ in range(200):
+            eta = design @ theta + offset
+            odds = np.exp(eta) / -np.expm1(eta)
+            score = design.T @ (y - (1.0 - y) * odds) - np.array([0.0, ratio * theta[1]])
+            information = design.T @ (((1.0 - y) * odds / -np.expm1(eta))[:, None] * design)
+            step = np.linalg.solve(information + np.diag([0.0, ratio]), score)
+            fraction = 1.0
+            while np.any(design @ (theta + fraction * step) + offset >= 0.0):
+                fraction /= 2.0
+            theta = theta + fraction * step
+            if np.max(np.abs(fraction * step)) <= 4.0 * _EPS * (1.0 + np.max(np.abs(theta))):
+                break
+        return theta
+
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.types import GroupSlice
+
+    scales = (1e-300, 1e-100, 1.0, 1e100, 1e300)
+    for w in (float(np.nextafter(0.0, 1.0)), *scales):
+        for s in scales:
+            log_ratio = math.log10(s) - math.log10(w)
+            ratio = 0.0 if log_ratio < -30.0 else (1e30 if log_ratio > 30.0 else 10.0**log_ratio)
+            theta = reference(ratio)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FractionalFrequencyWeightWarning)
+                result, _ = fit_irls_direct(
+                    DesignMatrix([DenseGroupMatrix(x[:, None])], n=4, p=1),
+                    y,
+                    np.full(4, w),
+                    Binomial(),
+                    LogLink(),
+                    [GroupSlice("x", 0, 1)],
+                    lambda2=0.0,
+                    offset=offset,
+                    S_override=np.array([[s]]),
+                    weight_semantics="frequency",
+                )
+            if w >= np.finfo(np.float64).tiny:
+                assert result.converged, (w, s)
+            if result.converged:
+                eta = x * result.beta[0] + result.intercept + offset
+                bound = 2.0 * _certified_eta_bound(design, y, offset, theta)
+                assert np.max(np.abs(eta - (design @ theta + offset))) <= bound, (w, s)
+
+
+def test_an_intercept_only_fit_at_the_smallest_weight_is_never_certified_wrong() -> None:
+    """Sol's #437 fixture: an intercept-only fit with every weight ``nextafter(0, 1)``.
+
+    The row products ``w odds`` underflowed before d1496789's power of two
+    could lift them, the rounded scores cancelled exactly, and it certified
+    an intercept of -3.5 (probabilities 0.223 and 0.607; the maximum, 0.232
+    and 0.629, has a relative score of 0.045 there).  The weights are now
+    normalised before any product.  This fit cannot reach the maximum on one
+    bit of weight, so it ends not converged, never certified elsewhere.
+    Master returns it not converged at an infeasible state.
+    """
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        weight_semantics="frequency",
+        features={},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FractionalFrequencyWeightWarning)
+        model.fit(
+            pd.DataFrame(index=range(4)),
+            np.array([0.0, 1.0, 0.0, 1.0]),
+            offset=np.array([2.0, 2.0, 3.0, 3.0]),
+            sample_weight=np.full(4, np.nextafter(0.0, 1.0)),
         )
-        model.fit(pd.DataFrame({"x": x}), y, offset=np.full(n, shift))
-        assert model.result.converged
-        assert model.result.termination_reason == "converged"
-        deviances.append(float(model.result.deviance))
-    assert abs(deviances[1] - deviances[0]) <= 2.0 * model._tol * (max(deviances) + 1.0)
+    eta = model.result.intercept + np.array([2.0, 2.0, 3.0, 3.0])
+    reference = _log_binomial_maximum(
+        np.ones((4, 1)), np.array([0.0, 1.0, 0.0, 1.0]), np.array([2.0, 2.0, 3.0, 3.0])
+    )
+    at_maximum = abs(float(eta[0] - (reference[0] + 2.0))) <= 1e-6
+    assert not model.result.converged or at_maximum
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
+def test_reml_newton_steps_are_certified_by_the_models_score(direct_solve: str) -> None:
+    """Sol's #437 fixture: ``fit_reml``, a fixed-lambda random effect, an event row at -25 per level.
+
+    REML's inner solves stop on ``mode_score``'s clipped residual, which
+    cannot pass at the model's mode: the clip all but removes each
+    low-probability event's unit score.  d1496789 reached the mode with
+    Newton steps but, its stop gated on that residual, ran to max_iter.
+    Under Newton steps the model's own certificate is now the stop.  The
+    mode has zero random effects and intercept ``log(2/3) - 2``; master
+    certifies ``log(1/2) - 2`` instead, the maximum without the event rows.
+    """
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={"g": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0))},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(
+            pd.DataFrame({"g": ["a", "a", "a", "b", "b", "b"]}),
+            np.array([1.0, 0.0, 1.0, 1.0, 0.0, 1.0]),
+            offset=np.array([-25.0, 2.0, 2.0, -25.0, 2.0, 2.0]),
+        )
+    assert model.result.converged
+    assert model.result.termination_reason == "converged"
+    assert model._reml_profile["direct_backend"] == direct_solve
+    assert model._reml_profile["irls_mean_space_newton_iters"] > 0
+    # certified: the intercept's score within bar sum|s| (sum|s| = 8 at the
+    # mode: per level two events of score 1 and a non-event of 2) against the
+    # non-events' observed curvature p / (1 - p)^2 = 6 per level, 12 in all,
+    # so within 2/3 bar of the mode, doubled for the curvature's change on
+    # the way; the random effects' penalty only adds curvature
+    bound = 4.0 / 3.0 * MODE_CERTIFICATION_BAR
+    assert abs(model.result.intercept - (np.log(2.0 / 3.0) - 2.0)) <= bound
+    assert np.all(np.abs(model.result.beta) <= bound)
+
+
+@pytest.mark.parametrize("scale", [1e-200, 1.0, 1e200])
+def test_a_constraint_row_s_norm_does_not_depend_on_its_units(scale: float) -> None:
+    """Sol's #437 fixture: ``scale * beta >= 0`` at unit weights and offset +2.
+
+    Eight rows, ``x`` 0 then 1, ``y = (1, 1, 1, 0, 0, 0, 0, 1)``: every
+    positive scale has the maximum ``beta = 0``, intercept ``log(1/2) - 2``.
+    d1496789 squared the row before its norm, so ``[[1e200]]`` had norm
+    ``inf`` and ``[[1e-200]]`` norm 0, and both ended ``score_stagnated``.
+    The row is now brought to a largest entry in ``[1/2, 1)`` by a power of
+    two first.  Master returns all three not converged at an infeasible
+    state.
+    """
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    x = np.array([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0])
+    groups = [
+        GroupSlice(
+            "x",
+            0,
+            1,
+            constraints=LinearConstraintSet(A=np.array([[scale]]), b=np.zeros(1)),
+            monotone_engine="qp",
+        )
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(x[:, None])], n=8, p=1),
+            np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+            np.ones(8),
+            Binomial(),
+            LogLink(),
+            groups,
+            lambda2=0.0,
+            offset=np.full(8, 2.0),
+            weight_semantics="frequency",
+        )
+    assert result.converged
+    assert result.beta[0] == 0.0
+    # certified: with beta = 0 every row shares eta, the intercept's score is
+    # c (1 - p / (1 - p)) for c events and c non-events, sum|s| = 2c and its
+    # slope in eta 2c / (1 - p) = 4c at p = 1/2, so eta is within bar / 2 of
+    # log(1/2), doubled for the curvature's change along the way, plus the
+    # intercept's own rounding, u |intercept|
+    bound = MODE_CERTIFICATION_BAR + _U * abs(np.log(0.5) - 2.0)
+    assert abs(result.intercept - (np.log(0.5) - 2.0)) <= bound
 
 
 def test_the_clip_and_the_true_score_are_read_off_the_unclipped_eta() -> None:
