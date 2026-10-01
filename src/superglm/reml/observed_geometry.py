@@ -1053,17 +1053,15 @@ def observed_penalized_mode_score(
     # X beta they cancel c' beta there, u |c' beta| in alpha and every row.
     alpha_c = getattr(result, "centred_intercept", None)
     centre = getattr(result, "state_center", None)
-    far = (
-        None
-        if alpha_c is None or centre is None
-        else offset_columns(dm, sample_weight, np.asarray(centre, dtype=np.float64))
-    )
-    if far is None or not np.any(far):
+    far = None
+    if alpha_c is not None and centre is not None:
+        centre = np.asarray(centre, dtype=np.float64)
+        far = offset_columns(dm, sample_weight, centre)
+    if alpha_c is None or centre is None or far is None or not np.any(far):
         shift = float(mean_x @ beta)
         alpha = float(result.intercept) + shift
         eta_tilde = dm.matvec(beta) - shift
     else:
-        centre = np.asarray(centre, dtype=np.float64)
         offset_mean = centre_offset_mean(
             dm, geometry.weights, float(geometry.sum_w), centre, mean_x, far
         )

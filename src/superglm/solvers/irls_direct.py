@@ -2391,12 +2391,7 @@ def _fit_irls_direct_once(
                     # formed on centred rows, so the border's ``X' r`` is never
                     # cancelled against ``c`` times the intercept's (a 1e16
                     # offset left no digit of it and the step was rejected)
-                    if not _far_centre:
-                        gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
-                        increment = augmented_factor.solve(
-                            gradient, centred=_state_center is not None
-                        )
-                    else:
+                    if _far_centre and _state_center is not None:
                         gradient[1:] = centred_data_score(
                             dm, residual_rows, _state_center
                         ) - penalty_matvec(committed.beta)
@@ -2404,6 +2399,11 @@ def _fit_irls_direct_once(
                             gradient,
                             centred=True,
                             border_centred=gradient[augmented_factor.small_indices[1:]],
+                        )
+                    else:
+                        gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
+                        increment = augmented_factor.solve(
+                            gradient, centred=_state_center is not None
                         )
                     beta = committed.beta + increment[1:]
                     if _state_center is not None:

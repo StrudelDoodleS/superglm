@@ -430,7 +430,7 @@ def centre_offset_mean(
     sum_w: float,
     center: NDArray,
     mean_x: NDArray,
-    columns: NDArray,
+    columns: NDArray | None,
 ) -> NDArray:
     """``d = sum W (x - c) / sum W``: a weighted column mean read about the state's centre ``c``.
 
@@ -441,10 +441,13 @@ def centre_offset_mean(
     column ``columns`` marks (``offset_columns``: a dense column whose centre
     lies beyond its spread) is differenced row by row before its weighted
     sum, in fixed chunks as ``centred_matvec``, so ``d`` rounds at ``gamma_n
-    max|x - c|``.  Every other column keeps ``mean_x - c``, which already
-    rounds within a factor two of that, bit for bit as before.
+    max|x - c|``.  Every other column (all of them for ``None``) keeps
+    ``mean_x - c``, which already rounds within a factor two of that, bit
+    for bit as before.
     """
     offset_mean = np.asarray(mean_x, dtype=np.float64) - center
+    if columns is None:
+        return offset_mean
     w = np.asarray(weights, dtype=np.float64)
     offset = 0
     for matrix in dm.group_matrices:
