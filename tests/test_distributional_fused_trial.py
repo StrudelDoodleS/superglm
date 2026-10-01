@@ -45,6 +45,18 @@ def _context(problem=None, *, source="observed"):
     return context, coefficients
 
 
+def test_a_replaced_penalty_rebuilds_the_penalty_entries():
+    context, _ = _context()
+    penalty = context.penalty.copy()
+    penalty[0, 0] = 0.0
+    derived = replace(context, penalty=penalty)
+    rows, columns = np.nonzero(penalty)
+    np.testing.assert_array_equal(derived.penalty_entries[0], rows)
+    np.testing.assert_array_equal(derived.penalty_entries[1], columns)
+    np.testing.assert_array_equal(derived.penalty_entries[2], penalty[rows, columns])
+    assert len(context.penalty_entries[0]) == len(rows) + 1
+
+
 def _run(context, coefficients, *, config=None, stop_policy="ordinary"):
     initial = solver_api._evaluate_state(context, coefficients)
     assert initial is not None

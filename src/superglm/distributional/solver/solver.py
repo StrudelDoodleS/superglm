@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import weakref
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal, cast
 
 import numpy as np
@@ -94,9 +94,6 @@ class _SolverContext:
     response: NDArray[np.float64]
     likelihood_plan: FamilyLikelihoodPlan
     penalty: NDArray[np.float64]
-    # The read-only penalty's nonzero entries in row-major order, built once
-    # with it: nothing changes the penalty during a solve.
-    penalty_entries: tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64]]
     links: tuple[Link, ...]
     coefficient_curvature: CoefficientCurvature
     chunk_size: int | None
@@ -104,6 +101,15 @@ class _SolverContext:
     dense_matrices: tuple[NDArray[np.float64], ...] | None
     coefficient_face: PenaltyFace | None
     likelihood_cache: _LikelihoodCache | None = None
+    # The penalty's nonzero entries in row-major order. Derived, never passed:
+    # __post_init__ rebuilds them with every context, including one that
+    # dataclasses.replace derives with a new penalty.
+    penalty_entries: tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64]] = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "penalty_entries", _penalty_entries(self.penalty))
 
 
 @dataclass(frozen=True)
@@ -649,7 +655,6 @@ def _validated_context(
         response=response,
         likelihood_plan=root_likelihood_plan,
         penalty=penalty_matrix,
-        penalty_entries=_penalty_entries(penalty_matrix),
         links=links,
         coefficient_curvature=coefficient_curvature,
         chunk_size=resolved_chunk_size,
