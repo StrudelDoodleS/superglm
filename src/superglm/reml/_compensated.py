@@ -92,3 +92,22 @@ def _dot2_selected(left, right, indices):
             values[index] = value
             success[index] = True
     return values, success
+
+
+@njit(cache=True, fastmath=False)
+def _dot2_quadratic_form(matrix, vector):
+    """Evaluate ``x' A x`` as ``Dot2(x, A x)`` with each row of ``A x`` from Dot2.
+
+    By Proposition 5.5 of Ogita, Rump and Oishi (2005), without underflow,
+    ``|v_i - (A x)_i| <= u |(A x)_i| + gamma_n**2 (|A| |x|)_i`` for each row
+    and ``|res - x' v| <= u |x' v| + gamma_n**2 |x|' |v|``, so the result is
+    within ``u |x' A x| + u |x|' |A x| + 2 gamma_n**2 |x|' |A| |x|`` to first
+    order. False requests the caller's fallback, as ``_dot2_value`` does.
+    """
+    rows = np.empty(len(vector), dtype=np.float64)
+    for row in range(len(vector)):
+        value, valid = _dot2_value(matrix[row], vector)
+        if not valid:
+            return 0.0, False
+        rows[row] = value
+    return _dot2_value(vector, rows)

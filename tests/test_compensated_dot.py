@@ -390,3 +390,73 @@ def test_refinement_retains_scalar_range_fallback(monkeypatch, without_fma, root
         assert abs(Fraction.from_float(action[row, column]) - exact) <= Fraction.from_float(
             error[row, column]
         )
+
+
+def _capped_difference_penalty(width: int = 8, lam: float = 1.0e10):
+    """A second-difference penalty at a capped lambda and an O(1) null-space state.
+
+    ``b`` is a linear trend, which the penalty annihilates, plus a 1e-10 wiggle,
+    as at an endpoint-authority cap fit: ``|b|' |P| |b|`` is near 1e12 while
+    ``b' P b`` is near 1e-9.
+    """
+    difference = np.diff(np.eye(width), n=2, axis=0)
+    penalty = lam * (difference.T @ difference)
+    rng = np.random.default_rng(427)
+    coefficients = 0.3 + 0.7 * np.linspace(0.0, 1.0, width) + 1.0e-10 * rng.normal(size=width)
+    return penalty, coefficients
+
+
+def _quadratic_form_error_bound(matrix, vector):
+    """Two-stage Proposition 5.5 bound for ``Dot2(x, Dot2-rows(A, x))``, in rationals.
+
+    Rows: ``|v_i - w_i| <= u |w_i| + g a_i`` with ``w = A x``, ``a = |A| |x|`` and
+    ``g = gamma_n**2``. Outer: ``|res - x'v| <= u |x'v| + g |x|'|v|``. With
+    ``|x'v| <= |q| + E``, ``E = u |x|'|w| + g |x|'a`` and ``|v| <= (1 + u + g) a``,
+    ``|res - q| <= u |q| + (1 + u) E + g (1 + u + g) |x|'a``. No underflow occurs
+    here, which the kernel's success flag certifies.
+    """
+    unit = Fraction(1, 2**53)
+    gamma = len(vector) * unit / (1 - len(vector) * unit)
+    g = gamma**2
+    rows = [_exact_dot(row, vector) for row in matrix]
+    absolute_rows = [_exact_dot(np.abs(row), np.abs(vector)) for row in matrix]
+    magnitudes = [abs(Fraction.from_float(float(value))) for value in vector]
+    exact = sum(
+        (Fraction.from_float(float(x)) * w for x, w in zip(vector, rows, strict=True)),
+        Fraction(0),
+    )
+    weighted_rows = sum((m * abs(w) for m, w in zip(magnitudes, rows, strict=True)), Fraction(0))
+    weighted_absolute = sum(
+        (m * a for m, a in zip(magnitudes, absolute_rows, strict=True)), Fraction(0)
+    )
+    first_stage = unit * weighted_rows + g * weighted_absolute
+    bound = unit * abs(exact) + (1 + unit) * first_stage + g * (1 + unit + g) * weighted_absolute
+    return exact, bound
+
+
+def test_quadratic_form_resolves_a_capped_penalty_and_rejects_the_plain_product():
+    from superglm.reml._compensated import _dot2_quadratic_form
+
+    penalty, coefficients = _capped_difference_penalty()
+    value, success = _dot2_quadratic_form(penalty, coefficients)
+    exact, bound = _quadratic_form_error_bound(penalty, coefficients)
+    assert success
+    assert abs(Fraction.from_float(value) - exact) <= bound
+    # Mutation control: the plain product cannot satisfy the bound.
+    plain = float(coefficients @ penalty @ coefficients)
+    assert abs(Fraction.from_float(plain) - exact) > bound
+
+
+def test_solver_penalty_value_uses_the_compensated_form_and_its_range_fallback():
+    from superglm.distributional.solver.solver import _half_penalty_quadratic
+    from superglm.reml._compensated import _dot2_quadratic_form
+
+    penalty, coefficients = _capped_difference_penalty()
+    value, success = _dot2_quadratic_form(penalty, coefficients)
+    assert success
+    assert _half_penalty_quadratic(penalty, coefficients) == 0.5 * value
+    # A subnormal coefficient is outside Dot2's normal range: the naive form.
+    tiny = coefficients.copy()
+    tiny[0] = np.nextafter(0.0, 1.0)
+    assert not _dot2_quadratic_form(penalty, tiny)[1]
+    assert _half_penalty_quadratic(penalty, tiny) == 0.5 * float(tiny @ penalty @ tiny)
