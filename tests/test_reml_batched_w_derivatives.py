@@ -711,21 +711,29 @@ def test_moment_route_requests_the_directions_together(monkeypatch, per_call):
         np.testing.assert_array_equal(grams[i], reference[i])
 
 
-def _support_correction_fixture(tensor):
-    """An exact Poisson fit on four lossless supports and a categorical.
+def _support_correction_fixture(kind):
+    """An exact Poisson fit on four smooth main effects and a categorical.
 
-    With ``tensor``, a discretized tensor joins them: a design outside the
-    shared-owner set, so each direction would project the supports itself.
+    ``owner``: the main effects are lossless supports, which the shared
+    fixed-support owner projects once. ``tensor``: a discretized tensor joins
+    them, outside the shared-owner set, so each direction would project the
+    supports itself. ``plain``: the main effects are sparse SSP bases, which
+    no cache projects.
     """
     rng = np.random.default_rng(8830)
     n, width = 8_000, 10
-    matrices = [
-        SupportCompressedSSPGroupMatrix(
-            rng.normal(size=(n, width)) / 4, np.eye(width), np.arange(n)
-        )
-        for _ in range(4)
-    ]
-    if tensor:
+    if kind == "plain":
+        values = rng.normal(size=(4, n, width)) / 4
+        values[rng.random(size=values.shape) < 0.6] = 0.0
+        matrices = [SparseSSPGroupMatrix(sparse.csr_matrix(v), np.eye(width)) for v in values]
+    else:
+        matrices = [
+            SupportCompressedSSPGroupMatrix(
+                rng.normal(size=(n, width)) / 4, np.eye(width), np.arange(n)
+            )
+            for _ in range(4)
+        ]
+    if kind == "tensor":
         bins, k = 24, 4
         margins = rng.normal(size=(bins, k)) / 2, rng.normal(size=(bins, k)) / 2
         idx1, idx2 = rng.integers(0, bins, n), rng.integers(0, bins, n)
@@ -792,20 +800,22 @@ def _support_correction_fixture(tensor):
     )
 
 
-@pytest.mark.parametrize("tensor", [True, False], ids=["tensor-no-owner", "shared-owner"])
-def test_batched_directions_stay_within_their_memory_budget(monkeypatch, tensor):
+@pytest.mark.parametrize("kind", ["tensor", "owner", "plain"])
+def test_batched_directions_stay_within_their_memory_budget(monkeypatch, kind):
     """A batch holds no more than its per-direction charge beyond one direction's peak.
 
     Without a shared owner every direction projects the supports itself, so a
-    batch kept one projection set per direction alive at once; such designs
-    now take the directions one at a time.
+    batch kept one projection set per direction alive at once (#436 review);
+    such designs now take the directions one at a time. Designs whose
+    supports the owner shares, or that project none, still batch.
     """
     import tracemalloc
 
-    kwargs = _support_correction_fixture(tensor)
+    kwargs = _support_correction_fixture(kind)
     dm = kwargs["dm"]
     plan_type = type(dm.execution_plan)
-    assert (dm.execution_plan._fixed_support_cache() is None) is tensor
+    assert (dm.execution_plan._fixed_support_cache() is not None) is (kind == "owner")
+    batches = kind != "tensor"
     original, requests = plan_type._signed_moments_channels, []
 
     def recorded(plan, weights, owner):
@@ -833,9 +843,9 @@ def test_batched_directions_stay_within_their_memory_budget(monkeypatch, tensor)
     m = len(kwargs["reml_penalties"])
     # The charge per direction: retained weights and their stacked copy (2n),
     # and the raw and centred Grams (3p^2), as w_derivatives budgets them.
-    # Beyond it, each block of this design makes at most one shared pass,
-    # live at most _CHANNEL_PASS_BYTES, beside one channel's copied slice.
+    # Beyond it, one block's shared passes: here at most one result of at most
+    # _CHANNEL_PASS_BYTES, or a few p x p ones, beside one channel's slice.
     charge = np.dtype(np.float64).itemsize * (2 * dm.n + 3 * dm.p * dm.p)
     assert batched <= serial + m * charge + 3 * algebra._CHANNEL_PASS_BYTES // 2
-    assert requests == ([] if tensor else [m])
+    assert requests == ([m] if batches else [])
     np.testing.assert_array_equal(actual[0], expected[0])

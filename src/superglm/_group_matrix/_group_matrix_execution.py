@@ -314,6 +314,13 @@ class MatrixExecutionPlan:
             return None
         return _BlockWeightCache()
 
+    def _projects_no_support(self) -> bool:
+        """Whether no group projects a support: each direction's cache then holds only Grams."""
+        from ..group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, SparseSSPGroupMatrix
+
+        plain = (CategoricalGroupMatrix, DenseGroupMatrix, SparseSSPGroupMatrix)
+        return all(type(group) in plain for group in self.group_matrices)
+
     def _signed_moments_fixed_support(
         self, weights: NDArray, owner: _BlockWeightCache
     ) -> WeightedMoments:
