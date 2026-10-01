@@ -22,6 +22,7 @@ import pytest
 
 from superglm import (
     Categorical,
+    FactorSmooth,
     LambdaPolicy,
     Numeric,
     Polynomial,
@@ -34,11 +35,15 @@ from tests.test_factor_smooth_sz_thin_and_influence import _frame, _model, _pena
 
 EPS = float(np.finfo(np.float64).eps)
 _U = EPS / 2.0
-REML_TOL = 1e-9  # fit_reml's default
 
 
 def _gamma(count: float) -> float:
     return count * _U / (1.0 - count * _U)
+
+
+def _reml_tol(model: SuperGLM) -> float:
+    """The stopping tolerance the fit's REML engine resolved and ran with."""
+    return float(model._reml_profile["reml_tol_resolved"])
 
 
 def _fit_reml(model: SuperGLM, frame, y) -> SuperGLM:
@@ -52,13 +57,15 @@ def _assert_same_reml(base: SuperGLM, shifted: SuperGLM) -> None:
 
     The optimizer stops once the objective resolves no change beyond
     ``reml_tol (1 + |V|)``, so two runs that stop certified sit within twice
-    that of each other.
+    that of each other.  Reading the stop rule as a bound on the distance to
+    the optimum's value holds once the outer Newton steps converge
+    superlinearly, as they do on these well-determined fixtures.
     """
     first, second = base._reml_result, shifted._reml_result
     assert first.converged and second.converged
     assert second.termination_reason == first.termination_reason
     objective = abs(float(first.objective))
-    assert abs(float(second.objective) - float(first.objective)) <= 2.0 * REML_TOL * (
+    assert abs(float(second.objective) - float(first.objective)) <= 2.0 * _reml_tol(base) * (
         1.0 + objective
     )
 
@@ -101,6 +108,43 @@ def test_discrete_cached_trials_carry_the_factors_centred_intercept(shift):
     _assert_same_reml(base, shifted)
 
 
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+def test_discrete_factor_smooth_trials_carry_the_leaf_centred_intercept(basis):
+    """Item 1 through the fs and sz leaf factors' cached solves.
+
+    ``solve_cached_block_structured`` and ``solve_cached_sum_to_zero_structured``
+    read the border centre from the leaf system (``system.leaf.center``), the
+    nested solve from its operator's.  ``x1`` sits in the border at 1e16.
+    Mutation: a zero centre for a leaf system in
+    ``assembly._cached_centred_solution`` (the trial's ``alpha`` is then
+    carried as if it were about zero).
+    """
+    frame, _, rng, _ = _frame(K=12, n=1500, seed=5)
+    z = 2.0 * rng.integers(-4, 5, len(frame)).astype(float)
+    signal = 0.5 + 0.2 * z + np.sin(2 * np.pi * frame["x"].to_numpy())
+    y = signal + rng.normal(0.0, 0.3, len(z))
+
+    def fit(shift: float) -> SuperGLM:
+        translated = frame.copy()
+        translated["x1"] = shift + z
+        features = {"x1": Numeric(), "cat": Categorical()}
+        if basis == "sz":
+            features["x"] = Spline(n_knots=6)
+        model = SuperGLM(
+            family="gaussian",
+            features=features,
+            interactions=[FactorSmooth("x", group="g", basis=basis, k=5)],
+            selection_penalty=0,
+            direct_solve="structured",
+            discrete=True,
+        )
+        return _fit_reml(model, translated, y)
+
+    base, shifted = fit(0.0), fit(1e16)
+    assert shifted._reml_profile["direct_backend"] == "structured"
+    _assert_same_reml(base, shifted)
+
+
 # --------------------------------------------------- 2. sz minimum-norm step
 def test_sz_minimum_norm_step_forms_its_score_about_the_centre():
     """A truncated ``sz`` factor's increment solves the centred score (item 2).
@@ -129,7 +173,7 @@ def test_sz_minimum_norm_step_forms_its_score_about_the_centre():
         assert model.result.converged
         assert model.result.termination_reason == "converged"
     criterion = abs(float(base._reml_result.objective))
-    tolerance = 4.0 * float(base.result.phi) * REML_TOL * (1.0 + criterion)
+    tolerance = 4.0 * float(base.result.phi) * _reml_tol(base) * (1.0 + criterion)
     assert abs(_penalized_objective(shifted) - _penalized_objective(base)) <= tolerance
 
 
@@ -231,6 +275,44 @@ def test_discrete_reml_warm_starts_carry_the_centred_state(family):
         return _fit_reml(model, pd.DataFrame({"x": shift + z, "g": g, "s": s}), y)
 
     _assert_same_reml(fit(0.0), fit(1e16))
+
+
+def test_a_centred_warm_state_without_its_beta_is_not_a_start():
+    """``_centred_init`` is ``alpha + (X - 1 c') beta_init``: without ``beta_init`` it is ignored.
+
+    The fit then starts from ``intercept_init`` with zero slopes, as without
+    the centred state.  One Poisson step depends on its start, so the two
+    fits agree bit for bit only from the same start.  Mutation: drop
+    ``beta_init is not None`` from ``irls_direct``'s warm-start guard (the fit
+    then starts from the warm ``alpha`` instead).
+    """
+    from superglm.distributions import Poisson
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import LogLink
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.types import GroupSlice
+
+    rng = np.random.default_rng(3)
+    n = 200
+    X = 5.0 + rng.normal(size=(n, 1))
+    y = rng.poisson(np.exp(0.2 + 0.3 * (X[:, 0] - 5.0))).astype(float)
+    common = {
+        "X": DesignMatrix([DenseGroupMatrix(X)], n=n, p=1),
+        "y": y,
+        "weights": np.ones(n),
+        "family": Poisson(),
+        "link": LogLink(),
+        "groups": [GroupSlice(name="x", start=0, end=1)],
+        "lambda2": 1.0,
+        "S_override": np.array([[0.1]]),
+        "intercept_init": 0.1,
+        "max_iter": 1,
+        "weight_semantics": "frequency",
+    }
+    plain, _ = fit_irls_direct(**common)
+    warm, _ = fit_irls_direct(**common, _centred_init=(2.0, np.array([5.0])))
+    np.testing.assert_array_equal(warm.beta, plain.beta)
+    assert warm.intercept == plain.intercept
 
 
 # --------------------------------------- 4b. the exact REML weight derivative
@@ -337,9 +419,10 @@ def test_a_folded_compensated_intercept_still_predicts_the_fit(base):
 
 
 # ------------------------------------------- 7. the gram path's intercept
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
 @pytest.mark.parametrize("family", ["poisson", "gamma"])
-def test_gram_intercept_reads_the_working_means_about_the_centre(family):
-    """The gram iteration's ``alpha = mean_z - (mean_x - c)' beta`` (item 7).
+def test_gram_and_qr_intercepts_read_the_working_means_about_the_centre(family, direct_solve):
+    """The gram and QR iterations' ``alpha = mean_z - (mean_x - c)' beta`` (item 7).
 
     ``mean_x`` of a column at ``s`` rounds at ``u s``, so ``mean_x - c`` erred
     by ``u s |beta|`` in every row's eta (2.7e-12 at 1e6; 4e-8 here at 1e10):
@@ -348,8 +431,9 @@ def test_gram_intercept_reads_the_working_means_about_the_centre(family):
     (``mode_score.centre_offset_mean``), and the translated fit runs the same
     centred arithmetic, so the two predictors agree to the forward error of
     the solves, ``gamma_n kappa(H) max|eta|`` with ``kappa`` the centred
-    Hessian's condition.  Mutation: ``centered.mean_x - _state_center`` in
-    ``irls_direct``'s gram branch.
+    Hessian's condition; QR is backward stable too, so one bound covers both
+    branches.  Mutation: ``centered.mean_x - _state_center`` in ``irls_direct``'s
+    gram branch, or in its QR branch.
     """
     rng = np.random.default_rng(7)
     n = 3000
@@ -367,7 +451,7 @@ def test_gram_intercept_reads_the_working_means_about_the_centre(family):
             family=family,
             features={"x": Numeric(), "cat": Categorical()},
             selection_penalty=0.0,
-            direct_solve="gram",
+            direct_solve=direct_solve,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

@@ -1284,6 +1284,38 @@ class TestDeviance:
         assert metrics.explained_deviance == 0.0
         assert model._fit_stats.explained_deviance == 0.0
 
+    def test_constant_response_null_within_eight_ulps_is_the_exact_null(self):
+        """The 8-ulp exact-null branch of ``_explained_deviance``, both ways.
+
+        A constant response under a constant offset still reaches it: the
+        null intercept ``0.3 - 0.1`` plus the offset rounds a few ulps from
+        0.3, so the null deviance is roundoff-positive and the convention
+        must read the null as exact (explained 0).  A null mean 16 ulps away
+        is outside the convention and keeps the ratio.  Mutations:
+        ``numerically_exact`` forced False fails the first two asserts,
+        forced True the last.
+        """
+        from superglm._utils import _explained_deviance
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 41)})
+        y = np.full(len(X), 0.3)
+        offset = np.full(len(X), 0.1)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, offset=offset)
+        metrics = model.metrics(X.copy(), y.copy(), offset=offset.copy())
+        assert metrics.null_deviance > 0.0
+        assert metrics.explained_deviance == 0.0
+
+        weights = np.ones(len(y))
+        ulp = np.spacing(0.3)
+        far = y + 16.0 * ulp
+        null_deviance = float(np.sum((y - far) ** 2))
+        deviance = 0.25 * null_deviance
+        assert _explained_deviance(deviance, null_deviance, y, far, weights) == pytest.approx(0.75)
+
     def test_ulp_guard_preserves_genuine_small_scale_signal(self):
         x = np.linspace(-1.0, 1.0, 41)
         X = pd.DataFrame({"x": x})

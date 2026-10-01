@@ -918,7 +918,8 @@ def _fit_irls_direct_once(
         and ``state_center``; ``centred_warm_start``).  The fit carries it to
         its own centre exactly instead of taking it back from
         ``intercept_init``, whose rounding cancels ``c' beta`` at a column's
-        offset.  Ignored when ``intercept_init`` is not the start.
+        offset.  Ignored without ``beta_init`` (the state's own ``beta``) or
+        when ``intercept_init`` is not the start.
     _compute_reml_geometry : bool
         Internal SCOP-candidate switch. If False, omit the generic profiled
         slope inverse, determinant, and rank because the caller replaces them
@@ -1869,6 +1870,7 @@ def _fit_irls_direct_once(
     if (
         _centred_init is not None
         and _state_center is not None
+        and beta_init is not None
         and intercept_init is not None
         and intercept == intercept_init
     ):
