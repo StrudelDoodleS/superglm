@@ -22,12 +22,13 @@ from superglm.diagnostics.exact_banding import (
 )
 from superglm.export._ppform import extract_ppform
 from superglm.export.rating_tables import build_rating_table_payload
+from superglm.model import base
 
-_EPS = float(np.finfo(np.float64).eps)
+_UNIT_ROUNDOFF = 2.0**-53
 
 
 def _brute_force(s, w, tol):
-    """(band count, weighted squared error) minimised lexicographically over every banding."""
+    """(band count, weighted squared error) least over every banding, and its starts."""
     n = len(s)
     best = None
     for r in range(n):
@@ -42,8 +43,8 @@ def _brute_force(s, w, tol):
                     feasible = False
                     break
                 total += float(np.sum(w[a:b] * (s[a:b] - mean) ** 2))
-            if feasible and (best is None or (len(starts), total) < best):
-                best = (len(starts), total)
+            if feasible and (best is None or (len(starts), total) < best[:2]):
+                best = (len(starts), total, list(starts))
     return best
 
 
@@ -56,13 +57,18 @@ def test_matches_exhaustive_search_on_random_curves():
         tol = rng.uniform(0.0, 0.4, n)
         tol[rng.random(n) < 0.15] = 0.0
         result = exact_bands(s, w, tol, max_bands=n)
-        count, sse = _brute_force(s, w, tol)
+        count, sse, starts = _brute_force(s, w, tol)
+        # The bound below compares one banding's two errors, so both must pick it.
+        assert result.starts.tolist() == starts
         # sse sums w (s - factor)**2 at the published factors, to relative
         # gamma_(n + 5); the brute force sums w (s - mean)**2 at np.average's
-        # means, to gamma_(n + 4).  Both sums are at most about sum(w s^2), so for
-        # n <= 10 they differ by under 15 eps sum(w s^2), plus each side's
-        # W (factor - mean)**2, which is second order in eps.  256 eps covers both.
-        scale = 256 * _EPS * (1.0 + float(np.sum(w * s * s)))
+        # means, to gamma_(n + 3): four roundings a term, then at most n - 1
+        # additions, as the first total += is exact.  Each sum is at most
+        # sum(w s^2) plus its W (factor - mean)**2, which is second order in
+        # u = 2**-53, so for n <= 10 they differ by under gamma_15 + gamma_13,
+        # 28 u to first order, times sum(w s^2).  32 u covers that and the
+        # second-order terms.  Nothing here nears underflow: no absolute term.
+        scale = 32 * _UNIT_ROUNDOFF * float(np.sum(w * s * s))
         assert len(result.starts) == count
         assert abs(result.sse - sse) <= scale
 
@@ -71,7 +77,10 @@ def test_two_obvious_bands():
     s = np.array([0.0, 0.05, 1.0, 1.05])
     result = exact_bands(s, np.ones(4), np.full(4, 0.1), max_bands=4)
     assert result.starts.tolist() == [0, 2]
-    np.testing.assert_allclose(result.factors, [0.025, 1.025], rtol=0, atol=4 * _EPS)
+    # Every step is exact but the last addition, so each factor is its band's
+    # exact mean rounded once: no tolerance.
+    means = [(Fraction(s[0]) + Fraction(s[1])) / 2, (Fraction(s[2]) + Fraction(s[3])) / 2]
+    assert result.factors.tolist() == [float(mean) for mean in means]
     assert result.tolerance_factor == 1.0
 
 
@@ -81,10 +90,9 @@ def test_every_value_is_within_its_tolerance_of_its_band():
     w = rng.uniform(0.1, 3.0, 60)
     tol = rng.uniform(0.01, 0.1, 60)
     result = exact_bands(s, w, tol, max_bands=60)
-    ends = np.append(result.starts[1:], 60)
-    for a, b, factor in zip(result.starts, ends, result.factors, strict=True):
-        slack = 4 * _EPS * (b - a) * (1.0 + np.abs(s[a:b]).max())
-        assert np.all(np.abs(s[a:b] - factor) <= tol[a:b] + slack)
+    # Every value is within its tolerance of its factor exactly, so the derived
+    # slack is zero.
+    assert _meets_exactly(s, result.starts, result.factors, tol)
 
 
 def test_constant_curve_with_zero_tolerance_is_one_band():
@@ -131,10 +139,9 @@ def test_a_small_cap_widens_the_tolerance_just_enough():
     assert result.tolerance_factor > 1.0
     tighter = result.tolerance_factor / (1.0 + 2e-6)
     assert len(_fewest_then_least(s, w, tighter * tol)[0]) > 5
-    ends = np.append(result.starts[1:], 50)
-    for a, b, factor in zip(result.starts, ends, result.factors, strict=True):
-        slack = 4 * _EPS * (b - a) * 2.0
-        assert np.all(np.abs(s[a:b] - factor) <= result.tolerance_factor * tol[a:b] + slack)
+    # Exactly within the widened tolerance, the double the solve used: no slack.
+    widened = result.tolerance_factor * tol
+    assert _meets_exactly(s, result.starts, result.factors, widened)
 
 
 def test_no_widening_when_the_cap_is_not_binding():
@@ -152,9 +159,9 @@ def test_rounding_slack_cannot_admit_a_band_that_breaks_a_tolerance():
     # Two values 7 ulps apart near 100, tolerances of 4.2 ulps, the weight on the
     # upper one: their mean lands 7 ulps from the lower value, past its 4.2. A
     # slack scaled by the curve's level (100) let that band through.
-    u = np.spacing(100.0)
-    s = np.array([100.0, 100.0 + 7.0 * u])
-    result = exact_bands(s, np.array([1.0, 1e6]), np.full(2, 4.2 * u), max_bands=2)
+    h = np.spacing(100.0)
+    s = np.array([100.0, 100.0 + 7.0 * h])
+    result = exact_bands(s, np.array([1.0, 1e6]), np.full(2, 4.2 * h), max_bands=2)
     assert result.starts.tolist() == [0, 1]
 
 
@@ -256,9 +263,10 @@ def test_the_acceptance_margin_certifies_ties_at_rounding_level():
 
 
 def test_the_acceptance_margin_does_not_cost_bands_it_can_certify():
-    # Eight times the margin clears any rounding, so one band must be taken.  The
-    # curve sits near zero: at a level of 100 the margin is far below an ulp, no
-    # double lies within every tolerance, and no factor could carry the band.
+    # Eight times the margin, 4 (k + 2) u max|d|, clears any rounding, so one
+    # band must be taken.  The curve sits near zero: at a level of 100 the
+    # margin is far below an ulp, no double lies within every tolerance, and no
+    # factor could carry the band.
     rng = np.random.default_rng(29)
     for _ in range(100):
         k = int(rng.integers(2, 6))
@@ -268,7 +276,7 @@ def test_the_acceptance_margin_does_not_cost_bands_it_can_certify():
         # tolerances are not rounded at the curve's level.
         d = s - s[-1]
         mean = np.average(d, weights=w)
-        margin = 16.0 * _EPS * (k + 2) * np.abs(d).max()
+        margin = 8 * 4 * _UNIT_ROUNDOFF * (k + 2) * np.abs(d).max()
         result = exact_bands(s, w, np.abs(d - mean) + margin, max_bands=k)
         assert result.starts.tolist() == [0]
 
@@ -340,8 +348,10 @@ def test_weights_whose_squared_error_passes_the_largest_double_are_refused():
     s, tol = np.array([0.0, 10.0]), np.full(2, 10.0)
     with np.errstate(over="raise"), pytest.raises(ValueError, match="past the largest double"):
         exact_bands(s, np.full(2, 8e307), tol, max_bands=1)
-    # The refusal is the double's limit, not a cap on large weights.
-    assert exact_bands(s, np.full(2, 1e306), tol, max_bands=1).sse == pytest.approx(5e307)
+    # The refusal is the double's limit, not a cap on large weights.  Every step
+    # is exact up to the error of 50 on unit weights, so the sse is that times
+    # the largest weight, rounded once.
+    assert exact_bands(s, np.full(2, 1e306), tol, max_bands=1).sse == 50.0 * 1e306
 
 
 _MAX = float(np.finfo(np.float64).max)
@@ -363,12 +373,26 @@ def _sse_gamma(n):
 
 
 def _sse_underflow(n, scale):
-    return n * Fraction(2) ** -1073 * Fraction(scale)
+    """The terms' underflow, in the units of ``w``, and the rescale's into the subnormals."""
+    return n * Fraction(2) ** -1073 * Fraction(scale) + Fraction(2) ** -1075
 
 
 def _sse_error_bound(exact, n, scale):
     """The documented bound on ``sse`` about its exact value."""
     return _sse_gamma(n) * exact + _sse_underflow(n, scale)
+
+
+def test_a_rescale_into_the_subnormals_stays_inside_the_bound():
+    # Every step is exact up to the normalised error, 2**-1041.  The rescale by
+    # fl(1/3072) = fl(1/3) * 2**-10 gives 2796202.67 * 2**-1074, which rounds to
+    # 2796203 * 2**-1074: a third of 2**-1074 off, 256 times the terms'
+    # underflow allowance, n * 2**-1073 * fl(1/3072).
+    s, w = np.array([0.0, 2.0**-520]), np.full(2, 1.0 / 3072.0)
+    result = exact_bands(s, w, np.ones(2), max_bands=1)
+    exact = _exact_sse(s, w, result)
+    error = abs(Fraction(result.sse) - exact)
+    assert error > _sse_gamma(2) * exact + 2 * Fraction(2) ** -1073 * Fraction(w.max())
+    assert error <= _sse_error_bound(exact, len(s), w.max())
 
 
 def test_an_error_lost_to_cancelling_moments_is_still_refused():
@@ -421,7 +445,11 @@ def _published_oracle(s, w, tol):
     odd multiples of 2**-11, every band sum is exact, so each factor here is
     the one exact_bands computes.  An exact mean on a tolerance edge would need
     a band weight divisible by 2**11 units of 2**-7, and seven values weigh at
-    most 896, so the acceptance test decides as exact arithmetic does.
+    most 896, so every exact mean is at least 2**-11 / 896, about 5e-7, from
+    every edge.  The acceptance margin and the computed mean's rounding are
+    under 3e-14 here (k <= 7, |d| <= 6), so every mean clears the margin by
+    about seven orders of magnitude and the acceptance test decides as exact
+    arithmetic does.
     """
     n = len(s)
     w = w / w.max()
@@ -457,9 +485,9 @@ def _published_oracle(s, w, tol):
 def test_the_published_factors_error_is_least_over_every_banding():
     """An exhaustive oracle where the factor's rounding moves it by up to half the spread.
 
-    The doubles near 2**52 are a unit apart, so the clip and the rounding move
-    factors by whole fractions of a band's spread, and the weight on that move
-    decides which banding is best.
+    The doubles from 2**52 up are a unit apart and those just below it half a
+    unit apart, so the clip and the rounding move factors by whole fractions of
+    a band's spread, and the weight on that move decides which banding is best.
     """
     rng = np.random.default_rng(47)
     for _ in range(400):
@@ -681,7 +709,9 @@ def test_term_se_at_matches_the_library_grid(banded_model):
         spec = model._specs[name]
         grid = np.linspace(spec._lo, spec._hi, 50)
         expected = model._feature_se_from_cov(name, cov, active, n_points=50)
-        np.testing.assert_allclose(_term_se_at(model, name, grid), expected, rtol=64 * _EPS, atol=0)
+        # Both evaluate sqrt(diag(M Cov M')) with the same operations on the same
+        # grid, so they agree bit for bit; a tolerance would hide a change to either.
+        np.testing.assert_array_equal(_term_se_at(model, name, grid), expected)
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, np.nan, np.inf, True, "1"])
@@ -796,14 +826,23 @@ def test_band_error_is_the_band_factors_error_against_the_curve(banded_model):
     )
     table = result.tables["age"]
     age = df["age"].to_numpy()
-    curve = extract_ppform(model, "age").evaluate(age)
+    # The curve the banding measures against: the model's own score of the term.
+    term = next(t for t in base._prediction_plan(model)["features"] if t["name"] == "age")
+    beta = model.result.beta[np.asarray(term["beta_idx"], dtype=np.intp)]
+    curve = base._score_feature(term["spec"], age, beta)
     band = np.array([_row_of(table, value)["log_relativity"] for value in age])
     _, geometry = _validated_discretization_weights(model, w, len(df))
     relative = np.abs(np.expm1(band - curve))
     diagnostics = result.band_diagnostics["age"]
-    assert diagnostics["worst_error"] == pytest.approx(relative.max(), rel=1e-8)
+    # The same doubles, so the same maximum.
+    assert diagnostics["worst_error"] == relative.max()
+    # The same nonnegative terms, averaged here over N rows and there over V
+    # values after summing each value's weights: within gamma_(2N) and
+    # gamma_(2N + 2V) of the exact mean, so of each other within this.
+    k = 4 * len(age) + 2 * len(np.unique(age)) + 1
+    within = k * _UNIT_ROUNDOFF / (1 - k * _UNIT_ROUNDOFF)
     assert diagnostics["mean_error"] == pytest.approx(
-        np.average(relative, weights=geometry), rel=1e-8
+        np.average(relative, weights=geometry), rel=within, abs=0.0
     )
 
 
