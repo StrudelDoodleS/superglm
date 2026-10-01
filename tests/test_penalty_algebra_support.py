@@ -297,8 +297,10 @@ def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
         interactions=[("x1", "x2")],
     ).fit_reml(pd.DataFrame({"x1": x1, "x2": x2}), y, max_reml_iter=3, reml_tol=1e-12)
     assert tensor_dimensions and singleton_dimensions
+    # Singletons are selected once on their raw penalty basis; only the
+    # certified coordinate volume follows each lambda's SSP map.
     singleton_widths = {
-        component.group_sl.stop - component.group_sl.start
+        component.omega_raw.shape[0]
         for component in model._reml_penalties
         if component.group_name not in tensor_dimensions
     }
