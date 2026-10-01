@@ -713,6 +713,51 @@ def test_an_sz_term_whose_every_level_is_thin_reproduces_its_fit() -> None:
     _assert_rule_follows(spec, blocks, shifted, step)
 
 
+def test_the_all_thin_border_decision_does_not_follow_the_penalty_products_rounding(
+    monkeypatch,
+) -> None:
+    """The border's rank decision beside a near-null alias holds at every rounding of the products.
+
+    Every level thin: the one penalized alias the border deflates has penalty
+    curvature ``a_NN = 2e-10`` against ``|N|'|S||N|`` near ``1e-3``, and the
+    elimination multiplied the products' rounding by ``a_MN a_NN^-1``, which
+    the column bound left out.  Its truncated subspace then carried Ritz values
+    from -8.7e-11 to +6e-11 (scaled) with BLAS's kernel: the fit refused on
+    OpenBLAS's Haswell, Zen, Sandybridge, Nehalem and Prescott kernels, on
+    Windows and on ARM64, and passed on SkylakeX alone (CI at 52c6b730).  The
+    bound now carries ``gamma_m |S||N|`` and ``gamma_(2m) |N|'|S||N|`` through
+    the elimination (``border._deflate``).  Check: the fit's own first border
+    inputs with the penalty under the congruence ``D S D``, ``D = diag(1 +
+    4 u xi)`` (exactly the same null structure, every product rounded anew),
+    give one decision and no refusal over 32 draws; on 52c6b730, 13 of 64
+    draws refused and the rest kept a rank the Haswell kernel did not.
+    """
+    import superglm.solvers._structured.balance_tree as tree_module
+
+    calls = []
+    original = tree_module.factor_border
+
+    def record(Q, S, U, generators, **kwargs):
+        if not calls:
+            calls.append((np.array(Q), np.array(S), np.array(U), generators, kwargs))
+        return original(Q, S, U, generators, **kwargs)
+
+    monkeypatch.setattr(tree_module, "factor_border", record)
+    frame, y = _all_thin_frame()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _all_thin_model().fit_reml(frame, y)
+    Q, S, U, generators, kwargs = calls[0]
+    assert generators is not None and generators.count
+    decisions = set()
+    for seed in range(32):
+        xi = np.random.default_rng(seed).uniform(-1.0, 1.0, len(S))
+        D = 1.0 + 4.0 * _U * xi
+        factor = original(Q, D[:, None] * S * D[None, :], U, generators, **kwargs)
+        decisions.add((factor.certificate.rank, factor.null.shape[1]))
+    assert len(decisions) == 1
+
+
 def test_metrics_on_a_copy_of_the_training_rows_are_the_fits() -> None:
     """``metrics`` reads the same deviance from the training frame and from a copy (#432; Sol P1).
 
