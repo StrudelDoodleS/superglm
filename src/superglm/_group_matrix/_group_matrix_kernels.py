@@ -362,6 +362,23 @@ def _weighted_bincount_2d(bin_idx, W, M, n_bins):
 
 
 @njit(cache=True)
+def _support_weighted_bincount_2d(out, bin_idx, W, B_unique, support_idx, col_start):
+    """Add ``W[i] * B_unique[support_idx[i], col_start + c]`` into ``out[bin_idx[i], c]``.
+
+    ``_weighted_bincount_2d`` of the gathered support rows, accumulated in
+    place: the same products added in the same row order, with neither the
+    gathered rows nor a separate result allocated.
+    """
+    n_cols = out.shape[1]
+    for i in range(len(bin_idx)):
+        b = bin_idx[i]
+        w = W[i]
+        row = support_idx[i]
+        for c in range(n_cols):
+            out[b, c] += w * B_unique[row, col_start + c]
+
+
+@njit(cache=True)
 def _csr_weighted_bincount(data, indices, indptr, n_cols, bin_idx, W, n_bins):
     """Fused CSR-aware W-weighted bincount."""
     n = len(bin_idx)
@@ -903,6 +920,12 @@ def _warmup_group_matrix_kernels() -> None:
         for second in (codes, frozen_codes):
             _weighted_hist_channels(first, second, matrix, 0, 2, 2, 2)
     _weighted_bincount_2d(codes, values, matrix, 2)
+    # Support crosses pass read-only C-contiguous operands and a fresh output.
+    frozen_values = values.copy()
+    frozen_values.setflags(write=False)
+    _support_weighted_bincount_2d(
+        np.zeros((2, 2)), frozen_codes, frozen_values, frozen_matrix, frozen_codes, 0
+    )
     _csr_weighted_bincount(values, csr_indices, csr_indptr, 2, codes, values, 2)
     _disc_disc_2d_hist(codes, codes, values, 2, 2)
     _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)

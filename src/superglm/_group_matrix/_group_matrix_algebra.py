@@ -25,6 +25,7 @@ from ._group_matrix_kernels import (
     _fused_2d_bincount_2,
     _gather_cell_order,
     _operand_exponent_bounds,
+    _support_weighted_bincount_2d,
     _tensor_operand_in_reassociation_range,
     _weighted_bincount_2d,
     _weighted_hist_channels,
@@ -1505,46 +1506,121 @@ def _support_support_raw_cross(
 
     The 2-D weight histogram both callers prefer costs ``n_bins_i * n_bins_j``
     cells, which is bounded only when the supports are bins.  A lossless
-    support is bounded by the row count instead, so this aggregates one
-    block's weighted rows onto the other block's support index and contracts
-    the two compact arrays: Li and Wood's (2020) right or left accumulation
-    (Algorithms 2 and 3), on the side their operation count favours.  Work is
-    ``n * p_a + n_b * p_i * p_j`` rather than ``n * p_i * p_j`` for expanding
-    both sides; the shapes alone choose the side.
+    support is bounded by the row count instead, so this adds one block's
+    weighted rows onto the other block's support index and contracts the two
+    compact arrays: Li and Wood's (2020) right or left accumulation
+    (Algorithms 2 and 3), on the side their operation count favours.  A row
+    subset, such as one level of a ``by=`` smooth, reaches only part of the
+    other block's support, so a target support larger than the rows is first
+    compacted to the rows it holds.  Then ``n_b <= n`` and the work
+    ``n * p_a + n_b * p_i * p_j`` is at most the ``n * p_i * p_j`` of expanding
+    both sides plus an ``n * p_a`` scatter, which replaces their gathers.
 
-    Neither transient grows with the row count: the gather is chunked by
-    ``max_bytes`` in :func:`_chunked_support_bincount_2d`, and the aggregate
-    (rows from one block, columns from the other) is built at most
-    ``_MAX_AGGREGATE_CELLS`` at a time.  The peak is therefore about three
-    times the 64 MiB budget, whatever ``n``: the aggregate (up to
-    ``_MAX_AGGREGATE_CELLS`` float64 cells), each chunk's
-    ``_weighted_bincount_2d`` result of the same size before it is added in,
-    and the gathered rows (up to ``max_bytes``).  Aggregating reorders the
-    sum over rows, so each entry is within ``gamma(n + n_b + chunks)`` of the
+    The aggregate is accumulated in place by one kernel that reads the support
+    rows directly, at most ``max_bytes`` of it (default 64 MiB, and never less
+    than one column) at a time, so neither gathered rows nor per-chunk results
+    exist and the peak does not grow with ``n``.
+
+    Aggregating reassociates ``B_i[r] * W[r] * B_j[r]``.  When every operand
+    lies in the exponent interval of ``_tensor_operand_in_reassociation_range``,
+    each nonzero product of two or three of them is a normal float64 and every
+    sum of them is finite, so each entry is within ``gamma(n + n_b)`` of the
     exact product relative to ``sum_r |B_i| |W| |B_j|`` (Higham 2002, eq. 3.5).
+    Otherwise, as for any non-float64 operand, the expansion of both sides
+    with the right side weighted is kept unchanged
+    (:func:`_support_support_raw_cross_expanded`), so the reassociation cannot
+    turn a representable product into zero or infinity.
     """
     n_rows = int(W_rows.shape[0])
     n_i, p_i = B_unique_i.shape
     n_j, p_j = B_unique_j.shape
-    aggregate_i = n_rows * p_i + n_j * p_i * p_j <= n_rows * p_j + n_i * p_i * p_j
+    if (
+        n_rows == 0
+        or any(value.dtype != np.float64 for value in (B_unique_i, B_unique_j, W_rows))
+        or not all(
+            _tensor_operand_in_reassociation_range(value)
+            for value in (B_unique_i, B_unique_j, W_rows[:, None])
+        )
+    ):
+        return _support_support_raw_cross_expanded(
+            B_unique_i, bin_idx_i, B_unique_j, bin_idx_j, W_rows, max_bytes
+        )
+    # Either target holds at most min(its support, n) rows once compacted.
+    target_i, target_j = min(n_i, n_rows), min(n_j, n_rows)
+    aggregate_i = n_rows * p_i + target_j * p_i * p_j <= n_rows * p_j + target_i * p_i * p_j
     B_a, idx_a, B_b, idx_b = (
         (B_unique_i, bin_idx_i, B_unique_j, bin_idx_j)
         if aggregate_i
         else (B_unique_j, bin_idx_j, B_unique_i, bin_idx_i)
     )
+    if B_b.shape[0] > n_rows:
+        held = np.flatnonzero(np.bincount(idx_b, minlength=B_b.shape[0]))
+        position = np.zeros(B_b.shape[0], dtype=np.intp)
+        position[held] = np.arange(len(held), dtype=np.intp)
+        idx_b, B_b = position[idx_b], B_b[held]
     n_b, p_a = int(B_b.shape[0]), int(B_a.shape[1])
+    budget = _MAX_CROSS_EXPANSION_BYTES if max_bytes is None else max_bytes
+    step = max(1, min(p_a, int(budget // (8 * n_b))))
+    rows_b, weights = _frozen_operand(idx_b, np.intp), _frozen_operand(W_rows, np.float64)
+    rows_a, support_a = _frozen_operand(idx_a, np.intp), _frozen_operand(B_a, np.float64)
     raw = np.zeros((p_a, int(B_b.shape[1])), dtype=np.float64)
-    if n_rows == 0:
-        return raw if aggregate_i else raw.T
-    step = _aggregate_column_chunk(n_b, p_a)
     for start in range(0, p_a, step):
-        columns = slice(start, min(p_a, start + step))
-        aggregate = _chunked_support_bincount_2d(
-            idx_b, W_rows, B_a[:, columns], idx_a, n_b, max_bytes
-        )
-        raw[columns] = aggregate.T @ B_b
+        stop = min(p_a, start + step)
+        aggregate = np.zeros((n_b, stop - start), dtype=np.float64)
+        _support_weighted_bincount_2d(aggregate, rows_b, weights, support_a, rows_a, start)
+        raw[start:stop] = aggregate.T @ B_b
         del aggregate
     return raw if aggregate_i else raw.T
+
+
+def _frozen_operand(values: NDArray, dtype) -> NDArray:
+    """``values`` as the read-only C-contiguous array a support kernel compiles for.
+
+    Numba compiles one specialisation per layout and write flag; contiguous
+    input is viewed, not copied.
+    """
+    array = np.ascontiguousarray(values, dtype=dtype).view()
+    array.flags.writeable = False
+    return array
+
+
+def _support_support_raw_cross_expanded(
+    B_unique_i: NDArray,
+    bin_idx_i: NDArray,
+    B_unique_j: NDArray,
+    bin_idx_j: NDArray,
+    W_rows: NDArray,
+    max_bytes: int | None = None,
+) -> NDArray:
+    """``B_i.T @ (W * B_j)`` with both blocks expanded to their rows, in chunks.
+
+    The association for operands outside the reassociation interval.  Chunked
+    over rows, because a lossless support does not bound the row count:
+    expanding both sides at once costs ``n_rows * (p_i + p_j) * 8`` bytes, so
+    each chunk is sized to ``max_bytes`` instead.  The contraction is a sum
+    over rows, so partitioning it changes only the summation order.
+    """
+    budget = _MAX_CROSS_EXPANSION_BYTES if max_bytes is None else max_bytes
+    p_i = int(B_unique_i.shape[1])
+    p_j = int(B_unique_j.shape[1])
+    out = np.zeros((p_i, p_j), dtype=np.float64)
+    n_rows = int(W_rows.shape[0])
+    if n_rows == 0:
+        return out
+    chunk = min(n_rows, _cross_expansion_chunk_rows(p_i, p_j, budget))
+    for start in range(0, n_rows, chunk):
+        stop = min(start + chunk, n_rows)
+        left = _expand_support_rows(B_unique_i, bin_idx_i[start:stop])
+        right = _expand_support_rows(B_unique_j, bin_idx_j[start:stop])
+        # Fancy indexing already returned a fresh array, so scaling it in place
+        # keeps the live count at two blocks rather than three.
+        right *= W_rows[start:stop, None]
+        out += left.T @ right
+        # Released explicitly: the next iteration's expansion is evaluated
+        # BEFORE its name is rebound, so without this the previous pair is
+        # still referenced at the allocation instant.
+        del left, right
+    return out
 
 
 def _cross_gram_categorical_spline_categorical(

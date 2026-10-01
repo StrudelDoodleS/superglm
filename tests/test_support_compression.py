@@ -1047,11 +1047,43 @@ def test_balanced_levels_still_compress():
         assert info.spline_cat_support_lossless is True
 
 
-def test_expanded_cross_gram_is_chunked_by_bytes(monkeypatch):
-    """Reviewer finding on #193: the cell cap routes here, and this path then
-    expanded every shared row at once -- so the cap moved the memory instead of
-    bounding it.  A lossless support does not bound the row count."""
+def _support_cross_bound(n_rows, n_b):
+    """gamma(n + n_b + 1) plus the reference's rounding (Higham 2002, eq. 3.5).
+
+    Each aggregate entry adds at most ``n`` rounded products ``W * B_a``, and
+    each output entry then adds ``n_b`` rounded products of those sums with
+    ``B_b``; one more unit covers the bound's own arithmetic.
+    ``exact_weighted_gram`` is correctly rounded, which adds ``2u`` relative
+    to the magnitude.
+    """
+    unit = np.finfo(float).eps / 2
+    count = n_rows + n_b + 1
+    return count * unit / (1 - count * unit) + 2 * unit
+
+
+def _spy_on_support_aggregates(monkeypatch):
+    """Record each in-place aggregate the one-sided support cross builds as
+    (target rows, columns, aggregated support's width)."""
     from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    seen: list[tuple[int, int, int]] = []
+    original = algebra._support_weighted_bincount_2d
+
+    def spy(out, bin_idx, weights, support, support_idx, col_start):
+        seen.append((int(out.shape[0]), int(out.shape[1]), int(support.shape[1])))
+        return original(out, bin_idx, weights, support, support_idx, col_start)
+
+    monkeypatch.setattr(algebra, "_support_weighted_bincount_2d", spy)
+    return seen
+
+
+def test_expanded_cross_gram_is_chunked_by_bytes(monkeypatch):
+    """Reviewer findings on #193 and #436: the cell cap routes here, and a
+    lossless support does not bound the row count, so the aggregate is bounded
+    by bytes. It is built in place, at most ``max_bytes`` at a time, with no
+    gathered rows and no per-chunk result."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from tests._exact_reference import exact_weighted_gram
 
     gen = np.random.default_rng(43)
     n_rows, p_i, p_j = 50_000, 20, 20
@@ -1061,21 +1093,49 @@ def test_expanded_cross_gram_is_chunked_by_bytes(monkeypatch):
     idx_j = gen.integers(0, 350, n_rows).astype(np.intp)
     weights = np.abs(gen.normal(1.0, 0.2, n_rows))
 
-    expanded_rows = _spy_on_row_expansion(monkeypatch)
-
-    budget = 1 << 20  # 1 MiB
+    aggregates = _spy_on_support_aggregates(monkeypatch)
+    expanded = _spy_on_row_expansion(monkeypatch)
+    budget = 1 << 14  # 16 KiB: five of the twenty columns per pass
     actual = algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights, max_bytes=budget)
 
-    expected = (b_i[idx_i]).T @ (b_j[idx_j] * weights[:, None])
-    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
+    assert not expanded
+    assert len(aggregates) > 1, "expected the aggregate to be built in column passes"
+    for rows, columns, _ in aggregates:
+        assert rows == 350 and rows * columns * 8 <= budget
+    assert sum(columns for _, columns, _ in aggregates) == p_i  # every column once
+    x, y = b_i[idx_i], b_j[idx_j]
+    magnitude = exact_weighted_gram(np.abs(x), np.abs(y), np.abs(weights))
+    error = np.abs(actual - exact_weighted_gram(x, y, weights))
+    assert np.all(error <= _support_cross_bound(n_rows, 350) * magnitude)
 
-    assert expanded_rows, "expected the fallback to expand support rows"
-    allowed = algebra._cross_expansion_chunk_rows(p_i, 0, budget)  # p_i == p_j
-    assert max(expanded_rows) <= allowed, (
-        f"expanded {max(expanded_rows)} rows at once against a {allowed}-row budget"
-    )
-    assert max(expanded_rows) * p_i * 8 <= budget
-    assert sum(expanded_rows) == n_rows  # one side, every row, exactly once
+
+def test_support_cross_peak_memory_is_its_byte_budget():
+    """#436 review: the aggregate, each chunk's result and the gathered rows
+    were live together, about three budgets. Accumulated in place, the traced
+    peak is one aggregate of at most ``max_bytes``, the p x p output and one
+    pass's slice of it."""
+    import tracemalloc
+
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    gen = np.random.default_rng(46)
+    n_rows, n_support, p = 200_000, 20_000, 12
+    b_i, b_j = gen.normal(size=(n_support, p)), gen.normal(size=(n_support, p))
+    idx_i = gen.integers(0, n_support, n_rows).astype(np.intp)
+    idx_j = gen.integers(0, n_support, n_rows).astype(np.intp)
+    weights = gen.normal(size=n_rows)
+    budget = 1 << 20
+    step = budget // (8 * n_support)
+    assert step < p  # several column passes
+    small = slice(None, 8)
+    algebra._support_support_raw_cross(b_i, idx_i[small], b_j, idx_j[small], weights[small])
+    tracemalloc.start()
+    try:
+        algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights, max_bytes=budget)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak <= budget + 8 * (p * p + step * p)
 
 
 def test_support_cross_aggregates_the_narrow_side_within_its_rounding_bound(monkeypatch):
@@ -1095,28 +1155,83 @@ def test_support_cross_aggregates_the_narrow_side_within_its_rounding_bound(monk
     idx_i = gen.integers(0, n_i, n_rows).astype(np.intp)
     idx_j = gen.integers(0, n_j, n_rows).astype(np.intp)
     weights = gen.normal(0.0, 1.0, n_rows)  # signed, as REML passes
-    gathered = []
-    original = algebra._expand_support_rows
-
-    def spy(B_unique, bin_idx):
-        gathered.append((int(np.size(bin_idx)), int(B_unique.shape[1])))
-        return original(B_unique, bin_idx)
-
-    monkeypatch.setattr(algebra, "_expand_support_rows", spy)
+    aggregates = _spy_on_support_aggregates(monkeypatch)
     actual = algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights)
-    assert gathered == [(n_rows, 9)]
+    # The 9-column side is added onto the other side's 1,300 support rows.
+    assert aggregates == [(n_j, 9, 9)]
     x, y = b_i[idx_i], b_j[idx_j]
-    unit = np.finfo(float).eps / 2
-    count = n_rows + n_j + 1
-    gamma = count * unit / (1 - count * unit)
     magnitude = exact_weighted_gram(np.abs(x), np.abs(y), np.abs(weights))
     error = np.abs(actual - exact_weighted_gram(x, y, weights))
-    assert np.all(error <= (gamma + 2 * unit) * magnitude)
+    assert np.all(error <= _support_cross_bound(n_rows, n_j) * magnitude)
+
+
+def test_support_cross_compacts_a_support_larger_than_its_rows(monkeypatch):
+    """#436 review: one level of a by= smooth passes its own rows but the
+    feature's whole support. The target is compacted to the rows it holds, so
+    the aggregate and the contraction after it are bounded by the rows."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from tests._exact_reference import exact_weighted_gram
+
+    gen = np.random.default_rng(47)
+    n_rows, n_support = 300, 5_000
+    b_i = gen.normal(size=(n_support, 6))
+    b_j = gen.normal(size=(n_support, 8))
+    idx_i = gen.integers(0, n_support, n_rows).astype(np.intp)
+    idx_j = gen.integers(0, n_support, n_rows).astype(np.intp)
+    weights = gen.normal(size=n_rows)
+    aggregates = _spy_on_support_aggregates(monkeypatch)
+    actual = algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights)
+    held = len(np.unique(idx_j))
+    assert held <= n_rows and aggregates == [(held, 6, 6)]
+    x, y = b_i[idx_i], b_j[idx_j]
+    magnitude = exact_weighted_gram(np.abs(x), np.abs(y), np.abs(weights))
+    error = np.abs(actual - exact_weighted_gram(x, y, weights))
+    assert np.all(error <= _support_cross_bound(n_rows, held) * magnitude)
+
+
+def test_support_cross_keeps_a_range_safe_association_outside_the_interval():
+    """#436 review (Sol, Codex): weighting chosen by shape alone can turn a
+    representable cross product into zero or infinity. Outside the
+    reassociation interval the weighted-right expansion is kept.
+
+    Sol's reproduction: two blocks that both represent the ordinary column v,
+    stored with factors 2**-600 and 2**600 and weighted by 2**-500. Weighting
+    the left basis underflows every term to zero. Every term v_r**2 2**-500
+    is positive and every other scaling an exact power of two, so the entry
+    is within gamma(n + 1) of the exact sum.
+    """
+    from fractions import Fraction
+
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm.group_matrix import DesignMatrix, SupportCompressedSSPGroupMatrix
+
+    n = 2_300
+    idx = np.arange(n)
+    v = (1 + idx / 4096)[:, None]
+    left = SupportCompressedSSPGroupMatrix(v * 2.0**-600, np.array([[2.0**600]]), idx)
+    right = SupportCompressedSSPGroupMatrix(v * 2.0**600, np.array([[2.0**-600]]), idx)
+    weights = np.full(n, 2.0**-500)
+    assert n * n > algebra._MAX_DISC_DISC_HIST_CELLS  # the unguarded row route
+    gram = DesignMatrix([left, right], n=n, p=2).execution_plan.moments(weights).gram
+    exact = sum(Fraction(float(value)) ** 2 for value in v[:, 0]) * Fraction(2) ** -500
+    unit = Fraction(1, 2**53)
+    gamma = (n + 1) * unit / (1 - (n + 1) * unit)
+    for value in (gram[0, 1], gram[1, 0]):
+        assert abs(Fraction(float(value)) - exact) <= gamma * exact
+
+    # Codex's overflow: two rows on one support value 1e308, beside 0.25.
+    # Summed first, the weighted rows overflow; the products sum to 5e307.
+    rows = np.zeros(2, dtype=np.intp)
+    raw = algebra._support_support_raw_cross(
+        np.array([[1e308]]), rows, np.array([[0.25]]), rows, np.ones(2)
+    )
+    assert raw[0, 0] == 5e307
 
 
 def test_expanded_cross_gram_chunking_matches_the_unchunked_contraction():
     """Chunking is a partition of a sum over rows; only the order changes."""
     from superglm._group_matrix import _group_matrix_algebra as algebra
+    from tests._exact_reference import exact_weighted_gram
 
     gen = np.random.default_rng(44)
     n_rows = 9_000
@@ -1131,7 +1246,11 @@ def test_expanded_cross_gram_chunking_matches_the_unchunked_contraction():
     )
     chunked = algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights, max_bytes=512)
 
-    np.testing.assert_allclose(chunked, one_shot, rtol=1e-11, atol=1e-11)
+    # Each evaluation is within its forward bound of the exact product, so
+    # they differ by at most twice it; either target has at most 60 rows.
+    magnitude = exact_weighted_gram(np.abs(b_i[idx_i]), np.abs(b_j[idx_j]), np.abs(weights))
+    allowed = 2 * _support_cross_bound(n_rows, 60) * magnitude
+    assert np.all(np.abs(chunked - one_shot) <= allowed)
 
 
 def _spy_on_row_expansion(monkeypatch):
@@ -1162,6 +1281,7 @@ _BOUNDED_AGGREGATE_HELPERS = frozenset(
     {
         "_chunked_support_bincount_2d",
         "_support_csr_raw_cross",
+        "_support_support_raw_cross",
     }
 )
 
@@ -1219,7 +1339,7 @@ def _aggregate_call_sites():
 
     source = pathlib.Path(algebra.__file__).read_text()
     tree = ast.parse(source)
-    kernels = {"_weighted_bincount_2d", "_csr_weighted_bincount"}
+    kernels = {"_weighted_bincount_2d", "_csr_weighted_bincount", "_support_weighted_bincount_2d"}
     sites = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
