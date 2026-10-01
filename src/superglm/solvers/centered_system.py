@@ -178,34 +178,53 @@ def grouped_weighted_factor_rhs(
 
 
 def penalty_factor(penalty: NDArray) -> NDArray:
-    """Return a factor ``R`` with ``R'R`` the PSD penalty ``S`` to within ``eigh``'s resolution.
+    """Return a factor ``R`` with ``R'R`` the PSD penalty ``S`` to within its own resolution.
 
     Every rank decision downstream counts a row of ``R`` along a data-null
     direction as identifying it, so ``R`` keeps only the curvature ``S``
     certifies.  An exactly zero row of ``S`` is an exact null and is left out.
     The rest splits exactly into its contiguous diagonal blocks (no entry
-    couples them; a penalty is block diagonal by term), and each block keeps
-    the eigenpairs above its own eigensolver resolution ``n_b eps ||S_b||_2``
-    (*LAPACK Users' Guide*, 3rd ed., sec. 4.7; ``rank._eigensolver_relative_bar``,
-    the bar every rank cut in this package uses).  Below it an eigenvalue's
-    magnitude and sign are rounding, so dropping it moves ``R'R`` by less than
-    ``eigh``'s own backward error; keeping it (the former ``> 0.0`` test)
-    invented curvature along an exact null.  Measured: an ``sz`` term's
-    unpenalized natural coordinates (exactly zero rows) came out of one
-    ``eigh`` of the whole matrix at up to ``+5.3e-12`` against ``||S||_2 =
-    3.9e4``, which made a thin level's exact data-null alias identified on
-    gram (rank +1 against the structured solver; REML's smoothing parameters
-    up to 800x off).  Per block, because the bar scales with the block's own
-    norm: one global bar would drop a random effect's ridge at a smoothing
-    parameter of ``1e-3`` beside a spline at ``1e10``, a curvature the
-    eigensolver resolves within its block.
+    couples them; a penalty is block diagonal by term).  Each block is
+    Jacobi-equilibrated, ``A_b = D S_b D`` with ``D = diag(S_b)^(-1/2)``, keeps
+    the eigenpairs of ``A_b`` above its eigensolver resolution ``n_b eps
+    ||A_b||_2`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.7;
+    ``rank._eigensolver_relative_bar``, the floor of the Gram route's rank cut,
+    which equilibrates the same way), and maps the root back, ``R_b = W^(1/2)
+    V' D^(-1)``.  ``R_b'R_b = D^(-1) (A_b)_+ D^(-1)`` is the projection of
+    ``S_b`` onto the PSD cone in the norm ``||D X D||_F`` (Higham 2002, IMA J.
+    Numer. Anal. 22, Thm 3.2), less the eigenvalues below the bar.
+
+    Below the bar an eigenvalue's magnitude and sign are rounding; keeping it
+    (the former ``> 0.0`` test) invented curvature along an exact null.
+    Measured: an ``sz`` term's unpenalized natural coordinates (exactly zero
+    rows) came out of one ``eigh`` of the whole matrix at up to ``+5.3e-12``
+    against ``||S||_2 = 3.9e4``, which made a thin level's exact data-null
+    alias identified on gram (rank +1 against the structured solver).
+
+    The cut is on ``A_b``, not ``S_b``, so no coordinate's units decide its
+    rank.  A sum of PSD terms (``lambda_j D_j'D_j``, a natural
+    parameterization, a Kronecker sum) is rounded entrywise within ``gamma_n
+    sqrt(S_ii S_jj)`` (the dot-product bound and Cauchy-Schwarz), the scaled
+    perturbation under which ``S``'s eigenvalues are determined to relative
+    accuracy ``||A^-1||_2`` times its size, however graded ``S`` is (Demmel &
+    Veselic 1992, SIAM J. Matrix Anal. Appl. 13(4); Drmac 2020,
+    arXiv:2006.02753, Thms 3.7 and 3.11), and Jacobi scaling is within a
+    factor ``n`` of the best diagonal scaling (van der Sluis 1969, Numer.
+    Math. 14; Drmac, Thm 3.12).  The unscaled cut ``n_b eps ||S_b||_2``
+    dropped the ``1e-6`` mode of ``[[1e10, 1e-10], [1e-10, 1e-6]]`` (bar
+    ``4.4e-6``), whose ``A_b`` is the identity to ``1e-12``, and gram then
+    rejected every step of a fit with that penalty.
+
+    A block that is not PSD at its scaled resolution has no scaled model:
+    a nonzero row on a non-positive diagonal, or an eigenvalue of ``A_b``
+    below ``decompose_gram``'s materially-indefinite bar.  Its small entries
+    are not known to be data rather than rounding (Drmac, sec. 3.3), so it
+    keeps the eigenpairs above ``n_b eps ||S_b||_2`` of ``S_b`` itself.
     """
     width = penalty.shape[0]
     symmetric = 0.5 * (penalty + penalty.T)
     if penalty.shape == (0, 0) or not np.any(symmetric):
         return np.empty((0, width))
-    from superglm.solvers.rank import _eigensolver_relative_bar
-
     support = np.flatnonzero(np.any(symmetric != 0.0, axis=1))
     coupled = symmetric[np.ix_(support, support)] != 0.0
     order = np.arange(len(support))
@@ -222,13 +241,53 @@ def penalty_factor(penalty: NDArray) -> NDArray:
     rows = [factor]
     for start, stop in zip(starts[~single], ends[~single], strict=True):
         columns = support[start:stop]
-        eigenvalues, eigenvectors = np.linalg.eigh(symmetric[np.ix_(columns, columns)])
-        bar = _eigensolver_relative_bar(len(columns)) * float(np.max(np.abs(eigenvalues)))
-        kept = eigenvalues > bar
-        block = np.zeros((int(np.count_nonzero(kept)), width))
-        block[:, columns] = np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T
-        rows.append(block)
+        block = symmetric[np.ix_(columns, columns)]
+        root = _equilibrated_block_root(block)
+        if root is None:
+            root = _block_root(block)
+        embedded = np.zeros((root.shape[0], width))
+        embedded[:, columns] = root
+        rows.append(embedded)
     return np.vstack(rows)
+
+
+def _block_root(block: NDArray) -> NDArray:
+    """The eigenpairs of ``block`` above ``n eps ||block||_2``, as a root."""
+    from superglm.solvers.rank import _eigensolver_relative_bar
+
+    eigenvalues, eigenvectors = np.linalg.eigh(block)
+    bar = _eigensolver_relative_bar(len(block)) * float(np.max(np.abs(eigenvalues)))
+    kept = eigenvalues > bar
+    return np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T
+
+
+def _equilibrated_block_root(block: NDArray) -> NDArray | None:
+    """``penalty_factor``'s root of a coupled block, cut on its Jacobi equilibration.
+
+    ``None`` where the block is not PSD at that resolution: a non-positive
+    diagonal, or an eigenvalue of ``D S_b D`` below ``-max(100 eps, n eps)
+    ||D S_b D||_2``, the bar ``rank.decompose_gram`` refuses as materially
+    indefinite.
+    """
+    from superglm.solvers.rank import _EPS, _eigensolver_relative_bar
+
+    diagonal = np.diag(block)
+    if not np.all(diagonal > 0.0):
+        return None
+    scale = np.sqrt(diagonal)
+    # |S_ij| / s_i <= s_j on a PSD block, so only an indefinite one overflows
+    with np.errstate(over="ignore"):
+        equilibrated = (block / scale[:, None]) / scale[None, :]
+    equilibrated = 0.5 * (equilibrated + equilibrated.T)
+    if not np.all(np.isfinite(equilibrated)):
+        return None
+    eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
+    norm = float(np.max(np.abs(eigenvalues)))
+    bar = _eigensolver_relative_bar(len(block))
+    if eigenvalues[0] < -max(100.0 * _EPS, bar) * norm:
+        return None
+    kept = eigenvalues > bar * norm
+    return np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T * scale[None, :]
 
 
 def grouped_augmented_factor(
