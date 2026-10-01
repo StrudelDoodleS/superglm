@@ -1,15 +1,21 @@
-"""Every floating value a fit publishes is IEEE binary64.
+"""Every floating value these SuperGLM fits publish is IEEE binary64.
 
 AGENTS.md, "Numerical policy": production numerics target float64 on every
-platform. Each case below fits a small model on one representative route and
-walks what the fit publishes -- the public result, the REML result and profile,
-``diagnostics()`` and ``predict()`` -- failing on any floating array, sparse
-matrix or NumPy scalar that is not float64 (complex values must be
-complex128). Integer and boolean arrays are index and mask data and are
-allowed; Python floats are binary64 by definition. No floating exception is
-needed today.
+platform. Each case below fits a small model on one representative route:
+``fit_reml`` on five routes, and ``fit()`` with an active selection penalty,
+which runs ``fit_pirls``. Every case runs twice, once as written and once with
+float32 features, response, ``sample_weight`` and ``offset``. The test walks
+what the fit publishes -- the public result, the REML result and profile,
+``diagnostics()``, ``iteration_diagnostics()`` where it was recorded, and
+``predict()`` -- and fails on any floating array, sparse matrix, pandas column
+or index, or NumPy scalar that is not float64 (complex values must be
+complex128). It also fails on any object it cannot look inside, so a new
+published type cannot hide a leaf. Integer and boolean arrays are index and
+mask data and are allowed; Python floats are binary64 by definition. SuperLSS
+fits are not covered here. No floating exception is needed today.
 """
 
+import types
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 
@@ -21,37 +27,78 @@ import scipy.sparse as sp
 from superglm import Constraint, PSpline, RandomEffect, Spline, SuperGLM, Tweedie
 
 _BINARY64 = (np.dtype(np.float64), np.dtype(np.complex128))
+# Code, not data: nothing a fit publishes is stored inside these.
+_CODE = (
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.MethodType,
+    types.ModuleType,
+    type,
+)
 
 
-def _floating_leaves(value, path="", seen=None, found=None):
-    """Return ``(path, dtype)`` for every floating leaf reachable from ``value``."""
+def _slot_names(value) -> list[str]:
+    names: list[str] = []
+    for klass in type(value).__mro__:
+        slots = klass.__dict__.get("__slots__", ())
+        names += [slots] if isinstance(slots, str) else list(slots)
+    return [name for name in names if name not in ("__dict__", "__weakref__")]
+
+
+def _children(value):
+    """Yield ``(suffix, child)`` for an object the walk can see inside, else None."""
+    if isinstance(value, pd.DataFrame):
+        return [(".index", value.index), (".columns", value.columns)] + [
+            (f"[{key!r}]", column) for key, column in value.items()
+        ]
+    if isinstance(value, pd.Series | pd.Index):
+        pairs = [(".index", value.index)] if isinstance(value, pd.Series) else []
+        if isinstance(value.dtype, pd.CategoricalDtype):
+            return [*pairs, (".categories", value.dtype.categories)]
+        if value.dtype.kind == "O":
+            return [*pairs, *((f"[{index}]", item) for index, item in enumerate(value))]
+        return pairs
+    if isinstance(value, np.ndarray | np.generic) or sp.issparse(value):
+        if value.dtype.kind != "O":
+            return []
+        return [(f"[{index}]", item) for index, item in enumerate(value.flat)]
+    if isinstance(value, Mapping):
+        return [(f"[{key!r}]", item) for key, item in value.items()]
+    if isinstance(value, slice):
+        return [(".start", value.start), (".stop", value.stop), (".step", value.step)]
+    if isinstance(value, list | tuple | set | frozenset):
+        return [(f"[{index}]", item) for index, item in enumerate(value)]
+    names = [item.name for item in fields(value)] if is_dataclass(value) else []
+    names += [name for name in getattr(value, "__dict__", {}) if name not in names]
+    names += [name for name in _slot_names(value) if name not in names]
+    if not names and not hasattr(value, "__dict__"):
+        return None
+    return [(f".{name}", getattr(value, name)) for name in names if hasattr(value, name)]
+
+
+def _floating_leaves(value, path="", seen=None, found=None, opaque=None):
+    """Return ``(path, dtype)`` for every floating leaf reachable from ``value``.
+
+    Objects the walk cannot see inside are appended to ``opaque``; when it is
+    not supplied, meeting one is an error, so the walk fails closed.
+    """
     seen = set() if seen is None else seen
     found = [] if found is None else found
     scalar = value is None or isinstance(value, str | bytes | bool | int | float | complex)
-    if scalar or callable(value) or id(value) in seen:
+    if scalar or isinstance(value, _CODE) or id(value) in seen:
         return found
     seen.add(id(value))
-    children = ()
-    if isinstance(value, np.ndarray | np.generic) or sp.issparse(value):
-        if value.dtype.kind in "fc":
-            found.append((path, value.dtype))
-        if value.dtype.kind == "O":
-            children = ((f"[{index}]", item) for index, item in enumerate(value.flat))
-    elif isinstance(value, pd.DataFrame | pd.Series):
-        frame = value.to_frame() if isinstance(value, pd.Series) else value
-        found.extend(
-            (f"{path}[{key!r}]", kind) for key, kind in frame.dtypes.items() if kind.kind in "fc"
-        )
-    elif isinstance(value, Mapping):
-        children = ((f"[{key!r}]", item) for key, item in value.items())
-    elif isinstance(value, list | tuple | set | frozenset):
-        children = ((f"[{index}]", item) for index, item in enumerate(value))
-    else:
-        names = [item.name for item in fields(value)] if is_dataclass(value) else []
-        names += [name for name in getattr(value, "__dict__", {}) if name not in names]
-        children = ((f".{name}", getattr(value, name)) for name in names)
+    dtype = getattr(value, "dtype", None)
+    if not isinstance(value, pd.DataFrame) and getattr(dtype, "kind", None) in ("f", "c"):
+        found.append((path, dtype))
+    children = _children(value)
+    if children is None:
+        if opaque is None:
+            raise TypeError(f"cannot inspect {type(value).__qualname__} at {path or 'root'}")
+        opaque.append((path, type(value).__qualname__))
+        return found
     for suffix, item in children:
-        _floating_leaves(item, path + suffix, seen, found)
+        _floating_leaves(item, path + suffix, seen, found, opaque)
     return found
 
 
@@ -96,9 +143,11 @@ def _gaussian_increasing():
     return model, pd.DataFrame({"x": x}), 2 * x + rng.normal(0, 0.2, x.size)
 
 
-def _gaussian_float32_inputs():
-    model, X, y = _gaussian_smooth()
-    return model, X.astype(np.float32), y.astype(np.float32)
+def _gaussian_selection():
+    # A positive selection penalty sends fit() through fit_pirls, not fit_reml.
+    _, X, y = _gaussian_smooth()
+    model = SuperGLM(family="gaussian", selection_penalty=0.1, features={"x": Spline(n_knots=6)})
+    return model, X, y
 
 
 CASES = {
@@ -107,25 +156,50 @@ CASES = {
     "tweedie_smooth": _tweedie_smooth,
     "gamma_discrete": _gamma_discrete,
     "gaussian_increasing_scop": _gaussian_increasing,
-    "gaussian_float32_inputs": _gaussian_float32_inputs,
+    "gaussian_selection_fit": _gaussian_selection,
 }
 
 
+def _float32_inputs(X, y):
+    rng = np.random.default_rng(7)
+    floats = X.select_dtypes("float").columns
+    narrowed = X.astype(dict.fromkeys(floats, np.float32))
+    weight = rng.uniform(0.5, 2.0, len(y)).astype(np.float32)
+    offset = rng.normal(0.0, 0.05, len(y)).astype(np.float32)
+    return narrowed, np.asarray(y, dtype=np.float32), {"sample_weight": weight, "offset": offset}
+
+
+@pytest.mark.parametrize("inputs", ["float64", "float32"])
 @pytest.mark.parametrize("case", CASES)
-def test_fit_publishes_only_binary64_floating_values(case):
+def test_fit_publishes_only_binary64_floating_values(case, inputs):
     model, X, y = CASES[case]()
-    model.fit_reml(X, y)
+    extra = {}
+    if inputs == "float32":
+        X, y, extra = _float32_inputs(X, y)
+    selection = case == "gaussian_selection_fit"
+    if selection:
+        model.fit(X, y, record_diagnostics=True, **extra)
+    else:
+        model.fit_reml(X, y, **extra)
     published = {
         "result": model.result,
         "reml_result": model._reml_result,
         "profile": model._reml_profile,
         "diagnostics": model.diagnostics(),
-        "predict": model.predict(X),
+        "predict": model.predict(X, offset=extra.get("offset")),
     }
-    leaves = _floating_leaves(published)
+    if selection:
+        published["iteration_diagnostics"] = model.iteration_diagnostics()
+    opaque: list[tuple[str, str]] = []
+    leaves = _floating_leaves(published, opaque=opaque)
+    assert not opaque, f"{case} published objects the walk cannot inspect: {opaque}"
     paths = {path for path, _ in leaves}
-    # The walk must reach the coefficients inside the result dataclass.
+    # The walk must reach the coefficients inside the result dataclass, and the
+    # selection case must reach the fit_pirls rank metadata.
     assert "['result'].beta" in paths and "['predict']" in paths
+    if selection:
+        assert model.selection_penalty > 0 and model._reml_result is None
+        assert "['result'].rank_info.feature_edf" in paths
     offenders = [(path, str(dtype)) for path, dtype in leaves if dtype not in _BINARY64]
     assert not offenders, f"{case} published non-binary64 floating values: {offenders}"
 
@@ -135,17 +209,59 @@ class _Holder:
     value: object
 
 
+class _SlottedHolder:
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
+class _CallableHolder:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
+_FLOAT32 = np.zeros(2, dtype=np.float32)
+
+
 @pytest.mark.parametrize(
     "value",
     [
-        _Holder(np.zeros(2, dtype=np.float32)),
+        _Holder(_FLOAT32),
         {"key": [np.float32(1.0)]},
         np.array([None, np.zeros(1, dtype=np.float16)], dtype=object),
         sp.csr_array(np.eye(2, dtype=np.float32)),
-        pd.DataFrame({"a": np.zeros(2, dtype=np.float32)}),
+        pd.DataFrame({"a": _FLOAT32}),
+        pd.DataFrame({"a": pd.Series([_FLOAT32, None], dtype=object)}),
+        pd.DataFrame({"a": [1, 2]}, index=pd.Index(_FLOAT32)),
+        pd.Series(pd.Categorical(_FLOAT32)),
+        _SlottedHolder(_FLOAT32),
+        _CallableHolder(_FLOAT32),
     ],
-    ids=["dataclass", "mapping_scalar", "object_array", "sparse", "frame"],
+    ids=[
+        "dataclass",
+        "mapping_scalar",
+        "object_array",
+        "sparse",
+        "frame",
+        "frame_object_column",
+        "frame_index",
+        "categorical",
+        "slots",
+        "callable_instance",
+    ],
 )
 def test_walk_reports_a_reduced_precision_leaf(value):
     leaves = _floating_leaves({"root": value})
     assert [dtype for _, dtype in leaves if dtype not in _BINARY64]
+
+
+def test_walk_fails_closed_on_an_object_it_cannot_inspect():
+    opaque: list[tuple[str, str]] = []
+    _floating_leaves({"root": [object()]}, opaque=opaque)
+    assert opaque == [("['root'][0]", "object")]
+    with pytest.raises(TypeError, match="cannot inspect"):
+        _floating_leaves({"root": object()})
