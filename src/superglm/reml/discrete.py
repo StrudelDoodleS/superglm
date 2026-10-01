@@ -485,6 +485,7 @@ def optimize_discrete_reml_cached_w(
         dm_boot.group_matrices,
         reml_groups,
         cache=penalty_context_cache,
+        _reuse_raw_from=penalties,
     )
     _t_penalty_context += _time.perf_counter() - _t0
     S_boot = (
@@ -1513,6 +1514,7 @@ def optimize_discrete_reml_cached_w(
             dm.group_matrices,
             reml_groups,
             cache=penalty_context_cache,
+            _reuse_raw_from=penalties,
         )
         _t_penalty_context += _time.perf_counter() - _t0
         shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
@@ -1554,6 +1556,7 @@ def optimize_discrete_reml_cached_w(
         dm.group_matrices,
         reml_groups,
         cache=penalty_context_cache,
+        _reuse_raw_from=penalties,
     )
     _t_penalty_context += _time.perf_counter() - _t0
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
