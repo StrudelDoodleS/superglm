@@ -238,6 +238,47 @@ def test_stored_penalty_rounding_keeps_its_rank_and_log_determinant(small):
     assert evaluation.rank == (2 if a * d - b * c > 0 else 1)
 
 
+def test_later_context_reuses_the_support_gram_and_the_volume_products(monkeypatch):
+    _, omega = _second_differences(7)
+    coordinate_map = np.random.default_rng(5).normal(size=(7, 6))
+    first = _context(omega, coordinate_map)
+    support = algebra._context_geometry(first).support
+    evidence = support._basis_gram_evidence
+    assert evidence is not None
+    lefts = []
+    original = algebra._context_product
+
+    def counted(left, right, *, refine):
+        lefts.append(left)
+        return original(left, right, refine=refine)
+
+    monkeypatch.setattr(algebra, "_context_product", counted)
+    later = _context(omega, 2 * coordinate_map, source=first)
+    assert algebra._context_geometry(later).coordinate_map is not None
+    assert algebra._context_geometry(later).support is support
+    # Q.T Q depends only on the support, so the later context reuses its Gram;
+    # the retained map takes Q.T Q and Q.T C from the volume instead of
+    # forming either product again.
+    assert support._basis_gram_evidence is evidence
+    assert lefts and not any(np.shares_memory(left, support.Q_plus) for left in lefts)
+
+
+def test_admitted_rounded_map_certifies_the_stored_log_determinant():
+    # S = [[1, 1], [1, fl(1 + 1e-6)]]: rounding moves ln det S from
+    # ln det(C.T C) = ln 1e-6 by about 8e-11, far above the summary and volume
+    # certificates. Only the Weyl agreement term covers that link, yet x is
+    # about 2e-9, so the raw path is admitted.
+    components = _context(np.eye(2), np.array([[1.0, 1.0], [0.0, 1e-3]]))
+    assert algebra._context_geometry(components).coordinate_map is not None
+    evaluation = algebra._compute_penalty_logdet_evaluation({"s": 1.0}, components)
+    assert evaluation.rank == 2
+    with localcontext() as context:
+        context.prec = 100
+        (a, b), (c, d) = _decimal(components[0].omega_ssp)
+        error = abs(Decimal.from_float(evaluation.logdet) - (a * d - b * c).ln())
+        assert error <= Decimal.from_float(float(evaluation.logdet_error))
+
+
 class _ScaledContrast:
     """Two sign columns, the second a 1e8-scaled contrast, with an identity penalty."""
 

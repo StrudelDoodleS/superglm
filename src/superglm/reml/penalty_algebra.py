@@ -126,9 +126,13 @@ def _context_product(left: NDArray, right: NDArray, *, refine: bool) -> tuple[ND
 
 
 def _retained_coordinate_map(
-    support, coordinate_map: NDArray, *, refine: bool = False
+    support, coordinate_map: NDArray, *, refine: bool = False, products=None
 ) -> tuple[NDArray, NDArray]:
-    """Enclose (Q.T Q)^-1 Q.T C without amplifying off-support root residue."""
+    """Enclose (Q.T Q)^-1 Q.T C without amplifying off-support root residue.
+
+    ``products`` are the enclosed ``C.T Q`` and ``Q.T Q`` already formed for
+    this map's volume (``_shared_map_products``); a refined call forms its own.
+    """
     from superglm.reml.multi_penalty import (
         _gamma,
         _norm_upper,
@@ -141,12 +145,20 @@ def _retained_coordinate_map(
     if rank == 0:
         empty = np.empty((0, coordinate_map.shape[1]))
         return empty, empty.copy()
-    gram, gram_error = _context_product(basis.T, basis, refine=refine)
+    shared = products is not None and not refine
+    if shared:
+        gram, gram_error = products[2], products[3]
+    else:
+        gram, gram_error = _context_product(basis.T, basis, refine=refine)
     defect_bound = _enclosed_bound_sum(np.abs(gram - np.eye(rank)), gram_error)
     eta = _norm_upper(defect_bound)
     if eta >= 1:
         raise PenaltyNumericalError("retained penalty coordinates are unresolved")
-    mapped, mapped_error = _context_product(basis.T, coordinate_map, refine=refine)
+    if shared:
+        # The transpose of an enclosed C.T Q encloses Q.T C entrywise.
+        mapped, mapped_error = products[0].T, products[1].T
+    else:
+        mapped, mapped_error = _context_product(basis.T, coordinate_map, refine=refine)
     result = scipy.linalg.solve(gram, mapped, assume_a="pos", check_finite=False)
     product, product_error = _context_product(gram, result, refine=refine)
     residual = _enclosed_bound_sum(
@@ -164,14 +176,14 @@ def _retained_coordinate_map(
     return result, _positive_product(inverse_bound, residual)
 
 
-def _ssp_component_roots(support, coordinate_map: NDArray, *, refine: bool = False):
+def _ssp_component_roots(support, coordinate_map: NDArray, *, refine: bool = False, products=None):
     """One common retained-coordinate target, with optional sharper products."""
     from superglm.reml.multi_penalty import _positive_product
 
     full = support.rank == support.Q_plus.shape[0]
     if not full:
         retained_map, retained_error = _retained_coordinate_map(
-            support, coordinate_map, refine=refine
+            support, coordinate_map, refine=refine, products=products
         )
     roots, errors = [], []
     for source, source_error in zip(
@@ -224,8 +236,21 @@ def _near_identity_logdet(gram: NDArray, error: NDArray) -> tuple[float, float]:
     return value, float(_upper((bound + 8 * tiny) / (1 - _gamma(8, unit))))
 
 
+def _shared_map_products(support, coordinate_map: NDArray) -> tuple[NDArray, ...]:
+    """Enclosed ``C.T Q`` for this map and ``Q.T Q`` for the support, formed once.
+
+    The volume and the retained coordinate map both need them. ``Q.T Q`` does
+    not depend on the map, so ``_basis_gram`` keeps it on the support, which
+    the raw family carries from one REML context to the next.
+    """
+    from superglm.reml.multi_penalty import _basis_gram, _matmul_enclosed
+
+    basis = support.Q_plus
+    return (*_matmul_enclosed(coordinate_map.T, basis), *_basis_gram(support, basis))
+
+
 def _support_coordinate_volume(
-    support, coordinate_map: NDArray, *, _refine: bool = False
+    support, coordinate_map: NDArray, *, _refine: bool = False, products=None
 ) -> tuple[float, float]:
     """Bound the volume ratio of one fixed active support under an SSP map.
 
@@ -250,7 +275,10 @@ def _support_coordinate_volume(
     if rank == 0 or np.array_equal(coordinate_map, np.eye(width)):
         return 0.0, 0.0
     basis = support.Q_plus
-    mapped, mapped_error = _matmul_enclosed(coordinate_map.T, basis)
+    if products is not None and not _refine:
+        mapped, mapped_error = products[0], products[1]
+    else:
+        mapped, mapped_error = _matmul_enclosed(coordinate_map.T, basis)
     if _refine:
         for row, column in np.ndindex(mapped.shape):
             value, error = _compensated_dot(coordinate_map[:, row], basis[:, column])
@@ -271,7 +299,10 @@ def _support_coordinate_volume(
     )
     gram, gram_error = _enclosed_root_gram(whitened, action_error)
     numerator, numerator_error = _near_identity_logdet(gram, gram_error)
-    basis_gram, basis_error = _matmul_enclosed(basis.T, basis)
+    if products is not None:
+        basis_gram, basis_error = products[2], products[3]
+    else:
+        basis_gram, basis_error = _matmul_enclosed(basis.T, basis)
     denominator, denominator_error = _near_identity_logdet(basis_gram, basis_error)
     # T is a chosen checked float64 triangular matrix. This identity needs
     # neither an exact inverse of the QR factor nor a bound on that solve:
@@ -2567,9 +2598,9 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source):
     Linear Algebra Appl. 459). The rank and first term depend on Omega alone;
     ``_support_coordinate_volume`` certifies the second term and that ``U.T C``
     has full row rank for each map. The stored solver penalty is unchanged,
-    and ``_solver_penalty_agreement`` certifies, for every map, that the raw
-    target and the stored penalty share their rank and adds the Weyl term
-    between their log pseudo-determinants to the volume's error.
+    and ``_solver_penalty_agreement`` certifies, for every map, a Weyl gap in
+    the stored penalty at the raw rank (one-sided; see there) and adds the
+    Weyl term between the log pseudo-determinants to the volume's error.
 
     ``source`` is the previous context of the same fit (``_reuse_raw_from``).
     Its raw support transfers only through ``_RawPenaltyFamilyReceipt``, and
@@ -2622,8 +2653,11 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source):
     if support.rank != declared_rank:
         return _RawPenaltyRefusalReceipt.capture(grouped)
     try:
-        volume, volume_error = _support_coordinate_volume(support, coordinate_map)
-        roots, errors = _ssp_component_roots(support, coordinate_map)
+        products = _shared_map_products(support, coordinate_map)
+        volume, volume_error = _support_coordinate_volume(
+            support, coordinate_map, products=products
+        )
+        roots, errors = _ssp_component_roots(support, coordinate_map, products=products)
         agreement = _solver_penalty_agreement(support, stored, roots[0], errors[0])
     except PenaltyNumericalError:
         return _RawPenaltyRefusalReceipt.capture(grouped)
@@ -2645,8 +2679,8 @@ def _solver_penalty_agreement(support, stored: NDArray, root: NDArray, root_erro
     inequality ``max_i |lambda_i(S) - lambda_i(X)| <= ||S - X||_2`` (Weyl
     1912; Horn and Johnson, Matrix Analysis, 2nd ed., 2013, section 4.3)
     leaves ``S`` with exactly ``r`` eigenvalues of at least ``mu - eps`` and
-    the rest in ``[-eps, eps]`` when ``2 eps < mu``. The retained rank is then
-    the stored penalty's across that gap and, with ``x = eps / mu``,
+    the rest in ``[-eps, eps]`` when ``2 eps < mu``: ``S`` has a gap at ``r``
+    and, with ``x = eps / mu``,
 
         |log pdet_r(S) - log pdet(X)| <= r * -log(1 - x) <= r x / (1 - x).
 
@@ -2663,6 +2697,13 @@ def _solver_penalty_agreement(support, stored: NDArray, root: NDArray, root_erro
     keeps the second-order term ``x**2`` at or below machine epsilon, and when
     ``mu - eps`` clears the shared Gram rank bar for ``S``. Returns the bound
     above; raises ``PenaltyNumericalError`` otherwise.
+
+    The rank claim is one-sided. The retained eigenvalues of ``S`` clear the
+    rank bar, but its trailing eigenvalues are certified only to lie within
+    ``eps`` of zero, not below that bar: the enclosures put ``eps`` above
+    ``bar * ||S||_2`` (42 to 8e4 times on pg17 step A discrete), so the
+    upper-side check would refuse every context. ``S`` is canonicalised to the
+    declared rank, so its tail is rounding residue.
     """
     from superglm.reml.multi_penalty import (
         _finite_double,
