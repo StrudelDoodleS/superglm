@@ -33,6 +33,9 @@ _SMALLEST_SUBNORMAL = np.nextafter(0.0, 1.0)
 # A work threshold, not an accuracy threshold: tiny reductions reuse the
 # scalar recurrence without loading Numba's native runtime on a small fit.
 _DOT2_NATIVE_MIN_WORK = 256
+# Entries refined per Dot2 batch: about 5 MiB of indices, values, bounds and
+# magnitudes, independent of the product's width.
+_DOT2_BATCH_ENTRIES = 1 << 16
 
 
 @dataclass(frozen=True)
@@ -626,23 +629,33 @@ def _refine_product(left: NDArray, right: NDArray, value: NDArray, error: NDArra
 
     Replaces an entry-by-entry ``_compensated_dot`` loop with the same values
     and exceptions. Only the shared ``|left| @ |right|`` bound's rounding differs.
+    Output rows are refined in blocks of at most ``_DOT2_BATCH_ENTRIES``
+    entries, so the batch's index, value, bound and magnitude arrays stay
+    bounded however wide the product is, as the loop's scalar state was.
     """
-    selected = np.argwhere(np.ones(value.shape, dtype=bool))
-    try:
-        magnitude = _positive_product(np.abs(left), np.abs(right))
-        dots, bounds, success = _dot2_entries(left, right, selected, magnitude)
-    except PenaltyNumericalError:
-        # The scalar loop below reproduces the entry that cannot be enclosed.
-        dots = bounds = np.zeros(len(selected))
-        success = np.zeros(len(selected), dtype=bool)
-    row, column = selected.T
-    use = success & (bounds < error[row, column])
-    value[row[use], column[use]] = dots[use]
-    error[row[use], column[use]] = bounds[use]
-    for r, c in selected[~success]:
-        corrected, bound = _compensated_dot(left[r], right[:, c])
-        if bound < error[r, c]:
-            value[r, c], error[r, c] = corrected, bound
+    n_rows, n_cols = value.shape
+    block_rows = max(1, _DOT2_BATCH_ENTRIES // max(n_cols, 1))
+    # Normalised once: each block then views the same native operand.
+    absolute_right, native_right = np.abs(right), _native_operand(right)
+    for start in range(0, n_rows, block_rows):
+        block = left[start : start + block_rows]
+        selected = np.argwhere(np.ones((block.shape[0], n_cols), dtype=bool))
+        try:
+            magnitude = _positive_product(np.abs(block), absolute_right)
+            dots, bounds, success = _dot2_entries(block, native_right, selected, magnitude)
+        except PenaltyNumericalError:
+            # The scalar loop below reproduces the entry that cannot be enclosed.
+            dots = bounds = np.zeros(len(selected))
+            success = np.zeros(len(selected), dtype=bool)
+        row, column = selected.T
+        row = row + start
+        use = success & (bounds < error[row, column])
+        value[row[use], column[use]] = dots[use]
+        error[row[use], column[use]] = bounds[use]
+        for r, c in zip(row[~success], column[~success], strict=True):
+            corrected, bound = _compensated_dot(left[r], right[:, c])
+            if bound < error[r, c]:
+                value[r, c], error[r, c] = corrected, bound
 
 
 def _squared_norm_enclosed(value: NDArray, error: NDArray) -> tuple[float, float]:

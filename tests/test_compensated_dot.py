@@ -449,6 +449,35 @@ def test_batched_product_refinement_reproduces_the_entrywise_loop(monkeypatch, i
         )
 
 
+def test_product_refinement_batches_are_bounded_by_entries(monkeypatch):
+    """#436 review (Codex): one batch over every entry of a wide product held
+    index, value, bound and magnitude arrays for all of them at once. Output
+    rows are refined in blocks of at most ``_DOT2_BATCH_ENTRIES`` entries, with
+    the entrywise loop's values and certified enclosures."""
+    from superglm.reml import multi_penalty as module
+
+    rng = np.random.default_rng(9140)
+    left = np.ldexp(rng.normal(size=(7, 300)), rng.integers(-40, 41, size=(7, 300)))
+    right = np.ldexp(rng.normal(size=(300, 5)), rng.integers(-40, 41, size=(300, 5)))
+    native = module._matmul_enclosed(left, right)
+    batched = tuple(array.copy() for array in native)
+    entrywise = tuple(array.copy() for array in native)
+    original, sizes = module._dot2_selected, []
+    monkeypatch.setattr(
+        module, "_dot2_selected", lambda *a: sizes.append(len(a[2])) or original(*a)
+    )
+    monkeypatch.setattr(module, "_DOT2_BATCH_ENTRIES", 11)  # two rows of five per block
+    module._refine_product(left, right, *batched)
+    assert sizes == [10, 10, 10, 5]
+    _entrywise_refinement(left, right, *entrywise)
+    np.testing.assert_array_equal(batched[0], entrywise[0])
+    for row, column in np.ndindex(batched[0].shape):
+        exact = _exact_dot(left[row], right[:, column])
+        assert abs(Fraction.from_float(batched[0][row, column]) - exact) <= Fraction.from_float(
+            batched[1][row, column]
+        )
+
+
 def test_refined_support_volume_is_one_batch_with_the_entrywise_value(monkeypatch):
     from types import SimpleNamespace
 
