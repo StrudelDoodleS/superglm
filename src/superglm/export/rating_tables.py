@@ -815,7 +815,8 @@ def _require_unclamped_response_export(model: SuperGLM) -> None:
 
     ``model.predict`` does not stop at the inverse link: it finishes with
     ``clip_mu``, which for ``Binomial`` clamps the mean into
-    ``[1e-7, 1 - 1e-7]``.  A clamp cannot be distributed over the exported
+    ``[1e-7, 1 - 1e-7]`` (under a log link, into ``1e-7`` up to the largest
+    float below one).  A clamp cannot be distributed over the exported
     blocks, so no multiplicative table can express it, and the refusal is by
     FAMILY rather than by frame because the payload is frame-independent -- a
     table that satisfies the clamp on every row of the export frame still
@@ -823,7 +824,7 @@ def _require_unclamped_response_export(model: SuperGLM) -> None:
 
     The usable domain is what settles it.  Under a log link a binomial mean is
     ``exp(eta)``, so the table agrees with ``predict`` only on
-    ``-16.118 <= eta <= -1.0e-7``: that is **20.1%** of the ``[-80, 0]`` band
+    ``-16.118 <= eta < 0``: that is **20.1%** of the ``[-80, 0]`` band
     ``stabilize_eta`` allows, and both edges are ordinary rather than
     degenerate.  Below it lies any probability under 1e-7, which is a real
     rare-event rate and not a mis-scaled fit; above it lies ``mu > 1``, and
@@ -831,10 +832,8 @@ def _require_unclamped_response_export(model: SuperGLM) -> None:
     log-binomial regression -- which is fitted precisely because it yields the
     multiplicative risk ratios someone would then want a rating table of.
     Measured: at eta 0.1 the table returns 1.105 where ``predict`` returns
-    0.9999999, 10.5% out at a predictor one ten-thousandth of the way to the
-    stabilization bound; and on a three-level fit with one 100%-event level,
-    974 of 3000 rows are rewritten by the clamp for 4.40e-01 maximum relative
-    error against a documented round-off claim of 7.1e-15.
+    the largest float below one, 10.5% out at a predictor one ten-thousandth
+    of the way to the stabilization bound.
 
     Refusing the family is what makes ``_require_unsaturated_predictor_export``
     able to check the predictor alone: with ``Binomial`` gone, ``clip_mu``
@@ -848,9 +847,10 @@ def _require_unclamped_response_export(model: SuperGLM) -> None:
         raise ValueError(
             "Rating-table export is not supported for Binomial models. The exported "
             "table is a product of per-block factors, and model.predict finishes by "
-            "clamping a binomial mean into [1e-7, 1 - 1e-7]; a clamp is not a factor, "
-            "so no table can carry it. Under a log link the two agree only for "
-            "-16.118 <= eta <= -1e-7 -- 20.1% of the permitted range -- and outside it "
+            "clamping a binomial mean into [1e-7, 1 - 1e-7], or under a log link from 1e-7 "
+            "to the largest float below one; a clamp is not a factor, so no table can "
+            "carry it. Under a log link the two agree only for "
+            "-16.118 <= eta < 0 -- 20.1% of the permitted range -- and outside it "
             "the workbook returns a 'probability' above one, or below the clamp, while "
             "the model returns the clamped value."
         )

@@ -138,7 +138,7 @@ def optimize_efs_reml(
 
     # Compute W and X'WX from bootstrap fit
     boot_eta = stabilize_eta(linear_predictor(dm, boot_result, offset_arr), link)
-    boot_mu = clip_mu(link.inverse(boot_eta), distribution)
+    boot_mu = clip_mu(link.inverse(boot_eta), distribution, link)
     boot_W = fisher_working_weights(
         distribution=distribution,
         link=link,
@@ -241,7 +241,7 @@ def optimize_efs_reml(
 
             # Compute IRLS weights and cache X'WX
             eta = stabilize_eta(linear_predictor(dm, pirls_result, offset_arr), link)
-            mu = clip_mu(link.inverse(eta), distribution)
+            mu = clip_mu(link.inverse(eta), distribution, link)
             W = fisher_working_weights(
                 distribution=distribution,
                 link=link,

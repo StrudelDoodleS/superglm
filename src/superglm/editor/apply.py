@@ -627,7 +627,7 @@ def _refresh_fit_statistics(
             model._solver_pirls_result() if model._solver_result is not None else model.result
         )
         eta = stabilize_eta(linear_predictor(model._dm, solver_result, offset_arr), model._link)
-        mu = clip_mu(model._link.inverse(eta), model._distribution)
+        mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
     else:
         model._fit_stats = None
         return

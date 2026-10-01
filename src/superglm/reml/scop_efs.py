@@ -832,7 +832,7 @@ def _evaluate_scop_reml_mode(
             else np.asarray(eta_unclipped, dtype=np.float64)
         )
         eta = stabilize_eta(eta_raw, context.link)
-        mu = clip_mu(context.link.inverse(eta), context.distribution)
+        mu = clip_mu(context.link.inverse(eta), context.distribution, context.link)
         return fisher_working_weights(
             distribution=context.distribution,
             link=context.link,
@@ -1404,7 +1404,7 @@ def _finalize_scop_reml_mode(
                 context.dm.matvec(result.beta) + result.intercept + context.offset_arr,
                 context.link,
             )
-            mu = clip_mu(context.link.inverse(eta), context.distribution)
+            mu = clip_mu(context.link.inverse(eta), context.distribution, context.link)
             cached_weights = fisher_working_weights(
                 distribution=context.distribution,
                 link=context.link,

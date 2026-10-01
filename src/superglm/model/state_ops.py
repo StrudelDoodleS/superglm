@@ -41,7 +41,7 @@ def _solver_space_working_weights(model) -> NDArray:
     solver = model._solver_pirls_result()
     # the fitted mode's own eta, from its centred state when it carries one
     eta = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    mu = clip_mu(model._link.inverse(eta), model._distribution, model._link)
     return fisher_working_weights(
         distribution=model._distribution,
         link=model._link,

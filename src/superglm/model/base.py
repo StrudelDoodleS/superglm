@@ -609,7 +609,7 @@ def predict_eta_fast_discrete(
 
 def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
     """Map stabilized eta to the public response scale."""
-    return clip_mu(model._link.inverse(eta), model._distribution)
+    return clip_mu(model._link.inverse(eta), model._distribution, model._link)
 
 
 def predict_exact(

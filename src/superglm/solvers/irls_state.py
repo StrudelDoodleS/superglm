@@ -9,9 +9,9 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Binomial, Distribution, Poisson, clip_mu
+from superglm.distributions import _FLOAT64_BELOW_ONE, Binomial, Distribution, Poisson, clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import _BINOMIAL_CLIP_MU_EPS, Link, LogLink, SqrtLink, stabilize_eta
+from superglm.links import Link, LogLink, SqrtLink, stabilize_eta
 
 _MAX_FLOAT64_HALVING_DEPTH = 1074
 
@@ -95,7 +95,7 @@ def _evaluate_irls_state(
         if eta_unclipped.shape != (dm.n,):
             raise ValueError(f"eta_unclipped must have shape {(dm.n,)}, got {eta_unclipped.shape}")
     eta = stabilize_eta(eta_unclipped, link)
-    mu = clip_mu(link.inverse(eta), family)
+    mu = clip_mu(link.inverse(eta), family, link)
     retained_deviance = (
         float(np.sum(weights * family.deviance_unit(y, mu)))
         if deviance is None
@@ -131,7 +131,7 @@ def mean_space_violation(
     ``exp(eta)`` covers ``(0, inf)``, which is wider than the binomial
     probability space ``(0, 1)``: a positive-weight row with ``eta >= 0`` has
     no binomial likelihood (``log(1 - mu)`` is undefined), so it is not a
-    state at all.  ``clip_mu`` would hide it behind a mean of ``1 - 1e-7``,
+    state at all.  ``clip_mu`` would hide it behind a capped mean,
     whose deviance is finite and flat in ``eta`` and whose Fisher weight
     ``exp(2 eta) / V(mu)`` pins the row where it landed: replacing an
     out-of-range fitted value instead of the coefficients is Wacholder's
@@ -150,28 +150,115 @@ def mean_space_violation(
     return None
 
 
-# ``clip_mu`` caps a binomial mean at ``1 - _BINOMIAL_CLIP_MU_EPS``: under the
-# log link that cap is reached at ``eta = log1p(-eps)``.
-_BINOMIAL_LOG_CAP_ETA = math.log1p(-_BINOMIAL_CLIP_MU_EPS)
+def merit_resolution(merit: float, merit_scale: float = 1.0) -> float:
+    """The change in a fitted objective below which a line search cannot tell two states apart.
+
+    ``64 eps max(merit_scale, |merit|)``: the roundoff ``_irls_trial_is_unsafe``
+    allows a trial's penalized deviance before it counts as an increase.
+    """
+    return 64.0 * np.finfo(float).eps * max(float(merit_scale), abs(float(merit)))
 
 
 def mean_space_boundary_rows(
     family: Distribution, link: Link, eta_unclipped: NDArray, weights: NDArray
 ) -> int:
-    """Positive-weight rows whose mean ``clip_mu`` caps at the mean-space boundary.
+    """Positive-weight rows whose mean float64 cannot tell from one.
 
     Zero for a family and link whose means cannot leave the mean space
-    (``mean_space_violation`` is ``None``).  A binomial/log row with
-    ``exp(eta) >= 1 - 1e-7`` has its mean replaced by the cap, so its deviance
-    is flat in ``eta`` there: the fitted objective is no longer the binomial
-    likelihood, and a state holding such a row is at the boundary of the
-    parameter space ``{beta : X beta + offset < 0}``, where the maximum is
-    not a stationary point (Donoghoe & Marschner 2018, J. Stat. Softw.
-    86(9), sections 2 and 4.1).
+    (``mean_space_violation`` is ``None``).  The binomial/log parameter space
+    is ``{beta : X beta + offset < 0}``, and every ``eta < 0`` is inside it.
+    ``1 - mu`` is exact for ``mu = exp(eta) >= 1/2`` (Sterbenz), but ``mu``
+    rounds by up to half an ulp of one, so once the mean rounds to one or to
+    the largest float below it, where ``clip_mu`` caps it, ``1 - mu`` keeps
+    no digit of ``-eta`` and the row's likelihood is flat: the state is at the
+    boundary, where the maximum is not a stationary point (Donoghoe &
+    Marschner 2018, J. Stat. Softw. 86(9), sections 2 and 4.1).
     """
     if mean_space_violation(family, link) is None:
         return 0
-    return int(np.count_nonzero((eta_unclipped >= _BINOMIAL_LOG_CAP_ETA) & (weights > 0.0)))
+    with np.errstate(over="ignore"):
+        mean = link.inverse(stabilize_eta(np.asarray(eta_unclipped, dtype=float), link))
+    return int(np.count_nonzero((mean >= _FLOAT64_BELOW_ONE) & (weights > 0.0)))
+
+
+def mean_space_heading_rows(
+    family: Distribution,
+    link: Link,
+    y: NDArray,
+    eta: NDArray,
+    step: NDArray,
+    previous_step: NDArray | None,
+    weights: NDArray,
+) -> NDArray:
+    """``(n,)`` bool: event rows whose Fisher iteration is heading for the boundary.
+
+    All ``False`` for a family and link whose means cannot leave the mean
+    space.  Only an event row (``y = 1``) can sit on the binomial/log boundary
+    at a maximum: its log-likelihood ``w eta`` is finite at ``eta = 0``, where
+    any other row's is not (Schwendinger, Gruen & Hornik 2021, Comput. Stat.
+    36, section 2.1).  Its score is its weight and its Fisher step its own
+    distance ``expm1(-eta) ~ -eta``, so approaching a maximum on the boundary
+    each proposal ``step`` carries it the share of that distance its Lagrange
+    multiplier leaves unbalanced, and the steps contract geometrically onto
+    ``eta = 0``; near an interior maximum ``eta* < 0`` they contract onto
+    ``eta*``.  Aitken's delta-squared extrapolation of the last two proposal
+    steps (Aitken 1926, Proc. R. Soc. Edinb. 46, 289-305),
+    ``eta + step / (1 - r)`` with ``r = step / previous_step``, estimates that
+    limit whatever the multiplier, where a deviance or coefficient test sees
+    only the shrinking steps.  A row is heading for the boundary when its
+    limit lies at least halfway from ``eta`` to ``eta = 0``, or when its
+    proposal alone covers half the distance (the first step, or a step that
+    does not contract).
+    """
+    current = np.asarray(eta, dtype=float)
+    if mean_space_violation(family, link) is None:
+        return np.zeros(current.shape, dtype=bool)
+    step = np.asarray(step, dtype=float)
+    candidate = (current < 0.0) & (step > 0.0) & (np.asarray(y) == 1.0) & (weights > 0.0)
+    heading = candidate & (current + step >= 0.5 * current)
+    if previous_step is not None:
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            ratio = step / np.asarray(previous_step, dtype=float)
+            limit = current + step / (1.0 - ratio)
+        contracting = (ratio > 0.0) & (ratio < 1.0)
+        heading |= candidate & contracting & (limit >= 0.5 * current)
+    return heading
+
+
+def interior_start_intercept(
+    family: Distribution,
+    link: Link,
+    eta_unclipped: NDArray,
+    weights: NDArray,
+    intercept: float,
+    level: float,
+) -> float:
+    """An intercept that puts a starting state strictly inside the mean space.
+
+    ``intercept`` unchanged when the start is interior or the family and link
+    cannot leave their mean space.  Otherwise it is lowered until the largest
+    positive-weight ``eta`` is ``level`` (the intercept-only start's own
+    ``log(mean)``, below zero).  Every log-binomial solver but the
+    augmented-Lagrangian ones needs a start inside the parameter space, and
+    with an intercept the simple one is ``(a, 0, ..., 0)`` with ``a < 0``
+    (Schwendinger, Gruen & Hornik 2021, Comput. Stat. 36, section 4.2); an
+    offset moves that bound to ``a < -max(offset)``, which the default
+    intercept, chosen before the offset, ignores.  A constant offset ``c``
+    then starts at ``intercept - c``, the no-offset start shifted with the
+    optimum.
+    """
+    if mean_space_violation(family, link) is None:
+        return float(intercept)
+    eta = np.asarray(eta_unclipped, dtype=float)
+    carried = weights > 0.0
+    if not np.any(carried):
+        return float(intercept)
+    top = float(np.max(eta[carried]))
+    if not math.isfinite(top) or (
+        top < 0.0 and mean_space_boundary_rows(family, link, eta, weights) == 0
+    ):
+        return float(intercept)
+    return float(intercept) - (top - float(level))
 
 
 StateInvalid = Callable[[_IRLSState], bool]
@@ -377,11 +464,7 @@ def _irls_trial_is_unsafe(
         if not np.isfinite(roundoff) or roundoff < 0.0:
             return True
     else:
-        roundoff = (
-            64.0
-            * np.finfo(float).eps
-            * max(merit_scale, abs(candidate_merit), abs(committed_merit))
-        )
+        roundoff = merit_resolution(max(abs(candidate_merit), abs(committed_merit)), merit_scale)
     if merit_delta is not None:
         delta = float(merit_delta(candidate, committed))
         return not np.isfinite(delta) or bool(delta > roundoff)

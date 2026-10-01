@@ -690,8 +690,8 @@ def compute_observed_d2W_deta2(
         eps = 1e-5
         eta_plus = eta + eps
         eta_minus = eta - eps
-        mu_plus = clip_mu(link.inverse(eta_plus), distribution)
-        mu_minus = clip_mu(link.inverse(eta_minus), distribution)
+        mu_plus = clip_mu(link.inverse(eta_plus), distribution, link)
+        mu_minus = clip_mu(link.inverse(eta_minus), distribution, link)
         plus = compute_observed_dW_deta(
             distribution,
             link,
@@ -1200,7 +1200,7 @@ def build_observed_reml_geometry(
         raise ObservedGeometryInfeasibleError("result.intercept must be finite")
 
     eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
-    mu = clip_mu(link.inverse(eta), distribution)
+    mu = clip_mu(link.inverse(eta), distribution, link)
     observed_w, weight_derivative, weight_second_derivative = _compute_observed_row_bundle(
         distribution,
         link,

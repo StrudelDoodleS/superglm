@@ -332,7 +332,7 @@ def _drop_term_holdout(
         eta_raw += contribution
 
     eta_full = stabilize_eta(eta_raw, model._link)
-    mu_full = clip_mu(model._link.inverse(eta_full), dist)
+    mu_full = clip_mu(model._link.inverse(eta_full), dist, model._link)
     dev_full = float(np.sum(w * dist.deviance_unit(y_arr, mu_full)))
 
     rows = []
@@ -341,7 +341,7 @@ def _drop_term_holdout(
             eta_raw - contributions[term["name"]],
             model._link,
         )
-        mu_drop = clip_mu(model._link.inverse(eta_drop), dist)
+        mu_drop = clip_mu(model._link.inverse(eta_drop), dist, model._link)
         dev_drop = float(np.sum(w * dist.deviance_unit(y_arr, mu_drop)))
 
         rows.append(

@@ -130,7 +130,7 @@ def vectorized_conditional_unpooled_effect(
 
     for _ in range(max_iter):
         eta = stabilize_eta(base_eta + effects[codes], link)
-        mu = clip_mu(link.inverse(eta), distribution)
+        mu = clip_mu(link.inverse(eta), distribution, link)
         variance = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
         derivative = link.deriv_inverse(eta)
         score = np.bincount(
