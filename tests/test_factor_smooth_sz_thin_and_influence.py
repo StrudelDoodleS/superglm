@@ -1114,6 +1114,52 @@ def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
             assert np.all(se == 0.0)
 
 
+def test_a_holdout_drop_term_starts_from_the_predicted_predictor() -> None:
+    """Holdout drop-term deltas start from ``predict``'s predictor (#432; Claude review, Low).
+
+    ``term_drop_diagnostics(mode="holdout")`` summed the terms at the fit's
+    coordinates, so a weightless level's rows took the fit's arbitrary point
+    along its alias (about +-5000 on this fixture) where ``predict`` gives the
+    population.  For the numeric ``x1`` the delta is ``D(eta - x1 b) -
+    D(eta)``; with ``eta`` from ``predict``, each deviance is within its rows'
+    predictor rounding ``rho`` (``2 |y - mu| rho + rho^2`` a row, identity
+    link) and each sum's ``gamma_n D``.
+    """
+    from superglm.diagnostics.term_diagnostics import term_drop_diagnostics
+    from superglm.model import base
+
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    rows = frame["g"].isin(["g003", "g007", "g010"]).to_numpy()
+    held = frame[rows].reset_index(drop=True)
+    target = y[rows]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        table = term_drop_diagnostics(
+            model,
+            frame,
+            y,
+            weight,
+            mode="holdout",
+            X_val=held,
+            y_val=target,
+            sample_weight_val=np.ones(len(held)),
+        )
+    reported = float(table.loc[table["feature"] == "x1", "delta_deviance"].iloc[0])
+    eta = base.predict_eta_exact(model, held, warn=False)
+    x1 = next(g for g in model._groups if g.name == "x1")
+    term = held["x1"].to_numpy() * float(model.result.beta[x1.sl][0])
+    full = float(np.sum((target - eta) ** 2))
+    dropped = float(np.sum((target - (eta - term)) ** 2))
+    rho = 2.0 * _rounding_bound(model, held) + _gamma(2) * np.abs(term)
+    bound = (
+        float(np.sum(2.0 * np.abs(target - eta) * rho + rho * rho))
+        + float(np.sum(2.0 * np.abs(target - eta + term) * rho + rho * rho))
+        + _gamma(len(held)) * (full + dropped)
+    )
+    assert abs(reported - (dropped - full)) <= bound
+
+
 def test_sz_aliased_levels_converge_beside_a_laplace_excluded_column(monkeypatch) -> None:
     """Two weightless levels beside ``xt``, which only two rows of weight 1e-15 move (#432 e).
 
