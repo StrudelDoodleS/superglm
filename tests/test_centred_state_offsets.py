@@ -233,6 +233,43 @@ def test_discrete_reml_warm_starts_carry_the_centred_state(family):
     _assert_same_reml(fit(0.0), fit(1e16))
 
 
+# --------------------------------------- 4b. the exact REML weight derivative
+@pytest.mark.parametrize("family", ["poisson", "gamma", "binomial"])
+def test_exact_reml_weight_derivative_reads_the_centred_direction(family):
+    """The W(rho) correction's ``deta = (X - 1 mean_x') dbeta`` is formed about the centre.
+
+    Exact REML differentiates the working weights through ``deta/drho``.  Formed
+    as ``X dbeta - mean_x' dbeta`` it cancels ``c' dbeta`` at a column's offset,
+    ``u |c' dbeta|`` in every row: at 1e16 Poisson, Gamma (observed geometry) and
+    binomial ended ``line_search_failed`` with lambda about 1e-4 off.  The dense
+    column is now applied about the state's centre and its mean offset formed on
+    centred rows (``reml.w_derivatives``).  Mutation: the raw ``centered_matvec``.
+    """
+    rng = np.random.default_rng(10)
+    n = 2400
+    g = np.tile(np.arange(40), n // 40)
+    z = 2.0 * rng.integers(-4, 5, n)
+    s = rng.uniform(size=n)
+    eta = 0.5 + 0.1 * z + 0.3 * np.sin(g) + 0.4 * np.sin(2 * np.pi * s)
+    if family == "poisson":
+        y = rng.poisson(np.exp(eta)).astype(float)
+    elif family == "gamma":
+        y = rng.gamma(3.0, np.exp(eta) / 3.0)
+    else:
+        y = (rng.uniform(size=n) < 1.0 / (1.0 + np.exp(1.0 - eta))).astype(float)
+
+    def fit(shift: float) -> SuperGLM:
+        model = SuperGLM(
+            family=family,
+            features={"x": Numeric(), "g": RandomEffect(), "s": Spline(kind="ps", k=8)},
+            selection_penalty=0,
+            **({"link": "log"} if family == "gamma" else {}),
+        )
+        return _fit_reml(model, pd.DataFrame({"x": shift + z, "g": g, "s": s}), y)
+
+    _assert_same_reml(fit(0.0), fit(1e16))
+
+
 # ------------------------------------------------------ 5. drop-term holdout
 def test_holdout_drop_term_reads_the_public_predictor():
     """``term_drop_diagnostics(mode="holdout")`` scores the fit's centred predictor (item 5).
@@ -274,7 +311,7 @@ def test_holdout_drop_term_reads_the_public_predictor():
 # ------------------------------------------- 6. the compensated intercept kept
 @pytest.mark.parametrize("base", [3e-8, 1e100])
 def test_a_folded_compensated_intercept_still_predicts_the_fit(base):
-    """With no column keeping a public centre the pair ``(alpha, alpha_lo)`` is kept (item 6).
+    """A Gaussian identity fit keeps its pair ``(alpha, alpha_lo)``, by type (item 6).
 
     ``Polynomial(degree=1)`` on ``x`` in {0, 1} is the column ``+-1`` about
     its exact zero centre, so canonicalization folds it and the public

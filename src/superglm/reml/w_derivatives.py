@@ -36,7 +36,13 @@ from superglm.solvers.hessian_factor import (
     HessianFactor,
     as_hessian_factor,
 )
-from superglm.solvers.mode_score import linear_predictor
+from superglm.solvers.mode_score import (
+    centre_offset_mean,
+    dense_centred_matvec,
+    dense_centred_rmatvec,
+    dense_columns,
+    linear_predictor,
+)
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.structured import (
     CenteredBlockOperator,
@@ -57,6 +63,7 @@ from superglm.solvers.structured import (
     structured_design_matvec,
     structured_design_rmatvec,
 )
+from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
 _SIGNED_GRAM_BATCH_BYTES = 64 << 20
@@ -462,18 +469,55 @@ def reml_w_correction(
             sum_w = float(factor_sum_w)
         use_stable_signed_gram = False
 
+    # Every dense column is applied about the fit's state centre, by type
+    # (issue #430): ``X dbeta - mean_x' dbeta`` formed raw cancels ``c' dbeta``
+    # at a column's offset, ``u |c' dbeta|`` in every row's ``deta`` (at 1e16
+    # exact REML ended line_search_failed with lambda 1e-4 off).  The offset
+    # ``mean_x - c`` is formed on centred rows with the weights ``mean_x``
+    # carries: the geometry's, else the Fisher weights at the mode.
+    dense = dense_columns(dm)
+    state_center = getattr(pirls_result, "state_center", None)
+    dense_centre: NDArray | None = None
+    dense_offset_mean: NDArray | None = None
+    if state_center is not None and np.any(dense):
+        dense_centre = np.where(dense, np.asarray(state_center, dtype=np.float64), 0.0)
+        mean_weights = (
+            np.asarray(geometry.weights, dtype=np.float64)
+            if geometry is not None
+            else fisher_working_weights(
+                distribution=distribution,
+                link=link,
+                mu=mu,
+                eta=eta,
+                sample_weight=(
+                    np.ones(dm.n) if sample_weight is None else np.asarray(sample_weight)
+                ),
+            )
+        )
+        dense_offset_mean = np.where(
+            dense,
+            centre_offset_mean(dm, mean_weights, float(np.sum(mean_weights)), dense_centre, mean_x),
+            0.0,
+        )
+
     def centered_matvec(values: NDArray) -> NDArray:
         """Apply the profiled-intercept design ``X - 1 mean_x'``."""
+        rest = values if dense_centre is None else np.where(dense, 0.0, values)
         design_values = (
-            dm.matvec(values)
+            dm.matvec(rest)
             if structured_layout is None
             else structured_design_matvec(
                 structured_layout,
                 dm.group_matrices,
-                values,
+                rest,
             )
         )
-        return design_values - float(mean_x @ values)
+        product = design_values - float(mean_x @ rest)
+        if dense_centre is None or dense_offset_mean is None:
+            return product
+        return product + (
+            dense_centred_matvec(dm, values, dense_centre) - float(dense_offset_mean @ values)
+        )
 
     def centered_rmatvec(values: NDArray) -> NDArray:
         """Apply the transpose of the profiled-intercept design."""
@@ -486,7 +530,12 @@ def reml_w_correction(
                 values,
             )
         )
-        return transpose_values - mean_x * float(np.sum(values, dtype=np.float64))
+        total = float(np.sum(values, dtype=np.float64))
+        product = transpose_values - mean_x * total
+        if dense_centre is None or dense_offset_mean is None:
+            return product
+        centred = dense_centred_rmatvec(dm, values, dense_centre) - dense_offset_mean * total
+        return np.where(dense, centred, product)
 
     structured_group_index: int | None = None
     structured_layout = None

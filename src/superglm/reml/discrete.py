@@ -71,7 +71,6 @@ from superglm.solvers.irls_direct import (
 from superglm.solvers.mode_score import (
     centred_matvec,
     centred_warm_start,
-    offset_columns,
     prior_weighted_centre,
 )
 from superglm.solvers.pirls import PIRLSResult
@@ -438,10 +437,6 @@ def optimize_discrete_reml_cached_w(
     # translated by 1e10 otherwise costs eta ~1e-6 per row in X beta against
     # the raw intercept, and the true objective that accepts a trial with it.
     trial_centre = prior_weighted_centre(dm, sample_weight)
-    # A dense column whose centre lies beyond its spread (issue #430): only
-    # then do the trials hold the candidate's centred state, since the raw
-    # intercept loses no bit otherwise and the trials compute as before.
-    offset_centre = bool(np.any(offset_columns(dm, sample_weight, trial_centre)))
     structured_decision = resolve_structured_backend(
         list(dm.group_matrices),
         groups,
@@ -780,17 +775,15 @@ def optimize_discrete_reml_cached_w(
         c_mean_x = cache["mean_x"]
         c_mean_z = cache["mean_z"]
         c_sum_W = cache["sum_W"]
-        # Beside a far-offset column the cached trials hold the candidate
-        # PIRLS's centred state (design §3.8): its centre, and its working
-        # means' offset from that centre formed on centred rows
-        # (``mode_score.centre_offset_mean``).
-        cand_centre = trial_centre
-        c_offset_mean = np.asarray(c_mean_x, dtype=np.float64) - trial_centre
-        if offset_centre and pirls_result.state_center is not None:
-            cand_centre = pirls_result.state_center
-            cached_offset_mean = cache.get("centre_offset_mean")
-            if cached_offset_mean is not None:
-                c_offset_mean = cached_offset_mean
+        # The cached trials hold the candidate PIRLS's centred state (design
+        # §3.8): its centre, and its working means' offset from that centre
+        # formed on centred rows (``mode_score.centre_offset_mean``).
+        cand_centre = (
+            trial_centre if pirls_result.state_center is None else pirls_result.state_center
+        )
+        c_offset_mean = cache.get("centre_offset_mean")
+        if c_offset_mean is None:
+            c_offset_mean = np.asarray(c_mean_x, dtype=np.float64) - cand_centre
 
         # Evaluate REML objective
         _t0 = _time.perf_counter()
@@ -1284,7 +1277,6 @@ def optimize_discrete_reml_cached_w(
                             groups,
                             trial_lambdas,
                             reml_penalties=penalties,
-                            centred=offset_centre,
                         )
                     log_det_H_trial = cached_solution.log_det_H
                     hessian_rank_trial = cached_solution.hessian_rank
@@ -1308,19 +1300,16 @@ def optimize_discrete_reml_cached_w(
                 beta_trial = cached_solution.beta
                 factor_alpha = cached_solution.centred_intercept
                 factor_centre = cached_solution.state_center
-                if factor_alpha is None or factor_centre is None:
-                    intercept_trial = cached_solution.intercept
-                    centred_intercept_trial = intercept_trial + math.fsum(cand_centre * beta_trial)
-                else:
-                    # the factor's centred alpha about its border centre, carried
-                    # to the candidate's centre (the same c0, exactly zero apart)
-                    # and never taken back from the rounded raw intercept, which
-                    # cancels c' beta at a column's offset (1e16: max_reml_iter,
-                    # lambda 2.84% off)
-                    centred_intercept_trial = float(factor_alpha) + math.fsum(
-                        (cand_centre - factor_centre) * beta_trial
-                    )
-                    intercept_trial = centred_intercept_trial - math.fsum(cand_centre * beta_trial)
+                if factor_alpha is None or factor_centre is None:  # pragma: no cover - invariant
+                    raise RuntimeError("Structured cached solve omitted its centred state.")
+                # the factor's centred alpha about its border centre, carried to
+                # the candidate's centre (the same c0, exactly zero apart) and
+                # never taken back from the rounded raw intercept, which cancels
+                # c' beta at a column's offset (1e16: max_reml_iter, lambda 2.84% off)
+                centred_intercept_trial = float(factor_alpha) + math.fsum(
+                    (cand_centre - factor_centre) * beta_trial
+                )
+                intercept_trial = centred_intercept_trial - math.fsum(cand_centre * beta_trial)
             else:
                 if c_centered_XtWX is None or S_trial is None:
                     raise RuntimeError("Dense cached solve is missing matrix geometry.")

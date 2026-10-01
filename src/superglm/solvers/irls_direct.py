@@ -105,7 +105,6 @@ from superglm.solvers.mode_score import (
     centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
-    offset_columns,
     penalized_mode_residual,
     prior_weighted_centre,
     stagnation_window,
@@ -326,12 +325,7 @@ def _evaluate_scop_trial(
 
 
 def _structured_score_centre(
-    system,
-    factor,
-    dm: DesignMatrix,
-    W: NDArray,
-    state_center: NDArray | None,
-    offset_mask: NDArray | None,
+    system, factor, dm: DesignMatrix, W: NDArray, state_center: NDArray | None
 ) -> tuple:
     """``(mean_x, sum_w, centred diagonal, weakly identified slopes, mean_x - c)`` of a structured solve.
 
@@ -340,8 +334,7 @@ def _structured_score_centre(
     (offset-free for a nested chain, ``compact_operator_diagonal``), the
     slopes the factor truncated as weakly identified (one-engine design §3.6
     step 5, §3.9), and the means' offset from the state's centre
-    (``centre_offset_mean`` on the columns ``offset_mask`` marks; ``None``
-    without a column whose centre lies beyond its spread).
+    (``centre_offset_mean``; ``None`` without a centred state).
     """
     operator = system.operator
     xtw = np.empty(operator.shape[0], dtype=np.float64)
@@ -356,8 +349,8 @@ def _structured_score_centre(
     )
     offset_mean = (
         None
-        if state_center is None or offset_mask is None or not np.any(offset_mask)
-        else centre_offset_mean(dm, W, float(system.sum_w), state_center, mean_x, offset_mask)
+        if state_center is None
+        else centre_offset_mean(dm, W, float(system.sum_w), state_center, mean_x)
     )
     return mean_x, float(system.sum_w), diagonal, excluded, offset_mean
 
@@ -1867,13 +1860,6 @@ def _fit_irls_direct_once(
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
     _mean_space_invalid = mean_space_violation(family, link)
-    # The dense columns whose centre lies beyond their spread (issue #430): only
-    # with one does the raw intercept lose a bit, so the centred readings below
-    # (a warm start's state, the gram intercept's mean offset, the certificate's
-    # intercept, the sz score) run then, and a design without one computes as
-    # before, bit for bit (``mode_score.offset_columns``).
-    _offset_mask = None if _state_center is None else offset_columns(dm, weights, _state_center)
-    _far_centre = _offset_mask is not None and bool(np.any(_offset_mask))
     # A warm start's centred state carried to this fit's centre (one-engine
     # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
     # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -1882,7 +1868,6 @@ def _fit_irls_direct_once(
     centred_start: float | None = None
     if (
         _centred_init is not None
-        and _far_centre
         and _state_center is not None
         and intercept_init is not None
         and intercept == intercept_init
@@ -2112,7 +2097,7 @@ def _fit_irls_direct_once(
             _last_working_offset_mean = None
             if _state_center is not None:
                 _last_working_offset_mean = centre_offset_mean(
-                    dm, W, centered.sum_w, _state_center, centered.mean_x, _offset_mask
+                    dm, W, centered.sum_w, _state_center, centered.mean_x
                 )
                 proposal_centred_intercept = centered.mean_z - math.fsum(
                     _last_working_offset_mean * beta
@@ -2127,7 +2112,7 @@ def _fit_irls_direct_once(
                     centered.sum_w,
                     np.diag(centered.data_gram),
                     (),
-                    _last_working_offset_mean if _far_centre else None,
+                    _last_working_offset_mean,
                 )
             _t_solve += time.perf_counter() - _t0
         else:
@@ -2391,7 +2376,7 @@ def _fit_irls_direct_once(
                     # formed on centred rows, so the border's ``X' r`` is never
                     # cancelled against ``c`` times the intercept's (a 1e16
                     # offset left no digit of it and the step was rejected)
-                    if _far_centre and _state_center is not None:
+                    if _state_center is not None:
                         gradient[1:] = centred_data_score(
                             dm, residual_rows, _state_center
                         ) - penalty_matvec(committed.beta)
@@ -2402,9 +2387,7 @@ def _fit_irls_direct_once(
                         )
                     else:
                         gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
-                        increment = augmented_factor.solve(
-                            gradient, centred=_state_center is not None
-                        )
+                        increment = augmented_factor.solve(gradient)
                     beta = committed.beta + increment[1:]
                     if _state_center is not None:
                         assert committed.centred_intercept is not None
@@ -2419,7 +2402,7 @@ def _fit_irls_direct_once(
                 rank_truncated = augmented_factor.rank_truncated
                 if convergence == "mode_score":
                     _score_centre = _structured_score_centre(
-                        structured_system, augmented_factor, dm, W, _state_center, _offset_mask
+                        structured_system, augmented_factor, dm, W, _state_center
                     )
                 _t_solve += time.perf_counter() - _t0
             elif not has_constraints:
@@ -2453,7 +2436,7 @@ def _fit_irls_direct_once(
                     # of the working mean to it, formed on centred rows
                     # (``centre_offset_mean``): no raw-scale cancellation
                     _last_working_offset_mean = centre_offset_mean(
-                        dm, W, centered.sum_w, _state_center, centered.mean_x, _offset_mask
+                        dm, W, centered.sum_w, _state_center, centered.mean_x
                     )
                     proposal_centred_intercept = centered.mean_z - math.fsum(
                         _last_working_offset_mean * beta
@@ -2468,7 +2451,7 @@ def _fit_irls_direct_once(
                         centered.sum_w,
                         np.diag(centered.data_gram),
                         (),
-                        _last_working_offset_mean if _far_centre else None,
+                        _last_working_offset_mean,
                     )
                 _t_solve += time.perf_counter() - _t0
             else:
@@ -3469,7 +3452,7 @@ def _fit_irls_direct_once(
                 None
                 if _state_center is None or cache_out is None
                 else centre_offset_mean(
-                    dm, W, centered_final.sum_w, _state_center, centered_final.mean_x, _offset_mask
+                    dm, W, centered_final.sum_w, _state_center, centered_final.mean_x
                 )
             )
         XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()

@@ -358,6 +358,57 @@ def centred_matvec(dm: DesignMatrix, beta: NDArray, center: NDArray) -> NDArray:
     return result
 
 
+def dense_columns(dm: DesignMatrix) -> NDArray:
+    """``(p,)`` bool: the ``DenseGroupMatrix`` columns, the one type whose entries its type does not bound."""
+    mask = np.zeros(dm.p, dtype=bool)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        mask[offset : offset + width] = type(matrix) is DenseGroupMatrix
+        offset += width
+    return mask
+
+
+def dense_centred_matvec(dm: DesignMatrix, values: NDArray, center: NDArray) -> NDArray:
+    """``(X_d - 1 c_d') v_d`` over the ``DenseGroupMatrix`` blocks only, centred row by row.
+
+    The dense blocks' share of ``centred_matvec`` in its fixed chunks, for a
+    caller that applies every other block through its own (structured)
+    product.
+    """
+    result = np.zeros(dm.n)
+    values = np.asarray(values, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            part = values[offset : offset + width]
+            centre = center[offset : offset + width]
+            for lo in range(0, dm.n, _CHUNK):
+                hi = min(lo + _CHUNK, dm.n)
+                result[lo:hi] += (matrix.M[lo:hi] - centre) @ part
+        offset += width
+    return result
+
+
+def dense_centred_rmatvec(dm: DesignMatrix, rows: NDArray, center: NDArray) -> NDArray:
+    """``(X_d - 1 c_d')' r`` on the ``DenseGroupMatrix`` columns (zero elsewhere), centred row by row."""
+    result = np.zeros(dm.p)
+    rows = np.asarray(rows, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            centre = center[offset : offset + width]
+            accumulated = np.zeros(width)
+            for lo in range(0, dm.n, _CHUNK):
+                hi = min(lo + _CHUNK, dm.n)
+                accumulated += (matrix.M[lo:hi] - centre).T @ rows[lo:hi]
+            result[offset : offset + width] = accumulated
+        offset += width
+    return result
+
+
 def prior_weighted_centre(dm: DesignMatrix, prior_weights: NDArray) -> NDArray:
     """``c0``: each dense column's shifted prior-weighted mean, 0 on every other column type.
 
@@ -389,79 +440,33 @@ def prior_weighted_centre(dm: DesignMatrix, prior_weights: NDArray) -> NDArray:
     return centre
 
 
-def offset_columns(dm: DesignMatrix, prior_weights: NDArray, center: NDArray) -> NDArray:
-    """``(p,)`` bool: the dense columns whose centre lies beyond their spread, ``|c| > max|x - c|``.
-
-    Over the rows of positive prior weight.  Only for such a column does the
-    raw intercept lose a bit: ``eta`` formed through it rounds at ``(|c| +
-    |x - c|) |beta|`` per row against the centred state's ``|x - c| |beta|``
-    (one-engine design §3.8), within a factor two of each other otherwise.
-    The centred readings of issue #430 (``centre_offset_mean``, a warm
-    start's ``(alpha, c)``, the certificates' intercept) run when a design
-    has such a column, and every other design computes as before, bit for
-    bit.  A ``DenseGroupMatrix`` column is the only type whose entries are
-    not bounded by their type; one pass over those columns, in fixed chunks.
-    """
-    center = np.asarray(center, dtype=np.float64)
-    weights = np.asarray(prior_weights, dtype=np.float64)
-    far = np.zeros(dm.p, dtype=bool)
-    positive = weights > 0.0
-    offset = 0
-    for matrix in dm.group_matrices:
-        width = matrix.shape[1]
-        centre = center[offset : offset + width]
-        if type(matrix) is DenseGroupMatrix and np.any(centre != 0.0):
-            values = matrix.M
-            spread = np.zeros(width)
-            for lo in range(0, dm.n, _CHUNK):
-                hi = min(lo + _CHUNK, dm.n)
-                rows = positive[lo:hi]
-                if np.any(rows):
-                    deviation = np.abs(values[lo:hi][rows] - centre)
-                    spread = np.maximum(spread, np.max(deviation, axis=0))
-            far[offset : offset + width] = np.abs(centre) > spread
-        offset += width
-    return far
-
-
 def centre_offset_mean(
-    dm: DesignMatrix,
-    weights: NDArray,
-    sum_w: float,
-    center: NDArray,
-    mean_x: NDArray,
-    columns: NDArray | None,
+    dm: DesignMatrix, weights: NDArray, sum_w: float, center: NDArray, mean_x: NDArray
 ) -> NDArray:
     """``d = sum W (x - c) / sum W``: a weighted column mean read about the state's centre ``c``.
 
     The centred intercept about ``c`` is ``alpha = mean_z - d' beta`` (one-engine
     design §3.8).  ``mean_x - c`` from the weighted mean ``mean_x`` rounds at
     ``u |c|``, the size of the column's offset, not of its spread: at a 1e6
-    offset that is ``1e-10``, times the slope in every row's ``eta``.  A
-    column ``columns`` marks (``offset_columns``: a dense column whose centre
-    lies beyond its spread) is differenced row by row before its weighted
+    offset that is ``1e-10``, times the slope in every row's ``eta``.  Every
+    ``DenseGroupMatrix`` column, by type (the only type whose entries are not
+    bounded by their type), is differenced row by row before its weighted
     sum, in fixed chunks as ``centred_matvec``, so ``d`` rounds at ``gamma_n
-    max|x - c|``.  Every other column (all of them for ``None``) keeps
-    ``mean_x - c``, which already rounds within a factor two of that, bit
-    for bit as before.
+    max|x - c|``.  Every other column keeps ``mean_x - c``.
     """
     offset_mean = np.asarray(mean_x, dtype=np.float64) - center
-    if columns is None:
-        return offset_mean
     w = np.asarray(weights, dtype=np.float64)
     offset = 0
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
-        marked = np.asarray(columns[offset : offset + width], dtype=bool)
-        if type(matrix) is DenseGroupMatrix and np.any(marked):
+        if type(matrix) is DenseGroupMatrix:
             centre = center[offset : offset + width]
             values = matrix.M
             accumulated = np.zeros(width)
             for lo in range(0, dm.n, _CHUNK):
                 hi = min(lo + _CHUNK, dm.n)
                 accumulated += (values[lo:hi] - centre).T @ w[lo:hi]
-            block = offset_mean[offset : offset + width]
-            block[marked] = accumulated[marked] / sum_w
+            offset_mean[offset : offset + width] = accumulated / sum_w
         offset += width
     return offset_mean
 

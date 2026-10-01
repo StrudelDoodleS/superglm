@@ -56,7 +56,6 @@ from superglm.solvers.mode_score import (
     centre_offset_mean,
     centred_matvec,
     linear_predictor,
-    offset_columns,
     penalized_mode_residual,
 )
 from superglm.solvers.pirls import PIRLSResult
@@ -1046,24 +1045,20 @@ def observed_penalized_mode_score(
     excluded_mask[np.asarray(excluded, dtype=np.intp)] = True
     bar = observed_mode_certification_bar() if bar is None else float(bar)
     # The floors read the mode's intercept about mean_x and its centred rows
-    # X~ beta.  Beside a column whose centre lies beyond its spread
-    # (``offset_columns``) a centred state (design §3.8) reads them from its
-    # own alpha and (X - 1 c') beta and the offset of mean_x from c, formed
-    # on centred rows (``centre_offset_mean``); from the raw intercept and
-    # X beta they cancel c' beta there, u |c' beta| in alpha and every row.
+    # X~ beta.  A centred state (design §3.8) reads them from its own alpha
+    # and (X - 1 c') beta and the offset of mean_x from c, formed on centred
+    # rows (``centre_offset_mean``); from the raw intercept and X beta they
+    # cancel c' beta at a column's offset, u |c' beta| in alpha and every row.
     alpha_c = getattr(result, "centred_intercept", None)
     centre = getattr(result, "state_center", None)
-    far = None
-    if alpha_c is not None and centre is not None:
-        centre = np.asarray(centre, dtype=np.float64)
-        far = offset_columns(dm, sample_weight, centre)
-    if alpha_c is None or centre is None or far is None or not np.any(far):
+    if alpha_c is None or centre is None:
         shift = float(mean_x @ beta)
         alpha = float(result.intercept) + shift
         eta_tilde = dm.matvec(beta) - shift
     else:
+        centre = np.asarray(centre, dtype=np.float64)
         offset_mean = centre_offset_mean(
-            dm, geometry.weights, float(geometry.sum_w), centre, mean_x, far
+            dm, geometry.weights, float(geometry.sum_w), centre, mean_x
         )
         shift = float(offset_mean @ beta)
         alpha = float(alpha_c) + shift
