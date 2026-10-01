@@ -98,13 +98,18 @@ from superglm.solvers.irls_state import (
     interior_start_intercept,
     mean_space_boundary_rows,
     mean_space_clipped_rows,
+    mean_space_deviance_delta,
+    mean_space_newton_rows,
     mean_space_score_rows,
     mean_space_violation,
 )
+from superglm.solvers.mode_score import _EPS as _EPS_FLOAT
+from superglm.solvers.mode_score import _UNIT_ROUNDOFF as _UNIT_ROUNDOFF_FLOAT
 from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
     MODE_RESOLVE_CAP,
     ModeResidual,
+    _gamma,
     centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
@@ -1169,47 +1174,111 @@ def _fit_irls_direct_once(
         intercept_value: float,
         eta_values: NDArray,
         active_rows: NDArray | None,
-    ) -> ModeResidual:
+        scop_groups: tuple[_SCOPGroupState, ...] | None,
+    ) -> tuple[float, bool]:
         """The mode certificate on the binomial/log score itself, for a stop the clip can fool.
 
+        ``(ratio, resolved)``: the largest relative score over its bar
+        (``ModeResidual.ratio``), and whether every relative score is within
+        ``MODE_RESOLVE_CAP`` (near the mode, where its floors are resolved).
         ``mode_residual``'s relative penalized score, bar, floors and weak
         tests, evaluated on the score and Fisher weights of the unclipped
         ``eta_values`` (``irls_state.mean_space_score_rows``) and centred on
         those weights (``mode_score.weighted_column_centring``), not on the
-        clipped solve's system.  ``active_rows`` are the hard constraints
-        ``a' beta >= b`` active at the iterate: the stationarity of a
-        constrained mode is ``G + A' m = 0`` with ``m >= 0``, so the residual
-        tested is ``G + A' m`` at the non-negative least-squares ``m`` of its
-        Jacobi-scaled form.
+        clipped solve's system.
+
+        **Units.** The relative scores are ratios, free of the units of the
+        weights and of the penalty; the floors that keep their denominators
+        positive are not.  Every quantity the certificate compares is first
+        multiplied by one power of two that brings the largest of them into
+        ``[1/2, 1)`` (``math.frexp``), exact for normal and subnormal inputs
+        alike, so a state reads the same relative score whatever the units:
+        at weights of ``1e-317`` a floor at the smallest normal float had
+        read a relative score of 1/3 as 4.5e-10.
+
+        **Constraints.** ``active_rows`` are the hard constraints ``a' beta >=
+        b`` active at the iterate.  A constrained mode is stationary when ``G
+        + A' m = 0`` with ``m >= 0``, so the residual tested is ``G + A' m``
+        at the non-negative least-squares ``m`` of its Jacobi-scaled form.
+        Each row is normalised to unit length first, which leaves the cone it
+        spans unchanged and keeps the constraint's own units out of the
+        system.
+
+        **SCOP.** A shape-constrained group's coefficients are its latent
+        ``theta``, with ``gamma = forward(theta)``.  Its stationarity is the
+        latent score ``J' B' s - lambda S theta`` (``J = d gamma / d theta``,
+        diagonal), projected off the directions its Newton step could not
+        resolve, and tested in the same relative form against the same bar
+        and the floor of its evaluated sums.
         """
         score, fisher = mean_space_score_rows(y, weights, eta_values)
+        if not (np.all(np.isfinite(score)) and np.all(np.isfinite(fisher))):
+            return math.inf, False
+        if not _penalty_curvature:
+            _penalty_curvature.append(penalty_curvature())
+        penalty_score = penalty_matvec(beta_values)
+        penalty_magnitude = penalty_matvec(beta_values, magnitude=True)
+        curvature = _penalty_curvature[0]
+        latent = []
+        for group_state in scop_groups or ():
+            state = _scop_state[group_state.group_index]
+            group = groups[group_state.group_index]
+            lam = float(lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2)
+            theta = np.asarray(group_state.beta_eff, dtype=np.float64)
+            penalty_matrix = np.asarray(state["S_scop"], dtype=np.float64)
+            latent.append(
+                (
+                    state,
+                    group_state,
+                    theta,
+                    lam * (penalty_matrix @ theta),
+                    lam * (np.abs(penalty_matrix) @ np.abs(theta)),
+                    lam * np.diag(penalty_matrix),
+                )
+            )
+        sizes = [score, fisher, penalty_magnitude, curvature]
+        sizes += [entry[4] for entry in latent] + [entry[5] for entry in latent]
+        largest = max((float(np.max(np.abs(a), initial=0.0)) for a in sizes), default=0.0)
+        if not math.isfinite(largest):
+            return math.inf, False
+        exponent = math.frexp(largest)[1] if largest > 0.0 else 0
+
+        def in_units(values: NDArray) -> NDArray:
+            return np.ldexp(np.asarray(values, dtype=np.float64), -exponent)
+
+        score, fisher = in_units(score), in_units(fisher)
+        penalty_score, penalty_magnitude = in_units(penalty_score), in_units(penalty_magnitude)
+        curvature = in_units(curvature)
         positive = weights > 0.0
         mean_x, sum_w, diagonal = weighted_column_centring(dm, fisher, positive)
         with np.errstate(invalid="ignore", divide="ignore"):
             scale = np.sqrt(np.maximum(diagonal, 0.0) / sum_w)
         excluded = np.zeros(p, dtype=bool)
         excluded[list(_laplace_excluded)] = True
-        if not _penalty_curvature:
-            _penalty_curvature.append(penalty_curvature())
-        penalty_score = penalty_matvec(beta_values)
-        penalty_magnitude = penalty_matvec(beta_values, magnitude=True)
+        if _scop_columns is not None:
+            excluded |= _scop_columns
+        tiny = float(np.finfo(np.float64).tiny)
+        zeta = float(np.sum(np.abs(score))) / math.sqrt(max(sum_w, tiny))
         if active_rows is not None and active_rows.size:
-            tiny = float(np.finfo(np.float64).tiny)
+            norms = np.linalg.norm(active_rows, axis=1)
+            rows = active_rows[norms > 0.0] / norms[norms > 0.0, None]
             gradient = centred_data_score(dm, score, mean_x) - penalty_score
-            zeta = float(np.sum(np.abs(score))) / math.sqrt(max(sum_w, tiny))
-            jacobi = np.maximum(
-                zeta * np.sqrt(np.maximum(diagonal, 0.0) + np.maximum(_penalty_curvature[0], 0.0))
-                + np.abs(penalty_score),
-                tiny,
-            )
-            if np.all(np.isfinite(gradient)) and np.all(np.isfinite(jacobi)):
+            jacobi = zeta * np.sqrt(np.maximum(diagonal, 0.0) + np.maximum(curvature, 0.0))
+            jacobi = jacobi + np.abs(penalty_score)
+            # any positive diagonal gives a valid m >= 0; keeping it within
+            # eps of its largest entry keeps the scaled rows finite
+            jacobi = np.maximum(jacobi, _EPS_FLOAT * max(float(np.max(jacobi, initial=0.0)), 1.0))
+            if rows.size and np.all(np.isfinite(gradient)) and np.all(np.isfinite(jacobi)):
                 from scipy.optimize import nnls
 
-                multipliers = nnls(active_rows.T / jacobi[:, None], -gradient / jacobi)[0]
-                penalty_score = penalty_score - active_rows.T @ multipliers
-                penalty_magnitude = penalty_magnitude + np.abs(active_rows).T @ multipliers
+                try:
+                    multipliers = nnls(rows.T / jacobi[:, None], -gradient / jacobi)[0]
+                except RuntimeError:  # the active-set iteration's own limit
+                    multipliers = np.zeros(rows.shape[0])
+                penalty_score = penalty_score - rows.T @ multipliers
+                penalty_magnitude = penalty_magnitude + np.abs(rows).T @ multipliers
         shift = float(mean_x @ beta_values)
-        return penalized_mode_residual(
+        residual = penalized_mode_residual(
             dm=dm,
             row_score=score,
             fisher_weights=fisher,
@@ -1220,12 +1289,47 @@ def _fit_irls_direct_once(
             eta_tilde=eta_values - offset - float(intercept_value) - shift,
             penalty_score=penalty_score,
             penalty_magnitude=penalty_magnitude,
-            penalty_curvature=_penalty_curvature[0],
+            penalty_curvature=curvature,
             sum_w=sum_w,
             bar=mode_bar,
             excluded=excluded,
             resolve_cap=MODE_RESOLVE_CAP,
         )
+        ratio = residual.ratio()
+        resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
+        rows_n = int(np.count_nonzero(positive))
+        for state, group_state, theta, pull, pull_size, pull_diagonal in latent:
+            bins = state["bin_idx"]
+            basis = np.asarray(state["B_scop"], dtype=np.float64)
+
+            def by_bin(values: NDArray, bins=bins, basis=basis) -> NDArray:
+                if bins is None:
+                    return values
+                return np.bincount(bins, weights=values, minlength=basis.shape[0])
+
+            jacobian = state["reparam"].jacobian_diagonal(theta)
+            pull, pull_size = in_units(pull), in_units(pull_size)
+            pull_diagonal = in_units(pull_diagonal)
+            gradient = jacobian * (basis.T @ by_bin(score)) - pull
+            discarded = group_state.discarded_directions
+            if discarded is not None and np.asarray(discarded).size:
+                frozen, _ = np.linalg.qr(np.asarray(discarded, dtype=np.float64).T)
+                gradient = gradient - frozen @ (frozen.T @ gradient)
+            data_curvature = jacobian**2 * ((basis**2).T @ by_bin(fisher))
+            latent_scale = np.maximum(
+                tiny,
+                zeta * np.sqrt(np.maximum(data_curvature + pull_diagonal, 0.0)) + np.abs(pull),
+            )
+            relative = np.abs(gradient) / latent_scale
+            evaluation = np.abs(jacobian) * (np.abs(basis).T @ by_bin(np.abs(score)))
+            floor = (
+                _gamma(rows_n) * evaluation
+                + _gamma(theta.size + 2) * pull_size
+                + _UNIT_ROUNDOFF_FLOAT * pull_size
+            ) / latent_scale
+            ratio = max(ratio, float(np.max(relative / np.maximum(mode_bar, floor), initial=0.0)))
+            resolved = resolved and bool(np.max(relative, initial=0.0) <= MODE_RESOLVE_CAP)
+        return ratio, resolved
 
     trace_enabled = trace_run is not None and trace_run.enabled
     trace_basis_id = trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
@@ -1402,6 +1506,14 @@ def _fit_irls_direct_once(
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    # the columns the binomial/log certificate tests in SCOP's latent
+    # coordinates instead (``true_mode_residual``)
+    _scop_columns: NDArray | None = None
+    if _has_scop:
+        _scop_columns = np.zeros(p, dtype=bool)
+        for g in groups:
+            if g.monotone_engine == "scop":
+                _scop_columns[g.sl] = True
     if (
         _state_center is None
         and not _use_structured
@@ -1618,6 +1730,9 @@ def _fit_irls_direct_once(
     # QR pre-computation: materialise full design matrix once
     # Constrained QP / SCOP requires Gram path — force it if constraints present
     _use_qr = direct_solve == "qr" and not has_constraints and not _has_scop
+    _mean_space_newton_available = bool(
+        mean_space_violation(family, link) is not None and not _use_qr and not _has_scop
+    )
     if _use_qr:
         has_disc = any(
             isinstance(gm, DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix)
@@ -1911,6 +2026,11 @@ def _fit_irls_direct_once(
     # the binomial/log score's certificate ratio at every stop it refused
     # (``true_mode_residual``), for the same stagnation stop
     _true_ratios: list[float] = []
+    # Newton steps on the observed information once the certificate refused
+    # a stop near the mode or its refused score stalled (below); never on the
+    # QR route (whose least squares cannot carry a zero-curvature row's
+    # score) or the SCOP route (which takes its own Newton steps)
+    _mean_space_newton = False
 
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
@@ -2093,6 +2213,23 @@ def _fit_irls_direct_once(
         )
         W = working_rows.weights
         z = working_rows.response
+        # binomial/log Newton rows once engaged (refusal block below): the
+        # observed curvature and the score of the unclipped eta, the step in
+        # score form.  ``z`` is then the predictor itself, so ``W (z - eta)``
+        # adds nothing and the score enters on its own; a state holding rows
+        # at the boundary keeps Fisher's rows.
+        newton_score: NDArray | None = None
+        if _mean_space_newton and not mean_space_boundary_rows(
+            family, link, committed.eta_unclipped, weights
+        ):
+            newton_rows = mean_space_newton_rows(y, weights, committed.eta_unclipped)
+            if newton_rows is not None:
+                W, newton_score = newton_rows
+                z = np.array(committed.eta_unclipped, dtype=np.float64)
+                if profile is not None:
+                    profile["irls_mean_space_newton_iters"] = (
+                        profile.get("irls_mean_space_newton_iters", 0) + 1
+                    )
         if working_rows.rejection_reason is not None:
             # Every accepted trial of an observed fit had finite rows (the
             # line search rejects the others), so only the entry state can
@@ -2304,7 +2441,7 @@ def _fit_irls_direct_once(
             elif _use_structured:
                 if _structured_group_index is None:  # pragma: no cover - selection invariant
                     raise RuntimeError("Structured backend has no dominant group.")
-                Wz = W * z_off
+                Wz = W * z_off if newton_score is None else W * z_off + newton_score
                 structured_system = build_structured_system(
                     gms,
                     groups,
@@ -2393,7 +2530,7 @@ def _fit_irls_direct_once(
                     # no fitted value or penalty moves along it.  In exact
                     # arithmetic the same step as the solve above whenever nothing
                     # is truncated.
-                    residual_rows = W * (z - eta)
+                    residual_rows = W * (z - eta) if newton_score is None else newton_score
                     gradient = np.empty(p + 1, dtype=np.float64)
                     gradient[0] = float(np.sum(residual_rows))
                     gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
@@ -2419,6 +2556,13 @@ def _fit_irls_direct_once(
                 _t_solve += time.perf_counter() - _t0
             elif not has_constraints:
                 centered = get_centered_system(W, z_off)
+                if newton_score is not None:
+                    # the working mean of ``z_off`` is the centred intercept;
+                    # the score moves it by sum(u) / sum(W)
+                    centered = replace(
+                        centered,
+                        mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
+                    )
                 _last_working_centered = centered
                 _t_gram += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
@@ -2428,19 +2572,31 @@ def _fit_irls_direct_once(
                     certification = certify_centered_factor(
                         centered,
                         W,
-                        response=z_off - centered.mean_z,
+                        response=None if newton_score is not None else z_off - centered.mean_z,
                     )
                     certified = certification.decomposition
-                    if certification.transformed_rhs is None:  # pragma: no cover - invariant
-                        raise RuntimeError("factor certification omitted its transformed RHS")
+                    if certification.transformed_rhs is None and newton_score is None:
+                        raise RuntimeError(  # pragma: no cover - invariant
+                            "factor certification omitted its transformed RHS"
+                        )
                     iteration_rank = certified
                     iteration_factor_rhs = certification.transformed_rhs
                     used_rank_certification = True
-                beta = (
-                    iteration_rank.solve(centered.rhs)
-                    if iteration_factor_rhs is None
-                    else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
-                )
+                if newton_score is not None:
+                    # the increment, not the iterate: a direction the factor
+                    # truncates keeps the iterate's component instead of the
+                    # minimum-norm reset of solving for it (Pes & Rodriguez
+                    # 2021, eqs. 1.2-1.4)
+                    beta = committed.beta + iteration_rank.solve(
+                        centred_data_score(dm, newton_score, centered.mean_x)
+                        - penalty_matvec(committed.beta)
+                    )
+                else:
+                    beta = (
+                        iteration_rank.solve(centered.rhs)
+                        if iteration_factor_rhs is None
+                        else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
+                    )
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
                 if _state_center is not None:
                     # the intercept about the state's centre, from the offset
@@ -2462,6 +2618,12 @@ def _fit_irls_direct_once(
                 _t_solve += time.perf_counter() - _t0
             else:
                 centered = get_centered_system(W, z_off)
+                if newton_score is not None:
+                    centered = replace(
+                        centered,
+                        mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
+                        rhs=centered.rhs + centred_data_score(dm, newton_score, centered.mean_x),
+                    )
                 _last_working_centered = centered
                 _t_gram += time.perf_counter() - _t0
 
@@ -2793,10 +2955,17 @@ def _fit_irls_direct_once(
                     else max_halving,
                 ),
                 merit_scale=objective_merit_scale,
+                # a Newton step is judged on the model's own deviance, which
+                # still sees the rows clip_mu holds; Fisher's on the clipped one
                 merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
                     candidate,
                     base,
                     penalty_matvec,
+                    deviance_delta=None
+                    if newton_score is None
+                    else mean_space_deviance_delta(
+                        y, weights, candidate.eta_unclipped, base.eta_unclipped
+                    ),
                 ),
             )
             if (
@@ -2947,24 +3116,21 @@ def _fit_irls_direct_once(
             # the clipped objective, or off a step taken from it, is accepted
             # only where the model's own penalized score certifies it
             # (``true_mode_residual``).  A refused stop goes on.  Each refused
-            # stop sits where the clipped iteration's own rule passed, so a
-            # score that has stopped contracting across them
-            # (``stagnation_window``) will not reach the bar: the fit ends
-            # uncertified, as under ``mode_score``.  SCOP's latent score is not
-            # formed, so a SCOP fit is never certified here.
-            if _has_scop:
-                true_ratio = math.inf
-            else:
-                true_ratio = true_mode_residual(
-                    retained.beta,
-                    retained.intercept,
-                    retained.eta_unclipped,
-                    (
-                        A_all[list(prev_active_set)]
-                        if has_constraints and A_all is not None and prev_active_set
-                        else None
-                    ),
-                ).ratio()
+            # stop sits where the iteration's own rule passed, so a score that
+            # has stopped contracting across them (``stagnation_window``) will
+            # not reach the bar: the fit ends uncertified, as under
+            # ``mode_score``.
+            true_ratio, true_resolved = true_mode_residual(
+                retained.beta,
+                retained.intercept,
+                retained.eta_unclipped,
+                (
+                    A_all[list(prev_active_set)]
+                    if has_constraints and A_all is not None and prev_active_set
+                    else None
+                ),
+                retained_scop.groups if _has_scop else None,
+            )
             if not true_ratio <= 1.0:
                 converged_this_iter = False
                 _true_ratios.append(true_ratio)
@@ -2972,6 +3138,22 @@ def _fit_irls_direct_once(
                     min(_true_ratios[-_stagnation_window:])
                     < 0.5 * min(_true_ratios[:-_stagnation_window])
                 )
+                if (
+                    _mean_space_newton_available
+                    and not _mean_space_newton
+                    and (true_resolved or score_stagnated)
+                ):
+                    # Fisher scoring has carried the fit to where its own
+                    # stop passes but the model's score does not: near the
+                    # mode (resolved), or where scoring has stalled.  The
+                    # iterations left take Newton steps on the observed
+                    # information (``irls_state.mean_space_newton_rows``),
+                    # which converge quadratically where scoring is linear;
+                    # far from the mode Fisher's steps stay the safer ones
+                    # (Green 1984, section 2.3 and its discussion).
+                    _mean_space_newton = True
+                    _true_ratios.clear()
+                    score_stagnated = False
 
         constraints_feasible_this_iter = True
         if has_constraints:

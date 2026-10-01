@@ -222,6 +222,75 @@ def mean_space_score_rows(
     return np.where(carried, score, 0.0), np.where(carried, fisher, 0.0)
 
 
+def mean_space_newton_rows(
+    y: NDArray, weights: NDArray, eta_unclipped: NDArray
+) -> tuple[NDArray, NDArray] | None:
+    """Newton rows for binomial/log: ``(observed curvature, score)`` in ``eta``, or ``None``.
+
+    The row log-likelihood is concave in ``eta``, with observed information
+    ``-d2l/deta2 = w (1 - y) mu / (1 - mu)^2``: never negative, and zero on
+    an event row, whose log-likelihood ``w eta`` is linear.  Fisher scoring
+    weights that row by ``w mu / (1 - mu)`` instead, which grows without
+    bound as ``mu -> 1``; near the boundary the two informations part, and
+    scoring converges linearly at a rate set by their mismatch (Osborne
+    1992, Int. Stat. Rev. 60; Green 1984, JRSSB 46, sections 1.2 and 2.3).
+    Newton's method on the observed information converges quadratically
+    there.  The step is taken in score form, ``(X' W X + S) delta = X' u - S
+    beta`` with these ``W`` and the score ``u`` of ``mean_space_score_rows``,
+    so an event row's zero curvature never divides its score.  ``None`` when
+    a row is not finite or no row carries curvature (every positive-weight
+    row an event: the boundary supremum), and the caller keeps its rows.
+    """
+    eta = np.asarray(eta_unclipped, dtype=np.float64)
+    prior = np.asarray(weights, dtype=np.float64)
+    score, _ = mean_space_score_rows(y, weights, eta)
+    with np.errstate(under="ignore", over="ignore", divide="ignore", invalid="ignore"):
+        complement = -np.expm1(eta)
+        curvature = prior * (1.0 - np.asarray(y, dtype=np.float64)) * (np.exp(eta) / complement)
+        curvature = curvature / complement
+    curvature = np.where(prior > 0.0, curvature, 0.0)
+    total = float(np.sum(curvature))
+    finite = bool(np.all(np.isfinite(curvature)) and np.all(np.isfinite(score)))
+    if not (finite and math.isfinite(total) and total > 0.0 and np.all(curvature >= 0.0)):
+        return None
+    return curvature, score
+
+
+def mean_space_deviance_delta(
+    y: NDArray, weights: NDArray, candidate_eta: NDArray, committed_eta: NDArray
+) -> float:
+    """``D(candidate) - D(committed)``: the binomial/log deviance difference of two unclipped predictors.
+
+    The model's own deviance, ``-2 sum w [y eta + (1 - y) log(1 - e^eta)]``
+    up to the saturated term, which cancels.  ``clip_mu``'s band does not
+    enter, so a row below its floor still counts.  ``log(1 - e^eta)`` is
+    Maechler's (2012) ``log1mexp``: ``log(-expm1(eta))`` above ``-log 2``,
+    ``log1p(-exp(eta))`` below, and each row's difference is formed before
+    the compensated sum.
+    """
+    response = np.asarray(y, dtype=np.float64)
+    prior = np.asarray(weights, dtype=np.float64)
+    carried = prior > 0.0
+
+    def log1mexp(eta: NDArray) -> NDArray:
+        with np.errstate(divide="ignore", invalid="ignore", under="ignore"):
+            return np.where(eta > -math.log(2.0), np.log(-np.expm1(eta)), np.log1p(-np.exp(eta)))
+
+    candidate = np.asarray(candidate_eta, dtype=np.float64)[carried]
+    committed = np.asarray(committed_eta, dtype=np.float64)[carried]
+    events = response[carried]
+    with np.errstate(invalid="ignore", over="ignore"):
+        rows = (
+            -2.0
+            * prior[carried]
+            * (
+                events * (candidate - committed)
+                + (1.0 - events) * (log1mexp(candidate) - log1mexp(committed))
+            )
+        )
+    return math.fsum(rows.tolist())
+
+
 def interior_start_intercept(
     family: Distribution,
     link: Link,
@@ -266,6 +335,7 @@ def _stable_penalized_deviance_delta(
     committed: _IRLSState,
     penalty_matvec: Callable[[NDArray], NDArray] | NDArray | None = None,
     nonsmooth_penalty: Callable[[NDArray], float] | None = None,
+    deviance_delta: float | None = None,
 ) -> float:
     """Compare penalized deviances without subtracting two large quadratics.
 
@@ -287,8 +357,14 @@ def _stable_penalized_deviance_delta(
     ``nonsmooth_penalty`` supplies any non-quadratic penalty term as a
     function of ``beta``, already scaled to match the caller's merit
     convention; its two evaluations enter the same ``math.fsum``.
+    ``deviance_delta``, when given, replaces the two states' deviances with
+    an already-formed difference of the data term.
     """
-    terms = [float(candidate.deviance), -float(committed.deviance)]
+    terms = (
+        [float(candidate.deviance), -float(committed.deviance)]
+        if deviance_delta is None
+        else [float(deviance_delta)]
+    )
 
     if penalty_matvec is not None:
         delta_beta = candidate.beta - committed.beta
