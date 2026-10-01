@@ -321,8 +321,7 @@ class PIRLSResult:
     centred_intercept_lo: float | None = None
     # Positive-weight rows the returned state holds at the boundary of the
     # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
-    # only with ``termination_reason == "mean_space_boundary"``, or with a
-    # constraint failure's reason, which it does not overwrite.
+    # only with ``termination_reason == "mean_space_boundary"``.
     mean_space_boundary_rows: int = 0
 
     def __setattr__(self, name: str, value: object) -> None:

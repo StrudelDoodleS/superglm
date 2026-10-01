@@ -422,6 +422,49 @@ def _irls_trial_is_unsafe(
     return bool(candidate_merit > committed_merit + roundoff)
 
 
+def _mean_space_halving_budget(
+    *,
+    committed: _IRLSState,
+    proposal: _IRLSState,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+    default: int,
+) -> int:
+    """Extend backtracking from a state inside the mean space until a trial is back inside.
+
+    ``default`` unless the family and link can leave their mean space
+    (``mean_space_violation``), the committed state is inside it and the
+    proposal is not.  The binomial/log space ``{eta < 0}`` is open and
+    convex, so from a committed ``eta`` strictly inside it the trial at
+    fraction ``alpha`` of the proposal step ``d`` stays inside exactly when
+    ``alpha < t = min(-eta / d)`` over positive-weight rows with ``d > 0``:
+    the fraction to the boundary of interior-point methods (Nocedal & Wright
+    2006, Numerical Optimization, chapter 19).  A feasible trial always
+    exists, but when ``t <= 2^-default`` every budgeted halving leaves the
+    space and the step is rejected.  The budget then reaches the first
+    halving below ``t``, depth ``floor(log2(1 / t)) + 1``, plus the ordinary
+    budget for the objective test from there, within float64's halving
+    depth.  ``_select_irls_trial`` reads it only after the ordinary budget
+    has failed, and ``fit_irls_direct`` asks for it only in a fit whose start
+    ``interior_start_intercept`` lowered, so every other fit is unchanged.
+    """
+    violates = mean_space_violation(family, link)
+    if violates is None or violates(committed.eta_unclipped, weights):
+        return default
+    eta = np.asarray(committed.eta_unclipped, dtype=np.float64)
+    step = np.asarray(proposal.eta_unclipped, dtype=np.float64) - eta
+    rising = (weights > 0.0) & (step > 0.0)
+    if not np.any(rising):
+        return default
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        fraction = float(np.min(-eta[rising] / step[rising]))
+    if not (math.isfinite(fraction) and 0.0 < fraction <= 2.0**-default):
+        return default
+    depth = math.floor(-math.log2(fraction)) + 1
+    return min(depth + default, _MAX_FLOAT64_HALVING_DEPTH)
+
+
 def _select_irls_trial(
     *,
     committed: _IRLSState,

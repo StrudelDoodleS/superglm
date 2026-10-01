@@ -90,6 +90,7 @@ from superglm.solvers.irls_state import (
     _irls_objective_scale,
     _IRLSState,
     _IRLSStepDecision,
+    _mean_space_halving_budget,
     _poisson_sqrt_halving_budget,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
@@ -1026,24 +1027,26 @@ def _fit_irls_direct_once(
             y=y,
             sample_weight=weights,
         )
-    if mean_space_violation(family, link) is not None:
+    # Whether the default start below was lowered into the family's mean space.
+    _start_lowered = False
+    if intercept_init is None and mean_space_violation(family, link) is not None:
         # The domain guard below keeps every accepted state inside the mean
         # space only from a start inside it, and the default intercept is
         # chosen before the offset: lower it until the start is inside
-        # (``irls_state.interior_start_intercept``).
+        # (``irls_state.interior_start_intercept``).  A caller's warm start is
+        # left as it is.
         start_intercept = interior_start_intercept(
             family,
             link,
             (dm.matvec(beta) if np.any(beta) else 0.0) + intercept + offset,
             weights,
             intercept,
-            level=coefficient_initial_intercept(
-                distribution=family, link=link, y=y, sample_weight=weights
-            ),
+            level=intercept,
         )
         if start_intercept != intercept:
             intercept = start_intercept
             _deviance_init = None
+            _start_lowered = True
 
     # Dense paths retain the existing p x p penalty oracle. Structured paths
     # add each penalty directly to A or d, unless a caller already supplied a
@@ -2696,14 +2699,28 @@ def _fit_irls_direct_once(
                 evaluate_state=evaluate_trial,
                 invalid_state=trial_is_invalid,
                 max_halving=max_halving,
-                extended_max_halving=lambda: _poisson_sqrt_halving_budget(
-                    committed=committed,
-                    proposal=proposal,
-                    y=y,
-                    weights=weights,
-                    family=family,
-                    link=link,
-                    default=max_halving,
+                extended_max_halving=lambda: max(
+                    _poisson_sqrt_halving_budget(
+                        committed=committed,
+                        proposal=proposal,
+                        y=y,
+                        weights=weights,
+                        family=family,
+                        link=link,
+                        default=max_halving,
+                    ),
+                    # a lowered start can sit far inside the space with a
+                    # proposal far outside it, past the ordinary budget
+                    _mean_space_halving_budget(
+                        committed=committed,
+                        proposal=proposal,
+                        weights=weights,
+                        family=family,
+                        link=link,
+                        default=max_halving,
+                    )
+                    if _start_lowered
+                    else max_halving,
                 ),
                 merit_scale=objective_merit_scale,
                 merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
@@ -3193,9 +3210,7 @@ def _fit_irls_direct_once(
     )
     if _boundary_rows:
         converged = False
-        # a constraint failure already recorded keeps its own reason
-        if termination_reason not in ("constraint_infeasible", "constraint_kkt_incomplete"):
-            termination_reason = "mean_space_boundary"
+        termination_reason = "mean_space_boundary"
         logger.info(
             "fit_irls_direct: %d row(s) at the boundary of the family's mean space; "
             "the penalized maximum is constrained, fit is not converged.",

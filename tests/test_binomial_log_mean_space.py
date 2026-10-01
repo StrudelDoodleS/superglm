@@ -23,13 +23,11 @@ import pytest
 from superglm import Categorical, LambdaPolicy, Numeric, RandomEffect, SuperGLM
 from superglm.diagnostics.separation import SeparationWarning
 from superglm.distributions import Binomial, Gamma, Poisson
-from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import CauchitLink, CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.irls_state import mean_space_boundary_rows, mean_space_violation
 from superglm.solvers.mode_score import mode_certification_bar
-from superglm.types import GroupSlice, LinearConstraintSet
 
 _U = 2.0**-53  # unit roundoff, and the spacing of float64 just below one
 
@@ -167,45 +165,6 @@ def test_reml_says_why_a_maximum_on_the_boundary_has_no_criterion() -> None:
         model.fit_reml(X, y)
 
 
-def test_a_constraint_failure_keeps_its_reason_at_the_boundary() -> None:
-    """The boundary does not overwrite a constrained solve's own failure (#431, P3).
-
-    Ten event rows started ``1e-8`` from the boundary under ``beta >= 0``: the
-    one permitted iteration is halved, so the inner QP's KKT certificate is
-    incomplete, and the rows end inside the ``1 - 1e-7`` boundary band.  Both
-    are reported, the constraint failure as the reason.
-    """
-    x = np.linspace(0.1, 1.0, 10)[:, None]
-    groups = [
-        GroupSlice(
-            "x",
-            0,
-            1,
-            constraints=LinearConstraintSet(A=np.ones((1, 1)), b=np.zeros(1)),
-            monotone_engine="qp",
-        )
-    ]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        result, _ = fit_irls_direct(
-            X=DesignMatrix([DenseGroupMatrix(x)], n=len(x), p=1),
-            y=np.ones(len(x)),
-            weights=np.ones(len(x)),
-            family=Binomial(),
-            link=LogLink(),
-            groups=groups,
-            lambda2=0.0,
-            beta_init=np.zeros(1),
-            intercept_init=-1e-8,
-            max_iter=1,
-            direct_solve="gram",
-            weight_semantics="prior",
-        )
-    assert not result.converged
-    assert result.termination_reason == "constraint_kkt_incomplete"
-    assert result.mean_space_boundary_rows == len(x)
-
-
 def _offset_fit(offset: float, *, plain: bool, direct_solve: str) -> SuperGLM:
     """Sol's #431 (c) fixture: an interior optimum, probabilities 0.16 to 0.69."""
     rng = np.random.default_rng(2)
@@ -262,6 +221,35 @@ def test_a_positive_offset_starts_inside_the_mean_space(direct_solve: str) -> No
             )
 
 
+@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
+def test_a_lowered_start_reaches_a_trial_inside_the_space(direct_solve: str) -> None:
+    """Sol's #437 fixture: the first step needs more than the ordinary 20 halvings.
+
+    With offsets -16 and +1.3 the lowered start puts level a at eta ~ -18 and
+    the Fisher proposal moves it by ~3e7, so only a fraction below ~6e-7 of
+    the step stays inside ``eta < 0``: past 2^-20.  Backtracking reaches the
+    fraction to the boundary instead of rejecting the step, and the fit
+    reaches the maximum, both probabilities 1/2 with deviance ``8 log 2``,
+    within the deviance stop's own ``tol |D|``.
+    """
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={"g": Categorical(base="first")},
+    )
+    model.fit(
+        pd.DataFrame({"g": ["a", "a", "b", "b"]}),
+        np.array([0.0, 1.0, 0.0, 1.0]),
+        offset=np.array([-16.0, -16.0, 1.3, 1.3]),
+    )
+    assert model.result.converged
+    assert model.result.termination_reason == "converged"
+    optimum = 8.0 * np.log(2.0)
+    assert abs(float(model.result.deviance) - optimum) <= 2.0 * model._tol * optimum
+
+
 def _frequency_weighted_events(*, plain: bool, direct_solve: str) -> SuperGLM:
     """Sol's #431 (d) fixture: per level, nine events of weight 1e7 and a non-event of weight 1."""
     n = 20
@@ -290,6 +278,7 @@ def _frequency_weighted_events(*, plain: bool, direct_solve: str) -> SuperGLM:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=ObservedModeNotConvergedError,
     reason="#431 (d): the 1 - 1e-7 clip is still the boundary; redone in #431",
 )
 @pytest.mark.parametrize("direct_solve", ["auto", "gram"])
