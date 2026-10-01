@@ -245,21 +245,45 @@ def test_later_context_reuses_the_support_gram_and_the_volume_products(monkeypat
     support = algebra._context_geometry(first).support
     evidence = support._basis_gram_evidence
     assert evidence is not None
-    lefts = []
-    original = algebra._context_product
+    lefts, shared, factored, near_identity = [], [], [], []
+    originals = {
+        "_context_product": algebra._context_product,
+        "_shared_map_products": algebra._shared_map_products,
+        "_near_identity_logdet": algebra._near_identity_logdet,
+        "qr": algebra.scipy.linalg.qr,
+    }
 
-    def counted(left, right, *, refine):
+    def context_product(left, right, *, refine):
         lefts.append(left)
-        return original(left, right, refine=refine)
+        return originals["_context_product"](left, right, refine=refine)
 
-    monkeypatch.setattr(algebra, "_context_product", counted)
+    def shared_map_products(*args):
+        shared.append(originals["_shared_map_products"](*args))
+        return shared[-1]
+
+    def near_identity_logdet(gram, error):
+        near_identity.append(gram)
+        return originals["_near_identity_logdet"](gram, error)
+
+    def qr(matrix, *args, **kwargs):
+        factored.append(matrix)
+        return originals["qr"](matrix, *args, **kwargs)
+
+    # _matmul_enclosed stays unpatched: the receipts bind its identity.
+    monkeypatch.setattr(algebra, "_context_product", context_product)
+    monkeypatch.setattr(algebra, "_shared_map_products", shared_map_products)
+    monkeypatch.setattr(algebra, "_near_identity_logdet", near_identity_logdet)
+    monkeypatch.setattr(algebra.scipy.linalg, "qr", qr)
     later = _context(omega, 2 * coordinate_map, source=first)
     assert algebra._context_geometry(later).coordinate_map is not None
     assert algebra._context_geometry(later).support is support
-    # Q.T Q depends only on the support, so the later context reuses its Gram;
-    # the retained map takes Q.T Q and Q.T C from the volume instead of
-    # forming either product again.
+    # Q.T Q depends only on the support, so the later context reuses its Gram.
+    # The volume factors the shared C.T Q and measures the shared Q.T Q, and
+    # the retained map takes both instead of forming either product again.
     assert support._basis_gram_evidence is evidence
+    (products,) = shared
+    assert any(matrix is products[0] for matrix in factored)
+    assert any(gram is products[2] for gram in near_identity)
     assert lefts and not any(np.shares_memory(left, support.Q_plus) for left in lefts)
 
 
