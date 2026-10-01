@@ -33,6 +33,7 @@ from superglm.solvers._structured.block_leaves import (
     FactorSmoothLeafSystem,
     FactorSmoothPenalizedOperator,
     ProfiledFactorSmoothLeafFactor,
+    release_leaf_memo,
 )
 from superglm.solvers._structured.geometry import (
     _MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH,
@@ -226,6 +227,7 @@ __all__ = [
     "materialize_compact_operator",
     "nested_parent_codes",
     "record_auto_backend_decision",
+    "release_leaf_memo",
     "resolve_structured_backend",
     "select_structured_group",
     "solve_cached_block_structured",

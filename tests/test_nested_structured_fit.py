@@ -447,6 +447,41 @@ def test_nested_fit_reproduces_the_dense_fit(family: str, discrete: bool) -> Non
     assert isinstance(str(nested_held.summary()), str)
 
 
+def test_a_discrete_fit_converges_whichever_way_its_trial_objectives_round(monkeypatch) -> None:
+    """The discrete line search does not ask the objective for digits it lacks.
+
+    Near the optimum a Newton step predicts a decrease ``-g'd`` far below the
+    stopping rule's resolution ``tau (1 + |V|)`` (1.7e-14 here, below one ulp
+    of ``V = 40.76``), so whether its trial objective lands above or below the
+    candidate's is rounding.  On OpenBLAS's Haswell kernels the Gamma/log
+    discrete gram fit's trials landed above: a strict ``trial < obj`` halved to
+    steps of 2^-24 chosen by rounding until the budget ran out with ``|g|``
+    at 1.9e-7 against a bar of 4.2e-8 (CI py3.14 D; Linux ARM64 in #427).
+    Every cached trial objective is raised here by ``64 eps (1 + |V|)``, a
+    rounding-level error the objective's sums carry, and the fit must still
+    converge, to the unperturbed fit's optimum within ``tau (1 + |V|)``.
+    Mutation: the strict ``trial_obj < obj`` acceptance (the fit stops at the
+    iteration budget, not converged).
+    """
+    import superglm.reml.discrete as discrete_module
+
+    reference = _fit("gamma", "gram", discrete=True)
+    assert reference._reml_result.converged
+    original = discrete_module.reml_laml_objective
+
+    def rounded_up(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if args[5].n_iter == 0 and isinstance(value, float):  # a cached line-search trial
+            return value + 64.0 * EPS * (1.0 + abs(value))
+        return value
+
+    monkeypatch.setattr(discrete_module, "reml_laml_objective", rounded_up)
+    perturbed = _fit("gamma", "gram", discrete=True)
+    assert perturbed._reml_result.converged
+    objective = reference._reml_result.objective
+    assert abs(perturbed._reml_result.objective - objective) <= REML_TOL * (1.0 + abs(objective))
+
+
 @pytest.mark.parametrize("lam", [1e-6, 1e10], ids=["nearly_free", "nearly_zero"])
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 def test_extreme_fixed_penalty_on_a_middle_level(lam: float, discrete: bool) -> None:

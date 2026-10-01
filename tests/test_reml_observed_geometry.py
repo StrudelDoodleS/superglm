@@ -36,6 +36,7 @@ from superglm.reml.observed_geometry import (
     compute_observed_dW_deta,
     compute_observed_information_weights,
     observed_penalized_mode_score,
+    schur_curvature_is_negative,
 )
 from superglm.reml.scale import prepare_gamma_reml_scale_data
 from superglm.reml.w_derivatives import reml_w_correction
@@ -1100,6 +1101,30 @@ def test_signed_observed_geometry_matches_augmented_hessian() -> None:
     )
 
 
+def test_the_structured_indefiniteness_gate_is_the_border_certificate_s_floor() -> None:
+    """The observed-geometry gate refuses exactly the curvature the border certificate calls material.
+
+    A scaled eigenvalue below minus ``tau + 2 n eps ||Q_s||_2`` (the factor's
+    certified uncertainty plus the eigensolver's rounding) is negative
+    curvature; one above it is within what the factor truncates as a null.
+    The certificates come from ``factor_border`` itself: identity blocks whose
+    bound ``U`` sets ``tau = c_R(3) + u_s``.  A hand-set ``-1e-10 max(|eig|, 1)``
+    fails both cases: it refuses ``-tau / 2`` when ``tau`` is 1.5e-9 (a null the
+    factor certified) and accepts ``-1e-11`` when ``tau`` is 1e-15 (curvature
+    10^4 times beyond it).
+    """
+    from superglm.solvers._structured.border import factor_border
+
+    wide = factor_border(np.eye(3), np.zeros((3, 3)), np.full(3, 5e-10), None, term_name="probe")
+    tight = factor_border(np.eye(3), np.zeros((3, 3)), np.full(3, 1e-16), None, term_name="probe")
+    tau_wide, tau_tight = wide.certificate.tau, tight.certificate.tau
+    assert tau_wide > 1e-9 and tau_tight < 1e-14
+    assert not schur_curvature_is_negative(np.array([-tau_wide / 2, 1.0, 1.0]), wide.certificate)
+    assert schur_curvature_is_negative(np.array([-2 * tau_wide, 1.0, 1.0]), wide.certificate)
+    assert schur_curvature_is_negative(np.array([-1e-11, 1.0, 1.0]), tight.certificate)
+    assert not schur_curvature_is_negative(np.array([-tau_tight / 2, 1.0, 1.0]), tight.certificate)
+
+
 def test_observed_geometry_rejects_indefinite_penalty_and_total_curvature() -> None:
     X = np.arange(-3.0, 4.0)[:, None]
     dm = DesignMatrix([DenseGroupMatrix(X)], n=len(X), p=1)
@@ -1131,9 +1156,7 @@ def test_observed_geometry_rejects_indefinite_penalty_and_total_curvature() -> N
             penalty=np.array([[-100.0]]),
         )
 
-    with pytest.raises(
-        ValueError, match="terminal observed REML coefficient Hessian is indefinite"
-    ):
+    with pytest.raises(ValueError, match="observed REML coefficient Hessian is indefinite"):
         build_observed_reml_geometry(
             dm=dm,
             distribution=Binomial(),

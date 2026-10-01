@@ -151,6 +151,18 @@ def _leaf_rows(
         rows.one_hot_column,
         center,
     )
+    _uncoded_rows(layout, out, lo, hi, center)
+
+
+def _uncoded_rows(
+    layout: NestedStructuredLayout | FactorSmoothLeafLayout,
+    out: NDArray,
+    lo: int,
+    hi: int,
+    center: NDArray,
+) -> None:
+    """``_leaf_rows`` for the blocks without codes (sparse, gathered, generic); others untouched."""
+    rows = layout.leaf_rows
     for column, matrix, basis in rows.sparse:
         _sparse_rows(out, column, matrix.indptr, matrix.indices, matrix.data, basis, lo, hi, center)
     order = layout.leaf_order[lo:hi]
@@ -163,13 +175,13 @@ def _leaf_rows(
         out[:, column:stop] = block - center[column:stop]
 
 
-def _border_rmatvec(layout: NestedStructuredLayout, values: NDArray) -> NDArray:
-    """``X_b' values`` ``(q,)`` through the border matrices' own transposes, densifying no rows."""
-    if layout.dense_small_matrix is not None:
-        return layout.dense_small_matrix.T @ values
-    if not layout.small_matrices:
-        return np.zeros(0)
-    return np.concatenate([matrix.rmatvec(values) for matrix in layout.small_matrices])
+def _indicator_rmatvec(layout: NestedStructuredLayout, values: NDArray) -> NDArray:
+    """``X_b' values`` ``(q,)`` on the random-effect border blocks through their own
+    transposes, densifying no rows; zero on every other column."""
+    out = np.zeros(len(layout.small_indices))
+    for cells in layout.sparse_indicators:
+        out[cells.columns] = layout.small_matrices[cells.block].rmatvec(values)
+    return out
 
 
 def nested_prior_statistics(
@@ -217,7 +229,22 @@ def nested_prior_statistics(
 
 
 def _prior_center(layout: NestedStructuredLayout, weights: NDArray, chunk_size: int) -> NDArray:
-    """The §3.2 centre ``(q,)`` of the border columns (``nested_prior_statistics``)."""
+    """The §3.2 centre ``(q,)`` of the border columns (``nested_prior_statistics``).
+
+    A coded block (a discretized spline's support table) takes the shifted sum
+    on its compact form, by type (design §3.2: "computed once per design from
+    compact forms"; Li & Wood 2020, Algorithm 0): every row of bin ``b`` is
+    the table row ``T_b``, so ``sum_r omega_r (x_r - x_ref) = sum_b Omega_b
+    (T_b - T_ref)`` with ``Omega_b`` the bin's prior weight, ``x_ref = T_ref``
+    the first weighted row's table row.  The differences are the row pass's
+    own, so a column constant on the weighted rows still shifts by exact
+    zeros and centres to ``x_ref``; the sum has ``m`` terms instead of ``n``,
+    with ``Omega_b`` rounding at ``gamma_(n_b)`` (Higham 2002, Lemma 3.1), the
+    same ``gamma_n sum omega |x - x_ref|`` order of bound.  It costs ``O(n)``
+    for the bin weights and ``O(m k)`` per lambda rebuild of the table,
+    where the row pass cost ``O(n q)``.  Every other dense block keeps the
+    serial row pass in leaf order, column by column as before.
+    """
     center = np.zeros(len(layout.small_indices))
     dense_columns = np.flatnonzero(~layout.indicator_columns)
     width = len(dense_columns)
@@ -231,12 +258,23 @@ def _prior_center(layout: NestedStructuredLayout, weights: NDArray, chunk_size: 
         first = int(positive[0])
         _leaf_rows(layout, reference, first, first + 1, zero)
         total = np.zeros(width)
-        buffer = np.empty((min(chunk_size, len(omega)), width))
-        for lo in range(0, len(omega), chunk_size):
-            hi = min(lo + chunk_size, len(omega))
-            rows = buffer[: hi - lo]
-            _leaf_rows(layout, rows, lo, hi, zero)
-            _shifted_sums(rows, omega[lo:hi], reference[0], total)
+        leaf_rows = layout.leaf_rows
+        if leaf_rows.sparse or leaf_rows.gathered or leaf_rows.generic:
+            # coded columns stay exact zeros here; their sums are replaced below
+            buffer = np.zeros((min(chunk_size, len(omega)), width))
+            for lo in range(0, len(omega), chunk_size):
+                hi = min(lo + chunk_size, len(omega))
+                rows = buffer[: hi - lo]
+                _uncoded_rows(layout, rows, lo, hi, zero)
+                _shifted_sums(rows, omega[lo:hi], reference[0], total)
+        stops = np.append(leaf_rows.table_start, leaf_rows.tables.size)[1:]
+        masses = _table_masses(layout, weights, omega, stops)
+        for block, (start, stop) in enumerate(zip(leaf_rows.table_start, stops, strict=True)):
+            column, block_width = leaf_rows.table_column[block], leaf_rows.table_width[block]
+            table = leaf_rows.tables[start:stop].reshape(-1, block_width)
+            reference_bin = leaf_rows.codes[first, block]
+            shift = (table - table[reference_bin]) * masses[block][:, None]
+            total[column : column + block_width] = np.sum(shift, axis=0)
         center[dense_columns] = reference[0] + total / float(np.sum(omega))
     offset = 0
     for matrix in layout.small_matrices:
@@ -246,6 +284,37 @@ def _prior_center(layout: NestedStructuredLayout, weights: NDArray, chunk_size: 
         offset += width
     center.setflags(write=False)
     return center
+
+
+def _table_masses(
+    layout: NestedStructuredLayout, weights: NDArray, omega: NDArray, stops: NDArray
+) -> tuple[NDArray, ...]:
+    """Each coded block's prior weight per bin, ``Omega_b = sum_{r: bin b} omega_r`` (``_prior_center``).
+
+    Summed in leaf order (``np.bincount``, serial).  Cache contract: a slot of
+    the lineage cache (``layout.lineage_cache``, shared by every lambda
+    rebuild of the design, which passes the bin codes through unchanged),
+    keyed by the leaf-ordered codes array itself (``LeafRows.codes``, a
+    lineage entry) and the prior weights (held as a read-only copy, matched
+    by identity or exact equality), at most two entries.  Bin codes and prior
+    weights are fixed for a design, so nothing else invalidates an entry; no
+    working weight, lambda, basis or penalty enters one.
+    """
+    rows = layout.leaf_rows
+    slot = layout.lineage_cache.setdefault(("nested_slot", "prior_mass"), [])
+    for codes, source, held, masses in slot:
+        if codes is rows.codes and (source is weights or np.array_equal(held, weights)):
+            return masses
+    sizes = (stops - rows.table_start) // np.maximum(rows.table_width, 1)
+    masses = tuple(
+        np.bincount(rows.codes[:, block], weights=omega, minlength=int(size))
+        for block, size in enumerate(sizes)
+    )
+    held = np.array(weights, dtype=np.float64, copy=True)
+    held.setflags(write=False)
+    slot.insert(0, (rows.codes, weights, held, masses))
+    del slot[2:]
+    return masses
 
 
 def _border_generators(
@@ -319,9 +388,9 @@ def _centered_leaf_pass(
     border_center: NDArray,
     rhs: NDArray | None = None,
     error: NDArray | None = None,
-) -> tuple[NDArray, NDArray, NDArray, NDArray | None, NDArray | None]:
-    """Return leaf means, the centred within-leaf scatter, the absolute mass, the deviations
-    and, with ``rhs``, ``sum_r rhs_r (x_r - c)`` on the dense columns.
+) -> tuple[NDArray, NDArray, NDArray, NDArray | None, NDArray | None, NDArray]:
+    """Return leaf means, the centred within-leaf scatter, the absolute mass, the deviations,
+    with ``rhs`` ``sum_r rhs_r (x_r - c)``, and ``sum_r a_r (x_r - c)``, both on the dense columns.
 
     The exact centred row pass of §3.4 and §3.6 (decision 1) in ONE pass over
     the border rows: rows are taken in leaf order (``layout.leaf_order``)
@@ -398,6 +467,8 @@ def _centered_leaf_pass(
     pieces: list[tuple] = []
     rhs_sums = None if rhs is None else np.zeros(width)
     rhs_ordered = None if rhs is None else np.asarray(rhs, dtype=np.float64)[order]
+    # X_b'a on the dense columns in the factor's centred coordinates, as rhs_sums
+    weight_sums = np.zeros(width)
     no_shift = np.zeros(width)
     for lo in range(0, n, chunk_size):
         hi = min(lo + chunk_size, n)
@@ -416,6 +487,7 @@ def _centered_leaf_pass(
             # centred coordinates, from these rows before any other centring
             _shifted_sums(centered, rhs_ordered[lo:hi], no_shift, rhs_sums)
         a = ordered[lo:hi]
+        _shifted_sums(centered, a, no_shift, weight_sums)
         magnitude = np.abs(a)
         error_chunk = magnitude if error_ordered is None else error_ordered[lo:hi]
         # exact-zero skip: a chunk without a negative row adds nothing to delta
@@ -505,6 +577,7 @@ def _centered_leaf_pass(
         absolute[layout_order],
         None if data_pass and not np.any(deviation) else deviation[:, layout_order],
         rhs_sums,
+        weight_sums,
     )
 
 
@@ -701,7 +774,7 @@ def _nested_pass(
     center: NDArray | None = None,
     rhs: NDArray | None = None,
     error: NDArray | None = None,
-) -> tuple[NestedLeafStatistics, NDArray | None]:
+) -> tuple[NestedLeafStatistics, NDArray | None, NDArray]:
     """One row pass of a nested chain: per-leaf statistics of the row weights.
 
     ``weight`` comes from the leaf kernel; ``mean``, ``within``, ``absolute``
@@ -718,7 +791,8 @@ def _nested_pass(
     side ``Wz``) it also returns ``sum_r rhs_r (x_r - c)`` on the border's
     dense columns (those outside the sparse random-effect blocks, in layout
     order), from the pass's own centred rows: the sum rounds at ``|x - c|``
-    rather than at a column's offset.
+    rather than at a column's offset.  It always returns ``sum_r weights_r
+    (x_r - c)`` on the same columns, from the same rows.
 
     The running error bound's inputs (signed-rows note §4.4): ``error_mass``
     ``sum_{r in l} e_r`` per leaf and the two rounding constants of the pass,
@@ -749,7 +823,7 @@ def _nested_pass(
         if error.shape != values.shape or not np.all(error >= np.abs(values)):
             raise ValueError("The row error scale must match the weights and bound |weights|.")
         error_mass = leaf.rmatvec(error)
-    leaf_mean, within, absolute, deviation, rhs_dense = _centered_leaf_pass(
+    leaf_mean, within, absolute, deviation, rhs_dense, weight_dense = _centered_leaf_pass(
         layout,
         values,
         leaf_magnitude,
@@ -775,7 +849,7 @@ def _nested_pass(
         rounding=((largest_leaf + 16) * eps, (min(n, chunk_size) + 21) * eps),
         indicator_pattern=layout.indicator_pattern,
     )
-    return statistics, rhs_dense
+    return statistics, rhs_dense, weight_dense
 
 
 def build_nested_structured_system(
@@ -799,9 +873,10 @@ def build_nested_structured_system(
     formed without a row pass.  ``error`` is the rows' weight-error scale
     (``_nested_pass``): the observed geometry passes its observed rows' scale,
     every other caller's rows are charged at ``|W|``.  Only the leaf group touches rows: one centred
-    leaf pass, and ``X_b'w``, ``X_b'Wz`` through the border's own transposes.
-    Every parent level is a subtree sum; the border Gram ``X_b'WX_b`` is never
-    formed (decision 1).
+    leaf pass, whose centred sums also give ``X_b'w`` and ``X_b'Wz`` on the
+    dense border columns (``sum a (x - c) + c sum a``; a random-effect block
+    through its own transpose).  Every parent level is a subtree sum; the
+    border Gram ``X_b'WX_b`` is never formed (decision 1).
     """
     weights, weighted_rhs, leaf = _validate_structured_inputs(
         group_matrices,
@@ -815,7 +890,7 @@ def build_nested_structured_system(
         for matrix, index in zip(layout.small_matrices, layout.small_group_indices, strict=True)
     ) or layout.chain_group_names != tuple(groups[i].name for i in layout.chain_group_indices):
         raise ValueError("Nested layout does not match the supplied grouped design.")
-    leaf_statistics, xtwz_dense = _nested_pass(
+    leaf_statistics, xtwz_dense, xtw_dense = _nested_pass(
         layout,
         group_matrices,
         weights,
@@ -831,17 +906,25 @@ def build_nested_structured_system(
         small_indices=layout.small_indices,
         structured_indices=layout.structured_indices,
     )
-    xtwz_small = (
-        np.zeros(len(layout.small_indices)) if Wz is None else _border_rmatvec(layout, weighted_rhs)
-    )
+    # X_b'a from the pass's centred sums, X_b'a = sum a (x - c) + c sum a on the
+    # dense columns (the fs leaf system's convention, block_leaves._assemble_system);
+    # a random-effect block (c = 0) through its own transpose
+    dense = ~layout.indicator_columns
+    border_center = leaf_statistics.center[dense]
+    sum_w, sum_wz = float(np.sum(weights)), float(np.sum(weighted_rhs))
+    xtw_small = _indicator_rmatvec(layout, weights)
+    xtw_small[dense] = xtw_dense + sum_w * border_center
+    xtwz_small = np.zeros(len(layout.small_indices))
     xtwz_small_centred = None
     if xtwz_dense is not None:
+        xtwz_small = _indicator_rmatvec(layout, weighted_rhs)
         # the factor's centred coordinates: the random-effect blocks keep c = 0
         xtwz_small_centred = xtwz_small.copy()
-        xtwz_small_centred[~layout.indicator_columns] = xtwz_dense
+        xtwz_small_centred[dense] = xtwz_dense
+        xtwz_small[dense] = xtwz_dense + sum_wz * border_center
     return NestedStructuredSystem(
         operator=operator,
-        xtw_small=_border_rmatvec(layout, weights),
+        xtw_small=xtw_small,
         xtw_structured=np.concatenate(layout.tree.subtree_sum(leaf_statistics.weight)),
         xtwz_small=xtwz_small,
         xtwz_small_centred=xtwz_small_centred,
@@ -850,8 +933,8 @@ def build_nested_structured_system(
             if Wz is None
             else np.concatenate(layout.tree.subtree_sum(leaf.rmatvec(weighted_rhs)))
         ),
-        sum_w=float(np.sum(weights)),
-        sum_wz=float(np.sum(weighted_rhs)),
+        sum_w=sum_w,
+        sum_wz=sum_wz,
         chain_group_indices=layout.chain_group_indices,
         chain_group_names=layout.chain_group_names,
         dominant_group_name=layout.leaf_group_name,

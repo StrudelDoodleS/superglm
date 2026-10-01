@@ -569,20 +569,24 @@ def solve_augmented_normal_equations(
 
     A nested factor takes its data-side solve with the border right-hand side
     in its centred coordinates (``NestedSchurFactor.solve_data``,
-    ``NestedStructuredSystem.xtwz_small_centred``); with ``centred`` its
-    first entry is then the centred intercept ``alpha`` about the factor's
-    border centre instead of the raw one.  Every other factor takes its
-    ``solve`` (``centred`` does not apply to it).  ``extra`` ``(p + 1,)``, zero
-    in the intercept entry, is a further right-hand side (a Levenberg shift's
-    ``E beta``, design §3.11): it is not data, so it takes the factor's full
-    solve beside the data-side one.
+    ``NestedStructuredSystem.xtwz_small_centred``), and the fs and sz leaf
+    factors theirs from the right-hand side inside the leaf factorization;
+    with ``centred`` the first entry is then the centred intercept ``alpha``
+    about the factor's border centre instead of the raw one.  Any other
+    factor takes its ``solve`` (``centred`` does not apply to it).  ``extra``
+    ``(p + 1,)``, zero in the intercept entry, is a further right-hand side
+    (a Levenberg shift's ``E beta``, design §3.11): it is not data, so it
+    takes the factor's full solve beside the data-side one, in the same
+    intercept coordinate.
     """
     if (
         isinstance(factor, FactorSmoothLeafFactor) and isinstance(system, FactorSmoothLeafSystem)
     ) or (isinstance(factor, SumToZeroTreeFactor) and isinstance(system, SumToZeroLeafSystem)):
         solution = factor.solve_data(centred=centred)
         if extra is not None:
-            solution = solution + factor.solve(extra)
+            # both solves in the same intercept coordinate: with ``centred``
+            # the data-side entry 0 is ``alpha``, so the extra one must be too
+            solution = solution + factor.solve(extra, centred=centred)
         return solution
     if isinstance(factor, NestedSchurFactor) and isinstance(system, NestedStructuredSystem):
         border_rhs = system.xtwz_small_centred

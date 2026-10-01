@@ -1734,3 +1734,45 @@ def test_fs_edf_is_the_identity_route_not_the_moment_trace() -> None:
     assert isinstance(factor, FactorSmoothLeafFactor)
     objective = gram._reml_result.objective
     assert abs(structured._reml_result.objective - objective) <= 1e-9 * (1.0 + abs(objective))
+
+
+def test_an_exactly_singular_data_gram_rounded_negative_is_not_refused(monkeypatch) -> None:
+    """A Fisher data Gram is PSD by construction; its null's rounding sign is not curvature.
+
+    The thin-level fs data Gram ``X~'WX~`` is exactly singular.  On macOS ARM64
+    (Accelerate) its null came out at -1.17e-13 in Jacobi-scaled coordinates,
+    beyond the eigensolver's resolution ``p eps max|w|`` (8.9e-14 at p = 189)
+    that the indefiniteness test is set at, and the fit raised "matrix is
+    materially indefinite" (CI, job 110251237184); OpenBLAS kernels leave it
+    at most -8.7e-15.  Its formation error is ``gamma_n |X~|'W|X~|`` (Higham
+    2002, section 3.5), at least ``gamma_n`` in scaled coordinates, 4.4e-13 at
+    these 4000 rows.  Every Gram the fit decomposes whose scaled spectrum
+    reaches zero is moved along its null to ``-2`` resolutions here, inside
+    that bound: the fit must complete and its data rank must be the one the
+    unmoved Gram gives.  Mutation: the call without ``psd_by_construction``
+    (``ValueError``).
+    """
+    reference, _ = _thin_level_fit("fs", "gram", True, None, 1.0)
+    original = irls_direct.decompose_gram_if_authoritative
+    eps = np.finfo(np.float64).eps
+    n = 4000
+    moved = []
+
+    def rounded_negative(matrix, *args, **kwargs):
+        matrix = np.asarray(matrix, dtype=np.float64)
+        scale = 1.0 / np.sqrt(np.diag(matrix))
+        scaled = scale[:, None] * matrix * scale[None, :]
+        values, vectors = np.linalg.eigh(0.5 * (scaled + scaled.T))
+        resolution = max(100.0, len(values)) * eps * max(float(np.max(np.abs(values))), 1.0)
+        if values[0] <= resolution:
+            shift = float(values[0]) + 2.0 * resolution
+            assert shift <= n * eps / 2 / (1.0 - n * eps / 2)  # within gamma_n
+            null = vectors[:, 0] / scale
+            matrix = matrix - shift * np.outer(null, null)
+            moved.append(shift)
+        return original(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(irls_direct, "decompose_gram_if_authoritative", rounded_negative)
+    gram, _ = _thin_level_fit("fs", "gram", True, None, 1.0)
+    assert moved
+    assert gram.result.rank_info.data.rank == reference.result.rank_info.data.rank

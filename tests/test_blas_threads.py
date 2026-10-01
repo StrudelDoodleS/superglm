@@ -237,6 +237,99 @@ def test_entrant_during_wide_overlap_gets_capped_after_wide_exits(monkeypatch):
     assert _blas_thread_counts() == before
 
 
+def test_overlapping_narrow_kernels_keep_the_cap_and_restore_native_state(monkeypatch):
+    """Review finding (PR #425): two wide fits whose narrow kernels overlap.
+
+    Each kernel's limiter recorded the pools it saw on entry: the first
+    restored the native pools while the second was still inside its kernel,
+    and the second then restored one thread, which nothing undid after both
+    fits returned.  The kernels must run on one thread until the last exits,
+    and the pools come back to the native state after it.
+    """
+    import threading
+
+    from superglm._blas_threads import allow_wide_design, narrow_kernel_blas_threads
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _native_blas_counts()
+    both_inside = threading.Barrier(2)
+    first_left = threading.Event()
+    seen: dict[str, list[int]] = {}
+
+    def wide_fit(name):
+        with solver_blas_threads():
+            allow_wide_design(5_000)
+            with narrow_kernel_blas_threads(100):
+                both_inside.wait(timeout=10)
+                if name == "second":
+                    first_left.wait(timeout=10)
+                    seen["second_after_first_left"] = _blas_thread_counts()
+            if name == "first":
+                first_left.set()
+            both_inside.wait(timeout=10)
+            seen[f"{name}_after_both"] = _blas_thread_counts()
+            both_inside.wait(timeout=10)
+
+    threads = [threading.Thread(target=wide_fit, args=(name,)) for name in ("first", "second")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert all(count == 1 for count in seen["second_after_first_left"])
+    assert seen["first_after_both"] == before
+    assert seen["second_after_both"] == before
+    assert _blas_thread_counts() == before
+
+
+def test_a_narrow_kernel_takes_one_thread_while_another_fit_is_wide(monkeypatch):
+    """Review finding (PR #425): a fit re-capped by ``keep_narrow_cap`` beside a wide fit.
+
+    The other fit's open wide scope keeps the pools released for the overlap,
+    and the re-capped fit's own scope is no longer wide, so its narrow kernels
+    ran on the released pools: their results depended on the thread count.
+    """
+    import threading
+
+    from superglm._blas_threads import (
+        allow_wide_design,
+        keep_narrow_cap,
+        narrow_kernel_blas_threads,
+    )
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _native_blas_counts()
+    wide_entered = threading.Event()
+    done = threading.Event()
+    seen: dict[str, list[int]] = {}
+
+    def wide_fit():
+        with solver_blas_threads():
+            allow_wide_design(10_000)
+            wide_entered.set()
+            done.wait(timeout=10)
+
+    wide_thread = threading.Thread(target=wide_fit)
+    wide_thread.start()
+    try:
+        wide_entered.wait(timeout=10)
+        with solver_blas_threads():
+            allow_wide_design(5_000)
+            keep_narrow_cap(9)
+            seen["overlap"] = _blas_thread_counts()
+            with narrow_kernel_blas_threads(9):
+                seen["kernel"] = _blas_thread_counts()
+            seen["after_kernel"] = _blas_thread_counts()
+    finally:
+        done.set()
+        wide_thread.join(timeout=10)
+
+    assert seen["overlap"] == before  # the wide fit holds the release for the overlap
+    assert all(count == 1 for count in seen["kernel"])
+    assert seen["after_kernel"] == before
+    assert _blas_thread_counts() == before
+
+
 def test_enter_failure_does_not_leak_scope_counter(monkeypatch):
     """Review finding: a threadpool_limits failure on entry left the refcount
     stuck above zero, disabling capping process-wide forever."""

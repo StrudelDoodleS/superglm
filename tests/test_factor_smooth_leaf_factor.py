@@ -37,6 +37,46 @@ def _gamma(count: float) -> float:
     return count * _U / (1.0 - count * _U)
 
 
+def _design(levels, Z, X):
+    """``[1 X Z]`` with each row's ``Z`` in its level's block, the factor's global order."""
+    n, k = Z.shape
+    q = X.shape[1]
+    design = np.zeros((n, 1 + q + (int(levels.max()) + 1) * k))
+    design[:, 0] = 1.0
+    design[:, 1 : 1 + q] = X
+    for row, level in enumerate(levels):
+        design[row, 1 + q + level * k : 1 + q + (level + 1) * k] = Z[row]
+    return design
+
+
+def _agreement(dense, levels, Z, X, w, local, small) -> tuple[float, float]:
+    """``(relative, logdet)``: what two backward-stable factorizations of ``H`` agree to.
+
+    Each factors ``H + dH`` with ``||dH||_2 <= eta ||H||_2``: a Cholesky-class
+    factor of the rows has ``|dH| <= gamma_{n+p+1} (|D|'|W||D| + |S|)``
+    entrywise (Higham 2002, Theorems 10.3 and 19.4, the row accumulations
+    included) and ``||.||_2 <= p ||.||_max``.  A solve, an inverse entry and
+    ``log det`` then move by at most ``kappa eta / (1 - kappa eta)`` relative
+    to ``||x||_2``, ``||H^-1||_2`` (Higham 2002, Theorem 7.2 and section
+    14.1) and ``p kappa eta`` absolute (first order of ``tr(H^-1 dH)``); two
+    factorizations by twice that.  ``|W|`` keeps signed rows' cancellation in
+    the bound.
+    """
+    p = dense.shape[0]
+    design = np.abs(_design(levels, Z, X))
+    magnitude = design.T @ (np.abs(w)[:, None] * design)
+    q = X.shape[1]
+    magnitude[1 : 1 + q, 1 : 1 + q] += np.abs(small)
+    k = Z.shape[1]
+    for level in range(local.shape[0]):
+        start = 1 + q + level * k
+        magnitude[start : start + k, start : start + k] += np.abs(local[level])
+    eta = p * _gamma(len(w) + p + 1) * np.max(magnitude) / np.linalg.norm(dense, 2)
+    kappa_eta = float(np.linalg.cond(dense) * eta)
+    assert kappa_eta < 0.5
+    return 2.0 * kappa_eta / (1.0 - kappa_eta), 2.0 * p * kappa_eta / (1.0 - kappa_eta)
+
+
 def _rows(rng, *, n_levels=5, block_size=3, border=4, per_level=9, signed=False):
     levels = np.repeat(np.arange(n_levels), per_level)
     n = len(levels)
@@ -95,39 +135,55 @@ def _dense(levels, Z, X, w, local, small):
 
 @pytest.mark.parametrize("signed", [False, True])
 def test_leaf_factor_solve_logdet_and_selected_inverse_match_dense(signed) -> None:
+    """Against LAPACK on the dense ``H``, within what two factorizations agree to (``_agreement``)."""
     rng = np.random.default_rng(731)
-    factor, _, dense, _ = _factor(rng, signed=signed)
+    factor, _, dense, (levels, Z, X, w, _, local, small) = _factor(rng, signed=signed)
+    relative, logdet = _agreement(dense, levels, Z, X, w, local, small)
     inverse = np.linalg.inv(dense)
     rhs = rng.normal(size=dense.shape[0])
     multi = rng.normal(size=(dense.shape[0], 4))
-    np.testing.assert_allclose(factor.solve(rhs), inverse @ rhs, atol=5e-12)
-    np.testing.assert_allclose(factor.solve(multi), inverse @ multi, atol=5e-12)
-    assert factor.logdet() == pytest.approx(np.linalg.slogdet(dense)[1], abs=5e-12)
+    expected = inverse @ rhs
+    np.testing.assert_allclose(
+        factor.solve(rhs), expected, rtol=0.0, atol=relative * np.linalg.norm(expected)
+    )
+    expected = inverse @ multi
+    error = np.abs(factor.solve(multi) - expected)
+    assert np.all(error <= relative * np.linalg.norm(expected, axis=0)[None, :])
+    assert abs(factor.logdet() - np.linalg.slogdet(dense)[1]) <= logdet
     assert factor.rank == dense.shape[0]
     selected = np.array([0, 2, 4, 7, 13], dtype=np.intp)
+    entry = relative * np.linalg.norm(inverse, 2)
     np.testing.assert_allclose(
-        factor.selected_inverse_block(selected), inverse[np.ix_(selected, selected)], atol=5e-12
+        factor.selected_inverse_block(selected),
+        inverse[np.ix_(selected, selected)],
+        rtol=0.0,
+        atol=entry,
     )
     np.testing.assert_allclose(
-        factor.selected_inverse_diagonal(selected), np.diag(inverse)[selected], atol=5e-12
+        factor.selected_inverse_diagonal(selected), np.diag(inverse)[selected], rtol=0.0, atol=entry
     )
 
 
 def test_leaf_factor_data_solve_is_the_normal_equations_solution() -> None:
-    """``solve_data`` reads the right-hand side that travelled inside the leaf QR."""
+    """``solve_data`` reads the right-hand side that travelled inside the leaf QR.
+
+    Within ``_agreement``'s solve bound plus the right-hand side's own: the
+    reference forms ``D'Wz`` in ``n``-term sums, within ``gamma_n |D|'|Wz|``
+    (Higham 2002, eq. 3.5), and ``H^-1`` carries it at ``||H^-1||_2``; the
+    factor's travels with its rows, likewise.
+    """
     rng = np.random.default_rng(732)
-    factor, _, dense, (levels, Z, X, w, wz, _, _) = _factor(rng)
-    n, k = Z.shape
-    q = X.shape[1]
-    design = np.zeros((n, dense.shape[0]))
-    design[:, 0] = 1.0
-    design[:, 1 : 1 + q] = X
-    for row, level in enumerate(levels):
-        design[row, 1 + q + level * k : 1 + q + (level + 1) * k] = Z[row]
+    factor, _, dense, (levels, Z, X, w, wz, local, small) = _factor(rng)
+    relative, _ = _agreement(dense, levels, Z, X, w, local, small)
+    design = _design(levels, Z, X)
     expected = np.linalg.solve(dense, design.T @ wz)
-    np.testing.assert_allclose(factor.solve_data(), expected, atol=5e-12)
+    data = _gamma(len(w)) * np.linalg.norm(np.abs(design).T @ np.abs(wz))
+    tolerance = (
+        relative * np.linalg.norm(expected) + 2.0 * np.linalg.norm(np.linalg.inv(dense), 2) * data
+    )
+    np.testing.assert_allclose(factor.solve_data(), expected, rtol=0.0, atol=tolerance)
     centred = factor.solve_data(centred=True)
-    np.testing.assert_allclose(centred[1:], expected[1:], atol=5e-12)
+    np.testing.assert_allclose(centred[1:], expected[1:], rtol=0.0, atol=tolerance)
 
 
 def _components(factor) -> tuple[PenaltyComponent, PenaltyComponent]:
@@ -575,7 +631,7 @@ def test_the_leaf_and_factor_memos_reuse_only_bitwise_equal_inputs(discrete) -> 
     moved[0] += 1.0
     second = build_factor_smooth_leaf_system(layout, W, moved)
     assert second is not first
-    assert not np.array_equal(second.leaf.triangles, first.leaf.triangles)
+    assert not np.array_equal(second.leaf.top, first.leaf.top)
     assert build_factor_smooth_leaf_system(layout, W, moved, signed=True) is not second
 
     K, k = second.operator.n_levels, second.operator.block_size
@@ -606,7 +662,7 @@ def test_the_leaf_and_factor_memos_reuse_only_bitwise_equal_inputs(discrete) -> 
     fresh[0] = DenseGroupMatrix(2.0 * np.asarray(matrices[0].M))
     moved_border = build_factor_smooth_leaf_system(rebuilt(fresh), W, Wz)
     assert moved_border is not held
-    assert not np.array_equal(moved_border.leaf.triangles, held.leaf.triangles)
+    assert not np.array_equal(moved_border.leaf.top, held.leaf.top)
     assert len(shared[("fs_slot", "leaf_memo")]) == 1
     assert len(shared[("fs_slot", "prior")]) <= 2
 

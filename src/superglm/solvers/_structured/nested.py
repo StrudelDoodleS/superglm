@@ -26,9 +26,9 @@ weights ``a_r`` and border rows ``x_r``,
 and the penalized Hessian is ``H = O_w + blockdiag(diag(lambda_node), S_b)``.
 
 Refusals follow the structured-factor convention.  ``np.linalg.LinAlgError``
-reports what an iterate's numbers caused (non-finite statistics, a tree pivot
-within its certified uncertainty, material negative Schur curvature, exact
-intercept aliasing); callers such as the
+reports what an iterate's numbers caused (non-finite statistics, a tree or
+super-root pivot within its certified uncertainty or below minus it, material
+negative Schur curvature, exact intercept aliasing); callers such as the
 observed-geometry build rely on that type.  ``ValueError`` reports a
 malformed call (shapes, partitions, coordinates, an operator built about
 other leaf means).  ``TypeError`` reports an operator kind the nested factor
@@ -112,6 +112,18 @@ def _restore_nested_state(instance, state: dict) -> None:
         instance.__dict__.update(state)
     else:
         instance.__dict__["_retired_state"] = dict(state)
+
+
+def _pending_nested_state(instance) -> dict:
+    """``__getstate__`` of the nested factors: a foreign state not yet rebuilt is saved as it came.
+
+    A factor loaded from another build holds only ``_retired_state`` until
+    first use.  Saving or copying it then must write that foreign state
+    itself, which ``_restore_nested_state`` keeps again for the same lazy
+    rebuild; the wrapper would be wrapped once more and lose its inputs.
+    """
+    pending = instance.__dict__.get("_retired_state")
+    return instance.__dict__ if pending is None else pending
 
 
 def _rebuild_on_first_use(instance, name: str, rebuild: Callable[[dict], None]):
@@ -1511,6 +1523,17 @@ class NestedSchurFactor:
             # for w >= 0, where D_u >= lambda_u and E_u << omega_u
             floor = pivot_error + 4.0 * eps * (np.abs(omega) + lam)
             if np.any(pivot <= floor):
+                negative = pivot < -floor
+                if np.any(negative):
+                    # below minus the uncertainty: certified negative curvature
+                    # (signed observed rows), not a pivot the rounding hides
+                    worst = int(np.flatnonzero(negative)[np.argmin(pivot[negative])])
+                    raise np.linalg.LinAlgError(
+                        f"Nested chain level {names[level]!r} has materially negative "
+                        f"curvature at a tree node: pivot {pivot[worst]:.6g}, below minus its "
+                        f"certified uncertainty {floor[worst]:.3g}, so the Hessian is "
+                        "indefinite there."
+                    )
                 worst = int(np.argmin(pivot - floor))
                 raise np.linalg.LinAlgError(
                     f"Nested chain level {names[level]!r} has a tree pivot {pivot[worst]:.6g} "
@@ -1614,7 +1637,14 @@ class NestedSchurFactor:
         D0 = float(np.sum(root_s))
         root_local = gamma_Q * float(np.sum(root_magnitude))
         super_error = float(np.sum(root_rho**2 * pivot_error)) + root_local
-        if not D0 > super_error + 4.0 * eps * abs(D0):
+        super_floor = super_error + 4.0 * eps * abs(D0)
+        if D0 < -super_floor:
+            raise np.linalg.LinAlgError(
+                f"Nested chain {names!r} has materially negative curvature along the "
+                f"intercept: the super-root pivot sum_r s_r = {D0:.6g} is below minus its "
+                f"certified uncertainty {super_floor:.3g}, so the Hessian is indefinite there."
+            )
+        if not D0 > super_floor:
             raise np.linalg.LinAlgError(
                 f"Nested chain {names!r} is aliased with the fitted intercept: the "
                 "super-root pivot sum_r s_r is within its certified uncertainty."
@@ -1804,6 +1834,9 @@ class NestedSchurFactor:
         self._level_pairs: dict[tuple[int, int], float] = {}
         self._state_format = _NESTED_STATE_FORMAT
 
+    def __getstate__(self) -> dict:
+        return _pending_nested_state(self)
+
     def __setstate__(self, state: dict) -> None:
         _restore_nested_state(self, state)
 
@@ -1959,6 +1992,24 @@ class NestedSchurFactor:
         result = np.vstack((x_0, x_rest))
         return result[:, 0] if values.ndim == 1 else result
 
+    def _retained_border(self, border: NDArray) -> NDArray:
+        """``(I - V_t W_t') border`` ``(q, r)``: the difference of two retained-subspace solves kept on it.
+
+        Each of the two border solves of ``_solve`` lands on the retained
+        subspace to the rounding of its own (projected) result, but they
+        cancel to a much smaller solution, which would then carry that
+        rounding along a truncated null direction: the Moore-Penrose solution
+        has none.  ``V_t = [-c*' v; v]`` are the truncated (not exact) border
+        nulls in the factor's coordinates and ``W_t = [0; w]`` their left
+        partners (``Q^+ Q = I - V W'``, ``W'V = I``); ``O(q t r)``.  Exact
+        nulls (zero rows of ``Q``) carry exact zeros already.
+        """
+        start = self._border.certificate.exact_null
+        if self._null_border.shape[1] == start:
+            return border
+        coefficients = self._border.null_left[:, start:].T @ border[1:]
+        return border - self._null_border[:, start:] @ coefficients
+
     def _border_quadratic_data(self, rows: NDArray) -> NDArray:
         """``y' Q^+ y`` per row of data-derived border rows ``(r, q)``: the super-root, then the rest."""
         rest = rows[:, 1:] - rows[:, :1] * self._center_star[None, :]
@@ -2031,7 +2082,7 @@ class NestedSchurFactor:
             share = share + self._leaf_deviation.T @ reached
         # the tree's share C'T^-1 r_t is data (C v = 0 on the structural nulls):
         # it takes the data-side inverse whatever the right-hand side
-        border = apply(border_rhs) - self._border_apply_data(share)
+        border = self._retained_border(apply(border_rhs) - self._border_apply_data(share))
         solution = np.empty_like(columns)
         solution[self.structured_indices] = np.concatenate(
             [u_level - F @ border for u_level, F in zip(u, self._F, strict=True)]
@@ -2869,6 +2920,9 @@ class ProfiledNestedSchurFactor:
         self._retained_about_mean = augmented_factor._retained_own
         self._state_format = _NESTED_STATE_FORMAT
 
+    def __getstate__(self) -> dict:
+        return _pending_nested_state(self)
+
     def __setstate__(self, state: dict) -> None:
         _restore_nested_state(self, state)
 
@@ -2974,7 +3028,9 @@ class ProfiledNestedSchurFactor:
         )
         quadratic = Y.T @ HY
         traces = traces - (quadratic + quadratic.T) / self.sum_w
-        traces = traces + np.outer(totals, totals) / self.sum_w**2
+        # (each total over sum_w first: sum_w^2 overflows past ~1.3e154)
+        means = totals / self.sum_w
+        traces = traces + np.outer(means, means)
         return 0.5 * (traces + traces.T) + _low_rank_matrix(self.solve, slopes)
 
     def solve(self, rhs: NDArray) -> NDArray:

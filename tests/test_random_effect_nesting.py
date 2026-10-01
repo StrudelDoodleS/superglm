@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Numeric, RandomEffect, SuperGLM
+from superglm import NegativeBinomial, Numeric, RandomEffect, SuperGLM, Tweedie
 from superglm.features.random_effect import near_nesting_notes, validate_declared_nesting
 from superglm.group_matrix import DenseGroupMatrix, RandomEffectGroupMatrix
 from superglm.solvers.structured import resolve_structured_backend
@@ -71,6 +71,51 @@ def test_a_declared_nesting_is_checked_on_the_training_rows() -> None:
     assert "nested_in='country'" in message
     assert repr(region) in message and "'c9'" in message and repr(home) in message
     assert "(row 7)" in message
+
+
+_PROFILED_ENTRY_POINTS = pytest.mark.parametrize(
+    ("family", "entry"),
+    [(NegativeBinomial(theta=5.0), "estimate_theta"), (Tweedie(p=1.5), "estimate_p")],
+)
+
+
+def _profiled_model(family, **region) -> SuperGLM:
+    model = _model(**region)
+    model.family = family
+    return model
+
+
+@_PROFILED_ENTRY_POINTS
+def test_every_reml_entry_point_checks_a_declared_nesting(family, entry) -> None:
+    """``estimate_theta`` and ``estimate_p`` check ``nested_in`` at their entry, as ``fit_reml`` does.
+
+    Mutation: without the check in ``estimate_theta`` the broken row is
+    accepted and the pair is fitted as crossed (``estimate_p`` raised it from
+    its search's first candidate fit before).
+    """
+    frame = _frame()
+    frame.loc[7, "country"] = "c9" if frame.loc[7, "country"] != "c9" else "c8"
+    model = _profiled_model(family, nested_in="country")
+    with pytest.raises(ValueError, match=r"nested_in='country'.*\(row 7\)"):
+        getattr(model, entry)(frame, _response(frame), fit_mode="reml")
+
+
+@_PROFILED_ENTRY_POINTS
+def test_every_reml_entry_point_names_a_near_nested_pair_once(family, entry) -> None:
+    """The near-nesting warning is raised once per call, by every REML entry point.
+
+    Mutation: ``estimate_theta`` without the check raises none; ``estimate_p``
+    without its search's candidates marked as checked raises one per candidate.
+    """
+    frame = _frame()
+    frame.loc[11, "country"] = "c9" if frame.loc[11, "country"] != "c9" else "c8"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        # a coarse power search: the warning count does not depend on its length
+        search = {"xatol": 0.1} if entry == "estimate_p" else {}
+        getattr(_profiled_model(family), entry)(frame, _response(frame), fit_mode="reml", **search)
+    notes = [str(item.message) for item in caught if "is nested in 'country'" in str(item.message)]
+    assert len(notes) == 1 and "row 11" in notes[0]
 
 
 def test_a_declared_parent_must_be_another_random_effect() -> None:
@@ -174,3 +219,19 @@ def test_a_crossed_pair_and_a_nested_pair_are_not_named() -> None:
         {"country": RandomEffect(), "region": RandomEffect(nested_in="country")},
         lambda name: frame[name].to_numpy(),
     )
+
+
+def test_the_re_helper_declares_nesting() -> None:
+    """``re(column, nested_in=)`` declares the hierarchy the terms API validates on its rows.
+
+    Fails on the helper without ``nested_in`` (``TypeError``).
+    """
+    from superglm.terms import normalize_terms, re
+
+    features = normalize_terms((re("country"), re("region", nested_in="country"))).features
+    assert features["region"].nested_in == "country"
+    frame = _frame()
+    validate_declared_nesting(features, lambda name: frame[name].to_numpy())
+    frame.loc[7, "country"] = "c9" if frame.loc[7, "country"] != "c9" else "c8"
+    with pytest.raises(ValueError, match=r"nested_in='country'.*\(row 7\)"):
+        validate_declared_nesting(features, lambda name: frame[name].to_numpy())

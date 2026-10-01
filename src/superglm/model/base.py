@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 from collections.abc import Hashable, Mapping
 from typing import Any, Literal, cast
 
@@ -389,6 +390,63 @@ def _score_prediction_term_exact(
     )
 
 
+def prediction_centred_state(result) -> tuple[float, NDArray | None]:
+    """The intercept and column centre a public result's predictor starts from.
+
+    ``(centred_intercept, state_center)`` when the result carries its fit's
+    centred state (one-engine design §3.8; read into the public coordinates
+    by ``runtime_canonicalize._public_centred_state``), else the raw
+    ``(intercept, None)``: a model saved before the state existed, or one
+    whose coefficients were revised after the fit, predicts as before.
+    """
+    alpha = getattr(result, "centred_intercept", None)
+    centre = getattr(result, "state_center", None)
+    if alpha is None or centre is None:
+        return float(result.intercept), None
+    return float(alpha), np.asarray(centre, dtype=np.float64)
+
+
+def scores_centred(spec) -> bool:
+    """Whether a term's spec scores its raw columns about a centre (``_score_centred``).
+
+    Only a raw numeric column (and the product of two) can sit at an offset
+    far above its spread; every other column type is bounded by its basis, so
+    its centre is folded into the intercept instead and it is scored as it is.
+    """
+    return callable(getattr(spec, "_score_centred", None))
+
+
+def _centred_term_contribution(
+    term: dict[str, Any],
+    X: EagerFrame,
+    beta_all: NDArray,
+    centre: NDArray,
+) -> NDArray[np.floating]:
+    """``(B - 1 c') beta`` for a term whose fitted columns carry a centre.
+
+    A raw numeric column is differenced before its product
+    (``_score_centred``), so a column at a large offset contributes rows of
+    its spread rounded at ``|x - c| |beta|``, as the fit's
+    ``mode_score.centred_matvec`` formed them.  Any other term (which the
+    published state never centres) is scored and its ``c' beta`` subtracted,
+    the same algebra.
+    """
+    beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
+    spec = term["spec"]
+    if term["kind"] == "feature":
+        columns: tuple[NDArray, ...] = (X.column_array(term["name"]),)
+    else:
+        left_name, right_name = term["parent_names"]
+        left_spec, right_spec = term.get("parent_specs", (None, None))
+        _, left = resolve_interaction_parent_of(spec, left_spec, X.column_array(left_name))
+        _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
+        columns = (left, right)
+    if scores_centred(spec):
+        return np.asarray(spec._score_centred(*columns, beta, centre), dtype=np.float64).ravel()
+    scored = np.asarray(spec.score(*columns, beta), dtype=np.float64).ravel()
+    return scored - math.fsum(centre * beta)
+
+
 def _score_prediction_term_fast_discrete(
     model,
     term: dict[str, Any],
@@ -435,18 +493,28 @@ def _predict_eta(
     validate_x_columns(frame, required_columns)
     offset = validate_prediction_offset(offset, len(frame))
     beta_all = model.result.beta
-    eta = np.full(len(frame), model.result.intercept, dtype=np.float64)
+    # The fit's centred predictor (one-engine design §3.8) when it carries one:
+    # a dense column's offset would otherwise cancel between X beta and the
+    # raw intercept and return the rounding the fit avoided.
+    intercept, centre = prediction_centred_state(model.result)
+    eta = np.full(len(frame), intercept, dtype=np.float64)
 
     scorer = _score_prediction_term_fast_discrete if fast_discrete else _score_prediction_term_exact
+
+    def score(term: dict[str, Any]) -> NDArray[np.floating]:
+        if centre is not None:
+            block = centre[term["beta_idx"]]
+            if np.any(block != 0.0):
+                return _centred_term_contribution(term, frame, beta_all, block)
+        if fast_discrete:
+            return scorer(model, term, frame, beta_all)
+        return scorer(term, frame, beta_all)
 
     for term in plan["features"]:
         if random_effects == "population" and isinstance(term["spec"], RandomEffect):
             term["spec"].validate_prediction_values(frame.column_array(term["name"]))
             continue
-        if fast_discrete:
-            eta += scorer(model, term, frame, beta_all)
-        else:
-            eta += scorer(term, frame, beta_all)
+        eta += score(term)
 
     for term in plan["interactions"]:
         if random_effects == "population" and isinstance(term["spec"], FactorSmooth):
@@ -456,10 +524,7 @@ def _predict_eta(
                 frame.column_array(right_name),
             )
             continue
-        if fast_discrete:
-            eta += scorer(model, term, frame, beta_all)
-        else:
-            eta += scorer(term, frame, beta_all)
+        eta += score(term)
 
     if offset is not None:
         eta = eta + offset

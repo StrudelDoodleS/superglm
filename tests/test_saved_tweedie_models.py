@@ -26,7 +26,7 @@ from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.solvers._structured.block_leaves import FactorSmoothLeafFactor
 from superglm.solvers._structured.nested import NestedSchurFactor
 
-from .test_saved_fs_models import _se_tolerance
+from .test_saved_fs_models import _se_tolerance, assert_predicts_as_saved
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_v0_35_0"
 NOTICE = "rebuilt with the current solver"
@@ -78,7 +78,7 @@ def _assert_se_close(rebuilt: dict, reference: dict, tolerance: float, pattern=T
 def test_a_tweedie_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(
     name, retired, factor
 ) -> None:
-    """Predictions are bitwise; the first inference call rebuilds the retired
+    """Predictions are v0.35.0's within two evaluations' rounding; the first inference call rebuilds the retired
     structured state once, with the notice, at the saved coefficients and
     smoothing parameters, and the REML memo is gone.
 
@@ -97,7 +97,7 @@ def test_a_tweedie_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(
     frame, y = record["frame"], record["y"]
     assert model._reml_result.tweedie_scale_data is None
 
-    np.testing.assert_array_equal(np.asarray(model.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
     se, notices = _metrics_se(model, frame, y)
     assert notices == 1
     assert isinstance(model._linear_system_state.augmented_factor, factor)
@@ -129,7 +129,7 @@ def test_a_tweedie_model_saved_by_v0_35_0_on_gram_loads_and_reports_as_saved() -
     model = record["model"]
     frame, y = record["frame"], record["y"]
     assert model._reml_result.tweedie_scale_data is None
-    np.testing.assert_array_equal(np.asarray(model.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
     se, notices = _metrics_se(model, frame, y)
     assert notices == 0
     _assert_se_close(se, record["se"], _se_tolerance(model))
@@ -147,7 +147,7 @@ def test_an_estimate_p_model_saved_by_v0_35_0_keeps_its_estimate_and_interval(na
     saved = record["profile"]
     model = record["model"]
     frame, y = record["frame"], record["y"]
-    np.testing.assert_array_equal(np.asarray(model.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
     assert model._distribution.p == saved["p_hat"]
 
     profile = model._tweedie_profile_result
@@ -176,7 +176,7 @@ def test_an_estimate_p_model_saved_by_v0_35_0_keeps_its_estimate_and_interval(na
         _assert_se_close(se, record["se"], _se_tolerance(model))
 
     again = pickle.loads(pickle.dumps(model))
-    np.testing.assert_array_equal(np.asarray(again.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(again, frame, record["prediction"])
     assert again._tweedie_profile_result.ci(0.05) == saved["ci"][0.05]
 
 

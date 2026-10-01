@@ -14,6 +14,7 @@ way outside the suite: SE equal to 4.9e-15, summaries and leverage working.)
 
 from __future__ import annotations
 
+import copy
 import pickle
 import warnings
 
@@ -69,22 +70,17 @@ def _observed(model, frame, y):
     return se, leverage, text
 
 
-def test_a_nested_factor_saved_by_an_earlier_build_is_rebuilt_on_first_use():
-    """T8 row "retired-class shim removed": fails with the nested factors' ``__setstate__``
-    and ``__getattr__`` removed (``AttributeError`` in SE, leverage and ``summary``).
+def _se_bound(model) -> float:
+    """``2 p eps kappa_s``: two backward-stable solves with the retained pivots (Higham 2002, §14.1)."""
+    factor = model._linear_system_state.augmented_factor
+    retained = factor.scaled_schur_eigenvalues()
+    retained = retained[retained > 0.0]
+    p = factor.shape[0]
+    return 2.0 * p * np.finfo(np.float64).eps * float(retained.max() / retained.min())
 
-    The rebuilt factor factors the saved operator by the same code, so the
-    leverage is the model's bit for bit and the standard errors agree within
-    the rounding of two evaluations of ``diag(H^-1)`` from the same factor:
-    the saved model had some of it cached from the fit, the rebuilt one forms
-    it on first use, and even one model's first and second SE reads differ in
-    the last bit.  Both are backward-stable solves with the retained pivots,
-    so they agree to ``2 p eps kappa_s`` relative (Higham 2002, section 14.1),
-    ``kappa_s`` the retained scaled border's condition.
-    """
-    model, frame, y = _model()
-    assert type(model._linear_system_state.augmented_factor).__name__ == "NestedSchurFactor"
-    se, leverage, _ = _observed(model, frame, y)
+
+def _loaded_from_an_earlier_build(model):
+    """``model`` as an earlier build pickles it, loaded: its inputs, an attribute of its own, no format marker."""
     foreign = pickle.loads(pickle.dumps(model))
     state = foreign._linear_system_state
     augmented, profiled = state.augmented_factor, state.profiled_factor
@@ -97,7 +93,26 @@ def test_a_nested_factor_saved_by_an_earlier_build_is_rebuilt_on_first_use():
     augmented.__dict__.update(old_augmented)
     profiled.__dict__.clear()
     profiled.__dict__.update(old_profiled)
-    loaded = pickle.loads(pickle.dumps(foreign))
+    return pickle.loads(pickle.dumps(foreign))
+
+
+def test_a_nested_factor_saved_by_an_earlier_build_is_rebuilt_on_first_use():
+    """T8 row "retired-class shim removed": fails with the nested factors' ``__setstate__``
+    and ``__getattr__`` removed (``AttributeError`` in SE, leverage and ``summary``).
+
+    The rebuilt factor factors the saved operator by the same code, so the
+    standard errors, and the leverage (a quadratic form in the same ``H^+``),
+    agree within the rounding of two evaluations from the same factor:
+    the saved model had some of it cached from the fit, the rebuilt one forms
+    it on first use, and even one model's first and second SE reads differ in
+    the last bit.  Both are backward-stable solves with the retained pivots,
+    so they agree to ``2 p eps kappa_s`` relative (Higham 2002, section 14.1),
+    ``kappa_s`` the retained scaled border's condition.
+    """
+    model, frame, y = _model()
+    assert type(model._linear_system_state.augmented_factor).__name__ == "NestedSchurFactor"
+    se, leverage, _ = _observed(model, frame, y)
+    loaded = _loaded_from_an_earlier_build(model)
     np.testing.assert_array_equal(loaded.predict(frame), model.predict(frame))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -108,16 +123,46 @@ def test_a_nested_factor_saved_by_an_earlier_build_is_rebuilt_on_first_use():
     assert len(notices) == 1
     loaded_se, loaded_leverage, text = _observed(loaded, frame, y)
     assert text
-    factor = model._linear_system_state.augmented_factor
-    retained = factor.scaled_schur_eigenvalues()
-    retained = retained[retained > 0.0]
-    p = factor.shape[0]
-    bound = 2.0 * p * np.finfo(np.float64).eps * float(retained.max() / retained.min())
+    bound = _se_bound(model)
     for name, values in se.items():
         np.testing.assert_array_equal(np.isnan(loaded_se[name]), np.isnan(values))
         finite = ~np.isnan(values)
         np.testing.assert_allclose(loaded_se[name][finite], values[finite], rtol=bound, atol=0.0)
-    np.testing.assert_array_equal(loaded_leverage, leverage)
+    np.testing.assert_allclose(loaded_leverage, leverage, rtol=bound, atol=0.0)
+
+
+def test_a_model_saved_by_an_earlier_build_saves_and_copies_again_before_first_use():
+    """Re-saving or copying a loaded model before its first inference call keeps the foreign state.
+
+    Fails without the nested factors' ``__getstate__``: the copy saves the
+    pending wrapper itself, the next load wraps it again, and the first
+    inference call raises ``KeyError: 'augmented_factor'``.  Each copy is then
+    rebuilt once, with the notice, to the standard errors and summary of the
+    model it was copied from.
+    """
+    model, frame, y = _model()
+    se, leverage, _ = _observed(model, frame, y)
+    rank = model._linear_system_state.profiled_factor.rank
+    bound = _se_bound(model)
+    loaded = _loaded_from_an_earlier_build(model)
+    copies = {"saved again": pickle.loads(pickle.dumps(loaded)), "deepcopy": copy.deepcopy(loaded)}
+    for label, again in copies.items():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert again._linear_system_state.profiled_factor.rank == rank, label
+        notices = [w for w in caught if "saved by an earlier superglm build" in str(w.message)]
+        assert len(notices) == 1, label
+        again_se, again_leverage, text = _observed(again, frame, y)
+        assert text, label
+        for name, values in se.items():
+            np.testing.assert_array_equal(np.isnan(again_se[name]), np.isnan(values))
+            finite = ~np.isnan(values)
+            np.testing.assert_allclose(
+                again_se[name][finite], values[finite], rtol=bound, atol=0.0, err_msg=label
+            )
+        # a quadratic form in the same H^+, as the variances (the solver's BLAS
+        # cap may differ from the fit's, so not bit for bit)
+        np.testing.assert_allclose(again_leverage, leverage, rtol=bound, atol=0.0, err_msg=label)
 
 
 def test_a_current_factor_round_trips_without_a_rebuild():

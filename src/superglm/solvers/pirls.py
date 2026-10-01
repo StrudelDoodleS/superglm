@@ -209,6 +209,7 @@ type TerminationReason = Literal[
     "max_iter",
     "continue",
     "score_stagnated",
+    "mean_space_boundary",
 ]
 
 # The same vocabulary at runtime, for consumers that enumerate the reasons
@@ -313,6 +314,10 @@ class PIRLSResult:
     # solver kept the raw intercept.
     centred_intercept: float | None = None
     state_center: NDArray | None = None
+    # Positive-weight rows the returned state holds at the boundary of the
+    # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
+    # only with ``termination_reason == "mean_space_boundary"``.
+    mean_space_boundary_rows: int = 0
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):

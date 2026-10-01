@@ -491,9 +491,10 @@ class ModelMetrics:
         from superglm.links import stabilize_eta
 
         if self._uses_fit_design:
+            from superglm.solvers.mode_score import linear_predictor
+
             solver = self._model._solver_pirls_result()
-            eta = self._dm.matvec(solver.beta) + solver.intercept + self._offset
-            eta = stabilize_eta(eta, self._link)
+            eta = stabilize_eta(linear_predictor(self._dm, solver, self._offset), self._link)
         else:
             from superglm.model import base
 

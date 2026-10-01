@@ -53,11 +53,27 @@ so that ``|dQ_ij| <= sqrt(U_i U_j)`` componentwise.  Five steps, one path:
    direction is not an exact null of ``H``: it is reported as weakly
    identified rather than aliased.
 
-The generalized inverse is the Moore-Penrose inverse of ``Q_s`` in the scaled
-metric on the retained subspace, ``Q_s^+ = (Q_s + ZZ')^-1 - ZZ'`` with ``Z``
-the orthonormal scaled null basis, mapped back through ``D_s``, the
-elimination of ``N`` and ``B``.  The pseudo-determinant is the unscaled
-Moore-Penrose one, ``log det a_NN + log pdet(Q''')``; with every deflated
+The generalized inverse is the Moore-Penrose inverse, in the scaled metric,
+of ``Q_s`` compressed onto the retained subspace: ``A = P Q_s P`` with ``P =
+I - ZZ'`` and ``Z`` the orthonormal scaled null basis (the Rayleigh-Ritz
+compression onto ``span(Z)^perp``; Parlett, *The Symmetric Eigenvalue
+Problem*, 1998, chapter 11).  A truncated direction is not an exact null of
+``Q_s``: it keeps curvature up to its Ritz values ``Theta`` and residual
+``R`` of step 4, and ``A = Q_s - (Z Theta Z' + Z R' + R Z')`` drops exactly
+those, which the certificate bounds.  Because ``A Z = 0``, ``A^+ = P (A +
+ZZ')^-1 P`` whenever ``A`` is positive definite on ``span(Z)^perp`` (the
+null-space identity for a symmetric matrix and an orthonormal basis of its
+null space; the Cholesky of ``A + ZZ'`` checks it and refuses otherwise, as
+before).  The solve, the explicit inverse and the pseudo-determinant ``log
+det(A + ZZ') = log pdet(A)`` all describe ``A``, so the inverse is positive
+semidefinite whatever the truncated curvature; without the compression,
+``(Q_s + ZZ')^-1 - ZZ'`` inverts nothing when ``Q_s Z != 0`` and can be
+indefinite.  Every result is projected by ``P``, which leaves its truncated
+component at the rounding of the projection rather than at ``eps kappa(A +
+ZZ')``.  The cost is ``O(width^2 t)`` for ``t`` truncated directions, once
+per factor, and ``O(width t)`` per solved column.  The inverse is mapped
+back through ``D_s``, the elimination of ``N`` and ``B``.  The
+pseudo-determinant is the unscaled Moore-Penrose one, ``log det a_NN + log pdet(Q''')``; with every deflated
 block penalized a null of ``Q`` vanishes on the block, so neither ``B`` nor
 the elimination moves it.
 
@@ -270,13 +286,46 @@ class BorderCertificate:
             return source.logdet_bound()
         return float(source)
 
+    def curvature_floor(self, norm: float) -> float:
+        """``tau + 2 width eps norm``: a computed scaled eigenvalue below minus it is negative curvature.
+
+        ``tau = c_R + u_s`` is what the certificate cannot tell apart from zero
+        in the scaled matrix itself (the data's running bound ``u_s`` and the
+        Cholesky constant ``c_R``); a backward-stable symmetric eigensolver
+        moves each eigenvalue by at most ``p(n) eps ||Q_s||_2`` (LAPACK Users'
+        Guide, 3rd ed., section 4.7), taken here as ``2 n eps`` times
+        ``norm``, the computed ``||Q_s||_2``.  Step 4's refusal of a Ritz value
+        is the same two terms with ``||Q_s||_2 <= n`` for the unit-diagonal
+        live block, so an eigenvalue below minus this floor is one the factor's
+        own certificate calls material, and one above it is within what the
+        factor truncates as a null.
+        """
+        return float(self.tau + 2.0 * self.width * _EPS * float(norm))
+
+
+def _projected_off(matrix: NDArray, basis: NDArray | None) -> NDArray:
+    """``P matrix P`` with ``P = I - B B'`` for a symmetric ``matrix`` and orthonormal ``B``.
+
+    The congruence keeps a positive semidefinite ``matrix`` semidefinite to
+    the rounding of the products, and leaves ``B'`` of the result at the
+    rounding of one projection whatever the conditioning of ``matrix``.
+    ``O(width^2 t)`` for ``t`` columns; ``matrix`` itself when ``B`` is empty.
+    """
+    if basis is None or not basis.shape[1]:
+        return matrix
+    right = matrix @ basis
+    projected = matrix - basis @ right.T - right @ basis.T + basis @ (basis.T @ right) @ basis.T
+    return 0.5 * (projected + projected.T)
+
 
 class _BorderInverse:
     """The inverses of one factored border, each formed on first read (module docstring).
 
     ``kind`` is ``"full"`` (``factor`` the Cholesky factor of the scaled
     ``Q_s[P, P]``, ``pivot`` ``P``) or ``"deflated"`` (``factor`` that of
-    ``Q_s + ZZ'``, ``null_scaled`` ``Z``); ``scale`` is ``D_s``; ``deflation``
+    ``A + ZZ'``, ``A = P Q_s P`` the compression of the module docstring,
+    ``null_scaled`` ``Z``, ``truncated`` its columns that are not exact
+    nulls); ``scale`` is ``D_s``; ``deflation``
     ``(N, references)`` with ``M``, ``G`` and ``a_lower`` the structural
     elimination of step 1, or ``None``.  Every lazy body runs under the same
     one-thread BLAS cap as the construction (``narrow_kernel_blas_threads``):
@@ -286,15 +335,32 @@ class _BorderInverse:
     """
 
     def __init__(
-        self, *, kind, factor, pivot, null_scaled, scale, deflation, M, G, a_lower, m, tau, live
+        self,
+        *,
+        kind,
+        factor,
+        pivot,
+        null_scaled,
+        scale,
+        deflation,
+        M,
+        G,
+        a_lower,
+        m,
+        tau,
+        live,
+        truncated=None,
     ):
         self.kind, self.factor, self.pivot, self.null_scaled = kind, factor, pivot, null_scaled
         self.scale, self.deflation, self.M, self.G = scale, deflation, M, G
         self.a_lower, self.m, self.tau, self.live = a_lower, m, tau, live
+        # the truncated (not exact-null) columns of ``null_scaled``: every
+        # result is projected off them (``_projected_off``)
+        self.truncated = truncated
 
     @cached_property
     def inverse_scaled(self) -> NDArray:
-        """``Q_s^+`` on the retained subspace (``(Q_s + ZZ')^-1 - ZZ'`` when truncated)."""
+        """``Q_s^+`` on the retained subspace (``P (A + ZZ')^-1 P`` when truncated)."""
         width = len(self.scale)
         with narrow_kernel_blas_threads(self.m):
             if self.kind == "full":
@@ -313,7 +379,10 @@ class _BorderInverse:
             inverse_scaled = scipy.linalg.cho_solve(
                 (self.factor, True), np.eye(width), check_finite=False
             )
-            return 0.5 * (inverse_scaled + inverse_scaled.T) - self.null_scaled @ self.null_scaled.T
+            inverse_scaled = (
+                0.5 * (inverse_scaled + inverse_scaled.T) - self.null_scaled @ self.null_scaled.T
+            )
+            return _projected_off(inverse_scaled, getattr(self, "truncated", None))
 
     @cached_property
     def inverse_kept(self) -> NDArray:
@@ -334,6 +403,9 @@ class _BorderInverse:
                 Z = self.null_scaled
                 x = scipy.linalg.cho_solve((self.factor, True), z, check_finite=False)
                 x = x - Z @ (Z.T @ z)
+                truncated = getattr(self, "truncated", None)
+                if truncated is not None and truncated.shape[1]:
+                    x = x - truncated @ (truncated.T @ x)
         return scale[:, None] * x if x.ndim == 2 else scale * x
 
     def logdet_bound(self) -> float:
@@ -512,9 +584,12 @@ def factor_border(
     generators: BorderGenerators | None,
     *,
     term_name: str,
+    term_kind: str = "Nested chain",
 ) -> BorderFactor:
     """Steps 1-5 of the module docstring on the rest-coordinate ``Q = Q_d + S``.
 
+    ``term_kind`` and ``term_name`` name the term in refusal messages
+    (``"FactorSmooth term"`` for the fs and sz factors).
     Refusals (``np.linalg.LinAlgError``): a pivot below minus its own bound
     (material negative curvature), a truncated cluster with a Ritz value below
     minus the uncertainty, or a retained block that is not positive definite
@@ -534,9 +609,10 @@ def factor_border(
     if np.any(diagonal < -bound):
         worst = int(np.argmin(diagonal + bound))
         raise np.linalg.LinAlgError(
-            f"Nested chain {term_name!r} border column {int(M[worst]) + 1} has materially "
-            f"negative Schur curvature {diagonal[worst]:.6g}, below minus its bound "
-            f"{bound[worst]:.3g}."
+            f"{term_kind} {term_name!r} has materially negative Schur curvature "
+            f"{diagonal[worst]:.6g} on its border (the intercept and the other terms' "
+            f"columns), below minus its bound {bound[worst]:.3g}, so the Hessian is "
+            "indefinite there."
         )
     exact_null = diagonal <= bound
     live = np.flatnonzero(~exact_null)
@@ -566,7 +642,7 @@ def factor_border(
         factor, info = dpotrf(live_matrix, lower=1, clean=1)
         if info != 0:  # pragma: no cover - the shifted factorization completed
             raise np.linalg.LinAlgError(
-                f"Nested chain {term_name!r} verified border block failed its Cholesky."
+                f"{term_kind} {term_name!r} verified border block failed its Cholesky."
             )
         rank, pivot = n_live, np.arange(n_live)
     elif n_live:
@@ -602,10 +678,11 @@ def factor_border(
         residual = float(np.linalg.norm(product - null_live @ rayleigh, 2))
         # a Ritz value of a PSD matrix below minus the uncertainty and the
         # evaluation's rounding is material negative curvature
+        # (``BorderCertificate.curvature_floor`` with ||Q_s||_2 <= n_live)
         floor = tau + 2.0 * n_live * n_live * _EPS
         if ritz[0] < -floor:
             raise np.linalg.LinAlgError(
-                f"Nested chain {term_name!r} has materially negative Schur curvature "
+                f"{term_kind} {term_name!r} has materially negative Schur curvature "
                 f"{ritz[0]:.3g} on its truncated border subspace."
             )
         gap = tau - float(ritz[-1])
@@ -634,12 +711,27 @@ def factor_border(
         squares = np.diag(factor) ** 2
         condition = float(squares.max() / squares.min())
     else:
-        deflated = Q_scaled + null_scaled @ null_scaled.T
+        # The truncated operator: Q_s compressed onto the retained subspace,
+        # P Q_s P with P = I - ZZ' (Rayleigh-Ritz), whose null space is
+        # exactly span(Z).  A truncated direction keeps curvature up to its
+        # Ritz values and residual (step 4), so Q_s Z != 0 and (Q_s + ZZ')^-1
+        # - ZZ' is no inverse of anything: it can be indefinite.  P Q_s P =
+        # Q_s - (Z Theta Z' + Z R' + R Z'), so it differs from Q_s by the
+        # Ritz block and the residual the certificate already bounds; exact
+        # nulls have zero rows in Q_s and need no projection.
+        operator = Q_scaled
+        if trailing:
+            coupling = np.zeros((width, trailing))
+            coupling[live] = product  # Q_s Z_t: rows off ``live`` are zero
+            Z_t = null_scaled[:, len(exact_columns) :]
+            operator = Q_scaled - Z_t @ coupling.T - coupling @ Z_t.T + Z_t @ rayleigh @ Z_t.T
+            operator = 0.5 * (operator + operator.T)
+        deflated = operator + null_scaled @ null_scaled.T
         try:
             cholesky = scipy.linalg.cholesky(deflated, lower=True, check_finite=False)
         except np.linalg.LinAlgError as error:
             raise np.linalg.LinAlgError(
-                f"Nested chain {term_name!r} retained Schur block is not positive definite "
+                f"{term_kind} {term_name!r} retained Schur block is not positive definite "
                 f"after deflating its {k} null directions: {error}"
             ) from error
         kind, solver_factor = "deflated", cholesky
@@ -665,6 +757,7 @@ def factor_border(
             m=m,
             tau=float(tau),
             live=live,
+            truncated=null_scaled[:, len(exact_columns) :],
         )
     )
     logdet_bound: _BorderInverse | float = source if (n_live and source is not None) else 0.0
@@ -686,6 +779,18 @@ def factor_border(
         null_left[M] = left_null
         null_left[references] = -N_M.T @ left_null
         logdet = logdet_N + logdet_M
+        if k:
+            # ``Q = C^-T diag(a_NN, Q''') C^-1`` with ``C = B L1^-T`` unimodular, so
+            # the pseudo-determinant of the congruence (design §3.5) is
+            # ``pdet(diag(a_NN, Q''')) det(V'V) / det(Z'Z)`` with ``V = C [0; Z]``
+            # the mapped nulls and ``Z`` any basis of ``Q'''``'s null space.  One
+            # (exactly) when the nulls vanish on the deflated block; not when a
+            # deflated direction couples to a null through the penalty (an ``sz``
+            # thin level's penalized alias beside its exact ones).
+            logdet += float(
+                np.linalg.slogdet(null.T @ null)[1]
+                - np.linalg.slogdet(unscaled_null.T @ unscaled_null)[1]
+            )
 
     # Step 5: disclosure of every null direction, exact nulls by their own
     # bound first, then the truncated subspace.

@@ -868,11 +868,13 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
 
     selection_penalty = fitted_penalty(work_model)
     smooth_penalty_terms = _build_smooth_penalty_terms(work_model)
-    current_eta = work_model._dm.matvec(work_model._solver_result.beta) + float(
-        work_model._solver_result.intercept
+    from superglm.solvers.mode_score import linear_predictor
+
+    current_eta = linear_predictor(
+        work_model._dm,
+        work_model._solver_result,
+        None if scoring_offset is None else np.asarray(scoring_offset, dtype=np.float64),
     )
-    if scoring_offset is not None:
-        current_eta = current_eta + np.asarray(scoring_offset, dtype=np.float64)
 
     # Why an ordered term carrying `specials=` survives the centering check
     # below, since this is the first consumer whose NUMERICAL VALIDITY depends

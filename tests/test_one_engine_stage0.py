@@ -28,7 +28,16 @@ import pandas as pd
 import pytest
 import scipy.linalg
 
-from superglm import Categorical, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM, Tweedie
+from superglm import (
+    Categorical,
+    FactorSmooth,
+    LambdaPolicy,
+    Numeric,
+    RandomEffect,
+    Spline,
+    SuperGLM,
+    Tweedie,
+)
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -439,6 +448,103 @@ def test_the_pivot_tolerance_is_derived_so_a_certified_direction_is_kept():
     assert abs(border.logdet - math.log(2.0 * d - d * d)) <= certificate.logdet_bound
 
 
+def test_a_border_refusal_names_the_term_kind_and_no_internal_column():
+    """The border factorization is shared by the nested chain and the fs and sz
+    factors: a refusal names the term as its caller describes it, and not by a
+    1-based index into the deflated rest coordinates, which is no model column."""
+    Q = np.array([[1.0, 0.0], [0.0, -5.0]])
+    with pytest.raises(
+        np.linalg.LinAlgError,
+        match=r"^FactorSmooth term 'x:g:sz' has materially negative Schur curvature -5 on its border",
+    ) as refusal:
+        factor_border(
+            Q,
+            np.zeros((2, 2)),
+            np.full(2, EPS),
+            None,
+            term_name="x:g:sz",
+            term_kind="FactorSmooth term",
+        )
+    assert "border column" not in str(refusal.value)
+
+
+def test_a_truncated_border_inverts_its_compression_onto_the_retained_subspace():
+    """Section 3.6, the generalized inverse (review P1: "remove truncated curvature").
+
+    ``[[1, 0.8], [0.8, 1]]`` with bound ``0.3`` per column has ``tau`` about 0.6
+    above its smaller eigenvalue 0.2, so one direction is truncated: complete
+    pivoting keeps column 0 and ``Z`` spans ``[-0.8, 1]``, along which ``Q`` keeps
+    curvature (``Q Z != 0``).  The inverse, the solve and ``log pdet`` must all
+    describe the compression ``A = P Q P``, ``P = I - ZZ'``: ``A^+ = v v' / (v'Qv)``
+    with ``v = [1, 0.8] / |.|``, ``v'Qv = 2.92 / 1.64``, so ``A^+ = [[1, 0.8],
+    [0.8, 0.64]] / 2.92``.  Fails with the uncompressed ``(Q + ZZ')^-1 - ZZ'``,
+    which has the eigenvalue -0.177 and ``log det(Q + ZZ') = 0.761``.  Every
+    quantity is a 2 x 2 solve with ``kappa(A + ZZ') < 2``: ``8 eps`` covers it.
+    """
+    Q = np.array([[1.0, 0.8], [0.8, 1.0]])
+    border = factor_border(Q, np.zeros((2, 2)), np.full(2, 0.3), None, term_name="probe")
+    assert border.certificate.rank == 1 and border.null.shape[1] == 1
+    expected = np.array([[1.0, 0.8], [0.8, 0.64]]) / 2.92
+    bound = 8 * EPS
+    assert np.max(np.abs(border.inverse - expected)) <= bound
+    assert np.linalg.eigvalsh(border.inverse)[0] >= -bound
+    assert abs(border.logdet - math.log(2.92 / 1.64)) <= bound
+    rhs = np.array([[1.0, 0.0], [0.0, 1.0], [0.3, -2.0]]).T
+    np.testing.assert_allclose(border.apply_data(rhs), expected @ rhs, rtol=0.0, atol=bound * 3)
+
+
+def test_a_fit_whose_border_truncates_weak_columns_publishes_a_semidefinite_covariance():
+    """Section 3.6 (review P1), as a complete fit: an ``fs`` term (eight levels of
+    30 evenly spaced rows, ``k = 5``) beside two numeric columns constant within
+    levels, every smoothing parameter fixed at 1e-22.  Both border columns
+    then lie in the level functions' span to within the penalty, and the
+    border truncates them with curvature of the penalty's size left on them.
+
+    The published ``H^+`` must be positive semidefinite to its rounding (its
+    eigenvalues are sums of the congruences of positive semidefinite blocks,
+    so within ``gamma_p ||H^+||``), and ``edf = tr(H^+ X'WX) <= tr(H^+ H)``,
+    which is the factor's rank because ``H^+`` annihilates the dropped Ritz
+    block and residual (the fixture's data rank, 40, leaves a unit for
+    rounding).  The uncompressed inverse gives variances near -3.6e21, an
+    eigenvalue near -9.8e21 and edf 41.08 above the rank 41.
+    """
+    rng = np.random.default_rng(3)
+    K, rows = 8, 30
+    g = np.repeat(np.arange(K), rows)
+    x = np.tile(np.linspace(0.0, 1.0, rows), K)
+    a, b = rng.normal(size=K)[g], rng.normal(size=K)[g]
+    y = (
+        1.0
+        + 0.5 * a
+        - 0.3 * b
+        + np.sin(3.0 * x) * (1.0 + 0.1 * g)
+        + 0.1 * rng.normal(size=K * rows)
+    )
+    frame = pd.DataFrame(
+        {"x": x, "a": a, "b": b, "g": np.array([f"g{c}" for c in g], dtype=object)}
+    )
+    policy = {c: LambdaPolicy.fixed(1e-22) for c in ("wiggle", "null_0", "null_1")}
+    model = SuperGLM(
+        family="gaussian",
+        features={"a": Numeric(), "b": Numeric()},
+        interactions=[FactorSmooth("x", group="g", basis="fs", k=5, lambda_policy=policy)],
+        selection_penalty=0,
+        direct_solve="structured",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    factor = model._linear_system_state.augmented_factor
+    assert factor.border_certificate.rank < factor.border_certificate.width
+    p = factor.shape[0]
+    inverse = factor.selected_inverse_block(np.arange(p))
+    eigenvalues = np.linalg.eigvalsh(0.5 * (inverse + inverse.T))
+    gamma = p * EPS / 2 / (1.0 - p * EPS / 2)
+    assert eigenvalues[0] >= -gamma * eigenvalues[-1]
+    assert np.min(np.diag(inverse)) >= -gamma * np.max(np.diag(inverse))
+    assert model._result.effective_df <= factor.rank
+
+
 # ------------------------------------------- 3.6: the published convention
 def test_an_alias_through_the_intercept_is_published_in_the_centred_convention():
     """Section 3.6 (critic F8), T3 rows "coupled-null refusal kept" and "log det(I + (FZ)'FZ) added".
@@ -658,3 +764,123 @@ def test_a_rare_offset_column_keeps_the_dense_rank_and_its_standard_errors():
     gram = _fit(frame, y, weight, "poisson", ["x1", "xt"], levels, solve="gram")
     assert model.result.reml_hessian_rank == gram.result.reml_hessian_rank
     assert _nan_se(model, frame, y, weight) == _nan_se(gram, frame, y, weight)
+
+
+# ------------------------------------------- the centred state after the fit (3.8)
+def _offset_fit(family: str, *, numeric: bool = True):
+    """The Sol review's fixture: an integer-step column at ``1e16`` beside a fixed RE."""
+    rng = np.random.default_rng(10)
+    n = 240
+    g = np.tile(np.arange(40), 6)
+    z = 2.0 * rng.integers(-4, 5, n)
+    if family == "poisson":
+        y = rng.poisson(np.exp(0.5 + 0.1 * z + 0.05 * np.sin(g))).astype(float)
+    else:
+        y = 3.0 + 0.2 * z + 0.05 * np.sin(g) + 0.01 * rng.normal(size=n)
+    frame = pd.DataFrame({"x": 1e16 + z, "g": g})
+    features = {"g": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0))}
+    if numeric:
+        features = {"x": Numeric(), **features}
+    model = SuperGLM(family=family, features=features, selection_penalty=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    return model, frame, y
+
+
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_every_reading_of_a_fit_uses_its_centred_predictor(family):
+    """Section 3.8: prediction and the post-fit consumers read ``alpha + (X - 1 c') beta``.
+
+    With ``x = 1e16 + z`` the raw intercept is about ``-1e16 beta_x``, so ``X beta +
+    intercept`` cancels to ``u 1e16 |beta_x|``: the review measured predictor errors of
+    0.15 and a training-row deviance of 1.63 against the fit's 0.028.  Prediction on new
+    rows centres the dense column before its product (``x - c`` is exact here, Sterbenz),
+    so the two evaluations of the same three terms differ by ``2 gamma_3`` of their
+    absolute sum.  The metrics' deviance is the fit's to the ``gamma_n`` of a sum of
+    non-negative terms (the same ``mu``), and the working weights are the Fisher
+    weights at the fit's own ``eta``.  Fails with ``_predict_eta``,
+    ``_working_eta_mu`` or ``_solver_space_working_weights`` reading ``X beta +
+    intercept``.
+    """
+    from superglm.model.state_ops import _solver_space_working_weights
+    from superglm.solvers.mode_score import linear_predictor
+
+    model, frame, y = _offset_fit(family)
+    solver = model._solver_pirls_result()
+    fitted = linear_predictor(model._dm, solver, None)
+    u = EPS / 2
+
+    def gamma(k: int) -> float:
+        return k * u / (1.0 - k * u)
+
+    alpha, centre = model.result.centred_intercept, model.result.state_center
+    assert alpha is not None and centre is not None
+    x = next(group for group in model._groups if group.name == "x").start
+    beta = model.result.beta
+    scale = (
+        abs(alpha) + np.abs(frame["x"].to_numpy() - centre[x]) * abs(beta[x]) + np.max(np.abs(beta))
+    )
+    predicted = np.asarray(model._predict_eta_raw_exact(frame))
+    np.testing.assert_array_less(np.abs(predicted - fitted), 2.0 * gamma(3) * scale)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        deviance = float(model.metrics(frame, y).deviance)
+    assert abs(deviance - solver.deviance) <= 2.0 * gamma(len(y)) * solver.deviance
+    expected = np.exp(fitted) if family == "poisson" else np.ones_like(fitted)
+    np.testing.assert_allclose(_solver_space_working_weights(model), expected, rtol=4 * u, atol=0)
+
+
+def test_a_fit_without_a_dense_column_keeps_its_raw_predictor():
+    """Only a dense column needs the centre: without one the public result carries no
+    centred state and predictions are the raw ``intercept + sum_t score_t`` as before."""
+    model, frame, _ = _offset_fit("gaussian", numeric=False)
+    assert model.result.centred_intercept is None and model.result.state_center is None
+    g = next(group for group in model._groups if group.name == "g")
+    expected = model.result.intercept + model.result.beta[g.sl][frame["g"].to_numpy()]
+    np.testing.assert_array_equal(model._predict_eta_raw_exact(frame), expected)
+
+
+def test_a_coefficient_revision_returns_the_predictor_to_the_raw_state():
+    """The centred state is the fitted mode's: a revision it does not cover clears it.
+
+    The editor's revision writes raw coordinates (``_patch_beta_block``); keeping
+    ``(alpha, c)`` left ``linear_predictor`` at the old intercept, off by ``c' dbeta``
+    (1e4 here).  After ``invalidate_revised_coefficient_mode`` both results read
+    ``X beta + intercept`` and prediction scores the revised coefficients.  (A null
+    revision keeps the state, and predictions bit for bit: ``test_piecewise_editor``.)
+    """
+    from superglm.editor.apply import _copy_model_for_editor_edits, _patch_beta_block
+    from superglm.model.fit_state import (
+        FittedStateRevision,
+        invalidate_revised_coefficient_mode,
+    )
+    from superglm.solvers.mode_score import linear_predictor
+
+    rng = np.random.default_rng(0)
+    n = 400
+    frame = pd.DataFrame({"x": rng.uniform(size=n), "t": 1e6 + rng.normal(size=n)})
+    y = np.sin(3 * frame["x"]) + 0.5 * (frame["t"] - 1e6) + 0.1 * rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Spline(kind="ps", k=8), "t": Numeric()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y.to_numpy())
+    assert model._solver_pirls_result().centred_intercept is not None
+    copied = _copy_model_for_editor_edits(model, share_transient_state=True)
+    revised = FittedStateRevision.start(copied, increment=True, freeze_auxiliary_arrays=True).model
+    t = next(group for group in revised._groups if group.name == "t")
+    _patch_beta_block(revised, [t], revised.result.beta[t.sl] + 0.01)
+    invalidate_revised_coefficient_mode(revised)
+    for result in (revised._result, revised._solver_result):
+        assert result.centred_intercept is None and result.state_center is None
+    solver = revised._solver_result
+    raw = revised._dm.matvec(solver.beta) + solver.intercept
+    np.testing.assert_array_equal(linear_predictor(revised._dm, solver, None), raw)
+    magnitude = abs(solver.intercept) + np.abs(revised._dm.toarray()) @ np.abs(solver.beta)
+    bound = 2.0 * (revised._dm.p + 2) * EPS * magnitude
+    np.testing.assert_array_less(np.abs(revised._predict_eta_raw_exact(frame) - raw), bound)

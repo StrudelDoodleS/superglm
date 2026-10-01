@@ -737,10 +737,12 @@ class ObservedREMLGeometry:
 class ObservedModeScore:
     """Penalized likelihood score and a unitless KKT residual (one-engine design §3.8, §3.9).
 
-    ``relative_max`` is the certificate's score: the fixed bar times the
-    largest ``relative / bar_effective`` over the intercept and the identified
-    slopes, so it exceeds ``observed_mode_certification_bar()`` exactly when
-    the mode is not certified (``mode_score.ModeResidual.ratio``).
+    ``relative_max`` is the certificate's score: the bar the score was taken
+    at (``observed_penalized_mode_score``'s ``bar``, which every REML caller
+    sets to ``mode_score.mode_certification_bar(reml_tol)``) times the largest
+    ``relative / bar_effective`` over the intercept and the identified slopes,
+    so it exceeds that bar exactly when the mode is not certified
+    (``mode_score.ModeResidual.ratio``).
     ``raw_relative_max`` is the largest relative score over every coefficient,
     weakly identified ones included; ``weakly_identified`` holds the slope
     indices flagged and kept (§3.9); ``floor_binding`` says a derived
@@ -764,14 +766,15 @@ OBSERVED_PIRLS_TOL_CEILING = 1e-10
 
 
 def observed_mode_certification_bar() -> float:
-    """The fixed bar a penalized mode must meet: ``mode_score.MODE_CERTIFICATION_BAR``.
+    """The bar at the default REML tolerance: ``mode_score.MODE_CERTIFICATION_BAR``.
 
-    One bar for the PIRLS stop and the certificate on every route (one-engine
-    design §3.8; its derivation is in ``solvers.mode_score``).  Deliberately a
-    constant with no tolerance parameter: the achieved score is set by
-    conditioning, so changing ``tol`` cannot move the bar -- a point that
-    certified as a candidate cannot fail publication solely because the
-    caller tightened ``pirls_tol``.
+    ``observed_penalized_mode_score`` uses it only when no ``bar`` is passed.
+    Every REML driver and the terminal refit pass the tolerance-derived bar
+    ``mode_score.mode_certification_bar(reml_tol)`` (``REML_TOL_BAR_RATIO``
+    times ``reml_tol``, clipped; one-engine design §3.8), one bar for the
+    PIRLS stop and the certificate of that fit, so ``reml_tol`` moves the bar
+    and ``pirls_tol`` does not: a point that certified as a candidate cannot
+    fail publication solely because the caller tightened ``pirls_tol``.
     """
     from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR
 
@@ -1109,6 +1112,24 @@ def _stable_signed_mean(dm: DesignMatrix, weights: NDArray, sum_w: float) -> NDA
     return anchor + total / sum_w
 
 
+def schur_curvature_is_negative(eigenvalues: NDArray, certificate) -> bool:
+    """Whether a structured factor's scaled Schur eigenvalues prove negative curvature.
+
+    ``eigenvalues`` are the computed eigenvalues of the factor's Jacobi-scaled
+    deflated border matrix and ``certificate`` its ``BorderCertificate``.  An
+    eigenvalue below minus ``certificate.curvature_floor(||Q_s||_2)`` (the
+    certified uncertainty ``tau`` plus the eigensolver's rounding) is negative
+    curvature the factor's own certificate calls material; one above it is
+    within what the factor truncates as a null, so the gate refuses exactly
+    the curvature the border factorization would.
+    """
+    values = np.asarray(eigenvalues, dtype=np.float64)
+    if not values.size:
+        return False
+    norm = float(np.max(np.abs(values)))
+    return bool(np.any(values < -certificate.curvature_floor(norm)))
+
+
 def build_observed_reml_geometry(
     *,
     dm: DesignMatrix,
@@ -1326,8 +1347,8 @@ def build_observed_reml_geometry(
             augmented_factor, _ = build_augmented_structured_factor(system, penalized)
         except np.linalg.LinAlgError as error:
             raise ObservedGeometryInfeasibleError(
-                "terminal observed REML coefficient Hessian is indefinite; "
-                "the fitted coefficients do not define a valid Laplace mode"
+                "the structured solver refused the observed REML coefficient Hessian "
+                f"({error}); the fitted coefficients do not define a valid Laplace mode"
             ) from error
         # The unsupported-geometry guard runs ahead of the eigencheck, so an
         # unrecognised factor reaches the TypeError that names it rather than
@@ -1349,13 +1370,9 @@ def build_observed_reml_geometry(
                 "observed REML Schur complement has no usable eigendecomposition "
                 "at the fitted coefficients"
             ) from error
-        schur_scale = max(
-            float(np.max(np.abs(schur_eigenvalues), initial=0.0)),
-            1.0,
-        )
-        if np.any(schur_eigenvalues < -1e-10 * schur_scale):
+        if schur_curvature_is_negative(schur_eigenvalues, augmented_factor.border_certificate):
             raise ObservedGeometryInfeasibleError(
-                "terminal observed REML coefficient Hessian is indefinite; "
+                "observed REML coefficient Hessian is indefinite; "
                 "the fitted coefficients do not define a valid Laplace mode"
             )
         if isinstance(augmented_factor, FactorSmoothLeafFactor):
@@ -1447,7 +1464,7 @@ def build_observed_reml_geometry(
         decomposition = decompose_gram(hessian)
     except ValueError as error:
         raise ObservedGeometryInfeasibleError(
-            "terminal observed REML coefficient Hessian is indefinite; "
+            "observed REML coefficient Hessian is indefinite; "
             "the fitted coefficients do not define a valid Laplace mode"
         ) from error
     if nonnegative and needs_factor_certification(decomposition):

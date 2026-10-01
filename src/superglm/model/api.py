@@ -143,8 +143,10 @@ class SuperGLM:
             ``"auto"`` selects compact structured elimination for random-effect
             and factor-smooth (``basis="fs"`` or ``"sz"``) terms above the
             measured size crossover, otherwise using Gram; the choice reads the
-            model's terms and their sizes, never the data's values or weights,
-            and ``result.direct_fallback_reason`` says why Gram was chosen.  A
+            model's terms, their sizes and the grouping columns' level pattern
+            (which levels nest in which), never the response, the weights or
+            the fit's progress, and ``result.direct_fallback_reason`` says why
+            Gram was chosen.  A
             fit never switches solver: when the structured solver cannot
             proceed, the fit stops with an error that names the cause, and
             ``"gram"`` fits the model with the dense solver instead.

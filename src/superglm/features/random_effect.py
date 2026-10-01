@@ -26,8 +26,10 @@ class RandomEffect:
     one of its levels (a region within a country, a vehicle model within a
     make).  Nesting is also detected from the level codes without it; the
     declaration is checked on the training rows, and a row that breaks it is
-    an error naming the row and both of the parent's levels.  The fit then
-    always eliminates this effect together with its declared parent.
+    an error naming the row and both of the parent's levels.  When this effect
+    is the structured solver's leaf (the random effect with the most levels,
+    with no ``FactorSmooth`` in the model), the declared parent is always in
+    its elimination chain; otherwise the declaration is only validated.
 
     Notes
     -----

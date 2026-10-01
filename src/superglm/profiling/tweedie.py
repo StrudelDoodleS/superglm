@@ -49,6 +49,7 @@ from superglm.profiling._scalar import (
     warn_caller,
 )
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+from superglm.solvers.mode_score import linear_predictor
 
 # Candidate REML fits only rank powers; the published refit at p_hat runs at the
 # tight publication default. At this bar a candidate's mean NLL was within
@@ -205,7 +206,7 @@ class _PowerProfile:
             intercept_init=self.warm_intercept,
         )
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
-        eta = clone._dm.matvec(result.beta) + result.intercept + self.offset
+        eta = linear_predictor(clone._dm, result, self.offset)
         mu = clip_mu(clone._link.inverse(stabilize_eta(eta, clone._link)), clone._distribution)
         return mu, bool(result.converged), None
 
@@ -216,6 +217,8 @@ class _PowerProfile:
         # (fit_ops._fetch_or_build_design) since the design does not depend on p.
         clone._suppress_reporting_support = True
         clone._profile_design_cache = {}
+        # estimate_p checked the rows' random-effect nesting once at its entry
+        clone._random_effect_nesting_checked = True
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         # fit_reml refuses a selection penalty.
         self.selecting = False

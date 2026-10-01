@@ -193,3 +193,164 @@ def _fit_recording(frame, y, weight, family, numerics, levels):
     )
     model.fit_reml(frame, y, sample_weight=weight, pirls_tol=1e-10, reml_tol=REML_TOL)
     return model
+
+
+# ── one factorization of H_II (review of #425) ──────────────────────────────
+
+
+def _aliased_weak_frame(case: str):
+    """A 40-level random effect beside columns two rows of weight 1e-15 carry.
+
+    ``sol``: ``b = r - a`` with ``r`` weak, so the full ``H`` is singular
+    (``a + b - r = 0``) and so is ``H_II`` (``a + b`` lives on the weak rows).
+    ``dup``: two identical weak columns, so ``(H^+)_WW`` has rank one.
+    Returns the frame, the response, the weights, the full and the reduced
+    numeric columns.
+    """
+    import pandas as pd
+
+    rng = np.random.default_rng(1)
+    n = 240
+    g = np.tile(np.arange(40), 6)
+    a = rng.integers(-5, 6, n).astype(float)
+    weight = np.ones(n)
+    weight[:2] = 1e-15
+    y = 0.3 * a + 0.1 * np.sin(g) + 0.1 * rng.normal(size=n)
+    r = np.zeros(n)
+    r[:2] = [1.0, 2.0]
+    frame = pd.DataFrame({"a": a, "g": [f"g{c:02d}" for c in g]})
+    if case == "sol":
+        frame["b"], frame["r"] = r - a, r
+        return frame, y, weight, ["a", "b", "r"], ["a", "b"]
+    frame["r1"], frame["r2"] = r, r.copy()
+    return frame, y, weight, ["a", "r1", "r2"], ["a"]
+
+
+def _numeric_fit(frame, y, weight, numerics, solve, **features):
+    from superglm import Numeric, RandomEffect, SuperGLM
+
+    spec = {name: Numeric() for name in numerics} | {"g": RandomEffect()} | features
+    model = SuperGLM(family="gaussian", features=spec, selection_penalty=0, direct_solve=solve)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y, sample_weight=weight, reml_tol=REML_TOL)
+    return model
+
+
+@pytest.mark.parametrize("solve", ["gram", "structured"])
+@pytest.mark.parametrize("case", ["sol", "dup"])
+def test_the_identified_part_is_the_criterion_without_the_weak_columns(case, solve):
+    """Sol P2 and Codex P2 on #425: ``log|H_II|``, rank and inverse from ONE factorization.
+
+    For a Gaussian identity fit ``H_II`` is exactly the Hessian of the model
+    without the excluded columns (the rows that carry them weigh 1e-15), so
+    the two REML criteria are one function of the smoothing parameter and
+    agree at their optima to the REML stop's ``reml_tol (1 + |V|)``.
+    Jacobi's identity on the singular full factor biased the criterion by
+    0.2027 (``sol``), and an excluded block of rank one left the retained
+    weak direction in ``log|H|`` while the inverse dropped it (``dup``: 14.7
+    on gram, 3.1 structured, and ``lambda_g`` moved by 0.7%).
+    """
+    frame, y, weight, full, reduced = _aliased_weak_frame(case)
+    model = _numeric_fit(frame, y, weight, full, solve)
+    control = _numeric_fit(frame, y, weight, reduced, solve)
+    assert model.result.direct_backend == control.result.direct_backend == solve
+    weak = [group.start for group in model._groups if group.name in set(full) - set(reduced)]
+    assert model._reml_profile["reml_laplace_excluded"] == tuple(weak)
+    assert control._reml_profile["reml_laplace_excluded"] == ()
+    value = control._reml_result.objective
+    assert abs(model._reml_result.objective - value) <= REML_TOL * (1.0 + abs(value))
+
+
+@pytest.mark.parametrize("solve", ["gram", "structured"])
+def test_a_penalty_fixed_at_zero_identifies_nothing(solve):
+    """Codex P2 on #425: a component whose policy is ``off()`` adds nothing to ``S``.
+
+    Level ``u4`` of a random effect fixed at lambda 0 lives only on two rows
+    of weight 1e-15: it is weakly identified and left out of the Laplace
+    approximation, which the component's mere presence used to prevent.  The
+    structured rebuild cannot leave out a column of a border random-effect
+    block (its complete one-hot sum is a structural generator), so that
+    backend keeps the full ``H`` for inverse, determinant and rank alike and
+    counts it.  Fails with ``penalized_columns`` reading component presence.
+    """
+    import pandas as pd
+
+    from superglm import RandomEffect
+    from superglm.types import LambdaPolicy
+
+    rng = np.random.default_rng(3)
+    n = 400
+    g = np.tile(np.arange(40), 10)
+    u = rng.integers(0, 4, n)
+    u[:2] = 4
+    weight = np.ones(n)
+    weight[:2] = 1e-15
+    a = rng.normal(size=n)
+    y = 0.3 * a + 0.2 * np.sin(g) + 0.1 * u + 0.1 * rng.normal(size=n)
+    frame = pd.DataFrame({"a": a, "g": [f"g{c:02d}" for c in g], "u": [f"u{c}" for c in u]})
+    model = _numeric_fit(
+        frame, y, weight, ["a"], solve, u=RandomEffect(lambda_policy=LambdaPolicy.off())
+    )
+    assert model._reml_profile["reml_laplace_excluded_labels"] == ("u[4]",)
+    unsupported = model._reml_profile["reml_laplace_exclusion_unsupported"]
+    assert (unsupported > 0) if solve == "structured" else (unsupported == 0)
+
+
+def test_a_refusal_in_the_identified_part_is_the_clear_error(monkeypatch):
+    """Claude Low on #425: the rebuild of the identified factor refuses as every
+    structured operation does, as ``StructuredSolverError`` naming the gram escape.
+
+    Fails with the rebuild outside ``_structured_solver_errors`` (a bare
+    ``LinAlgError``).
+    """
+    from superglm.solvers._structured.nested import NestedSchurFactor
+    from superglm.solvers.irls_direct import StructuredSolverError
+
+    build = NestedSchurFactor.__init__
+
+    def refusing(self, *args, excluded=(), **kwargs):
+        if excluded:
+            raise np.linalg.LinAlgError("Nested chain 'g' border column 1 is refused.")
+        build(self, *args, excluded=excluded, **kwargs)
+
+    monkeypatch.setattr(NestedSchurFactor, "__init__", refusing)
+    frame, y, weight, full, _ = _aliased_weak_frame("sol")
+    with pytest.raises(StructuredSolverError, match="direct_solve='gram'"):
+        _numeric_fit(frame, y, weight, full, "structured")
+
+
+def test_a_refused_identified_part_at_a_discrete_trial_halves_the_step(monkeypatch):
+    """Claude Low on #425: in the discrete line search the trial factor's identified
+    part is read inside the refused-trial handling, so a refusal there rejects
+    the trial (counted, step halved) and the fit completes.
+
+    Fails with the read after the ``try`` (the refusal fails the fit).
+    """
+    from superglm import Numeric, RandomEffect, SuperGLM
+    from superglm.solvers._structured.nested import NestedSchurFactor
+
+    build = NestedSchurFactor.__init__
+    restricted: list[int] = []
+
+    def refuse_second(self, *args, excluded=(), **kwargs):
+        if excluded:
+            restricted.append(len(restricted))
+            if len(restricted) == 2:  # the first candidate's is the first
+                raise np.linalg.LinAlgError("Nested chain 'g' border column 1 is refused.")
+        build(self, *args, excluded=excluded, **kwargs)
+
+    monkeypatch.setattr(NestedSchurFactor, "__init__", refuse_second)
+    frame, y, weight, full, _ = _aliased_weak_frame("sol")
+    model = SuperGLM(
+        family="poisson",
+        features={name: Numeric() for name in full} | {"g": RandomEffect()},
+        selection_penalty=0,
+        discrete=True,
+        direct_solve="structured",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, np.round(np.exp(y)), sample_weight=weight)
+    assert model._reml_profile["reml_n_refused_structured_trials"] >= 1
+    assert len(restricted) > 2

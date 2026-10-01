@@ -55,12 +55,77 @@ def _se_tolerance(model) -> float:
     return float(dm.n * u / (1.0 - dm.n * u) * kappa)
 
 
+_U = np.finfo(np.float64).eps / 2
+# numpy's documented worst case for a float64 SIMD transcendental (its SVML
+# kernels, numpy PR #19478); its own tests hold exp and log to 2 (PR #20991)
+_TRANSCENDENTAL_ULPS = 4
+
+
+def _gamma(count: int) -> float:
+    return count * _U / (1.0 - count * _U)
+
+
+def _term_magnitude(term, frame, beta_all) -> np.ndarray:
+    """``sum_j |X_ij| |beta_j|`` over one prediction term's columns, one column at a time."""
+    from superglm.model.base import _score_prediction_term_local_exact
+
+    width = len(term["beta_idx"])
+    beta = np.abs(beta_all[term["beta_idx"]])
+    magnitude = np.zeros(len(frame))
+    for j in np.flatnonzero(beta):
+        unit = np.zeros(width)
+        unit[j] = 1.0
+        magnitude += np.abs(_score_prediction_term_local_exact(term, frame, unit)) * beta[j]
+    return magnitude
+
+
+def _prediction_rounding(model, frame) -> np.ndarray:
+    """The bound two float64 evaluations of ``model.predict(frame)`` are held to, per row.
+
+    ``eta_i = b0 + sum_j X_ij beta_j`` is a dot product of ``p + 1`` terms, so
+    an evaluation in any summation order is within ``gamma_{p+1} a_i`` of the
+    exact one, ``a_i = |b0| + sum_j |X_ij| |beta_j|`` (Higham 2002, eq. 3.5):
+    two evaluations -- the saved one, and this one on another BLAS kernel or
+    SIMD target -- differ by twice that.  The inverse link carries it at its
+    slope, ``|h'(eta)| + |h''(eta)| d`` over the interval (``mu`` for the log
+    link), and adds each evaluation's own error, at most
+    ``_TRANSCENDENTAL_ULPS`` ulp of ``mu``.  Nothing here is the round-off of
+    one machine: a wrong coefficient or basis moves a prediction by many
+    orders of magnitude more.
+    """
+    from superglm._frame import as_eager_frame
+    from superglm.model.base import _prediction_plan
+
+    rows = as_eager_frame(frame)
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    plan = _prediction_plan(model)
+    magnitude = np.full(len(rows), abs(float(model.result.intercept)))
+    for term in plan["features"] + plan["interactions"]:
+        magnitude += _term_magnitude(term, rows, beta)
+    d_eta = 2.0 * _gamma(beta.size + 1) * magnitude
+    eta = np.asarray(model._predict_eta_raw_exact(frame), dtype=np.float64)
+    link = model._link
+    slope = np.abs(link.deriv_inverse(eta)) + np.abs(link.deriv2_inverse(eta)) * d_eta
+    mu = np.abs(np.asarray(link.inverse(eta), dtype=np.float64))
+    return slope * d_eta + 2.0 * _TRANSCENDENTAL_ULPS * 2.0 * _U * mu
+
+
+def assert_predicts_as_saved(model, frame, saved) -> None:
+    """``model.predict(frame)`` is the saved prediction within ``_prediction_rounding``."""
+    predicted = np.asarray(model.predict(frame), dtype=np.float64)
+    saved = np.asarray(saved, dtype=np.float64)
+    assert predicted.shape == saved.shape
+    excess = np.abs(predicted - saved) / _prediction_rounding(model, frame)
+    assert np.all(excess <= 1.0), (int(np.argmax(excess)), float(np.max(excess)))
+
+
 @pytest.mark.parametrize("name", ["fs_gaussian_exact", "fs_poisson_discrete"])
 def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(name) -> None:
     """T8 row "retired-class shim removed": without the module ``__getattr__`` of
     ``factors`` and ``moments`` the pickle does not load at all.
 
-    Predictions never read the solver state and stay bitwise.  The first
+    Predictions never read the solver state: they are v0.35.0's within two
+    evaluations' rounding (``assert_predicts_as_saved``).  The first
     inference call rebuilds it with the fs leaf factor at the saved
     coefficients and smoothing parameters, once, with the notice; its standard
     errors agree with the ones v0.35.0 reported.
@@ -71,7 +136,7 @@ def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(
     model = record["model"]
     frame, y = record["frame"], record["y"]
 
-    np.testing.assert_array_equal(np.asarray(model.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         se = model.metrics(frame, y).coefficient_se
@@ -93,10 +158,17 @@ def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(
 
 
 def test_a_released_fs_model_saved_by_v0_35_0_predicts_and_asks_for_a_refit() -> None:
+    """A model saved with ``retain_fit_state=False`` predicts; ``metrics``, ``summary`` and ``factor_smooth``
+    each ask for a refit (``summary`` and the term reports raised an unrelated
+    ``AttributeError`` before the retained state was resolved first).
+    """
     record = _load("fs_gaussian_released")
     assert record["version"] == "0.35.0"
     model = record["model"]
     frame, y = record["frame"], record["y"]
-    np.testing.assert_array_equal(np.asarray(model.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
     with pytest.raises(RuntimeError, match="refit with retain_fit_state=True"):
         model.metrics(frame, y).coefficient_se
+    for call in (model.summary, lambda: model.factor_smooth("x:g:fs")):
+        with pytest.raises(RuntimeError, match="refit with retain_fit_state=True"):
+            call()

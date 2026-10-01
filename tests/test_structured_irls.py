@@ -1017,6 +1017,46 @@ def test_a_refused_discrete_trial_is_rejected_with_a_shorter_step(monkeypatch) -
     assert fits["auto"]._reml_lambdas == fits["structured"]._reml_lambdas
 
 
+def test_a_refused_exact_trial_is_rejected_with_a_shorter_step(monkeypatch) -> None:
+    """The exact line search's PIRLS refuses its first trial's factor build (site 44).
+
+    The exact driver's twin of the discrete test above: a refused trial
+    supplies no objective, so it is rejected, counted and the step halved,
+    under every ``direct_solve`` alike, and the fit completes on the
+    structured backend -- auto bitwise the forced fit.  Mutation: without the
+    handler around the trial's ``fit_irls_direct`` the refusal fails
+    ``fit_reml``.
+    """
+    fit, build = direct_reml.fit_irls_direct, irls_direct.build_augmented_structured_factor
+    state = {"trial": False, "refused": 0}
+
+    def tracking(*args, **kwargs):
+        state["trial"] = kwargs.get("trace_purpose") == "reml_line_search"
+        try:
+            return fit(*args, **kwargs)
+        finally:
+            state["trial"] = False
+
+    def refuse_first_trial(system, operator):
+        if state["trial"] and not state["refused"]:
+            state["refused"] += 1
+            raise np.linalg.LinAlgError(_REFUSAL)
+        return build(system, operator)
+
+    monkeypatch.setattr(direct_reml, "fit_irls_direct", tracking)
+    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refuse_first_trial)
+    fits = {}
+    for direct_solve in ("auto", "structured"):
+        state["refused"] = 0
+        fits[direct_solve] = _pricing_fit(direct_solve)
+        assert state["refused"] == 1
+        assert fits[direct_solve]._reml_profile["reml_n_refused_structured_trials"] == 1
+        assert fits[direct_solve].result.direct_backend == "structured"
+        assert fits[direct_solve]._reml_result.converged
+    assert fits["auto"].result.deviance == fits["structured"].result.deviance
+    assert fits["auto"]._reml_lambdas == fits["structured"]._reml_lambdas
+
+
 # Families whose observed rows are signed: Gaussian/log rows w mu (2 mu - y) are
 # negative for y > 2 mu, Tweedie(1.75)/sqrt rows at y < mu / 5.  The chain
 # factors them (one-engine design §3.3), so no family declines it.

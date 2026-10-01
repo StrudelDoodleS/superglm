@@ -125,7 +125,9 @@ def build_reporting_support_state(
     if not structured_indices:
         return None
 
-    full_eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset, link)
+    from superglm.solvers.mode_score import linear_predictor
+
+    full_eta = stabilize_eta(linear_predictor(dm, result, offset), link)
     mu = clip_mu(link.inverse(full_eta), distribution)
     working_weights = fisher_working_weights(
         distribution=distribution,

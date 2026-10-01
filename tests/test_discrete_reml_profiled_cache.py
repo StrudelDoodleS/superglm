@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import warnings
 
 import numpy as np
@@ -11,7 +10,7 @@ import pytest
 from superglm.distributions import Gaussian
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import IdentityLink
-from superglm.reml.discrete import _solve_cached_profiled_system
+from superglm.reml.discrete import _cached_centred_intercept, _solve_cached_profiled_system
 from superglm.reml.objective import reml_laml_objective
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import centred_matvec, prior_weighted_centre
@@ -131,7 +130,23 @@ def test_cached_trial_matches_full_profiled_objective_after_large_translation(
     # trials (``reml.discrete``) and every PIRLS state form it: at a 1e10
     # translation X beta against the raw intercept errs by ~1e-6 per row
     centre = prior_weighted_centre(dm, weights)
-    alpha_cached = intercept_cached + math.fsum(centre * beta_cached)
+    alpha_cached = _cached_centred_intercept(cache["mean_z"], cache["mean_x"], centre, beta_cached)
+    # The centred intercept is the full fit's: for a Gaussian identity fit the
+    # working weights and response are the prior weights and y at every
+    # iterate, so both form mean_z - (mean_x - c)' beta from the same means
+    # and differ only through beta, by (mean_x - c)' d beta, plus the
+    # rounding of the two fsum'd sums, u (|mean_z| + |mean_x - c|' |beta|)
+    # each.  Through the raw intercept, (mean_z - mean_x' beta) + c' beta, the
+    # trial's alpha erred by ~u |mean_x|' |beta| ~ 2e-6 (4.2e-6 on OpenBLAS's
+    # Haswell kernels), which moved its REML objective by 1.1e-7.
+    np.testing.assert_array_equal(full_result.state_center, centre)
+    u = np.finfo(float).eps / 2
+    spread = np.abs(np.asarray(cache["mean_x"]) - centre)
+    alpha_bound = spread @ np.abs(beta_cached - full_result.beta) + 2.0 * u * (
+        abs(float(cache["mean_z"]))
+        + spread @ np.maximum(np.abs(beta_cached), np.abs(full_result.beta))
+    )
+    assert abs(alpha_cached - full_result.centred_intercept) <= alpha_bound
     eta_cached = alpha_cached + centred_matvec(dm, beta_cached, centre)
     mu_cached = link.inverse(eta_cached)
     cached_result = PIRLSResult(

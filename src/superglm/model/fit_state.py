@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Hashable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -461,8 +462,33 @@ class FittedStateRevision:
         return self.target_model
 
 
+def _centred_state_reads_the_coefficients(model) -> bool:
+    """Whether the fit's centred state ``(alpha, c)`` still reads the current coefficients.
+
+    PIRLS publishes ``intercept = alpha - fsum(c * beta)`` (``irls_direct``),
+    so the relation holds bit for bit until a revision writes a ``beta`` or
+    intercept it does not cover; a revision that moves only columns with a
+    zero centre, or nothing at all, keeps it.
+    """
+    solver = getattr(model, "_solver_result", None)
+    public = getattr(model, "_result", None)
+    alpha = getattr(solver, "centred_intercept", None)
+    centre = getattr(solver, "state_center", None)
+    if solver is None or public is None or alpha is None or centre is None:
+        return False
+    beta = np.asarray(solver.beta, dtype=np.float64)
+    if not np.array_equal(np.asarray(public.beta, dtype=np.float64), beta):
+        return False
+    return float(solver.intercept) == float(alpha) - math.fsum(np.asarray(centre) * beta)
+
+
 def invalidate_revised_coefficient_mode(model) -> None:
     """Clear artifacts that identify or describe the pre-revision coefficient mode."""
+    # The centred state (alpha, c) reads the fitted mode: a revised beta or
+    # intercept it does not cover would leave alpha + (X - 1 c') beta at the
+    # old mean, so eta (mode_score.linear_predictor, prediction) returns to the
+    # raw beta and intercept the revision wrote.
+    keep_centred = _centred_state_reads_the_coefficients(model)
     updated: set[int] = set()
     for result_name in ("_result", "_solver_result"):
         result = getattr(model, result_name, None)
@@ -480,6 +506,10 @@ def invalidate_revised_coefficient_mode(model) -> None:
         ):
             if hasattr(result, field_name):
                 setattr(result, field_name, value)
+        if not keep_centred:
+            for field_name in ("centred_intercept", "state_center"):
+                if hasattr(result, field_name):
+                    setattr(result, field_name, None)
         updated.add(id(result))
 
     reml_result = getattr(model, "_reml_result", None)

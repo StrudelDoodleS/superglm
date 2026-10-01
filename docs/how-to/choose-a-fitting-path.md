@@ -107,9 +107,10 @@ little or no weight, few rows, or little information.
 `direct_solve="auto"`, a model whose random effect or factor smooth is large
 enough is fitted with a compact solver, which never builds the full matrix for
 that term. A smaller model uses the ordinary Gram solver. The choice depends
-only on the model's terms and their sizes. It never depends on the data's
-values, the weights, or how the fit is going, so the same model always takes
-the same solver.
+only on the model's terms, their sizes, and which grouping levels sit inside
+which others. It never depends on the response, the weights, or how the fit is
+going, so the same model on the same grouping columns always takes the same
+solver.
 
 ```python
 model = SuperGLM(
@@ -151,14 +152,21 @@ semantics and the French motor example.
 ### Nested grouping factors
 
 - **Nesting is found from the data.** If every `region` level appears under a
-  single `country` level, the two random effects are fitted together as one
-  hierarchy.
+  single `country` level, `region` is nested in `country`.
+- **The compact solver uses it for its main random effect.** It builds its
+  hierarchy around the random effect with the most levels, and fits that
+  effect together with the effects it is nested in.
+- **Other nested pairs are fitted as usual.** A pair that does not include
+  the compact solver's main random effect is fitted like any other pair of
+  random effects. So is every pair when the Gram solver fits the model.
 - **You can declare it.** `RandomEffect(nested_in="country")` on `region`
   states the hierarchy. The fit checks it and stops with an error that names
   any row that breaks it.
+- **A declaration fixes the hierarchy.** When `region` is the compact solver's
+  main random effect, the declared parent is always part of its hierarchy.
 - **A near miss is reported.** If all but a few rows nest, a warning names
-  those rows and the fit treats the two random effects as crossed. Fix the
-  rows and declare `nested_in` to fit them as a hierarchy.
+  those rows and the fit treats the two random effects as crossed. Fixing
+  those rows makes the pair nested again.
 
 ### Factor smooths with `basis="sz"`
 

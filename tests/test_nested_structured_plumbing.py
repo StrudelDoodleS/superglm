@@ -1167,6 +1167,190 @@ def test_a_mostly_zero_numeric_column_stays_estimable_about_its_prior_weighted_m
     assert factor.coefficient_estimable()[border][:3].tolist() == [False, False, True]
 
 
+def _coded_border_case(seed: int = 41, n: int = 500):
+    """A chain of one (12 levels) beside two discretized splines and a categorical.
+
+    Every border block is coded (a support table or one-hot), so the border
+    centre has no row pass to make.  Spline 0's first column is 7.25 on every
+    bin a weighted row takes and 1e3 on bin 5, which only zero-weight rows take.
+    """
+    rng = np.random.default_rng(seed)
+    weights = np.exp(rng.normal(size=n))
+    weights[:30] = 0.0
+    bins = rng.integers(0, 5, n)
+    bins[:30] = 5
+    table = rng.normal(size=(6, 3))
+    table[:5, 0], table[5, 0] = 7.25, 1e3
+    matrices = [
+        DiscretizedSSPGroupMatrix(table, np.eye(3), bins),
+        DiscretizedSSPGroupMatrix(
+            rng.normal(size=(8, 4)), rng.normal(size=(4, 4)), rng.integers(0, 8, n)
+        ),
+        CategoricalGroupMatrix(rng.integers(-1, 3, size=n), n_levels=3),
+        RandomEffectGroupMatrix(rng.integers(0, 12, n), 12),
+    ]
+    groups, start = [], 0
+    for name, matrix in zip(("first", "second", "category", "group"), matrices, strict=True):
+        groups.append(GroupSlice(name=name, start=start, end=start + matrix.shape[1]))
+        start += matrix.shape[1]
+    dm = DesignMatrix(matrices, n=n, p=start)
+    layout = get_structured_layout(dm, groups, dominant_group_index=3, chain_group_indices=(3,))
+    return dm, groups, layout, weights
+
+
+def _pass_rows(layout: NestedStructuredLayout) -> np.ndarray:
+    """``(n, q)`` border rows as the row pass forms them (``_leaf_rows``) in row order,
+    the random-effect blocks (which it never densifies) from their own rows."""
+    n, dense = len(layout.leaf_order), ~layout.indicator_columns
+    rows = np.empty((n, int(np.count_nonzero(dense))))
+    _leaf_rows(layout, rows, 0, n, np.zeros(rows.shape[1]))
+    X = _border_rows(layout)
+    formed = np.empty_like(rows)
+    formed[layout.leaf_order] = rows
+    X[:, dense] = formed
+    return X
+
+
+def _exact_shifted_mean(X: np.ndarray, weights: np.ndarray, first: int) -> np.ndarray:
+    """``x_ref + sum w (x - x_ref) / sum w`` per column in exact rational arithmetic."""
+    total = sum(Fraction(w) for w in weights)
+    return np.array(
+        [
+            float(
+                Fraction(X[first, j])
+                + sum(
+                    Fraction(w) * (Fraction(x) - Fraction(X[first, j]))
+                    for w, x in zip(weights, X[:, j], strict=True)
+                )
+                / total
+            )
+            for j in range(X.shape[1])
+        ]
+    )
+
+
+def test_a_coded_border_centre_is_its_compact_shifted_mean_with_no_row_pass(monkeypatch) -> None:
+    """One-engine design §3.2 on a support table: computed from the compact form.
+
+    Every row of bin ``b`` is the table row ``T_b``, so the shifted sum is
+    ``sum_b Omega_b (T_b - T_ref)``: no row of the design is formed or summed
+    (no ``_shifted_sums`` call).  The differences are the row pass's own, so
+    a column constant on the weighted rows centres to exactly that constant,
+    however far a zero-weight bin lies.  Against the exact shifted mean, the
+    rounding is that of ``Omega_b`` (``n_b`` terms), the products and the
+    ``m``-term sum, the total weight, the division and the final addition:
+    ``|c - c*| <= gamma_(n + m + 4) sum w |x - x_ref| / sum w + u |c|``
+    (Higham 2002, Lemma 3.1 and eq. 3.4), with ``gamma_k <= k eps``.
+    """
+    import superglm.solvers._structured.moments as moments
+
+    dm, groups, layout, weights = _coded_border_case()
+    calls = []
+    real = moments._shifted_sums
+    monkeypatch.setattr(moments, "_shifted_sums", lambda *args: calls.append(1) or real(*args))
+    center = nested_prior_statistics(layout, weights)[0]
+    assert not calls
+    X = _pass_rows(layout)
+    order = layout.leaf_order
+    first = int(order[np.flatnonzero(weights[order] > 0.0)[0]])
+    exact = _exact_shifted_mean(X, weights, first)
+    coded = slice(0, 7)  # the two tables (6 and 8 bins); the categorical block keeps 0
+    spread = np.abs(X[:, coded] - X[first, coded]).T @ weights / np.sum(weights)
+    bound = (len(weights) + 8 + 4) * EPS * spread + EPS * np.abs(center[coded])
+    assert np.all(np.abs(center[coded] - exact[coded]) <= bound)
+    assert center[0] == 7.25
+    assert np.all(center[7:] == 0.0)
+
+
+def test_a_lambda_rebuild_recentres_the_new_table_from_the_held_bin_weights(monkeypatch) -> None:
+    """The bin weights ``Omega_b`` are the lineage's (design §3.2: computed once
+    per design), so a lambda rebuild that keeps the bin codes forms no ``O(n)``
+    sum for the centre (no ``bincount``); the centre is still the one of the
+    rebuilt table, bit for bit what a fresh lineage computes, and the
+    untouched blocks keep theirs bit for bit."""
+    dm, groups, layout, weights = _coded_border_case()
+    before = nested_prior_statistics(layout, weights)[0]
+    second = dm.group_matrices[1]
+    R_inv = np.random.default_rng(9).normal(size=(4, 4))
+    matrices = [
+        dm.group_matrices[0],
+        DiscretizedSSPGroupMatrix(second.B_unique, R_inv, second.bin_idx),
+        *dm.group_matrices[2:],
+    ]
+
+    def layout_of(carry: bool) -> NestedStructuredLayout:
+        rebuilt = DesignMatrix(matrices, n=dm.n, p=dm.p)
+        if carry:
+            selection.carry_nesting_cache(
+                dm._structured_layout_cache, rebuilt._structured_layout_cache
+            )
+        return get_structured_layout(
+            rebuilt, groups, dominant_group_index=3, chain_group_indices=(3,)
+        )
+
+    import superglm.solvers._structured.moments as moments
+
+    fresh = nested_prior_statistics(layout_of(False), weights)[0]
+    carried = layout_of(True)
+    carried.leaf_rows  # the tables of the new R_inv, built before counting
+    counted = []
+    bincount, shifted = np.bincount, moments._shifted_sums
+    monkeypatch.setattr(np, "bincount", lambda *a, **k: counted.append(1) or bincount(*a, **k))
+    monkeypatch.setattr(moments, "_shifted_sums", lambda *a: counted.append(1) or shifted(*a))
+    after = nested_prior_statistics(carried, weights)[0]
+    monkeypatch.undo()
+    assert not counted
+    np.testing.assert_array_equal(after, fresh)
+    np.testing.assert_array_equal(after[:3], before[:3])
+    assert not np.array_equal(after[3:7], before[3:7])
+
+
+def test_the_border_products_come_from_the_row_pass(monkeypatch) -> None:
+    """``X_b'w`` and ``X_b'Wz`` of a nested system come from the leaf pass's own
+    centred rows, ``sum a (x - c) + c sum a`` (the fs leaf system's convention),
+    so no border block but a random effect's is read again through its
+    transpose.  With ``x`` the rows the pass forms, the sequential sum of the
+    centred products, the pairwise ``sum a``, the product with ``c`` and the
+    addition round to ``|fl - X'a| <= gamma_(n + 4) (sum |a| |x - c| + |c| sum |a|
+    + |X'a|)`` (Higham 2002, Lemma 3.1 and eq. 3.4), with ``gamma_k <= k eps``.
+    """
+    case = _nested_case()
+    layout = _layout(case)
+    Wz = case.weights * np.random.default_rng(2).normal(size=case.dm.n)
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("a border block was read through its transpose")
+
+    own = RandomEffectGroupMatrix.rmatvec  # a random effect may inherit it
+    for kind in (
+        DenseGroupMatrix,
+        SparseSSPGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        CategoricalGroupMatrix,
+    ):
+        monkeypatch.setattr(kind, "rmatvec", refuse)
+    monkeypatch.setattr(RandomEffectGroupMatrix, "rmatvec", own)
+    system = build_nested_structured_system(
+        case.matrices, case.groups, case.weights, Wz, layout=layout
+    )
+    monkeypatch.undo()
+    n, X = case.dm.n, _pass_rows(layout)
+    c = system.operator.leaf.center
+    for a, product in ((case.weights, system.xtw_small), (Wz, system.xtwz_small)):
+        exact = np.array(
+            [
+                float(sum(Fraction(v) * Fraction(x) for v, x in zip(a, column, strict=True)))
+                for column in X.T
+            ]
+        )
+        bound = (
+            (n + 4)
+            * EPS
+            * (np.abs(X - c).T @ np.abs(a) + np.abs(c) * np.sum(np.abs(a)) + np.abs(exact))
+        )
+        assert np.all(np.abs(product - exact) <= bound)
+
+
 # ── System and penalties ─────────────────────────────────────────────────
 
 

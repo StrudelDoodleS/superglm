@@ -23,8 +23,8 @@ from superglm.reml.identified import (
     IdentifiedLaplace,
     WeakIdentificationWarning,
     coefficient_labels,
+    dense_hessian,
     final_mode_weak_slopes,
-    laplace_excluded_coefficients,
 )
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
@@ -69,6 +69,7 @@ from superglm.solvers.structured import (
     SumToZeroBlockOperator,
     SumToZeroLeafSystem,
     centred_data_operator,
+    release_leaf_memo,
 )
 
 
@@ -115,6 +116,12 @@ def _build_structured_linear_system_state(
         centered_data_operator = centred_data_operator(
             system, row_column_norm=cache.get("structured_row_column_norm")
         )
+        # the published state keeps no row-scale leaf arrays (Opus review P1):
+        # the system and the factor are copies whose leaf keeps only what a
+        # published factor reads, and the fit's own objects are left as they are
+        own = factor.augmented_factor.system is system
+        system = system.published()
+        factor = factor.published(system if own else None)
     else:
         xtw = np.empty(system.operator.shape[0], dtype=np.float64)
         xtw[system.operator.small_indices] = system.xtw_small
@@ -368,7 +375,9 @@ def _disclose_thin_levels(profile: dict, factor) -> None:
         f"FactorSmooth term {factor.dominant_group_name!r} (basis='sz') has levels with fewer "
         f"distinct x values than its penalty's null space, or no weight: {names}. Each such "
         "level's deviation is aliased with the main effect along the polynomial the penalty "
-        "does not shrink; the fit keeps the level and leaves that direction unestimated.",
+        "does not shrink. The fit keeps the level; the coefficients the alias touches, which "
+        "can be every coefficient of this term and of its main effect, have no standard error "
+        "(NaN).",
         UserWarning,
         stacklevel=4,
     )
@@ -537,9 +546,7 @@ def finalize_reml_fit(
             model._groups,
         )
         if not qp_passthrough:
-            identified = IdentifiedLaplace(
-                laplace_excluded_coefficients(model._dm, sample_weight, reml_penalties)
-            )
+            identified = IdentifiedLaplace.for_design(model._dm, sample_weight, reml_penalties)
         observed_terminal = terminal_curvature == "observed" and not qp_passthrough
         # One-engine design §3.8: the terminal refit of every route auto uses,
         # exact and discrete, gram and structured, stops on the certificate's
@@ -741,7 +748,7 @@ def finalize_reml_fit(
                 result=final_pirls,
                 penalty=S_final,
                 derivative_order=0,
-                # the identified part's determinant reads (H^-1)_WW
+                # the identified part rebuilds the structured factor returned here
                 compute_inverse=bool(identified),
                 groups=model._groups if structured_linear_state is not None else None,
                 lambdas=lambdas if structured_linear_state is not None else None,
@@ -874,8 +881,12 @@ def finalize_reml_fit(
             sample_weight,
             offset_arr,
             XtWX=final_xtwx,
-            log_det_H=identified.log_det(final_factor, final_pirls.log_det_H),
-            hessian_rank=identified.rank(final_pirls.reml_hessian_rank, final_factor),
+            log_det_H=identified.log_det(
+                final_factor, final_pirls.log_det_H, dense_hessian(final_cache)
+            ),
+            hessian_rank=identified.rank(
+                final_pirls.reml_hessian_rank, final_factor, dense_hessian(final_cache)
+            ),
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
@@ -957,6 +968,7 @@ def finalize_reml_fit(
     )
     model._reporting_support_state = reporting_state
     model._linear_system_state = structured_linear_state
+    release_leaf_memo(getattr(model._dm, "_structured_layout_cache", None))
 
     update_reml_r_inv(model, reml_groups, lambdas)
 

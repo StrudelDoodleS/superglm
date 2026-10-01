@@ -1518,6 +1518,18 @@ def test_refusals_by_the_iterate_are_linalg_errors():
                 chain_group_indices=(0, 1, 2),
                 intercept=True,
             )
+    # a pivot far below minus that uncertainty (w_0 = -10 lambda leaves -9
+    # lambda) is certified negative curvature and says so, not "uncertainty"
+    signed[0] = -10.0 * fx["lam"][-1]
+    with pytest.raises(
+        np.linalg.LinAlgError, match="'variant' has materially negative curvature at a tree node"
+    ):
+        NestedSchurFactor(
+            _penalized(fx, with_weight(signed)),
+            chain_group_names=CHAIN[:3],
+            chain_group_indices=(0, 1, 2),
+            intercept=True,
+        )
     # rows negative only by rounding do not refuse
     rounding = np.array(stats.weight)
     rounding[3] = -1e-15

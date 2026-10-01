@@ -30,14 +30,18 @@ _ENV_VAR = "SUPERGLM_BLAS_THREADS"
 # threadpool_limits mutates process-global BLAS state and restores whatever it
 # observed at entry, so overlapping scopes in different threads would restore
 # in the wrong order and leave the process pinned at the cap after all fits
-# returned.  A refcount keeps exactly one registration alive: the first
-# entrant records the true native state and the last exit restores it.
-# Wide designs are tracked per owning scope (thread-local stack) so that a
-# wide fit's release of the cap ends WITH that fit: when the last wide scope
-# exits while capped scopes remain, the cap is re-armed.
+# returned.  Every reason to cap -- a fit no wide fit has released, and a
+# narrow kernel inside any fit -- is counted under one lock, and one
+# registration serves them all (``_settle``): it is made on the transition
+# into the cap, when the pools are at the process's own state, and undone on
+# the transition out, so no scope or kernel restores a state another one
+# recorded.  Wide designs are tracked per owning scope (thread-local stack)
+# so that a wide fit's release of the cap ends WITH that fit: when the last
+# wide scope exits while capped scopes remain, the cap is re-armed.
 _scope_lock = threading.Lock()
 _active_scopes = 0
 _wide_scopes = 0
+_narrow_kernels = 0
 _registration = None
 _tls = threading.local()
 
@@ -75,8 +79,33 @@ def _auto_policy() -> bool:
     return False
 
 
+def _settle(limit: int, *, narrow: bool = False) -> None:
+    """Hold the cap exactly while something wants it; call with ``_scope_lock`` held.
+
+    The cap is wanted while a fit runs and no wide fit has released it, or
+    while a narrow kernel runs.  The registration is made only on the
+    transition into the cap, when no other registration exists and the pools
+    are at the process's own state, which it therefore records; it is undone
+    only on the transition out.  A narrow kernel's transition goes through
+    the cached controller (``_narrow_controller``), every other one through
+    ``threadpool_limits``.
+    """
+    global _registration
+    wanted = (_active_scopes > 0 and _wide_scopes == 0) or _narrow_kernels > 0
+    if wanted and _registration is None:
+        if narrow:
+            _registration = _narrow_controller().limit(limits=limit, user_api="blas")
+        else:
+            from threadpoolctl import threadpool_limits
+
+            _registration = threadpool_limits(limits=limit, user_api="blas")
+    elif not wanted and _registration is not None:
+        _registration.unregister()
+        _registration = None
+
+
 def _release_current_scope() -> None:
-    global _registration, _wide_scopes
+    global _wide_scopes
     stack = _scope_stack()
     scope = stack[-1] if stack else None
     if scope is None:
@@ -85,9 +114,7 @@ def _release_current_scope() -> None:
         if not scope["wide"]:
             scope["wide"] = True
             _wide_scopes += 1
-        if _registration is not None:
-            _registration.unregister()
-            _registration = None
+        _settle(1)
 
 
 def allow_wide_design(p: int) -> None:
@@ -115,9 +142,12 @@ def keep_narrow_cap(width: int) -> None:
     thread count (design §14 T4).  A nested chain is not re-capped: its parent
     levels' blocks are wider than its border, and pg17_E_discrete ran 1.5x
     master's time on default threads with the cap re-armed.  Called once the
-    route is known; the fit's scope then ends as a narrow one.
+    route is known; the fit's scope then ends as a narrow one.  While another
+    fit's wide scope stays open the pools stay released for the overlap, as
+    ``allow_wide_design`` says, and this fit's narrow kernels still take one
+    thread (``narrow_kernel_blas_threads``).
     """
-    global _registration, _wide_scopes
+    global _wide_scopes
     if width >= _WIDE_DESIGN_THRESHOLD or not _auto_policy():
         return
     stack = _scope_stack()
@@ -125,13 +155,10 @@ def keep_narrow_cap(width: int) -> None:
     limit = _resolve_limit()
     if scope is None or not scope["wide"] or limit is None:
         return
-    from threadpoolctl import threadpool_limits
-
     with _scope_lock:
         scope["wide"] = False
         _wide_scopes -= 1
-        if _wide_scopes == 0 and _registration is None:
-            _registration = threadpool_limits(limits=limit, user_api="blas")
+        _settle(limit)
 
 
 @contextmanager
@@ -144,17 +171,31 @@ def narrow_kernel_blas_threads(width: int):
     same measured break-even the single thread wins for them too (a border
     of 1,045 columns inside a 16,851-column fit: threaded ``potrf`` 40-110
     ms against 10 ms).  Only the automatic policy caps, and only inside a
-    fit whose scope released the cap; an explicit integer or ``native``, a
-    kernel at or above the break-even, or a call outside a fit is left
-    alone.  The kernels then run on one thread whatever the pool, so their
-    results do not depend on the thread count.
+    fit; an explicit integer or ``native``, a kernel at or above the
+    break-even, or a call outside a fit is left alone.  The kernels then run
+    on one thread whatever the pool, so their results do not depend on the
+    thread count, including while another thread's wide fit has released
+    the pools.  Kernels are counted (``_settle``): overlapping kernels in
+    different threads keep the cap until the last one exits, and the pools
+    come back to the state before the first.
     """
-    stack = _scope_stack()
-    if width >= _WIDE_DESIGN_THRESHOLD or not stack or not stack[-1]["wide"] or not _auto_policy():
+    global _narrow_kernels
+    if width >= _WIDE_DESIGN_THRESHOLD or not _scope_stack() or not _auto_policy():
         yield
         return
-    with _narrow_controller().limit(limits=1, user_api="blas"):
+    with _scope_lock:
+        _narrow_kernels += 1
+        try:
+            _settle(1, narrow=True)
+        except BaseException:
+            _narrow_kernels -= 1
+            raise
+    try:
         yield
+    finally:
+        with _scope_lock:
+            _narrow_kernels -= 1
+            _settle(1)
 
 
 _NARROW_CONTROLLER = None
@@ -205,13 +246,11 @@ def solver_blas_threads():
     scope exits, and a wide design's cap release (``allow_wide_design``)
     ends when its owning scope does — remaining narrow fits are re-capped.
     """
-    global _active_scopes, _registration, _wide_scopes
+    global _active_scopes, _wide_scopes
     limit = _resolve_limit()
     if limit is None:
         yield
         return
-    from threadpoolctl import threadpool_limits
-
     scope = {"wide": False}
     stack = _scope_stack()
     entered = False
@@ -219,8 +258,7 @@ def solver_blas_threads():
         with _scope_lock:
             _active_scopes += 1
             entered = True
-            if _registration is None and _wide_scopes == 0:
-                _registration = threadpool_limits(limits=limit, user_api="blas")
+            _settle(limit)
         stack.append(scope)
         yield
     finally:
@@ -231,9 +269,4 @@ def solver_blas_threads():
                 _active_scopes -= 1
                 if scope["wide"]:
                     _wide_scopes -= 1
-                if _active_scopes == 0:
-                    if _registration is not None:
-                        _registration.unregister()
-                        _registration = None
-                elif _wide_scopes == 0 and _registration is None:
-                    _registration = threadpool_limits(limits=limit, user_api="blas")
+                _settle(limit)

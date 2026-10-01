@@ -53,6 +53,7 @@ from superglm.solvers.dispersion import (
     dispersion_likelihood_size,
     model_weight_semantics,
 )
+from superglm.solvers.mode_score import linear_predictor
 
 #: Default search range for the NB2 shape parameter. Deliberately wide: these
 #: are numerical guard rails for the bracketed solve, not a statistical prior.
@@ -354,9 +355,7 @@ class _MeanFit:
             reml_penalties=self.reml_penalties,
         )
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
-        eta = stabilize_eta(
-            model._dm.matvec(result.beta) + result.intercept + self.offset, model._link
-        )
+        eta = stabilize_eta(linear_predictor(model._dm, result, self.offset), model._link)
         return clip_mu(model._link.inverse(eta), model._distribution)
 
 

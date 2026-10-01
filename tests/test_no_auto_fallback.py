@@ -1,8 +1,11 @@
 """No fallback reason is reachable under ``direct_solve="auto"`` (one-engine design §6, §15 stage 4).
 
-The routing inventory of the one-engine work (43 sites, 2026-09-29) listed
-every place a direct fit could change solver or arithmetic route.  This module
-walks all of them.  Each site now has one of these dispositions:
+The routing inventory of the one-engine work (43 sites, 2026-09-29; site 44,
+the exact line search's refused trial, added at review) listed every place a
+direct fit could change solver or arithmetic route.  ``INVENTORY`` records
+where each site's disposition is checked; the checks are the behavioural tests
+it names, here and in the files it cites, not the table itself.  Each site now
+has one of these dispositions:
 
 - ``structure``: a decision the model's terms, their sizes, the penalties the
   user fixed or an override's pattern make, before any row is read.  The
@@ -21,7 +24,6 @@ walks all of them.  Each site now has one of these dispositions:
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 
 import numpy as np
@@ -38,7 +40,6 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
 )
 from superglm.links import LogLink
-from superglm.solvers._structured import selection
 from superglm.solvers.structured import NestedSchurFactor, resolve_structured_backend
 from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 
@@ -56,7 +57,7 @@ INVENTORY: dict[int, tuple[str, str, str]] = {
     10: ("random-effect price", "structure", "structural[below-crossover]"),
     11: ("fs price", "structure", "structural[fs-below-crossover]"),
     12: ("sz price", "structure", "structural[sz]"),
-    13: ("dense memory budget", "deleted", "the_memory_budget_is_gone"),
+    13: ("dense memory budget", "deleted", "never committed: no commit's src reads memory"),
     14: ("override couples the leaf", "structure", "structural[override-leaf]"),
     15: ("zero penalty on the leaf", "structure", "structural[zero-penalty-leaf]"),
     16: ("level weight under an override", "deleted", "resolver_reads_no_rows"),
@@ -87,14 +88,8 @@ INVENTORY: dict[int, tuple[str, str, str]] = {
     41: ("BLAS threads by width", "structure", "thread count, not a route"),
     42: ("direct or coordinate-descent solver", "structure", "configuration"),
     43: ("selected inverse block cap", "structure", "post-fit request size"),
+    44: ("exact refused trial", "one method", "test_structured_irls.py exact trial"),
 }
-DISPOSITIONS = {"structure", "pattern", "deleted", "one method", "post-fit", "stage 5"}
-
-
-def test_the_inventory_is_walked_completely() -> None:
-    assert sorted(INVENTORY) == list(range(1, 44))
-    assert {disposition for _, disposition, _ in INVENTORY.values()} <= DISPOSITIONS
-    assert all(check for _, _, check in INVENTORY.values())
 
 
 # ── structure: decisions that read no row ────────────────────────────────
@@ -290,13 +285,6 @@ def test_a_random_effect_is_always_a_chain() -> None:
         get_structured_layout(DesignMatrix(lone, n=240, p=63), lone_groups, dominant_group_index=1)
 
 
-def test_the_memory_budget_is_gone() -> None:
-    """Site 13: no decision reads the machine's or a container's memory."""
-    assert importlib.util.find_spec("superglm.solvers.dense_memory") is None
-    assert not hasattr(selection, "_declined_on_gram")
-    assert not hasattr(selection, "dense_fallback_budget")
-
-
 # ── deleted: runtime nets ───────────────────────────────────────────────
 
 
@@ -378,6 +366,43 @@ def test_refusal_is_one_clear_error(monkeypatch, site: str) -> None:
     assert cause.rstrip(".") in str(refused.value)
     assert "direct_solve='gram'" in str(refused.value)
     assert calls == ["auto"]
+
+
+def test_a_non_finite_outer_hessian_is_the_clear_error(monkeypatch) -> None:
+    """A structured REML outer Hessian out of float64 range has no Newton step
+    (Opus review of #425: a uniform prior weight of 1e-200 does it): the fit
+    raises the structured path's one clear error, naming the gram escape,
+    instead of numpy's "Eigenvalues did not converge" or a later non-finite
+    smoothing parameter.
+
+    The Hessian is made non-finite directly, so the test pins the guard
+    whatever the factor does at extreme weights.  Fails without the
+    finiteness check before the modified Newton step.
+    """
+    import pandas as pd
+
+    import superglm.reml.direct as direct_reml
+    from superglm import Numeric, RandomEffect, SuperGLM
+
+    hessian = direct_reml.reml_direct_hessian
+
+    def overflowing(*args, **kwargs):
+        return np.full_like(hessian(*args, **kwargs), np.inf)
+
+    monkeypatch.setattr(direct_reml, "reml_direct_hessian", overflowing)
+    rng = np.random.default_rng(0)
+    n = 600
+    codes = rng.integers(0, 60, n)
+    frame = pd.DataFrame({"x": rng.normal(size=n), "g": [f"g{c:02d}" for c in codes]})
+    y = rng.poisson(np.exp(0.2 * frame["x"] + rng.normal(0, 0.3, 60)[codes])).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Numeric(), "g": RandomEffect()},
+        selection_penalty=0,
+        direct_solve="structured",
+    )
+    with pytest.raises(irls_direct.StructuredSolverError, match="direct_solve='gram'"):
+        model.fit_reml(frame, y)
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])

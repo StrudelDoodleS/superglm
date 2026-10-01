@@ -123,12 +123,23 @@ class FactorSmoothLeafLayout:
         prior weight.  A disclosure only: it routes nothing.  Held in the
         lineage cache, keyed by the sources and the prior weights.
         """
+        levels, _ = self.thin_level_counts(prior_weights)
+        return tuple(self.dominant.levels[level] for level in levels)
+
+    def thin_level_counts(self, prior_weights: NDArray | None) -> tuple[NDArray, NDArray]:
+        """``(levels, distinct)``: the thin levels' codes and their distinct weighted ``x`` counts.
+
+        The structure ``thin_levels`` names, by code: the balance tree builds
+        each thin level's exact data-null directions from it (``balance_tree``,
+        the penalized aliases).  Held in the lineage cache, keyed by the
+        sources and the prior weights.
+        """
         dominant = self.dominant
         n = len(self.leaf_order)
         weights = (
             np.ones(n) if prior_weights is None else np.asarray(prior_weights, dtype=np.float64)
         )
-        slot = self.lineage_cache.setdefault(("sz_slot", "thin"), [])
+        slot = self.lineage_cache.setdefault(("sz_slot", "thin_counts"), [])
         sources = self.lineage_sources
         for held_sources, held, value in slot:
             if (
@@ -155,7 +166,10 @@ class FactorSmoothLeafLayout:
         else:
             data, indices, indptr = source
         distinct = _distinct_level_rows(data, indices, indptr, self.leaf_starts, ordered, nullity)
-        value = tuple(dominant.levels[level] for level in np.flatnonzero(distinct < nullity))
+        thin = np.flatnonzero(distinct < nullity).astype(np.intp)
+        value = (thin, np.asarray(distinct[thin], dtype=np.intp))
+        for array in value:
+            array.setflags(write=False)
         slot.insert(0, (sources, np.array(weights, copy=True), value))
         del slot[2:]
         return value

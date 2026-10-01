@@ -93,6 +93,8 @@ from superglm.solvers.irls_state import (
     _select_irls_trial,
     _stable_penalized_deviance_delta,
     _state_is_finite,
+    mean_space_boundary_rows,
+    mean_space_violation,
 )
 from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
@@ -546,8 +548,8 @@ def _levenberg_shifted_leaf_operator(
     k = leaf.block_size
     local = np.array(penalized.penalty_local, dtype=np.float64, copy=True)
     small = np.array(penalized.penalty_small, dtype=np.float64, copy=True)
-    if leaf.error_gram is not None:
-        mass = np.diagonal(leaf.error_gram, axis1=1, axis2=2)[:, :k]
+    if leaf.error_diagonal is not None:
+        mass = leaf.error_diagonal[:, :k]
     else:
         mass = np.abs(np.diagonal(system.operator.D, axis1=1, axis2=2))
     local_shift = shift * (mass + np.abs(np.diagonal(local, axis1=1, axis2=2)))
@@ -592,9 +594,11 @@ def _build_iterate_factor(system, penalized_operator, *, observed: bool):
     propagates).  An observed nested iterate the factor refuses (a tree pivot
     within its certified uncertainty, material negative border curvature)
     takes the smallest Levenberg shift of ``_LEVENBERG_SHIFTS`` whose factor
-    certifies; the last refusal propagates when none does.  The shifted
-    Newton step ``(H + E)^-1 g`` from ``beta`` is the normal-equations solve
-    with ``E beta`` added to the right-hand side (the caller's part).
+    certifies.  When none does, the unshifted refusal propagates, since it
+    names the iterate's own cause; the largest shift's refusal is attached
+    to it as a note.  The shifted Newton step ``(H + E)^-1 g`` from ``beta``
+    is the normal-equations solve with ``E beta`` added to the right-hand
+    side (the caller's part).
     """
     try:
         factor, rhs = build_augmented_structured_factor(system, penalized_operator)
@@ -606,6 +610,7 @@ def _build_iterate_factor(system, penalized_operator, *, observed: bool):
         ):
             raise
         refusal = error
+    shifted_refusal: np.linalg.LinAlgError | None = None
     for shift in _LEVENBERG_SHIFTS:
         if isinstance(
             penalized_operator, FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator
@@ -617,7 +622,12 @@ def _build_iterate_factor(system, penalized_operator, *, observed: bool):
             factor, rhs = build_augmented_structured_factor(system, shifted)
             return factor, rhs, shift, diagonal
         except np.linalg.LinAlgError as error:
-            refusal = error
+            shifted_refusal = error
+    if shifted_refusal is not None:
+        refusal.add_note(
+            f"No Levenberg shift up to {_LEVENBERG_SHIFTS[-1]:g} certified the iterate either; "
+            f"the largest shift's factor refused with: {shifted_refusal}"
+        )
     raise refusal
 
 
@@ -1797,6 +1807,9 @@ def _fit_irls_direct_once(
     _stagnation_window = stagnation_window(max_iter, mode_bar)
     score_stagnated = False
 
+    # The family's mean space, when the link's inverse can leave it (declared
+    # by the family and link, ``irls_state.mean_space_violation``).
+    _mean_space_invalid = mean_space_violation(family, link)
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
     committed = evaluate_state(
         beta,
@@ -2246,6 +2259,53 @@ def _fit_irls_direct_once(
                     intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
                 else:
                     intercept = float(beta_aug[0])
+                if augmented_factor.rank_truncated and isinstance(
+                    augmented_factor, SumToZeroTreeFactor
+                ):
+                    # A truncated factor is a generalized inverse, and its
+                    # normal-equations solution ``H^+ [1 X]'Wz`` is the minimum-norm
+                    # representative: it resets the iterate's component along every
+                    # truncated direction on each step.  Along an ``sz`` level whose
+                    # rows the likelihood drives to the link's boundary (a one-row
+                    # level with a response below a log link's range: no finite
+                    # mode, Geyer 2009, Theorem 4) the direction is truncated once
+                    # its rows' working weight falls to its rounding, and the reset
+                    # moves those rows' eta arbitrarily far (+2844 from -20.7 on
+                    # the stage-4 fixture); step halving then stalls every other
+                    # coefficient and PIRLS ends uncertified.  The Gauss-Newton
+                    # step of a rank-deficient problem is the minimum-norm
+                    # *increment* (Pes & Rodriguez 2021, arXiv 2101.07560, eqs.
+                    # 1.2-1.4; the Newton step of Wood, Pya & Safken 2016, section
+                    # 3.1.2): ``Delta = H^+ g``, ``g = [1 X]' W (z - eta) - [0; S
+                    # beta]``, the shifted factor's under a Levenberg shift, which
+                    # leaves the iterate where it is along the truncated directions.
+                    # Projecting the iterate onto the null space on every step (the
+                    # minimal-norm variant, ibid. section 2, and in effect the
+                    # solve above) is safe only along exact nulls; along a direction
+                    # truncated as rank but carrying data it raises the residual,
+                    # the failure they analyse.  Along an exact null (data and
+                    # penalty both leave it free) the iterate keeps its component:
+                    # no fitted value or penalty moves along it.  In exact
+                    # arithmetic the same step as the solve above whenever nothing
+                    # is truncated.
+                    residual_rows = W * (z - eta)
+                    gradient = np.empty(p + 1, dtype=np.float64)
+                    gradient[0] = float(np.sum(residual_rows))
+                    gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
+                    # the increment's intercept entry in the state's own coordinate:
+                    # alpha about the centre when the state is centred (round 1's
+                    # centred state; the raw intercept would cancel at a large
+                    # column offset), else the raw intercept
+                    increment = augmented_factor.solve(gradient, centred=_state_center is not None)
+                    beta = committed.beta + increment[1:]
+                    if _state_center is not None:
+                        assert committed.centred_intercept is not None
+                        proposal_centred_intercept = float(committed.centred_intercept) + float(
+                            increment[0]
+                        )
+                        intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
+                    else:
+                        intercept = float(committed.intercept) + float(increment[0])
                 _used_svd = False  # one path: the engine has no SVD fallback
                 _cond_est = augmented_factor.schur_condition_estimate
                 rank_truncated = augmented_factor.rank_truncated
@@ -2584,11 +2644,25 @@ def _fit_irls_direct_once(
                         abs_A=abs_A_all,
                     )
 
+            trial_is_invalid = constraint_trial_is_invalid
+            if _mean_space_invalid is not None and not _mean_space_invalid(
+                committed.eta_unclipped, weights
+            ):
+                # A feasible committed state keeps every accepted trial in the
+                # family's mean space (``mean_space_violation``).
+                def trial_is_invalid(
+                    candidate: _IRLSState, other=constraint_trial_is_invalid
+                ) -> bool:
+                    assert _mean_space_invalid is not None
+                    if _mean_space_invalid(candidate.eta_unclipped, weights):
+                        return True
+                    return other is not None and other(candidate)
+
             decision = _select_irls_trial(
                 committed=committed,
                 proposal=proposal,
                 evaluate_state=evaluate_trial,
-                invalid_state=constraint_trial_is_invalid,
+                invalid_state=trial_is_invalid,
                 max_halving=max_halving,
                 extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                     committed=committed,
@@ -3049,6 +3123,24 @@ def _fit_irls_direct_once(
                 "constrained-QP KKT certificate; fit is not converged."
             )
 
+    # A returned state with rows at the mean-space boundary is not a mode of
+    # the model: their capped mean makes the deviance flat there, and the
+    # maximum it approaches is constrained, not stationary.  It is never
+    # converged, whatever stopped the loop (``mean_space_boundary_rows``).
+    _boundary_rows = (
+        0
+        if _mean_space_invalid is None
+        else mean_space_boundary_rows(family, link, eta_unclipped, weights)
+    )
+    if _boundary_rows:
+        converged = False
+        termination_reason = "mean_space_boundary"
+        logger.info(
+            "fit_irls_direct: %d row(s) at the boundary of the family's mean space; "
+            "the penalized maximum is constrained, fit is not converged.",
+            _boundary_rows,
+        )
+
     if _has_scop:
         # Final Gram and SCOP Hessian caches must describe the retained model,
         # not the working state or a discarded full proposal.
@@ -3158,6 +3250,10 @@ def _fit_irls_direct_once(
         profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
         profile["irls_calls"] = profile.get("irls_calls", 0) + 1
         profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
+        if _boundary_rows:
+            profile["irls_mean_space_boundary_calls"] = (
+                profile.get("irls_mean_space_boundary_calls", 0) + 1
+            )
         if _last_mode_residual is not None:
             # §3.8, §3.9: the stop rule's last score, whether a derived floor
             # bound it, and the slopes it flagged weakly identified and kept.
@@ -3251,6 +3347,9 @@ def _fit_irls_direct_once(
                 raise RuntimeError("Dense fit did not produce a centered system.")
             cache_out["XtWX"] = XtWX
             cache_out["centered_XtWX"] = centered_final.data_gram
+            # the matrix the slope decomposition was taken of (the identified
+            # part of the Laplace approximation restricts it, ``reml.identified``)
+            cache_out["centered_hessian"] = centered_final.hessian
         cache_out["XtWz"] = XtWz
         cache_out["XtW1"] = XtW1
         cache_out["sum_W"] = sum_W
@@ -3398,8 +3497,15 @@ def _fit_irls_direct_once(
                 data_rank = decompose_factor(A_data_final) if compute_rank_info else None
                 augmented_rank = reml_slope_rank
             else:
+                # The export rows are Fisher (``prefer_observed=False``), whose
+                # weights are nonnegative: the data Gram is PSD by construction,
+                # so a negative eigenvalue at its null is formation rounding and
+                # sends the rank to the factor below instead of raising.
                 data_rank = (
-                    decompose_gram_if_authoritative(centered_final.data_gram)
+                    decompose_gram_if_authoritative(
+                        centered_final.data_gram,
+                        psd_by_construction=not _return_working_system,
+                    )
                     if compute_rank_info
                     else None
                 )
@@ -3526,6 +3632,7 @@ def _fit_irls_direct_once(
         direct_fallback_reason=_direct_fallback_reason,
         centred_intercept=retained.centred_intercept,
         state_center=None if retained.centred_intercept is None else _state_center,
+        mean_space_boundary_rows=_boundary_rows,
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.

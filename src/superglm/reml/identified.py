@@ -25,19 +25,15 @@ move with it: path-dependent, and silently wrong (the stage-0 verifier's
 ``offset_rare`` Poisson, lambda_u 19.0 against 10.47).  The approximation is
 therefore taken over the identified slopes ``I`` with the weakly identified
 slopes ``W`` held fixed at the fitted values (decision 7: flag, keep, and
-certify the identified part).  By the Schur determinant identity and the
-block inverse,
-
-    log|H_II| = log|H| + log det((H^-1)_WW),
-    [H_II^-1, 0; 0, 0] = H^-1 - H^-1 E_W ((H^-1)_WW)^-1 E_W' H^-1,
-
-the second with exactly zero ``W`` rows and columns.  The REML objective, its
-gradient, the ``W(rho)`` correction and the outer Hessian all read these, so
-they are one function of the smoothing parameters whatever value of
-``beta_W`` PIRLS leaves: the identified block depends on ``beta_W`` only
-through rows weighted at the rounding.  The coefficient rank the scale
-profile counts loses ``|W|`` with them.  The fit keeps ``beta_W``, and its
-standard error comes from the full ``H``, never from this part.
+certify the identified part).  ``log|H_II|``, the inverse ``[H_II^+, 0; 0,
+0]`` (exactly zero ``W`` rows and columns) and the coefficient rank are read
+from one factorization of ``H_II`` itself (``IdentifiedLaplace``), so they
+describe the same matrix even where ``H`` or ``H_II`` is singular.  The REML
+objective, its gradient, the ``W(rho)`` correction and the outer Hessian all
+read these, so they are one function of the smoothing parameters whatever
+value of ``beta_W`` PIRLS leaves: the identified block depends on ``beta_W``
+only through rows weighted at the rounding.  The fit keeps ``beta_W``, and
+its standard error comes from the full ``H``, never from this part.
 
 The set is decided once per fit, before any iterate, from the design and the
 prior weights: no classification changes between REML candidates, and none
@@ -49,12 +45,17 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
-import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, DesignMatrix
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DenseGroupMatrix,
+    DesignMatrix,
+    RandomEffectGroupMatrix,
+)
 
 _UNIT_ROUNDOFF = 2.0**-53
 _CHUNK = 8192
@@ -92,11 +93,38 @@ def _gamma(count: int) -> float:
 
 
 def penalized_columns(width: int, penalties: Sequence | None) -> NDArray:
-    """``(width,)`` bool: the slopes some penalty component's block covers."""
+    """``(width,)`` bool: the slopes some penalty component's block covers.
+
+    A component whose ``lambda_policy`` fixes its smoothing parameter at zero
+    (``LambdaPolicy.off()`` or ``fixed(0.0)``) adds nothing to ``S`` for the
+    whole fit, so it identifies nothing: its slopes stay candidates.  The
+    policy is part of the specification, so the classification still reads
+    no data value.
+    """
     mask = np.zeros(width, dtype=bool)
     for component in penalties or ():
+        policy = getattr(component, "lambda_policy", None)
+        if policy is not None and policy.mode == "fixed" and float(policy.value) == 0.0:
+            continue
         mask[component.group_sl] = True
     return mask
+
+
+def random_effect_columns(dm: DesignMatrix) -> NDArray:
+    """Slope indices of every ``RandomEffectGroupMatrix`` block, ascending.
+
+    In a structured factor's border such a block is complete, so its exposed
+    levels sum to the intercept: a structural generator of the border's data
+    part (``_structured.moments._border_generators``), which the factor's
+    rebuild cannot leave out (``IdentifiedLaplace``).
+    """
+    columns, offset = [], 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if isinstance(matrix, RandomEffectGroupMatrix):
+            columns.append(np.arange(offset, offset + width))
+        offset += width
+    return np.concatenate(columns).astype(np.intp) if columns else np.zeros(0, dtype=np.intp)
 
 
 def laplace_excluded_coefficients(
@@ -174,199 +202,240 @@ def laplace_excluded_coefficients(
     return np.flatnonzero(weak).astype(np.intp)
 
 
+def dense_hessian(cache: dict | None) -> tuple[NDArray, float] | None:
+    """``(H_c, sum w)`` a dense PIRLS left in its ``cache_out``; ``None`` without one.
+
+    ``H_c`` is the centred slope Hessian the fit's slope decomposition was
+    taken of: the dense identified part restricts exactly that matrix.
+    """
+    if not cache or "centered_hessian" not in cache:
+        return None
+    return cache["centered_hessian"], float(cache["sum_W"])
+
+
+@dataclasses.dataclass(frozen=True)
+class _IdentifiedPart:
+    """One input's identified part: its inverse (``None`` when not asked), ``log|H_II|`` and rank."""
+
+    inverse: Any
+    log_det: float
+    rank: int
+
+
 class IdentifiedLaplace:
     """The identified part of one fit's Laplace approximation (module docstring).
 
-    ``excluded`` holds the slope indices ``W``.  Every method maps the full
-    ``H`` object a REML evaluation holds to its identified part, and returns
-    its argument unchanged when ``W`` is empty.  ``unsupported`` counts the
-    factors of a family this cannot restrict (the ``sz`` block factor,
-    replaced by the engine in stage 3): those evaluations keep the full
-    ``H``, and the count is published.  The ``fs`` leaf factor and the nested
-    factor are rebuilt with the excluded border columns left out.
+    ``excluded`` holds the slope indices ``W``.  The identified part is read
+    from ONE factorization of ``H_II`` itself, so its inverse, ``log|H_II|``
+    and coefficient rank always describe the same matrix: a structured factor
+    is rebuilt by its own engine with the ``W`` border columns left out (its
+    ``logdet`` and ``rank``), and a dense system's centred Hessian ``H_c`` is
+    restricted to ``I`` and decomposed by the shared rank rule
+    (``solvers.rank.decompose_gram``), ``log|H_II| = log(sum w) + log
+    pdet(H_c[I, I])`` as for ``H``.  Jacobi's complementary-minor identity
+    ``det H_II = det H det((H^-1)_WW)`` is a statement about an invertible
+    ``H``; once the full factor truncates a direction, the ``W`` block of its
+    generalized inverse no longer determines ``H_II`` (the Jacobi-type
+    identities for generalized inverses carry nullity terms instead), so it
+    is not used.  A dense input therefore needs its centred Hessian
+    (``dense=(H_c, sum_w)``), which every dense caller holds.
+
+    Every method returns its argument unchanged when ``W`` is empty.
+    ``unsupported`` counts the inputs this cannot restrict -- an excluded
+    slope outside a structured factor's border, or on a random-effect block,
+    whose complete one-hot sum is a structural generator of the border that
+    the rebuild cannot leave out -- for which every method keeps the full
+    ``H``, inverse, determinant and rank alike; the count is published.
+
+    Cache: the last input's part is memoised (owner: this object, one fit;
+    lifetime: until an input of another identity arrives; invalidation: the
+    identity of the input factor or Hessian, which are immutable once built),
+    so the inverse, determinant and rank reads of one evaluation share one
+    rebuild.  A structured refusal while restricting raises
+    ``StructuredSolverError``, as every structured factor operation does.
     """
 
-    def __init__(self, excluded: NDArray | Sequence[int] = ()):
+    def __init__(
+        self,
+        excluded: NDArray | Sequence[int] = (),
+        *,
+        generator_columns: NDArray | Sequence[int] = (),
+    ):
         self.excluded = np.asarray(excluded, dtype=np.intp)
+        self.generator_columns = np.asarray(generator_columns, dtype=np.intp)
         self.unsupported = 0
+        self._memo: tuple | None = None
+
+    @classmethod
+    def for_design(
+        cls, dm: DesignMatrix, sample_weight: NDArray, penalties: Sequence | None
+    ) -> IdentifiedLaplace:
+        """The fit's identified part: ``laplace_excluded_coefficients`` and the generator columns."""
+        excluded = laplace_excluded_coefficients(dm, sample_weight, penalties)
+        if not excluded.size:  # nothing to restrict: no generator test either
+            return cls(excluded)
+        return cls(excluded, generator_columns=random_effect_columns(dm))
 
     def __bool__(self) -> bool:
         return bool(self.excluded.size)
 
-    def _block(self, inverse) -> NDArray:
-        """``(H^-1)_WW`` from a dense inverse or any Hessian factor."""
-        W = self.excluded
-        if isinstance(inverse, np.ndarray):
-            return np.asarray(inverse[np.ix_(W, W)], dtype=np.float64)
-        from superglm.solvers.hessian_factor import as_hessian_factor
-
-        return np.asarray(as_hessian_factor(inverse).selected_inverse_block(W), dtype=np.float64)
-
-    def _lower(self, block: NDArray) -> NDArray | None:
-        """The Cholesky factor of ``(H^-1)_WW``, ``None`` when the full factor already truncated ``W``.
-
-        A generalized inverse whose ``W`` block is not positive definite
-        belongs to a factor that took a weakly identified direction as a null
-        already (gram's rank decision): its pseudo-determinant has left it out.
-        """
-        block = 0.5 * (block + block.T)
-        if not np.all(np.isfinite(block)):
-            return None
-        try:
-            return scipy.linalg.cholesky(block, lower=True, check_finite=False)
-        except np.linalg.LinAlgError:
-            return None
-
-    def log_det(self, inverse, log_det: float | None) -> float | None:
-        """``log|H_II| = log|H| + log det((H^-1)_WW)``."""
-        if not self or inverse is None or log_det is None:
-            return log_det
-        lower = self._lower(self._block(inverse))
-        if lower is None:
-            return log_det
-        return float(log_det + 2.0 * np.sum(np.log(np.diag(lower))))
-
-    def log_det_of_hessian(self, hessian: NDArray, log_det: float) -> tuple[float, bool]:
-        """``log|H_II|`` from a dense ``H`` itself (a cached solve with no inverse).
-
-        ``(H^-1)_WW`` by one Cholesky solve of the Jacobi-equilibrated ``H``;
-        the flag says it applied (``False`` leaves ``log_det`` for a system
-        whose factor did not certify).
-        """
-        if not self:
-            return log_det, False
-        matrix = 0.5 * (np.asarray(hessian, dtype=np.float64) + np.asarray(hessian).T)
-        diagonal = np.diag(matrix)
-        if not np.all(np.isfinite(matrix)) or not np.all(diagonal > 0.0):
-            return log_det, False
-        scale = 1.0 / np.sqrt(diagonal)
-        try:
-            lower = scipy.linalg.cholesky(
-                scale[:, None] * matrix * scale[None, :], lower=True, check_finite=False
-            )
-        except np.linalg.LinAlgError:
-            return log_det, False
-        units = np.zeros((len(diagonal), self.excluded.size))
-        units[self.excluded, np.arange(self.excluded.size)] = scale[self.excluded]
-        solved = scipy.linalg.cho_solve((lower, True), units, check_finite=False)
-        block = scale[self.excluded, None] * solved[self.excluded]
-        chol = self._lower(block)
-        if chol is None:
-            return log_det, False
-        return float(log_det + 2.0 * np.sum(np.log(np.diag(chol)))), True
-
-    def rank(self, rank: int | None, inverse) -> int | None:
-        """The coefficient rank of the identified part."""
-        if not self or rank is None or inverse is None:
-            return rank
-        if self._lower(self._block(inverse)) is None:
-            return rank
-        return int(rank) - int(self.excluded.size)
-
-    def _dense(self, inverse: NDArray) -> NDArray:
-        W = self.excluded
-        full = np.asarray(inverse, dtype=np.float64)
-        lower = self._lower(full[np.ix_(W, W)])
-        part = full.copy()
-        if lower is not None:
-            columns = full[:, W]
-            part -= columns @ scipy.linalg.cho_solve((lower, True), columns.T, check_finite=False)
-            part = 0.5 * (part + part.T)
-        part[W, :] = 0.0
-        part[:, W] = 0.0
+    def _part(self, inverse, dense) -> _IdentifiedPart | None:
+        hessian = None if dense is None else dense[0]
+        memo = self._memo
+        if memo is not None and memo[0] is inverse and memo[1] is hessian:
+            return memo[2]
+        part = self._restrict(inverse, dense)
+        self._memo = (inverse, hessian, part)
         return part
 
-    def inverse(self, inverse):
-        """The identified inverse ``[H_II^-1, 0; 0, 0]`` in the same representation."""
-        if not self or inverse is None:
-            return inverse
-        from superglm.solvers._structured.nested import (
-            NestedSchurFactor,
-            ProfiledNestedSchurFactor,
-        )
+    def _restrict(self, inverse, dense) -> _IdentifiedPart | None:
+        from superglm.solvers._structured.balance_tree import ProfiledSumToZeroTreeFactor
+        from superglm.solvers._structured.block_leaves import ProfiledFactorSmoothLeafFactor
+        from superglm.solvers._structured.nested import ProfiledNestedSchurFactor
         from superglm.solvers.hessian_factor import DenseHessianFactor
 
-        if isinstance(inverse, np.ndarray):
-            return self._dense(inverse)
-        if isinstance(inverse, DenseHessianFactor):
-            log_det = self.log_det(inverse, inverse.logdet())
-            return DenseHessianFactor(
-                inverse=self._dense(inverse.inverse),
-                log_det=float("nan") if log_det is None else log_det,
-            )
-        if isinstance(inverse, ProfiledNestedSchurFactor):
-            augmented = inverse.augmented_factor
-            border = self.excluded[np.isin(self.excluded + 1, augmented.small_indices)]
-            if border.size != self.excluded.size:
-                self.unsupported += 1
-                return inverse
-            rebuilt = NestedSchurFactor(
-                augmented.operator,
-                chain_group_names=augmented.chain_group_names,
-                chain_group_indices=augmented.chain_group_indices,
-                intercept=True,
-                max_structured_inverse_block=augmented.max_structured_inverse_block,
-                excluded=tuple(int(index) + 1 for index in border),
-            )
-            return ProfiledNestedSchurFactor(
-                augmented_factor=rebuilt,
-                sum_w=inverse.sum_w,
-                xtw=inverse.xtw,
-                data_operator=inverse.data_operator,
-            )
-        from superglm.solvers._structured.block_leaves import (
-            FactorSmoothLeafFactor,
-            ProfiledFactorSmoothLeafFactor,
+        if isinstance(
+            inverse,
+            ProfiledNestedSchurFactor
+            | ProfiledFactorSmoothLeafFactor
+            | ProfiledSumToZeroTreeFactor,
+        ):
+            return self._structured_part(inverse)
+        if inverse is None or isinstance(inverse, np.ndarray | DenseHessianFactor):
+            if dense is None:
+                raise RuntimeError(
+                    "The identified part of a dense system needs its centred Hessian."
+                )
+            part = self._dense_part(*dense, with_inverse=inverse is not None)
+            if isinstance(inverse, DenseHessianFactor):
+                part = dataclasses.replace(
+                    part, inverse=DenseHessianFactor(inverse=part.inverse, log_det=part.log_det)
+                )
+            return part
+        self.unsupported += 1
+        return None
+
+    def _dense_part(self, hessian, sum_w: float, *, with_inverse: bool) -> _IdentifiedPart:
+        """``H_c[I, I]`` decomposed by the shared rule; ``W`` rows and columns of the inverse zero."""
+        from superglm.solvers.rank import decompose_gram
+
+        matrix = np.asarray(hessian, dtype=np.float64)
+        kept = np.ones(matrix.shape[0], dtype=bool)
+        kept[self.excluded] = False
+        block = matrix[np.ix_(kept, kept)]
+        decomposition = decompose_gram(0.5 * (block + block.T))
+        inverse = None
+        if with_inverse:
+            inverse = np.zeros_like(matrix)
+            inverse[np.ix_(kept, kept)] = decomposition.pseudo_inverse()
+        return _IdentifiedPart(
+            inverse=inverse,
+            log_det=float(np.log(sum_w) + decomposition.log_pdet),
+            rank=1 + int(decomposition.rank),
         )
 
-        if isinstance(inverse, ProfiledFactorSmoothLeafFactor):
-            augmented = inverse.augmented_factor
-            border = self.excluded[np.isin(self.excluded + 1, augmented.small_indices)]
-            if border.size != self.excluded.size:
-                self.unsupported += 1
-                return inverse
-            rebuilt = FactorSmoothLeafFactor(
-                augmented.system,
-                augmented.penalized,
-                max_structured_inverse_block=augmented.max_structured_inverse_block,
-                excluded=tuple(int(index) + 1 for index in border),
-            )
-            return ProfiledFactorSmoothLeafFactor(
-                augmented_factor=rebuilt, sum_w=inverse.sum_w, xtw=inverse.xtw
-            )
+    def _structured_part(self, inverse) -> _IdentifiedPart | None:
+        """The structured factor rebuilt by its own engine with ``W`` left out of its border."""
         from superglm.solvers._structured.balance_tree import (
             ProfiledSumToZeroTreeFactor,
             SumToZeroTreeFactor,
         )
+        from superglm.solvers._structured.block_leaves import (
+            FactorSmoothLeafFactor,
+            ProfiledFactorSmoothLeafFactor,
+        )
+        from superglm.solvers._structured.nested import (
+            NestedSchurFactor,
+            ProfiledNestedSchurFactor,
+        )
+        from superglm.solvers.irls_direct import _structured_solver_errors
 
-        if isinstance(inverse, ProfiledSumToZeroTreeFactor):
-            augmented = inverse.augmented_factor
-            border = self.excluded[np.isin(self.excluded + 1, augmented.small_indices)]
-            if border.size != self.excluded.size:
-                self.unsupported += 1
-                return inverse
-            rebuilt = SumToZeroTreeFactor(
-                augmented.system,
-                augmented.penalized,
-                max_structured_inverse_block=augmented.max_structured_inverse_block,
-                excluded=tuple(int(index) + 1 for index in border),
-            )
-            return ProfiledSumToZeroTreeFactor(
-                augmented_factor=rebuilt, sum_w=inverse.sum_w, xtw=inverse.xtw
-            )
-        self.unsupported += 1
-        return inverse
+        augmented = inverse.augmented_factor
+        positions = self.excluded + 1
+        if not np.all(np.isin(positions, augmented.small_indices)) or np.any(
+            np.isin(self.excluded, self.generator_columns)
+        ):
+            self.unsupported += 1
+            return None
+        excluded = tuple(int(index) for index in positions)
+        with _structured_solver_errors():
+            if isinstance(inverse, ProfiledNestedSchurFactor):
+                rebuilt = NestedSchurFactor(
+                    augmented.operator,
+                    chain_group_names=augmented.chain_group_names,
+                    chain_group_indices=augmented.chain_group_indices,
+                    intercept=True,
+                    max_structured_inverse_block=augmented.max_structured_inverse_block,
+                    excluded=excluded,
+                )
+                profiled = ProfiledNestedSchurFactor(
+                    augmented_factor=rebuilt,
+                    sum_w=inverse.sum_w,
+                    xtw=inverse.xtw,
+                    data_operator=inverse.data_operator,
+                )
+            elif isinstance(inverse, ProfiledFactorSmoothLeafFactor):
+                rebuilt = FactorSmoothLeafFactor(
+                    augmented.system,
+                    augmented.penalized,
+                    max_structured_inverse_block=augmented.max_structured_inverse_block,
+                    excluded=excluded,
+                )
+                profiled = ProfiledFactorSmoothLeafFactor(
+                    augmented_factor=rebuilt, sum_w=inverse.sum_w, xtw=inverse.xtw
+                )
+            else:
+                assert isinstance(inverse, ProfiledSumToZeroTreeFactor)
+                rebuilt = SumToZeroTreeFactor(
+                    augmented.system,
+                    augmented.penalized,
+                    max_structured_inverse_block=augmented.max_structured_inverse_block,
+                    excluded=excluded,
+                )
+                profiled = ProfiledSumToZeroTreeFactor(
+                    augmented_factor=rebuilt, sum_w=inverse.sum_w, xtw=inverse.xtw
+                )
+            log_det = float(rebuilt.logdet())
+        return _IdentifiedPart(inverse=profiled, log_det=log_det, rank=int(rebuilt.rank))
+
+    def inverse(self, inverse, dense: tuple | None = None):
+        """The identified inverse ``[H_II^+, 0; 0, 0]`` in the same representation."""
+        if not self or inverse is None:
+            return inverse
+        part = self._part(inverse, dense)
+        return inverse if part is None else part.inverse
+
+    def log_det(self, inverse, log_det: float | None, dense: tuple | None = None) -> float | None:
+        """``log|H_II|`` (a pseudo-determinant where ``H_II`` is singular) of the same factorization."""
+        if not self or log_det is None or (inverse is None and dense is None):
+            return log_det
+        part = self._part(inverse, dense)
+        return log_det if part is None else part.log_det
+
+    def rank(self, rank: int | None, inverse, dense: tuple | None = None) -> int | None:
+        """The coefficient rank of the identified part, from the same factorization."""
+        if not self or rank is None or (inverse is None and dense is None):
+            return rank
+        part = self._part(inverse, dense)
+        return rank if part is None else part.rank
 
     def geometry(self, geometry):
         """An observed REML geometry with its inverse, determinant and rank restricted."""
         if not self or geometry is None:
             return geometry
         inverse = geometry.hessian_inverse
+        hessian = geometry.centered_hessian
+        dense = (hessian, float(geometry.sum_w)) if isinstance(hessian, np.ndarray) else None
+        if inverse is None and dense is None:
+            return geometry
+        part = self._part(inverse, dense)
+        if part is None:
+            return geometry
         return dataclasses.replace(
             geometry,
-            hessian_inverse=self.inverse(inverse),
-            log_det_H=self.log_det(inverse, geometry.log_det_H),
-            hessian_rank=self.rank(geometry.hessian_rank, inverse),
+            hessian_inverse=part.inverse if inverse is not None else None,
+            log_det_H=part.log_det,
+            hessian_rank=part.rank,
         )
 
 

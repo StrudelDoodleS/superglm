@@ -9,9 +9,9 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, Poisson, clip_mu
+from superglm.distributions import Binomial, Distribution, Poisson, clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import Link, SqrtLink, stabilize_eta
+from superglm.links import _BINOMIAL_CLIP_MU_EPS, Link, LogLink, SqrtLink, stabilize_eta
 
 _MAX_FLOAT64_HALVING_DEPTH = 1074
 
@@ -119,6 +119,59 @@ def _evaluate_irls_state(
         lambdas=lambdas,
         dispersion=dispersion,
     )
+
+
+def mean_space_violation(
+    family: Distribution, link: Link
+) -> Callable[[NDArray, NDArray], bool] | None:
+    """The test that a linear predictor leaves the family's mean space, or ``None``.
+
+    Declared by the family and link alone: ``None`` when every ``eta`` the
+    link accepts maps into the family's means.  The log link's inverse
+    ``exp(eta)`` covers ``(0, inf)``, which is wider than the binomial
+    probability space ``(0, 1)``: a positive-weight row with ``eta >= 0`` has
+    no binomial likelihood (``log(1 - mu)`` is undefined), so it is not a
+    state at all.  ``clip_mu`` would hide it behind a mean of ``1 - 1e-7``,
+    whose deviance is finite and flat in ``eta`` and whose Fisher weight
+    ``exp(2 eta) / V(mu)`` pins the row where it landed: replacing an
+    out-of-range fitted value instead of the coefficients is Wacholder's
+    (1986) device, which can return estimates whose fitted probabilities are
+    invalid.  The feasible set ``{beta : X beta + offset < 0}`` is convex and
+    the log-likelihood concave, so a line search from a feasible state finds
+    a feasible step by halving, as R's ``glm`` and ``glm2`` do (Donoghoe &
+    Marschner 2018, J. Stat. Softw. 86(9), sections 2 and 3.2).
+    """
+    if isinstance(family, Binomial) and isinstance(link, LogLink):
+
+        def violates(eta_unclipped: NDArray, weights: NDArray) -> bool:
+            return bool(np.any((eta_unclipped >= 0.0) & (weights > 0.0)))
+
+        return violates
+    return None
+
+
+# ``clip_mu`` caps a binomial mean at ``1 - _BINOMIAL_CLIP_MU_EPS``: under the
+# log link that cap is reached at ``eta = log1p(-eps)``.
+_BINOMIAL_LOG_CAP_ETA = math.log1p(-_BINOMIAL_CLIP_MU_EPS)
+
+
+def mean_space_boundary_rows(
+    family: Distribution, link: Link, eta_unclipped: NDArray, weights: NDArray
+) -> int:
+    """Positive-weight rows whose mean ``clip_mu`` caps at the mean-space boundary.
+
+    Zero for a family and link whose means cannot leave the mean space
+    (``mean_space_violation`` is ``None``).  A binomial/log row with
+    ``exp(eta) >= 1 - 1e-7`` has its mean replaced by the cap, so its deviance
+    is flat in ``eta`` there: the fitted objective is no longer the binomial
+    likelihood, and a state holding such a row is at the boundary of the
+    parameter space ``{beta : X beta + offset < 0}``, where the maximum is
+    not a stationary point (Donoghoe & Marschner 2018, J. Stat. Softw.
+    86(9), sections 2 and 4.1).
+    """
+    if mean_space_violation(family, link) is None:
+        return 0
+    return int(np.count_nonzero((eta_unclipped >= _BINOMIAL_LOG_CAP_ETA) & (weights > 0.0)))
 
 
 StateInvalid = Callable[[_IRLSState], bool]

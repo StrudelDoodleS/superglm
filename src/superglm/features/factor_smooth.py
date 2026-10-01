@@ -103,6 +103,14 @@ class FactorSmooth:
     ``basis="sz"`` represents centered sum-to-zero deviations; its specialized
     geometry is populated by the design-matrix builder.
 
+    Both bases store each level's curve in the natural parameterization of the
+    marginal P-spline: per level, the coordinates in which the wiggle penalty
+    is diagonal, followed by the unpenalized polynomial coordinates.  The
+    coefficients are therefore neither the B-spline coefficients nor mgcv's
+    ``s(x, g, bs="sz")`` coordinates; read a level's curve through
+    ``SuperGLM.factor_smooth`` instead.  (An ``sz`` model saved by 0.35.0 or
+    earlier keeps the marginal-basis coordinates it was fitted in.)
+
     ``levels=`` binds the grouping column's level universe (spec 2026-08-11,
     §3.1).  Under ``basis="fs"`` a declared level with no training rows keeps
     its own curve block and shrinks to zero through the penalty.  ``basis="sz"``

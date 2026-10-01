@@ -22,7 +22,7 @@ from matplotlib.figure import Figure
 from superglm.profiling.nb import NBProfileResult
 from superglm.solvers.dispersion import model_weight_semantics
 
-from .test_saved_fs_models import _se_tolerance
+from .test_saved_fs_models import _se_tolerance, assert_predicts_as_saved
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_v0_35_0"
 
@@ -56,7 +56,7 @@ def _assert_reports_saved_intervals(result: NBProfileResult, saved: dict) -> Non
     "name", ["nb_estimate_theta_fit", "nb_estimate_theta_reml", "nb_near_poisson"]
 )
 def test_an_estimate_theta_model_saved_by_v0_35_0_reports_its_estimate_and_interval(name) -> None:
-    """Predictions are bitwise, standard errors are v0.35.0's (to ``n u kappa_s``
+    """Predictions are v0.35.0's within two evaluations' rounding, standard errors are v0.35.0's (to ``n u kappa_s``
     where REML published them; an ML fit's pattern), and the summary reports
     v0.35.0's estimate and interval with its censoring.  An interval v0.35.0
     did not compute (the REML fixture has none) is inverted on the profile at
@@ -65,7 +65,7 @@ def test_an_estimate_theta_model_saved_by_v0_35_0_reports_its_estimate_and_inter
     assert record["version"] == "0.35.0"
     saved = record["profile"]
     model, frame, y = record["model"], record["frame"], record["y"]
-    np.testing.assert_array_equal(np.asarray(model.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         se = model.metrics(frame, y).coefficient_se
@@ -101,7 +101,7 @@ def test_an_estimate_theta_model_saved_by_v0_35_0_reports_its_estimate_and_inter
     _assert_reports_saved_intervals(model._nb_profile_result, saved)
 
     again = pickle.loads(pickle.dumps(model))
-    np.testing.assert_array_equal(np.asarray(again.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(again, frame, record["prediction"])
     _assert_reports_saved_intervals(again._nb_profile_result, saved)
 
 

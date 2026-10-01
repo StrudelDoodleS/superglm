@@ -249,3 +249,143 @@ def test_large_dominant_builder_never_requests_full_p_by_p_storage(monkeypatch):
 
     assert system.operator.A.shape == (2, 2)
     assert system.operator.leaf.cross.shape == (n_levels, 2)
+
+
+# T7, memory: an fs term beside a wide border (Opus review P1).  The leaf route
+# works on per-level triangles of width p = k + q + 2 (q the border); a stack of
+# them, K p^2 doubles, grows with the square of the border, where every array
+# the factorization and the published state need is O(K k p) or O(n).  The
+# unfixed route kept the triangles and the level Grams (two such stacks) on its
+# system, its published factor and its pickle, and formed several more in the
+# pass and the signed assembly.  Byte counts, never wall time.
+_WIDE = dict(K=400, Q=60, n=2400, k=5)
+
+
+@pytest.fixture(scope="module", params=["poisson", "tweedie"])
+def _wide_border_fs_fit(request):
+    """A REML fit (smoothing parameters held) of an fs term beside a 60-level categorical.
+
+    The Tweedie fit's observed REML geometry builds signed leaf systems.
+    """
+    import warnings
+
+    import pandas as pd
+
+    from superglm import Categorical, FactorSmooth, LambdaPolicy, Numeric, SuperGLM, families
+
+    K, Q, n, k = _WIDE["K"], _WIDE["Q"], _WIDE["n"], _WIDE["k"]
+    rng = np.random.default_rng(7)
+    g = np.repeat(np.arange(K), n // K)
+    x = rng.uniform(size=n)
+    c = rng.integers(0, Q, n)
+    frame = pd.DataFrame(
+        {
+            "x": x,
+            "g": [f"g{v:03d}" for v in g],
+            "z": rng.normal(size=n),
+            "cat": [f"c{v:02d}" for v in c],
+        }
+    )
+    mu = np.exp(0.3 + np.sin(3 * x) + rng.normal(0, 0.4, K)[g] + rng.normal(0, 0.3, Q)[c])
+    if request.param == "poisson":
+        family, y = "poisson", rng.poisson(mu).astype(float)
+    else:
+        family = families.tweedie(p=1.5)
+        y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.7)
+    policy = {name: LambdaPolicy.fixed(1.0) for name in ("wiggle", "null_0", "null_1")}
+    model = SuperGLM(
+        family=family,
+        features={"z": Numeric(), "cat": Categorical()},
+        interactions=[FactorSmooth("x", group="g", k=k, lambda_policy=policy)],
+        selection_penalty=0,
+        direct_solve="structured",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    system = model._linear_system_state.system
+    p = k + len(system.operator.small_indices) + 2
+    return model, p
+
+
+def _largest_reachable_array(root) -> int:
+    """The size of the largest NumPy array (owning its data) reachable from ``root``."""
+    largest, seen, stack = 0, set(), [root]
+    while stack:
+        item = stack.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, np.ndarray):
+            if item.base is None:
+                largest = max(largest, item.size)
+            elif isinstance(item.base, np.ndarray):
+                stack.append(item.base)
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list | tuple | set | frozenset):
+            stack.extend(item)
+        elif isinstance(getattr(item, "__dict__", None), dict):
+            stack.extend(vars(item).values())
+    return largest
+
+
+def test_a_fitted_fs_model_keeps_and_pickles_no_stack_of_level_triangles(_wide_border_fs_fit):
+    """Opus review P1: fails on the unfixed route, whose fitted model held the triangles
+    and level Grams (and, after a Tweedie fit, the lineage memo's signed system) and
+    pickled 2.7 stacks of them.
+
+    Everything the model keeps, the design's caches included, is below the
+    triangles' trailing rows alone, ``K p (p - k)``; the pickle is below one
+    stack, ``8 K p^2`` bytes (it holds the design's ``O(n)`` arrays and the
+    ``O(K k p)`` leaf data and factor).
+    """
+    import pickle
+
+    model, p = _wide_border_fs_fit
+    K, k = _WIDE["K"], _WIDE["k"]
+    assert _largest_reachable_array(model) < K * p * (p - k)
+    assert len(pickle.dumps(model)) < 8 * K * p * p
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_an_fs_leaf_pass_forms_no_stack_beyond_what_the_step_reads(_wide_border_fs_fit, signed):
+    """Opus review P1: fails on the unfixed pass, which peaked at 3.0 stacks of level
+    triangles on Fisher rows and 7.0 on signed rows.
+
+    Fisher rows keep each level's leading ``k`` rows, the trailing rows' norms
+    and their Gram, so the build stays below one stack, ``8 K p^2`` bytes.
+    Signed rows keep the pseudo-rows the per-lambda step reads (one stack) and
+    nothing else of that size: below two.
+    """
+    import tracemalloc
+
+    from superglm.solvers._structured.block_leaves import build_factor_smooth_leaf_system
+    from superglm.solvers.structured import get_structured_layout
+
+    model, p = _wide_border_fs_fit
+    K = _WIDE["K"]
+    system = model._linear_system_state.system
+    layout = get_structured_layout(
+        model._dm, model._groups, dominant_group_index=system.dominant_group_index
+    )
+    rng = np.random.default_rng(3)
+    n = model._dm.n
+
+    def rows():
+        W = rng.uniform(0.5, 1.5, n)
+        if signed:
+            W = np.where(rng.uniform(size=n) < 0.2, -0.3 * W, W)
+        return W, rng.normal(size=n)
+
+    # a first build compiles (or loads) the pass's kernels outside the trace
+    build_factor_smooth_leaf_system(layout, *rows(), signed=signed)
+    W, Wz = rows()
+    tracemalloc.start()
+    try:
+        built = build_factor_smooth_leaf_system(layout, W, Wz, signed=signed)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < (2 if signed else 1) * 8 * K * p * p
+    assert built.leaf.triangles is None

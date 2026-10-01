@@ -392,7 +392,9 @@ def test_gram_certificate_refusal_clears_payload(monkeypatch):
     problem = _problem()
     entry = centered_system._FisherDataReuse()
     _fit(problem, entry)
-    monkeypatch.setattr(irls_direct, "decompose_gram_if_authoritative", lambda *args: None)
+    monkeypatch.setattr(
+        irls_direct, "decompose_gram_if_authoritative", lambda *args, **kwargs: None
+    )
     result, inverse = _fit(problem, entry)
     assert result.converged
     np.testing.assert_allclose(inverse, np.diag([1 / 5, 1 / 2.5]), rtol=32 * np.finfo(float).eps)

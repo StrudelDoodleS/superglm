@@ -192,6 +192,12 @@ Consequently `regional_deviation.collapsed` is `None`, and its table reports
 support, information, EDF, and coefficient norms without `credibility` or
 `shrinkage` columns.
 
+The `sz` coefficients use the same coordinates as `fs`: for each level, the
+coordinates in which the wiggle penalty is diagonal, then the unpenalized
+polynomial coordinates. They are not the B-spline coefficients of the curve,
+so compare levels through `model.factor_smooth(...)` rather than through raw
+coefficients.
+
 SZ requires the matching global `Spline`. It is not a generic
 `SplineCategorical` interaction: `SplineCategorical` is reference-coded and
 unpooled, while SZ uses all levels symmetrically with an exact sum-to-zero
@@ -251,7 +257,8 @@ model.fit_reml(train, y, offset=offset)
 structured solver above a size crossover. The crossover is reached only when
 the structured term spans most of the coefficient columns: a wide random
 effect beside an equally wide dense border fits faster on Gram. The choice
-reads only the model's terms and their sizes.
+reads only the model's terms, their sizes, and which grouping levels sit inside
+which others.
 
 - **A fit never switches solver.** If the structured solver cannot finish a
   fit, the fit stops with an error that names the cause.
@@ -259,8 +266,11 @@ reads only the model's terms and their sizes.
 - **`direct_solve="structured"` forces the structured solver.** It is useful
   for reproducible benchmarking.
 - **A thinly observed `sz` level is kept.** A level with fewer distinct values
-  than its smooth's unpenalized part is named in a warning, and that part of
-  its deviation is left unestimated.
+  than its smooth's unpenalized part stays in the model.
+- **Its standard errors can be missing.** Such a level can leave every
+  standard error of the term and of its main effect missing (NaN).
+- **The structured solver names the level.** It names such a level in a
+  warning. The Gram solver fits the same model without that warning.
 
 `discrete=True` bins the continuous spline support and reuses cached
 sufficient statistics across REML iterations; factor identities and the SZ

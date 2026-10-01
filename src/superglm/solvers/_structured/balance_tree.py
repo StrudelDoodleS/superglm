@@ -75,9 +75,15 @@ make coupled nulls routine (a level attribute, a thin level), and there it is
 what keeps the determinant exact.
 
 **Thin levels** (fewer than ``m`` distinct weighted ``x`` values beside the
-required global Spline, decision 4) make an exact alias of the main-effect
-polynomial with that level's deviation.  They are flagged and kept: the alias
-is an exact null, truncated like any other, and ``thin_levels`` names them.
+required global Spline, decision 4) make exact data nulls of the main-effect
+polynomial with that level's deviation.  They are flagged and kept, and
+``thin_levels`` names them.  The data part of the border vanishes along every
+one of them, so their curvature is the border penalty's alone: where the main
+effect's penalty does not annihilate the polynomial (the default ``Spline``
+gives ``x`` a curvature of about ``1e-5`` of its squared norm), the
+combination it penalizes is deflated structurally with its exact curvature
+(``_penalized_aliases``), and the combinations no penalty touches are exact
+nulls of ``H``, truncated like any other.
 
 **Inference.**  With the whitened innovations ``xi_v`` (``z_v = g_v - G_v s_v -
 F_v x + y_v xi_v``, ``y_v = P_v^e R_zz,v^-1``) independent of the border ``x ~
@@ -94,9 +100,23 @@ level-by-level matrix.  Public coordinates are the first ``K - 1`` levels:
 ``H_pub^-1 C' = Sigma_lev[public, :]`` with ``C = [I; -1'] (x) I``, so a public
 diagonal is a level-space one less its cross with the last level.
 
-Caches (AGENTS.md): the factor forms its inference state (``_inference``) on
-first read; owner the factor, lifetime the factor, invalidation none (every
-input is fixed at construction).  No rank decision or bound reads it.
+Caches (AGENTS.md):
+
+* ``SumToZeroTreeFactor`` forms its inference state on first read: the cached
+  properties ``minimum_local_eigenvalue``, ``_Q_inverse_centred``,
+  ``_level_diagonal_blocks``, ``_last_level_cross``, ``_penalty_total_form``
+  and ``_retained_own`` (which also sets ``_projector_parts``), and the
+  attributes ``_scaled_eigenvalues_cache`` and ``_data_estimable``.  Owner the
+  factor, lifetime the factor, invalidation none (every input is fixed at
+  construction).  They are pickled with a retained model as they stand, so a
+  loaded model does not form them again.  No rank decision or bound reads
+  them.
+* ``balance_tree(K)`` is a module ``lru_cache(maxsize=16)``: owner the module,
+  lifetime the process, keyed by ``K``, invalidation none (the tree is a pure
+  function of ``K`` and its arrays are read-only).
+* ``SumToZeroLeafSystem`` keeps a weak memo of the last factor built on it
+  (described there) and forms ``centred_data_operator`` on first read: owner
+  the system, lifetime the system, invalidation none.
 """
 
 from __future__ import annotations
@@ -149,6 +169,50 @@ def _gamma(count: float) -> float:
 
 def _gamma_array(count: NDArray) -> NDArray:
     return count * _UNIT / (1.0 - count * _UNIT)
+
+
+def _append_generators(
+    generators: BorderGenerators | None, extra: NDArray, term_name: str
+) -> BorderGenerators:
+    """``generators`` (rest coordinates) with the columns of ``extra``, reduced to ``N[refs] = I``.
+
+    Gauss-Jordan in a fixed order (as ``border.reduce_generators``): each
+    extra column is cleared on the references already chosen, takes as its
+    reference its largest entry (lowest index on ties) and clears that
+    reference in every earlier generator; a column that clears to its
+    rounding is dependent and dropped.  The span is unchanged, so the
+    deflation (border step 1) is too.  Deterministic.
+    """
+    width = extra.shape[0]
+    columns: list[NDArray] = []
+    references: list[int] = []
+    labels: list[str] = []
+    if generators is not None:
+        columns = [np.array(column, dtype=np.float64) for column in generators.matrix.T]
+        references = [int(reference) for reference in generators.references]
+        labels = list(generators.labels) + [""] * (len(columns) - len(generators.labels))
+    for index in range(extra.shape[1]):
+        vector = np.array(extra[:, index], dtype=np.float64)
+        size = float(np.max(np.abs(vector), initial=0.0))
+        for column, reference in zip(columns, references, strict=True):
+            if vector[reference] != 0.0:
+                vector -= vector[reference] * column
+        largest = float(np.max(np.abs(vector), initial=0.0))
+        if not largest > width * _EPS * size:
+            continue
+        reference = int(np.argmax(np.abs(vector)))
+        vector = vector / vector[reference]
+        vector[reference] = 1.0
+        for position, column in enumerate(columns):
+            if column[reference] != 0.0:
+                column = column - column[reference] * vector
+                column[reference] = 0.0
+                columns[position] = column
+        columns.append(vector)
+        references.append(reference)
+        labels.append(f"{term_name}: a thin level's penalized alias")
+    matrix = np.column_stack(columns) if columns else np.zeros((width, 0))
+    return BorderGenerators(matrix, np.array(references, dtype=np.intp), tuple(labels))
 
 
 # ------------------------------------------------------------- topology ----
@@ -334,9 +398,10 @@ def _leaf_exports(R_acc, roots, k, w_pos, Es, Ex, Qx):  # pragma: no cover - com
     """Fisher leaves: ``QR([[R_l[:k]], [sqrt(P_l), 0]])``; ``[E^s | E^x]`` and ``Qx += T'T``.
 
     ``w_pos`` maps the level rows' ``w`` border columns (intercept, border,
-    right-hand side) to ``ext`` positions.
+    right-hand side) to ``ext`` positions.  ``R_acc`` ``(K, >= k, p)``: only
+    each level's leading ``k`` rows are read.
     """
-    K, p, _ = R_acc.shape
+    K, p = R_acc.shape[0], R_acc.shape[2]
     w = p - k
     m = 2 * k
     empty = np.zeros((0, 0))
@@ -782,10 +847,13 @@ def _leaf_column_norms2(leaf) -> NDArray:
     them); signed rows take their error Gram ``sum e_r x_r x_r'``, the
     unsigned scale their rounding is charged at.
     """
-    if leaf.signed and leaf.error_gram is not None:
-        return np.diagonal(leaf.error_gram, axis1=1, axis2=2).copy()
-    R = leaf.triangles
-    return np.sum(R[:, :, : R.shape[1] - 1] ** 2, axis=1)
+    if leaf.signed and leaf.error_diagonal is not None:
+        return leaf.error_diagonal.copy()
+    top, k = leaf.top, leaf.block_size
+    p = top.shape[2]
+    a2 = np.sum(top[:, :, : p - 1] ** 2, axis=1)
+    a2[:, k:] += leaf.tail_norms2[:, : p - 1 - k]
+    return a2
 
 
 @numba.njit(cache=True)
@@ -1021,9 +1089,11 @@ class SumToZeroPenalizedOperator(SumToZeroBlockOperator):
     def with_penalties(
         cls, operator: SumToZeroBlockOperator, penalty_small: NDArray, penalty_local: NDArray
     ) -> SumToZeroPenalizedOperator:
+        from superglm.solvers._structured.block_leaves import share_cross_block
+
         small = np.asarray(penalty_small, dtype=np.float64)
         local = np.asarray(penalty_local, dtype=np.float64)
-        return cls(
+        penalized = cls(
             A=operator.A + small,
             C=operator.C,
             D=operator.D + local,
@@ -1032,6 +1102,7 @@ class SumToZeroPenalizedOperator(SumToZeroBlockOperator):
             penalty_small=0.5 * (small + small.T),
             penalty_local=0.5 * (local + local.transpose(0, 2, 1)),
         )
+        return share_cross_block(penalized, operator.C)
 
 
 @dataclass(frozen=True)
@@ -1058,9 +1129,15 @@ class SumToZeroLeafSystem:
     dominant_group_index: int
     dominant_group_name: str
     thin_levels: tuple = ()
-    # ``sum w (x - c0)(x - c0)'`` and ``sum w (x - c0)`` (as FactorSmoothLeafSystem)
+    # ``(levels, distinct)``: the thin levels' codes and their distinct weighted
+    # ``x`` counts (``layout.thin_level_counts``), from which the factor builds
+    # their penalized aliases; ``None`` on a system saved before it existed.
+    thin_counts: tuple | None = None
+    # ``sum w (x - c0)(x - c0)'``, ``sum w (x - c0)`` and ``sum w z (x - c0)'``
+    # (as FactorSmoothLeafSystem)
     shifted_gram_small: NDArray | None = None
     shifted_xtw_small: NDArray | None = None
+    shifted_level_cross: NDArray | None = None
     # The last factor built on this system (perf F1, as FactorSmoothLeafSystem),
     # held weakly (``assembly.build_augmented_sum_to_zero_factor``).  Owner: this
     # system; lifetime: the system, one slot; never pickled (a weak reference
@@ -1076,12 +1153,22 @@ class SumToZeroLeafSystem:
         for name, value in state.items():
             object.__setattr__(self, name, value)
 
+    def published(self) -> SumToZeroLeafSystem:
+        """This system as a published state keeps it (``block_leaves.published_leaf_system``)."""
+        from superglm.solvers._structured.block_leaves import published_leaf_system
+
+        return published_leaf_system(self)
+
     @cached_property
     def centred_data_operator(self) -> CenteredBlockOperator:
         """The centred data operator on the ``c0``-shifted moments (``FactorSmoothLeafSystem``'s)."""
         from superglm.solvers._structured.block_leaves import _shifted_centred_operator
 
-        if self.shifted_gram_small is None or self.shifted_xtw_small is None:
+        if (
+            self.shifted_gram_small is None
+            or self.shifted_xtw_small is None
+            or self.shifted_level_cross is None
+        ):
             raise ValueError("This sz system was built without its shifted border moments.")
         return _shifted_centred_operator(self, SumToZeroBlockOperator, self.raw_xtw_structured)
 
@@ -1201,7 +1288,7 @@ class SumToZeroTreeFactor:
             Es = np.zeros((K, k, k))
             Ex_w = np.zeros((K, k, w))
             Qw = np.zeros((w, w))
-            _leaf_exports(np.ascontiguousarray(leaf.triangles), roots, k, w_first, Es, Ex_w, Qw)
+            _leaf_exports(leaf.top, roots, k, w_first, Es, Ex_w, Qw)
         deferred = np.zeros((n_int, k), dtype=np.bool_)
         _decide(
             Es, tree.child, tree.h, k, sqrt_tau, np.sqrt(node_a2), deferred, np.zeros((n_int, k, k))
@@ -1233,6 +1320,11 @@ class SumToZeroTreeFactor:
             M_leaf = np.zeros((K, size_e, size_e))
             R_leaf[:, position[:, None], position[None, :]] = R0
             M_leaf[:, position[:, None], position[None, :]] = M0
+            # the bound reads each leaf middle factor's largest entry alone: keep
+            # that (K,) and free the (K, p, p) exports before the sweep (Opus
+            # review P1: a factor held a stack of middle factors for its lifetime)
+            leaf_middle_max = np.max(np.abs(M0), axis=(1, 2))
+            del R0, M0
             kappa = np.ones(n_int)
             sigma_extra = np.zeros(n_int)
             middle_norm = np.zeros(n_int)
@@ -1260,7 +1352,7 @@ class SumToZeroTreeFactor:
                     "that is not positive definite (the tree pivot certificate refuses the iterate)."
                 )
             self._kappa, self._sigma_extra, self._middle_norm = kappa, sigma_extra, middle_norm
-            self._leaf_middle = M0
+            self._leaf_middle_max = leaf_middle_max
         else:
             E_leaf = np.zeros((K, k, k + n_ext))
             E_leaf[:, :, :k] = Es
@@ -1337,6 +1429,7 @@ class SumToZeroTreeFactor:
         # the certificate holds either way.
         D0 = float(Q_xx[0, 0])
         self.excluded = tuple(int(index) for index in excluded)
+        self._alias_x = self._penalized_aliases(system, P, penalized)
         border = None
         for candidate in self._border_bound(leaf, P, Q_xx, a2, node_a2):
             factored = self._factor_border(Q_xx, candidate, penalized, system)
@@ -1398,6 +1491,9 @@ class SumToZeroTreeFactor:
             S_rest[c:, c:] = S_small
             if generators is not None and c:
                 generators = generators.shifted(c)
+        aliases = self._alias_x
+        if aliases is not None and not super_deferred:
+            aliases = aliases[1:]  # the super-root has eliminated alpha (a Schur complement)
         if self.excluded:
             positions = self._small_position[np.asarray(self.excluded, dtype=np.intp)]
             if np.any(positions < 1):
@@ -1405,12 +1501,166 @@ class SumToZeroTreeFactor:
             rest = lead + positions - 1
             if generators is not None and np.any(generators.matrix[rest]):
                 raise ValueError("An excluded border column cannot carry a structural generator.")
+            if aliases is not None:
+                # an alias through a column the Laplace term leaves out stays with
+                # the pivoted factorization (it is not deflated)
+                aliases = aliases[:, ~np.any(aliases[rest] != 0.0, axis=0)]
             Q_rest, S_rest, rest_bound = Q_rest.copy(), S_rest.copy(), rest_bound.copy()
             Q_rest[rest, :] = Q_rest[:, rest] = 0.0
             S_rest[rest, :] = S_rest[:, rest] = 0.0
             rest_bound[rest] = 0.0
-        border = factor_border(Q_rest, S_rest, rest_bound, generators, term_name=self.term_name)
+        if aliases is not None and aliases.shape[1]:
+            generators = _append_generators(generators, aliases, self.term_name)
+        border = factor_border(
+            Q_rest,
+            S_rest,
+            rest_bound,
+            generators,
+            term_name=self.term_name,
+            term_kind="FactorSmooth term",
+        )
         return super_deferred, center_star, border
+
+    def _penalized_aliases(self, system, P: NDArray, penalized) -> NDArray | None:
+        """The thin levels' data-null directions the border penalty identifies, ``(n_x, g)``.
+
+        A thin level ``t`` (``d_t`` distinct weighted ``x`` values, fewer than
+        the dimension ``m`` of the level penalty's null space ``N_P``) has the
+        exact data nulls ``beta_t += N_P f (K - 1) / K``, ``beta_l -= N_P f / K``
+        for every other level, and the border taking ``+g(x)' f / K``, for
+        every ``f`` with ``g(x)' f = 0`` on the level's ``x`` values (``g =
+        N_P' z``, the null-space functions; design §3.5, the alias with the
+        required global Spline).  In ``x = [alpha | carried | border]`` their
+        tree part is ``z_v = h_v(t) N_P f`` on the deferred ``(v, j)``
+        (``sum_l h_v(l) = 0``).  The data part of the border Schur complement
+        vanishes along every one of them for every working weight (they are
+        nulls of ``[1, X]`` on the weighted rows, and the tree penalty
+        vanishes on their tree part), so their curvature is the border
+        penalty's alone: smoothing-parameter-scaled, never a rounding
+        decision.  Truncated as data, as before, it crossed the certified
+        tolerance with lambda and the published ``log|H|`` jumped by the log
+        of the tolerance between nearby evaluations (REML's line search then
+        failed).  They are therefore deflated structurally (design §3.6
+        step 1: data part zero by construction, curvature from ``S``).  Only
+        the combinations the penalty certifies (curvature above the
+        rounding of the quadratic form; a test invariant to rescaling the
+        penalty, so the same at every lambda: Wood, Pya & Safken 2016,
+        §3.1.2, an identifiability test that does not depend on the
+        smoothing parameters) are returned; the exact nulls stay with the
+        pivoted factorization, which truncates them as before.
+
+        ``N_P`` is the shared null space of the level blocks, each scaled to
+        unit norm; ``f`` spans the null space of the level's ``sqrt|w|``
+        triangle on ``N_P`` beyond its ``d_t`` distinct rows (a level with no
+        weight frees all of ``N_P``); the border part is the least-squares
+        representation of the null-space functions over every level's
+        triangle, kept only when it reproduces them to within ``sqrt(eps)``
+        (else the border cannot represent them and there is no alias).
+        ``None`` without thin levels or penalty.
+        """
+        counts = getattr(system, "thin_counts", None)
+        if counts is None or not len(counts[0]):
+            return None
+        levels, distinct = counts
+        K, k = self.n_levels, self.block_size
+        c, n_x = self._carried, self._n_x
+        q = len(self._border_x)
+        S_b = np.asarray(penalized.penalty_small, dtype=np.float64)
+        if not np.any(S_b):
+            return None
+        norms = np.sqrt(np.einsum("lij,lij->l", P, P))
+        live = norms > 0.0
+        if not np.any(live):
+            return None
+        balanced = np.sum(P[live] / norms[live, None, None], axis=0)
+        values, vectors = np.linalg.eigh(0.5 * (balanced + balanced.T))
+        null = values <= k * _EPS * max(float(values[-1]), 0.0)
+        N_P = vectors[:, null]
+        m = N_P.shape[1]
+        if not m:
+            return None
+        # The leaf keeps no whole triangles (Opus review P1): each level's is
+        # upper triangular, so its rows below the leading ``k`` are zero on the
+        # level basis.  The null-space functions' rows are the leading rows'
+        # alone, and the intercept and border rows are the leading rows' and the
+        # trailing rows', read through their triangular factor (``trailing_root``,
+        # an orthogonal map of the stacked trailing rows, which keeps every Gram
+        # and every product's norm; not their Gram, whose rounding would swamp
+        # the cancelling residual below).
+        leaf = system.leaf
+        top = np.asarray(leaf.top, dtype=np.float64)
+        RZ = np.matmul(top[:, :, :k], N_P)  # (K, k, m): the null-space functions' rows
+        RB = top[:, :, k : k + 1 + q]  # (K, k, 1 + q): intercept and border rows
+        tail = np.asarray(leaf.trailing_root(), dtype=np.float64)  # (r, 1 + q), zero on z
+        if tail.shape[1] != 1 + q:
+            raise ValueError("The sz leaf's trailing rows do not match its border.")
+        G_BB = np.einsum("lai,laj->ij", RB, RB) + np.einsum("ai,aj->ij", tail, tail)
+        G_BZ = np.einsum("lai,laj->ij", RB, RZ)
+        # Jacobi-equilibrated: a smooth's reparametrised columns scale with its
+        # lambda (``1e-5`` of the others at lambda 1e10), and the raw Gram's
+        # condition (``1e14``) would cost the representation its accuracy
+        diagonal = np.diag(G_BB)
+        scale = np.zeros_like(diagonal)
+        scale[diagonal > 0.0] = 1.0 / np.sqrt(diagonal[diagonal > 0.0])
+        scaled = scipy.linalg.lstsq(
+            scale[:, None] * G_BB * scale[None, :],
+            scale[:, None] * G_BZ,
+            cond=(1 + q) * _EPS,
+            check_finite=False,
+        )[0]
+        U = scale[:, None] * scaled
+        residual = RZ - np.matmul(RB, U)
+        tail_residual = np.einsum(
+            "ai,ij->aj", tail, U
+        )  # the trailing rows' share: RZ is zero there
+        misfit = math.sqrt(
+            float(np.sum(residual * residual)) + float(np.sum(tail_residual * tail_residual))
+        )
+        size = float(np.sqrt(np.sum(RZ * RZ)))
+        if not size > 0.0 or misfit > math.sqrt(_EPS) * size:
+            return None
+        tree = self._tree
+        columns = []
+        for level, count in zip(levels, distinct, strict=True):
+            free = m - int(count)
+            if free <= 0:
+                continue
+            if int(count) == 0:
+                F = np.eye(m)
+            else:
+                F = np.linalg.svd(RZ[level], full_matrices=True)[2][int(count) :].T
+            for f in F.T:
+                vector = np.zeros(n_x)
+                representation = U @ (f / K)
+                vector[0] = representation[0]
+                vector[1 + c :] = representation[1:]
+                if c:
+                    shift = N_P @ f
+                    for node in range(tree.n_internal):
+                        lo, hi = int(tree.lo[node]), int(tree.hi[node])
+                        if not lo <= int(level) < hi:
+                            continue
+                        side = 0 if int(level) < lo + (hi - lo + 1) // 2 else 1
+                        deferred = np.flatnonzero(self._deferred_mask[node])
+                        vector[self._carry_pos[node, deferred]] = (
+                            tree.h[node, side] * shift[deferred]
+                        )
+                columns.append(vector)
+        if not columns:
+            return None
+        aliases = np.column_stack(columns)
+        border = aliases[1 + c :]
+        curvature = border.T @ S_b @ border
+        values, vectors = np.linalg.eigh(0.5 * (curvature + curvature.T))
+        # the rounding of each combination's quadratic form, on its entries before
+        # they cancel: a combination whose border part cancels (an exact null of
+        # the penalty as well) is left with rounding alone, below this
+        spread = np.abs(border) @ np.abs(vectors)
+        magnitude = np.einsum("it,ij,jt->t", spread, np.abs(S_b), spread)
+        certified = values > (q + 2 + len(values)) * _EPS * magnitude
+        if not np.any(certified):
+            return None
+        return aliases @ vectors[:, certified]
 
     def _joint_generators(self, generators, system) -> BorderGenerators:
         """The border generators over ``[alpha | carried | border]`` (super-root deferred).
@@ -1454,8 +1704,8 @@ class SumToZeroTreeFactor:
         per merge, the middle factor's product and Schur step on the subtree's
         rows.
         """
-        R = leaf.triangles
-        K, p, _ = R.shape
+        top = leaf.top
+        K, p = top.shape[0], top.shape[2]
         k = leaf.block_size
         n_x = self._n_x
         c = self._carried
@@ -1467,11 +1717,15 @@ class SumToZeroTreeFactor:
         merges = leaf.merges.astype(np.float64)
         # the level rows' columns [z | intercept | border | rhs] -> x positions
         x_of_w = np.concatenate(([0], self._border_x)).astype(np.intp)  # w columns but rhs
-        # augmented unsigned residuals per level: R_l [beta_lj; e_j] and the penalty rows
-        residual = np.matmul(R[:, :, :k], S_leaf)
-        residual[:, :, x_of_w] += R[:, :, k : k + 1 + q]
+        # augmented unsigned residuals per level: R_l [beta_lj; e_j] and the penalty
+        # rows; the triangle's rows below its leading k are zero on the level
+        # basis, so theirs is the trailing rows' column norm whatever beta is
+        residual = np.matmul(top[:, :, :k], S_leaf)
+        residual[:, :, x_of_w] += top[:, :, k : k + 1 + q]
         penalty_part = np.matmul(self._roots, S_leaf)
-        r2_level = np.sum(residual**2, axis=1) + np.sum(penalty_part**2, axis=1)  # (K, n_x)
+        r2_level = np.sum(residual**2, axis=1)
+        r2_level[:, x_of_w] += leaf.tail_norms2[:, : 1 + q]
+        r2_level = r2_level + np.sum(penalty_part**2, axis=1)  # (K, n_x)
         # column scales of the level rows (data, ``a2``) and of the penalty
         a_z = np.sqrt(np.maximum(a2[:, :k] + np.diagonal(P, axis1=1, axis2=2), 0.0))
         a_x_level = np.zeros((K, n_x))
@@ -1576,7 +1830,7 @@ class SumToZeroTreeFactor:
             + p * _gamma(m_trial)
             + merges * (2.0 * math.sqrt(p) * _gamma(4.0 * p * p) + p * _gamma(2.0 * p))
         )
-        sigma_level = sigma_level * (1.0 + np.max(np.abs(self._leaf_middle), axis=(1, 2)))
+        sigma_level = sigma_level * (1.0 + self._leaf_middle_max)
         total = np.einsum("l,le->e", sigma_level, rbar2_level)
         size = self._n_x + 1 + leaf.block_size
         width = 2 * leaf.block_size + self._n_x + 1
@@ -1776,6 +2030,19 @@ class SumToZeroTreeFactor:
         if self._scaled_eigenvalues_cache is None:
             self._scaled_eigenvalues_cache = np.linalg.eigvalsh(self._border.scaled_matrix)
         return self._scaled_eigenvalues_cache
+
+    def published(self, system: SumToZeroLeafSystem) -> SumToZeroTreeFactor:
+        """This factor on ``system``, its published copy (``published_leaf_system``).
+
+        Every number is this factor's own; the system it was built on is
+        replaced, which only the data estimability reads, on the published
+        leaf's trailing factor (``FactorSmoothLeafData.stacked_tail_rows``).
+        """
+        import copy
+
+        clone = copy.copy(self)
+        clone.system = system
+        return clone
 
     @cached_property
     def minimum_local_eigenvalue(self) -> float:
@@ -2006,7 +2273,12 @@ class SumToZeroTreeFactor:
 
     def _data_factor(self) -> SumToZeroTreeFactor:
         """The balance tree of the data alone: the leaf triangles, no penalty, Fisher form."""
-        from superglm.solvers._structured.block_leaves import _assemble_system
+        import dataclasses
+
+        from superglm.solvers._structured.block_leaves import (
+            _fisher_moments,
+            _system_from_moments,
+        )
 
         system, leaf = self.system, self.system.leaf
         penalized = self.penalized
@@ -2017,17 +2289,25 @@ class SumToZeroTreeFactor:
         if leaf.signed:
             # the triangles are of ``sqrt|w|`` rows: their Grams are the data's
             # under |w|, the intercept column's the total |w|
-            system = _assemble_system(
-                leaf.triangles,
-                None,
-                None,
-                leaf.counts,
-                leaf.merges,
-                center=leaf.center,
-                generators=leaf.generators,
+            tail_gram = leaf.trailing_gram()
+            if tail_gram is None:
+                raise ValueError("This signed sz leaf keeps no Gram of its trailing rows.")
+            fisher = dataclasses.replace(
+                leaf,
                 signed=False,
-                block_size=k,
-                weights=np.array([np.sum(leaf.triangles[:, :, k] ** 2)]),
+                tail_gram=tail_gram,
+                pseudo_rows=None,
+                signature=None,
+                error_rows=None,
+                error_diagonal=None,
+            )
+            level_rows, border = _fisher_moments(fisher.top, tail_gram, k)
+            total = float(np.sum(fisher.top[:, :, k] ** 2) + np.sum(fisher.tail_norms2[:, 0]))
+            system = _system_from_moments(
+                fisher,
+                level_rows,
+                border,
+                weights=np.array([total]),
                 weighted_rhs=np.zeros(1),
                 small_indices=operator.small_indices,
                 structured_indices=operator.structured_indices,
@@ -2035,6 +2315,7 @@ class SumToZeroTreeFactor:
                 group_name=system.dominant_group_name,
                 basis="sz",
                 thin_levels=system.thin_levels,
+                thin_counts=getattr(system, "thin_counts", None),
             )
         data = SumToZeroPenalizedOperator.with_penalties(
             system.operator, np.zeros((q, q)), np.zeros((K, k, k))
@@ -2077,11 +2358,17 @@ class SumToZeroTreeFactor:
         diagonal[0] = self.system.sum_w
         root = np.sqrt(np.maximum(diagonal, np.finfo(np.float64).tiny))
         Q, Rq = np.linalg.qr(root[:, None] * basis)
-        R = np.asarray(self.system.leaf.triangles, dtype=np.float64)
-        rows = np.matmul(R[:, :, :k], beta)
-        rows += R[:, :, k : k + 1] * N_x[0][None, None, :]
-        rows += np.matmul(R[:, :, k + 1 : k + 1 + q], N_x[self._border_x])
-        residual = scipy.linalg.solve_triangular(Rq, rows.reshape(-1, t).T, trans="T").T
+        leaf = self.system.leaf
+        top = leaf.top
+        # the triangles' leading rows, then their trailing rows (zero on the
+        # level basis) or the trailing rows' triangular factor: an orthogonal
+        # map of the stacked rows, which keeps every singular value
+        rows = np.matmul(top[:, :, :k], beta)
+        rows += top[:, :, k : k + 1] * N_x[0][None, None, :]
+        rows += np.matmul(top[:, :, k + 1 : k + 1 + q], N_x[self._border_x])
+        tail = leaf.stacked_tail_rows() @ np.vstack([N_x[:1], N_x[self._border_x]])
+        stacked = np.concatenate([rows.reshape(-1, t), tail])
+        residual = scipy.linalg.solve_triangular(Rq, stacked.T, trans="T").T
         singular, right = np.linalg.svd(residual, full_matrices=False)[1:]
         null = Q @ right[singular <= SHARED_RANK_POLICY.factor_rcond].T
         return np.linalg.norm(null, axis=1) <= SHARED_RANK_POLICY.factor_rcond
@@ -2704,6 +2991,17 @@ class ProfiledSumToZeroTreeFactor:
     @property
     def minimum_local_eigenvalue(self) -> float:
         return self.augmented_factor.minimum_local_eigenvalue
+
+    def published(self, system: SumToZeroLeafSystem | None = None):
+        """This factor with its augmented factor on the published ``system`` (its own, published, if ``None``)."""
+        import copy
+
+        augmented = self.augmented_factor
+        clone = copy.copy(self)
+        clone.augmented_factor = augmented.published(
+            augmented.system.published() if system is None else system
+        )
+        return clone
 
     @staticmethod
     def _shift_component(component: PenaltyComponent) -> PenaltyComponent:

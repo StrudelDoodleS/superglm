@@ -22,7 +22,7 @@ import pytest
 
 from superglm.solvers._structured.nested import NestedSchurFactor
 
-from .test_saved_fs_models import _se_tolerance
+from .test_saved_fs_models import _se_tolerance, assert_predicts_as_saved
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_v0_35_0"
 NOTICE = "rebuilt with the current solver"
@@ -38,7 +38,8 @@ def test_a_random_effect_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(name
     """T8 row "retired-class shim removed": without the module ``__getattr__`` of
     ``factors``, ``moments`` and ``operators`` the pickle does not load at all.
 
-    Predictions never read the solver state and stay bitwise.  The first
+    Predictions never read the solver state: they are v0.35.0's within two
+    evaluations' rounding (``assert_predicts_as_saved``).  The first
     inference call rebuilds it once, with the notice, as the random effect's
     chain of one on the nested factor at the saved coefficients and smoothing
     parameters; its standard errors agree with the ones v0.35.0 reported
@@ -51,7 +52,7 @@ def test_a_random_effect_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(name
     model = record["model"]
     frame, y = record["frame"], record["y"]
 
-    np.testing.assert_array_equal(np.asarray(model.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         se = model.metrics(frame, y).coefficient_se
@@ -76,11 +77,18 @@ def test_a_random_effect_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(name
 
 
 def test_a_released_random_effect_model_saved_by_v0_35_0_predicts_and_asks_for_a_refit() -> None:
+    """A model saved with ``retain_fit_state=False`` predicts; ``metrics``, ``summary`` and ``random_effects``
+    each ask for a refit (``summary`` and the term reports raised an unrelated
+    ``AttributeError`` before the retained state was resolved first).
+    """
     record = _load("re_gaussian_released")
     assert record["version"] == "0.35.0"
     assert record["state_types"]["augmented_factor"] == "ScalarSchurFactor"
     model = record["model"]
     frame, y = record["frame"], record["y"]
-    np.testing.assert_array_equal(np.asarray(model.predict(frame)), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
     with pytest.raises(RuntimeError, match="refit with retain_fit_state=True"):
         model.metrics(frame, y).coefficient_se
+    for call in (model.summary, lambda: model.random_effects("g")):
+        with pytest.raises(RuntimeError, match="refit with retain_fit_state=True"):
+            call()

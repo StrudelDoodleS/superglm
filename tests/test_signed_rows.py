@@ -314,3 +314,99 @@ def test_a_refused_observed_iterate_takes_a_levenberg_shift_and_its_step() -> No
     assert np.max(residual) <= tolerance
     unshifted = solve_augmented_normal_equations(system, factor, rhs)
     assert np.max(np.abs(unshifted - reference) / np.maximum(np.abs(reference), 1.0)) > tolerance
+
+
+def _centred_leaf_case(basis: str):
+    """An fs or sz leaf system on signed rows whose border carries a centre ``c0 != 0``."""
+    from superglm.solvers.structured import FactorSmoothPenalizedOperator
+    from tests._leaf_systems import leaf_system_from_rows
+    from tests.test_factor_smooth_leaf_factor import _rows
+    from tests.test_sum_to_zero_tree_factor import _case
+
+    if basis == "sz":
+        case = _case(signed=True, seed=21, border=lambda rng, n, _: 50.0 + rng.normal(size=(n, 3)))
+        return case["system"], case["penalized"], case["X"].mean(axis=0)
+    rng = np.random.default_rng(744)
+    n_levels, block_size, border = 5, 3, 4
+    centre = np.array([5.0, -3.0, 2.0, 1.0])
+    levels, Z, X, w, wz = _rows(rng, n_levels=n_levels, block_size=block_size, signed=True)
+    system = leaf_system_from_rows(
+        Z,
+        X + centre,
+        levels,
+        w,
+        wz,
+        n_levels=n_levels,
+        small_indices=np.arange(border),
+        structured_indices=np.arange(border, border + n_levels * block_size).reshape(
+            n_levels, block_size
+        ),
+        center=centre,
+        signed=True,
+    )
+    roots = rng.normal(size=(n_levels, block_size, block_size))
+    local = np.einsum("kji,kjl->kil", roots, roots) + 1.5 * np.eye(block_size)
+    penalized = FactorSmoothPenalizedOperator.with_penalties(
+        system.operator, 0.4 * np.eye(border), local
+    )
+    return system, penalized, centre
+
+
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+def test_a_shifted_leaf_step_keeps_its_intercept_in_the_centred_coordinate(basis) -> None:
+    """A Levenberg-shifted fs or sz step reads entry 0 as ``alpha`` (design §3.8, §3.11).
+
+    ``irls_direct`` solves ``(H + E) [b_0; b] = [1 X]' W z + E beta`` with
+    ``centred=True`` and reads entry 0 as the centred intercept ``alpha = b_0 +
+    c0' b``.  The data-side solve is centred there, so the ``E beta`` solve
+    must be too: in raw coordinates its entry 0 is ``b_0`` and the step's
+    intercept is off by ``-c0' b_extra`` (the review measured -3.55 on fs and
+    +37.4 on sz).  The slopes agree; the two intercepts differ by a few
+    roundings of terms no larger than ``|alpha|`` and ``|c0|' |b|``, so
+    ``gamma_{q+4} (|alpha| + 2 |c0|' |b|)`` bounds them.
+    """
+    from superglm.solvers.irls_direct import _levenberg_shifted_leaf_operator
+    from superglm.solvers.structured import build_augmented_structured_factor
+
+    system, penalized, centre = _centred_leaf_case(basis)
+    shifted, shift_of = _levenberg_shifted_leaf_operator(penalized, 1e-2, system)
+    factor, rhs = build_augmented_structured_factor(system, shifted)
+    p = factor.shape[0] - 1
+    beta = np.random.default_rng(1).normal(size=p)
+    apply = shift_of if callable(shift_of) else (lambda values: shift_of * values)
+    extra = np.concatenate(([0.0], apply(beta)))
+    raw = solve_augmented_normal_equations(system, factor, rhs, extra=extra)
+    centred = solve_augmented_normal_equations(system, factor, rhs, centred=True, extra=extra)
+    border = system.operator.small_indices
+    q = border.size
+    gamma = (q + 4) * EPS / 2 / (1.0 - (q + 4) * EPS / 2)
+    scale = abs(centred[0]) + 2.0 * float(np.abs(centre) @ np.abs(raw[1:][border]))
+    np.testing.assert_allclose(centred[1:], raw[1:], rtol=0.0, atol=gamma * scale)
+    alpha = raw[0] + math.fsum(centre * raw[1:][border])
+    assert abs(centred[0] - alpha) <= gamma * scale, (centred[0], alpha, gamma * scale)
+
+
+def test_an_iterate_no_shift_certifies_raises_its_own_refusal(monkeypatch) -> None:
+    """The unshifted refusal names the iterate's cause; the shifted ones do not.
+
+    When no Levenberg shift certifies an observed iterate, the error raised is
+    the factor's refusal of ``H`` itself, with the largest shift's refusal
+    attached as a note, never the refusal of ``H + 1e8 diag(scale)`` alone.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+
+    case, w, lambdas = _signed_case("cancel", 2, 1e-7, 1e4, 0.0)
+    system, penalized = _chain_factor(case, w, lambdas)
+    builds = []
+
+    def refuse(system_, operator):
+        builds.append(operator)
+        cause = "of the iterate" if operator is penalized else f"shifted, build {len(builds)}"
+        raise np.linalg.LinAlgError(f"refusal {cause}")
+
+    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refuse)
+    with pytest.raises(np.linalg.LinAlgError, match="refusal of the iterate") as raised:
+        _build_iterate_factor(system, penalized, observed=True)
+    assert len(builds) == 1 + len(irls_direct._LEVENBERG_SHIFTS)
+    notes = getattr(raised.value, "__notes__", [])
+    assert any(f"shifted, build {len(builds)}" in note for note in notes)

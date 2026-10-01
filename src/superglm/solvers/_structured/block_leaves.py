@@ -14,8 +14,11 @@ each level's rows ``g_r = sqrt|w_r| [z_r, 1, x_r - c0, zeta_r]`` (``zeta`` the
 working response, so the right-hand side travels inside the factorization)
 are reduced by Householder QR, a level cut by a chunk edge merging its pieces
 by one more QR of the stacked triangles (TSQR).  Fisher rows (``w >= 0`` by
-type) keep the triangle ``R_l``; its trailing rows, the within-level residual
-of the border on the level basis, go straight into the border Gram ``W_r``.
+type) keep the triangle ``R_l``'s leading ``k`` rows; its trailing rows, the
+within-level residual of the border on the level basis, go straight into the
+border Gram ``W_r``.  A level is closed into that compact form as the pass
+leaves it, so no ``(K, p, p)`` stack of triangles is formed
+(``FactorSmoothLeafData``).
 Signed rows (observed curvature, by type) follow Chandrasekaran, Gu and Sayed
 as Bojanczyk, Higham and Patel (2003, SIMAX 24) state it: the middle factor
 ``M_l = Q_l' J Q_l`` (a merge maps it by the merge's orthogonal factor), its
@@ -67,18 +70,25 @@ where this bound gives 1.5e-3, with every measured error within it.
 
 Caches: ``FactorSmoothLeafFactor`` forms ``Q^+`` in raw coordinates on first
 read (owner: the factor; lifetime: the factor; invalidation: none, since every
-input is fixed at construction).  The leaf data of an iterate belong to its
-system and are never modified.
+input is fixed at construction); its ``(K, k, q)``-sized products
+(``_REBUILT_ON_USE``) are dropped from a pickle and formed again on first use.
+The leaf data of an iterate belong to its system and are never modified.  The
+lineage's leaf memo (``build_factor_smooth_leaf_system``) holds the last
+system until the fit publishes its state (``release_leaf_memo``); the
+published state holds copies of the terminal system and factor
+(``published_leaf_system``), whose leaf keeps what a factor build reads and no
+way back to the rows.
 """
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numba
 import numpy as np
@@ -359,6 +369,110 @@ def _leaf_segments(
 
 
 @numba.njit(cache=True)
+def _close_level(R, level, k, top, tail_norms2, tail_gram, with_gram):  # pragma: no cover
+    """Fold one level's finished triangle ``R`` ``(p, p)`` into the compact leaf data.
+
+    ``top[level]`` its leading ``k`` rows; ``tail_norms2[level]`` the squared
+    column norms of its trailing rows ``T = R[k:, k:]`` (upper triangular);
+    ``tail_gram += T'T`` when ``with_gram``, each entry once and mirrored, so
+    it stays exactly symmetric.  Fixed order, no BLAS.
+    """
+    p = R.shape[0]
+    w = p - k
+    for i in range(k):
+        for j in range(p):
+            top[level, i, j] = R[i, j]
+    for j in range(w):
+        s = 0.0
+        for a in range(j + 1):
+            value = R[k + a, k + j]
+            s += value * value
+        tail_norms2[level, j] = s
+    if with_gram:
+        for i in range(w):
+            for j in range(i, w):
+                s = 0.0
+                for a in range(i + 1):
+                    s += R[k + a, k + i] * R[k + a, k + j]
+                tail_gram[i, j] += s
+                if j != i:
+                    tail_gram[j, i] += s
+
+
+@numba.njit(cache=True)
+def _close_levels(R_acc, k, top, tail_norms2, tail_gram, with_gram):  # pragma: no cover
+    """``_close_level`` over every level of ``R_acc`` ``(K, p, p)``, in level order."""
+    for level in range(R_acc.shape[0]):
+        _close_level(R_acc[level], level, k, top, tail_norms2, tail_gram, with_gram)
+
+
+@numba.njit(cache=True)
+def _fisher_leaf_segments(
+    rows, weights, levels, R_open, open_state, top, tail_norms2, tail_gram, counts, merges, k
+):  # pragma: no cover - compiled
+    """``_leaf_segments`` for Fisher rows, holding only the open level's triangle.
+
+    The rows come in level order, so a level is finished once the pass
+    leaves it: its triangle ``R_open`` is then closed into the compact leaf
+    data (``_close_level``) and the next level opens.  ``open_state`` is
+    ``[level, started]`` across chunks (``level`` ``-1`` before the first
+    row); the caller closes the last level.  The triangle of each level is
+    the one ``_leaf_segments`` forms, bit for bit (the same QR and merges).
+    Returns ``-1``, or the row of a level out of order.
+    """
+    m, p = rows.shape
+    work = np.empty(64 * (p + 1))
+    ints = np.empty(6, np.int32)
+    no_middle = np.zeros((1, 1))
+    start = 0
+    while start < m:
+        level = levels[start]
+        stop = start
+        while stop < m and levels[stop] == level:
+            stop += 1
+        if level != open_state[0]:
+            if level < open_state[0]:
+                return start
+            if open_state[0] >= 0:
+                _close_level(R_open, open_state[0], k, top, tail_norms2, tail_gram, True)
+            open_state[0] = level
+            open_state[1] = 0
+            for i in range(p):
+                for j in range(p):
+                    R_open[i, j] = 0.0
+        live = 0
+        for r in range(start, stop):
+            if weights[r] != 0.0:
+                live += 1
+        if live:
+            G = np.empty((p, live)).T
+            position = 0
+            for r in range(start, stop):
+                w = weights[r]
+                if w == 0.0:
+                    continue
+                root = math.sqrt(abs(w))
+                for j in range(p):
+                    G[position, j] = root * rows[r, j]
+                position += 1
+            tau = np.zeros(min(live, p))
+            _house_qr(G, tau, work, ints)
+            R_new = np.zeros((p, p))
+            _upper_of(G, R_new)
+            if open_state[1]:
+                _merge_level(R_open, no_middle, R_new, no_middle, False)
+                merges[level] += 1
+            else:
+                for i in range(p):
+                    for j in range(p):
+                        R_open[i, j] = R_new[i, j]
+                open_state[1] = 1
+            counts[level] += live
+        start = stop
+    return -1
+
+
+@numba.njit(cache=True)
 def _exact_basis_rows(out, order, lo, hi, data, indices, indptr, natural_map):  # pragma: no cover
     """Rows ``order[lo:hi]`` of ``B @ natural_map`` from ``B``'s CSR arrays, stored order."""
     k = natural_map.shape[1]
@@ -426,8 +540,9 @@ def _level_row_forms(U, F, levels, Z, tree_out, cross_out):  # pragma: no cover 
 def _fisher_trials(R_acc, roots, k, Qx, U_out, F_out, Dinv_out, logdets):  # pragma: no cover
     """Per level ``QR([[R_top], [sqrt(P), 0]])``: ``U``, ``F = U^-1 V``, ``D^-1``, ``log|D|``;
     ``Qx += T'T``.  Returns ``-1`` or the first level whose pivot is not positive.
+    ``R_acc`` ``(K, >= k, p)``: only each level's leading ``k`` rows are read.
     """
-    K, p, _ = R_acc.shape
+    K, p = R_acc.shape[0], R_acc.shape[2]
     width = p - k
     stacked = np.empty((p, 2 * k)).T
     tau = np.zeros(min(2 * k, p))
@@ -595,48 +710,169 @@ def _signed_trials(
 
 
 # ------------------------------------------------------------ leaf data ----
+class _TrailingRowsSource:
+    """An ``sz`` leaf's trailing rows, formed again by its own leaf pass (Opus review P1).
+
+    An ``sz`` leaf keeps no ``(K, p, p)`` triangles during the fit: its data
+    estimability reads the trailing rows only through their triangular
+    factor, which ``FactorSmoothLeafData.published`` forms once from this
+    pass (the same rows, kernel and order, so the same triangles bit for
+    bit).  It holds the layout and the read-only rows the leaf was formed
+    from (the lineage memo's copies).  Never pickled: a restored in-fit leaf
+    has no source (``stacked_tail_rows`` then says so).
+    """
+
+    def __init__(self, layout, weights, weighted_rhs, center, error, signed: bool) -> None:
+        self.layout = layout
+        self.rows = (weights, weighted_rhs, center, error)
+        self.signed = bool(signed)
+
+    def triangles(self) -> NDArray | None:
+        if self.layout is None:
+            return None
+        weights, weighted_rhs, center, error = self.rows
+        assert weights is not None and weighted_rhs is not None and center is not None
+        with narrow_kernel_blas_threads(self.layout.block_size + self.layout.width + 2):
+            return _leaf_pass(
+                self.layout, weights, weighted_rhs, center, error, signed=self.signed
+            )[0]
+
+    def __getstate__(self) -> dict:
+        return {}
+
+    def __setstate__(self, state: dict) -> None:
+        self.layout, self.rows, self.signed = None, (None, None, None, None), False
+
+
 @dataclass(frozen=True, eq=False)
 class FactorSmoothLeafData:
     """One iterate's leaf statistics of an ``fs`` term (module docstring).
 
-    ``triangles`` ``(K, p, p)`` the level triangles of ``sqrt|w| [z, 1, x -
-    c0, zeta]`` (``p = k + q + 2``); for Fisher rows ``within`` ``(q + 2, q +
-    2)`` is the within-level residual Gram (every level's trailing rows) and
-    the per-lambda step reads only the leading ``k`` rows; for signed rows
-    ``pseudo_rows`` and ``signature`` are ``B_l`` and ``sign Lambda_l`` and
-    ``error_gram`` ``(K, p - 1, p - 1)`` is ``sum_r e_r x_r x_r'`` per level.
-    ``counts`` and ``merges`` are each level's live rows and TSQR merges (the
-    bound's constants).  ``center`` is ``c0`` ``(q,)`` and ``generators`` the
-    structural nulls of the border (``factor_smooth_prior_statistics``).
+    Each level's triangle ``R_l`` of ``sqrt|w| [z, 1, x - c0, zeta]`` (``p = k
+    + q + 2``) is upper triangular, so every row below its leading ``k`` is
+    zero on the level basis: ``top`` ``(K, k, p)`` holds those leading rows,
+    all a per-lambda step reads; ``tail_norms2`` ``(K, q + 2)`` the squared
+    column norms of the trailing rows (the border bound's residuals and
+    column scales) and ``tail_gram`` ``(q + 2, q + 2)`` their Gram summed over
+    the levels, which for Fisher rows is the within-level residual Gram
+    ``within``.  For signed rows ``pseudo_rows`` and ``signature`` are ``B_l``
+    and ``sign Lambda_l``, and of each level's error Gram ``sum_r e_r x_r
+    x_r'`` (``x = [z, 1, x - c0]``) the border bound and the Levenberg scale
+    read only its leading ``k`` rows ``error_rows`` ``(K, k, p - 1)`` and its
+    diagonal ``error_diagonal`` ``(K, p - 1)``.  ``counts`` and ``merges`` are
+    each level's live rows and TSQR merges (the bound's constants).
+    ``center`` is ``c0`` ``(q,)`` and ``generators`` the structural nulls of
+    the border (``factor_smooth_prior_statistics``).
+
+    Memory (Opus review P1): nothing here is ``K p^2`` except the signed
+    pseudo-rows a step reads.  An ``sz`` leaf's data estimability reads the
+    trailing rows themselves (``SumToZeroTreeFactor._verified_data_estimable``,
+    through ``stacked_tail_rows``): during the fit ``trailing_source`` forms
+    them again from the leaf's own pass, and the published leaf keeps their
+    triangular factor ``tail_root`` (``published``).  ``triangles`` holds the
+    whole triangles only where a caller formed them (``_assemble_system``).
     """
 
-    triangles: NDArray
-    within: NDArray | None
+    top: NDArray
+    tail_norms2: NDArray
+    tail_gram: NDArray | None
     pseudo_rows: NDArray | None
     signature: NDArray | None
-    middle: NDArray | None
-    error_gram: NDArray | None
+    error_rows: NDArray | None
+    error_diagonal: NDArray | None
     counts: NDArray
     merges: NDArray
     center: NDArray
     generators: BorderGenerators | None
     signed: bool
     block_size: int
+    triangles: NDArray | None = None
+    tail_root: NDArray | None = None
+    trailing_source: _TrailingRowsSource | None = None
 
     @property
     def width(self) -> int:
         """``p = k + q + 2``: basis, intercept, border and right-hand side."""
-        return int(self.triangles.shape[1])
+        return int(self.top.shape[2])
 
-    @cached_property
-    def grams(self) -> NDArray:
-        """``(K, p, p)`` level Grams ``G_l' J G_l`` from the leaf data (products, no pass)."""
-        R = self.triangles
-        if self.signed and self.middle is not None:
-            grams = np.einsum("kai,kab,kbj->kij", R, self.middle, R, optimize=True)
-        else:
-            grams = np.einsum("kai,kaj->kij", R, R, optimize=True)
-        return 0.5 * (grams + grams.transpose(0, 2, 1))
+    @property
+    def within(self) -> NDArray | None:
+        """The within-level residual Gram of Fisher rows (``None`` for signed rows)."""
+        return None if self.signed else self.tail_gram
+
+    def stacked_tail_rows(self) -> NDArray:
+        """Rows ``(m, q + 1)`` whose Gram is the trailing rows' over ``[1, x - c0]``.
+
+        The trailing rows themselves while the triangles are held, else their
+        triangular factor ``tail_root``: the same singular values and right
+        singular vectors on any product (an orthogonal map of the rows).
+        """
+        k = self.block_size
+        q1 = self.width - k - 1
+        if self.tail_root is not None:
+            return self.tail_root
+        triangles = self.triangles
+        if triangles is None and self.trailing_source is not None:
+            triangles = self.trailing_source.triangles()
+        if triangles is None:
+            raise ValueError(
+                "This leaf keeps neither its triangles nor their trailing factor, and cannot "
+                "form them again (a leaf restored from a pickle in the middle of a fit)."
+            )
+        return np.ascontiguousarray(triangles[:, k:, k : k + q1]).reshape(-1, q1)
+
+    def trailing_root(self) -> NDArray:
+        """The trailing rows' triangular factor over ``[1, x - c0]``: the same products' norms.
+
+        ``tail_root`` once published; during a fit, formed from
+        ``stacked_tail_rows`` on first read and held (an ``sz`` term's
+        thin-level aliases read it at every factor build,
+        ``SumToZeroTreeFactor._penalized_aliases``).  Owner: this leaf;
+        lifetime: the leaf's; invalidation: none (the leaf data are
+        immutable).  ``(q + 1)^2`` floats.
+        """
+        if self.tail_root is not None:
+            return self.tail_root
+        held = self.__dict__.get("_trailing_root")
+        if held is None:
+            rows = self.stacked_tail_rows()
+            # one BLAS thread, as the pass: its bits do not depend on the pool
+            with narrow_kernel_blas_threads(self.width):
+                held = np.linalg.qr(rows, mode="r")
+            object.__setattr__(self, "_trailing_root", held)
+        return held
+
+    def trailing_gram(self) -> NDArray | None:
+        """``sum_l T_l' T_l`` of the trailing rows ``T_l``: ``tail_gram``, or formed from the triangles."""
+        if self.tail_gram is not None or self.triangles is None:
+            return self.tail_gram
+        k = self.block_size
+        tail = self.triangles[:, k:, k:]
+        gram = np.einsum("kai,kaj->ij", tail, tail, optimize=True)
+        return 0.5 * (gram + gram.T)
+
+    def published(self) -> FactorSmoothLeafData:
+        """The leaf a published state keeps: what a factor build reads, without the whole triangles.
+
+        A published system still serves a lambda-only trial
+        (``assembly.solve_cached_structured``), so its leaf keeps the leading
+        rows, the trailing rows' norms and Gram, and, on signed rows, the
+        pseudo-rows and error Grams.  Only an ``sz`` leaf's way to its trailing
+        rows goes (its triangles, or the pass that forms them): they become
+        their triangular factor (``stacked_tail_rows``), formed here once.
+        """
+        if self.triangles is None and self.trailing_source is None:
+            return self
+        tail_root = self.tail_root
+        if tail_root is None:
+            tail_root = np.linalg.qr(self.stacked_tail_rows(), mode="r")
+        return dataclasses.replace(
+            self,
+            triangles=None,
+            trailing_source=None,
+            tail_root=tail_root,
+            tail_gram=self.trailing_gram(),
+        )
 
 
 def factor_smooth_prior_statistics(
@@ -698,6 +934,24 @@ def factor_smooth_prior_statistics(
     return center, generators
 
 
+def release_leaf_memo(layout_cache: dict | None) -> None:
+    """Empty the lineage's leaf memo once a fit has published its state (Opus review P1).
+
+    The memo (``build_factor_smooth_leaf_system``) serves a repeated build
+    within a fit.  Its last system would otherwise stay alive with the
+    design: on signed rows its pseudo-rows and error Grams, on an ``sz`` term
+    its whole triangles, ``K p^2`` each.  A later fit on the lineage fills it
+    again.
+    """
+    from superglm.solvers._structured.selection import shared_nesting_cache
+
+    if layout_cache is None:
+        return
+    memo = shared_nesting_cache(layout_cache).get(("fs_slot", "leaf_memo"))
+    if memo is not None:
+        memo.clear()
+
+
 def _lineage_slot(layout: FactorSmoothLeafLayout, name: str) -> list:
     """A bounded list in the layout's lineage cache, one per ``name`` (perf F15).
 
@@ -725,18 +979,38 @@ def _leaf_pass(
     error: NDArray | None,
     *,
     signed: bool,
+    compact: bool = False,
     chunk_size: int = _CHUNK,
-) -> tuple[NDArray, NDArray | None, NDArray | None, NDArray, NDArray]:
-    """The per-level triangles (and middle factors, error Grams) of one iterate's rows."""
+) -> tuple:
+    """The per-level triangles (and middle factors, error Grams) of one iterate's rows.
+
+    Returns ``(R_acc, M_acc, E_acc, counts, merges)``.  ``compact`` closes
+    each level into the compact leaf data as the pass leaves it and forms no
+    ``(K, p, p)`` triangle or middle factor (Opus review P1): Fisher rows in
+    the kernel itself (``_fisher_leaf_segments``), signed rows a few levels at
+    a time (``_SignedWindow``); it returns their ``_LeafParts``.
+    """
     dominant = layout.dominant
     k, q = layout.block_size, layout.width
     p = k + q + 2
     K = layout.leaf_count
     order = layout.leaf_order
     n = len(order)
-    R_acc = np.zeros((K, p, p))
-    M_acc = np.zeros((K, p, p)) if signed else np.zeros((1, 1, 1))
-    E_acc = np.zeros((K, p - 1, p - 1)) if signed else np.zeros((1, 1, 1))
+    window = (
+        _SignedWindow(K, k, p, with_gram=dominant.factor_basis == "sz")
+        if compact and signed
+        else None
+    )
+    if compact and not signed:
+        top = np.zeros((K, k, p))
+        tail_norms2 = np.zeros((K, p - k))
+        tail_gram = np.zeros((p - k, p - k))
+        R_open = np.zeros((p, p))
+        open_state = np.array([-1, 0], dtype=np.int64)
+    elif window is None:
+        R_acc = np.zeros((K, p, p))
+        M_acc = np.zeros((K, p, p)) if signed else np.zeros((1, 1, 1))
+        E_acc = np.zeros((K, p - 1, p - 1)) if signed else np.zeros((1, 1, 1))
     started = np.zeros(K, dtype=np.bool_)
     counts = np.zeros(K, dtype=np.int64)
     merges = np.zeros(K, dtype=np.int64)
@@ -777,6 +1051,29 @@ def _leaf_pass(
             raise np.linalg.LinAlgError(
                 f"FactorSmooth term {layout.dominant_group_name!r} has non-finite leaf rows."
             )
+        if window is not None:
+            assert error_all is not None
+            window.fold(chunk, w, np.ascontiguousarray(error_all[index]), levels[lo:hi])
+            continue
+        if compact:
+            if (
+                _fisher_leaf_segments(
+                    chunk,
+                    w,
+                    levels[lo:hi],
+                    R_open,
+                    open_state,
+                    top,
+                    tail_norms2,
+                    tail_gram,
+                    counts,
+                    merges,
+                    k,
+                )
+                >= 0
+            ):
+                raise ValueError("The leaf pass needs its rows in level order.")
+            continue
         _leaf_segments(
             chunk,
             w,
@@ -790,6 +1087,12 @@ def _leaf_pass(
             merges,
             signed,
         )
+    if window is not None:
+        return window.finish()
+    if compact:
+        if open_state[0] >= 0:
+            _close_level(R_open, open_state[0], k, top, tail_norms2, tail_gram, True)
+        return _LeafParts(top, tail_norms2, tail_gram, counts, merges)
     return R_acc, (M_acc if signed else None), (E_acc if signed else None), counts, merges
 
 
@@ -1003,9 +1306,11 @@ class FactorSmoothLeafSystem:
     dominant_group_index: int
     dominant_group_name: str
     # The border block and cross of the rows shifted by ``c0`` (``leaf.center``):
-    # ``sum w (x - c0)(x - c0)'`` and ``sum w (x - c0)``, from the leaf Grams.
+    # ``sum w (x - c0)(x - c0)'`` and ``sum w (x - c0)``, and the level-by-border
+    # cross ``sum w z (x - c0)'`` ``(K, k, q)``, from the leaf Grams.
     shifted_gram_small: NDArray
     shifted_xtw_small: NDArray
+    shifted_level_cross: NDArray
     # The last factor built on this system (``assembly.build_augmented_block_factor``),
     # reused when the next has bitwise the same penalty parts (perf F1).  Owner:
     # this system; lifetime: the system, one slot; key: ``penalty_small`` and
@@ -1025,6 +1330,10 @@ class FactorSmoothLeafSystem:
         for name, value in state.items():
             object.__setattr__(self, name, value)
 
+    def published(self) -> FactorSmoothLeafSystem:
+        """This system as a published state keeps it (``published_leaf_system``)."""
+        return published_leaf_system(self)
+
     @cached_property
     def centred_data_operator(self) -> CenteredBlockOperator:
         """``X~' W X~`` centred on the working-weighted mean, formed on the rows shifted by ``c0``.
@@ -1040,6 +1349,23 @@ class FactorSmoothLeafSystem:
         immutable); lifetime: the system.
         """
         return _shifted_centred_operator(self, BlockSymmetricOperator, None)
+
+
+def published_leaf_system(system):
+    """A copy of an ``fs`` or ``sz`` leaf system for a published state (Opus review P1).
+
+    The same moments, the same centred data operator (formed once, before the
+    copy, so a published factor still recognises it as its own data) and the
+    leaf without the whole triangles (``FactorSmoothLeafData.published``); no
+    factor memo.  The fit's own system is left as it is: the lineage's memo
+    may serve it to a later fit, which builds factors on it.
+    """
+    system.centred_data_operator  # noqa: B018 - formed once, carried by the copy
+    state = system.__getstate__()
+    state["leaf"] = system.leaf.published()
+    clone = object.__new__(type(system))
+    clone.__setstate__(state)
+    return clone
 
 
 def _is_own_centred_data(operator, system, xtw: NDArray, sum_w: float) -> bool:
@@ -1062,26 +1388,46 @@ def _is_own_centred_data(operator, system, xtw: NDArray, sum_w: float) -> bool:
     )
 
 
+def share_cross_block(operator, cross: NDArray):
+    """``operator`` keeping ``cross`` itself as its cross block, not the copy it made (Opus review P1).
+
+    The block operators copy every block they are given.  A penalty never
+    touches the level-by-border cross block, so the penalized operators of a
+    system (one per trial) and its centred operator would each keep a ``(K,
+    k, q)`` copy of the system's.  ``cross`` is shared only when it holds the
+    same values and is a read-only array that owns its data, so nothing can
+    write through it; the copy is then dropped.
+    """
+    if (
+        isinstance(cross, np.ndarray)
+        and cross.dtype == np.float64
+        and cross.base is None
+        and not cross.flags.writeable
+        and np.array_equal(operator.C, cross)
+    ):
+        object.__setattr__(operator, "C", cross)
+    return operator
+
+
 def _shifted_centred_operator(
     system, operator_type, raw_structured_cross: NDArray | None
 ) -> CenteredBlockOperator:
     """The centred data operator of an ``fs`` or ``sz`` leaf system on its ``c0``-shifted moments.
 
     The border block is ``system.shifted_gram_small``, the level-by-border cross
-    the leaf Grams' ``sum w z (x - c0)'`` (``C_c``), the level blocks the
-    system's own; the cross vector is ``[sum w (x - c0) | X_t' w]`` (the level
+    ``system.shifted_level_cross`` (``C_c = sum w z (x - c0)'``), the level
+    blocks the system's own; the cross vector is ``[sum w (x - c0) | X_t' w]`` (the level
     columns are not shifted) and the centre that over ``sum_w``.
     """
-    leaf = system.leaf
-    k, q = leaf.block_size, len(leaf.center)
     raw = system.operator
     shifted = operator_type(
         A=system.shifted_gram_small,
-        C=leaf.grams[:, :k, k + 1 : k + 1 + q],
+        C=system.shifted_level_cross,
         D=raw.D,
         small_indices=raw.small_indices,
         structured_indices=raw.structured_indices,
     )
+    share_cross_block(shifted, system.shifted_level_cross)
     cross = np.empty(raw.shape[0], dtype=np.float64)
     cross[raw.small_indices] = system.shifted_xtw_small
     cross[raw.structured_indices] = system.xtw_structured
@@ -1144,16 +1490,26 @@ def build_factor_smooth_leaf_system(
             return system
     # LAPACK inside the pass runs on one BLAS thread under the automatic policy
     # (a wide fit re-capped at the leaf's width), so its bits do not depend on it
+    basis = layout.dominant.factor_basis
+    held = tuple(
+        None if values is None else _read_only_copy(values)
+        for values in (weights, weighted_rhs, held_error)
+    )
+    # no (K, p, p) triangle or middle factor is formed; an sz leaf forms its
+    # trailing rows again from this pass when its estimability reads them
     with narrow_kernel_blas_threads(layout.block_size + layout.width + 2):
-        R_acc, M_acc, E_acc, counts, merges = _leaf_pass(
-            layout, weights, weighted_rhs, center, error, signed=signed
+        parts = _leaf_pass(
+            layout, weights, weighted_rhs, center, error, signed=signed, compact=True
         )
-    system = _assemble_system(
-        R_acc,
-        M_acc,
-        E_acc,
-        counts,
-        merges,
+    source = (
+        _TrailingRowsSource(layout, held[0], held[1], center, held[2], signed)
+        if basis == "sz"
+        else None
+    )
+    assert isinstance(parts, _LeafParts)
+    system = _assemble_compact(
+        parts,
+        trailing_source=source,
         center=center,
         generators=generators,
         signed=signed,
@@ -1164,14 +1520,9 @@ def build_factor_smooth_leaf_system(
         structured_indices=layout.structured_indices,
         group_index=layout.dominant_group_index,
         group_name=layout.dominant_group_name,
-        basis=layout.dominant.factor_basis,
-        thin_levels=(
-            layout.thin_levels(prior_weights) if layout.dominant.factor_basis == "sz" else ()
-        ),
-    )
-    held = tuple(
-        None if values is None else _read_only_copy(values)
-        for values in (weights, weighted_rhs, held_error)
+        basis=basis,
+        thin_levels=(layout.thin_levels(prior_weights) if basis == "sz" else ()),
+        thin_counts=(layout.thin_level_counts(prior_weights) if basis == "sz" else None),
     )
     memo[:] = [(sources, (*held, bool(signed), center), system)]
     return system
@@ -1202,50 +1553,356 @@ def _assemble_system(
     group_name: str,
     basis: str = "fs",
     thin_levels: tuple = (),
+    thin_counts: tuple[NDArray, NDArray] | None = None,
 ):
     """The leaf data (pseudo-rows or within Gram) and the raw moment operator by products.
 
-    ``basis="sz"`` returns the ``SumToZeroLeafSystem`` of the balance tree: the
-    same leaf data over all ``K`` levels, the level-space moment operator
-    behind the public ``K - 1`` coordinates and the public vectors
-    ``[I; -1']' v`` of the level ones (one-engine design §3.5).
+    The whole triangles ``R_acc`` are closed level by level into the compact
+    leaf data (``_close_levels``, the arithmetic of the compact pass) and the
+    system is assembled from it (``_assemble_compact``); signed rows read
+    their triangles and middle factors once more there, and an ``sz`` leaf
+    keeps the triangles.
     """
     k = block_size
-    q = len(center)
-    within = None
-    pseudo_rows = signature = None
+    K, p = R_acc.shape[0], R_acc.shape[2]
+    top = np.zeros((K, k, p))
+    tail_norms2 = np.zeros((K, p - k))
+    tail_gram = np.zeros((p - k, p - k))
+    _close_levels(R_acc, k, top, tail_norms2, tail_gram, not signed)
+    parts = _LeafParts(top, tail_norms2, None if signed else tail_gram, counts, merges)
     if signed:
         assert M_acc is not None
-        lam, vectors = np.linalg.eigh(M_acc)
-        pseudo_rows = np.sqrt(np.abs(lam))[:, :, None] * np.einsum(
-            "kba,kbj->kaj", vectors, R_acc, optimize=True
+        pseudo_rows, signature, level_rows, border = _signed_parts(R_acc, M_acc, k)
+        assert E_acc is not None
+        parts = parts._replace(
+            pseudo_rows=pseudo_rows,
+            signature=signature,
+            error_rows=np.ascontiguousarray(E_acc[:, :k, :]),
+            error_diagonal=np.diagonal(E_acc, axis1=1, axis2=2).copy(),
+            level_rows=level_rows,
+            border=border,
         )
-        signature = np.where(lam < 0.0, -1.0, 1.0)
+    return _assemble_compact(
+        parts._replace(triangles=R_acc),
+        center=center,
+        generators=generators,
+        signed=signed,
+        block_size=block_size,
+        weights=weights,
+        weighted_rhs=weighted_rhs,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+        group_index=group_index,
+        group_name=group_name,
+        basis=basis,
+        thin_levels=thin_levels,
+        thin_counts=thin_counts,
+    )
+
+
+class _LeafParts(NamedTuple):
+    """One iterate's compact leaf data as a pass or ``_assemble_system`` forms it.
+
+    ``top``, ``tail_norms2``, ``tail_gram`` (Fisher rows), ``counts`` and
+    ``merges`` as ``FactorSmoothLeafData``; signed rows add the pseudo-rows,
+    signatures and error Grams' leading rows and diagonals, and their level
+    Grams' level-basis rows and
+    border sum (``_signed_parts``); ``triangles`` the whole triangles where a
+    caller formed them (an ``sz`` leaf keeps them).
+    """
+
+    top: NDArray
+    tail_norms2: NDArray
+    tail_gram: NDArray | None
+    counts: NDArray
+    merges: NDArray
+    pseudo_rows: NDArray | None = None
+    signature: NDArray | None = None
+    error_rows: NDArray | None = None
+    error_diagonal: NDArray | None = None
+    level_rows: NDArray | None = None
+    border: NDArray | None = None
+    triangles: NDArray | None = None
+
+
+def _assemble_compact(
+    parts: _LeafParts,
+    *,
+    trailing_source: _TrailingRowsSource | None = None,
+    center: NDArray,
+    generators: BorderGenerators | None,
+    signed: bool,
+    block_size: int,
+    weights: NDArray,
+    weighted_rhs: NDArray,
+    small_indices: NDArray,
+    structured_indices: NDArray,
+    group_index: int,
+    group_name: str,
+    basis: str = "fs",
+    thin_levels: tuple = (),
+    thin_counts: tuple[NDArray, NDArray] | None = None,
+):
+    """The system of one iterate from its compact leaf data (``FactorSmoothLeafData``).
+
+    The level Grams ``G_l = R_l' M_l R_l`` (``M_l = I`` for Fisher rows) are
+    never formed whole (Opus review P1: ``(K, p, p)`` beside a wide border):
+    the moment operator reads only their level-basis rows ``G_l[:k, :]`` and
+    the border block summed over the levels (``_fisher_moments``; signed
+    rows bring theirs, ``_signed_parts``).  ``basis="sz"`` returns the
+    ``SumToZeroLeafSystem`` of the balance tree: the same leaf data over all
+    ``K`` levels, the level-space moment operator behind the public ``K - 1``
+    coordinates and the public vectors ``[I; -1']' v`` of the level ones
+    (one-engine design §3.5); its leaf reaches its trailing rows through
+    ``trailing_source`` (or the triangles a caller formed) until it is
+    published (``FactorSmoothLeafData.published``).
+    """
+    k = block_size
+    top, tail_norms2, tail_gram = parts.top, parts.tail_norms2, parts.tail_gram
+    if signed:
+        assert parts.pseudo_rows is not None and parts.signature is not None
+        assert parts.level_rows is not None and parts.border is not None
+        level_rows, border = parts.level_rows, parts.border
     else:
-        tail = R_acc[:, k:, k:]
-        within = np.einsum("kai,kaj->ij", tail, tail, optimize=True)
-        within = 0.5 * (within + within.T)
+        assert tail_gram is not None
+        level_rows, border = _fisher_moments(top, tail_gram, k)
     leaf = FactorSmoothLeafData(
-        triangles=R_acc,
-        within=within,
-        pseudo_rows=pseudo_rows,
-        signature=signature,
-        middle=M_acc,
-        error_gram=E_acc,
-        counts=counts,
-        merges=merges,
+        top=top,
+        tail_norms2=tail_norms2,
+        tail_gram=tail_gram,
+        pseudo_rows=parts.pseudo_rows,
+        signature=parts.signature,
+        error_rows=parts.error_rows,
+        error_diagonal=parts.error_diagonal,
+        counts=parts.counts,
+        merges=parts.merges,
         center=center,
         generators=generators,
         signed=bool(signed),
         block_size=k,
+        triangles=parts.triangles if basis == "sz" else None,
+        trailing_source=trailing_source,
     )
-    # The raw moment operator from the leaf Grams (module docstring), by products.
-    grams = leaf.grams
-    D = np.ascontiguousarray(grams[:, :k, :k])
-    zw = grams[:, :k, k]
-    C_centred = grams[:, :k, k + 1 : k + 1 + q]
-    zwz = grams[:, :k, k + q + 1]
-    border = np.sum(grams[:, k:, k:], axis=0)
+    return _system_from_moments(
+        leaf,
+        level_rows,
+        border,
+        weights=weights,
+        weighted_rhs=weighted_rhs,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+        group_index=group_index,
+        group_name=group_name,
+        basis=basis,
+        thin_levels=thin_levels,
+        thin_counts=thin_counts,
+    )
+
+
+def _fisher_moments(top: NDArray, tail_gram: NDArray, k: int) -> tuple[NDArray, NDArray]:
+    """``G_l[:k, :]`` ``(K, k, p)`` and ``sum_l G_l[k:, k:]`` of Fisher rows, ``G_l = R_l'R_l``.
+
+    ``R_l`` is zero below its leading ``k`` rows on the level basis, so the
+    level-basis rows of ``G_l`` are products of ``top`` alone, and the border
+    block is ``top``'s trailing columns' Gram plus the trailing rows' one.
+    """
+    level_rows = np.einsum("kai,kaj->kij", top[:, :, :k], top, optimize=True)
+    right = top[:, :, k:]
+    border = np.einsum("kai,kaj->ij", right, right, optimize=True) + tail_gram
+    return level_rows, border
+
+
+def _signed_parts(R: NDArray, M: NDArray, k: int) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """Signed rows' pseudo-rows and signatures, ``G_l[:k, :]`` and ``sum_l G_l[k:, k:]``.
+
+    ``_signed_block`` over blocks of about half a MiB of ``p x p`` matrices, so no
+    temporary is another ``(K, p, p)`` array beside the ones returned (Opus
+    review P1); each level's own numbers do not depend on the block.
+    """
+    K, p = R.shape[0], R.shape[2]
+    pseudo_rows = np.empty((K, p, p))
+    signature = np.empty((K, p))
+    level_rows = np.empty((K, k, p))
+    border = np.zeros((p - k, p - k))
+    step = max(1, (1 << 16) // (p * p))
+    for lo in range(0, K, step):
+        hi = min(lo + step, K)
+        pseudo_rows[lo:hi], signature[lo:hi], level_rows[lo:hi], piece = _signed_block(
+            R[lo:hi], M[lo:hi], k
+        )
+        border += piece
+    return pseudo_rows, signature, level_rows, border
+
+
+def _signed_block(R: NDArray, M: NDArray, k: int) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """``_signed_parts`` of a block of levels ``R``, ``M`` ``(b, p, p)``.
+
+    ``M_l = V Lambda V'`` gives ``B_l = |Lambda|^1/2 V' R_l`` with signature
+    ``sign Lambda`` (module docstring), and ``G_l = R_l' M_l R_l``: ``R_l[:, :k]``
+    is zero below row ``k``, so ``G_l[:k, :] = R_l[:k, :k]' (M_l R_l)[:k, :]``,
+    and the border block runs over every row of the middle factor.
+    """
+    lam, vectors = np.linalg.eigh(M)
+    pseudo_rows = np.sqrt(np.abs(lam))[:, :, None] * np.einsum(
+        "kba,kbj->kaj", vectors, R, optimize=True
+    )
+    signature = np.where(lam < 0.0, -1.0, 1.0)
+    level_rows = np.einsum("kai,kaj->kij", R[:, :k, :k], np.matmul(M[:, :k, :], R), optimize=True)
+    right = R[:, :, k:]
+    border = np.einsum("kai,kaj->ij", right, np.matmul(M, right), optimize=True)
+    return pseudo_rows, signature, level_rows, border
+
+
+class _SignedWindow:
+    """The signed rows of an ``fs`` pass, a few levels at a time (Opus review P1).
+
+    The rows come in level order, so a level is finished once the pass leaves
+    it.  ``fold`` runs the leaf kernel (``_leaf_segments``) over at most
+    ``size`` levels at a time in window slots, closes every finished level
+    into its pseudo-rows, signature, level Gram rows, border sum, leading
+    rows, trailing norms and error Gram rows and diagonal (``_signed_block``,
+    ``_close_level``), and carries the open one in slot 0; ``finish`` closes
+    the last.  Each level's triangle, middle factor and error Gram are the
+    kernel's on the whole pass, bit for bit, and no ``(K, p, p)`` triangle,
+    middle factor or error Gram is formed: the pseudo-rows the per-lambda
+    step reads are all that is ``K p^2``.  ``with_gram`` (an ``sz`` term) also
+    sums the trailing rows' Gram, which its data estimability's Fisher system
+    reads.  A level with no rows keeps zeros and signature one, as the whole
+    pass gives it.
+    """
+
+    def __init__(self, K: int, k: int, p: int, *, with_gram: bool = False) -> None:
+        self.k, self.p = k, p
+        self.with_gram = bool(with_gram)
+        self.tail_gram = np.zeros((p - k, p - k)) if with_gram else np.zeros((0, 0))
+        self.size = max(2, (1 << 16) // (p * p))
+        self.top = np.zeros((K, k, p))
+        self.tail_norms2 = np.zeros((K, p - k))
+        self.error_rows = np.zeros((K, k, p - 1))
+        self.error_diagonal = np.zeros((K, p - 1))
+        self.pseudo_rows = np.zeros((K, p, p))
+        self.signature = np.ones((K, p))
+        self.level_rows = np.zeros((K, k, p))
+        self.border = np.zeros((p - k, p - k))
+        self.counts = np.zeros(K, dtype=np.int64)
+        self.merges = np.zeros(K, dtype=np.int64)
+        size = self.size
+        self._R = np.zeros((size, p, p))
+        self._M = np.zeros((size, p, p))
+        self._E = np.zeros((size, p - 1, p - 1))
+        self._started = np.zeros(size, dtype=np.bool_)
+        self._counts = np.zeros(size, dtype=np.int64)
+        self._merges = np.zeros(size, dtype=np.int64)
+        self._levels = np.zeros(0, dtype=np.intp)  # the absolute level of each live slot
+
+    def fold(self, rows: NDArray, weights: NDArray, error: NDArray, levels: NDArray) -> None:
+        """Fold one chunk of level-ordered rows."""
+        starts = np.flatnonzero(levels[1:] != levels[:-1]) + 1
+        bounds = np.concatenate(([0], starts[self.size - 1 :: self.size], [len(levels)]))
+        for lo, hi in zip(bounds[:-1], bounds[1:], strict=True):
+            if hi > lo:
+                self._fold(rows[lo:hi], weights[lo:hi], error[lo:hi], levels[lo:hi])
+
+    def _fold(self, rows: NDArray, weights: NDArray, error: NDArray, levels: NDArray) -> None:
+        first = int(levels[0])
+        if self._levels.size and int(self._levels[0]) != first:
+            self._close(1)
+        if self._levels.size and int(levels[-1]) < int(self._levels[0]):
+            raise ValueError("The leaf pass needs its rows in level order.")
+        changes = np.flatnonzero(levels[1:] != levels[:-1]) + 1
+        slots = np.zeros(len(levels), dtype=np.intp)
+        slots[changes] = 1
+        slots = np.cumsum(slots)
+        self._levels = np.concatenate(([first], levels[changes])).astype(np.intp)
+        _leaf_segments(
+            rows,
+            weights,
+            error,
+            slots,
+            self._R,
+            self._M,
+            self._E,
+            self._started,
+            self._counts,
+            self._merges,
+            True,
+        )
+        used = len(self._levels)
+        self._close(used - 1)  # leaves the open level's absolute index alone in _levels
+        if used > 1:
+            for buffer in (self._R, self._M, self._E, self._started, self._counts, self._merges):
+                buffer[0] = buffer[used - 1]
+                buffer[1:used] = 0
+
+    def _close(self, count: int) -> None:
+        """Close slots ``[0, count)``, whose levels are finished, into the leaf data."""
+        if count <= 0:
+            return
+        levels = self._levels[:count]
+        k = self.k
+        for slot, level in enumerate(levels):
+            _close_level(
+                self._R[slot], level, k, self.top, self.tail_norms2, self.tail_gram, self.with_gram
+            )
+        pseudo_rows, signature, level_rows, border = _signed_block(
+            self._R[:count], self._M[:count], k
+        )
+        self.pseudo_rows[levels] = pseudo_rows
+        self.signature[levels] = signature
+        self.level_rows[levels] = level_rows
+        self.border += border
+        self.error_rows[levels] = self._E[:count, :k, :]
+        self.error_diagonal[levels] = np.diagonal(self._E[:count], axis1=1, axis2=2)
+        self.counts[levels] = self._counts[:count]
+        self.merges[levels] = self._merges[:count]
+        for buffer in (self._R, self._M, self._E, self._started, self._counts, self._merges):
+            buffer[:count] = 0
+        self._levels = self._levels[count:]
+
+    def finish(self) -> _LeafParts:
+        """Close the open level; the pass's compact signed leaf data."""
+        self._close(len(self._levels))
+        return _LeafParts(
+            self.top,
+            self.tail_norms2,
+            self.tail_gram if self.with_gram else None,
+            self.counts,
+            self.merges,
+            pseudo_rows=self.pseudo_rows,
+            signature=self.signature,
+            error_rows=self.error_rows,
+            error_diagonal=self.error_diagonal,
+            level_rows=self.level_rows,
+            border=self.border,
+        )
+
+
+def _system_from_moments(
+    leaf: FactorSmoothLeafData,
+    level_rows: NDArray,
+    border: NDArray,
+    *,
+    weights: NDArray,
+    weighted_rhs: NDArray,
+    small_indices: NDArray,
+    structured_indices: NDArray,
+    group_index: int,
+    group_name: str,
+    basis: str = "fs",
+    thin_levels: tuple = (),
+    thin_counts: tuple[NDArray, NDArray] | None = None,
+):
+    """The system of ``leaf`` from its level Grams' level-basis rows and border sum."""
+    k = leaf.block_size
+    center = leaf.center
+    q = len(center)
+    D = level_rows[:, :, :k]
+    D = np.ascontiguousarray(0.5 * (D + D.transpose(0, 2, 1)))
+    zw = np.ascontiguousarray(level_rows[:, :, k])
+    C_centred = np.array(level_rows[:, :, k + 1 : k + 1 + q], copy=True)
+    C_centred.setflags(write=False)  # shared by the centred operator (share_cross_block)
+    zwz = np.ascontiguousarray(level_rows[:, :, k + q + 1])
+    border = 0.5 * (border + border.T)
     moment = border[0, 1 : q + 1]
     shifted_A = border[1 : q + 1, 1 : q + 1]
     shifted_A = 0.5 * (shifted_A + shifted_A.T)
@@ -1266,14 +1923,16 @@ def _assemble_system(
             xtw_structured=adjoint_sum_to_zero_blocks(zw),
             xtwz_small=border[1 : q + 1, q + 1] + border[0, q + 1] * center,
             xtwz_structured=adjoint_sum_to_zero_blocks(zwz),
-            raw_xtw_structured=np.ascontiguousarray(zw),
+            raw_xtw_structured=zw,
             sum_w=float(np.sum(weights)),
             sum_wz=float(np.sum(weighted_rhs)),
             dominant_group_index=group_index,
             dominant_group_name=group_name,
             thin_levels=tuple(thin_levels),
+            thin_counts=thin_counts,
             shifted_gram_small=shifted_A,
             shifted_xtw_small=np.array(moment, copy=True),
+            shifted_level_cross=C_centred,
         )
     operator = BlockSymmetricOperator(
         A=A,
@@ -1286,15 +1945,16 @@ def _assemble_system(
         operator=operator,
         leaf=leaf,
         xtw_small=moment + border[0, 0] * center,
-        xtw_structured=np.ascontiguousarray(zw),
+        xtw_structured=zw,
         xtwz_small=border[1 : q + 1, q + 1] + border[0, q + 1] * center,
-        xtwz_structured=np.ascontiguousarray(zwz),
+        xtwz_structured=zwz,
         sum_w=float(np.sum(weights)),
         sum_wz=float(np.sum(weighted_rhs)),
         dominant_group_index=group_index,
         dominant_group_name=group_name,
         shifted_gram_small=shifted_A,
         shifted_xtw_small=np.array(moment, copy=True),
+        shifted_level_cross=C_centred,
     )
 
 
@@ -1318,7 +1978,7 @@ class FactorSmoothPenalizedOperator(BlockSymmetricOperator):
         """The moments ``operator`` plus the penalty parts, which it also keeps apart."""
         small = np.asarray(penalty_small, dtype=np.float64)
         local = np.asarray(penalty_local, dtype=np.float64)
-        return cls(
+        penalized = cls(
             A=operator.A + small,
             C=operator.C,
             D=operator.D + local,
@@ -1327,6 +1987,7 @@ class FactorSmoothPenalizedOperator(BlockSymmetricOperator):
             penalty_small=0.5 * (small + small.T),
             penalty_local=0.5 * (local + local.transpose(0, 2, 1)),
         )
+        return share_cross_block(penalized, operator.C)
 
 
 # ---------------------------------------------------------------- factor ----
@@ -1430,9 +2091,7 @@ class FactorSmoothLeafFactor:
                 sigma_extra,
             )
         else:
-            failed = _fisher_trials(
-                np.ascontiguousarray(leaf.triangles), roots, k, Qx, U, F, Dinv, logdets
-            )
+            failed = _fisher_trials(leaf.top, roots, k, Qx, U, F, Dinv, logdets)
         if failed >= 0:
             raise np.linalg.LinAlgError(
                 f"FactorSmooth term {self.term_name!r} level {failed} has a pivot block that is "
@@ -1458,7 +2117,14 @@ class FactorSmoothLeafFactor:
 
         # The super-root: the intercept, eliminated last (design §3.1).
         D0 = float(Q_xx[0, 0])
-        if not D0 > bound[0] + 4.0 * _EPS * abs(D0):
+        super_floor = bound[0] + 4.0 * _EPS * abs(D0)
+        if D0 < -super_floor:
+            raise np.linalg.LinAlgError(
+                f"FactorSmooth term {self.term_name!r} has materially negative curvature along "
+                f"the intercept: the super-root pivot {D0:.6g} is below minus its certified "
+                f"uncertainty {super_floor:.3g}, so the Hessian is indefinite there."
+            )
+        if not D0 > super_floor:
             raise np.linalg.LinAlgError(
                 f"FactorSmooth term {self.term_name!r} is aliased with the fitted intercept: "
                 "the super-root pivot is within its certified uncertainty."
@@ -1484,7 +2150,14 @@ class FactorSmoothLeafFactor:
             Q_rest[rest, :] = Q_rest[:, rest] = 0.0
             S_rest[rest, :] = S_rest[:, rest] = 0.0
             rest_bound[rest] = 0.0
-        border = factor_border(Q_rest, S_rest, rest_bound, generators, term_name=self.term_name)
+        border = factor_border(
+            Q_rest,
+            S_rest,
+            rest_bound,
+            generators,
+            term_name=self.term_name,
+            term_kind="FactorSmooth term",
+        )
         self._border = border
         self._center_star = center_star
         self._intercept_pivot = D0
@@ -1509,8 +2182,39 @@ class FactorSmoothLeafFactor:
         self.rank = int(K * k + q + 1 - null.shape[1])
         self.rank_truncated = self.rank < size
         self._inverse_bdlr_cache: _BlockDiagonalLowRank | None = None
-        # F in raw coordinates: F_raw[:, :, j] = F_c[:, :, j] + c0_j F_c[:, :, 0] (C = C_c T).
-        self._F = self._F_centred + self._F_centred[:, :, :1] * c_full[None, None, :]
+
+    def published(self, system: FactorSmoothLeafSystem) -> FactorSmoothLeafFactor:
+        """This factor on ``system``, its published copy (``published_leaf_system``).
+
+        Every number is this factor's own; only the system it was built on is
+        replaced, which no solve, inverse or trace reads.
+        """
+        clone = copy.copy(self)
+        clone.system = system
+        return clone
+
+    @cached_property
+    def _F(self) -> NDArray:
+        """``F`` in raw coordinates, ``F_raw[:, :, j] = F_c[:, :, j] + c0_j F_c[:, :, 0]`` (``C = C_c T``).
+
+        Formed on first read (only raw data operators read it, ``_inverse_bdlr``);
+        owner and lifetime the factor, never pickled (``__getstate__``).
+        """
+        return self._F_centred + self._F_centred[:, :, :1] * self._c_full[None, None, :]
+
+    # The (K, k, q)-sized products formed on first read from the factor's own
+    # numbers (Opus review P1): dropped from a pickle and formed again, by the
+    # same arithmetic, on first use after loading.  Owner: the factor; lifetime:
+    # the factor in memory; nothing invalidates them.  The small caches (the
+    # border inverse, the retained projector, the scaled eigenvalues) are kept.
+    _REBUILT_ON_USE = ("_F", "_inverse_bdlr_centred", "_penalty_total", "_penalty_product")
+
+    def __getstate__(self) -> dict:
+        state = {
+            name: value for name, value in self.__dict__.items() if name not in self._REBUILT_ON_USE
+        }
+        state["_inverse_bdlr_cache"] = None
+        return state
 
     @cached_property
     def minimum_local_eigenvalue(self) -> float:
@@ -1532,23 +2236,27 @@ class FactorSmoothLeafFactor:
         sigma_extra: NDArray,
     ) -> NDArray:
         """``U`` ``(q + 1,)`` with ``|dQ_ij| <= sqrt(U_i U_j)`` on the intercept-and-border Gram."""
-        R = leaf.triangles
-        K, p, _ = R.shape
+        top = leaf.top
+        K, p = top.shape[0], top.shape[2]
         k = leaf.block_size
         q1 = F.shape[2]
         if K == 0:
             return np.zeros(q1)
         counts = leaf.counts.astype(np.float64)
         merges = leaf.merges.astype(np.float64)
-        # augmented unsigned residuals ||A v_j|| of every column j, v_j = [-F_j; e_j]
-        residual_rows = R[:, :, k : k + q1] - np.matmul(R[:, :, :k], F)
+        # augmented unsigned residuals ||A v_j|| of every column j, v_j = [-F_j; e_j]:
+        # the triangle's rows below its leading k are zero on the level basis, so
+        # theirs is the trailing rows' column norm whatever F is
+        residual_rows = top[:, :, k : k + q1] - np.matmul(top[:, :, :k], F)
         penalty_part = np.matmul(roots, F)
-        r2 = np.sum(residual_rows**2, axis=1) + np.sum(penalty_part**2, axis=1)
+        r2 = np.sum(residual_rows**2, axis=1) + leaf.tail_norms2[:, :q1]
+        r2 = r2 + np.sum(penalty_part**2, axis=1)
         # column scales a~ of the error-weighted rows (Fisher: e = w, the triangle's columns)
-        if leaf.signed and leaf.error_gram is not None:
-            a2 = np.diagonal(leaf.error_gram, axis1=1, axis2=2).copy()
+        if leaf.signed and leaf.error_diagonal is not None:
+            a2 = leaf.error_diagonal.copy()
         else:
-            a2 = np.sum(R[:, :, : p - 1] ** 2, axis=1)
+            a2 = np.sum(top[:, :, : p - 1] ** 2, axis=1)
+            a2[:, k:] += leaf.tail_norms2[:, : p - 1 - k]
         a2[:, :k] += np.diagonal(P, axis1=1, axis2=2)
         a = np.sqrt(np.maximum(a2, 0.0))
         v_tilde = a[:, k : k + q1] + np.matmul(a[:, None, :k], np.abs(F))[:, 0, :]
@@ -1562,9 +2270,13 @@ class FactorSmoothLeafFactor:
         if leaf.signed:
             g_row = g_row + math.sqrt(p) * _gamma(p + 1)
         eta = g_row[:, None] * v_tilde
-        if leaf.signed and leaf.error_gram is not None:
-            v = np.concatenate([-F, np.broadcast_to(np.eye(q1), (K, q1, q1))], axis=1)
-            re2 = np.sum(v * np.matmul(leaf.error_gram[:, : k + q1, : k + q1], v), axis=1)
+        if leaf.signed and leaf.error_rows is not None and leaf.error_diagonal is not None:
+            # v_j' E v_j with v_j = [-F_j; e_j]: F_j' E_zz F_j - 2 F_j' E_zx e_j + E_jj,
+            # from the error Gram's leading rows and diagonal alone, without forming v
+            E = leaf.error_rows
+            re2 = np.sum(F * np.matmul(E[:, :, :k], F), axis=1)
+            re2 = re2 - 2.0 * np.sum(F * E[:, :, k : k + q1], axis=1)
+            re2 = re2 + leaf.error_diagonal[:, k : k + q1]
             re2 = np.maximum(re2, 0.0) + np.sum(penalty_part**2, axis=1)
         else:
             re2 = r2
@@ -1867,19 +2579,38 @@ class FactorSmoothLeafFactor:
         return self._bdlr(self._F_centred, self._Q_inverse_centred)
 
     @cached_property
-    def _penalty_total(self) -> BlockSymmetricOperator:
-        """The whole penalty ``S`` in augmented coordinates (border and level parts)."""
+    def _penalty_total(self) -> _BlockDiagonalLowRank:
+        """The whole penalty ``S`` in augmented coordinates (border and level parts).
+
+        The form ``_operator_bdlr`` gives a block operator with no cross block,
+        built without that ``(K, k, q)`` block of zeros: the level penalties
+        as the blocks, and the border penalty (when it is not zero) on the
+        border's unit basis.
+        """
         q = len(self.small_indices)
         small, local = self.penalized.penalty_small, self.penalized.penalty_local
         assert small is not None and local is not None  # checked at construction
         A = np.zeros((q, q))
         A[1:, 1:] = small
-        return BlockSymmetricOperator(
-            A=A,
-            C=np.zeros((self.n_levels, self.block_size, q)),
-            D=local,
-            small_indices=self.small_indices,
+        blocks = np.array(local, dtype=np.float64, copy=True)
+        blocks.setflags(write=False)
+        if not np.any(A):
+            return _BlockDiagonalLowRank(
+                blocks=blocks,
+                structured_indices=self.structured_indices,
+                basis=np.empty((self.shape[0], 0)),
+                core=np.empty((0, 0)),
+                shape=self.shape,
+            )
+        basis = np.zeros((self.shape[0], q), dtype=np.float64)
+        basis[self.small_indices] = np.eye(q)
+        A.setflags(write=False)
+        return _BlockDiagonalLowRank(
+            blocks=blocks,
             structured_indices=self.structured_indices,
+            basis=basis,
+            core=A,
+            shape=self.shape,
         )
 
     @cached_property
@@ -1891,10 +2622,7 @@ class FactorSmoothLeafFactor:
     @cached_property
     def _penalty_product(self):
         """``H_c^+ S`` as a general block-diagonal-plus-low-rank product (centred)."""
-        return _multiply_symmetric_bdlr(
-            self._inverse_bdlr_centred,
-            _operator_bdlr(self._penalty_total, self.structured_indices),
-        )
+        return _multiply_symmetric_bdlr(self._inverse_bdlr_centred, self._penalty_total)
 
     def _identity_diagonal(self) -> NDArray:
         """``diag(H^+ (H - S)) = diag(H^+ H) - diag(H^+ S)``: the own data operator's route."""
@@ -2095,6 +2823,20 @@ class ProfiledFactorSmoothLeafFactor:
     @property
     def minimum_local_eigenvalue(self) -> float:
         return self.augmented_factor.minimum_local_eigenvalue
+
+    def __getstate__(self) -> dict:
+        state = dict(self.__dict__)
+        state["_inverse_bdlr_cache"] = None  # (p, q) basis, formed again on first use
+        return state
+
+    def published(self, system: FactorSmoothLeafSystem | None = None):
+        """This factor with its augmented factor on the published ``system`` (its own, published, if ``None``)."""
+        augmented = self.augmented_factor
+        clone = copy.copy(self)
+        clone.augmented_factor = augmented.published(
+            augmented.system.published() if system is None else system
+        )
+        return clone
 
     @staticmethod
     def _shift_indices(indices: NDArray) -> NDArray[np.intp]:

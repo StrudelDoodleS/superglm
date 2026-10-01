@@ -35,7 +35,7 @@ from superglm.reml.convergence import (
     trial_counts_as_precision_evidence,
 )
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
-from superglm.reml.identified import IdentifiedLaplace, laplace_excluded_coefficients
+from superglm.reml.identified import IdentifiedLaplace, dense_hessian
 from superglm.reml.objective import (
     REMLObjectiveEvaluation,
     reml_laml_objective,
@@ -147,6 +147,25 @@ def _solve_cached_profiled_system(
     intercept = float(mean_z - mean_x @ beta)
     log_det_H = float(np.log(sum_W) + log_pdet)
     return beta, intercept, log_det_H, 1 + slope_rank
+
+
+def _cached_centred_intercept(
+    mean_z: float, mean_x: NDArray, centre: NDArray, beta: NDArray
+) -> float:
+    """A cached trial's centred intercept ``alpha = mean_z - (mean_x - c)' beta`` (design §3.8).
+
+    The profiled intercept about the fixed centre ``c``, formed as the PIRLS
+    centred system forms it (``irls_direct``), so a cached trial and a full
+    fit with the same ``beta`` hold the same state.  Recovering it from the
+    raw intercept, ``(mean_z - mean_x' beta) + c' beta``, cancels
+    ``|mean_x|' |beta|``: at a 1e10 column translation that leaves an error
+    near ``u 1e10 |beta| ~ 1e-6`` in every row's eta, which moved the
+    Gaussian REML objective of the cached trial by 1.1e-7 (CI, OpenBLAS
+    Haswell kernels).  ``mean_x - c`` is a difference of two means of the
+    same columns, of the size of their spread.
+    """
+    difference = np.asarray(mean_x, dtype=np.float64) - np.asarray(centre, dtype=np.float64)
+    return float(mean_z) - math.fsum(difference * np.asarray(beta, dtype=np.float64))
 
 
 def _shared_tensor_group_names(penalties: list[PenaltyComponent], group_matrices: list) -> set[str]:
@@ -404,7 +423,7 @@ def optimize_discrete_reml_cached_w(
     p = dm.p
     # The Laplace approximation's identified part (design §3.9,
     # ``reml.identified``): decided once, from the design and prior weights.
-    identified = IdentifiedLaplace(laplace_excluded_coefficients(dm, sample_weight, penalties))
+    identified = IdentifiedLaplace.for_design(dm, sample_weight, penalties)
     # The cached trials' linear predictor about the fixed prior-weighted
     # centre (one-engine design §3.8), as every PIRLS state is: a column
     # translated by 1e10 otherwise costs eta ~1e-6 per row in X beta against
@@ -725,9 +744,11 @@ def optimize_discrete_reml_cached_w(
         warm_intercept = float(pirls_result.intercept)
         warm_deviance = float(pirls_result.deviance)
 
-        # the identified part of the Laplace approximation (design §3.9)
+        # the identified part of the Laplace approximation (design §3.9); a
+        # dense one restricts the centred Hessian this PIRLS decomposed
         full_inverse = XtWX_S_inv
-        XtWX_S_inv = identified.inverse(full_inverse)
+        full_dense = None if use_structured else dense_hessian(cache)
+        XtWX_S_inv = identified.inverse(full_inverse, full_dense)
         c_centered_XtWX = cache.get("centered_XtWX")
         c_structured_system = cache.get("structured_system")
         if use_structured and not isinstance(
@@ -757,9 +778,9 @@ def optimize_discrete_reml_cached_w(
             offset_arr,
             XtWX=XtWX,
             penalty_caches=penalty_caches,
-            log_det_H=identified.log_det(full_inverse, pirls_result.log_det_H),
+            log_det_H=identified.log_det(full_inverse, pirls_result.log_det_H, full_dense),
             hessian_rank=(
-                identified.rank(pirls_result.reml_hessian_rank, full_inverse)
+                identified.rank(pirls_result.reml_hessian_rank, full_inverse, full_dense)
                 if identified
                 else None
             ),
@@ -1170,6 +1191,23 @@ def optimize_discrete_reml_cached_w(
         local_max_halving = max_halving
         if use_tensor_linesearch and max_delta < 1e-12:
             local_max_halving = 0
+        # The relaxed Armijo condition for an objective with evaluation noise
+        # (Shi, Xie, Byrd & Nocedal 2022, SIAM J. Optim. 32(1) 29-55;
+        # Hamaguchi, Marumo & Takeda 2026, arXiv 2603.10642, eq. 4):
+        # accept f(rho + a d) <= f(rho) + Delta.  The stopping rule declares
+        # an objective change below ``resolution = tol (1 + |V|)`` to be no
+        # change, so when the whole step predicts a decrease -g'd below it the
+        # comparison carries no information the rule uses: near the optimum
+        # -g'd fell to 1.7e-14, below one ulp of V = 40.76, and a strict
+        # ``trial < obj`` then compared rounding, halving to steps of 2^-24
+        # chosen by it until the iteration budget ran out (Gamma/log discrete
+        # on OpenBLAS Haswell kernels, |g| stuck at 1.9e-7 against a bar of
+        # 4.2e-8).  There a trial is accepted unless it is worse by more than
+        # that resolution; the gradient (accurate: it fell to 3.6e-9 after the
+        # full step) keeps the convergence decision.  Every step whose
+        # predicted decrease the objective can resolve keeps the strict test.
+        resolution = _tol * score_scale_d
+        unresolvable_step = -float(grad @ delta) <= resolution
         for _ls in range(local_max_halving):
             rho_trial = np.clip(rho + step * delta, log_lo, log_hi)
             if use_tensor_linesearch and bool(np.all(np.abs(rho_trial - rho_clipped) <= 1e-12)):
@@ -1216,6 +1254,15 @@ def optimize_discrete_reml_cached_w(
                             trial_lambdas,
                             reml_penalties=penalties,
                         )
+                    log_det_H_trial = cached_solution.log_det_H
+                    hessian_rank_trial = cached_solution.hessian_rank
+                    if identified:
+                        # the trial factor's identified part, inside the same
+                        # refusal handling: a factor that refuses it supplies
+                        # no objective either
+                        trial_factor = getattr(cached_solution, "factor", None)
+                        log_det_H_trial = identified.log_det(trial_factor, log_det_H_trial)
+                        hessian_rank_trial = identified.rank(hessian_rank_trial, trial_factor)
                 except StructuredSolverError:
                     # A trial the factor cannot certify supplies no objective:
                     # keep the retained state and try a shorter step towards
@@ -1228,12 +1275,7 @@ def optimize_discrete_reml_cached_w(
                     continue
                 beta_trial = cached_solution.beta
                 intercept_trial = cached_solution.intercept
-                log_det_H_trial = cached_solution.log_det_H
-                hessian_rank_trial = cached_solution.hessian_rank
-                if identified:
-                    trial_factor = getattr(cached_solution, "factor", None)
-                    log_det_H_trial = identified.log_det(trial_factor, log_det_H_trial)
-                    hessian_rank_trial = identified.rank(hessian_rank_trial, trial_factor)
+                centred_intercept_trial = intercept_trial + math.fsum(trial_centre * beta_trial)
             else:
                 if c_centered_XtWX is None or S_trial is None:
                     raise RuntimeError("Dense cached solve is missing matrix geometry.")
@@ -1247,12 +1289,15 @@ def optimize_discrete_reml_cached_w(
                         c_mean_z,
                     )
                 )
+                centred_intercept_trial = _cached_centred_intercept(
+                    c_mean_z, c_mean_x, trial_centre, beta_trial
+                )
+                intercept_trial = centred_intercept_trial - math.fsum(trial_centre * beta_trial)
                 if identified:
-                    log_det_H_trial, restricted = identified.log_det_of_hessian(
-                        c_centered_XtWX + S_trial, log_det_H_trial
-                    )
-                    if restricted:
-                        hessian_rank_trial = int(hessian_rank_trial) - int(identified.excluded.size)
+                    # the identified part of the same trial Hessian H_c
+                    trial_dense = (c_centered_XtWX + S_trial, float(c_sum_W))
+                    log_det_H_trial = identified.log_det(None, log_det_H_trial, trial_dense)
+                    hessian_rank_trial = identified.rank(hessian_rank_trial, None, trial_dense)
             cached_solve_elapsed = _time.perf_counter() - _tls0
             _t_linesearch_solve += cached_solve_elapsed
             if use_structured:
@@ -1266,7 +1311,6 @@ def optimize_discrete_reml_cached_w(
                     _n_block_structured_cache_solves += 1
 
             # Only the true objective can accept this trial.
-            centred_intercept_trial = intercept_trial + math.fsum(trial_centre * beta_trial)
             eta_trial = stabilize_eta(
                 centred_intercept_trial + centred_matvec(dm, beta_trial, trial_centre) + offset_arr,
                 link,
@@ -1322,7 +1366,7 @@ def optimize_discrete_reml_cached_w(
             if trial_counts_as_precision_evidence(trial_pirls.converged, trial_obj):
                 evaluated_feasible_trial = True
 
-            if trial_obj < obj:
+            if trial_obj < obj or (unresolvable_step and trial_obj <= obj + resolution):
                 rho = rho_trial
                 warm_beta = beta_trial.copy()
                 warm_intercept = intercept_trial
@@ -1533,6 +1577,7 @@ def optimize_discrete_reml_cached_w(
         )
     )
     _t0 = _time.perf_counter()
+    final_cache: dict | None = {} if identified and not use_structured else None
     final_result, final_inv, final_xtwx = fit_irls_direct(
         X=dm,
         y=y,
@@ -1556,7 +1601,9 @@ def optimize_discrete_reml_cached_w(
         trace_run=trace_run,
         trace_purpose="reml_optimizer_final",
         weight_semantics=weight_semantics,
+        cache_out=final_cache,
     )
+    final_dense = dense_hessian(final_cache)
     _t_pirls += _time.perf_counter() - _t0
     _t0 = _time.perf_counter()
     final_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
@@ -1574,9 +1621,11 @@ def optimize_discrete_reml_cached_w(
         offset_arr,
         XtWX=final_xtwx,
         penalty_caches=penalty_caches,
-        log_det_H=identified.log_det(final_inv, final_result.log_det_H),
+        log_det_H=identified.log_det(final_inv, final_result.log_det_H, final_dense),
         hessian_rank=(
-            identified.rank(final_result.reml_hessian_rank, final_inv) if identified else None
+            identified.rank(final_result.reml_hessian_rank, final_inv, final_dense)
+            if identified
+            else None
         ),
         S_override=S_final,
         reml_penalties=penalties,
