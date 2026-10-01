@@ -10,10 +10,11 @@ what the fit publishes -- the public result, the REML result and profile,
 the retained linear-system and reporting-support state, ``diagnostics()``,
 ``iteration_diagnostics()`` where it was recorded, and ``predict()`` -- and
 fails on any floating array, sparse matrix, pandas column or index, or NumPy
-scalar that is not float64 (complex values must be complex128). It also fails on any object it cannot look inside, so a new
-published type cannot hide a leaf. Integer and boolean arrays are index and
-mask data and are allowed; Python floats are binary64 by definition. SuperLSS
-fits are not covered here. No floating exception is needed today.
+scalar that is not float64 (complex values must be complex128). It also fails
+on any object it cannot look inside, so a new published type cannot hide a
+leaf. Integer and boolean arrays are index and mask data and are allowed;
+Python floats are binary64 by definition. SuperLSS fits are not covered here.
+No floating exception is needed today.
 """
 
 import types
