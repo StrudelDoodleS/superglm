@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import warnings
 from collections.abc import Hashable, Mapping
 from typing import Any, Literal, cast
 
@@ -390,6 +391,28 @@ def _score_prediction_term_exact(
     )
 
 
+# ``model.predict`` -> ``_predict_exact`` -> ``predict_exact`` -> ``predict_eta_exact``
+# -> ``_predict_eta``: a prediction warning names the caller of ``predict``.
+_PREDICTION_WARNING_STACKLEVEL = 6
+
+
+def _score_unidentified_factor_smooth(
+    term: dict[str, Any],
+    X: EagerFrame,
+    beta_all: NDArray,
+    *,
+    population: bool,
+) -> tuple[NDArray[np.floating], tuple]:
+    """An ``sz`` term with unidentified levels, each predicted at the population value (#432)."""
+    left_name, right_name = term["parent_names"]
+    left_spec, right_spec = term.get("parent_specs", (None, None))
+    spec = term["spec"]
+    _, left = resolve_interaction_parent_of(spec, left_spec, X.column_array(left_name))
+    _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
+    beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
+    return spec._score_identified(left, right, beta, population=population)
+
+
 def prediction_centred_state(result) -> tuple[float, NDArray | None, float | None]:
     """The intercept, column centre and intercept remainder a public result's predictor starts from.
 
@@ -539,15 +562,33 @@ def _predict_eta(
             continue
         eta += score(term)
 
+    unidentified: list[str] = []
     for term in plan["interactions"]:
-        if random_effects == "population" and isinstance(term["spec"], FactorSmooth):
+        spec = term["spec"]
+        if isinstance(spec, FactorSmooth) and getattr(spec, "_unidentified_levels", ()):
+            contribution, named = _score_unidentified_factor_smooth(
+                term, frame, beta_all, population=random_effects == "population"
+            )
+            eta += contribution
+            if named:
+                unidentified.append(f"term {term['name']!r} levels {', '.join(map(str, named))}")
+            continue
+        if random_effects == "population" and isinstance(spec, FactorSmooth):
             left_name, right_name = term["parent_names"]
-            term["spec"].validate_population_prediction_values(
+            spec.validate_population_prediction_values(
                 frame.column_array(left_name),
                 frame.column_array(right_name),
             )
             continue
         eta += score(term)
+    if unidentified:
+        warnings.warn(
+            "FactorSmooth basis='sz' levels the training data could not identify (no weight, "
+            "or fewer distinct x values than the penalty's null space) are predicted at the "
+            "population value, their deviation set to zero: " + "; ".join(unidentified) + ".",
+            UserWarning,
+            stacklevel=_PREDICTION_WARNING_STACKLEVEL,
+        )
 
     eta = finish_eta(eta, intercept, intercept_lo)
     if offset is not None:

@@ -389,3 +389,160 @@ def test_an_fs_leaf_pass_forms_no_stack_beyond_what_the_step_reads(_wide_border_
         tracemalloc.stop()
     assert peak < (2 if signed else 1) * 8 * K * p * p
     assert built.leaf.triangles is None
+
+
+@pytest.fixture(scope="module")
+def _wide_border_sz_fit():
+    """A REML fit (smoothing parameters held) of an sz term beside a 60-level categorical."""
+    import warnings
+
+    import pandas as pd
+
+    from superglm import Categorical, FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
+
+    K, Q, n, k = _WIDE["K"], _WIDE["Q"], _WIDE["n"], _WIDE["k"]
+    rng = np.random.default_rng(11)
+    g = np.repeat(np.arange(K), n // K)
+    x = rng.uniform(size=n)
+    c = rng.integers(0, Q, n)
+    frame = pd.DataFrame(
+        {
+            "x": x,
+            "g": [f"g{v:03d}" for v in g],
+            "z": rng.normal(size=n),
+            "cat": [f"c{v:02d}" for v in c],
+        }
+    )
+    y = np.sin(3 * x) + rng.normal(0, 0.4, K)[g] * x + rng.normal(0, 0.3, Q)[c]
+    y = y + rng.normal(0, 0.5, n)
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "z": Numeric(),
+            "cat": Categorical(),
+            "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", k=k, lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+            )
+        ],
+        selection_penalty=0,
+        direct_solve="structured",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    system = model._linear_system_state.system
+    p = k + len(system.operator.small_indices) + 2
+    return model, p
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_an_sz_leafs_trailing_factor_forms_no_stack_of_level_triangles(_wide_border_sz_fit, signed):
+    """#432 b: the trailing rows' triangular factor an sz leaf reads costs no ``(K, p, p)`` stack.
+
+    The factor (``trailing_root``) was the QR of every level's trailing rows,
+    which a second, whole leaf pass formed by keeping every level's triangle
+    (and on signed rows its middle factor and error Gram): 3 stacks at its
+    peak.  It is now a TSQR merge as the compact pass closes each level
+    (``_close_level``): beside a weightless level, in the build's own pass;
+    otherwise by one more compact pass on first read.  Peaks as the fs build
+    (below one stack, two on signed rows for their pseudo-rows), and the
+    factor's Gram is the stacked rows' within both computations' Householder
+    backward error, ``(2 gamma~ + gamma~^2) ||t_i|| ||t_j||`` columnwise
+    (Higham 2002, Thm 19.4; ``gamma~_k = gamma_(10k)``).
+    """
+    import tracemalloc
+
+    import superglm.solvers._structured.block_leaves as leaves
+    from superglm.solvers.structured import get_structured_layout
+
+    model, p = _wide_border_sz_fit
+    K, k = _WIDE["K"], _WIDE["k"]
+    system = model._linear_system_state.system
+    layout = get_structured_layout(
+        model._dm, model._groups, dominant_group_index=system.dominant_group_index
+    )
+    rng = np.random.default_rng(5)
+    n = model._dm.n
+    W = rng.uniform(0.5, 1.5, n)
+    if signed:
+        W = np.where(rng.uniform(size=n) < 0.2, -0.3 * W, W)
+    Wz = rng.normal(size=n)
+    prior = np.ones(n)
+    prior[layout.dominant.codes == 7] = 0.0  # one weightless level: thin
+    stack = 8 * K * p * p
+    # first builds compile (or load) the kernels outside the traces
+    warm = leaves.build_factor_smooth_leaf_system(layout, W * 1.01, Wz, signed=signed)
+    warm.leaf.trailing_root()
+    leaves.build_factor_smooth_leaf_system(layout, W * 1.02, Wz, prior_weights=prior, signed=signed)
+
+    plain = leaves.build_factor_smooth_leaf_system(layout, W, Wz, signed=signed)
+    assert plain.leaf.tail_root is None
+    tracemalloc.start()
+    try:
+        root = plain.leaf.trailing_root()
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < (2 if signed else 1) * stack
+
+    tracemalloc.start()
+    try:
+        thin = leaves.build_factor_smooth_leaf_system(
+            layout, W, Wz, prior_weights=prior, signed=signed
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert thin.thin_levels and thin.leaf.tail_root is not None
+    assert peak < (2 if signed else 1) * stack
+
+    whole = leaves._leaf_pass(layout, W, Wz, plain.leaf.center, None, signed=signed)[0]
+    q1 = p - k - 1
+    rows = np.ascontiguousarray(whole[:, k:, k : k + q1]).reshape(-1, q1)
+    reference = np.linalg.qr(rows, mode="r")
+    norms = np.linalg.norm(rows, axis=0)
+    unit = np.finfo(np.float64).eps / 2
+    count = 10 * rows.shape[0] * q1
+    householder = count * unit / (1 - count * unit)
+    bound = 2.0 * (2.0 * householder + householder**2) * np.outer(norms, norms)
+    assert np.all(np.abs(root.T @ root - reference.T @ reference) <= bound)
+
+
+def test_a_thin_level_sz_fit_runs_one_compact_pass_per_leaf_system(monkeypatch):
+    """#432 c: beside a thin level every leaf system costs one compact pass, which merges its factor.
+
+    The thin levels' aliases read the trailing rows' factor at every factor
+    build, and each leaf system formed it by a second, whole pass: 185 to 215
+    passes on the signed fixtures against about 100 systems, 5 against 2 on
+    this Fisher one.  The compact pass now merges it (``_close_level``), so
+    the counts match and no pass keeps the level triangles.
+    """
+    import warnings
+
+    import superglm.solvers._structured.block_leaves as leaves
+    from tests.test_factor_smooth_sz_thin_and_influence import _model, _signed_aliased_frame
+
+    passes, systems = [], []
+    leaf_pass, assemble = leaves._leaf_pass, leaves._assemble_compact
+
+    def counted_pass(*args, **kwargs):
+        passes.append((kwargs.get("compact", False), kwargs.get("tail_root", False)))
+        return leaf_pass(*args, **kwargs)
+
+    def counted_system(*args, **kwargs):
+        systems.append(1)
+        return assemble(*args, **kwargs)
+
+    monkeypatch.setattr(leaves, "_leaf_pass", counted_pass)
+    monkeypatch.setattr(leaves, "_assemble_compact", counted_system)
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _model("gaussian", "auto", lam=None, numerics=("x1", "x10"))
+        model.fit_reml(frame, y, sample_weight=weight)
+    assert model._reml_profile["direct_backend"] == "structured"
+    assert systems and len(passes) == len(systems)
+    assert all(compact and root for compact, root in passes)

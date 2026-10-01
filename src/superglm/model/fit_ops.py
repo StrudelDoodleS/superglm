@@ -721,7 +721,24 @@ def _store_fit_arrays(model, sample_weight, offset):
     # "weighted fit whose arrays were released" and refuse to silently
     # substitute unit weights in the latter case.
     model._fit_used_weights = bool(np.any(model._fit_weights != 1.0))
+    _record_unidentified_factor_smooth_levels(model, model._fit_weights)
     return model._fit_weights, model._fit_offset
+
+
+def _record_unidentified_factor_smooth_levels(model, sample_weight) -> None:
+    """Record, on each ``sz`` FactorSmooth spec, the levels this design leaves unidentified (#432).
+
+    Read from the built design and the prior weights, for every backend, so
+    prediction treats the levels alike whichever solver fitted them.
+    """
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.group_matrix import FactorSmoothGroupMatrix
+
+    specs = getattr(model, "_interaction_specs", {}) or {}
+    for group, matrix in zip(model._groups, model._dm.group_matrices, strict=True):
+        spec = specs.get(group.name)
+        if isinstance(spec, FactorSmooth) and isinstance(matrix, FactorSmoothGroupMatrix):
+            spec._record_unidentified_levels(matrix, sample_weight)
 
 
 def _make_reml_debug_recorder(

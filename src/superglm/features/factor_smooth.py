@@ -207,6 +207,10 @@ class FactorSmooth:
         self._natural_map = None
         self._base_penalty_components: tuple[tuple[str, Any], ...] = ()
         self._marginal_build_backend: _MarginalBuildBackend | None = None
+        # The levels the fit's data leave unidentified (sz, #432), by code, and
+        # the penalty's null space (``_record_unidentified_levels``).
+        self._unidentified_levels: tuple[int, ...] = ()
+        self._population_null_space: NDArray | None = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -640,6 +644,88 @@ class FactorSmooth:
             optimize=True,
         )
         return result
+
+    def _record_unidentified_levels(self, design, prior_weights: NDArray | None) -> None:
+        """Record the ``sz`` levels the fit's data leave unidentified (#432).
+
+        A level with no weight, or with fewer distinct ``x`` values than the
+        penalty's null space, has deviations the data cannot tell from the main
+        effect (``layout.sz_unidentified_levels``).  ``_score_identified``
+        predicts such a level at the population value.
+        """
+        from superglm.solvers._structured.layout import sz_unidentified_levels
+
+        levels, null_space = (), None
+        if self.basis == "sz":
+            levels, null_space = sz_unidentified_levels(design, prior_weights)
+        self._unidentified_levels = levels
+        self._population_null_space = null_space if levels else None
+
+    @property
+    def _unidentified_level_names(self) -> tuple:
+        """The fitted ``sz`` levels predicted at the population value (``_record_unidentified_levels``)."""
+        return tuple(self._levels[code] for code in getattr(self, "_unidentified_levels", ()))
+
+    def _population_offset(self, blocks: NDArray) -> NDArray[np.float64]:
+        """The population curve's offset ``c`` (natural basis): the identified levels' own mean.
+
+        An unidentified level ``t`` (``T`` of the ``K`` levels) leaves part of
+        its polynomial deviation, ``r_t`` in the penalty's null space ``N_P``,
+        free: shifting it, every level by ``-R / K`` and the main effect by
+        ``+R / K`` (``R = sum_t r_t``) keeps the sum-to-zero constraint, every
+        identified level's curve and every level's fit at its own ``x``.  The
+        fit's coefficients are one arbitrary point of that family (the solver's
+        choice along the exact nulls, or a ratio of near-null terms of the main
+        effect's penalty), and the main effect, so every population
+        prediction, moved with it.  The population curve here is the one from
+        which the identified levels' polynomial deviations sum to zero, the
+        constraint without the unidentified levels (mgcv drops unused factor
+        levels before it fits; lme4 predicts the population for a level it did
+        not see): ``c = -P_N sum_t beta_t / (K - T)``, ``P_N = N_P N_P'``.
+        Along the family ``c`` moves by ``-R / K`` exactly as the main effect
+        moves by ``+R / K``, so ``main + b(x)' c`` does not depend on the
+        fit's point.  With every level unidentified there is no such mean, and
+        ``c = 0``.
+        """
+        n_levels = blocks.shape[0]
+        levels = self._unidentified_levels
+        null_space = self._population_null_space
+        if null_space is None or len(levels) >= n_levels:
+            return np.zeros(blocks.shape[1])
+        total = np.sum(blocks[np.asarray(levels, dtype=np.intp)], axis=0)
+        return -(null_space @ (null_space.T @ total)) / (n_levels - len(levels))
+
+    def _score_identified(
+        self,
+        x: NDArray,
+        group: NDArray,
+        beta: NDArray,
+        *,
+        population: bool,
+    ) -> tuple[NDArray[np.float64], tuple]:
+        """Score with every unidentified ``sz`` level at the population value (#432).
+
+        Returns the term's contribution and the unidentified levels among the
+        rows.  A level's identified curve is unchanged.  Under ``population``
+        (or for an unidentified or unseen level) each row takes the population
+        offset ``b(x)' c`` of ``_population_offset``, which makes the
+        population curve independent of the fit's arbitrary point along the
+        aliases.
+        """
+        if population:
+            numeric, _ = self._validated_prediction_inputs(x, group)
+            codes = np.full(len(numeric), -1, dtype=np.intp)
+        else:
+            numeric, codes = self.validate_prediction_values(x, group)
+        basis = self.marginal_basis(numeric)
+        blocks = self._level_blocks(beta)
+        coefficients = blocks[np.maximum(codes, 0)]
+        unidentified = np.isin(codes, np.asarray(self._unidentified_levels, dtype=np.intp))
+        at_population = (codes < 0) | unidentified
+        coefficients[at_population] = self._population_offset(blocks)
+        result = np.einsum("ij,ij->i", basis, coefficients, optimize=True)
+        named = tuple(self._levels[code] for code in np.unique(codes[unidentified]))
+        return result, named
 
     def _level_blocks(self, beta: NDArray) -> NDArray[np.float64]:
         """Return coefficients for every fitted level in marginal coordinates."""

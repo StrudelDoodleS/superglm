@@ -431,6 +431,263 @@ def test_sz_aliased_levels_converge_under_reml(variant) -> None:
     assert model._reml_result.termination_reason != "line_search_failed"
 
 
+_UNIDENTIFIED = {"weightless": ("g003", "g007"), "one_row": ("g000", "g001"), "same_x": ("g005",)}
+
+
+def _population_warnings(caught) -> list:
+    return [w for w in caught if "predicted at the population value" in str(w.message)]
+
+
+@pytest.mark.parametrize(
+    ("variant", "response", "solve"),
+    [
+        ("weightless", "signed", "auto"),
+        ("weightless", "fisher", "auto"),
+        ("weightless", "fisher", "gram"),
+        ("one_row", "signed", "auto"),
+        ("same_x", "fisher", "auto"),
+    ],
+)
+def test_unidentified_sz_levels_predict_the_population(variant, response, solve) -> None:
+    """A level the data cannot identify predicts the population value, named once (#432 a).
+
+    Two weightless levels, two one-row levels or one level at a single ``x``
+    leave part of each level's polynomial deviation free: shifting it, every
+    level the other way by ``1 / K`` and the main effect with them keeps every
+    identified level's curve and every level's fit at its own rows, so the
+    fit's coefficients hold an arbitrary point of that family.  The main
+    effect moved with it, so predictions at those levels, and even population
+    predictions, were arbitrary: up to the log link's ``exp(+-80)`` clip on
+    signed rows and about ``+-5e3`` on Fisher rows, with no warning.  Now such
+    a level predicts the population value, its deviation exactly zero, with
+    one warning per prediction naming it; the identified levels predict
+    exactly as fitted, and the population is the curve from which their
+    polynomial deviations sum to zero (next test), well inside the clip.
+    Recorded from the design and prior weights, so gram fits alike.
+    Mutations: the population offset dropped (``_population_offset``
+    returning zero) and the deviation kept (``_score_identified`` scoring
+    every known level).
+    """
+    from superglm.links import _LOG_LINK_ETA_MAX
+
+    frame, y, weight = _signed_aliased_frame(variant, response=response)
+    family = "gaussian" if response == "fisher" else "gaussian_log"
+    model = _fit(_model(family, solve, lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    expected = _UNIDENTIFIED[variant]
+    assert spec._unidentified_level_names == expected
+    rows = np.isin(frame["g"].to_numpy(), expected)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        conditional = model.predict(frame)
+    named = _population_warnings(caught)
+    assert len(named) == 1
+    assert all(level in str(named[0].message) for level in expected)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        population = model.predict(frame, random_effects="population")
+        model.predict(frame[~rows])
+    assert not _population_warnings(caught)
+    assert np.array_equal(conditional[rows], population[rows])
+    held = spec._unidentified_levels
+    spec._unidentified_levels = ()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fitted = model.predict(frame)
+    finally:
+        spec._unidentified_levels = held
+    assert np.array_equal(conditional[~rows], fitted[~rows])
+    eta = model._link.link(population)
+    assert np.all(np.abs(eta) < _LOG_LINK_ETA_MAX)
+
+
+@pytest.mark.parametrize(("variant", "solve"), [("weightless", "auto"), ("same_x", "gram")])
+def test_the_sz_population_is_the_identified_levels_mean(variant, solve) -> None:
+    """The population curve is the one the identified levels' polynomial deviations sum to zero from.
+
+    On a grid of ``x``, the identified levels' deviations from the population,
+    ``sum_l (eta_l - eta_pop) = b(x)' sum_l (beta_l - c)``, are recovered as
+    coefficients ``gamma`` by least squares on the term's basis ``b``; their
+    part in the penalty's null space ``N_P' gamma`` is zero (``c`` the
+    population offset, ``_population_offset``): as if the unidentified levels
+    were not in the model.  On a2a909ef it was minus the unidentified levels'
+    polynomial deviations, hundreds to thousands on these fits.  Bound: each
+    predictor's rounding ``gamma_(T+2)`` times the sum of its terms'
+    magnitudes ``M`` (``T`` terms), two predictors per row and ``L`` levels,
+    through ``||b^+||_2``, plus the least-squares solve's own backward error
+    ``k u kappa(b) ||gamma||``.  Fisher rows (identity link), the auto and
+    gram backends.
+    """
+    from superglm._frame import as_eager_frame
+    from superglm.model.base import _prediction_plan, _score_prediction_term_exact
+
+    frame, y, weight = _signed_aliased_frame(variant, response="fisher")
+    model = _fit(_model("gaussian", solve, lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    identified = [level for level in spec._levels if level not in spec._unidentified_level_names]
+    grid = np.linspace(0.02, 0.98, 3 * spec.k)
+    rows = pd.DataFrame(
+        {
+            "x": np.tile(grid, len(identified)),
+            "x1": 0.0,
+            "x10": 10.0,
+            "cat": frame["cat"].iloc[0],
+            "g": np.repeat(identified, len(grid)),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        deviations = model.predict(rows) - model.predict(rows, random_effects="population")
+    total = deviations.reshape(len(identified), len(grid)).sum(axis=0)
+    basis = spec.marginal_basis(grid)
+    gamma, *_ = np.linalg.lstsq(basis, total, rcond=None)
+    null_part = spec._population_null_space.T @ gamma
+
+    plan = _prediction_plan(model)
+    terms = plan["features"] + plan["interactions"]
+    eager = as_eager_frame(rows)
+    magnitude = abs(float(model.result.intercept)) + sum(
+        np.abs(_score_prediction_term_exact(term, eager, model.result.beta)) for term in terms
+    )
+    rounding = _gamma(len(terms) + 2) * float(np.max(magnitude))
+    singular = np.linalg.svd(basis, compute_uv=False)
+    bound = (2.0 * len(identified) * math.sqrt(len(grid)) * rounding) / singular[-1] + (
+        spec.k * _U * singular[0] / singular[-1] * float(np.linalg.norm(gamma))
+    )
+    assert float(np.max(np.abs(null_part))) <= bound
+
+
+def test_sz_aliased_levels_converge_beside_a_laplace_excluded_column(monkeypatch) -> None:
+    """Two weightless levels beside ``xt``, which only two rows of weight 1e-15 move (#432 e).
+
+    ``xt`` is left out of the Laplace term, so REML reads ``log|H_II|`` from
+    the factor rebuilt without it, which deflates the levels' penalized alias
+    only where the alias is exactly zero on ``xt``.  Represented over every
+    border column, the alias took a least-squares coefficient on ``xt`` that
+    it does not need (2e-16 of the largest in the scaled solve, never 0.0),
+    so the rebuild handed it to the pivoted factorization: the rank went
+    190 -> 189 between each accepted iterate and every trial 0.7% away
+    (``log|H_II|`` +13.4), and REML stopped ``line_search_failed`` 0.0088
+    above its optimum.  The rank of ``H_II`` does not depend on positive
+    smoothing parameters, so every rebuild has one rank.  Mutation: the
+    excluded columns back in the representation (``_penalized_aliases``).
+    """
+    from superglm.solvers._structured.balance_tree import SumToZeroTreeFactor
+
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    rows = np.flatnonzero((weight > 0) & (frame["g"].to_numpy() == "g029"))[:2]
+    frame["xt"] = 5.0
+    frame.loc[frame.index[rows], "xt"] = [6.0, 7.0]
+    weight[rows] = 1e-15
+    build = SumToZeroTreeFactor.__init__
+    ranks: list[int] = []
+
+    def recording(self, *args, excluded=(), **kwargs):
+        build(self, *args, excluded=excluded, **kwargs)
+        if excluded:
+            ranks.append(int(self.rank))
+
+    monkeypatch.setattr(SumToZeroTreeFactor, "__init__", recording)
+    model = _fit(
+        _model("gaussian", "auto", lam=None, numerics=("x1", "x10", "xt")), frame, y, weight
+    )
+    assert model._reml_profile["direct_backend"] == "structured"
+    xt = next(group.start for group in model._groups if group.name == "xt")
+    assert model._reml_profile["reml_laplace_excluded"] == (xt,)
+    assert ranks and len(set(ranks)) == 1
+    assert bool(model._reml_result.converged)
+    assert model._reml_result.termination_reason != "line_search_failed"
+
+
+@pytest.mark.parametrize(
+    ("variant", "lam_x"), [("same_x", 8e-4), ("same_x", 1e-4), ("one_row", 1e-4)]
+)
+def test_an_sz_weight_derivative_cross_trace_survives_the_alias_variance(variant, lam_x) -> None:
+    """``tr(H^-1 C H^-1 C)`` of a centred weight-derivative operator stays a sum of squares (#432 d).
+
+    The REML Hessian traces each weight-derivative operator ``C`` (centred:
+    ``J' O J`` over ``[1, X]``) against the profiled sz factor.  With
+    ``lambda_x`` small a thin level's penalized alias has a variance of
+    ``1e11`` to ``1e12``, and ``C`` vanishes along it; held as raw moments
+    plus a rank-two centring, the two parts met that variance separately and
+    the trace cancelled to their rounding: ``-6.2e4``, ``-3.4e7`` and
+    ``-5.9e7`` here against dense ``8.2e4``, ``8.2e4`` and ``7.2e4``.  It is
+    ``||H^-1/2 C H^-1/2||_F^2``, never negative, and ``_trace_form`` (the
+    intercept column per level, each part annihilating the alias) keeps it
+    so.  Mutation: ``_trace_form`` returning ``self._form(operator)``.
+    """
+    from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
+    from superglm.solvers._structured.operators import CenteredBlockOperator
+    from superglm.solvers._structured.state import centred_data_operator
+    from superglm.solvers.structured import get_structured_layout
+
+    frame, y, weight = _signed_aliased_frame(variant)
+    model = _model("gaussian_log", "auto", lam=1.29, main_lam=lam_x, numerics=("x1", "x10"))
+    model = _fit(model, frame, y, weight)
+    factor = model._linear_system_state.profiled_factor
+    system = factor.augmented_factor.system
+    layout = get_structured_layout(
+        model._dm, model._groups, dominant_group_index=system.dominant_group_index
+    )
+    rates = np.random.default_rng(0).normal(size=model._dm.n) * weight
+    ((raw, cross, total, level),) = factor_smooth_moment_operators(
+        layout, [rates], center=system.leaf.center, level_cross=True
+    )
+    operator = CenteredBlockOperator(
+        raw=raw,
+        cross=cross,
+        total=total,
+        center=centred_data_operator(system).center,
+        raw_structured_cross=level,
+    )
+    assert factor.operator_cross_trace(operator, operator) > 0.0
+
+
+@pytest.mark.threads
+def test_sz_same_x_reml_decisions_do_not_follow_the_blas_thread_count(monkeypatch) -> None:
+    """REML's decisions beside a same-x level are the same at 1 and N BLAS threads (#432 d).
+
+    The level's penalized alias ``(a_0, v)`` is a null of ``[1, X]``, so every
+    centred weight-derivative operator vanishes along it, while its variance is
+    ``1 / (lambda_x a'Sa)`` (1.8e8 in the border at the first iterate).  Held
+    as raw moments plus a rank-two centring, the two parts met that variance
+    separately and the outer Hessian's wiggle entry cancelled to its rounding,
+    so the first Newton step, and then the iteration count (14 at one BLAS
+    thread against 13 at eight on a2a909ef), followed the thread count.
+    ``ProfiledSumToZeroTreeFactor._trace_form`` holds the
+    same operator as ``K' O K`` with the intercept column per level, each part
+    annihilating the alias.  ``native`` keeps the pools live inside the fit
+    (the default caps them to one thread below 1500 columns, which hides it).
+    Mutation: ``_trace_form`` returning ``self._form(operator)``.
+    """
+    from threadpoolctl import ThreadpoolController, threadpool_limits
+
+    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "native")
+    native = max(
+        (
+            pool["num_threads"]
+            for pool in ThreadpoolController().info()
+            if pool.get("user_api") == "blas"
+        ),
+        default=1,
+    )
+    if native < 2:
+        pytest.skip("one BLAS thread: nothing to compare")
+    frame, y, weight = _signed_aliased_frame("same_x")
+    runs = []
+    for threads in (1, min(native, 8)):
+        with threadpool_limits(threads, user_api="blas"):
+            model = _fit(
+                _model("gaussian_log", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight
+            )
+        result = model._reml_result
+        runs.append(
+            (int(result.n_reml_iter), result.termination_reason, len(result.lambda_history))
+        )
+    assert runs[0] == runs[1]
+
+
 def test_a_dense_penalty_charges_nothing_along_its_null_space() -> None:
     """The main spline's penalty quadratic over its range: a null-space coefficient adds nothing.
 

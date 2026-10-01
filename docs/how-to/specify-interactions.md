@@ -166,7 +166,30 @@ population = model.predict(test, random_effects="population")
 
 `random_effects="population"` removes `RandomEffect` and `FactorSmooth`
 contributions while retaining fixed effects and the global spline. For SZ,
-that is exactly the global curve.
+that is the global curve, adjusted as described next when the training data
+cannot identify some levels.
+
+### SZ levels the data cannot identify
+
+Some SZ levels do not carry enough information for their own curve:
+
+- a level whose training rows all have zero weight;
+- a level with fewer distinct values of the smooth's variable than the
+  penalty leaves unpenalized (with the default `m=2`, a single distinct value).
+
+For such a level, part of its curve can trade places with the global curve
+without changing any other prediction, so the data do not decide either one.
+The fit already warns and names these levels. At prediction:
+
+- such a level is predicted at the population value: its deviation is set to
+  exactly zero;
+- each call to `predict` that meets such a level warns once and names it;
+- the population curve is the one around which the other levels' unpenalized
+  parts (straight lines, with `m=2`) average to zero, as if the unidentified
+  levels were not in the model;
+- every other level predicts exactly as fitted.
+
+To give a level its own curve, give it weighted rows at enough distinct values.
 
 ## Separated cells: exposure without response
 

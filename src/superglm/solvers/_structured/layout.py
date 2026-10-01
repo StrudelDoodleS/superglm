@@ -148,24 +148,11 @@ class FactorSmoothLeafLayout:
                 and np.array_equal(held, weights)
             ):
                 return value
-        omega = sum(
-            np.asarray(matrix, dtype=np.float64)
-            for _, matrix in dominant.repeated_penalty_components
-        )
-        spectrum = np.linalg.eigvalsh(0.5 * (omega + np.transpose(omega)))
-        nullity = int(
-            np.count_nonzero(spectrum <= len(spectrum) * np.finfo(np.float64).eps * spectrum[-1])
-        )
-        from superglm.solvers._structured.leaf_kernels import _distinct_level_rows
-
+        nullity = _sz_penalty_null_space(dominant).shape[1]
         ordered = np.ascontiguousarray(weights[self.leaf_order])
-        source = self.sorted_basis
-        if dominant.is_discrete:
-            bins = source[0]
-            data, indices, indptr = np.zeros(len(bins)), bins, np.arange(len(bins) + 1)
-        else:
-            data, indices, indptr = source
-        distinct = _distinct_level_rows(data, indices, indptr, self.leaf_starts, ordered, nullity)
+        distinct = _distinct_level_counts(
+            dominant, self.sorted_basis, self.leaf_starts, ordered, nullity
+        )
         thin = np.flatnonzero(distinct < nullity).astype(np.intp)
         value = (thin, np.asarray(distinct[thin], dtype=np.intp))
         for array in value:
@@ -526,6 +513,79 @@ def build_factor_smooth_leaf_layout(
         lineage_cache=cache,
         **_border_partition(group_matrices, groups, (dominant_group_index,), dominant.shape[0]),
     )
+
+
+def _sz_penalty_null_space(dominant: FactorSmoothGroupMatrix) -> NDArray:
+    """``N_P`` ``(k, m)``: the null space of an ``sz`` term's summed level penalty.
+
+    Its eigenvectors at or below ``k eps`` of the largest eigenvalue; in the
+    natural parameterization (a diagonal penalty) the unpenalized polynomial
+    coordinates, exactly.
+    """
+    omega = sum(
+        np.asarray(matrix, dtype=np.float64) for _, matrix in dominant.repeated_penalty_components
+    )
+    values, vectors = np.linalg.eigh(0.5 * (omega + np.transpose(omega)))
+    return vectors[:, values <= len(values) * np.finfo(np.float64).eps * values[-1]]
+
+
+def _distinct_level_counts(
+    dominant: FactorSmoothGroupMatrix,
+    sorted_source: tuple[NDArray, ...],
+    starts: NDArray,
+    ordered_weights: NDArray,
+    cap: int,
+) -> NDArray:
+    """Each level's count of distinct basis rows of positive weight, stopped at ``cap``.
+
+    ``sorted_source`` is the basis in level order (``sorted_basis``): an exact
+    term's CSR arrays or a discrete term's bins, one bin a row.
+    """
+    from superglm.solvers._structured.leaf_kernels import _distinct_level_rows
+
+    if dominant.is_discrete:
+        bins = sorted_source[0]
+        data, indices, indptr = np.zeros(len(bins)), bins, np.arange(len(bins) + 1)
+    else:
+        data, indices, indptr = sorted_source
+    return _distinct_level_rows(data, indices, indptr, starts, ordered_weights, cap)
+
+
+def sz_unidentified_levels(
+    dominant: FactorSmoothGroupMatrix, prior_weights: NDArray | None
+) -> tuple[tuple[int, ...], NDArray]:
+    """The ``sz`` levels the data leave unidentified, and the penalty's null space ``N_P``.
+
+    A level whose rows of positive weight hold fewer distinct ``x`` values than
+    the dimension ``m`` of ``N_P`` (none, for a level without weight) cannot
+    tell part of its polynomial deviation from the main effect: the rule
+    ``thin_level_counts`` applies, on the same kernel.  Backend independent:
+    it reads the design and the prior weights alone, so a gram fit records
+    the levels an ``sz`` balance tree names.
+    """
+    null_space = _sz_penalty_null_space(dominant)
+    null_space.setflags(write=False)
+    nullity = null_space.shape[1]
+    if not nullity:
+        return (), null_space
+    codes = dominant.codes
+    weights = (
+        np.ones(len(codes)) if prior_weights is None else np.asarray(prior_weights, np.float64)
+    )
+    order, starts = _level_order(codes, dominant.n_levels)
+    if dominant.is_discrete:
+        source: tuple[NDArray, ...] = (np.ascontiguousarray(dominant.bin_idx[order]),)
+    else:
+        csr = dominant.B[order]
+        source = (
+            np.ascontiguousarray(csr.data, dtype=np.float64),
+            np.ascontiguousarray(csr.indices, dtype=np.int64),
+            np.ascontiguousarray(csr.indptr, dtype=np.int64),
+        )
+    distinct = _distinct_level_counts(
+        dominant, source, starts, np.ascontiguousarray(weights[order]), nullity
+    )
+    return tuple(int(level) for level in np.flatnonzero(distinct < nullity)), null_space
 
 
 def _level_order(codes: NDArray, n_levels: int) -> tuple[NDArray, NDArray]:
