@@ -692,3 +692,24 @@ def test_solver_penalty_value_uses_the_compensated_form_and_its_range_fallback()
     tiny[0] = np.nextafter(0.0, 1.0)
     assert not _dot2_quadratic_form(*_nonzero_entries(penalty), tiny)[1]
     assert _half_penalty_quadratic(penalty, tiny) == 0.5 * float(tiny @ penalty @ tiny)
+
+
+@pytest.mark.parametrize("width", [4, 2])
+@pytest.mark.parametrize("with_entries", [False, True])
+def test_solver_penalty_value_refuses_coefficients_that_do_not_conform(width, with_entries):
+    """A length mismatch raises the plain form's ValueError, not a truncated value.
+
+    The kernel reads coefficients without bounds checks: before this check a
+    longer vector returned the form over its first three entries (1.5 here) and
+    a shorter one read past the end of the buffer.
+    """
+    from superglm.distributional.solver.solver import _half_penalty_quadratic, _penalty_entries
+
+    penalty = np.eye(3)
+    coefficients = np.ones(width)
+    entries = _penalty_entries(penalty) if with_entries else None
+    with pytest.raises(ValueError) as plain:
+        coefficients @ penalty @ coefficients
+    with pytest.raises(ValueError) as caught:
+        _half_penalty_quadratic(penalty, coefficients, entries)
+    assert str(caught.value) == str(plain.value)

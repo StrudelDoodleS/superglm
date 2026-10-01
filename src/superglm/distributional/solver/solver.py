@@ -1008,11 +1008,16 @@ def _half_penalty_quadratic(
     through the Newton decrement, not the score.
     """
     values = _native_operand(coefficients)
+    matrix = np.asarray(penalty, dtype=np.float64)
+    if values.ndim != 1 or matrix.shape != (values.size, values.size):
+        # The kernel indexes the coefficients without bounds checks, so a pair
+        # that does not conform takes the plain form, which raises numpy's own
+        # ValueError, exactly as the penalty value did before the kernel.
+        return 0.5 * float(values @ matrix @ values)
     if entries is None:
-        entries = _penalty_entries(penalty)
+        entries = _penalty_entries(matrix)
     quadratic, valid = _dot2_quadratic_form(*entries, values)
     if not valid:
-        matrix = np.asarray(penalty, dtype=np.float64)
         quadratic = values @ matrix @ values
     return 0.5 * float(quadratic)
 
