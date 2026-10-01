@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from typing import Any, Literal
 
 import numpy as np
@@ -19,6 +20,16 @@ class RandomEffect:
     with no training rows is not pinned the way an unpenalized dummy is: it
     keeps its own coefficient and shrinks to the population value through the
     variance component, exactly as a thinly observed level does.
+
+    ``nested_in=`` names another ``RandomEffect`` feature of the same model
+    that this one is nested in: every level of this effect belongs to exactly
+    one of its levels (a region within a country, a vehicle model within a
+    make).  Nesting is also detected from the level codes without it; the
+    declaration is checked on the training rows, and a row that breaks it is
+    an error naming the row and both of the parent's levels.  When this effect
+    is the structured solver's leaf (the random effect with the most levels,
+    with no ``FactorSmooth`` in the model), the declared parent is always in
+    its elimination chain; otherwise the declaration is only validated.
 
     Notes
     -----
@@ -42,9 +53,12 @@ class RandomEffect:
         unseen: Literal["population", "error"] = "population",
         missing: Literal["error"] = "error",
         lambda_policy: LambdaPolicy | None = None,
+        nested_in: Hashable | None = None,
     ):
         from superglm.features._level_source import resolve_level_source
 
+        if nested_in is not None and not isinstance(nested_in, Hashable):
+            raise TypeError("nested_in must be the name of another RandomEffect feature or None")
         if unseen not in ("population", "error"):
             raise ValueError(f"unseen must be 'population' or 'error', got {unseen!r}")
         if missing != "error":
@@ -55,6 +69,7 @@ class RandomEffect:
         self.unseen = unseen
         self.missing = missing
         self._lambda_policy = lambda_policy
+        self.nested_in = nested_in
         self._declared_levels: list | None = (
             None if levels is None else resolve_level_source(levels, context="RandomEffect")
         )
@@ -134,6 +149,7 @@ class RandomEffect:
                 None if self._lambda_policy is None else {"_default": self._lambda_policy}
             ),
             structured_kind="random_effect",
+            random_effect_nested_in=getattr(self, "nested_in", None),
         )
 
     def validate_prediction_values(self, x: NDArray) -> None:
@@ -184,3 +200,130 @@ class RandomEffect:
             "log_relativities": effects.copy(),
             "relativities": {level: float(np.exp(value)) for level, value in effects.items()},
         }
+
+
+# Near-nesting disclosure (one-engine design §3.13): an undeclared pair of
+# random effects is named when all but a few rows nest.  "A few" is at most
+# this share of the rows (and at least one row); a crossed pair breaks nesting
+# on most of its rows, so the warning is not a routing input and its bound is
+# a disclosure choice, not a numerical one.
+_NEAR_NESTING_SHARE = 0.01
+_NEAR_NESTING_ROWS_SHOWN = 3
+
+
+def _factorized(values) -> tuple[NDArray[np.intp], NDArray]:
+    codes, uniques = pd.factorize(np.asarray(values).ravel())
+    return codes.astype(np.intp, copy=False), np.asarray(uniques, dtype=object)
+
+
+def _first_rows(codes: NDArray[np.intp], n_levels: int) -> NDArray[np.intp]:
+    """The first row of every level (``-1`` for a level with no row)."""
+    first = np.full(n_levels, -1, dtype=np.intp)
+    rows = np.arange(len(codes), dtype=np.intp)
+    first[codes[::-1]] = rows[::-1]
+    return first
+
+
+def random_effect_specs(specs) -> dict:
+    """The ``RandomEffect`` features of a feature mapping, in its order."""
+    return {name: spec for name, spec in specs.items() if isinstance(spec, RandomEffect)}
+
+
+def validate_declared_nesting(specs, column) -> None:
+    """Check every ``RandomEffect(nested_in=)`` declaration on the training rows.
+
+    ``specs`` maps feature names to specs and ``column(name)`` returns a
+    feature's training values.  The declared parent must be another
+    ``RandomEffect`` feature, and every level of the child must meet one
+    parent level on the training rows; a row that breaks it raises a
+    ``ValueError`` naming the row (its position in the training data) and
+    both parent levels.  Missing values are left to the specs' own check.
+    """
+    effects = random_effect_specs(specs)
+    for child, spec in effects.items():
+        parent = getattr(spec, "nested_in", None)
+        if parent is None:
+            continue
+        if parent == child or parent not in effects:
+            raise ValueError(
+                f"RandomEffect {child!r} is declared nested_in={parent!r}, which is not "
+                "another RandomEffect feature of this model."
+            )
+        child_codes, child_levels = _factorized(column(child))
+        parent_codes, parent_levels = _factorized(column(parent))
+        if np.any(child_codes < 0) or np.any(parent_codes < 0):
+            continue
+        first = _first_rows(child_codes, len(child_levels))[child_codes]
+        broken = np.flatnonzero(parent_codes[first] != parent_codes)
+        if broken.size:
+            row = int(broken[0])
+            head = int(first[row])
+            raise ValueError(
+                f"RandomEffect {child!r} is declared nested_in={parent!r}, but its level "
+                f"{child_levels[child_codes[row]]!r} occurs under {parent!r} level "
+                f"{parent_levels[parent_codes[head]]!r} (row {head}) and under "
+                f"{parent_levels[parent_codes[row]]!r} (row {row}); rows are counted from 0 "
+                f"in the training data, and {broken.size} row(s) break the declaration. Fix "
+                f"those rows, or remove nested_in to fit {child!r} and {parent!r} as crossed "
+                "effects."
+            )
+
+
+def near_nesting_notes(specs, column) -> list[str]:
+    """Name each undeclared pair of random effects that nests on all but a few rows.
+
+    For every ordered pair (child, parent) of ``RandomEffect`` features with
+    at least as many child levels, the rows off their child level's most
+    frequent parent level break nesting.  A pair broken by at least one row
+    and at most ``_NEAR_NESTING_SHARE`` of the rows is named, with a few of
+    those rows: the fit treats such a pair as crossed.  The notes never
+    change a fit's route; ``validate_declared_nesting`` covers the declared
+    pairs.
+    """
+    effects = random_effect_specs(specs)
+    if len(effects) < 2:
+        return []
+    coded = {name: _factorized(column(name)) for name in effects}
+    notes = []
+    for child, (child_codes, child_levels) in coded.items():
+        for parent, (parent_codes, parent_levels) in coded.items():
+            if (
+                parent == child
+                or getattr(effects[child], "nested_in", None) == parent
+                or len(child_levels) < len(parent_levels)
+                or np.any(child_codes < 0)
+                or np.any(parent_codes < 0)
+            ):
+                continue
+            first = _first_rows(child_codes, len(child_levels))[child_codes]
+            if np.array_equal(parent_codes[first], parent_codes):
+                continue  # nested: the solver detects it from the codes
+            pair = child_codes.astype(np.int64) * len(parent_levels) + parent_codes
+            cells, inverse, counts = np.unique(pair, return_inverse=True, return_counts=True)
+            cell_child = cells // len(parent_levels)
+            # each child level's most frequent parent cell (ties: the first)
+            order = np.lexsort((-counts, cell_child))
+            leading = np.zeros(len(cells), dtype=bool)
+            leading[order[np.r_[True, cell_child[order][1:] != cell_child[order][:-1]]]] = True
+            broken = np.flatnonzero(~leading[inverse])
+            limit = max(1, int(_NEAR_NESTING_SHARE * len(child_codes)))
+            if not 0 < broken.size <= limit:
+                continue
+            majority = {
+                int(cell // len(parent_levels)): int(cell % len(parent_levels))
+                for cell in cells[leading]
+            }
+            examples = "; ".join(
+                f"row {int(row)}: {child!r} level {child_levels[child_codes[row]]!r} under "
+                f"{parent!r} level {parent_levels[parent_codes[row]]!r}, where most of its rows "
+                f"are under {parent_levels[majority[int(child_codes[row])]]!r}"
+                for row in broken[:_NEAR_NESTING_ROWS_SHOWN]
+            )
+            notes.append(
+                f"RandomEffect {child!r} is nested in {parent!r} except for {broken.size} "
+                f"row(s) ({examples}; rows are counted from 0 in the training data), so the "
+                f"fit treats the two as crossed. If each {child!r} level belongs to one "
+                f"{parent!r} level, fix those rows and declare "
+                f"RandomEffect(nested_in={parent!r})."
+            )
+    return notes

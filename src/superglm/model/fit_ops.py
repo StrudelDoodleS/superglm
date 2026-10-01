@@ -63,6 +63,7 @@ from superglm.model.reml_setup import (
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.pirls import fit_pirls
 from superglm.solvers.working_rows import pearson_chi2
 from superglm.types import FitStats
@@ -240,6 +241,26 @@ def _claim_free_categorical_levels(values: NDArray, spec, positive: NDArray, val
         }
 
     return len(levels(valid) - levels(positive))
+
+
+def _check_random_effect_nesting(model, X) -> None:
+    """Validate declared nesting and name near-nested pairs on the training rows (§3.13).
+
+    ``RandomEffect(nested_in=)`` is checked here, where the training rows are
+    first bound, once per REML entry point (``fit_reml``, ``estimate_theta``,
+    ``estimate_p``; the ``estimate_p`` search's candidate fits, which run
+    ``fit_reml`` on a clone of the same rows, are marked as checked): a row
+    that breaks it is an error.  An undeclared pair that
+    nests on all but a few rows is named once, in a warning that never changes
+    the fit (``features.random_effect.near_nesting_notes``).
+    """
+    import warnings
+
+    from superglm.features.random_effect import near_nesting_notes, validate_declared_nesting
+
+    validate_declared_nesting(model._specs, X.column_array)
+    for note in near_nesting_notes(model._specs, X.column_array):
+        warnings.warn(note, UserWarning, stacklevel=4)
 
 
 def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
@@ -918,10 +939,9 @@ def _prime_fit_caches(
         fit_space_result = (
             model._solver_pirls_result() if model._solver_result is not None else model.result
         )
-        eta = model._dm.matvec(fit_space_result.beta) + fit_space_result.intercept
-        if model._fit_offset is not None:
-            eta = eta + model._fit_offset
-        eta = stabilize_eta(eta, model._link)
+        eta = stabilize_eta(
+            linear_predictor(model._dm, fit_space_result, model._fit_offset), model._link
+        )
         mu = clip_mu(model._link.inverse(eta), model._distribution)
     if null_mu is None:
         null_mu = _compute_null_mu(
@@ -1383,10 +1403,7 @@ def _fit_in_workspace(
     if scale_known and model._result.phi != 1.0:
         model._result = replace(model._result, phi=1.0)
 
-    eta = model._dm.matvec(model._result.beta) + model._result.intercept
-    if offset is not None:
-        eta = eta + offset
-    eta = stabilize_eta(eta, model._link)
+    eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     null_mu = _compute_null_mu(
@@ -1533,10 +1550,7 @@ def _fit_path_in_workspace(
     # Set model state to the last (least-regularized) fit
     model._result = result
 
-    eta = model._dm.matvec(result.beta) + result.intercept
-    if offset is not None:
-        eta = eta + offset
-    eta = stabilize_eta(eta, model._link)
+    eta = stabilize_eta(linear_predictor(model._dm, result, offset), model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
     null_mu = _compute_null_mu(
         y,
@@ -1617,6 +1631,8 @@ def fit_reml(
     sample_weight_ref = sample_weight
     offset_ref = offset
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
+    if not getattr(model, "_random_effect_nesting_checked", False):
+        _check_random_effect_nesting(model, X)
     # Governed by the same seam as the other separation diagnostics, so a
     # caller filtering on SeparationWarning catches all three and
     # ``separation="ignore"`` quiets all three.
@@ -1811,10 +1827,7 @@ def _fit_reml_in_workspace(
             record_diagnostics=False,
             convergence=model._convergence,
         )
-        eta = model._dm.matvec(model._result.beta) + model._result.intercept
-        if offset is not None:
-            eta = eta + offset
-        eta = stabilize_eta(eta, model._link)
+        eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
         mu = clip_mu(model._link.inverse(eta), model._distribution)
         null_mu = _compute_null_mu(
             y,

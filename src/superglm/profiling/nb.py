@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -52,6 +53,7 @@ from superglm.solvers.dispersion import (
     dispersion_likelihood_size,
     model_weight_semantics,
 )
+from superglm.solvers.mode_score import linear_predictor
 
 #: Default search range for the NB2 shape parameter. Deliberately wide: these
 #: are numerical guard rails for the bracketed solve, not a statistical prior.
@@ -353,9 +355,7 @@ class _MeanFit:
             reml_penalties=self.reml_penalties,
         )
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
-        eta = stabilize_eta(
-            model._dm.matvec(result.beta) + result.intercept + self.offset, model._link
-        )
+        eta = stabilize_eta(linear_predictor(model._dm, result, self.offset), model._link)
         return clip_mu(model._link.inverse(eta), model._distribution)
 
 
@@ -496,6 +496,16 @@ class NBProfileResult:
     _optimum_point: tuple[float, float, bool] | None = field(default=None, repr=False)
     # Cautions about one interval: theta_hat outside it, or a higher optimum it found.
     _ci_cautions: dict[float, list[str]] = field(default_factory=dict, repr=False)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore a pickle; a result saved by superglm 0.35.0 is restated in this layout.
+
+        One path for a result pickled on its own (what ``estimate_theta``
+        returns) and for one inside a saved model (`_restate_v0_35`).
+        """
+        if "n_evaluations" in state:
+            state = _restate_v0_35(state)
+        self.__dict__.update(state)
 
     def _at_mean(self, y: NDArray, mu: NDArray, weights: NDArray) -> NBProfileResult:
         """The estimate restated at a fitted mean, whose NLL and interval it then describes."""
@@ -677,3 +687,46 @@ class NBProfileResult:
             ax.axvline(self.theta_hat, c="k", lw=1, ls=":")
         ax.set_xscale("log")
         return ax
+
+
+def _restate_v0_35(saved: dict[str, Any]) -> dict[str, Any]:
+    """The fields of an ``NBProfileResult`` unpickled from superglm 0.35.0, in this layout.
+
+    v0.35.0 kept each interval as a ``(lower, upper)`` tuple in ``_ci_cache``
+    and no endpoint status: a side whose likelihood-ratio statistic never
+    reached its cutoff was returned at the end of its search range,
+    ``min(0.01, theta_hat / 100)`` below and ``max(500, theta_hat * 100)``
+    above (``_CI_RANGE``, unchanged since), so a side at that end is censored.
+    Its iterates (``cache``: theta to six significant digits, then NLL, the
+    last at the published mean) become ``evaluations``.  The saved response,
+    mean and weights are kept, so an interval at another level is inverted on
+    the same fixed-mean profile; v0.35.0 recorded no estimation bound, so that
+    interval's search range is not stopped at one.
+    """
+    theta_hat = float(saved["theta_hat"])
+    ends = (min(_CI_RANGE[0], theta_hat / 100.0), max(_CI_RANGE[1], theta_hat * 100.0))
+    intervals = {
+        float(alpha): Interval(
+            float(lower), float(upper), float(lower) == ends[0], float(upper) == ends[1]
+        )
+        for alpha, (lower, upper) in (saved.get("_ci_cache") or {}).items()
+    }
+    iterates = saved.get("cache") or {}
+    restated = NBProfileResult(
+        theta_hat=theta_hat,
+        nll=float(saved["nll"]),
+        converged=bool(saved["converged"]),
+        evaluations=pd.DataFrame(
+            {"theta": list(map(float, iterates)), "nll": list(map(float, iterates.values()))},
+            columns=["theta", "nll"],
+        ),
+        _y=saved.get("_y"),
+        _mu=saved.get("_mu"),
+        _weights=saved.get("_weights"),
+        _weight_semantics=saved.get("_weight_semantics", FREQUENCY_WEIGHTS),
+        _ci_cache=intervals,
+        _ci_cautions={alpha: [] for alpha in intervals},
+    )
+    for alpha in intervals:
+        restated.warnings.extend(restated._interval_warnings(alpha))
+    return vars(restated)

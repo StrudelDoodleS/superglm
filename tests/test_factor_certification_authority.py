@@ -5,9 +5,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
+import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm import Numeric, SuperGLM
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributions import Gamma, Gaussian
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
@@ -38,7 +41,7 @@ from superglm.solvers.rank import (
     needs_factor_certification,
     streamed_weighted_factor,
 )
-from superglm.types import GroupSlice
+from superglm.types import GroupInfo, GroupSlice
 from tests._exact_reference import exact_matmul
 
 
@@ -1086,3 +1089,149 @@ def test_full_rank_ill_conditioned_geometry_is_certified_by_the_factor() -> None
         decomposition.pseudo_inverse(),
     )
     assert moved >= 1e-3
+
+
+def test_penalty_factor_keeps_each_blocks_resolved_curvature_and_no_rounding() -> None:
+    """The penalty's square root carries the curvature ``S`` certifies, block by block.
+
+    Three diagonal blocks, every entry exact: a ridge at ``1e-6``, an integer
+    second-difference penalty at ``1e10`` (an exact two-dimensional null
+    space), and an ``sz``-like block whose exactly zero rows (unpenalized
+    natural coordinates) interleave its penalized ones.  The factor has
+    exactly the rank of ``S``, nothing on the zero rows, and reproduces each
+    block to within twice its eigensolver resolution ``n_b eps ||S_b||_2``.
+    Fails on 6544d2bc, where one ``eigh`` of the whole matrix kept every
+    positive rounding eigenvalue (rows on the zero coordinates: the rounding
+    curvature that made an sz alias identified on gram).  Mutation: one bar
+    for the whole matrix, ``n eps ||S||_2``, drops the ridge beside the
+    ``1e10`` block, a curvature its own block resolves.
+    """
+    second = np.diff(np.eye(6), n=2, axis=0)
+    blocks = [
+        np.diag([1e-6, 2e-6, 3e-6]),
+        1e10 * (second.T @ second),
+        np.kron(np.array([[2.0, 1.0], [1.0, 2.0]]), np.diag([4.0, 1.0, 0.0])),
+    ]
+    ranks = (3, 4, 4)
+    S = np.zeros((15, 15))
+    starts = (0, 3, 9)
+    for start, block in zip(starts, blocks, strict=True):
+        S[start : start + len(block), start : start + len(block)] = block
+    R = penalty_factor(S)
+    assert R.shape == (sum(ranks), 15)
+    assert np.all(R[:, [11, 14]] == 0.0)
+    gram = R.T @ R
+    eps = float(np.finfo(np.float64).eps)
+    for start, block in zip(starts, blocks, strict=True):
+        span = slice(start, start + len(block))
+        norm = float(np.linalg.norm(block, 2))
+        assert np.linalg.norm(gram[span, span] - block, 2) <= 2.0 * len(block) * eps * norm
+        assert not np.any(gram[span, :start]) and not np.any(gram[span, span.stop :])
+
+
+class _GradedPenaltyPair:
+    """Columns ``t`` and ``1e-8 cos(i)`` under ``S = [[1e10, 1e-10], [1e-10, 1e-6]]``, unreparametrized."""
+
+    penalty = np.array([[1e10, 1e-10], [1e-10, 1e-6]])
+
+    def build(self, x, sample_weight=None):
+        columns = sp.csr_matrix(self.transform(x))
+        return GroupInfo(
+            columns=columns, n_cols=2, penalty_matrix=self.penalty, reparametrize=False
+        )
+
+    def transform(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        return np.column_stack([x, 1e-8 * np.cos(np.arange(len(x)))])
+
+    def reconstruct(self, beta):
+        return {"coef": beta}
+
+
+def test_penalty_factor_cuts_a_graded_block_on_its_equilibration() -> None:
+    """A graded penalty keeps every mode its Jacobi equilibration resolves.
+
+    ``S = [[1e10, 1e-10], [1e-10, 1e-6]]`` equilibrates to the identity to
+    ``1e-12``, but the unscaled cut ``n eps ||S||_2 = 4.4e-6`` dropped its
+    ``1e-6`` mode.  Two duplicate columns send gram to factor certification,
+    where the ``1e-8 cos(i)`` coefficient then carried only its ``4e-15`` of
+    data curvature: gram rejected every step of the first iteration and
+    published converged=False, edf 3 and log|H| -1.364.  Fails on 623230ac
+    (Sol's review, P1).
+
+    The root reproduces ``S`` within twice the eigensolver resolution of its
+    equilibration, entrywise in ``sqrt(S_ii S_jj)``.  The fit reaches the
+    dense reference: ``log n + log det(Q' H_c Q)`` over the range ``Q`` of
+    the duplicate pair, and edf ``1 + tr(H^-1 X_c'X_c)`` there, both on the
+    Jacobi equilibration ``A`` of ``Q' H_c Q``.  The centred Gram rounds
+    entrywise within ``gamma_n sqrt(H_ii H_jj)``, which moves each of the
+    ``p`` eigenvalues by at most ``||A^-1||_2 p gamma_n`` relatively (Drmac
+    2020, arXiv:2006.02753, Thm 3.11), so each sum is within ``p^2 gamma_n
+    ||A^-1||_2``.
+    """
+    eps = float(np.finfo(np.float64).eps)
+    S = _GradedPenaltyPair.penalty
+    scale = np.sqrt(np.diag(S))
+    equilibrated = S / np.outer(scale, scale)
+    R = penalty_factor(S)
+    assert R.shape == (2, 2)
+    resolution = 2.0 * len(S) * eps * float(np.linalg.norm(equilibrated, 2))
+    assert np.all(np.abs(R.T @ R - S) <= resolution * np.outer(scale, scale))
+
+    n = 80
+    i = np.arange(n)
+    t = np.linspace(-1.0, 1.0, n)
+    z = np.sin(i)
+    y = 1.0 + np.cos(i)
+    model = SuperGLM(
+        family="gaussian",
+        features={"pair": _GradedPenaltyPair(), "z1": Numeric(), "z2": Numeric()},
+        selection_penalty=0,
+        spline_penalty=1.0,
+        direct_solve="gram",
+    )
+    model.fit(pd.DataFrame({"pair": t, "z1": z, "z2": z}), y)
+
+    X = np.column_stack([t, 1e-8 * np.cos(i), z, z])
+    X = X - X.mean(axis=0)
+    range_basis = np.zeros((4, 3))
+    range_basis[[0, 1], [0, 1]] = 1.0
+    range_basis[2:, 2] = 1.0 / np.sqrt(2.0)
+    data = range_basis.T @ (X.T @ X) @ range_basis
+    hessian = data.copy()
+    hessian[:2, :2] += S
+    diagonal = np.sqrt(np.diag(hessian))
+    A = hessian / np.outer(diagonal, diagonal)
+    log_det = np.log(n) + 2.0 * np.sum(np.log(np.diag(np.linalg.cholesky(A)) * diagonal))
+    edf = 1.0 + np.trace(np.linalg.solve(A, data / np.outer(diagonal, diagonal)))
+    p = len(A)
+    gamma = n * eps / (1.0 - n * eps)
+    bound = p**2 * gamma * float(np.linalg.norm(np.linalg.inv(A), 2))
+    assert model.result.converged
+    assert abs(float(model.result.log_det_H) - log_det) <= bound
+    assert abs(float(model.result.effective_df) - edf) <= bound
+
+
+@pytest.mark.parametrize(
+    "S",
+    [np.array([[1e-300, 1e-3], [1e-3, 1.0]]), np.array([[0.0, 1e-3], [1e-3, 1.0]])],
+    ids=["cauchy_schwarz_broken", "zero_diagonal"],
+)
+def test_penalty_factor_keeps_the_unscaled_cut_where_scaling_certifies_nothing(S) -> None:
+    """A block that is not PSD once equilibrated keeps the unscaled cut.
+
+    ``[[1e-300, 1e-3], [1e-3, 1]]`` breaks ``|S_12| <= sqrt(S_11 S_22)`` by
+    ``1e147``: its equilibration has eigenvalues ``1 +- 1e147``, whose
+    positive part maps back to ``5e146`` on ``S_22``, and a zero diagonal
+    has no equilibration at all.  Neither has a scaled model, so the block
+    keeps the eigenpairs above ``n eps ||S||_2`` of ``S`` itself, its PSD
+    projection in the Frobenius norm (Higham 2002, IMA J. Numer. Anal. 22,
+    Thm 3.2 with ``W = I``), within ``|lambda_min(S)| + 2 n eps ||S||_2``
+    of ``S``.  Mutation: no definiteness test before the equilibrated cut.
+    """
+    eps = float(np.finfo(np.float64).eps)
+    values = np.linalg.eigvalsh(S)
+    R = penalty_factor(S)
+    assert R.shape == (1, 2)
+    bound = abs(values[0]) + 2.0 * len(S) * eps * values[-1]
+    assert np.linalg.norm(R.T @ R - S, 2) <= bound

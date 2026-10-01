@@ -33,6 +33,9 @@ def diagnostics(model) -> dict[str, Any]:
     res = model.result
     group_edf = model._group_edf
     reml_lam = getattr(model, "_reml_lambdas", None)
+    # design §3.9: the slopes a REML fit flagged weakly identified and kept
+    reml_profile = getattr(model, "_reml_profile", None) or {}
+    weak_indices = tuple(reml_profile.get("reml_weakly_identified", ()) or ())
     penalty = fitted_penalty(model)
     lambda2 = fitted_lambda2(model)
     selected_names = selected_group_name_set(res, model._groups, penalty=penalty)
@@ -48,6 +51,9 @@ def diagnostics(model) -> dict[str, Any]:
         spec = model._specs.get(g.feature_name)
         if isinstance(spec, _SplineBase):
             entry.update(spline_group_enrichment(g.name, spec, group_edf, reml_lam, lambda2))
+        entry["weakly_identified"] = [
+            int(index) - g.start for index in weak_indices if g.start <= int(index) < g.end
+        ]
         out[g.name] = entry
     out["_model"] = {
         "intercept": res.intercept,
@@ -65,7 +71,15 @@ def diagnostics(model) -> dict[str, Any]:
             else res.converged
         ),
         "lambda1": penalty.lambda1,
+        "weakly_identified": list(reml_profile.get("reml_weakly_identified_labels", ()) or ()),
+        "excluded_from_smoothing_selection": list(
+            reml_profile.get("reml_laplace_excluded_labels", ()) or ()
+        ),
     }
+    if out["_model"]["weakly_identified"]:
+        from superglm.reml.identified import WEAK_IDENTIFICATION_NOTE
+
+        out["_model"]["weakly_identified_note"] = WEAK_IDENTIFICATION_NOTE
     return out
 
 

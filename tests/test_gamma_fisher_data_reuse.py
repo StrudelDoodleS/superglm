@@ -309,7 +309,10 @@ def test_exception_or_nonconvergence_releases_payload(bad):
     assert entry.data is None and entry.weights is None and entry.owners == ()
 
 
-def test_observed_rescue_and_fisher_return_require_fresh_systems(monkeypatch):
+def test_a_rejected_fisher_step_keeps_the_reuse_entry_on_fisher_systems(monkeypatch):
+    """One-engine design §3.11: a rejected Gamma/log Fisher step ends the fit in
+    its declared Fisher curvature; no observed rescue builds a system of
+    another curvature, so the reuse entry only ever sees Fisher systems."""
     problem = _problem()
     entry = centered_system._FisherDataReuse()
     _fit(problem, entry)
@@ -333,22 +336,23 @@ def test_observed_rescue_and_fisher_return_require_fresh_systems(monkeypatch):
         remembered.append(rows[-1])
         return original_remember(self, *args)
 
-    def reject_twice(*args, **kwargs):
+    def reject_the_first(*args, **kwargs):
         nonlocal selections
         selections += 1
-        if selections <= 2:
+        if selections == 1:
             return _IRLSStepDecision(0.0, 0, True, trials_attempted=21)
         return original_select(*args, **kwargs)
 
     monkeypatch.setattr(irls_direct, "coefficient_working_rows", working)
     monkeypatch.setattr(irls_direct, "build_centered_system", build)
     monkeypatch.setattr(centered_system._FisherDataReuse, "remember", remember)
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_twice)
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_the_first)
     result, _ = _fit(problem, entry, y=np.array([0.8, 1.2, 1.1, 1.3, 0.9, 1.5]))
-    assert result.converged
-    assert rows[:3] == ["fisher", "observed", "fisher"]
-    assert builds[:3] == [("fisher", True), ("observed", False), ("fisher", False)]
-    assert remembered == ["fisher"]
+    assert not result.converged and result.n_iter == 1
+    assert set(rows) == {"fisher"}
+    assert builds[0] == ("fisher", True)
+    assert {curvature for curvature, _ in builds} == {"fisher"}
+    assert set(remembered) <= {"fisher"}
 
 
 def test_scop_and_non_gamma_do_not_populate_the_payload():
@@ -388,7 +392,9 @@ def test_gram_certificate_refusal_clears_payload(monkeypatch):
     problem = _problem()
     entry = centered_system._FisherDataReuse()
     _fit(problem, entry)
-    monkeypatch.setattr(irls_direct, "decompose_gram_if_authoritative", lambda *args: None)
+    monkeypatch.setattr(
+        irls_direct, "decompose_gram_if_authoritative", lambda *args, **kwargs: None
+    )
     result, inverse = _fit(problem, entry)
     assert result.converged
     np.testing.assert_allclose(inverse, np.diag([1 / 5, 1 / 2.5]), rtol=32 * np.finfo(float).eps)

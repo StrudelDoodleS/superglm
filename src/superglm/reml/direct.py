@@ -31,6 +31,7 @@ from superglm.reml.convergence import (
 )
 from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
+from superglm.reml.identified import IdentifiedLaplace, dense_hessian
 from superglm.reml.objective import (
     REMLObjectiveEvaluation,
     reml_laml_objective,
@@ -38,13 +39,11 @@ from superglm.reml.objective import (
 from superglm.reml.observed_geometry import (
     OBSERVED_PIRLS_TOL_CEILING,
     ObservedGeometryInfeasibleError,
-    ObservedModeNotCertifiedError,
     ObservedModeNotConvergedError,
     ObservedREMLGeometry,
     build_observed_reml_geometry,
     classify_reml_curvature,
     mode_certification_hint,
-    observed_mode_certification_bar,
     observed_penalized_mode_score,
     stopped_on_iteration_budget,
     validate_observed_derivative_capability,
@@ -71,8 +70,8 @@ from superglm.solvers.centered_system import (
     _InitialDataReuse,
 )
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
-from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.pirls import PIRLSResult
+from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
+from superglm.solvers.mode_score import mode_certification_bar
 from superglm.solvers.structured import record_auto_backend_decision, resolve_structured_backend
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -85,6 +84,24 @@ _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 # spline/categorical timings cross over at four penalties on the reference host;
 # below that, the specialized Gram route remains cheaper.
 _LEVERAGE_GRADIENT_MIN_PENALTIES = 4
+
+
+def _mean_space_boundary_message(rows: int, *, estimated: bool) -> str:
+    """Why a fit whose maximum stays at the mean-space boundary has no REML criterion."""
+    where = (
+        "even with every estimated smoothing parameter at its upper bound"
+        if estimated
+        else "at the fixed smoothing parameters"
+    )
+    return (
+        f"The binomial/log model has no interior maximum: {rows} row(s) are fitted at "
+        f"probability 1, the boundary of its parameter space, {where}. The maximum "
+        "is constrained there rather than stationary, so the Laplace-approximate REML "
+        "criterion is not defined at it. The unpenalized part of the model fits these "
+        "rows at probability one (for example a categorical level or parametric term "
+        "whose rows all have y = 1); a logit link, merging that level, or a Poisson/log "
+        "risk-ratio fit with robust standard errors (Zou 2004) avoids the boundary."
+    )
 
 
 def optimize_direct_reml(
@@ -211,11 +228,8 @@ def optimize_direct_reml(
         groups,
         direct_solve=direct_solve,
         coefficient_width=dm.p,
-        row_weights=sample_weight,
         lambda2=lambdas,
-        family=distribution,
-        link=link,
-        nesting_cache=getattr(dm, "_scalar_structured_layout_cache", None),
+        nesting_cache=getattr(dm, "_structured_layout_cache", None),
     )
     use_structured = structured_decision.use_structured
     record_auto_backend_decision(profile, direct_solve, structured_decision)
@@ -225,14 +239,6 @@ def optimize_direct_reml(
     observed_pirls_tol = (
         min(pirls_tol, _OBSERVED_PIRLS_TOL_CEILING) if use_observed_geometry else pirls_tol
     )
-    # Derived from the fixed ceiling, NOT from `observed_pirls_tol`. The bar
-    # certifies that the mode is accurate enough to implicitly differentiate
-    # through; that is a property of the derivative, not of how hard the caller
-    # asked PIRLS to work. Scaling it with the caller's `tol` made the knob
-    # self-defeating: the natural response to a certification failure is to
-    # tighten the solve, which tightened the bar by the same factor, and
-    # `tol=1e-14` could fail a fit that passed at every looser setting.
-    observed_mode_tol = observed_mode_certification_bar()
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
     # estimated_mask[i] = True  => component i is free to be optimized
@@ -245,6 +251,32 @@ def optimize_direct_reml(
     max_newton_step = 5.0
     _eps = np.finfo(float).eps
     _tol = reml_tol
+    # One-engine design §3.8: every PIRLS the criterion reads certifies its
+    # mode at the bar this stopping tolerance needs (``mode_score``).
+    mode_bar = mode_certification_bar(reml_tol)
+    # The Laplace approximation's identified part (design §3.9,
+    # ``reml.identified``): decided once, from the design and prior weights.
+    identified = IdentifiedLaplace.for_design(dm, sample_weight, penalties)
+    # A dense Fisher evaluation's identified part restricts the centred
+    # Hessian its PIRLS decomposed; the cache holds it (no extra pass).
+    identified_dense = bool(identified) and not use_structured
+    # One-engine design §3.8: every PIRLS the criterion is evaluated at stops
+    # on the certificate's own centred score over the identified coefficients.
+    # A deviance change is blind to a coefficient whose rows carry a small
+    # share of the likelihood, while its log-curvature enters log|H| at full
+    # weight: the objective then moved with every warm start (stage-0
+    # verifier census, raw_1e8 binomial).  A linearly constrained or SCOP
+    # mode is certified by its inner QP/KKT state and keeps the deviance stop.
+    pirls_convergence = (
+        "mode_score"
+        if use_observed_geometry
+        or not any(
+            getattr(group, "constraints", None) is not None
+            or getattr(group, "monotone_engine", None) == "scop"
+            for group in groups
+        )
+        else "deviance"
+    )
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     objective_history: list[float] = []
@@ -277,35 +309,14 @@ def optimize_direct_reml(
     _accepted_observed_mode_residual_max = 0.0
     _rejected_trial_observed_mode_residual_max = 0.0
     _observed_mode_rejected_trial_count = 0
+    # line-search trials whose structured factor refused (a shorter step)
+    _n_refused_structured_trials = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
-    structured_runtime_fallback_reason: str | None = None
     # Only a rejected general raw-centering route crosses coefficient fits.
     # This owner dies with the optimizer; outside/finalization fits stay fresh.
     raw_moment_policy = TabmatCenteringState()
     fisher_data_reuse = _FisherDataReuse()
-
-    def latch_runtime_backend(
-        pirls_result: PIRLSResult,
-        lambda_values: dict[str, float],
-        penalty: NDArray | None,
-    ) -> NDArray | None:
-        """Pin later REML work to Gram after an automatic structured retry."""
-        nonlocal direct_solve, structured_runtime_fallback_reason, use_structured
-        if not use_structured or pirls_result.direct_backend == "structured":
-            return penalty
-        use_structured = False
-        direct_solve = "gram"
-        structured_runtime_fallback_reason = pirls_result.direct_fallback_reason
-        if penalty is not None:
-            return penalty
-        return build_penalty_matrix(
-            list(dm.group_matrices),
-            groups,
-            lambda_values,
-            dm.p,
-            reml_penalties=penalties,
-        )
 
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
@@ -344,12 +355,13 @@ def optimize_direct_reml(
         debug_context={"phase": "bootstrap", "reml_iteration": 0},
         trace_run=trace_run,
         trace_purpose="reml_bootstrap",
+        _compensate_centred_intercept=False,
         weight_semantics=weight_semantics,
         _raw_moment_policy=raw_moment_policy,
         _fisher_data_reuse=fisher_data_reuse,
+        _mode_bar=mode_bar,
     )
     _t_pirls += _time.perf_counter() - _t0
-    S_boot = latch_runtime_backend(boot_result, boot_lambdas, S_boot)
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
 
@@ -450,6 +462,64 @@ def optimize_direct_reml(
             )
         rho[i] = np.clip(log_target, log_lo, log_hi)
 
+    def fit_candidate(
+        candidate_lambdas: dict[str, float],
+        beta_start: NDArray | None,
+        intercept_start: float | None,
+        iteration: int,
+    ) -> tuple[Any, Any, Any, NDArray | None, tuple[NDArray, float] | None]:
+        """The candidate's penalized mode, inverse, weighted Gram, penalty and dense identified Hessian."""
+        nonlocal _t_pirls
+        S_fit = (
+            None
+            if use_structured
+            else build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                candidate_lambdas,
+                dm.p,
+                reml_penalties=penalties,
+            )
+        )
+        _t_start = _time.perf_counter()
+        fit_cache: dict | None = {} if identified_dense else None
+        fit_result, fit_inv, fit_xtwx = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=sample_weight,
+            family=distribution,
+            link=link,
+            groups=groups,
+            lambda2=candidate_lambdas,
+            offset=offset_arr,
+            beta_init=beta_start,
+            intercept_init=intercept_start,
+            max_iter=max_pirls_iter,
+            tol=observed_pirls_tol,
+            convergence=pirls_convergence,
+            return_xtwx=True,
+            profile=profile,
+            direct_solve=direct_solve,
+            S_override=S_fit,
+            reml_penalties=penalties,
+            compute_rank_info=loop_fit_statistics,
+            _compute_fit_statistics=loop_fit_statistics,
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "candidate", "reml_iteration": iteration},
+            trace_run=trace_run,
+            trace_purpose="reml_candidate",
+            _compensate_centred_intercept=False,
+            weight_semantics=weight_semantics,
+            _raw_moment_policy=raw_moment_policy,
+            _fisher_data_reuse=fisher_data_reuse,
+            _laplace_excluded=tuple(int(index) for index in identified.excluded),
+            _mode_bar=mode_bar,
+            cache_out=fit_cache,
+        )
+        _t_pirls += _time.perf_counter() - _t_start
+        return fit_result, fit_inv, fit_xtwx, S_fit, dense_hessian(fit_cache)
+
+    n_mean_space_restorations = 0
     prev_obj = np.inf
     # Frozen directions from the previous iteration's active-set decision:
     # the stop criterion judges the ACTIVE set. An inferentially flat frozen
@@ -475,66 +545,79 @@ def optimize_direct_reml(
         cand_lambdas.update(fixed_lambdas)
 
         if _carry_forward is not None and _carry_forward[0] == cand_lambdas:
-            _, pirls_result, XtWX_S_inv, XtWX, S_cand = _carry_forward
+            _, pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = _carry_forward
             if profile is not None:
                 profile["reml_candidate_reuses"] = profile.get("reml_candidate_reuses", 0) + 1
         else:
-            S_cand = (
-                None
-                if use_structured
-                else build_penalty_matrix(
-                    dm.group_matrices,
-                    groups,
-                    cand_lambdas,
-                    dm.p,
-                    reml_penalties=penalties,
+            pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = fit_candidate(
+                cand_lambdas, warm_beta, warm_intercept, n_iter
+            )
+        # No interior mode at these lambdas: the penalized maximum holds rows
+        # at the boundary of the family's mean space, where it is constrained,
+        # not stationary, and the Laplace approximation (Wood, Pya & Saefken
+        # 2016, JASA 111, section 3.1: a positive definite maximum of a
+        # regular likelihood) does not exist.  Raising every estimated
+        # penalty moves the mode towards the unpenalized fit, so the outer
+        # iteration restores an interior start along that direction, in
+        # doubling log-steps (the bracketing phase of a line search, Nocedal
+        # & Wright 2006, section 3.5).  Each refit starts cold: a state at
+        # the boundary is no start, since its rows' Fisher weights
+        # mu / (1 - mu) pin them there and their working response
+        # eta + (1 - mu) / mu is never inside.  A line-search trial without
+        # an interior mode is rejected as any uncertified trial is.
+        restoration_step = 1.0
+        rho_at_boundary = rho_clipped
+        while pirls_result.termination_reason == "mean_space_boundary":
+            if not bool(np.any(estimated_mask & (rho_clipped < log_hi))):
+                raise ObservedModeNotConvergedError(
+                    _mean_space_boundary_message(
+                        int(pirls_result.mean_space_boundary_rows),
+                        estimated=bool(np.any(estimated_mask)),
+                    ),
+                    infeasible_detail=(
+                        "the penalized maximum lies on the boundary of the binomial mean space"
+                    ),
                 )
+            rho_clipped = np.where(
+                estimated_mask,
+                np.clip(rho_at_boundary + restoration_step, log_lo, log_hi),
+                rho_at_boundary,
             )
-            _t0 = _time.perf_counter()
-            pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
-                X=dm,
-                y=y,
-                weights=sample_weight,
-                family=distribution,
-                link=link,
-                groups=groups,
-                lambda2=cand_lambdas,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-                max_iter=max_pirls_iter,
-                tol=observed_pirls_tol,
-                convergence="coefficients" if use_observed_geometry else "deviance",
-                return_xtwx=True,
-                profile=profile,
-                direct_solve=direct_solve,
-                S_override=S_cand,
-                reml_penalties=penalties,
-                compute_rank_info=loop_fit_statistics,
-                _compute_fit_statistics=loop_fit_statistics,
-                debug_recorder=debug_recorder,
-                debug_context={"phase": "candidate", "reml_iteration": n_iter},
-                trace_run=trace_run,
-                trace_purpose="reml_candidate",
-                weight_semantics=weight_semantics,
-                _raw_moment_policy=raw_moment_policy,
-                _fisher_data_reuse=fisher_data_reuse,
+            rho = rho_clipped
+            restoration_step *= 2.0
+            n_mean_space_restorations += 1
+            cand_lambdas = lambdas.copy()
+            for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
+                cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+            cand_lambdas.update(fixed_lambdas)
+            pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = fit_candidate(
+                cand_lambdas, None, None, n_iter
             )
-            _t_pirls += _time.perf_counter() - _t0
-        S_cand = latch_runtime_backend(pirls_result, cand_lambdas, S_cand)
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
 
         geometry: ObservedREMLGeometry | None = None
+        # Under observed geometry the geometry's own identified part replaces
+        # these below, so the PIRLS factor is not restricted as well.
         reml_inverse = XtWX_S_inv
         objective_logdet = pirls_result.log_det_H
         objective_hessian_rank: int | None = None
-        # What proves this mode stationary. On the Fisher path the step-length
-        # flag is the only evidence available. Under observed geometry the KKT
-        # certificate below is the authority and is strictly stronger, so a
-        # budget-exhausted candidate that certifies counts as stationary --
-        # otherwise the convergence exits re-ask a question the certificate has
-        # already answered, and answer it wrong at the round-off floor.
+        if identified and not use_observed_geometry:
+            reml_inverse = identified.inverse(XtWX_S_inv, cand_dense)
+            objective_logdet = identified.log_det(XtWX_S_inv, pirls_result.log_det_H, cand_dense)
+            objective_hessian_rank = identified.rank(
+                pirls_result.reml_hessian_rank
+                if pirls_result.reml_hessian_rank is not None
+                else 1 + dm.p,
+                XtWX_S_inv,
+                cand_dense,
+            )
+        # What proves this mode stationary is PIRLS's own stop: the mode
+        # certificate (``convergence="mode_score"``, one-engine design §3.8)
+        # on every route that has one, the deviance stop for a linearly
+        # constrained or SCOP mode.  A budget-exhausted candidate is therefore
+        # not stationary on any path; the observed geometry's mode score below
+        # is recorded as a diagnostic and never raises this flag.
         candidate_mode_stationary = bool(pirls_result.converged)
         if use_observed_geometry:
             if not pirls_result.converged and not stopped_on_iteration_budget(pirls_result):
@@ -592,6 +675,7 @@ def optimize_direct_reml(
                     hint=mode_certification_hint(distribution),
                     infeasible_detail="observed geometry refused the penalized mode",
                 ) from exc
+            geometry = identified.geometry(geometry)
             _t_observed_geometry += _time.perf_counter() - _t0
             if geometry.hessian_inverse is None:  # pragma: no cover - requested above
                 raise RuntimeError("observed REML geometry omitted its slope inverse")
@@ -610,6 +694,8 @@ def optimize_direct_reml(
                     geometry=geometry,
                     lambdas=cand_lambdas if use_structured else None,
                     reml_penalties=penalties if use_structured else None,
+                    excluded=identified.excluded,
+                    bar=mode_bar,
                 )
             except ObservedGeometryInfeasibleError as exc:
                 # An unusable score is the same kind of statement as the
@@ -633,20 +719,13 @@ def optimize_direct_reml(
                 _accepted_observed_mode_residual_max,
                 mode_score.relative_max,
             )
-            if mode_score.relative_max > observed_mode_tol:
-                raise ObservedModeNotCertifiedError(
-                    mode_score.relative_max,
-                    observed_mode_tol,
-                    hint=mode_certification_hint(distribution),
-                )
-            # Set on the fall-through only, the way the line-search trial below
-            # sets its own flag: the certificate is what makes this mode
-            # stationary, so a mode that missed the bar must not read stationary
-            # on its way past. Setting it above the check was correct only
-            # because the raise leaves the frame -- soften that to a warning, a
-            # scored-infeasible return or a `continue` and this ordering is the
-            # only thing still holding the invariant up.
-            candidate_mode_stationary = True
+            # The certificate is PIRLS's own stop residual at the mode it
+            # returned (``convergence="mode_score"``, one-engine design §3.8):
+            # ``candidate_mode_stationary`` above already reads it.  A mode
+            # that misses the bar is never refused (owner decision 3,
+            # 2026-09-30): it cannot authorise a convergence exit, so a fit
+            # that never certifies ends not converged and says so.  The
+            # geometry's own score is kept as a diagnostic.
 
         _t0 = _time.perf_counter()
         objective_evaluation = reml_laml_objective(
@@ -1016,6 +1095,17 @@ def optimize_direct_reml(
                 reml_penalties=penalties,
             )
         )
+        if use_structured and not (np.all(np.isfinite(hess)) and np.all(np.isfinite(grad))):
+            # Prior weights at the edge of the float64 range can take the
+            # structured factor's trace terms out of range (measured at a
+            # uniform weight of 1e-200); no Newton step exists, so this is the
+            # structured path's one clear error rather than eigh's.
+            raise StructuredSolverError(
+                "The structured solver cannot proceed: the REML outer gradient or Hessian "
+                "is not finite at these smoothing parameters. This should not happen for a "
+                "model its data identify; direct_solve='gram' fits it with the dense solver "
+                "instead."
+            )
 
         # Active-set: freeze components with negligible gradient and Hessian.
         # The gradient/curvature bars live with the classifier's calibration
@@ -1148,45 +1238,71 @@ def optimize_direct_reml(
                     reml_penalties=penalties,
                 )
             )
-            trial_result, trial_inv, trial_xtwx = fit_irls_direct(
-                X=dm,
-                y=y,
-                weights=sample_weight,
-                family=distribution,
-                link=link,
-                groups=groups,
-                lambda2=trial_lambdas,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-                max_iter=max_pirls_iter,
-                tol=observed_pirls_tol,
-                convergence="coefficients" if use_observed_geometry else "deviance",
-                return_xtwx=True,
-                profile=profile,
-                direct_solve=direct_solve,
-                S_override=S_trial,
-                reml_penalties=penalties,
-                compute_rank_info=loop_fit_statistics,
-                _compute_fit_statistics=loop_fit_statistics,
-                debug_recorder=debug_recorder,
-                debug_context={
-                    "phase": "line_search",
-                    "reml_iteration": n_iter,
-                    "line_search_iteration": _ls + 1,
-                    "trial_alpha": float(step),
-                },
-                trace_run=trace_run,
-                trace_purpose="reml_line_search",
-                weight_semantics=weight_semantics,
-                _initial_data_reuse=_initial_data_reuse,
-                _raw_moment_policy=raw_moment_policy,
-                _fisher_data_reuse=fisher_data_reuse,
-            )
-            S_trial = latch_runtime_backend(trial_result, trial_lambdas, S_trial)
-
-            trial_logdet = trial_result.log_det_H
+            trial_cache: dict | None = {} if identified_dense else None
+            trial_logdet: float | None = None
             trial_hessian_rank: int | None = None
+            try:
+                trial_result, trial_inv, trial_xtwx = fit_irls_direct(
+                    X=dm,
+                    y=y,
+                    weights=sample_weight,
+                    family=distribution,
+                    link=link,
+                    groups=groups,
+                    lambda2=trial_lambdas,
+                    offset=offset_arr,
+                    beta_init=warm_beta,
+                    intercept_init=warm_intercept,
+                    max_iter=max_pirls_iter,
+                    tol=observed_pirls_tol,
+                    convergence=pirls_convergence,
+                    return_xtwx=True,
+                    profile=profile,
+                    direct_solve=direct_solve,
+                    S_override=S_trial,
+                    reml_penalties=penalties,
+                    compute_rank_info=loop_fit_statistics,
+                    _compute_fit_statistics=loop_fit_statistics,
+                    debug_recorder=debug_recorder,
+                    debug_context={
+                        "phase": "line_search",
+                        "reml_iteration": n_iter,
+                        "line_search_iteration": _ls + 1,
+                        "trial_alpha": float(step),
+                    },
+                    trace_run=trace_run,
+                    trace_purpose="reml_line_search",
+                    _compensate_centred_intercept=False,
+                    weight_semantics=weight_semantics,
+                    _initial_data_reuse=_initial_data_reuse,
+                    _raw_moment_policy=raw_moment_policy,
+                    _fisher_data_reuse=fisher_data_reuse,
+                    _laplace_excluded=tuple(int(index) for index in identified.excluded),
+                    _mode_bar=mode_bar,
+                    cache_out=trial_cache,
+                )
+                trial_dense = dense_hessian(trial_cache)
+                trial_logdet = trial_result.log_det_H
+                if identified and not use_observed_geometry:
+                    trial_logdet = identified.log_det(trial_inv, trial_logdet, trial_dense)
+                    trial_hessian_rank = identified.rank(
+                        trial_result.reml_hessian_rank
+                        if trial_result.reml_hessian_rank is not None
+                        else 1 + dm.p,
+                        trial_inv,
+                        trial_dense,
+                    )
+            except StructuredSolverError:
+                # A trial the structured factor refuses (a tree pivot within
+                # its certified uncertainty, a border block that is not
+                # positive definite, ...) supplies no objective: keep the
+                # retained state and try a shorter step towards it, as the
+                # discrete driver does and as a trial whose observed geometry
+                # is infeasible is handled below.  No other solver is tried;
+                # a refused candidate or bootstrap fit still raises.
+                _n_refused_structured_trials += 1
+                step *= 0.5
+                continue
             trial_mode_residual: float | None = None
             # Same standard as the candidate above: the certificate, where one
             # runs, is what establishes stationarity.
@@ -1207,7 +1323,8 @@ def optimize_direct_reml(
                         result=trial_result,
                         penalty=S_trial,
                         tabmat_state=observed_tabmat_state,
-                        compute_inverse=False,
+                        # the identified part rebuilds the structured factor returned here
+                        compute_inverse=bool(identified),
                         groups=groups if use_structured else None,
                         lambdas=trial_lambdas if use_structured else None,
                         reml_penalties=penalties if use_structured else None,
@@ -1230,6 +1347,15 @@ def optimize_direct_reml(
                     _observed_mode_rejected_trial_count += 1
                     step *= 0.5
                     continue
+                try:
+                    trial_geometry = identified.geometry(trial_geometry)
+                except StructuredSolverError:
+                    # the factor refused its identified part: the same
+                    # rejected trial as a refused PIRLS build above
+                    _t_observed_geometry += _time.perf_counter() - _t_geometry
+                    _n_refused_structured_trials += 1
+                    step *= 0.5
+                    continue
                 _t_observed_geometry += _time.perf_counter() - _t_geometry
                 trial_logdet = trial_geometry.log_det_H
                 trial_hessian_rank = trial_geometry.hessian_rank
@@ -1245,6 +1371,8 @@ def optimize_direct_reml(
                         geometry=trial_geometry,
                         lambdas=trial_lambdas if use_structured else None,
                         reml_penalties=penalties if use_structured else None,
+                        excluded=identified.excluded,
+                        bar=mode_bar,
                     )
                 except ObservedGeometryInfeasibleError:
                     # A score this trial iterate makes unusable says exactly
@@ -1264,7 +1392,9 @@ def optimize_direct_reml(
                     step *= 0.5
                     continue
                 trial_mode_residual = trial_mode_score.relative_max
-                if trial_mode_score.relative_max > observed_mode_tol:
+                if not trial_mode_stationary:
+                    # PIRLS's own certificate (above) missed the bar: an
+                    # uncertified trial is no evidence for the line search.
                     _observed_mode_rejected_trial_count += 1
                     _rejected_trial_observed_mode_residual_max = max(
                         _rejected_trial_observed_mode_residual_max,
@@ -1272,7 +1402,6 @@ def optimize_direct_reml(
                     )
                     step *= 0.5
                     continue
-                trial_mode_stationary = True
 
             try:
                 trial_evaluation = reml_laml_objective(
@@ -1365,9 +1494,9 @@ def optimize_direct_reml(
                 # a STATIONARY state: on the Fisher path an Armijo-accepted
                 # trial that exhausted max_pirls_iter is nonstationary, and
                 # reusing it would put the next gradient/Hessian at the wrong
-                # coefficients instead of warm-start refitting them. Under
-                # observed geometry the trial cleared the certificate above,
-                # which proves the stationarity the step flag cannot.
+                # coefficients instead of warm-start refitting them.  Stationary
+                # means PIRLS's own stop (``trial_mode_stationary`` above), on
+                # every path: the geometry's mode score is a diagnostic.
                 if trial_mode_stationary:
                     _carry_forward = (
                         trial_lambdas.copy(),
@@ -1375,6 +1504,7 @@ def optimize_direct_reml(
                         trial_inv,
                         trial_xtwx,
                         S_trial,
+                        trial_dense,
                     )
                 else:
                     _carry_forward = None
@@ -1428,12 +1558,8 @@ def optimize_direct_reml(
 
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
-    if structured_runtime_fallback_reason is not None:
-        best_pirls.direct_fallback_reason = structured_runtime_fallback_reason
 
     if profile is not None:
-        if structured_runtime_fallback_reason is not None:
-            profile["direct_fallback_reason"] = structured_runtime_fallback_reason
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
         profile["reml_pirls_s"] = _t_pirls
         profile["reml_objective_s"] = _t_objective
@@ -1445,11 +1571,15 @@ def optimize_direct_reml(
             _rejected_trial_observed_mode_residual_max
         )
         profile["reml_observed_mode_rejected_trial_count"] = _observed_mode_rejected_trial_count
+        profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
         profile["reml_w_correction_order"] = int(w_correction_order)
         profile["reml_hessian_newton_s"] = _t_hessian
         profile["reml_linesearch_s"] = _t_linesearch
         profile["reml_n_linesearch_fits"] = _n_linesearch_fits
         profile["reml_n_outer_iter"] = n_iter
+        profile["reml_mean_space_restorations"] = n_mean_space_restorations
+        profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.excluded)
+        profile["reml_laplace_exclusion_unsupported"] = int(identified.unsupported)
 
     return REMLResult(
         lambdas=best_lambdas,

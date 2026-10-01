@@ -62,7 +62,7 @@ def test_gamma_rows_keep_representable_curvature_and_weighted_response(
     )
 
     assert rows.curvature_source == ("observed" if prefer_observed else "fisher")
-    assert rows.fallback_reason is None
+    assert rows.rejection_reason is None
     with localcontext() as context:
         context.prec = 200
         response = _decimal(y[0])
@@ -101,7 +101,7 @@ def test_gamma_observed_rows_do_not_need_an_unscaled_response_mean_ratio() -> No
     )
 
     assert rows.curvature_source == "observed"
-    assert rows.fallback_reason is None
+    assert rows.rejection_reason is None
     with localcontext() as context:
         context.prec = 200
         expected = _decimal(weight[0]) * _decimal(y[0]) / _decimal(mu[0])
@@ -137,12 +137,17 @@ def test_gamma_zero_weight_row_does_not_require_a_representable_working_response
     ("response", "mean", "weight"),
     [(2.0, 1.0, 1.0e308), (1.0e-300, 1.0e30, 1.0e300)],
 )
-def test_unrepresentable_gamma_observed_rows_still_fall_back_as_a_whole(
+def test_unrepresentable_gamma_observed_rows_reject_the_step_as_a_whole(
     response: float,
     mean: float,
     weight: float,
 ) -> None:
-    """Neither true curvature overflow nor response overflow becomes a fake Newton row."""
+    """Neither true curvature overflow nor response overflow becomes a fake Newton row.
+
+    The rows keep their declared observed curvature and are marked non-finite,
+    so the caller rejects the step; no Fisher row is substituted (one-engine
+    design §3.11).
+    """
     eta = np.log(np.array([mean, 1.0]))
     mu = np.exp(eta)
     rows = working_rows.coefficient_working_rows(
@@ -155,13 +160,12 @@ def test_unrepresentable_gamma_observed_rows_still_fall_back_as_a_whole(
         prefer_observed=True,
     )
 
-    assert rows.curvature_source == "fisher"
-    assert rows.fallback_reason == "invalid_observed_rows"
-    np.testing.assert_array_equal(rows.weights, np.array([weight, 0.5]))
-    assert np.all(np.isfinite(rows.response))
+    assert rows.curvature_source == "observed"
+    assert rows.rejection_reason == "nonfinite_observed_rows"
+    assert not (np.all(np.isfinite(rows.weights)) and np.all(np.isfinite(rows.response)))
 
 
-def test_gamma_observed_total_weight_overflow_uses_finite_fisher_system() -> None:
+def test_gamma_observed_total_weight_overflow_rejects_the_step() -> None:
     """Finite individual Newton rows do not certify an unrepresentable intercept sum."""
     weights = np.full(2, 4.0e307)
     rows = working_rows.coefficient_working_rows(
@@ -174,11 +178,10 @@ def test_gamma_observed_total_weight_overflow_uses_finite_fisher_system() -> Non
         prefer_observed=True,
     )
 
-    assert rows.curvature_source == "fisher"
-    assert rows.fallback_reason == "invalid_observed_rows"
-    np.testing.assert_array_equal(rows.weights, weights)
-    assert np.isfinite(np.sum(rows.weights))
-    assert np.isfinite(np.sum(rows.weights * rows.response))
+    assert rows.curvature_source == "observed"
+    assert rows.rejection_reason == "nonfinite_observed_rows"
+    assert np.all(np.isfinite(rows.weights))
+    assert not np.isfinite(np.sum(rows.weights))
 
 
 @pytest.mark.parametrize(

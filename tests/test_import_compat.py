@@ -186,6 +186,50 @@ assert signatures() == compiled
     assert completed.stderr == ""
 
 
+def test_public_warmup_leaves_the_structured_engine_kernels_to_their_first_use() -> None:
+    """``superglm.warmup()`` costs what master's does: the structured engine's
+    kernels (leaf pass, fs block leaves, sz balance tree, mode score) compile or
+    load from numba's cache on a fit's first call, so a process pays only for
+    the kernels its model class uses.  Warming all of them added 0.26-0.39 s to
+    every process, more than a small sz fit's whole first-use cost.  Asserted on
+    compiled signatures, not time.
+    """
+    script = r"""
+import importlib
+
+import superglm
+from numba.core.registry import CPUDispatcher
+
+modules = (
+    "superglm.solvers._structured.leaf_kernels",
+    "superglm.solvers._structured.block_leaves",
+    "superglm.solvers._structured.balance_tree",
+    "superglm.solvers.mode_score",
+)
+dispatchers = {}
+for name in modules:
+    module = importlib.import_module(name)
+    dispatchers.update(
+        {
+            f"{name}.{attribute}": value
+            for attribute, value in vars(module).items()
+            if isinstance(value, CPUDispatcher) and value.py_func.__module__ == name
+        }
+    )
+assert len(dispatchers) > 20, sorted(dispatchers)
+superglm.warmup()
+compiled = sorted(name for name, value in dispatchers.items() if value.nopython_signatures)
+assert not compiled, compiled
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_an_exception_raised_by_a_root_export_is_catchable_from_the_root():
     """A caller must be able to catch what the top-level API can raise.
 
@@ -220,6 +264,20 @@ def test_an_exception_raised_by_a_root_export_is_catchable_from_the_root():
             f"superglm.{name} is a different object from superglm.export.{name}, so "
             "an except clause written against one would not catch the other"
         )
+
+
+def test_the_structured_solver_error_is_catchable_from_the_root():
+    """A structured fit that cannot proceed raises ``StructuredSolverError``
+    (no other solver is tried); a caller catches it as ``superglm.StructuredSolverError``
+    or, as before it existed, as ``numpy.linalg.LinAlgError``."""
+    import numpy as np
+
+    import superglm
+    from superglm.solvers import irls_direct
+
+    assert "StructuredSolverError" in superglm.__all__
+    assert superglm.StructuredSolverError is irls_direct.StructuredSolverError
+    assert issubclass(superglm.StructuredSolverError, np.linalg.LinAlgError)
 
 
 def test_public_model_signatures_do_not_expose_private_frame_adapter():

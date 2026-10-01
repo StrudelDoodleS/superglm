@@ -441,18 +441,6 @@ def _fused_bincount_2(bin_idx, W, Wz, n_bins):
 
 
 @njit(cache=True)
-def _random_effect_sufficient_stats(codes, W, Wz, n_levels):
-    """Aggregate local Hessian diagonals and working RHS in one observation pass."""
-    level_W = np.zeros(n_levels)
-    level_Wz = np.zeros(n_levels)
-    for i in range(len(codes)):
-        level = codes[i]
-        level_W[level] += W[i]
-        level_Wz[level] += Wz[i]
-    return level_W, level_Wz
-
-
-@njit(cache=True)
 def _factor_smooth_csr_matvec(data, indices, indptr, codes, raw_coefficients):
     """Apply a level-specific raw spline coefficient block to CSR rows."""
     result = np.zeros(len(codes))
@@ -803,7 +791,6 @@ def _warmup_group_matrix_kernels() -> None:
     # a signature of its own only through a direct call.
     _add_raw_row(np.zeros(4), 1.0, 0, 0, starts, matrix, starts, matrix, 2)
     _fused_bincount_2(codes, values, values, 2)
-    _random_effect_sufficient_stats(codes, values, values, 2)
     _factor_smooth_csr_matvec(values, csr_indices, csr_indptr, codes, matrix)
     _factor_smooth_support_matvec(matrix, codes, codes, matrix)
     _factor_smooth_csr_rmatvec(values, csr_indices, csr_indptr, codes, values, 2, 2)

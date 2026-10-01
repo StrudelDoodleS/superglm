@@ -162,12 +162,10 @@ def specials_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
 
 @pytest.fixture(scope="module")
 def absorbed_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
-    """A level term the factor smooth's own main effect leaves unidentified.
+    """A level term beside a constrained factor smooth on the same feature.
 
-    A constrained factor smooth on ``g`` spans the level indicators exactly, so
-    the unpenalized ``g`` block has no estimable direction of its own: its EDF
-    and its covariance block are zero while the min-norm solve still writes a
-    non-zero number into its coefficients.
+    The sz smooth's unpenalized per-level constants span the ``g`` indicators
+    exactly, so the pair is an exact alias the rank decision has to split.
     """
     rng = np.random.default_rng(1)
     n = 900
@@ -626,22 +624,31 @@ def test_summary_table_labels_the_special_block(specials_case) -> None:
     assert set(table["note"]) == {""}
 
 
-def test_summary_table_notes_a_level_term_absorbed_by_its_interaction(absorbed_case) -> None:
+def test_summary_table_keeps_the_level_term_an_sz_smooth_aliases(absorbed_case) -> None:
+    """sz on fs's natural parameterization (one-engine design section 3.5, decision 5).
+
+    Each level's constant is then one unpenalized coordinate, exactly collinear
+    with the level term's indicators, and the rank decision keeps the level
+    term and drops the smooth's constants: ``g`` carries the level effect with
+    its full ``K - 1`` EDF (an unpenalized retained column contributes exactly
+    one) and the smooth carries the shapes, so no row is absorbed.  On the raw
+    basis the same alias split between the two terms by seed and lambda --
+    ``g`` kept 0 to ``K - 1`` columns over 12 seeds x 2 lambdas, K = 3 to 6 --
+    and this fixture happened to give ``g`` none.
+    """
+    from superglm.distributional import terms as module
+
     fitted, frame = absorbed_case
     table = summary_table(fitted, frame)
 
-    term_slice = fitted.layout.term_slices["location:g"]
-    coefficients = np.asarray(fitted.coefficients)[term_slice]
-    assert fitted.inference.term_edf["location:g"] == pytest.approx(0.0, abs=1e-12)
-    assert np.any(coefficients != 0.0)
-
-    absorbed = table[(table["parameter"] == "location") & (table["term"] == "g")].iloc[0]
-    assert absorbed["note"] == "absorbed by x:g:sz"
-    assert float(absorbed["statistic"]) == 0.0
-    assert float(absorbed["p_value"]) == 1.0
-
-    others = table[table["term"] != "g"]
-    assert set(others["note"]) == {""}
+    assert fitted.inference.term_edf["location:g"] == pytest.approx(2.0, abs=1e-12)
+    kept = table[(table["parameter"] == "location") & (table["term"] == "g")].iloc[0]
+    assert kept["note"] == ""
+    assert float(kept["statistic"]) > 0.0
+    assert set(table["note"]) == {""}
+    # The note itself: a level term left with no estimable direction names the
+    # interaction that spans it.
+    assert module._absorption_note(fitted, "location", "g", 0.0, np.ones(1)) == "absorbed by x:g:sz"
 
 
 def test_corrected_covariance_refuses_without_retained_rows(fit_case) -> None:

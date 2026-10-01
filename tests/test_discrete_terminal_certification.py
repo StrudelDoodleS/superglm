@@ -6,26 +6,18 @@ objective change of ``tau |F|`` leaves ``1/2 e' H e`` of that size and ``e``
 of order ``sqrt(tau)`` (Gill, Murray and Wright, Practical Optimization,
 section 8.2.3).  A discrete Gamma fit held at fixed smoothing parameters was
 left 1e-6 from its fixed point at ``pirls_tol = 1e-10``.  The terminal refit
-now stops when either first-order certificate holds, as glum's IRLS stops on
-``gradient_tol`` or ``step_size_tol``:
-
-- the penalized score ``g = [1 X]' s - S beta``, ``s = w (y - mu) h' / V``,
-  satisfies ``||g||_inf <= tau sum |s|``, the intercept column of the
-  pre-cancellation magnitude ``|X|' |s|``, or the rounding of ``S beta``,
-  ``gamma_m max(|S| |beta|)``, where that is larger; or
-- the step into the retained state satisfies ``|d_j| <= tau max(1, |beta_j|)``.
-
-Fisher scoring reaches the fixed point at a linear rate.  Gamma/log, whose
-observed rows the solver approves, takes observed-Newton steps to the same
-root instead, quadratically, and keeps the Fisher geometry.
+of every route auto uses now stops on the mode certificate
+(``convergence="mode_score"``, one-engine design §3.8): the penalized score
+``g = [1 X~]' s - S beta``, ``s = w (y - mu) h' / V``, satisfies ``|g_0| <=
+bar sum |s|`` and ``|g_j| <= bar (zeta sqrt(D_jj + S_jj) + |S beta|_j)``,
+``zeta = sum |s| / sqrt(sum w_F)`` and ``D_jj = sum w_F x~_j^2``
+(``solvers.mode_score``), with ``bar`` the certificate's bar for the fit's
+REML tolerance (``mode_certification_bar``).
 
 To first order ``beta* - beta = H_O^-1 g`` with ``H_O`` the observed penalized
-Hessian.  The step certificate bounds the score too: the retained state is one
-Fisher step past ``beta_prev``, so ``g = (H_F - H_O) d`` (one observed-Newton
-step leaves only the second-order remainder in ``d``).  Either way
-``|g| <= c = tau max(sum |s|, |H_F - H_O| max(1, |beta|))`` componentwise, and
-``|beta - beta*| <= |H_O^-1| (c + 2 err)`` with ``err`` the rounding of the
-score evaluated here and in the reference: the sums of products rounded once
+Hessian, so ``|beta - beta*| <= |H_O^-1| (c + 2 err)`` componentwise, with
+``c`` the certified score bound above and ``err`` the rounding of the score
+evaluated here and in the reference: the sums of products rounded once
 (``2 eps G``, ``G = |X|' |s| + |S| |beta|``), each score row within
 ``16 eps w |h' / V| (|y| + |mu|)``, and ``eta`` within
 ``(m + 1) eps (|X| |beta| + |offset|)`` for ``m`` nonzero products, moving the
@@ -47,12 +39,13 @@ import pandas as pd
 import pytest
 
 import superglm.model.reml_finalize as reml_finalize
-from superglm import Categorical, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM, Tweedie
+from superglm import Categorical, LambdaPolicy, RandomEffect, Spline, SuperGLM, Tweedie
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.solvers import irls_direct
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.irls_state import _IRLSStepDecision
+from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR, mode_certification_bar
 
 EPS = np.finfo(np.float64).eps
 PIRLS_TOL = 1e-10
@@ -141,6 +134,29 @@ def _newton_fixed_point(model: SuperGLM, y, offset, S, beta):
     raise AssertionError("the dense Newton reference did not settle")
 
 
+def _certified_score(model: SuperGLM, y, offset, S, beta, bar):
+    """The penalized score ``g`` at ``beta``, the certificate's bound on it and its rounding.
+
+    ``|g_0| <= bar sum |s|`` and ``|g_j| <= bar (zeta sqrt(D_jj + S_jj) +
+    |S beta|_j)`` (module docstring, ``solvers.mode_score``), recomputed here
+    from the dense design; ``err`` bounds the rounding of this evaluation and
+    of the solver's (sums of products rounded once, ``2 eps G``, plus the
+    rows' own rounding).
+    """
+    p = S.shape[0] - 1
+    X, score, fisher, _, rows = _rows(model, y, offset, beta)
+    total = float(np.sum(np.abs(score)))
+    centred = X[:, :p] - (fisher @ X[:, :p]) / np.sum(fisher)
+    zeta = total / np.sqrt(np.sum(fisher))
+    curvature = fisher @ centred**2 + np.diag(S)[:p]
+    certified = bar * np.append(
+        zeta * np.sqrt(curvature) + np.abs(S[:p, :p] @ beta[:p]),
+        total,
+    )
+    err = np.abs(X).T @ (rows + 2 * EPS * np.abs(score)) + 2 * EPS * np.abs(S) @ np.abs(beta)
+    return X.T @ score - S @ beta, certified, err
+
+
 @pytest.mark.parametrize("family", ["gamma", "tweedie"])
 def test_discrete_terminal_fit_reaches_the_certified_fixed_point(family: str) -> None:
     frame, y, offset = _response(family)
@@ -156,61 +172,21 @@ def test_discrete_terminal_fit_reaches_the_certified_fixed_point(family: str) ->
     beta = np.append(model.result.beta, model.result.intercept - shift)
     X, score, fisher, observed, rows = _rows(model, y, offset, beta)
     H_O = X.T @ (observed[:, None] * X) + S
-    H_F = X.T @ (fisher[:, None] * X) + S
 
-    certified = PIRLS_TOL * np.maximum(
-        np.sum(np.abs(score)),
-        np.abs(H_F - H_O) @ np.maximum(1.0, np.abs(beta)),
+    assert model._reml_profile["reml_terminal_mode_certified"] is True
+    bar = mode_certification_bar(model._reml_profile["reml_tol_resolved"])
+    total = float(np.sum(np.abs(score)))
+    centred = X[:, :p] - (fisher @ X[:, :p]) / np.sum(fisher)
+    zeta = total / np.sqrt(np.sum(fisher))
+    curvature = fisher @ centred**2 + np.diag(S)[:p]
+    certified = bar * np.append(
+        zeta * np.sqrt(curvature) + np.abs(S[:p, :p] @ beta[:p]),
+        total,
     )
     err = np.abs(X).T @ (rows + 2 * EPS * np.abs(score)) + 2 * EPS * np.abs(S) @ np.abs(beta)
     bound = np.abs(np.linalg.inv(H_O)) @ (certified + 2 * err)
     distance = np.abs(beta - _newton_fixed_point(model, y, offset, S, beta))
     assert np.all(distance <= bound), float(np.max(distance / bound))
-    if family == "gamma":
-        # quadratic from the held start: two Newton steps where Fisher scoring takes six
-        assert model.result.n_iter <= 2
-
-
-def test_score_mode_stops_no_later_than_the_step_rule() -> None:
-    """A column in large units makes ``tau sum |s|`` a strict bar on its score.
-
-    ``"score"`` stops on the smaller of the score ratio and the step, so on the
-    same Fisher iterates it stops no later than the step rule the exact path
-    uses.  Observed-Newton is off in both runs: it would change the iterates.
-    """
-    frame, y, _ = _response("gamma")
-    frame = frame.assign(big=1e6 * np.random.default_rng(3).standard_normal(len(frame)))
-    model = SuperGLM(
-        family="gamma",
-        features={
-            "x": Spline(n_knots=8, lambda_policy=LambdaPolicy.fixed(HELD["x"])),
-            "cat": Categorical(),
-            "grp": RandomEffect(lambda_policy=LambdaPolicy.fixed(HELD["grp"])),
-            "big": Numeric(),
-        },
-        selection_penalty=0,
-        discrete=True,
-    )
-    model.fit_reml(frame, y, pirls_tol=PIRLS_TOL)
-    results = {
-        convergence: fit_irls_direct(
-            X=model._dm,
-            y=y,
-            weights=np.ones(len(y)),
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
-            lambda2=dict(model._reml_lambdas),
-            reml_penalties=model._reml_penalties,
-            tol=PIRLS_TOL,
-            convergence=convergence,
-            weight_semantics="prior",
-            _use_observed_newton=False,
-        )[0]
-        for convergence in ("score", "coefficients")
-    }
-    assert results["score"].converged and results["coefficients"].converged
-    assert results["score"].n_iter <= results["coefficients"].n_iter
 
 
 @pytest.mark.parametrize("family", ["poisson", "gamma"])
@@ -218,10 +194,10 @@ def test_score_is_certified_no_finer_than_the_penalty_rounding(family: str) -> N
     """A tensor block's margin penalties cancel in ``S beta`` at the fixed point.
 
     At lambda 1e10 the terms of ``S beta`` are about 1e10 times the score they
-    cancel to, so the score settles near ``eps max(|S| |beta|) / sum |s|``,
-    1e-9 here, and the step dithers above 1e-10 with it: without the rounding
-    floor neither certificate held in 30 iterations.  The accepted score must
-    still sit within that floor, recomputed here from the dense design.
+    cancel to, so the score settles at the rounding of ``S beta``: the mode
+    certificate's bar carries ``|S beta|_j`` in its scale for that reason, and
+    the fit certifies within 30 iterations.  The accepted score must sit within
+    the certificate, recomputed here from the dense design.
     """
     rng = np.random.default_rng(3)
     n = 2000
@@ -250,7 +226,7 @@ def test_score_is_certified_no_finer_than_the_penalty_rounding(family: str) -> N
         reml_penalties=model._reml_penalties,
         max_iter=30,
         tol=PIRLS_TOL,
-        convergence="score",
+        convergence="mode_score",
         weight_semantics="prior",
     )[0]
     assert result.converged
@@ -261,12 +237,8 @@ def test_score_is_certified_no_finer_than_the_penalty_rounding(family: str) -> N
         dm.group_matrices, model._groups, lambdas, p, model._reml_penalties
     )
     beta = np.append(result.beta, result.intercept)
-    X, score, *_ = _rows(model, y, None, beta)
-    scale = np.sum(np.abs(score))
-    additions = (p + 3) * EPS / 2
-    floor = additions / (1 - additions) * np.max(np.abs(S) @ np.abs(beta)) / scale
-    # the solver's evaluation and this one each round by up to the floor
-    assert np.max(np.abs(X.T @ score - S @ beta)) / scale <= PIRLS_TOL + 3 * floor
+    score, certified, err = _certified_score(model, y, None, S, beta, MODE_CERTIFICATION_BAR)
+    assert np.all(np.abs(score) <= certified + 2 * err)
 
 
 def test_a_damped_step_does_not_certify_the_fixed_point(monkeypatch) -> None:
@@ -303,7 +275,7 @@ def test_a_damped_step_does_not_certify_the_fixed_point(monkeypatch) -> None:
         lambda2=lambdas,
         reml_penalties=model._reml_penalties,
         tol=PIRLS_TOL,
-        convergence="score",
+        convergence="mode_score",
         weight_semantics="prior",
     )[0]
     assert forced and result.converged
@@ -314,32 +286,23 @@ def test_a_damped_step_does_not_certify_the_fixed_point(monkeypatch) -> None:
         dm.group_matrices, model._groups, lambdas, p, model._reml_penalties
     )
     beta = np.append(result.beta, result.intercept)
-    X, score, *_ = _rows(model, y, None, beta)
-    scale = np.sum(np.abs(score))
-    additions = (p + 3) * EPS / 2
-    floor = additions / (1 - additions) * np.max(np.abs(S) @ np.abs(beta)) / scale
-    assert np.max(np.abs(X.T @ score - S @ beta)) / scale <= PIRLS_TOL + 3 * floor
+    score, certified, err = _certified_score(model, y, None, S, beta, MODE_CERTIFICATION_BAR)
+    assert np.all(np.abs(score) <= certified + 2 * err)
 
 
 @pytest.mark.parametrize(
-    ("family", "link", "certified"),
-    [
-        ("poisson", "log", True),
-        ("gamma", "log", True),
-        ("poisson", "sqrt", False),
-        ("binomial", "probit", False),
-    ],
+    ("family", "link"),
+    [("poisson", "log"), ("gamma", "log"), ("poisson", "sqrt"), ("binomial", "probit")],
 )
-def test_only_a_quadratic_terminal_refit_certifies_the_score(
-    monkeypatch, family: str, link: str, certified: bool
+def test_every_discrete_terminal_refit_stops_on_the_mode_certificate(
+    monkeypatch, family: str, link: str
 ) -> None:
-    """Fisher scoring off a canonical link contracts linearly to the certificate.
+    """One stop rule for every route auto uses (one-engine design §3.8).
 
-    From the REML loop's objective stop, about sqrt(tol) from the fixed point, a
-    contraction rate above ~0.85 would spend the whole iteration budget reaching
-    1e-10 and publish a settled mode as unconverged.  So the certificate applies
-    where the steps are quadratic (a canonical link, or the observed-Newton
-    pairs), and every other pair keeps the objective stop it had before.
+    Fisher scoring off a canonical link contracts only linearly, and at the
+    old 1e-10 target that could spend the whole iteration budget; the bar the
+    REML tolerance needs (``mode_certification_bar``, 1e-8 at the default) is
+    reached at a linear rate too, so every pair certifies its terminal mode.
     """
     modes = []
     original = reml_finalize.fit_irls_direct
@@ -368,7 +331,8 @@ def test_only_a_quadratic_terminal_refit_certifies_the_score(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_reml(frame[["x", "cat"]], y)
-    assert modes == ["score" if certified else "deviance"]
+    assert modes == ["mode_score"]
+    assert model._reml_profile["reml_terminal_mode_certified"] is True
 
 
 def test_separated_level_is_not_walked_to_the_overflow_guard() -> None:

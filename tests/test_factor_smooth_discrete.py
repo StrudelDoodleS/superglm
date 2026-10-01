@@ -13,8 +13,8 @@ from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, 
 from superglm.group_matrix import FactorSmoothGroupMatrix
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.solvers.structured import (
-    BlockStructuredSystem,
     CachedBlockStructuredSolution,
+    FactorSmoothLeafSystem,
     materialize_compact_operator,
     solve_cached_structured,
 )
@@ -512,7 +512,7 @@ def test_cached_block_lambda_trial_uses_only_retained_moments(
     state = model._linear_system_state
     assert state is not None
     system = state.system
-    assert isinstance(system, BlockStructuredSystem)
+    assert isinstance(system, FactorSmoothLeafSystem)
     trial_lambdas = {
         name: value * (1.25 if name.endswith("wiggle") else 0.85)
         for name, value in model._reml_lambdas.items()

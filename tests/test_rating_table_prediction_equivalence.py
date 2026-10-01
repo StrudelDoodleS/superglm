@@ -1722,11 +1722,10 @@ def test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like():
     strictly inside -- ``exp(+/-80)`` is [1.8e-35, 5.5e34] -- and ``Gaussian`` is
     not clamped, so ``Binomial`` is the only family a log link can reach it with.
 
-    A level with a 100% event rate is all it takes to make it bite in-frame: the
-    MLE puts it at ``mu = 1`` and the fit lands slightly above, at eta +0.3647,
-    so ``exp`` returns a "probability" of 1.4401 where ``predict`` returns
-    0.9999999 -- 974 of 3000 rows rewritten, 4.40e-01 maximum relative error
-    against a documented round-off claim of 7.1e-15.
+    A level with a 100% event rate puts the MLE at ``mu = 1``, the boundary of
+    the log-binomial parameter space.  The fit keeps every trial inside it
+    (``irls_state.mean_space_violation``), so it ends just below the boundary
+    rather than at a "probability" above one that ``clip_mu`` rewrites.
 
     But the refusal is by FAMILY, and the second fixture below is why.  A
     binomial whose every fitted mean sits inside the clamp exports with nothing
@@ -1756,10 +1755,11 @@ def test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like():
     model.fit(X, y)
     assert isinstance(model._link, LogLink), "the link gate must not be what refuses this"
 
-    # The clamp is what bites, not the eta clip: the predictor is nowhere near 80.
+    # The predictor is nowhere near the eta clip of 80, and the fit stays inside
+    # the mean space: the all-event level approaches mu = 1 from below.
     eta = predict_eta_raw_exact(model, X)
     assert float(np.abs(eta).max()) < 80.0
-    assert float(np.exp(eta).max()) > 1.0, "a mean above one is what the clamp catches"
+    assert 1.0 - 1e-3 < float(np.exp(eta).max()) < 1.0, "the level sits at the boundary"
 
     with pytest.raises(ValueError, match="not supported for Binomial"):
         build_rating_table_payload(model, X, y, n_bins=10, impact_bins=(10,))

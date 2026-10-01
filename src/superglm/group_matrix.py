@@ -270,7 +270,7 @@ class DesignMatrix:
         self._mixed_bin_space_centering_plan_attempted = False
         self._centered_pattern_plan = None
         self._centered_solver_supports = None
-        self._scalar_structured_layout_cache: dict[object, Any] = {}
+        self._structured_layout_cache: dict[object, Any] = {}
 
     def __getstate__(self) -> dict[str, Any]:
         """Serialize durable matrix state without the rebuildable execution plan."""
@@ -283,7 +283,7 @@ class DesignMatrix:
         state.pop("_mixed_centering_execution_plan", None)
         state["_mixed_bin_space_centering_plan"] = None
         state["_mixed_bin_space_centering_plan_attempted"] = False
-        state["_scalar_structured_layout_cache"] = {}
+        state["_structured_layout_cache"] = {}
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -311,7 +311,10 @@ class DesignMatrix:
         state.pop("_mixed_centering_execution_plan", None)
         state["_mixed_bin_space_centering_plan"] = None
         state["_mixed_bin_space_centering_plan_attempted"] = False
-        state["_scalar_structured_layout_cache"] = {}
+        # the layout cache is never pickled; a design pickled before its rename
+        # (one-engine stage 4) carries an empty one under the old name
+        state.pop("_scalar_structured_layout_cache", None)
+        state["_structured_layout_cache"] = {}
         state.setdefault("_tabmat_centering_candidate", None)
         state["_tabmat_vector_candidate"] = _is_retained_tabmat_vector_candidate(
             group_matrices,

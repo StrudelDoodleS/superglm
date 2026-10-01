@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -317,6 +317,7 @@ def re(
     unseen: Literal["population", "error"] = "population",
     missing: Literal["error"] = "error",
     lambda_policy: LambdaPolicy | None = None,
+    nested_in: Hashable | None = None,
 ) -> BoundTerm:
     """Declare a random effect with a coefficient for every group level.
 
@@ -337,6 +338,10 @@ def re(
         Missing group labels raise an error.
     lambda_policy : LambdaPolicy, optional
         Set the policy for the random effect's smoothing penalty.
+    nested_in : str, optional
+        Name of another random effect in the same predictor that this one is
+        nested in, such as a region within a country. Each training row is
+        checked against it.
 
     Returns
     -------
@@ -355,6 +360,7 @@ def re(
             unseen=unseen,
             missing=missing,
             lambda_policy=lambda_policy,
+            nested_in=nested_in,
         ),
     )
 

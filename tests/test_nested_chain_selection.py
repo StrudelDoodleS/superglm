@@ -19,7 +19,7 @@ arithmetic over the family's parameter range.
 from __future__ import annotations
 
 import warnings
-from itertools import chain, combinations, product
+from itertools import chain, combinations
 
 import numpy as np
 import pandas as pd
@@ -29,7 +29,7 @@ import scipy.sparse as sp
 import superglm.solvers._structured.layout as layout_module
 import superglm.solvers._structured.selection as selection
 from superglm import RandomEffect, Spline, SuperGLM
-from superglm.distributions import Gamma, NegativeBinomial, Tweedie
+from superglm.distributions import Tweedie
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -37,10 +37,8 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
 )
-from superglm.links import LogLink, NegativeBinomialLink, PowerLink, SqrtLink
+from superglm.links import SqrtLink
 from superglm.reml.observed_geometry import (
-    _BUILTIN_REML_DISTRIBUTIONS,
-    _BUILTIN_REML_LINKS,
     compute_observed_information_weights,
 )
 from superglm.solvers.structured import (
@@ -49,11 +47,9 @@ from superglm.solvers.structured import (
     build_structured_system,
     find_nested_chain,
     get_structured_layout,
-    nested_chain_weights_admissible,
     nested_parent_codes,
     resolve_structured_backend,
 )
-from superglm.solvers.working_rows import supports_observed_newton
 from superglm.types import GroupSlice, PenaltyComponent
 
 EPS = np.finfo(np.float64).eps
@@ -173,7 +169,7 @@ def test_candidate_pairs_are_tested_on_the_leaf_levels_not_the_rows(monkeypatch)
         return nested_parent_codes(child, parent)
 
     monkeypatch.setattr(selection, "nested_parent_codes", counting)
-    cache = selection.shared_nesting_cache(dm._scalar_structured_layout_cache)
+    cache = selection.shared_nesting_cache(dm._structured_layout_cache)
     found = find_nested_chain(matrices, groups, leaf_index=leaf, cache=cache)
     # one row test per other RandomEffect term, each against the leaf
     assert len(calls) == leaf - 2
@@ -203,7 +199,7 @@ def test_lambda_rebuilds_share_the_nesting_cache_and_rebuild_the_border() -> Non
         direct_solve="structured",
         coefficient_width=dm.p,
         lambda2=1.0,
-        nesting_cache=dm._scalar_structured_layout_cache,
+        nesting_cache=dm._structured_layout_cache,
     )
     chain = decision.chain_group_indices
     weights = np.ones(dm.n)
@@ -223,10 +219,10 @@ def test_lambda_rebuilds_share_the_nesting_cache_and_rebuild_the_border() -> Non
     driver = rebuild(dm, 3.0)
     driven = layout(driver)
     final = rebuild(dm, 5.0)
-    assert set(final._scalar_structured_layout_cache) == {"nesting"}
+    assert set(final._structured_layout_cache) == {"nesting"}
     refit = layout(final)
-    shared = dm._scalar_structured_layout_cache["nesting"]
-    assert final._scalar_structured_layout_cache["nesting"] is shared
+    shared = dm._structured_layout_cache["nesting"]
+    assert final._structured_layout_cache["nesting"] is shared
     assert {key[0] for key in shared} == {"nested_parent", "nested_chain", "nested_tree"}
     assert refit.tree is driven.tree
     # the leaf argsort, the one O(n) entry, is shared rather than recomputed
@@ -234,7 +230,7 @@ def test_lambda_rebuilds_share_the_nesting_cache_and_rebuild_the_border() -> Non
     # the border belongs to each design, and a layout never outlives its design
     assert refit.small_matrices[1] is final.group_matrices[1]
     assert driven.small_matrices[1] is driver.group_matrices[1]
-    assert set(rebuild(driver, 7.0)._scalar_structured_layout_cache) == {"nesting"}
+    assert set(rebuild(driver, 7.0)._structured_layout_cache) == {"nesting"}
 
 
 def _frame(n: int = 3000) -> tuple[pd.DataFrame, np.ndarray]:
@@ -316,18 +312,19 @@ def _signed_leaf_case(power: float):
     return matrices, groups, weights
 
 
-@pytest.mark.parametrize(("power", "chained"), [(1.25, True), (1.5, True), (1.75, False)])
-def test_tweedie_sqrt_keeps_the_chain_only_while_its_rows_are_non_negative(power, chained):
+@pytest.mark.parametrize("power", [1.25, 1.5, 1.75])
+def test_tweedie_sqrt_keeps_the_chain_for_signed_rows(power):
     """Tweedie/sqrt rows are ``2 mu^-p ((3 - 2p) mu + (2p - 1) y)``: negative at y = 0 past 3/2.
 
     At p = 1.75 the rows are (-1, 1, 4, 4, 4), so the first leaf's mass cancels
-    to zero while its x moment is 1.  The nested row pass reads zero mass as
-    zero moments and gave logdet 15.75083 against the dense 15.78923; the
-    chain is declined there, and kept at 1.25 and at the boundary 1.5, where
-    the zero row is zero up to rounding.  Both backends are backward stable to
-    ``(n + p) eps`` of the absolute moments ``|X|' |W| |X| + S`` entrywise, so
-    by Weyl in the Jacobi-scaled metric the logdets differ by at most
-    ``2 p (n + p) eps ||A||_F / lambda_min``, ``A`` those moments scaled.
+    to zero while its x moment is 1.  A row pass that centres on the signed
+    leaf mean reads zero mass as zero moments and gave logdet 15.75083 against
+    the dense 15.78923; centred on the absolute-weight mean with the carried
+    deviation (one-engine design §3.3) the chain is kept for every power.
+    Both backends are backward stable to ``(n + p) eps`` of the absolute
+    moments ``|X|' |W| |X| + S`` entrywise, so by Weyl in the Jacobi-scaled
+    metric the logdets differ by at most ``2 p (n + p) eps ||A||_F /
+    lambda_min``, ``A`` those moments scaled.
     """
     matrices, groups, weights = _signed_leaf_case(power)
     lambdas = {"root": 0.1, "leaf": 6.0}
@@ -336,15 +333,10 @@ def test_tweedie_sqrt_keeps_the_chain_only_while_its_rows_are_non_negative(power
         groups,
         direct_solve="structured",
         coefficient_width=7,
-        row_weights=weights,
         lambda2=lambdas,
-        family=Tweedie(power),
-        link=SqrtLink(),
     )
-    assert decision.chain_group_indices == ((1, 2) if chained else (2,))
-    assert (decision.nested_fallback_reason is None) == chained
-    if not chained:
-        assert "negative at y = 0 for p > 1.5" in decision.nested_fallback_reason
+    assert decision.chain_group_indices == (1, 2)
+    assert decision.nested_fallback_reason is None
 
     layout = get_structured_layout(
         DesignMatrix(matrices, n=len(weights), p=7),
@@ -382,55 +374,3 @@ def test_tweedie_sqrt_keeps_the_chain_only_while_its_rows_are_non_negative(power
     moments_norm = np.linalg.norm(scale[:, None] * moments * scale[None, :])
     bound = 2 * p * (len(weights) + p) * EPS * moments_norm / lambda_min
     assert abs(factor.logdet() - np.linalg.slogdet(H)[1]) <= bound
-
-
-def test_a_subclass_of_an_audited_family_declines_the_chain() -> None:
-    """Pairs match by exact type, since a subclass can change V (§3.7).
-
-    ``V = mu^3`` is the inverse Gaussian variance: its observed log-link rows
-    ``(2y - mu) / mu^2`` are negative for ``y < mu / 2``.  The subclass keeps
-    the name ``Gamma``, which a match on class names admitted.
-    """
-    cubic = type(
-        "Gamma",
-        (Gamma,),
-        {
-            "variance": lambda self, mu: mu**3,
-            "variance_derivative": lambda self, mu: 3.0 * mu**2,
-            "reml_curvature": lambda self, link: "observed",
-        },
-    )()
-    mu, ones = np.array([2.0]), np.ones(1)
-    rows = compute_observed_information_weights(
-        cubic, LogLink(), np.array([0.5]), mu, np.log(mu), ones
-    )
-    assert rows[0] < 0.0  # (2 y - mu) / mu^2 = -1/4
-    assert nested_chain_weights_admissible(Gamma(), LogLink())
-    assert not nested_chain_weights_admissible(cubic, LogLink())
-
-
-def test_every_observed_newton_pair_is_admitted_by_the_weight_gate() -> None:
-    """The discrete terminal refit feeds observed-Newton rows to the factor.
-
-    A discrete fit's REML curvature is Fisher, so the gate is never asked
-    about those rows: every built-in pair ``supports_observed_newton`` approves
-    must be one the gate admits.
-    """
-    parameters = {
-        NegativeBinomial: [(1.0,), ("auto",)],
-        Tweedie: [(1.25,), (1.75,)],
-        PowerLink: [(0.5,), (2.0,)],
-        NegativeBinomialLink: [(1.0,)],
-    }
-    families, links = (
-        [kind(*args) for kind in kinds for args in parameters.get(kind, [()])]
-        for kinds in (_BUILTIN_REML_DISTRIBUTIONS, _BUILTIN_REML_LINKS)
-    )
-    approved = [pair for pair in product(families, links) if supports_observed_newton(*pair)]
-    assert approved
-    declined = [
-        (type(family).__name__, type(link).__name__)
-        for family, link in approved
-        if not nested_chain_weights_admissible(family, link)
-    ]
-    assert declined == []

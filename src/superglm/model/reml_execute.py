@@ -14,6 +14,7 @@ from superglm.model.reml_setup import promote_estimated_scop_lambdas
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.mode_score import linear_predictor
 
 # The two optimizer families interpret reml_tol against different criteria, so
 # an unset tolerance resolves per engine rather than to one number. The Newton
@@ -191,10 +192,7 @@ def run_fixed_monotone_reml(
     model._reml_lambdas = lambdas
     model._reml_penalties = reml_penalties
 
-    eta = model._dm.matvec(result.beta) + result.intercept
-    if offset is not None:
-        eta = eta + offset
-    eta = stabilize_eta(eta, model._link)
+    eta = stabilize_eta(linear_predictor(model._dm, result, offset), model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
@@ -283,10 +281,7 @@ def run_scop_efs_reml(
     model._reml_penalties = best.reml_penalties if best.reml_penalties else reml_penalties
     model._reml_result = best
 
-    eta = model._dm.matvec(best.pirls_result.beta) + best.pirls_result.intercept
-    if offset is not None:
-        eta = eta + offset
-    eta = stabilize_eta(eta, model._link)
+    eta = stabilize_eta(linear_predictor(model._dm, best.pirls_result, offset), model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
@@ -349,7 +344,9 @@ def optimize_reml_best(
                 penalty_ranks,
                 lambdas,
                 max_reml_iter=1,
-                reml_tol=1.0,
+                # every lambda fixed: one evaluation, whose modes certify at
+                # the resolved tolerance's bar (``mode_score``)
+                reml_tol=reml_tol,
                 verbose=verbose,
                 penalty_caches=penalty_caches,
                 profile=profile,

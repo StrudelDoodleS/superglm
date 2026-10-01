@@ -1154,8 +1154,13 @@ def test_fixed_scop_fit_lifecycle_builds_postfit_inference_once(monkeypatch, fit
     )
     np.testing.assert_allclose(evaluation_inverse, inference.coefficient_inverse)
     evaluation_dense = evaluation_design.toarray()
-    expected_leverage = evaluation_weights * np.sum(
-        (evaluation_dense @ inference.coefficient_inverse) * evaluation_dense,
+    # the influence diagonal with the intercept (one-engine design §3.10 (A)):
+    # w_i / sum w + w_i x~_i' M_ss x~_i, x~ centred on the working-weighted mean
+    # and M_ss the slope block of the retained augmented inverse
+    total = np.sum(evaluation_weights)
+    centred = evaluation_dense - evaluation_weights @ evaluation_dense / total
+    expected_leverage = evaluation_weights / total + evaluation_weights * np.sum(
+        (centred @ inference.augmented_inverse[1:, 1:]) * centred,
         axis=1,
     )
     np.testing.assert_allclose(

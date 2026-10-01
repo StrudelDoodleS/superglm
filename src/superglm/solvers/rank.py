@@ -1651,6 +1651,7 @@ def _decompose_gram(
     fallback_factor: NDArray | None = None,
     allow_indefinite: bool = False,
     omit_uncertifiable: bool = False,
+    psd_by_construction: bool = False,
 ) -> RankDecomposition | None:
     """Equilibrate and decompose a symmetric positive-semidefinite matrix.
 
@@ -1659,6 +1660,9 @@ def _decompose_gram(
     :func:`needs_factor_certification` would have rejected anyway.  It is
     permitted to return a decomposition in that case too, so the caller still
     owns the predicate -- see :func:`decompose_gram_if_authoritative`.
+    ``psd_by_construction`` (only with ``omit_uncertifiable``) returns
+    ``None`` where a materially negative eigenvalue would otherwise raise:
+    see :func:`decompose_gram_if_authoritative`.
     """
     equilibrated, column_scale, active_columns, _ = _equilibrate_gram(
         matrix, allow_indefinite=allow_indefinite
@@ -1791,6 +1795,8 @@ def _decompose_gram(
     )
     materially_indefinite = bool(eigenvalues[0] < -negative_tolerance)
     if not allow_indefinite and materially_indefinite:
+        if omit_uncertifiable and psd_by_construction:
+            return None
         raise ValueError(
             "matrix is materially indefinite "
             f"(min equilibrated eigenvalue={eigenvalues[0]:.3e}, "
@@ -2013,6 +2019,7 @@ def decompose_gram_if_authoritative(
     policy: RankPolicy = SHARED_RANK_POLICY,
     residual_tol: float = 1e-6,
     fallback_factor: NDArray | None = None,
+    psd_by_construction: bool = False,
 ) -> RankDecomposition | None:
     """The Gram decomposition when it is authoritative, else ``None``.
 
@@ -2028,6 +2035,21 @@ def decompose_gram_if_authoritative(
     hint inside chooses to skip: the eager and deferring paths agree on every
     field that decides it, and a spared decomposition is one no caller in this
     shape could have read.
+
+    ``psd_by_construction`` says ``matrix`` is a computed Gram ``X'WX`` of
+    rows whose weights are all nonnegative: positive semidefinite in exact
+    arithmetic, and within ``gamma_n |X|'W|X|`` of that matrix as computed
+    (Higham 2002, section 3.5), which in Jacobi-scaled coordinates can exceed
+    the eigensolver's resolution that the indefiniteness test is set at.  A
+    negative eigenvalue beyond that resolution is then the rounding of the
+    Gram's formation, not curvature, and it falls where a near-null of the
+    data sits: the Gram cannot certify its own spectrum there, so this
+    returns ``None`` (the caller goes to its observation factor) instead of
+    refusing the matrix as indefinite.  Measured: an fs data Gram whose
+    exact null came out at -1.17e-13 on macOS ARM64 (Accelerate) against a
+    resolution of 8.9e-14, at most -8.7e-15 on OpenBLAS; ``gamma_n`` at its
+    4000 rows is 4.4e-13.  Without the flag a materially negative
+    eigenvalue still raises: signed (observed) rows make it real.
     """
     decomposition = _decompose_gram(
         matrix,
@@ -2035,6 +2057,7 @@ def decompose_gram_if_authoritative(
         residual_tol=residual_tol,
         fallback_factor=fallback_factor,
         omit_uncertifiable=True,
+        psd_by_construction=psd_by_construction,
     )
     if decomposition is None or needs_factor_certification(decomposition, policy=policy):
         return None

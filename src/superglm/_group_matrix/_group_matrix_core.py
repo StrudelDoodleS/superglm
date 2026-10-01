@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from typing import Literal, cast
 
 import numpy as np
@@ -136,9 +137,15 @@ class CategoricalGroupMatrix:
 
 
 class RandomEffectGroupMatrix(CategoricalGroupMatrix):
-    """All-level categorical matrix used by structured random effects."""
+    """All-level categorical matrix used by structured random effects.
 
-    __slots__ = ("lambda_policies",)
+    ``nested_in`` names the feature this effect was declared nested in
+    (``RandomEffect(nested_in=)``, validated on the training rows), or is
+    ``None``; a matrix pickled before the declaration existed reads ``None``
+    through ``declared_parent``.
+    """
+
+    __slots__ = ("lambda_policies", "nested_in")
 
     def __init__(
         self,
@@ -146,6 +153,7 @@ class RandomEffectGroupMatrix(CategoricalGroupMatrix):
         n_levels: int,
         *,
         lambda_policies=None,
+        nested_in: Hashable | None = None,
     ):
         c = np.asarray(codes, dtype=np.intp)
         if n_levels < 1:
@@ -154,12 +162,19 @@ class RandomEffectGroupMatrix(CategoricalGroupMatrix):
             raise ValueError("RandomEffect codes must be between 0 and n_levels - 1.")
         super().__init__(c, n_levels)
         self.lambda_policies = lambda_policies
+        self.nested_in = nested_in
+
+    @property
+    def declared_parent(self) -> Hashable | None:
+        """The declared parent feature's name, ``None`` when undeclared."""
+        return getattr(self, "nested_in", None)
 
     def row_subset(self, idx: NDArray) -> RandomEffectGroupMatrix:
         return RandomEffectGroupMatrix(
             self.codes[idx],
             self.n_levels,
             lambda_policies=self.lambda_policies,
+            nested_in=self.declared_parent,
         )
 
 

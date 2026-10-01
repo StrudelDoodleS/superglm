@@ -3,7 +3,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-import scipy.sparse as sp
 
 import superglm.solvers._structured.moments as structured_moments
 from superglm import RandomEffect, Spline, SuperGLM
@@ -20,53 +19,12 @@ from superglm.reml.discrete import _solve_cached_profiled_system
 from superglm.reml.penalty_algebra import build_penalty_context
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.structured import (
-    ScalarStructuredSystem,
-    build_scalar_structured_system,
-    solve_cached_scalar_structured,
+    NestedStructuredSystem,
+    build_nested_structured_layout,
+    build_nested_structured_system,
+    solve_cached_nested_structured,
 )
 from superglm.types import GroupSlice, PenaltyComponent
-from tests._exact_reference import exact_weighted_gram
-
-
-@pytest.mark.parametrize("sensitive", [False, True])
-def test_structured_sparse_diagonal_is_reused_by_level_crosses(monkeypatch, sensitive):
-    n = 40
-    x = np.linspace(-1, 1, n)
-    basis = np.zeros((n, 8))
-    basis[:, 0], basis[:, 1] = 1, 1 + 1e-8 * x if sensitive else x
-    transform = np.zeros((8, 2))
-    transform[:2] = [[1, 1], [-1, 0]] if sensitive else np.eye(2)
-    spline = SparseSSPGroupMatrix(sp.csr_matrix(basis), transform)
-    random = RandomEffectGroupMatrix(np.arange(n) % 4, 4)
-    groups = [GroupSlice("spline", 0, 2, True), GroupSlice("random", 2, 6, True)]
-    original = SparseSSPGroupMatrix._gram_with_projection
-    calls = []
-
-    def recorded(group, weights):
-        calls.append(group)
-        return original(group, weights)
-
-    monkeypatch.setattr(SparseSSPGroupMatrix, "_gram_with_projection", recorded)
-    weights = np.linspace(0.5, 1.5, n)
-    for iteration in range(2):
-        system = build_scalar_structured_system(
-            [spline, random], groups, weights, weights * x, dominant_group_index=1
-        )
-        assert len(calls) == iteration + 1
-        design = spline.toarray()
-        expected_a = exact_weighted_gram(design, design, weights)
-        expected_c = exact_weighted_gram(random.toarray(), design, weights)
-        scale = np.sqrt(np.diag(expected_a))
-        bound = 100 * np.finfo(float).eps
-        assert (
-            np.linalg.norm((system.operator.A - expected_a) / np.outer(scale, scale), 2)
-            <= 2 * bound
-        )
-        assert np.linalg.norm((system.operator.C - expected_c) / scale, 2) <= bound * np.sqrt(
-            weights.sum()
-        )
-        weights *= 0.75
-        spline.R_inv[:, 1] *= 0.5
 
 
 def _build_random_effect_design(
@@ -100,7 +58,7 @@ def _cached_system_fixture(
     *,
     n_levels: int = 31,
 ) -> tuple[
-    ScalarStructuredSystem,
+    NestedStructuredSystem,
     list,
     list[GroupSlice],
     list[PenaltyComponent],
@@ -139,13 +97,8 @@ def _cached_system_fixture(
     W = rng.uniform(0.4, 2.0, size=n)
     z = rng.normal(size=n)
     Wz = W * z
-    system = build_scalar_structured_system(
-        matrices,
-        groups,
-        W,
-        Wz,
-        dominant_group_index=1,
-    )
+    layout = build_nested_structured_layout(matrices, groups, chain_group_indices=(1,))
+    system = build_nested_structured_system(matrices, groups, W, Wz, layout=layout)
 
     dense = np.column_stack((numeric, np.eye(n_levels)[codes]))
     xtw = dense.T @ W
@@ -326,7 +279,7 @@ def test_cached_structured_lambda_solve_matches_dense_profiled_oracle(
         )
     )
 
-    actual = solve_cached_scalar_structured(
+    actual = solve_cached_nested_structured(
         system,
         matrices,
         groups,
@@ -344,10 +297,13 @@ def test_cached_structured_trial_has_no_data_pass_or_dense_p_squared_state(monke
     system, matrices, groups, penalties, *_ = _cached_system_fixture(n_levels=257)
     p = system.operator.shape[0]
 
+    leaf = system.operator.leaf
     cached_arrays = (
         system.operator.A,
-        system.operator.C,
-        system.operator.d,
+        leaf.weight,
+        leaf.mean,
+        leaf.cross,
+        leaf.within,
         system.xtw_small,
         system.xtw_structured,
         system.xtwz_small,
@@ -363,18 +319,9 @@ def test_cached_structured_trial_has_no_data_pass_or_dense_p_squared_state(monke
     monkeypatch.setattr(DenseGroupMatrix, "rmatvec", fail_data_pass)
     monkeypatch.setattr(RandomEffectGroupMatrix, "matvec", fail_data_pass)
     monkeypatch.setattr(RandomEffectGroupMatrix, "rmatvec", fail_data_pass)
-    monkeypatch.setattr(
-        structured_moments,
-        "_random_effect_cross_gram",
-        fail_data_pass,
-    )
-    monkeypatch.setattr(
-        structured_moments,
-        "_random_effect_sufficient_stats",
-        fail_data_pass,
-    )
+    monkeypatch.setattr(structured_moments, "_nested_pass", fail_data_pass)
 
-    solution = solve_cached_scalar_structured(
+    solution = solve_cached_nested_structured(
         system,
         matrices,
         groups,

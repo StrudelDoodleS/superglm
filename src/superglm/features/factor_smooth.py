@@ -103,6 +103,14 @@ class FactorSmooth:
     ``basis="sz"`` represents centered sum-to-zero deviations; its specialized
     geometry is populated by the design-matrix builder.
 
+    Both bases store each level's curve in the natural parameterization of the
+    marginal P-spline: per level, the coordinates in which the wiggle penalty
+    is diagonal, followed by the unpenalized polynomial coordinates.  The
+    coefficients are therefore neither the B-spline coefficients nor mgcv's
+    ``s(x, g, bs="sz")`` coordinates; read a level's curve through
+    ``SuperGLM.factor_smooth`` instead.  (An ``sz`` model saved by 0.35.0 or
+    earlier keeps the marginal-basis coordinates it was fitted in.)
+
     ``levels=`` binds the grouping column's level universe (spec 2026-08-11,
     §3.1).  Under ``basis="fs"`` a declared level with no training rows keeps
     its own curve block and shrinks to zero through the penalty.  ``basis="sz"``
@@ -462,17 +470,21 @@ class FactorSmooth:
                 "FactorSmooth marginal basis is rank deficient; use more distinct "
                 "numeric values or a smaller k, or choose a suitable non-smooth feature."
             )
-        if self.basis == "fs":
-            natural_map, components = _natural_parameterization_from_r(
-                qr_r,
-                penalty,
-                rank=self.k - self.m,
-                n_rows=len(x),
-                normalization_mass=normalization_mass,
-            )
-        else:
-            natural_map = np.eye(self.k, dtype=np.float64)
-            components = (("wiggle", penalty),)
+        natural_map, components = _natural_parameterization_from_r(
+            qr_r,
+            penalty,
+            rank=self.k - self.m,
+            n_rows=len(x),
+            normalization_mass=normalization_mass,
+        )
+        if self.basis == "sz":
+            # One-engine design §3.5, decision 5: sz takes fs's natural
+            # parameterization.  Its sum-to-zero constraint is coefficientwise,
+            # so the same per-level change of basis preserves it; the wiggle
+            # penalty becomes diagonal (its square root exact) and the
+            # polynomial null coordinates separate.  sz penalizes the wiggle
+            # component alone, as before: the null coordinates stay unpenalized.
+            components = components[:1]
         self._spline = spline
         self._natural_map = natural_map
         self._base_penalty_components = components
