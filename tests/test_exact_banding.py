@@ -252,14 +252,16 @@ def test_the_acceptance_margin_certifies_ties_at_rounding_level():
 
 
 def test_the_acceptance_margin_does_not_cost_bands_it_can_certify():
-    # Eight times the margin clears any rounding, so one band must be taken.
+    # Eight times the margin clears any rounding, so one band must be taken.  The
+    # curve sits near zero: at a level of 100 the margin is far below an ulp, no
+    # double lies within every tolerance, and no factor could carry the band.
     rng = np.random.default_rng(29)
     for _ in range(100):
         k = int(rng.integers(2, 6))
-        s = 100.0 + np.cumsum(rng.normal(0.0, 1e-3, k))
+        s = np.cumsum(rng.normal(0.0, 1e-3, k))
         w = rng.uniform(0.1, 3.0, k) ** 3
         # In the frame of the last value, as the banding measures, so the
-        # tolerances are not rounded at the curve's level of 100.
+        # tolerances are not rounded at the curve's level.
         d = s - s[-1]
         mean = np.average(d, weights=w)
         margin = 16.0 * _EPS * (k + 2) * np.abs(d).max()
@@ -270,6 +272,72 @@ def test_the_acceptance_margin_does_not_cost_bands_it_can_certify():
 def test_weights_spanning_more_than_a_double_are_refused():
     with np.errstate(under="raise"), pytest.raises(ValueError, match="span more than a double"):
         exact_bands(np.array([0.0, 1.0]), np.array([1e308, 1e-20]), np.zeros(2), max_bands=2)
+
+
+def _meets_exactly(s, starts, factors, tol):
+    """Every value within its tolerance of its band's factor, in exact arithmetic."""
+    band = np.repeat(factors, np.diff(np.append(starts, len(s))))
+    return all(
+        abs(Fraction(value) - Fraction(factor)) <= Fraction(limit)
+        for value, factor, limit in zip(s, band, tol, strict=True)
+    )
+
+
+def test_a_factor_that_rounds_past_a_tolerance_moves_to_a_double_inside_them_all():
+    # The mean, near 100 + 0.49 h, rounded to 100: a full ulp from the upper value,
+    # past its 0.75 h, while tolerance_factor said 1.0.  100 + h meets both.
+    h = np.spacing(100.0)
+    s = np.array([100.0, 100.0 + h])
+    tol = np.array([1.1 * h, 0.75 * h])
+    result = exact_bands(s, np.array([51.0, 49.0]), tol, max_bands=1)
+    assert result.starts.tolist() == [0]
+    assert result.tolerance_factor == 1.0
+    assert result.factors[0] == 100.0 + h
+
+
+def test_a_band_whose_tolerances_leave_no_double_between_them_is_not_formed():
+    # The exact mean, 100 + h/2, meets both tolerances of 0.75 h, but the only
+    # doubles near it are the two values, each a full ulp from the other.
+    h = np.spacing(100.0)
+    s = np.array([100.0, 100.0 + h])
+    tol = np.full(2, 0.75 * h)
+    assert exact_bands(s, np.ones(2), tol, max_bands=2).starts.tolist() == [0, 1]
+    # Widened by 4/3 the tolerance is h, and either value can carry the band.
+    widened = exact_bands(s, np.ones(2), tol, max_bands=1)
+    assert widened.tolerance_factor == pytest.approx(4.0 / 3.0, rel=2e-6)
+    assert _meets_exactly(s, widened.starts, widened.factors, widened.tolerance_factor * tol)
+
+
+@pytest.mark.parametrize("start", [100.0, np.nextafter(128.0, 0.0)])
+def test_every_factor_meets_every_tolerance_exactly_at_rounding_level(start):
+    """Curves a few ulps wide with tolerances of a few ulps, checked in exact arithmetic.
+
+    Starting just below 128 puts the curve across a change in the spacing of
+    doubles, where an ulp below the boundary is half of one above it.
+    """
+    rng = np.random.default_rng(37)
+    for _ in range(150):
+        k = int(rng.integers(2, 7))
+        s = np.empty(k)
+        s[0] = start
+        for i in range(1, k):
+            s[i] = s[i - 1]
+            for _ in range(int(rng.integers(0, 4))):
+                s[i] = np.nextafter(s[i], np.inf)
+        w = rng.uniform(0.1, 3.0, k) ** 3
+        tol = np.spacing(s) * rng.uniform(0.2, 2.0, k)
+        result = exact_bands(s, w, tol, max_bands=int(rng.integers(1, k + 1)))
+        assert _meets_exactly(s, result.starts, result.factors, result.tolerance_factor * tol)
+
+
+def test_weights_whose_squared_error_passes_the_largest_double_are_refused():
+    # The error on weights scaled to 1 is 50; times the largest weight, 8e307, it
+    # came back as inf without a warning, since the product is a Python float.
+    s, tol = np.array([0.0, 10.0]), np.full(2, 10.0)
+    with np.errstate(over="raise"), pytest.raises(ValueError, match="past the largest double"):
+        exact_bands(s, np.full(2, 8e307), tol, max_bands=1)
+    # The refusal is the double's limit, not a cap on large weights.
+    assert exact_bands(s, np.full(2, 1e306), tol, max_bands=1).sse == pytest.approx(5e307)
 
 
 @pytest.fixture(scope="module")

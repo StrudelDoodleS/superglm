@@ -149,10 +149,13 @@ within one standard error of the fitted curve, and never more than 10% from it
 maximum is too small, the limit widens by the least factor that fits: the
 export warns, and the impact sheet's `band_*` columns and
 `discretization_impact(...).band_diagnostics` report it. The limit holds at
-the observed values the bands are placed on. A band holding only the largest
-value is written as a closed key, `[x, x]`. A model carrying editor edits, or a
-term with a post-fit shape repair, is refused, because its standard errors are
-not the published curve's.
+the observed values the bands are placed on, for each band's factor exactly as
+it is stored. Weights so large that the bands' weighted squared error would
+pass the largest double are refused: only their ratios set the bands, so
+dividing them by a common factor gives the same bands. A band holding only the
+largest value is written as a closed key, `[x, x]`. A model carrying editor
+edits, or a term with a post-fit shape repair, is refused, because its standard
+errors are not the published curve's.
 
 `export_rating_tables` writes the same payload as an Excel workbook: one sheet
 of rating tables laid out side by side for a rater to key on, one for the
