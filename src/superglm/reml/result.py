@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -98,3 +100,32 @@ def _map_beta_between_bases(
             beta_bspline = gm_old.R_inv @ beta_new[g.sl]
             beta_new[g.sl] = np.linalg.lstsq(gm_new.R_inv, beta_bspline, rcond=None)[0]
     return beta_new
+
+
+def _map_centred_state_between_bases(
+    centred: tuple[float, NDArray] | None,
+    beta: NDArray,
+    old_gms: Sequence,
+    new_gms: Sequence,
+    groups: Sequence,
+) -> tuple[float, NDArray] | None:
+    """A warm centred state ``(alpha, c)`` read with ``_map_beta_between_bases``' coefficients.
+
+    A rebuilt block (a new matrix: a new reparametrization) has new columns,
+    so its centre no longer applies: its ``c' beta`` at the old coefficients
+    ``beta`` moves into ``alpha`` and its centre becomes zero, where the
+    mapped coefficients read the same function on the new columns.  A block
+    the rebuild reuses (every non-spline block, every dense column) keeps its
+    centre and coefficients bit for bit, so no offset is ever cancelled.
+    """
+    if centred is None:
+        return None
+    alpha, centre = centred
+    moved = np.zeros(len(centre), dtype=bool)
+    for gm_old, gm_new, g in zip(old_gms, new_gms, groups):
+        if gm_old is not gm_new:
+            moved[g.sl] = True
+    if not np.any(moved & (centre != 0.0)):
+        return alpha, centre
+    shift = math.fsum(centre[moved] * np.asarray(beta, dtype=np.float64)[moved])
+    return float(alpha) - shift, np.where(moved, 0.0, centre)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import weakref
 from dataclasses import dataclass
 
@@ -50,6 +51,11 @@ class CachedBlockStructuredSolution:
     penalized_operator: FactorSmoothPenalizedOperator
     log_det_H: float  # noqa: N815
     hessian_rank: int
+    # with ``centred``, the solve's state (one-engine design §3.8): ``alpha``
+    # about the factor's border centre ``c0``, written into slope coordinates
+    # (0 off the border); ``intercept = alpha - fsum(c * beta)``
+    centred_intercept: float | None = None
+    state_center: NDArray | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,11 @@ class CachedNestedStructuredSolution:
     penalized_operator: NestedPenalizedOperator
     log_det_H: float  # noqa: N815
     hessian_rank: int
+    # with ``centred``, the solve's state (one-engine design §3.8): ``alpha``
+    # about the factor's border centre ``c0``, written into slope coordinates
+    # (0 off the border); ``intercept = alpha - fsum(c * beta)``
+    centred_intercept: float | None = None
+    state_center: NDArray | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +85,11 @@ class CachedSumToZeroStructuredSolution:
     penalized_operator: SumToZeroPenalizedOperator
     log_det_H: float  # noqa: N815
     hessian_rank: int
+    # with ``centred``, the solve's state (one-engine design §3.8): ``alpha``
+    # about the factor's border centre ``c0``, written into slope coordinates
+    # (0 off the border); ``intercept = alpha - fsum(c * beta)``
+    centred_intercept: float | None = None
+    state_center: NDArray | None = None
 
 
 _PENALTIES_REQUIRED = (
@@ -602,6 +618,34 @@ def solve_augmented_normal_equations(
     return factor.solve(rhs)
 
 
+def _cached_centred_solution(
+    system, factor, rhs: NDArray, centred: bool
+) -> tuple[NDArray, float, float | None, NDArray | None]:
+    """``(beta, intercept, alpha, c)`` of a cached lambda trial in the PIRLS state's coordinates.
+
+    The data-side solve keeps its intercept as the centred ``alpha`` about the
+    factor's border centre ``c0`` (``solve_augmented_normal_equations`` with
+    ``centred``), as a PIRLS iterate holds it, and the raw intercept is read
+    from it as PIRLS reads it, ``alpha - fsum(c * beta)``.  A trial that took
+    ``alpha`` back from the raw intercept instead, ``intercept + c' beta``,
+    cancelled ``c' beta`` at a column's offset: at 1e16 discrete REML ran to
+    ``max_reml_iter`` with lambda 2.84% off.  ``c`` is ``(p,)``, zero off the
+    border; a border without a centred column gives ``alpha`` bit for bit as
+    the raw solve's intercept.  Without ``centred`` the raw solve, as
+    before, and no centred state (``alpha`` and ``c`` are ``None``).
+    """
+    if not centred:
+        coefficients = solve_augmented_normal_equations(system, factor, rhs)
+        return coefficients[1:], float(coefficients[0]), None, None
+    coefficients = solve_augmented_normal_equations(system, factor, rhs, centred=True)
+    beta = coefficients[1:]
+    leaf = system.operator.leaf if isinstance(system, NestedStructuredSystem) else system.leaf
+    centre = np.zeros(len(beta), dtype=np.float64)
+    centre[system.operator.small_indices] = leaf.center
+    alpha = float(coefficients[0])
+    return beta, alpha - math.fsum(centre * beta), alpha, centre
+
+
 def build_augmented_structured_factor(
     system: FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem,
     penalized_operator: (
@@ -631,6 +675,7 @@ def solve_cached_block_structured(
     lambdas: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
+    centred: bool = False,
 ) -> CachedBlockStructuredSolution:
     """Solve a factor-smooth lambda trial from a cached ``fs`` leaf system (no data pass)."""
     penalized = build_penalized_block_operator(
@@ -641,7 +686,9 @@ def solve_cached_block_structured(
         reml_penalties=reml_penalties,
     )
     augmented_factor, rhs = build_augmented_block_factor(system, penalized)
-    coefficients = solve_augmented_normal_equations(system, augmented_factor, rhs)
+    beta, intercept, alpha, centre = _cached_centred_solution(
+        system, augmented_factor, rhs, centred
+    )
     xtw = np.empty(system.operator.shape[0], dtype=np.float64)
     xtw[system.operator.small_indices] = system.xtw_small
     xtw[system.operator.structured_indices] = system.xtw_structured
@@ -651,12 +698,14 @@ def solve_cached_block_structured(
         xtw=xtw,
     )
     return CachedBlockStructuredSolution(
-        beta=coefficients[1:],
-        intercept=float(coefficients[0]),
+        beta=beta,
+        intercept=intercept,
         factor=factor,
         penalized_operator=penalized,
         log_det_H=augmented_factor.logdet(),
         hessian_rank=augmented_factor.rank,
+        centred_intercept=alpha,
+        state_center=centre,
     )
 
 
@@ -667,6 +716,7 @@ def solve_cached_sum_to_zero_structured(
     lambdas: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
+    centred: bool = False,
 ) -> CachedSumToZeroStructuredSolution:
     """Solve an ``sz`` lambda trial from a cached leaf system on the balance tree (no data pass)."""
     penalized = build_penalized_sum_to_zero_operator(
@@ -677,7 +727,9 @@ def solve_cached_sum_to_zero_structured(
         reml_penalties=reml_penalties,
     )
     augmented_factor, rhs = build_augmented_sum_to_zero_factor(system, penalized)
-    coefficients = solve_augmented_normal_equations(system, augmented_factor, rhs)
+    beta, intercept, alpha, centre = _cached_centred_solution(
+        system, augmented_factor, rhs, centred
+    )
     xtw = np.empty(system.operator.shape[0], dtype=np.float64)
     xtw[system.operator.small_indices] = system.xtw_small
     xtw[system.operator.structured_indices] = system.xtw_structured
@@ -687,12 +739,14 @@ def solve_cached_sum_to_zero_structured(
         xtw=xtw,
     )
     return CachedSumToZeroStructuredSolution(
-        beta=coefficients[1:],
-        intercept=float(coefficients[0]),
+        beta=beta,
+        intercept=intercept,
         factor=factor,
         penalized_operator=penalized,
         log_det_H=augmented_factor.logdet(),
         hessian_rank=augmented_factor.rank,
+        centred_intercept=alpha,
+        state_center=centre,
     )
 
 
@@ -703,6 +757,7 @@ def solve_cached_nested_structured(
     lambdas: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
+    centred: bool = False,
 ) -> CachedNestedStructuredSolution:
     """Solve a lambda trial from cached nested working moments (no data pass)."""
     penalized = build_penalized_nested_operator(
@@ -713,7 +768,9 @@ def solve_cached_nested_structured(
         reml_penalties=reml_penalties,
     )
     augmented_factor, rhs = build_augmented_nested_factor(system, penalized)
-    coefficients = solve_augmented_normal_equations(system, augmented_factor, rhs)
+    beta, intercept, alpha, centre = _cached_centred_solution(
+        system, augmented_factor, rhs, centred
+    )
     xtw = np.empty(system.operator.shape[0], dtype=np.float64)
     xtw[system.operator.small_indices] = system.xtw_small
     xtw[system.operator.structured_indices] = system.xtw_structured
@@ -724,12 +781,14 @@ def solve_cached_nested_structured(
         data_operator=system.operator,
     )
     return CachedNestedStructuredSolution(
-        beta=coefficients[1:],
-        intercept=float(coefficients[0]),
+        beta=beta,
+        intercept=intercept,
         factor=factor,
         penalized_operator=penalized,
         log_det_H=augmented_factor.logdet(),
         hessian_rank=augmented_factor.rank,
+        centred_intercept=alpha,
+        state_center=centre,
     )
 
 
@@ -740,12 +799,17 @@ def solve_cached_structured(
     lambdas: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
+    centred: bool = False,
 ) -> (
     CachedBlockStructuredSolution
     | CachedSumToZeroStructuredSolution
     | CachedNestedStructuredSolution
 ):
-    """Dispatch a cached lambda-only solve by dominant structured geometry."""
+    """Dispatch a cached lambda-only solve by dominant structured geometry.
+
+    With ``centred`` the solution also carries the factor's centred state
+    (``centred_intercept`` about ``state_center``, ``_cached_centred_solution``).
+    """
     if isinstance(system, NestedStructuredSystem):
         return solve_cached_nested_structured(
             system,
@@ -753,6 +817,7 @@ def solve_cached_structured(
             groups,
             lambdas,
             reml_penalties=reml_penalties,
+            centred=centred,
         )
     if isinstance(system, SumToZeroLeafSystem):
         return solve_cached_sum_to_zero_structured(
@@ -761,6 +826,7 @@ def solve_cached_structured(
             groups,
             lambdas,
             reml_penalties=reml_penalties,
+            centred=centred,
         )
     if isinstance(system, FactorSmoothLeafSystem):
         return solve_cached_block_structured(
@@ -769,5 +835,6 @@ def solve_cached_structured(
             groups,
             lambdas,
             reml_penalties=reml_penalties,
+            centred=centred,
         )
     raise TypeError(f"Unsupported structured system {type(system).__name__}.")

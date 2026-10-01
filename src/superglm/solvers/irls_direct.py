@@ -101,8 +101,11 @@ from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
     MODE_RESOLVE_CAP,
     ModeResidual,
+    centre_offset_mean,
+    centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
+    offset_columns,
     penalized_mode_residual,
     prior_weighted_centre,
     stagnation_window,
@@ -322,14 +325,23 @@ def _evaluate_scop_trial(
     return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
-def _structured_score_centre(system, factor) -> tuple:
-    """``(mean_x, sum_w, centred diagonal, weakly identified slopes)`` of a structured solve.
+def _structured_score_centre(
+    system,
+    factor,
+    dm: DesignMatrix,
+    W: NDArray,
+    state_center: NDArray | None,
+    offset_mask: NDArray | None,
+) -> tuple:
+    """``(mean_x, sum_w, centred diagonal, weakly identified slopes, mean_x - c)`` of a structured solve.
 
     The centring the certificate's score is formed about (``mode_residual``):
     the working-weighted means of the system, its centred data diagonal
-    (offset-free for a nested chain, ``compact_operator_diagonal``), and the
+    (offset-free for a nested chain, ``compact_operator_diagonal``), the
     slopes the factor truncated as weakly identified (one-engine design §3.6
-    step 5, §3.9).
+    step 5, §3.9), and the means' offset from the state's centre
+    (``centre_offset_mean`` on the columns ``offset_mask`` marks; ``None``
+    without a column whose centre lies beyond its spread).
     """
     operator = system.operator
     xtw = np.empty(operator.shape[0], dtype=np.float64)
@@ -342,7 +354,12 @@ def _structured_score_centre(system, factor) -> tuple:
     excluded = tuple(
         index - 1 for index in getattr(factor, "weakly_identified_coefficients", ()) if index > 0
     )
-    return mean_x, float(system.sum_w), diagonal, excluded
+    offset_mean = (
+        None
+        if state_center is None or offset_mask is None or not np.any(offset_mask)
+        else centre_offset_mean(dm, W, float(system.sum_w), state_center, mean_x, offset_mask)
+    )
+    return mean_x, float(system.sum_w), diagonal, excluded, offset_mean
 
 
 def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
@@ -726,6 +743,7 @@ def fit_irls_direct(
     _laplace_excluded: tuple[int, ...] = (),
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
+    _centred_init: tuple[float, NDArray] | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS (see ``_fit_irls_direct_once``).
 
@@ -782,6 +800,7 @@ def fit_irls_direct(
             _laplace_excluded=_laplace_excluded,
             _mode_bar=_mode_bar,
             _compensate_centred_intercept=_compensate_centred_intercept,
+            _centred_init=_centred_init,
         )
         return result
     finally:
@@ -834,6 +853,7 @@ def _fit_irls_direct_once(
     _laplace_excluded: tuple[int, ...] = (),
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
+    _centred_init: tuple[float, NDArray] | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -899,6 +919,13 @@ def _fit_irls_direct_once(
         publishes its intercept as the compensated pair ``(alpha, alpha_lo)``
         (``mode_score.centred_intercept_remainder``) and its deviance and
         scale at that predictor.
+    _centred_init : (float, ndarray), optional
+        The warm start's centred state ``(alpha, c)``: its predictor is
+        ``alpha + (X - 1 c') beta_init + offset`` (``PIRLSResult.centred_intercept``
+        and ``state_center``; ``centred_warm_start``).  The fit carries it to
+        its own centre exactly instead of taking it back from
+        ``intercept_init``, whose rounding cancels ``c' beta`` at a column's
+        offset.  Ignored when ``intercept_init`` is not the start.
     _compute_reml_geometry : bool
         Internal SCOP-candidate switch. If False, omit the generic profiled
         slope inverse, determinant, and rank because the caller replaces them
@@ -1089,7 +1116,11 @@ def _fit_irls_direct_once(
         return float(values @ penalty_matvec(values))
 
     def mode_residual(
-        beta_values: NDArray, intercept_value: float, mu_values: NDArray, eta_values: NDArray
+        beta_values: NDArray,
+        intercept_value: float,
+        mu_values: NDArray,
+        eta_values: NDArray,
+        centred_intercept: float | None = None,
     ) -> ModeResidual:
         """The observed-REML certificate's score at an iterate (``convergence="mode_score"``).
 
@@ -1097,10 +1128,13 @@ def _fit_irls_direct_once(
         the curvature the rows carry), centred on the system the last solve
         linearised about (``_score_centre``), its floors and weak tests
         resolved once every relative score is within ``MODE_RESOLVE_CAP``
-        (``solvers.mode_score``).
+        (``solvers.mode_score``).  The floors read the iterate's intercept
+        about ``mean_x``; a centred state reads it from its own ``alpha`` and
+        the offset of ``mean_x`` from the centre (``centre_offset_mean``), not
+        from the raw intercept, which cancels ``c' beta`` at a column's offset.
         """
         assert _score_centre is not None
-        mean_x, sum_w, diagonal, excluded_indices = _score_centre
+        mean_x, sum_w, diagonal, excluded_indices, offset_mean = _score_centre
         rows = coefficient_working_rows(
             distribution=family,
             link=link,
@@ -1117,7 +1151,14 @@ def _fit_irls_direct_once(
         # the slopes the REML fit's Laplace approximation leaves out
         # (``reml.identified``, design §3.9): flagged and kept, never gated
         excluded[list(_laplace_excluded)] = True
-        shift = float(mean_x @ beta_values)
+        if centred_intercept is None or offset_mean is None:
+            shift = float(mean_x @ beta_values)
+            alpha = float(intercept_value) + shift
+            eta_tilde = eta_values - offset - float(intercept_value) - shift
+        else:
+            shift = float(offset_mean @ beta_values)
+            alpha = float(centred_intercept) + shift
+            eta_tilde = eta_values - offset - float(centred_intercept) - shift
         if not _penalty_curvature:
             _penalty_curvature.append(penalty_curvature())
         return penalized_mode_residual(
@@ -1127,8 +1168,8 @@ def _fit_irls_direct_once(
             positive_prior=weights > 0.0,
             mean_x=mean_x,
             centered_scale=np.where(np.isfinite(scale), scale, 0.0),
-            alpha=float(intercept_value) + shift,
-            eta_tilde=eta_values - offset - float(intercept_value) - shift,
+            alpha=alpha,
+            eta_tilde=eta_tilde,
             penalty_score=penalty_matvec(beta_values),
             penalty_magnitude=penalty_matvec(beta_values, magnitude=True),
             penalty_curvature=_penalty_curvature[0],
@@ -1801,12 +1842,15 @@ def _fit_irls_direct_once(
     _t_eta = 0.0
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
+    # its mean_x less the state's centre (``centre_offset_mean``), None without one
+    _last_working_offset_mean: NDArray | None = None
     _last_working_structured: (
         FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
     ) = None
     # convergence="mode_score": the centring of the certificate's score at the
     # iterate each solve linearised about -- (mean_x, sum_w, centred diagonal,
-    # coefficients the factor truncated as weakly identified) -- or None on a
+    # coefficients the factor truncated as weakly identified, mean_x less the
+    # state's centre or None without one) -- or None on a
     # route that forms no centred system (SCOP, linear constraints), which
     # keeps the coefficient-step test.
     _score_centre: tuple | None = None
@@ -1823,6 +1867,30 @@ def _fit_irls_direct_once(
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
     _mean_space_invalid = mean_space_violation(family, link)
+    # The dense columns whose centre lies beyond their spread (issue #430): only
+    # with one does the raw intercept lose a bit, so the centred readings below
+    # (a warm start's state, the gram intercept's mean offset, the certificate's
+    # intercept, the sz score) run then, and a design without one computes as
+    # before, bit for bit (``mode_score.offset_columns``).
+    _offset_mask = None if _state_center is None else offset_columns(dm, weights, _state_center)
+    _far_centre = _offset_mask is not None and bool(np.any(_offset_mask))
+    # A warm start's centred state carried to this fit's centre (one-engine
+    # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
+    # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
+    # the two centres share.  Taken back from the raw intercept instead it
+    # errs by u |c' beta| in every row's eta, ~0.25 at a 1e16 offset.
+    centred_start: float | None = None
+    if (
+        _centred_init is not None
+        and _far_centre
+        and _state_center is not None
+        and intercept_init is not None
+        and intercept == intercept_init
+    ):
+        warm_alpha, warm_centre = _centred_init
+        warm_centre = np.asarray(warm_centre, dtype=np.float64)
+        if warm_centre.shape == _state_center.shape:
+            centred_start = float(warm_alpha) + math.fsum((_state_center - warm_centre) * beta)
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
     committed = evaluate_state(
         beta,
@@ -1831,6 +1899,7 @@ def _fit_irls_direct_once(
         iteration=0,
         deviance=_deviance_init,
         emit_trace=not _has_scop,
+        centred_intercept=centred_start,
     )
     if _has_scop:
         scop_committed = _SCOPTrialState(
@@ -2040,16 +2109,26 @@ def _fit_irls_direct_once(
             iteration_rank = decompose_factor(A, retain_factor_solve=True)
             beta = iteration_rank.solve_factor_rhs(rhs_qr)
             intercept = centered.mean_z - float(centered.mean_x @ beta)
+            _last_working_offset_mean = None
             if _state_center is not None:
+                _last_working_offset_mean = centre_offset_mean(
+                    dm, W, centered.sum_w, _state_center, centered.mean_x, _offset_mask
+                )
                 proposal_centred_intercept = centered.mean_z - math.fsum(
-                    (centered.mean_x - _state_center) * beta
+                    _last_working_offset_mean * beta
                 )
                 intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
             _cond_est = iteration_rank.pre_truncation_condition
             _used_svd = iteration_rank.used_svd_fallback
             rank_truncated = iteration_rank.rank_truncated
             if convergence == "mode_score":
-                _score_centre = (centered.mean_x, centered.sum_w, np.diag(centered.data_gram), ())
+                _score_centre = (
+                    centered.mean_x,
+                    centered.sum_w,
+                    np.diag(centered.data_gram),
+                    (),
+                    _last_working_offset_mean if _far_centre else None,
+                )
             _t_solve += time.perf_counter() - _t0
         else:
             # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
@@ -2304,12 +2383,28 @@ def _fit_irls_direct_once(
                     residual_rows = W * (z - eta)
                     gradient = np.empty(p + 1, dtype=np.float64)
                     gradient[0] = float(np.sum(residual_rows))
-                    gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
                     # the increment's intercept entry in the state's own coordinate:
                     # alpha about the centre when the state is centred (round 1's
                     # centred state; the raw intercept would cancel at a large
-                    # column offset), else the raw intercept
-                    increment = augmented_factor.solve(gradient, centred=_state_center is not None)
+                    # column offset), else the raw intercept.  A centred state
+                    # takes the score about the same centre, ``(X - 1 c')' r``
+                    # formed on centred rows, so the border's ``X' r`` is never
+                    # cancelled against ``c`` times the intercept's (a 1e16
+                    # offset left no digit of it and the step was rejected)
+                    if not _far_centre:
+                        gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
+                        increment = augmented_factor.solve(
+                            gradient, centred=_state_center is not None
+                        )
+                    else:
+                        gradient[1:] = centred_data_score(
+                            dm, residual_rows, _state_center
+                        ) - penalty_matvec(committed.beta)
+                        increment = augmented_factor.solve(
+                            gradient,
+                            centred=True,
+                            border_centred=gradient[augmented_factor.small_indices[1:]],
+                        )
                     beta = committed.beta + increment[1:]
                     if _state_center is not None:
                         assert committed.centred_intercept is not None
@@ -2323,7 +2418,9 @@ def _fit_irls_direct_once(
                 _cond_est = augmented_factor.schur_condition_estimate
                 rank_truncated = augmented_factor.rank_truncated
                 if convergence == "mode_score":
-                    _score_centre = _structured_score_centre(structured_system, augmented_factor)
+                    _score_centre = _structured_score_centre(
+                        structured_system, augmented_factor, dm, W, _state_center, _offset_mask
+                    )
                 _t_solve += time.perf_counter() - _t0
             elif not has_constraints:
                 centered = get_centered_system(W, z_off)
@@ -2350,11 +2447,16 @@ def _fit_irls_direct_once(
                     else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
                 )
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
+                _last_working_offset_mean = None
                 if _state_center is not None:
                     # the intercept about the state's centre, from the offset
-                    # of the working mean to it: no raw-scale cancellation
+                    # of the working mean to it, formed on centred rows
+                    # (``centre_offset_mean``): no raw-scale cancellation
+                    _last_working_offset_mean = centre_offset_mean(
+                        dm, W, centered.sum_w, _state_center, centered.mean_x, _offset_mask
+                    )
                     proposal_centred_intercept = centered.mean_z - math.fsum(
-                        (centered.mean_x - _state_center) * beta
+                        _last_working_offset_mean * beta
                     )
                     intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
                 _cond_est = iteration_rank.pre_truncation_condition
@@ -2366,6 +2468,7 @@ def _fit_irls_direct_once(
                         centered.sum_w,
                         np.diag(centered.data_gram),
                         (),
+                        _last_working_offset_mean if _far_centre else None,
                     )
                 _t_solve += time.perf_counter() - _t0
             else:
@@ -2761,7 +2864,9 @@ def _fit_irls_direct_once(
                 coef_change = float(
                     np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0)
                 )
-                residual = mode_residual(beta, intercept, mu, eta)
+                residual = mode_residual(
+                    beta, intercept, mu, eta, centred_intercept=retained.centred_intercept
+                )
                 convergence_value = mode_bar * residual.ratio()
                 converged_this_iter = residual.ratio() <= 1.0
                 _last_mode_residual = residual
@@ -3350,14 +3455,23 @@ def _fit_irls_direct_once(
         mean_z = sum_Wz / sum_W
         centered_rhs = XtWz - XtW1 * mean_z
         XtWX = None
+        offset_mean_final = None
     else:
         if _return_working_system:
             if _last_working_centered is None:
                 raise RuntimeError("working centered system was not computed")
             centered_final = _last_working_centered
+            offset_mean_final = _last_working_offset_mean
         else:
             z_off = z - offset
             centered_final = get_centered_system(W, z_off)
+            offset_mean_final = (
+                None
+                if _state_center is None or cache_out is None
+                else centre_offset_mean(
+                    dm, W, centered_final.sum_w, _state_center, centered_final.mean_x, _offset_mask
+                )
+            )
         XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
         sum_W = centered_final.sum_w
         mean_x = centered_final.mean_x
@@ -3387,6 +3501,9 @@ def _fit_irls_direct_once(
                 raise RuntimeError("Dense fit did not produce a centered system.")
             cache_out["XtWX"] = XtWX
             cache_out["centered_XtWX"] = centered_final.data_gram
+            # mean_x less the state's centre, formed on centred rows: a cached
+            # trial's centred intercept (``reml.discrete``) reads it
+            cache_out["centre_offset_mean"] = offset_mean_final
             # the matrix the slope decomposition was taken of (the identified
             # part of the Laplace approximation restricts it, ``reml.identified``)
             cache_out["centered_hessian"] = centered_final.hessian

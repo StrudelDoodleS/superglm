@@ -389,6 +389,80 @@ def prior_weighted_centre(dm: DesignMatrix, prior_weights: NDArray) -> NDArray:
     return centre
 
 
+def offset_columns(dm: DesignMatrix, prior_weights: NDArray, center: NDArray) -> NDArray:
+    """``(p,)`` bool: the dense columns whose centre lies beyond their spread, ``|c| > max|x - c|``.
+
+    Over the rows of positive prior weight.  Only for such a column does the
+    raw intercept lose a bit: ``eta`` formed through it rounds at ``(|c| +
+    |x - c|) |beta|`` per row against the centred state's ``|x - c| |beta|``
+    (one-engine design §3.8), within a factor two of each other otherwise.
+    The centred readings of issue #430 (``centre_offset_mean``, a warm
+    start's ``(alpha, c)``, the certificates' intercept) run when a design
+    has such a column, and every other design computes as before, bit for
+    bit.  A ``DenseGroupMatrix`` column is the only type whose entries are
+    not bounded by their type; one pass over those columns, in fixed chunks.
+    """
+    center = np.asarray(center, dtype=np.float64)
+    weights = np.asarray(prior_weights, dtype=np.float64)
+    far = np.zeros(dm.p, dtype=bool)
+    positive = weights > 0.0
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        centre = center[offset : offset + width]
+        if type(matrix) is DenseGroupMatrix and np.any(centre != 0.0):
+            values = matrix.M
+            spread = np.zeros(width)
+            for lo in range(0, dm.n, _CHUNK):
+                hi = min(lo + _CHUNK, dm.n)
+                rows = positive[lo:hi]
+                if np.any(rows):
+                    deviation = np.abs(values[lo:hi][rows] - centre)
+                    spread = np.maximum(spread, np.max(deviation, axis=0))
+            far[offset : offset + width] = np.abs(centre) > spread
+        offset += width
+    return far
+
+
+def centre_offset_mean(
+    dm: DesignMatrix,
+    weights: NDArray,
+    sum_w: float,
+    center: NDArray,
+    mean_x: NDArray,
+    columns: NDArray,
+) -> NDArray:
+    """``d = sum W (x - c) / sum W``: a weighted column mean read about the state's centre ``c``.
+
+    The centred intercept about ``c`` is ``alpha = mean_z - d' beta`` (one-engine
+    design §3.8).  ``mean_x - c`` from the weighted mean ``mean_x`` rounds at
+    ``u |c|``, the size of the column's offset, not of its spread: at a 1e6
+    offset that is ``1e-10``, times the slope in every row's ``eta``.  A
+    column ``columns`` marks (``offset_columns``: a dense column whose centre
+    lies beyond its spread) is differenced row by row before its weighted
+    sum, in fixed chunks as ``centred_matvec``, so ``d`` rounds at ``gamma_n
+    max|x - c|``.  Every other column keeps ``mean_x - c``, which already
+    rounds within a factor two of that, bit for bit as before.
+    """
+    offset_mean = np.asarray(mean_x, dtype=np.float64) - center
+    w = np.asarray(weights, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        marked = np.asarray(columns[offset : offset + width], dtype=bool)
+        if type(matrix) is DenseGroupMatrix and np.any(marked):
+            centre = center[offset : offset + width]
+            values = matrix.M
+            accumulated = np.zeros(width)
+            for lo in range(0, dm.n, _CHUNK):
+                hi = min(lo + _CHUNK, dm.n)
+                accumulated += (values[lo:hi] - centre).T @ w[lo:hi]
+            block = offset_mean[offset : offset + width]
+            block[marked] = accumulated[marked] / sum_w
+        offset += width
+    return offset_mean
+
+
 def two_sum(a, b):
     """Knuth's TwoSum: ``s = fl(a + b)`` and its rounding error, ``a + b = s + e`` exactly.
 
@@ -398,6 +472,31 @@ def two_sum(a, b):
     s = a + b
     b_virtual = s - a
     return s, (a - (s - b_virtual)) + (b - b_virtual)
+
+
+def compensated_weighted_mean(values: NDArray, weights: NDArray) -> float:
+    """``sum w v / sum w`` refined once with an error-free residual (``centred_intercept_remainder``).
+
+    ``m0 = np.average(v, w)`` (pairwise or BLAS summation) errs by up to
+    ``gamma_n mean_w |v|``, which on a two-level sample of adjacent floats
+    is 1.5 ulp: the midpoint ``m*`` is no float, and ``m0`` landed an ulp
+    beyond either neighbour.  One step of iterative refinement with the
+    residual formed by TwoSum (``v - m0 = h + e`` exactly) returns ``m0 + d``,
+    ``d = sum w (h + e) / sum w``:
+
+        |m - m*| <= u |m*| + gamma_{n+2} sum w |v - m0| / sum w + O(u^2) mean_w |v|,
+
+    which scales with the values' spread about their mean, not with ``|m|``.
+    On the adjacent-float sample every quantity is exact and ``m`` is ``m*``
+    correctly rounded.  ``m0`` when the residual is not finite.
+    """
+    v = np.asarray(values, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+    first = float(np.average(v, weights=w))
+    head, error = two_sum(v, -first)
+    with np.errstate(over="ignore", invalid="ignore"):
+        correction = float(np.sum(w * head + w * error)) / float(np.sum(w))
+    return first + correction if math.isfinite(correction) else first
 
 
 def centred_intercept_remainder(
@@ -440,6 +539,21 @@ def centred_intercept_remainder(
     with np.errstate(over="ignore", invalid="ignore"):
         remainder = float(np.sum(w * residual)) / total
     return remainder if math.isfinite(remainder) else None
+
+
+def centred_warm_start(result) -> tuple[float, NDArray] | None:
+    """``(alpha, c)`` of a PIRLS state that carries its centred predictor, else ``None``.
+
+    A warm start's ``_centred_init`` (``irls_direct``): the next fit continues
+    from ``alpha + (X - 1 c') beta`` rather than from the raw intercept,
+    which rounds ``alpha - c' beta`` at ``|c' beta|``.  Pass it only with the
+    state's own ``beta`` in the same design coordinates.
+    """
+    alpha = getattr(result, "centred_intercept", None)
+    centre = getattr(result, "state_center", None)
+    if alpha is None or centre is None:
+        return None
+    return float(alpha), np.asarray(centre, dtype=np.float64)
 
 
 def linear_predictor(dm: DesignMatrix, result, offset: NDArray | None) -> NDArray:

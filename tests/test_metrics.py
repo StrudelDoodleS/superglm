@@ -1250,8 +1250,12 @@ class TestDeviance:
         metrics = model.metrics(X.copy(), y.copy())
         editor_metrics = _compute_metrics(model, X.copy(), y.copy(), weights, None)
 
-        assert metrics.null_deviance > 0.0
-        assert model._fit_stats.null_deviance > 0.0
+        # np.average left the null mean of a constant 0.3 one ulp off, a
+        # roundoff-scale null deviance; the refined weighted mean
+        # (``compensated_weighted_mean``) returns 0.3 itself, so the null
+        # deviance is the exact zero and the convention reads that branch
+        assert metrics.null_deviance == 0.0
+        assert model._fit_stats.null_deviance == 0.0
         assert metrics.explained_deviance == 0.0
         assert model._fit_stats.explained_deviance == 0.0
         assert editor_metrics["explained_deviance"] == 0.0
@@ -1274,7 +1278,9 @@ class TestDeviance:
             sample_weight=weights.copy(),
         )
 
-        assert metrics.null_deviance > 0.0
+        # the weightless outlier leaves the refined null mean at the active
+        # rows' 0.3 exactly (np.average's rounding made it roundoff-positive)
+        assert metrics.null_deviance == 0.0
         assert metrics.explained_deviance == 0.0
         assert model._fit_stats.explained_deviance == 0.0
 

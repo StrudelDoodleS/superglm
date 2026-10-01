@@ -51,7 +51,11 @@ from superglm.reml.penalty_algebra import (
     penalty_component_quadratic,
     total_penalty_quadratic,
 )
-from superglm.reml.result import REMLResult, _map_beta_between_bases
+from superglm.reml.result import (
+    REMLResult,
+    _map_beta_between_bases,
+    _map_centred_state_between_bases,
+)
 from superglm.reml.scale import (
     prepare_reml_scale_data,
     profile_gamma_reml_scale,
@@ -64,7 +68,12 @@ from superglm.solvers.irls_direct import (
     _structured_solver_errors,
     fit_irls_direct,
 )
-from superglm.solvers.mode_score import centred_matvec, prior_weighted_centre
+from superglm.solvers.mode_score import (
+    centred_matvec,
+    centred_warm_start,
+    offset_columns,
+    prior_weighted_centre,
+)
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.solvers.structured import (
@@ -149,9 +158,7 @@ def _solve_cached_profiled_system(
     return beta, intercept, log_det_H, 1 + slope_rank
 
 
-def _cached_centred_intercept(
-    mean_z: float, mean_x: NDArray, centre: NDArray, beta: NDArray
-) -> float:
+def _cached_centred_intercept(mean_z: float, offset_mean: NDArray, beta: NDArray) -> float:
     """A cached trial's centred intercept ``alpha = mean_z - (mean_x - c)' beta`` (design §3.8).
 
     The profiled intercept about the fixed centre ``c``, formed as the PIRLS
@@ -161,11 +168,13 @@ def _cached_centred_intercept(
     ``|mean_x|' |beta|``: at a 1e10 column translation that leaves an error
     near ``u 1e10 |beta| ~ 1e-6`` in every row's eta, which moved the
     Gaussian REML objective of the cached trial by 1.1e-7 (CI, OpenBLAS
-    Haswell kernels).  ``mean_x - c`` is a difference of two means of the
-    same columns, of the size of their spread.
+    Haswell kernels).  ``offset_mean = mean_x - c`` is the PIRLS's own,
+    formed on centred rows (``mode_score.centre_offset_mean``): the
+    difference of the two rounded means rounds at ``u |c|``, 2.7e-12 in the
+    intercept at a 1e6 offset.
     """
-    difference = np.asarray(mean_x, dtype=np.float64) - np.asarray(centre, dtype=np.float64)
-    return float(mean_z) - math.fsum(difference * np.asarray(beta, dtype=np.float64))
+    offset_mean = np.asarray(offset_mean, dtype=np.float64)
+    return float(mean_z) - math.fsum(offset_mean * np.asarray(beta, dtype=np.float64))
 
 
 def _shared_tensor_group_names(penalties: list[PenaltyComponent], group_matrices: list) -> set[str]:
@@ -429,6 +438,10 @@ def optimize_discrete_reml_cached_w(
     # translated by 1e10 otherwise costs eta ~1e-6 per row in X beta against
     # the raw intercept, and the true objective that accepts a trial with it.
     trial_centre = prior_weighted_centre(dm, sample_weight)
+    # A dense column whose centre lies beyond its spread (issue #430): only
+    # then do the trials hold the candidate's centred state, since the raw
+    # intercept loses no bit otherwise and the trials compute as before.
+    offset_centre = bool(np.any(offset_columns(dm, sample_weight, trial_centre)))
     structured_decision = resolve_structured_backend(
         list(dm.group_matrices),
         groups,
@@ -443,6 +456,9 @@ def optimize_discrete_reml_cached_w(
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     warm_beta: NDArray | None = None
     warm_intercept: float | None = None
+    # the warm state's centred predictor (alpha, c), carried with warm_beta and
+    # warm_intercept (``mode_score.centred_warm_start``)
+    warm_centred: tuple[float, NDArray] | None = None
     warm_deviance: float | None = None
     max_newton_step = 5.0
     max_halving = 25
@@ -543,6 +559,7 @@ def optimize_discrete_reml_cached_w(
     _t_tensor_summary += _time.perf_counter() - _t0
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
+    warm_centred = centred_warm_start(boot_result)
     warm_deviance = float(boot_result.deviance)
 
     # Bootstrap FP step for initial rho
@@ -716,6 +733,7 @@ def optimize_discrete_reml_cached_w(
             offset=offset_arr,
             beta_init=warm_beta,
             intercept_init=warm_intercept,
+            _centred_init=warm_centred,
             max_iter=1,
             tol=pirls_tol,
             return_xtwx=True,
@@ -743,6 +761,7 @@ def optimize_discrete_reml_cached_w(
         candidate_mode_stationary = bool(pirls_result.converged)
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
+        warm_centred = centred_warm_start(pirls_result)
         warm_deviance = float(pirls_result.deviance)
 
         # the identified part of the Laplace approximation (design §3.9); a
@@ -761,6 +780,17 @@ def optimize_discrete_reml_cached_w(
         c_mean_x = cache["mean_x"]
         c_mean_z = cache["mean_z"]
         c_sum_W = cache["sum_W"]
+        # Beside a far-offset column the cached trials hold the candidate
+        # PIRLS's centred state (design §3.8): its centre, and its working
+        # means' offset from that centre formed on centred rows
+        # (``mode_score.centre_offset_mean``).
+        cand_centre = trial_centre
+        c_offset_mean = np.asarray(c_mean_x, dtype=np.float64) - trial_centre
+        if offset_centre and pirls_result.state_center is not None:
+            cand_centre = pirls_result.state_center
+            cached_offset_mean = cache.get("centre_offset_mean")
+            if cached_offset_mean is not None:
+                c_offset_mean = cached_offset_mean
 
         # Evaluate REML objective
         _t0 = _time.perf_counter()
@@ -1254,6 +1284,7 @@ def optimize_discrete_reml_cached_w(
                             groups,
                             trial_lambdas,
                             reml_penalties=penalties,
+                            centred=offset_centre,
                         )
                     log_det_H_trial = cached_solution.log_det_H
                     hessian_rank_trial = cached_solution.hessian_rank
@@ -1275,8 +1306,21 @@ def optimize_discrete_reml_cached_w(
                     halving_count += 1
                     continue
                 beta_trial = cached_solution.beta
-                intercept_trial = cached_solution.intercept
-                centred_intercept_trial = intercept_trial + math.fsum(trial_centre * beta_trial)
+                factor_alpha = cached_solution.centred_intercept
+                factor_centre = cached_solution.state_center
+                if factor_alpha is None or factor_centre is None:
+                    intercept_trial = cached_solution.intercept
+                    centred_intercept_trial = intercept_trial + math.fsum(cand_centre * beta_trial)
+                else:
+                    # the factor's centred alpha about its border centre, carried
+                    # to the candidate's centre (the same c0, exactly zero apart)
+                    # and never taken back from the rounded raw intercept, which
+                    # cancels c' beta at a column's offset (1e16: max_reml_iter,
+                    # lambda 2.84% off)
+                    centred_intercept_trial = float(factor_alpha) + math.fsum(
+                        (cand_centre - factor_centre) * beta_trial
+                    )
+                    intercept_trial = centred_intercept_trial - math.fsum(cand_centre * beta_trial)
             else:
                 if c_centered_XtWX is None or S_trial is None:
                     raise RuntimeError("Dense cached solve is missing matrix geometry.")
@@ -1291,9 +1335,9 @@ def optimize_discrete_reml_cached_w(
                     )
                 )
                 centred_intercept_trial = _cached_centred_intercept(
-                    c_mean_z, c_mean_x, trial_centre, beta_trial
+                    c_mean_z, c_offset_mean, beta_trial
                 )
-                intercept_trial = centred_intercept_trial - math.fsum(trial_centre * beta_trial)
+                intercept_trial = centred_intercept_trial - math.fsum(cand_centre * beta_trial)
                 if identified:
                     # the identified part of the same trial Hessian H_c
                     trial_dense = (c_centered_XtWX + S_trial, float(c_sum_W))
@@ -1313,7 +1357,7 @@ def optimize_discrete_reml_cached_w(
 
             # Only the true objective can accept this trial.
             eta_trial = stabilize_eta(
-                centred_intercept_trial + centred_matvec(dm, beta_trial, trial_centre) + offset_arr,
+                centred_intercept_trial + centred_matvec(dm, beta_trial, cand_centre) + offset_arr,
                 link,
             )
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
@@ -1329,7 +1373,7 @@ def optimize_discrete_reml_cached_w(
                 log_det_H=log_det_H_trial,
                 reml_hessian_rank=hessian_rank_trial,
                 centred_intercept=centred_intercept_trial,
-                state_center=trial_centre,
+                state_center=cand_centre,
             )
             trial_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
                 tensor_pair_summaries, trial_lambdas
@@ -1371,6 +1415,7 @@ def optimize_discrete_reml_cached_w(
                 rho = rho_trial
                 warm_beta = beta_trial.copy()
                 warm_intercept = intercept_trial
+                warm_centred = (centred_intercept_trial, cand_centre)
                 warm_deviance = dev_trial
                 accepted = True
                 break
@@ -1508,6 +1553,13 @@ def optimize_discrete_reml_cached_w(
         )
         _t_map_beta += _time.perf_counter() - _t0
         warm_intercept = float(pirls_result.intercept)
+        warm_centred = _map_centred_state_between_bases(
+            centred_warm_start(pirls_result),
+            pirls_result.beta,
+            old_gms,
+            dm.group_matrices,
+            groups,
+        )
         warm_deviance = float(pirls_result.deviance)
         _t0 = _time.perf_counter()
         penalties, penalty_caches, penalty_ranks = build_penalty_context(
@@ -1544,8 +1596,13 @@ def optimize_discrete_reml_cached_w(
     )
     _t_rebuild_dm += _time.perf_counter() - _t0
     _t0 = _time.perf_counter()
+    if warm_beta is None:
+        warm_beta, warm_centred = pirls_result.beta, centred_warm_start(pirls_result)
+    warm_centred = _map_centred_state_between_bases(
+        warm_centred, warm_beta, old_gms_final, dm.group_matrices, groups
+    )
     warm_beta = _map_beta_between_bases(
-        warm_beta if warm_beta is not None else pirls_result.beta,
+        warm_beta,
         old_gms_final,
         dm.group_matrices,
         groups,
@@ -1592,6 +1649,7 @@ def optimize_discrete_reml_cached_w(
         offset=offset_arr,
         beta_init=warm_beta,
         intercept_init=warm_intercept,
+        _centred_init=warm_centred,
         max_iter=max_pirls_iter,
         tol=pirls_tol,
         return_xtwx=True,

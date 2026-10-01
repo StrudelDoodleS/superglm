@@ -503,7 +503,11 @@ def _compute_null_mu(
         eta_null = stabilize_eta(null_result.intercept + offset, link)
         return clip_mu(link.inverse(eta_null), distribution)
 
-    y_bar = float(np.average(y, weights=weights))
+    from superglm.solvers.mode_score import compensated_weighted_mean
+
+    # the weighted mean to the rounding of its own value (np.average alone sat
+    # 1.5 ulp off on two adjacent-float levels, inflating the null deviance 5x)
+    y_bar = compensated_weighted_mean(y, weights)
     if isinstance(distribution, Binomial):
         y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
     elif isinstance(distribution, Gaussian):

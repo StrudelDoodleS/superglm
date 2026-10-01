@@ -472,9 +472,11 @@ def _public_centred_state(
     (``_apply_r_inv_centering``).  Exact algebra: ``alpha_pub + (X_pub - 1
     c_pub') beta`` is the solver's predictor.  A compensated solver intercept
     ``(alpha, alpha_lo)`` keeps its remainder, plus the rounding of the fold
-    (a TwoSum).  ``(None, None, None)`` when the solver carries no centred
-    state or no such column keeps a centre, so the model predicts from its raw
-    intercept exactly as before.
+    (a TwoSum), also when every dense column folds (the public centre is then
+    zero and every term is scored as it is).  ``(None, None, None)`` when the
+    solver carries no centred state, or no such column keeps a centre and
+    there is no remainder or no dense column, so the model predicts from its
+    raw intercept exactly as before.
     """
     from superglm.group_matrix import DenseGroupMatrix
     from superglm.model.base import scores_centred
@@ -505,11 +507,17 @@ def _public_centred_state(
             lo, hi = group_state["solver_slice"]
             shifts[lo:hi] = np.asarray(group_state["column_means"], dtype=np.float64)
     public_centre = np.where(dense & differenced & (centre != 0.0), centre - shifts, 0.0)
-    if not np.any(public_centre != 0.0):
+    alpha_lo = getattr(solver, "centred_intercept_lo", None)
+    # A compensated intercept keeps its pair when a dense column's centre folds
+    # into it (a zero public centre, as a Polynomial's): the remainder is part
+    # of the fit's predictor, and the raw intercept alone predicted it away
+    # from the deviance and scale the fit published.  A design without a
+    # dense column keeps its raw intercept bit for bit, as before: nothing is
+    # centred, and the remainder is only the rounding of alpha itself.
+    if not np.any(public_centre != 0.0) and (alpha_lo is None or not np.any(dense)):
         return None, None, None
     folded = public_centre == 0.0
     fold = math.fsum((shifts[folded] - centre[folded]) * beta[folded])
-    alpha_lo = getattr(solver, "centred_intercept_lo", None)
     if alpha_lo is None:
         return float(alpha) + fold, public_centre, None
     alpha_public, fold_error = two_sum(float(alpha), fold)

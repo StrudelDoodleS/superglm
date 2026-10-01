@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -323,22 +324,40 @@ def _drop_term_holdout(
 
     plan = base._prediction_plan(model)
     terms = [*plan["features"], *plan["interactions"]]
-    eta_raw = np.full(n_val, model.result.intercept, dtype=np.float64)
-    eta_raw += offset_arr
+    # The public predictor (``base._predict_eta``): the fit's centred intercept,
+    # a term whose dense columns keep a centre scored about it, a compensated
+    # intercept's remainder added at the rows' scale and the offset last, so
+    # the full model's deviance is the one predict() and metrics() read.  From
+    # the raw intercept, X beta cancels against it at a column's offset.
+    intercept, centre, intercept_lo = base.prediction_centred_state(model.result)
+    accumulated = base.start_eta(n_val, intercept, intercept_lo)
     contributions: dict[str, NDArray[np.floating]] = {}
+    # Dropping a term zeros its raw contribution x' beta = (x - c)' beta + c' beta:
+    # the c' beta its centred contribution leaves in the intercept goes too.
+    centre_shifts: dict[str, float] = {}
     for term in terms:
-        contribution = base._score_prediction_term_exact(term, X_val, beta)
+        block = None if centre is None else centre[term["beta_idx"]]
+        if block is not None and np.any(block != 0.0):
+            contribution = base._centred_term_contribution(term, X_val, beta, block)
+            centre_shifts[term["name"]] = math.fsum(block * beta[term["beta_idx"]])
+        else:
+            contribution = base._score_prediction_term_exact(term, X_val, beta)
+            centre_shifts[term["name"]] = 0.0
         contributions[term["name"]] = contribution
-        eta_raw += contribution
+        accumulated += contribution
 
-    eta_full = stabilize_eta(eta_raw, model._link)
+    eta_full = stabilize_eta(
+        base.finish_eta(accumulated, intercept, intercept_lo) + offset_arr, model._link
+    )
     mu_full = clip_mu(model._link.inverse(eta_full), dist)
     dev_full = float(np.sum(w * dist.deviance_unit(y_arr, mu_full)))
 
     rows = []
     for term in terms:
         eta_drop = stabilize_eta(
-            eta_raw - contributions[term["name"]],
+            base.finish_eta(accumulated - contributions[term["name"]], intercept, intercept_lo)
+            - centre_shifts[term["name"]]
+            + offset_arr,
             model._link,
         )
         mu_drop = clip_mu(model._link.inverse(eta_drop), dist)

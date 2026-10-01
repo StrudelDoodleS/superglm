@@ -52,7 +52,13 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
 )
 from superglm.solvers.hessian_factor import HessianFactor
-from superglm.solvers.mode_score import linear_predictor, penalized_mode_residual
+from superglm.solvers.mode_score import (
+    centre_offset_mean,
+    centred_matvec,
+    linear_predictor,
+    offset_columns,
+    penalized_mode_residual,
+)
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
@@ -1039,6 +1045,31 @@ def observed_penalized_mode_score(
     excluded_mask[list(excluded_indices)] = True
     excluded_mask[np.asarray(excluded, dtype=np.intp)] = True
     bar = observed_mode_certification_bar() if bar is None else float(bar)
+    # The floors read the mode's intercept about mean_x and its centred rows
+    # X~ beta.  Beside a column whose centre lies beyond its spread
+    # (``offset_columns``) a centred state (design §3.8) reads them from its
+    # own alpha and (X - 1 c') beta and the offset of mean_x from c, formed
+    # on centred rows (``centre_offset_mean``); from the raw intercept and
+    # X beta they cancel c' beta there, u |c' beta| in alpha and every row.
+    alpha_c = getattr(result, "centred_intercept", None)
+    centre = getattr(result, "state_center", None)
+    far = (
+        None
+        if alpha_c is None or centre is None
+        else offset_columns(dm, sample_weight, np.asarray(centre, dtype=np.float64))
+    )
+    if far is None or not np.any(far):
+        shift = float(mean_x @ beta)
+        alpha = float(result.intercept) + shift
+        eta_tilde = dm.matvec(beta) - shift
+    else:
+        centre = np.asarray(centre, dtype=np.float64)
+        offset_mean = centre_offset_mean(
+            dm, geometry.weights, float(geometry.sum_w), centre, mean_x, far
+        )
+        shift = float(offset_mean @ beta)
+        alpha = float(alpha_c) + shift
+        eta_tilde = centred_matvec(dm, beta, centre) - shift
     residual = penalized_mode_residual(
         dm=dm,
         row_score=row_score,
@@ -1046,8 +1077,8 @@ def observed_penalized_mode_score(
         positive_prior=sample_weight > 0.0,
         mean_x=mean_x,
         centered_scale=centered_scale,
-        alpha=float(result.intercept) + float(mean_x @ beta),
-        eta_tilde=dm.matvec(beta) - float(mean_x @ beta),
+        alpha=alpha,
+        eta_tilde=eta_tilde,
         penalty_score=penalty_score,
         penalty_magnitude=penalty_magnitude,
         penalty_curvature=penalty_curvature,
