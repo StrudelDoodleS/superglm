@@ -22,7 +22,9 @@ leaf build before it forms a new system, then runs one full collection,
 unless the application has disabled the collector: the frames the cycles
 reach have returned by then, and the dead stacks go before the next one is
 allocated.  The event fires only on a disk-cache miss (a cached kernel loads
-without compiling), so a warm cache never collects.  Measured on that cold
+without compiling), so a warm cache never collects; ``superglm.warmup``,
+which compiles outside any fit (and in every process an uncached inline
+helper), drops its own mark (``forget_compiles``).  Measured on that cold
 first fit: 1.4 s of collection and a 773 MiB peak (1.24x).  Collecting at
 every compile's end instead reached 1.20x for 3.5 s per cold fit and about
 9 s per CI worker; the owner chose the ``fs`` checkpoint (2026-10-01).  Other
@@ -59,6 +61,17 @@ class _MarkCompile(numba_event.Listener):
         if _state.depth == 0 and getattr(_state, "ours", False):
             _state.ours = False
             _compiled[0] = True
+
+
+def forget_compiles() -> None:
+    """Drop the mark of compiles that ran outside any fit (``superglm.warmup``).
+
+    Their frames hold no fit's arrays, so the next ``fs`` leaf build need not
+    collect for them: without this, a warm-cache process paid one full
+    collection on its first fit for warmup's own compile of the uncached
+    ``_add_raw_row`` (0.15 s on a 30,000-row ``sz`` fit).
+    """
+    _compiled[0] = False
 
 
 def collect_after_compile() -> None:

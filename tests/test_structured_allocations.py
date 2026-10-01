@@ -487,6 +487,53 @@ def test_the_fs_build_after_a_compile_frees_the_stack_the_compile_pinned(
     assert len(collections) == 1
 
 
+def test_the_first_build_after_warmup_does_not_collect(_wide_border_fs_fit) -> None:
+    """``superglm.warmup()`` compiles outside any fit, so the next build does not collect (#432).
+
+    Warmup compiles an uncached inline helper (``_add_raw_row``) in every
+    process, which marked a compile, and a warm-cache process then paid one
+    full collection on its first fit: 0.15 s on a 30,000-row ``sz`` sentinel.
+    The frames warmup's compiles keep hold no fit's arrays, so it drops its
+    mark (``forget_compiles``).  Fails without it: one collection.
+    """
+    import gc
+
+    import superglm
+    from superglm import _numba_compile
+    from superglm.solvers._structured import block_leaves
+    from superglm.solvers.structured import get_structured_layout
+
+    model, _ = _wide_border_fs_fit
+    system = model._linear_system_state.system
+    layout = get_structured_layout(
+        model._dm, model._groups, dominant_group_index=system.dominant_group_index
+    )
+    n = model._dm.n
+    rng = np.random.default_rng(9)
+    layout_cache = model._dm._structured_layout_cache
+    collections = []
+
+    def count(phase, info):
+        if phase == "start" and info["generation"] == 2:
+            collections.append(phase)
+
+    block_leaves.release_leaf_memo(layout_cache)
+    _numba_compile._compiled[0] = True  # a compile inside warmup
+    superglm.warmup()
+    thresholds = gc.get_threshold()
+    gc.set_threshold(0)  # no automatic collection; the collector stays enabled
+    gc.callbacks.append(count)
+    try:
+        block_leaves.build_factor_smooth_leaf_system(
+            layout, rng.uniform(0.5, 1.5, n), rng.normal(size=n), signed=True
+        )
+    finally:
+        gc.callbacks.remove(count)
+        gc.set_threshold(*thresholds)
+        block_leaves.release_leaf_memo(layout_cache)
+    assert not collections
+
+
 @pytest.fixture(scope="module")
 def _wide_border_sz_fit():
     """A REML fit (smoothing parameters held) of an sz term beside a 60-level categorical."""
