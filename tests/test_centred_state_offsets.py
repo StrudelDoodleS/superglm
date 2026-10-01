@@ -816,31 +816,319 @@ def test_the_null_deviance_reads_a_correctly_rounded_mean(base):
     assert model.metrics(X, y).null_deviance == 50.0 * (adjacent - base) ** 2
 
 
+def _mean_bound(values, weights, exact):
+    """The stated bound of ``compensated_weighted_mean``, in exact arithmetic."""
+    from fractions import Fraction
+
+    u = Fraction(_U)
+    largest_product = max(
+        abs(Fraction(v) * Fraction(w)) for v, w in zip(values, weights, strict=True)
+    )
+    largest_weight = max(Fraction(w) for w in weights)
+    total = sum(Fraction(w) for w in weights)
+    scaling = Fraction(2) ** -1074 * (
+        1 + 9 * len(values) * (largest_product + abs(exact) * largest_weight) / total
+    )
+    return (u + 10 * u * u) * abs(exact) + scaling
+
+
+def _exact_mean(values, weights):
+    from fractions import Fraction
+
+    return sum(Fraction(w) * Fraction(v) for v, w in zip(values, weights, strict=True)) / sum(
+        Fraction(w) for w in weights
+    )
+
+
 @pytest.mark.parametrize(
     "values, weights",
     [
         ([0.0, 1.0, 1.0], [5e-324] * 3),
         ([1e300, -1e300, 1.0], [1.0] * 3),
+        ([0.0, 1e300], [1e300, 1e-300]),
     ],
-    ids=["subnormal_weights", "wide_range"],
+    ids=["subnormal_weights", "wide_range", "mixed_exponents"],
 )
-def test_the_compensated_mean_scales_its_weights_and_keeps_its_error_terms(values, weights):
-    """``compensated_weighted_mean`` on subnormal weights and on values of +-1e300.
+def test_the_compensated_mean_keeps_every_product_and_error_term(values, weights):
+    """``compensated_weighted_mean`` on subnormal weights, values of +-1e300 and mixed exponents.
 
-    Scaling the weights by a power of two is exact, so each scaled weight here
-    is 1/2 and every product ``W v``, ``W h`` and ``W e`` is exact; ``fsum``
-    rounds each sum once, so the mean is within one rounding of the division
-    and one of the final addition, ``2 u |m*|``, of the exact rational mean.
-    The unscaled products rounded the subnormal weights to zero (0.333 for
-    2/3), and summing ``W (h + e)`` absorbed each error term before the sum
-    (0.556 for 1/3).  Mutations: drop the scaling, or sum ``W (h + e)``.
+    Every product is split exactly on the operands' mantissas with its
+    exponent kept apart, and each sum is rounded once, so the mean meets its
+    stated bound (``_mean_bound``); here every piece stays in range and the
+    mean is within ``2 u |m*|`` of the exact rational mean as well.  The first
+    version returned 0.333 for 2/3 (subnormal products), 0.556 for 1/3 (each
+    error term absorbed into its head), and its fix, scaling the weights by
+    the largest one's power of two, erased ``1e-300`` beside ``1e300`` and
+    returned 0 for ``1e-300`` (Sol; ``np.average`` gets it).  Mutations: the
+    weights scaled by the largest one with raw products, or ``W (h + e)``
+    summed per row.
     """
     from fractions import Fraction
 
     from superglm.solvers.mode_score import compensated_weighted_mean
 
-    exact = sum(Fraction(w) * Fraction(v) for v, w in zip(values, weights, strict=True)) / sum(
-        Fraction(w) for w in weights
-    )
+    exact = _exact_mean(values, weights)
     mean = compensated_weighted_mean(np.array(values), np.array(weights))
+    assert abs(Fraction(mean) - exact) <= _mean_bound(values, weights, exact)
     assert abs(Fraction(mean) - exact) <= 2 * Fraction(_U) * abs(exact)
+
+
+def test_the_compensated_mean_meets_its_bound_across_the_exponent_range():
+    """Signed values and weights drawn across ``1e-300 .. 1e300``, against ``fractions.Fraction``.
+
+    Products under- and overflow the binary64 range in pairs here; the bound
+    (``_mean_bound``) holds for every draw, and the null model's Gaussian
+    predictor on Sol's mixed-exponent rows is their mean, not zero.
+    Mutation: as the previous test.
+    """
+    from fractions import Fraction
+
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.model.fit_ops import _compute_null_mu
+    from superglm.solvers.mode_score import compensated_weighted_mean
+
+    rng = np.random.default_rng(430)
+    for _ in range(100):
+        n = int(rng.integers(2, 40))
+        values = (rng.choice([-1.0, 1.0], n) * 10.0 ** rng.uniform(-300, 300, n)).tolist()
+        weights = (10.0 ** rng.uniform(-300, 300, n)).tolist()
+        exact = _exact_mean(values, weights)
+        mean = compensated_weighted_mean(np.array(values), np.array(weights))
+        assert abs(Fraction(mean) - exact) <= _mean_bound(values, weights, exact)
+
+    null = _compute_null_mu(
+        np.array([0.0, 1e300]),
+        np.array([1e300, 1e-300]),
+        None,
+        Gaussian(),
+        IdentityLink(),
+        weight_semantics="prior",
+    )
+    np.testing.assert_array_equal(null, np.full(2, 1e-300))
+
+
+# ------------------------------------------- 10. the anchor of the exact pair
+def _pair_gram_bound(x: NDArray, w: NDArray) -> float:
+    """How far a Gram centred about the corrected two-pass pair may sit from the exact ``G*``.
+
+    With ``m*`` the exact mean and ``x_ref`` the first row that carries
+    weight, pass one puts the anchor within ``L = u |m*| + gamma_{n+2} sum
+    |w| |x - x_ref| / |sum w|`` of ``m*``.  With ``D_i = |x_i - m*|`` and ``A
+    = sum |w| (D + L) / |sum w|``, the remainder ``lo`` errs by at most
+    ``gamma_{n+2} A`` and each centred row ``(x - hi) - lo`` by ``E_i =
+    gamma_{n+4} (A + 2 D_i + 4 L)``; the Gram of those rows then errs by
+    ``sum |w| (2 D_i E_i + E_i^2) + gamma_{n+2} sum |w| (D_i + E_i)^2``.
+    """
+    from fractions import Fraction
+
+    total = sum(Fraction(v) for v in w)
+    mean = sum(Fraction(a) * Fraction(b) for a, b in zip(x, w, strict=True)) / total
+    deviation = np.array([float(abs(Fraction(a) - mean)) for a in x])
+    magnitude = np.abs(w)
+    seed = x[np.flatnonzero(w != 0.0)[0]]
+    offset = _U * abs(float(mean)) + _gamma(len(x) + 2) * float(
+        np.sum(magnitude * np.abs(x - seed)) / abs(float(total))
+    )
+    spread = float(np.sum(magnitude * (deviation + offset)) / abs(float(total)))
+    n = len(x)
+    row = _gamma(n + 4) * (spread + 2.0 * deviation + 4.0 * offset)
+    return float(
+        np.sum(magnitude * (2.0 * deviation * row + row**2))
+        + _gamma(n + 2) * np.sum(magnitude * (deviation + row) ** 2)
+    )
+
+
+@pytest.mark.parametrize(
+    "route, w",
+    [
+        ("signed", [0.0, -0.1, 1.0, 1.0]),
+        ("signed", [1e-30, -0.1, 1.0, 1.0]),
+        ("gram", [1e-30, 0.5, 1.0, 1.0]),
+    ],
+    ids=["signed_zero_weight", "signed_negligible_weight", "gram_negligible_weight"],
+)
+def test_the_exact_pair_does_not_anchor_on_a_far_row(route, w):
+    """The pair is seeded by a row that carries weight, then refined about the rounded mean.
+
+    The signed observed route anchored on row 0 whatever its weight: Sol's
+    ``x = [0, 1e16 - 2, 1e16, 1e16 + 2]`` at ``w = [0, -0.1, 1, 1]`` formed
+    the remainder at the offset's scale and read a centred Gram of 3.6 for
+    1.0526315789.  A seed row of negligible weight far from the rest did the
+    same on either route.  The anchor is now the rounded mean
+    (``corrected_two_pass_pair``), within pass one's rounding of it, so the
+    same rows in any order give the exact Gram to ``_pair_gram_bound``.
+    Mutations: the anchor back on row 0, or pass two dropped.
+    """
+    from fractions import Fraction
+
+    from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
+    from superglm.reml.observed_geometry import _stable_signed_mean_pair
+    from superglm.solvers.centered_system import weighted_mean_pair
+
+    x = np.array([0.0, 1e16 - 2.0, 1e16, 1e16 + 2.0])
+    w = np.array(w)
+    total = sum(Fraction(v) for v in w)
+    mean = sum(Fraction(a) * Fraction(b) for a, b in zip(x, w, strict=True)) / total
+    exact = sum(Fraction(b) * (Fraction(a) - mean) ** 2 for a, b in zip(x, w, strict=True))
+    pair = _stable_signed_mean_pair if route == "signed" else weighted_mean_pair
+    for order in ([0, 1, 2, 3], [1, 2, 3, 0], [3, 0, 2, 1]):
+        rows, weights = x[order], w[order]
+        dm = DesignMatrix([DenseGroupMatrix(rows[:, None])], n=4, p=1)
+        _, hi, lo = pair(dm, weights, float(np.sum(weights)))
+        gram, _ = centered_gram_rhs(dm=dm, W=weights, mean_x=hi, z_centered=np.zeros(4), mean_lo=lo)
+        assert abs(Fraction(float(gram[0, 0])) - exact) <= Fraction(_pair_gram_bound(rows, weights))
+
+
+def test_gaussian_log_reml_ignores_where_a_zero_weight_row_sits():
+    """Public Gaussian/log REML (signed observed weights) with a zero-weight row far from the data.
+
+    The row's place in the frame decided the observed geometry's anchor, and
+    moving it from first to last moved the converged objective by 0.29
+    against a stopping resolution near 2e-6 (Sol).  Both orders now stop
+    with the same termination within that resolution.  Mutation: the anchor
+    back on row 0.
+    """
+    rng, eta, frame = _even_grid_frame(1e16)
+    y = np.exp(eta) + 0.5 * rng.normal(size=len(eta))
+    weights = np.ones(len(y))
+    far = pd.DataFrame({"x": [0.0], "s": [0.5], "c": ["c0"]})
+
+    def fit(first: bool) -> SuperGLM:
+        rows = pd.concat([far, frame] if first else [frame, far], ignore_index=True)
+        response = np.concatenate([[1.0], y] if first else [y, [1.0]])
+        prior = np.concatenate([[0.0], weights] if first else [weights, [0.0]])
+        model = SuperGLM(
+            family="gaussian",
+            link="log",
+            features={"x": Numeric(), "s": Spline(kind="ps", k=8)},
+            selection_penalty=0,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit_reml(rows.drop(columns="c"), response, sample_weight=prior)
+
+    _assert_same_reml(fit(False), fit(True))
+
+
+# ---------------------------------------------- 11. the metrics certificates
+def test_metrics_certify_the_rank_about_the_exact_pair():
+    """``metrics()`` on new rows certifies rank about the exact pair, like the fit.
+
+    Sol's two Numeric columns at 1e16, one a translate of the other: the fit
+    reads slope rank 1 and NaN standard errors for both.  The streamed
+    certificates of ``metrics`` (data rank and profiled covariance) centred
+    their rows about the one-float ``X'W1 / sum W`` and read rank 2, so
+    ``metrics(X.copy(), y)`` published finite standard errors.  Mutation: the
+    one-float centre in either certificate.
+    """
+    from superglm.inference import metrics as metrics_module
+    from superglm.inference._metrics_design import weighted_moments
+
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], 100)
+    X = pd.DataFrame({"a": 1e16 + z, "b": 1e16 + z + 2.0})
+    y = 0.3 + 0.1 * z + np.tile([0.01, -0.02, 0.03, -0.02], 100)
+    model = SuperGLM(
+        family="gaussian", features={"a": Numeric(), "b": Numeric()}, selection_penalty=0
+    ).fit(X, y)
+    for name in ("a", "b"):
+        assert np.all(np.isnan(model.metrics(X, y).coefficient_se[name]))
+        assert np.all(np.isnan(model.metrics(X.copy(), y).coefficient_se[name]))
+
+    s = np.tile([0.1, 0.7, 0.3, 0.9, 0.5], 80)
+    design = np.column_stack((1e16 + z, 1e16 + z + 2.0, s))
+    W = np.ones(len(z))
+    _, xtw1, data_gram = weighted_moments(design, W)
+    data_rank = metrics_module._certified_data_rank(design, W, data_gram, xtw1)
+    profile_rank = metrics_module._certified_profile_rank(
+        design, W, data_gram, xtw1, np.diag([0.0, 0.0, 1.0]), data_rank
+    )
+    assert data_rank.rank == 2
+    assert profile_rank.rank == 2
+
+
+@pytest.mark.parametrize("fit", ["gram", "gram_reml", "gamma_reml", "proximal"])
+def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
+    """Two Numeric columns at 1e16, ``b = 2 a - 1e16``, beside a P-spline.
+
+    ``a = s + z`` and ``b = s + 2 z`` alias with the intercept, so the centred
+    Gram is singular and the rank comes from a factor certificate:
+    ``certify_centered_factor`` and the terminal data rank on the direct
+    path, the observed geometry's certificate (Gamma/log REML), the
+    covariance factors (``state_ops``), the proximal fit's post-fit rank
+    (``pirls``) and the metrics certificates.  Each centres its rows about
+    the exact pair, as the Gram does; about the one-float means ``2 m_a -
+    m_b`` rounds away from the offset and the pair stops aliasing (the proximal certificate
+    read rank 9 against 8 at no offset, Codex).  The certified rank and the
+    NaN standard errors of the pair match the fit at no offset.  Mutation:
+    the one-float centre at a certification site.
+    """
+    rng = np.random.default_rng(5)
+    n = 800
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], n // 4)
+    s = rng.uniform(size=n)
+    eta = 0.3 + 0.1 * z + 0.4 * np.sin(2 * np.pi * s)
+    if fit == "proximal":
+        y = 3.0 + eta + 0.3 * rng.normal(size=n)
+    elif fit == "gamma_reml":
+        y = rng.gamma(3.0, np.exp(eta) / 3.0)
+    else:
+        y = rng.poisson(np.exp(eta)).astype(float)
+    family = {"proximal": "gaussian", "gamma_reml": "gamma"}.get(fit, "poisson")
+    ranks = []
+    for shift in (0.0, 1e16):
+        frame = pd.DataFrame({"a": shift + z, "b": shift + 2.0 * z, "s": s})
+        model = SuperGLM(
+            family=family,
+            features={"a": Numeric(), "b": Numeric(), "s": Spline(kind="ps", k=8)},
+            selection_penalty=0.01 if fit == "proximal" else 0,
+            **({"link": "log"} if fit == "gamma_reml" else {}),
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            if fit.endswith("reml"):
+                model.fit_reml(frame, y)
+            else:
+                model.fit(frame, y)
+        ranks.append(int(model.result.rank_info.data.rank))
+        for rows in (frame, frame.copy()):
+            se = model.metrics(rows, y).coefficient_se
+            assert np.all(np.isnan(se["a"])) and np.all(np.isnan(se["b"]))
+    assert ranks[1] == ranks[0]
+
+
+# ------------------------------------------- 12. dense columns take the pair
+@pytest.mark.parametrize("rung", ["raw_moment", "tabmat"])
+def test_a_dense_column_takes_the_exact_pair_at_every_offset(rung):
+    """A ``DenseGroupMatrix`` column never takes a raw-moment rung, at any offset.
+
+    Above the raw rungs' size crossover, Sol's even-integer column (n =
+    108,000) took the raw-moment rung at offset 0 and the exact pair at
+    offset 10, where ``_raw_centering_well_scaled`` rejected it; beside a
+    150-level categorical the tabmat rung did the same.  The arithmetic
+    changed with the column's location.  Both offsets now centre about the
+    exact pair.  Mutation: dense designs admitted to the raw rungs.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix
+    from superglm.solvers.centered_system import TabmatCenteringState, build_centered_system
+
+    column = 2.0 * np.tile(np.arange(-4, 5), 12000)
+    n = len(column)
+    codes = np.random.default_rng(3).integers(0, 150, n)
+    for shift in (0.0, 10.0):
+        groups = [DenseGroupMatrix((column + shift)[:, None])]
+        if rung == "tabmat":
+            groups.append(CategoricalGroupMatrix(codes, 150))
+        dm = DesignMatrix(groups, n=n, p=sum(group.shape[1] for group in groups))
+        profile: dict = {}
+        system = build_centered_system(
+            dm=dm,
+            W=np.ones(n),
+            z_off=np.zeros(n),
+            penalty=np.zeros((dm.p, dm.p)),
+            tabmat_split=dm.tabmat_centering_split,
+            tabmat_state=TabmatCenteringState(),
+            profile=profile,
+        )
+        assert system.mean_lo is not None
+        assert "centered_raw_moment_hits" not in profile

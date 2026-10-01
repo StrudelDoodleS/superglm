@@ -18,7 +18,11 @@ from superglm._group_matrix._group_matrix_centered import (
     try_raw_moment_centering,
 )
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
-from superglm.solvers.mode_score import dense_centred_rmatvec, dense_columns
+from superglm.solvers.mode_score import (
+    corrected_two_pass_pair,
+    dense_centred_rmatvec,
+    dense_columns,
+)
 
 _FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
 _FACTOR_CHUNK_ROWS = 8192
@@ -440,7 +444,19 @@ def build_centered_system(
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
     packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
-    if packed is None and (tabmat_state is None or tabmat_state.eligible is not False):
+    # A ``DenseGroupMatrix`` column, the one type whose entries its type does
+    # not bound, never takes a raw-moment rung: each subtracts ``sum W x x'``
+    # and ``(X'W)(X'W)' / sum W`` under a value certificate
+    # (``_raw_centering_well_scaled``), so the arithmetic changed with the
+    # column's location (offset 0: the raw-moment rung; offset 10: the exact
+    # pair).  Such a design takes the exact pair below on every fit; the
+    # packed and raw-spline rungs admit no dense column by their own types.
+    raw_rungs = not np.any(dense_columns(dm))
+    if (
+        packed is None
+        and raw_rungs
+        and (tabmat_state is None or tabmat_state.eligible is not False)
+    ):
         mixed_attempted, mixed = _try_mixed_discrete_centering(
             dm=dm,
             W=W,
@@ -481,6 +497,7 @@ def build_centered_system(
                 )
     if (
         packed is None
+        and raw_rungs
         and tabmat_split is not None
         and (tabmat_state is None or tabmat_state.eligible is not False)
     ):
@@ -503,6 +520,7 @@ def build_centered_system(
     # accelerated rungs do, so the moments are not recomputed every iteration.
     if (
         packed is None
+        and raw_rungs
         and not _force_chunked
         and (
             tabmat_state is None
@@ -542,49 +560,68 @@ def build_centered_system(
     return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
 
 
+def dense_mean_pair(dm: DesignMatrix, W: NDArray, sum_w: float) -> tuple[NDArray, NDArray] | None:
+    """``(hi, lo)`` over all ``p`` columns, zero off the ``DenseGroupMatrix`` ones; ``None`` without one.
+
+    Each dense column's weighted mean ``sum W x / sum W`` as an exact pair,
+    by the corrected two-pass algorithm (``mode_score.corrected_two_pass_pair``):
+    ``hi`` the rounded mean, ``lo`` the remainder formed on rows differenced
+    from it.  ``W`` may be signed (observed geometry); ``sum_w`` is the
+    caller's own.
+    """
+    if not any(type(matrix) is DenseGroupMatrix for matrix in dm.group_matrices):
+        return None
+    W = np.asarray(W, dtype=np.float64)
+    hi = np.zeros(dm.p, dtype=np.float64)
+    lo = np.zeros(dm.p, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            values = matrix.M
+
+            def chunks(values=values):
+                for start in range(0, dm.n, _FACTOR_CHUNK_ROWS):
+                    stop = min(start + _FACTOR_CHUNK_ROWS, dm.n)
+                    yield start, stop, values[start:stop]
+
+            hi[offset : offset + width], lo[offset : offset + width] = corrected_two_pass_pair(
+                chunks, W, sum_w, width
+            )
+        offset += width
+    return hi, lo
+
+
 def weighted_mean_pair(
     dm: DesignMatrix, W: NDArray, sum_w: float
 ) -> tuple[NDArray, NDArray, NDArray | None]:
     """``(mean_x, hi, lo)``: the weighted column mean and the exact pair it rounds.
 
     One-engine design §3.2 applied to gram's centred system: a
-    ``DenseGroupMatrix`` column's mean is ``hi + lo`` with ``hi = x_ref``, the
-    first row of positive weight (exact), and ``lo = sum W (x - x_ref) / sum
-    W`` formed on rows differenced from it, so a column constant on its
-    weighted rows centres to exact zeros (the unshifted ``sum W x / sum W``
-    left a rounding-level centred diagonal whose rank decision moved the REML
+    ``DenseGroupMatrix`` column's mean is ``hi + lo`` (``dense_mean_pair``),
+    ``hi`` the rounded mean from a pass shifted by the first row that
+    carries weight and ``lo`` the remainder formed on rows differenced from
+    ``hi`` (Chan, Golub & LeVeque 1983).  A column constant on its weighted
+    rows centres to exact zeros (the unshifted ``sum W x / sum W`` left a
+    rounding-level centred diagonal whose rank decision moved the REML
     objective by ~30 between iterates: stage-1 verifier, the Gamma/log
-    constant-column fit).  Rows are centred as ``(x - hi) - lo``, which rounds
-    at the column's spread; ``x - mean_x`` with ``mean_x = fl(hi + lo)``
-    rounds at ``u |mean|`` and adds ``sum W d d'`` (``d`` that rounding) to
-    the profiled Gram, which at a 1e16 offset moved a Gaussian fit's eta by
-    1e-3 (issue #430).  Every other column, bounded by its type, has ``hi =
-    mean_x = X'W / sum W`` and ``lo = 0``; ``lo`` is ``None`` for a design
-    without a dense column.
+    constant-column fit), and a far row of negligible weight no longer sets
+    the remainder's scale, as it did as the anchor.  Rows are centred as
+    ``(x - hi) - lo``, which rounds at the column's spread; ``x - mean_x``
+    with ``mean_x = fl(hi + lo)`` rounds at ``u |mean|`` and adds ``sum W d
+    d'`` (``d`` that rounding) to the profiled Gram, which at a 1e16 offset
+    moved a Gaussian fit's eta by 1e-3 (issue #430).  Every other column,
+    bounded by its type, has ``hi = mean_x = X'W / sum W`` and ``lo = 0``;
+    ``lo`` is ``None`` for a design without a dense column.
     """
     mean = dm.rmatvec(W) / sum_w
-    hi = mean.copy()
-    lo = np.zeros_like(mean)
-    positive = np.flatnonzero(np.asarray(W) > 0.0)
-    has_dense = any(type(matrix) is DenseGroupMatrix for matrix in dm.group_matrices)
-    if not positive.size or not has_dense:
-        return mean, hi, None
-    reference = int(positive[0])
-    offset = 0
-    for matrix in dm.group_matrices:
-        width = matrix.shape[1]
-        if type(matrix) is DenseGroupMatrix:
-            values = matrix.M
-            anchor = np.asarray(values[reference], dtype=np.float64)
-            total = np.zeros(width, dtype=np.float64)
-            for start in range(0, dm.n, _FACTOR_CHUNK_ROWS):
-                stop = min(start + _FACTOR_CHUNK_ROWS, dm.n)
-                total += (values[start:stop] - anchor).T @ W[start:stop]
-            hi[offset : offset + width] = anchor
-            lo[offset : offset + width] = total / sum_w
-            mean[offset : offset + width] = anchor + total / sum_w
-        offset += width
-    return mean, hi, lo
+    pair = dense_mean_pair(dm, W, sum_w)
+    if pair is None:
+        return mean, mean.copy(), None
+    dense = dense_columns(dm)
+    hi = np.where(dense, pair[0], mean)
+    lo = np.where(dense, pair[1], 0.0)
+    return np.where(dense, pair[0] + pair[1], mean), hi, lo
 
 
 def _attach_centered_penalty(

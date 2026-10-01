@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 
 import superglm.solvers.rank as rank_module
 from superglm import SuperGLM
@@ -22,6 +23,7 @@ from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    SparseGroupMatrix,
 )
 from superglm.links import IdentityLink
 from superglm.model import state_ops
@@ -362,7 +364,7 @@ def test_mixed_categorical_centering_uses_tabmat_without_materializing_rows(
     rng.shuffle(codes)
     categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
     dm = DesignMatrix(
-        [DenseGroupMatrix(dense), categorical],
+        [SparseGroupMatrix(sparse.csr_matrix(dense)), categorical],
         n=n,
         p=dense.shape[1] + n_levels,
     )
@@ -414,7 +416,7 @@ def test_unsafe_mixed_tabmat_centering_falls_back_to_stable_chunks(
     rng.shuffle(codes)
     categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
     dm = DesignMatrix(
-        [DenseGroupMatrix(dense), categorical],
+        [SparseGroupMatrix(sparse.csr_matrix(dense)), categorical],
         n=n,
         p=dense.shape[1] + n_levels,
     )
@@ -501,7 +503,7 @@ def test_tabmat_centering_normalizes_weight_buffers(
     rng.shuffle(codes)
     categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
     dm = DesignMatrix(
-        [DenseGroupMatrix(dense), categorical],
+        [SparseGroupMatrix(sparse.csr_matrix(dense)), categorical],
         n=n,
         p=dense.shape[1] + n_levels,
     )
@@ -573,7 +575,7 @@ def test_nonfinite_tabmat_raw_moments_fall_back_without_floating_point_error() -
     codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
     categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
     dm = DesignMatrix(
-        [DenseGroupMatrix(dense), categorical],
+        [SparseGroupMatrix(sparse.csr_matrix(dense)), categorical],
         n=n,
         p=dense.shape[1] + n_levels,
     )

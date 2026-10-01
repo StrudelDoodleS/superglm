@@ -29,14 +29,13 @@ from superglm.reml.penalty_algebra import (
     penalty_component_matvec,
 )
 from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
-from superglm.solvers.centered_system import iter_grouped_design_chunks
+from superglm.solvers.centered_system import dense_mean_pair, iter_grouped_design_chunks
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
     HessianFactor,
     as_hessian_factor,
 )
 from superglm.solvers.mode_score import (
-    centre_offset_mean,
     dense_centred_matvec,
     dense_centred_rmatvec,
     dense_columns,
@@ -450,10 +449,12 @@ def reml_w_correction(
             sum_w = float(factor_sum_w)
 
     # Every dense column is centred about an exact pair, by type (issue #430):
-    # ``(x - c) - d`` with ``c`` the fit's state centre (else the first row) and
-    # ``d = sum W (x - c) / sum W`` formed on centred rows with the weights
-    # ``mean_x`` carries -- the geometry's, else the Fisher weights at the mode
-    # -- and its own ``sum_w``.  About the rounded ``mean_x`` the direction
+    # ``(x - c) - d`` with ``c`` the rounded mean and ``d`` the remainder formed
+    # on rows differenced from it (``centered_system.dense_mean_pair``, the
+    # corrected two-pass algorithm), with the weights ``mean_x`` carries -- the
+    # geometry's, else the Fisher weights at the mode -- and its own
+    # ``sum_w``.  No row and no state centre seeds it beyond pass one's
+    # rounding.  About the rounded ``mean_x`` the direction
     # ``X dbeta - mean_x' dbeta``, the signed Grams and the leverage rows all
     # cancel ``c' dbeta`` at a column's offset (at 1e16 the correction was 9.2%
     # off, 17.1% on the leverage route, and exact REML ended
@@ -462,7 +463,6 @@ def reml_w_correction(
     # signed-Gram route by type: centred rows beside a dense column, raw
     # moments, whose entries their type bounds, otherwise.
     dense = dense_columns(dm)
-    state_center = getattr(pirls_result, "state_center", None)
     centre_hi = mean_x
     centre_lo: NDArray | None = None
     if sum_w is not None and np.any(dense):
@@ -479,19 +479,11 @@ def reml_w_correction(
                 ),
             )
         )
-        if state_center is not None:
-            anchor = np.asarray(state_center, dtype=np.float64)
-        else:
-            # a row that carries weight: a weightless row may sit anywhere
-            weighted = np.flatnonzero(mean_weights != 0.0)
-            row = int(weighted[0]) if weighted.size else 0
-            anchor = np.asarray(
-                dm.row_subset(np.array([row], dtype=np.intp)).toarray()[0], dtype=float
-            )
-        dense_anchor = np.where(dense, anchor, 0.0)
-        offset_mean = centre_offset_mean(dm, mean_weights, sum_w, dense_anchor, mean_x)
-        centre_hi = np.where(dense, dense_anchor, mean_x)
-        centre_lo = np.where(dense, offset_mean, 0.0)
+        pair = dense_mean_pair(dm, mean_weights, sum_w)
+        if pair is None:  # pragma: no cover - a dense column is present
+            raise RuntimeError("A dense column formed no centre pair.")
+        centre_hi = np.where(dense, pair[0], mean_x)
+        centre_lo = np.where(dense, pair[1], 0.0)
     use_stable_signed_gram = centre_lo is not None
 
     def centered_matvec(values: NDArray) -> NDArray:

@@ -499,42 +499,144 @@ def two_sum(a, b):
     return s, (a - (s - b_virtual)) + (b - b_virtual)
 
 
-def compensated_weighted_mean(values: NDArray, weights: NDArray) -> float:
-    """``m* = sum w v / sum w``, refined once with an exact residual, the sums compensated.
+_VELTKAMP = 134217729.0  # 2^27 + 1, the binary64 splitting constant
 
-    The weights are first scaled by ``2^-e``, ``e`` the exponent of the largest
-    (``frexp``), which is exact and puts every product in range: a subnormal
-    weight no longer rounds ``w v`` to zero.  With ``W`` the scaled weights,
-    ``T = fsum(W)``, ``m0 = fsum(W v) / T`` and the residual formed exactly by
-    TwoSum, ``v - m0 = h + e``, the correction sums the heads and the errors
-    as separate terms of one ``math.fsum`` (Shewchuk; correctly rounded), so
-    an error term is never absorbed into its own head before the sum (it
-    was, and the ``1e300, -1e300, 1`` sample returned 0.556):
 
-        m = fl(m0 + fl(fsum(W h, W e) / T)),
-        |m - m*| <= u |m*| + gamma_4 sum w |v - m0| / sum w + 4 n 2^-1075,
+def _split(a: NDArray) -> tuple[NDArray, NDArray]:
+    """Veltkamp's split: ``a = hi + lo`` exactly, each half 26 bits wide."""
+    c = _VELTKAMP * a
+    hi = c - (c - a)
+    return hi, a - hi
 
-    the last term the absolute error of products that underflow (``u`` the
-    unit roundoff, Higham 2002 §2.2; Demmel 1984 for gradual underflow).  It
-    scales with the values' spread about the mean, not with ``|m|``: on two
-    levels of adjacent floats every quantity is exact and ``m`` is ``m*``
-    correctly rounded.  Falls back to ``np.average`` when a sum overflows.
+
+def two_product(a: NDArray, b: NDArray) -> tuple[NDArray, NDArray]:
+    """Dekker's TwoProduct: ``p = fl(ab)`` and its error, ``ab = p + e`` exactly.
+
+    Exact when neither the product nor the split over- or underflows (Dekker
+    1971; Ogita, Rump & Oishi 2005, Algorithm 3.3 and Theorem 3.4), which holds
+    for the ``frexp`` mantissas ``compensated_weighted_mean`` passes, all in
+    ``[0.5, 1)`` or zero.  No fused multiply-add: Python 3.12 has none.
     """
-    v = np.asarray(values, dtype=np.float64)
-    w = np.asarray(weights, dtype=np.float64)
-    largest = float(np.max(w, initial=0.0))
-    if not largest > 0.0 or not math.isfinite(largest):
+    p = a * b
+    a_hi, a_lo = _split(a)
+    b_hi, b_lo = _split(b)
+    return p, ((a_hi * b_hi - p) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo
+
+
+def _scaled_exact_dot(a: NDArray, b: NDArray) -> tuple[float, int]:
+    """``(S, K)`` with ``sum a_i b_i = S 2^K`` up to the scaling loss.
+
+    Each product is formed exactly on the operands' ``frexp`` mantissas, its
+    binary exponent kept apart; every piece is scaled by ``2^-K``, ``K`` the
+    largest product exponent, and ``math.fsum`` rounds the sum once
+    (Shewchuk 1997).  A piece pushed below the normal range loses at most
+    ``2^-1075`` of ``2^K``, and ``2^K <= 4 max |a_i b_i|``.
+    """
+    mantissa_a, exponent_a = np.frexp(a)
+    mantissa_b, exponent_b = np.frexp(b)
+    head, tail = two_product(mantissa_a, mantissa_b)
+    exponent = exponent_a.astype(np.int32) + exponent_b.astype(np.int32)
+    carried = head != 0.0
+    if not np.any(carried):
+        return 0.0, 0
+    top = int(np.max(exponent[carried]))
+    shift = (exponent - top).astype(np.int32)
+    # ``tolist`` hands fsum Python floats: iterating a NumPy array boxes each
+    # element, several times the cost per element
+    pieces = np.concatenate((np.ldexp(head, shift), np.ldexp(tail, shift)))
+    return math.fsum(pieces.tolist()), top
+
+
+def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) -> float:
+    """``(N 2^K) / (D 2^L)`` without forming either scaled sum."""
+    return math.ldexp(numerator[0] / denominator[0], numerator[1] - denominator[1])
+
+
+def compensated_weighted_mean(values: NDArray, weights: NDArray) -> float:
+    """``m* = sum w v / sum w`` from exact products, refined once with an exact residual.
+
+    Every product ``w_i v_i`` is split exactly into two floats on the
+    operands' ``frexp`` mantissas (``two_product``), its exponent kept apart,
+    and each sum is scaled by its own largest product's power of two and
+    rounded once by ``math.fsum`` (``_scaled_exact_dot``).  No weight is
+    rescaled on its own, so a contribution survives whatever its exponent:
+    scaling the weights by the largest one erased ``1e-300`` beside ``1e300``
+    and returned 0 for a mean of ``1e-300``.  The first quotient ``m0`` is then
+    refined by the residual ``v - m0 = h + e`` (TwoSum, exact), whose
+    products are formed the same way.  With ``n`` rows, ``u`` the unit
+    roundoff and ``W = sum w``:
+
+        |m - m*| <= (u + 10 u^2) |m*| + 2^-1074 (1 + 9 n (max |w v| + |m*| max w) / W),
+
+    the second term the pieces scaled below the normal range (each at most
+    ``2^-1075`` of its sum's largest power of two) and the subnormal results
+    (Higham 2002 §2.2).  On two levels of adjacent floats, on subnormal
+    weights and on values of ``+-1e300`` the mean is correctly rounded.
+    Falls back to ``np.average`` on non-finite input or a zero weight sum.
+    """
+    v = np.asarray(values, dtype=np.float64).ravel()
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if not (np.all(np.isfinite(v)) and np.all(np.isfinite(w))):
         return float(np.average(v, weights=w))
-    scaled = np.ldexp(w, -math.frexp(largest)[1])
-    try:
-        total = math.fsum(scaled)
-        first = math.fsum(scaled * v) / total
-        head, error = two_sum(v, -first)
-        correction = math.fsum(np.concatenate((scaled * head, scaled * error))) / total
-    except OverflowError:
+    total = _scaled_exact_dot(w, np.ones_like(w))
+    if total[0] == 0.0:
         return float(np.average(v, weights=w))
+    first = _scaled_ratio(_scaled_exact_dot(w, v), total)
+    head, error = two_sum(v, -first)
+    if not (math.isfinite(first) and np.all(np.isfinite(head))):
+        return float(np.average(v, weights=w))
+    correction = _scaled_ratio(
+        _scaled_exact_dot(np.concatenate((w, w)), np.concatenate((head, error))), total
+    )
     mean = first + correction
-    return mean if math.isfinite(mean) else float(np.average(v, weights=w))
+    return mean if math.isfinite(mean) else first
+
+
+def _anchored_total(chunks, weights: NDArray, anchor: NDArray) -> NDArray:
+    """``sum w (x - anchor)`` over the row chunks, compensated across chunks (Kahan)."""
+    total = np.zeros_like(anchor)
+    compensation = np.zeros_like(anchor)
+    for start, stop, block in chunks():
+        contribution = (np.asarray(block, dtype=np.float64) - anchor).T @ weights[start:stop]
+        corrected = contribution - compensation
+        updated = total + corrected
+        compensation = (updated - total) - corrected
+        total = updated
+    return total
+
+
+def corrected_two_pass_pair(chunks, weights: NDArray, sum_w: float, width: int):
+    """``(anchor, lo)``: each column's weighted mean as an exact pair, the corrected two-pass way.
+
+    ``chunks`` is a zero-argument callable returning ``(start, stop, rows)``
+    blocks.  Pass one forms the shift ``sum w (x - x_ref) / sum w`` about
+    ``x_ref``, the first row that carries weight, and rounds the mean,
+    ``anchor = fl(x_ref + shift)``; pass two forms the remainder ``lo = sum w
+    (x - anchor) / sum w`` (Chan, Golub & LeVeque 1983, the corrected
+    two-pass algorithm on shifted data).  The anchor lies within ``u |m| +
+    gamma_k sum |w| |x - x_ref| / |sum w|`` of the mean (``k`` the chunk
+    length plus two, Higham 2002 §4.3), so ``x - anchor`` is exact where
+    ``x`` and the anchor lie within a factor two (Sterbenz) and otherwise
+    rounds at ``u |x - anchor|``, the centred row's own scale, and ``lo``
+    carries ``gamma_k sum |w| |x - anchor| / |sum w|``.  The seed row enters
+    only through pass one's rounding, which pass two absorbs: a row far from
+    the mean with zero or negligible weight no longer sets the remainder's
+    scale (it did as the anchor: Sol's ``x = [0, 1e16 - 2, 1e16, 1e16 + 2]``
+    at ``w = [0, -0.1, 1, 1]`` read a centred Gram of 3.6 for 1.0526).  Zero
+    weights enter neither sum, and a column constant on its weighted rows
+    gives ``anchor = x_ref`` and ``lo = 0`` exactly.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    reference = None
+    for start, stop, block in chunks():
+        carried = np.flatnonzero(weights[start:stop] != 0.0)
+        if carried.size:
+            reference = np.array(np.asarray(block, dtype=np.float64)[carried[0]], copy=True)
+            break
+    if reference is None:
+        return np.zeros(width, dtype=np.float64), np.zeros(width, dtype=np.float64)
+    anchor = reference + _anchored_total(chunks, weights, reference) / sum_w
+    return anchor, _anchored_total(chunks, weights, anchor) / sum_w
 
 
 def centred_intercept_remainder(

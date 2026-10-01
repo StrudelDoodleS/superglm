@@ -1726,13 +1726,18 @@ def _fit_pirls_inner(
         z_off=z_final - offset,
         penalty=selected_penalty,
     )
+    # The certificates centre their rows exactly as the Gram did: a dense
+    # column about its exact pair (issue #430).  About the one-float mean a
+    # column at 1e16 certified a rank one above the Gram's.
+    centre, centre_lo = centered.centre_pair()
     data_rank = decompose_gram_if_authoritative(centered.data_gram)
     if data_rank is None:
         certified = decompose_factor(
             grouped_weighted_factor(
                 selected_dm,
                 W_final,
-                center=centered.mean_x,
+                center=centre,
+                center_lo=centre_lo,
             )
         )
         data_rank = certified
@@ -1749,7 +1754,8 @@ def _fit_pirls_inner(
                 selected_dm,
                 W_final,
                 selected_penalty,
-                center=centered.mean_x,
+                center=centre,
+                center_lo=centre_lo,
             )
         )
         augmented_rank = certified

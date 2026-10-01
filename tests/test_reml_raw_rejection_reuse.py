@@ -6,12 +6,13 @@ import weakref
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 
 from superglm import Constraint, CubicRegressionSpline, Numeric, SuperGLM
 from superglm._fit_trace import TraceRun
 from superglm._group_matrix import _group_matrix_centered as raw_centering
 from superglm.distributions import Gamma, Gaussian, Poisson
-from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, SparseSSPGroupMatrix
 from superglm.links import IdentityLink, LogLink
 from superglm.reml import direct, observed_geometry
 from superglm.solvers import centered_system, irls_direct
@@ -20,7 +21,9 @@ from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 
 
 def _fixture(x=(1.0, 2.0, 3.0)):
-    dm = DesignMatrix([DenseGroupMatrix(np.array(x)[:, None])], n=len(x), p=1)
+    # a type the raw-moment rung admits: a dense column never takes it
+    column = sparse.csr_matrix(np.array(x)[:, None])
+    dm = DesignMatrix([SparseSSPGroupMatrix(column, np.ones((1, 1)))], n=len(x), p=1)
     groups = [
         GroupSlice(
             name="BonusMalus",
@@ -141,7 +144,10 @@ def test_bonus_malus_cubic_qp_representation_is_eligible(attempts):
         assert result.converged
         np.testing.assert_array_equal(result.beta, np.zeros(dm.p))
         assert result.intercept == 0.0
-    assert attempts == [False]
+    # The Numeric column is a DenseGroupMatrix, which never takes a raw-moment
+    # rung (issue #430): the design centres about the exact pair on every fit,
+    # so there is no rejection to carry.
+    assert attempts == []
 
 
 def test_optimizer_owns_one_rejection_but_outside_refits_stay_fresh(attempts, monkeypatch):

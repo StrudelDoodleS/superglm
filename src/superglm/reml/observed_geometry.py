@@ -55,6 +55,7 @@ from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
     centre_offset_mean,
     centred_matvec,
+    corrected_two_pass_pair,
     dense_columns,
     linear_predictor,
     penalized_mode_residual,
@@ -1122,12 +1123,12 @@ def _stable_signed_mean_pair(
 ) -> tuple[NDArray, NDArray, NDArray | None]:
     """``(mean_x, hi, lo)``: a signed weighted mean and, on dense columns, its exact pair.
 
-    The mean is accumulated about the first row, ``anchor + total / sum_w``,
-    without subtracting large raw moments.  A ``DenseGroupMatrix`` column keeps
-    the pair ``(anchor, total / sum_w)`` so its rows centre as ``(x - hi) -
-    lo`` (``centered_system.weighted_mean_pair``, issue #430); every other
-    column centres about the rounded mean, ``lo = 0``.  ``lo`` is ``None``
-    without a dense column.
+    The mean is ``anchor + lo`` from the corrected two-pass algorithm
+    (``mode_score.corrected_two_pass_pair``), never from large raw moments.
+    A ``DenseGroupMatrix`` column keeps the pair ``(anchor, lo)`` so its
+    rows centre as ``(x - hi) - lo`` (``centered_system.weighted_mean_pair``,
+    issue #430); every other column centres about the rounded mean, ``lo =
+    0``.  ``lo`` is ``None`` without a dense column.
     """
     anchor, offset_mean = _stable_signed_offset(dm, weights, sum_w)
     mean = anchor + offset_mean
@@ -1140,23 +1141,25 @@ def _stable_signed_mean_pair(
 def _stable_signed_offset(
     dm: DesignMatrix, weights: NDArray, sum_w: float
 ) -> tuple[NDArray, NDArray]:
-    """``(anchor, sum w (x - anchor) / sum w)`` about the first row, compensated."""
+    """``(anchor, lo)``: the signed weighted mean as an exact pair, every column.
+
+    The anchor is the rounded mean from a pass shifted by the first row that
+    carries weight, never row 0 as such: a zero-weight row 0 far from the
+    data set the remainder's scale (``x = [0, 1e16 - 2, 1e16, 1e16 + 2]`` at
+    ``w = [0, -0.1, 1, 1]`` read a centred Gram of 3.6 for 1.0526, and moving
+    that row last moved a Gaussian/log REML objective by 0.29).
+    """
     if dm.p == 0:
         return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
-    anchor = np.asarray(dm.row_subset(np.array([0], dtype=np.intp)).toarray()[0], dtype=float)
-    total = np.zeros(dm.p, dtype=np.float64)
-    compensation = np.zeros(dm.p, dtype=np.float64)
     chunk_size = 8192
-    for start in range(0, dm.n, chunk_size):
-        stop = min(start + chunk_size, dm.n)
-        rows = np.arange(start, stop, dtype=np.intp)
-        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
-        contribution = (block - anchor).T @ weights[start:stop]
-        corrected = contribution - compensation
-        updated = total + corrected
-        compensation[...] = (updated - total) - corrected
-        total[...] = updated
-    return anchor, total / sum_w
+
+    def chunks():
+        for start in range(0, dm.n, chunk_size):
+            stop = min(start + chunk_size, dm.n)
+            rows = np.arange(start, stop, dtype=np.intp)
+            yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+
+    return corrected_two_pass_pair(chunks, np.asarray(weights, dtype=np.float64), sum_w, dm.p)
 
 
 def schur_curvature_is_negative(eigenvalues: NDArray, certificate) -> bool:

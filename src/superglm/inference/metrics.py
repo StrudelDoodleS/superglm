@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from scipy.special import gammaln
 
 from superglm.distributions import weighted_log_likelihood
+from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import (
     EvaluationDesign,
     MetricsDesign,
@@ -44,7 +45,8 @@ from superglm.profiling._reporting import (
     profile_cautioned,
     reported_interval,
 )
-from superglm.solvers.centered_system import penalty_factor
+from superglm.solvers.centered_system import penalty_factor, weighted_mean_pair
+from superglm.solvers.mode_score import corrected_two_pass_pair
 from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram,
@@ -155,6 +157,26 @@ def _profiled_augmented_covariance(
     return augmented
 
 
+def _centre_pair(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArray | None]:
+    """``(hi, lo)``: the working-weighted column means as an exact pair, for row centring.
+
+    A grouped design pairs its ``DenseGroupMatrix`` columns
+    (``centered_system.weighted_mean_pair``); an evaluated design's columns
+    are all dense blocks, so each is paired (``corrected_two_pass_pair``).
+    About the one-float ``X'W1 / sum W`` a column at an offset rounds at ``u
+    |c|`` in every row: two Numeric columns at 1e16 aliased in the fit read
+    rank 2 and finite standard errors in ``metrics()``.
+    """
+    W = np.asarray(W, dtype=np.float64)
+    sum_w = float(np.sum(W))
+    if isinstance(design, DesignMatrix):
+        _, hi, lo = weighted_mean_pair(design, W, sum_w)
+        return hi, lo
+    return corrected_two_pass_pair(
+        lambda: iter_dense_chunks(design), W, sum_w, int(design.shape[1])
+    )
+
+
 def _certified_data_rank(
     design: MetricsDesign,
     W: NDArray,
@@ -165,10 +187,12 @@ def _certified_data_rank(
     decomposition = decompose_gram_if_authoritative(data_gram)
     if decomposition is not None:
         return decomposition
+    center, center_lo = _centre_pair(design, W)
     factor = streamed_weighted_factor(
         iter_dense_chunks(design),
         W,
-        center=xtw1 / float(np.sum(W)),
+        center=center,
+        center_lo=center_lo,
     )
     return decompose_factor(factor)
 
@@ -204,10 +228,12 @@ def _certified_profile_rank(
     decomposition = decompose_gram_if_authoritative(data_gram + penalty)
     if decomposition is not None:
         return decomposition
+    center, center_lo = _centre_pair(design, W)
     factor = streamed_weighted_factor(
         iter_dense_chunks(design),
         W,
-        center=xtw1 / float(np.sum(W)),
+        center=center,
+        center_lo=center_lo,
     )
     smooth_factor = penalty_factor(penalty)
     if smooth_factor.shape[0]:
