@@ -554,6 +554,10 @@ def reml_w_correction(
     # Factors cannot change between these first-order directions. Public moment
     # calls and later correction calls still start with fresh numerical state.
     fixed_support = dm.execution_plan._fixed_support_cache() if batch_moments else None
+    # Directions batch only beside that shared owner. Without it every
+    # direction builds its own support projections and keeps them until the
+    # batch returns, which the per-direction budget below does not count.
+    batch_moments = batch_moments and fixed_support is not None
     batch_size = 0
     if (
         use_stable_signed_gram
@@ -568,7 +572,8 @@ def reml_w_correction(
             batch_size = 0
     elif batch_moments:
         # One row pass per block serves every direction: retained weights and
-        # their stacked copy, the raw moments, and the centred outputs.
+        # their stacked copy, the raw moments, and the centred outputs. The
+        # shared owner holds the support projections once for all of them.
         bytes_per_direction = np.dtype(np.float64).itemsize * (2 * dm.n + 3 * p * p)
         batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
         if batch_size < 2:

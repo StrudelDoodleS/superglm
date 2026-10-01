@@ -170,6 +170,10 @@ class _ChannelBatch:
         """
         entry = self._results.get(key)
         if entry is None or not entry[1] <= channel < entry[2]:
+            # The channels before this one are done with the key: release
+            # their group before forming the next, so one pass is live a key.
+            self._results.pop(key, None)
+            entry = None
             width = self.width(cells, channel)
             if width < 2:
                 return single()

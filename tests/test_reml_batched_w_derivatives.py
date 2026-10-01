@@ -20,6 +20,7 @@ from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
+    DiscretizedTensorGroupMatrix,
     SparseSSPGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
@@ -708,3 +709,133 @@ def test_moment_route_requests_the_directions_together(monkeypatch, per_call):
     assert grams is not None and reference is not None
     for i in range(3):
         np.testing.assert_array_equal(grams[i], reference[i])
+
+
+def _support_correction_fixture(tensor):
+    """An exact Poisson fit on four lossless supports and a categorical.
+
+    With ``tensor``, a discretized tensor joins them: a design outside the
+    shared-owner set, so each direction would project the supports itself.
+    """
+    rng = np.random.default_rng(8830)
+    n, width = 8_000, 10
+    matrices = [
+        SupportCompressedSSPGroupMatrix(
+            rng.normal(size=(n, width)) / 4, np.eye(width), np.arange(n)
+        )
+        for _ in range(4)
+    ]
+    if tensor:
+        bins, k = 24, 4
+        margins = rng.normal(size=(bins, k)) / 2, rng.normal(size=(bins, k)) / 2
+        idx1, idx2 = rng.integers(0, bins, n), rng.integers(0, bins, n)
+        cells, pair_idx = np.unique(idx1 * bins + idx2, return_inverse=True)
+        joint = (
+            margins[0][cells // bins][:, :, None] * margins[1][cells % bins][:, None, :]
+        ).reshape(len(cells), k * k)
+        matrices.append(
+            DiscretizedTensorGroupMatrix(
+                *margins, idx1, idx2, joint, np.eye(k * k), pair_idx, tensor_id=1
+            )
+        )
+    matrices.append(CategoricalGroupMatrix(rng.integers(-1, 5, n), n_levels=5))
+    widths = [matrix.shape[1] for matrix in matrices]
+    starts = np.concatenate(([0], np.cumsum(widths)))
+    dm = DesignMatrix(matrices, n=n, p=int(starts[-1]))
+    groups = [
+        GroupSlice(name=f"g{i}", start=int(starts[i]), end=int(starts[i + 1]))
+        for i in range(len(matrices))
+    ]
+    penalties = [
+        PenaltyComponent(
+            name=g.name,
+            group_name=g.name,
+            group_index=i,
+            group_sl=slice(g.start, g.end),
+            omega_raw=np.eye(widths[i]),
+            omega_ssp=np.eye(widths[i]),
+            rank=float(widths[i]),
+            log_det_omega_plus=0.0,
+            eigvals_omega=np.ones(widths[i]),
+        )
+        for i, g in enumerate(groups)
+    ]
+    y = rng.poisson(np.exp(0.2 + 0.3 * dm.matvec(rng.normal(size=dm.p) / 4))).astype(float)
+    lambdas = {g.name: 2.0 + i for i, g in enumerate(groups)}
+    weights, offset = np.ones(n), np.zeros(n)
+    family, link = Poisson(), LogLink()
+    result, inverse, _ = fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=family,
+        link=link,
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        return_xtwx=True,
+        reml_penalties=penalties,
+        weight_semantics="frequency",
+    )
+    assert result.converged
+    return dict(
+        dm=dm,
+        link=link,
+        groups=groups,
+        pirls_result=result,
+        XtWX_S_inv=inverse,
+        lambdas=lambdas,
+        sample_weight=weights,
+        offset_arr=offset,
+        distribution=family,
+        reml_penalties=penalties,
+    )
+
+
+@pytest.mark.parametrize("tensor", [True, False], ids=["tensor-no-owner", "shared-owner"])
+def test_batched_directions_stay_within_their_memory_budget(monkeypatch, tensor):
+    """A batch holds no more than its per-direction charge beyond one direction's peak.
+
+    Without a shared owner every direction projects the supports itself, so a
+    batch kept one projection set per direction alive at once; such designs
+    now take the directions one at a time.
+    """
+    import tracemalloc
+
+    kwargs = _support_correction_fixture(tensor)
+    dm = kwargs["dm"]
+    plan_type = type(dm.execution_plan)
+    assert (dm.execution_plan._fixed_support_cache() is None) is tensor
+    original, requests = plan_type._signed_moments_channels, []
+
+    def recorded(plan, weights, owner):
+        requests.append(len(weights))
+        return original(plan, weights, owner)
+
+    def traced_peak(budget):
+        with monkeypatch.context() as patch:
+            patch.setattr(plan_type, "_signed_moments_channels", recorded)
+            if budget is not None:
+                patch.setattr(w_derivatives, "_SIGNED_GRAM_BATCH_BYTES", budget)
+            gc.collect()
+            tracemalloc.start()
+            try:
+                result = w_derivatives.reml_w_correction(**kwargs)
+                return tracemalloc.get_traced_memory()[1], result
+            finally:
+                tracemalloc.stop()
+
+    traced_peak(None)  # load every kernel the batch reaches before measuring
+    requests.clear()
+    serial, expected = traced_peak(1)  # every direction on its own
+    assert requests == []
+    batched, actual = traced_peak(None)
+    m = len(kwargs["reml_penalties"])
+    # The charge per direction: retained weights and their stacked copy (2n),
+    # and the raw and centred Grams (3p^2), as w_derivatives budgets them.
+    # Beyond it, each block of this design makes at most one shared pass,
+    # live at most _CHANNEL_PASS_BYTES, beside one channel's copied slice.
+    charge = np.dtype(np.float64).itemsize * (2 * dm.n + 3 * dm.p * dm.p)
+    assert batched <= serial + m * charge + 3 * algebra._CHANNEL_PASS_BYTES // 2
+    assert requests == ([] if tensor else [m])
+    np.testing.assert_array_equal(actual[0], expected[0])
