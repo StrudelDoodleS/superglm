@@ -162,6 +162,44 @@ def test_fit_builds_each_penalty_support_once(monkeypatch, discrete):
     )
 
 
+@pytest.mark.parametrize("path", ["direct", "scop"])
+def test_fitted_model_keeps_no_raw_receipts(monkeypatch, path):
+    from superglm import Constraint
+    from superglm.features.spline import PSpline
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    # One spline is refused by the agreement and one admitted, so the final
+    # context holds a refusal and a family receipt until they are released.
+    agreement, refused = algebra._solver_penalty_agreement, []
+
+    def refuse_the_smaller_spline(support, stored, root, root_error):
+        if stored.shape[0] == 7:
+            refused.append(stored.shape)
+            raise PenaltyNumericalError("refused by the test")
+        return agreement(support, stored, root, root_error)
+
+    monkeypatch.setattr(algebra, "_solver_penalty_agreement", refuse_the_smaller_spline)
+    rng = np.random.default_rng(7)
+    x, z1, z2 = rng.uniform(size=(3, 400))
+    mean = np.exp(-0.2 + 0.8 * x + 0.4 * np.sin(5 * z1) + 0.3 * z2**2)
+    y = mean * rng.gamma(8.0, 1 / 8.0, size=400)
+    features = {"z1": Spline(kind="ps", k=8), "z2": Spline(kind="ps", k=10)}
+    if path == "scop":
+        features["x"] = PSpline(n_knots=6, constraint=Constraint.fit.increasing)
+    model = SuperGLM(family="gamma", selection_penalty=0.0, features=features)
+    model.fit_reml(pd.DataFrame({"x": x, "z1": z1, "z2": z2}), y, max_reml_iter=5)
+    geometries = {item.name: item._penalty_geometry for item in model._reml_penalties}
+    assert refused
+    assert geometries["z1"].coordinate_map is None
+    assert geometries["z2"].coordinate_map is not None
+    assert all(
+        geometry.raw_family is None
+        and geometry.raw_summary is None
+        and geometry.raw_refusal is None
+        for geometry in geometries.values()
+    )
+
+
 def test_raw_support_has_the_solver_space_rank_and_log_lambda_derivatives():
     # Log-determinant values are checked against exact targets below; the two
     # supports' values certify different representatives, so they are not

@@ -286,6 +286,54 @@ def test_fit_local_receipts_are_dropped_when_the_context_is_copied(method):
     assert _evaluate(target) == _evaluate(_build(raw, target_map))
 
 
+def test_non_direct_finalization_keeps_no_raw_receipts():
+    from superglm.model import reml_finalize
+
+    raw, target_map = _inputs()
+    source = _build(raw, np.eye(3))
+    group = SimpleNamespace(name="shared", sl=slice(0, 3), size=3)
+    target_matrix = SimpleNamespace(
+        R_inv=target_map,
+        omega=sum(raw),
+        omega_components=list(zip(("a", "b", "c"), raw, strict=True)),
+    )
+
+    class ReachedTerminalContextError(Exception):
+        pass
+
+    class Model(SimpleNamespace):
+        # Stop once finalization has published its terminal penalty context.
+        def __setattr__(self, name, value):
+            super().__setattr__(name, value)
+            if name == "_reml_result":
+                raise ReachedTerminalContextError
+
+    model = Model(_dm=SimpleNamespace(group_matrices=[target_matrix]), _groups=[group])
+    best = SimpleNamespace(pirls_result=None, lambdas=_values())
+    with pytest.raises(ReachedTerminalContextError):
+        reml_finalize.finalize_reml_fit(
+            model,
+            best=best,
+            use_direct=False,
+            reml_groups=[(0, group)],
+            reml_penalties=source,
+            y=np.zeros(4),
+            sample_weight=np.ones(4),
+            offset=None,
+            offset_arr=np.zeros(4),
+            max_pirls_iter=10,
+            pirls_tol=1e-9,
+            qp_passthrough=False,
+            qp_saved_state=None,
+            profile={},
+            total_start=0,
+            compute_fit_stats=lambda *_args: None,
+        )
+    geometry = algebra._context_geometry(model._reml_penalties)
+    assert geometry.coordinate_map is not None
+    assert geometry.raw_family is None and geometry.raw_summary is None
+
+
 def test_finalization_passes_the_optimizer_family_to_the_new_ssp_context(monkeypatch):
     from superglm.model import reml_finalize
 
