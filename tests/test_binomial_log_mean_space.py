@@ -21,20 +21,32 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, LambdaPolicy, Numeric, RandomEffect, SuperGLM
+from superglm import (
+    BSplineSmooth,
+    Categorical,
+    Constraint,
+    LambdaPolicy,
+    Numeric,
+    RandomEffect,
+    SuperGLM,
+)
 from superglm.diagnostics.separation import SeparationWarning
 from superglm.distributions import Binomial, Gamma, Poisson
 from superglm.links import CauchitLink, CloglogLink, LogitLink, LogLink, ProbitLink
+from superglm.model.input_validation import FractionalFrequencyWeightWarning
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.irls_state import (
     _mean_space_halving_budget,
     mean_space_boundary_rows,
+    mean_space_clipped_rows,
+    mean_space_score_rows,
     mean_space_violation,
 )
-from superglm.solvers.mode_score import mode_certification_bar
+from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR, mode_certification_bar
 
 _U = 2.0**-53  # unit roundoff, and the spacing of float64 just below one
+_EPS = 2.0**-52  # machine epsilon, the spacing of float64 above one
 
 
 def _thin_event_levels() -> tuple[pd.DataFrame, np.ndarray]:
@@ -247,11 +259,14 @@ def _two_level_fit(offset_a: float, offset_b: float, direct_solve: str) -> Super
 def _assert_at_the_two_level_mle(model: SuperGLM, offset_a: float, offset_b: float) -> None:
     """Converged, with both levels at ``log(1/2)`` within what the deviance stop resolves.
 
-    Each level's deviance ``-2 eta - 2 log(1 - e^eta)`` has curvature 4 at its
-    maximum, where Fisher scoring's curvature equals the observed one
-    (``2p/(1-p) = p/(1-p)^2`` at ``p = 1/2``), so the iteration contracts at
-    least by half near it and the excess before the stop is at most twice the
-    last change, ``2 tol |D|``.  That bounds each level by ``sqrt(tol |D|)``.
+    The deviance stop is ``|D - D_prev| < tol (|D_prev| + 1)``
+    (``_irls_objective_relative_change``).  Each level's deviance ``-2 eta - 2
+    log(1 - e^eta)`` has curvature 4 at its maximum, where Fisher scoring's
+    curvature equals the observed one (``2p/(1-p) = p/(1-p)^2`` at ``p =
+    1/2``), so the iteration contracts at least by half near it and the excess
+    left after the stop is at most the last change.  A level ``delta`` from its
+    maximum carries an excess ``2 delta^2``, so ``delta <= sqrt(tol (|D_prev|
+    + 1) / 2)``, within ``sqrt(tol |D|)`` at ``|D| = 8 log 2 >= 1``.
     """
     assert model.result.converged
     assert model.result.termination_reason == "converged"
@@ -285,12 +300,214 @@ def test_a_level_below_the_clip_floor_is_not_a_converged_fit(direct_solve: str, 
     the clipped deviance is flat in ``eta``.  A step that leaves the level
     there changed nothing the deviance stop can see, which reported a wrong
     fit as converged at -35 and -40 (probabilities ``1e-7`` and 1/2,
-    deviance 35.0088).  The stop is refused while an event row sits below
-    the floor, and the fit goes on to the maximum.  Master returns these
+    deviance 35.0088).  A stop is accepted only where the binomial/log score
+    certifies it, so the fit goes on to the maximum.  Master returns these
     fits unconverged from an infeasible start, with a "probability" of 1.83.
     """
     model = _two_level_fit(-float(depth), 1.3, direct_solve)
     _assert_at_the_two_level_mle(model, -float(depth), 1.3)
+
+
+def _three_row_fit(y, offset, weights, direct_solve: str) -> SuperGLM:
+    """Sol's #437 fixture: two levels of three rows, the first with its own offset and weight."""
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        weight_semantics="frequency",
+        features={"g": Categorical(base="first")},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FractionalFrequencyWeightWarning)
+        model.fit(
+            pd.DataFrame({"g": ["a", "a", "a", "b", "b", "b"]}),
+            np.tile(np.asarray(y, dtype=float), 2),
+            offset=np.tile(np.asarray(offset, dtype=float), 2),
+            sample_weight=np.tile(np.asarray(weights, dtype=float), 2),
+        )
+    return model
+
+
+def _common_rows(model: SuperGLM, offset) -> np.ndarray:
+    """Each level's probability on its two rows at the common offset."""
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept
+    return np.exp(eta + np.tile(np.asarray(offset, dtype=float), 2))[[1, 4]]
+
+
+# Both three-row fixtures have a common-row probability near 1/2 at their
+# maximum, where the six rows' scores sum in size to under 4.001 and each
+# level's score falls by more than 1.99 per unit of its shift (the common
+# non-event's observed curvature p / (1 - p)^2 = 2).  The certificate holds the
+# intercept's score within bar sum|s| and level b's centred score within
+# bar sum|s| / 2, so each level's score is within 2.5 bar sum|s| and its log
+# probability within 2.5 bar 4.001 / 1.99 < 5.1 bar of the maximum.
+_THREE_ROW_LOG_P_BOUND = 5.1 * MODE_CERTIFICATION_BAR
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
+def test_a_clipped_non_event_row_does_not_certify_a_stop(direct_solve: str) -> None:
+    """Sol's #437 fixture: a non-event of weight 1e14 per level at offset -30, the rest at +10.
+
+    The heavy rows sit far below ``clip_mu``'s floor, where each adds a flat
+    ``-2 w log(1 - 1e-7) ~ 2e7`` to the clipped deviance: that constant made
+    the relative deviance stop pass after one step, at a common-row
+    probability of 0.049.  The maximum solves the level's score equation ``1 -
+    p / (1 - p) - w q / (1 - q) = 0``, ``q = p e^-40``: ``p = 0.4999468955724079``
+    (Sol's 70-digit oracle).  The stop is accepted only on the binomial/log
+    score, so the fit goes on to it.
+    """
+    offset = [-30.0, 10.0, 10.0]
+    model = _three_row_fit([0, 0, 1], offset, [1e14, 1, 1], direct_solve)
+    assert model.result.converged
+    assert model.result.termination_reason == "converged"
+    p_star = 0.4999468955724079
+    assert np.max(np.abs(np.log(_common_rows(model, offset) / p_star))) <= _THREE_ROW_LOG_P_BOUND
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
+def test_an_optimum_beside_a_negligible_event_row_is_certified(direct_solve: str) -> None:
+    """Sol's #437 fixture: an event of weight 1e-12 per level at offset -20, the rest at +1.3.
+
+    The light row sits below ``clip_mu``'s floor, and the stop refused while
+    any event row did ran to max_iter at the maximum.  The certificate weighs
+    the row's score ``1e-12`` against the whole score instead, and accepts
+    the maximum ``p / (1 - p) = 1 + 1e-12``; the same model with every offset
+    shifted by -2 starts inside and reaches the same probabilities.
+    """
+    p_star = (1.0 + 1e-12) / (2.0 + 1e-12)
+    for offset in ([-20.0, 1.3, 1.3], [-22.0, -0.7, -0.7]):
+        model = _three_row_fit([1, 0, 1], offset, [1e-12, 1, 1], direct_solve)
+        assert model.result.converged
+        assert model.result.termination_reason == "converged"
+        p = _common_rows(model, offset)
+        assert np.max(np.abs(np.log(p / p_star))) <= _THREE_ROW_LOG_P_BOUND
+
+
+def _event_row_below_the_floor(shift: float, direct_solve: str):
+    """claude's #437 fixture: 200 rows at offset +2 and one event row at offset -25."""
+    rng = np.random.default_rng(0)
+    x = np.append(rng.uniform(-1.0, 1.0, 200), 0.3)
+    y = np.append((rng.uniform(size=200) < 0.2).astype(np.float64), 1.0)
+    offset = np.append(np.full(200, 2.0), -25.0) + shift
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={"x": Numeric()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SeparationWarning)
+        model.fit(pd.DataFrame({"x": x}), y, offset=offset)
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept + offset
+    return model, x, y, eta
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
+def test_an_event_row_the_clipped_iteration_ignores_is_not_certified(direct_solve: str) -> None:
+    """The event row's score is ``w y = 1`` wherever its mean is, but PIRLS does not see it.
+
+    Below ``clip_mu``'s floor PIRLS weights the row by ``mu'^2 / V(1e-7)``
+    and credits it with ``exp(eta) / 1e-7`` (about 4e-6) of its score, so the
+    clipped iteration settles on the maximum without the row, 0.13 standard
+    errors from the model's.  Master certified that state when the start was
+    inside (every offset shifted by -1); the previous refusal ran the other
+    to max_iter and a SeparationWarning.  The binomial/log score refuses both
+    stops, the score stops contracting, and both fits end uncertified at the
+    same state.  At it, the true score is the row's uncredited part,
+    ``(1 - c) (1, x_row)`` with ``c = exp(eta_row) / 1e-7``: the clipped score
+    is zero to the certificate's bar against ``sum |s|``.
+    """
+    fits = [_event_row_below_the_floor(shift, direct_solve) for shift in (0.0, -1.0)]
+    for model, x, y, eta in fits:
+        assert not model.result.converged
+        assert model.result.termination_reason == "score_stagnated"
+        score, _ = mean_space_score_rows(y, np.ones_like(y), eta)
+        uncredited = 1.0 - np.exp(eta[-1]) / 1e-7
+        tolerance = MODE_CERTIFICATION_BAR * float(np.sum(np.abs(score)))
+        assert abs(float(np.sum(score)) - uncredited) <= tolerance
+        assert abs(float(score @ x) - 0.3 * uncredited) <= tolerance
+    # one model: each fit's clipped score is within bar sum|s| per component,
+    # so their coefficients are within 2 sqrt(2) bar sum|s| / lambda_min of
+    # the clipped maximum's and every eta, |(1, x)| <= sqrt(2), within 4 bar
+    # sum|s| / lambda_min of the other's (lambda_min: the Fisher curvature's)
+    (first, x, y, eta_first), (second, _, _, eta_second) = fits
+    design = np.column_stack([np.ones_like(x), x])
+    score, fisher = mean_space_score_rows(y, np.ones_like(y), eta_first)
+    smallest = float(np.linalg.eigvalsh(design.T @ (fisher[:, None] * design))[0])
+    bound = 4.0 * MODE_CERTIFICATION_BAR * float(np.sum(np.abs(score))) / smallest
+    assert np.max(np.abs(eta_first - eta_second)) <= bound
+    assert abs(float(first.result.beta[0] - second.result.beta[0])) <= bound
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
+def test_a_constrained_lowered_fit_is_certified_with_its_multipliers(direct_solve: str) -> None:
+    """An increasing spline on a probability that rises then falls, offset by +1.5.
+
+    The lowered start brings the fit under the binomial/log certificate, and
+    its maximum has active monotonicity constraints: the penalized score is
+    balanced by their multipliers, ``G + A' m = 0`` with ``m >= 0``, not
+    zero.  The certificate tests that residual (without the multipliers this
+    fit ended ``score_stagnated``) and accepts the mode the no-offset fit
+    reaches, its deviance within the deviance stop's tolerance of it.
+    """
+    rng = np.random.default_rng(5)
+    n = 400
+    x = rng.uniform(0.0, 1.0, n)
+    y = (rng.uniform(size=n) < 0.1 + 0.3 * np.sin(np.pi * x)).astype(np.float64)
+    deviances = []
+    for shift in (0.0, 1.5):
+        model = SuperGLM(
+            family="binomial",
+            link="log",
+            selection_penalty=0.0,
+            direct_solve=direct_solve,
+            features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
+        )
+        model.fit(pd.DataFrame({"x": x}), y, offset=np.full(n, shift))
+        assert model.result.converged
+        assert model.result.termination_reason == "converged"
+        deviances.append(float(model.result.deviance))
+    assert abs(deviances[1] - deviances[0]) <= 2.0 * model._tol * (max(deviances) + 1.0)
+
+
+def test_the_clip_and_the_true_score_are_read_off_the_unclipped_eta() -> None:
+    """``mean_space_clipped_rows`` and ``mean_space_score_rows`` on each of their branches."""
+    family, link = Binomial(), LogLink()
+    # clip_mu holds 1e-7 <= mu <= 1 - 1e-7: rows below and above it count,
+    # events or not, when they carry weight, and so does exp's underflow
+    eta = np.array([-17.0, -17.0, -16.0, -1e-8, -1e-6, -800.0, -17.0])
+    y = np.array([0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+    weights = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])
+    assert mean_space_clipped_rows(family, link, eta, weights) == 4
+    assert mean_space_clipped_rows(family, LogitLink(), eta, weights) == 0
+    # the score w [y - (1 - y) mu / (1 - mu)] and Fisher weight w mu / (1 - mu)
+    # against 400-digit references (eta = -1e-300 needs 1 - mu to 300 digits):
+    # exp, expm1, the division and the product by w round once each, within 4
+    # eps of the reference; exp's underflow below eta ~ -745 gives the exact
+    # limits w y and 0
+    from decimal import Decimal, localcontext
+
+    eta = np.array([-800.0, -40.0, -1.0, -1e-12, -1e-300, -40.0, -1e-12])
+    y = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0])
+    weights = np.array([3.0, 1e14, 0.5, 2.0, 1.0, 1e-12, 7.0])
+    score, fisher = mean_space_score_rows(y, weights, eta)
+    with localcontext() as context:
+        context.prec = 400
+        for k in range(len(eta)):
+            mu = Decimal(float(eta[k])).exp()
+            odds = mu / (1 - mu)
+            w = Decimal(float(weights[k]))
+            response = Decimal(float(y[k]))
+            expected_score = float(w * (response - (1 - response) * odds))
+            expected_fisher = float(w * odds)
+            assert abs(score[k] - expected_score) <= 4.0 * _EPS * abs(expected_score)
+            assert abs(fisher[k] - expected_fisher) <= 4.0 * _EPS * abs(expected_fisher)
+    # outside the space: no likelihood with weight, nothing without
+    score, fisher = mean_space_score_rows(np.zeros(2), np.array([1.0, 0.0]), np.zeros(2))
+    assert not np.isfinite(score[0])
+    assert score[1] == 0.0 and fisher[1] == 0.0
 
 
 def test_the_halving_budget_reaches_the_fraction_to_the_boundary() -> None:

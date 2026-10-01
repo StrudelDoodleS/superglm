@@ -97,18 +97,21 @@ from superglm.solvers.irls_state import (
     _state_is_finite,
     interior_start_intercept,
     mean_space_boundary_rows,
-    mean_space_flat_event_rows,
+    mean_space_clipped_rows,
+    mean_space_score_rows,
     mean_space_violation,
 )
 from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
     MODE_RESOLVE_CAP,
     ModeResidual,
+    centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
     penalized_mode_residual,
     prior_weighted_centre,
     stagnation_window,
+    weighted_column_centring,
 )
 from superglm.solvers.pirls import (
     IterationDiagnostics,
@@ -1161,6 +1164,69 @@ def _fit_irls_direct_once(
             resolve_cap=MODE_RESOLVE_CAP,
         )
 
+    def true_mode_residual(
+        beta_values: NDArray,
+        intercept_value: float,
+        eta_values: NDArray,
+        active_rows: NDArray | None,
+    ) -> ModeResidual:
+        """The mode certificate on the binomial/log score itself, for a stop the clip can fool.
+
+        ``mode_residual``'s relative penalized score, bar, floors and weak
+        tests, evaluated on the score and Fisher weights of the unclipped
+        ``eta_values`` (``irls_state.mean_space_score_rows``) and centred on
+        those weights (``mode_score.weighted_column_centring``), not on the
+        clipped solve's system.  ``active_rows`` are the hard constraints
+        ``a' beta >= b`` active at the iterate: the stationarity of a
+        constrained mode is ``G + A' m = 0`` with ``m >= 0``, so the residual
+        tested is ``G + A' m`` at the non-negative least-squares ``m`` of its
+        Jacobi-scaled form.
+        """
+        score, fisher = mean_space_score_rows(y, weights, eta_values)
+        positive = weights > 0.0
+        mean_x, sum_w, diagonal = weighted_column_centring(dm, fisher, positive)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            scale = np.sqrt(np.maximum(diagonal, 0.0) / sum_w)
+        excluded = np.zeros(p, dtype=bool)
+        excluded[list(_laplace_excluded)] = True
+        if not _penalty_curvature:
+            _penalty_curvature.append(penalty_curvature())
+        penalty_score = penalty_matvec(beta_values)
+        penalty_magnitude = penalty_matvec(beta_values, magnitude=True)
+        if active_rows is not None and active_rows.size:
+            tiny = float(np.finfo(np.float64).tiny)
+            gradient = centred_data_score(dm, score, mean_x) - penalty_score
+            zeta = float(np.sum(np.abs(score))) / math.sqrt(max(sum_w, tiny))
+            jacobi = np.maximum(
+                zeta * np.sqrt(np.maximum(diagonal, 0.0) + np.maximum(_penalty_curvature[0], 0.0))
+                + np.abs(penalty_score),
+                tiny,
+            )
+            if np.all(np.isfinite(gradient)) and np.all(np.isfinite(jacobi)):
+                from scipy.optimize import nnls
+
+                multipliers = nnls(active_rows.T / jacobi[:, None], -gradient / jacobi)[0]
+                penalty_score = penalty_score - active_rows.T @ multipliers
+                penalty_magnitude = penalty_magnitude + np.abs(active_rows).T @ multipliers
+        shift = float(mean_x @ beta_values)
+        return penalized_mode_residual(
+            dm=dm,
+            row_score=score,
+            fisher_weights=fisher,
+            positive_prior=positive,
+            mean_x=mean_x,
+            centered_scale=np.where(np.isfinite(scale), scale, 0.0),
+            alpha=float(intercept_value) + shift,
+            eta_tilde=eta_values - offset - float(intercept_value) - shift,
+            penalty_score=penalty_score,
+            penalty_magnitude=penalty_magnitude,
+            penalty_curvature=_penalty_curvature[0],
+            sum_w=sum_w,
+            bar=mode_bar,
+            excluded=excluded,
+            resolve_cap=MODE_RESOLVE_CAP,
+        )
+
     trace_enabled = trace_run is not None and trace_run.enabled
     trace_basis_id = trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
     if not trace_enabled:
@@ -1842,6 +1908,9 @@ def _fit_irls_direct_once(
     mode_bar = MODE_CERTIFICATION_BAR if _mode_bar is None else float(_mode_bar)
     _stagnation_window = stagnation_window(max_iter, mode_bar)
     score_stagnated = False
+    # the binomial/log score's certificate ratio at every stop it refused
+    # (``true_mode_residual``), for the same stagnation stop
+    _true_ratios: list[float] = []
 
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
@@ -2857,16 +2926,52 @@ def _fit_irls_direct_once(
             convergence_value = None
         if step_rejected:
             converged_this_iter = False
-        if (
+        # A state holding rows at the boundary is never published as converged
+        # (``mean_space_boundary`` below), so its stop stands as on master.
+        at_boundary = bool(
             converged_this_iter
-            and _start_lowered
-            and mean_space_flat_event_rows(family, link, y, retained.eta_unclipped, weights)
-        ):
-            # A lowered start can put a level below clip_mu's floor, where the
-            # clipped deviance is flat but the true score still pushes the
-            # level's event rows up: a stop there is not at a mode, so the fit
-            # goes on (``irls_state.mean_space_flat_event_rows``).
-            converged_this_iter = False
+            and _mean_space_invalid is not None
+            and mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
+        )
+        # rows clip_mu holds, at the step's base or where it landed
+        clipped_rows = (
+            mean_space_clipped_rows(family, link, committed.eta_unclipped, weights)
+            + mean_space_clipped_rows(family, link, retained.eta_unclipped, weights)
+            if converged_this_iter and _mean_space_invalid is not None and not at_boundary
+            else 0
+        )
+        if converged_this_iter and not at_boundary and (clipped_rows or _start_lowered):
+            # On a row whose mean leaves clip_mu's band the clipped deviance
+            # is flat and the step's score is not the binomial/log score, and
+            # a lowered start can sit far below that band: a stop read off
+            # the clipped objective, or off a step taken from it, is accepted
+            # only where the model's own penalized score certifies it
+            # (``true_mode_residual``).  A refused stop goes on.  Each refused
+            # stop sits where the clipped iteration's own rule passed, so a
+            # score that has stopped contracting across them
+            # (``stagnation_window``) will not reach the bar: the fit ends
+            # uncertified, as under ``mode_score``.  SCOP's latent score is not
+            # formed, so a SCOP fit is never certified here.
+            if _has_scop:
+                true_ratio = math.inf
+            else:
+                true_ratio = true_mode_residual(
+                    retained.beta,
+                    retained.intercept,
+                    retained.eta_unclipped,
+                    (
+                        A_all[list(prev_active_set)]
+                        if has_constraints and A_all is not None and prev_active_set
+                        else None
+                    ),
+                ).ratio()
+            if not true_ratio <= 1.0:
+                converged_this_iter = False
+                _true_ratios.append(true_ratio)
+                score_stagnated = len(_true_ratios) > _stagnation_window and not (
+                    min(_true_ratios[-_stagnation_window:])
+                    < 0.5 * min(_true_ratios[:-_stagnation_window])
+                )
 
         constraints_feasible_this_iter = True
         if has_constraints:

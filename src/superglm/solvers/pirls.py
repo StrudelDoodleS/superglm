@@ -192,9 +192,10 @@ class REMLGeometrySummary:
 # sentinel: it labels an iteration that ended without ending the loop, so it
 # reaches the per-iteration diagnostics and the trace but never a result, which
 # carries only a reason that actually ended the fit. ``score_stagnated`` ends a
-# ``convergence="mode_score"`` solve whose certificate score stopped
-# contracting short of its bar (``irls_direct``: the iterate is at its
-# limiting accuracy; the mode is published as not converged, never refused).
+# solve whose certificate score stopped contracting short of its bar: a
+# ``convergence="mode_score"`` solve's, or a binomial/log fit's own score at
+# the stops it refused (``irls_direct``: the iterate is at its limiting
+# accuracy; the mode is published as not converged, never refused).
 # The gap runs the other way exactly once, and deliberately: the fitted-state
 # invalidation path stamps a synthetic marker of its own over the field through
 # a dynamic ``setattr`` this annotation cannot see, and that records a revision

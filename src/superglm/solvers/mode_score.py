@@ -389,6 +389,47 @@ def prior_weighted_centre(dm: DesignMatrix, prior_weights: NDArray) -> NDArray:
     return centre
 
 
+def weighted_column_centring(
+    dm: DesignMatrix, weights: NDArray, positive_prior: NDArray
+) -> tuple[NDArray, float, NDArray]:
+    """``(mean_x, sum_w, D)``: the ``weights``-weighted column means and centred diagonal.
+
+    ``D_jj = sum_r w_r (x_rj - mean_j)^2``, the centring
+    ``penalized_mode_residual`` scales a score by, formed from given working
+    weights instead of a solve's centred system.  The means take one
+    transpose product, a dense column's anchored at its first positive-weight
+    row (``prior_weighted_centre``).  A one-hot column's diagonal is in
+    closed form; every other column's comes from its own entries
+    (``column_sums``).  Zeros when no weight is positive.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    sum_w = float(np.sum(w))
+    p = dm.p
+    if not sum_w > 0.0:
+        return np.zeros(p), 0.0, np.zeros(p)
+    on_weight = dm.rmatvec(w)
+    mean_x = on_weight / sum_w
+    dense = np.zeros(p, dtype=bool)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        dense[offset : offset + width] = type(matrix) is DenseGroupMatrix
+        offset += width
+    if np.any(dense):
+        mean_x[dense] = prior_weighted_centre(dm, w)[dense]
+    diagonal = np.empty(p)
+    one_hot = one_hot_columns(dm)
+    centre = mean_x[one_hot]
+    diagonal[one_hot] = (
+        on_weight[one_hot] * (1.0 - centre) ** 2 + (sum_w - on_weight[one_hot]) * centre**2
+    )
+    other = np.flatnonzero(~one_hot)
+    if other.size:
+        zeros = np.zeros(dm.n)
+        diagonal[other] = column_sums(dm, other, mean_x, (zeros, zeros, w), positive_prior)[2]
+    return mean_x, sum_w, diagonal
+
+
 def two_sum(a, b):
     """Knuth's TwoSum: ``s = fl(a + b)`` and its rounding error, ``a + b = s + e`` exactly.
 
