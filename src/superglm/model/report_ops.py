@@ -765,7 +765,7 @@ def reconstruct_feature(model, name: str) -> dict[str, Any]:
             f"and an interaction. Use the feature or interaction spec "
             f"directly to disambiguate."
         )
-    from superglm.inference._term_model_ops import with_population_curve
+    from superglm.features.factor_smooth import with_population_curve
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)

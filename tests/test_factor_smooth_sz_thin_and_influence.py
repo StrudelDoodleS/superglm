@@ -1098,6 +1098,57 @@ def test_sz_reports_agree_with_the_population_prediction(variant) -> None:
     assert np.all(np.abs(drift) <= 2.0 * (bound + bound[0]))
 
 
+def test_term_inference_and_bands_report_the_population_curve() -> None:
+    """``term_inference`` (so ``plot`` and the editor) and the bands report the population curve.
+
+    The Claude review of 52c6b730: ``term_inference`` paired the unshifted
+    main-effect curve with the shifted curve's errors, and the simultaneous
+    bands drew the unshifted curve.  Every surface now takes the curve from
+    ``with_population_curve`` and its errors from ``_population_curve_map``:
+    ``term_inference`` equals ``relativities`` bit for bit, values and errors,
+    and the bands' values and errors are the same curve to the rounding of
+    their own products, ``gamma_(p + k)`` of ``|M||gamma| + |b||c|`` and
+    ``gamma_(2p + 4k)`` of ``|g|'|V||g|`` on a gram fit's dense covariance.
+    Mutation: ``term_inference`` unshifted.
+    """
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    relativity = model.relativities(with_se=True)["x"]
+    inference = model.term_inference("x", with_se=True)
+    assert np.array_equal(inference.log_relativity, relativity["log_relativity"].to_numpy())
+    assert np.array_equal(inference.se_log_relativity, relativity["se_log_relativity"].to_numpy())
+
+    bands = model.simultaneous_bands("x", n_sim=2_000)
+    grid = bands["x"].to_numpy()
+    main = model._specs["x"]
+    group = next(g for g in model._groups if g.name == "x")
+    term = next(g for g in model._groups if g.name == "x:g:sz")
+    gamma = np.asarray(model.result.beta[group.sl])
+    blocks = spec._level_blocks(np.asarray(model.result.beta[term.sl]))
+    offset = spec._population_offset(blocks)
+    M, B = main.transform(grid), spec.marginal_basis(grid)
+    size = np.abs(M) @ np.abs(gamma) + np.abs(B) @ np.abs(offset)
+    count = len(gamma) + spec.k
+    assert np.all(
+        np.abs(bands["log_relativity"].to_numpy() - relativity["log_relativity"].to_numpy())
+        <= 2.0 * _gamma(count) * size
+    )
+    covariance, active = model._coef_covariance
+    V = np.asarray(covariance, dtype=np.float64)
+    main_active = next(g for g in active if g.feature_name == "x")
+    term_active = next(g for g in active if g.feature_name == "x:g:sz")
+    G = np.zeros((len(grid), len(V)))
+    G[:, main_active.start : main_active.end] = M
+    G[:, term_active.start : term_active.end] = B @ spec._population_contrast()
+    reach = np.einsum("ij,jk,ik->i", np.abs(G), np.abs(V), np.abs(G))
+    se = bands["se"].to_numpy()
+    reference = relativity["se_log_relativity"].to_numpy()
+    assert np.all(
+        np.abs(se * se - reference * reference) <= 4.0 * _gamma(2 * len(V) + 4 * spec.k) * reach
+    )
+
+
 def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
     """The reported curves' errors are those of the contrasts they report (#432; Opus P2).
 

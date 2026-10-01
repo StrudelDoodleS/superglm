@@ -72,27 +72,27 @@ def _scatter_centered_variance(
     return mean_centered_variance(variance, cross, float(weights @ column))
 
 
-def _population_curve_se(
+def _population_curve_map(
     spline_spec,
     name: Hashable,
     feature_groups: list[GroupSlice],
     active_groups: list[GroupSlice],
     Cov_active,
-    interaction_specs: Mapping[Any, Any],
+    interaction_specs: Mapping[Any, Any] | None,
+    x_grid: NDArray,
     *,
-    n_points: int,
     center: bool,
-) -> NDArray | None:
-    """The errors of a main-effect curve shifted onto its ``sz`` population curve (#432).
+) -> tuple[NDArray, NDArray] | None:
+    """``(M, V_f)``: a main-effect curve's map and covariance on its ``sz`` population curve (#432).
 
     The reported curve is ``f(x) = M(x) gamma + sum_terms b(x)' C theta``
-    (``_term_model_ops.with_population_curve``; ``C`` each term's
+    (``factor_smooth.with_population_curve``; ``C`` each term's
     ``FactorSmooth._population_contrast`` on its coefficients ``theta``), so
-    ``var f = diag(M V_mm M') + 2 diag(M V_m. L B') + diag(B L' V L B')``
-    with ``L`` the terms' ``C'`` placed in their rows: one product of the
-    covariance with ``L``, ``k`` columns a term.  ``center`` reports ``f -
-    mean f``, whose map is ``M`` and ``B`` less their column means.  None when
-    no ``sz`` term moves the curve, or the curve or a term is inactive.
+    ``V_f = M V_mm M' + M V_m. L B' + B L' V_.m M' + B L' V L B'`` with ``L``
+    the terms' ``C'`` placed in their rows: one product of the covariance
+    with ``L``, ``k`` columns a term.  ``center`` maps ``f - mean f``: ``M``
+    and ``B`` less their column means.  None when no ``sz`` term moves the
+    curve, or the curve or a term is inactive.
     """
     from superglm.features.factor_smooth import population_curve_terms
 
@@ -107,7 +107,6 @@ def _population_curve_se(
             return None
         term_groups.append((group, term))
     indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
-    x_grid = np.linspace(spline_spec._lo, spline_spec._hi, n_points)
     M = np.asarray(spline_spec.transform(x_grid), dtype=np.float64)
     M = M[:, _active_subgroup_columns(name, feature_groups, active_subs)]
     lifted = np.zeros((Cov_active.shape[0], sum(term.k for _, term in term_groups)))
@@ -124,12 +123,37 @@ def _population_curve_se(
         B = B - B.mean(axis=0)
     product = np.asarray(_covariance_apply(Cov_active, lifted), dtype=np.float64)
     Cov_g = np.asarray(Cov_active[np.ix_(indices, indices)], dtype=np.float64)
-    variance = (
-        np.sum((M @ Cov_g) * M, axis=1)
-        + 2.0 * np.sum((M @ product[indices]) * B, axis=1)
-        + np.sum((B @ (lifted.T @ product)) * B, axis=1)
+    cross = M @ product[indices] @ B.T
+    V_f = M @ Cov_g @ M.T + cross + cross.T + B @ (lifted.T @ product) @ B.T
+    return M, 0.5 * (V_f + V_f.T)
+
+
+def _population_curve_se(
+    spline_spec,
+    name: Hashable,
+    feature_groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    Cov_active,
+    interaction_specs: Mapping[Any, Any] | None,
+    *,
+    n_points: int,
+    center: bool,
+) -> NDArray | None:
+    """The errors of a main-effect curve on its ``sz`` population curve (``_population_curve_map``)."""
+    x_grid = np.linspace(spline_spec._lo, spline_spec._hi, n_points)
+    mapped = _population_curve_map(
+        spline_spec,
+        name,
+        feature_groups,
+        active_groups,
+        Cov_active,
+        interaction_specs,
+        x_grid,
+        center=center,
     )
-    return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+    if mapped is None:
+        return None
+    return cast(NDArray, np.sqrt(np.maximum(np.diag(mapped[1]), 0.0)))
 
 
 def feature_se_from_cov(
@@ -360,6 +384,7 @@ def simultaneous_bands(
     n_points: int = 200,
     seed: int = 42,
     center: bool = False,
+    interaction_specs: Mapping[Any, Any] | None = None,
 ) -> pd.DataFrame:
     """Simultaneous confidence bands for a spline feature.
 
@@ -367,7 +392,11 @@ def simultaneous_bands(
     quantile of ``max_x |f(x)| / se(x)`` over the whole grid, and centering
     changes both the numerator and the denominator, so it is a different
     number rather than the same one applied to shifted values -- which is why
-    it is computed here through the centered map rather than reused.
+    it is computed here through the centered map rather than reused.  A curve
+    an ``sz`` term moves onto its population curve (``interaction_specs``,
+    #432) is banded on that curve: its values carry ``b(x)' c`` and its
+    draws the curve's covariance ``V_f`` (``_population_curve_map``),
+    simulated through ``V_f``'s eigendecomposition.
     """
     from scipy.stats import norm
 
@@ -411,9 +440,30 @@ def simultaneous_bands(
     log_rel = M @ beta_g
 
     rng = np.random.default_rng(seed)
-    L = np.linalg.cholesky(Cov_g + 1e-12 * np.eye(Cov_g.shape[0]))
-    beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ L.T
-    f_sim = beta_sim @ M.T
+    mapped = _population_curve_map(
+        spec,
+        feature,
+        feature_groups,
+        active_groups,
+        Cov_active,
+        interaction_specs,
+        x_grid,
+        center=center,
+    )
+    if mapped is not None:
+        from superglm.features.factor_smooth import population_curve_shift
+
+        shift = population_curve_shift(feature, x_grid, interaction_specs, groups, beta)
+        assert shift is not None
+        log_rel = log_rel + (shift - shift.mean() if center else shift)
+        values, vectors = np.linalg.eigh(mapped[1])
+        root = vectors * np.sqrt(np.maximum(values, 0.0))[None, :]
+        se = np.sqrt(np.maximum(np.diag(mapped[1]), 0.0))
+        f_sim = rng.standard_normal((n_sim, len(values))) @ root.T
+    else:
+        L = np.linalg.cholesky(Cov_g + 1e-12 * np.eye(Cov_g.shape[0]))
+        beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ L.T
+        f_sim = beta_sim @ M.T
 
     se_safe = np.maximum(se, 1e-20)
     T_sim = np.max(np.abs(f_sim) / se_safe[np.newaxis, :], axis=1)

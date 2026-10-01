@@ -948,4 +948,26 @@ def population_curve_shift(
     return shift
 
 
+def with_population_curve(
+    raw: dict[str, Any], name: Any, interaction_specs: Any, groups: Any, beta: NDArray
+) -> dict[str, Any]:
+    """A main-effect curve shifted onto its ``sz`` terms' population curve (#432).
+
+    With ``sz`` levels left out of the population the curve the model
+    predicts for the population is ``main(x) + b(x)' c``
+    (``population_curve_shift``), so every report of the main effect's curve
+    (relativities, reconstruct, term inference, bands) is that one; a curve
+    no ``sz`` term moves is returned as it is.
+    """
+    if "x" not in raw or "log_relativity" not in raw:
+        return raw
+    shift = population_curve_shift(name, raw["x"], interaction_specs, groups, beta)
+    if shift is None:
+        return raw
+    shifted = dict(raw)
+    shifted["log_relativity"] = np.asarray(raw["log_relativity"], dtype=np.float64) + shift
+    shifted["relativity"] = np.exp(shifted["log_relativity"])
+    return shifted
+
+
 __all__ = ["FactorSmooth"]
