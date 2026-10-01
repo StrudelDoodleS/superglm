@@ -174,6 +174,27 @@ def mean_space_boundary_rows(
     return int(np.count_nonzero((eta_unclipped >= _BINOMIAL_LOG_CAP_ETA) & (weights > 0.0)))
 
 
+def mean_space_flat_event_rows(
+    family: Distribution, link: Link, y: NDArray, eta_unclipped: NDArray, weights: NDArray
+) -> int:
+    """Positive-weight event rows whose mean sits below ``clip_mu``'s floor.
+
+    Zero for a family and link whose means cannot leave the mean space.  Below
+    the floor ``1e-7`` the clipped binomial deviance is flat in ``eta``, so a
+    deviance or coefficient stop sees no change there.  The row's true
+    binomial/log score ``w (y - mu) / (1 - mu)`` is close to ``w y > 0``, so
+    it still pushes ``eta`` up.  A state holding such a row is therefore not
+    a mode the clipped objective can certify.  A non-event row there is only
+    approaching ``mu = 0`` along a separated direction, and is left alone.
+    """
+    if mean_space_violation(family, link) is None:
+        return 0
+    with np.errstate(under="ignore"):
+        mean = link.inverse(stabilize_eta(np.asarray(eta_unclipped, dtype=float), link))
+    flat = (mean < _BINOMIAL_CLIP_MU_EPS) & (np.asarray(y) > 0.0) & (weights > 0.0)
+    return int(np.count_nonzero(flat))
+
+
 def interior_start_intercept(
     family: Distribution,
     link: Link,

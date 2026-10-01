@@ -97,6 +97,7 @@ from superglm.solvers.irls_state import (
     _state_is_finite,
     interior_start_intercept,
     mean_space_boundary_rows,
+    mean_space_flat_event_rows,
     mean_space_violation,
 )
 from superglm.solvers.mode_score import (
@@ -2855,6 +2856,16 @@ def _fit_irls_direct_once(
             converged_this_iter = False
             convergence_value = None
         if step_rejected:
+            converged_this_iter = False
+        if (
+            converged_this_iter
+            and _start_lowered
+            and mean_space_flat_event_rows(family, link, y, retained.eta_unclipped, weights)
+        ):
+            # A lowered start can put a level below clip_mu's floor, where the
+            # clipped deviance is flat but the true score still pushes the
+            # level's event rows up: a stop there is not at a mode, so the fit
+            # goes on (``irls_state.mean_space_flat_event_rows``).
             converged_this_iter = False
 
         constraints_feasible_this_iter = True

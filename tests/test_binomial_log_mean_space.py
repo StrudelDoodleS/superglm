@@ -15,6 +15,7 @@ start or says why none exists.
 from __future__ import annotations
 
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -26,7 +27,11 @@ from superglm.distributions import Binomial, Gamma, Poisson
 from superglm.links import CauchitLink, CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.irls_state import mean_space_boundary_rows, mean_space_violation
+from superglm.solvers.irls_state import (
+    _mean_space_halving_budget,
+    mean_space_boundary_rows,
+    mean_space_violation,
+)
 from superglm.solvers.mode_score import mode_certification_bar
 
 _U = 2.0**-53  # unit roundoff, and the spacing of float64 just below one
@@ -221,17 +226,8 @@ def test_a_positive_offset_starts_inside_the_mean_space(direct_solve: str) -> No
             )
 
 
-@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
-def test_a_lowered_start_reaches_a_trial_inside_the_space(direct_solve: str) -> None:
-    """Sol's #437 fixture: the first step needs more than the ordinary 20 halvings.
-
-    With offsets -16 and +1.3 the lowered start puts level a at eta ~ -18 and
-    the Fisher proposal moves it by ~3e7, so only a fraction below ~6e-7 of
-    the step stays inside ``eta < 0``: past 2^-20.  Backtracking reaches the
-    fraction to the boundary instead of rejecting the step, and the fit
-    reaches the maximum, both probabilities 1/2 with deviance ``8 log 2``,
-    within the deviance stop's own ``tol |D|``.
-    """
+def _two_level_fit(offset_a: float, offset_b: float, direct_solve: str) -> SuperGLM:
+    """Two Categorical levels, one event and one non-event each: both MLE probabilities 1/2."""
     model = SuperGLM(
         family="binomial",
         link="log",
@@ -242,12 +238,89 @@ def test_a_lowered_start_reaches_a_trial_inside_the_space(direct_solve: str) -> 
     model.fit(
         pd.DataFrame({"g": ["a", "a", "b", "b"]}),
         np.array([0.0, 1.0, 0.0, 1.0]),
-        offset=np.array([-16.0, -16.0, 1.3, 1.3]),
+        offset=np.array([offset_a, offset_a, offset_b, offset_b]),
+        record_diagnostics=True,
     )
+    return model
+
+
+def _assert_at_the_two_level_mle(model: SuperGLM, offset_a: float, offset_b: float) -> None:
+    """Converged, with both levels at ``log(1/2)`` within what the deviance stop resolves.
+
+    Each level's deviance ``-2 eta - 2 log(1 - e^eta)`` has curvature 4 at its
+    maximum, where Fisher scoring's curvature equals the observed one
+    (``2p/(1-p) = p/(1-p)^2`` at ``p = 1/2``), so the iteration contracts at
+    least by half near it and the excess before the stop is at most twice the
+    last change, ``2 tol |D|``.  That bounds each level by ``sqrt(tol |D|)``.
+    """
     assert model.result.converged
     assert model.result.termination_reason == "converged"
-    optimum = 8.0 * np.log(2.0)
-    assert abs(float(model.result.deviance) - optimum) <= 2.0 * model._tol * optimum
+    offset = np.array([offset_a, offset_a, offset_b, offset_b])
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept + offset
+    bound = np.sqrt(model._tol * abs(float(model.result.deviance)))
+    assert float(np.max(np.abs(eta - np.log(0.5)))) <= bound
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
+def test_a_lowered_start_reaches_a_trial_inside_the_space(direct_solve: str) -> None:
+    """Sol's #437 fixture: the first step needs more than the ordinary 20 halvings.
+
+    With offsets -16 and +1.3 the lowered start puts level a at eta ~ -18 and
+    the Fisher proposal moves it by ~3e7, so only a fraction below ~6e-7 of
+    the step stays inside ``eta < 0``: past 2^-20.  Backtracking reaches the
+    fraction to the boundary instead of rejecting the step, and the fit
+    reaches the maximum.
+    """
+    model = _two_level_fit(-16.0, 1.3, direct_solve)
+    assert model.result.iteration_log[0].step_halvings > 20
+    _assert_at_the_two_level_mle(model, -16.0, 1.3)
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram"])
+@pytest.mark.parametrize("depth", range(20, 41))
+def test_a_level_below_the_clip_floor_is_not_a_converged_fit(direct_solve: str, depth: int) -> None:
+    """Sol's #437 fixture over offsets -20 to -40: no stop on the flat clipped deviance.
+
+    The lowered start puts level a below ``clip_mu``'s floor ``1e-7``, where
+    the clipped deviance is flat in ``eta``.  A step that leaves the level
+    there changed nothing the deviance stop can see, which reported a wrong
+    fit as converged at -35 and -40 (probabilities ``1e-7`` and 1/2,
+    deviance 35.0088).  The stop is refused while an event row sits below
+    the floor, and the fit goes on to the maximum.  Master returns these
+    fits unconverged from an infeasible start, with a "probability" of 1.83.
+    """
+    model = _two_level_fit(-float(depth), 1.3, direct_solve)
+    _assert_at_the_two_level_mle(model, -float(depth), 1.3)
+
+
+def test_the_halving_budget_reaches_the_fraction_to_the_boundary() -> None:
+    """``_mean_space_halving_budget`` on each of its branches."""
+    family, link = Binomial(), LogLink()
+    weights = np.ones(2)
+
+    def budget(eta, proposal, default=20, link=link):
+        return _mean_space_halving_budget(
+            committed=SimpleNamespace(eta_unclipped=np.asarray(eta, dtype=float)),
+            proposal=SimpleNamespace(eta_unclipped=np.asarray(proposal, dtype=float)),
+            weights=weights,
+            family=family,
+            link=link,
+            default=default,
+        )
+
+    # a link that stays in (0, 1), a start outside the space, no row moving up,
+    # and a fraction the ordinary budget reaches all keep the default
+    assert budget([-1.0, -1.0], [5.0, -1.0], link=LogitLink()) == 20
+    assert budget([0.0, -1.0], [5.0, -1.0]) == 20
+    assert budget([-1.0, -1.0], [-2.0, -1.5]) == 20
+    assert budget([-1.0, -1.0], [1.0, -1.0]) == 20
+    # t = 1 / 3e7: the first halving below t, then the ordinary budget
+    eta, step = -1.0, 3e7
+    depth = budget([eta, -1.0], [eta + step, -1.0]) - 20
+    fraction = -eta / step
+    assert 2.0**-depth < fraction <= 2.0 ** -(depth - 1)
+    # float64's halving depth caps it
+    assert budget([-1e-320, -1.0], [1.0, -1.0]) == 1074
 
 
 def _frequency_weighted_events(*, plain: bool, direct_solve: str) -> SuperGLM:
