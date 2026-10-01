@@ -2013,6 +2013,10 @@ def _cross_gram_sparse_ssp(
         def single() -> NDArray:
             return _csr_weighted_cross(a[0], a[1], a[2], b[0], b[1], b[2], W, p, q)
 
+        # A batched pass already holds at most _CHANNEL_PASS_BYTES (1 MiB), so
+        # with the shipped constants this guard only fires if that pass cap is
+        # ever raised above _MAX_CROSS_EXPANSION_BYTES (64 MiB); tests reach it
+        # by lowering the budget instead.
         if 8 * p * q * cache.channel_width(W, p * q) > _MAX_CROSS_EXPANSION_BYTES:
             raw = single()
         else:
