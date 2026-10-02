@@ -86,6 +86,27 @@ def test_finite_readings_infinitely_far_apart_are_refused(readings) -> None:
             if len(readings) == 4:
                 with recorder.measure("predictor_compilation"):
                     pass
+    recorder.snapshot()  # the refused span was never accumulated
+
+
+def test_finite_spans_that_sum_past_the_largest_float_are_refused() -> None:
+    # Two sibling observations of 1e308 each: every span is finite, but their
+    # inclusive and exclusive totals would overflow.
+    readings = iter((-1.0e308, 0.0, 0.0, 1.0e308))
+    recorder = FitPhaseRecorder(clock=lambda: next(readings))
+    with recorder.measure("likelihood_evaluation"):
+        pass
+
+    with pytest.raises(RuntimeError, match="totals must stay finite"):
+        with recorder.measure("likelihood_evaluation"):
+            pass
+    recorder.add("serialization", 1.0e308)
+    with pytest.raises(RuntimeError, match="totals must stay finite"):
+        recorder.add("serialization", 1.0e308)
+
+    snapshot = recorder.snapshot()  # every total kept is still finite
+    assert snapshot.exclusive_seconds["likelihood_evaluation"] == 1.0e308
+    assert snapshot.manual_seconds["serialization"] == 1.0e308
 
 
 def test_a_manual_sample_inside_an_open_phase_stays_out_of_the_partition() -> None:

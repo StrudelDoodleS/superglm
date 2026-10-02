@@ -35,6 +35,19 @@ def _validate_phase(name: str) -> str:
     return name
 
 
+def _accumulate(totals: dict[str, float], name: str, seconds: float) -> None:
+    """Add ``seconds`` to ``totals[name]``, refusing a total that overflows.
+
+    Each addend is finite, but finite addends can still sum past the largest
+    float; refusing here keeps a bad clock from surfacing later as an invalid
+    snapshot after the fit has finished.
+    """
+    total = totals[name] + seconds
+    if not math.isfinite(total):
+        raise RuntimeError("phase timing totals must stay finite")
+    totals[name] = total
+
+
 def _owned_seconds(values: Mapping[str, float], label: str) -> dict[str, float]:
     seconds = dict(values)
     if tuple(seconds) != PHASE_NAMES:
@@ -127,8 +140,8 @@ class FitPhaseRecorder:
         elapsed = float(seconds)
         if not math.isfinite(elapsed) or elapsed < 0.0:
             raise ValueError("phase seconds must be finite and non-negative")
-        self._seconds[phase] += elapsed
-        self._manual[phase] += elapsed
+        _accumulate(self._seconds, phase, elapsed)
+        _accumulate(self._manual, phase, elapsed)
         self._counts[phase] += 1
 
     def _read_clock(self) -> float:
@@ -148,7 +161,7 @@ class FitPhaseRecorder:
             # Two finite readings can still be infinitely far apart.
             if not math.isfinite(interval) or interval < 0.0:
                 raise RuntimeError("phase clock must return finite monotonic values")
-            self._exclusive[self._open[-1]] += interval
+            _accumulate(self._exclusive, self._open[-1], interval)
         if self._first_reading is None:
             self._first_reading = reading
         self._last_reading = reading
@@ -176,7 +189,7 @@ class FitPhaseRecorder:
             if not math.isfinite(elapsed):
                 raise RuntimeError("phase clock must return finite monotonic values")
             if phase not in self._open:
-                self._seconds[phase] += elapsed
+                _accumulate(self._seconds, phase, elapsed)
             self._counts[phase] += 1
 
     def _absorb(self, timed: FitPhaseRecorder) -> None:
@@ -194,9 +207,9 @@ class FitPhaseRecorder:
             self._last_reading = timed._last_reading
         for name in PHASE_NAMES:
             if name not in self._open:
-                self._seconds[name] += timed._seconds[name]
-            self._exclusive[name] += timed._exclusive[name]
-            self._manual[name] += timed._manual[name]
+                _accumulate(self._seconds, name, timed._seconds[name])
+            _accumulate(self._exclusive, name, timed._exclusive[name])
+            _accumulate(self._manual, name, timed._manual[name])
             self._counts[name] += timed._counts[name]
 
     def snapshot(self) -> FitPhaseSnapshot:
