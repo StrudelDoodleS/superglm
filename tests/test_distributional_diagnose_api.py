@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 import superglm
+import superglm.distributional.solver.solver as solver_module
 from superglm import SuperLSS
 from superglm.diagnostics.fit_report import (
     FitDiagnosticReport,
@@ -37,7 +38,9 @@ def profiled_face_fit() -> tuple[SuperLSS, FitPhaseSnapshot]:
     sign = np.tile(np.array([-1.0, 1.0]), 9)
     response = 0.4 + 0.006 * x + np.exp(-1.2 + 0.003 * z) * sign
     ticks = itertools.count()
-    recorder = FitPhaseRecorder(clock=lambda: next(ticks) * 0.001)
+    # A dyadic tick keeps every timing sum exact, so the profile's total can
+    # be compared with the recorded fit total without a rounding allowance.
+    recorder = FitPhaseRecorder(clock=lambda: next(ticks) * 2.0**-10)
     model = model_from_templates(
         family=GaussianLS(scale_floor=0.0),
         predictors=(
@@ -244,7 +247,7 @@ def test_diagnose_leads_with_work_timing_and_smoothing_metrics(
     assert profile.backtracked_proposals >= profile.rejected_proposals
     likelihood = next(item for item in profile.phases if item.name == "likelihood_evaluation")
     assert likelihood.calls == measured.counts["likelihood_evaluation"]
-    assert likelihood.seconds == measured.seconds["likelihood_evaluation"]
+    assert likelihood.seconds == measured.exclusive_seconds["likelihood_evaluation"]
     assert likelihood.fit_share == pytest.approx(likelihood.seconds / profile.fit_seconds)
     assert sum(item.fit_share for item in profile.phases) == pytest.approx(1.0)
     assert {item.name for item in profile.phases}.isdisjoint(
@@ -254,11 +257,11 @@ def test_diagnose_leads_with_work_timing_and_smoothing_metrics(
     terminal = next(
         item for item in profile.phases if item.name == "terminal_inference_and_null_fit"
     )
-    assert terminal.seconds == measured.seconds["inference_edf"]
+    assert terminal.seconds == measured.exclusive_seconds["inference_edf"]
     assert all(item.name != "inference_edf" for item in profile.phases)
     dense = next(item for item in profile.phases if item.name == "dense_predictor_matrices")
     assert dense.calls == measured.counts["dense_predictor_matrices"]
-    assert dense.seconds == measured.seconds["dense_predictor_matrices"]
+    assert dense.seconds == measured.exclusive_seconds["dense_predictor_matrices"]
     assert report.findings == diagnose_distributional_fit(fitted).findings
 
     rendered = report.render()
@@ -269,6 +272,56 @@ def test_diagnose_leads_with_work_timing_and_smoothing_metrics(
     assert "Coefficient fits" in rendered
     assert "Time distribution" in rendered
     assert "Smoothing parameters" in rendered
+
+
+def test_diagnose_counts_a_phase_nested_in_another_once(monkeypatch) -> None:
+    """Issue #446: a phase timed inside another is not charged to both.
+
+    With automatic lambdas, EFS initialisation builds the dense predictor
+    matrices inside ``layout_penalty_assembly``.  The fake clock jumps by
+    ``jump`` whenever the matrices are built, so counting the nested build in
+    both phases puts the reported phases past the fit total, which the
+    unfixed profile refused with a ValueError.  Integer readings keep every
+    sum exact.
+    """
+    jump = 2.0**20
+    readings = itertools.count()
+    offset = [0.0]
+    original = solver_module.dense_predictor_matrices
+
+    def slow_build(layout):
+        offset[0] += jump
+        return original(layout)
+
+    monkeypatch.setattr(solver_module, "dense_predictor_matrices", slow_build)
+    recorder = FitPhaseRecorder(clock=lambda: float(next(readings)) + offset[0])
+    x = np.linspace(0.0, 1.0, 80)
+    response = 0.3 + np.sin(2.0 * np.pi * x) + np.random.default_rng(446).normal(0.0, 0.25, 80)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor(
+                "location",
+                {
+                    "x": Spline(
+                        kind="cr", n_knots=6, lambda_policy={"wiggle": LambdaPolicy.estimate()}
+                    )
+                },
+            ),
+            Predictor("scale", {}),
+        ),
+    ).fit_reml(pd.DataFrame({"x": x}), response, phase_recorder=recorder)
+    measured = recorder.snapshot()
+    assert measured.seconds["layout_penalty_assembly"] > jump  # the build ran inside it
+
+    profile = model.diagnose().profile
+
+    assert profile is not None
+    phases = {item.name: item for item in profile.phases}
+    assert phases["dense_predictor_matrices"].seconds >= jump
+    assert phases["layout_penalty_assembly"].seconds < jump
+    assert profile.fit_seconds == measured.seconds["fit_total"]
+    assert sum(item.seconds for item in profile.phases) == profile.fit_seconds
 
 
 def test_exact_face_profile_names_the_driving_terms_without_contradicting_itself(

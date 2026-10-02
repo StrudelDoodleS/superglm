@@ -1281,7 +1281,8 @@ The report leads with the fit's work profile (`report.profile`):
   curvature and gradient assembly, decomposition solves, EFS updates and
   backtracking, terminal inference, ...) with each phase's share of the fit
   and its call count; time the phases do not cover is reported as
-  orchestration and unmeasured;
+  orchestration and unmeasured. A phase's time leaves out any phase that runs
+  inside it, so the shares add up to the whole fit;
 - one row per smoothing component: initial and final lambda, accepted moves,
   how often it led the largest accepted move, iterations spent at the cap, the
   term's terminal EDF, and its outcome: `finite`, `fixed` by the caller,

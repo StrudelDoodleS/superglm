@@ -444,6 +444,10 @@ def _phase_delta(
     return FitPhaseSnapshot(
         seconds={name: after.seconds[name] - before.seconds[name] for name in after.seconds},
         counts={name: after.counts[name] - before.counts[name] for name in after.counts},
+        exclusive_seconds={
+            name: after.exclusive_seconds[name] - before.exclusive_seconds[name]
+            for name in after.exclusive_seconds
+        },
     )
 
 
