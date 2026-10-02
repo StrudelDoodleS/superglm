@@ -592,3 +592,36 @@ def test_a_revision_far_from_its_public_intercept_commits():
     magnitude += np.abs(columns) @ np.abs(beta)
     bound = 2.0 * _gamma(beta.size + 3) * magnitude
     assert np.all(np.abs(edited.predict(frame) - raw) <= bound)
+
+
+def test_holdout_drop_term_reads_a_slope_edit_exactly():
+    """Dropping an edited numeric term in holdout diagnostics keeps the carried change's cancellation.
+
+    Claude's review of #453: the drop subtracted the term's ``c' beta`` after the
+    compensated sum had rounded at ``|alpha|``, and ``alpha`` holds the carried
+    ``c dbeta``.  On Sol's P2a fixture with a slope of 1.1 and holdout rows at
+    ``x = 0``, where dropping ``x`` changes nothing, the drop read 4.0 against
+    2.3333 and ``delta_deviance`` was 16.7.  v0.36.0 read 0.  The shift is now
+    subtracted inside the sum as exact products.  Bound: the two predictors
+    differ by at most twice the compensated sum's ``u |eta| + gamma_k^2``
+    magnitudes ``d``, so the deviances differ by ``2 sum |r| d + n d^2``.
+    """
+    frame = pd.DataFrame({"x": 1e16 * np.resize([0.0, 1.0, 2.0], 60)})
+    y = np.resize([2.0, 3.0, 2.0], 60)
+    model = _numeric_fit(frame, y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        edited = _slope_edited(model, frame, y, {"x": 1.1})
+    holdout = pd.DataFrame({"x": np.zeros(6)})
+    y_holdout = np.full(6, 2.5)
+    table = edited.term_drop_diagnostics(
+        frame, y, mode="holdout", X_val=holdout, y_val=y_holdout
+    ).set_index("feature")
+    result = edited.result
+    p = result.beta.size
+    magnitude = abs(float(result.centred_intercept)) + abs(result.centred_intercept_lo or 0.0)
+    magnitude += abs(float(np.asarray(result.state_center)[0]) * float(result.beta[0]))
+    eta = edited.predict(holdout)
+    d = 2.0 * ((_gamma(3 * p + 4) ** 2 + _U**2) * magnitude + _U * float(np.max(np.abs(eta))))
+    bound = 2.0 * float(np.sum(np.abs(y_holdout - eta))) * d + len(eta) * d**2
+    assert abs(float(table.loc["x", "delta_deviance"])) <= bound

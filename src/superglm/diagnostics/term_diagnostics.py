@@ -366,6 +366,17 @@ def _drop_term_holdout(
         pieces = contribution if isinstance(contribution, tuple) else (contribution,)
         contributions[term["name"]] = pieces
         accumulated.add_pieces(pieces)
+        if accumulated.compensated and centre_shifts[term["name"]] != 0.0:
+            # A compensated pair holds a carried c dbeta that the dropped term's
+            # c' beta cancels: subtract it inside the sum, as exact products,
+            # not after the one rounding at |alpha|.
+            from superglm.solvers.mode_score import two_product
+
+            shift = two_product(block, np.asarray(beta[term["beta_idx"]], dtype=np.float64))
+            contributions[term["name"]] = pieces + tuple(
+                float(value) for part in shift for value in np.ravel(part)
+            )
+            centre_shifts[term["name"]] = 0.0
 
     eta_full = stabilize_eta(accumulated.finish() + offset_arr, model._link)
     mu_full = clip_mu(model._link.inverse(eta_full), dist)
