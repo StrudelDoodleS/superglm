@@ -52,7 +52,15 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
 )
 from superglm.solvers.hessian_factor import HessianFactor
-from superglm.solvers.mode_score import _gamma, linear_predictor, penalized_mode_residual
+from superglm.solvers.mode_score import (
+    _gamma,
+    centre_offset_mean,
+    centred_matvec,
+    corrected_two_pass_pair,
+    dense_columns,
+    linear_predictor,
+    penalized_mode_residual,
+)
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
@@ -1052,6 +1060,25 @@ def observed_penalized_mode_score(
     excluded_mask[list(excluded_indices)] = True
     excluded_mask[np.asarray(excluded, dtype=np.intp)] = True
     bar = observed_mode_certification_bar() if bar is None else float(bar)
+    # The floors read the mode's intercept about mean_x and its centred rows
+    # X~ beta.  A centred state (design §3.8) reads them from its own alpha
+    # and (X - 1 c') beta and the offset of mean_x from c, formed on centred
+    # rows (``centre_offset_mean``); from the raw intercept and X beta they
+    # cancel c' beta at a column's offset, u |c' beta| in alpha and every row.
+    alpha_c = getattr(result, "centred_intercept", None)
+    centre = getattr(result, "state_center", None)
+    if alpha_c is None or centre is None:
+        shift = float(mean_x @ beta)
+        alpha = float(result.intercept) + shift
+        eta_tilde = dm.matvec(beta) - shift
+    else:
+        centre = np.asarray(centre, dtype=np.float64)
+        offset_mean = centre_offset_mean(
+            dm, geometry.weights, float(geometry.sum_w), centre, mean_x
+        )
+        shift = float(offset_mean @ beta)
+        alpha = float(alpha_c) + shift
+        eta_tilde = centred_matvec(dm, beta, centre) - shift
     residual = penalized_mode_residual(
         dm=dm,
         row_score=row_score,
@@ -1059,8 +1086,8 @@ def observed_penalized_mode_score(
         positive_prior=sample_weight > 0.0,
         mean_x=mean_x,
         centered_scale=centered_scale,
-        alpha=float(result.intercept) + float(mean_x @ beta),
-        eta_tilde=dm.matvec(beta) - float(mean_x @ beta),
+        alpha=alpha,
+        eta_tilde=eta_tilde,
         penalty_score=penalty_score,
         penalty_magnitude=penalty_magnitude,
         penalty_curvature=penalty_curvature,
@@ -1105,24 +1132,48 @@ def total_penalty_magnitude_matvec(
     return product
 
 
-def _stable_signed_mean(dm: DesignMatrix, weights: NDArray, sum_w: float) -> NDArray:
-    """Compute a signed weighted mean without subtracting large raw moments."""
+def _stable_signed_mean_pair(
+    dm: DesignMatrix, weights: NDArray, sum_w: float
+) -> tuple[NDArray, NDArray, NDArray | None]:
+    """``(mean_x, hi, lo)``: a signed weighted mean and, on dense columns, its exact pair.
+
+    The mean is ``anchor + lo`` from the corrected two-pass algorithm
+    (``mode_score.corrected_two_pass_pair``), never from large raw moments.
+    A ``DenseGroupMatrix`` column keeps the pair ``(anchor, lo)`` so its
+    rows centre as ``(x - hi) - lo`` (``centered_system.weighted_mean_pair``,
+    issue #430); every other column centres about the rounded mean, ``lo =
+    0``.  ``lo`` is ``None`` without a dense column.
+    """
+    anchor, offset_mean = _stable_signed_offset(dm, weights, sum_w)
+    mean = anchor + offset_mean
+    dense = dense_columns(dm)
+    if not np.any(dense):
+        return mean, mean, None
+    return mean, np.where(dense, anchor, mean), np.where(dense, offset_mean, 0.0)
+
+
+def _stable_signed_offset(
+    dm: DesignMatrix, weights: NDArray, sum_w: float
+) -> tuple[NDArray, NDArray]:
+    """``(anchor, lo)``: the signed weighted mean as an exact pair, every column.
+
+    The anchor is the rounded mean from a pass shifted by the first row that
+    carries weight, never row 0 as such: a zero-weight row 0 far from the
+    data set the remainder's scale (``x = [0, 1e16 - 2, 1e16, 1e16 + 2]`` at
+    ``w = [0, -0.1, 1, 1]`` read a centred Gram of 3.6 for 1.0526, and moving
+    that row last moved a Gaussian/log REML objective by 0.29).
+    """
     if dm.p == 0:
-        return np.zeros(0, dtype=np.float64)
-    anchor = np.asarray(dm.row_subset(np.array([0], dtype=np.intp)).toarray()[0], dtype=float)
-    total = np.zeros(dm.p, dtype=np.float64)
-    compensation = np.zeros(dm.p, dtype=np.float64)
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
     chunk_size = 8192
-    for start in range(0, dm.n, chunk_size):
-        stop = min(start + chunk_size, dm.n)
-        rows = np.arange(start, stop, dtype=np.intp)
-        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
-        contribution = (block - anchor).T @ weights[start:stop]
-        corrected = contribution - compensation
-        updated = total + corrected
-        compensation[...] = (updated - total) - corrected
-        total[...] = updated
-    return anchor + total / sum_w
+
+    def chunks():
+        for start in range(0, dm.n, chunk_size):
+            stop = min(start + chunk_size, dm.n)
+            rows = np.arange(start, stop, dtype=np.intp)
+            yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+
+    return corrected_two_pass_pair(chunks, np.asarray(weights, dtype=np.float64), sum_w, dm.p)
 
 
 def schur_curvature_is_negative(eigenvalues: NDArray, certificate) -> bool:
@@ -1470,20 +1521,22 @@ def build_observed_reml_geometry(
                 "observed working weights do not define a centered system at these coefficients"
             ) from error
         mean_x = centered.mean_x
+        centre, centre_lo = centered.centre_pair()
         data_gram = centered.data_gram
         hessian = centered.hessian
     else:
         if penalty is None:  # pragma: no cover - dense branch invariant
             raise RuntimeError("Dense observed geometry is missing its penalty.")
-        mean_x = _stable_signed_mean(dm, observed_w, sum_w)
+        mean_x, centre, centre_lo = _stable_signed_mean_pair(dm, observed_w, sum_w)
         # No retype seam on this branch: `centered_gram_rhs` validates shapes
         # only -- two row counts and a column count this function supplies
         # itself -- so it has nothing iterate-conditioned left to refuse.
         data_gram, _ = centered_gram_rhs(
             dm=dm,
             W=observed_w,
-            mean_x=mean_x,
+            mean_x=centre,
             z_centered=np.zeros(dm.n, dtype=np.float64),
+            mean_lo=centre_lo,
         )
         hessian = 0.5 * (data_gram + data_gram.T) + penalty
 
@@ -1505,7 +1558,8 @@ def build_observed_reml_geometry(
                     dm,
                     observed_w,
                     penalty,
-                    center=mean_x,
+                    center=centre,
+                    center_lo=centre_lo,
                 )
             )
         except ValueError as error:

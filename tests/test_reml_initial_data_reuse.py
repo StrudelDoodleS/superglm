@@ -132,7 +132,10 @@ def test_custom_group_does_not_enter_the_fixed_design_reuse_path(monkeypatch):
 
 
 def _seed_entry():
-    dm = DesignMatrix([DenseGroupMatrix(np.array([[-1.0], [0.0], [1.0]]))], n=3, p=1)
+    # a type the raw-moment rung admits, so its latch moves: a dense column
+    # never takes that rung (issue #430)
+    column = sparse.csr_matrix(np.array([[-1.0], [0.0], [1.0]]))
+    dm = DesignMatrix([SparseSSPGroupMatrix(column, np.ones((1, 1)))], n=3, p=1)
     W, z = np.array([1.0, 2.0, 1.0]), np.array([-1.0, 0.0, 1.0])
     state = centered_system.TabmatCenteringState()
     before = centered_system.TabmatCenteringState()

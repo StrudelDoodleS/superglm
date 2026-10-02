@@ -931,7 +931,7 @@ def _run_wall_time_suite(args: argparse.Namespace) -> dict[str, object]:
             "phase_timings_are_regression_gates": False,
         },
         "optimization_targets": {
-            "categorical_fit": "dispatch prepared Tabmat kernels instead of dense centering",
+            "categorical_fit": "centre the categorical on its packed path, not by dense centering",
         },
     }
     payload: dict[str, object] = {

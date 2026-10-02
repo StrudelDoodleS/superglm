@@ -105,7 +105,17 @@ def _immutable_path_array(values, *, dtype) -> NDArray:
 
 @dataclass(frozen=True)
 class PathResult:
-    """Immutable container for regularization path results."""
+    """Immutable container for regularization path results.
+
+    ``coef_path`` and ``intercept_path`` are each point's public coefficients
+    and raw intercept, and ``deviance_path`` its fitted deviance.  Beside a
+    numeric column far from zero (a year, an epoch time), ``X @ coef_path[i]
+    + intercept_path[i]`` cancels the column's offset against the intercept
+    and loses the rounding of that offset (tenths at 1e16), so it does not
+    reproduce ``deviance_path[i]``.  Predict with the fitted model, which
+    holds the last point, or refit at ``selection_penalty=lambda_seq[i]`` and
+    predict with that model: both carry the centred predictor.
+    """
 
     lambda_seq: NDArray  # shape (n_lambda,)
     coef_path: NDArray  # shape (n_lambda, p)
@@ -503,7 +513,11 @@ def _compute_null_mu(
         eta_null = stabilize_eta(null_result.intercept + offset, link)
         return clip_mu(link.inverse(eta_null), distribution)
 
-    y_bar = float(np.average(y, weights=weights))
+    from superglm.solvers.mode_score import compensated_weighted_mean
+
+    # the weighted mean to the rounding of its own value (np.average alone sat
+    # 1.5 ulp off on two adjacent-float levels, inflating the null deviance 5x)
+    y_bar = compensated_weighted_mean(y, weights)
     if isinstance(distribution, Binomial):
         y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
     elif isinstance(distribution, Gaussian):

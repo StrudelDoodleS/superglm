@@ -3,10 +3,11 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 
 from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
-from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, SparseGroupMatrix
 from superglm.model import SuperGLM
 from superglm.types import GroupSlice, LinearConstraintSet
 
@@ -1252,7 +1253,8 @@ class TestDirectSolverBasic:
         n = 50_000
         X_raw = np.column_stack([rng.normal(size=n), rng.normal(size=n)])
         y = 0.3 + X_raw @ np.array([0.1, -0.2]) + rng.normal(scale=0.1, size=n)
-        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
+        # a type the raw-moment rung admits: a dense column never takes it
+        dm = DesignMatrix([SparseGroupMatrix(sparse.csr_matrix(X_raw))], n=n, p=2)
         groups = [
             GroupSlice(
                 name="x",

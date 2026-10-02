@@ -45,7 +45,7 @@ from superglm.reml.penalty_algebra import (
     evaluate_tensor_pair_logdet_summaries,
     total_penalty_quadratic,
 )
-from superglm.reml.result import _map_beta_between_bases
+from superglm.reml.result import _map_beta_between_bases, _map_centred_state_between_bases
 from superglm.reml.scale import (
     GammaScaleProfileData,
     gaussian_reml_scale_terms,
@@ -55,7 +55,11 @@ from superglm.reml.scale import (
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.mode_score import linear_predictor, mode_certification_bar
+from superglm.solvers.mode_score import (
+    centred_warm_start,
+    linear_predictor,
+    mode_certification_bar,
+)
 from superglm.solvers.structured import (
     BlockSymmetricOperator,
     CenteredBlockOperator,
@@ -586,6 +590,15 @@ def finalize_reml_fit(
             offset=offset_arr,
             beta_init=beta_init,
             intercept_init=float(best.pirls_result.intercept),
+            # the optimizer's state, centred (design §3.8), read in the
+            # rebuilt basis as beta_init is
+            _centred_init=_map_centred_state_between_bases(
+                centred_warm_start(best.pirls_result),
+                solver_result.beta,
+                old_gms,
+                model._dm.group_matrices,
+                model._groups,
+            ),
             max_iter=max_pirls_iter,
             tol=final_tolerance,
             convergence="mode_score" if certified_terminal else "deviance",

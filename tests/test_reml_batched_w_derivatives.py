@@ -15,7 +15,7 @@ from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
 )
-from superglm.distributions import Poisson
+from superglm.distributions import Binomial, Poisson
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -24,7 +24,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
-from superglm.links import LogLink
+from superglm.links import LogitLink, LogLink
 from superglm.reml import w_derivatives
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -49,10 +49,15 @@ def _gram_bound(centered, weights):
     return 8 * gamma * (np.abs(centered).T @ (np.abs(weights)[:, None] * np.abs(centered)))
 
 
-def _serial_signed_grams(*, dm, weights, mean_x, chunk_size=8192):
+def _serial_signed_grams(*, dm, weights, mean_x, chunk_size=8192, mean_lo=None):
     return [
         centered_gram_rhs(
-            dm=dm, W=w, mean_x=mean_x, z_centered=np.zeros(dm.n), chunk_size=chunk_size
+            dm=dm,
+            W=w,
+            mean_x=mean_x,
+            z_centered=np.zeros(dm.n),
+            chunk_size=chunk_size,
+            mean_lo=mean_lo,
         )[0]
         for w in weights
     ]
@@ -153,13 +158,17 @@ def test_batched_signed_grams_boundaries_without_materializing_rows(monkeypatch,
             centered_signed_grams(dm=dm, weights=channels, mean_x=mean, chunk_size=chunk_size)
 
 
-def _correction_fixture(p=2, shift=1.0e8, storage=None):
+def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
     rng = np.random.default_rng(123)
     x = np.linspace(-1.5, 1.5, 320)
     X = np.column_stack((x, x**2 - np.mean(x**2), np.sin(3 * x)))[:, :p]
     if storage is not None:
         X[:, 2] = (np.arange(len(x)) % 3 == 0).astype(float)
-    y = rng.poisson(np.exp(0.25 + X @ np.array([0.35, -0.15, 0.2])[:p])).astype(float)
+    signal = 0.25 + X @ np.array([0.35, -0.15, 0.2])[:p]
+    if family == "poisson":
+        y = rng.poisson(np.exp(signal)).astype(float)
+    else:
+        y = (rng.uniform(size=len(x)) < 1.0 / (1.0 + np.exp(-signal))).astype(float)
     matrices = [DenseGroupMatrix(X[:, i : i + 1] + shift) for i in range(p)]
     if storage is not None:
 
@@ -193,7 +202,7 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None):
     ]
     lambdas = {g.name: 4.0 + i for i, g in enumerate(groups)}
     weights, offset = np.ones_like(x), np.zeros_like(x)
-    family, link = Poisson(), LogLink()
+    family, link = (Poisson(), LogLink()) if family == "poisson" else (Binomial(), LogitLink())
     result, inverse, _ = fit_irls_direct(
         X=dm,
         y=y,
@@ -224,7 +233,13 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None):
 
 @pytest.mark.parametrize("p,bounded", [(2, False), (3, True)])
 def test_first_order_batch_matches_serial_grams_and_scalar_gradient(monkeypatch, p, bounded):
-    kwargs = _correction_fixture(p=p)
+    # Binomial/logit, whose dW/deta = W (1 - 2 mu) is not proportional to W.
+    # Under Poisson/log dW/deta = W, so the scalar log(sum(W)) derivative is
+    # sum W (X - 1 mean_x') dbeta = 0 in exact arithmetic (mean_x is the
+    # W-weighted mean): its "observable" size at a 1e8 column offset was the
+    # cancellation of X dbeta against mean_x' dbeta (issue #430), which the
+    # centred direction removes.
+    kwargs = _correction_fixture(p=p, family="binomial")
     dm = kwargs["dm"]
     if bounded:
         bytes_per_direction = np.dtype(np.float64).itemsize * (dm.n + 3 * p * p)
@@ -281,11 +296,15 @@ def test_only_second_order_computes_mean_derivative_transposes(monkeypatch, orde
 
 
 @pytest.mark.parametrize(
-    "route", ["well_scaled", "single", "second_order", "small_budget", "gradient_only"]
+    "route", ["no_dense", "single", "second_order", "small_budget", "gradient_only"]
 )
 def test_other_routes_do_not_batch_signed_grams(monkeypatch, route):
-    kwargs = _correction_fixture(
-        p=1 if route == "single" else 2, shift=0 if route == "well_scaled" else 1e8
+    # The centred-row kernel runs by type, beside a dense column at any offset;
+    # a design without one keeps the execution plan's signed moments.
+    kwargs = (
+        _correction_fixture(p=3, shift=0, storage="mixed")
+        if route == "no_dense"
+        else _correction_fixture(p=1 if route == "single" else 2, shift=1e8)
     )
     if route == "small_budget":
         monkeypatch.setattr(w_derivatives, "_SIGNED_GRAM_BATCH_BYTES", 1)

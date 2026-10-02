@@ -304,8 +304,13 @@ def streamed_weighted_factor(
     weights: NDArray,
     *,
     center: NDArray | None = None,
+    center_lo: NDArray | None = None,
 ) -> NDArray:
-    """Build a compact QR factor from bounded weighted row chunks."""
+    """Build a compact QR factor from bounded weighted row chunks.
+
+    Rows are centred as ``(x - center) - center_lo`` when the centre is an
+    exact pair (``centered_system.weighted_mean_pair``).
+    """
     weights = np.asarray(weights, dtype=float)
     factor: NDArray | None = None
     width = 0 if center is None else len(center)
@@ -314,6 +319,8 @@ def streamed_weighted_factor(
         width = block.shape[1]
         if center is not None:
             block = block - center
+        if center_lo is not None:
+            block = block - center_lo
         block = np.sqrt(weights[start:stop])[:, None] * block
         stacked = block if factor is None else np.vstack((factor, block))
         factor = np.linalg.qr(stacked, mode="r")
@@ -326,6 +333,7 @@ def streamed_weighted_factor_rhs(
     response: NDArray,
     *,
     center: NDArray | None = None,
+    center_lo: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Build a compact weighted QR factor and its consistently transformed RHS.
 
@@ -344,6 +352,8 @@ def streamed_weighted_factor_rhs(
         width = block.shape[1]
         if center is not None:
             block = block - center
+        if center_lo is not None:
+            block = block - center_lo
         sqrt_weights = np.sqrt(weights[start:stop])
         joint_block = np.column_stack(
             (sqrt_weights[:, None] * block, sqrt_weights * response[start:stop])

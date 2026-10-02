@@ -342,7 +342,9 @@ def test_psd_cleanup_preserves_structurally_zero_rows_and_rank(
         ]
     )
     assert np.linalg.eigvalsh(raw_hessian)[0] < -1e-12
-    dm = DesignMatrix([DenseGroupMatrix(np.zeros((2, 3)))], n=2, p=3)
+    # a type the raw rungs admit, so the injected packed Gram is used: a dense
+    # column never enters a raw rung (issue #430)
+    dm = DesignMatrix([SparseSSPGroupMatrix(sp.csr_matrix(np.zeros((2, 3))), np.eye(3))], n=2, p=3)
 
     monkeypatch.setattr(
         centered_system,

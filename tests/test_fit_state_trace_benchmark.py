@@ -112,14 +112,28 @@ def test_tabmat_kernel_counter_records_actual_split_calls() -> None:
     assert calls == {"sandwich": 1, "transpose_matvec": 1}
 
 
-def test_categorical_fit_dispatches_prepared_tabmat_kernels() -> None:
-    prepared = CASES["categorical_fit"](0.02)
+def test_categorical_fit_keeps_the_categorical_off_dense_centering(monkeypatch) -> None:
+    # The Numeric column is a DenseGroupMatrix, centred about its exact pair and
+    # kept off every raw rung (issue #430); the 160-level categorical beside it
+    # is centred on its own compact packed path, so neither Tabmat nor the
+    # whole-design dense centring runs.
+    from superglm.solvers import centered_system
 
+    prepared = CASES["categorical_fit"](0.02)
+    whole_design_dense = []
+    original = centered_system.weighted_mean_pair
+
+    def counted(*args, **kwargs):
+        whole_design_dense.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(centered_system, "weighted_mean_pair", counted)
     with _count_tabmat_kernel_calls() as calls:
         prepared.model.fit(prepared.X, prepared.y)
 
-    assert calls["sandwich"] > 0
-    assert calls["sandwich"] <= calls["transpose_matvec"] <= 2 * calls["sandwich"]
+    assert prepared.model.result.converged
+    assert whole_design_dense == []
+    assert calls == {"sandwich": 0, "transpose_matvec": 0}
     assert prepared.model._dm._tabmat_centering_candidate is True
 
 

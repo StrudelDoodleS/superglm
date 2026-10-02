@@ -130,7 +130,9 @@ def test_cached_trial_matches_full_profiled_objective_after_large_translation(
     # trials (``reml.discrete``) and every PIRLS state form it: at a 1e10
     # translation X beta against the raw intercept errs by ~1e-6 per row
     centre = prior_weighted_centre(dm, weights)
-    alpha_cached = _cached_centred_intercept(cache["mean_z"], cache["mean_x"], centre, beta_cached)
+    alpha_cached = _cached_centred_intercept(
+        cache["mean_z"], cache["centre_offset_mean"], beta_cached
+    )
     # The centred intercept is the full fit's: for a Gaussian identity fit the
     # working weights and response are the prior weights and y at every
     # iterate, so both form mean_z - (mean_x - c)' beta from the same means
