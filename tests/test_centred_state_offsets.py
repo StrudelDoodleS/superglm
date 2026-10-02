@@ -30,6 +30,7 @@ from superglm import (
     LambdaPolicy,
     Numeric,
     Polynomial,
+    PSpline,
     RandomEffect,
     Spline,
     SuperGLM,
@@ -698,6 +699,67 @@ def test_the_public_intercept_pair_carries_the_fold_exactly(folded):
     bound = Fraction(_gamma(3)) * sum(map(abs, terms), Fraction(0))
     bound += Fraction(_gamma(1)) * abs(Fraction(public.centred_intercept_lo))
     assert abs(gap) <= bound, f"gap {float(gap):.3g}, fold {float(fold):.3g}"
+
+
+def test_a_kept_centred_state_is_read_again_at_the_revised_coefficients():
+    """A revision that keeps the solver's centred state republishes the public pair (#433).
+
+    A ``PSpline``'s columns are sparse, so the solver centres none of them
+    (``c = 0``) and the public pair folds the means its public columns lose:
+    ``alpha_pub = alpha + m' beta``, ``m`` the unweighted means, which differ
+    from the weighted centre under unequal weights.  A post-fit shape repair writes a new
+    ``beta`` and a profiled intercept; when that intercept rounds back to
+    ``alpha`` bit for bit, the solver relation ``intercept = alpha - fsum(c
+    beta)`` still holds and the revision keeps the centred state, but
+    ``alpha_pub`` was the pre-revision fold: a frequency-weighted fit then
+    predicted its unweighted fitted mean (master's Windows CI,
+    ``test_pearson_scale_weights``).  Here the coincidence is set directly:
+    ``beta`` halved and the solver intercept left at ``alpha``.  The public
+    prediction must be the raw public predictor ``intercept_pub + X_pub beta``
+    of the same revision, to the remainder ``alpha_lo`` it adds, two roundings
+    of each intercept and each evaluation's ``gamma_(p+2)`` (Higham 2002,
+    section 3.1).  Fails on a7871319 by ``m' beta / 2``.
+    """
+    from superglm.model import shape_ops
+    from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
+
+    x = np.linspace(0.0, 1.0, 60)
+    y = 1.5 - 1.1 * x + 0.08 * np.sin(7.0 * x)
+    weights = np.resize(np.array([1.0, 3.0, 2.0, 4.0]), x.size)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.8,
+        features={"x": PSpline(n_knots=6, knot_strategy="uniform")},
+        weight_semantics="frequency",
+    ).fit(frame, y, sample_weight=weights)
+    solver = model._solver_pirls_result()
+    assert solver.state_center is not None and not np.any(solver.state_center)
+    assert model.result.centred_intercept != solver.centred_intercept  # m' beta is folded in
+
+    revision = FittedStateRevision.start(model)
+    work = revision.model
+    beta = 0.5 * np.asarray(work.result.beta, dtype=np.float64)
+    shape_ops._replace_result_beta(work, beta)
+    shift = shape_ops._canonical_intercept_shift(work, beta)
+    work._result.intercept = float(solver.centred_intercept) + shift
+    shape_ops._synchronize_repaired_intercept_state(work)
+    work._solver_result.intercept = float(solver.centred_intercept)  # the coincidence
+    invalidate_revised_coefficient_mode(work)
+    revised = revision.commit()
+    public = revised.result
+    assert public.centred_intercept is not None  # the solver relation held: kept
+
+    columns = np.asarray(revised._specs["x"].transform(x), dtype=np.float64)
+    raw = float(public.intercept) + columns @ beta
+    magnitude = np.abs(columns) @ np.abs(beta) + abs(float(public.centred_intercept))
+    bound = (
+        abs(float(public.centred_intercept_lo or 0.0))
+        + 2.0 * _U * (abs(float(public.centred_intercept)) + abs(float(public.intercept)))
+        + 2.0 * _gamma(beta.size + 2) * magnitude
+    )
+    assert np.all(np.abs(revised.predict(frame) - raw) <= bound)
 
 
 # ------------------------------------- 7. the gram and QR paths at 1e16

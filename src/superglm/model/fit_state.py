@@ -482,6 +482,31 @@ def _centred_state_reads_the_coefficients(model) -> bool:
     return float(solver.intercept) == float(alpha) - math.fsum(np.asarray(centre) * beta)
 
 
+def _republish_centred_state(model) -> None:
+    """Read a kept solver centred state in the public coordinates at the revised ``beta``.
+
+    The public pair is ``alpha + (m - c)' beta`` over the columns it folds
+    (``runtime_canonicalize._public_centred_state``, ``m`` the means the
+    public columns lose), so a revision that moves a folded column with a zero
+    solver centre keeps the solver relation and changes the public intercept.
+    Left as published, it predicted the pre-revision fold: after a post-fit
+    shape repair whose profiled intercept rounded back to ``alpha`` bit for
+    bit, a frequency-weighted fit predicted its unweighted fitted mean (#433;
+    master's Windows CI).
+    """
+    public = getattr(model, "_result", None)
+    solver = getattr(model, "_solver_result", None)
+    terms = (getattr(model, "_runtime_canonical_state", None) or {}).get("terms")
+    if public is None or public is solver or terms is None:
+        return
+    from superglm.model.runtime_canonicalize import _public_centred_state
+
+    alpha, centre, alpha_lo = _public_centred_state(model, solver, terms)
+    public.centred_intercept = alpha
+    public.state_center = centre
+    public.centred_intercept_lo = alpha_lo
+
+
 def invalidate_revised_coefficient_mode(model) -> None:
     """Clear artifacts that identify or describe the pre-revision coefficient mode."""
     # The centred state (alpha, c) reads the fitted mode: a revised beta or
@@ -511,6 +536,8 @@ def invalidate_revised_coefficient_mode(model) -> None:
                 if hasattr(result, field_name):
                     setattr(result, field_name, None)
         updated.add(id(result))
+    if keep_centred:
+        _republish_centred_state(model)
 
     reml_result = getattr(model, "_reml_result", None)
     if reml_result is not None:
