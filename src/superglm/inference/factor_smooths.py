@@ -198,7 +198,9 @@ def _population_deviations(
     weightless = set(spec._weightless_levels)
     for level, directions in zip(spec._unidentified_levels, spec._free_directions, strict=True):
         free_part = np.asarray(directions, dtype=np.float64)
-        keep[level] = 0.0 if level in weightless else np.eye(k) - free_part @ free_part.T
+        keep[level] = np.eye(k) - free_part @ free_part.T
+    for level in weightless:
+        keep[level] = 0.0
     covariances = keep @ covariances @ np.transpose(keep, (0, 2, 1))
     return deviations, 0.5 * (covariances + np.transpose(covariances, (0, 2, 1)))
 

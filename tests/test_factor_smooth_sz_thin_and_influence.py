@@ -1448,9 +1448,12 @@ def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() 
     The level has no data term, so the sum-to-zero constraint alone fixes its
     block: minus the other levels' deviations, shrunk but not zero.  As in
     every other ``sz`` fit and for an unseen level, it is predicted at the
-    population curve, which the identified levels then fix at the main effect
-    (``c = 0`` to the rule's rounding).  Mutation: the penalized record
-    without the weightless levels (Claude review of 4dd54555).
+    population curve, which stays the main effect (``c = 0`` to the rule's
+    rounding), and ``predict`` names it.  ``factor_smooth()`` reports a curve
+    of zero with no band, as for an unpenalized fit
+    (``test_sz_reports_agree_with_the_population_prediction``).  Mutations:
+    the penalized record without the weightless levels (Claude review of
+    4dd54555); the report's band kept for it (Claude review of 8fbdadda).
     """
     from superglm.model import base
 
@@ -1463,9 +1466,19 @@ def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() 
     assert spec._lines_penalized
     assert spec._weightless_levels == (5,)
     grid = pd.DataFrame({"x": np.linspace(0.0, 1.0, 21), "g": "g005"})
-    eta = base.predict_eta_exact(model, grid, warn=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        eta = base.predict_eta_exact(model, grid)
+    named = _thin_warnings(caught)
+    assert len(named) == 1 and "g005" in str(named[0].message)
     population = base.predict_eta_exact(model, grid, random_effects="population", warn=False)
     assert np.array_equal(eta, population)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        report = model.factor_smooth("x:g:sz", levels=["g005"])
+    assert np.all(report.curves["effect"].to_numpy() == 0.0)
+    assert np.all(report.curves["posterior_se"].to_numpy() == 0.0)
+    assert report.diagnostics["population_convention"] == "main"
     group = next(g for g in model._groups if g.name == "x:g:sz")
     blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
     offset = spec._population_offset(blocks)

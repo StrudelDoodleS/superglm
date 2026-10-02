@@ -790,16 +790,26 @@ class FactorSmooth:
 
     @property
     def _unidentified_level_names(self) -> tuple:
-        """The fitted ``sz`` levels the data identify only in part (``_record_unidentified_levels``)."""
-        return tuple(self._levels[code] for code in getattr(self, "_unidentified_levels", ()))
+        """The fitted ``sz`` levels the data identify only in part (``_record_unidentified_levels``).
+
+        A weightless level is one, also beside penalized lines, where it is
+        not in ``_unidentified_levels``.
+        """
+        thin = tuple(getattr(self, "_unidentified_levels", ()))
+        codes = thin + tuple(
+            level for level in getattr(self, "_weightless_levels", ()) if level not in thin
+        )
+        return tuple(self._levels[code] for code in codes)
 
     @property
     def _has_population_offset(self) -> bool:
         """Whether some level stays out of the population curve, which then moves off the main effect.
 
         A weightless level beside penalized lines also stays out: it is
-        predicted at the population curve, which the other levels' lines,
-        all identified, then fix at the main effect (``c = 0``).
+        predicted at the population curve.  No level is unidentified there,
+        so ``c`` is the polynomial part of the mean over all ``K`` levels,
+        the weightless one included, which the sum-to-zero constraint makes
+        zero: the population is the main effect (``"main"``).
         """
         return (
             bool(getattr(self, "_unidentified_levels", ()))
@@ -820,9 +830,9 @@ class FactorSmooth:
         unless the term's policy is ``LambdaPolicy.off()``; the last two
         conventions serve such terms and the models 0.36.0 saved.
         """
-        if not self._has_population_offset:
-            return "main"
         excluded = set(self._unidentified_levels) | set(self._separated_levels)
+        if not excluded:
+            return "main"
         if len(excluded) < len(self._levels):
             return "mean"
         if len(self._unidentified_levels) < len(self._levels):
@@ -962,7 +972,8 @@ class FactorSmooth:
         coefficients = blocks[np.maximum(codes, 0)]
         coefficients[codes < 0] = offset
         result = np.einsum("ij,ij->i", basis, coefficients, optimize=True)
-        thin = np.isin(codes, np.asarray(self._unidentified_levels, dtype=np.intp))
+        unidentified = (*self._unidentified_levels, *getattr(self, "_weightless_levels", ()))
+        thin = np.isin(codes, np.asarray(unidentified, dtype=np.intp))
         named = tuple(self._levels[code] for code in np.unique(codes[thin]))
         return result, named
 
