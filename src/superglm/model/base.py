@@ -453,6 +453,66 @@ def finish_eta(eta: NDArray, intercept: float, intercept_lo: float | None) -> ND
     return eta if intercept_lo is None else intercept + eta
 
 
+class EtaSum:
+    """A public predictor's sum of its intercept and its term contributions.
+
+    As fitted, ``start_eta`` and ``finish_eta``: ``alpha + (alpha_lo + sum_t
+    score_t)``, bit for bit.  When a revision carried a centred column's change
+    into the pair (``PIRLSResult.centred_sum_compensated``), ``alpha`` holds
+    that column's ``c dbeta`` and can cancel against a row's ``(x - c) beta``.
+    The sum is then compensated (``mode_score.CompensatedSum``), with ``alpha``
+    first, each centred column as its exact pieces (``_centred_term_pieces``)
+    and ``alpha_lo`` joining the errors last.  ``mode_score.linear_predictor``
+    evaluates the solver's pair the same way.
+    """
+
+    __slots__ = ("compensated", "intercept", "intercept_lo", "total")
+
+    def __init__(
+        self, n: int, intercept: float, intercept_lo: float | None, compensated: bool = False
+    ) -> None:
+        from superglm.solvers.mode_score import CompensatedSum
+
+        self.intercept, self.intercept_lo = intercept, intercept_lo
+        self.compensated = bool(compensated)
+        self.total: NDArray | CompensatedSum = (
+            CompensatedSum(np.full(n, intercept, dtype=np.float64))
+            if self.compensated
+            else start_eta(n, intercept, intercept_lo)
+        )
+
+    def add(self, values) -> None:
+        if self.compensated:
+            self.total.add(values)
+        else:
+            self.total += values
+
+    def __iadd__(self, values) -> EtaSum:
+        self.add(values)
+        return self
+
+    def add_pieces(self, pieces) -> None:
+        for piece in pieces:
+            self.add(piece)
+
+    def finish(self, without=()) -> NDArray:
+        """The predictor, less the addends ``without`` (a dropped term's pieces)."""
+        from superglm.solvers.mode_score import CompensatedSum
+
+        if not self.compensated:
+            total = self.total
+            for piece in without:
+                total = total - piece
+            return finish_eta(total, self.intercept, self.intercept_lo)
+        total = self.total
+        if without:
+            total = CompensatedSum(self.total.total)
+            total.error = self.total.error.copy()
+            for piece in without:
+                total.add(-np.asarray(piece, dtype=np.float64))
+        return total.value(float(self.intercept_lo or 0.0))
+
+
 def scores_centred(spec) -> bool:
     """Whether a term's spec scores its raw columns about a centre (``_score_centred``).
 
@@ -480,18 +540,45 @@ def _centred_term_contribution(
     """
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
     spec = term["spec"]
-    if term["kind"] == "feature":
-        columns: tuple[NDArray, ...] = (X.column_array(term["name"]),)
-    else:
-        left_name, right_name = term["parent_names"]
-        left_spec, right_spec = term.get("parent_specs", (None, None))
-        _, left = resolve_interaction_parent_of(spec, left_spec, X.column_array(left_name))
-        _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
-        columns = (left, right)
+    columns = _term_columns(term, X)
     if scores_centred(spec):
         return np.asarray(spec._score_centred(*columns, beta, centre), dtype=np.float64).ravel()
     scored = np.asarray(spec.score(*columns, beta), dtype=np.float64).ravel()
     return scored - math.fsum(centre * beta)
+
+
+def _term_columns(term: dict[str, Any], X: EagerFrame) -> tuple[NDArray, ...]:
+    """The raw columns a term is scored on: its own, or its two parents' as fitted."""
+    if term["kind"] == "feature":
+        return (X.column_array(term["name"]),)
+    spec = term["spec"]
+    left_name, right_name = term["parent_names"]
+    left_spec, right_spec = term.get("parent_specs", (None, None))
+    _, left = resolve_interaction_parent_of(spec, left_spec, X.column_array(left_name))
+    _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
+    return (left, right)
+
+
+def _centred_term_pieces(
+    term: dict[str, Any],
+    X: EagerFrame,
+    beta_all: NDArray,
+    centre: NDArray,
+) -> tuple[NDArray, ...]:
+    """``(B - 1 c') beta`` as addends whose exact sum it is, for a compensated ``EtaSum``.
+
+    A column scored about its centre gives ``mode_score.centred_column_pieces``
+    of its values (exact to ``u^2``); any other term gives its one
+    contribution (``_centred_term_contribution``).
+    """
+    spec = term["spec"]
+    if not scores_centred(spec):
+        return (_centred_term_contribution(term, X, beta_all, centre),)
+    from superglm.solvers.mode_score import centred_column_pieces
+
+    beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64).ravel()
+    values = np.asarray(spec._centred_values(*_term_columns(term, X)), dtype=np.float64).ravel()
+    return centred_column_pieces(values, float(centre[0]), float(beta[0]))
 
 
 def _score_prediction_term_fast_discrete(
@@ -554,24 +641,35 @@ def _predict_eta(
     # a dense column's offset would otherwise cancel between X beta and the
     # raw intercept and return the rounding the fit avoided.
     intercept, centre, intercept_lo = prediction_centred_state(model.result)
-    eta = start_eta(len(frame), intercept, intercept_lo)
+    eta = EtaSum(
+        len(frame),
+        intercept,
+        intercept_lo,
+        compensated=centre is not None
+        and bool(getattr(model.result, "centred_sum_compensated", False)),
+    )
 
     scorer = _score_prediction_term_fast_discrete if fast_discrete else _score_prediction_term_exact
 
-    def score(term: dict[str, Any]) -> NDArray[np.floating]:
+    def score(term: dict[str, Any]) -> None:
         if centre is not None:
             block = centre[term["beta_idx"]]
             if np.any(block != 0.0):
-                return _centred_term_contribution(term, frame, beta_all, block)
+                if eta.compensated:
+                    eta.add_pieces(_centred_term_pieces(term, frame, beta_all, block))
+                else:
+                    eta.add(_centred_term_contribution(term, frame, beta_all, block))
+                return
         if fast_discrete:
-            return scorer(model, term, frame, beta_all)
-        return scorer(term, frame, beta_all)
+            eta.add(scorer(model, term, frame, beta_all))
+        else:
+            eta.add(scorer(term, frame, beta_all))
 
     for term in plan["features"]:
         if random_effects == "population" and isinstance(term["spec"], RandomEffect):
             term["spec"].validate_prediction_values(frame.column_array(term["name"]))
             continue
-        eta += score(term)
+        score(term)
 
     if not fitted:
         from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
@@ -595,7 +693,7 @@ def _predict_eta(
                 frame.column_array(right_name),
             )
             continue
-        eta += score(term)
+        score(term)
     if unidentified and warn:
         warnings.warn(
             "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than the "
@@ -606,10 +704,10 @@ def _predict_eta(
             stacklevel=_PREDICTION_WARNING_STACKLEVEL,
         )
 
-    eta = finish_eta(eta, intercept, intercept_lo)
+    total = eta.finish()
     if offset is not None:
-        eta = eta + offset
-    return stabilize_eta(eta, model._link) if stabilize else eta
+        total = total + offset
+    return stabilize_eta(total, model._link) if stabilize else total
 
 
 def predict_eta_exact(

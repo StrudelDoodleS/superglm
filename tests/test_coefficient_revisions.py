@@ -8,7 +8,9 @@ the solver predictor that a later shape repair profiles its intercept from.
 Before #447 the editor left the solver predictor at the pre-edit coefficients'
 shift ``m' beta``, so a repair after an edit published the difference, and an
 intercept change reached only the raw intercepts, where it rounded away beside
-a numeric column at an offset of 1e16.
+a numeric column at an offset of 1e16.  A numeric slope edit keeps its fitted
+centre and carries its change into the pair exactly, and the pair is then
+evaluated as one compensated sum (#449).
 
 References are exact (``Fraction``) or the repair's own definition: the
 projection of the edited coefficients onto the shape cone, then the intercept
@@ -19,11 +21,11 @@ that minimizes the deviance at them.  Bounds derive from the dimensions,
 
 from __future__ import annotations
 
-import copy
 import math
 import pickle
 import warnings
 from fractions import Fraction
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -332,101 +334,109 @@ def test_a_repair_beside_a_far_offset_numeric_keeps_its_profiled_intercept():
     assert np.all(error <= bound), f"max error {float(np.max(error)):.3g}, bound {bound:.3g}"
 
 
-def test_a_revision_starts_from_the_published_predictor_of_an_older_edit():
-    """A model an editor revised before #447 is repaired from its published predictor.
+FIXTURES = Path(__file__).parent / "fixtures"
 
-    Such a model kept the solver intercept, centred pair and recorded shift of
-    its pre-edit coefficients; a pickle carries them.  It is emulated here by
-    writing the fit's values back over an edit's.  ``predict`` reads the
-    published pair either way; a revision has to start from it, or the repair
-    profiles from the old shift as before the fix.  For this edit the editor
-    skips its -2.7e-17 intercept change, so these are the values 31544462
-    wrote: a pickle of its edit matches them field for field.  Check: the
-    first test's reference and bound.  Mutation: drop the reconcile in
+
+@pytest.mark.parametrize("source", ["saved_v0_35_0", "saved_31544462"])
+def test_an_edit_saved_before_447_is_repaired_from_its_published_predictor(source):
+    """An edited model saved by v0.35.0 or 31544462 repairs to the first test's reference.
+
+    Their editor left the solver intercept and the recorded shift, and on
+    31544462 the solver's centred pair, at the pre-edit coefficients
+    (``scripts/make_saved_editor_fixtures.py`` wrote these pickles).  The model
+    predicts as it was saved, bit for bit, and a revision starts from its
+    published predictor (``FittedStateRevision.start``).  The repair then reaches
+    the projection-and-profile reference within the first test's bound; the
+    writer's own repair missed it by 3.55e-3.  Mutation: drop the re-read in
     ``FittedStateRevision.start``.
     """
-    x = np.linspace(0.0, 1.0, 60)
-    y = 1.5 - 1.1 * x + 0.08 * np.sin(7.0 * x)
-    w = np.resize(np.array([1.0, 3.0, 2.0, 4.0]), x.size)
-    frame = pd.DataFrame({"x": x})
+    with open(FIXTURES / source / "editor_halved_spline.pkl", "rb") as handle:
+        record = pickle.load(handle)
+    model, frame = record["model"], record["frame"]
+    y, w = record["y"], record["sample_weight"]
+    np.testing.assert_array_equal(model.predict(frame), record["prediction"])
+
+    x = frame["x"].to_numpy(dtype=np.float64)
+    beta_edit = np.asarray(model.result.beta, dtype=np.float64).copy()
+    beta_reference, columns, reference = _projected_reference(model, x, y, w)
+    bound = _gaussian_repair_bound(model, columns, beta_edit, beta_reference, y, w, reference)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model = _shaped_fit(y, x, w)
-        edited, _, _ = _edit(model, frame, y, w, "x", 0.5, 0.0)
-    stale = pickle.loads(pickle.dumps(edited))
-    fitted_solver = model._solver_pirls_result()
-    for name in ("intercept", "centred_intercept", "centred_intercept_lo"):
-        object.__setattr__(stale._solver_result, name, getattr(fitted_solver, name))
-    stale._runtime_canonical_state = copy.deepcopy(model._runtime_canonical_state)
-    np.testing.assert_array_equal(stale.predict(frame), edited.predict(frame))
-
-    beta_edit = np.asarray(edited.result.beta, dtype=np.float64)
-    beta_reference, columns, reference = _projected_reference(edited, x, y, w)
-    stale.apply_shape_postfit(frame, n_grid=80)
-    np.testing.assert_array_equal(stale.result.beta, beta_reference)
-    bound = _gaussian_repair_bound(edited, columns, beta_edit, beta_reference, y, w, reference)
-    error = np.abs(stale.predict(frame) - reference)
+        model.apply_shape_postfit(frame, n_grid=80)
+    np.testing.assert_array_equal(model.result.beta, beta_reference)
+    error = np.abs(model.predict(frame) - reference)
     assert np.all(error <= bound), f"max error {float(np.max(error)):.3g}, bound {bound:.3g}"
 
 
+def _slope_edited(model, frame, y, slopes: dict[str, float]) -> SuperGLM:
+    """The model with each named numeric column's slope edited, one session per column."""
+    edited = model
+    for name, slope in slopes.items():
+        session = EditorSession.from_model(edited, terms=[name], train_data=(frame, y))
+        session.terms[name].edited_log_effect = np.array([slope], dtype=np.float64)
+        edited = session.to_model()
+    return edited
+
+
+def _raw_reference(model, frame, slopes: dict[str, float]) -> np.ndarray:
+    """``eta_before + sum_j x_j (slope_j - beta_old_j)``, exact before its one rounding."""
+    groups = {group.feature_name: group for group in model._groups}
+    changes = {
+        name: Fraction(slope) - Fraction(float(model.result.beta[groups[name].sl][0]))
+        for name, slope in slopes.items()
+    }
+    rows = []
+    for index, before in enumerate(model.predict(frame)):
+        value = Fraction(float(before))
+        for name, change in changes.items():
+            value += Fraction(float(frame[name].iloc[index])) * change
+        rows.append(float(value))
+    return np.array(rows)
+
+
 def _slope_edit_bound(model, edited, frame, expected) -> np.ndarray:
-    """Each row's evaluation error in the coordinates a slope edit is defined in.
+    """Each row's error budget for numeric slope edits of an all-numeric model.
 
-    The edit pivots at ``x = 0``, so the rows read ``intercept + x beta``:
-    each evaluation (the fit's, the edit's) is within ``gamma_(p+3)`` of the
-    raw magnitudes ``|eta| + |x| (|beta_old| + |beta_new|)``, plus the fit's
-    centred constant ``|c beta_old|`` that the edit moves into the intercept
-    (one product rounding), and the reference's own rounding ``u |eta|``.
+    The reference starts from the fit's own prediction, which is within
+    ``gamma_(p+2)`` of the fit's centred magnitudes ``|alpha| + |alpha_lo| +
+    sum |x - c| |beta_old|`` (Higham 2002, section 3.1).  An edit that moves
+    a centred column is one compensated sum of the pair and each such column's
+    exact pieces about its fitted centre.  That is within ``u |eta|`` and
+    ``gamma_k^2`` of the addends' magnitudes ``|alpha'| + |alpha_lo'| + sum |x
+    - c| |beta|``, ``k = 3p + 2`` (Ogita, Rump & Oishi 2005, Proposition 4.5),
+    plus the pieces' own ``u^2``.  A column without a centre is one product
+    added as fitted, ``gamma_2 |x beta|``.  Nothing a moved centre or an
+    uncompensated pair would add to the magnitudes is allowed.  Each term is
+    doubled for the magnitudes' own rounding.
     """
-    x = frame["x"].to_numpy(dtype=np.float64)
-    old, new = abs(float(model.result.beta[0])), abs(float(edited.result.beta[0]))
-    centre = abs(float(np.asarray(model.result.state_center)[0]))
-    magnitude = np.abs(model.predict(frame)) + np.abs(x) * (old + new) + centre * old
-    return 2.0 * _gamma(model.result.beta.size + 3) * magnitude + _U * np.abs(expected)
-
-
-def _slope_edited(model, frame, y, slope) -> SuperGLM:
-    session = EditorSession.from_model(model, terms=["x"], train_data=(frame, y))
-    session.terms["x"].edited_log_effect = np.array([slope], dtype=np.float64)
-    return session.to_model()
-
-
-def _raw_reference(model, frame, slope) -> np.ndarray:
-    """``eta_before + x (slope - beta_old)``, exact before its one rounding."""
-    change = Fraction(slope) - Fraction(float(model.result.beta[0]))
-    return np.array(
-        [
-            float(Fraction(float(b)) + Fraction(float(v)) * change)
-            for b, v in zip(model.predict(frame), frame["x"])
-        ]
+    p = model.result.beta.size
+    centre = np.asarray(model.result.state_center, dtype=np.float64)
+    columns = _public_columns(model, frame)
+    beta = np.abs(np.asarray(edited.result.beta, dtype=np.float64))
+    centred = centre != 0.0
+    pieces = np.abs(columns[:, centred] - centre[centred]) @ beta[centred]
+    plain = np.abs(columns[:, ~centred]) @ beta[~centred]
+    pair = abs(float(edited.result.centred_intercept)) + abs(
+        edited.result.centred_intercept_lo or 0.0
     )
+    compensated = (_gamma(3 * p + 2) ** 2 + _U**2) * (pair + pieces)
+    fitted = _gamma(p + 2) * _centred_magnitude(model, frame)
+    return 2.0 * (fitted + compensated + _gamma(2) * plain + _U * np.abs(expected))
 
 
-@pytest.mark.parametrize("slope", [1.0, -1.0], ids=["up", "down"])
-@pytest.mark.parametrize("scale", [1e16, -1e16])
-def test_a_numeric_slope_edit_keeps_the_intercept_remainder(scale, slope):
-    """A slope edit on a column spanning zero to 2e16 predicts its raw intercept at zero.
-
-    Sol's review of #448 (P2): ``x = 1e16 {0, 1, 2}`` beside ``y = {2, 3, 2}``
-    fits a slope of about 5e-35 about the centre 1e16 and the raw intercept
-    2.3333333333333335.  An editor slope is defined about ``x = 0``, so the row
-    at zero predicts that intercept.  26321fd6 carried ``c dbeta`` into the
-    pair, which became ``(1e16 + 2, 1/3)``, and predicted 2.0 there: the
-    remainder joined the row's ``-1e16`` before that cancelled the high part.
-    The moved column is now scored about zero (``_recentre_revised_columns``).
-    Reference: ``eta_before + x dbeta`` exactly; bound ``_slope_edit_bound``;
-    through ``predict``, ``metrics`` on the fit rows and a pickle round trip.
-    """
-    x = scale * np.resize([0.0, 1.0, 2.0], 60)
-    y = np.resize([2.0, 3.0, 2.0], 60)
-    frame = pd.DataFrame({"x": x})
+def _numeric_fit(frame, y) -> SuperGLM:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()}).fit(
-            frame, y
-        )
-        edited = _slope_edited(model, frame, y, slope)
-    expected = _raw_reference(model, frame, slope)
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={name: Numeric() for name in frame.columns},
+        ).fit(frame, y)
+
+
+def _assert_edit_reads(model, edited, frame, y, slopes) -> None:
+    """``predict``, ``metrics`` on the fit rows and a pickle all read the raw reference."""
+    expected = _raw_reference(model, frame, slopes)
     bound = _slope_edit_bound(model, edited, frame, expected)
     for label, values in (
         ("predict", edited.predict(frame)),
@@ -437,29 +447,146 @@ def test_a_numeric_slope_edit_keeps_the_intercept_remainder(scale, slope):
         assert np.all(error <= bound), f"{label}: max error {float(np.max(error)):.3g}"
 
 
+@pytest.mark.parametrize("slope", [1.0, -1.0, 1.1], ids=["up", "down", "inexact"])
+@pytest.mark.parametrize("scale", [1e16, -1e16])
+def test_a_numeric_slope_edit_keeps_the_intercept_remainder(scale, slope):
+    """A slope edit on a column spanning zero to 2e16 predicts its raw intercept at zero.
+
+    Sol's review of #448 (P2): ``x = 1e16 {0, 1, 2}`` beside ``y = {2, 3, 2}``
+    fits a slope of about 5e-35 about the centre 1e16 and the raw intercept
+    2.3333333333333335.  An editor slope is defined about ``x = 0``, so the row
+    at zero predicts that intercept.  26321fd6 carried ``c dbeta`` into the
+    pair, which became ``(1e16 + 2, 1/3)``, and predicted 2.0 there: the
+    remainder joined the row's ``-1e16`` before that cancelled the high part.
+    The centre stays, the change is carried exactly, and the sum is
+    compensated with the row's exact pieces, so a slope whose product with the
+    centre rounds (1.1) reads it too.  Reference: ``eta_before + x dbeta``
+    exactly; bound ``_slope_edit_bound``; through ``predict``, ``metrics`` and a
+    pickle round trip.
+    """
+    frame = pd.DataFrame({"x": scale * np.resize([0.0, 1.0, 2.0], 60)})
+    y = np.resize([2.0, 3.0, 2.0], 60)
+    model = _numeric_fit(frame, y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        edited = _slope_edited(model, frame, y, {"x": slope})
+    np.testing.assert_array_equal(edited.result.state_center, model.result.state_center)
+    _assert_edit_reads(model, edited, frame, y, {"x": slope})
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["positive", "negative"])
+def test_cancelling_slope_edits_on_two_columns_keep_their_rows_apart(sign):
+    """Two columns a few ulps apart at 1e12, their slopes edited to +-5e7, keep the rows' differences.
+
+    #449 (Sol's bounded check of #448): ``x = 1e12 + s a`` and ``t = 1e12 + s
+    b``, ``s`` the spacing at 1e12 and ``a, b`` in ``{-3, -1, 1, 3}``, with ``y =
+    2.5 + 1e8 (x - t)``.  v0.36.0 re-centred both columns at ``c beta_before /
+    beta = 2e12``.  Their contributions became about 5e19 each, and their
+    cancellation lost the rows' differences: 4177 off.  Keeping the centres
+    keeps each row's ``(x - c) beta`` at about 1e4, and the carried ``c dbeta``
+    of the two columns is summed exactly.  Reference and bound as in the
+    previous test.
+    """
+    spacing = float(np.spacing(1e12))
+    a = np.resize([-3.0, -1.0, 1.0, 3.0], 64)
+    b = np.repeat(np.resize([-3.0, -1.0, 1.0, 3.0], 16), 4)[:64]
+    frame = pd.DataFrame({"x": sign * (1e12 + spacing * a), "t": sign * (1e12 + spacing * b)})
+    y = 2.5 + 1e8 * (frame["x"].to_numpy() - frame["t"].to_numpy())
+    model = _numeric_fit(frame, y)
+    slopes = {"x": 5e7, "t": -5e7}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        edited = _slope_edited(model, frame, y, slopes)
+    _assert_edit_reads(model, edited, frame, y, slopes)
+
+
+def test_a_slope_edited_to_zero_carries_the_columns_fitted_constant():
+    """A numeric effect removed in the editor leaves ``eta_before - x beta_before``.
+
+    A year column (centre about 2010, slope 0.01) edited to a slope of 0: the
+    column then contributes nothing, and the pair takes ``-c beta_before``
+    from an exact product.  0.36.0 reached the same value through its
+    zero-slope fallback, a centre of 0 (#449).  Reference and bound as above.
+    """
+    year = 2000.0 + np.resize(np.arange(20.0), 60)
+    frame = pd.DataFrame({"x": year})
+    y = 1.0 + 0.01 * (year - 2010.0) + np.resize([0.1, -0.1, 0.05], 60)
+    model = _numeric_fit(frame, y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        edited = _slope_edited(model, frame, y, {"x": 0.0})
+    assert edited.result.beta[0] == 0.0
+    _assert_edit_reads(model, edited, frame, y, {"x": 0.0})
+
+
 @pytest.mark.parametrize("slopes", [(-1e308, 1e308), (1e308, -1e308)], ids=["up", "down"])
-@pytest.mark.parametrize("scale", [1e-308, 1e-300])
-def test_slope_edits_across_the_float_range_form_no_coefficient_difference(scale, slopes):
+@pytest.mark.parametrize(
+    ("scale", "pattern"),
+    [(1e-308, (-1.0, 0.0, 1.0)), (1e-300, (-1.0, 0.0, 1.0)), (1e-300, (1.0, 2.0, 3.0))],
+    ids=["zero_centre_1e-308", "zero_centre_1e-300", "centred_1e-300"],
+)
+def test_slope_edits_across_the_float_range_form_no_coefficient_difference(scale, pattern, slopes):
     """Successive slope edits of -1e308 and 1e308 complete and predict ``intercept + x beta``.
 
     Sol's review of #448 (P2): ``x = scale {-1, 0, 1}`` has a zero centre, so a
     slope edit moves no centred column.  26321fd6 formed ``beta - beta_before``,
     which overflowed to ``inf`` on the second edit, and ``0 * inf`` poisoned the
-    pair: the revision refused with non-finite scalars where 31544462 predicted
-    about ``2.33 +- 1`` (or ``+- 1e8``).  A zero-centre column is now skipped
-    without a product.  Reference and bound as in the previous test.
+    pair.  The revision refused with non-finite scalars where 31544462
+    predicted about ``2.33 +- 1`` (or ``+- 1e8``).  ``x = 1e-300 {1, 2, 3}`` keeps
+    a centre of 2e-300 and predictions of about 3e8 (#449).  There the carried
+    change is ``c beta - c beta_before`` from two finite exact products, about
+    4e8; the difference ``c (beta - beta_before)`` would be ``c * inf``.  A
+    zero-centre column is skipped without a product.  Reference and bound as
+    above.
     """
-    x = scale * np.resize([-1.0, 0.0, 1.0], 60)
+    frame = pd.DataFrame({"x": scale * np.resize(list(pattern), 60)})
     y = np.resize([2.0, 3.0, 2.0], 60)
-    frame = pd.DataFrame({"x": x})
+    model = _numeric_fit(frame, y)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()}).fit(
-            frame, y
-        )
-        first = _slope_edited(model, frame, y, slopes[0])
-        second = _slope_edited(first, frame, y, slopes[1])
+        first = _slope_edited(model, frame, y, {"x": slopes[0]})
+        second = _slope_edited(first, frame, y, {"x": slopes[1]})
     for edited, slope in ((first, slopes[0]), (second, slopes[1])):
-        expected = _raw_reference(model, frame, slope)
-        error = np.abs(edited.predict(frame) - expected)
-        assert np.all(error <= _slope_edit_bound(model, edited, frame, expected))
+        _assert_edit_reads(model, edited, frame, y, {"x": slope})
+
+
+def test_a_revision_far_from_its_public_intercept_commits():
+    """The intercepts are checked to ``gamma_2`` of their magnitudes, not a bare 1e-13 (#449).
+
+    ``y = 1e5 sin(2 pi x)`` under weights that differ between the halves puts
+    the public intercept at about 0 and the solver's at about -3.3e4.  An edit
+    re-reads ``S = fl(P - h)``, one rounding of up to ``u |S|`` (3.6e-12).  The
+    bare ``1e-13 (1 + |P|)`` before #449 refused the commit as an inconsistent
+    intercept relation (Claude's review of #448), and v0.36.0 refuses this
+    edit.  The derived bound is ``fit_state._intercepts_read_the_shift``.
+    Check: the edit commits and predicts the raw public predictor ``P' + X_pub
+    beta'`` to each evaluation's ``gamma_(p+3)``.
+    """
+    rng = np.random.default_rng(0)
+    x = np.sort(rng.uniform(0.0, 1.0, 200))
+    w = np.where(x < 0.5, 1.0, 4.0)
+    y = 1e5 * np.sin(2.0 * np.pi * x) + rng.normal(0.0, 1.0, x.size)
+    frame = pd.DataFrame({"x": x})
+
+    def fit(target):
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=1e-3,
+            features={"x": PSpline(n_knots=8)},
+            weight_semantics="frequency",
+        ).fit(frame, target, sample_weight=w)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        y = y - fit(y).result.intercept
+        model = fit(y)
+        assert abs(model.result.intercept) < 1.0 < 2048.0 < abs(model._solver_result.intercept)
+        edited, _, _ = _edit(model, frame, y, w, "x", 0.5, 0.0)
+    columns = _public_columns(edited, frame)
+    beta = np.asarray(edited.result.beta, dtype=np.float64)
+    raw = float(edited.result.intercept) + columns @ beta
+    magnitude = _centred_magnitude(edited, frame) + abs(float(edited.result.intercept))
+    magnitude += np.abs(columns) @ np.abs(beta)
+    bound = 2.0 * _gamma(beta.size + 3) * magnitude
+    assert np.all(np.abs(edited.predict(frame) - raw) <= bound)

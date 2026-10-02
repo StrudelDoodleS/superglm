@@ -589,6 +589,93 @@ def two_sum(a, b):
     return s, (a - (s - b_virtual)) + (b - b_virtual)
 
 
+_VELTKAMP = float(2**27 + 1)
+
+
+def two_product(a, b):
+    """Dekker's TwoProduct elementwise: ``a b = p + e`` exactly, with ``p = fl(a b)``.
+
+    It is formed on the factors' ``frexp`` mantissas, which lie in ``[0.5, 1)``,
+    so Veltkamp's split and the partial products neither over- nor underflow
+    whatever the exponents (Ogita, Rump & Oishi 2005, Algorithms 3.2 and 3.3).
+    ``ldexp`` restores the exponents, exactly unless the product leaves the
+    normal range, where ``e`` loses at most ``2^-1075``.
+    """
+    left, left_exponent = np.frexp(np.asarray(a, dtype=np.float64))
+    right, right_exponent = np.frexp(np.asarray(b, dtype=np.float64))
+    product = left * right
+    scaled = _VELTKAMP * left
+    left_high = scaled - (scaled - left)
+    left_low = left - left_high
+    scaled = _VELTKAMP * right
+    right_high = scaled - (scaled - right)
+    right_low = right - right_high
+    error = (
+        (left_high * right_high - product) + left_high * right_low + left_low * right_high
+    ) + left_low * right_low
+    exponent = left_exponent + right_exponent
+    return np.ldexp(product, exponent), np.ldexp(error, exponent)
+
+
+def centred_column_pieces(values, centre: float, beta: float) -> tuple[NDArray, NDArray, NDArray]:
+    """``(v - c) beta`` as three addends whose exact sum it is, to ``u^2 |(v - c) beta|``.
+
+    TwoSum splits ``v - c = d + d_e`` and TwoProduct ``d beta = p + e``, both
+    exactly; ``d_e beta`` takes one rounding, at most ``u |d_e beta| <= u^2 |d
+    beta|``.  A row far from the centre then keeps the digits its product has
+    beyond the row's own value, which a revised pair cancels against.
+    """
+    difference, difference_error = two_sum(np.asarray(values, dtype=np.float64), -float(centre))
+    product, product_error = two_product(difference, float(beta))
+    return product, product_error, difference_error * float(beta)
+
+
+class CompensatedSum:
+    """Ogita, Rump & Oishi's Sum2 (2005, Algorithm 4.4) over arrays, row by row.
+
+    Each addend joins the running total by TwoSum and its error joins a second
+    running sum, which is added once at the end: for ``k`` addends the result
+    is within ``u |S| + gamma_(k-1)^2 sum |addends|`` of their exact sum ``S``
+    (their Proposition 4.5), whatever the addends cancel.
+    """
+
+    __slots__ = ("error", "total")
+
+    def __init__(self, start: NDArray) -> None:
+        self.total = np.array(start, dtype=np.float64)
+        self.error = np.zeros_like(self.total)
+
+    def add(self, values) -> None:
+        self.total, error = two_sum(self.total, np.asarray(values, dtype=np.float64))
+        self.error = self.error + error
+
+    def value(self, last: float = 0.0) -> NDArray:
+        """The sum, ``last`` (a remainder) joining the errors before the one rounding."""
+        return self.total + (self.error + last)
+
+
+def _centred_pieces(dm: DesignMatrix, beta: NDArray, center: NDArray) -> Iterator[NDArray]:
+    """``(X - 1 center') beta`` as addends whose exact sum it is, a dense block column by column.
+
+    Every other block's entries and centre are bounded by its type, so its
+    product less ``center' beta`` is one addend, as in ``centred_matvec``.
+    """
+    beta = np.asarray(beta, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        part = beta[offset : offset + width]
+        centre = center[offset : offset + width]
+        if type(matrix) is DenseGroupMatrix:
+            for column in range(width):
+                yield from centred_column_pieces(
+                    matrix.M[:, column], float(centre[column]), float(part[column])
+                )
+        else:
+            yield matrix.matvec(part) - float(centre @ part)
+        offset += width
+
+
 def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) -> float:
     """``(N 2^K) / (D 2^L)`` without forming either scaled sum, and without raising.
 
@@ -813,12 +900,22 @@ def linear_predictor(dm: DesignMatrix, result, offset: NDArray | None) -> NDArra
     evaluates the compensated pair as ``alpha + (X~ beta + alpha_lo)``: the
     remainder joins the rows at their own scale before the one rounding at
     ``|eta|``, so ``|eta - eta*| <= u |eta*| + u |X~ beta + alpha_lo|`` plus
-    the remainder's bound.  ``offset`` ``None`` adds nothing.
+    the remainder's bound.  A pair a revision carried a centred column's change
+    into (``centred_sum_compensated``) is evaluated as one compensated sum of
+    ``alpha``, every column's exact centred product and ``alpha_lo``
+    (``CompensatedSum``, ``centred_column_pieces``): ``alpha`` then holds the
+    column's ``c dbeta`` and can cancel against a row's ``(x - c) beta``, so the
+    rows may not round before it does.  ``offset`` ``None`` adds nothing.
     """
     alpha = getattr(result, "centred_intercept", None)
     center = getattr(result, "state_center", None)
     if alpha is None or center is None:
         eta = dm.matvec(result.beta) + result.intercept
+    elif getattr(result, "centred_sum_compensated", False):
+        total = CompensatedSum(np.full(dm.n, float(alpha)))
+        for piece in _centred_pieces(dm, result.beta, np.asarray(center, dtype=np.float64)):
+            total.add(piece)
+        eta = total.value(float(getattr(result, "centred_intercept_lo", None) or 0.0))
     else:
         eta = centred_matvec(dm, result.beta, center)
         alpha_lo = getattr(result, "centred_intercept_lo", None)

@@ -67,6 +67,8 @@ PUBLIC_API = [
     "NegativeBinomialLS",
     "NegativeBinomialLink",
     "Numeric",
+    "ObservedModeNotCertifiedError",
+    "ObservedModeNotConvergedError",
     "OrderedCategorical",
     "PSpline",
     "PathResult",

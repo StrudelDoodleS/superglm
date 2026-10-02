@@ -330,8 +330,14 @@ def _drop_term_holdout(
     # the full model's deviance is the one predict() and metrics() read.  From
     # the raw intercept, X beta cancels against it at a column's offset.
     intercept, centre, intercept_lo = base.prediction_centred_state(model.result)
-    accumulated = base.start_eta(n_val, intercept, intercept_lo)
-    contributions: dict[str, NDArray[np.floating]] = {}
+    accumulated = base.EtaSum(
+        n_val,
+        intercept,
+        intercept_lo,
+        compensated=centre is not None
+        and bool(getattr(model.result, "centred_sum_compensated", False)),
+    )
+    contributions: dict[str, tuple[NDArray[np.floating], ...]] = {}
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
@@ -349,23 +355,26 @@ def _drop_term_holdout(
                 term, X_val, beta, population=False
             )
         elif block is not None and np.any(block != 0.0):
-            contribution = base._centred_term_contribution(term, X_val, beta, block)
+            contribution = (
+                base._centred_term_pieces(term, X_val, beta, block)
+                if accumulated.compensated
+                else (base._centred_term_contribution(term, X_val, beta, block),)
+            )
             centre_shifts[term["name"]] = math.fsum(block * beta[term["beta_idx"]])
         else:
             contribution = base._score_prediction_term_exact(term, X_val, beta)
-        contributions[term["name"]] = contribution
-        accumulated += contribution
+        pieces = contribution if isinstance(contribution, tuple) else (contribution,)
+        contributions[term["name"]] = pieces
+        accumulated.add_pieces(pieces)
 
-    eta_full = stabilize_eta(
-        base.finish_eta(accumulated, intercept, intercept_lo) + offset_arr, model._link
-    )
+    eta_full = stabilize_eta(accumulated.finish() + offset_arr, model._link)
     mu_full = clip_mu(model._link.inverse(eta_full), dist)
     dev_full = float(np.sum(w * dist.deviance_unit(y_arr, mu_full)))
 
     rows = []
     for term in terms:
         eta_drop = stabilize_eta(
-            base.finish_eta(accumulated - contributions[term["name"]], intercept, intercept_lo)
+            accumulated.finish(without=contributions[term["name"]])
             - centre_shifts[term["name"]]
             + offset_arr,
             model._link,

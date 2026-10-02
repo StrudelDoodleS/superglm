@@ -431,10 +431,14 @@ class FittedStateRevision:
                 reml_copy.pirls_result = replacement
                 work_model._reml_result = reml_copy
 
-        if not _recorded_shift_reads_the_coefficients(work_model):
+        if not (
+            _recorded_shift_reads_the_coefficients(work_model)
+            and _intercepts_read_the_shift(work_model)
+        ):
             # A model an editor revised before #447 kept the solver state of
-            # its pre-edit coefficients: every revision starts from the
-            # published predictor.
+            # its pre-edit coefficients, or moved both raw intercepts apart by
+            # their own roundings: every revision starts from the published
+            # predictor.
             _read_solver_state_from_public(work_model)
 
         current_state = getattr(model, "_fit_state", None)
@@ -521,6 +525,33 @@ def _recorded_shift_reads_the_coefficients(model) -> bool:
     return abs(float(state.get("intercept_shift", 0.0)) - shift) <= 2.0 * gamma * magnitude
 
 
+def _intercepts_read_the_shift(model) -> bool:
+    """Whether the raw intercepts read one predictor through the recorded shift ``h``.
+
+    A fit publishes ``P = fl(S + h)`` and a revision reads ``S = fl(P - h)``
+    (``_read_solver_state_from_public``).  In the second case ``fl(S + h) - P =
+    d1 (P - h) + d2 (S + h)`` with ``|d1|, |d2| <= u``, so ``|P - fl(S + h)| <=
+    u (|P| + |S| + 2 |h|) <= gamma_2 (|P| + |S| + |h|)`` (Higham 2002, section
+    2.2); the first case is exact.  The gap is formed by one subtraction of
+    nearby floats, exact by Sterbenz's lemma where it matters.  A bare
+    ``1e-13`` checked this before #449, below one rounding of a solver
+    intercept above about 900 (Claude's review of #448).
+    """
+    public = getattr(model, "_result", None)
+    solver = getattr(model, "_solver_result", None)
+    state = getattr(model, "_runtime_canonical_state", None)
+    if public is None or solver is None or not isinstance(state, dict):
+        return True
+    shift = state.get("intercept_shift")
+    if shift is None:
+        return True
+    public_intercept, solver_intercept = float(public.intercept), float(solver.intercept)
+    unit = float(np.finfo(np.float64).eps) / 2.0
+    gamma_2 = 2.0 * unit / (1.0 - 2.0 * unit)
+    gap = abs(public_intercept - (solver_intercept + float(shift)))
+    return gap <= gamma_2 * (abs(public_intercept) + abs(solver_intercept) + abs(float(shift)))
+
+
 def _carry_into_centred_pair(result, values) -> None:
     """Add ``fsum(values)`` to a result's centred intercept, keeping a compensated pair's error.
 
@@ -570,8 +601,10 @@ def _read_solver_state_from_public(model) -> None:
     The solver's reads the same rows' values from ``intercept_pub - m' beta``
     raw and from ``alpha = alpha_pub - (m - c)' beta`` over the columns the
     public pair folds (``c_pub = 0``), centred: the inverse fold, a correctly
-    rounded ``fsum`` and a TwoSum into the remainder.  Every other column's
-    ``c_pub`` is ``c - m``, so it adds nothing.  Left at its pre-revision
+    rounded ``fsum`` and a TwoSum into the remainder.  Every other column is a
+    numeric one, whose public shift ``m`` is zero, so its ``c_pub`` is ``c``
+    and it adds nothing.  The solver's pair is evaluated as the public one is
+    (``centred_sum_compensated``).  Left at its pre-revision
     values, the solver predictor, which a post-fit shape repair profiles its
     intercept from and metrics read on the training rows, read the old
     coefficients' shift ``m' beta_old`` after an editor edit, and the repair
@@ -610,7 +643,9 @@ def _read_solver_state_from_public(model) -> None:
     if alpha_public is None or public_centre is None:
         for field_name in ("centred_intercept", "state_center", "centred_intercept_lo"):
             setattr(solver, field_name, None)
+        solver.centred_sum_compensated = False
         return
+    solver.centred_sum_compensated = bool(getattr(public, "centred_sum_compensated", False))
     from superglm.model.runtime_canonicalize import _public_column_shifts
     from superglm.solvers.mode_score import two_sum
 
@@ -627,31 +662,42 @@ def _read_solver_state_from_public(model) -> None:
     solver.centred_intercept_lo = float(alpha_public_lo) + error
 
 
-def _recentre_revised_columns(model, beta_before) -> None:
-    """Re-centre each centred column a revision moved where its old and new terms agree.
+def _exact_rounded_sum(weights: np.ndarray, values: np.ndarray) -> float:
+    """``sum w v`` from exact products, rounded once (``mode_score._exact_sum``)."""
+    from superglm.solvers._exact_sums import native_operand
+    from superglm.solvers.mode_score import _exact_sum
+
+    total, exponent, exact = _exact_sum(native_operand(weights), native_operand(values), 0.0, 1)
+    if not exact:  # pragma: no cover - finite operands always sum
+        raise RuntimeError("a revised column's intercept change is not finite")
+    return math.ldexp(total, exponent)
+
+
+def _carry_revised_columns(model, beta_before) -> None:
+    """Carry the change of each centred column a revision moved into the pair, exactly.
 
     A revision writes raw coordinates: a numeric column's new slope pivots at
-    ``x = 0``, so the column must contribute ``x beta - c beta_before``, its
-    fitted centred term ``(x - c) beta_before`` plus the edit's ``x dbeta``.
-    About ``c' = c beta_before / beta`` that is ``(x - c') beta + K``, ``K =
-    c' beta - c beta_before``, which is zero but for the roundings of ``c'``;
-    ``K`` is formed exactly and rounded once (``mode_score._exact_sum``) and
-    the pair takes it by TwoSum.  Each row then adds the remainder ``alpha_lo``
-    to a contribution of the size of the fitted term plus the edit's, never to
-    a constant that a contribution must cancel: at the old centre the pair
-    carried ``c dbeta``, ``1e16 + 2`` beside a row's ``-1e16``, and the
-    remainder was lost before they cancelled; about zero it carried ``c
-    beta_before``, which a near-identity slope edit at an offset of 1e16 cancels
-    against ``x beta`` (Sol's review of #448, and the sweep behind it).  A slope
-    edited to zero, or a quotient past the binary64 range, is centred at zero.
-    A zero-centre column is skipped, and no coefficient difference is formed:
-    one from -1e308 to 1e308 overflowed (the same review).  The solver's
-    centre on these columns is the public one, a numeric column's training
-    means being zero.
+    ``x = 0``, so about its fitted centre ``c`` the column contributes ``(x -
+    c) beta`` and the pair takes ``K = sum c beta - c beta_before``.  ``K`` is
+    formed from exact products, ``c beta`` and ``-c beta_before`` and never
+    their difference (which -1e308 to 1e308 overflows), and split into its
+    correctly rounded value and the rounded remainder, so the pair holds it to
+    ``u^2``.  The centres stay where the fit put them.  A zero-centre column
+    contributes ``x beta`` already and is skipped.
+
+    ``alpha`` then holds ``c dbeta``, which a row's ``(x - c) beta`` can cancel:
+    ``1e16 + 2`` beside ``-1e16`` at ``x = 0`` in Sol's review of #448.  The
+    result is marked ``centred_sum_compensated`` and evaluated as one
+    compensated sum with each column's exact centred product
+    (``mode_score.linear_predictor``, ``model.base.EtaSum``), so the remainder
+    survives the cancellation.  Moving the centre instead (0.36.0, ``c' = c
+    beta_before / beta``) lost a cancellation between two edited columns
+    (#449).  A pair with no remainder gains one here, whatever the family.
     """
     public = model._result
     centre = getattr(public, "state_center", None)
-    if centre is None or getattr(public, "centred_intercept", None) is None:
+    alpha = getattr(public, "centred_intercept", None)
+    if centre is None or alpha is None:
         return
     centre = np.asarray(centre, dtype=np.float64)
     before = np.asarray(beta_before, dtype=np.float64)
@@ -659,27 +705,17 @@ def _recentre_revised_columns(model, beta_before) -> None:
     moved = np.flatnonzero((centre != 0.0) & (beta != before))
     if not moved.size:
         return
-    from superglm.solvers._exact_sums import native_operand
-    from superglm.solvers.mode_score import _exact_sum
+    from superglm.solvers.mode_score import two_sum
 
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        recentred = centre[moved] * (before[moved] / beta[moved])
-    recentred = np.where(np.isfinite(recentred), recentred, 0.0)
-    total, exponent, exact = _exact_sum(
-        native_operand(np.concatenate([recentred, -centre[moved]])),
-        native_operand(np.concatenate([beta[moved], before[moved]])),
-        0.0,
-        1,
-    )
-    if not exact:  # pragma: no cover - finite operands always sum
-        raise RuntimeError("the re-centred intercept change is not finite")
-    _carry_into_centred_pair(public, (math.ldexp(total, exponent),))
-    for result in {id(r): r for r in (public, model._solver_result) if r is not None}.values():
-        result_centre = getattr(result, "state_center", None)
-        if result_centre is not None:
-            updated = np.array(result_centre, dtype=np.float64)
-            updated[moved] = recentred
-            result.state_center = updated
+    weights = np.concatenate([centre[moved], -centre[moved]])
+    values = np.concatenate([beta[moved], before[moved]])
+    high = _exact_rounded_sum(weights, values)
+    low = _exact_rounded_sum(np.append(weights, -1.0), np.append(values, high))
+    alpha_high, error = two_sum(float(alpha), high)
+    alpha_low = getattr(public, "centred_intercept_lo", None)
+    public.centred_intercept = alpha_high
+    public.centred_intercept_lo = float(alpha_low or 0.0) + (error + low)
+    public.centred_sum_compensated = True
 
 
 def publish_revised_coefficients(model, beta_before) -> None:
@@ -688,18 +724,18 @@ def publish_revised_coefficients(model, beta_before) -> None:
     A revision (an editor edit, a post-fit shape repair) writes ``beta`` into
     both results and moves the public intercept through
     ``move_public_intercept``; the raw public predictor ``intercept_pub +
-    X_pub beta`` states what it means.  A column the pair keeps centred (a
-    numeric one) that the revision moved is re-centred where its old and new
-    terms agree (``_recentre_revised_columns``), so that ``alpha_pub + (X_pub -
-    1 c_pub') beta`` predicts the same rows; every other column carries no
-    centre and nothing moves.  The solver state is then read from the published one
+    X_pub beta`` states what it means.  The change of a column the pair keeps
+    centred (a numeric one) that the revision moved is carried into the pair
+    exactly (``_carry_revised_columns``), so that ``alpha_pub + (X_pub - 1
+    c_pub') beta`` predicts the same rows; every other column carries no centre
+    and nothing moves.  The solver state is then read from the published one
     (``_read_solver_state_from_public``) and the fitted mode's identity is
     cleared.  The pair is carried, never dropped: clearing it dropped every
     dense column's centring (Sol's review of #445, P2), and keeping the
     solver's pre-revision pair beside it left the solver predictor at the old
     coefficients (#447).
     """
-    _recentre_revised_columns(model, beta_before)
+    _carry_revised_columns(model, beta_before)
     _read_solver_state_from_public(model)
 
     updated: set[int] = set()
@@ -827,13 +863,7 @@ def _validate_workspace_result(work_model) -> float:
     intercept_shift = work_model._runtime_canonical_state.get("intercept_shift")
     if intercept_shift is None or not np.isfinite(intercept_shift):
         raise RuntimeError("fit candidate is missing its canonical intercept shift")
-    expected_intercept = float(solver_result.intercept) + float(intercept_shift)
-    if not np.isclose(
-        float(result.intercept),
-        expected_intercept,
-        rtol=1e-13,
-        atol=1e-13,
-    ):
+    if not _intercepts_read_the_shift(work_model):
         raise RuntimeError("fit candidate canonical intercept relation is inconsistent")
     reml_result = getattr(work_model, "_reml_result", None)
     if reml_result is not None and getattr(reml_result, "pirls_result", None) is not solver_result:
