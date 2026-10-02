@@ -742,33 +742,47 @@ def _all_thin_frame():
     return frame, y
 
 
-def _all_thin_model(solve: str = "auto") -> SuperGLM:
+def _all_thin_model(solve: str = "auto", lines: LambdaPolicy | None = None) -> SuperGLM:
+    """``lines``: one policy for every component of the term; by default only ``wiggle`` is fixed."""
+    policy = lines if lines is not None else {"wiggle": LambdaPolicy.fixed(1.0)}
     return SuperGLM(
         family="gaussian",
         features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
-        interactions=[
-            FactorSmooth(
-                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
-            )
-        ],
+        interactions=[FactorSmooth("x", group="g", basis="sz", lambda_policy=policy)],
         selection_penalty=0,
         direct_solve=solve,
     )
 
 
-def test_an_sz_term_whose_every_level_is_thin_reproduces_its_fit() -> None:
+def _without_line_penalty(monkeypatch) -> None:
+    """Fit as 0.36.0 did: the record without the lines' penalty (#444), as a model saved then holds."""
+    original = FactorSmooth._record_unidentified_levels
+
+    def unpenalized(self, *args, **kwargs):
+        kwargs["penalize"] = False
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(FactorSmooth, "_record_unidentified_levels", unpenalized)
+
+
+def test_an_sz_term_whose_every_level_is_thin_reproduces_its_fit(monkeypatch) -> None:
     """Every level at one ``x``: the canonical population, a warning, and the fit kept (#432 b).
 
     No level identifies the population curve, so ``_population_offset`` was
     zero and every level's deviation went to it: the conditional training
     predictions spanned -260702 to 260703 on b5080877 against master's -0.726
-    to 0.954 (Codex and Sol reviews, P1).  The population is now the family's
+    to 0.954 (Codex and Sol reviews, P1).  The population is the family's
     canonical point, where each level's free part is zero, named in a warning
     at fit; the predictions on the training rows are the fit's own to their
-    rounding, and the rule follows the family there as well.
+    rounding, and the rule follows the family there as well.  A fit now
+    penalizes such a term's lines instead (#444,
+    ``test_penalized_sz_lines_predict_alike_on_both_solvers``); the
+    convention serves the models 0.36.0 saved, fitted here without the
+    penalty.
     """
     from superglm.model import base
 
+    _without_line_penalty(monkeypatch)
     frame, y = _all_thin_frame()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -803,10 +817,12 @@ def test_the_all_thin_border_decision_does_not_follow_the_penalty_products_round
     inputs with the penalty under the congruence ``D S D``, ``D = diag(1 +
     4 u xi)`` (exactly the same null structure, every product rounded anew),
     give one decision and no refusal over 32 draws; on 52c6b730, 13 of 64
-    draws refused and the rest kept a rank the Haswell kernel did not.
+    draws refused and the rest kept a rank the Haswell kernel did not.  The
+    fit is held without the lines' penalty (#444), which removes the alias.
     """
     import superglm.solvers._structured.balance_tree as tree_module
 
+    _without_line_penalty(monkeypatch)
     calls = []
     original = tree_module.factor_border
 
@@ -1089,72 +1105,319 @@ def _separated_poisson():
     return frame, y
 
 
-def _separated_model(separation: str = "warn") -> SuperGLM:
+def _separated_model(
+    separation: str = "warn", direct_solve: str = "auto", lines: LambdaPolicy | None = None
+) -> SuperGLM:
+    """``lines``: one policy for every component of the term; by default only ``wiggle`` is fixed."""
+    policy = lines if lines is not None else {"wiggle": LambdaPolicy.fixed(1.0)}
     return SuperGLM(
         family="poisson",
         features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
-        interactions=[
-            FactorSmooth(
-                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
-            )
-        ],
+        interactions=[FactorSmooth("x", group="g", basis="sz", lambda_policy=policy)],
         selection_penalty=0,
         separation=separation,
+        direct_solve=direct_solve,
     )
 
 
-def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> None:
-    """A level whose unpenalized line separates the response is named, and stays out (Opus P2).
+def _working_rows(model: SuperGLM):
+    """``(A, S, theta, mu, slope, fisher)`` at the retained fit, in the predictor's coordinates.
 
-    On pg17's make model 26 of 71 identified makes had no claim; their lines
-    walked toward ``-inf`` for as long as each fit ran, so the population
-    curve, the mean of the levels with them, sat at ``[-37, -9.6]`` (auto)
-    against ``[-80, 80]`` (gram).  The scan (``separated_factor_smooth_levels``)
-    names a zero-claim level and a one-sided one, not a level with claims
-    inside its rows, in a ``SeparationWarning`` (``separation="ignore"``
-    silences it and still leaves them out).  Along a separated line, ``d``
-    into the level and ``-d / K`` from every level, the population and every
-    other level do not move (``_assert_rule_follows``).  The binomial scan,
-    on the same design, finds the level whose ones all lie above its zeros
-    (the linear program's side).  Mutations: no scan; the separated levels
-    kept in the mean.
+    ``A = [1, X - 1 c']`` and ``theta = (alpha, beta)`` with the fit's centred
+    state ``(alpha, c)`` (``prediction_centred_state``), so ``A theta`` is the
+    fit's linear predictor; ``S`` is the penalty, with a zero row and column
+    for the intercept.  Unit prior weights; ``slope = h' / V`` and ``fisher =
+    h' slope``, the observed weight as well under the canonical links used here.
+    """
+    from superglm.model.base import prediction_centred_state
+
+    alpha, centre, _ = prediction_centred_state(model.result)
+    dm = model._dm
+    X = np.asarray(dm.toarray(), dtype=np.float64)
+    if centre is not None:
+        X = X - centre[None, :]
+    A = np.column_stack([np.ones(len(X)), X])
+    S = np.zeros((A.shape[1], A.shape[1]))
+    S[1:, 1:] = build_penalty_matrix(
+        dm.group_matrices, model._groups, model._reml_lambdas, dm.p, model._reml_penalties
+    )
+    theta = np.concatenate([[alpha], np.asarray(model.result.beta, dtype=np.float64)])
+    eta = A @ theta
+    link, family = model._link, model._distribution
+    mu, d1 = link.inverse(eta), link.deriv_inverse(eta)
+    slope = d1 / family.variance(mu)
+    return A, S, theta, mu, slope, d1 * slope
+
+
+def _scaled_kappa_eta(model: SuperGLM) -> float:
+    """``kappa_s eta`` of the fit's ``H = A' W A + S`` (``_working_rows``).
+
+    A backward-stable factorization perturbs the Jacobi-scaled ``H`` by at
+    most ``eta = q gamma_(n+q+1) max_ij (|A|' W |A| + |S|)_ij / sqrt(H_ii
+    H_jj)`` in the 2-norm (Higham 2002, Theorems 10.3 and 19.4, as
+    ``test_sum_to_zero_tree_factor._logdet_agreement``); ``kappa_s`` is the
+    scaled condition number.  Below ``1 / 2`` the system has one solution in
+    working precision.  An exact alias makes ``kappa_s`` near ``1 / u``.
+    """
+    A, S, _, _, _, fisher = _working_rows(model)
+    H = A.T @ (fisher[:, None] * A) + S
+    magnitude = np.abs(A).T @ (fisher[:, None] * np.abs(A)) + np.abs(S)
+    scale = 1.0 / np.sqrt(np.diag(H))
+    q = H.shape[0]
+    eta = q * _gamma(A.shape[0] + q + 1) * float(np.max(scale[:, None] * magnitude * scale))
+    return float(np.linalg.cond(scale[:, None] * H * scale[None, :])) * eta
+
+
+def _mode_gap(model: SuperGLM, y: np.ndarray) -> np.ndarray:
+    """A first-order bound on ``|theta - theta*|``, entrywise, at the retained fit.
+
+    ``test_nested_structured_fit._fixed_point_gap`` in ``_working_rows``'
+    coordinates: ``theta - theta* = H^-1 g`` to first order, ``g = A's - S
+    theta`` the penalized score with ``s = (y - mu) h' / V``, summed exactly
+    over products rounded once (``2 eps |A|' |s| + 2 eps |S| |theta|``).  Each
+    score row is within ``16 eps |h' / V| (|y| + |mu|)`` and moves by ``W |d
+    eta|``, ``|d eta| <= (m + 1) eps |A| |theta|`` over a row's ``m``
+    nonzeros.  These go through ``|H^-1|`` and add to ``|H^-1 g|``: the solves'
+    rounding and the stop rule's resolution together, whichever iteration
+    stopped the fit.
+    """
+    A, S, theta, mu, slope, fisher = _working_rows(model)
+    inverse = np.linalg.inv(A.T @ (fisher[:, None] * A) + S)
+    score = (y - mu) * slope
+    terms = np.vstack([A * score[:, None], -(S * theta).T])
+    g = np.array([math.fsum(column) for column in terms.T])
+    d_eta = (np.count_nonzero(A, axis=1) + 1) * EPS * (np.abs(A) @ np.abs(theta))
+    rows = fisher * d_eta + 16 * EPS * np.abs(slope) * (np.abs(y) + np.abs(mu))
+    error = np.abs(A).T @ (rows + 2 * EPS * np.abs(score)) + 2 * EPS * np.abs(S) @ np.abs(theta)
+    return np.abs(inverse @ g) + np.abs(inverse) @ error
+
+
+def _prediction_rows(model: SuperGLM, frame: pd.DataFrame, *, population: bool) -> np.ndarray:
+    """``Z`` with ``Z theta`` the predictor ``predict`` evaluates (``_working_rows``' coordinates).
+
+    The intercept and each term's centred columns; the population skips the
+    ``sz`` term, which no level stays out of once its lines are penalized.
+    """
+    from superglm.model.base import _prediction_plan, prediction_centred_state
+
+    _, centre, _ = prediction_centred_state(model.result)
+    Z = np.zeros((len(frame), 1 + len(model.result.beta)))
+    Z[:, 0] = 1.0
+    plan = _prediction_plan(model)
+    for term in plan["features"] + plan["interactions"]:
+        spec = term["spec"]
+        if isinstance(spec, FactorSmooth):
+            if population:
+                continue
+            columns = spec.transform(frame["x"].to_numpy(dtype=float), frame["g"].to_numpy())
+        else:
+            columns = spec.transform(frame[term["name"]].to_numpy(dtype=float))
+        index = np.asarray(term["beta_idx"])
+        shift = 0.0 if centre is None else centre[index][None, :]
+        Z[:, 1 + index] = np.asarray(columns, dtype=np.float64) - shift
+    return Z
+
+
+def _line_bound(model: SuperGLM, frame: pd.DataFrame, y: np.ndarray) -> np.ndarray:
+    """Per row of ``frame``, a bound on ``|b(x)' beta_l|``, any level's deviation from the population.
+
+    Each of the ``K`` levels' blocks pays ``beta_l' P beta_l``, ``P = lambda_w
+    Omega_w + lambda_N Omega_N`` (the term's two components; their sum over
+    the levels is the term's penalty), so ``|b(x)' beta_l| <= sqrt(b(x)' P^-1
+    b(x)) sqrt(beta_l' P beta_l)`` (Cauchy-Schwarz in ``P``).  The fit
+    minimizes ``D + theta' S theta`` to within ``eps = 2 phi reml_tol (1 +
+    |V|)`` (``_assert_fits_as_gram``), so it costs no more than the same
+    coefficients with the term removed, which keeps every other penalty:
+    ``sum_l beta_l' P beta_l <= D(theta_0) - D(theta) + eps``.  The data and
+    the other terms fix that, wherever the solver went.  Without the lines'
+    penalty ``P`` is singular on them and nothing bounds a separated line.
+    """
+    from scipy.special import xlogy
+
+    spec = model._interaction_specs["x:g:sz"]
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    lam = model._reml_lambdas
+    _, omega = spec._level_line_penalty()
+    P = np.diag(
+        lam["x:g:sz:wiggle"] * np.diag(spec._base_penalty_components[0][1])
+        + lam["x:g:sz:null"] * np.diag(omega)
+    )
+    A, _, theta, _, _, _ = _working_rows(model)
+    term = slice(1 + group.sl.start, 1 + group.sl.stop)
+    eta = A @ theta
+
+    def deviance(mu: np.ndarray) -> float:
+        return float(np.sum(2.0 * (xlogy(y, y / mu) - (y - mu))))
+
+    eps = 2.0 * float(model.result.phi) * 1e-9 * (1.0 + abs(float(model._reml_result.objective)))
+    room = deviance(np.exp(eta - A[:, term] @ theta[term])) - deviance(np.exp(eta)) + eps
+    basis = spec.marginal_basis(frame["x"].to_numpy(dtype=float))
+    return np.sqrt(np.einsum("ij,ij->i", basis, basis / np.diag(P)[None, :]) * max(room, 0.0))
+
+
+def test_a_separated_sz_line_is_penalized_and_stays_bounded() -> None:
+    """Separated ``sz`` lines take the null-space penalty and stay bounded on both solvers (#444).
+
+    g000 has no claim and g001's claims sit at one ``x`` below its other rows:
+    neither line has a finite estimate, and on master each walked for as long
+    as the fit ran (to the log link's clip, ``eta = -80``, on its rows, as
+    the real-data model #444 reports does), the solver deciding where it
+    stopped.  The fit now names them in a ``SeparationWarning`` and gives
+    every level's line Marra & Wood's null-space penalty, with a smoothing
+    parameter REML estimates (``x:g:sz:null``).  Each level's deviation from
+    the population curve is then within ``_line_bound``, which the data fix,
+    and the structured and dense solvers reach one fit
+    (``_assert_fits_as_gram``).  The scan still names only the separated
+    levels, ``separation="ignore"`` silences the warning and keeps the
+    penalty, a response that no line separates keeps the lines unpenalized,
+    and the binomial scan, on the same design, finds the level whose ones all
+    lie above its zeros (the linear program's side).  Mutations: no penalty
+    (master); the penalty on every ``sz`` fit.
     """
     from superglm.diagnostics.separation import (
         SeparationWarning,
         separated_factor_smooth_levels,
     )
+    from superglm.model import base
 
     frame, y = _separated_poisson()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        model = _separated_model().fit_reml(frame, y)
-    spec = model._interaction_specs["x:g:sz"]
-    assert [spec._levels[code] for code in spec._separated_levels] == ["g000", "g001"]
-    named = [w for w in caught if "unpenalized line" in str(w.message)]
-    assert len(named) == 1
-    assert issubclass(named[0].category, SeparationWarning)
-    assert "'g000'" in str(named[0].message) and "'g001'" in str(named[0].message)
-    assert "'g002'" not in str(named[0].message)
-    group = next(g for g in model._groups if g.name == "x:g:sz")
-    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
-    shifted, step = _family_shift(spec, blocks, (0, 1), float(np.max(np.abs(blocks))))
-    _assert_rule_follows(spec, blocks, shifted, step, keep=(0, 1))
+    grid = pd.DataFrame(
+        {
+            "x": np.tile(np.linspace(0.0, 1.0, 21), 3),
+            "g": np.repeat(np.array(["g000", "g001", "g002"], dtype=object), 21),
+        }
+    )
+    models = {}
+    for solve in ("structured", "gram"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = _separated_model(direct_solve=solve).fit_reml(frame, y)
+        named = [w for w in caught if "unpenalized line" in str(w.message)]
+        assert len(named) == 1
+        assert issubclass(named[0].category, SeparationWarning)
+        message = str(named[0].message)
+        assert "'g000'" in message and "'g001'" in message and "'g002'" not in message
+        assert "penalizes every level's line" in message
+        lam = model._reml_lambdas.get("x:g:sz:null")
+        assert lam is not None and 0.0 < lam < np.inf
+        assert bool(model._reml_result.converged)
+        assert not model._interaction_specs["x:g:sz"]._has_population_offset
+        eta = base.predict_eta_exact(model, grid, warn=False)
+        population = base.predict_eta_exact(model, grid, random_effects="population", warn=False)
+        slack = 4.0 * _rounding_bound(model, grid)
+        assert np.all(np.abs(eta - population) <= _line_bound(model, grid, y) + slack)
+        models[solve] = model
+    _assert_fits_as_gram(models["structured"], models["gram"])
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         quiet = _separated_model("ignore").fit_reml(frame, y)
     assert not [w for w in caught if "unpenalized line" in str(w.message)]
-    assert quiet._interaction_specs["x:g:sz"]._separated_levels == spec._separated_levels
+    assert "x:g:sz:null" in quiet._reml_lambdas
 
-    dm = model._dm.group_matrices[model._groups.index(group)]
+    joined = y.copy()
+    g, x = frame["g"].to_numpy(), frame["x"].to_numpy()
+    none, one = np.flatnonzero(g == "g000"), np.flatnonzero(g == "g001")
+    joined[none[:2]] = 1.0
+    joined[one[np.argmax(x[one])]] = 1.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        plain = _separated_model().fit_reml(frame, joined)
+    assert not [w for w in caught if "unpenalized line" in str(w.message)]
+    assert "x:g:sz:null" not in plain._reml_lambdas
+
+    model = models["gram"]
+    spec = model._interaction_specs["x:g:sz"]
+    dm = model._dm.group_matrices[[g.name for g in model._groups].index("x:g:sz")]
+    null_space = np.eye(spec.k)[:, np.diag(spec._base_penalty_components[0][1]) == 0.0]
     codes = np.asarray(dm.codes)
     binary = (y > 0).astype(float)
     level = np.flatnonzero(codes == 3)
-    binary[level] = (frame["x"].to_numpy()[level] > 0.6).astype(float)
-    found = separated_factor_smooth_levels(
-        dm, spec._population_null_space, None, binary, ("zero", "one")
-    )
+    binary[level] = (x[level] > 0.6).astype(float)
+    found = separated_factor_smooth_levels(dm, null_space, None, binary, ("zero", "one"))
     assert 3 in found and 2 not in found
+
+
+@pytest.mark.parametrize("case", ["all_thin", "separated"])
+def test_penalized_sz_lines_predict_alike_on_both_solvers(case) -> None:
+    """With every level thin, or a line separated, both solvers predict the same curves (#444).
+
+    Every level at one ``x`` (the Sol review's fixture): the levels' lines
+    and the main effect's unpenalized curve were an exact alias, and the
+    population off the levels' ``x`` values followed each solver's point
+    along it (``+-585`` on ``auto`` against ``-0.03 .. 1.07`` on ``gram`` at
+    #440's head, and still ``7.9e-4`` apart on master).  With the lines'
+    penalty every smoothing parameter fixed (one policy for the term), the
+    penalized system has one solution in working precision (``kappa_s eta <
+    1/2``, ``_scaled_kappa_eta``; master's alias puts it near ``1 / u``), and
+    each fit is within ``_mode_gap`` of it, so on a grid every level's curve
+    and the population's agree within ``|Z| (gap_a + gap_g)`` plus each
+    evaluation's ``(m + 1) eps |Z| |theta|`` (``Z`` the predictor's rows,
+    ``_prediction_rows``, checked against ``predict`` first).  The separated
+    fixture holds the same on its walked levels.  Mutation: no penalty
+    (master), where the singular system fails the first check.
+    """
+    from superglm.model import base
+
+    if case == "all_thin":
+        frame, y = _all_thin_frame()
+        build = lambda solve: _all_thin_model(solve, LambdaPolicy.fixed(1.0))  # noqa: E731
+        levels = ("g0", "g3", "g9")
+    else:
+        frame, y = _separated_poisson()
+        build = lambda solve: _separated_model(  # noqa: E731
+            direct_solve=solve, lines=LambdaPolicy.fixed(1.0)
+        )
+        levels = ("g000", "g001", "g002")
+    x = np.linspace(float(frame["x"].min()), float(frame["x"].max()), 41)
+    grid = pd.DataFrame(
+        {"x": np.tile(x, len(levels)), "g": np.repeat(np.array(levels, dtype=object), len(x))}
+    )
+    models = {}
+    for solve in ("structured", "gram"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            models[solve] = build(solve).fit_reml(frame, y)
+        assert models[solve]._reml_lambdas["x:g:sz:null"] == 1.0
+    assert models["structured"]._reml_profile["direct_backend"] == "structured"
+    for population in (False, True):
+        etas, reach = [], np.zeros(len(grid))
+        for model in models.values():
+            assert _scaled_kappa_eta(model) < 0.5
+            theta = _working_rows(model)[2]
+            Z = _prediction_rows(model, grid, population=population)
+            eta = base.predict_eta_exact(
+                model,
+                grid,
+                random_effects="population" if population else "conditional",
+                warn=False,
+            )
+            rounding = (np.count_nonzero(Z, axis=1) + 1) * EPS * (np.abs(Z) @ np.abs(theta))
+            assert np.all(np.abs(Z @ theta - eta) <= 2.0 * rounding)
+            reach += np.abs(Z) @ _mode_gap(model, y) + rounding
+            etas.append(eta)
+        assert np.all(np.abs(etas[0] - etas[1]) <= reach)
+
+
+def test_an_all_thin_sz_term_penalizes_its_lines_under_reml() -> None:
+    """The Sol review's all-thin fit, its lines' smoothing parameter estimated: one fit on both solvers.
+
+    The fit names the penalty in a warning and estimates ``x:g:sz:null`` by
+    REML; the structured and dense solvers reach the same penalized objective
+    and rank (``_assert_fits_as_gram``), where on master the objective was
+    flat along the alias and each solver kept its own point.  Mutation: no
+    penalty (master).
+    """
+    frame, y = _all_thin_frame()
+    models = {}
+    for solve in ("structured", "gram"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            models[solve] = _all_thin_model(solve).fit_reml(frame, y)
+        assert [w for w in caught if "penalizes every level's line" in str(w.message)]
+        assert not [w for w in caught if "fixed by convention" in str(w.message)]
+        assert 0.0 < models[solve]._reml_lambdas["x:g:sz:null"] < np.inf
+    _assert_fits_as_gram(models["structured"], models["gram"])
 
 
 def test_an_sz_model_saved_before_the_record_predicts_as_refitted() -> None:

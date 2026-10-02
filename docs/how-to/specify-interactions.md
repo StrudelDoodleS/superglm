@@ -198,11 +198,11 @@ and `relativities()` report on the same footing: each level's curve is its
 deviation from the population curve, and the global curve is the population
 curve.
 
-If every level is in this position, no level identifies the population curve.
-Its unpenalized part is then set by a convention: each level's unidentified
-part is zero. Away from the levels' own values, the curves still depend on
-where the fit landed along the global smooth's unpenalized curve, wherever
-that curve is not a polynomial. The fit warns.
+If every level is in this position, no level identifies the population curve:
+the data cannot tell the levels' straight lines from the global curve's. The
+fit then penalizes every level's line, as described next, and warns. The
+global curve is then fitted through the trend across the levels, and the
+population curve is the global curve.
 
 To give a level its own curve, give it weighted rows at enough distinct values.
 
@@ -212,17 +212,32 @@ Under a log link with zero responses (Poisson, Tweedie, negative binomial), or
 under a binomial link, an SZ level's unpenalized straight line can separate
 the response. Two examples are a level with no claims, and a level whose claims
 all sit at one value of the variable with its other rows to one side. The
-likelihood then keeps increasing along that line, so the level's fitted values
-move toward zero (or one) for as long as the fit runs.
+likelihood then keeps increasing along that line, so on its own the line has
+no finite estimate.
 
-- The fit warns with a `SeparationWarning` that names these levels.
-- `separation="ignore"` silences the warning; `separation="error"` does not
-  refuse the fit for this case.
-- The population curve leaves these levels out of its average, so it does not
-  follow their lines.
+When this happens, or when every level is thin as above, the fit adds a second
+penalty to the term. It penalizes every level's straight line, with a
+smoothing parameter of its own named `null` (for example `x:g:sz:null`), and
+REML estimates it as it estimates the others. This is the null-space penalty
+of mgcv's `select=TRUE` (Marra and Wood, 2011), and it treats the levels'
+lines as random effects, as `basis="fs"` does.
 
-To give such levels finite estimates, merge them into neighbouring levels or
-model the group with a `RandomEffect`.
+- Every level's curve is finite: a level with no claims sits below the
+  population curve by as much as its rows and the other levels support.
+- The population curve is the global curve, and every level predicts its own
+  fitted curve.
+- The `SeparationWarning` names the levels whose line separates.
+  `separation="ignore"` silences it and keeps the penalty.
+  `separation="error"` does not refuse the fit for this case.
+- The penalty shrinks every level's line, so it changes the fit of the other
+  levels too. Every other SZ fit keeps the lines unpenalized.
+- The smoothing parameter needs enough levels to estimate. With very few
+  levels and one of them separated, REML can drive it to its lower bound and
+  report that it did not converge. The lines are still finite there.
+- A lambda policy given as one `LambdaPolicy` for the whole term also fixes
+  `null`. A dict of policies leaves `null` to REML.
+- A model saved by superglm 0.36.0 keeps the rules it was saved with: its
+  population curve leaves its separated levels out.
 
 ## Separated cells: exposure without response
 

@@ -103,7 +103,7 @@ def _factor_penalties(
             f"requires only {expected_kind!r} REML components."
         )
     suffixes = {_component_suffix(group.name, component.name) for component in matching}
-    if spec.basis == "sz" and suffixes != {"wiggle"}:
+    if spec.basis == "sz" and suffixes not in ({"wiggle"}, {"wiggle", "null"}):
         raise RuntimeError(
             f"FactorSmooth term {group.name!r} with basis='sz' requires exactly "
             "one shared 'wiggle' REML component."

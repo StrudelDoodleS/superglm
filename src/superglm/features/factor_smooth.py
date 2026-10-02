@@ -116,6 +116,19 @@ class FactorSmooth:
     its own curve block and shrinks to zero through the penalty.  ``basis="sz"``
     rejects one: its sum-to-zero contrast is what identifies the deviations, and
     an empty level makes that constraint vacuous.
+
+    ``basis="sz"`` leaves each level's polynomial part (its line, with
+    ``m=2``) unpenalized, as mgcv's ``sz`` does.  When the fit's data leave
+    those lines without a finite or unique estimate -- some level's line
+    separates the response, or every level holds fewer distinct ``x`` values
+    than the line has coefficients -- the fit adds a second penalty
+    component, ``"null"``, on every level's line: Marra & Wood's (2011)
+    null-space penalty (mgcv's ``select=TRUE``), with its own smoothing
+    parameter, which reads the lines as random effects shrunk toward the
+    population curve, as ``basis="fs"`` does with its ``null_j``
+    components.  Its smoothing parameter is estimated by REML unless
+    ``lambda_policy`` is a single policy for the whole term.  Every other
+    ``sz`` fit keeps the lines unpenalized.
     """
 
     structured_kind = "factor_smooth"
@@ -217,6 +230,9 @@ class FactorSmooth:
         self._weightless_levels: tuple[int, ...] = ()
         self._separated_levels: tuple[int, ...] = ()
         self._population_null_space: NDArray | None = None
+        # Whether the fit penalized the levels' lines (#444,
+        # ``_record_unidentified_levels``); a model saved before has none.
+        self._lines_penalized = False
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -657,6 +673,8 @@ class FactorSmooth:
         prior_weights: NDArray | None,
         response: NDArray | None = None,
         boundaries: tuple[str, ...] = (),
+        *,
+        penalize: bool = False,
     ) -> tuple[int, ...]:
         """Record what the fit's data identify of each ``sz`` level (#432); return the separated.
 
@@ -668,6 +686,16 @@ class FactorSmooth:
         boundaries reached at infinite ``eta``) has no finite line
         (``diagnostics.separation.separated_factor_smooth_levels``).  Both
         stay out of the population curve (``_population_map``).
+
+        ``penalize`` (a fit about to run on ``design``, #444): when some line
+        separates, or every level is thin, the lines have no finite or no
+        unique estimate that a convention could fix away from the levels'
+        own ``x`` values.  The design then takes the null-space penalty
+        (``_level_line_penalty``) and no level is left unidentified, so the
+        population curve is the main effect and every level predicts its
+        own fitted curve.  The decision reads the wiggle penalty's null space
+        alone, so it is the same whether or not ``design`` already carries
+        the penalty from an earlier fit of the same data.
         """
         from superglm.diagnostics.separation import separated_factor_smooth_levels
         from superglm.solvers._structured.layout import sz_level_identification
@@ -677,20 +705,60 @@ class FactorSmooth:
         self._weightless_levels = ()
         self._separated_levels = ()
         self._population_null_space = None
+        if penalize:
+            self._lines_penalized = False
         if self.basis != "sz":
             return ()
+        if penalize:
+            design.repeated_penalty_components = self._base_penalty_components
+            design.lambda_policies = self._resolve_lambda_policies()
         rows = sz_level_identification(design, prior_weights)
         separated: tuple[int, ...] = ()
         if response is not None and boundaries:
             separated = separated_factor_smooth_levels(
                 design, rows.null_space, prior_weights, response, boundaries
             )
+        if penalize and (separated or len(rows.thin) == len(self._levels)):
+            suffix, omega = self._level_line_penalty()
+            design.repeated_penalty_components = (
+                *self._base_penalty_components,
+                (suffix, omega),
+            )
+            if isinstance(self._lambda_policy, LambdaPolicy):
+                design.lambda_policies = {
+                    **(design.lambda_policies or {}),
+                    suffix: self._lambda_policy,
+                }
+            self._lines_penalized = True
+            return separated
         self._unidentified_levels = rows.thin
         self._free_directions = rows.free
         self._weightless_levels = rows.weightless
         self._separated_levels = separated
         self._population_null_space = rows.null_space if (rows.thin or separated) else None
         return separated
+
+    def _level_line_penalty(self) -> tuple[str, NDArray[np.float64]]:
+        """``("null", S*)``: the penalty on each level's polynomial part (#444).
+
+        Marra & Wood's (2011) null-space penalty: the wiggle penalty's
+        eigenvectors with its zero eigenvalues set to one and the rest to
+        zero.  In the natural parameterization the wiggle penalty is diagonal
+        (``_natural_parameterization_from_r``), so ``S*`` is the indicator of
+        its zero diagonal, exactly.  Those coordinates are orthonormal over
+        the term's weighted rows (unit mean square each), so ``beta_l' S*
+        beta_l`` is the mean square of level ``l``'s polynomial part over the
+        data: invariant under any rotation of the null coordinates, as the
+        streamed marginal QR may choose.
+        """
+        wiggle = np.asarray(self._base_penalty_components[0][1], dtype=np.float64)
+        diagonal = np.diag(wiggle)
+        if (
+            np.count_nonzero(wiggle - np.diag(diagonal))
+            or np.count_nonzero(diagonal == 0.0) != self.m
+        ):
+            raise RuntimeError("an sz level-line penalty needs the natural parameterization")
+        return "null", np.diag((diagonal == 0.0).astype(np.float64))
 
     @property
     def _unidentified_level_names(self) -> tuple:

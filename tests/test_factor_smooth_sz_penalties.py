@@ -160,6 +160,7 @@ def test_dense_hessian_factor_sz_traces_match_dense_oracle() -> None:
     [
         (("null", np.eye(4)),),
         (("wiggle", np.eye(4)), ("extra", np.eye(4))),
+        (("null", np.eye(4)), ("wiggle", np.eye(4))),
     ],
 )
 def test_sz_rejects_noncanonical_penalty_component_geometry(components) -> None:
@@ -174,5 +175,5 @@ def test_sz_rejects_noncanonical_penalty_component_geometry(components) -> None:
     )
     group = GroupSlice(name="x:g:sz", start=0, end=4)
 
-    with pytest.raises(ValueError, match="exactly one 'wiggle' component"):
+    with pytest.raises(ValueError, match="require a 'wiggle' component, optionally"):
         build_penalty_components([gm], collect_reml_groups([group], [gm]))

@@ -744,7 +744,7 @@ def _store_fit_arrays(model, sample_weight, offset, y=None):
     # "weighted fit whose arrays were released" and refuse to silently
     # substitute unit weights in the latter case.
     model._fit_used_weights = bool(np.any(model._fit_weights != 1.0))
-    _record_unidentified_factor_smooth_levels(model, model._fit_weights, y)
+    _record_unidentified_factor_smooth_levels(model, model._fit_weights, y, penalize=True)
     return model._fit_weights, model._fit_offset
 
 
@@ -754,16 +754,23 @@ def _store_fit_arrays(model, sample_weight, offset, y=None):
 _FIT_WARNING_STACKLEVEL = 5
 
 
-def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, stacklevel=None):
+def _record_unidentified_factor_smooth_levels(
+    model, sample_weight, y=None, *, stacklevel=None, penalize=False
+):
     """Record, on each ``sz`` FactorSmooth spec, what this design identifies of its levels (#432).
 
     Read from the built design, the prior weights and the response, for
     every backend, so prediction treats the levels alike whichever solver
-    fitted them.  Levels whose unpenalized line separates the response are
-    named in a ``SeparationWarning`` (never refused: the population curve
-    leaves them out, ``FactorSmooth._population_map``), unless the model's
-    ``separation`` is ``"ignore"``; a population fixed by the canonical
-    convention, or by separated lines alone, is named in a ``UserWarning``.
+    fitted them.  ``penalize`` is set by a fit about to run on the design:
+    a term whose level lines separate the response, or whose every level
+    is thin, then takes the null-space penalty on its lines (#444,
+    ``FactorSmooth._record_unidentified_levels``), named in a
+    ``SeparationWarning`` for separated lines (never refused) unless the
+    model's ``separation`` is ``"ignore"``, and in a ``UserWarning`` when
+    every level is thin.  Without ``penalize`` (a model saved before the
+    record existed, which keeps no response) a population that every level
+    being thin leaves to the canonical convention is named in a
+    ``UserWarning``.
     """
     import warnings
 
@@ -783,12 +790,27 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
         spec = specs.get(group.name)
         if not (isinstance(spec, FactorSmooth) and isinstance(matrix, FactorSmoothGroupMatrix)):
             continue
-        separated = spec._record_unidentified_levels(matrix, sample_weight, y, boundaries)
+        separated = spec._record_unidentified_levels(
+            matrix, sample_weight, y, boundaries, penalize=penalize
+        )
+        penalized = bool(getattr(spec, "_lines_penalized", False))
         if separated and mode != "ignore":
             labels = [spec._levels[code] for code in separated]
             warnings.warn(
                 format_factor_smooth_separation(group.name, labels, len(spec._levels)),
                 SeparationWarning,
+                stacklevel=level,
+            )
+        if penalized and not separated:
+            warnings.warn(
+                f"FactorSmooth {group.name!r} (basis='sz'): every level holds fewer distinct x "
+                "values than its unpenalized polynomial part (its line, with m=2) has "
+                "coefficients, so the data cannot tell the levels' lines from the main "
+                "effect's. The fit therefore penalizes every level's line, with a 'null' "
+                "smoothing parameter of its own (as basis='fs' does), which shrinks the lines "
+                "toward the population curve: the population curve is the main effect, fitted "
+                "through the trend across the levels, and every level's curve is its own fit.",
+                UserWarning,
                 stacklevel=level,
             )
         convention = spec._population_convention
@@ -801,14 +823,6 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
                 "and every level's curve, still follow the fit's point along the main effect's "
                 "unpenalized curve wherever that curve is not a polynomial. Predictions on the "
                 "training rows reproduce the fit.",
-                UserWarning,
-                stacklevel=level,
-            )
-        elif convention == "separated_mean":
-            warnings.warn(
-                f"FactorSmooth {group.name!r} (basis='sz'): every level the data identify has "
-                "an unpenalized line that separates the response, so the population curve is "
-                "their mean and moves with how far the fit walked those lines.",
                 UserWarning,
                 stacklevel=level,
             )

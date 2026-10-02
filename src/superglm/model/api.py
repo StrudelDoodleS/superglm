@@ -199,9 +199,10 @@ class SuperGLM:
             separation the build scan cannot see.
             A ``FactorSmooth(basis="sz")`` level whose unpenalized line
             separates the response is named in a ``SeparationWarning`` at fit
-            under ``"warn"`` and ``"error"`` alike (never refused) and left
-            out of the term's population curve; ``"ignore"`` silences the
-            warning only.
+            under ``"warn"`` and ``"error"`` alike (never refused), and the
+            fit penalizes every level's line of that term (its ``null``
+            smoothing parameter), which gives every level a finite curve;
+            ``"ignore"`` silences the warning only.
         group_pricing : {"rank", "spanned"}
             Dimension ``p_g`` at which the selection penalty and the fallback
             df ledger price a group whose spec emits fewer columns than the
@@ -1916,9 +1917,10 @@ class SuperGLM:
             Whether to include fitted random-effect and factor-smooth
             deviations. Population prediction sets all such contributions to
             zero, except that a ``basis="sz"`` FactorSmooth with levels its
-            data identify only in part, or levels whose line separates the
-            response, contributes its population curve's offset (see "SZ
-            levels the data cannot identify" in the interactions guide).
+            data identify only in part contributes its population curve's
+            offset (see "SZ levels the data cannot identify" in the
+            interactions guide), as does one saved by 0.36.0 with levels
+            whose line separates the response.
 
         Returns
         -------
