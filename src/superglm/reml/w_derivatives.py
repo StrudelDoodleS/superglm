@@ -468,7 +468,28 @@ def reml_w_correction(
     dense = dense_columns(dm)
     centre_hi = mean_x
     centre_lo: NDArray | None = None
-    if sum_w is not None and np.any(dense):
+    # The final system's own pair, formed with the weights mean_x carries,
+    # when the summary holds it for this sum_w and it rounds to this mean_x
+    # on every dense column: no pass.
+    summary = pirls_result.reml_geometry if geometry is None else None
+    carried = None
+    if (
+        summary is not None
+        and sum_w is not None
+        and getattr(summary, "mean_hi", None) is not None
+        and getattr(summary, "mean_lo", None) is not None
+        and float(summary.sum_w) == sum_w
+    ):
+        carried_hi = np.asarray(summary.mean_hi, dtype=np.float64)
+        carried_lo = np.asarray(summary.mean_lo, dtype=np.float64)
+        if carried_hi.shape == mean_x.shape and np.array_equal(
+            (carried_hi + carried_lo)[dense], mean_x[dense]
+        ):
+            carried = carried_hi, carried_lo
+    if carried is not None and np.any(dense):
+        centre_hi = np.where(dense, carried[0], mean_x)
+        centre_lo = np.where(dense, carried[1], 0.0)
+    elif sum_w is not None and np.any(dense):
         mean_weights = (
             np.asarray(geometry.weights, dtype=np.float64)
             if geometry is not None

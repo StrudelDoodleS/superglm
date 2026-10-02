@@ -23,7 +23,7 @@ import math
 import time
 import warnings
 from collections.abc import Callable
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -113,7 +113,6 @@ from superglm.solvers.mode_score import (
     _gamma,
     centre_offset_mean,
     centred_data_score,
-    centred_dense_rows,
     centred_intercept_remainder,
     centred_matvec,
     dense_columns,
@@ -866,7 +865,6 @@ def fit_irls_direct(
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
     _centred_init: tuple[float, NDArray] | None = None,
-    _held_rows: ExitStack | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS (see ``_fit_irls_direct_once``).
 
@@ -876,7 +874,6 @@ def fit_irls_direct(
     fit fails or ends unconverged.
     """
     result = None
-    held_rows = ExitStack()
     try:
         if max_iter < 1:
             raise ValueError(f"max_iter must be at least 1, got {max_iter}")
@@ -925,11 +922,9 @@ def fit_irls_direct(
             _mode_bar=_mode_bar,
             _compensate_centred_intercept=_compensate_centred_intercept,
             _centred_init=_centred_init,
-            _held_rows=held_rows,
         )
         return result
     finally:
-        held_rows.close()
         if _fisher_data_reuse is not None and (result is None or not result[0].converged):
             _fisher_data_reuse.clear()
 
@@ -980,7 +975,6 @@ def _fit_irls_direct_once(
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
     _centred_init: tuple[float, NDArray] | None = None,
-    _held_rows: ExitStack | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -1897,13 +1891,6 @@ def _fit_irls_direct_once(
         # 1e-11 relative, so no Newton step near the mode was accepted and
         # the score stalled at 1e-6).
         _state_center = prior_weighted_centre(dm, weights)
-    if _held_rows is not None and _state_center is not None:
-        # Each dense block centred once about the state's fixed centre, held
-        # until the fit returns (``mode_score.centred_dense_rows``): every
-        # centred product of this fit reads those rows instead of forming
-        # them, and its working-weighted shift enters as a rank-one
-        # correction (``centered_system.dense_mean_pair``).
-        _held_rows.enter_context(centred_dense_rows(dm, _state_center))
     _scop_curvature = "fisher"
     if _has_scop:
         from superglm.reml.observed_geometry import classify_scop_reml_curvature
@@ -4439,6 +4426,8 @@ def _fit_irls_direct_once(
                 mean_x=np.asarray(centered_final.mean_x, dtype=np.float64),
                 sum_w=float(centered_final.sum_w),
                 column_scale=np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
+                mean_hi=centered_final.mean_hi,
+                mean_lo=centered_final.mean_lo,
             )
         else:
             reml_slope_rank = None

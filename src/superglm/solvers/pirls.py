@@ -8,7 +8,6 @@ import math
 import time
 import warnings
 from collections.abc import Iterator, Mapping
-from contextlib import ExitStack
 from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Literal, cast, get_args
 
@@ -41,6 +40,7 @@ from superglm.solvers.centered_system import (
     dense_mean_pair,
     grouped_augmented_factor,
     grouped_weighted_factor,
+    rank_one_centred_gram,
 )
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_state import (
@@ -53,7 +53,6 @@ from superglm.solvers.irls_state import (
     _stable_penalized_deviance_delta,
 )
 from superglm.solvers.mode_score import (
-    centred_dense_rows,
     centred_matvec,
     dense_centred_matvec,
     dense_centred_rmatvec,
@@ -187,12 +186,17 @@ class REMLGeometrySummary:
     the data-gram column scales feeding the signed-gram stability policy.
     Populating it is O(p) from quantities the solve already holds, which lets
     the optimizer loop skip per-fit rank certification without changing what
-    either consumer sees.
+    either consumer sees.  ``mean_hi`` and ``mean_lo`` are the system's dense
+    centre pair (``CenteredSystem.mean_hi``/``mean_lo``, ``None`` without
+    one), which the weight derivative's profiled design reads instead of
+    forming the pair again from the same weights.
     """
 
     mean_x: NDArray
     sum_w: float
     column_scale: NDArray
+    mean_hi: NDArray | None = None
+    mean_lo: NDArray | None = None
 
 
 # Every value ``termination_reason`` may hold except the marker stamped after
@@ -508,14 +512,37 @@ def _freeze_result_arrays(value: object, memo: dict[int, object]) -> object:
     return value
 
 
+def _held_dense_rows(
+    dm: DesignMatrix, groups: list[GroupSlice], centre: NDArray
+) -> dict[int, NDArray]:
+    """Each dense group's rows centred once about the fit's centre ``c``: ``fl(x - c)``, C order.
+
+    The proximal solver's block updates, block Grams and convergence
+    certificate read these rows in every outer iteration instead of forming
+    them (``_dense_group_centring``).  One copy of the dense columns:
+    - owner: one ``_fit_pirls_inner`` call;
+    - lifetime: that call;
+    - invalidation: none within it, the centre and the design being fixed for
+      the call; no weight, parameter or penalty enters the rows.
+    """
+    held: dict[int, NDArray] = {}
+    for index, (matrix, group) in enumerate(zip(dm.group_matrices, groups, strict=True)):
+        if type(matrix) is DenseGroupMatrix:
+            rows = np.ascontiguousarray(matrix.M - centre[group.sl], dtype=np.float64)
+            rows.setflags(write=False)
+            held[index] = rows
+    return held
+
+
 def _dense_group_centring(
     dm: DesignMatrix,
     groups: list[GroupSlice],
     W: NDArray,
     anchor: NDArray | None = None,
     response: NDArray | None = None,
+    held: dict[int, NDArray] | None = None,
 ) -> list[tuple | None] | None:
-    """Per group, ``(design, hi, lo, gram, score)`` for a ``DenseGroupMatrix`` about its ``W``-weighted mean.
+    """Per group, ``(design, hi, lo, gram, score, rows)`` for a ``DenseGroupMatrix`` about its ``W``-weighted mean.
 
     ``None`` for every other group, and ``None`` overall without a dense
     group or a positive weight total.  Rows ``(x - hi) - lo`` are the group's
@@ -526,14 +553,17 @@ def _dense_group_centring(
     mean).
 
     With the fit's centre ``anchor`` each group takes one pass over its rows
-    held centred once about it (``centered_system.anchored_dense_moments``):
+    centred about it, ``x~ = fl(x - anchor)``: the fit's ``held`` rows
+    (``_held_dense_rows``), else formed (``centered_system.anchored_dense_moments``).
     ``hi`` is the centre, ``lo = t / sum W`` the working mean's shift from it,
-    and ``gram`` the centred Gram by the rank-one correction ``G - t lo'``,
-    while ``lo`` lies within one weighted standard deviation
-    (``centered_system._anchored_remainder``); ``score`` is ``X~_raw' W z``
-    for a ``response`` ``z`` (``None`` without one).  A group past that
+    and ``gram`` the centred Gram by the rank-one correction ``G - t lo'``
+    (``centered_system.rank_one_centred_gram``), while ``lo`` lies within one
+    weighted standard deviation (``centered_system._anchored_remainder``);
+    ``score`` is ``x~' W z`` for a ``response`` ``z`` (``None`` without one)
+    and ``rows`` the held rows (``None`` when formed).  A group past that
     certificate, or every group without an anchor, takes the exact pair
-    (``centered_system.dense_mean_pair``) with ``gram`` and ``score`` ``None``.
+    (``centered_system.dense_mean_pair``) with ``gram``, ``score`` and
+    ``rows`` ``None``.
     """
     matrices = dm.group_matrices
     if not any(type(matrix) is DenseGroupMatrix for matrix in matrices):
@@ -543,25 +573,56 @@ def _dense_group_centring(
         return None
     pair: tuple[NDArray, NDArray] | None = None
     centring: list[tuple | None] = []
-    for matrix, group in zip(matrices, groups, strict=True):
+    for index, (matrix, group) in enumerate(zip(matrices, groups, strict=True)):
         if type(matrix) is not DenseGroupMatrix:
             centring.append(None)
             continue
         design = DesignMatrix([matrix], n=dm.n, p=matrix.shape[1])
         if anchor is not None:
             hi = np.array(anchor[group.sl], dtype=np.float64)
-            first, gram, score = anchored_dense_moments(design, W, hi, response)
+            rows = None if held is None else held.get(index)
+            if rows is None:
+                first, gram, score = anchored_dense_moments(design, W, hi, response)
+            else:
+                weighted = rows * W[:, None]
+                first = rows.T @ W
+                gram = rows.T @ weighted
+                gram = 0.5 * (gram + gram.T)
+                score = None if response is None else weighted.T @ response
             lo = _anchored_remainder(first, np.diag(gram), sum_w)
             if lo is not None:
-                centred = gram - np.outer(first, lo)
-                centring.append((design, hi, lo, 0.5 * (centred + centred.T), score))
+                centring.append(
+                    (design, hi, lo, rank_one_centred_gram(first, gram, lo), score, rows)
+                )
                 continue
         if pair is None:
             pair = dense_mean_pair(dm, W, sum_w)
             if pair is None:  # pragma: no cover - a dense group is present
                 return None
-        centring.append((design, pair[0][group.sl].copy(), pair[1][group.sl].copy(), None, None))
+        centring.append(
+            (design, pair[0][group.sl].copy(), pair[1][group.sl].copy(), None, None, None)
+        )
     return centring
+
+
+def _centred_group_score(centring: tuple, values: NDArray) -> NDArray:
+    """``X~_g' v`` of a dense group: its held rows' product less ``lo (1' v)``, else in chunks."""
+    design, hi, lo, _, _, rows = centring
+    if rows is None:
+        return dense_centred_rmatvec(design, values, hi, lo)
+    return rows.T @ values - lo * float(np.sum(values))
+
+
+def _centred_group_step(centring: tuple, step: NDArray) -> NDArray:
+    """``X~_g d`` of a dense group: its held rows' product less ``lo' d``, else in chunks."""
+    design, hi, lo, _, _, rows = centring
+    if rows is None:
+        return dense_centred_matvec(design, step, hi, lo)
+    result = rows @ step
+    shift = math.fsum(lo * step)
+    if shift != 0.0:
+        result -= shift
+    return result
 
 
 def _centred_group_gram(centring: tuple, W: NDArray) -> NDArray:
@@ -925,6 +986,7 @@ def _composite_kkt_violation(
     curvature_weights: NDArray | None = None,
     tol: float = 1e-6,
     centre: NDArray | None = None,
+    held: dict[int, NDArray] | None = None,
 ) -> float:
     """Return homogeneous proximal stationarity with represented-score roundoff.
 
@@ -961,10 +1023,11 @@ def _composite_kkt_violation(
     # after one iteration with its slope at 1e-24 for 0.2.  The intercept is
     # unpenalized, so at its stationary point the centred and raw scores agree.
     # With the fit's centre each dense group's score and curvature come from
-    # one pass over its rows held centred once (``_dense_group_centring``),
-    # and no raw product of the group is formed.
+    # one pass over its rows centred about it (``_dense_group_centring``,
+    # the fit's ``held`` rows when it holds them), and no raw product of the
+    # group is formed.
     dense_centring = (
-        _dense_group_centring(dm, groups, W, centre, working_residual)
+        _dense_group_centring(dm, groups, W, centre, working_residual, held)
         if centre is not None
         else None
     )
@@ -978,9 +1041,7 @@ def _composite_kkt_violation(
             elif centring[4] is not None:
                 loss_gradient[group.sl] = -(centring[4] - centring[2] * residual_total)
             else:
-                loss_gradient[group.sl] = -dense_centred_rmatvec(
-                    centring[0], weighted_residual, centring[1], centring[2]
-                )
+                loss_gradient[group.sl] = -_centred_group_score(centring, weighted_residual)
         if weights_changed:
             L_groups, _ = _compute_group_hessians(
                 list(dm.group_matrices),
@@ -1163,7 +1224,6 @@ def _fit_pirls_inner(
     separation: str = "warn",
     *,
     weight_semantics: str,
-    _held_rows: ExitStack | None = None,
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with a composite block-coordinate inner solver."""
     n, p = dm.shape
@@ -1198,11 +1258,9 @@ def _fit_pirls_inner(
     # alpha + (X - 1 c0') beta + offset, and the raw intercept alpha - c0' beta
     # is only its reading.  ``intercept`` below is then that centred alpha.
     state_center = prior_weighted_centre(dm, weights) if any_dense_group else None
-    if _held_rows is not None and state_center is not None:
-        # every dense block centred once about c0 for this fit
-        # (``mode_score.centred_dense_rows``); the working-weighted shift of
-        # each outer iteration enters as a rank-one correction
-        _held_rows.enter_context(centred_dense_rows(dm, state_center))
+    # every dense group centred once about c0 for this fit; the working
+    # weighted shift of each outer iteration enters as a rank-one correction
+    held_dense = _held_dense_rows(dm, groups, state_center) if state_center is not None else None
 
     def working_residual(
         z_values: NDArray, beta_values: NDArray, intercept_value: float
@@ -1441,7 +1499,9 @@ def _fit_pirls_inner(
         # curvature (m^2 + s^2) sum W, and block coordinate descent shrank the
         # slope's error by only m^2 / (m^2 + s^2) per sweep.
         dense_centring = (
-            _dense_group_centring(dm, groups, W, state_center) if any_dense_group else None
+            _dense_group_centring(dm, groups, W, state_center, held=held_dense)
+            if any_dense_group
+            else None
         )
 
         # Per-group Hessians and Lipschitz constants
@@ -1524,9 +1584,7 @@ def _fit_pirls_inner(
                 if centring_g is None:
                     grad_g = -gm.rmatvec(W * r)
                 else:
-                    grad_g = -dense_centred_rmatvec(
-                        centring_g[0], W * r, centring_g[1], centring_g[2]
-                    )
+                    grad_g = -_centred_group_score(centring_g, W * r)
                 if S_beta is not None:
                     grad_g = grad_g + S_beta[g.sl]
 
@@ -1569,7 +1627,7 @@ def _fit_pirls_inner(
                         # and zero for a pair anchored at it
                         _, hi_g, lo_g = centring_g[:3]
                         assert state_center is not None
-                        r -= dense_centred_matvec(centring_g[0], d, hi_g, lo_g)
+                        r -= _centred_group_step(centring_g, d)
                         intercept -= math.fsum(
                             np.concatenate(((hi_g - state_center[g.sl]) * d, lo_g * d))
                         )
@@ -1588,9 +1646,7 @@ def _fit_pirls_inner(
                         if centring_g is None:
                             grad_after = -gm.rmatvec(W * r)
                         else:
-                            grad_after = -dense_centred_rmatvec(
-                                centring_g[0], W * r, centring_g[1], centring_g[2]
-                            )
+                            grad_after = -_centred_group_score(centring_g, W * r)
                         if S_beta is not None:
                             grad_after = grad_after + S_beta[g.sl]
                         zero_probe = penalty.prox_group(
@@ -1729,6 +1785,7 @@ def _fit_pirls_inner(
                 curvature_weights=W,
                 tol=tol,
                 centre=state_center,
+                held=held_dense,
             )
             convergence_value = max(convergence_value, kkt_violation)
             iteration_converged = convergence_value < tol
@@ -2215,62 +2272,6 @@ def fit_pirls(
         trace_run.next_basis_id() if trace_run is not None and trace_run.enabled else None
     )
 
-    # Each stage holds the dense rows centred about its state centre until it
-    # returns; the stack releases them when the fit does.
-    with ExitStack() as held_rows:
-        return _fit_pirls_stages(
-            dm,
-            y,
-            weights,
-            family,
-            link,
-            groups,
-            penalty,
-            offset,
-            beta_init,
-            intercept_init,
-            max_iter_outer,
-            max_iter_inner,
-            tol,
-            active_set,
-            lambda2,
-            record_diagnostics,
-            convergence,
-            S_override,
-            trace_run,
-            trace_basis_id,
-            separation,
-            weight_semantics,
-            held_rows,
-        )
-
-
-def _fit_pirls_stages(
-    dm: DesignMatrix,
-    y: NDArray,
-    weights: NDArray,
-    family: Distribution,
-    link: Link,
-    groups: list[GroupSlice],
-    penalty: Penalty,
-    offset: NDArray,
-    beta_init: NDArray | None,
-    intercept_init: float | None,
-    max_iter_outer: int,
-    max_iter_inner: int,
-    tol: float,
-    active_set: bool,
-    lambda2: float | dict[str, float],
-    record_diagnostics: bool,
-    convergence: str,
-    S_override: NDArray | None,
-    trace_run: TraceRun | None,
-    trace_basis_id: int | None,
-    separation: str,
-    weight_semantics: str,
-    held_rows: ExitStack,
-) -> PIRLSResult:
-    """``fit_pirls``'s stage 1 and, for a flavored penalty, its warm-started stage 2."""
     # Stage 1: initial fit
     result = _fit_pirls_inner(
         dm,
@@ -2298,7 +2299,6 @@ def _fit_pirls_stages(
         # returned fit carries the separation backstop.
         separation="ignore" if penalty.flavor is not None else separation,
         weight_semantics=weight_semantics,
-        _held_rows=held_rows,
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -2330,7 +2330,6 @@ def _fit_pirls_stages(
             trace_purpose="adjusted_flavor_fit",
             separation=separation,
             weight_semantics=weight_semantics,
-            _held_rows=held_rows,
         )
 
     return result
