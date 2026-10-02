@@ -589,6 +589,241 @@ def two_sum(a, b):
     return s, (a - (s - b_virtual)) + (b - b_virtual)
 
 
+_VELTKAMP = float(2**27 + 1)
+
+
+def two_product(a, b):
+    """Dekker's TwoProduct elementwise: ``a b = p + e`` exactly, with ``p = fl(a b)``.
+
+    It is formed on the factors' ``frexp`` mantissas, which lie in ``[0.5, 1)``,
+    so Veltkamp's split and the partial products neither over- nor underflow
+    whatever the exponents (Ogita, Rump & Oishi 2005, Algorithms 3.2 and 3.3).
+    ``ldexp`` restores the exponents, exactly unless the product leaves the
+    normal range.  ``e`` is at most ``u |p|``, so once ``|p| < 2^-969`` it
+    leaves the normal range: the exact product's tail then lies under
+    ``2^-1074``, no float64 holds it, and ``e`` loses at most ``2^-1075``, a
+    float64 limit rather than a rounding of this algorithm (Codex's and
+    Claude's reviews of #453).
+    """
+    left, left_exponent = np.frexp(np.asarray(a, dtype=np.float64))
+    right, right_exponent = np.frexp(np.asarray(b, dtype=np.float64))
+    product = left * right
+    scaled = _VELTKAMP * left
+    left_high = scaled - (scaled - left)
+    left_low = left - left_high
+    scaled = _VELTKAMP * right
+    right_high = scaled - (scaled - right)
+    right_low = right - right_high
+    error = (
+        (left_high * right_high - product) + left_high * right_low + left_low * right_high
+    ) + left_low * right_low
+    exponent = left_exponent + right_exponent
+    return np.ldexp(product, exponent), np.ldexp(error, exponent)
+
+
+def centred_column_expansion(
+    values, centre: float, beta: float
+) -> tuple[tuple[NDArray, NDArray, NDArray], NDArray]:
+    """``(v - c) beta`` as three addends whose exact sum it is, with its plain product.
+
+    TwoSum splits ``v - c = d + d_e`` and TwoProduct ``d beta = p + e``, both
+    exactly; ``d_e beta`` takes one rounding, at most ``u |d_e beta| <= u^2 |d
+    beta|``.  A row far from the centre then keeps the digits its product has
+    beyond the row's own value, which a revised pair cancels against.  Where
+    ``|p| < 2^-969`` the product's tail lies under ``2^-1074`` and each addend
+    loses at most ``2^-1075`` (``two_product``).  The plain product ``fl(d
+    beta)``, the term as the fitted predictor scores it (``_score_centred``),
+    is returned beside them for ``CompensatedSum``'s guard.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        difference, difference_error = two_sum(np.asarray(values, dtype=np.float64), -float(centre))
+        product, product_error = two_product(difference, float(beta))
+        pieces = (product, product_error, difference_error * float(beta))
+        return pieces, difference * float(beta)
+
+
+@dataclass(frozen=True)
+class _Addend:
+    """One addend of a ``CompensatedSum``, kept so that a row's fallback can replay it.
+
+    ``source`` holds the addend's rows, or a callable that recomputes them.
+    With ``centre`` it is a centred column ``(v - centre) beta``, expanded
+    exactly (``centred_column_expansion``), and otherwise one plain addend.  A
+    ``source`` of ``None`` is the scalar ``constants``, whose plain value is
+    ``original``.  ``sign`` -1 negates every piece, which is exact.
+    """
+
+    source: NDArray | Callable[[], NDArray] | None
+    centre: float | None = None
+    beta: float = 0.0
+    constants: tuple[float, ...] = ()
+    original: float = 0.0
+    sign: float = 1.0
+
+    def negated(self) -> _Addend:
+        return _Addend(
+            self.source, self.centre, self.beta, self.constants, self.original, -self.sign
+        )
+
+    def data(self) -> NDArray | None:
+        """The addend's rows, recomputed when only their recipe is held."""
+        return self.source() if callable(self.source) else self.source
+
+    def expand(self, data: NDArray | None, rows) -> tuple[tuple[NDArray, ...], NDArray]:
+        """``(pieces, original)`` on ``rows`` of ``data`` (``data()``): exact pieces, plain value."""
+        if self.source is None:
+            pieces = tuple(np.asarray(value, dtype=np.float64) for value in self.constants)
+            original = np.asarray(self.original, dtype=np.float64)
+        elif self.centre is None:
+            original = np.asarray(data[rows], dtype=np.float64)
+            pieces = (original,)
+        else:
+            pieces, original = centred_column_expansion(data[rows], self.centre, self.beta)
+        if self.sign < 0.0:
+            return tuple(-piece for piece in pieces), -original
+        return pieces, original
+
+
+def constant_addend(pieces, original: float) -> _Addend:
+    """Scalar ``pieces`` whose exact sum is ``original``'s, for ``CompensatedSum.subtract``."""
+    return _Addend(None, constants=tuple(float(value) for value in pieces), original=original)
+
+
+class CompensatedSum:
+    """Ogita, Rump & Oishi's Sum2 (2005, Algorithm 4.4) over arrays, row by row.
+
+    Each addend joins the running total by TwoSum and its error joins a second
+    running sum; ``remainder`` (a pair's ``alpha_lo``) joins the errors at the
+    end, before the one rounding.  For ``k`` addends the result is within ``u
+    |S| + gamma_(k-1)^2 sum |addends|`` of their exact sum ``S`` (their
+    Proposition 4.5), whatever the addends cancel.
+
+    Two rows keep a fallback.
+    - A row whose running total overflows where the sum does not (``1e308 +
+      1e308 - 1e308``; Codex's review of #453) takes the plain sum of its
+      addends, the start added last.
+    - A row a term's expansion makes non-finite (a product past the binary64
+      range, whose pieces are ``inf`` and ``-inf``; Sol's review of #453)
+      takes the original, un-expanded predictor: ``start + (remainder + sum
+      t)``, each term's plain contribution in the order added, as a fit
+      evaluates it.  It keeps the signed overflow, which a link then clips as
+      before.
+    Every other row keeps the compensated value bit for bit.
+
+    The sum holds two rows-long arrays, its running total and error, and its
+    addends' sources, never their pieces: each addend is expanded and added
+    ``_CHUNK`` rows at a time, as ``centred_matvec`` forms its products
+    (Claude's review of #453).  Every operation is elementwise and the rows
+    independent, so ``value`` replays the addends on just the rows whose
+    fallback it needs, recomputing a recomputable source once, and every row
+    reads what a whole-array evaluation gives, bit for bit.
+    """
+
+    __slots__ = ("addends", "error", "remainder", "start", "total")
+
+    def __init__(self, start, remainder: float = 0.0, n: int | None = None) -> None:
+        self.start = np.asarray(start, dtype=np.float64)
+        self.remainder = float(remainder)
+        self.total = np.full(n, float(self.start)) if self.start.ndim == 0 else self.start.copy()
+        self.error = np.zeros_like(self.total)
+        self.addends: list[_Addend] = []
+
+    def _join(self, addend: _Addend) -> _Addend:
+        data = addend.data()
+        n = self.total.shape[0]
+        with np.errstate(over="ignore", invalid="ignore"):
+            for lo in range(0, n, _CHUNK):
+                rows = slice(lo, min(lo + _CHUNK, n))
+                pieces, _ = addend.expand(data, rows)
+                for piece in pieces:
+                    self.total[rows], error = two_sum(self.total[rows], piece)
+                    self.error[rows] += error
+        self.addends.append(addend)
+        return addend
+
+    def add(self, values) -> _Addend:
+        """Add one term's contribution, its own plain value: rows, or a callable giving them."""
+        return self._join(_Addend(values))
+
+    def add_column(self, values, centre: float, beta: float) -> _Addend:
+        """Add ``(values - centre) beta`` as its exact pieces (``centred_column_expansion``)."""
+        return self._join(_Addend(values, float(centre), float(beta)))
+
+    def subtract(self, addend: _Addend) -> None:
+        """Add ``addend`` negated: a term an earlier ``add`` returned, or a ``constant_addend``."""
+        self._join(addend.negated())
+
+    def copy(self) -> CompensatedSum:
+        twin = CompensatedSum.__new__(CompensatedSum)
+        twin.start, twin.remainder = self.start, self.remainder
+        twin.total, twin.error = self.total.copy(), self.error.copy()
+        twin.addends = list(self.addends)
+        return twin
+
+    def value(self, consume: bool = False) -> NDArray:
+        """The sum, a row the compensation cannot finish at its fallback.
+
+        ``consume`` writes it over the running total, which ends the sum.
+        """
+        n = self.total.shape[0]
+        out = self.total if consume else np.empty_like(self.total)
+        unfinished = []
+        with np.errstate(over="ignore", invalid="ignore"):
+            for lo in range(0, n, _CHUNK):
+                rows = slice(lo, min(lo + _CHUNK, n))
+                out[rows] = self.total[rows] + (self.error[rows] + self.remainder)
+                failed = np.flatnonzero(~np.isfinite(out[rows]))
+                if failed.size:
+                    unfinished.append(failed + lo)
+        if unfinished:
+            rows = np.concatenate(unfinished)
+            out[rows] = self._fallback(rows)
+        return out
+
+    def _fallback(self, rows: NDArray) -> NDArray:
+        """The plain sums of ``rows``: of their pieces, or of their terms where a piece is not finite."""
+        plain = np.zeros(rows.size)
+        original = np.full(rows.size, self.remainder)
+        expanded = np.ones(rows.size, dtype=bool)
+        with np.errstate(over="ignore", invalid="ignore"):
+            for addend in self.addends:
+                pieces, value = addend.expand(addend.data(), rows)
+                for piece in pieces:
+                    plain = plain + piece
+                    expanded &= np.isfinite(piece)
+                original = original + value
+            start = self.start if self.start.ndim == 0 else self.start[rows]
+            return np.where(expanded, start + (self.remainder + plain), start + original)
+
+
+def _add_centred_columns(
+    total: CompensatedSum, dm: DesignMatrix, beta: NDArray, center: NDArray
+) -> None:
+    """Add ``(X - 1 center') beta`` to ``total``, a dense block column by column.
+
+    A dense column is added as its exact pieces about its centre.  Every other
+    block's entries and centre are bounded by its type, so its product less
+    ``center' beta`` is one addend, its own plain value, as in
+    ``centred_matvec``, and is recomputed if a row's fallback needs it.
+    """
+    beta = np.asarray(beta, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        part = beta[offset : offset + width]
+        centre = center[offset : offset + width]
+        if type(matrix) is DenseGroupMatrix:
+            for column in range(width):
+                total.add_column(matrix.M[:, column], float(centre[column]), float(part[column]))
+        else:
+            total.add(
+                lambda matrix=matrix, part=part, centre=centre: (
+                    matrix.matvec(part) - float(centre @ part)
+                )
+            )
+        offset += width
+
+
 def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) -> float:
     """``(N 2^K) / (D 2^L)`` without forming either scaled sum, and without raising.
 
@@ -813,12 +1048,24 @@ def linear_predictor(dm: DesignMatrix, result, offset: NDArray | None) -> NDArra
     evaluates the compensated pair as ``alpha + (X~ beta + alpha_lo)``: the
     remainder joins the rows at their own scale before the one rounding at
     ``|eta|``, so ``|eta - eta*| <= u |eta*| + u |X~ beta + alpha_lo|`` plus
-    the remainder's bound.  ``offset`` ``None`` adds nothing.
+    the remainder's bound.  A pair a revision carried a centred column's change
+    into (``centred_sum_compensated``) is evaluated as one compensated sum of
+    ``alpha``, every column's exact centred product and ``alpha_lo``
+    (``CompensatedSum``, ``centred_column_expansion``), in row chunks:
+    ``alpha`` then holds the column's ``c dbeta`` and can cancel against a
+    row's ``(x - c) beta``, so the rows may not round before it does.
+    ``offset`` ``None`` adds nothing.
     """
     alpha = getattr(result, "centred_intercept", None)
     center = getattr(result, "state_center", None)
     if alpha is None or center is None:
         eta = dm.matvec(result.beta) + result.intercept
+    elif getattr(result, "centred_sum_compensated", False):
+        total = CompensatedSum(
+            float(alpha), float(getattr(result, "centred_intercept_lo", None) or 0.0), n=dm.n
+        )
+        _add_centred_columns(total, dm, result.beta, np.asarray(center, dtype=np.float64))
+        eta = total.value(consume=True)
     else:
         eta = centred_matvec(dm, result.beta, center)
         alpha_lo = getattr(result, "centred_intercept_lo", None)

@@ -329,6 +329,13 @@ class PIRLSResult:
     # centred_intercept_lo)`` (``mode_score.centred_intercept_remainder``).
     # ``None`` for every other fit, which evaluates as before.
     centred_intercept_lo: float | None = None
+    # A revision carried a centred column's change into the pair
+    # (``fit_state._carry_revised_columns``): the pair is then evaluated as one
+    # compensated sum of ``centred_intercept``, every column's exact centred
+    # product and ``centred_intercept_lo`` (``mode_score.linear_predictor``,
+    # ``model.base.EtaSum``), whatever the family.  ``False`` for every fit, which
+    # evaluates as above, bit for bit.
+    centred_sum_compensated: bool = False
     # Positive-weight rows the returned state holds at the boundary of the
     # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
     # only with ``termination_reason == "mean_space_boundary"``.

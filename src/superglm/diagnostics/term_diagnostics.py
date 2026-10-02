@@ -330,8 +330,16 @@ def _drop_term_holdout(
     # the full model's deviance is the one predict() and metrics() read.  From
     # the raw intercept, X beta cancels against it at a column's offset.
     intercept, centre, intercept_lo = base.prediction_centred_state(model.result)
-    accumulated = base.start_eta(n_val, intercept, intercept_lo)
-    contributions: dict[str, NDArray[np.floating]] = {}
+    accumulated = base.EtaSum(
+        n_val,
+        intercept,
+        intercept_lo,
+        compensated=centre is not None
+        and bool(getattr(model.result, "centred_sum_compensated", False)),
+    )
+    # Each term's ``EtaSum`` handles: the drop removes them all, a compensated
+    # pair's carried ``c' beta`` included.
+    contributions: dict[str, list] = {}
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
@@ -348,24 +356,35 @@ def _drop_term_holdout(
             contribution, _ = base._score_unidentified_factor_smooth(
                 term, X_val, beta, population=False
             )
+            handle = accumulated.add(contribution)
         elif block is not None and np.any(block != 0.0):
-            contribution = base._centred_term_contribution(term, X_val, beta, block)
+            if accumulated.compensated:
+                handle = base._add_centred_term(accumulated, term, X_val, beta, block)
+            else:
+                handle = accumulated.add(base._centred_term_contribution(term, X_val, beta, block))
             centre_shifts[term["name"]] = math.fsum(block * beta[term["beta_idx"]])
         else:
-            contribution = base._score_prediction_term_exact(term, X_val, beta)
-        contributions[term["name"]] = contribution
-        accumulated += contribution
+            handle = accumulated.add(base._score_prediction_term_exact(term, X_val, beta))
+        contributions[term["name"]] = [handle]
+        if accumulated.compensated and centre_shifts[term["name"]] != 0.0:
+            # A compensated pair holds a carried c dbeta that the dropped term's
+            # c' beta cancels: subtract it inside the sum, as exact products,
+            # not after the one rounding at |alpha|.
+            from superglm.solvers.mode_score import constant_addend, two_product
 
-    eta_full = stabilize_eta(
-        base.finish_eta(accumulated, intercept, intercept_lo) + offset_arr, model._link
-    )
+            shift = two_product(block, np.asarray(beta[term["beta_idx"]], dtype=np.float64))
+            pieces = [value for part in shift for value in np.ravel(part)]
+            contributions[term["name"]].append(constant_addend(pieces, centre_shifts[term["name"]]))
+            centre_shifts[term["name"]] = 0.0
+
+    eta_full = stabilize_eta(accumulated.finish() + offset_arr, model._link)
     mu_full = clip_mu(model._link.inverse(eta_full), dist)
     dev_full = float(np.sum(w * dist.deviance_unit(y_arr, mu_full)))
 
     rows = []
     for term in terms:
         eta_drop = stabilize_eta(
-            base.finish_eta(accumulated - contributions[term["name"]], intercept, intercept_lo)
+            accumulated.finish(without=contributions[term["name"]])
             - centre_shifts[term["name"]]
             + offset_arr,
             model._link,

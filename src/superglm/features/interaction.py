@@ -1206,10 +1206,15 @@ class NumericInteraction:
         x1s, x2s = self._prep(x1, x2)
         return x1s * x2s * float(np.asarray(beta, dtype=np.float64).ravel()[0])
 
+    def _centred_values(self, x1: NDArray, x2: NDArray) -> NDArray:
+        """The product column ``_score_centred`` differences about its centre."""
+        x1s, x2s = self._prep(x1, x2)
+        return x1s * x2s
+
     def _score_centred(self, x1: NDArray, x2: NDArray, beta: NDArray, centre: NDArray) -> NDArray:
         """``(x1 x2 - c) beta``: the product column about the fit's centre, differenced first."""
-        x1s, x2s = self._prep(x1, x2)
-        return (x1s * x2s - float(centre[0])) * float(np.asarray(beta, dtype=np.float64).ravel()[0])
+        values = self._centred_values(x1, x2)
+        return (values - float(centre[0])) * float(np.asarray(beta, dtype=np.float64).ravel()[0])
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         b = float(beta[0])
