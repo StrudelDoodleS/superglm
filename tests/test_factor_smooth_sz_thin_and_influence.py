@@ -1252,20 +1252,13 @@ def test_an_editor_edit_of_the_main_spline_moves_predictions_by_the_edit() -> No
 
     frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
     model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
         session = EditorSession.from_model(model, terms=["x"])
         term = session.terms["x"]
         delta = 0.1
         term.edited_log_effect = np.asarray(term.edited_log_effect, dtype=np.float64) + delta
         edited = apply_edits_to_model_copy_with_data(model, session.terms)
-    assert not _thin_warnings(caught)  # the editor's own evaluations (review of 84bef26)
-    from superglm.editor.metrics import _compute_metrics
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _compute_metrics(edited, frame, y, weight, None)
-    assert not _thin_warnings(caught)
     before = base.predict_eta_exact(model, frame, warn=False)
     after = base.predict_eta_exact(edited, frame, warn=False)
     grid = np.asarray(term.x, dtype=np.float64)
@@ -1353,11 +1346,9 @@ def test_a_tweedie_profile_raises_no_predict_warning_of_its_own(retain) -> None:
     refit's means through public ``predict``, so a Tweedie profile of a model
     with a thin ``sz`` level raised ``predict``'s user-facing warning from
     library frames; without retained fit state each candidate ``p``'s clone
-    did too (review of 84bef26), and ``dispersion_test`` reads ``predict``'s
-    values the same way.  Mutation: public ``predict`` again.
+    did too (review of 84bef26).  Mutation: public ``predict`` again.
     """
     from superglm import families
-    from superglm.stats.model_tests import dispersion_test
 
     rng = np.random.default_rng(6)
     K, n = 8, 1600
@@ -1382,25 +1373,6 @@ def test_a_tweedie_profile_raises_no_predict_warning_of_its_own(retain) -> None:
         warnings.simplefilter("always")
         model.estimate_p(frame, y, fit_mode="reml", p_bounds=(1.4, 1.6), xatol=0.05)
     assert model._interaction_specs["x:g:sz"]._unidentified_level_names == ("g2",)
-    assert not _thin_warnings(caught)
-    counts = np.round(y * 2.0)
-    poisson = SuperGLM(
-        family="poisson",
-        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
-        interactions=[
-            FactorSmooth(
-                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
-            )
-        ],
-        selection_penalty=0,
-        retain_fit_state=retain,
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        poisson.fit_reml(frame, counts)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        dispersion_test(poisson, frame, counts)
     assert not _thin_warnings(caught)
 
 

@@ -167,10 +167,7 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
     y_arr = np.asarray(y, dtype=np.float64).ravel()
     w = np.asarray(weights, dtype=np.float64).ravel()
     offset_arg = None if offset is None else np.asarray(offset, dtype=np.float64).ravel()
-    from superglm.model import base
-
-    # predict's values without its warning: a library evaluation (#440 review)
-    mu = np.asarray(base.predict_exact(model, X, offset_arg, warn=False), dtype=np.float64).ravel()
+    mu = np.asarray(model.predict(X, offset=offset_arg), dtype=np.float64).ravel()
     if w.size != y_arr.size:
         raise ValueError(f"sample_weight has length {w.size}, expected {y_arr.size}.")
     if offset_arg is not None and offset_arg.size != y_arr.size:
