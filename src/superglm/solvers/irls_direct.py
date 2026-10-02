@@ -98,6 +98,7 @@ from superglm.solvers.irls_state import (
     interior_start_intercept,
     mean_space_boundary_rows,
     mean_space_clipped_rows,
+    mean_space_first_halving,
     mean_space_log_likelihood_rows,
     mean_space_newton_rows,
     mean_space_score_rows,
@@ -3412,7 +3413,20 @@ def _fit_irls_direct_once(
                     else _newton_deviance_delta(candidate, base),
                 ),
                 merit_roundoff=None if newton_score is None else _newton_merit_roundoff,
+                # a proposal that leaves the space: the halvings above the
+                # boundary are refused without a deviance pass each
+                first_halving=lambda: mean_space_first_halving(
+                    committed=committed,
+                    proposal=proposal,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                ),
             )
+            if decision.skipped and profile is not None:
+                profile["irls_halvings_skipped"] = (
+                    profile.get("irls_halvings_skipped", 0) + decision.skipped
+                )
             if (
                 has_constraints
                 and decision.step_rejected

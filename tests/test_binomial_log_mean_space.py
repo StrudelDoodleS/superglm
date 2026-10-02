@@ -30,6 +30,7 @@ from superglm import (
     Numeric,
     PSpline,
     RandomEffect,
+    Spline,
     SuperGLM,
 )
 from superglm.diagnostics.separation import SeparationWarning
@@ -294,17 +295,78 @@ def _assert_at_the_two_level_mle(model: SuperGLM, offset_a: float, offset_b: flo
 
 @pytest.mark.parametrize("direct_solve", ["auto", "gram"])
 def test_a_lowered_start_reaches_a_trial_inside_the_space(direct_solve: str) -> None:
-    """Sol's #437 fixture: the first step needs more than the ordinary 20 halvings.
+    """Sol's #437 fixture: the first step lies past the ordinary 20 halvings.
 
     With offsets -16 and +1.3 the lowered start puts level a at eta ~ -18 and
     the Fisher proposal moves it by ~3e7, so only a fraction below ~6e-7 of
     the step stays inside ``eta < 0``: past 2^-20.  Backtracking reaches the
     fraction to the boundary instead of rejecting the step, and the fit
-    reaches the maximum.
+    reaches the maximum.  The halvings above the boundary are refused
+    without being evaluated (``irls_state.mean_space_first_halving``): the
+    proposal and one trial, at the depth #437 reached through 21 trials
+    outside the space.
     """
     model = _two_level_fit(-16.0, 1.3, direct_solve)
-    assert model.result.iteration_log[0].step_halvings > 20
+    first = model.result.iteration_log[0]
+    assert first.step_halvings > 20
+    assert first.trials_attempted == 2
     _assert_at_the_two_level_mle(model, -16.0, 1.3)
+
+
+def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small analogue of #431's blhi: exposure offsets, eta <= -2.4, a random effect, REML.
+
+    The offset lowers the start, and in inner solves at some smoothing
+    parameters the clipped Fisher proposal keeps landing just above the
+    boundary: each step then has to stop short of it, and the iterate creeps
+    towards ``eta = 0``.  Halving from the full step evaluated every fraction
+    above the boundary first, up to ``floor(log2(1 / t)) + 21`` states per
+    step (188 at most here on #437's merge, 17,578 in all).  With those
+    refused unevaluated, a line search evaluates the proposal and at most
+    ``max_halving + 2`` trials: the depths from the first inside the space to
+    the extended budget's limit, ``max_halving`` past the first depth below
+    the computed fraction ``t``, which the first inside precedes by at most
+    one (the trial at ``2^-j >= t`` is outside but for rounding).  The fit
+    converges.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.irls_state import _select_irls_trial
+
+    decisions = []
+
+    def counted(**kwargs):
+        decision = _select_irls_trial(**kwargs)
+        decisions.append(decision)
+        return decision
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", counted)
+    rng = np.random.default_rng(3)
+    n, levels = 800, 10
+    X = pd.DataFrame({"s0": rng.uniform(size=n), "s1": rng.uniform(size=n)})
+    X["f"] = rng.integers(0, 4, n).astype(str)
+    X["g"] = rng.integers(0, levels, n).astype(str)
+    exposure = rng.uniform(0.5, 8.0, n)
+    eta = -2.5 - X["s0"] ** 2 - 0.8 * X["s1"] + rng.normal(0.0, 0.1, levels)[X["g"].astype(int)]
+    y = (rng.uniform(size=n) < exposure * np.exp(np.minimum(eta, -2.4))).astype(float)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        features={
+            "s0": Spline(k=6),
+            "s1": Spline(k=6),
+            "f": Categorical(),
+            "g": RandomEffect(),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y, offset=np.log(exposure))
+    assert model._reml_result.converged
+    max_halving = 20  # irls_direct's ordinary budget
+    assert max(decision.trials_attempted for decision in decisions) <= 1 + max_halving + 2
+    assert sum(decision.skipped for decision in decisions) > 0
 
 
 @pytest.mark.parametrize("direct_solve", ["auto", "gram"])
@@ -3143,6 +3205,153 @@ def test_the_halving_budget_reaches_the_fraction_to_the_boundary() -> None:
     assert 2.0**-depth < fraction <= 2.0 ** -(depth - 1)
     # float64's halving depth caps it
     assert budget([-1e-320, -1.0], [1.0, -1.0]) == 1074
+
+
+def _random_steps(rng: np.random.Generator, rows: int = 64):
+    """A state inside the space and a proposal that leaves it, across float64's range.
+
+    ``eta`` from -745 to -1e-150 and steps of 1e-150 to 1e150 either way, with
+    zero-weight rows outside the space, which the space test ignores.
+    """
+    eta = -np.exp(rng.uniform(np.log(1e-150), np.log(745.0), rows))
+    move = np.exp(rng.uniform(np.log(1e-150), np.log(1e150), rows)) * rng.choice([-1.0, 1.0], rows)
+    proposal = eta + move
+    proposal[0] = abs(proposal[0]) + 1.0  # leaves the space
+    weights = np.where(rng.uniform(size=rows) < 0.1, 0.0, 1.0)
+    weights[0] = 1.0
+    eta[weights == 0.0] = 3.0
+    proposal[weights == 0.0] = 5.0
+    return eta, proposal, weights
+
+
+def test_the_first_halving_is_the_first_the_space_test_can_accept() -> None:
+    """``mean_space_first_halving`` skips only halvings the space test refuses.
+
+    Every depth above the one returned leaves a positive-weight row at
+    ``eta >= 0`` when the trial is formed as the line search forms it, ``eta +
+    2^-j (proposal - eta)``, so the halving would refuse it; at the depth
+    returned the row attaining the fraction to the boundary is inside.
+    """
+    from superglm.solvers.irls_state import mean_space_first_halving
+
+    family, link = Binomial(), LogLink()
+    rng = np.random.default_rng(431)
+
+    def first(eta, proposal, weights, link=link):
+        return mean_space_first_halving(
+            committed=SimpleNamespace(eta_unclipped=np.asarray(eta, dtype=float)),
+            proposal=SimpleNamespace(eta_unclipped=np.asarray(proposal, dtype=float)),
+            weights=np.asarray(weights, dtype=float),
+            family=family,
+            link=link,
+        )
+
+    deep = 0
+    for _ in range(400):
+        eta, proposal, weights = _random_steps(rng)
+        depth = first(eta, proposal, weights)
+        d = proposal - eta
+        for shallower in range(1, depth):
+            trial = eta + 2.0**-shallower * d
+            assert np.any((trial >= 0.0) & (weights > 0.0))
+        rising = (weights > 0.0) & (d > 0.0)
+        row = np.flatnonzero(rising)[np.argmin(-eta[rising] / d[rising])]
+        assert eta[row] + 2.0**-depth * d[row] < 0.0
+        deep += depth > 20
+    assert deep > 100  # many lie past the ordinary 20 halvings
+    # nothing to skip: a link that stays in (0, 1), a committed state outside
+    # the space, a proposal inside it, a non-finite proposal row
+    assert first([-1.0, -1.0], [5.0, -1.0], [1.0, 1.0], link=LogitLink()) == 1
+    assert first([0.0, -1.0], [5.0, -1.0], [1.0, 1.0]) == 1
+    assert first([-1.0, -1.0], [-0.5, -2.0], [1.0, 1.0]) == 1
+    assert first([-1.0, -1.0], [1.0, np.inf], [1.0, 1.0]) == 1
+
+
+def test_skipping_refused_halvings_keeps_every_decision() -> None:
+    """``_select_irls_trial`` decides the same step with and without the skip, with fewer evaluations.
+
+    On random states the merit is a convex quadratic in the step, minimised
+    at a random fraction, so the merit test refuses some feasible trials too;
+    a lowered fit's extended budget is on for half of them.  The accepted
+    fraction, its depth and a rejection agree exactly, and the skip never
+    evaluates more states.
+    """
+    from superglm.solvers.irls_state import (
+        _mean_space_halving_budget,
+        _select_irls_trial,
+        mean_space_first_halving,
+    )
+
+    family, link = Binomial(), LogLink()
+    rng = np.random.default_rng(437)
+
+    def state(eta_values, merit):
+        return SimpleNamespace(
+            beta=np.zeros(1),
+            intercept=0.0,
+            eta_unclipped=eta_values,
+            eta=eta_values,
+            mu=np.zeros_like(eta_values),
+            deviance=merit,
+            penalized_deviance=None,
+        )
+
+    saved = 0
+    for case in range(400):
+        eta, proposal, weights = _random_steps(rng)
+        target = 2.0 ** rng.uniform(-60.0, 0.0)
+        direction = proposal - eta
+        committed = state(eta, target**2)
+        full = state(proposal, (1.0 - target) ** 2)
+
+        def decide(skip, case=case, weights=weights, target=target, direction=direction):
+            calls: list[float] = []
+
+            def evaluate(alpha):
+                calls.append(alpha)
+                return state(committed.eta_unclipped + alpha * direction, (alpha - target) ** 2)
+
+            budget = lambda: _mean_space_halving_budget(  # noqa: E731
+                committed=committed,
+                proposal=full,
+                weights=weights,
+                family=family,
+                link=link,
+                default=20,
+            )
+            first = lambda: mean_space_first_halving(  # noqa: E731
+                committed=committed,
+                proposal=full,
+                weights=weights,
+                family=family,
+                link=link,
+            )
+            decision = _select_irls_trial(
+                committed=committed,
+                proposal=full,
+                evaluate_state=evaluate,
+                invalid_state=lambda candidate: bool(
+                    np.any((candidate.eta_unclipped >= 0.0) & (weights > 0.0))
+                ),
+                extended_max_halving=budget if case % 2 else None,
+                merit_delta=lambda candidate, base: candidate.deviance - base.deviance,
+                merit_roundoff=lambda candidate, base: 0.0,
+                first_halving=first if skip else None,
+            )
+            return decision, calls
+
+        halved, halved_calls = decide(False)
+        skipped, skipped_calls = decide(True)
+        assert (skipped.alpha, skipped.step_halvings, skipped.step_rejected) == (
+            halved.alpha,
+            halved.step_halvings,
+            halved.step_rejected,
+        )
+        assert set(skipped_calls) <= set(halved_calls)
+        assert skipped.trials_attempted == 1 + len(skipped_calls)
+        assert skipped.skipped == len(halved_calls) - len(skipped_calls)
+        saved += skipped.skipped
+    assert saved > 0
 
 
 def _frequency_weighted_events(*, plain: bool, direct_solve: str) -> SuperGLM:
