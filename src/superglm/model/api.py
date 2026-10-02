@@ -1213,7 +1213,13 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
     ) -> ModelMetrics:
-        """Compute comprehensive diagnostics for the fitted model."""
+        """Compute comprehensive diagnostics for the fitted model.
+
+        The deviance, likelihoods, Pearson statistic and residuals are computed
+        from the model's predictions on ``X``, the values ``predict`` returns,
+        so equal copies of the training data and a saved and reloaded model
+        give the same values as the objects the model was fitted on.
+        """
         return explain_ops.metrics(self, X, y, sample_weight, offset)
 
     def drop1(

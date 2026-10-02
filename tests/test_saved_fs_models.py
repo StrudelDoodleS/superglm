@@ -119,6 +119,22 @@ def assert_predicts_as_saved(model, frame, saved) -> None:
     assert np.all(excess <= 1.0), (int(np.argmax(excess)), float(np.max(excess)))
 
 
+def saved_se_scale(model, metrics) -> float:
+    """The factor that restates v0.35.0's ``coefficient_se`` at today's dispersion.
+
+    For a known-scale family ``coefficient_se`` scales the covariance by
+    ``pearson_chi2 / residual_df``.  Given the fit's own objects, v0.35.0 read
+    ``pearson_chi2`` from the fit's statistics (``model._fit_stats``), which on
+    a discrete fit belong to the binned design.  ``metrics`` now evaluates it
+    on ``predict``'s mean on every path (#441).  So the saved standard errors
+    move by the square root of the ratio, and the rebuilt factor is compared
+    with them after it.
+    """
+    if not metrics._known_scale:
+        return 1.0
+    return float(np.sqrt(metrics.pearson_chi2 / model._fit_stats.pearson_chi2))
+
+
 @pytest.mark.parametrize("name", ["fs_gaussian_exact", "fs_poisson_discrete"])
 def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(name) -> None:
     """T8 row "retired-class shim removed": without the module ``__getattr__`` of
@@ -139,12 +155,15 @@ def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(
     assert_predicts_as_saved(model, frame, record["prediction"])
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        se = model.metrics(frame, y).coefficient_se
+        metrics = model.metrics(frame, y)
+        se = metrics.coefficient_se
     assert sum(NOTICE in str(item.message) for item in caught) == 1
     assert isinstance(model._linear_system_state.augmented_factor, FactorSmoothLeafFactor)
 
     tolerance = _se_tolerance(model)
+    scale = saved_se_scale(model, metrics)
     for term, saved in record["se"].items():
+        saved = scale * np.asarray(saved, dtype=float)
         rebuilt = np.asarray(se[term], dtype=float)
         np.testing.assert_array_equal(np.isfinite(rebuilt), np.isfinite(saved))
         finite = np.isfinite(saved)

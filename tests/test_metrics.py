@@ -1,5 +1,6 @@
 """Tests for ModelMetrics diagnostics module."""
 
+import pickle
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -106,12 +107,60 @@ class TestLogLikelihood:
 
 
 class TestMetricsCaching:
-    def test_metrics_reuses_fit_mu_on_training_data(self, fitted_poisson):
-        """metrics() on fit data should reuse the cached fitted mean vector."""
+    def test_metrics_on_training_data_use_the_models_predictions(self, fitted_poisson):
+        """metrics() on the fit's own objects evaluates predict, not the fit's mean (#441)."""
         model, X, y, w = fitted_poisson
         metrics = model.metrics(X, y, sample_weight=w)
 
-        assert metrics._mu is model._fit_mu
+        np.testing.assert_array_equal(metrics._mu, model.predict(X))
+
+    @pytest.mark.parametrize("discrete", [True, False], ids=["discrete", "exact"])
+    def test_metrics_do_not_depend_on_object_identity(self, discrete):
+        """#441: the fit's own objects, equal copies and a pickled model agree exactly.
+
+        A discrete fit's own mean is its binned design's.  Reusing it only when
+        the arguments were the fit's own objects moved the deviance between
+        these three calls.  Each call now runs the same code on equal inputs,
+        so the results are identical, not merely close.
+        """
+        rng = np.random.default_rng(441)
+        n = 4000
+        X = pd.DataFrame({"a": rng.uniform(size=n), "b": rng.uniform(size=n)})
+        exposure = rng.uniform(0.2, 1.0, n)
+        offset = np.log(exposure)
+        signal = -1.0 + np.sin(6.0 * X["a"].to_numpy()) + 0.5 * X["b"].to_numpy() ** 2
+        y = rng.poisson(exposure * np.exp(signal)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            features={"a": Spline(n_knots=12), "b": Spline(n_knots=12)},
+            discrete=discrete,
+        )
+        model.fit_reml(X, y, offset=offset)
+
+        calls = {
+            "fit objects": model.metrics(X, y, offset=offset),
+            "copies": model.metrics(X.copy(), y.copy(), offset=offset.copy()),
+            "pickled model": pickle.loads(pickle.dumps(model)).metrics(X, y, offset=offset),
+        }
+
+        reference = calls["copies"]
+        for label, metrics in calls.items():
+            for name in (
+                "deviance",
+                "log_likelihood",
+                "null_deviance",
+                "null_log_likelihood",
+                "explained_deviance",
+                "pearson_chi2",
+                "aic",
+                "bic",
+            ):
+                assert getattr(metrics, name) == getattr(reference, name), (label, name)
+            np.testing.assert_array_equal(metrics.eta, reference.eta, err_msg=label)
+            np.testing.assert_array_equal(
+                metrics.residuals("deviance"), reference.residuals("deviance"), err_msg=label
+            )
+        np.testing.assert_array_equal(reference._mu, model.predict(X, offset=offset))
 
     def test_metrics_returns_cached_object_for_same_fit_refs(self, fitted_poisson):
         """Repeated metrics() on the exact fit refs should return the cached object."""

@@ -24,7 +24,12 @@ import pytest
 
 from superglm.solvers._structured.balance_tree import SumToZeroTreeFactor
 
-from .test_saved_fs_models import _gamma, _se_tolerance, assert_predicts_as_saved
+from .test_saved_fs_models import (
+    _gamma,
+    _se_tolerance,
+    assert_predicts_as_saved,
+    saved_se_scale,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_v0_35_0"
 NOTICE = "rebuilt with the current solver"
@@ -82,12 +87,15 @@ def test_an_sz_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(
     assert_predicts_as_saved(model, frame, record["prediction"])
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        se = model.metrics(frame, y).coefficient_se
+        metrics = model.metrics(frame, y)
+        se = metrics.coefficient_se
     assert sum(NOTICE in str(item.message) for item in caught) == 1
     assert isinstance(model._linear_system_state.augmented_factor, SumToZeroTreeFactor)
 
     tolerance = _se_tolerance(model)
+    scale = saved_se_scale(model, metrics)
     for term, saved in record["se"].items():
+        saved = scale * np.asarray(saved, dtype=float)
         rebuilt = np.asarray(se[term], dtype=float)
         np.testing.assert_array_equal(np.isfinite(rebuilt), np.isfinite(saved))
         finite = np.isfinite(saved)
