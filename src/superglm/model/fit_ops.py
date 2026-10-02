@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import time
@@ -1063,20 +1064,32 @@ def _warn_unresolved_rows(model) -> None:
     for record in records:
         if record.at_maximum:
             continue
-        rows = record.rows
-        shown = ", ".join(str(row) for row in rows[:6])
-        if len(rows) > 6:
-            shown += f" and {len(rows) - 6} more"
-        labels = ", ".join(coefficient_labels(model._groups, record.columns))
-        warnings.warn(
-            f"Rows {shown} carry about {record.information_ratio:.0e} times less information "
-            f"than the other rows that share their coefficients ({labels}), so the fit cannot "
-            "be certified at float64 precision and is reported as not converged. Check the "
-            "weights and offsets on these rows; diagnostics()['_model']['unresolved_rows'] "
-            "lists them.",
-            WeakIdentificationWarning,
-            stacklevel=4,
+        first = itertools.islice(
+            (row for start, stop in record.row_ranges for row in range(start, stop)), 6
         )
+        shown = ", ".join(str(row) for row in first)
+        if record.row_count > 6:
+            shown += f" and {record.row_count - 6} more"
+        labels = ", ".join(coefficient_labels(model._groups, record.columns))
+        if record.boundary:
+            message = (
+                f"Rows {shown} carry about {record.information_ratio:.0e} times less "
+                f"information than the other rows that share their coefficients ({labels}), "
+                "and their likelihood keeps rising towards probability 1, the boundary of the "
+                "model's parameter space, along a direction float64 cannot resolve. Their "
+                "maximum is on that boundary rather than inside it, so the fit is reported as "
+                "not converged. Check the weights and offsets on these rows; "
+                "diagnostics()['_model']['boundary_rows'] lists them."
+            )
+        else:
+            message = (
+                f"Rows {shown} carry about {record.information_ratio:.0e} times less "
+                f"information than the other rows that share their coefficients ({labels}), "
+                "so the fit cannot be certified at float64 precision and is reported as not "
+                "converged. Check the weights and offsets on these rows; "
+                "diagnostics()['_model']['unresolved_rows'] lists them."
+            )
+        warnings.warn(message, WeakIdentificationWarning, stacklevel=4)
 
 
 def _prime_fit_caches(

@@ -342,9 +342,11 @@ class PIRLSResult:
     # ``reml.observed_geometry.build_observed_reml_geometry``).
     mean_space_true_mode: bool = False
     # Rows a direction the factorization truncated moves, each judged on those
-    # rows at the returned state (``mode_score.truncated_direction_ratio``):
-    # at their own maximum (weakly identified), or beyond float64's
-    # resolution (the fit is not converged).
+    # rows (``mode_score.truncated_direction_ratio``): at their own maximum
+    # (weakly identified), beyond float64's resolution, or rising towards the
+    # boundary (the fit is not converged in either).  A converged fit carries
+    # the judgement of the iteration that certified it; any other fit the
+    # last judgement that found such rows.
     truncated_directions: tuple = ()
 
     def __setattr__(self, name: str, value: object) -> None:

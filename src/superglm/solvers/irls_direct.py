@@ -1372,6 +1372,7 @@ def _fit_irls_direct_once(
         penalty that overflows there is refused).
         """
         _last_true_residual[0] = None
+        _judged_truncated[0] = ()
         positive = weights > 0.0
         largest_weight = float(np.max(weights[positive], initial=0.0)) if np.any(positive) else 0.0
         weight_exponent = _even_exponent(largest_weight)
@@ -1545,9 +1546,12 @@ def _fit_irls_direct_once(
                     penalty_apply=lambda v: np.ldexp(penalty_matvec(v), -weight_exponent),
                     bar=mode_bar,
                     underflow=underflow,
+                    column_scale=held_rank.column_scale,
                 )
             ratio = max(ratio, truncated_ratio)
-            _last_truncated[0] = truncated
+            _judged_truncated[0] = truncated
+            if truncated:
+                _last_truncated[0] = truncated
         resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
         latent_parts = []
         for group_state in scop_groups or ():
@@ -2375,9 +2379,14 @@ def _fit_irls_direct_once(
     _true_confirmed = False
     _true_stop_ratio = math.inf
     _last_true_residual: list[ModeResidual | None] = [None]
-    # the decomposition this iteration's solve holds (gram and qr routes), and
-    # the truncated directions its certificate judged (``truncated_direction_ratio``)
+    # the decomposition this iteration's solve holds (gram and qr routes); the
+    # truncated directions this iteration's certificate judged
+    # (``truncated_direction_ratio``), and the last judgement that found any:
+    # a converged fit publishes its certifying iteration's, any other the last
+    # found, so a refusal's record survives an exit on which the certificate
+    # did not run (a rejected step, the iteration budget)
     _held_rank: list = [None]
+    _judged_truncated: list[tuple] = [()]
     _last_truncated: list[tuple] = [()]
 
     # The family's mean space, when the link's inverse can leave it (declared
@@ -2550,7 +2559,7 @@ def _fit_irls_direct_once(
 
     for it in range(max_iter):
         _held_rank[0] = None
-        _last_truncated[0] = ()
+        _judged_truncated[0] = ()
         beta_prev = committed.beta
         intercept_prev = committed.intercept
         beta = committed.beta.copy()
@@ -4005,6 +4014,21 @@ def _fit_irls_direct_once(
             "the penalized maximum is constrained, fit is not converged.",
             _boundary_rows,
         )
+    # the truncated directions published: the certifying iteration's judgement
+    # for a converged fit, else the last that found any
+    _published_truncated = _judged_truncated[0] if converged else _last_truncated[0]
+    _boundary_sets = [record for record in _published_truncated if record.boundary]
+    if not converged and not _boundary_rows and _boundary_sets:
+        # rows whose supremum along a direction the factorization truncates
+        # is the boundary (``TruncatedDirection.boundary``): the same verdict
+        # as rows held at it, though float64 cannot carry them there
+        termination_reason = "mean_space_boundary"
+        _boundary_rows = sum(record.row_count for record in _boundary_sets)
+        logger.info(
+            "fit_irls_direct: %d row(s) rise towards the boundary of the family's mean "
+            "space along a direction float64 cannot resolve; fit is not converged.",
+            _boundary_rows,
+        )
 
     if _has_scop:
         # Final Gram and SCOP Hessian caches must describe the retained model,
@@ -4535,7 +4559,7 @@ def _fit_irls_direct_once(
         centred_intercept_lo=centred_intercept_lo,
         mean_space_boundary_rows=_boundary_rows,
         mean_space_true_mode=bool(converged and _true_confirmed),
-        truncated_directions=_last_truncated[0],
+        truncated_directions=_published_truncated,
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.

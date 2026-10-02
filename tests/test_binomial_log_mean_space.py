@@ -1298,6 +1298,258 @@ def test_a_light_cut_without_events_is_left_to_separation() -> None:
 
 
 @pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+def test_a_visible_truncated_direction_does_not_hide_a_light_cut(direct_solve: str) -> None:
+    """claude's #437 Medium (r4164942997): the light cut beside two nearly collinear columns.
+
+    The factorization truncates both the cut and ``x1 - x2``, which moves
+    every row by ~1e-9.  #437 judged the union of the truncated directions'
+    rows on unweighted score sums, so ``x1 - x2`` made every row visible and
+    the cut was never judged: the fit was certified after one iteration with
+    the light cells at their start.  Each direction is now judged on its own
+    rows, weighted by how far it moves them, so the cut is refused with its
+    rows, which the record holds as one run of rows.
+    """
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0)
+    rng = np.random.default_rng(0)
+    cell = pd.factorize(frame["A"] + frame["B"])[0]
+    frame["x1"] = rng.uniform(size=cell.max() + 1)[cell]
+    frame["x2"] = frame["x1"] + 1e-9 * rng.normal(size=len(frame))
+    light = np.array([(a, b) in _TWO_LINKS for a, b in zip(frame["A"], frame["B"], strict=True)])
+    features = {
+        "A": Categorical(base="a0"),
+        "B": Categorical(base="b0"),
+        "x1": Numeric(),
+        "x2": Numeric(),
+    }
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features=features,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame[list(features)], y, **fit)
+    assert not model.result.converged
+    (unresolved,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert unresolved["rows"] == np.flatnonzero(light).tolist()
+    assert unresolved["row_count"] == int(np.count_nonzero(light))
+    (record,) = model.result.truncated_directions
+    assert record.row_ranges == ((16, 20),)
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+def test_an_all_events_light_cut_is_a_boundary_supremum(direct_solve: str) -> None:
+    """claude's #437 Medium (r4164944703): a light cut whose rows are all events.
+
+    An event row's log-likelihood ``w eta`` rises until ``eta = 0``, so under
+    the log link the cut's supremum is on the boundary of the parameter space
+    at finite coefficients, not a separation.  #437 read every event row
+    rising as a separation and certified the fit after one iteration with the
+    light rows at ``p ~ e^-22``.  It is now the boundary verdict: not
+    converged, ``mean_space_boundary`` with the cut's rows counted, listed in
+    ``diagnostics()["_model"]["boundary_rows"]`` and named in a plain-words
+    warning.
+    """
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0, link_responses=(1.0, 1.0))
+    light = np.array([(a, b) in _TWO_LINKS for a, b in zip(frame["A"], frame["B"], strict=True)])
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert not model.result.converged
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert model.result.mean_space_boundary_rows == int(np.count_nonzero(light))
+    diagnostics = model.diagnostics()["_model"]
+    assert diagnostics["unresolved_rows"] == []
+    (boundary,) = diagnostics["boundary_rows"]
+    assert boundary["rows"] == np.flatnonzero(light).tolist()
+    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    assert any("towards probability 1" in message for message in messages)
+    # REML's refusal names such rows as rising towards the boundary, and rows
+    # the clip holds as before
+    from superglm.reml.direct import _mean_space_boundary_message
+
+    assert "4 row(s) rise towards probability 1 along a direction float64 cannot resolve" in (
+        _mean_space_boundary_message(4, estimated=False, unresolved=True)
+    )
+    assert "4 row(s) are fitted at probability 1, the boundary" in (
+        _mean_space_boundary_message(4, estimated=False)
+    )
+
+
+def test_a_refused_direction_keeps_its_record_through_a_rejected_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude's #437 Low (r4164946634): a refusal's record survives an exit without a certificate.
+
+    The light cut is refused at the first iteration's stop.  Every later step
+    is then made to fail its line search, so the fit ends ``step_rejected``,
+    an exit on which the certificate does not run.  #437 cleared the record
+    at the top of each iteration, so the fit was published not converged
+    with no record and no warning.  The last record found is kept.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.irls_state import _IRLSStepDecision, _select_irls_trial
+
+    calls: list[int] = []
+
+    def first_then_rejected(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return _select_irls_trial(**kwargs)
+        return _IRLSStepDecision(0.0, 0, True)
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", first_then_rejected)
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert len(calls) >= 2
+    assert not model.result.converged
+    assert model.result.termination_reason == "step_rejected"
+    (unresolved,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert unresolved["rows"] == [16, 17, 18, 19]
+    assert any("less information" in str(w.message) for w in caught)
+
+
+def _two_level_design(z: np.ndarray):
+    """Base level a and level c heavy (weight 1e8), level b light (1e-8), each a 0 and a 1 at p = 1/2.
+
+    Columns: b, c (one-hot) and a dense ``z``.  Every row sits at its own
+    maximum: score ``w (y - (1 - y))`` and Fisher weight ``w``.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, DesignMatrix
+
+    codes = np.array([-1, -1, -1, -1, 0, 0, 1, 1, 1, 1])
+    response = np.array([0.0, 1.0] * 5)
+    weight = np.where(codes == 0, 1e-8, 1e8)
+    dm = DesignMatrix(
+        [CategoricalGroupMatrix(codes, 2), DenseGroupMatrix(z[:, None])], n=len(codes), p=3
+    )
+    return dm, response, weight * (2.0 * response - 1.0), weight
+
+
+def test_the_pull_carries_the_null_basis_error() -> None:
+    """claude's #437 Low (PRRT_kwDORfJEl86oT-0e): a light set at its maximum beside a penalized column.
+
+    The truncated direction is level b's, computed with an error of
+    ``angle`` along a penalized column ``z`` whose penalty gradient is 1.
+    That error reaches the pull ``d' S beta``: brought to the light rows'
+    units (2^26) it is ~7e-5, and with the rows' own score zero it sets a
+    Newton step of ~5e-5, above the bar.  #437's floor counted the basis
+    error in the rows' movement but not in the pull, so it refused the set.
+    With the pull's share of the error counted, the rows are at their
+    maximum: weakly identified.
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    z = np.linspace(-1.0, 1.0, 10)
+    dm, response, score, weight = _two_level_design(z)
+    angle = 1e-12
+    basis = np.array([[1.0], [0.0], [angle]])
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=basis,
+        angle=angle,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=weight,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.array([0.0, 0.0, 1.0]),
+        penalty_size=np.array([0.0, 0.0, 1.0]),
+        penalty_apply=lambda v: np.array([0.0, 0.0, float(v[2])]),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio == 0.0
+    (record,) = found
+    assert record.at_maximum
+    assert record.rows == (4, 5)
+
+
+def test_an_unresolved_null_basis_refuses() -> None:
+    """claude's #437 Low (r4164945870): a basis whose error reaches every row's movement refuses.
+
+    A row moves by at most its l1 bound times the direction's largest
+    coefficient, and the basis's error is ``4 (angle + gamma)`` times that.
+    At ``angle = 0.3`` every movement lies within the error, so no row can be
+    told moved: #437 read the empty support as aliasing and passed the stop.
+    It is not resolved, so the claim is refused (``inf``).
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    z = np.linspace(-1.0, 1.0, 10)
+    dm, response, score, weight = _two_level_design(z)
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=np.array([[1.0], [0.0], [0.0]]),
+        angle=0.3,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=weight,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: np.zeros(3),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio == math.inf
+    assert found == ()
+
+
+def test_structural_null_columns_are_not_read_on_the_design() -> None:
+    """claude's #437 Low (r4164947185): a column without centred data is not multiplied through.
+
+    ``rank._null_basis`` ends with an exact unit vector per column whose
+    centred data are zero (``column_scale`` 0), which moves no row by
+    construction.  #437 formed one design product for it on every
+    certificate evaluation; only the discarded spectral direction is read.
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    dm, response, _, _ = _two_level_design(np.zeros(10))
+    products: list[int] = []
+    matvec = dm.matvec
+    dm.matvec = lambda v: products.append(1) or matvec(v)
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=np.array([[1.0, 0.0], [0.0, 0.0], [0.0, 1.0]]),
+        angle=1e-12,
+        mean_x=np.zeros(3),
+        row_score=2.0 * response - 1.0,
+        fisher_weights=np.ones(10),
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: np.zeros(3),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+        column_scale=np.array([1.0, 1.0, 0.0]),
+    )
+    assert (ratio, found) == (0.0, ())
+    assert len(products) == 1
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
 def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: str) -> None:
     """Two numeric columns 1e-9 apart: the factorization truncates their difference, and the fit certifies.
 
