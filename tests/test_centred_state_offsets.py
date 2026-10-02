@@ -445,7 +445,10 @@ def _translated_state(state: dict, shift: float) -> dict:
         rank_info = dataclasses.replace(rank_info, mean_x=rank_info.mean_x + shift)
     summary = result.reml_geometry
     if summary is not None:
-        summary = dataclasses.replace(summary, mean_x=summary.mean_x + shift)
+        # the translated state is read without the untranslated system's pair
+        summary = dataclasses.replace(
+            summary, mean_x=summary.mean_x + shift, mean_hi=None, mean_lo=None
+        )
     moved = dataclasses.replace(
         result,
         state_center=centre,
@@ -2055,14 +2058,13 @@ def test_the_dense_split_matches_the_exact_pair_reference(bounded, monkeypatch):
     assert np.all(np.abs(system.mean_x - mean_x) <= 4.0 * gamma * (np.abs(X).T @ W) / sum_w)
 
 
-# Centred once (the #439 follow-up).  Every dense column is centred about the
-# fit's fixed state centre ``c`` (``prior_weighted_centre``) in one
-# subtraction, and the working-weighted mean enters as the pair ``(c, d)``:
-# the textbook formula on data shifted by ``c`` (Chan, Golub & LeVeque 1983,
-# §3), its Gram ``G - t d'`` a rank-one correction of the shifted moments.
-# The correction is taken while ``d`` lies within one weighted standard
-# deviation (``kappa^2 <= 2``, their eq. 3.3); past that the column takes the
-# exact pair about its working mean, as before.
+# One pass for the working mean (the #439 follow-up).  Every dense column takes
+# the corrected two-pass algorithm about its working-weighted mean, by type:
+# pass one rounds the mean ``a`` (shifted by the first weighted row), pass two
+# forms the rows ``x - a`` once and from them ``e = sum W (x - a)``, the Gram
+# ``G`` and the right-hand side, and Björck's correction ``G - e e' / sum W``
+# folds in the remainder that #439 formed in a pass of its own (Chan, Golub &
+# LeVeque 1983, eq. 1.7 and Table 1).
 
 
 def _exact_centred_gram(values: NDArray, weights: NDArray) -> list[list[Fraction]]:
@@ -2084,13 +2086,66 @@ def _exact_centred_gram(values: NDArray, weights: NDArray) -> list[list[Fraction
     ]
 
 
-def _anchored_split_design(n: int, shift: float, *, tilt: bool):
+def _two_pass_bound(values: NDArray, weights: NDArray) -> NDArray:
+    """How far the corrected two-pass Gram may sit from the exact ``S``, entry by entry.
+
+    Pass one puts the anchor within ``L = u |m| + gamma_{n+2} sum |w| |x -
+    x_ref| / |sum w|`` of the exact mean ``m`` (as ``_pair_gram_bound``).
+    With ``D = |x - m|`` and ``A = D + L``, the rows ``fl(x - a)`` carry
+    ``R = u A``; centred, the perturbation is at most ``F = R + sum |w| R /
+    |sum w|``, which moves the exact centred Gram by ``sum |w| (D_j F_k + F_j
+    D_k + F_j F_k)``.  The pass's dot products err by ``gamma_{n+3} sum |w|
+    (A + R)_j (A + R)_k`` and ``e`` by ``E_err = gamma_{n+3} sum |w| (A +
+    R)``, against ``|e| <= E = |sum w| L + sum |w| R``.  Each of the
+    correction's three terms ``e l'``, ``l e'`` and ``l l' sum w``
+    (``two_pass_centred_gram``, ``l = e / sum w``) then errs from ``e e' / sum
+    w`` by at most ``(E_j E_err,k + E_err,j E_k + E_err,j E_err,k + gamma_{n+3}
+    (E + E_err)_j (E + E_err)_k) (1 + gamma_n) / |sum w|``, and the three
+    additions and the symmetrization by ``4u`` of the terms.
+    """
+    n, width = values.shape
+    total = sum(Fraction(w) for w in weights)
+    magnitude = np.abs(weights)
+    seed = values[np.flatnonzero(weights != 0.0)[0]]
+    D = np.empty_like(values)
+    L = np.empty(width)
+    for j in range(width):
+        mean = sum(Fraction(a) * Fraction(b) for a, b in zip(values[:, j], weights, strict=True))
+        mean /= total
+        D[:, j] = [float(abs(Fraction(a) - mean)) for a in values[:, j]]
+        L[j] = _U * abs(float(mean)) + _gamma(n + 2) * float(
+            np.sum(magnitude * np.abs(values[:, j] - seed[j])) / abs(float(total))
+        )
+    A = D + L
+    R = _U * A
+    F = R + (magnitude @ R) / abs(float(total))
+    data = D.T @ (magnitude[:, None] * F) + F.T @ (magnitude[:, None] * D)
+    data += F.T @ (magnitude[:, None] * F)
+    rows = A + R
+    gram = _gamma(n + 3) * (rows.T @ (magnitude[:, None] * rows))
+    E = abs(float(total)) * L + magnitude @ R
+    E_err = _gamma(n + 3) * (magnitude @ rows)
+    correction = np.outer(E, E_err) + np.outer(E_err, E) + np.outer(E_err, E_err)
+    correction += _gamma(n + 3) * np.outer(E + E_err, E + E_err)
+    correction *= 3.0 * (1.0 + _gamma(n)) / abs(float(total))
+    final = (
+        4.0
+        * _U
+        * (
+            rows.T @ (magnitude[:, None] * rows)
+            + 3.0 * np.outer(E + E_err, E + E_err) / abs(float(total))
+        )
+    )
+    return (data + gram + correction + final) * (1.0 + 8.0 * _gamma(n + 4))
+
+
+def _split_design(n: int, shift: float, *, tilt: bool):
     """An even-integer column beside a 120-level categorical, above the raw rungs' crossovers.
 
     The working weights spread over ``[0.5, 2]``.  With ``tilt`` the first row
-    sits ``2e9`` from the rest and carries prior weight but no working
-    weight: the working mean then lies ``2e9 / n`` from the prior-weighted
-    centre, about 4e4 working standard deviations.
+    sits ``2e9`` from the rest and carries no working weight, so the working
+    mean sits ``2e9 / n``, about 4e4 working standard deviations, from the
+    unit-weighted mean: ``kappa^2`` of the rows about that mean is about 2e9.
     """
     from superglm.group_matrix import CategoricalGroupMatrix
 
@@ -2106,8 +2161,8 @@ def _anchored_split_design(n: int, shift: float, *, tilt: bool):
     return DesignMatrix(groups, n=n, p=121), W
 
 
-def _anchored_system(dm, W, z, centre, monkeypatch):
-    """``build_centered_system`` with the fit's centre, asserting the dense/bounded split ran."""
+def _split_system(dm, W, z, monkeypatch):
+    """``build_centered_system`` on a design whose bounded half takes a raw rung (the split)."""
     from superglm.solvers import centered_system
 
     attached = []
@@ -2125,46 +2180,41 @@ def _anchored_system(dm, W, z, centre, monkeypatch):
         penalty=np.zeros((dm.p, dm.p)),
         tabmat_split=dm.tabmat_centering_split,
         tabmat_state=centered_system.TabmatCenteringState(),
-        centre=centre,
     )
     assert attached, "the bounded half took no raw rung: the split was not exercised"
     return system
 
 
 @pytest.mark.parametrize("shift", [0.0, 1e8, 1e16])
-def test_the_dense_block_takes_a_rank_one_correction_about_the_fit_centre(shift, monkeypatch):
-    """With the fit's centre the split centres its dense block by ``G - t d'``, at every offset.
+def test_the_dense_block_takes_the_corrected_two_pass_at_every_offset(shift, monkeypatch):
+    """The split's dense block, by the corrected two-pass, against the exact pair and exact rationals.
 
-    The pair is ``(c, d)`` (``mean_hi`` the centre itself), and the system
-    agrees with the exact-pair reference, centred row by row about
+    The system agrees with #439's reference, centred row by row about
     ``weighted_mean_pair``'s ``(hi, lo)``, to ``5 gamma_{n+p+4}`` of the
-    entry formed on absolute rows: a dense column's ``|x - c| + |(x - hi) -
-    lo|`` (both routes' rows), a bounded column's ``|x| + |m|``.  The dense
-    diagonal meets the derived bound against the exact rational value,
-    ``5 gamma_{n+4} sum W (x - c)^2``: ``4 gamma_{n+3}`` for the correction
-    of the shifted moments (``rank_one_centred_gram``) and ``5u`` for the
-    rows' own rounding.  Mutation: the correction dropped (``G`` for ``G -
-    t d'``).
+    entry formed on absolute rows (a dense column's ``|x - hi| + |(x - hi) -
+    lo|``, a bounded column's ``|x| + |m|``), and its dense diagonal meets
+    ``_two_pass_bound`` against the exact rational value.  The pair it
+    publishes is the exact pair's anchor and a remainder below the anchor's
+    rounding.  Mutations: Björck's correction dropped (``G`` for ``G - e e' /
+    sum W``), which at 1e16 leaves the anchor's rounding, a ulp of the
+    offset, in the Gram; pass one taken without the working weights.
     """
+    from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
     from superglm.solvers.centered_system import weighted_mean_pair
-    from superglm.solvers.mode_score import prior_weighted_centre
 
     n = 9000
-    dm, W = _anchored_split_design(n, shift, tilt=False)
+    dm, W = _split_design(n, shift, tilt=False)
     z = np.random.default_rng(6).normal(size=n)
-    centre = prior_weighted_centre(dm, np.ones(n))
-    system = _anchored_system(dm, W, z, centre, monkeypatch)
-    assert system.mean_hi is not None and system.mean_hi[0] == centre[0]
-
-    from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
-
+    system = _split_system(dm, W, z, monkeypatch)
     sum_w = float(np.sum(W))
     mean_x, hi, lo = weighted_mean_pair(dm, W, sum_w)
+    assert system.mean_hi is not None and system.mean_lo is not None
+    assert system.mean_hi[0] == hi[0]
     z_centered = z - system.mean_z
     gram, rhs = centered_gram_rhs(dm=dm, W=W, mean_x=hi, z_centered=z_centered, mean_lo=lo)
     X = dm.toarray()
     magnitude = np.abs(X) + np.abs(mean_x)
-    magnitude[:, 0] = np.abs(X[:, 0] - centre[0]) + np.abs((X[:, 0] - hi[0]) - lo[0])
+    magnitude[:, 0] = np.abs(X[:, 0] - hi[0]) + np.abs((X[:, 0] - hi[0]) - lo[0])
     gamma = _gamma(n + dm.p + 4)
     assert np.all(
         np.abs(system.data_gram - gram) <= 5.0 * gamma * (magnitude.T @ (W[:, None] * magnitude))
@@ -2172,80 +2222,70 @@ def test_the_dense_block_takes_a_rank_one_correction_about_the_fit_centre(shift,
     assert np.all(
         np.abs(system.rhs - rhs) <= 5.0 * gamma * (magnitude.T @ (W * np.abs(z_centered)))
     )
-    shifted = X[:, 0] - centre[0]
     exact = _exact_centred_gram(X[:, :1], W)[0][0]
-    bound = 5.0 * _gamma(n + 4) * float(W @ shifted**2)
+    bound = float(_two_pass_bound(X[:, :1], W)[0, 0])
     assert abs(Fraction(float(system.data_gram[0, 0])) - exact) <= Fraction(bound)
 
 
 @pytest.mark.parametrize("shift", [0.0, 1e16])
 @pytest.mark.parametrize("route", ["gram", "proximal"])
-def test_a_working_mean_far_from_the_fit_centre_takes_the_exact_pair(route, shift, monkeypatch):
-    """A working mean many standard deviations from the centre is centred about its exact pair.
+def test_a_working_mean_far_from_the_unweighted_mean_keeps_the_two_pass_bound(
+    route, shift, monkeypatch
+):
+    """A working mean 4e4 working standard deviations from the rows' unit-weighted mean.
 
-    One row 2e9 away carries prior weight and no working weight, so the
-    working mean sits 2e9 / n from the prior-weighted centre: ``kappa^2 = 1
-    + sum W d^2 / S`` is about 2e9 and the rank-one correction would lose
-    ``n u kappa^2``, two parts in a thousand, against the bound below.  The
-    certificate (``_anchored_remainder``) sends the column to the corrected
-    two-pass pair about its working mean (``hi`` is no longer the centre),
-    whose Gram meets ``_pair_gram_bound`` against the exact value, on the
-    gram route's split and in the proximal solver's block Gram.  Mutation:
-    the certificate always accepting.
+    One row 2e9 away carries no working weight.  About the rows' unweighted
+    mean, ``kappa^2`` is about 2e9, and the textbook formula on rows shifted
+    there would lose ``n u kappa^2``, two parts in a thousand.  The corrected
+    two-pass algorithm anchors at the working mean whatever the rows, so on
+    the gram route's split and in the proximal solver's block Gram the result
+    meets ``_two_pass_bound`` against exact rationals, as it does untilted.
+    Mutations: pass one taken without the working weights; Björck's
+    correction dropped (at 1e16).
     """
-    from superglm.solvers.mode_score import prior_weighted_centre
-    from superglm.solvers.pirls import (
-        _centred_group_gram,
-        _dense_group_centring,
-        _held_dense_rows,
-    )
+    from superglm.solvers.pirls import _dense_group_centring, _dense_rows_buffer
     from superglm.types import GroupSlice
 
     n = 9000
-    dm, W = _anchored_split_design(n, shift, tilt=True)
-    centre = prior_weighted_centre(dm, np.ones(n))
+    dm, W = _split_design(n, shift, tilt=True)
     if route == "gram":
-        system = _anchored_system(dm, W, np.zeros(n), centre, monkeypatch)
-        assert system.mean_hi is not None and system.mean_hi[0] != centre[0]
+        system = _split_system(dm, W, np.zeros(n), monkeypatch)
         value = float(system.data_gram[0, 0])
     else:
         groups = [GroupSlice("x", 0, 1), GroupSlice("c", 1, dm.p)]
-        held = _held_dense_rows(dm, groups, centre)
-        centring = _dense_group_centring(dm, groups, W, centre, held=held)
+        centring = _dense_group_centring(dm, groups, W, buffer=_dense_rows_buffer(dm, groups))
         assert centring is not None and centring[0] is not None
-        assert centring[0][1][0] != centre[0] and centring[0][5] is None
-        value = float(_centred_group_gram(centring[0], W)[0, 0])
-    x = dm.group_matrices[0].M[:, 0]
-    exact = _exact_centred_gram(x[:, None], W)[0][0]
-    assert abs(Fraction(value) - exact) <= Fraction(_pair_gram_bound(x, W))
+        value = float(centring[0][3][0, 0])
+    x = dm.group_matrices[0].M[:, :1]
+    exact = _exact_centred_gram(x, W)[0][0]
+    assert abs(Fraction(value) - exact) <= Fraction(float(_two_pass_bound(x, W)[0, 0]))
 
 
-def test_the_rank_one_correction_meets_its_bound_against_exact_arithmetic():
-    """The shifted moments' rank-one correction against exact rational arithmetic.
+def test_the_corrected_two_pass_meets_its_bound_against_exact_arithmetic():
+    """The corrected two-pass Gram against exact rational arithmetic, at any tilt of the weights.
 
     Draws of 3 to 40 rows and 1 to 3 columns on grids exact at offsets 0,
-    1e4, 1e8 and 1e16, with prior weights and working weights tilted by
-    factors of ``exp(N(0, sigma))``, ``sigma`` 0.1, 1 or 3, some rows weightless.
-    The centre is the prior-weighted one.  Where the certificate accepts,
-    every entry of ``G - t d'`` is within ``5 gamma_{n+4} sqrt(Q_jj Q_kk)``
-    of the exact centred Gram, ``Q = sum W (x - c)^2``: the dot products err
-    by ``gamma_{n+1}``, the correction ``t d'`` by ``3 gamma_{n+2}`` (``t``'s
-    error ``gamma_n sqrt(sum W Q)`` against ``|t| <= sqrt(sum W Q)``), and the
-    rows' own rounding ``|x~ - (x - c)| <= u |x~|`` moves the Gram by ``4u``
-    (Cauchy-Schwarz).  The certificate holds the shift within one weighted
-    standard deviation, ``Q_jj <= 2 S_jj`` up to ``8 gamma`` of ``Q_jj``, so the
-    bound is ``10 gamma`` relative to ``sqrt(S_jj S_kk)``.  Both outcomes of the
-    certificate occur.  Mutation: the certificate always accepting.
+    1e4, 1e8 and 1e16.  The working weights are prior weights tilted by
+    ``exp(N(0, sigma))``, ``sigma`` 0.1, 1 or 3, some rows weightless, and in
+    one draw in four a row 2e9 grid steps away carries no working weight, so
+    the working mean sits up to ``kappa^2 ~ 1e9`` from the rows' unweighted
+    mean.  Every entry of ``dense_anchor`` + ``anchored_dense_moments`` +
+    ``two_pass_centred_gram`` meets ``_two_pass_bound``, which does not grow
+    with that tilt, and #439's exact pair (``weighted_mean_pair`` and rows
+    ``(x - hi) - lo``) meets ``_pair_gram_bound`` on the same draws.  On every
+    draw the two-pass bound is within a factor two of #439's.  Mutations:
+    Björck's correction dropped; pass one taken without the working weights.
     """
+    from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
     from superglm.solvers.centered_system import (
-        _anchored_remainder,
         anchored_dense_moments,
-        rank_one_centred_gram,
+        dense_anchor,
+        two_pass_centred_gram,
+        weighted_mean_pair,
     )
-    from superglm.solvers.mode_score import prior_weighted_centre
 
     rng = np.random.default_rng(2026)
-    accepted = rejected = 0
+    tilted = 0
     for draw in range(240):
         n = int(rng.integers(3, 41))
         width = int(rng.integers(1, 4))
@@ -2255,42 +2295,94 @@ def test_the_rank_one_correction_meets_its_bound_against_exact_arithmetic():
         prior = np.exp(rng.normal(0.0, 0.5, n))
         working = prior * np.exp(rng.normal(0.0, (0.1, 1.0, 3.0)[draw % 3], n))
         working[rng.uniform(size=n) < 0.1] = 0.0
+        if draw % 4 == 1:
+            values[0] = shift + spacing * 2.0e9
+            working[0] = 0.0
+            tilted += 1
         if not np.any(working > 0.0):
-            working[0] = 1.0
+            working[-1] = 1.0
         dm = DesignMatrix([DenseGroupMatrix(values)], n=n, p=width)
-        centre = prior_weighted_centre(dm, prior)
         sum_w = float(np.sum(working))
-        first, gram, _ = anchored_dense_moments(dm, working, centre)
-        remainder = _anchored_remainder(first, np.diag(gram), sum_w)
-        if remainder is None:
-            rejected += 1
-            continue
-        accepted += 1
-        centred = rank_one_centred_gram(first, gram, remainder)
+        anchor = dense_anchor(dm, working, sum_w)
+        first, gram, _ = anchored_dense_moments(dm, working, anchor)
+        centred = two_pass_centred_gram(first, gram, first / sum_w, sum_w)
         exact = _exact_centred_gram(values, working)
-        shifted = values - centre
-        second = working @ shifted**2
-        gamma = _gamma(n + 4)
+        bound = _two_pass_bound(values, working)
+        _, hi, lo = weighted_mean_pair(dm, working, sum_w)
+        pair, _ = centered_gram_rhs(dm=dm, W=working, mean_x=hi, z_centered=np.zeros(n), mean_lo=lo)
         for j in range(width):
-            assert second[j] <= 2.0 * float(exact[j][j]) + 8.0 * gamma * second[j]
+            reference = _pair_gram_bound(values[:, j], working)
+            assert bound[j, j] <= 2.0 * reference
+            assert abs(Fraction(float(pair[j, j])) - exact[j][j]) <= Fraction(reference)
             for k in range(width):
-                bound = 5.0 * gamma * math.sqrt(second[j] * second[k])
-                assert abs(Fraction(float(centred[j, k])) - exact[j][k]) <= Fraction(bound)
-    assert accepted >= 40 and rejected >= 10
+                error = abs(Fraction(float(centred[j, k])) - exact[j][k])
+                assert error <= Fraction(float(bound[j, k]))
+    assert tilted >= 50
 
 
-def test_a_centred_fit_forms_no_second_pass_for_its_working_mean(monkeypatch):
-    """Beside a centred ``Numeric`` the solvers read the working mean from the pass that needs it.
+def test_the_proximal_rows_serve_the_block_products_of_their_outer_iteration():
+    """The proximal solver's rows, formed once per outer iteration, against the chunked products.
 
-    Gram REML (binomial/logit, a ``Numeric`` and a spline) and a selection
-    fit (Poisson): no PIRLS iteration forms the corrected two-pass pair (two
-    passes) or the offset of the working mean from the centre (one more),
-    and the weight derivative forms no pair of its own, reading the final
-    system's.  These counts are the follow-up's point, so they are asserted;
-    the pass counts per iteration are in the PR.  Mutations, each failing it
-    alone: the centre not passed to ``build_centered_system`` by PIRLS; the
-    geometry summary without its pair; the working mean's offset formed by
-    ``centre_offset_mean``'s pass.
+    ``_dense_group_centring`` writes each dense group's rows ``fl(x - a)``
+    into the fit's buffer in the pass that forms its Gram.  The block updates
+    read them: ``X~' v = R' v - lo (1' v)`` (``_centred_group_score``) and
+    ``X~ d = R d - lo' d`` (``_centred_group_step``).  Against the chunked
+    products about the same pair (``dense_centred_rmatvec``,
+    ``dense_centred_matvec``) they differ only in their summation order, at
+    most ``2 gamma_{n+2}`` of the products formed on absolute rows; the Gram
+    is the one formed without a buffer.  A two-column group at a 1e16 offset,
+    where the pair's remainder is not negligible.  Mutations: ``- lo (1'v)``
+    dropped from the score; ``- lo'd`` dropped from the step.
+    """
+    from superglm.solvers.mode_score import dense_centred_matvec, dense_centred_rmatvec
+    from superglm.solvers.pirls import (
+        _centred_group_score,
+        _centred_group_step,
+        _dense_group_centring,
+        _dense_rows_buffer,
+    )
+    from superglm.types import GroupSlice
+
+    rng = np.random.default_rng(458)
+    n = 20000  # three chunks of the chunked products
+    values = 1e16 + 2.0 * rng.integers(-50, 51, size=(n, 2)).astype(np.float64)
+    dm = DesignMatrix([DenseGroupMatrix(values)], n=n, p=2)
+    groups = [GroupSlice("x", 0, 2)]
+    W = rng.uniform(0.2, 3.0, n)
+    buffered = _dense_group_centring(dm, groups, W, buffer=_dense_rows_buffer(dm, groups))
+    formed = _dense_group_centring(dm, groups, W)
+    assert buffered is not None and formed is not None
+    entry = buffered[0]
+    assert entry is not None and entry[5] is not None and formed[0][5] is None
+    design, hi, lo, gram, _, rows = entry
+    assert np.array_equal(hi, formed[0][1]) and np.array_equal(lo, formed[0][2])
+    assert np.array_equal(rows, values - hi)
+    assert np.all(np.abs(lo) > 0.0)
+    np.testing.assert_array_equal(gram, formed[0][3])
+    v = W * rng.normal(1.0, 1.0, n)
+    absolute = np.abs(rows).T @ np.abs(v) + np.abs(lo) * float(np.sum(np.abs(v)))
+    score = _centred_group_score(entry, v)
+    reference = dense_centred_rmatvec(design, v, hi, lo)
+    assert np.all(np.abs(score - reference) <= 2.0 * _gamma(n + 2) * absolute)
+    d = rng.normal(size=2)
+    step = _centred_group_step(entry, d)
+    reference = dense_centred_matvec(design, d, hi, lo)
+    row_scale = np.abs(rows) @ np.abs(d) + float(np.abs(lo) @ np.abs(d))
+    assert np.all(np.abs(step - reference) <= 2.0 * _gamma(4) * row_scale)
+
+
+def test_a_fit_forms_each_working_mean_once(monkeypatch):
+    """Beside a dense column, every working mean comes from the pass that needs it.
+
+    Gram REML (binomial/logit, a ``Numeric``, a spline and a 120-level
+    categorical, so the bounded half takes a raw rung) and a selection fit
+    (Poisson): no PIRLS iteration forms #439's separate remainder pass
+    (``corrected_two_pass_pair``) or the offset of the working mean from the
+    state centre (``centre_offset_mean``), and the weight derivative forms no
+    pair, reading the final system's.  The pass counts per iteration are in
+    the PR.  Mutations, each failing it alone: the split's remainder formed by
+    ``dense_mean_pair``; the offset formed by ``centre_offset_mean``; the
+    geometry summary without its pair.
     """
     import collections
 
@@ -2312,13 +2404,18 @@ def test_a_centred_fit_forms_no_second_pass_for_its_working_mean(monkeypatch):
     count(irls_direct, "centre_offset_mean")
     count(w_derivatives, "dense_mean_pair")
     rng = np.random.default_rng(12)
-    n = 3000
-    frame = pd.DataFrame({"x": rng.normal(size=n), "s": rng.uniform(size=n)})
+    n = 9000
+    frame = pd.DataFrame(
+        {
+            "x": rng.normal(size=n),
+            "s": rng.uniform(size=n),
+            "c": pd.Categorical(rng.integers(0, 120, n).astype(str)),
+        }
+    )
     eta = -0.5 + 0.3 * frame["x"] + np.sin(4.0 * frame["s"])
     y = (rng.uniform(size=n) < 1.0 / (1.0 + np.exp(-eta))).astype(float)
-    model = _fit_reml(
-        SuperGLM(family="binomial", features={"x": Numeric(), "s": Spline(k=8)}), frame, y
-    )
+    features = {"x": Numeric(), "s": Spline(k=8), "c": Categorical()}
+    model = _fit_reml(SuperGLM(family="binomial", features=features), frame, y)
     assert model._reml_result.converged
     assert model._reml_profile.get("direct_backend") == "gram"
     assert sum(calls.values()) == 0, dict(calls)
@@ -2328,6 +2425,6 @@ def test_a_centred_fit_forms_no_second_pass_for_its_working_mean(monkeypatch):
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        selection.fit(frame, counts.astype(float))
+        selection.fit(frame[["x", "s"]], counts.astype(float))
     assert selection.result.converged
     assert sum(calls.values()) == 0, dict(calls)

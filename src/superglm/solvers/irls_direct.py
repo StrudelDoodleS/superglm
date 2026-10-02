@@ -435,18 +435,20 @@ def _system_offset_mean(
 ) -> NDArray:
     """``mean_x - c``, the working mean's offset from the state's centre, read from the system's pair.
 
-    A system whose dense pair is anchored at the state's centre, ``(c, d)``
-    (``centered_system.dense_mean_pair``), carries the offset as ``d``, formed
-    in the system's own pass on rows centred about ``c``: no further pass.
-    Any other system takes ``centre_offset_mean``'s pass over centred rows.
+    A dense column's working mean is the system's exact pair ``(hi, lo)``
+    (``centered_system.dense_mean_pair``, ``_attach_dense_split``), so its
+    offset from ``c`` is ``(hi - c) + lo``: ``hi - c`` is exact where the two
+    lie within a factor two (Sterbenz), as they do at a column's offset, and
+    otherwise rounds at ``u |hi - c|``, inside ``centre_offset_mean``'s
+    ``gamma_n sum W |x - c| / sum W``.  No pass.  A system without a pair has
+    no dense column and reads ``mean_x - c``.
     """
-    if system.mean_hi is not None and system.mean_lo is not None:
-        dense = dense_columns(dm)
-        if np.array_equal(system.mean_hi[dense], state_center[dense]):
-            offset_mean = np.asarray(system.mean_x, dtype=np.float64) - state_center
-            offset_mean[dense] = system.mean_lo[dense]
-            return offset_mean
-    return centre_offset_mean(dm, W, float(system.sum_w), state_center, system.mean_x)
+    if system.mean_hi is None or system.mean_lo is None:
+        return centre_offset_mean(dm, W, float(system.sum_w), state_center, system.mean_x)
+    offset_mean = np.asarray(system.mean_x, dtype=np.float64) - state_center
+    dense = dense_columns(dm)
+    offset_mean[dense] = (system.mean_hi[dense] - state_center[dense]) + system.mean_lo[dense]
+    return offset_mean
 
 
 def _structured_score_centre(
@@ -2276,7 +2278,6 @@ def _fit_irls_direct_once(
             tabmat_state=_tabmat_centering_state,
             profile=profile,
             _data=data,
-            centre=_state_center,
         )
         if fisher is not None and fisher.data is None:
             fisher.remember(W_current, system)

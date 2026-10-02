@@ -382,13 +382,11 @@ def dense_centred_matvec(
 
     The dense blocks' share of ``centred_matvec`` in its fixed chunks, for a
     caller that applies every other block through its own (structured)
-    product.  ``center_lo`` makes the centre a pair ``(c, d)``, rows ``(x - c)
-    - d`` (``centered_system.dense_mean_pair``), applied as a rank-one
-    correction: ``(X_d - 1 c_d') v_d - (d' v_d) 1``.  The pair's ``d`` is the
-    shift of the weighted mean from ``c``, within one weighted standard
-    deviation of the rows' spread when ``c`` is a fit's centre (the
-    certificate ``dense_mean_pair`` applies), so the correction rounds at the
-    rows' own scale.
+    product.  ``center_lo`` makes the centre an exact pair ``(c, d)``, rows
+    ``(x - c) - d`` (``centered_system.dense_mean_pair``), applied as a
+    rank-one correction: ``(X_d - 1 c_d') v_d - (d' v_d) 1``.  ``d`` is the
+    pair's remainder, the rounding of the mean ``c``, so the correction is
+    far below the rows' own scale.
     """
     result = np.zeros(dm.n)
     values = np.asarray(values, dtype=np.float64)

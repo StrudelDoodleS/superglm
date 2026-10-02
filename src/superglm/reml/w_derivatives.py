@@ -448,16 +448,14 @@ def reml_w_correction(
             mean_x = np.asarray(factor_mean, dtype=np.float64)
             sum_w = float(factor_sum_w)
 
-    # Every dense column is centred about a pair, by type (issue #430):
-    # ``(x - c) - d`` with ``c`` the fit's state centre and ``d`` the working
-    # mean's shift from it, formed in one pass on rows centred about ``c``,
-    # while ``d`` stays within one weighted standard deviation; otherwise ``c``
-    # the rounded mean and ``d`` the remainder formed on rows differenced from
-    # it, the corrected two-pass algorithm (``centered_system.dense_mean_pair``).
-    # Either is formed with the weights ``mean_x`` carries -- the geometry's,
-    # else the Fisher weights at the mode -- and its own ``sum_w``, and ``d``
-    # enters every product below as a rank-one correction.  About the rounded
-    # ``mean_x`` the direction
+    # Every dense column is centred about an exact pair, by type (issue #430):
+    # ``(x - c) - d`` with ``c`` the rounded mean and ``d`` the remainder formed
+    # on rows differenced from it (``centered_system.dense_mean_pair``, the
+    # corrected two-pass algorithm), with the weights ``mean_x`` carries -- the
+    # geometry's, else the Fisher weights at the mode -- and its own
+    # ``sum_w``; ``d`` enters every product below as a rank-one correction.
+    # No row and no state centre seeds it beyond pass one's
+    # rounding.  About the rounded ``mean_x`` the direction
     # ``X dbeta - mean_x' dbeta``, the signed Grams and the leverage rows all
     # cancel ``c' dbeta`` at a column's offset (at 1e16 the correction was 9.2%
     # off, 17.1% on the leverage route, and exact REML ended
@@ -468,27 +466,16 @@ def reml_w_correction(
     dense = dense_columns(dm)
     centre_hi = mean_x
     centre_lo: NDArray | None = None
-    # The final system's own pair, formed with the weights mean_x carries,
-    # when the summary holds it for this sum_w and it rounds to this mean_x
-    # on every dense column: no pass.
+    # Without a geometry the summary's pair is the final system's own: the
+    # summary, ``rank_info`` and ``mean_x`` all come from ``centered_final``
+    # (``irls_direct``), formed with the Fisher weights at the mode, so it is
+    # read, not formed again.  Older pickled summaries carry no pair.
     summary = pirls_result.reml_geometry if geometry is None else None
-    carried = None
-    if (
-        summary is not None
-        and sum_w is not None
-        and getattr(summary, "mean_hi", None) is not None
-        and getattr(summary, "mean_lo", None) is not None
-        and float(summary.sum_w) == sum_w
-    ):
-        carried_hi = np.asarray(summary.mean_hi, dtype=np.float64)
-        carried_lo = np.asarray(summary.mean_lo, dtype=np.float64)
-        if carried_hi.shape == mean_x.shape and np.array_equal(
-            (carried_hi + carried_lo)[dense], mean_x[dense]
-        ):
-            carried = carried_hi, carried_lo
-    if carried is not None and np.any(dense):
-        centre_hi = np.where(dense, carried[0], mean_x)
-        centre_lo = np.where(dense, carried[1], 0.0)
+    carried_hi = None if summary is None else getattr(summary, "mean_hi", None)
+    carried_lo = None if summary is None else getattr(summary, "mean_lo", None)
+    if carried_hi is not None and carried_lo is not None and sum_w is not None and np.any(dense):
+        centre_hi = np.where(dense, np.asarray(carried_hi, dtype=np.float64), mean_x)
+        centre_lo = np.where(dense, np.asarray(carried_lo, dtype=np.float64), 0.0)
     elif sum_w is not None and np.any(dense):
         mean_weights = (
             np.asarray(geometry.weights, dtype=np.float64)
@@ -503,9 +490,7 @@ def reml_w_correction(
                 ),
             )
         )
-        pair = dense_mean_pair(
-            dm, mean_weights, sum_w, anchor=getattr(pirls_result, "state_center", None)
-        )
+        pair = dense_mean_pair(dm, mean_weights, sum_w)
         if pair is None:  # pragma: no cover - a dense column is present
             raise RuntimeError("A dense column formed no centre pair.")
         centre_hi = np.where(dense, pair[0], mean_x)
