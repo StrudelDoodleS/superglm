@@ -287,9 +287,9 @@ def reml_laml_objective(
             centered_hessian_rank = decomposition.rank
             logdet_m = decomposition.log_pdet
 
-    # A binomial/log state certified on the model's own score under Newton
-    # steps (``PIRLSResult.mean_space_true_mode``) is the model's mode, where
-    # the clipped likelihood is not stationary: there the criterion reads the
+    # A binomial/log state certified on the model's own score
+    # (``PIRLSResult.mean_space_true_mode``) is the model's mode, where the
+    # clipped likelihood need not be stationary: there the criterion reads the
     # model's own likelihood, so that its value and the envelope gradient
     # ``lambda_j beta' S_j beta / 2`` describe one objective.  The change is
     # ``sum (l_true - l_clipped)`` over the rows, the true rows by

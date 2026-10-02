@@ -778,6 +778,69 @@ def test_a_weight_ratio_never_certifies_a_wrong_two_level_maximum(direct_solve: 
             assert not converged or excess <= bound, (ratio, level_b_offset, excess, bound)
 
 
+@pytest.mark.parametrize(
+    ("low_scores", "excluded"),
+    [
+        ((1e-16, 0.0), True),  # at the mode along the pair: excluded
+        ((1e-12, 0.0), False),  # far from it: refused
+        ((1e-16, -2e-13), False),  # each slope passes alone, the pair does not
+    ],
+)
+def test_the_weak_exclusion_reads_the_block_newton_decrement(
+    low_scores: tuple[float, float], excluded: bool
+) -> None:
+    """``penalized_mode_residual``'s weak exclusion, by table: allowed, refused, refused as a block.
+
+    Two dense columns vary only on two rows of Fisher weight 1e-20 beside
+    eight of weight 1: ``x1 = e_8`` and ``x2 = e_8 + 1e-3 e_9``.  Both are
+    weak (curvature about 1e-20 against ``gamma_10`` times the mass), and
+    nearly collinear: ``H_BB = 1e-20 [[1, 1], [1, 1 + 1e-6]]``, eigenvalues
+    about 2e-20 and 5e-27.  The rows' scores ``(s_8, s_9)`` set ``g``; the
+    noise is 1e-10 and the bar ``MODE_CERTIFICATION_BAR``, which each slope
+    misses (relative score about ``|g| / 2.8e-10``).
+    - ``g = (a, a)``, ``a = 1e-16``, along the large eigenvector: half the
+      block decrement is about ``a^2 / 2e-20 = 5e-13``, within the noise, so
+      both slopes are excluded and the intercept certifies alone.
+    - ``a = 1e-12``: about 5e-5, refused.
+    - ``g = (a, -a)``, along the small eigenvector: each slope's own term is
+      ``a^2 / 2e-20``, summing to 1e-12 (within the noise, so 430a423a
+      excluded both), but the block's is about ``a^2 / 5e-27 = 4e-6``,
+      refused.
+    """
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import penalized_mode_residual
+
+    columns = np.zeros((10, 2))
+    columns[8] = 1.0
+    columns[9, 1] = 1e-3
+    dm = DesignMatrix([DenseGroupMatrix(columns)], n=10, p=2)
+    fisher = np.append(np.ones(8), [1e-20, 1e-20])
+    score = np.append(np.tile([1.0, -1.0], 4), low_scores)
+    sum_w = float(np.sum(fisher))
+    mean_x = fisher @ columns / sum_w
+    centred = columns - mean_x
+    diagonal = fisher @ centred**2
+    residual = penalized_mode_residual(
+        dm=dm,
+        row_score=score,
+        fisher_weights=fisher,
+        positive_prior=np.ones(10, dtype=bool),
+        mean_x=mean_x,
+        centered_scale=np.sqrt(diagonal / sum_w),
+        alpha=0.0,
+        eta_tilde=np.zeros(10),
+        penalty_score=np.zeros(2),
+        penalty_magnitude=np.zeros(2),
+        penalty_curvature=np.zeros(2),
+        sum_w=sum_w,
+        bar=MODE_CERTIFICATION_BAR,
+        decrement_noise=lambda: 1e-10,
+    )
+    assert np.all(residual.relative[1:] > MODE_CERTIFICATION_BAR)
+    assert bool(np.all(residual.excluded)) is excluded
+    assert (residual.ratio() <= 1.0) is excluded
+
+
 def test_the_underflow_allowance_is_representable() -> None:
     """Half the subnormal spacing, ``2.0**-1075``, rounds to 0; the allowance counts the whole spacing."""
     from superglm.solvers.irls_direct import _SUBNORMAL_SPACING, _underflow_allowance
@@ -1110,40 +1173,59 @@ def test_an_intercept_only_fit_at_the_smallest_weight_is_never_certified_wrong()
     assert not model.result.converged or at_maximum
 
 
-def _true_laml(design: np.ndarray, y: np.ndarray, offset: np.ndarray, rho: float):
+def _true_laml(
+    design: np.ndarray,
+    y: np.ndarray,
+    offset: np.ndarray,
+    rho: float,
+    theta: np.ndarray | None = None,
+    weights: np.ndarray | None = None,
+):
     """``(V, size, condition)``: the model's own LAML at ``rho``, its terms' sizes and ``H``'s condition.
 
-    ``V = -l(theta) + (lambda |b|^2 + log|H| - q rho) / 2`` at the penalized
-    mode ``theta = (alpha, b)``, found by Newton's method on the exact
-    score with halved steps that stay inside the mean space; ``l`` is the
-    exact log-likelihood by ``log1mexp`` and ``H`` the observed information
-    plus ``lambda`` on the ``q`` random effects.
+    ``V = -l(theta) + (lambda |b|^2 + log|H| - q rho) / 2`` with ``l`` the
+    exact weighted log-likelihood by ``log1mexp`` and ``H`` the weighted
+    observed information plus ``lambda`` on the ``q`` random effects.
+    ``theta = (alpha, b)`` is evaluated as given, or found as the penalized
+    mode by Newton's method on the exact score, with halved steps that stay
+    inside the mean space.
     """
     lam = math.exp(rho)
     q = design.shape[1] - 1
     penalty = np.diag([0.0] + [lam] * q)
+    w = np.ones(len(y)) if weights is None else np.asarray(weights, dtype=np.float64)
+    carried = w > 0.0
 
     def log_likelihood(eta: np.ndarray) -> np.ndarray:
-        complement = np.where(eta > -math.log(2.0), np.log(-np.expm1(eta)), np.log1p(-np.exp(eta)))
-        return y * eta + (1.0 - y) * complement
+        rows = np.zeros_like(eta)
+        e = eta[carried]
+        complement = np.where(e > -math.log(2.0), np.log(-np.expm1(e)), np.log1p(-np.exp(e)))
+        rows[carried] = w[carried] * (y[carried] * e + (1.0 - y[carried]) * complement)
+        return rows
 
-    theta = np.zeros(design.shape[1])
-    theta[0] = -1.0 - float(np.max(offset))
-    for _ in range(200):
-        eta = design @ theta + offset
-        odds = np.exp(eta) / -np.expm1(eta)
-        score = design.T @ (y - (1.0 - y) * odds) - penalty @ theta
-        information = design.T @ (((1.0 - y) * odds / -np.expm1(eta))[:, None] * design) + penalty
-        step = np.linalg.solve(information, score)
-        fraction = 1.0
-        while np.any(design @ (theta + fraction * step) + offset >= 0.0):
-            fraction /= 2.0
-        theta = theta + fraction * step
-        if np.max(np.abs(fraction * step)) <= 4.0 * _EPS * (1.0 + np.max(np.abs(theta))):
-            break
+    def information_at(eta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        odds = np.zeros_like(eta)
+        curvature = np.zeros_like(eta)
+        e = eta[carried]
+        odds[carried] = np.exp(e) / -np.expm1(e)
+        curvature[carried] = w[carried] * (1.0 - y[carried]) * odds[carried] / -np.expm1(e)
+        score = design.T @ (w * (y - (1.0 - y) * odds))
+        return score, design.T @ (curvature[:, None] * design) + penalty
+
+    if theta is None:
+        theta = np.zeros(design.shape[1])
+        theta[0] = -1.0 - float(np.max(offset[carried]))
+        for _ in range(200):
+            score, information = information_at(design @ theta + offset)
+            step = np.linalg.solve(information, score - penalty @ theta)
+            fraction = 1.0
+            while np.any((design @ (theta + fraction * step) + offset)[carried] >= 0.0):
+                fraction /= 2.0
+            theta = theta + fraction * step
+            if np.max(np.abs(fraction * step)) <= 4.0 * _EPS * (1.0 + np.max(np.abs(theta))):
+                break
     eta = design @ theta + offset
-    odds = np.exp(eta) / -np.expm1(eta)
-    information = design.T @ (((1.0 - y) * odds / -np.expm1(eta))[:, None] * design) + penalty
+    information = information_at(eta)[1]
     rows = log_likelihood(eta)
     quadratic = lam * float(theta[1:] @ theta[1:])
     log_det = float(np.linalg.slogdet(information)[1])
@@ -1152,8 +1234,8 @@ def _true_laml(design: np.ndarray, y: np.ndarray, offset: np.ndarray, rho: float
     return value, size, float(np.linalg.cond(information))
 
 
-def _deep_event_levels():
-    """Eight levels of 20 rows (1 to 12 events), plus one event row per level at offset -25."""
+def _deep_event_levels(deep_y: float = 1.0, deep_offset: float = -25.0, deep_levels: int = 8):
+    """Eight levels of 20 rows (1 to 12 events), plus one row ``deep_y`` at ``deep_offset`` in the first ``deep_levels``."""
     events = [1, 3, 6, 10, 2, 8, 4, 12]
     levels, y, offset = [], [], []
     for k, count in enumerate(events):
@@ -1161,9 +1243,10 @@ def _deep_event_levels():
             levels.append(f"l{k}")
             y.append(1.0 if r < count else 0.0)
             offset.append(0.0)
-        levels.append(f"l{k}")
-        y.append(1.0)
-        offset.append(-25.0)
+        if k < deep_levels:
+            levels.append(f"l{k}")
+            y.append(deep_y)
+            offset.append(deep_offset)
     levels_arr = np.array(levels)
     design = np.column_stack(
         [np.ones(len(levels))]
@@ -1182,20 +1265,14 @@ def _laml_noise(design: np.ndarray, size: float, condition: float) -> float:
     return gamma(n + p + 4) * size + p * gamma(p) * condition
 
 
-def test_reml_reads_the_models_own_laml_at_a_true_score_mode() -> None:
-    """At a fixed lambda, the REML criterion at a true-score mode is the model's own LAML.
+def _fixed_lambda_criterion(levels, y, offset, design, rho: float, weights=None):
+    """A fixed-lambda ``fit_reml``, its published criterion, and the model's LAML at the fit's own state.
 
-    The inner solve ends on the binomial/log certificate under Newton steps
-    (``PIRLSResult.mean_space_true_mode``), so the criterion reads the
-    model's likelihood, and its observed curvature at the unclipped mean.
-    eec69403 read both off the clip: its criterion sat -1.3e-5 from the
-    model's here, most of it from the event rows' curvature (about -5e-5 a
-    row at the clip, zero in the model).  The two sides share no additive
-    constant to remove (the binomial likelihood has none), so they agree to
-    the rounding of each, ``_laml_noise``.
+    Evaluated at the fit's own coefficients, not at a reference mode, so the
+    inner mode's own error (certified to the bar, entering ``log|H|`` to first
+    order) does not enter the comparison: both sides are one expression at
+    one state, and agree to the rounding of each, ``_laml_noise``.
     """
-    levels_arr, y_arr, offset_arr, design = _deep_event_levels()
-    rho = 1.36
     model = SuperGLM(
         family="binomial",
         link="log",
@@ -1204,10 +1281,91 @@ def test_reml_reads_the_models_own_laml_at_a_true_score_mode() -> None:
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(pd.DataFrame({"g": levels_arr}), y_arr, offset=offset_arr)
+        model.fit_reml(pd.DataFrame({"g": levels}), y, offset=offset, sample_weight=weights)
+    result = model._reml_result.pirls_result
+    theta = np.concatenate(([result.intercept], result.beta))
+    value, size, condition = _true_laml(design, y, offset, rho, theta=theta, weights=weights)
+    return model, value, _laml_noise(design, size, condition)
+
+
+def test_reml_reads_the_models_own_laml_at_a_true_score_mode() -> None:
+    """At a fixed lambda, the REML criterion at a Newton-ended true-score mode is the model's own LAML.
+
+    The inner solve ends on the binomial/log certificate under Newton steps
+    (``PIRLSResult.mean_space_true_mode``), so the criterion reads the
+    model's likelihood, and its observed curvature at the unclipped mean.
+    eec69403 read both off the clip: its criterion sat -1.3e-5 from the
+    model's here, most of it from the event rows' curvature (about -5e-5 a
+    row at the clip, zero in the model).  The two sides share no additive
+    constant to remove (the binomial likelihood has none).
+    """
+    levels, y, offset, design = _deep_event_levels()
+    model, value, noise = _fixed_lambda_criterion(levels, y, offset, design, 1.36)
+    assert model._reml_profile["irls_mean_space_newton_iters"] > 0
     assert model._reml_result.pirls_result.mean_space_true_mode
-    value, size, condition = _true_laml(design, y_arr, offset_arr, rho)
-    noise = _laml_noise(design, size, condition)
+    assert abs(model._reml_result.objective - value) <= 2.0 * noise
+
+
+@pytest.mark.parametrize("convergence", ["coefficients", "mode_score"])
+def test_a_fisher_certified_stop_beside_a_clipped_row_is_the_models_mode(convergence: str) -> None:
+    """A Fisher stop the true-score certificate confirms is flagged as the model's mode, as a Newton one is.
+
+    One non-event row at offset -20, below the floor, beside 200 rows near
+    p = 0.2: Fisher steps credit it with the clip's score, ``-1e-7``
+    against ``-e^eta``, within the bar, so the clipped stop passes and the
+    true-score certificate confirms it without Newton steps.  The state is
+    the model's mode all the same, so ``mean_space_true_mode`` is set and a
+    REML criterion read there reads the model's likelihood and curvature
+    (``test_reml_reads_the_models_own_laml_at_a_true_score_mode``).
+    430a423a set it only under Newton, so its criterion read the clip here,
+    about 1e-7 a row off, and stepped between candidates certified one way
+    and the other.
+    """
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.types import GroupSlice
+
+    rng = np.random.default_rng(3)
+    x = np.append(rng.uniform(-1.0, 1.0, 200), 0.0)
+    y = np.append((rng.uniform(size=200) < 0.2 + 0.1 * x[:200]).astype(np.float64), 0.0)
+    offset = np.append(np.zeros(200), -20.0)
+    profile: dict = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(x[:, None])], n=201, p=1),
+            y,
+            np.ones(201),
+            Binomial(),
+            LogLink(),
+            [GroupSlice("x", 0, 1)],
+            lambda2=0.0,
+            offset=offset,
+            weight_semantics="frequency",
+            profile=profile,
+            convergence=convergence,
+        )
+    assert result.converged
+    assert profile.get("irls_mean_space_newton_iters", 0) == 0
+    assert result.mean_space_true_mode
+
+
+def test_reml_keeps_a_zero_weight_row_at_the_clip() -> None:
+    """A zero-weight row at eta 3.8 beside a true-score mode: the criterion forms, and is the model's.
+
+    PIRLS never holds a zero-weight row's eta inside the mean space, so at a
+    true-score mode 430a423a's unclipped mean passed one there, the variance
+    floor overflowed its weight derivatives, and ``fit_reml`` raised
+    ``ObservedModeNotConvergedError``.  Such a row is no part of the mode and
+    keeps the clip; it adds nothing to either side.
+    """
+    levels, y, offset, design = _deep_event_levels()
+    levels = np.append(levels, "l0")
+    y = np.append(y, 0.0)
+    offset = np.append(offset, 5.0)
+    design = np.vstack([design, design[0]])
+    weights = np.append(np.ones(len(levels) - 1), 0.0)
+    model, value, noise = _fixed_lambda_criterion(levels, y, offset, design, 1.36, weights)
+    assert model._reml_result.pirls_result.mean_space_true_mode
     assert abs(model._reml_result.objective - value) <= 2.0 * noise
 
 
@@ -1437,13 +1595,21 @@ def test_the_clip_and_the_true_score_are_read_off_the_unclipped_eta() -> None:
             expected += (
                 -2 * w * (yk * (a - b) + (1 - yk) * ((1 - a.exp()).ln() - (1 - b.exp()).ln()))
             )
-    delta = -2.0 * float(
-        np.sum(
-            mean_space_log_likelihood_rows(y, weights, after)
-            - mean_space_log_likelihood_rows(y, weights, before)
-        )
+    rows_after = mean_space_log_likelihood_rows(y, weights, after)
+    rows_before = mean_space_log_likelihood_rows(y, weights, before)
+    delta = -2.0 * float(np.sum(rows_after - rows_before))
+    # Each row is within 8u of its own size: log1mexp's library calls are
+    # within one ulp (2u) each, log(-expm1) carries expm1's 2u as absolute
+    # error beside |log z| >= log 2, log1p(-t) carries exp's 2u times
+    # t / (1 - t) <= 2t beside |log1p(-t)| >= t, and the weight's product
+    # adds u: at most 7u.  The rows' differences then round once and their
+    # three-term sum adds gamma_2, all doubled by the exact factor -2.
+    difference = float(np.sum(np.abs(rows_after - rows_before)))
+    tolerance = 2.0 * (
+        8.0 * _U * float(np.sum(np.abs(rows_after) + np.abs(rows_before)))
+        + (_U + 2.0 * _U / (1.0 - 2.0 * _U)) * difference
     )
-    assert abs(delta - float(expected)) <= 8.0 * _EPS * abs(float(expected))
+    assert abs(delta - float(expected)) <= tolerance
 
 
 def test_the_halving_budget_reaches_the_fraction_to_the_boundary() -> None:

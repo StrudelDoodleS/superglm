@@ -1285,12 +1285,13 @@ def _fit_irls_direct_once(
           bar's allowance, ``bar`` times an identified coordinate's scale,
           the certificate cannot resolve the score and refuses: ``inf``,
           never a pass.
-        - A slope the weak test finds at rounding-level curvature is left out
-          of the ratio only while the iterate is at the mode along it: half
-          its Newton decrement within the log-likelihood sum's own rounding,
-          ``gamma_n sum |l_i|`` (``penalized_mode_residual``'s
-          ``decrement_noise``).  The penalty's rounding is left out of that
-          noise, which can only refuse.
+        - Slopes the weak test finds at rounding-level curvature are left out
+          of the ratio only while the iterate is at the mode along them: half
+          their block Newton decrement, over their penalised curvature block
+          (``weak_penalty_block`` for the penalty's part), within the
+          log-likelihood sum's own rounding, ``gamma_n sum |l_i|``
+          (``penalized_mode_residual``'s ``decrement_noise``).  The penalty's
+          rounding is left out of that noise, which can only refuse.
 
         **Constraints.** ``active_rows`` are the hard constraints ``a' beta >=
         b`` active at the iterate.  A constrained mode is stationary when ``G
@@ -1375,6 +1376,17 @@ def _fit_irls_direct_once(
             noise = _gamma(int(np.count_nonzero(positive))) * float(np.sum(np.abs(rows_l)))
             return noise if math.isfinite(noise) else 0.0
 
+        def weak_penalty_block(columns: NDArray) -> NDArray:
+            # the penalty's block on a few weakly identified slopes, in the
+            # weights' units: one penalty product per slope
+            block = np.empty((len(columns), len(columns)))
+            for position, column in enumerate(columns):
+                unit = np.zeros(p)
+                unit[column] = 1.0
+                block[:, position] = penalty_matvec(unit)[columns]
+            with np.errstate(over="ignore"):
+                return np.ldexp(0.5 * (block + block.T), -weight_exponent)
+
         residual = penalized_mode_residual(
             dm=dm,
             row_score=score,
@@ -1393,6 +1405,7 @@ def _fit_irls_direct_once(
             resolve_cap=MODE_RESOLVE_CAP,
             column_shift=shift,
             decrement_noise=likelihood_noise,
+            penalty_block=weak_penalty_block,
         )
         _last_true_residual[0] = residual
         rows_n = int(np.count_nonzero(positive))
@@ -2220,6 +2233,7 @@ def _fit_irls_direct_once(
     # then publish that rule's numbers, and ``PIRLSResult.mean_space_true_mode``
     # tells a criterion read at the state that it is the model's own mode.
     _true_stop = False
+    _true_confirmed = False
     _true_stop_ratio = math.inf
     _last_true_residual: list[ModeResidual | None] = [None]
 
@@ -3113,10 +3127,17 @@ def _fit_irls_direct_once(
                         abs_A=abs_A_all,
                     )
 
+            # the last trial's rows, read by both the decrease and its
+            # round-off allowance: one log1mexp pass per trial
+            _trial_rows: list = [None, None]
+
             def _newton_rows_at(state: _IRLSState) -> NDArray:
                 if state is committed and newton_committed_rows is not None:
                     return newton_committed_rows
-                return mean_space_log_likelihood_rows(y, weights, state.eta_unclipped)
+                if _trial_rows[0] is not state:
+                    _trial_rows[0] = state
+                    _trial_rows[1] = mean_space_log_likelihood_rows(y, weights, state.eta_unclipped)
+                return _trial_rows[1]
 
             def _newton_deviance_delta(candidate: _IRLSState, base: _IRLSState) -> float:
                 # each row's change first, then numpy's pairwise sum
@@ -3337,6 +3358,7 @@ def _fit_irls_direct_once(
             if converged_this_iter and _mean_space_invalid is not None and not at_boundary
             else 0
         )
+        _true_confirmed = False
         if not at_boundary and (
             newton_stop or (converged_this_iter and (clipped_rows or _start_lowered))
         ):
@@ -3362,6 +3384,10 @@ def _fit_irls_direct_once(
                 ),
                 retained_scop.groups if _has_scop else None,
             )
+            # the state is certified on the model's own score, Newton or not,
+            # where the clip holds a row (or Newton decided): a criterion read
+            # at it reads the model's own likelihood and curvature
+            _true_confirmed = bool(true_ratio <= 1.0 and (newton_stop or clipped_rows))
             if newton_stop:
                 converged_this_iter = bool(true_ratio <= 1.0)
                 score_stagnated = False
@@ -4276,7 +4302,7 @@ def _fit_irls_direct_once(
         state_center=None if retained.centred_intercept is None else _state_center,
         centred_intercept_lo=centred_intercept_lo,
         mean_space_boundary_rows=_boundary_rows,
-        mean_space_true_mode=bool(converged and _true_stop),
+        mean_space_true_mode=bool(converged and _true_confirmed),
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.
