@@ -446,17 +446,17 @@ def _disclose_weak_identification(
     labels = coefficient_labels(model._groups, indices)
     profile["reml_weakly_identified"] = indices
     profile["reml_weakly_identified_labels"] = labels
-    # everything the Laplace term leaves out: the weakly identified slopes and
-    # the pivots standing for separated unpenalized directions
-    # (``reml.identified.separated_directions``), named by their sets
-    profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.excluded)
+    # everything the Laplace term leaves out, each index paired with its
+    # label: the weakly identified slopes, then the separated unpenalized
+    # sets (``reml.identified.separated_directions``) by their pivots
+    profile["reml_laplace_excluded"] = identified.disclosed
     separated_labels = separated_set_labels(model._groups, identified.separated_sets)
-    weak = {int(index) for index in identified.weak}
-    profile["reml_laplace_separated"] = tuple(
-        int(index) for index in identified.excluded if int(index) not in weak
-    )
+    profile["reml_laplace_separated"] = tuple(int(index) for index in identified.separated_pivots)
     profile["reml_laplace_separated_labels"] = separated_labels
-    excluded_labels = coefficient_labels(model._groups, tuple(sorted(weak))) + separated_labels
+    excluded_labels = (
+        coefficient_labels(model._groups, tuple(int(index) for index in identified.weak))
+        + separated_labels
+    )
     profile["reml_laplace_excluded_labels"] = excluded_labels
     if labels:
         left_out = (
@@ -469,6 +469,18 @@ def _disclose_weak_identification(
             "(a factor level or column with little or no weight, observations or "
             f"information): {', '.join(labels)}. They stay in the model, and their "
             f"estimates and standard errors carry little information.{left_out}",
+            WeakIdentificationWarning,
+            stacklevel=4,
+        )
+    elif separated_labels:
+        # a separated set the Laplace term leaves out is disclosed in plain
+        # words even where no coefficient is flagged weak (a reference level
+        # without events has no coefficient of its own)
+        warnings.warn(
+            "Every response on these rows is 0, or every one is 1, so the model has no "
+            f"finite estimate for them: {', '.join(separated_labels)}. They stay in the "
+            "model, their fitted means sit at that limit, and they are left out of "
+            "smoothing-parameter selection.",
             WeakIdentificationWarning,
             stacklevel=4,
         )

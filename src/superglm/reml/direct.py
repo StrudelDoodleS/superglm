@@ -1589,7 +1589,7 @@ def optimize_direct_reml(
         profile["reml_n_linesearch_fits"] = _n_linesearch_fits
         profile["reml_n_outer_iter"] = n_iter
         profile["reml_mean_space_restorations"] = n_mean_space_restorations
-        profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.excluded)
+        profile["reml_laplace_excluded"] = identified.disclosed
         profile["reml_laplace_exclusion_unsupported"] = int(identified.unsupported)
 
     return REMLResult(

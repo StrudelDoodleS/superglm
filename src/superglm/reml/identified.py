@@ -216,6 +216,7 @@ def separated_directions(
     sample_weight: NDArray,
     penalized: NDArray,
     generator_columns: NDArray,
+    weak: NDArray | Sequence[int] = (),
 ) -> tuple[NDArray, tuple]:
     """``(pivots, sets)``: a binomial/log fit's separated unpenalized directions.
 
@@ -250,10 +251,14 @@ def separated_directions(
     coordinate is unimodular, and at the supremum ``H`` is singular along
     it, so the determinant left over differs from the pseudo-determinant of
     the rest by a constant that no smoothing parameter moves.  A direction
-    with no such column, or spanned by those already taken, adds none.
-    ``pivots`` are ascending; ``sets`` describe the sets that took one, each
-    a tuple of ``(block's first column, level code or None for its
-    reference)`` over the blocks it names (``separated_set_labels``).
+    with no such column, or spanned by those already taken, adds none.  The
+    ``weak`` slopes, which the Laplace term leaves out already, come first in
+    the elimination: no pivot is a weak column, and a set whose direction a
+    weak slope already spans (a separated level that is also weak) takes none
+    and is disclosed once, as weak.  ``pivots`` are in the order the sets are
+    found, and ``sets`` match them one to one, each a tuple of ``(block's
+    first column, level code or None for its reference)`` over the blocks it
+    names (``separated_set_labels``).
     """
     from superglm.solvers.mode_score import row_sets
 
@@ -263,6 +268,9 @@ def separated_directions(
     covered = np.asarray(penalized, dtype=bool)
     allowed = ~covered
     allowed[np.asarray(generator_columns, dtype=np.intp)] = False
+    seeded = np.zeros(width, dtype=bool)
+    seeded[np.asarray(weak, dtype=np.intp)] = True
+    allowed &= ~seeded
     rising = (positive & (response > 0.0)).astype(np.float64)
     falling = (positive & (response < 1.0)).astype(np.float64)
     carried = positive.astype(np.float64)
@@ -312,6 +320,7 @@ def separated_directions(
     named: list[tuple] = []
     for direction, described in candidates:
         reduced = direction.copy()
+        reduced[seeded] = 0.0  # the weak slopes' unit directions, taken first
         for pivot, basis in zip(pivots, taken, strict=True):
             if reduced[pivot] != 0.0:
                 reduced = reduced - (reduced[pivot] / basis[pivot]) * basis
@@ -323,7 +332,7 @@ def separated_directions(
         pivots.append(pivot)
         taken.append(reduced)
         named.append(described)
-    return np.unique(np.asarray(pivots, dtype=np.intp)), tuple(named)
+    return np.asarray(pivots, dtype=np.intp), tuple(named)
 
 
 def separated_set_labels(groups: Sequence, sets: Sequence[tuple]) -> tuple[str, ...]:
@@ -401,10 +410,12 @@ class IdentifiedLaplace:
         *,
         generator_columns: NDArray | Sequence[int] = (),
         weak: NDArray | Sequence[int] | None = None,
+        separated_pivots: NDArray | Sequence[int] = (),
         separated_sets: tuple = (),
     ):
         self.excluded = np.asarray(excluded, dtype=np.intp)
         self.weak = self.excluded if weak is None else np.asarray(weak, dtype=np.intp)
+        self.separated_pivots = np.asarray(separated_pivots, dtype=np.intp)
         self.separated_sets = tuple(separated_sets)
         self.generator_columns = np.asarray(generator_columns, dtype=np.intp)
         self.unsupported = 0
@@ -432,6 +443,7 @@ class IdentifiedLaplace:
                 sample_weight,
                 penalized_columns(dm.p, penalties),
                 random_effect_columns(dm),
+                weak,
             )
         if not pivots.size:
             if not weak.size:  # nothing to restrict: no generator test either
@@ -441,11 +453,23 @@ class IdentifiedLaplace:
             np.union1d(weak, pivots).astype(np.intp),
             generator_columns=random_effect_columns(dm),
             weak=weak,
+            separated_pivots=pivots,
             separated_sets=separated,
         )
 
     def __bool__(self) -> bool:
         return bool(self.excluded.size)
+
+    @property
+    def disclosed(self) -> tuple[int, ...]:
+        """The left-out coordinates in disclosure order: the weak slopes, then each separated set's pivot.
+
+        Pairs one to one with ``coefficient_labels`` of the weak slopes
+        followed by ``separated_set_labels`` of ``separated_sets``.
+        """
+        return tuple(int(index) for index in self.weak) + tuple(
+            int(index) for index in self.separated_pivots
+        )
 
     def _part(self, inverse, dense) -> _IdentifiedPart | None:
         hessian = None if dense is None else dense[0]

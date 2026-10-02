@@ -1960,7 +1960,10 @@ def test_a_warm_structured_newton_solve_keeps_a_truncated_direction_where_it_is(
     way, and the search stopped far from the optimum (16.95 against 29.98 on
     2,000 districts in 50 regions).  A Newton step on a truncated structured
     factor now takes the increment, which leaves the iterate where it is along
-    a truncated direction, and the solve converges.
+    a truncated direction, and the solve converges.  Asserted on the solve's
+    own record: Newton steps ran, at least one as the increment on a truncated
+    structured factor, and the two regions' rows end far below the clip floor,
+    not reset toward the intercept.
     """
     frame, y = _separated_region_districts()
     model = SuperGLM(
@@ -1977,6 +1980,7 @@ def test_a_warm_structured_newton_solve_keeps_a_truncated_direction_where_it_is(
         model.fit_reml(frame, y)
     beta = np.array(model.result.beta, dtype=np.float64)
     beta[:2] = -1e8  # the two non-base regions without events
+    profile: dict = {}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         result, _ = fit_irls_direct(
@@ -1993,8 +1997,14 @@ def test_a_warm_structured_newton_solve_keeps_a_truncated_direction_where_it_is(
             beta_init=beta,
             intercept_init=float(model.result.intercept) - 3.0,
             convergence="mode_score",
+            profile=profile,
         )
     assert result.converged, result.termination_reason
+    assert profile.get("irls_mean_space_newton_iters", 0) > 0
+    assert profile.get("irls_truncated_newton_increments", 0) > 0
+    regions = model._dm.group_matrices[0].codes
+    eta = model._dm.matvec(result.beta) + result.intercept
+    assert float(np.max(eta[(regions == 0) | (regions == 1)])) < math.log(1e-7)
 
 
 @pytest.mark.parametrize("direct_solve", ["gram", "qr"])
@@ -2129,6 +2139,97 @@ def test_a_wide_design_keeps_its_joint_cell_sets() -> None:
         underflow=0.0,
     )
     assert ratio > 1.0
+
+
+def _left_out(frame: pd.DataFrame, y: np.ndarray, weights=None) -> tuple[SuperGLM, list[str]]:
+    """``fit_reml`` with a Categorical ``c`` and a RandomEffect ``g``; its WeakIdentificationWarning messages."""
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"c": Categorical(base="first"), "g": RandomEffect()},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y, sample_weight=weights)
+    assert model.result.converged
+    return model, [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+
+
+def test_the_left_out_coefficients_pair_with_their_labels() -> None:
+    """Each published left-out index names its own label's coefficient.
+
+    Regions r00 (the base), r10 and r11 have no events.  The two levels take
+    their own columns, 9 and 10, and the reference rows take the first other
+    column of the block, 0.  9c4f8660 published the indices sorted, (0, 9,
+    10), beside the labels in the order the sets were found, so a consumer
+    pairing them named c[0], a region with events, as c[9].
+    """
+    rng = np.random.default_rng(13)
+    regions, districts, per = 15, 6, 8
+    probability = rng.uniform(0.08, 0.3, regions)
+    probability[[0, 10, 11]] = 0.0
+    region = np.repeat(np.arange(regions), districts * per)
+    district = np.repeat(np.arange(regions * districts), per)
+    y = (rng.uniform(size=len(region)) < probability[region]).astype(np.float64)
+    frame = pd.DataFrame({"c": [f"r{k:02d}" for k in region], "g": [f"d{k:03d}" for k in district]})
+    model, _ = _left_out(frame, y)
+    profile = model._reml_profile
+    assert profile["reml_laplace_separated_labels"] == ("c[9]", "c[10]", "c[reference]")
+    for indices, labels in (
+        (profile["reml_laplace_separated"], profile["reml_laplace_separated_labels"]),
+        (profile["reml_laplace_excluded"], profile["reml_laplace_excluded_labels"]),
+    ):
+        assert len(indices) == len(labels)
+        levels = {int(label[2:-1]) for label in labels if label != "c[reference]"}
+        for index, label in zip(indices, labels, strict=True):
+            if label == "c[reference]":
+                assert 0 <= index < regions - 1 and index not in levels
+            else:
+                assert index == int(label[2:-1]), (index, label)
+
+
+def test_a_separated_level_that_is_also_weak_is_disclosed_once() -> None:
+    """A level without events whose rows weigh 1e-17 beside rows of weight 1 is weak and separated.
+
+    Its direction is its own weakly identified column, which the elimination
+    takes first, so it takes no second pivot and is labelled once, as weak.
+    9c4f8660 listed c[1] twice, one entry longer than the left-out indices.
+    """
+    rng = np.random.default_rng(14)
+    level = np.array(["a"] * 200 + ["b"] * 200 + ["w"] * 20)
+    group = rng.choice([f"g{k}" for k in range(6)], len(level))
+    y = np.concatenate(
+        [rng.uniform(size=200) < 0.2, rng.uniform(size=200) < 0.3, np.zeros(20, dtype=bool)]
+    ).astype(np.float64)
+    weights = np.concatenate([np.ones(400), np.full(20, 1e-17)])
+    model, _ = _left_out(pd.DataFrame({"c": level, "g": group}), y, weights)
+    profile = model._reml_profile
+    assert profile["reml_laplace_excluded"] == (1,)
+    assert profile["reml_laplace_excluded_labels"] == ("c[1]",)
+    assert profile["reml_laplace_separated_labels"] == ()
+
+
+def test_a_reference_level_without_events_alone_is_disclosed() -> None:
+    """The base level has no events and nothing is weakly identified: the warning still names it.
+
+    The Laplace term leaves the reference rows' direction out, and the
+    owner's rule is that a left-out coefficient is disclosed in plain words.
+    9c4f8660 warned only when some slope was flagged weak, so this fit said
+    nothing.
+    """
+    rng = np.random.default_rng(15)
+    level = np.array(["a"] * 150 + ["b"] * 200 + ["c"] * 200)
+    group = rng.choice([f"g{k}" for k in range(6)], len(level))
+    y = np.concatenate(
+        [np.zeros(150, dtype=bool), rng.uniform(size=200) < 0.2, rng.uniform(size=200) < 0.3]
+    ).astype(np.float64)
+    model, messages = _left_out(pd.DataFrame({"c": level, "g": group}), y)
+    assert model._reml_profile["reml_weakly_identified_labels"] == ()
+    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[reference]"]
+    assert any(
+        "c[reference]" in message and "no finite estimate" in message for message in messages
+    )
 
 
 def test_reml_keeps_a_zero_weight_row_at_the_clip() -> None:

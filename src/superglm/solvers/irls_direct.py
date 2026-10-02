@@ -2876,6 +2876,12 @@ def _fit_irls_direct_once(
                     # no fitted value or penalty moves along it.  In exact
                     # arithmetic the same step as the solve above whenever nothing
                     # is truncated.
+                    if newton_score is not None and profile is not None:
+                        # a mean-space Newton step taken as the increment on a
+                        # truncated structured factor
+                        profile["irls_truncated_newton_increments"] = (
+                            profile.get("irls_truncated_newton_increments", 0) + 1
+                        )
                     residual_rows = W * (z - eta) if newton_score is None else newton_score
                     gradient = np.empty(p + 1, dtype=np.float64)
                     gradient[0] = float(np.sum(residual_rows))
