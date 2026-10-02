@@ -549,7 +549,16 @@ def _intercepts_read_the_shift(model) -> bool:
     unit = float(np.finfo(np.float64).eps) / 2.0
     gamma_2 = 2.0 * unit / (1.0 - 2.0 * unit)
     gap = abs(public_intercept - (solver_intercept + float(shift)))
-    return gap <= gamma_2 * (abs(public_intercept) + abs(solver_intercept) + abs(float(shift)))
+    # Each magnitude is scaled before the sum, so the bound stays finite at the
+    # binary64 limit, where a fit's own intercepts sit in a consistent state.
+    # An inconsistent ``S + h`` past the limit leaves the gap infinite, and
+    # ``inf <= inf`` would pass it (Codex's review of #453).
+    bound = (
+        gamma_2 * abs(public_intercept)
+        + gamma_2 * abs(solver_intercept)
+        + gamma_2 * abs(float(shift))
+    )
+    return math.isfinite(gap) and gap <= bound
 
 
 def _carry_into_centred_pair(result, values) -> None:
@@ -669,8 +678,13 @@ def _exact_rounded_sum(weights: np.ndarray, values: np.ndarray) -> float:
 
     total, exponent, exact = _exact_sum(native_operand(weights), native_operand(values), 0.0, 1)
     if not exact:  # pragma: no cover - finite operands always sum
-        raise RuntimeError("a revised column's intercept change is not finite")
-    return math.ldexp(total, exponent)
+        return math.inf
+    try:
+        return math.ldexp(total, exponent)
+    except OverflowError:
+        # The exact sum is finite but past the binary64 range (a year column
+        # edited to a slope of 1e306: Claude's review of #453).
+        return math.copysign(math.inf, total)
 
 
 def _carry_revised_columns(model, beta_before) -> None:
@@ -710,12 +724,22 @@ def _carry_revised_columns(model, beta_before) -> None:
     weights = np.concatenate([centre[moved], -centre[moved]])
     values = np.concatenate([beta[moved], before[moved]])
     high = _exact_rounded_sum(weights, values)
-    low = _exact_rounded_sum(np.append(weights, -1.0), np.append(values, high))
-    alpha_high, error = two_sum(float(alpha), high)
-    alpha_low = getattr(public, "centred_intercept_lo", None)
-    public.centred_intercept = alpha_high
-    public.centred_intercept_lo = float(alpha_low or 0.0) + (error + low)
-    public.centred_sum_compensated = True
+    if math.isfinite(high):
+        low = _exact_rounded_sum(np.append(weights, -1.0), np.append(values, high))
+        alpha_high, error = two_sum(float(alpha), high)
+        alpha_low = float(getattr(public, "centred_intercept_lo", None) or 0.0) + (error + low)
+        if math.isfinite(alpha_high) and math.isfinite(alpha_low):
+            public.centred_intercept = alpha_high
+            public.centred_intercept_lo = alpha_low
+            public.centred_sum_compensated = True
+            return
+    # A change past the binary64 range cannot be carried.  The predictor falls
+    # back to the raw intercept, as 31544462's editor left every slope edit.  A
+    # row whose ``x beta`` overflows is not finite on any version, and the
+    # edit's refreshed deviance refuses it as v0.36.0 does.
+    for field_name in ("centred_intercept", "state_center", "centred_intercept_lo"):
+        setattr(public, field_name, None)
+    public.centred_sum_compensated = False
 
 
 def publish_revised_coefficients(model, beta_before) -> None:

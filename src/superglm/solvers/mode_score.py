@@ -599,7 +599,9 @@ def two_product(a, b):
     so Veltkamp's split and the partial products neither over- nor underflow
     whatever the exponents (Ogita, Rump & Oishi 2005, Algorithms 3.2 and 3.3).
     ``ldexp`` restores the exponents, exactly unless the product leaves the
-    normal range, where ``e`` loses at most ``2^-1075``.
+    normal range.  Below it the exact product's tail lies under ``2^-1074``
+    and no float64 holds it: ``e`` then loses at most ``2^-1075``, a float64
+    limit rather than a rounding of this algorithm (Codex's review of #453).
     """
     left, left_exponent = np.frexp(np.asarray(a, dtype=np.float64))
     right, right_exponent = np.frexp(np.asarray(b, dtype=np.float64))
@@ -620,6 +622,9 @@ def two_product(a, b):
 def centred_column_pieces(values, centre: float, beta: float) -> tuple[NDArray, NDArray, NDArray]:
     """``(v - c) beta`` as three addends whose exact sum it is, to ``u^2 |(v - c) beta|``.
 
+    Below the normal range each addend also loses at most ``2^-1075``
+    (``two_product``).
+
     TwoSum splits ``v - c = d + d_e`` and TwoProduct ``d beta = p + e``, both
     exactly; ``d_e beta`` takes one rounding, at most ``u |d_e beta| <= u^2 |d
     beta|``.  A row far from the centre then keeps the digits its product has
@@ -637,21 +642,42 @@ class CompensatedSum:
     running sum, which is added once at the end: for ``k`` addends the result
     is within ``u |S| + gamma_(k-1)^2 sum |addends|`` of their exact sum ``S``
     (their Proposition 4.5), whatever the addends cancel.
+
+    A running total can overflow where the sum does not: ``1e308 + 1e308 -
+    1e308``.  TwoSum then returns ``inf`` and a ``nan`` error (Codex's review of
+    #453), so the plain sum of the addends, the start added last as a fit's
+    predictor adds its intercept, is kept beside it.  A row whose compensated
+    value is not finite takes that one instead, finite wherever the plain
+    evaluation is.
     """
 
-    __slots__ = ("error", "total")
+    __slots__ = ("error", "plain", "start", "total")
 
     def __init__(self, start: NDArray) -> None:
-        self.total = np.array(start, dtype=np.float64)
+        self.start = np.array(start, dtype=np.float64)
+        self.total = self.start.copy()
         self.error = np.zeros_like(self.total)
+        self.plain = np.zeros_like(self.total)
 
     def add(self, values) -> None:
-        self.total, error = two_sum(self.total, np.asarray(values, dtype=np.float64))
-        self.error = self.error + error
+        values = np.asarray(values, dtype=np.float64)
+        with np.errstate(over="ignore", invalid="ignore"):
+            self.total, error = two_sum(self.total, values)
+            self.error = self.error + error
+        self.plain = self.plain + values
+
+    def copy(self) -> CompensatedSum:
+        twin = CompensatedSum(self.start)
+        twin.total, twin.error, twin.plain = self.total.copy(), self.error.copy(), self.plain.copy()
+        return twin
 
     def value(self, last: float = 0.0) -> NDArray:
         """The sum, ``last`` (a remainder) joining the errors before the one rounding."""
-        return self.total + (self.error + last)
+        with np.errstate(over="ignore", invalid="ignore"):
+            compensated = self.total + (self.error + last)
+        if np.all(np.isfinite(compensated)):
+            return compensated
+        return np.where(np.isfinite(compensated), compensated, self.start + (last + self.plain))
 
 
 def _centred_pieces(dm: DesignMatrix, beta: NDArray, center: NDArray) -> Iterator[NDArray]:

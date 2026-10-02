@@ -497,8 +497,6 @@ class EtaSum:
 
     def finish(self, without=()) -> NDArray:
         """The predictor, less the addends ``without`` (a dropped term's pieces)."""
-        from superglm.solvers.mode_score import CompensatedSum
-
         if not self.compensated:
             total = self.total
             for piece in without:
@@ -506,8 +504,7 @@ class EtaSum:
             return finish_eta(total, self.intercept, self.intercept_lo)
         total = self.total
         if without:
-            total = CompensatedSum(self.total.total)
-            total.error = self.total.error.copy()
+            total = self.total.copy()
             for piece in without:
                 total.add(-np.asarray(piece, dtype=np.float64))
         return total.value(float(self.intercept_lo or 0.0))

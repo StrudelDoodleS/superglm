@@ -625,3 +625,84 @@ def test_holdout_drop_term_reads_a_slope_edit_exactly():
     d = 2.0 * ((_gamma(3 * p + 4) ** 2 + _U**2) * magnitude + _U * float(np.max(np.abs(eta))))
     bound = 2.0 * float(np.sum(np.abs(y_holdout - eta))) * d + len(eta) * d**2
     assert abs(float(table.loc["x", "delta_deviance"])) <= bound
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["positive", "negative"])
+def test_a_compensated_sum_whose_running_total_overflows_returns_the_plain_sum(sign):
+    """Sum2 near the binary64 limit falls back to the plain sum where it alone stays finite.
+
+    ``1e308 + 1e308 - 1e308`` is ``1e308``, but the running total's TwoSum
+    returns ``inf`` and a ``nan`` error (Codex's review of #453).  The rows whose
+    compensated value is not finite take the plain sum of the addends, the
+    start added last; every other row keeps the compensated value bit for bit.
+    """
+    from superglm.solvers.mode_score import CompensatedSum
+
+    start = np.array([sign * 1e308, 2.5])
+    total = CompensatedSum(start)
+    total.add(np.array([sign * 1e308, 1e16]))
+    total.add(np.array([-sign * 1e308, -1e16]))
+    value = total.value(0.25)
+    assert value[0] == sign * 1e308
+    assert value[1] == 2.75
+
+
+def test_the_intercept_check_refuses_a_relation_that_overflows():
+    """``|P - (S + h)| <= gamma_2 (|P| + |S| + |h|)`` requires both sides finite.
+
+    With ``S`` and ``h`` near ``1e308`` of one sign, ``S + h`` and the bound
+    overflow together, and ``inf <= inf`` passed an inconsistent state (Codex's
+    review of #453).  A consistent relation at an ordinary scale still passes.
+    """
+    from types import SimpleNamespace
+
+    from superglm.model.fit_state import _intercepts_read_the_shift
+
+    def model(public, solver, shift):
+        return SimpleNamespace(
+            _result=SimpleNamespace(intercept=public),
+            _solver_result=SimpleNamespace(intercept=solver),
+            _runtime_canonical_state={"intercept_shift": shift},
+        )
+
+    assert not _intercepts_read_the_shift(model(1e308, 1e308, 1e308))
+    assert not _intercepts_read_the_shift(model(-1e308, -1e308, -1e308))
+    solver, shift = 1.25, 0.5
+    assert _intercepts_read_the_shift(model(solver + shift, solver, shift))
+
+
+def test_a_carried_change_past_the_float_range_falls_back_to_the_raw_intercept():
+    """A slope edit whose ``c dbeta`` overflows is not carried, and the edit is refused as before.
+
+    A year column (centre about 2010) edited to a slope of 1e306 makes ``c
+    beta`` about 2e309.  #453's first head raised ``OverflowError`` from
+    ``math.ldexp`` (Claude's review of #453).  The revision now drops the
+    centred pair and predicts from the raw intercept, as 31544462 did after
+    every slope edit.  Here: the published state after such a revision has no
+    pair, its raw intercept is unchanged and finite, and the solver's matches.
+    Through the editor, the training rows' predictions overflow and the edit is
+    refused with v0.36.0's own message.
+    """
+    from superglm.editor.apply import _copy_model_for_editor_edits, _patch_beta_block
+    from superglm.model.fit_state import FittedStateRevision, publish_revised_coefficients
+
+    year = 2000.0 + np.resize(np.arange(20.0), 60)
+    frame = pd.DataFrame({"x": year})
+    y = 1.0 + 0.01 * (year - 2010.0) + np.resize([0.1, -0.1, 0.05], 60)
+    model = _numeric_fit(frame, y)
+    copied = _copy_model_for_editor_edits(model, share_transient_state=True)
+    revised = FittedStateRevision.start(copied).model
+    before = np.array(revised.result.beta, dtype=np.float64)
+    group = next(group for group in revised._groups if group.name == "x")
+    _patch_beta_block(revised, [group], np.array([1e306]))
+    publish_revised_coefficients(revised, before)
+    for result in (revised._result, revised._solver_result):
+        assert result.centred_intercept is None and result.state_center is None
+        assert not result.centred_sum_compensated
+    assert revised._result.intercept == model.result.intercept
+    assert np.isfinite(revised._solver_result.intercept)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(RuntimeError, match="fit candidate scalar results must be finite"):
+            _slope_edited(model, frame, y, {"x": 1e306})
