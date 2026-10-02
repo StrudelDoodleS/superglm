@@ -89,6 +89,7 @@ class.
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -931,8 +932,209 @@ def _half_block_decrement(hessian: NDArray, gradient: NDArray) -> float:
 
 
 # Above this many joint cells of the one-hot blocks the cell sets are not
-# formed (their incidence SVD); every level and reference set still is.
+# formed; every level and reference set still is.
 _ROW_SET_CELL_LIMIT = 4096
+# The cells elimination leaves (the incidence's core) are decided by one SVD,
+# formed only while its cost ``m k min(m, k)`` stays within this many flops.
+_ROW_SET_CORE_FLOPS = 2**31
+# Kept cells' directions are held dense, ``(cells, p)``, up to this many entries.
+_ROW_SET_DIRECTION_ENTRIES = 2**22
+# The design's row sets, in its ``_structured_layout_cache`` (``row_sets``).
+_ROW_SETS_KEY = "row_sets"
+
+
+@dataclass(frozen=True)
+class RowSets:
+    """The sets of rows a design's one-hot blocks move on their own (``row_sets``).
+
+    ``blocks`` holds ``(first column, matrix)`` for each
+    ``CategoricalGroupMatrix``.  ``cell_of_row`` gives each row's kept joint
+    cell (``-1`` for a row in none), or is ``None`` when no cell is kept.
+    ``cell_directions`` is ``(cells, p)``: the slope part of a coefficient
+    direction that moves the kept cell's rows and no other row (its
+    intercept part carries no penalty).
+    """
+
+    blocks: tuple[tuple[int, CategoricalGroupMatrix], ...]
+    cell_of_row: NDArray | None
+    cell_directions: NDArray
+
+    def directions(self, p: int) -> list[NDArray]:
+        """The slope parts ``(p,)`` of each block's reference direction, then of each kept cell's."""
+        out = []
+        for start, matrix in self.blocks:
+            reference = np.zeros(p)
+            reference[start : start + matrix.n_levels] = -1.0
+            out.append(reference)
+        out.extend(np.array(row, dtype=np.float64) for row in self.cell_directions)
+        return out
+
+
+def row_sets(dm: DesignMatrix) -> RowSets:
+    """The design's ``RowSets``, formed once per design and held in its ``_structured_layout_cache``.
+
+    Owner: the design's one-hot blocks.  Lifetime: the design (the layout
+    cache is not pickled).  Invalidation: none, since the cells, their
+    elimination and their directions read the blocks' codes alone, never a
+    weight, response, coefficient or penalty, and no fit changes a code.  A
+    held entry is reused only for the same block objects at the same columns.
+    """
+    found = []
+    offset = 0
+    for matrix in dm.group_matrices:
+        if isinstance(matrix, CategoricalGroupMatrix):
+            found.append((offset, matrix))
+        offset += matrix.shape[1]
+    blocks = tuple(found)
+    cache = getattr(dm, "_structured_layout_cache", None)
+    held = cache.get(_ROW_SETS_KEY) if isinstance(cache, dict) else None
+    if (
+        isinstance(held, RowSets)
+        and len(held.blocks) == len(blocks)
+        and all(a == c and b is d for (a, b), (c, d) in zip(held.blocks, blocks, strict=True))
+    ):
+        return held
+    sets = _form_row_sets(blocks, dm.p)
+    if isinstance(cache, dict):
+        cache[_ROW_SETS_KEY] = sets
+    return sets
+
+
+def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: int) -> RowSets:
+    """The joint cells of two or more one-hot blocks that are sets of their own (``row_sets``).
+
+    A cell is a set when its indicator ``e_c`` lies in the range of the
+    cells' incidence ``M`` (columns: the intercept and every one-hot column;
+    a block's reference has no column), so that some ``d`` with ``M d =
+    e_c`` moves its rows alone.  A cell that is the only cell of a level, or
+    of a block's reference rows, has that set's rows and is judged there
+    already: it is not kept.
+
+    **Elimination.**  A column that holds one remaining cell is that cell's
+    indicator less the indicators of cells already eliminated, so ``d_c =
+    e_column - sum d_eliminated`` and the cell is a set, exactly (integer
+    arithmetic).  Eliminating it may leave another column with one cell.
+    Elimination never decides a remaining cell's rank, because only the
+    eliminated cell has a nonzero in its pivot column.  It decides every
+    cell of nested blocks (each a duplicate) and of a saturated interaction.
+
+    **The core** the elimination leaves is decided by one SVD.  The computed
+    SVD is the exact SVD of ``M + E`` with ``||E||_2 <= p(m, k) eps ||M||_2``,
+    and its leading ``r`` left singular vectors lie within an angle ``p(m,
+    k) eps ||M||_2 / gap`` of the true subspace (LAPACK Users' Guide, 3rd
+    ed., section 4.9.1), the gap being ``sigma_r`` for an incidence whose
+    other singular values are zero.  With ``p(m, k) = max(m, k)``, the rank
+    tolerance's own constant, a cell's leverage ``||U_c||^2`` is within
+    ``tol / (sigma_r - tol) + gamma_{r+2} + r eps`` of its value (``tol =
+    max(m, k) eps sigma_1``; the last two terms its sum and ``U``'s
+    orthogonality).  A cell is a set exactly when its leverage is 1, so it is
+    kept when ``1 - ||U_c||^2`` lies within that resolution.  A kept cell
+    that is not a set can only be refused: its direction does not move its
+    rows alone, so at the exact mode its test reads a nonzero residual.  For
+    two blocks a cell that is not a set has ``1 - h_c = 1 / (1 + r_c) >= 1
+    / m``, ``r_c`` the resistance between its two levels with the cell
+    removed, so the decision is exact while the resolution is below
+    ``1 / (2m)``.  A core cell's direction is the SVD's minimum-norm ``d``,
+    less each eliminated cell's direction times the amount ``d`` moves it.
+    The core is formed only while ``m k min(m, k) <= _ROW_SET_CORE_FLOPS``.
+    """
+    none = RowSets(blocks, None, np.zeros((0, p)))
+    if len(blocks) < 2:
+        return none
+    stacked = np.column_stack([matrix.codes for _, matrix in blocks])
+    cells, inverse = np.unique(stacked, axis=0, return_inverse=True)
+    cell_of_row = np.asarray(inverse).reshape(-1)
+    count = len(cells)
+    if count > _ROW_SET_CELL_LIMIT:
+        return none
+    duplicate = np.zeros(count, dtype=bool)
+    for position, (_, matrix) in enumerate(blocks):
+        per_code = np.bincount(cells[:, position], minlength=matrix.n_levels + 1)
+        duplicate |= per_code[cells[:, position]] == 1
+    if np.all(duplicate):
+        return none
+    # incidence column 0 is the intercept, column 1 + j slope j
+    columns_of: list[list[int]] = [[0] for _ in range(count)]
+    cells_of: dict[int, list[int]] = {0: list(range(count))}
+    for position, (start, matrix) in enumerate(blocks):
+        for cell, code in enumerate(cells[:, position].tolist()):
+            if code < matrix.n_levels:
+                columns_of[cell].append(1 + start + code)
+                cells_of.setdefault(1 + start + code, []).append(cell)
+    live = np.ones(count, dtype=bool)
+    remaining = {column: len(members) for column, members in cells_of.items()}
+    queue = deque(column for column, size in remaining.items() if size == 1)
+    direction: dict[int, dict[int, float]] = {}
+    while queue:
+        pivot = queue.popleft()
+        if remaining[pivot] != 1:
+            continue
+        cell = next(member for member in cells_of[pivot] if live[member])
+        moved = {pivot: 1.0}
+        for member in cells_of[pivot]:
+            if member != cell:
+                for column, value in direction[member].items():
+                    moved[column] = moved.get(column, 0.0) - value
+        direction[cell] = moved
+        live[cell] = False
+        for column in columns_of[cell]:
+            remaining[column] -= 1
+            if remaining[column] == 1:
+                queue.append(column)
+    core = np.flatnonzero(live)
+    if core.size and np.any(~duplicate[core]):
+        _decide_core(core, columns_of, duplicate, live, direction)
+    kept = sorted(cell for cell in direction if not duplicate[cell])
+    if not kept or len(kept) * p > _ROW_SET_DIRECTION_ENTRIES:
+        return none
+    held = np.zeros((len(kept), p))
+    for row, cell in enumerate(kept):
+        for column, value in direction[cell].items():
+            if column:
+                held[row, column - 1] = value
+    index = np.full(count, -1, dtype=np.intp)
+    index[kept] = np.arange(len(kept))
+    return RowSets(blocks, index[cell_of_row], held)
+
+
+def _decide_core(
+    core: NDArray,
+    columns_of: list[list[int]],
+    duplicate: NDArray,
+    live: NDArray,
+    direction: dict[int, dict[int, float]],
+) -> None:
+    """Add the directions of the core's sets (``_form_row_sets``) to ``direction``."""
+    core_columns = sorted({column for cell in core.tolist() for column in columns_of[cell]})
+    m, k = len(core), len(core_columns)
+    if m * k * min(m, k) > _ROW_SET_CORE_FLOPS:
+        return
+    where = {column: index for index, column in enumerate(core_columns)}
+    incidence = np.zeros((m, k))
+    for row, cell in enumerate(core.tolist()):
+        incidence[row, [where[column] for column in columns_of[cell]]] = 1.0
+    left, singular, right = np.linalg.svd(incidence, full_matrices=False)
+    tolerance = max(m, k) * _EPS * float(singular[0])
+    rank = int(np.sum(singular > tolerance))
+    if rank == 0 or float(singular[rank - 1]) <= 2.0 * tolerance:
+        return
+    resolution = (
+        tolerance / (float(singular[rank - 1]) - tolerance) + _gamma(rank + 2) + rank * _EPS
+    )
+    if resolution >= 0.5:
+        return
+    leverage = np.sum(left[:, :rank] ** 2, axis=1)
+    eliminated = np.flatnonzero(~live).tolist()
+    for row in np.flatnonzero((1.0 - leverage <= resolution) & ~duplicate[core]).tolist():
+        solution = right[:rank].T @ (left[row, :rank] / singular[:rank])
+        moved = {core_columns[i]: float(value) for i, value in enumerate(solution) if value}
+        base = dict(moved)
+        for cell in eliminated:
+            carried = sum(base.get(column, 0.0) for column in columns_of[cell])
+            if carried:
+                for column, value in direction[cell].items():
+                    moved[column] = moved.get(column, 0.0) - carried * value
+        direction[int(core[row])] = moved
 
 
 def _set_totals(sums: list, index: int) -> tuple[float, float, float, float, float, float]:
@@ -941,9 +1143,31 @@ def _set_totals(sums: list, index: int) -> tuple[float, float, float, float, flo
     return own, absolute, represented, count, up, down
 
 
+def row_set_quadratics(sets: RowSets, p: int, apply: Callable[..., NDArray]) -> NDArray:
+    """A lower bound on ``d' S d`` along each of ``sets.directions(p)``, in ``apply``'s units.
+
+    ``apply(v)`` is ``S v`` and ``apply(v, magnitude=True)`` is ``|S| |v|``,
+    which bounds the product's rounding, so ``d' S d - gamma_{2p+4} |d|' |S|
+    |d|`` is a lower bound.  Where the penalty is positive along ``d`` but
+    that bound is not, the entry is ``nan``: penalized, with no curvature
+    bound.  One penalty product per reference and per kept cell.
+    """
+    out = []
+    for direction in sets.directions(p):
+        with np.errstate(over="ignore", invalid="ignore"):
+            product = float(direction @ apply(direction))
+            size = float(np.abs(direction) @ apply(direction, magnitude=True))
+            lower = product - _gamma(2 * p + 4) * size
+        if not product > 0.0:
+            out.append(0.0 if product == 0.0 else math.nan)
+        else:
+            out.append(lower if lower > 0.0 else math.nan)
+    return np.asarray(out, dtype=np.float64)
+
+
 def row_set_residual(
     *,
-    dm: DesignMatrix,
+    sets: RowSets,
     row_score: NDArray,
     response: NDArray,
     fisher_weights: NDArray,
@@ -952,6 +1176,7 @@ def row_set_residual(
     column_penalty: NDArray,
     column_penalty_size: NDArray,
     column_curvature: NDArray,
+    set_curvature: NDArray,
     bar: float,
     underflow: float,
 ) -> float:
@@ -972,36 +1197,46 @@ def row_set_residual(
     within the bar of its own terms' size, ``sum_{i in R} |s_i| + |d_R|'
     (|S| |beta|)``, or of their rounding, ``gamma_{|R| + 2}`` of the rows'
     sum, ``u`` of their predictor's representation ``sum f_i |eta_i|`` and
-    ``gamma_{p + 2}`` of the penalty's size.  The sets, by one rule (an
-    indicator in the span of the intercept and the one-hot columns):
+    ``gamma_{p + 2}`` of the penalty's size.  The sets (``row_sets``, formed
+    once per design), by one rule (an indicator in the span of the intercept
+    and the one-hot columns):
     - each level of each one-hot block (``CategoricalGroupMatrix``, random
       effects included), ``d_R`` its column;
     - each block's reference rows, the rows no column of it holds, summed
       directly over those rows, ``d_R`` the intercept less the block's
       columns;
     - with two or more blocks, each joint cell of their codes whose
-      indicator lies in that span (the incidence's projector reads 1 on its
-      diagonal), ``d_R`` the least-squares direction that moves it alone:
-      the cells of a saturated interaction, base cells included.  Above
-      ``_ROW_SET_CELL_LIMIT`` cells these are not formed.
+      indicator lies in that span and that is not already one of the sets
+      above: the cells of a saturated interaction, base cells included.
+      Above ``_ROW_SET_CELL_LIMIT`` cells these are not formed.
+
+    **A penalized set** is also certified by its distance to its own maximum.
+    The log-likelihood is concave in ``eta``, so the penalized objective
+    along ``d_R`` is at least ``d_R' S d_R``-strongly concave, and its
+    maximum along ``d_R`` lies within ``|g_R| / d_R' S d_R`` of the iterate,
+    in the units of ``eta`` on ``R``'s rows.  That distance, with ``g_R``'s
+    floor and ``underflow`` added, within ``bar`` passes the set
+    (``set_curvature`` and ``diag S`` for a level: lower bounds on ``d_R' S
+    d_R``).  It is what certifies a penalized set whose rows' scores vanish
+    together with its penalty's gradient: a random-effect level inside a
+    level without events, whose free column carries the separation while
+    each step returns the random effect to zero.
+
     A set whose positive-weight rows' responses are all zero, or all one, and
     whose direction carries no penalty has no interior maximum (its supremum
     is at infinity, or at the mean space's boundary): it is the separation
     the weak test discloses, and it is not tested here.  That is read off
     the responses, not off the scores' signs: a non-event's score ``-w
     odds`` underflows to zero at small enough weights and means, and would
-    hide a level's event rows behind it.  A set whose bar falls within ``underflow``
-    cannot be resolved and is refused (``inf``).  ``column_*`` are per
-    column in the weights' units: the penalty gradient (with any active
-    constraint's multipliers), its size ``|S| |beta|``, and ``diag S``.
+    hide a level's event rows behind it.  A separated set along a penalized
+    direction has a finite penalized maximum and is tested.  A set whose bar
+    falls within ``underflow`` and that the distance does not pass cannot be
+    resolved and is refused (``inf``).  ``column_*`` are per column in the
+    weights' units: the penalty gradient (with any active constraint's
+    multipliers), its size ``|S| |beta|``, and ``diag S``; ``set_curvature``
+    is ``row_set_quadratics`` in the same units.
     """
-    groups = []
-    offset = 0
-    for matrix in dm.group_matrices:
-        width = matrix.shape[1]
-        if isinstance(matrix, CategoricalGroupMatrix):
-            groups.append((offset, matrix))
-        offset += width
+    groups = sets.blocks
     if not groups:
         return 0.0
     score = np.asarray(row_score, dtype=np.float64)
@@ -1015,7 +1250,8 @@ def row_set_residual(
     penalty = np.asarray(column_penalty, dtype=np.float64)
     size = np.asarray(column_penalty_size, dtype=np.float64)
     curvature = np.asarray(column_curvature, dtype=np.float64)
-    p = dm.p
+    quadratics = np.asarray(set_curvature, dtype=np.float64)
+    p = len(penalty)
     worst = 0.0
 
     def judge(
@@ -1027,18 +1263,16 @@ def row_set_residual(
         down,
         direction_penalty,
         direction_size,
-        direction_curvature,
+        quadratic,
     ):
         nonlocal worst
         if count <= 0.0:
             return
-        if direction_curvature <= 0.0 and (up == 0.0 or down == 0.0):
-            return  # separated: no interior maximum on these rows
+        penalized = not quadratic <= 0.0  # nan: penalized, with no curvature bound
+        if not penalized and (up == 0.0 or down == 0.0):
+            return  # separated along an unpenalized direction: no interior maximum
         scale = absolute_sum + direction_size
         if not (math.isfinite(scale) and math.isfinite(direction_penalty)):
-            worst = math.inf
-            return
-        if bar * scale <= underflow:
             worst = math.inf
             return
         residual = abs(own - direction_penalty)
@@ -1047,9 +1281,12 @@ def row_set_residual(
             + _UNIT_ROUNDOFF * represented_sum
             + _gamma(p + 2) * direction_size
         )
-        worst = max(worst, residual / max(bar * scale, floor))
+        ratio = math.inf if bar * scale <= underflow else residual / max(bar * scale, floor)
+        if penalized and math.isfinite(quadratic):
+            ratio = min(ratio, (residual + floor + underflow) / (bar * quadratic))
+        worst = max(worst, ratio)
 
-    for start, matrix in groups:
+    for position, (start, matrix) in enumerate(groups):
         levels = matrix.n_levels
         codes = matrix.codes
         columns = slice(start, start + levels)
@@ -1065,44 +1302,27 @@ def row_set_residual(
                 direction = (
                     -float(np.sum(penalty[columns])),
                     float(np.sum(size[columns])),
-                    float(np.sum(curvature[columns])),
+                    float(quadratics[position]),
                 )
             judge(*_set_totals(sums, level), *direction)
-    if len(groups) < 2:
+    if sets.cell_of_row is None:
         return worst
-    stacked = np.column_stack([matrix.codes for _, matrix in groups])
-    cells, cell_of_row = np.unique(stacked, axis=0, return_inverse=True)
-    cell_of_row = np.asarray(cell_of_row).reshape(-1)
-    if len(cells) > _ROW_SET_CELL_LIMIT:
-        return worst
-    incidence = [np.ones(len(cells))]
-    one_hot = []
-    for position, (start, matrix) in enumerate(groups):
-        for level in range(matrix.n_levels):
-            incidence.append((cells[:, position] == level).astype(np.float64))
-            one_hot.append(start + level)
-    incidence_matrix = np.column_stack(incidence)
-    left, singular, right = np.linalg.svd(incidence_matrix, full_matrices=False)
-    rank = int(np.sum(singular > singular[0] * max(incidence_matrix.shape) * _EPS))
-    basis = left[:, :rank]
-    movable = np.sum(basis**2, axis=1) >= 1.0 - 1e-8
-    if not np.any(movable):
-        return worst
-    # the coefficient direction moving each movable cell alone (minimum norm)
-    solve = right[:rank].T / singular[:rank]
-    column_index = np.asarray(one_hot, dtype=np.intp)
+    held = sets.cell_directions
+    kept = held.shape[0]
+    on_cells = sets.cell_of_row >= 0
     sums = [
-        np.bincount(cell_of_row, weights=values, minlength=len(cells))
+        np.bincount(sets.cell_of_row[on_cells], weights=values[on_cells], minlength=kept)
         for values in (score, absolute, represented, carried, rising, falling)
     ]
-    for cell in np.flatnonzero(movable):
-        direction = solve @ basis[cell]  # (1 + one-hot columns,): intercept first
-        weights_on_columns = direction[1:]
+    with np.errstate(over="ignore", invalid="ignore"):
+        cell_penalty = held @ penalty
+        cell_size = np.abs(held) @ size
+    for cell in range(kept):
         judge(
-            *_set_totals(sums, int(cell)),
-            float(weights_on_columns @ penalty[column_index]),
-            float(np.abs(weights_on_columns) @ size[column_index]),
-            float(np.abs(weights_on_columns) @ curvature[column_index]),
+            *_set_totals(sums, cell),
+            float(cell_penalty[cell]),
+            float(cell_size[cell]),
+            float(quadratics[len(groups) + cell]),
         )
     return worst
 

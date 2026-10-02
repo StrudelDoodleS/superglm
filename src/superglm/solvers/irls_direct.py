@@ -116,7 +116,9 @@ from superglm.solvers.mode_score import (
     centred_matvec,
     penalized_mode_residual,
     prior_weighted_centre,
+    row_set_quadratics,
     row_set_residual,
+    row_sets,
     stagnation_window,
     weighted_column_centring,
 )
@@ -1224,6 +1226,10 @@ def _fit_irls_direct_once(
 
     # diag(S), formed once per call on first use by the mode score (S is fixed)
     _penalty_curvature: list[NDArray] = []
+    # d'Sd along each one-hot reference and joint-cell direction
+    # (``mode_score.row_set_quadratics``): one penalty product each, formed
+    # once per call on first use (S and the design are fixed within a call)
+    _row_set_curvature: list[NDArray] = []
 
     def penalty_quadratic(beta_values: NDArray) -> float:
         values = np.asarray(beta_values, dtype=np.float64)
@@ -1478,15 +1484,20 @@ def _fit_irls_direct_once(
             return math.inf, False
         ratio = residual.ratio()
         # every set of rows the one-hot blocks move on their own, certified on
-        # its own rows (``mode_score.row_set_residual``)
+        # its own rows (``mode_score.row_set_residual``); the sets are the
+        # design's, formed once per design (``mode_score.row_sets``)
+        sets = row_sets(dm)
+        if not _row_set_curvature:
+            _row_set_curvature.append(row_set_quadratics(sets, p, penalty_matvec))
         with np.errstate(over="ignore", invalid="ignore"):
             column_penalty = np.ldexp(penalty_score, shift)
             column_penalty_size = np.ldexp(penalty_magnitude, shift)
             column_curvature = np.ldexp(curvature, shift)
+            set_curvature = np.ldexp(_row_set_curvature[0], -weight_exponent)
         ratio = max(
             ratio,
             row_set_residual(
-                dm=dm,
+                sets=sets,
                 row_score=score,
                 response=y,
                 fisher_weights=fisher,
@@ -1495,6 +1506,7 @@ def _fit_irls_direct_once(
                 column_penalty=column_penalty,
                 column_penalty_size=column_penalty_size,
                 column_curvature=column_curvature,
+                set_curvature=set_curvature,
                 bar=mode_bar,
                 underflow=underflow,
             ),

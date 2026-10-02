@@ -955,11 +955,11 @@ def test_a_reference_level_is_separated_only_by_its_responses(
     on the 10,800-fit sweep at weights near 1e-300.
     """
     from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
-    from superglm.solvers.mode_score import row_set_residual
+    from superglm.solvers.mode_score import row_set_residual, row_sets
 
     dm = DesignMatrix([CategoricalGroupMatrix(np.array([-1, -1, 0, 0]), 1)], n=4, p=1)
     ratio = row_set_residual(
-        dm=dm,
+        sets=row_sets(dm),
         row_score=np.array([*light_scores, -1.0, 1.0]),
         response=np.array([*light_y, 0.0, 1.0]),
         fisher_weights=np.array([1e-300, 1e-300, 1.0, 1.0]),
@@ -968,10 +968,91 @@ def test_a_reference_level_is_separated_only_by_its_responses(
         column_penalty=np.zeros(1),
         column_penalty_size=np.zeros(1),
         column_curvature=np.zeros(1),
+        set_curvature=np.zeros(1),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
     )
     assert (ratio <= 1.0) is separated
+
+
+def test_a_bridge_between_two_crossed_cycles_is_the_only_joint_cell_set() -> None:
+    """``mode_score.row_sets`` on two crossed blocks whose cells are two 4-cycles joined by one cell.
+
+    Every column holds two or more cells, so elimination leaves all nine to
+    the core's SVD.  A cell is a set exactly when it is a bridge of the
+    levels' graph (leverage 1); a cycle's cell has ``1 - h = 1 / (1 + 3)``,
+    far outside the derived resolution.  The bridge's direction moves its
+    rows by one and every other row by the same amount, which the intercept
+    returns to zero, to within the SVD's backward error times the
+    incidence's condition number.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import row_sets
+
+    pairs = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 2), (2, 3), (3, 2), (3, 3), (1, 2)]
+    rows = [pair for pair in pairs for _ in range(2)]
+    first = np.array([a - 1 for a, _ in rows])  # level 0 is each block's reference (-1)
+    second = np.array([b - 1 for _, b in rows])
+    blocks = [CategoricalGroupMatrix(first, 3), CategoricalGroupMatrix(second, 3)]
+    dm = DesignMatrix(blocks, n=len(rows), p=6)
+    sets = row_sets(dm)
+    assert sets.cell_of_row is not None
+    kept = sets.cell_of_row >= 0
+    assert np.array_equal(kept, np.array([pair == (1, 2) for pair in rows]))
+    incidence = np.column_stack(
+        [np.ones(len(pairs))]
+        + [np.array([a == level for a, _ in pairs], dtype=float) for level in (1, 2, 3)]
+        + [np.array([b == level for _, b in pairs], dtype=float) for level in (1, 2, 3)]
+    )
+    singular = np.linalg.svd(incidence, compute_uv=False)
+    rank = int(np.sum(singular > max(incidence.shape) * np.finfo(float).eps * singular[0]))
+    tolerance = 4 * max(incidence.shape) * np.finfo(float).eps * singular[0] / singular[rank - 1]
+    moved = dm.matvec(sets.cell_directions[0])
+    np.testing.assert_allclose(moved - moved[~kept][0], kept.astype(float), rtol=0, atol=tolerance)
+
+
+def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cells, their elimination and any core SVD read the one-hot codes alone (``mode_score.row_sets``).
+
+    They are held in each design's layout cache.  50ff4b7d formed the cells'
+    ``np.unique`` and an SVD of their incidence at every certificate
+    evaluation: 90 SVDs in this nested REML fit.  The fit evaluates the
+    certificate on two designs, its REML search's and the final model's,
+    and forms each one's sets once.  Each nested cell is one district's
+    rows, already judged as its level, so no cell is kept and no SVD runs.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.mode_score as mode_score
+
+    formed: list[int] = []
+    decided: list[int] = []
+    designs: list[int] = []
+    form, decide, sets_of = (
+        mode_score._form_row_sets,
+        mode_score._decide_core,
+        irls_direct.row_sets,
+    )
+    monkeypatch.setattr(
+        mode_score, "_form_row_sets", lambda *a, **k: formed.append(1) or form(*a, **k)
+    )
+    monkeypatch.setattr(
+        mode_score, "_decide_core", lambda *a, **k: decided.append(1) or decide(*a, **k)
+    )
+    monkeypatch.setattr(irls_direct, "row_sets", lambda dm: designs.append(id(dm)) or sets_of(dm))
+    frame, y = _districts_in_regions(2)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"c": Categorical(base="first"), "g": RandomEffect()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    assert len(designs) > len(set(designs))
+    assert len(formed) == len(set(designs))
+    assert decided == []
+    assert mode_score.row_sets(model._dm).cell_of_row is None
 
 
 @pytest.mark.parametrize(("slopes", "excluded"), [(32, True), (33, False)])
@@ -1614,21 +1695,131 @@ def test_a_rare_event_random_effect_level_is_certified_at_its_own_mode(direct_so
     assert abs(float(model.result.beta[2]) - 1.0) <= 4.0 * MODE_CERTIFICATION_BAR
 
 
-@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
-def test_reml_with_a_separated_level_converges_as_on_master(direct_solve: str) -> None:
-    """claude's #437 question: an unpenalized level without events under ``fit_reml``.
+def _districts_in_regions(districts_in_r: int) -> tuple[pd.DataFrame, np.ndarray]:
+    """``RandomEffect`` districts nested in ``Categorical`` regions; region ``r`` has no events.
 
-    Its maximum is at ``eta -> -infinity``, so its rows' scores all share one
-    sign; no set of its rows has an interior maximum to certify on its own
-    rows, and the row-set test leaves it to the weak test, which excludes and
-    discloses it (#425's convention).  The fit converges, as on master.
+    Regions ``p`` and ``q`` hold four districts of 60 rows each, at event
+    probabilities 0.15 and 0.3; region ``r`` holds ``districts_in_r``
+    districts of 40 rows, every response zero.
     """
-    rng = np.random.default_rng(7)
-    n = 600
-    category = rng.choice(["p", "q", "r"], n)
-    group = rng.choice([f"g{k}" for k in range(8)], n)
-    probability = np.where(category == "r", 0.0, np.where(category == "p", 0.15, 0.3))
-    y = (rng.uniform(size=n) < probability).astype(np.float64)
+    rng = np.random.default_rng(11)
+    region: list[str] = []
+    district: list[str] = []
+    y: list[float] = []
+    for name, probability in (("p", 0.15), ("q", 0.3)):
+        for k in range(4):
+            region += [name] * 60
+            district += [f"{name}{k}"] * 60
+            y += (rng.uniform(size=60) < probability).astype(np.float64).tolist()
+    for k in range(districts_in_r):
+        region += ["r"] * 40
+        district += [f"r{k}"] * 40
+        y += [0.0] * 40
+    return pd.DataFrame({"c": region, "g": district}), np.array(y)
+
+
+def _random_effect_distances(
+    model: SuperGLM, y: np.ndarray, lam: float
+) -> list[tuple[float, float]]:
+    """Each ``RandomEffect`` level's distance to its own penalized maximum along its column.
+
+    ``(|t*|, bound)`` per level: ``t*`` maximizes ``sum_R l_i(eta_i + t) - lam
+    (beta_l + t)^2 / 2`` over the level's rows (Newton's method; the
+    function is ``lam``-strongly concave).  The bound is the row-set test's:
+    a set it passes by distance is within ``bar``; one it passes by its
+    relative score has ``|g| <= bar (sum_R |s| + lam |beta_l|)``, so ``|t*| <=
+    |g| / lam`` is within that over ``lam``.  Doubled for this oracle's own
+    rounding.
+    """
+    dm = model._dm
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    eta = dm.matvec(beta) + float(model.result.intercept)
+    start = sum(matrix.shape[1] for matrix in dm.group_matrices[:-1])
+    levels = dm.group_matrices[-1]
+    out = []
+    for level in range(levels.n_levels):
+        rows = levels.codes == level
+        events, base = y[rows] > 0.0, eta[rows]
+        coefficient = float(beta[start + level])
+        with np.errstate(under="ignore"):
+            odds = np.exp(base) / -np.expm1(base)
+        scale = float(np.sum(np.where(events, 1.0, odds))) + lam * abs(coefficient)
+        t = 0.0
+        for _ in range(100):
+            with np.errstate(under="ignore"):
+                shifted = base + t
+                odds = np.exp(shifted) / -np.expm1(shifted)
+                gradient = float(np.sum(np.where(events, 1.0, -odds))) - lam * (coefficient + t)
+                curvature = float(np.sum(np.where(events, 0.0, odds / -np.expm1(shifted)))) + lam
+            t += gradient / curvature
+        out.append((abs(t), 2.0 * MODE_CERTIFICATION_BAR * max(1.0, scale / lam)))
+    return out
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
+@pytest.mark.parametrize("districts_in_r", [1, 2])
+def test_a_random_effect_level_inside_a_level_without_events_is_certified_at_its_own_mode(
+    districts_in_r: int, direct_solve: str
+) -> None:
+    """claude's #437 fixture: districts nested in regions, region ``r`` without events, lambda fixed at 1.
+
+    Region ``r``'s free column carries the separation, and each step
+    returns the coefficients of the districts inside it to about zero (with
+    one district exactly: the step's two stationarity rows leave ``lambda
+    (beta_l + delta_l) = 0``).  Such a district's rows score ``-sum w odds``,
+    one-signed, against a penalty gradient near zero, so its relative score
+    reads about 1 at every iterate however far its mean falls; once ``odds``
+    underflows its bar does too.  50ff4b7d ended the fit ``score_stagnated``
+    where master converges.  The district's direction carries the penalty,
+    so its penalized maximum along it is finite and the set passes by its
+    distance to it, ``|g| / lambda`` within the bar.  Every district is then
+    within the certificate's bound of its own penalized maximum.
+    """
+    frame, y = _districts_in_regions(districts_in_r)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={
+            "c": Categorical(base="first"),
+            "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    assert model.result.converged
+    for distance, bound in _random_effect_distances(model, y, 1.0):
+        assert distance <= bound, (distance, bound)
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
+@pytest.mark.parametrize("design", ["crossed", "nested"])
+def test_reml_with_a_separated_level_converges_as_on_master(design: str, direct_solve: str) -> None:
+    """claude's #437 questions: an unpenalized level without events under ``fit_reml``.
+
+    Crossed with a ``RandomEffect``, or holding two of its levels.  The
+    level's maximum is at ``eta -> -infinity``: its rows' responses are all
+    zero and its direction carries no penalty, so the row-set test leaves it
+    out.  Its global relative score falls like ``sqrt(mu)`` as its mean
+    falls, and the stop passes once that is within the bar; the weak test at
+    the final mode (``reml.identified.final_mode_weak_slopes``) then
+    discloses it.  In the nested design the two ``RandomEffect`` levels
+    inside it are penalized sets, each certified by its distance to its own
+    penalized maximum; 50ff4b7d ended that fit ``score_stagnated``.  Both
+    converge, as on master, and disclose the level.
+    """
+    if design == "crossed":
+        rng = np.random.default_rng(7)
+        n = 600
+        category = rng.choice(["p", "q", "r"], n)
+        group = rng.choice([f"g{k}" for k in range(8)], n)
+        probability = np.where(category == "r", 0.0, np.where(category == "p", 0.15, 0.3))
+        y = (rng.uniform(size=n) < probability).astype(np.float64)
+        frame = pd.DataFrame({"c": category, "g": group})
+    else:
+        frame, y = _districts_in_regions(2)
     model = SuperGLM(
         family="binomial",
         link="log",
@@ -1638,8 +1829,9 @@ def test_reml_with_a_separated_level_converges_as_on_master(direct_solve: str) -
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(pd.DataFrame({"c": category, "g": group}), y)
+        model.fit_reml(frame, y)
     assert model.result.converged
+    assert model.diagnostics()["c"]["weakly_identified"] == [1]  # level r
 
 
 def test_reml_keeps_a_zero_weight_row_at_the_clip() -> None:
