@@ -34,6 +34,7 @@ import pytest
 from superglm import Categorical, Constraint, MonotoneRepairer, Numeric, PSpline, SuperGLM
 from superglm.editor import EditorSession
 from superglm.model import shape_ops
+from tests.test_saved_fs_models import assert_predicts_as_saved
 
 EPS = float(np.finfo(np.float64).eps)
 _U = EPS / 2.0
@@ -344,8 +345,9 @@ def test_an_edit_saved_before_447_is_repaired_from_its_published_predictor(sourc
     Their editor left the solver intercept and the recorded shift, and on
     31544462 the solver's centred pair, at the pre-edit coefficients
     (``scripts/make_saved_editor_fixtures.py`` wrote these pickles).  The model
-    predicts as it was saved, bit for bit, and a revision starts from its
-    published predictor (``FittedStateRevision.start``).  The repair then reaches
+    predicts as it was saved, to two evaluations' rounding on another BLAS
+    kernel or SIMD target (``assert_predicts_as_saved``), and a revision starts
+    from its published predictor (``FittedStateRevision.start``).  The repair then reaches
     the projection-and-profile reference within the first test's bound; the
     writer's own repair missed it by 3.55e-3.  Mutation: drop the re-read in
     ``FittedStateRevision.start``.
@@ -354,7 +356,7 @@ def test_an_edit_saved_before_447_is_repaired_from_its_published_predictor(sourc
         record = pickle.load(handle)
     model, frame = record["model"], record["frame"]
     y, w = record["y"], record["sample_weight"]
-    np.testing.assert_array_equal(model.predict(frame), record["prediction"])
+    assert_predicts_as_saved(model, frame, record["prediction"])
 
     x = frame["x"].to_numpy(dtype=np.float64)
     beta_edit = np.asarray(model.result.beta, dtype=np.float64).copy()
