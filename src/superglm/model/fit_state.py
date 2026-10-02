@@ -801,6 +801,12 @@ def capture_fit_state(
         # in this workspace, but duplicates the durable sparse spline basis.
         # Drop that rebuildable cache before ownership moves to the public fit.
         release_raw_splines()
+    if design is not None:
+        from superglm.solvers.centered_system import release_dense_split
+
+        # Beside a dense column the bounded half of the design carries its own
+        # copies of those caches (``centered_system._DENSE_SPLITS``); they go too.
+        release_dense_split(design)
     return _capture_model_state(
         workspace.model,
         public_model,

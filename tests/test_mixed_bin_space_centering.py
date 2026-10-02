@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -17,6 +18,7 @@ from superglm.group_matrix import (
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
 )
+from superglm.solvers import centered_system
 from superglm.solvers.centered_system import TabmatCenteringState, build_centered_system
 from superglm.solvers.rank import decompose_gram
 
@@ -50,6 +52,39 @@ def _mixed_discrete_design(
     )
     X = np.column_stack((dense, discrete.toarray(), categorical.toarray()))
     return dm, X
+
+
+def _mixed_rung_system(dm: DesignMatrix, W: np.ndarray, z: np.ndarray, state: TabmatCenteringState):
+    """The mixed bin-space rung driven directly, then its stable fallback.
+
+    Unit tests of the plan's dense ("ordinary numeric") blocks, which no fit
+    reaches any more: beside a ``DenseGroupMatrix`` ``build_centered_system``
+    hands the raw rungs only the bounded half of the design (the dense/bounded
+    split, issue #430), and the dense columns join it about their exact pair.
+    They are kept, and labelled, while the plan still carries that support;
+    removing it is a follow-up recorded on PR #439.  The route fits take is
+    pinned against the exact-pair reference by
+    ``test_centred_state_offsets.py::test_the_dense_split_matches_the_exact_pair_reference``.
+    Here the rung runs with the builder's preflight and lockout bookkeeping,
+    and a rejection falls back to the builder's exact-pair system.
+    """
+    W = np.asarray(W, dtype=np.float64)
+    sum_w = float(np.sum(W, dtype=np.float64))
+    z_centered = z - float(np.dot(W, z) / sum_w)
+    if state.eligible is not False:
+        attempted, packed = centered_system._try_mixed_discrete_centering(
+            dm=dm,
+            W=W,
+            z_centered=z_centered,
+            sum_w=sum_w,
+            preflight=state.eligible is None,
+        )
+        if attempted:
+            state.eligible = packed is not None
+            if packed is not None:
+                mean_x, data_gram, rhs = packed
+                return SimpleNamespace(mean_x=mean_x, data_gram=data_gram, rhs=rhs)
+    return build_centered_system(dm=dm, W=W, z_off=z, penalty=np.zeros((dm.p, dm.p)))
 
 
 def _count_tabmat_split_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
@@ -118,13 +153,7 @@ def test_mixed_discrete_centering_uses_execution_plan_without_materializing_rows
         lambda _self: pytest.fail("mixed centering must preserve categorical codes"),
     )
 
-    system = build_centered_system(
-        dm=dm,
-        W=W,
-        z_off=z,
-        penalty=np.zeros((dm.p, dm.p)),
-        tabmat_state=state,
-    )
+    system = _mixed_rung_system(dm, W, z, state)
 
     assert state.eligible is True
     assert dm._mixed_bin_space_centering_plan is not None
@@ -178,13 +207,7 @@ def test_fragmented_mixed_discrete_centering_uses_bin_space_tabmat_plan(
         lambda _self: pytest.fail("fragmented mixed centering expanded spline rows"),
     )
 
-    system = build_centered_system(
-        dm=dm,
-        W=W,
-        z_off=z,
-        penalty=np.zeros((dm.p, dm.p)),
-        tabmat_state=state,
-    )
+    system = _mixed_rung_system(dm, W, z, state)
 
     assert state.eligible is True
     assert calls == {"standardize": 1, "sandwich": 1, "transpose_matvec": 1}
@@ -272,13 +295,7 @@ def test_mixed_bin_space_centering_uses_public_tabmat_without_numba(
     )
 
     state = TabmatCenteringState()
-    system = build_centered_system(
-        dm=dm,
-        W=W,
-        z_off=z,
-        penalty=np.zeros((dm.p, dm.p)),
-        tabmat_state=state,
-    )
+    system = _mixed_rung_system(dm, W, z, state)
 
     assert state.eligible is True
     assert calls == {"standardize": 1, "sandwich": 1, "transpose_matvec": 1}
@@ -444,13 +461,7 @@ def test_mixed_bin_space_centering_preserves_low_cardinality_and_group_order(
     )
 
     state = TabmatCenteringState()
-    system = build_centered_system(
-        dm=dm,
-        W=W,
-        z_off=z,
-        penalty=np.zeros((dm.p, dm.p)),
-        tabmat_state=state,
-    )
+    system = _mixed_rung_system(dm, W, z, state)
 
     assert state.eligible is True
     assert calls == {"standardize": 1, "sandwich": 1, "transpose_matvec": 1}
@@ -1010,24 +1021,15 @@ def test_unsafe_mixed_discrete_preflight_locks_out_raw_route(
     )
 
     with np.errstate(over="raise", invalid="raise"):
-        first = build_centered_system(
-            dm=dm,
-            W=W,
-            z_off=z,
-            penalty=np.zeros((dm.p, dm.p)),
-            tabmat_state=state,
-        )
-        second = build_centered_system(
-            dm=dm,
-            W=W,
-            z_off=z,
-            penalty=np.zeros((dm.p, dm.p)),
-            tabmat_state=state,
-        )
+        first = _mixed_rung_system(dm, W, z, state)
+        second = _mixed_rung_system(dm, W, z, state)
 
     assert state.eligible is False
     assert preflight_calls == 1
-    assert row_subset_calls == 2
+    # The builder's fallback for this design centres the dense columns about
+    # their exact pair beside the packed spline and categorical blocks, so no
+    # stable row chunk is materialized (issue #430).
+    assert row_subset_calls == 0
     assert np.all(np.isfinite(first.data_gram))
     np.testing.assert_array_equal(second.data_gram, first.data_gram)
     np.testing.assert_array_equal(second.rhs, first.rhs)
@@ -1067,22 +1069,10 @@ def test_accepted_mixed_discrete_route_recertifies_changed_weights_and_locks_out
     monkeypatch.setattr(centered_algebra, "_mixed_raw_centering_preflight", counted_preflight)
     monkeypatch.setattr(MixedBinSpaceCenteringPlan, "moments", counted_moments)
 
-    first = build_centered_system(
-        dm=dm,
-        W=W_safe,
-        z_off=z,
-        penalty=np.zeros((dm.p, dm.p)),
-        tabmat_state=state,
-    )
+    first = _mixed_rung_system(dm, W_safe, z, state)
     assert state.eligible is True
 
-    changed = build_centered_system(
-        dm=dm,
-        W=W_changed_safe,
-        z_off=z,
-        penalty=np.zeros((dm.p, dm.p)),
-        tabmat_state=state,
-    )
+    changed = _mixed_rung_system(dm, W_changed_safe, z, state)
     assert state.eligible is True
     changed_mean_x = np.average(X, axis=0, weights=W_changed_safe)
     changed_centered = X - changed_mean_x
@@ -1093,24 +1083,12 @@ def test_accepted_mixed_discrete_route_recertifies_changed_weights_and_locks_out
         atol=2e-11,
     )
 
-    rejected = build_centered_system(
-        dm=dm,
-        W=W_degenerate,
-        z_off=z,
-        penalty=np.zeros((dm.p, dm.p)),
-        tabmat_state=state,
-    )
+    rejected = _mixed_rung_system(dm, W_degenerate, z, state)
     assert state.eligible is False
     np.testing.assert_allclose(rejected.data_gram, 0.0, atol=1e-13)
     np.testing.assert_allclose(rejected.rhs, 0.0, atol=1e-13)
 
-    third = build_centered_system(
-        dm=dm,
-        W=W_safe,
-        z_off=z,
-        penalty=np.zeros((dm.p, dm.p)),
-        tabmat_state=state,
-    )
+    third = _mixed_rung_system(dm, W_safe, z, state)
     mean_x = np.mean(X, axis=0)
     mean_z = float(np.mean(z))
     X_centered = X - mean_x

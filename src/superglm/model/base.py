@@ -1227,11 +1227,26 @@ def compute_lambda_max(model, y, weights):
     """
     from superglm.distributions import initial_mean
     from superglm.screening import working_score
+    from superglm.solvers.mode_score import (
+        dense_centred_rmatvec,
+        dense_columns,
+        prior_weighted_centre,
+    )
 
     mu_null = np.atleast_1d(np.asarray(initial_mean(y, weights, model._distribution), float))
     eta_null = model._link.link(mu_null)
     score = working_score(y, mu_null, eta_null, weights, model._distribution, model._link)
     grad = model._dm.rmatvec(score)
+    # A dense column's score is read about its prior-weighted centre, by type,
+    # as the proximal solver reads it about its pair (issue #430; the null W is
+    # the prior times a constant, so the two centres agree).  sum(score) is zero
+    # only to rounding, and raw, a column at 1e12 multiplied that rounding by
+    # its offset (lambda_max read 267.0078125 for 267).
+    dense = dense_columns(model._dm)
+    if np.any(dense):
+        prior = np.ones(model._dm.n) if weights is None else np.asarray(weights, dtype=float)
+        centre = prior_weighted_centre(model._dm, prior)
+        grad = np.where(dense, dense_centred_rmatvec(model._dm, score, centre), grad)
     penalty = configured_penalty(model)
     # GroupLasso thresholds at lambda1 * w_g; the elastic-net family scales that
     # by its L1 share alpha (pirls.py radial threshold), so the lambda that

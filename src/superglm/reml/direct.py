@@ -71,7 +71,7 @@ from superglm.solvers.centered_system import (
 )
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
-from superglm.solvers.mode_score import mode_certification_bar
+from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
 from superglm.solvers.structured import record_auto_backend_decision, resolve_structured_backend
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -282,6 +282,9 @@ def optimize_direct_reml(
     objective_history: list[float] = []
     warm_beta: NDArray | None = None
     warm_intercept: float | None = None
+    # the warm state's centred predictor (alpha, c), carried with warm_beta and
+    # warm_intercept (``mode_score.centred_warm_start``)
+    warm_centred: tuple[float, NDArray] | None = None
 
     best_obj = np.inf
     best_lambdas = lambdas.copy()
@@ -364,6 +367,7 @@ def optimize_direct_reml(
     _t_pirls += _time.perf_counter() - _t0
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
+    warm_centred = centred_warm_start(boot_result)
 
     boot_phi = 1.0
     boot_inv_phi = 1.0
@@ -467,6 +471,7 @@ def optimize_direct_reml(
         beta_start: NDArray | None,
         intercept_start: float | None,
         iteration: int,
+        centred_start: tuple[float, NDArray] | None = None,
     ) -> tuple[Any, Any, Any, NDArray | None, tuple[NDArray, float] | None]:
         """The candidate's penalized mode, inverse, weighted Gram, penalty and dense identified Hessian."""
         nonlocal _t_pirls
@@ -494,6 +499,7 @@ def optimize_direct_reml(
             offset=offset_arr,
             beta_init=beta_start,
             intercept_init=intercept_start,
+            _centred_init=centred_start,
             max_iter=max_pirls_iter,
             tol=observed_pirls_tol,
             convergence=pirls_convergence,
@@ -550,7 +556,7 @@ def optimize_direct_reml(
                 profile["reml_candidate_reuses"] = profile.get("reml_candidate_reuses", 0) + 1
         else:
             pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = fit_candidate(
-                cand_lambdas, warm_beta, warm_intercept, n_iter
+                cand_lambdas, warm_beta, warm_intercept, n_iter, warm_centred
             )
         # No interior mode at these lambdas: the penalized maximum holds rows
         # at the boundary of the family's mean space, where it is constrained,
@@ -595,6 +601,7 @@ def optimize_direct_reml(
             )
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
+        warm_centred = centred_warm_start(pirls_result)
 
         geometry: ObservedREMLGeometry | None = None
         # Under observed geometry the geometry's own identified part replaces
@@ -1253,6 +1260,7 @@ def optimize_direct_reml(
                     offset=offset_arr,
                     beta_init=warm_beta,
                     intercept_init=warm_intercept,
+                    _centred_init=warm_centred,
                     max_iter=max_pirls_iter,
                     tol=observed_pirls_tol,
                     convergence=pirls_convergence,
@@ -1475,6 +1483,7 @@ def optimize_direct_reml(
                 rho = rho_trial
                 warm_beta = trial_result.beta.copy()
                 warm_intercept = float(trial_result.intercept)
+                warm_centred = centred_warm_start(trial_result)
                 # The accepted line-search state has already paid for a full
                 # PIRLS solve and objective evaluation.  It is therefore a
                 # valid retained candidate even when this is the final outer

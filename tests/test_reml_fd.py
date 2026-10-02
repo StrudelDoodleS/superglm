@@ -1586,10 +1586,11 @@ class TestREMLFiniteDifference:
             assert correction is not None and correction[2] is not None
             return correction[0], correction[2]
 
+        # A dense column takes centred rows by type, at every offset (issue
+        # #430): no value of its mean routes it to raw moments.
         base_gradient, base_hessian = correction_for_shift(0.0)
-        assert stable_gram_calls == 0, "well-scaled designs must retain the execution-plan hot path"
-        shifted_gradient, shifted_hessian = correction_for_shift(1.0e8)
         assert stable_gram_calls > 0
+        shifted_gradient, shifted_hessian = correction_for_shift(1.0e8)
         np.testing.assert_allclose(shifted_gradient, base_gradient, rtol=2e-6, atol=2e-8)
         np.testing.assert_allclose(shifted_hessian, base_hessian, rtol=2e-5, atol=2e-8)
 
