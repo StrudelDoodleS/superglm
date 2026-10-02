@@ -115,6 +115,7 @@ from superglm.solvers.mode_score import (
     centred_matvec,
     penalized_mode_residual,
     prior_weighted_centre,
+    row_set_residual,
     stagnation_window,
     weighted_column_centring,
 )
@@ -1420,7 +1421,6 @@ def _fit_irls_direct_once(
             column_shift=shift,
             decrement_noise=likelihood_noise,
             penalty_block=weak_penalty_block,
-            level_zeta=True,
         )
         _last_true_residual[0] = residual
         rows_n = int(np.count_nonzero(positive))
@@ -1430,6 +1430,28 @@ def _fit_irls_direct_once(
         if np.any(mode_bar * residual.scale[identified] <= underflow):
             return math.inf, False
         ratio = residual.ratio()
+        # every set of rows the one-hot blocks move on their own, certified on
+        # its own rows (``mode_score.row_set_residual``)
+        with np.errstate(over="ignore", invalid="ignore"):
+            column_penalty = np.ldexp(penalty_score, shift)
+            column_penalty_size = np.ldexp(penalty_magnitude, shift)
+            column_curvature = np.ldexp(curvature, shift)
+        ratio = max(
+            ratio,
+            row_set_residual(
+                dm=dm,
+                row_score=score,
+                response=y,
+                fisher_weights=fisher,
+                positive_prior=positive,
+                eta=eta_values,
+                column_penalty=column_penalty,
+                column_penalty_size=column_penalty_size,
+                column_curvature=column_curvature,
+                bar=mode_bar,
+                underflow=underflow,
+            ),
+        )
         resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
         latent_parts = []
         for group_state in scop_groups or ():

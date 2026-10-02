@@ -687,12 +687,11 @@ def test_a_subnormal_weight_level_publishes_finite_degrees_of_freedom(
     )
 
 
-# How far a certified level of the two-level fixture can sit from log(1/2),
-# per level, where every row's score is +-w and its observed curvature 2w a
-# level (the non-event's w p / (1 - p)^2 at p = 1/2):
-# - identified, the level's score is within the bar of its own scale,
-#   zeta_level sqrt(D) = sqrt(2w) sqrt(2w) = 2w (``level_zeta``), so its eta
-#   is within bar; the intercept's within bar of its own sum |s|;
+# How far a certified level (or cell) of the two-level fixtures can sit from
+# log(1/2), where every row's score is +-w and a level's own score
+# w (1 - p / (1 - p)) moves by -2w per unit of eta at p = 1/2:
+# - certified on its own rows (``mode_score.row_set_residual``), the level's
+#   score is within the bar of its own sum |s| = 2w, so its eta is within bar;
 # - excluded as weak, half its decrement 2w deta^2 / 2 is within the noise
 #   of its own rows, gamma_6 2w log 2, so deta <= sqrt(2 gamma_6 log 2);
 # each doubled for the curvature's change along the way.  The floors, of
@@ -701,7 +700,9 @@ _GAMMA_6 = 6.0 * 2.0**-53 / (1.0 - 6.0 * 2.0**-53)
 _TWO_LEVEL_BOUND = 2.0 * max(MODE_CERTIFICATION_BAR, math.sqrt(2.0 * _GAMMA_6 * math.log(2.0)))
 
 
-def _two_level_levels(weights: np.ndarray, offset: np.ndarray, direct_solve: str):
+def _two_level_levels(
+    weights: np.ndarray, offset: np.ndarray, direct_solve: str, base: str = "first"
+):
     """``(converged, largest |eta_level - log(1/2)|)`` of a two-level fit whose maxima are ``p = 1/2``."""
     model = SuperGLM(
         family="binomial",
@@ -709,7 +710,7 @@ def _two_level_levels(weights: np.ndarray, offset: np.ndarray, direct_solve: str
         selection_penalty=0.0,
         direct_solve=direct_solve,
         weight_semantics="frequency",
-        features={"g": Categorical(base="first")},
+        features={"g": Categorical(base=base)},
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -725,61 +726,139 @@ def _two_level_levels(weights: np.ndarray, offset: np.ndarray, direct_solve: str
 
 @pytest.mark.parametrize("direct_solve", ["auto", "gram", "qr"])
 @pytest.mark.parametrize(
-    ("weights", "level_b_offset"),
+    ("weights", "offsets", "base", "must_converge"),
     [
-        ((1e4, 1e4, 1e-8, 1e-8), -30.0),  # Sol, on 6b2f2bed: p_b = 7.07e-7
-        ((1e8, 1e8, 1e-8, 1e-8), -20.0),  # Sol, on 2357a43a: p_b = 0.0676
+        # Sol, on 6b2f2bed: p_b = 7.07e-7
+        ((1e4, 1e4, 1e-8, 1e-8), (1.3, 1.3, -30.0, -30.0), "first", True),
+        # Sol, on 2357a43a: p_b = 0.0676
+        ((1e8, 1e8, 1e-8, 1e-8), (1.3, 1.3, -20.0, -20.0), "first", True),
+        # Sol, on 3520abec: the light level is the reference, p_a = 0.334
+        ((1e-8, 1e-8, 1e8, 1e8), (-20.0, -20.0, 1.3, 1.3), "a", False),
+        # the same fit with the heavy level as the reference reaches both maxima
+        ((1e-8, 1e-8, 1e8, 1e8), (-20.0, -20.0, 1.3, 1.3), "b", True),
     ],
 )
 def test_a_light_level_is_never_certified_away_from_its_own_maximum(
-    weights: tuple, level_b_offset: float, direct_solve: str
+    weights: tuple, offsets: tuple, base: str, must_converge: bool, direct_solve: str
 ) -> None:
-    """Sol's #437 fixtures: a heavy level at offset +1.3 and a light one far below the clip floor.
+    """Sol's #437 fixtures: a heavy level near offset +1.3 and a light one far below the clip floor.
 
-    Both levels' maxima are ``p = 1/2``.  6b2f2bed excluded the light level as
-    weak on its curvature at an unfinished iterate.  2357a43a measured its
-    block decrement against the noise of every row, dominated by the heavy
-    level, and certified ``p_b = 0.0676``.  The noise is now the light
-    level's own rows', and its relative score is scaled by its own rows'
-    ``zeta``.  The assertion is per level: an aggregate deviance hides a
-    light level's error.
+    Both levels' maxima are ``p = 1/2``.
+    - 6b2f2bed excluded the light level as weak on its curvature at an
+      unfinished iterate.
+    - 2357a43a measured its block decrement against the noise of every row,
+      which the heavy level dominates, and certified ``p_b = 0.0676``.
+    - 3520abec scaled each non-reference level by its own rows, but a light
+      *reference* level has no column: it was read only through the intercept,
+      whose scale the heavy level sets, and ``p_a = 0.334`` was certified.
+    Every level, the reference included, is now certified on its own rows
+    (``mode_score.row_set_residual``).  The assertion is per level.  With the
+    light level as the reference at ratio 1e16 the gram route cannot resolve
+    the direction that moves it alone, and that fit ends not converged; the
+    QR route reaches it.
     """
     converged, error = _two_level_levels(
-        np.array(weights), np.array([1.3, 1.3, level_b_offset, level_b_offset]), direct_solve
+        np.array(weights), np.array(offsets), direct_solve, base=base
     )
     assert not converged or error <= _TWO_LEVEL_BOUND, error
+    if must_converge or direct_solve == "qr":
+        assert converged
 
 
+@pytest.mark.parametrize("light_base", [False, True])
 @pytest.mark.parametrize("direct_solve", ["auto", "gram", "qr"])
-def test_a_weight_ratio_never_certifies_a_level_away_from_its_maximum(direct_solve: str) -> None:
-    """Level weights ``sqrt(ratio)`` and ``1 / sqrt(ratio)``, ratio 1 to 1e16, light level at -5 to -40.
+def test_a_weight_ratio_never_certifies_a_level_away_from_its_maximum(
+    direct_solve: str, light_base: bool
+) -> None:
+    """Level weights ``sqrt(ratio)`` and ``1 / sqrt(ratio)``, ratio 1 to 1e16, the light level at -5 to -40.
 
-    Every fit is per level within ``_TWO_LEVEL_BOUND`` of its own maximum, or
-    is not converged.  2357a43a certified levels up to 0.98 away in eta at
-    ratio 1e16.
+    The light level is the second level, or the reference.  Every fit is per
+    level within ``_TWO_LEVEL_BOUND`` of its own maximum, or is not converged;
+    2357a43a certified levels up to 0.98 away in eta, and 3520abec a light
+    reference level 0.40 away.  Every fit converges except a light reference
+    at ratio 1e12 and above on the gram route (auto takes gram here), which
+    cannot resolve the direction that moves that level alone.
     """
     for ratio in (1.0, 1e4, 1e8, 1e12, 1e16):
         heavy, light = math.sqrt(ratio), 1.0 / math.sqrt(ratio)
-        for level_b_offset in (-5.0, -10.0, -20.0, -30.0, -40.0):
+        for light_offset in (-5.0, -10.0, -20.0, -30.0, -40.0):
+            if light_base:
+                weights = np.array([light, light, heavy, heavy])
+                offsets = np.array([light_offset, light_offset, 1.3, 1.3])
+            else:
+                weights = np.array([heavy, heavy, light, light])
+                offsets = np.array([1.3, 1.3, light_offset, light_offset])
             converged, error = _two_level_levels(
-                np.array([heavy, heavy, light, light]),
-                np.array([1.3, 1.3, level_b_offset, level_b_offset]),
-                direct_solve,
+                weights, offsets, direct_solve, base="a" if light_base else "first"
             )
-            assert not converged or error <= _TWO_LEVEL_BOUND, (ratio, level_b_offset, error)
+            case = (ratio, light_offset, converged, error)
+            assert not converged or error <= _TWO_LEVEL_BOUND, case
+            if not light_base or ratio <= 1e8 or direct_solve == "qr":
+                assert converged, case
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram", "qr"])
+@pytest.mark.parametrize(("ratio", "light_offset"), [(1e8, -5.0), (1e8, -20.0), (1e16, -30.0)])
+def test_a_light_base_cell_of_an_interaction_is_never_certified_away_from_its_maximum(
+    ratio: float, light_offset: float, direct_solve: str
+) -> None:
+    """``A + B + A:B`` on 2 x 2 cells, the base cell ``(a0, b0)`` light and far below the clip floor.
+
+    Each cell holds one event and one non-event, so the saturated model's
+    maxima are ``p = 1/2`` in every cell.  The base cell has no column of
+    its own in any block, and the reference rows of ``A`` and of ``B`` pool
+    it with a heavy cell, so only the joint cells of the one-hot blocks read
+    it on its own rows.  3520abec certified it at ``p = 0.064`` (offset -5)
+    and below ``1e-8`` (offsets -20, -30).  The assertion is per cell; the
+    mildest case must converge.
+    """
+    heavy, light = math.sqrt(ratio), 1.0 / math.sqrt(ratio)
+    a, b, y, w, o = [], [], [], [], []
+    for cell_a, cell_b in (("a0", "b0"), ("a0", "b1"), ("a1", "b0"), ("a1", "b1")):
+        base_cell = (cell_a, cell_b) == ("a0", "b0")
+        for event in (0.0, 1.0):
+            a.append(cell_a)
+            b.append(cell_b)
+            y.append(event)
+            w.append(light if base_cell else heavy)
+            o.append(light_offset if base_cell else 1.3)
+    offsets = np.array(o)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        weight_semantics="frequency",
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+        interactions=[("A", "B")],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(
+            pd.DataFrame({"A": a, "B": b}), np.array(y), offset=offsets, sample_weight=np.array(w)
+        )
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept + offsets
+    error = float(np.max(np.abs(eta[::2] - math.log(0.5))))
+    assert not model.result.converged or error <= _TWO_LEVEL_BOUND, error
+    if (ratio, light_offset) == (1e8, -5.0):
+        assert model.result.converged
 
 
 @pytest.mark.parametrize(
-    ("low_scores", "second", "excluded"),
+    ("low_scores", "second", "excluded", "row_noise"),
     [
-        ((1e-16, 0.0), 1e-3, True),  # at the mode along the pair: excluded
-        ((1e-12, 0.0), 1e-3, False),  # far from it: refused
-        ((1e-16, -2e-13), 1e-3, False),  # each slope passes alone, the pair does not
-        ((1e-16, 0.0), 0.0, True),  # identical columns: H_BB singular, g in its range
+        ((1e-16, 0.0), 1e-3, True, None),  # at the mode along the pair: excluded
+        ((1e-12, 0.0), 1e-3, False, None),  # far from it: refused
+        ((1e-16, -2e-13), 1e-3, False, None),  # each slope passes alone, the pair does not
+        ((1e-16, 0.0), 0.0, True, None),  # identical columns: H_BB singular, g in its range
+        # noise by row: the heavy rows would admit anything, the block's own rows
+        # admit the aligned pair and not far from the mode
+        ((1e-16, 0.0), 1e-3, True, (1.0, 5e-11)),
+        ((1e-12, 0.0), 1e-3, False, (1.0, 5e-11)),
     ],
 )
 def test_the_weak_exclusion_reads_the_block_newton_decrement(
-    low_scores: tuple[float, float], second: float, excluded: bool
+    low_scores: tuple[float, float], second: float, excluded: bool, row_noise
 ) -> None:
     """``penalized_mode_residual``'s weak exclusion, by table: allowed, refused, refused as a block.
 
@@ -830,7 +909,15 @@ def test_the_weak_exclusion_reads_the_block_newton_decrement(
         penalty_curvature=np.zeros(2),
         sum_w=sum_w,
         bar=MODE_CERTIFICATION_BAR,
-        decrement_noise=lambda support: 1e-10,
+        decrement_noise=(
+            (lambda support: 1e-10)
+            if row_noise is None
+            else (
+                lambda support: float(
+                    np.sum(np.where(np.arange(10) < 8, row_noise[0], row_noise[1])[support])
+                )
+            )
+        ),
     )
     assert np.all(residual.relative[1:] > MODE_CERTIFICATION_BAR)
     assert bool(np.all(residual.excluded)) is excluded
@@ -847,6 +934,128 @@ def test_the_underflow_allowance_is_representable() -> None:
         assert _underflow_allowance(rows) == (rows + 2) * _SUBNORMAL_SPACING > 0.0
 
 
+@pytest.mark.parametrize(
+    ("light_scores", "light_y", "separated"),
+    [
+        ((0.0, 1e-300), (0.0, 1.0), False),  # a non-event's score underflowed: still mixed
+        ((-1e-300, 0.0), (0.0, 0.0), True),  # no events: no interior maximum
+    ],
+)
+def test_a_reference_level_is_separated_only_by_its_responses(
+    light_scores: tuple, light_y: tuple, separated: bool
+) -> None:
+    """``row_set_residual`` on a light reference level beside a balanced heavy level.
+
+    The reference rows (no column of the block) are summed directly.  A level
+    holding an event and a non-event has an interior maximum, even where the
+    non-event's score ``-w odds`` has underflowed to zero at weight 1e-300:
+    its own score, 1e-300 of 1e-300, is then refused.  A level without
+    events has no interior maximum and is left to the weak test.  Reading
+    separation off the scores' signs instead certified such a light level
+    on the 10,800-fit sweep at weights near 1e-300.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import row_set_residual
+
+    dm = DesignMatrix([CategoricalGroupMatrix(np.array([-1, -1, 0, 0]), 1)], n=4, p=1)
+    ratio = row_set_residual(
+        dm=dm,
+        row_score=np.array([*light_scores, -1.0, 1.0]),
+        response=np.array([*light_y, 0.0, 1.0]),
+        fisher_weights=np.array([1e-300, 1e-300, 1.0, 1.0]),
+        positive_prior=np.ones(4, dtype=bool),
+        eta=np.full(4, math.log(0.5)),
+        column_penalty=np.zeros(1),
+        column_penalty_size=np.zeros(1),
+        column_curvature=np.zeros(1),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert (ratio <= 1.0) is separated
+
+
+@pytest.mark.parametrize(("slopes", "excluded"), [(32, True), (33, False)])
+def test_a_weak_set_at_the_block_limit_is_formed_and_one_past_it_is_refused(
+    slopes: int, excluded: bool
+) -> None:
+    """``_WEAK_BLOCK_LIMIT`` (32): a weak set of 32 slopes is formed and excluded, of 33 refused.
+
+    Each slope's column is one row of Fisher weight 1e-20 beside eight of
+    weight 1, its score 1e-16 there, so it misses the bar (relative score
+    about 3.5e-7) and is weak; half the block decrement, ``k a^2 / 2e-20``,
+    is at most 1.6e-11 against a noise of 1e-10.  Above the limit the
+    exclusion is refused, the safe direction, and the slopes stay in the
+    ratio.
+    """
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import _WEAK_BLOCK_LIMIT, penalized_mode_residual
+
+    assert _WEAK_BLOCK_LIMIT == 32
+    n = 8 + slopes
+    columns = np.zeros((n, slopes))
+    columns[8 + np.arange(slopes), np.arange(slopes)] = 1.0
+    dm = DesignMatrix([DenseGroupMatrix(columns)], n=n, p=slopes)
+    fisher = np.append(np.ones(8), np.full(slopes, 1e-20))
+    score = np.append(np.tile([1.0, -1.0], 4), np.full(slopes, 1e-16))
+    sum_w = float(np.sum(fisher))
+    mean_x = fisher @ columns / sum_w
+    diagonal = fisher @ (columns - mean_x) ** 2
+    residual = penalized_mode_residual(
+        dm=dm,
+        row_score=score,
+        fisher_weights=fisher,
+        positive_prior=np.ones(n, dtype=bool),
+        mean_x=mean_x,
+        centered_scale=np.sqrt(diagonal / sum_w),
+        alpha=0.0,
+        eta_tilde=np.zeros(n),
+        penalty_score=np.zeros(slopes),
+        penalty_magnitude=np.zeros(slopes),
+        penalty_curvature=np.zeros(slopes),
+        sum_w=sum_w,
+        bar=MODE_CERTIFICATION_BAR,
+        decrement_noise=lambda support: 1e-10,
+    )
+    assert np.all(residual.relative[1:] > MODE_CERTIFICATION_BAR)
+    assert bool(np.all(residual.excluded)) is excluded
+    assert (residual.ratio() <= 1.0) is excluded
+
+
+@pytest.mark.parametrize("rows", [8191, 8192, 8193, 16385])
+def test_the_weak_block_gram_is_whole_across_its_row_chunks(rows: int) -> None:
+    """``_centred_block_gram`` at and across the 8192-row chunk boundary: every row counted once.
+
+    Against the same corrected two-pass cross products formed in one pass
+    with ``math.fsum``, to ``gamma_{rows + 4}`` of ``sum w |x~| |x~|'``; the
+    support is the rows where either column is nonzero, the last row
+    included.
+    """
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import _centred_block_gram
+
+    rng = np.random.default_rng(rows)
+    columns = rng.normal(size=(rows, 2))
+    columns[rows // 3 : rows // 2] = 0.0
+    columns[-1] = (2.0, -3.0)
+    weights = rng.uniform(0.5, 2.0, rows)
+    dm = DesignMatrix([DenseGroupMatrix(columns)], n=rows, p=2)
+    mean_x = weights @ columns / float(np.sum(weights))
+    gram, support = _centred_block_gram(dm, np.arange(2), mean_x, weights)
+    centred = columns - mean_x
+    total = math.fsum(weights)
+    gamma = (rows + 4) * _U / (1.0 - (rows + 4) * _U)
+    for j in range(2):
+        for k in range(2):
+            first_j = math.fsum(weights * centred[:, j])
+            first_k = math.fsum(weights * centred[:, k])
+            expected = (
+                math.fsum(weights * centred[:, j] * centred[:, k]) - first_j * first_k / total
+            )
+            size = math.fsum(weights * np.abs(centred[:, j] * centred[:, k]))
+            assert abs(gram[j, k] - expected) <= gamma * size, (j, k)
+    assert np.array_equal(support, np.any(columns != 0.0, axis=1))
+
+
 @pytest.mark.parametrize(("row", "refused"), [(-(2.0**-52), False), (-1e-3, True)])
 def test_a_scop_observed_row_is_signed_only_beyond_its_rounding(row: float, refused: bool) -> None:
     """SCOP's observed rows: a negative row within its rounding is zero, one beyond it is refused.
@@ -856,8 +1065,8 @@ def test_a_scop_observed_row_is_signed_only_beyond_its_rounding(row: float, refu
     and -2.2e-16 on the macOS, Windows and ARM64 runners, where 2357a43a's
     ``test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates`` raised
     "signed observed-information rows are not supported".  Rows are within
-    ``8u`` of their terms' scale (``observed_row_error_scale``, at least 1
-    here: the Fisher part of a row at ``p = 1/2``).
+    ``gamma_20`` of their terms' scale (``observed_row_error_scale``, at
+    least 1 here: the Fisher part of a row at ``p = 1/2``).
     """
     from superglm.reml.observed_geometry import compute_scop_observed_information_weights
 
@@ -1370,6 +1579,67 @@ def test_a_fisher_certified_stop_beside_a_clipped_row_is_the_models_mode(converg
     assert result.converged
     assert profile.get("irls_mean_space_newton_iters", 0) == 0
     assert result.mean_space_true_mode
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
+def test_a_rare_event_random_effect_level_is_certified_at_its_own_mode(direct_solve: str) -> None:
+    """claude's #437 fixture: a random-effect level of one event row at offset -40 beside two heavy levels.
+
+    ``RandomEffect`` at a fixed lambda of 1.  The event row's score is its
+    weight, 1, wherever its mean is, so the level's own stationarity ``1 -
+    lambda beta_c = 0`` puts its mode at ``beta_c = 1`` exactly.  Clipped
+    Fisher scoring credits the row with about ``e^eta / 1e-7`` of that score
+    and stops near ``beta_c = 0``.  Master and 3520abec certified it there;
+    3520abec's level ``zeta`` loosened the level's test by ``mu^(-1/2)``.
+    Certified on its own rows, ``|1 - lambda beta_c| <= bar (1 + lambda
+    |beta_c|)``, so ``beta_c`` is within ``2 bar`` of 1, doubled.
+    """
+    rng = np.random.default_rng(5)
+    levels = np.array(["a"] * 200 + ["b"] * 200 + ["c"])
+    y = np.append((rng.uniform(size=400) < 0.2).astype(np.float64), 1.0)
+    weights = np.append(np.full(400, 5e6), 1.0)
+    offset = np.append(np.zeros(400), -40.0)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        weight_semantics="frequency",
+        features={"g": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0))},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(pd.DataFrame({"g": levels}), y, offset=offset, sample_weight=weights)
+    assert model.result.converged
+    assert abs(float(model.result.beta[2]) - 1.0) <= 4.0 * MODE_CERTIFICATION_BAR
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
+def test_reml_with_a_separated_level_converges_as_on_master(direct_solve: str) -> None:
+    """claude's #437 question: an unpenalized level without events under ``fit_reml``.
+
+    Its maximum is at ``eta -> -infinity``, so its rows' scores all share one
+    sign; no set of its rows has an interior maximum to certify on its own
+    rows, and the row-set test leaves it to the weak test, which excludes and
+    discloses it (#425's convention).  The fit converges, as on master.
+    """
+    rng = np.random.default_rng(7)
+    n = 600
+    category = rng.choice(["p", "q", "r"], n)
+    group = rng.choice([f"g{k}" for k in range(8)], n)
+    probability = np.where(category == "r", 0.0, np.where(category == "p", 0.15, 0.3))
+    y = (rng.uniform(size=n) < probability).astype(np.float64)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={"c": Categorical(base="first"), "g": RandomEffect()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(pd.DataFrame({"c": category, "g": group}), y)
+    assert model.result.converged
 
 
 def test_reml_keeps_a_zero_weight_row_at_the_clip() -> None:

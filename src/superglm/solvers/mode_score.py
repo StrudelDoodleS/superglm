@@ -659,6 +659,177 @@ def _half_block_decrement(hessian: NDArray, gradient: NDArray) -> float:
     return 0.5 * float(np.sum(projection[kept] ** 2 / values[kept]))
 
 
+# Above this many joint cells of the one-hot blocks the cell sets are not
+# formed (their incidence SVD); every level and reference set still is.
+_ROW_SET_CELL_LIMIT = 4096
+
+
+def row_set_residual(
+    *,
+    dm: DesignMatrix,
+    row_score: NDArray,
+    response: NDArray,
+    fisher_weights: NDArray,
+    positive_prior: NDArray,
+    eta: NDArray,
+    column_penalty: NDArray,
+    column_penalty_size: NDArray,
+    column_curvature: NDArray,
+    bar: float,
+    underflow: float,
+) -> float:
+    """The largest relative score of a set of rows the one-hot blocks move on their own.
+
+    The relative penalized score scales every coordinate by one global
+    ``zeta``, which the heaviest rows set: a level carrying ``w`` of the
+    weight ``W`` then passes about ``sqrt(W / w)`` bars from its own maximum.
+    And a reference level has no column of its own, so a light reference
+    level is read only through the intercept, whose scale the heavy levels
+    set.  Every set ``R`` of rows the model can move independently is
+    therefore certified on its own rows: the score along its indicator, less
+    the penalty's gradient along the coefficient direction ``d_R`` that moves
+    it,
+
+        g_R = sum_{i in R} s_i - d_R' (S beta),
+
+    within the bar of its own terms' size, ``sum_{i in R} |s_i| + |d_R|'
+    (|S| |beta|)``, or of their rounding, ``gamma_{|R| + 2}`` of the rows'
+    sum, ``u`` of their predictor's representation ``sum f_i |eta_i|`` and
+    ``gamma_{p + 2}`` of the penalty's size.  The sets, by one rule (an
+    indicator in the span of the intercept and the one-hot columns):
+    - each level of each one-hot block (``CategoricalGroupMatrix``, random
+      effects included), ``d_R`` its column;
+    - each block's reference rows, the rows no column of it holds, summed
+      directly over those rows, ``d_R`` the intercept less the block's
+      columns;
+    - with two or more blocks, each joint cell of their codes whose
+      indicator lies in that span (the incidence's projector reads 1 on its
+      diagonal), ``d_R`` the least-squares direction that moves it alone:
+      the cells of a saturated interaction, base cells included.  Above
+      ``_ROW_SET_CELL_LIMIT`` cells these are not formed.
+    A set whose positive-weight rows' responses are all zero, or all one, and
+    whose direction carries no penalty has no interior maximum (its supremum
+    is at infinity, or at the mean space's boundary): it is the separation
+    the weak test discloses, and it is not tested here.  That is read off
+    the responses, not off the scores' signs: a non-event's score ``-w
+    odds`` underflows to zero at small enough weights and means, and would
+    hide a level's event rows behind it.  A set whose bar falls within ``underflow``
+    cannot be resolved and is refused (``inf``).  ``column_*`` are per
+    column in the weights' units: the penalty gradient (with any active
+    constraint's multipliers), its size ``|S| |beta|``, and ``diag S``.
+    """
+    groups = []
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if isinstance(matrix, CategoricalGroupMatrix):
+            groups.append((offset, matrix))
+        offset += width
+    if not groups:
+        return 0.0
+    score = np.asarray(row_score, dtype=np.float64)
+    positive = np.asarray(positive_prior, dtype=bool)
+    absolute = np.abs(score)
+    represented = np.asarray(fisher_weights, dtype=np.float64) * np.abs(eta)
+    observed = np.asarray(response, dtype=np.float64)
+    rising = (positive & (observed > 0.0)).astype(np.float64)
+    falling = (positive & (observed < 1.0)).astype(np.float64)
+    carried = positive.astype(np.float64)
+    penalty = np.asarray(column_penalty, dtype=np.float64)
+    size = np.asarray(column_penalty_size, dtype=np.float64)
+    curvature = np.asarray(column_curvature, dtype=np.float64)
+    p = dm.p
+    worst = 0.0
+
+    def judge(
+        own,
+        absolute_sum,
+        represented_sum,
+        count,
+        up,
+        down,
+        direction_penalty,
+        direction_size,
+        direction_curvature,
+    ):
+        nonlocal worst
+        if count <= 0.0:
+            return
+        if direction_curvature <= 0.0 and (up == 0.0 or down == 0.0):
+            return  # separated: no interior maximum on these rows
+        scale = absolute_sum + direction_size
+        if not (math.isfinite(scale) and math.isfinite(direction_penalty)):
+            worst = math.inf
+            return
+        if bar * scale <= underflow:
+            worst = math.inf
+            return
+        residual = abs(own - direction_penalty)
+        floor = (
+            _gamma(int(count) + 2) * absolute_sum
+            + _UNIT_ROUNDOFF * represented_sum
+            + _gamma(p + 2) * direction_size
+        )
+        worst = max(worst, residual / max(bar * scale, floor))
+
+    for start, matrix in groups:
+        levels = matrix.n_levels
+        codes = matrix.codes
+        columns = slice(start, start + levels)
+        sums = [
+            np.bincount(codes, weights=values, minlength=levels + 1)
+            for values in (score, absolute, represented, carried, rising, falling)
+        ]
+        for level in range(levels + 1):
+            if level < levels:
+                column = start + level
+                direction = (penalty[column], size[column], curvature[column])
+            else:  # the reference rows: intercept less every column of the block
+                direction = (
+                    -float(np.sum(penalty[columns])),
+                    float(np.sum(size[columns])),
+                    float(np.sum(curvature[columns])),
+                )
+            judge(*(float(total[level]) for total in sums), *direction)
+    if len(groups) < 2:
+        return worst
+    stacked = np.column_stack([matrix.codes for _, matrix in groups])
+    cells, cell_of_row = np.unique(stacked, axis=0, return_inverse=True)
+    cell_of_row = np.asarray(cell_of_row).reshape(-1)
+    if len(cells) > _ROW_SET_CELL_LIMIT:
+        return worst
+    incidence = [np.ones(len(cells))]
+    one_hot = []
+    for position, (start, matrix) in enumerate(groups):
+        for level in range(matrix.n_levels):
+            incidence.append((cells[:, position] == level).astype(np.float64))
+            one_hot.append(start + level)
+    incidence_matrix = np.column_stack(incidence)
+    left, singular, right = np.linalg.svd(incidence_matrix, full_matrices=False)
+    rank = int(np.sum(singular > singular[0] * max(incidence_matrix.shape) * _EPS))
+    basis = left[:, :rank]
+    movable = np.sum(basis**2, axis=1) >= 1.0 - 1e-8
+    if not np.any(movable):
+        return worst
+    # the coefficient direction moving each movable cell alone (minimum norm)
+    solve = right[:rank].T / singular[:rank]
+    column_index = np.asarray(one_hot, dtype=np.intp)
+    sums = [
+        np.bincount(cell_of_row, weights=values, minlength=len(cells))
+        for values in (score, absolute, represented, carried, rising, falling)
+    ]
+    for cell in np.flatnonzero(movable):
+        direction = solve @ basis[cell]  # (1 + one-hot columns,): intercept first
+        weights_on_columns = direction[1:]
+        judge(
+            *(float(total[cell]) for total in sums),
+            float(weights_on_columns @ penalty[column_index]),
+            float(np.abs(weights_on_columns) @ size[column_index]),
+            float(np.abs(weights_on_columns) @ curvature[column_index]),
+        )
+    return worst
+
+
 def penalized_mode_residual(
     *,
     dm: DesignMatrix,
@@ -679,7 +850,6 @@ def penalized_mode_residual(
     column_shift: NDArray | None = None,
     decrement_noise: Callable[[NDArray], float] | None = None,
     penalty_block: Callable[[NDArray], NDArray] | None = None,
-    level_zeta: bool = False,
 ) -> ModeResidual:
     """Evaluate the shared relative score (module docstring) at one iterate.
 
@@ -728,27 +898,22 @@ def penalized_mode_residual(
       slopes are newly weak.
     - The noise is the objective's own over the rows the block touches,
       ``decrement_noise(S)`` for ``S`` the support of ``X_B``, the rows where
-      any of its columns is nonzero.  A Newton step in ``B`` with the
+      any of its columns is nonzero.  A step ``d`` in ``B`` with the raw
       intercept held changes ``eta`` on ``S`` alone, so the objective's
       change is ``sum_{i in S} [l_i(eta_i + x_iB' d) - l_i(eta_i)]``, and
       evaluating it in float64 carries about ``gamma_{|S|}`` times ``sum_{i
-      in S} |l_i|`` (each row's own few roundings add a few ``u |l_i|``).  A
-      gain within that noise cannot be told from none; one beyond it is a
-      step the fit has not taken.  Rows outside ``S`` carry noise the step
-      never meets: a heavy level's rounding must not hide a light level's
-      gain.  For one-hot levels ``S`` is the levels' own rows; for a dense
-      or spline column it is its nonzero rows, possibly all of them.
+      in S} |l_i|`` (each row's own few roundings add a few ``u |l_i|``).  The
+      decrement itself is formed in centred coordinates, whose step also
+      moves every row by ``-m_B' d``: the profiled gain, never below the
+      held-intercept one, so measuring it against ``S``'s noise can only
+      refuse more.  A gain within that noise cannot be told from none; one
+      beyond it is a step the fit has not taken.  Rows outside ``S`` carry
+      noise that a step on ``S`` alone never meets: a heavy level's rounding
+      must not hide a light level's gain.  For one-hot levels ``S`` is the
+      levels' own rows; for a dense or spline column it is its nonzero
+      rows, possibly all of them.
     If the gain exceeds the noise, no slope of this evaluation is excluded as
     weak.
-
-    ``level_zeta`` scales each one-hot level by its own rows' ``zeta``,
-    ``sum_level |s| / sqrt(sum_level w)``, in place of the global one.  The
-    global ``zeta`` is set by the heaviest rows: a level carrying ``w`` of
-    the total weight ``W`` passes it while its own score is about ``sqrt(W /
-    w)`` bars from zero, so at ``W / w = 1e16`` a level's probability could be
-    certified anywhere.  Against its own rows' scale the level is held to the
-    bar on its own score, and its floors to its own rows' rounding.  Other
-    columns keep the global ``zeta``.
     """
     n, p = dm.n, dm.p
     total = float(np.sum(row_score))
@@ -769,23 +934,6 @@ def penalized_mode_residual(
         if column_shift is None
         else np.ldexp(np.full(p, zeta), -(np.asarray(column_shift) // 2))
     )
-    if level_zeta:
-        levels = one_hot_columns(dm)
-        if np.any(levels):
-            level_weight = np.asarray(
-                dm.rmatvec(np.asarray(fisher_weights, dtype=np.float64)), dtype=np.float64
-            )[levels]
-            level_score = np.asarray(dm.rmatvec(absolute), dtype=np.float64)[levels]
-            own = np.full(p, zeta)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                own[levels] = np.where(
-                    level_weight > 0.0,
-                    level_score / np.sqrt(np.maximum(level_weight, _TINY)),
-                    zeta,
-                )
-            column_zeta = (
-                own if column_shift is None else np.ldexp(own, -(np.asarray(column_shift) // 2))
-            )
     curvature_root = np.sqrt(
         shifted((np.maximum(centered_scale, resolution) * root_weight) ** 2)
         + np.maximum(np.asarray(penalty_curvature, dtype=np.float64), 0.0)
