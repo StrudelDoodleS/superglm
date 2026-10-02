@@ -5,11 +5,11 @@ from __future__ import annotations
 import math
 from contextlib import contextmanager
 from dataclasses import replace
+from types import FunctionType, SimpleNamespace
 
 import numpy as np
 import pytest
 from numba import njit  # type: ignore[import-untyped]
-from numba.core.caching import FunctionCache, NullCache  # type: ignore[import-untyped]
 from numba.core.dispatcher import Dispatcher  # type: ignore[import-untyped]
 from scipy.special import polygamma
 
@@ -681,8 +681,8 @@ def test_compiled_order_zero_series_skips_all_special_function_channels() -> Non
     coefficients = np.empty(10, dtype=np.float64)
     with _compiled_with(
         ("_series_summary",), _term_derivative_channels=forbidden_channels
-    ) as compiled_module:
-        summary = compiled_module._series_summary(
+    ) as stand_in:
+        summary = stand_in._series_summary(
             math.log(2.0),
             math.nan,
             math.nan,
@@ -695,7 +695,7 @@ def test_compiled_order_zero_series_skips_all_special_function_channels() -> Non
         )
         assert summary[0] == 0
         with pytest.raises(RuntimeError, match="order-zero special-function poison"):
-            compiled_module._series_summary(
+            stand_in._series_summary(
                 math.log(2.0),
                 1.0,
                 math.nan,
@@ -725,15 +725,23 @@ _SERIES_PATH = (
 
 @contextmanager
 def _compiled_with(recompiled: tuple[str, ...], **stand_ins):
-    """Recompile ``recompiled`` against njit stand-ins for compiled-module globals.
+    """Yield the compiled module's namespace with ``recompiled`` copied onto njit stand-ins.
 
-    ``Dispatcher.recompile()`` saves to Numba's disk cache under a key hashed from
-    the caller's own bytecode only, so a stand-in compiled into a caller would be
-    loaded by every later or concurrent process, and a counting stand-in would then
-    write past production's ten-element ``coefficients``. While patched, every
-    dispatcher that can reach a stand-in, and every recompiled one, compiles without
-    its disk cache; on exit their production overloads are reloaded from the
-    untouched cache instead of recompiled. Other callees keep loading from disk.
+    Each name in ``recompiled`` becomes an uncached njit copy of its production
+    function under its own qualified name, resolving its globals in a copy of the
+    module namespace where the stand-ins and the other copies replace the
+    production functions.  The production dispatchers, their overloads, caches
+    and module globals are never touched, so nothing needs restoring.
+
+    The copies must not keep the production names.  Numba links each callee into
+    a caller as a weak symbol named by its qualified name and a per-process
+    compile counter (``FunctionIdentity`` uid), keeps every compiled function
+    resident, and its JIT binds a weak symbol to the first definition of that
+    name it holds.  A production function recompiled against a stand-in under its
+    own name stayed resident, so a production caller loaded later from the disk
+    cache, compiled by a process whose counter gave the callee the same uid, ran
+    the stand-in: the order-dependent poison and spare-slot failures of #433
+    (reproduced by aligning the uid; any other uid ran production code).
     """
     compiled_module = tweedie_kernel._compiled
     dispatchers = {
@@ -742,44 +750,65 @@ def _compiled_with(recompiled: tuple[str, ...], **stand_ins):
         if isinstance(value, Dispatcher)
     }
     calls = {
-        name: set(dispatcher.py_func.__code__.co_names) for name, dispatcher in dispatchers.items()
+        name: set(dispatcher.py_func.__code__.co_names) & dispatchers.keys()
+        for name, dispatcher in dispatchers.items()
     }
-    tainted = set(stand_ins)
-    while grown := {name for name, called in calls.items() if called & tainted} - tainted:
-        tainted |= grown
-    saved = [
-        (name, dispatchers[name], dispatchers[name]._cache, tuple(dispatchers[name].overloads))
-        for name in sorted(tainted | set(recompiled))
-    ]
-    originals = {name: getattr(compiled_module, name) for name in stand_ins}
-    for _, dispatcher, _, _ in saved:
-        dispatcher._cache = NullCache()
-    try:
-        for name, stand_in in stand_ins.items():
-            setattr(compiled_module, name, stand_in)
-        for name in recompiled:
-            getattr(compiled_module, name).recompile()
-        yield compiled_module
-    finally:
-        for name, original in originals.items():
-            setattr(compiled_module, name, original)
-        stale = []
-        for name, dispatcher, cache, signatures in saved:
-            dispatcher._cache = cache
-            if name in recompiled or tuple(dispatcher.overloads) != signatures:
-                dispatcher._make_finalizer()()
-                dispatcher._reset_overloads()
-                stale.append((dispatcher, signatures))
-        # Reload only once no dispatcher holds a stand-in overload: a disk miss compiles
-        # from source, linking whatever each callee holds, and saves the production key.
-        for dispatcher, signatures in stale:
-            for signature in signatures:
-                dispatcher.compile(signature)
-    # Reached only when the body passed, so this never masks the body's own failure.
-    assert all(isinstance(dispatcher._cache, FunctionCache) for _, dispatcher, _, _ in saved)
-    # A stand-in left as a module global survives a disk-cache reload (the key ignores
-    # globals), so every later recompile in this worker would link it back in.
-    assert all(getattr(compiled_module, name) is original for name, original in originals.items())
+    reaches = set(stand_ins)
+    while grown := {name for name, called in calls.items() if called & reaches} - reaches:
+        reaches |= grown
+    # A copy calling a production function that reaches a stand-in would link
+    # production code where the test means the stand-in.
+    for name in recompiled:
+        assert not (calls[name] & reaches) - set(recompiled) - set(stand_ins), name
+    namespace = dict(vars(compiled_module))
+    namespace.update(stand_ins)
+    for name in recompiled:
+        production = dispatchers[name]
+        function = FunctionType(production.py_func.__code__, namespace, f"_stand_in{name}")
+        function.__qualname__ = function.__name__
+        options = {
+            k: v for k, v in production.targetoptions.items() if k not in ("cache", "nopython")
+        }
+        namespace[name] = njit(**options)(function)
+    yield SimpleNamespace(**namespace)
+
+
+def test_stand_ins_compile_under_their_own_names_and_leave_production_alone() -> None:
+    """No code linked against a stand-in carries a production function's name (#433).
+
+    A production name compiled against a stand-in stays resident and can capture
+    a production caller loaded later from the disk cache (``_compiled_with``).
+    Fails on the helper that recompiled the production dispatchers in place.
+    """
+    compiled_module = tweedie_kernel._compiled
+    production = {
+        name: value
+        for name, value in vars(compiled_module).items()
+        if isinstance(value, Dispatcher)
+    }
+    before = {name: dict(dispatcher.overloads) for name, dispatcher in production.items()}
+    production_names = {dispatcher.py_func.__qualname__ for dispatcher in production.values()}
+
+    @njit
+    def forbidden_channels(j, zeta_p, zeta_pp, inverse_r, derivative_order):
+        if j > 0:
+            raise RuntimeError("order-zero special-function poison")
+        return zeta_p, zeta_pp, inverse_r, float(derivative_order)
+
+    path = _POSITIVE_PATH[1:]
+    with _compiled_with(path, _term_derivative_channels=forbidden_channels) as stand_in:
+        arrays = _case_arrays(TWEEDIE_LSS_CASES[3])
+        with pytest.raises(RuntimeError, match="order-zero special-function poison"):
+            stand_in._evaluate_tweedie_batch_core(*arrays, 0, 1, 100_000, 37.0)
+        for name in path:
+            copy = getattr(stand_in, name)
+            assert copy is not production[name]
+            assert copy.overloads
+            assert not {cres.fndesc.qualname for cres in copy.overloads.values()} & (
+                production_names
+            )
+    for name, dispatcher in production.items():
+        assert all(dispatcher.overloads.get(key) is cres for key, cres in before[name].items())
 
 
 def test_series_prepares_log_gamma_coefficients_only_when_first_needed() -> None:
@@ -819,7 +848,9 @@ def test_series_prepares_log_gamma_coefficients_only_when_first_needed() -> None
         original_fill(alpha, coefficients)
         coefficients[10] += 1.0
 
-    with _compiled_with(_SERIES_PATH, _fill_log_gamma_increment_coefficients=counted_fill):
+    with _compiled_with(
+        _SERIES_PATH, _fill_log_gamma_increment_coefficients=counted_fill
+    ) as stand_in:
         for (
             case_id,
             zeta,
@@ -832,7 +863,7 @@ def test_series_prepares_log_gamma_coefficients_only_when_first_needed() -> None
             for derivative_order in range(3):
                 coefficients = np.empty(11, dtype=np.float64)
                 coefficients[10] = 0.0
-                summary = compiled_module._series_summary(
+                summary = stand_in._series_summary(
                     zeta,
                     0.25,
                     -0.125,
@@ -848,9 +879,8 @@ def test_series_prepares_log_gamma_coefficients_only_when_first_needed() -> None
                 np.testing.assert_equal(summary, baselines[case_id, derivative_order])
                 assert int(coefficients[10]) == expected_fills
 
-    # The restore must also put this process back on production code, which its disk-cache
-    # guard cannot see: the crossing case fills once, so a counting stand-in still live
-    # here would raise the spare slot to one.
+    # Production code is untouched: the crossing case fills once, so a counting stand-in
+    # reachable from the production function would raise the spare slot to one.
     crossing = next(case for case in cases if case[0] == "noninteger-crosses-threshold")
     _, zeta, inverse_r, alpha, max_terms, _, fills = crossing
     assert fills == 1
@@ -898,19 +928,19 @@ def test_series_reuses_mode_boundary_ratios_for_first_window_steps() -> None:
 
     with _compiled_with(
         ("_locate_series_mode", "_series_summary"), _log_adjacent_ratio=counted_ratio
-    ):
+    ) as stand_in:
         for case_id, zeta, expected_mode in cases:
             coefficients = np.empty(13, dtype=np.float64)
             coefficients[10:] = 0.0
             compiled_module._fill_log_gamma_increment_coefficients(1.0, coefficients)
-            located = compiled_module._locate_series_mode(zeta, 1.0, coefficients)
+            located = stand_in._locate_series_mode(zeta, 1.0, coefficients)
             assert located[0] == compiled_module.KERNEL_OK
             assert located[1] == expected_mode
             locate_counts = coefficients[10:].copy()
 
             for derivative_order in range(3):
                 coefficients[10:] = 0.0
-                summary = compiled_module._series_summary(
+                summary = stand_in._series_summary(
                     zeta,
                     0.25,
                     -0.125,
@@ -927,14 +957,18 @@ def test_series_reuses_mode_boundary_ratios_for_first_window_steps() -> None:
                 np.testing.assert_array_equal(coefficients[10:], locate_counts)
 
 
-def test_production_order_one_batch_skips_poisoned_trigamma() -> None:
+def test_production_order_one_batch_skips_poisoned_trigamma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     @njit
     def forbidden_trigamma(value):
         if value > 0.0:
             raise RuntimeError("order-one trigamma poison")
         return 0.0, 0.0
 
-    with _compiled_with(_POSITIVE_PATH, _digamma_trigamma_positive=forbidden_trigamma):
+    with _compiled_with(_POSITIVE_PATH, _digamma_trigamma_positive=forbidden_trigamma) as stand_in:
+        core = stand_in._evaluate_tweedie_batch_core
+        monkeypatch.setattr(tweedie_kernel, "_evaluate_tweedie_batch_core", core)
         arrays = _case_arrays(TWEEDIE_LSS_CASES[3])
         order_one = evaluate_tweedie_rows(*arrays, "prior", derivative_order=1)
         assert order_one.score is not None
