@@ -631,10 +631,10 @@ def compute_scop_observed_information_weights(
         # (y - mu)(u^2 V'/V^2 - v/V))`` takes about ten roundings for ``a =
         # u^2 V'/V^2``, four for ``b = v/V``, five more for ``a - b``, ``y - mu``,
         # the product, the sum and ``w``, and ``u``, ``v`` and ``mu`` each carry
-        # one library call's own error: within ``gamma_20`` of that scale the
-        # row is zero.  A row negative beyond it is signed and refused.
+        # one library call's own error, 22 in all: within ``gamma_22`` of that
+        # scale the row is zero.  A row negative beyond it is signed and refused.
         scale = observed_row_error_scale(distribution, link, y, mu, eta, sample_weight, observed)
-        rounding = (observed < 0.0) & (-observed <= _gamma(20) * scale)
+        rounding = (observed < 0.0) & (-observed <= _gamma(22) * scale)
         observed = np.where(rounding, 0.0, observed)
         if np.any(observed < 0.0):
             minimum = float(np.min(observed))

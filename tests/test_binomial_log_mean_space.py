@@ -1146,7 +1146,7 @@ def test_a_scop_observed_row_is_signed_only_beyond_its_rounding(row: float, refu
     and -2.2e-16 on the macOS, Windows and ARM64 runners, where 2357a43a's
     ``test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates`` raised
     "signed observed-information rows are not supported".  Rows are within
-    ``gamma_20`` of their terms' scale (``observed_row_error_scale``, at
+    ``gamma_22`` of their terms' scale (``observed_row_error_scale``, at
     least 1 here: the Fisher part of a row at ``p = 1/2``).
     """
     from superglm.reml.observed_geometry import compute_scop_observed_information_weights
