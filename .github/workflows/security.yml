@@ -76,6 +76,17 @@ jobs:
             --requirement "$RUNNER_TEMP/audit-requirements.txt" \
             --require-hashes --disable-pip --strict --progress-spinner off
 
+      # pip-audit sees only advisories in its database, so a re-resolution that moves a
+      # package back to a vulnerable release can pass it; compare with the base lock.
+      - name: No package below the base branch's lock
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          SUPERGLM_LOCK_BASE=FETCH_HEAD uv run --frozen --extra dev python -m pytest \
+            tests/test_supply_chain_governance.py -k lock_change_never_moves -p no:cacheprovider
+
   package-audit:
     name: Build and inspect package
     runs-on: ubuntu-latest

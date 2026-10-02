@@ -1,6 +1,11 @@
+import json
+import os
 import re
+import subprocess
 import tomllib
 from pathlib import Path
+
+from packaging.version import Version
 
 from tests.test_ci_contracts import _check_run_names, _compatibility_cases, _jobs
 
@@ -437,6 +442,16 @@ def test_dependabot_groups_python_and_github_actions_updates():
 
 
 _COOLDOWN_DAYS = 7
+# Packages admitted before the cooldown passes them: a security fix younger than the
+# window, with the advisories it fixes.  Each gets a fixed cutoff just after the fixing
+# release's upload in pyproject's ``exclude-newer-package``; drop it (and its entry
+# here) at the first lock bump after the window has passed that release.
+_COOLDOWN_EXEMPTIONS = {
+    "virtualenv": "21.14.2 fixes GHSA-8rjx-v5ww-45pp and GHSA-c947-3pg5-gm8q",
+}
+# Packages a lock change may move below the base lock, each with its reason.
+_LOCK_DOWNGRADE_EXEMPTIONS: dict[str, str] = {}
+_LOCK_BASELINE = "tests/fixtures/uv_lock_baseline.json"
 
 
 def _span_days(span: str) -> float:
@@ -460,18 +475,40 @@ def test_lock_bumps_wait_out_a_minimum_release_age():
     in ``uv.lock``, where ``uv lock --check`` (CI) fails if the setting and the
     lock disagree, and re-dates the cutoff only when it resolves again.
     Dependabot's own ``cooldown`` keeps its version updates to releases that
-    resolution accepts; it does not delay security updates, whose fix may then
-    need an ``exclude-newer-package`` exemption.  Seven days: 8 of the 10 supply-chain
-    attacks Woodruff surveyed were caught within a week ("We should all be using
-    dependency cooldowns", 2025).  Fails on a lock resolved without the window
-    (#428 locked a virtualenv published the same morning).
+    resolution accepts.  Seven days: 8 of the 10 supply-chain attacks Woodruff
+    surveyed were caught within a week ("We should all be using dependency
+    cooldowns", 2025).  Fails on a lock resolved without the window (#428 locked
+    a virtualenv published the same morning).
+
+    A security fix younger than the window is admitted by a listed exemption
+    (``_COOLDOWN_EXEMPTIONS``): a fixed RFC 3339 cutoff in ``exclude-newer-package``
+    just after the fixing release, which admits it and nothing newer, never
+    ``false`` or a duration, which would lift the window for that package.
     """
-    span = tomllib.loads(_read("pyproject.toml"))["tool"]["uv"].get("exclude-newer")
+    uv = tomllib.loads(_read("pyproject.toml"))["tool"]["uv"]
+    span = uv.get("exclude-newer")
     assert isinstance(span, str), "pyproject sets no relative uv exclude-newer"
     assert _span_days(span) >= _COOLDOWN_DAYS
-    options = tomllib.loads(_read("uv.lock")).get("options", {})
+    lock = tomllib.loads(_read("uv.lock"))
+    options = lock.get("options", {})
     assert "exclude-newer-span" in options, "uv.lock was not resolved under the cooldown"
     assert _span_days(options["exclude-newer-span"]) == _span_days(span)
+
+    exempt = uv.get("exclude-newer-package", {})
+    assert set(exempt) == set(_COOLDOWN_EXEMPTIONS), "every cooldown exemption is listed"
+    assert options.get("exclude-newer-package", {}) == exempt
+    for name, cutoff in exempt.items():
+        assert isinstance(cutoff, str) and re.fullmatch(
+            r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", cutoff
+        ), f"{name}: an exemption is a fixed cutoff, not {cutoff!r}"
+        uploads = [
+            artifact["upload-time"]
+            for package in lock["package"]
+            if package["name"] == name
+            for artifact in [package.get("sdist", {}), *package.get("wheels", [])]
+            if "upload-time" in artifact
+        ]
+        assert uploads and max(uploads) <= cutoff, f"{name} is locked past its exemption"
 
     dependabot = _read(".github/dependabot.yml")
     uv_config = dependabot.split('package-ecosystem: "uv"', maxsplit=1)[1].split(
@@ -480,6 +517,83 @@ def test_lock_bumps_wait_out_a_minimum_release_age():
     cooldown = re.search(r"cooldown:\s*\n\s+default-days:\s*(\d+)", uv_config)
     assert cooldown, "the uv updates set no Dependabot cooldown"
     assert int(cooldown[1]) >= _span_days(span)
+
+
+def _locked_versions(text: str) -> dict[str, list[str]]:
+    """Each locked package's versions (one per resolution fork), oldest first."""
+    versions: dict[str, list[str]] = {}
+    for package in tomllib.loads(text).get("package", []):
+        versions.setdefault(package["name"], []).append(package["version"])
+    return {name: sorted(found, key=Version) for name, found in versions.items()}
+
+
+def _git(*args: str) -> str | None:
+    try:
+        done = subprocess.run(
+            ["git", *args], cwd=ROOT, capture_output=True, text=True, timeout=60, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def _base_locks() -> list[tuple[str, dict[str, list[str]]]]:
+    """The locks this tree's ``uv.lock`` must not fall below, each with its source.
+
+    Always the recorded baseline (master's lock when it was last refreshed), which a
+    shallow clone can read.  Then the lock this tree's changes start from:
+    ``SUPERGLM_LOCK_BASE`` (a git ref; the security workflow fetches a pull
+    request's base branch), else the merge base with ``origin/master`` when the
+    history is present.  A named base that cannot be read fails, never passes.
+    """
+    recorded = json.loads(_read(_LOCK_BASELINE))
+    bases = [(_LOCK_BASELINE, {name: sorted(v, key=Version) for name, v in recorded.items()})]
+    named = os.environ.get("SUPERGLM_LOCK_BASE")
+    ref = named or (_git("merge-base", "HEAD", "origin/master") or "").strip()
+    if ref:
+        text = _git("show", f"{ref}:uv.lock")
+        assert text is not None or not named, f"SUPERGLM_LOCK_BASE={named!r} has no uv.lock"
+        if text is not None:
+            bases.append((f"uv.lock at {ref}", _locked_versions(text)))
+    return bases
+
+
+def _moved_below(base: dict[str, list[str]], lock: dict[str, list[str]]) -> dict[str, str]:
+    """Packages whose newest or oldest locked version is older than the base's."""
+    return {
+        name: f"{base[name]} -> {lock[name]}"
+        for name in base.keys() & lock.keys()
+        if Version(lock[name][-1]) < Version(base[name][-1])
+        or Version(lock[name][0]) < Version(base[name][0])
+    }
+
+
+def test_a_lock_change_never_moves_a_package_below_the_base_lock():
+    """No package goes back to an older version than the base lock without a listed reason.
+
+    A re-resolution can move a package down as readily as up: #445's first
+    cooldown re-lock took virtualenv from 21.14.2 back to 21.12.1, reopening
+    GHSA-8rjx-v5ww-45pp and GHSA-c947-3pg5-gm8q, which pip-audit could not see
+    (published as repository advisories that morning, in neither OSV nor
+    PyPI's advisory data).  Compared with the recorded baseline and, where git
+    can read it, the lock the change starts from (``_base_locks``).  A package
+    may go down only when ``_LOCK_DOWNGRADE_EXEMPTIONS`` names it with a reason.
+    Refresh the baseline at a lock bump with ``_record_lock_baseline()``.
+    """
+    lock = _locked_versions(_read("uv.lock"))
+    for source, base in _base_locks():
+        moved = {
+            name: change
+            for name, change in _moved_below(base, lock).items()
+            if name not in _LOCK_DOWNGRADE_EXEMPTIONS
+        }
+        assert not moved, f"uv.lock moves packages below {source}: {moved}"
+
+
+def _record_lock_baseline() -> None:
+    """Write ``uv.lock``'s versions as the recorded baseline (a maintenance helper)."""
+    versions = _locked_versions(_read("uv.lock"))
+    (ROOT / _LOCK_BASELINE).write_text(json.dumps(versions, indent=1, sort_keys=True) + "\n")
 
 
 def test_security_policy_and_codeowners_cover_governance_surfaces():
