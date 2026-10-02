@@ -941,7 +941,8 @@ _ROW_SET_CELL_LIMIT = 4096
 # formed only while its cost ``m k min(m, k)`` stays within this many flops.
 _ROW_SET_CORE_FLOPS = 2**31
 # The most nonzeros the two-block bridge sets' directions hold in one design
-# (about 50 MB): past it a bridge is held without its direction
+# (about 50 MB retained as CSR; formation first holds them in Python
+# dictionaries, several times that): past it a bridge is held without its direction
 # (``RowSets.bounded``).  Only a long chain of single-cell links reaches it.
 _ROW_SET_BRIDGE_NONZEROS = 2**22
 # The design's row sets, in its ``_structured_layout_cache`` (``row_sets``).
@@ -1595,6 +1596,236 @@ def row_set_residual(
             slack,
         )
     return worst
+
+
+@dataclass(frozen=True)
+class TruncatedDirection:
+    """Rows a direction the factorization truncates moves, judged on those rows (``truncated_direction_ratio``).
+
+    ``rows`` are the positive-weight rows the direction moves, ``columns`` the
+    coefficients it leans on most (at most eight, by size), and
+    ``information_ratio`` the Fisher information of the other rows that share
+    those coefficients over that of the moved rows.  ``at_maximum`` says the
+    rows sit at their own maximum along the direction (weakly identified);
+    otherwise the fit cannot be certified in float64.
+    """
+
+    rows: tuple[int, ...]
+    columns: tuple[int, ...]
+    information_ratio: float
+    at_maximum: bool
+
+
+# The design's bound on any row's l1 norm, in its ``_structured_layout_cache``.
+_ROW_L1_KEY = "row_l1_bound"
+
+
+def row_l1_bound(dm: DesignMatrix) -> float:
+    """``max_i sum_j |x_ij|`` bounded by ``sum_j max_i |x_ij|``, formed once per design.
+
+    A one-hot block contributes 1 (a row holds one of its columns or none);
+    any other block the largest entry of each column, one product per column.
+    Owner, lifetime and invalidation as ``row_sets``: it reads the design's
+    entries alone.
+    """
+    cache = getattr(dm, "_structured_layout_cache", None)
+    held = cache.get(_ROW_L1_KEY) if isinstance(cache, dict) else None
+    if isinstance(held, float):
+        return held
+    bound = 0.0
+    for matrix in dm.group_matrices:
+        if isinstance(matrix, CategoricalGroupMatrix):
+            bound += 1.0
+            continue
+        width = matrix.shape[1]
+        for column in range(width):
+            unit = np.zeros(width)
+            unit[column] = 1.0
+            bound += float(np.max(np.abs(np.asarray(matrix.matvec(unit))), initial=0.0))
+    if isinstance(cache, dict):
+        cache[_ROW_L1_KEY] = bound
+    return bound
+
+
+def null_basis_angle(decomposition: Any, rows: int) -> float:
+    """The angle within which a rank decision's discarded subspace is computed, or 1 without a gap.
+
+    The computed invariant subspace of an eigenvalue cluster lies within
+    ``p(n) eps ||A||_2 / gap`` of the true one, ``gap`` the distance from the
+    cluster to the nearest other eigenvalue (LAPACK Users' Guide, 3rd ed.,
+    section 4.7, after Parlett), and the singular subspace of a factor
+    likewise with its singular values (section 4.9).  The discarded cluster
+    holds every eigenvalue at or below the cutoff, so its gap is the smallest
+    retained one less the cutoff: a light set's vanishing curvature lies
+    inside the cluster and does not shrink it.  ``p(n)`` is the matrix's
+    larger dimension.  Without a gap the subspace is not resolved: 1.
+    """
+    retained = np.asarray(
+        decomposition.retained_values if decomposition.retained_values is not None else (),
+        dtype=np.float64,
+    )
+    width = int(decomposition.width)
+    if retained.size == 0:
+        return 1.0
+    if decomposition.method == "qr_svd":
+        sigma = np.sqrt(retained)
+        gap = float(np.min(sigma)) - float(decomposition.cutoff)
+        size = max(rows, width)
+        largest = float(np.max(sigma))
+    else:
+        gap = float(np.min(retained)) - float(decomposition.cutoff)
+        size = width
+        largest = float(np.max(retained))
+    if not gap > 0.0:
+        return 1.0
+    return min(1.0, size * _EPS * largest / gap)
+
+
+def truncated_direction_ratio(
+    *,
+    dm: DesignMatrix,
+    null_basis: NDArray,
+    angle: float,
+    mean_x: NDArray,
+    row_score: NDArray,
+    fisher_weights: NDArray,
+    response: NDArray,
+    positive_prior: NDArray,
+    penalty_gradient: NDArray,
+    penalty_size: NDArray,
+    penalty_apply: Callable[[NDArray], NDArray],
+    bar: float,
+    underflow: float,
+) -> tuple[float, tuple[TruncatedDirection, ...]]:
+    """The directions the factorization truncates, judged on the rows they move.
+
+    A light row set, weighing ~1e16 below the rows it shares coefficients
+    with, adds curvature below the rounding of ``X'WX``: the factorization
+    truncates its direction, and the relative score sums it beside the heavy
+    rows' rounding.  ``null_basis`` ``V`` spans the truncated subspace, to
+    within ``angle`` (``null_basis_angle``).  Each row's movement ``m = (X -
+    1 mean_x') V`` is read on the design, and the rows it moves beyond the
+    basis's error (``4 (angle + (p + 2) u)`` times the row's l1 bound times
+    ``|V|``, ``row_l1_bound``) are its support.
+
+    - **Structural.**  A direction that moves no row is aliasing: nothing to
+      judge.
+    - **Not hidden.**  Moved rows whose scores sum above ``bar`` times every
+      row's are seen by the relative score, which governs as before: two
+      nearly collinear columns move every row.
+    - **Hidden.**  The Newton step on the moved rows alone, ``delta =
+      C^+ G`` with ``C = M' F M + V' S V`` and ``G = M' s - V' S beta``
+      (score and Fisher weights of those rows only, brought to unit scale by
+      a power of two), moves each row by ``M delta`` in ``eta``.  Within
+      ``bar`` or its rounding (``gamma`` of the sums, the basis's error and
+      the penalty's size, through ``|C^+|``) on every row, the rows sit at
+      their own maximum: weakly identified.  Otherwise, where every row it
+      moves improves (a response of 0 moving down, of 1 up), the direction is
+      a separation, with no interior maximum (left to the separated sets);
+      else the fit cannot be certified in float64.
+
+    Returns the largest ``|M delta| / max(bar, floor)`` over uncertifiable
+    directions (0 where none) and the hidden directions found.  Nothing in
+    the literature certifies a maximum beyond float64's resolution
+    (Schwendinger, Grun & Hornik 2021 compare log-binomial solvers by the best
+    log-likelihood any of them reaches): this detects it and refuses.
+    """
+    basis = np.asarray(null_basis, dtype=np.float64)
+    if basis.ndim != 2 or basis.shape[1] == 0:
+        return 0.0, ()
+    positive = np.asarray(positive_prior, dtype=bool)
+    score = np.asarray(row_score, dtype=np.float64)
+    fisher = np.asarray(fisher_weights, dtype=np.float64)
+    observed = np.asarray(response, dtype=np.float64)
+    mean = np.asarray(mean_x, dtype=np.float64)
+    p = dm.p
+    moved = np.column_stack(
+        [
+            np.asarray(dm.matvec(basis[:, k]), dtype=np.float64) - float(mean @ basis[:, k])
+            for k in range(basis.shape[1])
+        ]
+    )
+    reach = row_l1_bound(dm) + float(np.sum(np.abs(mean)))
+    error = 4.0 * (angle + _gamma(p + 2)) * reach * np.max(np.abs(basis), axis=0)
+    support = positive & np.any(np.abs(moved) > error[None, :], axis=1)
+    if not support.any():
+        return 0.0, ()
+    total = float(np.sum(np.abs(score[positive])))
+    hidden = float(np.sum(np.abs(score[support])))
+    if not (math.isfinite(total) and math.isfinite(hidden)) or hidden > bar * total:
+        return 0.0, ()
+    rows_moved = moved[support]
+    _, singular, right = np.linalg.svd(rows_moved, full_matrices=False)
+    keep = singular > float(np.max(singular, initial=0.0)) * 4.0 * rows_moved.shape[0] * _EPS
+    if not np.any(keep):
+        return 0.0, ()
+    turn = right[keep].T
+    local = rows_moved @ turn
+    direction = basis @ turn
+    still = right[~keep].T
+    if still.shape[1]:
+        # less what the directions that move no row add: the least-norm
+        # direction that moves these rows, so the coefficients named are its own
+        structural = basis @ still
+        direction = direction - structural @ np.linalg.lstsq(structural, direction, rcond=None)[0]
+    s_local, f_local = score[support], fisher[support]
+    largest = float(np.max(np.concatenate([np.abs(s_local), f_local]), initial=0.0))
+    if not (math.isfinite(largest) and largest > 0.0):
+        return 0.0, ()
+    exponent = -int(np.frexp(largest)[1])
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        s_local = np.ldexp(s_local, exponent)
+        f_local = np.ldexp(f_local, exponent)
+        pull = np.ldexp(direction.T @ np.asarray(penalty_gradient, dtype=np.float64), exponent)
+        pull_size = np.ldexp(
+            np.abs(direction).T @ np.asarray(penalty_size, dtype=np.float64), exponent
+        )
+        stiffness = np.column_stack(
+            [
+                np.ldexp(np.asarray(penalty_apply(direction[:, j]), dtype=np.float64), exponent)
+                for j in range(direction.shape[1])
+            ]
+        )
+        curvature = local.T @ (f_local[:, None] * local) + direction.T @ stiffness
+        gradient = local.T @ s_local - pull
+    if not (np.all(np.isfinite(curvature)) and np.all(np.isfinite(gradient))):
+        return 0.0, ()
+    curvature = 0.5 * (curvature + curvature.T)
+    values, vectors = np.linalg.eigh(curvature)
+    kept = values > float(np.max(np.abs(values), initial=0.0)) * 4.0 * len(values) * _EPS
+    inverse = (vectors[:, kept] / values[kept]) @ vectors[:, kept].T
+    steps = local @ (inverse @ gradient)
+    local_error = error @ np.abs(turn)  # each direction's movement error, per unit
+    rounding = (
+        _gamma(len(s_local) + 2) * (np.abs(local).T @ np.abs(s_local))
+        + np.abs(s_local) @ np.ones((len(s_local), 1)) * local_error
+        + _gamma(p + 2) * pull_size
+        + np.ldexp(underflow, exponent)
+    ).ravel()
+    floor = np.abs(local) @ (np.abs(inverse) @ rounding) + _gamma(4 * len(s_local)) * np.abs(steps)
+    limit = np.maximum(bar, floor)
+    over = np.abs(steps) > limit
+    rows = np.flatnonzero(support)
+    weights = np.abs(direction).max(axis=1)
+    # a coefficient the direction leans on beyond its basis's error
+    significant = weights > 4.0 * (angle + _gamma(p + 2)) * float(np.max(weights))
+    columns = tuple(int(j) for j in np.argsort(-weights)[:8] if significant[j])
+    shared = np.zeros(dm.n, dtype=bool)
+    for column in np.flatnonzero(significant):
+        unit = np.zeros(p)
+        unit[column] = 1.0
+        shared |= np.asarray(dm.matvec(unit)) != 0.0
+    shared &= positive & ~support
+    information = float(np.sum(fisher[shared])) / max(float(np.sum(fisher[support])), _TINY)
+    if not over.any():
+        return 0.0, (TruncatedDirection(tuple(int(i) for i in rows), columns, information, True),)
+    y_moved, step_moved = observed[rows[over]], steps[over]
+    improving = ((y_moved == 0.0) & (step_moved < 0.0)) | ((y_moved == 1.0) & (step_moved > 0.0))
+    if np.all(improving):
+        return 0.0, ()  # a separation: no interior maximum
+    ratio = float(np.max(np.abs(steps) / limit))
+    record = TruncatedDirection(tuple(int(i) for i in rows), columns, information, False)
+    return ratio, (record,)
 
 
 def penalized_mode_residual(

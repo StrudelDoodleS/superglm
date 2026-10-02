@@ -6,6 +6,7 @@ import logging
 import os
 import time
 import uuid
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -1045,6 +1046,37 @@ def _canonicalize_fitted_model(
     t0 = time.perf_counter()
     runtime_canonicalize.canonicalize_fitted_model(model, validate=validate_runtime)
     profile["fit_runtime_canonicalize_s"] = time.perf_counter() - t0
+    _warn_unresolved_rows(model)
+
+
+def _warn_unresolved_rows(model) -> None:
+    """Name, in plain words, the rows the fit could not certify at float64 precision.
+
+    A direction the factorization truncated, whose rows are not at their own
+    maximum (``mode_score.truncated_direction_ratio``): the fit is reported
+    as not converged, and this says which rows, beside which coefficients,
+    and what to check.
+    """
+    from superglm.reml.identified import WeakIdentificationWarning, coefficient_labels
+
+    records = getattr(model._result, "truncated_directions", ()) or ()
+    for record in records:
+        if record.at_maximum:
+            continue
+        rows = record.rows
+        shown = ", ".join(str(row) for row in rows[:6])
+        if len(rows) > 6:
+            shown += f" and {len(rows) - 6} more"
+        labels = ", ".join(coefficient_labels(model._groups, record.columns))
+        warnings.warn(
+            f"Rows {shown} carry about {record.information_ratio:.0e} times less information "
+            f"than the other rows that share their coefficients ({labels}), so the fit cannot "
+            "be certified at float64 precision and is reported as not converged. Check the "
+            "weights and offsets on these rows; diagnostics()['_model']['unresolved_rows'] "
+            "lists them.",
+            WeakIdentificationWarning,
+            stacklevel=4,
+        )
 
 
 def _prime_fit_caches(
@@ -1568,6 +1600,7 @@ def _fit_in_workspace(
         null_mu=null_mu,
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
+    _warn_unresolved_rows(model)
 
     model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
     _maybe_release_fit_state(model)

@@ -114,12 +114,14 @@ from superglm.solvers.mode_score import (
     centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
+    null_basis_angle,
     penalized_mode_residual,
     prior_weighted_centre,
     row_set_quadratics,
     row_set_residual,
     row_sets,
     stagnation_window,
+    truncated_direction_ratio,
     weighted_column_centring,
 )
 from superglm.solvers.pirls import (
@@ -1514,6 +1516,37 @@ def _fit_irls_direct_once(
                 underflow=underflow,
             ),
         )
+        # the directions the factorization this iteration holds truncates,
+        # judged on the rows they move (``mode_score.truncated_direction_ratio``):
+        # a light row set the relative score sums beside the heavy rows'
+        # rounding.  The gram and qr routes hold one; unconstrained, no SCOP.
+        held_rank = _held_rank[0]
+        if (
+            held_rank is not None
+            and held_rank.parameter_null_basis is not None
+            and (active_rows is None or not active_rows.size)
+            and not scop_groups
+        ):
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                truncated_ratio, truncated = truncated_direction_ratio(
+                    dm=dm,
+                    null_basis=held_rank.parameter_null_basis,
+                    angle=null_basis_angle(held_rank, n),
+                    mean_x=mean_x,
+                    row_score=score,
+                    fisher_weights=fisher,
+                    response=y,
+                    positive_prior=positive,
+                    penalty_gradient=np.ldexp(penalty_matvec(beta_values), -weight_exponent),
+                    penalty_size=np.ldexp(
+                        penalty_matvec(beta_values, magnitude=True), -weight_exponent
+                    ),
+                    penalty_apply=lambda v: np.ldexp(penalty_matvec(v), -weight_exponent),
+                    bar=mode_bar,
+                    underflow=underflow,
+                )
+            ratio = max(ratio, truncated_ratio)
+            _last_truncated[0] = truncated
         resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
         latent_parts = []
         for group_state in scop_groups or ():
@@ -2341,6 +2374,10 @@ def _fit_irls_direct_once(
     _true_confirmed = False
     _true_stop_ratio = math.inf
     _last_true_residual: list[ModeResidual | None] = [None]
+    # the decomposition this iteration's solve holds (gram and qr routes), and
+    # the truncated directions its certificate judged (``truncated_direction_ratio``)
+    _held_rank: list = [None]
+    _last_truncated: list[tuple] = [()]
 
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
@@ -2511,6 +2548,8 @@ def _fit_irls_direct_once(
     deviance_relative_change = float("inf")
 
     for it in range(max_iter):
+        _held_rank[0] = None
+        _last_truncated[0] = ()
         beta_prev = committed.beta
         intercept_prev = committed.intercept
         beta = committed.beta.copy()
@@ -2615,6 +2654,7 @@ def _fit_irls_direct_once(
                 )
                 intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
             _cond_est = iteration_rank.pre_truncation_condition
+            _held_rank[0] = iteration_rank
             _used_svd = iteration_rank.used_svd_fallback
             rank_truncated = iteration_rank.rank_truncated
             if convergence == "mode_score":
@@ -2982,6 +3022,7 @@ def _fit_irls_direct_once(
                     )
                     intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
                 _cond_est = iteration_rank.pre_truncation_condition
+                _held_rank[0] = iteration_rank
                 _used_svd = iteration_rank.used_svd_fallback
                 rank_truncated = iteration_rank.rank_truncated
                 if convergence == "mode_score":
@@ -4480,6 +4521,7 @@ def _fit_irls_direct_once(
         centred_intercept_lo=centred_intercept_lo,
         mean_space_boundary_rows=_boundary_rows,
         mean_space_true_mode=bool(converged and _true_confirmed),
+        truncated_directions=_last_truncated[0],
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.

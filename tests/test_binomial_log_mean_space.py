@@ -1068,12 +1068,15 @@ def test_a_light_bridge_past_the_old_cell_limit_is_not_certified(
     assert np.array_equal(sets.cell_sets.toarray()[sets.row_cell, index] > 0, bridge)
 
 
-def test_a_large_clean_crossing_still_certifies() -> None:
+def test_a_large_clean_crossing_still_certifies(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two crossed 70-level Categoricals, every one of the 4,900 cells with events and non-events.
 
     Past the old 4,096-cell limit; refusing every such design would refuse
     this one.  A complete crossing has no bridge: every cell lies on a
-    4-cycle, so no joint set is formed and the fit certifies.
+    4-cycle, so no joint set is formed and the fit certifies.  An offset of
+    +2 lowers the start, so the true-score certificate is what certifies it
+    (without one the fit stops on master's rule and the certificate never
+    runs).
     """
     from superglm.solvers.mode_score import row_sets
 
@@ -1095,11 +1098,239 @@ def test_a_large_clean_crossing_still_certifies() -> None:
         selection_penalty=0.0,
         features={"A": Categorical(base="first"), "B": Categorical(base="first")},
     )
+    import superglm.solvers.irls_direct as irls_direct
+
+    evaluations: list[int] = []
+    judge = irls_direct.row_set_residual
+    monkeypatch.setattr(
+        irls_direct, "row_set_residual", lambda **k: evaluations.append(1) or judge(**k)
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit(frame, y)
+        model.fit(frame, y, offset=np.full(len(y), 2.0))
+    assert evaluations  # the offset lowers the start: the true-score certificate decides
     assert model.result.converged
     assert row_sets(model._dm).row_cell is None
+    assert model.diagnostics()["_model"]["unresolved_rows"] == []
+
+
+def _light_cut(
+    links: list[tuple[str, str]], light_offset: float, link_responses: tuple = (0.0, 1.0)
+) -> tuple[pd.DataFrame, np.ndarray, dict]:
+    """Two crossed 2 x 2 blocks, every cell a 0 and a 1 of weight 1e8 at offset 1.3, joined by light cells.
+
+    Each light cell (``links``) holds ``link_responses`` (a 0 and a 1 unless
+    given) of weight 1e-8 at ``light_offset``.  No light cell is a bridge
+    once there are two: moving a2, a3 down and b2, b3 up moves them all, and
+    only them.
+    """
+    heavy = [(a, b) for a in ("a0", "a1") for b in ("b0", "b1")]
+    heavy += [(a, b) for a in ("a2", "a3") for b in ("b2", "b3")]
+    rows = [(a, b, response, 1e8, 1.3) for a, b in heavy for response in (0.0, 1.0)]
+    rows += [(a, b, response, 1e-8, light_offset) for a, b in links for response in link_responses]
+    frame = pd.DataFrame(rows, columns=["A", "B", "y", "w", "off"])
+    fit = {"sample_weight": frame["w"].to_numpy(), "offset": frame["off"].to_numpy()}
+    return frame, frame["y"].to_numpy(), fit
+
+
+_TWO_LINKS = [("a1", "b2"), ("a1", "b3")]
+_THREE_EDGES = [("a1", "b2"), ("a1", "b3"), ("a0", "b3")]
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+@pytest.mark.parametrize("design", ["two_links", "three_edges", "bridge_64"])
+def test_a_light_cut_the_factorization_truncates_is_refused_with_its_rows(
+    direct_solve: str, design: str
+) -> None:
+    """claude's e3419705 Medium: light cells joining two crossed blocks, none of them a bridge.
+
+    They weigh 1e16 below the rows sharing their coefficients, so ``X'WX``
+    holds their direction below its rounding and the factorization truncates
+    it.  The rows it moves are judged on their own (``mode_score.
+    truncated_direction_ratio``): their Newton step is ~1.8e9 in ``eta``, so
+    the fit cannot be certified in float64.  It is not converged, a
+    plain-words warning names the rows, how much less information they carry
+    and what to check, and ``diagnostics()`` lists them.  e3419705 certified
+    the two- and three-cell cuts after one iteration (no cell is a bridge),
+    and refused Sol's 64 x 64 bridge without saying why.
+    """
+    if design == "bridge_64":
+        model, frame, y, fit = _light_bridge(("a0", "b0"), direct_solve)
+        light = ((frame["A"] == "a1") & (frame["B"] == "b2")).to_numpy()
+    else:
+        links = _TWO_LINKS if design == "two_links" else _THREE_EDGES
+        frame, y, fit = _light_cut(links, -20.0)
+        light = np.array([(a, b) in links for a, b in zip(frame["A"], frame["B"], strict=True)])
+        model = SuperGLM(
+            family="binomial",
+            link="log",
+            selection_penalty=0.0,
+            direct_solve=direct_solve,
+            features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert not model.result.converged
+    (unresolved,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert unresolved["rows"] == np.flatnonzero(light).tolist()
+    assert unresolved["information_ratio"] > 1e16
+    assert len(unresolved["coefficients"]) == 4  # a2, a3, b2, b3
+    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    assert any(
+        f"Rows {int(np.flatnonzero(light)[0])}" in message
+        and "less information" in message
+        and "Check the weights and offsets" in message
+        for message in messages
+    )
+
+
+def test_a_light_cut_at_its_own_maximum_is_certified_and_disclosed() -> None:
+    """The two light cells at offset 1.3: every row, light or heavy, starts at its own maximum.
+
+    The factorization still truncates the light direction, but its rows'
+    own Newton step is at rounding (~1e-16): weakly identified, listed in
+    ``diagnostics()``, with no warning, and the fit certifies.
+    """
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert model.result.converged
+    diagnostics = model.diagnostics()["_model"]
+    assert diagnostics["unresolved_rows"] == []
+    (weak,) = diagnostics["weakly_identified_rows"]
+    assert weak["rows"] == [16, 17, 18, 19]
+    assert not [w for w in caught if "less information" in str(w.message)]
+
+
+def test_a_light_cut_without_events_is_left_to_separation() -> None:
+    """The two light cells with no events: their maximum is at eta -> -infinity, not interior.
+
+    Their own Newton step moves every one of their rows down, the way a
+    separation drifts: no interior maximum to certify, so the flag leaves
+    them to the separated sets, and the fit stops as e3419705 did (the drift
+    exclusion removed, it is refused instead).
+    """
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0, link_responses=(0.0, 0.0))
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert model.result.converged
+    assert model.diagnostics()["_model"]["unresolved_rows"] == []
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: str) -> None:
+    """Two numeric columns 1e-9 apart: the factorization truncates their difference, and the fit certifies.
+
+    The truncated direction moves every row (by ~1e-9), so its rows are not
+    hidden from the relative score, which governs as before: the flag
+    refuses only rows whose score the relative score cannot see.  An offset
+    of 3 lowers the start, so the true-score certificate decides.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+
+    rng = np.random.default_rng(11)
+    n = 3000
+    x1 = rng.uniform(0.0, 1.0, n)
+    x2 = x1 + 1e-9 * rng.normal(size=n)
+    y = (rng.uniform(size=n) < np.exp(-3.0 + 0.8 * x1)).astype(np.float64)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={"x1": Numeric(), "x2": Numeric()},
+    )
+    evaluations: list[int] = []
+    judge = irls_direct.row_set_residual
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            irls_direct, "row_set_residual", lambda **k: evaluations.append(1) or judge(**k)
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(pd.DataFrame({"x1": x1, "x2": x2}), y, offset=np.full(n, 3.0))
+    assert evaluations
+    assert model.result.rank_info.coefficient.rank_truncated
+    assert model.result.converged
+    assert model.diagnostics()["_model"]["unresolved_rows"] == []
+
+
+def test_the_truncated_subspace_is_the_heavy_rows_null_space_to_its_derived_angle() -> None:
+    """The factorization's truncated subspace in the 1e16 regime, against an exact reference.
+
+    At the two light links' weights the exact Hessian's small eigenvalues
+    sit ~1e-26 below its largest, inside the discarded cluster, so its
+    truncated subspace is, to ~1e-21, the null space of the heavy rows,
+    ``{v : X_h v in span(1)}``, formed here in rational arithmetic.  The
+    computed subspace lies within ``null_basis_angle`` of it (LAPACK Users'
+    Guide, section 4.7: ``p(n) eps ||A|| / gap``), measured in the
+    equilibrated coordinates the decomposition works in.
+    """
+    from fractions import Fraction
+
+    from superglm.solvers.mode_score import null_basis_angle
+    from superglm.solvers.rank import decompose_gram
+
+    frame, _, _ = _light_cut(_TWO_LINKS, -20.0)
+    light = np.array([(a, b) in _TWO_LINKS for a, b in zip(frame["A"], frame["B"], strict=True)])
+    levels_a, levels_b = ("a1", "a2", "a3"), ("b1", "b2", "b3")
+    X = np.column_stack(
+        [(frame["A"] == level).to_numpy(float) for level in levels_a]
+        + [(frame["B"] == level).to_numpy(float) for level in levels_b]
+    )
+    weights = np.where(light, 1e-8, 1e8)
+    eta = np.where(light, -20.0 - 1.993, math.log(0.5))
+    fisher = np.ldexp(weights, -27) * np.exp(eta) / (1.0 - np.exp(eta))
+    centred = X - (fisher @ X) / np.sum(fisher)
+    decomposition = decompose_gram((centred * fisher[:, None]).T @ centred)
+    basis = np.asarray(decomposition.parameter_null_basis)
+    # exact: rows [X_h, 1] reduced over the rationals; the null space's slope parts
+    table = [
+        [Fraction(int(v)) for v in row] + [Fraction(1)] for row in np.unique(X[~light], axis=0)
+    ]
+    pivots, rank = [], 0
+    for column in range(7):
+        pivot = next((i for i in range(rank, len(table)) if table[i][column] != 0), None)
+        if pivot is None:
+            continue
+        table[rank], table[pivot] = table[pivot], table[rank]
+        table[rank] = [v / table[rank][column] for v in table[rank]]
+        for i in range(len(table)):
+            if i != rank and table[i][column] != 0:
+                factor = table[i][column]
+                table[i] = [a - factor * b for a, b in zip(table[i], table[rank], strict=True)]
+        pivots.append(column)
+        rank += 1
+    free = [column for column in range(7) if column not in pivots]
+    reference = np.array(
+        [
+            [float(-table[pivots.index(c)][f]) if c in pivots else float(c == f) for c in range(6)]
+            for f in free
+        ]
+    ).T
+    assert basis.shape[1] == reference.shape[1] == 1
+    scale = np.asarray(decomposition.column_scale)[:, None]
+    computed, _ = np.linalg.qr(basis * scale)
+    exact, _ = np.linalg.qr(reference * scale)
+    sine = float(np.linalg.norm(exact - computed @ (computed.T @ exact), 2))
+    assert sine <= null_basis_angle(decomposition, len(frame))
 
 
 def _random_blocks(rng: np.random.Generator, count: int) -> tuple[list, int]:

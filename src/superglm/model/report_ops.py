@@ -76,6 +76,21 @@ def diagnostics(model) -> dict[str, Any]:
             reml_profile.get("reml_laplace_excluded_labels", ()) or ()
         ),
     }
+    # rows a direction the factorization truncated moves (binomial/log,
+    # ``mode_score.truncated_direction_ratio``): at their own maximum, or not
+    # certifiable at float64 precision (the fit is not converged)
+    from superglm.reml.identified import coefficient_labels
+
+    for key, at_maximum in (("weakly_identified_rows", True), ("unresolved_rows", False)):
+        out["_model"][key] = [
+            {
+                "rows": list(record.rows),
+                "coefficients": list(coefficient_labels(model._groups, record.columns)),
+                "information_ratio": record.information_ratio,
+            }
+            for record in getattr(res, "truncated_directions", ()) or ()
+            if record.at_maximum is at_maximum
+        ]
     if out["_model"]["weakly_identified"]:
         from superglm.reml.identified import WEAK_IDENTIFICATION_NOTE
 
