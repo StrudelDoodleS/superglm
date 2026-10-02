@@ -549,7 +549,11 @@ def finalize_reml_fit(
     # The Laplace approximation's identified part (design §3.9,
     # ``reml.identified``): the terminal objective leaves out the same slopes
     # the optimizer's did, so it scores the state it publishes consistently.
+    # ``disclosed`` is the same record for the disclosure: on the QP
+    # passthrough the terminal objective keeps the full Laplace term, but the
+    # search that chose lambda left these out, and they are disclosed.
     identified = IdentifiedLaplace()
+    disclosed = identified
     if use_direct:
         old_gms = model._dm.group_matrices
         model._dm = rebuild_dm_with_lambdas(model, lambdas, sample_weight)
@@ -573,15 +577,16 @@ def finalize_reml_fit(
             model._dm.group_matrices,
             model._groups,
         )
+        disclosed = IdentifiedLaplace.for_design(
+            model._dm,
+            sample_weight,
+            reml_penalties,
+            y=y,
+            distribution=model._distribution,
+            link=model._link,
+        )
         if not qp_passthrough:
-            identified = IdentifiedLaplace.for_design(
-                model._dm,
-                sample_weight,
-                reml_penalties,
-                y=y,
-                distribution=model._distribution,
-                link=model._link,
-            )
+            identified = disclosed
         observed_terminal = terminal_curvature == "observed" and not qp_passthrough
         # One-engine design §3.8: the terminal refit of every route auto uses,
         # exact and discrete, gram and structured, stops on the certificate's
@@ -1001,7 +1006,7 @@ def finalize_reml_fit(
     _disclose_weak_identification(
         model,
         profile=profile,
-        identified=identified,
+        identified=disclosed,
         result=corrected,
         factor=final_factor,
         sample_weight=sample_weight,

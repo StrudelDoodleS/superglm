@@ -2232,6 +2232,79 @@ def test_a_reference_level_without_events_alone_is_disclosed() -> None:
     )
 
 
+def test_a_qp_passthrough_fit_discloses_what_its_search_left_out() -> None:
+    """A QP-monotone spline with an estimated lambda beside a Categorical level without events.
+
+    The passthrough's first stage, unconstrained REML, leaves the level's
+    separated direction out of its Laplace term, so lambda-hat comes from a
+    criterion without it.  4a563fc7 disclosed the finished fit through an
+    empty record: it overwrote the search's ``reml_laplace_excluded`` with
+    ``()``, published no label and warned nothing.  The record is now formed
+    for the disclosure on every direct route, and the terminal objective of
+    the passthrough keeps its full Laplace term.
+    """
+    rng = np.random.default_rng(21)
+    n = 900
+    x = rng.uniform(0.0, 1.0, n)
+    level = rng.choice(["a", "b", "c"], n)
+    probability = np.where(level == "c", 0.0, (0.08 + 0.12 * x) * np.where(level == "b", 1.4, 1.0))
+    y = (rng.uniform(size=n) < probability).astype(np.float64)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "x": BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing),
+            "c": Categorical(base="first"),
+        },
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(pd.DataFrame({"x": x, "c": level}), y)
+    assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"
+    profile = model._reml_profile
+    start = next(group.start for group in model._groups if group.name == "c")
+    assert profile["reml_laplace_excluded"] == (start + 1,)
+    assert profile["reml_laplace_excluded_labels"] == ("c[1]",)
+    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[1]"]
+    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    assert any("c[1]" in message and "no finite estimate" in message for message in messages)
+
+
+def test_the_weak_slopes_seed_the_separated_directions_elimination() -> None:
+    """``separated_directions`` on a block whose base level a has no events, beside a weak level m and an ordinary z.
+
+    m's rows weigh 1e-17 beside rows of weight 1, so its slope is weakly
+    identified and the Laplace term leaves it out already.  The reference
+    direction ``-(e_m + e_z)`` ties at m and z.  The weak slopes come first in
+    the elimination, so the reference takes z: the left-out set ``{m, z}``
+    then spans both near-null directions, and ``log|H_II|`` no longer reads the
+    base rows' vanishing curvature.  Without the seeding the tie went to m,
+    the left-out set was ``{m}`` alone, and that curvature stayed in the
+    criterion.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.reml.identified import laplace_excluded_coefficients, separated_directions
+
+    codes = np.repeat([-1, 0, 1], 4)  # a (the base), m, z
+    y = np.array([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0], dtype=np.float64)
+    weights = np.repeat([1.0, 1e-17, 1.0], 4)
+    dm = DesignMatrix([CategoricalGroupMatrix(codes, 2)], n=12, p=2)
+    weak = laplace_excluded_coefficients(dm, weights, None)
+    assert weak.tolist() == [0]
+    pivots, sets = separated_directions(
+        dm, y, weights, np.zeros(2, dtype=bool), np.zeros(0, dtype=np.intp), weak
+    )
+    assert pivots.tolist() == [1]
+    assert sets == (((0, None),),)
+    left_out = np.zeros((2, 2))
+    left_out[0, weak] = 1.0
+    left_out[1, pivots] = 1.0
+    reference = -np.ones(2)
+    residual = reference - left_out.T @ np.linalg.lstsq(left_out.T, reference, rcond=None)[0]
+    assert float(np.max(np.abs(residual))) == 0.0
+
+
 def test_reml_keeps_a_zero_weight_row_at_the_clip() -> None:
     """A zero-weight row at eta 3.8 beside a true-score mode: the criterion forms, and is the model's.
 
