@@ -693,6 +693,18 @@ def test_pirls_backtracking_reuses_the_endpoint_linear_predictor(monkeypatch) ->
         return original_matvec(beta)
 
     monkeypatch.setattr(dm, "matvec", counted_matvec)
+    # Beside a dense column the proximal solver forms X beta about its state
+    # centre (issue #430), through ``centred_matvec`` rather than ``dm.matvec``.
+    import superglm.solvers.pirls as pirls_module
+
+    original_centred_matvec = pirls_module.centred_matvec
+
+    def counted_centred_matvec(design, beta, center):
+        nonlocal matvec_calls
+        matvec_calls += 1
+        return original_centred_matvec(design, beta, center)
+
+    monkeypatch.setattr(pirls_module, "centred_matvec", counted_centred_matvec)
 
     def deviance_for_mean(mu: float) -> float:
         if np.isclose(mu, 0.0):
@@ -718,8 +730,8 @@ def test_pirls_backtracking_reuses_the_endpoint_linear_predictor(monkeypatch) ->
     )
 
     assert result.intercept == pytest.approx(0.5)
-    # Initial evaluation, working residual, and proposal evaluation. The
-    # fixed-endpoint line-search trial must not multiply X by beta again.
+    # Initial evaluation, working residual, and proposal evaluation, by either
+    # product. The fixed-endpoint line-search trial must not multiply X by beta again.
     assert matvec_calls == 3
 
 
