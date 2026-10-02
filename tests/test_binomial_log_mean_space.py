@@ -1874,14 +1874,18 @@ def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
     refused and the inner fits stagnated (without it three of the four
     searches end unconverged).
 
-    Each fit converges, the four objectives agree within twice the REML stop
-    rule ``reml_tol (1 + |V|)`` (as the two backends' do), and the four
+    Each final fit converges, the four objectives agree within twice the REML
+    stop rule ``reml_tol (1 + |V|)`` (as the two backends' do), and the four
     lambda-hats within what that resolution allows on V's curvature
     ``V''`` in ``log lambda``, measured beside the optimum:
     ``|rho_a - rho_b| <= 2 sqrt(2 epsilon / V'')`` with ``epsilon`` twice the
     stop rule.  The criterion at a fixed lambda agrees across offsets within
     the same resolution.  The fourth offset lowers the start into the mean
-    space, checked.
+    space, checked.  The searches' own stop flag is not asserted: on this
+    family of fixtures with no level without events, six seeds of eight end
+    ``line_search_failed`` at the optimum on every offset, lambda-hat agreeing
+    to 1e-6, and the flag varies across platforms.  (The structured
+    increment's own test is the warm-started solve below.)
     """
     import superglm.solvers.irls_direct as irls_direct
 
@@ -1918,7 +1922,6 @@ def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
         fits[offset_value] = fit(offset_value)
         assert any(lowered) is (offset_value == lowering), offset_value
     for model in fits.values():
-        assert model._reml_result.converged
         assert model.result.converged
     objectives = np.array([float(model._reml_result.objective) for model in fits.values()])
     tolerance = float(fits[0.0]._reml_profile["reml_tol_resolved"])
@@ -1934,6 +1937,55 @@ def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
     curvature = 2.0 * (values[0] - float(objectives[0])) / 0.5**2
     assert curvature > 0.0
     assert float(np.ptp(rho)) <= 2.0 * math.sqrt(2.0 * epsilon / curvature)
+
+
+@pytest.mark.parametrize("lam", [2.0, 8.0])
+def test_a_warm_structured_newton_solve_keeps_a_truncated_direction_where_it_is(lam: float) -> None:
+    """A structured solve warm-started with two regions without events drifted to -1e8.
+
+    Their rows' curvature has underflowed, so the structured factor truncates
+    their directions.  1ffcacec's Newton step solved for the iterate, whose
+    minimum-norm solution reset those coefficients each step: the full step
+    was refused, every accepted step was halved, and the solve ended
+    ``score_stagnated``.  REML's warm-started inner solves stalled the same
+    way, and the search stopped far from the optimum (16.95 against 29.98 on
+    2,000 districts in 50 regions).  A Newton step on a truncated structured
+    factor now takes the increment, which leaves the iterate where it is along
+    a truncated direction, and the solve converges.
+    """
+    frame, y = _separated_region_districts()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "c": Categorical(base="first"),
+            "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(5.0)),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    beta = np.array(model.result.beta, dtype=np.float64)
+    beta[:2] = -1e8  # the two non-base regions without events
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result, _ = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=np.ones(len(y)),
+            family=Binomial(),
+            link=LogLink(),
+            groups=model._groups,
+            lambda2={name: lam for name in model._reml_result.lambdas},
+            reml_penalties=model._reml_penalties,
+            direct_solve="structured",
+            weight_semantics="prior",
+            beta_init=beta,
+            intercept_init=float(model.result.intercept) - 3.0,
+            convergence="mode_score",
+        )
+    assert result.converged, result.termination_reason
 
 
 @pytest.mark.parametrize("direct_solve", ["gram", "qr"])
