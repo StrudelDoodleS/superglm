@@ -13,6 +13,7 @@ against ``det(H + N N') / det(N'N)``.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import numpy as np
@@ -26,6 +27,7 @@ from superglm.solvers._structured.balance_tree import (
     SumToZeroTreeFactor,
     balance_tree,
 )
+from superglm.solvers._structured.border import BorderGenerators
 from superglm.solvers._structured.operators import (
     CenteredBlockOperator,
     LowRankSymmetricOperator,
@@ -602,6 +604,98 @@ def test_an_exhausted_subtree_is_deferred_against_its_unreduced_columns(
     np.testing.assert_allclose(
         fitted[live], expected[live], atol=tolerance * np.max(np.abs(expected))
     )
+
+
+def _alias_beside_a_random_effect(S_b: np.ndarray):
+    """A one-row level beside a random effect, built by hand: ``(factor, case)``.
+
+    ``K = 8``, ``k = 4``, ``omega = diag(1, 1, 0, 0)``.  Level 0's single row
+    has unpenalized coordinates ``(1, 1)``, so its free direction is ``(1,
+    -1)``.  The border holds ``z_2`` and ``z_3`` (the global Spline's share
+    of the null-space functions, which represents the alias) and a complete
+    three-level one-hot block, whose sum is the generator.  ``thin_counts``
+    is set as ``layout.thin_level_counts`` would set it.
+    """
+    K, k, n, lam = 8, 4, 400, 0.3
+    rng = np.random.default_rng(7)
+    levels = rng.integers(1, K, n)
+    levels[0] = 0
+    x = rng.uniform(size=n)
+    Z = np.column_stack([x**j for j in range(k)]) + 0.1 * rng.normal(size=(n, k))
+    Z[0, 2:] = 1.0
+    effect = rng.integers(0, 3, n)
+    effect[:3] = np.arange(3)
+    X = np.column_stack((Z[:, 2:], np.eye(3)[effect]))
+    q = X.shape[1]
+    W = rng.uniform(0.5, 2.0, n)
+    z = rng.normal(size=n)
+    system = leaf_system_from_rows(
+        Z,
+        X,
+        levels,
+        W,
+        W * z,
+        n_levels=K,
+        small_indices=np.arange(q),
+        structured_indices=np.arange(q, q + (K - 1) * k).reshape(K - 1, k),
+        generators=BorderGenerators(matrix=np.array([[0.0, 0.0, 1.0, 1.0, 1.0]]).T, references=[2]),
+        basis="sz",
+    )
+    system = dataclasses.replace(system, thin_counts=(np.array([0]), np.array([1])))
+    omega = np.diag([1.0, 1.0, 0.0, 0.0])
+    penalized = SumToZeroPenalizedOperator.with_penalties(
+        system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy()
+    )
+    case = dict(K=K, k=k, q=q, levels=levels, Z=Z, X=X, W=W, z=z, omega=omega, lam=lam, S_b=S_b)
+    return SumToZeroTreeFactor(system, penalized), case
+
+
+def test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out() -> None:
+    """The alias deflation's coupled-penalty fallback (``_penalized_aliases``), driven directly.
+
+    A thin level's penalized alias ``A`` is deflated with the border's
+    structural generators ``G`` as one block, ``a_NN = [G A]' S [G A]``, and
+    certified on ``A'SA`` alone: exact when ``a_NN = diag(G'SG, A'SA)``, as
+    ``A`` is zero on ``G``'s columns and a penalty is block diagonal by term.
+    A penalty with ``G'SA != 0`` voids that, and the aliases stay with the
+    pivoted factorization.  No public model builds such a penalty (a random
+    effect's ridge is its own diagonal block), so the leaf is built by hand
+    (``_alias_beside_a_random_effect``).  Block diagonal ``S_b``: the alias is
+    deflated beside the generator, ``H`` has full rank and ``log|H| = log
+    det H``.  ``S_b = 5 I - w w'``, ``w = (1, -1, 1, 1, 1)`` the border part
+    of the generator plus eight times the alias (exact entries):
+    ``G'SG = A'SA = 6`` but ``a_NN`` is singular, and the generator plus the
+    alias is an exact null of ``H``.  The alias stays out, the generator alone
+    is deflated, and the factor has ``H``'s rank and pseudo-determinant.
+    Mutation: the guard removed: the alias joins the deflation and, its
+    ``a_NN`` unresolved, ``_deflate`` declines every generator (none
+    deflated); on c9ac978b, before that check, the Cholesky of ``a_NN``
+    raised ``LinAlgError`` (Claude review of #425, Nit).
+    """
+    factor, case = _alias_beside_a_random_effect(np.diag([0.5, 0.7, 0.3, 0.4, 0.6]))
+    H, _, _ = _dense(case)
+    assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
+    assert factor.border_certificate.deflated == 2
+    assert factor.rank == H.shape[0]
+    tolerance = 50 * H.shape[0] * EPS * _kappa(H)
+    assert factor.logdet() == pytest.approx(np.linalg.slogdet(H)[1], abs=tolerance)
+
+    w = np.array([1.0, -1.0, 1.0, 1.0, 1.0])
+    factor, case = _alias_beside_a_random_effect(5.0 * np.eye(5) - np.outer(w, w))
+    H, _, _ = _dense(case)
+    K, k, q = case["K"], case["k"], case["q"]
+    N = np.zeros(H.shape[0])
+    N[: 1 + q] = (-1.0, 1.0, -1.0, 1.0, 1.0, 1.0)  # intercept, z_2 and z_3, the effect's levels
+    for level in range(K - 1):
+        share = K - 1.0 if level == 0 else -1.0
+        N[1 + q + level * k + 2 : 1 + q + (level + 1) * k] = (share, -share)
+    assert np.max(np.abs(H @ N)) <= 64 * EPS * np.max(np.abs(H)) * np.max(np.abs(N))
+    Hc = H[1:, 1:] - np.outer(H[1:, 0], H[0, 1:]) / H[0, 0]
+    tolerance = 50 * H.shape[0] * EPS * _kappa(H + np.outer(N, N))
+    assert factor._alias_x is None
+    assert factor.border_certificate.deflated == 1
+    assert factor.rank == H.shape[0] - 1
+    assert factor.logdet() == pytest.approx(np.log(H[0, 0]) + _pdet(Hc, N[1:, None]), abs=tolerance)
 
 
 def _pinv_known_nullity(H: np.ndarray, nullity: int) -> np.ndarray:

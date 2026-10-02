@@ -329,7 +329,9 @@ def _signed_aliased_frame(variant: str, response: str = "signed"):
     return frame, y, np.where(np.isin(g, ["g003", "g007"]), 0.0, 1.0)
 
 
-def _dense_log_pdet(model: SuperGLM, y, weight, rows: str = "signed") -> tuple[float, float]:
+def _dense_log_pdet(
+    model: SuperGLM, y, weight, rows: str = "signed", *, factor_route: bool = False
+) -> tuple[float, float]:
     """``log sum W + log pdet(H_c)`` at the published mode and rank, and its float64 bound.
 
     ``H_c = X'WX + S - X'W1 1'WX / sum W`` in the public coordinates with the
@@ -339,7 +341,9 @@ def _dense_log_pdet(model: SuperGLM, y, weight, rows: str = "signed") -> tuple[f
     one (Weyl): the assembly's ``gamma_{n+2} || |X|'|W||X| || + gamma_p ||S||``
     (Higham 2002, section 3.5) and the symmetric eigensolver's ``p u ||H_c||``
     (its backward error), so the log of the retained ones is within ``sum_i
-    log(lambda_i / (lambda_i - delta))``.
+    log(lambda_i / (lambda_i - delta))``.  ``factor_route`` adds gram's own
+    error on its factor route (``_factor_route_bound``), so the bound covers
+    both computations.
     """
     dm = model._dm
     X = np.asarray(dm.toarray(), dtype=np.float64)
@@ -368,7 +372,76 @@ def _dense_log_pdet(model: SuperGLM, y, weight, rows: str = "signed") -> tuple[f
     )
     assert np.all(retained > delta)
     bound = float(np.sum(np.log(retained / (retained - delta))))
+    if factor_route:
+        assert rows == "fisher"  # the factor takes sqrt(W)
+        bound += _factor_route_bound(X, W, S, H, retained - delta)
     return math.log(total) + float(np.sum(np.log(retained))), bound
+
+
+def _factor_route_bound(X, W, S, H, lower) -> float:
+    """gram's own error in ``log pdet(H_c)`` on its factor route; ``lower`` bounds the exact eigenvalues.
+
+    gram publishes ``log sum W`` plus the pseudo-determinant of the rank-``r``
+    truncation of its augmented factor: Householder QRs of ``[sqrt(W) X_c,
+    z]`` and of that triangle over the penalty root ``R``
+    (``grouped_augmented_factor_rhs``), then the SVD of the column-equilibrated
+    triangle (``decompose_factor``), whose pseudo-determinant formula is exact
+    for any column scaling.  Two perturbations separate it from ``H_c``:
+
+    - the root: ``R'R = S + E_S`` with ``||E_S||_2 <= 2 m eps ||A||_2 max_i
+      S_ii``, ``A`` the Jacobi equilibration of ``S`` over its ``m`` nonzero
+      rows (``penalty_factor``: twice its eigensolver resolution per block, and
+      ``A`` majorizes each block's; ``||D||_2^2 = max S_ii`` maps it back), so
+      each eigenvalue of ``H_c + E_S`` is within ``||E_S||`` of ``H_c``'s (Weyl);
+    - the factor: the computed triangle is an orthogonal transform of ``F +
+      dF``, ``F = [sqrt(W) X_c; R]`` exact for ``H_c + E_S``, with ``||df_j||
+      <= eta ||f_j||`` per column (Higham 2002, Thm 19.4, for the two QRs of
+      at most ``n + 2p + 1`` rows and ``p + 1`` columns, ``gamma~_k =
+      gamma_(10k)`` as in test_factor_certification_authority; ``gamma_4`` for
+      the entries' centring, weighting and equilibration), the SVD's backward
+      error ``p eps ||B||_2 <= p^(3/2) eps`` on the unit-column ``B = F D^-1``
+      (*LAPACK Users' Guide*, 3rd ed., sec. 4.9.1), and the computed centre's
+      rank-one ``sqrt(sum W) ||dc||`` (as ``_dense_cross_trace``).  So ``||dF||_2
+      <= e_F = (eta + p^(3/2) eps)(1 + eta) ||F||_F + sqrt(sum W) ||dc||`` with
+      ``||F||_F^2 = tr(H_c + E_S)``, and each retained singular value, at least
+      ``sqrt(lower_i - ||E_S||)``, moves by at most ``e_F`` (Weyl for singular
+      values, the same section); the truncated ones are left out of both.
+
+    Each ``log lambda_i`` is then within ``-log(1 - ||E_S|| / lower_i) - 2
+    log(1 - e_F / sqrt(lower_i - ||E_S||))``.  The formula's own evaluation adds
+    ``gamma_(2p+3) (r + p + 2) L`` for its summed logarithms (``L`` the largest
+    magnitude among them: ``log sum W``, the column scales ``log H_jj`` and
+    the scaled ``log sigma_i^2`` between ``log(lower_i / max H_jj)`` and ``log
+    p``) and ``2 k log(1 + sqrt(k) p eps kappa)`` for the orthogonality of the
+    ``k`` singular vectors it reads the subspace from (``k = min(r, p - r)``),
+    through the column scales' ratio ``kappa``, and ``gamma_n`` for ``sum W``.
+    """
+    n, p = X.shape
+    total = float(np.sum(W))
+    live = np.flatnonzero(np.any(S != 0.0, axis=1))
+    penalized = np.diag(S)[live]
+    A = S[np.ix_(live, live)] / np.sqrt(np.outer(penalized, penalized))
+    root = 2.0 * len(live) * EPS * float(np.linalg.norm(A, 2)) * float(np.max(penalized))
+    Xc = X - (X.T @ W) / total
+    trace = float(np.sum(W[:, None] * Xc * Xc)) + float(np.trace(S)) + len(live) * root
+    eta = _gamma(10 * (n + 2 * p + 1) * (p + 1)) + _gamma(4)
+    dc = _gamma(2 * n + 1) * float(np.linalg.norm(np.abs(X).T @ W)) / total
+    e_F = (eta + p * math.sqrt(p) * EPS) * (1.0 + eta) * math.sqrt(trace * (1.0 + _gamma(n + p)))
+    e_F += math.sqrt(total) * dc
+    assert np.all(lower > root) and np.all(np.sqrt(lower - root) > e_F)
+    bound = -float(np.sum(np.log1p(-root / lower)))
+    bound -= 2.0 * float(np.sum(np.log1p(-e_F / np.sqrt(lower - root))))
+    scales = np.diag(H)[np.diag(H) > 0.0]
+    largest = max(
+        abs(math.log(total)),
+        float(np.max(np.abs(np.log(scales)))),
+        abs(math.log(float(np.min(lower)) / float(np.max(scales)))),
+        math.log(p),
+    )
+    kappa = math.sqrt(float(np.max(scales)) / float(np.min(scales)))
+    k = min(len(lower), p - len(lower))
+    bound += _gamma(2 * p + 3) * (len(lower) + p + 2) * largest + _gamma(n)
+    return bound + 2.0 * k * math.log1p(math.sqrt(k) * p * EPS * kappa)
 
 
 def test_sz_one_row_level_below_a_log_links_range_reaches_its_mode() -> None:
@@ -1788,6 +1861,14 @@ def test_sz_thin_levels_beside_a_random_effect_keep_the_dense_rank() -> None:
     representation, so the deflated block is ``diag(G'SG, A'SA)`` and the
     alias certificate holds for it.  Demonstration: 6544d2bc publishes rank
     203 here against the dense 202.
+
+    The deflation stays on beside the random effect: the border deflates the
+    effect's block sum and the levels' one penalized alias.  Switched off
+    there (``_penalized_aliases`` returning ``None`` whenever the leaf has
+    generators, the aliases truncated as data) the rank and ``log|H|`` above
+    still hold at these lambdas, so only the count catches it (1, not 2);
+    under Poisson REML on this fixture the fit then stopped
+    ``line_search_failed`` (Opus review of #425, P3).
     """
     frame, y, weight = _signed_aliased_frame("one_row", response="fisher")
     rng = np.random.default_rng(11)
@@ -1801,9 +1882,10 @@ def test_sz_thin_levels_beside_a_random_effect_keep_the_dense_rank() -> None:
     assert auto._reml_profile["direct_backend"] == "structured"
     assert int(auto.result.reml_hessian_rank) == int(models["gram"].result.reml_hessian_rank)
     reference, bound = _dense_log_pdet(auto, y, weight, rows="fisher")
-    certificate = auto._linear_system_state.augmented_factor.border_certificate.logdet_bound
-    assert abs(float(auto.result.log_det_H) - reference) <= bound + certificate
+    certificate = auto._linear_system_state.augmented_factor.border_certificate
+    assert abs(float(auto.result.log_det_H) - reference) <= bound + certificate.logdet_bound
     assert float(auto.result.effective_df) > 0.0
+    assert certificate.deflated == 2
 
 
 def test_gram_counts_no_rounding_curvature_along_an_sz_alias() -> None:
@@ -1819,7 +1901,11 @@ def test_gram_counts_no_rounding_curvature_along_an_sz_alias() -> None:
     ended up to 800x off, and auto picks gram for small sz models).
     ``penalty_factor`` now keeps each block's eigenpairs above its
     eigensolver resolution.  Demonstration: 6544d2bc's gram publishes rank
-    193 here against 192.
+    193 here against 192.  gram's ``log|H|`` is the dense reference's within
+    the reference's bound plus gram's own on its factor route (QRs, SVD and
+    penalty root, ``_factor_route_bound``): 0.13 and 0.015 here against an
+    observed 1.5e-5.  The bound covered the reference alone before (Claude
+    review of #425, Low).
     """
     frame, y, weight = _signed_aliased_frame("one_row", response="fisher")
     models = {
@@ -1834,7 +1920,7 @@ def test_gram_counts_no_rounding_curvature_along_an_sz_alias() -> None:
     gram = models["gram"]
     assert gram._reml_profile["direct_backend"] == "gram"
     assert int(gram.result.reml_hessian_rank) == int(models["structured"].result.reml_hessian_rank)
-    reference, bound = _dense_log_pdet(gram, y, weight, rows="fisher")
+    reference, bound = _dense_log_pdet(gram, y, weight, rows="fisher", factor_route=True)
     assert abs(float(gram.result.log_det_H) - reference) <= bound
 
 
