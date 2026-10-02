@@ -115,6 +115,7 @@ from superglm.solvers.mode_score import (
     centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
+    dense_columns,
     null_basis_angle,
     penalized_mode_residual,
     prior_weighted_centre,
@@ -427,6 +428,27 @@ def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
     centre, centre_lo = system.centre_pair()
     rows = X - centre
     return rows if centre_lo is None else rows - centre_lo
+
+
+def _system_offset_mean(
+    dm: DesignMatrix, W: NDArray, system: CenteredSystem, state_center: NDArray
+) -> NDArray:
+    """``mean_x - c``, the working mean's offset from the state's centre, read from the system's pair.
+
+    A dense column's working mean is the system's exact pair ``(hi, lo)``
+    (``centered_system.dense_mean_pair``, ``_attach_dense_split``), so its
+    offset from ``c`` is ``(hi - c) + lo``: ``hi - c`` is exact where the two
+    lie within a factor two (Sterbenz), as they do at a column's offset, and
+    otherwise rounds at ``u |hi - c|``, inside ``centre_offset_mean``'s
+    ``gamma_n sum W |x - c| / sum W``.  No pass.  A system without a pair has
+    no dense column and reads ``mean_x - c``.
+    """
+    if system.mean_hi is None or system.mean_lo is None:
+        return centre_offset_mean(dm, W, float(system.sum_w), state_center, system.mean_x)
+    offset_mean = np.asarray(system.mean_x, dtype=np.float64) - state_center
+    dense = dense_columns(dm)
+    offset_mean[dense] = (system.mean_hi[dense] - state_center[dense]) + system.mean_lo[dense]
+    return offset_mean
 
 
 def _structured_score_centre(
@@ -1256,7 +1278,7 @@ def _fit_irls_direct_once(
         resolved once every relative score is within ``MODE_RESOLVE_CAP``
         (``solvers.mode_score``).  The floors read the iterate's intercept
         about ``mean_x``; a centred state reads it from its own ``alpha`` and
-        the offset of ``mean_x`` from the centre (``centre_offset_mean``), not
+        the offset of ``mean_x`` from the centre (``_system_offset_mean``), not
         from the raw intercept, which cancels ``c' beta`` at a column's offset.
         """
         assert _score_centre is not None
@@ -2353,7 +2375,7 @@ def _fit_irls_direct_once(
     _t_eta = 0.0
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
-    # its mean_x less the state's centre (``centre_offset_mean``), None without one
+    # its mean_x less the state's centre (``_system_offset_mean``), None without one
     _last_working_offset_mean: NDArray | None = None
     _last_working_structured: (
         FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
@@ -2666,9 +2688,7 @@ def _fit_irls_direct_once(
             intercept = centered.mean_z - float(centered.mean_x @ beta)
             _last_working_offset_mean = None
             if _state_center is not None:
-                _last_working_offset_mean = centre_offset_mean(
-                    dm, W, centered.sum_w, _state_center, centered.mean_x
-                )
+                _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
                 proposal_centred_intercept = centered.mean_z - math.fsum(
                     _last_working_offset_mean * beta
                 )
@@ -3032,11 +3052,10 @@ def _fit_irls_direct_once(
                 _last_working_offset_mean = None
                 if _state_center is not None:
                     # the intercept about the state's centre, from the offset
-                    # of the working mean to it, formed on centred rows
-                    # (``centre_offset_mean``): no raw-scale cancellation
-                    _last_working_offset_mean = centre_offset_mean(
-                        dm, W, centered.sum_w, _state_center, centered.mean_x
-                    )
+                    # of the working mean to it, formed on centred rows (the
+                    # system's pair, else ``centre_offset_mean``): no
+                    # raw-scale cancellation
+                    _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
                     proposal_centred_intercept = centered.mean_z - math.fsum(
                         _last_working_offset_mean * beta
                     )
@@ -4257,9 +4276,7 @@ def _fit_irls_direct_once(
             offset_mean_final = (
                 None
                 if _state_center is None or cache_out is None
-                else centre_offset_mean(
-                    dm, W, centered_final.sum_w, _state_center, centered_final.mean_x
-                )
+                else _system_offset_mean(dm, W, centered_final, _state_center)
             )
         XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
         sum_W = centered_final.sum_w
@@ -4411,6 +4428,8 @@ def _fit_irls_direct_once(
                 mean_x=np.asarray(centered_final.mean_x, dtype=np.float64),
                 sum_w=float(centered_final.sum_w),
                 column_scale=np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
+                mean_hi=centered_final.mean_hi,
+                mean_lo=centered_final.mean_lo,
             )
         else:
             reml_slope_rank = None

@@ -996,6 +996,7 @@ def centered_gram_rhs(
     z_centered: NDArray,
     chunk_size: int = 8192,
     mean_lo: NDArray | None = None,
+    first: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Return centered ``X'WX`` and ``X'Wz`` without raw-moment subtraction.
 
@@ -1007,6 +1008,10 @@ def centered_gram_rhs(
     ``(mean_x, mean_lo)`` (``centered_system.weighted_mean_pair``): rows are
     centred as ``(x - mean_x) - mean_lo``, so a dense column at an offset is
     centred about its anchor exactly and then by the small remainder.
+    ``first``, when given (``(p,)`` zeros), receives ``sum W (x - mean_x)``
+    from the same rows, compensated across chunks: the moment Björck's
+    correction of the corrected two-pass algorithm reads
+    (``centered_system.two_pass_centred_gram``).
     """
     n, p = dm.shape
     W = np.asarray(W, dtype=float)
@@ -1023,6 +1028,7 @@ def centered_gram_rhs(
 
     gram = np.zeros((p, p), dtype=float)
     gram_compensation = np.zeros_like(gram)
+    first_compensation = np.zeros(p, dtype=float)
     rhs = np.zeros(p, dtype=float)
     rhs_compensation = np.zeros_like(rhs)
 
@@ -1038,6 +1044,8 @@ def centered_gram_rhs(
         rhs_block = block.T @ (W_block * z_centered[start:stop])
         _compensated_add(gram, gram_compensation, gram_block)
         _compensated_add(rhs, rhs_compensation, rhs_block)
+        if first is not None:
+            _compensated_add(first, first_compensation, block.T @ W_block)
 
     gram = 0.5 * (gram + gram.T)
     return gram, rhs

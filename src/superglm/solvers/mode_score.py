@@ -375,12 +375,6 @@ def dense_columns(dm: DesignMatrix) -> NDArray:
     return mask
 
 
-def _dense_rows(matrix, start, stop, centre, centre_lo):
-    """Rows ``start:stop`` of a dense block, ``(x - c) - c_lo`` (``c_lo`` ``None``: ``x - c``)."""
-    rows = matrix.M[start:stop] - centre
-    return rows if centre_lo is None else rows - centre_lo
-
-
 def dense_centred_matvec(
     dm: DesignMatrix, values: NDArray, center: NDArray, center_lo: NDArray | None = None
 ) -> NDArray:
@@ -388,22 +382,31 @@ def dense_centred_matvec(
 
     The dense blocks' share of ``centred_matvec`` in its fixed chunks, for a
     caller that applies every other block through its own (structured)
-    product.  ``center_lo`` makes the centre an exact pair, rows ``(x - c) -
-    c_lo`` (``centered_system.weighted_mean_pair``).
+    product.  ``center_lo`` makes the centre an exact pair ``(c, d)``, rows
+    ``(x - c) - d`` (``centered_system.dense_mean_pair``), applied as a
+    rank-one correction: ``(X_d - 1 c_d') v_d - (d' v_d) 1``.  ``d`` is the
+    pair's remainder, the rounding of the mean ``c``, so the correction is
+    far below the rows' own scale.
     """
     result = np.zeros(dm.n)
     values = np.asarray(values, dtype=np.float64)
+    shift: list[float] = []
     offset = 0
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
         if type(matrix) is DenseGroupMatrix:
             part = values[offset : offset + width]
             centre = center[offset : offset + width]
-            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            source = matrix.M
             for start in range(0, dm.n, _CHUNK):
                 stop = min(start + _CHUNK, dm.n)
-                result[start:stop] += _dense_rows(matrix, start, stop, centre, centre_lo) @ part
+                result[start:stop] += (source[start:stop] - centre) @ part
+            if center_lo is not None:
+                shift.extend(center_lo[offset : offset + width] * part)
         offset += width
+    correction = math.fsum(shift)
+    if correction != 0.0:
+        result -= correction
     return result
 
 
@@ -412,21 +415,24 @@ def dense_centred_rmatvec(
 ) -> NDArray:
     """``(X_d - 1 c_d')' r`` on the ``DenseGroupMatrix`` columns (zero elsewhere), centred row by row.
 
-    ``center_lo`` as ``dense_centred_matvec``.
+    ``center_lo`` as ``dense_centred_matvec``: the rank-one correction ``-d
+    (1' r)``.
     """
     result = np.zeros(dm.p)
     rows = np.asarray(rows, dtype=np.float64)
+    total = float(np.sum(rows)) if center_lo is not None else 0.0
     offset = 0
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
         if type(matrix) is DenseGroupMatrix:
             centre = center[offset : offset + width]
-            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            source = matrix.M
             accumulated = np.zeros(width)
             for start in range(0, dm.n, _CHUNK):
                 stop = min(start + _CHUNK, dm.n)
-                block = _dense_rows(matrix, start, stop, centre, centre_lo)
-                accumulated += block.T @ rows[start:stop]
+                accumulated += (source[start:stop] - centre).T @ rows[start:stop]
+            if center_lo is not None:
+                accumulated -= center_lo[offset : offset + width] * total
             result[offset : offset + width] = accumulated
         offset += width
     return result
