@@ -1723,6 +1723,9 @@ def truncated_direction_ratio(
       moves improves (a response of 0 moving down, of 1 up), the direction is
       a separation, with no interior maximum (left to the separated sets);
       else the fit cannot be certified in float64.
+    - **Separated.**  Moved rows whose responses are all 0, or all 1, are a
+      separated set, read off the responses (as ``row_set_residual`` reads
+      them): not judged here.
 
     Returns the largest ``|M delta| / max(bar, floor)`` over uncertifiable
     directions (0 where none) and the hidden directions found.  Nothing in
@@ -1749,6 +1752,13 @@ def truncated_direction_ratio(
     error = 4.0 * (angle + _gamma(p + 2)) * reach * np.max(np.abs(basis), axis=0)
     support = positive & np.any(np.abs(moved) > error[None, :], axis=1)
     if not support.any():
+        return 0.0, ()
+    responses = observed[support]
+    if np.all(responses == 0.0) or np.all(responses == 1.0):
+        # a separated set, read off its responses as ``row_set_residual``
+        # does: no interior maximum.  Not off its scores' or its step's signs:
+        # at means near 0 the rows' scores and curvature vanish, and the
+        # penalty's gradient or rounding sets the step's sign.
         return 0.0, ()
     total = float(np.sum(np.abs(score[positive])))
     hidden = float(np.sum(np.abs(score[support])))

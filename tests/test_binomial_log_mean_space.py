@@ -1214,10 +1214,11 @@ def test_a_light_cut_at_its_own_maximum_is_certified_and_disclosed() -> None:
 def test_a_light_cut_without_events_is_left_to_separation() -> None:
     """The two light cells with no events: their maximum is at eta -> -infinity, not interior.
 
-    Their own Newton step moves every one of their rows down, the way a
-    separation drifts: no interior maximum to certify, so the flag leaves
-    them to the separated sets, and the fit stops as e3419705 did (the drift
-    exclusion removed, it is refused instead).
+    Their responses are all 0, a separated set (read off the responses,
+    ``test_a_truncated_separated_set_is_read_off_its_responses``), and their
+    own Newton step moves every one of their rows down, the way a separation
+    drifts: no interior maximum to certify, so the flag leaves them to the
+    separated sets, and the fit stops as e3419705 did.
     """
     frame, y, fit = _light_cut(_TWO_LINKS, -20.0, link_responses=(0.0, 0.0))
     model = SuperGLM(
@@ -1270,6 +1271,46 @@ def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: 
     assert model.result.rank_info.coefficient.rank_truncated
     assert model.result.converged
     assert model.diagnostics()["_model"]["unresolved_rows"] == []
+
+
+def test_a_truncated_separated_set_is_read_off_its_responses() -> None:
+    """``truncated_direction_ratio`` on a reference level whose rows' responses are all 0.
+
+    Its means have drifted to ~0, so its rows' scores and curvature are
+    ~1e-30, and a penalty's gradient on the other levels sets the sign of
+    their own Newton step: up.  b91ccc04 classed a separation by that step
+    moving every row down, so it refused this set, and the REML fit with a
+    base level without events ended not converged on four CI platforms.
+    The set is read off its responses, as ``row_set_residual`` does: no
+    interior maximum, not judged here.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    codes = np.repeat([-1, 0, 1], 4)  # the base level a, then b and c
+    dm = DesignMatrix([CategoricalGroupMatrix(codes, 2)], n=12, p=2)
+    response = np.array([0.0] * 4 + [0.0, 1.0] * 4)
+    score = np.concatenate([np.full(4, -1e-30), np.tile([-0.5, 0.5], 4)])
+    fisher = np.concatenate([np.full(4, 1e-30), np.full(8, 0.25)])
+    mean_x = np.array([0.5, 0.5])
+    reference = -np.ones((2, 1)) / math.sqrt(2.0)
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=reference,
+        angle=1e-12,
+        mean_x=mean_x,
+        row_score=score,
+        fisher_weights=fisher,
+        response=response,
+        positive_prior=np.ones(12, dtype=bool),
+        penalty_gradient=np.full(2, 1e-20),
+        penalty_size=np.full(2, 1e-20),
+        penalty_apply=lambda v: 1e-40 * np.asarray(v),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio == 0.0
+    assert found == ()
 
 
 def test_the_truncated_subspace_is_the_heavy_rows_null_space_to_its_derived_angle() -> None:
