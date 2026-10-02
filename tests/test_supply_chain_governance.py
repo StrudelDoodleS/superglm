@@ -436,6 +436,52 @@ def test_dependabot_groups_python_and_github_actions_updates():
     assert '- "*"' in actions_config
 
 
+_COOLDOWN_DAYS = 7
+
+
+def _span_days(span: str) -> float:
+    """Days in a relative uv ``exclude-newer``: friendly (``7 days``, ``1 week``) or ISO 8601 (``P7D``)."""
+    hours = {"hour": 1, "day": 24, "week": 168}
+    friendly = re.fullmatch(r"(\d+)\s*(hour|day|week)s?", span.strip())
+    if friendly:
+        return int(friendly[1]) * hours[friendly[2]] / 24
+    iso = re.fullmatch(r"P(?:(\d+)W)?(?:(\d+)D)?(?:T(\d+)H)?", span.strip())
+    assert iso and any(iso.groups()), f"not a relative exclude-newer span: {span!r}"
+    weeks, days, hours_part = (int(value or 0) for value in iso.groups())
+    return 7 * weeks + days + hours_part / 24
+
+
+def test_lock_bumps_wait_out_a_minimum_release_age():
+    """Every resolution skips files younger than the cooldown, and the lock was resolved under it.
+
+    A relative ``[tool.uv] exclude-newer`` makes every ``uv lock`` ignore files
+    uploaded within the window (uv docs, "Resolution", dependency cooldowns), so a
+    lock bump by anyone takes only releases public that long.  uv records the span
+    in ``uv.lock``, where ``uv lock --check`` (CI) fails if the setting and the
+    lock disagree, and re-dates the cutoff only when it resolves again.
+    Dependabot's own ``cooldown`` keeps its version updates to releases that
+    resolution accepts; it does not delay security updates, whose fix may then
+    need an ``exclude-newer-package`` exemption.  Seven days: 8 of the 10 supply-chain
+    attacks Woodruff surveyed were caught within a week ("We should all be using
+    dependency cooldowns", 2025).  Fails on a lock resolved without the window
+    (#428 locked a virtualenv published the same morning).
+    """
+    span = tomllib.loads(_read("pyproject.toml"))["tool"]["uv"].get("exclude-newer")
+    assert isinstance(span, str), "pyproject sets no relative uv exclude-newer"
+    assert _span_days(span) >= _COOLDOWN_DAYS
+    options = tomllib.loads(_read("uv.lock")).get("options", {})
+    assert "exclude-newer-span" in options, "uv.lock was not resolved under the cooldown"
+    assert _span_days(options["exclude-newer-span"]) == _span_days(span)
+
+    dependabot = _read(".github/dependabot.yml")
+    uv_config = dependabot.split('package-ecosystem: "uv"', maxsplit=1)[1].split(
+        "package-ecosystem:", maxsplit=1
+    )[0]
+    cooldown = re.search(r"cooldown:\s*\n\s+default-days:\s*(\d+)", uv_config)
+    assert cooldown, "the uv updates set no Dependabot cooldown"
+    assert int(cooldown[1]) >= _span_days(span)
+
+
 def test_security_policy_and_codeowners_cover_governance_surfaces():
     security_policy = _read("SECURITY.md")
     security_policy_lower = security_policy.lower()

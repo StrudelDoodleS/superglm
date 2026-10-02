@@ -86,6 +86,11 @@ plotting = [
 
 [tool.uv]
 required-version = "==0.12.1"
+# Dependency cooldown: every resolution ignores files uploaded in the last
+# seven days, so a lock bump takes only releases that have been public that
+# long (uv docs, "Resolution: dependency cooldowns"). A security fix younger
+# than that is exempted per package with `exclude-newer-package`.
+exclude-newer = "7 days"
 
 [build-system]
 requires = ["hatchling>=1.27"]
