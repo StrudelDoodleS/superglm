@@ -214,10 +214,24 @@ class TestMetricsCaching:
             editor = compute_dataset_metrics(
                 model, EvaluationDataset("train", "Train", X, y, sample_weight=w)
             )
+            # The editor's own training split hands over the retained copies.
+            retained = compute_dataset_metrics(
+                model,
+                EvaluationDataset(
+                    "train",
+                    "Train",
+                    X,
+                    y,
+                    sample_weight=model._fit_weights,
+                    offset=model._fit_offset,
+                    source="retained_fit_data",
+                ),
+            )
         with pytest.warns(UserWarning, match="not a SuperGLM-shipped family"):
             copies = model.metrics(X.copy(), y.copy(), sample_weight=w.copy())
             assert (copies.log_likelihood, copies.null_log_likelihood) == log_likelihoods
         assert editor["log_likelihood"] == log_likelihoods[0]
+        assert retained["log_likelihood"] == log_likelihoods[0]
 
     def test_metrics_returns_cached_object_for_same_fit_refs(self, fitted_poisson):
         """Repeated metrics() on the exact fit refs should return the cached object."""

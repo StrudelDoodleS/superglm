@@ -130,17 +130,33 @@ def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, floa
 
 
 def _same_fit_dataset(model, dataset: EvaluationDataset) -> bool:
+    """Whether ``dataset`` holds the fit's own rows, unchanged since the fit checked them.
+
+    Identity alone is not enough: an array mutated in place keeps its
+    identity.  The fit's data guard confirms the values, as
+    ``explain_ops.metrics`` does.
+    """
     fit_weight_ref = getattr(model, "_fit_sample_weight_ref", None)
     fit_weights = getattr(model, "_fit_weights", None)
     fit_offset_ref = getattr(model, "_fit_offset_ref", None)
     fit_offset = getattr(model, "_fit_offset", None)
     weights_match = dataset.sample_weight is fit_weight_ref or dataset.sample_weight is fit_weights
     offset_matches = dataset.offset is fit_offset_ref or dataset.offset is fit_offset
-    return (
+    fit_data_guard = getattr(model, "_fit_data_guard", None)
+    return bool(
         dataset.X is getattr(model, "_fit_X_ref", None)
         and dataset.y is getattr(model, "_fit_y_ref", None)
         and weights_match
         and offset_matches
+        and fit_data_guard is not None
+        and fit_data_guard.matches(
+            dataset.X,
+            dataset.y,
+            dataset.sample_weight,
+            dataset.offset,
+            fit_weights=fit_weights,
+            fit_offset=fit_offset,
+        )
     )
 
 

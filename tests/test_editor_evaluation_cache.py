@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
@@ -254,11 +255,55 @@ def test_training_split_metrics_score_the_model_like_metrics(
     assert set(metrics) == set(_METRIC_NAMES)
     for name in ("deviance", "log_likelihood", "aic", "aicc", "bic", "effective_df"):
         assert metrics[name] == getattr(core, name), name
-    # Two Pearson sums over n non-negative terms are gamma_n relative apart.
+    # Each Pearson sum has n non-negative terms of about four roundings each,
+    # so each is within gamma_(n+3) of the exact sum and the two differ by at
+    # most 2 gamma_(n+3), in the unit roundoff u.
     n = len(y)
-    pearson_bound = n * np.finfo(np.float64).eps / (1.0 - n * np.finfo(np.float64).eps)
+    u = np.finfo(np.float64).eps / 2.0
+    pearson_bound = 2.0 * (n + 3) * u / (1.0 - (n + 3) * u)
     assert metrics["pearson_chi2"] == pytest.approx(core.pearson_chi2, rel=pearson_bound, abs=0.0)
     assert metrics["explained_deviance"] == core.explained_deviance
+
+
+@pytest.mark.parametrize("mutated", ["response", "weights"])
+def test_training_arrays_mutated_in_place_are_checked_like_metrics(mutated):
+    """The fit's own objects, changed in place, are new rows to the contract check.
+
+    Identity still matches after an in-place change, so only the fit's data
+    guard tells the editor the fit never checked these values.  The editor
+    warns exactly as ``model.metrics`` does on the same objects.
+    """
+    rng = np.random.default_rng(452)
+    n = 200
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    y = rng.poisson(np.exp(0.2 + 0.3 * X["x"].to_numpy())).astype(float)
+    weights = rng.integers(1, 4, size=n).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+        weight_semantics="frequency",
+    ).fit(X, y, sample_weight=weights)
+    if mutated == "response":
+        y[0] = 2.5  # off the count lattice
+    else:
+        weights[0] = 0.5  # not a replication count
+
+    def caught(evaluate) -> list[tuple[type[Warning], str]]:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            evaluate()
+        return [(type(item.message), str(item.message)) for item in seen]
+
+    core = caught(lambda: model.metrics(X, y, sample_weight=weights).log_likelihood)
+    editor = caught(
+        lambda: compute_dataset_metrics(
+            model, EvaluationDataset("train", "Train", X, y, sample_weight=weights)
+        )
+    )
+
+    assert core  # metrics() checks the changed rows
+    assert editor == core
 
 
 def test_training_split_metrics_on_a_discrete_fit_match_metrics():

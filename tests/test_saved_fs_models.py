@@ -130,9 +130,10 @@ def saved_se_scale(model, frame, y) -> float:
     independent Pearson sum on that mean, not from ``metrics``, so the
     comparison still pins the dispersion ``coefficient_se`` applies.
 
-    Rounding: the two Pearson sums have ``n`` non-negative terms each and agree
-    within ``gamma_(n+3)`` relative; the ratio, square root and the multiply
-    add a few units of roundoff.  Both are far below ``_se_tolerance``'s
+    Rounding: each Pearson sum has ``n`` non-negative terms and is within
+    ``gamma_(n+3)`` of the exact sum, so the two agree within
+    ``2 gamma_(n+3)`` relative; the ratio, square root and the multiply add a
+    few units of roundoff.  Both are far below ``_se_tolerance``'s
     ``n u kappa``, which they leave unchanged.  The fixtures carry no weights or
     offsets.
     """
