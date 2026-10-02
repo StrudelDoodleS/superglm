@@ -90,7 +90,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -953,23 +953,29 @@ class RowSets:
     ``cell_directions`` is ``(cells, p)``, sparse (CSR): the slope part of a
     coefficient direction that moves the kept cell's rows and no other row
     (its intercept part carries no penalty).  Held sparse, it costs its
-    nonzeros, so no width of the design drops a cell set.
+    nonzeros, so no width of the design drops a cell set.  ``cell_codes`` is
+    ``(cells, blocks)``: each kept cell's code in each block (a block's
+    ``n_levels`` for its reference).
     """
 
     blocks: tuple[tuple[int, CategoricalGroupMatrix], ...]
     cell_of_row: NDArray | None
     cell_directions: Any
+    cell_codes: NDArray
 
-    def directions(self, p: int) -> list[NDArray]:
-        """The slope parts ``(p,)`` of each block's reference direction, then of each kept cell's."""
-        out = []
+    def directions(self, p: int) -> Iterator[NDArray]:
+        """The slope parts ``(p,)`` of each block's reference direction, then of each kept cell's.
+
+        One at a time: a single dense ``(p,)`` vector is alive, whatever the
+        number of sets.
+        """
         for start, matrix in self.blocks:
             reference = np.zeros(p)
             reference[start : start + matrix.n_levels] = -1.0
-            out.append(reference)
+            yield reference
         held = self.cell_directions
-        out.extend(held[[row]].toarray().ravel() for row in range(held.shape[0]))
-        return out
+        for row in range(held.shape[0]):
+            yield held[[row]].toarray().ravel()
 
 
 def row_sets(dm: DesignMatrix) -> RowSets:
@@ -1040,7 +1046,9 @@ def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: in
     less each eliminated cell's direction times the amount ``d`` moves it.
     The core is formed only while ``m k min(m, k) <= _ROW_SET_CORE_FLOPS``.
     """
-    none = RowSets(blocks, None, sparse.csr_matrix((0, p)))
+    none = RowSets(
+        blocks, None, sparse.csr_matrix((0, p)), np.zeros((0, len(blocks)), dtype=np.intp)
+    )
     if len(blocks) < 2:
         return none
     stacked = np.column_stack([matrix.codes for _, matrix in blocks])
@@ -1099,7 +1107,7 @@ def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: in
     held = sparse.csr_matrix((values, (rows, columns)), shape=(len(kept), p))
     index = np.full(count, -1, dtype=np.intp)
     index[kept] = np.arange(len(kept))
-    return RowSets(blocks, index[cell_of_row], held)
+    return RowSets(blocks, index[cell_of_row], held, cells[kept])
 
 
 def _decide_core(

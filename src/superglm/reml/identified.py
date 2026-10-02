@@ -216,8 +216,8 @@ def separated_directions(
     sample_weight: NDArray,
     penalized: NDArray,
     generator_columns: NDArray,
-) -> NDArray:
-    """The coordinates standing for a binomial/log fit's separated unpenalized directions, ascending.
+) -> tuple[NDArray, tuple]:
+    """``(pivots, sets)``: a binomial/log fit's separated unpenalized directions.
 
     **The class.**  A set of rows the one-hot blocks move on their own
     (``mode_score.row_sets``: a level, a block's reference rows, a kept joint
@@ -251,6 +251,9 @@ def separated_directions(
     it, so the determinant left over differs from the pseudo-determinant of
     the rest by a constant that no smoothing parameter moves.  A direction
     with no such column, or spanned by those already taken, adds none.
+    ``pivots`` are ascending; ``sets`` describe the sets that took one, each
+    a tuple of ``(block's first column, level code or None for its
+    reference)`` over the blocks it names (``separated_set_labels``).
     """
     from superglm.solvers.mode_score import row_sets
 
@@ -263,7 +266,7 @@ def separated_directions(
     rising = (positive & (response > 0.0)).astype(np.float64)
     falling = (positive & (response < 1.0)).astype(np.float64)
     carried = positive.astype(np.float64)
-    candidates: list[NDArray] = []
+    candidates: list[tuple[NDArray, tuple]] = []
     sets = row_sets(dm)
     for start, matrix in sets.blocks:
         levels = matrix.n_levels
@@ -284,7 +287,7 @@ def separated_directions(
                     continue
                 direction = np.zeros(width)
                 direction[start : start + levels] = -1.0
-            candidates.append(direction)
+            candidates.append((direction, ((start, level if level < levels else None),)))
     if sets.cell_of_row is not None:
         held = sets.cell_directions
         on_cells = sets.cell_of_row >= 0
@@ -298,10 +301,16 @@ def separated_directions(
             direction = held[[cell]].toarray().ravel()
             if np.any(covered & (direction != 0.0)):
                 continue
-            candidates.append(direction)
+            codes_of_cell = sets.cell_codes[cell].tolist()
+            described = tuple(
+                (start, code if code < matrix.n_levels else None)
+                for (start, matrix), code in zip(sets.blocks, codes_of_cell, strict=True)
+            )
+            candidates.append((direction, described))
     pivots: list[int] = []
     taken: list[NDArray] = []
-    for direction in candidates:
+    named: list[tuple] = []
+    for direction, described in candidates:
         reduced = direction.copy()
         for pivot, basis in zip(pivots, taken, strict=True):
             if reduced[pivot] != 0.0:
@@ -313,7 +322,21 @@ def separated_directions(
             continue
         pivots.append(pivot)
         taken.append(reduced)
-    return np.unique(np.asarray(pivots, dtype=np.intp))
+        named.append(described)
+    return np.unique(np.asarray(pivots, dtype=np.intp)), tuple(named)
+
+
+def separated_set_labels(groups: Sequence, sets: Sequence[tuple]) -> tuple[str, ...]:
+    """``group[level]`` or ``group[reference]`` per block a separated set names, joined by `` x ``."""
+    labels = []
+    for described in sets:
+        parts = []
+        for start, level in described:
+            group = next((g for g in groups if g.start == int(start)), None)
+            name = f"coef[{int(start)}]" if group is None else group.name
+            parts.append(f"{name}[{'reference' if level is None else int(level)}]")
+        labels.append(" x ".join(parts))
+    return tuple(labels)
 
 
 def dense_hessian(cache: dict | None) -> tuple[NDArray, float] | None:
@@ -378,9 +401,11 @@ class IdentifiedLaplace:
         *,
         generator_columns: NDArray | Sequence[int] = (),
         weak: NDArray | Sequence[int] | None = None,
+        separated_sets: tuple = (),
     ):
         self.excluded = np.asarray(excluded, dtype=np.intp)
         self.weak = self.excluded if weak is None else np.asarray(weak, dtype=np.intp)
+        self.separated_sets = tuple(separated_sets)
         self.generator_columns = np.asarray(generator_columns, dtype=np.intp)
         self.unsupported = 0
         self._memo: tuple | None = None
@@ -399,8 +424,9 @@ class IdentifiedLaplace:
         """The fit's identified part: ``laplace_excluded_coefficients``, the separated directions' pivots and the generator columns."""
         weak = laplace_excluded_coefficients(dm, sample_weight, penalties)
         pivots: NDArray = np.zeros(0, dtype=np.intp)
+        separated: tuple = ()
         if y is not None and binomial_log(distribution, link):
-            pivots = separated_directions(
+            pivots, separated = separated_directions(
                 dm,
                 y,
                 sample_weight,
@@ -415,6 +441,7 @@ class IdentifiedLaplace:
             np.union1d(weak, pivots).astype(np.intp),
             generator_columns=random_effect_columns(dm),
             weak=weak,
+            separated_sets=separated,
         )
 
     def __bool__(self) -> bool:

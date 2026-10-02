@@ -25,6 +25,7 @@ from superglm.reml.identified import (
     coefficient_labels,
     dense_hessian,
     final_mode_weak_slopes,
+    separated_set_labels,
 )
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
@@ -445,19 +446,17 @@ def _disclose_weak_identification(
     labels = coefficient_labels(model._groups, indices)
     profile["reml_weakly_identified"] = indices
     profile["reml_weakly_identified_labels"] = labels
-    profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.weak)
-    excluded_labels = coefficient_labels(
-        model._groups, tuple(int(index) for index in identified.weak)
+    # everything the Laplace term leaves out: the weakly identified slopes and
+    # the pivots standing for separated unpenalized directions
+    # (``reml.identified.separated_directions``), named by their sets
+    profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.excluded)
+    separated_labels = separated_set_labels(model._groups, identified.separated_sets)
+    weak = {int(index) for index in identified.weak}
+    profile["reml_laplace_separated"] = tuple(
+        int(index) for index in identified.excluded if int(index) not in weak
     )
-    # the coordinates standing for separated unpenalized directions, which the
-    # Laplace term also leaves out (``reml.identified.separated_directions``)
-    separated = tuple(
-        int(index)
-        for index in identified.excluded
-        if int(index) not in {int(weak) for weak in identified.weak}
-    )
-    profile["reml_laplace_separated"] = separated
-    profile["reml_laplace_separated_labels"] = coefficient_labels(model._groups, separated)
+    profile["reml_laplace_separated_labels"] = separated_labels
+    excluded_labels = coefficient_labels(model._groups, tuple(sorted(weak))) + separated_labels
     profile["reml_laplace_excluded_labels"] = excluded_labels
     if labels:
         left_out = (

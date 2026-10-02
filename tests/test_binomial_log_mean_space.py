@@ -36,6 +36,7 @@ from superglm.diagnostics.separation import SeparationWarning
 from superglm.distributions import Binomial, Gamma, Poisson
 from superglm.links import CauchitLink, CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.model.input_validation import FractionalFrequencyWeightWarning
+from superglm.reml.identified import WeakIdentificationWarning
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.irls_state import (
@@ -1815,7 +1816,9 @@ def test_reml_with_a_separated_level_converges_as_on_master(design: str, direct_
     discloses it.  In the nested design the two ``RandomEffect`` levels
     inside it are penalized sets, each certified by its distance to its own
     penalized maximum; 50ff4b7d ended that fit ``score_stagnated``.  Both
-    converge, as on master, and disclose the level.
+    converge, as on master, and disclose the level, also as left out of
+    smoothing-parameter selection: the Laplace term leaves its separated
+    direction out (``reml.identified.separated_directions``).
     """
     if design == "crossed":
         rng = np.random.default_rng(7)
@@ -1834,11 +1837,14 @@ def test_reml_with_a_separated_level_converges_as_on_master(design: str, direct_
         direct_solve=direct_solve,
         features={"c": Categorical(base="first"), "g": RandomEffect()},
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         model.fit_reml(frame, y)
     assert model.result.converged
     assert model.diagnostics()["c"]["weakly_identified"] == [1]  # level r
+    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[1]"]
+    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    assert any("Left out of smoothing-parameter selection: c[1]." in m for m in messages)
 
 
 def _separated_region_districts() -> tuple[pd.DataFrame, np.ndarray]:
@@ -1923,6 +1929,9 @@ def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
         assert any(lowered) is (offset_value == lowering), offset_value
     for model in fits.values():
         assert model.result.converged
+    # r01 and r02 are levels 0 and 1, and the base region r00 is the reference
+    profile = fits[0.0]._reml_profile
+    assert profile["reml_laplace_separated_labels"] == ("c[0]", "c[1]", "c[reference]")
     objectives = np.array([float(model._reml_result.objective) for model in fits.values()])
     tolerance = float(fits[0.0]._reml_profile["reml_tol_resolved"])
     epsilon = 2.0 * tolerance * (1.0 + float(np.max(np.abs(objectives))))
