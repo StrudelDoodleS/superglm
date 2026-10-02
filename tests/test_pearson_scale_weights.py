@@ -185,12 +185,12 @@ def test_postfit_shape_repair_frequency_weights_match_row_replication(
 ) -> None:
     """A repair that flattens the curve publishes the weighted mean, as the replicated rows do.
 
-    The repaired fit keeps its centred state when its profiled intercept rounds
-    back to the solver's ``alpha`` bit for bit; the public intercept then has to
-    be re-read at the repaired ``beta``, or it predicts the unweighted fitted
-    mean (``fit_state._republish_centred_state``; #433, master's Windows CI on
-    the base case).  Cases a and b keep it on Linux x86-64 OpenBLAS: they failed
-    by 0.0154 and 0.0157 before the republication.
+    The repaired fit carries its centred state, so the published pair has to move
+    with the repaired ``beta`` and the profiled intercept, or it predicts the
+    unweighted fitted mean (#433, master's Windows CI on the base case; the
+    pair is carried by ``fit_state.publish_revised_coefficients`` since #447).
+    Cases a and b kept the pre-repair pair on Linux x86-64 OpenBLAS: they
+    failed by 0.0154 and 0.0157 before #433's fix.
     """
     x = np.linspace(0.0, 1.0, 28)
     y = level - 1.1 * x + 0.08 * np.sin(7.0 * x)
