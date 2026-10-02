@@ -349,10 +349,14 @@ class PIRLSResult:
     mean_space_true_mode: bool = False
     # Rows a direction the factorization truncated moves, each judged on those
     # rows (``mode_score.truncated_direction_ratio``): at their own maximum
-    # (weakly identified), beyond float64's resolution, or rising towards the
-    # boundary (the fit is not converged in either).  A converged fit carries
-    # the judgement of the iteration that certified it; any other fit the
-    # last judgement that found such rows.
+    # (weakly identified), beyond float64's resolution, rising towards the
+    # boundary, or along a direction the basis cannot resolve
+    # (``unresolved_basis``, naming the rows it visibly moves, possibly none);
+    # the fit is not converged in all but the first.  The judgement of the
+    # returned state when it was judged (``irls_direct``), the only one that
+    # decides the verdict; otherwise, for a fit that is not converged, the
+    # latest judgement that found any, each record marked ``earlier`` as
+    # history; otherwise empty.
     truncated_directions: tuple = ()
 
     def __setattr__(self, name: str, value: object) -> None:

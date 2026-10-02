@@ -6,7 +6,9 @@ a fit whose factorization truncated a light cut, so its ``PIRLSResult`` carries
 v0.36.0's ``TruncatedDirection`` records, which stored every moved row as
 ``rows``: at the cut's own maximum (converged, weakly identified) and away from
 it (not converged, unresolved).  The records now hold their rows as runs; a
-saved one must still load, list its rows and predict exactly as v0.36.0 did.
+saved one must still load, list its rows and predict as v0.36.0 did, within
+two evaluations' rounding (``assert_predicts_as_saved``): bit equality across
+BLAS kernels and platforms is not something the arithmetic certifies.
 """
 
 from __future__ import annotations
@@ -15,8 +17,9 @@ import pickle
 import warnings
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+from .test_saved_fs_models import assert_predicts_as_saved
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_v0_36_0"
 
@@ -27,8 +30,7 @@ def test_a_saved_truncated_record_loads_and_predicts_exactly(name: str) -> None:
         record = pickle.load(handle)
     assert record["version"] == "0.36.0"
     model, frame = record["model"], record["frame"]
-    predictions = np.asarray(model.predict(frame[["A", "B"]], offset=frame["off"].to_numpy()))
-    np.testing.assert_array_equal(predictions, record["predictions"])
+    assert_predicts_as_saved(model, frame[["A", "B"]], record["prediction"])
     assert model.result.converged is record["converged"]
     records = model.result.truncated_directions
     assert [list(r.rows) for r in records] == record["truncated_rows"]

@@ -1549,14 +1549,17 @@ def _fit_irls_direct_once(
                     underflow=underflow,
                     column_scale=held_rank.column_scale,
                     eta=eta_values,
+                    penalty_size_apply=lambda v: np.ldexp(
+                        penalty_matvec(v, magnitude=True), -weight_exponent
+                    ),
                 )
             ratio = max(ratio, truncated_ratio)
             _judged_truncated[0] = (eta_values, truncated)
             if truncated:
                 _last_truncated[0] = (eta_values, truncated)
             if truncated_ratio == math.inf and profile is not None:
-                # refused without a record: the basis or the arithmetic
-                # cannot resolve the truncated rows
+                # refused because the basis or the arithmetic cannot resolve
+                # the truncated rows (an ``unresolved_basis`` record)
                 profile["irls_truncated_unresolved"] = (
                     profile.get("irls_truncated_unresolved", 0) + 1
                 )

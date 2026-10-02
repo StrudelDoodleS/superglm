@@ -1072,7 +1072,26 @@ def _warn_unresolved_rows(model) -> None:
             shown += f" and {record.row_count - 6} more"
         labels = ", ".join(coefficient_labels(model._groups, record.columns))
         key = "boundary_rows" if record.boundary else "unresolved_rows"
-        if record.earlier:
+        if getattr(record, "unresolved_basis", False):
+            # the basis cannot show whether the direction moves rows at all
+            when = "At an earlier iterate, the" if record.earlier else "The"
+            along = f" (along {labels})" if labels else ""
+            if record.row_count:
+                message = (
+                    f"{when} fit's factorization truncated a direction{along} that it computes "
+                    f"too inaccurately to show whether rows {shown} move along it at all, so "
+                    "the fit cannot be certified at float64 precision and is reported as not "
+                    "converged. Check the weights and offsets on these rows; "
+                    "diagnostics()['_model']['unresolved_rows'] lists them."
+                )
+            else:
+                message = (
+                    f"{when} fit's factorization truncated a direction{along} it could not judge "
+                    "at float64 precision, and no record of which rows it moves exists, so the "
+                    "fit is reported as not converged. "
+                    "diagnostics()['_model']['unresolved_rows'] records the refusal."
+                )
+        elif record.earlier:
             # judged at an earlier iterate, not at the fit returned
             found = (
                 "their likelihood rose towards probability 1 along a direction float64 "

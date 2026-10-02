@@ -96,6 +96,8 @@ def diagnostics(model) -> dict[str, Any]:
                 "information_ratio": record.information_ratio,
                 # judged at an iterate before the one returned: history
                 "earlier": bool(getattr(record, "earlier", False)),
+                # the basis could not show whether the direction moves rows
+                "unresolved_basis": bool(getattr(record, "unresolved_basis", False)),
             }
             for record in records
             if keep(record)

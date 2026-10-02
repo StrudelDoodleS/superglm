@@ -1548,6 +1548,82 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
     assert any("At an earlier iterate, rows 16" in str(w.message) for w in caught)
 
 
+def test_an_unresolved_basis_is_refused_and_named_in_the_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The returned state's refusal for an unresolved basis is the fit's own record, in plain words.
+
+    The light cut at its own maximum, judged as if its basis were computed
+    only to ``angle = 0.3``: no row's movement can be shown flat, so the
+    certificate refuses at every iterate.  04cc5e7b returned that refusal
+    with no record, so the fit was published not converged with nothing
+    named.  The returned state's record now names the four light rows the
+    direction visibly moves, with a warning that says the basis is too
+    inaccurate to show whether they move, and no earlier record is shown as
+    history.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+
+    judge = irls_direct.truncated_direction_ratio
+    monkeypatch.setattr(
+        irls_direct,
+        "truncated_direction_ratio",
+        lambda **kwargs: judge(**{**kwargs, "angle": 0.3}),
+    )
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        max_iter=6,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert not model.result.converged
+    (record,) = model.result.truncated_directions
+    assert record.unresolved_basis and not record.earlier
+    (entry,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert entry["rows"] == [16, 17, 18, 19] and entry["unresolved_basis"]
+    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    assert any("too inaccurately to show whether rows 16, 17, 18, 19" in m for m in messages)
+    assert not any("At an earlier iterate" in m for m in messages)
+
+
+def test_a_refusal_with_no_rows_to_name_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated-direction refusal that cannot name rows is still disclosed, plainly.
+
+    The judgement is made to refuse without being able to form the rows'
+    movement (a non-finite movement, a vanishing or overflowing system).
+    The fit is not converged; ``diagnostics()`` records the refusal with no
+    rows, and the warning says no record of the rows exists.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.mode_score import _unresolved
+
+    monkeypatch.setattr(
+        irls_direct, "truncated_direction_ratio", lambda **kwargs: (math.inf, (_unresolved(),))
+    )
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        max_iter=6,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert not model.result.converged
+    (entry,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert entry["rows"] == [] and entry["row_count"] == 0 and entry["unresolved_basis"]
+    assert any("no record of which rows it moves exists" in str(w.message) for w in caught)
+
+
 def _penalized_event_level(penalty: float, z: np.ndarray | None = None):
     """``_two_level_design`` with level b's rows both events at ``eta = -20`` and its column penalized."""
     dm, response, score, weight = _two_level_design(np.zeros(10) if z is None else z)
@@ -1603,16 +1679,21 @@ def test_a_penalized_events_direction_is_on_the_boundary_only_past_it(
     assert record.boundary is boundary
 
 
-def test_a_wide_column_does_not_hide_a_light_set_as_aliasing() -> None:
-    """claude's Medium on #454: the basis's error is each row's own, not the design's widest.
+@pytest.mark.parametrize("angle", [1e-3, 1e-2])
+def test_a_wide_column_does_not_hide_a_light_set_as_aliasing(angle: float) -> None:
+    """claude's Mediums on #454: the basis's error is each row's own, and an alias must be shown flat.
 
     Beside a dense column spanning -1000 to 1000, #437's bound took every
     row's movement error as ``4 angle`` times the design's l1 bound (1001):
     at ``angle = 1e-3`` that is 4.0, above the light rows' movement of 1, so
     the support was empty and the direction passed as aliasing.  Each row's
-    error is now ``4 (angle + gamma) l1_i ||d||_2`` with its own ``l1_i``
-    (112 on the light rows), so the light rows are judged: events rising
-    along an unpenalized direction, a boundary supremum.
+    error is now ``4 l1_i (angle ||d||_2 + gamma ||d||_inf)`` with its own
+    ``l1_i`` (112 on the light rows): at ``1e-3`` the light rows are judged,
+    events rising along an unpenalized direction, a boundary supremum.  At
+    ``1e-2`` their error, 4.5, exceeds their movement again, so a real
+    movement cannot be told from an alias's; 04cc5e7b passed it as aliasing.
+    What is not shown flat to the bar is refused, naming the rows the
+    direction visibly moves.
     """
     from superglm.solvers.mode_score import truncated_direction_ratio
 
@@ -1622,7 +1703,7 @@ def test_a_wide_column_does_not_hide_a_light_set_as_aliasing() -> None:
     ratio, found = truncated_direction_ratio(
         dm=dm,
         null_basis=np.array([[1.0], [0.0], [0.0]]),
-        angle=1e-3,
+        angle=angle,
         mean_x=np.zeros(3),
         row_score=score,
         fisher_weights=fisher,
@@ -1637,7 +1718,11 @@ def test_a_wide_column_does_not_hide_a_light_set_as_aliasing() -> None:
     )
     assert ratio > 1.0
     (record,) = found
-    assert record.boundary and record.rows == (4, 5)
+    assert record.rows == (4, 5)
+    if angle == 1e-3:
+        assert record.boundary and not record.unresolved_basis
+    else:
+        assert record.unresolved_basis and not record.boundary
 
 
 def test_reml_refuses_an_all_events_light_cut_in_plain_words() -> None:
@@ -1714,7 +1799,8 @@ def test_an_unresolved_null_basis_refuses() -> None:
     coefficient, and the basis's error is ``4 (angle + gamma)`` times that.
     At ``angle = 0.3`` every movement lies within the error, so no row can be
     told moved: #437 read the empty support as aliasing and passed the stop.
-    It is not resolved, so the claim is refused (``inf``).
+    It is not resolved, so the claim is refused (``inf``), with a record
+    naming the rows the direction visibly moves.
     """
     from superglm.solvers.mode_score import truncated_direction_ratio
 
@@ -1736,7 +1822,8 @@ def test_an_unresolved_null_basis_refuses() -> None:
         underflow=0.0,
     )
     assert ratio == math.inf
-    assert found == ()
+    (record,) = found
+    assert record.unresolved_basis and record.rows == (4, 5)
 
 
 def test_structural_null_columns_are_not_read_on_the_design() -> None:

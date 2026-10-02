@@ -103,7 +103,9 @@ from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
+    DiscretizedSSPGroupMatrix,
     FactorSmoothGroupMatrix,
+    SparseSSPGroupMatrix,
 )
 
 _UNIT_ROUNDOFF = 2.0**-53
@@ -1613,9 +1615,12 @@ class TruncatedDirection:
     ``boundary`` then says every row it moves improves along it and some are
     events, which under the log link rise until one reaches ``eta = 0``: the
     rows' supremum is on the boundary of the parameter space, a probability of
-    one, not an interior maximum.  ``earlier`` marks a record judged at an
-    iterate before the one the fit returned: history, which never decides the
-    fit's verdict (``irls_direct``).
+    one, not an interior maximum.  ``unresolved_basis`` says the
+    factorization's basis is too inaccurate to show whether the direction moves
+    rows at all: ``rows`` are those it visibly moves, possibly none, and the
+    claim is refused.  ``earlier`` marks a record judged at an iterate before
+    the one the fit returned: history, which never decides the fit's verdict
+    (``irls_direct``).
     """
 
     row_ranges: tuple[tuple[int, int], ...]
@@ -1625,6 +1630,7 @@ class TruncatedDirection:
     at_maximum: bool
     boundary: bool = False
     earlier: bool = False
+    unresolved_basis: bool = False
 
     @property
     def rows(self) -> tuple[int, ...]:
@@ -1640,8 +1646,17 @@ class TruncatedDirection:
             state["row_count"] = int(rows.size)
         state.setdefault("boundary", False)
         state.setdefault("earlier", False)
+        state.setdefault("unresolved_basis", False)
         for name, value in state.items():
             object.__setattr__(self, name, value)
+
+
+def _unresolved(rows: NDArray | None = None, columns: tuple[int, ...] = ()) -> TruncatedDirection:
+    """A refusal's record when the judgement cannot be formed: the rows it can name, or none."""
+    rows = np.zeros(0, dtype=np.int64) if rows is None else np.asarray(rows, dtype=np.int64)
+    return TruncatedDirection(
+        row_ranges(rows), int(rows.size), columns, 0.0, False, unresolved_basis=True
+    )
 
 
 def row_ranges(rows: NDArray) -> tuple[tuple[int, int], ...]:
@@ -1663,10 +1678,12 @@ def row_abs_sums(dm: DesignMatrix) -> NDArray:
     """Each row's ``sum_j |x_ij|``, or a bound on it, formed once per design.
 
     A one-hot block contributes its row's own entry (1, or 0 on its base
-    level) and a dense block ``|M| 1``, both exact; any other block the sum
-    of its columns' largest entries, one product per column, which bounds
-    every row.  Owner, lifetime and invalidation as ``row_sets``: it reads
-    the design's entries alone.
+    level) and a dense block ``|M| 1``, both exact.  A spline block stored as
+    a basis ``B`` and a reparameterisation ``R`` (``X = B R``, sparse or
+    binned) contributes ``|B| (|R| 1)``, which bounds its row's sum.  Any
+    other block contributes the sum of its columns' largest entries, one
+    product per column, which bounds every row.  Owner, lifetime and
+    invalidation as ``row_sets``: it reads the design's entries alone.
     """
     cache = getattr(dm, "_structured_layout_cache", None)
     held = cache.get(_ROW_ABS_KEY) if isinstance(cache, dict) else None
@@ -1679,6 +1696,12 @@ def row_abs_sums(dm: DesignMatrix) -> NDArray:
             sums += np.asarray(matrix.matvec(np.ones(width)), dtype=np.float64)
         elif isinstance(matrix, DenseGroupMatrix):
             sums += np.abs(np.asarray(matrix.M, dtype=np.float64)) @ np.ones(width)
+        elif type(matrix) is SparseSSPGroupMatrix:
+            spread = np.abs(np.asarray(matrix.R_inv, dtype=np.float64)) @ np.ones(width)
+            sums += abs(matrix.B) @ spread
+        elif type(matrix) is DiscretizedSSPGroupMatrix:
+            spread = np.abs(np.asarray(matrix.R_inv, dtype=np.float64)) @ np.ones(width)
+            sums += (np.abs(np.asarray(matrix.B_unique, dtype=np.float64)) @ spread)[matrix.bin_idx]
         else:
             for column in range(width):
                 unit = np.zeros(width)
@@ -1754,6 +1777,7 @@ def truncated_direction_ratio(
     underflow: float,
     column_scale: NDArray | None = None,
     eta: NDArray | None = None,
+    penalty_size_apply: Callable[[NDArray], NDArray] | None = None,
 ) -> tuple[float, tuple[TruncatedDirection, ...]]:
     """The directions the factorization truncates, each judged on the rows it moves.
 
@@ -1775,15 +1799,16 @@ def truncated_direction_ratio(
     and row ``i``'s
     movement within ``l1_i angle ||d||_2`` of the true one, ``l1_i`` the
     row's own ``sum_j |x_ij - mean_j|`` (``row_abs_sums``); the movement's
-    rounding adds ``gamma_{p+2} l1_i ||d||_inf``.  The error is ``r l1_i
-    ||d||_2``, ``r = 4 (angle + gamma_{p+2})``.
+    rounding adds ``gamma_{p+2} l1_i ||d||_inf``.  The error is ``4 l1_i
+    (angle ||d||_2 + gamma_{p+2} ||d||_inf)``.
 
-    - **Structural.**  A direction that moves no row beyond its error moves
-      none resolvably: aliasing, at the basis's resolution on each row's own
-      entries.  Unless that test is vacuous: a row moves at most ``l1_i
-      ||d||_inf``, so once ``r ||d||_2 >= ||d||_inf`` every row's error
-      reaches the most it can move, no movement can be told from the error,
-      and the claim is refused (``inf``), never passed.
+    - **Structural.**  A direction that moves no row beyond its error is
+      aliasing only where it is shown flat to the certificate's own
+      resolution: on every row, the movement and its error together within
+      ``bar l1_i ||d||_inf``, ``bar`` times the most the row can move.
+      Otherwise an alias cannot be told from a real movement, and the claim
+      is refused with a record (``unresolved_basis``) naming the rows the
+      direction visibly moves, if any.
     - **Not hidden.**  A direction whose rows' scores, each weighted by how far
       it moves the row, sum above ``bar`` times every row's score at its
       largest movement, ``sum |m_i s_i| > bar max |m_i| sum |s|``, is seen by
@@ -1811,8 +1836,14 @@ def truncated_direction_ratio(
         0`` (``eta``, the rows' current predictor; without it, never).
       Else the fit cannot be certified in float64.
 
-    Arithmetic that cannot form the judgement (scores and weights that
-    vanish, or a scaled system that overflows) refuses: ``inf``.
+    Arithmetic that cannot form the judgement (a non-finite movement or
+    score, scores and weights that vanish, or a scaled system that overflows)
+    refuses (``inf``) with a record that names no rows (``unresolved_basis``).
+
+    The penalty's bend ``d' S d`` is judged against its error: the basis's,
+    ``2 r ||d||_2 ||S d||_2 + ||S||_inf (r ||d||_2)^2`` with ``r = 4 (angle +
+    gamma_{p+2})`` (``||S||_inf`` from ``penalty_size_apply``, ``|S| |v|``,
+    bounding ``||S||_2``), and its rounding, ``gamma_{p+2} |d|' |S| |d|``.
 
     Returns the largest ``|M delta| / max(bar, floor)`` over uncertifiable
     directions (0 where none) and the hidden directions found.  Nothing in
@@ -1842,26 +1873,37 @@ def truncated_direction_ratio(
     reach = row_abs_sums(dm) + float(np.sum(np.abs(mean)))
     resolution = 4.0 * (angle + _gamma(p + 2))
     if not np.any(positive) or not np.all(np.isfinite(moved[positive])):
-        return math.inf, ()
+        return math.inf, (_unresolved(),)
     # the subspace turned to the right singular vectors of its movement
     _, _, right = np.linalg.svd(moved[positive], full_matrices=False)
     turn = right.T
     directions = basis @ turn
     movement = moved @ turn
     lengths = np.linalg.norm(directions, axis=0)
-    # row i's movement along direction k is within ``r l1_i ||d_k||_2``
-    error = resolution * reach[:, None] * lengths[None, :]
+    peaks = np.max(np.abs(directions), axis=0)
+    # row i's movement along direction k is within this
+    reach_error = 4.0 * (angle * lengths + _gamma(p + 2) * peaks)
+    error = reach[:, None] * reach_error[None, :]
     total = float(np.sum(np.abs(score[positive])))
     if not math.isfinite(total):
-        return math.inf, ()
+        return math.inf, (_unresolved(),)
     hidden: list[int] = []
     for k in range(directions.shape[1]):
         support = positive & (np.abs(movement[:, k]) > error[:, k])
         if not support.any():
-            if resolution * lengths[k] >= float(np.max(np.abs(directions[:, k]))):
-                # every row's error reaches the most it can move: unresolved
-                return math.inf, ()
-            continue  # aliasing
+            # aliasing only where shown flat to the certificate's resolution:
+            # each row's movement and error within bar of its largest
+            flat_level = bar * reach * peaks[k]
+            if np.all((np.abs(movement[:, k]) + error[:, k] <= flat_level)[positive]):
+                continue  # aliasing
+            visible = np.flatnonzero(positive & (np.abs(movement[:, k]) > flat_level))
+            leaning = np.abs(directions[:, k])
+            named = tuple(
+                int(j)
+                for j in np.argsort(-leaning)[:8]
+                if leaning[j] > resolution * float(peaks[k])
+            )
+            return math.inf, (_unresolved(visible, named),)
         weighted = float(np.sum(np.abs(movement[support, k]) * np.abs(score[support])))
         largest_move = float(np.max(np.abs(movement[support, k])))
         if not math.isfinite(weighted) or weighted > bar * largest_move * total:
@@ -1881,10 +1923,10 @@ def truncated_direction_ratio(
     lengths = lengths[hidden]
     s_local, f_local = score[support], fisher[support]
     # the gradient's error from the rows' movement error, per direction
-    movement_error = resolution * lengths * float(reach[support] @ np.abs(s_local))
+    movement_error = reach_error[hidden] * float(reach[support] @ np.abs(s_local))
     largest = float(np.max(np.concatenate([np.abs(s_local), f_local]), initial=0.0))
     if not (math.isfinite(largest) and largest > 0.0):
-        return math.inf, ()
+        return math.inf, (_unresolved(),)
     exponent = -int(np.frexp(largest)[1])
     gradient_at = np.asarray(penalty_gradient, dtype=np.float64)
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
@@ -1907,9 +1949,30 @@ def truncated_direction_ratio(
         bending = direction.T @ stiffness
         curvature = local.T @ (f_local[:, None] * local) + bending
         gradient = local.T @ s_local - pull
-        # the penalty's curvature along each direction, and the basis's
-        # error in it: ``|d' S d - d*' S d*| <= ||e||_2 ||S (d + d*)||_2``
-        bending_error = 2.0 * resolution * lengths * np.linalg.norm(stiffness, axis=0)
+        # the penalty's curvature along each direction, and its error:
+        # the basis's, ``|d' S d - d*' S d*| = |e' S (2 d - e)|``, and the
+        # rounding of forming ``S d`` and ``d' S d``
+        size_apply = (
+            penalty_size_apply
+            if penalty_size_apply is not None
+            else (lambda v: np.abs(np.asarray(penalty_apply(v), dtype=np.float64)))
+        )
+        bent_size = np.column_stack(
+            [
+                np.ldexp(
+                    np.asarray(size_apply(np.abs(direction[:, j])), dtype=np.float64), exponent
+                )
+                for j in range(direction.shape[1])
+            ]
+        )
+        penalty_norm = float(
+            np.max(np.ldexp(np.asarray(size_apply(np.ones(p)), dtype=np.float64), exponent))
+        )
+        bending_error = (
+            2.0 * resolution * lengths * np.linalg.norm(stiffness, axis=0)
+            + penalty_norm * (resolution * lengths) ** 2
+            + _gamma(p + 2) * np.sum(np.abs(direction) * bent_size, axis=0)
+        )
     if not (
         np.all(np.isfinite(curvature))
         and np.all(np.isfinite(gradient))
@@ -1917,7 +1980,7 @@ def truncated_direction_ratio(
         and np.all(np.isfinite(movement_error))
         and np.all(np.isfinite(bending_error))
     ):
-        return math.inf, ()
+        return math.inf, (_unresolved(),)
     curvature = 0.5 * (curvature + curvature.T)
     values, vectors = np.linalg.eigh(curvature)
     kept = values > float(np.max(np.abs(values), initial=0.0)) * 4.0 * len(values) * _EPS

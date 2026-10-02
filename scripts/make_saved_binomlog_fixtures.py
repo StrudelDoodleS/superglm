@@ -6,7 +6,8 @@ Run it with the v0.36.0 release on the path (commit f8e5ac01), for example from
     PYTHONPATH=<dir>/src python scripts/make_saved_binomlog_fixtures.py tests/fixtures/saved_v0_36_0
 
 Each record holds the fitted model, its training rows, offsets and weights, its
-predictions, and the rows of the ``TruncatedDirection`` records v0.36.0
+predictions (without the offset, as ``tests/test_saved_fs_models.py``'s
+``assert_predicts_as_saved`` reads them), and the rows of the ``TruncatedDirection`` records v0.36.0
 published: a binomial/log fit whose factorization truncates a light cut
 (``tests/test_binomial_log_mean_space.py::_light_cut``), at its own maximum
 (weakly identified) and away from it (unresolved).
@@ -65,9 +66,7 @@ def main(out: str) -> None:
         record = {
             "model": model,
             "frame": frame,
-            "predictions": np.asarray(
-                model.predict(frame[["A", "B"]], offset=frame["off"].to_numpy())
-            ),
+            "prediction": np.asarray(model.predict(frame[["A", "B"]])),
             "truncated_rows": [list(r.rows) for r in records],
             "at_maximum": [bool(r.at_maximum) for r in records],
             "converged": bool(model.result.converged),
