@@ -436,9 +436,9 @@ def _system_offset_mean(
     """``mean_x - c``, the working mean's offset from the state's centre, read from the system's pair.
 
     A system whose dense pair is anchored at the state's centre, ``(c, d)``
-    (``centered_system.dense_mean_pair``), carries the offset as ``d``,
-    formed on the rows held centred about ``c``: no pass.  Any other system
-    takes ``centre_offset_mean``'s pass over centred rows.
+    (``centered_system.dense_mean_pair``), carries the offset as ``d``, formed
+    in the system's own pass on rows centred about ``c``: no further pass.
+    Any other system takes ``centre_offset_mean``'s pass over centred rows.
     """
     if system.mean_hi is not None and system.mean_lo is not None:
         dense = dense_columns(dm)
@@ -3051,8 +3051,9 @@ def _fit_irls_direct_once(
                 _last_working_offset_mean = None
                 if _state_center is not None:
                     # the intercept about the state's centre, from the offset
-                    # of the working mean to it, formed on centred rows
-                    # (``centre_offset_mean``): no raw-scale cancellation
+                    # of the working mean to it, formed on centred rows (the
+                    # system's pair, else ``centre_offset_mean``): no
+                    # raw-scale cancellation
                     _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
                     proposal_centred_intercept = centered.mean_z - math.fsum(
                         _last_working_offset_mean * beta

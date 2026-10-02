@@ -460,8 +460,8 @@ def build_centered_system(
     ``centre`` is the fit's fixed state centre (``mode_score.prior_weighted_centre``):
     a dense column's weighted mean is then read as the pair ``(centre, d)``,
     ``d`` the shift of its working-weighted mean from the centre, and the
-    dense block is centred by a rank-one correction of its rows centred once
-    about the centre (``dense_mean_pair``, ``_attach_dense_split``).
+    dense block is centred by a rank-one correction of its rows centred about
+    the centre in one subtraction (``dense_mean_pair``, ``_attach_dense_split``).
     """
     n, p = dm.shape
     W = np.asarray(W, dtype=float)
@@ -754,8 +754,8 @@ def _attach_dense_split(
         rhs_dense = response - lo * float(np.dot(W, z_centered))
         # one rows-long buffer serves every dense column: W (x_k - c_k)
         weighted = np.empty(split.dense.n, dtype=np.float64)
-        for column, (values, centre) in enumerate(_dense_columns_of(split.dense, hi)):
-            np.subtract(values, centre, out=weighted)
+        for column, (values, column_centre) in enumerate(_dense_columns_of(split.dense, hi)):
+            np.subtract(values, column_centre, out=weighted)
             weighted *= W
             cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(
                 np.sum(weighted)
