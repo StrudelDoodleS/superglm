@@ -358,6 +358,74 @@ def centred_matvec(dm: DesignMatrix, beta: NDArray, center: NDArray) -> NDArray:
     return result
 
 
+def dense_columns(dm: DesignMatrix) -> NDArray:
+    """``(p,)`` bool: the ``DenseGroupMatrix`` columns, the one type whose entries its type does not bound."""
+    mask = np.zeros(dm.p, dtype=bool)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        mask[offset : offset + width] = type(matrix) is DenseGroupMatrix
+        offset += width
+    return mask
+
+
+def _dense_rows(matrix, start, stop, centre, centre_lo):
+    """Rows ``start:stop`` of a dense block, ``(x - c) - c_lo`` (``c_lo`` ``None``: ``x - c``)."""
+    rows = matrix.M[start:stop] - centre
+    return rows if centre_lo is None else rows - centre_lo
+
+
+def dense_centred_matvec(
+    dm: DesignMatrix, values: NDArray, center: NDArray, center_lo: NDArray | None = None
+) -> NDArray:
+    """``(X_d - 1 c_d') v_d`` over the ``DenseGroupMatrix`` blocks only, centred row by row.
+
+    The dense blocks' share of ``centred_matvec`` in its fixed chunks, for a
+    caller that applies every other block through its own (structured)
+    product.  ``center_lo`` makes the centre an exact pair, rows ``(x - c) -
+    c_lo`` (``centered_system.weighted_mean_pair``).
+    """
+    result = np.zeros(dm.n)
+    values = np.asarray(values, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            part = values[offset : offset + width]
+            centre = center[offset : offset + width]
+            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            for start in range(0, dm.n, _CHUNK):
+                stop = min(start + _CHUNK, dm.n)
+                result[start:stop] += _dense_rows(matrix, start, stop, centre, centre_lo) @ part
+        offset += width
+    return result
+
+
+def dense_centred_rmatvec(
+    dm: DesignMatrix, rows: NDArray, center: NDArray, center_lo: NDArray | None = None
+) -> NDArray:
+    """``(X_d - 1 c_d')' r`` on the ``DenseGroupMatrix`` columns (zero elsewhere), centred row by row.
+
+    ``center_lo`` as ``dense_centred_matvec``.
+    """
+    result = np.zeros(dm.p)
+    rows = np.asarray(rows, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            centre = center[offset : offset + width]
+            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            accumulated = np.zeros(width)
+            for start in range(0, dm.n, _CHUNK):
+                stop = min(start + _CHUNK, dm.n)
+                block = _dense_rows(matrix, start, stop, centre, centre_lo)
+                accumulated += block.T @ rows[start:stop]
+            result[offset : offset + width] = accumulated
+        offset += width
+    return result
+
+
 def prior_weighted_centre(dm: DesignMatrix, prior_weights: NDArray) -> NDArray:
     """``c0``: each dense column's shifted prior-weighted mean, 0 on every other column type.
 
@@ -389,6 +457,37 @@ def prior_weighted_centre(dm: DesignMatrix, prior_weights: NDArray) -> NDArray:
     return centre
 
 
+def centre_offset_mean(
+    dm: DesignMatrix, weights: NDArray, sum_w: float, center: NDArray, mean_x: NDArray
+) -> NDArray:
+    """``d = sum W (x - c) / sum W``: a weighted column mean read about the state's centre ``c``.
+
+    The centred intercept about ``c`` is ``alpha = mean_z - d' beta`` (one-engine
+    design §3.8).  ``mean_x - c`` from the weighted mean ``mean_x`` rounds at
+    ``u |c|``, the size of the column's offset, not of its spread: at a 1e6
+    offset that is ``1e-10``, times the slope in every row's ``eta``.  Every
+    ``DenseGroupMatrix`` column, by type (the only type whose entries are not
+    bounded by their type), is differenced row by row before its weighted
+    sum, in fixed chunks as ``centred_matvec``, so ``d`` rounds at ``gamma_n
+    max|x - c|``.  Every other column keeps ``mean_x - c``.
+    """
+    offset_mean = np.asarray(mean_x, dtype=np.float64) - center
+    w = np.asarray(weights, dtype=np.float64)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            centre = center[offset : offset + width]
+            values = matrix.M
+            accumulated = np.zeros(width)
+            for lo in range(0, dm.n, _CHUNK):
+                hi = min(lo + _CHUNK, dm.n)
+                accumulated += (values[lo:hi] - centre).T @ w[lo:hi]
+            offset_mean[offset : offset + width] = accumulated / sum_w
+        offset += width
+    return offset_mean
+
+
 def two_sum(a, b):
     """Knuth's TwoSum: ``s = fl(a + b)`` and its rounding error, ``a + b = s + e`` exactly.
 
@@ -398,6 +497,156 @@ def two_sum(a, b):
     s = a + b
     b_virtual = s - a
     return s, (a - (s - b_virtual)) + (b - b_virtual)
+
+
+def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) -> float:
+    """``(N 2^K) / (D 2^L)`` without forming either scaled sum, and without raising.
+
+    Every finite non-zero pair divides its significands as ``frexp``
+    mantissas, whose quotient lies in ``(1/2, 2)``, so it neither under- nor
+    overflows whichever sum sits at the larger scale: a weight total carried
+    at ``2^-1126`` beside a numerator at ``2^0`` read ``1e10 * 2^-1126`` and
+    rounded to 0, and a numerator at ``2^-1126`` beside a total at ``2^0``
+    read ``2^146 / 2^-960 = inf`` before the guard tested the operands.  The
+    exponents are added before scaling back: a result past the binary64 range
+    is a signed infinity, one below it a signed zero, never the
+    ``OverflowError`` ``math.ldexp`` raises.  A zero denominator has no
+    quotient and returns ``nan``, which every caller reads as "fall back".
+    """
+    if denominator[0] == 0.0:
+        return math.nan
+    if numerator[0] == 0.0 or not (math.isfinite(numerator[0]) and math.isfinite(denominator[0])):
+        return numerator[0] / denominator[0]
+    numerator_mantissa, numerator_exponent = math.frexp(numerator[0])
+    denominator_mantissa, denominator_exponent = math.frexp(denominator[0])
+    mantissa, exponent = math.frexp(numerator_mantissa / denominator_mantissa)
+    exponent += numerator_exponent - denominator_exponent + numerator[1] - denominator[1]
+    if exponent > 1024:
+        return math.copysign(math.inf, mantissa)
+    if exponent < -1100:
+        return math.copysign(0.0, mantissa)
+    return math.ldexp(mantissa, exponent)
+
+
+def _exact_sum(
+    weights: NDArray, values: NDArray, shift: float, mode: int
+) -> tuple[float, int, bool]:
+    """``(S, K, ok)`` with the sum ``S 2^K``: unscaled in one pass, scaled only if that overflows."""
+    from superglm.solvers._exact_sums import scaled_exact_sum, unscaled_exact_sum
+
+    total, exponent, ok = unscaled_exact_sum(weights, values, shift, mode)
+    if ok:
+        return total, exponent, True
+    return scaled_exact_sum(weights, values, shift, mode)
+
+
+def compensated_weighted_mean(values: NDArray, weights: NDArray) -> float:
+    """``m* = sum w v / sum w`` from exact products, refined once with an exact residual.
+
+    Each sum runs in a compiled kernel (``_exact_sums``) that streams the rows
+    and holds only Shewchuk's partials, so it needs no memory that grows with
+    the rows.  Every product ``w_i v_i`` is split exactly into two floats and
+    the partials are rounded once, as ``math.fsum`` rounds them.  The products
+    are added unscaled, so no contribution underflows before the large terms
+    cancel (``[1e150, -1e150, 1e-200]`` keeps its ``1e-200``); a product below
+    ``2^-969``, where TwoProduct stops being exact, is formed on the operands'
+    mantissas and carried exactly at a shifted scale.  Only if a
+    split, product or partial overflows does that sum fall back to the scaled
+    kernel: products on the operands' ``frexp`` mantissas, each sum scaled by
+    its own largest power of two (so ``1e-300`` beside ``1e300`` survives
+    there too).  The first quotient ``m0`` is then refined by the residual
+    ``v - m0 = h + e`` (TwoSum, exact), whose products are formed the same
+    way.  With ``n`` rows, ``u`` the unit roundoff and ``W = sum w``:
+
+        |m - m*| <= (u + 10 u^2) |m*| + 2^-1074 (2 + 16 (n + 5) L / W),
+
+    ``L = 1`` on the unscaled path (the merge of the scaled-up partials of
+    products below ``2^-969``, half a unit of ``2^-1074`` per partial) and
+    ``L = max |w v| + |m*| max w`` on the overflow fallback (a piece scaled
+    below the normal range, at most ``2^-1075`` of its sum's largest power of
+    two), plus the subnormal results (Higham 2002 §2.2).  On
+    two levels of adjacent floats, on subnormal weights and on values of
+    ``+-1e300`` the mean is correctly rounded.  Three passes over the rows,
+    two more for a sum that overflows.  A quotient past the binary64 range,
+    a zero weight sum, non-finite input or a non-finite residual falls back
+    to ``np.average``.
+    """
+    from superglm.solvers._exact_sums import native_operand
+
+    v = native_operand(values)
+    w = native_operand(weights)
+    if not (np.all(np.isfinite(v)) and np.all(np.isfinite(w))):
+        return float(np.average(v, weights=w))
+    total, total_exponent, total_ok = _exact_sum(w, v, 0.0, 0)
+    if not total_ok or total == 0.0:
+        return float(np.average(v, weights=w))
+    numerator, numerator_exponent, numerator_ok = _exact_sum(w, v, 0.0, 1)
+    first = _scaled_ratio((numerator, numerator_exponent), (total, total_exponent))
+    if not numerator_ok or not math.isfinite(first):
+        return float(np.average(v, weights=w))
+    residual, residual_exponent, residual_ok = _exact_sum(w, v, first, 2)
+    if not residual_ok:
+        return float(np.average(v, weights=w))
+    mean = first + _scaled_ratio((residual, residual_exponent), (total, total_exponent))
+    return mean if math.isfinite(mean) else first
+
+
+def _anchored_total(chunks, weights: NDArray, anchor: NDArray) -> NDArray:
+    """``sum w (x - anchor)`` over the row chunks, compensated across chunks (Kahan)."""
+    total = np.zeros_like(anchor)
+    compensation = np.zeros_like(anchor)
+    for start, stop, block in chunks():
+        contribution = (np.asarray(block, dtype=np.float64) - anchor).T @ weights[start:stop]
+        corrected = contribution - compensation
+        updated = total + corrected
+        compensation = (updated - total) - corrected
+        total = updated
+    return total
+
+
+def corrected_two_pass_pair(chunks, weights: NDArray, sum_w: float, width: int):
+    """``(anchor, lo)``: each column's weighted mean as an exact pair, the corrected two-pass way.
+
+    ``chunks`` is a zero-argument callable returning ``(start, stop, rows)``
+    blocks.  Pass one forms the shift ``sum w (x - x_ref) / sum w`` about
+    ``x_ref``, the first row that carries weight, and rounds the mean,
+    ``anchor = fl(x_ref + shift)``; pass two forms the remainder ``lo = sum w
+    (x - anchor) / sum w`` (Chan, Golub & LeVeque 1983, the corrected
+    two-pass algorithm on shifted data).  The anchor lies within ``u |m| +
+    gamma_k sum |w| |x - x_ref| / |sum w|`` of the mean (``k`` the chunk
+    length plus two, Higham 2002 §4.3), so ``x - anchor`` is exact where
+    ``x`` and the anchor lie within a factor two (Sterbenz) and otherwise
+    rounds at ``u |x - anchor|``, the centred row's own scale, and ``lo``
+    carries ``gamma_k sum |w| |x - anchor| / |sum w|``.  The seed row enters
+    only through pass one's rounding, which pass two absorbs: a row far from
+    the mean with zero or negligible weight no longer sets the remainder's
+    scale (it did as the anchor: Sol's ``x = [0, 1e16 - 2, 1e16, 1e16 + 2]``
+    at ``w = [0, -0.1, 1, 1]`` read a centred Gram of 3.6 for 1.0526).  Zero
+    weights enter neither sum, and a column constant on its weighted rows
+    gives ``anchor = x_ref`` and ``lo = 0`` exactly.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    anchor = rounded_weighted_mean(chunks, weights, sum_w, width)
+    return anchor, _anchored_total(chunks, weights, anchor) / sum_w
+
+
+def rounded_weighted_mean(chunks, weights: NDArray, sum_w: float, width: int) -> NDArray:
+    """Pass one of ``corrected_two_pass_pair``: the weighted mean, shifted by the first weighted row.
+
+    ``fl(x_ref + sum w (x - x_ref) / sum w)``: within ``u |m| + gamma_k sum |w| |x
+    - x_ref| / |sum w|`` of the mean, whichever row seeds it; zeros without a
+    weighted row.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    reference = None
+    for start, stop, block in chunks():
+        carried = np.flatnonzero(weights[start:stop] != 0.0)
+        if carried.size:
+            reference = np.array(np.asarray(block, dtype=np.float64)[carried[0]], copy=True)
+            break
+    if reference is None:
+        return np.zeros(width, dtype=np.float64)
+    return reference + _anchored_total(chunks, weights, reference) / sum_w
 
 
 def centred_intercept_remainder(
@@ -417,29 +666,51 @@ def centred_intercept_remainder(
     and by at least the half ulp ``alpha*`` loses when it is not representable
     (the midpoint of two adjacent floats).  One step of iterative refinement
     with the residual formed error-free (Demmel et al. 2009 for least squares)
-    recovers it: ``y - o`` and ``- alpha`` are TwoSums, so the residual ``d =
-    y - o - alpha - t`` rounds at its own size, and
+    recovers it.  Each row's residual ``d = y - o - alpha - t`` is carried as
+    four floats by TwoSum and weighted by TwoProduct into one exact sum
+    (``_exact_sums.weighted_residual_sum``), never added back into its head
+    before the reduction (that absorbed the errors: ``y = [1e12, -1e12, 1]``
+    predicted 0.3333062 for 1/3).  The sum and ``sum w`` are each rounded
+    once, so
 
-        |alpha + alpha_lo - alpha*| <= gamma_{n+3} sum w |d| / sum w
-                                       + gamma_n |alpha_lo| + O(u^2) mean_w |y - o|,
+        |alpha + alpha_lo - alpha*| <= 3u |alpha_lo| + 2^-1074 (1 + 5 m / sum w),
 
-    which scales with the residuals, not with ``|eta|`` as ``alpha``'s own
-    error does.  ``None`` when there is no positive weight or the residual
-    overflows, and the predictor stays ``alpha + t``.
+    ``m`` the weighted rows, the last term a product's error below the normal
+    range.  ``None`` when there is no positive weight or a part overflows,
+    and the predictor stays ``alpha + t``.
     """
-    w = np.asarray(weights, dtype=np.float64)
-    total = float(np.sum(w))
-    if not total > 0.0:
+    from superglm.solvers._exact_sums import native_operand, weighted_residual_sum
+
+    w = native_operand(weights)
+    total, total_exponent, total_ok = _exact_sum(w, w, 0.0, 0)
+    if not total_ok or not total > 0.0:
         return None
-    response = np.asarray(y, dtype=np.float64)
-    tail = 0.0
-    if offset is not None and np.any(offset):
-        response, tail = two_sum(response, -np.asarray(offset, dtype=np.float64))
-    head, error = two_sum(response, -float(alpha))
-    residual = (head - contribution) + (error + tail)
-    with np.errstate(over="ignore", invalid="ignore"):
-        remainder = float(np.sum(w * residual)) / total
+    response = native_operand(y)
+    contribution = native_operand(contribution)
+    has_offset = offset is not None and bool(np.any(offset))
+    shift = native_operand(offset) if has_offset else native_operand(np.zeros(0))
+    residual, residual_exponent, ok = weighted_residual_sum(
+        w, response, shift, has_offset, float(alpha), contribution
+    )
+    if not ok:
+        return None
+    remainder = _scaled_ratio((residual, residual_exponent), (total, total_exponent))
     return remainder if math.isfinite(remainder) else None
+
+
+def centred_warm_start(result) -> tuple[float, NDArray] | None:
+    """``(alpha, c)`` of a PIRLS state that carries its centred predictor, else ``None``.
+
+    A warm start's ``_centred_init`` (``irls_direct``): the next fit continues
+    from ``alpha + (X - 1 c') beta`` rather than from the raw intercept,
+    which rounds ``alpha - c' beta`` at ``|c' beta|``.  Pass it only with the
+    state's own ``beta`` in the same design coordinates.
+    """
+    alpha = getattr(result, "centred_intercept", None)
+    centre = getattr(result, "state_center", None)
+    if alpha is None or centre is None:
+        return None
+    return float(alpha), np.asarray(centre, dtype=np.float64)
 
 
 def linear_predictor(dm: DesignMatrix, result, offset: NDArray | None) -> NDArray:

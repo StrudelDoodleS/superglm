@@ -863,13 +863,26 @@ def test_the_compensated_intercept_reproduces_an_adjacent_float_fit_exactly(base
     assert model.metrics(X, y).deviance == 0.0
 
 
-def test_a_fit_without_a_dense_column_keeps_its_raw_predictor():
-    """Only a dense column needs the centre: without one the public result carries no
-    centred state and predictions are the raw ``intercept + sum_t score_t`` as before."""
-    model, frame, _ = _offset_fit("gaussian", numeric=False)
-    assert model.result.centred_intercept is None and model.result.state_center is None
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_a_fit_without_a_dense_column_scores_its_terms_uncentred(family):
+    """Only a dense column needs the centre: without one no term is scored about a centre.
+
+    A Poisson fit then carries no centred state and predicts the raw ``intercept +
+    sum_t score_t`` as before.  A Gaussian identity fit carries its compensated
+    intercept by type (issue #430), with a zero public centre, and predicts ``alpha
+    + (sum_t score_t + alpha_lo)``, the predictor its deviance was published at.
+    """
+    model, frame, _ = _offset_fit(family, numeric=False)
     g = next(group for group in model._groups if group.name == "g")
-    expected = model.result.intercept + model.result.beta[g.sl][frame["g"].to_numpy()]
+    scores = model.result.beta[g.sl][frame["g"].to_numpy()]
+    if family == "poisson":
+        assert model.result.centred_intercept is None and model.result.state_center is None
+        expected = model.result.intercept + scores
+    else:
+        alpha, lo = model.result.centred_intercept, model.result.centred_intercept_lo
+        assert alpha is not None and lo is not None
+        assert not np.any(model.result.state_center)
+        expected = alpha + (np.full(len(frame), lo) + scores)
     np.testing.assert_array_equal(model._predict_eta_raw_exact(frame), expected)
 
 

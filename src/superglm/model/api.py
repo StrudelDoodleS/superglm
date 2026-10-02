@@ -631,7 +631,11 @@ class SuperGLM:
     ) -> PathResult:
         """Fit a regularization path from lambda_max down to lambda_min.
 
-        Warm-starts each lambda from the previous solution.
+        Warm-starts each lambda from the previous solution, and leaves the
+        model fitted at the last one.  The returned ``coef_path`` and
+        ``intercept_path`` are raw coefficients: beside a numeric column far
+        from zero, rebuilding predictions from them cancels the column's
+        offset (``PathResult``); predict with a fitted model instead.
         """
         with solver_blas_threads():
             return fit_ops.fit_path(

@@ -203,8 +203,12 @@ def _legacy_active_state(model, solver, W: NDArray):
     raw_gram, xtw1, _, _ = centered.raw_weighted_moments()
     coefficient_rank = decompose_gram_if_authoritative(raw_gram + curvature)
     data_rank = decompose_gram_if_authoritative(centered.data_gram)
+    # rows centred about the system's exact centre pair (issue #430)
+    centre, centre_lo = centered.centre_pair()
     if data_rank is None:
-        certified = decompose_factor(grouped_weighted_factor(design, W, center=centered.mean_x))
+        certified = decompose_factor(
+            grouped_weighted_factor(design, W, center=centre, center_lo=centre_lo)
+        )
         data_rank = certified
     if coefficient_rank is None:
         certified = decompose_factor(grouped_augmented_factor(design, W, curvature))
@@ -219,7 +223,8 @@ def _legacy_active_state(model, solver, W: NDArray):
                     design,
                     W,
                     curvature,
-                    center=centered.mean_x,
+                    center=centre,
+                    center_lo=centre_lo,
                 )
             )
             profile_rank = certified

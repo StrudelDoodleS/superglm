@@ -2205,8 +2205,21 @@ class SumToZeroTreeFactor:
             )
         return solution
 
-    def solve(self, rhs: NDArray, *, centred: bool = False) -> NDArray:
-        """``H^-1 rhs`` in raw coordinates (``centred``: the intercept stays ``alpha``), as fs."""
+    def solve(
+        self,
+        rhs: NDArray,
+        *,
+        centred: bool = False,
+        border_centred: NDArray | None = None,
+    ) -> NDArray:
+        """``H^-1 rhs`` in raw coordinates (``centred``: the intercept stays ``alpha``), as fs.
+
+        ``border_centred`` ``(q,)`` or ``(q, m)``, when given, is the border
+        part of ``rhs`` already in the factor's centred coordinates, ``(X_b -
+        1 c')' r`` formed on centred rows (``mode_score.centred_data_score``):
+        it replaces the subtraction ``r_b - c r_0``, which cancels a column's
+        offset against the intercept row, as ``NestedSchurFactor.solve_data``'s.
+        """
         values = np.asarray(rhs, dtype=np.float64)
         vector_rhs = values.ndim == 1
         if vector_rhs:
@@ -2218,7 +2231,10 @@ class SumToZeroTreeFactor:
             )
         values = values.copy()
         border = self.small_indices[1:]
-        values[border] -= self._center[:, None] * values[:1]
+        if border_centred is None:
+            values[border] -= self._center[:, None] * values[:1]
+        else:
+            values[border] = np.asarray(border_centred, dtype=np.float64).reshape(len(border), -1)
         coordinates = self._coordinates(True)
         beta, x = self._cov_apply(*self._vectors_to_level(values, coordinates))
         solution = self._level_to_public(beta, x, coordinates)

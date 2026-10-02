@@ -995,6 +995,7 @@ def centered_gram_rhs(
     mean_x: NDArray,
     z_centered: NDArray,
     chunk_size: int = 8192,
+    mean_lo: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Return centered ``X'WX`` and ``X'Wz`` without raw-moment subtraction.
 
@@ -1002,6 +1003,10 @@ def centered_gram_rhs(
     multiplication, so large feature offsets cannot cancel two raw moments.
     Group-specific ``row_subset`` implementations preserve sparse/discretized
     storage and avoid materializing the full training design.
+    ``mean_lo``, when given, is the low half of the centre as an exact pair
+    ``(mean_x, mean_lo)`` (``centered_system.weighted_mean_pair``): rows are
+    centred as ``(x - mean_x) - mean_lo``, so a dense column at an offset is
+    centred about its anchor exactly and then by the small remainder.
     """
     n, p = dm.shape
     W = np.asarray(W, dtype=float)
@@ -1026,6 +1031,8 @@ def centered_gram_rhs(
         rows = np.arange(start, stop)
         block = np.asarray(dm.row_subset(rows).toarray(), dtype=float)
         block -= mean_x
+        if mean_lo is not None:
+            block -= mean_lo
         W_block = W[start:stop]
         gram_block = block.T @ (W_block[:, None] * block)
         rhs_block = block.T @ (W_block * z_centered[start:stop])
@@ -1042,8 +1049,15 @@ def centered_signed_grams(
     weights: Sequence[NDArray],
     mean_x: NDArray,
     chunk_size: int = 8192,
+    mean_lo: NDArray | None = None,
 ) -> list[NDArray]:
-    """Reuse centered row chunks across signed Gram products in input order."""
+    """Reuse centered row chunks across signed Gram products in input order.
+
+    ``mean_lo``, when given, is the low half of the centre as an exact pair
+    ``(mean_x, mean_lo)`` (``centered_system.weighted_mean_pair``): rows are
+    centred as ``(x - mean_x) - mean_lo``, so a dense column at an offset is
+    centred about its anchor exactly and then by the small remainder.
+    """
     n, p = dm.shape
     weights = [np.asarray(channel, dtype=float) for channel in weights]
     mean_x = np.asarray(mean_x, dtype=float)
@@ -1061,6 +1075,8 @@ def centered_signed_grams(
         stop = min(start + chunk_size, n)
         block = np.asarray(dm.row_subset(np.arange(start, stop)).toarray(), dtype=float)
         block -= mean_x
+        if mean_lo is not None:
+            block -= mean_lo
         for weights_j, gram, compensation in zip(weights, grams, compensations, strict=True):
             contribution = block.T @ (weights_j[start:stop, None] * block)
             _compensated_add(gram, compensation, contribution)
@@ -1074,8 +1090,15 @@ def centered_rhs(
     mean_x: NDArray,
     z_centered: NDArray,
     chunk_size: int = 8192,
+    mean_lo: NDArray | None = None,
 ) -> NDArray:
-    """Return ``(X - mean_x)' W z_centered`` without rebuilding the Gram."""
+    """Return ``(X - mean_x)' W z_centered`` without rebuilding the Gram.
+
+    ``mean_lo``, when given, is the low half of the centre as an exact pair
+    ``(mean_x, mean_lo)`` (``centered_system.weighted_mean_pair``): rows are
+    centred as ``(x - mean_x) - mean_lo``, so a dense column at an offset is
+    centred about its anchor exactly and then by the small remainder.
+    """
     n, p = dm.shape
     W = np.asarray(W, dtype=float)
     mean_x = np.asarray(mean_x, dtype=float)
@@ -1096,6 +1119,8 @@ def centered_rhs(
         rows = np.arange(start, stop)
         block = np.asarray(dm.row_subset(rows).toarray(), dtype=float)
         block -= mean_x
+        if mean_lo is not None:
+            block -= mean_lo
         rhs_block = block.T @ (W[start:stop] * z_centered[start:stop])
         _compensated_add(rhs, compensation, rhs_block)
     return rhs

@@ -284,6 +284,48 @@ def test_fit_publication_releases_rebuildable_raw_spline_tabmat_plan(monkeypatch
     assert model._dm._raw_spline_tabmat_holder.plan is None
 
 
+def test_fit_publication_releases_the_bounded_half_of_a_dense_split(monkeypatch):
+    """Beside a dense column the bounded half's raw-spline plan is released at publication too.
+
+    Since the dense/bounded split (issue #430) the bounded design of a
+    ``Numeric + 2 Spline`` fit qualifies for the raw-spline Tabmat plan that
+    the full design never did, and ``centered_system._DENSE_SPLITS`` kept it
+    for the published model's lifetime.  Mutation: publication without
+    ``release_dense_split``.
+    """
+    import superglm._group_matrix._group_matrix_tabmat as tabmat_helpers
+    import superglm.group_matrix as group_matrix_module
+    from superglm import Numeric
+    from superglm.solvers import centered_system
+
+    monkeypatch.setattr(tabmat_helpers, "_MIN_RAW_SPLINE_TABMAT_ROWS", 100)
+    n = 200
+    x = np.linspace(0.0, 1.0, n)
+    X = pd.DataFrame({"x": x, "z": x[::-1].copy(), "w": 40.0 + np.sin(7.0 * x)})
+    y = np.ones(n, dtype=np.float64)
+    real_builder = group_matrix_module._build_raw_spline_tabmat_plan
+    built_plans = []
+
+    def recording_builder(*args, **kwargs):
+        plan = real_builder(*args, **kwargs)
+        if plan is not None:
+            built_plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(group_matrix_module, "_build_raw_spline_tabmat_plan", recording_builder)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"x": Spline(n_knots=8), "z": Spline(n_knots=8), "w": Numeric()},
+    )
+
+    model.fit(X, y, max_iter=2)
+
+    assert len(built_plans) == 1
+    assert model._dm.raw_spline_tabmat_plan_built is False
+    assert centered_system._DENSE_SPLITS.get(model._dm) is None
+
+
 def test_install_is_one_revision_dictionary_swap():
     model = _model()
     old_dict = model.__dict__

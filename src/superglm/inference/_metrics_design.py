@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import operator
 from collections.abc import Iterator
 
@@ -285,27 +286,7 @@ class EvaluationDesign:
         W = np.asarray(W, dtype=np.float64)
         if W.shape != (self.n,):
             raise ValueError("working weights must match evaluation design rows")
-        gram = np.zeros((self.p, self.p), dtype=np.float64)
-        xtw1 = np.zeros(self.p, dtype=np.float64)
-        anchored_gram = np.zeros((self.p, self.p), dtype=np.float64)
-        anchored_xtw1 = np.zeros(self.p, dtype=np.float64)
-        anchor = None
-        for start, stop, block in self.iter_dense_chunks():
-            weights = W[start:stop]
-            gram += block.T @ (weights[:, None] * block)
-            xtw1 += block.T @ weights
-            if anchor is None and len(block):
-                anchor = block[0].copy()
-            shifted = block if anchor is None else block - anchor
-            anchored_gram += shifted.T @ (weights[:, None] * shifted)
-            anchored_xtw1 += shifted.T @ weights
-        gram = 0.5 * (gram + gram.T)
-        centered = centered_gram_from_moments(
-            anchored_gram,
-            anchored_xtw1,
-            float(np.sum(W)),
-        )
-        return gram, xtw1, centered
+        return _anchored_weighted_moments(self.iter_dense_chunks, W, self.p)
 
 
 MetricsDesign = DesignMatrix | EvaluationDesign | NDArray
@@ -433,6 +414,107 @@ def weighted_center(design: MetricsDesign, W: NDArray) -> NDArray:
     return anchor + total / float(np.sum(W))
 
 
+def _merge_weights(total: float, chunk_weight: float) -> tuple[float, float, float]:
+    """``(sqrt(m), f_a, f_b)`` for the pairwise merge of two positive weights, without over- or underflow.
+
+    ``m = w_a w_b / (w_a + w_b)`` is formed as ``min(w_a, w_b) (max / (w_a +
+    w_b))`` and the shares ``f_a = w_a / (w_a + w_b)``, ``f_b = w_b / (w_a +
+    w_b)`` from both weights scaled by the larger one's power of two, so the
+    sum cannot overflow and ``max / sum`` lies in ``[1/2, 1]``: ``m``
+    underflows only where its value does (``w_b / (w_a + w_b)`` alone
+    underflowed at 1e-200 beside 1e200 and dropped the merge term, Sol).
+    """
+    exponent = math.frexp(max(total, chunk_weight))[1]
+    scaled_total = math.ldexp(total, -exponent)
+    scaled_chunk = math.ldexp(chunk_weight, -exponent)
+    scaled_sum = scaled_total + scaled_chunk
+    share = max(scaled_total, scaled_chunk) / scaled_sum
+    root = math.sqrt(min(total, chunk_weight)) * math.sqrt(share)
+    return root, scaled_total / scaled_sum, scaled_chunk / scaled_sum
+
+
+def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDArray, NDArray]:
+    """Raw Gram, ``X'W1`` and the centred Gram, the latter merged from chunk co-moments, in one traversal.
+
+    Each chunk that carries weight is centred about its own weighted mean as
+    an exact pair ``(hi, lo)`` (``mode_score.corrected_two_pass_pair`` on the
+    chunk in memory; Chan, Golub & LeVeque 1983), rows ``(x - hi) - lo``.  The
+    chunks' co-moments are merged by the pairwise update ``C = C_a + C_b + m d
+    d'``, ``m = w_a w_b / (w_a + w_b)``, ``d`` the difference of the two
+    means (Chan, Golub & LeVeque 1979; the weighted multivariate form in
+    Pebay, Terriberry, Kolla & Bennett 2016, Comput. Stat. 31:1305):
+
+    - ``d = (hi_b - hi_a) + (lo_b - lo_a)``: the leading difference is exact
+      where the two means lie within a factor two (Sterbenz) and otherwise
+      rounds at ``u |d|``, so ``d`` carries its own relative accuracy at any
+      column offset;
+    - the running mean stays an exact pair, moved from the heavier side's
+      pair by the lighter side's share of ``d`` (at most ``|d| / 2``, the new
+      mean's own distance from that side) and added to its head by TwoSum:
+      stepping from the lighter side cancelled, a chunk of weight 7e292
+      beside 2e164 moved a mean of -2.9e22 to -5.3e-23 by rounding at 3e6;
+    - ``m d d'`` is the outer product of ``sqrt(m) d`` with itself, ``sqrt(m)``
+      and ``f`` from ``_merge_weights``, so nothing over- or underflows that
+      the term's own value does not.
+
+    Every term is then a chunk co-moment or a merge term formed to a few
+    roundings of its own size, and a diagonal entry, a sum of non-negative
+    terms, is accurate to ``O(gamma_{n + K})`` relative, ``K`` the chunks; an
+    off-diagonal one to that times ``sqrt(C_ii C_jj)`` (Cauchy-Schwarz).  No
+    row is shifted by another chunk's mean: a global anchor rounded a chunk
+    far below it to nothing.  Working weights are Fisher weights, never
+    negative; a chunk without weight adds nothing.
+    """
+    from superglm.solvers.mode_score import corrected_two_pass_pair
+
+    gram = np.zeros((p, p), dtype=np.float64)
+    xtw1 = np.zeros(p, dtype=np.float64)
+    total = 0.0
+    mean_hi = np.zeros(p, dtype=np.float64)
+    mean_lo = np.zeros(p, dtype=np.float64)
+    comoment = np.zeros((p, p), dtype=np.float64)
+    for start, stop, block in chunks():
+        weights = W[start:stop]
+        gram += block.T @ (weights[:, None] * block)
+        xtw1 += block.T @ weights
+        chunk_weight = float(np.sum(weights))
+        if not chunk_weight > 0.0:
+            continue
+        count = stop - start
+        rows = np.asarray(block, dtype=np.float64)
+        hi, lo = corrected_two_pass_pair(
+            lambda rows=rows: iter(((0, count, rows),)), weights, chunk_weight, p
+        )
+        centred = (rows - hi) - lo
+        chunk_comoment = centered_gram_from_moments(
+            centred.T @ (weights[:, None] * centred), centred.T @ weights, chunk_weight
+        )
+        if total == 0.0:
+            mean_hi, mean_lo = np.array(hi, dtype=np.float64), np.array(lo, dtype=np.float64)
+            comoment, total = chunk_comoment, chunk_weight
+            continue
+        delta = (hi - mean_hi) + (lo - mean_lo)
+        root, share_total, share_chunk = _merge_weights(total, chunk_weight)
+        scaled = delta * root
+        comoment = comoment + chunk_comoment + np.outer(scaled, scaled)
+        # the running mean as an exact pair, from the heavier side: its head
+        # plus (tail + the lighter side's share of d), the head's rounding
+        # carried exactly into the tail (TwoSum)
+        if share_chunk > share_total:
+            base, step = hi, lo - delta * share_total
+        else:
+            base, step = mean_hi, mean_lo + delta * share_chunk
+        head = base + step
+        tail_part = head - base
+        mean_lo = (base - (head - tail_part)) + (step - tail_part)
+        mean_hi = head
+        total = total + chunk_weight
+    if not total > 0.0:
+        raise ValueError("working weights must have positive total weight")
+    gram = 0.5 * (gram + gram.T)
+    return gram, xtw1, 0.5 * (comoment + comoment.T)
+
+
 def weighted_moments(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     """Return raw Gram, intercept cross-product, and centered data Gram."""
     W = np.asarray(W, dtype=np.float64)
@@ -442,25 +524,9 @@ def weighted_moments(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArra
     if isinstance(design, np.ndarray):
         if W.shape != (design.shape[0],):
             raise ValueError("working weights must match dense design rows")
-        p = design.shape[1]
-        gram = np.zeros((p, p), dtype=np.float64)
-        xtw1 = np.zeros(p, dtype=np.float64)
-        anchored_gram = np.zeros((p, p), dtype=np.float64)
-        anchored_xtw1 = np.zeros(p, dtype=np.float64)
-        anchor = None
-        for start, stop, block in iter_dense_chunks(design):
-            weights = W[start:stop]
-            gram += block.T @ (weights[:, None] * block)
-            xtw1 += block.T @ weights
-            if anchor is None and len(block):
-                anchor = block[0].copy()
-            shifted = block if anchor is None else block - anchor
-            anchored_gram += shifted.T @ (weights[:, None] * shifted)
-            anchored_xtw1 += shifted.T @ weights
-        gram = 0.5 * (gram + gram.T)
-        sum_w = float(np.sum(W))
-        centered = centered_gram_from_moments(anchored_gram, anchored_xtw1, sum_w)
-        return gram, xtw1, centered
+        return _anchored_weighted_moments(
+            lambda: iter_dense_chunks(design), W, int(design.shape[1])
+        )
 
     from superglm.solvers.centered_system import build_centered_system
 
