@@ -5,6 +5,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Matches pyproject's uv exclude-newer window, which resolution enforces.
+    cooldown:
+      default-days: 7
     groups:
       python-dependencies:
         patterns:

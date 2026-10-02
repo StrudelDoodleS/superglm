@@ -49,7 +49,7 @@ def _design(levels, Z, X):
     return design
 
 
-def _agreement(dense, levels, Z, X, w, local, small) -> tuple[float, float]:
+def _agreement(dense, levels, Z, X, w, local, small, *, roundings=0) -> tuple[float, float]:
     """``(relative, logdet)``: what two backward-stable factorizations of ``H`` agree to.
 
     Each factors ``H + dH`` with ``||dH||_2 <= eta ||H||_2``: a Cholesky-class
@@ -60,7 +60,9 @@ def _agreement(dense, levels, Z, X, w, local, small) -> tuple[float, float]:
     to ``||x||_2``, ``||H^-1||_2`` (Higham 2002, Theorem 7.2 and section
     14.1) and ``p kappa eta`` absolute (first order of ``tr(H^-1 dH)``); two
     factorizations by twice that.  ``|W|`` keeps signed rows' cancellation in
-    the bound.
+    the bound.  ``roundings`` more on each entry of ``H`` (a shift added to
+    its diagonal) raise the count to ``gamma_{n+p+1+roundings}`` (Higham 2002,
+    Lemma 3.3).
     """
     p = dense.shape[0]
     design = np.abs(_design(levels, Z, X))
@@ -71,7 +73,9 @@ def _agreement(dense, levels, Z, X, w, local, small) -> tuple[float, float]:
     for level in range(local.shape[0]):
         start = 1 + q + level * k
         magnitude[start : start + k, start : start + k] += np.abs(local[level])
-    eta = p * _gamma(len(w) + p + 1) * np.max(magnitude) / np.linalg.norm(dense, 2)
+    # r >= 10/9: the spare tenth of each delta term (``_product_bounds``)
+    assert 0.9 * p * np.max(magnitude) >= np.linalg.norm(magnitude, 2)
+    eta = p * _gamma(len(w) + p + 1 + roundings) * np.max(magnitude) / np.linalg.norm(dense, 2)
     kappa_eta = float(np.linalg.cond(dense) * eta)
     assert kappa_eta < 0.5
     return 2.0 * kappa_eta / (1.0 - kappa_eta), 2.0 * p * kappa_eta / (1.0 - kappa_eta)
@@ -226,36 +230,132 @@ def _expanded(component: PenaltyComponent, width: int) -> np.ndarray:
     return result
 
 
+def _spread(inverse, relative) -> tuple[float, float]:
+    """``(m, delta)``: ``m >= ||H^-1||_2`` and ``delta >= ||E||_2``, ``E`` the factor's inverse less LAPACK's.
+
+    Each lies within ``(relative / 2) ||H^-1||_2`` of the exact inverse
+    (``_agreement``), so ``||H^-1||_2 <= ||M~||_2 / (1 - relative / 2)``.  A
+    principal block of ``E`` (the profiled slope block) is no larger.
+    """
+    m = float(np.linalg.norm(inverse, 2)) / (1.0 - 0.5 * relative)
+    return m, relative * m
+
+
+def _materialized(operator) -> tuple[np.ndarray, np.ndarray]:
+    """``(O, Obar)``: the reference's dense operator and the majorant its rounding scales with.
+
+    ``Obar`` sums the operator's terms in absolute value.  A matvec on ``I``
+    rounds an entry at most four times (a centred operator's three updates,
+    a rank-2 ``U R U'``) and a scaled penalty once, so ``|fl(O) - O| <=
+    gamma_5 Obar`` (Higham 2002, section 3.5).
+    """
+    if isinstance(operator, np.ndarray):
+        return operator, np.abs(operator)
+    dense = materialize_compact_operator(operator)
+    if isinstance(operator, LowRankSymmetricOperator):
+        basis = np.abs(operator.basis)
+        return dense, basis @ np.abs(operator.core) @ basis.T
+    if isinstance(operator, CenteredBlockOperator):
+        cross, center = np.abs(operator.cross), np.abs(operator.center)
+        outer = np.outer(cross, center)
+        majorant = np.abs(materialize_compact_operator(operator.raw)) + outer + outer.T
+        return dense, majorant + abs(operator.total) * np.outer(center, center)
+    return dense, np.abs(dense)
+
+
+def _product_bounds(block, spread, operator, route=None):
+    """``(trace, diagonal, square)``: the factor's ``M O`` functionals against ``block @ O``.
+
+    With ``E`` as in ``_spread`` and ``M~ = block``: ``|tr(E O)| <= delta
+    ||O||_*`` (``O``'s SVD; each ``|v' E u| <= delta``), ``|(E O)_ii| <=
+    delta ||O e_i||_2``, and ``diag((M~ O)^2)`` moves by ``e_i' (E O M~ O +
+    M~ O E O + E O E O) e_i``, at most ``(2 delta m + delta^2) ||O||_2
+    ||O e_i||_2``.  The reference's products and trace add ``gamma_{2p+5}``,
+    ``gamma_{p+5}`` and ``gamma_{3p+10}`` times the same functional of
+    ``|M~| Obar`` (Higham 2002, section 3.5 and Lemma 3.3).  ``route`` is the
+    operator the factor reaches the value through when it is not ``O`` (its
+    own data operator by ``H_c^-1 (H_c - S) = I - H_c^-1 S``): each side then
+    carries ``delta / 2`` on its own operator, so the norms are the larger.
+    The factor's products of ``D_l^-1``, ``F`` and ``Q^+`` round likewise,
+    against those components' magnitudes (within twice ``||H^-1||_2`` on these
+    rows): under 5% of each bound even at ``gamma_{50p}``, more roundings than
+    any one term takes.  ``_agreement`` charges ``p`` times the largest entry
+    of ``|D|'|W||D| + |S|`` where its 2-norm suffices (``|dH|`` is below
+    ``gamma`` times it entrywise, and the 2-norm is monotone on nonnegative
+    matrices), ``r`` times more (five to seven on these rows), so ``1 - 1/r``
+    of each ``delta`` term is spare.  That holds 5% of a bound when ``(1 -
+    1/r) s >= 0.05``, ``s`` the ``delta`` term's share of it: ``_agreement``
+    asserts ``r >= 10/9``, and the bounds here and in ``_cross_bound`` that
+    their own rounding is at most the ``delta`` term (``s >= 1/2``; it is
+    under 0.1% on these rows).
+    """
+    m, delta = spread
+    p = block.shape[0]
+    dense, majorant = _materialized(operator)
+    sides = (dense,) if route is None else (dense, route)
+    nuclear = max(np.linalg.norm(side, "nuc") for side in sides)
+    norm = max(np.linalg.norm(side, 2) for side in sides)
+    columns = np.max([np.linalg.norm(side, axis=0) for side in sides], axis=0)
+    magnitude = np.abs(block) @ majorant
+    delta_terms = (delta * nuclear, delta * columns, (2.0 * delta * m + delta**2) * norm * columns)
+    roundings = (
+        _gamma(2 * p + 5) * np.trace(magnitude),
+        _gamma(p + 5) * np.diag(magnitude),
+        _gamma(3 * p + 10) * np.einsum("ij,ji->i", magnitude, magnitude),
+    )
+    assert all(np.all(r <= t) for r, t in zip(roundings, delta_terms, strict=True))
+    return tuple(t + r for t, r in zip(delta_terms, roundings, strict=True))
+
+
+def _cross_bound(block, spread, left, right) -> float:
+    """The factor's ``tr(M A M B)`` against ``tr(M~ A M~ B)``, ``M~ = block`` (``_product_bounds``).
+
+    ``E`` moves it by ``tr(E A M~ B) + tr(M~ A E B) + tr(E A E B)``, each a
+    product of 2-norms and one nuclear norm (``|tr(X Y)| <= ||X||_2
+    ||Y||_*``): ``(2 delta m + delta^2) min(||A||_* ||B||_2, ||A||_2
+    ||B||_*)``.  The reference's three products and trace add
+    ``gamma_{4p+10} tr(|M~| Abar |M~| Bbar)``.
+    """
+    m, delta = spread
+    (a, a_bar), (b, b_bar) = _materialized(left), _materialized(right)
+    norms = min(
+        np.linalg.norm(a, "nuc") * np.linalg.norm(b, 2),
+        np.linalg.norm(a, 2) * np.linalg.norm(b, "nuc"),
+    )
+    absolute = np.abs(block)
+    rounding = _gamma(4 * block.shape[0] + 10) * np.trace(absolute @ a_bar @ absolute @ b_bar)
+    delta_term = (2.0 * delta * m + delta**2) * norms
+    assert rounding <= delta_term  # the spare share (``_product_bounds``)
+    return delta_term + rounding
+
+
 def test_leaf_factor_penalty_traces_match_dense() -> None:
+    """Within ``_product_bounds`` and ``_cross_bound`` of the dense inverse's traces."""
     rng = np.random.default_rng(733)
-    factor, _, dense, _ = _factor(rng)
+    factor, _, dense, (levels, Z, X, w, _, local, small) = _factor(rng)
     inverse = np.linalg.inv(dense)
-    repeated, small = _components(factor)
-    for component in (repeated, small):
-        assert factor.trace_inverse_penalty(component) == pytest.approx(
-            np.trace(inverse @ _expanded(component, dense.shape[0])), abs=3e-11
-        )
-    for left in (repeated, small):
-        for right in (repeated, small):
-            expected = (
-                1.2
-                * 0.7
-                * np.trace(
-                    inverse
-                    @ _expanded(left, dense.shape[0])
-                    @ inverse
-                    @ _expanded(right, dense.shape[0])
-                )
-            )
-            assert factor.penalty_cross_trace(left, right, 1.2, 0.7) == pytest.approx(
-                expected, abs=3e-11
-            )
+    spread = _spread(inverse, _agreement(dense, levels, Z, X, w, local, small)[0])
+    p = dense.shape[0]
+    components = _components(factor)
+    for component in components:
+        omega = _expanded(component, p)
+        bound, _, _ = _product_bounds(inverse, spread, omega)
+        assert abs(factor.trace_inverse_penalty(component) - np.trace(inverse @ omega)) <= bound
+    for left in components:
+        for right in components:
+            A, B = 1.2 * _expanded(left, p), 0.7 * _expanded(right, p)
+            expected = np.trace(inverse @ A @ inverse @ B)
+            assert abs(
+                factor.penalty_cross_trace(left, right, 1.2, 0.7) - expected
+            ) <= _cross_bound(inverse, spread, A, B)
 
 
 def test_leaf_factor_operator_protocol_matches_dense() -> None:
+    """Within ``_product_bounds`` and ``_cross_bound`` of the dense inverse's products."""
     rng = np.random.default_rng(734)
-    factor, system, dense, _ = _factor(rng)
+    factor, system, dense, (levels, Z, X, w, _, local, small) = _factor(rng)
     inverse = np.linalg.inv(dense)
+    spread = _spread(inverse, _agreement(dense, levels, Z, X, w, local, small)[0])
     p = dense.shape[0]
     raw = BlockSymmetricOperator(
         A=np.pad(system.operator.A, ((1, 0), (1, 0))),
@@ -272,63 +372,79 @@ def test_leaf_factor_operator_protocol_matches_dense() -> None:
     repeated, _ = _components(factor)
     for compact in (raw, low_rank, centered):
         product = inverse @ materialize_compact_operator(compact)
-        assert factor.trace_inverse_operator(compact) == pytest.approx(np.trace(product), abs=3e-11)
-        np.testing.assert_allclose(
-            factor.inverse_operator_diagonal(compact), np.diag(product), atol=3e-11
+        trace, diagonal, square = _product_bounds(inverse, spread, compact)
+        assert abs(factor.trace_inverse_operator(compact) - np.trace(product)) <= trace
+        error = np.abs(factor.inverse_operator_diagonal(compact) - np.diag(product))
+        assert np.all(error <= diagonal)
+        error = np.abs(
+            factor.inverse_operator_square_diagonal(compact) - np.diag(product @ product)
         )
-        np.testing.assert_allclose(
-            factor.inverse_operator_square_diagonal(compact), np.diag(product @ product), atol=5e-10
-        )
+        assert np.all(error <= square)
     expected = np.trace(
         inverse
         @ materialize_compact_operator(centered)
         @ inverse
         @ materialize_compact_operator(low_rank)
     )
-    assert factor.operator_cross_trace(centered, low_rank) == pytest.approx(expected, abs=5e-10)
-    expected = np.trace(
-        inverse @ (1.3 * _expanded(repeated, p)) @ inverse @ materialize_compact_operator(centered)
+    assert abs(factor.operator_cross_trace(centered, low_rank) - expected) <= _cross_bound(
+        inverse, spread, centered, low_rank
     )
-    assert factor.penalty_operator_cross_trace(repeated, 1.3, centered) == pytest.approx(
-        expected, abs=5e-10
+    penalty = 1.3 * _expanded(repeated, p)
+    expected = np.trace(inverse @ penalty @ inverse @ materialize_compact_operator(centered))
+    assert abs(factor.penalty_operator_cross_trace(repeated, 1.3, centered) - expected) <= (
+        _cross_bound(inverse, spread, penalty, centered)
     )
 
 
 def test_profiled_leaf_factor_matches_the_slope_block_and_its_edf_identity() -> None:
-    """``M_ss`` from the centred factor, and ``edf`` through ``diag(H^+ (H - S))``."""
+    """``M_ss`` from the centred factor, and ``edf`` through ``diag(H^+ (H - S))``.
+
+    ``M_ss`` is a principal block of ``H^-1``: the augmented ``_spread``
+    bounds its entries, its solve (the factor's within ``relative / 2`` of
+    ``||H^-1 [0; r]|| <= m ||r||``, the reference's product within
+    ``delta / 2`` and ``gamma_p |M~_ss| |r|``) and every trace.  ``log det
+    H_c = log det H - log sum_w`` (the unpenalized intercept's Schur
+    complement), one subtraction's rounding more on each side.  The own data
+    operator ``H_c - S`` is reached through ``I - M_ss S``, its ``route``.
+    """
     rng = np.random.default_rng(735)
-    factor, system, dense, _ = _factor(rng, n_levels=4, block_size=3, border=3)
+    factor, system, dense, (levels, Z, X, w, _, local, small) = _factor(
+        rng, n_levels=4, block_size=3, border=3
+    )
+    relative, logdet = _agreement(dense, levels, Z, X, w, local, small)
+    inverse = np.linalg.inv(dense)
+    spread = _spread(inverse, relative)
+    delta = spread[1]
     xtw = np.empty(system.operator.shape[0])
     xtw[system.operator.small_indices] = system.xtw_small
     xtw[system.operator.structured_indices] = system.xtw_structured
     profiled = ProfiledFactorSmoothLeafFactor(augmented_factor=factor, sum_w=system.sum_w, xtw=xtw)
-    expected = np.linalg.inv(dense)[1:, 1:]
+    expected = inverse[1:, 1:]
     rhs = rng.normal(size=profiled.shape[0])
-    np.testing.assert_allclose(profiled.solve(rhs), expected @ rhs, atol=3e-12)
+    tolerance = delta * np.linalg.norm(rhs) + _gamma(len(rhs)) * (np.abs(expected) @ np.abs(rhs))
+    assert np.all(np.abs(profiled.solve(rhs) - expected @ rhs) <= tolerance)
     selected = np.array([0, 3, 8], dtype=np.intp)
-    np.testing.assert_allclose(
-        profiled.selected_inverse_block(selected), expected[np.ix_(selected, selected)], atol=3e-12
-    )
-    np.testing.assert_allclose(
-        profiled.selected_inverse_diagonal(selected), np.diag(expected)[selected], atol=3e-12
-    )
-    assert profiled.logdet() == pytest.approx(factor.logdet() - np.log(system.sum_w), abs=2e-12)
-    repeated, small = _components(profiled)
-    for component in (repeated, small):
-        assert profiled.trace_inverse_penalty(component) == pytest.approx(
-            np.trace(expected @ _expanded(component, profiled.shape[0])), abs=3e-11
-        )
+    error = profiled.selected_inverse_block(selected) - expected[np.ix_(selected, selected)]
+    assert np.all(np.abs(error) <= delta)
+    error = profiled.selected_inverse_diagonal(selected) - np.diag(expected)[selected]
+    assert np.all(np.abs(error) <= delta)
+    reference = np.linalg.slogdet(dense)[1] - np.log(system.sum_w)
+    rounding = _gamma(1) * (abs(profiled.logdet()) + abs(reference))
+    assert abs(profiled.logdet() - reference) <= logdet + rounding
+    for component in _components(profiled):
+        omega = _expanded(component, profiled.shape[0])
+        bound, _, _ = _product_bounds(expected, spread, omega)
+        assert abs(profiled.trace_inverse_penalty(component) - np.trace(expected @ omega)) <= bound
     # the factor's own centred data operator: the identity route
     mean = xtw / system.sum_w
     own = CenteredBlockOperator(raw=system.operator, cross=xtw, total=system.sum_w, center=mean)
     product = expected @ materialize_compact_operator(own)
-    assert profiled.trace_inverse_operator(own) == pytest.approx(np.trace(product), abs=3e-11)
-    np.testing.assert_allclose(
-        profiled.inverse_operator_diagonal(own), np.diag(product), atol=3e-11
-    )
-    np.testing.assert_allclose(
-        profiled.inverse_operator_square_diagonal(own), np.diag(product @ product), atol=5e-10
-    )
+    penalty = _dense(levels, Z, X, np.zeros_like(w), local, small)[1:, 1:]
+    trace, diagonal, square = _product_bounds(expected, spread, own, route=penalty)
+    assert abs(profiled.trace_inverse_operator(own) - np.trace(product)) <= trace
+    assert np.all(np.abs(profiled.inverse_operator_diagonal(own) - np.diag(product)) <= diagonal)
+    error = np.abs(profiled.inverse_operator_square_diagonal(own) - np.diag(product @ product))
+    assert np.all(error <= square)
 
 
 def _window_level(rng, *, n=40, k=6, lam=1e-9, weight=1e4, signed=False):
@@ -743,22 +859,29 @@ def test_a_levenberg_shift_on_signed_fs_rows_adds_exactly_its_diagonal() -> None
 
     The shift goes into the penalty parts the factor takes as square roots, so
     the shifted factor is the factor of ``H + diag(E)`` on the slopes and the
-    levels (the intercept is never shifted).
+    levels (the intercept is never shifted).  Within ``_agreement`` on ``H +
+    E``: its magnitude carries the shifted penalty diagonal, and adding
+    ``diag(E)`` rounds each diagonal entry once more.
     """
     from superglm.solvers.irls_direct import _levenberg_shifted_leaf_operator
 
     rng = np.random.default_rng(744)
-    factor, system, dense, _ = _factor(rng, signed=True)
+    factor, system, dense, (levels, Z, X, w, _, local, small) = _factor(rng, signed=True)
     shifted, diagonal = _levenberg_shifted_leaf_operator(factor.penalized, 1e-3, system)
     shifted_factor = FactorSmoothLeafFactor(system, shifted)
     expected = dense.copy()
     expected[np.arange(1, dense.shape[0]), np.arange(1, dense.shape[0])] += diagonal
     assert np.all(diagonal > 0.0)
-    assert shifted_factor.logdet() == pytest.approx(np.linalg.slogdet(expected)[1], abs=1e-11)
-    rhs = rng.normal(size=dense.shape[0])
-    np.testing.assert_allclose(
-        shifted_factor.solve(rhs), np.linalg.solve(expected, rhs), atol=5e-12
+    q, (K, k) = small.shape[0], local.shape[:2]
+    local_shifted = local + diagonal[q:].reshape(K, k)[:, :, None] * np.eye(k)
+    relative, logdet = _agreement(
+        expected, levels, Z, X, w, local_shifted, small + np.diag(diagonal[:q]), roundings=1
     )
+    assert abs(shifted_factor.logdet() - np.linalg.slogdet(expected)[1]) <= logdet
+    rhs = rng.normal(size=dense.shape[0])
+    solution = np.linalg.solve(expected, rhs)
+    error = np.abs(shifted_factor.solve(rhs) - solution)
+    assert np.all(error <= relative * np.linalg.norm(solution))
 
 
 # -- the stage-2 verifier's findings (large offsets, the border bound, leverage, memo) ----

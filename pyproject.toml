@@ -86,6 +86,16 @@ plotting = [
 
 [tool.uv]
 required-version = "==0.12.1"
+# Dependency cooldown: every resolution ignores files uploaded in the last
+# seven days, so a lock bump takes only releases that have been public that
+# long (uv docs, "Resolution: dependency cooldowns"). A security fix younger
+# than that gets a per-package cutoff just after the fixing release's upload,
+# which admits that release and nothing newer, listed with its advisories in
+# tests/test_supply_chain_governance.py; drop it once the window has passed it.
+exclude-newer = "7 days"
+# virtualenv 21.14.2 (uploaded 2026-10-01T06:22:47Z) fixes GHSA-8rjx-v5ww-45pp
+# and GHSA-c947-3pg5-gm8q.
+exclude-newer-package = { virtualenv = "2026-10-01T06:23:00Z" }
 
 [build-system]
 requires = ["hatchling>=1.27"]

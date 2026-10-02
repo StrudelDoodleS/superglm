@@ -214,6 +214,11 @@ def test_sz_vector_and_moment_products_never_allocate_expanded_geometry(
     monkeypatch: pytest.MonkeyPatch,
     discrete: bool,
 ) -> None:
+    # Compile (or load) the products' Numba kernels before the guards go in: a
+    # kernel typed while ``np.zeros`` is swapped resolves the guard, not NumPy's
+    # function, and fails to compile on a cold cache.  A separate instance, so the
+    # guarded one has computed and cached nothing yet.
+    _run_sz_products(_matrix_fixture(discrete=discrete)[0])
     gm, _reference, _natural_basis = _matrix_fixture(discrete=discrete)
     forbidden_shapes = {gm.shape, (gm.shape[1], gm.shape[1])}
     original_zeros = np.zeros
@@ -231,6 +236,10 @@ def test_sz_vector_and_moment_products_never_allocate_expanded_geometry(
 
     monkeypatch.setattr(np, "zeros", guarded_zeros)
     monkeypatch.setattr(np, "empty", guarded_empty)
+    _run_sz_products(gm)
+
+
+def _run_sz_products(gm: FactorSmoothGroupMatrix) -> None:
     gm.matvec(np.ones(gm.shape[1]))
     gm.rmatvec(np.ones(gm.shape[0]))
     gm.factor_smooth_sufficient_stats(
