@@ -733,13 +733,13 @@ def _attach_dense_split(
       (``anchored_dense_moments``).
 
     The Gram is ``G - e l' - l e' + l l' sum W``, ``l = e / sum W``
-    (``two_pass_centred_gram``), and the right-hand side ``r - l sum W z``.  ``(a, l)`` is the exact pair
-    of ``dense_mean_pair``, its remainder formed in pass two instead of a pass
-    of its own.  The cross block is ``N~' W D~ = N' (W (x - a)) - m_N e'``, one
-    transpose product of the bounded design per dense column; ``l``'s share,
-    ``l (N'W - m_N sum W)``, is a product of two roundings.  The bounded
-    columns' raw values never meet a dense column's offset, and the bounded
-    block is the rung's own.
+    (``two_pass_centred_gram``), and the right-hand side ``r - l sum W z``.
+    ``(a, l)`` is the exact pair of ``dense_mean_pair``, its remainder formed
+    in pass two instead of a pass of its own.  The cross block is ``N~' W D~
+    = N' (W (x - a)) - m_N e'``, one transpose product of the bounded design
+    per dense column; ``l``'s share, ``l (N'W - m_N sum W)``, is a product of
+    two roundings.  The bounded columns' raw values never meet a dense
+    column's offset, and the bounded block is the rung's own.
     """
     mean_bounded, gram_bounded, rhs_bounded = packed
     dense_width = split.dense.p
