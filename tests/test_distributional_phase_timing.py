@@ -70,6 +70,40 @@ def test_exclusive_seconds_charge_each_interval_to_the_innermost_open_phase() ->
     assert snapshot.counts["layout_penalty_assembly"] == 2
 
 
+@pytest.mark.parametrize(
+    "readings",
+    [(-1.0e308, 1.0e308), (-1.0e308, 0.0, 1.0e308, 1.0e308)],
+    ids=["interval", "observation"],
+)
+def test_finite_readings_infinitely_far_apart_are_refused(readings) -> None:
+    # Each reading is finite and monotonic, but an interval between two of them
+    # (or an outer observation spanning both halves) overflows to infinity.
+    clock = iter(readings)
+    recorder = FitPhaseRecorder(clock=lambda: next(clock))
+
+    with pytest.raises(RuntimeError, match="finite monotonic"):
+        with recorder.measure("fit_total"):
+            if len(readings) == 4:
+                with recorder.measure("predictor_compilation"):
+                    pass
+
+
+def test_a_manual_sample_inside_an_open_phase_stays_out_of_the_partition() -> None:
+    # fit_total spans one second of clock; a one-second manual sample taken
+    # inside it would otherwise be counted on top of that second.
+    readings = iter((0.0, 1.0))
+    recorder = FitPhaseRecorder(clock=lambda: next(readings))
+
+    with recorder.measure("fit_total"):
+        recorder.add("serialization", 1.0)
+
+    snapshot = recorder.snapshot()
+    assert sum(snapshot.exclusive_seconds.values()) == snapshot.seconds["fit_total"] == 1.0
+    assert snapshot.manual_seconds["serialization"] == 1.0
+    assert snapshot.seconds["serialization"] == 1.0
+    assert snapshot.counts["serialization"] == 1
+
+
 def test_snapshot_is_immutable_owned_and_records_manual_samples() -> None:
     recorder = FitPhaseRecorder(clock=lambda: 0.0)
     recorder.add("serialization", 0.25)
@@ -77,6 +111,8 @@ def test_snapshot_is_immutable_owned_and_records_manual_samples() -> None:
     recorder.add("serialization", 0.75)
 
     assert snapshot.seconds["serialization"] == 0.25
+    assert snapshot.manual_seconds["serialization"] == 0.25
+    assert snapshot.exclusive_seconds["serialization"] == 0.0
     assert snapshot.counts["serialization"] == 1
     with pytest.raises(TypeError):
         snapshot.seconds["serialization"] = 2.0  # type: ignore[index]

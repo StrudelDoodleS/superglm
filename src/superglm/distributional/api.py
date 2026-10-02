@@ -436,21 +436,6 @@ def _prediction_index(X: FrameLike | EagerFrame, n_observations: int) -> pd.Inde
     return pd.RangeIndex(n_observations)
 
 
-def _phase_delta(
-    after: FitPhaseSnapshot,
-    before: FitPhaseSnapshot,
-) -> FitPhaseSnapshot:
-    """The phase timing of one fit, isolated from whatever the recorder held before it."""
-    return FitPhaseSnapshot(
-        seconds={name: after.seconds[name] - before.seconds[name] for name in after.seconds},
-        counts={name: after.counts[name] - before.counts[name] for name in after.counts},
-        exclusive_seconds={
-            name: after.exclusive_seconds[name] - before.exclusive_seconds[name]
-            for name in after.exclusive_seconds
-        },
-    )
-
-
 #: Renderer module and figure names of each engine, imported only when asked
 #: for, so ``plotly`` is never a requirement of importing this module.
 _RENDERERS = {
@@ -682,8 +667,9 @@ class SuperLSS:
         phase_recorder: FitPhaseRecorder | None = None,
     ) -> SuperLSS:
         next_revision = 1 if self._model is None else self._model.fit_state.revision + 1
-        recorder = FitPhaseRecorder() if phase_recorder is None else phase_recorder
-        before = recorder.snapshot()
+        # The fit is timed on a recorder of its own, so its profile is the fit
+        # alone, then folded into a caller's recorder as one nested interval.
+        recorder = FitPhaseRecorder(clock=None if phase_recorder is None else phase_recorder._clock)
         with solver_blas_threads():
             try:
                 candidate = fit_dense_distributional(
@@ -716,7 +702,10 @@ class SuperLSS:
                 if translated is not None:
                     raise translated from failure
                 raise
-        phase_snapshot = _phase_delta(recorder.snapshot(), before)
+            finally:
+                if phase_recorder is not None:
+                    phase_recorder._absorb(recorder)
+        phase_snapshot = recorder.snapshot()
         self._model = candidate
         self._fit_phase_snapshot = phase_snapshot
         frame = as_eager_frame(X)

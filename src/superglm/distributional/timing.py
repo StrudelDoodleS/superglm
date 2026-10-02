@@ -52,17 +52,22 @@ class FitPhaseSnapshot:
     """Immutable cumulative seconds and observation counts for every phase.
 
     ``seconds`` is each phase's inclusive time, nested phases included.
-    ``exclusive_seconds`` is the time a phase spent with no other phase open
-    inside it, so the exclusive seconds of different phases never overlap.
+    ``exclusive_seconds`` is the clock time a phase spent with no other phase
+    open inside it, so the exclusive seconds of different phases never
+    overlap.  ``manual_seconds`` holds samples added with
+    ``FitPhaseRecorder.add``: they have no interval on the clock and may
+    overlap measured time, so they stay out of the exclusive partition.
     """
 
     seconds: Mapping[str, float]
     counts: Mapping[str, int]
     exclusive_seconds: Mapping[str, float]
+    manual_seconds: Mapping[str, float]
 
     def __post_init__(self) -> None:
         seconds = _owned_seconds(self.seconds, "seconds")
         exclusive = _owned_seconds(self.exclusive_seconds, "exclusive seconds")
+        manual = _owned_seconds(self.manual_seconds, "manual seconds")
         counts = dict(self.counts)
         if tuple(counts) != PHASE_NAMES:
             raise ValueError("phase snapshot must contain every phase in canonical order")
@@ -73,6 +78,7 @@ class FitPhaseSnapshot:
         object.__setattr__(self, "seconds", MappingProxyType(seconds))
         object.__setattr__(self, "counts", MappingProxyType(counts))
         object.__setattr__(self, "exclusive_seconds", MappingProxyType(exclusive))
+        object.__setattr__(self, "manual_seconds", MappingProxyType(manual))
 
     def as_dict(self) -> dict[str, dict[str, float | int]]:
         """Return a JSON-safe owned representation."""
@@ -81,6 +87,7 @@ class FitPhaseSnapshot:
             "seconds": dict(self.seconds),
             "counts": dict(self.counts),
             "exclusive_seconds": dict(self.exclusive_seconds),
+            "manual_seconds": dict(self.manual_seconds),
         }
 
 
@@ -101,15 +108,19 @@ class FitPhaseRecorder:
             raise TypeError("clock must be callable")
         self._seconds = {name: 0.0 for name in PHASE_NAMES}
         self._exclusive = {name: 0.0 for name in PHASE_NAMES}
+        self._manual = {name: 0.0 for name in PHASE_NAMES}
         self._counts = {name: 0 for name in PHASE_NAMES}
         self._open: list[str] = []
+        self._first_reading: float | None = None
         self._last_reading = 0.0
 
     def add(self, name: str, seconds: float) -> None:
         """Add one completed observation to a phase.
 
-        A manual sample has no interval on this recorder's clock, so it adds
-        the same seconds to the phase's inclusive and exclusive time.
+        A manual sample has no interval on this recorder's clock, and the
+        clock time it describes may already be charged to an open phase.  It
+        therefore adds to the phase's inclusive ``seconds`` and to its
+        ``manual_seconds``, never to the exclusive partition.
         """
 
         phase = _validate_phase(name)
@@ -117,22 +128,30 @@ class FitPhaseRecorder:
         if not math.isfinite(elapsed) or elapsed < 0.0:
             raise ValueError("phase seconds must be finite and non-negative")
         self._seconds[phase] += elapsed
-        self._exclusive[phase] += elapsed
+        self._manual[phase] += elapsed
         self._counts[phase] += 1
 
     def _read_clock(self) -> float:
         """Read the clock and charge the interval since the last reading."""
 
         reading = float(self._clock())
+        self._advance(reading)
+        return reading
+
+    def _advance(self, reading: float) -> None:
+        """Charge the interval up to ``reading`` to the innermost open phase."""
+
         if not math.isfinite(reading):
             raise RuntimeError("phase clock must return finite monotonic values")
         if self._open:
             interval = reading - self._last_reading
-            if interval < 0.0:
+            # Two finite readings can still be infinitely far apart.
+            if not math.isfinite(interval) or interval < 0.0:
                 raise RuntimeError("phase clock must return finite monotonic values")
             self._exclusive[self._open[-1]] += interval
+        if self._first_reading is None:
+            self._first_reading = reading
         self._last_reading = reading
-        return reading
 
     @contextmanager
     def measure(self, name: str) -> Iterator[None]:
@@ -153,9 +172,32 @@ class FitPhaseRecorder:
             # Python's profiler counts cumulative time only at the outermost
             # call of a recursive function; a phase nested in itself does too,
             # so its inclusive seconds cannot exceed the time it was open.
+            elapsed = finished - started
+            if not math.isfinite(elapsed):
+                raise RuntimeError("phase clock must return finite monotonic values")
             if phase not in self._open:
-                self._seconds[phase] += finished - started
+                self._seconds[phase] += elapsed
             self._counts[phase] += 1
+
+    def _absorb(self, timed: FitPhaseRecorder) -> None:
+        """Fold in a finished recorder that read this clock, as one nested interval.
+
+        A fit is timed on a recorder of its own, so its profile holds the fit
+        alone whatever this recorder has open.  Folding it in charges the time
+        before the fit's first reading to the phase open here, adds the fit's
+        observations, and leaves the time after its last reading for this
+        recorder's next reading.
+        """
+
+        if timed._first_reading is not None:
+            self._advance(timed._first_reading)
+            self._last_reading = timed._last_reading
+        for name in PHASE_NAMES:
+            if name not in self._open:
+                self._seconds[name] += timed._seconds[name]
+            self._exclusive[name] += timed._exclusive[name]
+            self._manual[name] += timed._manual[name]
+            self._counts[name] += timed._counts[name]
 
     def snapshot(self) -> FitPhaseSnapshot:
         """Return an owned immutable view of the current accumulators."""
@@ -164,6 +206,7 @@ class FitPhaseRecorder:
             seconds=self._seconds,
             counts=self._counts,
             exclusive_seconds=self._exclusive,
+            manual_seconds=self._manual,
         )
 
 
