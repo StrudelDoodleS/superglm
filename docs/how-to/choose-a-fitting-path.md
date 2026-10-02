@@ -284,6 +284,14 @@ result.deviance_path
 result.n_iter_path
 ```
 
+After `fit_path()` the model is fitted at the last lambda, so `model.predict()`
+predicts at that point. To predict at another point, fit with
+`selection_penalty=result.lambda_seq[i]` and predict with that model.
+
+Rebuilding predictions as `X @ coef_path[i] + intercept_path[i]` works only
+when every numeric column sits near zero. A column far from zero, such as a
+year or an epoch time, cancels against the intercept and loses accuracy.
+
 Next:
 
 - [Recommended workflows](recommended-workflows.md)

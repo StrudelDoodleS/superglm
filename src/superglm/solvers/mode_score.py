@@ -510,13 +510,12 @@ def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) 
     read ``2^146 / 2^-960 = inf`` before the guard tested the operands.  The
     exponents are added before scaling back: a result past the binary64 range
     is a signed infinity, one below it a signed zero, never the
-    ``OverflowError`` ``math.ldexp`` raises.
+    ``OverflowError`` ``math.ldexp`` raises.  A zero denominator has no
+    quotient and returns ``nan``, which every caller reads as "fall back".
     """
-    if (
-        numerator[0] == 0.0
-        or denominator[0] == 0.0
-        or not (math.isfinite(numerator[0]) and math.isfinite(denominator[0]))
-    ):
+    if denominator[0] == 0.0:
+        return math.nan
+    if numerator[0] == 0.0 or not (math.isfinite(numerator[0]) and math.isfinite(denominator[0])):
         return numerator[0] / denominator[0]
     numerator_mantissa, numerator_exponent = math.frexp(numerator[0])
     denominator_mantissa, denominator_exponent = math.frexp(denominator[0])

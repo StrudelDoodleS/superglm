@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -917,6 +918,7 @@ def test_the_scaled_ratio_divides_mantissas_whichever_sum_is_larger(monkeypatch)
 
     assert _scaled_ratio((2.0**146, -1126), (2.0**-960, 0)) == 2.0**-20
     assert _scaled_ratio((2.0**-20, 0), (2.0**146, -1126)) == 2.0**960
+    assert math.isnan(_scaled_ratio((1.0, 0), (0.0, 0)))  # no quotient: nan, never a raise
 
     def no_fallback(*args, **kwargs):
         raise AssertionError("the compensated mean fell back to np.average")
@@ -1289,7 +1291,7 @@ def test_the_proximal_solver_centres_a_dense_column(family, shift):
     assert np.max(np.abs(path.coef_path - base_path.coef_path)) <= 2.0 * tol * scale
 
 
-@pytest.mark.parametrize("entry", ["fit", "fit_path"])
+@pytest.mark.parametrize("entry", ["fit", "fit_path", "refit_at_a_path_point"])
 @pytest.mark.parametrize("shift", [0.0, 40.0, 1e12, 1e16])
 def test_a_proximal_fit_predicts_the_deviance_it_reports(entry, shift):
     """``predict()`` on the training rows reproduces a selection fit's reported deviance.
@@ -1298,7 +1300,9 @@ def test_a_proximal_fit_predicts_the_deviance_it_reports(entry, shift):
     published only the raw reading ``alpha - c' beta``, which cancels at a
     column's offset: at 1e16 a Gaussian fit reported deviance 0.172 and
     predicted the levels [2.75, 3, 3.5, 3.75], a squared error of 2.58, and
-    ``fit_path``'s final model did the same (Sol).  Both predictors are
+    ``fit_path``'s final model did the same (Sol).  A path's other points
+    are predicted by refitting at ``lambda_seq[i]`` (``PathResult``), the
+    third entry.  Both predictors are
     ``alpha + (x - c) beta``, each row formed with at most four roundings,
     with ``|x - c| <= R = max|z| + 2`` (``c`` lies within one grid spacing,
     at most 2 here, of the mean) and ``|alpha| <= max|mu| + R |beta|``.  Per
@@ -1315,8 +1319,16 @@ def test_a_proximal_fit_predicts_the_deviance_it_reports(entry, shift):
         if entry == "fit":
             model.fit(frame, y)
             reported = float(model.result.deviance)
-        else:
+        elif entry == "fit_path":
             reported = float(model.fit_path(frame, y, n_lambda=8).deviance_path[-1])
+        else:
+            path = model.fit_path(frame, y, n_lambda=8)
+            model = SuperGLM(
+                family="gaussian",
+                features={"x": Numeric()},
+                selection_penalty=float(path.lambda_seq[3]),
+            ).fit(frame, y)
+            reported = float(model.result.deviance)
     assert model.result.converged
     mu = np.asarray(model.predict(frame), dtype=np.float64)
     residual = y - mu
@@ -1331,6 +1343,50 @@ def test_a_proximal_fit_predicts_the_deviance_it_reports(entry, shift):
     delta = 2.0 * gamma(4) * (float(np.max(np.abs(mu))) + 2.0 * spread * slope)
     bound = 2.0 * delta * float(np.sum(np.abs(residual))) + n * delta**2 + 2.0 * gamma(n) * reported
     assert abs(float(np.sum(residual**2)) - reported) <= bound
+
+
+def test_cross_validation_scores_a_selection_fit_the_same_at_an_offset():
+    """``cross_validate`` of a selection fit reads the fold deviances it reads at no offset.
+
+    Each fold refits and predicts its held-out rows, so the published centred
+    state reaches cross-validation too: on 5e8988d1 a Numeric at 1e16 scored
+    the folds 0.007 to 0.036 against 0.0004 at no offset.  Each fold's slope
+    is within ``2 tol |beta|`` of its unshifted fit (one penalized column,
+    ``test_the_proximal_solver_centres_a_dense_column``) and its intercept the
+    held-out mean's, so a held-out row moves by at most ``delta = 2 R 2 tol
+    |beta|``, ``R = 6`` the grid's range, and a fold's mean squared residual
+    ``m`` by at most ``2 sqrt(m) delta + delta^2 + 2 gamma_n m``.  Mutation: the
+    result published without its centred state.
+    """
+    from sklearn.model_selection import KFold
+
+    from superglm import cross_validate
+
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], 100)
+    y = 3.0 + 0.2 * z + np.tile([0.01, -0.02, 0.03, -0.02], 100)
+    scores = {}
+    for shift in (0.0, 1e16):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = cross_validate(
+                SuperGLM(family="gaussian", features={"x": Numeric()}, selection_penalty=0.01),
+                pd.DataFrame({"x": shift + z}),
+                y,
+                cv=KFold(4, shuffle=True, random_state=0),
+                scoring=("deviance",),
+                return_estimators=True,
+            )
+        scores[shift] = result
+    base, shifted = scores[0.0], scores[1e16]
+    tol = SuperGLM(family="gaussian", features={"x": Numeric()})._tol
+    u = np.finfo(np.float64).eps / 2.0
+    for fold, estimator in enumerate(base.estimators):
+        m = float(base.fold_scores["deviance"].iloc[fold])
+        n = int(base.fold_scores["n_test"].iloc[fold])
+        delta = 2.0 * 6.0 * 2.0 * tol * abs(float(estimator.result.beta[0]))
+        gamma = n * u / (1.0 - n * u)
+        bound = 2.0 * np.sqrt(m) * delta + delta**2 + 2.0 * gamma * m
+        assert abs(float(shifted.fold_scores["deviance"].iloc[fold]) - m) <= bound
 
 
 def test_the_metrics_gram_does_not_anchor_on_a_far_first_chunk():
@@ -1367,34 +1423,144 @@ def test_the_metrics_gram_does_not_anchor_on_a_far_first_chunk():
 
 
 @pytest.mark.parametrize(
-    "gap, weight",
-    [(1e160, 1e-24), (1e-200, 1e100)],
-    ids=["large_gap_small_weight", "small_gap_large_weight"],
+    "gap, weight_a, weight_b",
+    [
+        (1e160, 1e-24, 1e-24),
+        (1e-200, 1e100, 1e100),
+        (1e100, 1e200, 1e-200),
+        (1e100, 1e-200, 1e200),
+        (1e160, 1e296, 1e-28),
+    ],
+    ids=[
+        "large_gap_small_weight",
+        "small_gap_large_weight",
+        "heavy_chunk_first",
+        "light_chunk_first",
+        "heavy_total_far_light_chunk",
+    ],
 )
-def test_the_metrics_gram_merges_chunks_without_over_or_underflow(gap, weight):
-    """The pairwise merge's term ``m d d'`` is formed as ``(sqrt(m) d)(sqrt(m) d)'``.
+def test_the_metrics_gram_merges_chunks_without_over_or_underflow(gap, weight_a, weight_b):
+    """The pairwise merge's term ``m d d'`` neither over- nor underflows where its value does not.
 
-    Two chunks of 8192 rows at 0 and at ``gap``, every row of weight
-    ``weight``: the centred Gram is ``W gap^2 / 4``, 4.096e299 and 4.096e-297,
-    which master's one-anchor formula reads.  Formed as ``d d'`` before the
-    weight, the merge read ``inf`` and 0 (Sol).  The result must lie within
-    ``4 gamma_{n+4}`` of that value.  Mutation: ``m * outer(d, d)``.
+    Two chunks of 8192 rows, at 0 with weight ``weight_a`` and at ``gap``
+    with weight ``weight_b``: the centred Gram is ``m gap^2``, ``m = W_a W_b /
+    (W_a + W_b)``.  Master reads 4.096e299, 4.096e-297 and 8192 here; the
+    last case is Codex's, a total near 1e300 beside a chunk near 1e-24 at a
+    separation of 1e160, a term near 8e295.  Formed
+    as ``d d'`` before the weight, the merge read ``inf`` and 0 (Sol, on
+    a40b61c8's parent); with ``w_b / (w_a + w_b)`` formed before the square
+    root, 1e-200 beside 1e200 underflowed and read 0, and the rank 0 (Sol, on
+    d7971d77).  The result must lie within ``4 gamma_{n+4}`` of the exact
+    value.  Mutations: ``m * outer(d, d)``; the raw share.
     """
     from superglm.inference._metrics_design import _anchored_weighted_moments
 
     x = np.repeat([0.0, gap], 8192)
-    W = np.full(x.size, weight)
+    W = np.repeat([weight_a, weight_b], 8192)
 
     def chunks():
         for start in range(0, x.size, 8192):
             yield start, start + 8192, x[start : start + 8192, None]
 
     _, _, centred = _anchored_weighted_moments(chunks, W, 1)
-    exact = (x.size * weight / 4.0) * gap * gap
+    total_a, total_b = 8192 * Fraction(weight_a), 8192 * Fraction(weight_b)
+    exact = float(total_a * total_b / (total_a + total_b) * Fraction(gap) ** 2)
     u = np.finfo(np.float64).eps / 2.0
     k = x.size + 4
-    assert np.isfinite(centred[0, 0])
+    assert np.isfinite(centred[0, 0]) and centred[0, 0] > 0.0
     assert abs(float(centred[0, 0]) - exact) <= 4.0 * (k * u / (1.0 - k * u)) * exact
+
+
+def _exact_product_sum(terms) -> Fraction:
+    """The exact sum of products of floats: each term a tuple of floats."""
+    numerators, exponents = [], []
+    for factors in terms:
+        numerator, exponent = 1, 0
+        for value in factors:
+            top, bottom = float(value).as_integer_ratio()
+            numerator *= top
+            exponent += bottom.bit_length() - 1
+        numerators.append(numerator)
+        exponents.append(exponent)
+    scale = max(exponents)
+    shifted = sum(n << (scale - e) for n, e in zip(numerators, exponents, strict=True))
+    return Fraction(shifted, 1 << scale)
+
+
+def test_the_metrics_gram_merge_meets_its_bound_against_exact_arithmetic():
+    """The merged centred Gram against exact rational arithmetic, over draws spanning +-300 decades.
+
+    Each draw has 2 to 6 chunks of 1 to 400 rows; a chunk's weights sit near
+    ``10^e_w``, ``e_w`` over +-300.  Two draws in three put each chunk's two
+    columns near their own ``+-10^e_x`` with 50% spread; the third translates
+    every chunk to one offset ``+-10^e_c`` with a spread of 1e-12 to 1e-4 of
+    it, the chunks' means a few spreads apart.  The exponents are drawn so a
+    row's ``w x^2`` lies within 1e+-290 (every exact entry then
+    representable, the products normal).  Each term
+    of the merge is a chunk co-moment or a merge term formed to a few
+    roundings of its own size, so every entry lies within ``16
+    gamma_{n + 2K} sqrt(C_ii C_jj)`` of the exact co-moment, ``K`` the chunks
+    (Cauchy-Schwarz bounds an off-diagonal term by its diagonal pair), and is
+    never inf, NaN, or a zero diagonal.  On these 600 draws the largest error
+    is 0.52 of ``gamma_{n + 2K} sqrt(C_ii C_jj)``; master's row-0 anchor
+    fails 271 (483 entries NaN or infinite, 108 zero diagonals) and
+    d7971d77's merge fails 204.  Mutations: the raw share; the running mean
+    stepped from the lighter side; the means' tails dropped from ``d``; ``m``
+    applied after ``d d'``.
+    """
+    from superglm.inference._metrics_design import _anchored_weighted_moments
+
+    rng = np.random.default_rng(4300)
+    u = np.finfo(np.float64).eps / 2.0
+    for draw in range(600):
+        blocks, weights = [], []
+        # every third draw translates all its chunks to one far offset: a
+        # spread 10^-12 to 10^-4 of it, the chunks' means apart by a few spreads
+        translated = draw % 3 == 2
+        e_c = rng.uniform(-140.0, 140.0, size=2)
+        offset = rng.choice([-1.0, 1.0], size=2) * 10.0**e_c
+        spread = 10.0 ** rng.uniform(-12.0, -4.0)
+        for _chunk in range(int(rng.integers(2, 7))):
+            size = int(rng.choice([1, 2, 7, 60, 400]))
+            if translated:
+                e_w = rng.uniform(
+                    max(-300.0, -290.0 - 2.0 * e_c.min()), min(300.0, 290.0 - 2.0 * e_c.max())
+                )
+                shift = rng.normal(scale=3.0)
+                blocks.append(offset * (1.0 + spread * (shift + rng.standard_normal((size, 2)))))
+            else:
+                e_w = rng.uniform(-300.0, 300.0)
+                low, high = max(-300.0, (-290.0 - e_w) / 2.0), min(300.0, (290.0 - e_w) / 2.0)
+                centre = rng.choice([-1.0, 1.0], size=2) * 10.0 ** rng.uniform(low, high, size=2)
+                blocks.append(centre * (1.0 + 0.5 * rng.standard_normal((size, 2))))
+            weights.append(10.0 ** (e_w + 0.3 * rng.standard_normal(size)))
+        x, w = np.vstack(blocks), np.concatenate(weights)
+        edges = np.cumsum([0] + [len(block) for block in blocks])
+
+        def chunks(blocks=blocks, edges=edges):
+            for index, block in enumerate(blocks):
+                yield int(edges[index]), int(edges[index + 1]), block
+
+        _, _, centred = _anchored_weighted_moments(chunks, w, 2)
+        total = _exact_product_sum((value,) for value in w)
+        sums = [_exact_product_sum(zip(w, x[:, j], strict=True)) for j in range(2)]
+        exact = [
+            [
+                _exact_product_sum(zip(w, x[:, i], x[:, j], strict=True))
+                - sums[i] * sums[j] / total
+                for j in range(2)
+            ]
+            for i in range(2)
+        ]
+        diagonal = [float(exact[i][i]) for i in range(2)]
+        k = len(x) + 2 * len(blocks)
+        gamma = k * u / (1.0 - k * u)
+        for i in range(2):
+            assert centred[i, i] > 0.0
+            for j in range(2):
+                assert np.isfinite(centred[i, j])
+                bound = 16.0 * gamma * np.sqrt(diagonal[i]) * np.sqrt(diagonal[j])
+                assert abs(Fraction(float(centred[i, j])) - exact[i][j]) <= Fraction(bound)
 
 
 @pytest.mark.parametrize("position", ["first", "last"])

@@ -105,7 +105,17 @@ def _immutable_path_array(values, *, dtype) -> NDArray:
 
 @dataclass(frozen=True)
 class PathResult:
-    """Immutable container for regularization path results."""
+    """Immutable container for regularization path results.
+
+    ``coef_path`` and ``intercept_path`` are each point's public coefficients
+    and raw intercept, and ``deviance_path`` its fitted deviance.  Beside a
+    numeric column far from zero (a year, an epoch time), ``X @ coef_path[i]
+    + intercept_path[i]`` cancels the column's offset against the intercept
+    and loses the rounding of that offset (tenths at 1e16), so it does not
+    reproduce ``deviance_path[i]``.  Predict with the fitted model, which
+    holds the last point, or refit at ``selection_penalty=lambda_seq[i]`` and
+    predict with that model: both carry the centred predictor.
+    """
 
     lambda_seq: NDArray  # shape (n_lambda,)
     coef_path: NDArray  # shape (n_lambda, p)
