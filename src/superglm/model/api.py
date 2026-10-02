@@ -197,6 +197,11 @@ class SuperGLM:
             governs the in-solver backstop that fires when an exhausted,
             stagnant IRLS run shows the extreme-working-weight signature of
             separation the build scan cannot see.
+            A ``FactorSmooth(basis="sz")`` level whose unpenalized line
+            separates the response is named in a ``SeparationWarning`` at fit
+            under ``"warn"`` and ``"error"`` alike (never refused) and left
+            out of the term's population curve; ``"ignore"`` silences the
+            warning only.
         group_pricing : {"rank", "spanned"}
             Dimension ``p_g`` at which the selection penalty and the fallback
             df ledger price a group whose spec emits fewer columns than the

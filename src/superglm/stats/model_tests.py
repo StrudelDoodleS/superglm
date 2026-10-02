@@ -71,8 +71,10 @@ class VuongTestResult:
 
 
 def _get_mu(model: SuperGLM, X, y, offset=None) -> NDArray:
-    """Get predicted mu from a fitted model."""
-    return np.asarray(model.predict(X, offset=offset), dtype=float)
+    """Get predicted mu from a fitted model (``predict``'s values without its warning)."""
+    from superglm.model import base
+
+    return np.asarray(base.predict_exact(model, X, offset, warn=False), dtype=float)
 
 
 def _check_family(model: SuperGLM, allowed: set[str], func_name: str) -> str:

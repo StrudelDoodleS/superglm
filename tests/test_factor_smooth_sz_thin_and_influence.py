@@ -758,6 +758,63 @@ def test_the_all_thin_border_decision_does_not_follow_the_penalty_products_round
     assert len(decisions) == 1
 
 
+@pytest.mark.parametrize("scale", [1e-140, 1e-160, 1e-300])
+def test_the_deflation_bound_keeps_a_contrast_beside_a_tiny_penalty(scale) -> None:
+    """The deflation's product bound is range-safe at tiny penalties (Sol review of 0ccab297, P2).
+
+    ``Q_d = 1e-3 [[1, -1], [-1, 1]]``, ``S = scale I`` and the generator
+    ``N = [1, 1]'``: the contrast is identified by the data alone.  On 0ccab297
+    the bound's ``t`` overflowed (``reach / spread`` near ``1e311`` at
+    ``1e-140``), or ``e_i^2`` underflowed into a spurious ``t = 1`` (a bound of
+    0.25 at ``1e-160``), so the contrast went to the null space (rank 0);
+    master keeps it.  ``_paired_majorant`` scales by ``e_max g_max`` and never
+    forms ``e_i^2`` or the quotient of the sums.
+    """
+    from superglm.solvers._structured.border import BorderGenerators, factor_border
+
+    Q_d = 1e-3 * np.array([[1.0, -1.0], [-1.0, 1.0]])
+    generators = BorderGenerators(matrix=np.array([[1.0], [1.0]]), references=np.array([0]))
+    border = factor_border(Q_d, scale * np.eye(2), np.zeros(2), generators, term_name="t")
+    assert border.certificate.rank == 1
+    assert border.null.shape[1] == 0
+
+
+def test_an_fs_fit_beside_a_random_effect_at_a_tiny_fixed_lambda_converges() -> None:
+    """The complete fit of the Sol review of 0ccab297: an fs term beside a near-unpenalized RE.
+
+    A three-level random effect at a fixed ``lambda = 1e-140`` and prior
+    weights ``1e-6``: its generator's penalty curvature is near ``1e-140``,
+    and on 0ccab297 the deflation bound overflowed, sent the identified
+    contrast to the null space and the fit stopped unconverged; master and
+    this branch converge to the same fit.
+    """
+    rng = np.random.default_rng(3)
+    n, K = 1200, 6
+    g = rng.integers(0, K, n)
+    h = rng.integers(0, 3, n)
+    x = rng.uniform(size=n)
+    y = np.sin(3 * x) + rng.normal(0, 0.3, K)[g] + np.array([0.2, -0.1, 0.05])[h]
+    y = y + rng.normal(0, 0.01, n)
+    frame = pd.DataFrame(
+        dict(
+            x=x,
+            g=np.char.add("g", g.astype(str)).astype(object),
+            h=np.char.add("h", h.astype(str)).astype(object),
+        )
+    )
+    policy = dict.fromkeys(("wiggle", "null_0", "null_1"), LambdaPolicy.fixed(1.0))
+    model = SuperGLM(
+        family="gaussian",
+        features=dict(h=RandomEffect(lambda_policy=LambdaPolicy.fixed(1e-140))),
+        interactions=[FactorSmooth("x", group="g", k=6, lambda_policy=policy)],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y, sample_weight=np.full(n, 1e-6))
+    assert bool(model.result.converged)
+
+
 def test_metrics_on_a_copy_of_the_training_rows_are_the_fits() -> None:
     """``metrics`` reads the same deviance from the training frame and from a copy (#432; Sol P1).
 
@@ -1175,6 +1232,58 @@ def test_term_inference_and_bands_report_the_population_curve() -> None:
     )
 
 
+def test_an_editor_edit_of_the_main_spline_moves_predictions_by_the_edit() -> None:
+    """Editing the population curve moves every prediction by the edit, not by ``b(x)' c`` (#432).
+
+    The Claude review of 84bef26 (High): the editor builds the main spline's
+    editable curve from ``term_inference``, which now reports the population
+    curve ``main + b(x)' c``, and wrote an edit back by projecting that whole
+    curve onto the main effect, so every prediction also moved by about
+    ``b(x)' c`` (hundreds on this fixture).  The projection now subtracts the
+    offset, which stays with the ``sz`` term.  Check: raising the whole curve
+    by ``0.1`` raises every training prediction by ``0.1`` (identity link), to
+    the projection's backward error ``k u kappa(B) (||B|| ||gamma|| + 0.1)``
+    on the editor's grid and each predictor's rounding (``_rounding_bound``).
+    Mutation: the offset projected into the main effect again.
+    """
+    from superglm.editor import EditorSession
+    from superglm.editor.apply import apply_edits_to_model_copy_with_data
+    from superglm.model import base
+
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        session = EditorSession.from_model(model, terms=["x"])
+        term = session.terms["x"]
+        delta = 0.1
+        term.edited_log_effect = np.asarray(term.edited_log_effect, dtype=np.float64) + delta
+        edited = apply_edits_to_model_copy_with_data(model, session.terms)
+    assert not _thin_warnings(caught)  # the editor's own evaluations (review of 84bef26)
+    from superglm.editor.metrics import _compute_metrics
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _compute_metrics(edited, frame, y, weight, None)
+    assert not _thin_warnings(caught)
+    before = base.predict_eta_exact(model, frame, warn=False)
+    after = base.predict_eta_exact(edited, frame, warn=False)
+    grid = np.asarray(term.x, dtype=np.float64)
+    design = np.column_stack([np.ones(len(grid)), model._specs["x"].transform(grid)])
+    singular = np.linalg.svd(design, compute_uv=False)
+    group = next(g for g in model._groups if g.name == "x")
+    gamma = np.asarray(model.result.beta[group.sl])
+    projection = (
+        design.shape[1]
+        * _U
+        * singular[0]
+        / singular[-1]
+        * (singular[0] * float(np.linalg.norm(gamma)) + delta)
+    )
+    bound = _rounding_bound(model, frame) + _rounding_bound(edited, frame) + projection
+    assert np.all(np.abs(after - before - delta) <= bound)
+
+
 def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
     """The reported curves' errors are those of the contrasts they report (#432; Opus P2).
 
@@ -1236,15 +1345,19 @@ def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
             assert np.all(se == 0.0)
 
 
-def test_a_tweedie_profile_raises_no_predict_warning_of_its_own() -> None:
+@pytest.mark.parametrize("retain", [True, False])
+def test_a_tweedie_profile_raises_no_predict_warning_of_its_own(retain) -> None:
     """``estimate_p`` restates its refit through ``predict``'s values, not its warning (#440 review).
 
     The Claude review of 52c6b730 (Low): ``_install_tweedie_profile`` read the
     refit's means through public ``predict``, so a Tweedie profile of a model
     with a thin ``sz`` level raised ``predict``'s user-facing warning from
-    library frames.  Mutation: public ``predict`` again.
+    library frames; without retained fit state each candidate ``p``'s clone
+    did too (review of 84bef26), and ``dispersion_test`` reads ``predict``'s
+    values the same way.  Mutation: public ``predict`` again.
     """
     from superglm import families
+    from superglm.stats.model_tests import dispersion_test
 
     rng = np.random.default_rng(6)
     K, n = 8, 1600
@@ -1263,11 +1376,31 @@ def test_a_tweedie_profile_raises_no_predict_warning_of_its_own() -> None:
             )
         ],
         selection_penalty=0,
+        retain_fit_state=retain,
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.estimate_p(frame, y, fit_mode="reml", p_bounds=(1.4, 1.6), xatol=0.05)
     assert model._interaction_specs["x:g:sz"]._unidentified_level_names == ("g2",)
+    assert not _thin_warnings(caught)
+    counts = np.round(y * 2.0)
+    poisson = SuperGLM(
+        family="poisson",
+        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+            )
+        ],
+        selection_penalty=0,
+        retain_fit_state=retain,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        poisson.fit_reml(frame, counts)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        dispersion_test(poisson, frame, counts)
     assert not _thin_warnings(caught)
 
 

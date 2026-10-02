@@ -203,9 +203,25 @@ def _apply_projected_term(
 ) -> None:
     B = _as_dense(spec.transform(x_values))
     weights = _term_weights(term)
+    target = native_log_effect_values(term)
+    # The editable curve is the population curve when an sz term moves it
+    # (#432: main(x) + b(x)' c, ``term_inference``); the main effect's own
+    # coefficients carry the curve without the offset, which stays with the
+    # sz term (the Claude review of 84bef26: an edit wrote b'c into main).
+    from superglm.features.factor_smooth import population_curve_shift
+
+    shift = population_curve_shift(
+        term.name,
+        np.asarray(x_values, dtype=np.float64),
+        model._interaction_specs,
+        model._groups,
+        np.asarray(model.result.beta),
+    )
+    if shift is not None:
+        target = np.asarray(target, dtype=np.float64) - shift
     intercept_delta, beta_new = _solve_with_intercept(
         B,
-        native_log_effect_values(term),
+        target,
         weights,
     )
     _adjust_intercept(model, intercept_delta)
@@ -621,7 +637,10 @@ def _refresh_fit_statistics(
         and (X_ref is retained_X_ref or X_ref is None)
     )
     if X_ref is not None and not can_use_fitted_design:
-        mu = model.predict(X_ref, offset=offset_arr)
+        from superglm.model import base
+
+        # predict's values without its warning: a library evaluation (#440 review)
+        mu = base.predict_exact(model, X_ref, offset_arr, warn=False)
     elif getattr(model, "_dm", None) is not None and model._dm.n == y_arr.size:
         solver_result = (
             model._solver_pirls_result() if model._solver_result is not None else model.result

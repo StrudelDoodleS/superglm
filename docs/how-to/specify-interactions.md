@@ -178,8 +178,10 @@ Some SZ levels do not carry enough information for their whole curve:
   penalty leaves unpenalized (with the default `m=2`, a single distinct value).
 
 For such a level, part of its curve can trade places with the global curve
-without changing any fitted value, so the data do not decide that part. The
-fit already warns and names these levels. At prediction:
+without changing any fitted value, so the data do not decide that part. A
+`fit_reml` fit on the structured solver names these levels when it fits;
+every fit records them, and `predict` names them when it meets them. At
+prediction:
 
 - a level with data keeps the value its rows identify, so predictions on its
   training rows reproduce the fit;
