@@ -2096,6 +2096,18 @@ def truncated_direction_ratio(
     ``p`` terms per penalty component, scales each by its ``lambda`` and adds
     the components on a coordinate, at most ``p + 2`` of them; the product
     ``d' fl(S d)`` adds ``p`` more: ``gamma_{3p + 5} |d|' |S| |d|`` in all.
+    ``S`` is PSD, so along a direction whose computed bend lies within that
+    error the true bend lies in ``[0, 2 error]`` and may be 0, and a PSD
+    matrix with a zero diagonal entry has that row and column zero (``b_jk^2
+    <= b_jj b_kk``).  That row and column are set to 0 before ``C`` is
+    formed, as a Cholesky factorization with complete pivoting treats a pivot
+    within its tolerance (LAPACK ``dpstrf``; Higham 1990).  ``C`` along the
+    direction is then the rows' own ``M' F M``, non-negative: a negative
+    round-off bend can no longer make it negative and drop the direction from
+    ``C^+``.  The system formed is one the true bend allows, so a
+    certificate that holds for every bend the arithmetic allows still holds;
+    along one direction it is the extreme case, the step ``|m g| / (a + b)``
+    being largest at ``b = 0``.
 
     Returns the largest ``|M delta| / max(bar, floor)`` over uncertifiable
     directions (0 where none) and the hidden directions found.  Nothing in
@@ -2135,9 +2147,8 @@ def truncated_direction_ratio(
     peaks = np.max(np.abs(directions), axis=0)
     # row i's movement along direction k is within this, per unit of l1_i:
     # the basis's error, and the rounding of ``(X V) t`` through ``|t|``
-    reach_error = 4.0 * (
-        angle * lengths + _gamma(p + 2) * (np.max(np.abs(basis), axis=0) @ np.abs(turn))
-    )
+    basis_rounding = 4.0 * _gamma(p + 2) * (np.max(np.abs(basis), axis=0) @ np.abs(turn))
+    reach_error = 4.0 * angle * lengths + basis_rounding
     error = reach[:, None] * reach_error[None, :]
     total = float(np.sum(np.abs(score[positive])))
     if not math.isfinite(total):
@@ -2149,7 +2160,7 @@ def truncated_direction_ratio(
             if reach_error[k] < peaks[k]:
                 continue  # aliasing
             # every row's error reaches the most it can move: unresolved
-            rounding = reach * (_gamma(p + 2) * float(peaks[k]))
+            rounding = reach * float(basis_rounding[k])
             visible = np.flatnonzero(positive & (np.abs(movement[:, k]) > rounding))
             leaning = np.abs(directions[:, k])
             named = tuple(
@@ -2201,7 +2212,6 @@ def truncated_direction_ratio(
             ]
         )
         bending = direction.T @ stiffness
-        curvature = local.T @ (f_local[:, None] * local) + bending
         gradient = local.T @ s_local - pull
         # the penalty's curvature along each direction, and its error:
         # the basis's, ``|d' S d - d*' S d*| = |e' S (2 d - e)|``, and the
@@ -2223,6 +2233,14 @@ def truncated_direction_ratio(
             + penalty_norm * (resolution * lengths) ** 2
             + _gamma(3 * p + 5) * np.sum(np.abs(direction) * bent_size, axis=0)
         )
+        # S is PSD, so a bend within its error may truly be 0, and a PSD
+        # matrix with a zero diagonal entry has that row and column zero: the
+        # bend enters the Newton system only along directions it resolvably
+        # bends, never as round-off of either sign
+        bent = np.diag(bending) > bending_error
+        bending[~bent, :] = 0.0
+        bending[:, ~bent] = 0.0
+        curvature = local.T @ (f_local[:, None] * local) + bending
     if not (
         np.all(np.isfinite(curvature))
         and np.all(np.isfinite(gradient))
@@ -2270,7 +2288,7 @@ def truncated_direction_ratio(
     ratio = float(np.max(np.abs(steps) / limit))
     rising = improving & determined & (y_moved == 1.0)
     if np.all(improving | ~determined):
-        if not np.any(np.diag(bending) > bending_error):
+        if not np.any(bent):
             if not np.any(rising):
                 return 0.0, ()  # a separation: no interior maximum
             # events rising: under the log link their supremum is the boundary

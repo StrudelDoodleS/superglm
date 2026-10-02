@@ -1687,25 +1687,31 @@ def test_an_exact_alias_on_a_large_design_is_not_refused(
     assert not any(record.unresolved_basis for record in model.result.truncated_directions)
 
 
-def test_a_direction_in_a_penalty_null_space_is_not_bent() -> None:
-    """claude's Low on 7e6ef1ee: a hidden direction along a second-difference penalty's null vector.
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["positive", "negative"])
+def test_a_direction_in_a_penalty_null_space_is_not_bent(sign: float) -> None:
+    """claude's Low on 7e6ef1ee and Medium on 4558acb8: a bend within its error is no bend, of either sign.
 
     Three light levels whose rows are all events, along the direction ``(1,
-    2, 3) / sqrt(14)``: linear, so a second-difference penalty ``S = lambda
-    D'D`` does not bend it.  ``S d`` is formed as two components that cancel,
-    ``M d - (M - S) d`` with ``|M| ~ 1e6``, as a penalty summed over
-    components forms it, so ``fl(S d)`` carries rounding of order ``u |M|
-    |d|`` (a bend of about 1e-9 here) and nothing else.  The bend is judged
-    against the basis's error and both roundings of ``d' fl(S d)``
-    (``gamma_{3p+5} |d|' |S| |d|``, with ``|S| |v|`` the components'
-    magnitudes), so the direction reads as unbent: a recession direction
-    whose events rise, a boundary supremum.  Read as bent, it would be
-    refused as unresolved (no ``eta`` is given, so no crossing could be
-    confirmed); with the rounding term dropped it is, wherever the
-    round-off's sign makes the bend positive.
+    2, 3) / 4``: linear, so a second-difference penalty ``S = lambda D'D``
+    does not bend it, and ``S d`` is exactly 0 in any summation order (every
+    product and partial sum is a multiple of 1/4).  A penalty summed over
+    components ``M`` and ``M - S`` with ``|M| ~ 1e6`` forms ``S d`` with
+    rounding up to ``gamma_{p+2} (|M| + |M - S|) |d|``.  That rounding is
+    injected here, ``sign eta d`` with ``eta`` a power of two inside that
+    bound, so the bend ``d' fl(S d)`` is exactly ``sign eta |d|^2`` on every
+    platform: inside its error (``gamma_{3p+5} |d|' |S| |d|``), and some
+    1e8 times the rows' own curvature.  Both signs read as unbent: a
+    recession direction whose events rise, a boundary supremum.  4558acb8
+    added the negative bend to ``C``, which went negative; the eigensolver
+    dropped it, the step was 0, and the rows were certified at their own
+    maximum (ratio 0).  Read as bent, the positive one would be refused as
+    unresolved (no ``eta`` is given, so no crossing could be confirmed).
     """
     from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
     from superglm.solvers.mode_score import truncated_direction_ratio
+
+    def gamma(k: int) -> float:
+        return k * _U / (1.0 - k * _U)
 
     codes = np.array([-1, -1, -1, -1, 0, 0, 1, 1, 2, 2])
     response = np.array([0.0, 1.0, 0.0, 1.0] + [1.0] * 6)
@@ -1718,8 +1724,13 @@ def test_a_direction_in_a_penalty_null_space_is_not_bent() -> None:
     penalty = 1e6 * (second.T @ second)
     spread = np.random.default_rng(4).normal(size=(3, 3))
     component = 1e6 * (spread + spread.T)
-    rest = component - penalty
-    direction = np.array([[1.0], [2.0], [3.0]]) / math.sqrt(14.0)
+    magnitude = np.abs(component) + np.abs(component - penalty)
+    direction = np.array([[1.0], [2.0], [3.0]]) / 4.0
+    d = direction[:, 0]
+    assert np.all(penalty @ d == 0.0) and np.all(penalty @ -d == 0.0)
+    # the largest power of two whose ``eta |d|`` lies inside forming S d's rounding
+    eta = 2.0 ** math.floor(math.log2(np.min(gamma(5) * (magnitude @ d) / d)))
+    assert eta * float(d @ d) < gamma(14) * float(d @ (magnitude @ d))  # within the bend's error
     ratio, found = truncated_direction_ratio(
         dm=dm,
         null_basis=direction,
@@ -1731,14 +1742,14 @@ def test_a_direction_in_a_penalty_null_space_is_not_bent() -> None:
         positive_prior=np.ones(10, dtype=bool),
         penalty_gradient=np.zeros(3),
         penalty_size=np.zeros(3),
-        penalty_apply=lambda v: component @ np.asarray(v) - rest @ np.asarray(v),
-        penalty_size_apply=lambda v: (np.abs(component) + np.abs(rest)) @ np.abs(np.asarray(v)),
+        penalty_apply=lambda v: penalty @ np.asarray(v) + sign * eta * np.asarray(v),
+        penalty_size_apply=lambda v: magnitude @ np.abs(np.asarray(v)),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
     )
     assert ratio > 1.0
     (record,) = found
-    assert record.boundary and not record.unresolved_basis
+    assert record.boundary and not record.unresolved_basis and not record.at_maximum
     assert record.rows == (4, 5, 6, 7, 8, 9)
 
 
@@ -1839,7 +1850,20 @@ def test_a_penalized_events_direction_is_on_the_boundary_only_past_it(
     assert record.boundary is boundary
 
 
-@pytest.mark.parametrize("angle", [1e-3, 1e-2])
+@pytest.mark.parametrize(
+    "angle",
+    [
+        1e-3,
+        pytest.param(
+            1e-2,
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason="#431: an empty support within the basis's error passes as aliasing",
+            ),
+        ),
+    ],
+)
 def test_a_wide_column_does_not_hide_a_light_set_as_aliasing(angle: float) -> None:
     """claude's Medium on #454: the basis's error is each row's own, not the design's widest.
 
@@ -1854,11 +1878,12 @@ def test_a_wide_column_does_not_hide_a_light_set_as_aliasing(angle: float) -> No
     At ``1e-2`` their error, 4.5, exceeds their movement again while the
     test is not vacuous: a basis error the angle allows could explain a
     movement of 1 on a row whose l1 sum is 112, so an alias cannot be told
-    from a real movement.  That case passes as aliasing, as on 0.36.0: the
-    documented limit, recorded in #431 with its fix (a minimum-norm check of
-    whether the movement can be explained by a basis error the angle
-    allows).  Refusing that range refused exact aliases on large or
-    ordinarily conditioned designs (7e6ef1ee).
+    from a real movement.  That case still passes as aliasing, as on 0.36.0:
+    the documented limit, a strict xfail on the boundary record it should
+    give, recorded in #431 with its fix (a minimum-norm check of whether the
+    movement can be explained by a basis error the angle allows).  Refusing
+    that range refused exact aliases on large or ordinarily conditioned
+    designs (7e6ef1ee).
     """
     from superglm.solvers.mode_score import truncated_direction_ratio
 
@@ -1882,9 +1907,6 @@ def test_a_wide_column_does_not_hide_a_light_set_as_aliasing(angle: float) -> No
         underflow=0.0,
         eta=eta,
     )
-    if angle == 1e-2:
-        assert (ratio, found) == (0.0, ())  # the documented limit
-        return
     assert ratio > 1.0
     (record,) = found
     assert record.rows == (4, 5)
@@ -1959,7 +1981,8 @@ def test_the_pull_carries_the_null_basis_error() -> None:
     assert record.rows == (4, 5)
 
 
-def test_an_unresolved_null_basis_refuses() -> None:
+@pytest.mark.parametrize("along", ["level", "column"])
+def test_an_unresolved_null_basis_refuses(along: str) -> None:
     """claude's #437 Low (r4164945870): a basis whose error reaches every row's movement refuses.
 
     A row moves by at most its l1 bound times the direction's largest
@@ -1967,15 +1990,21 @@ def test_an_unresolved_null_basis_refuses() -> None:
     At ``angle = 0.3`` every movement lies within the error, so no row can be
     told moved: #437 read the empty support as aliasing and passed the stop.
     It is not resolved, so the claim is refused (``inf``), with a record
-    naming the rows the direction visibly moves.
+    naming the rows the direction visibly moves: beyond the rounding of
+    forming ``(X V) t``, ``4 gamma_{p+2} l1_i (max |V|) |t|``.  Along the
+    dense column, row 4's entry ``2 gamma_{p+2}`` moves it within that
+    rounding, so it is not named (claude's Nit on 4558acb8: the record read
+    ``gamma_{p+2} l1_i ||d||_inf`` and named it).
     """
     from superglm.solvers.mode_score import truncated_direction_ratio
 
     z = np.linspace(-1.0, 1.0, 10)
+    gamma = 5 * _U / (1.0 - 5 * _U)  # gamma_{p+2}, p = 3
+    z[4] = 2.0 * gamma
     dm, response, score, weight = _two_level_design(z)
     ratio, found = truncated_direction_ratio(
         dm=dm,
-        null_basis=np.array([[1.0], [0.0], [0.0]]),
+        null_basis=np.array([[1.0], [0.0], [0.0]] if along == "level" else [[0.0], [0.0], [1.0]]),
         angle=0.3,
         mean_x=np.zeros(3),
         row_score=score,
@@ -1991,7 +2020,8 @@ def test_an_unresolved_null_basis_refuses() -> None:
     )
     assert ratio == math.inf
     (record,) = found
-    assert record.unresolved_basis and record.rows == (4, 5)
+    named = (4, 5) if along == "level" else (0, 1, 2, 3, 5, 6, 7, 8, 9)
+    assert record.unresolved_basis and record.rows == named
 
 
 def test_structural_null_columns_are_not_read_on_the_design() -> None:
