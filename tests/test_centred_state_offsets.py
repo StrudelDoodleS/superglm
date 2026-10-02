@@ -646,6 +646,60 @@ def test_a_folded_compensated_intercept_still_predicts_the_fit(base):
     assert model.metrics(X, y).deviance == 0.0
 
 
+@pytest.mark.parametrize("folded", ["spline", "polynomial"])
+def test_the_public_intercept_pair_carries_the_fold_exactly(folded):
+    """Canonicalization folds ``(m - c)' beta`` into the compensated pair, error included.
+
+    A materialized term's public columns lose their training means ``m``,
+    and the solver centred them about its own ``c``, two roundings of the
+    same means: the fold ``(m - c)' beta`` (``_public_centred_state``) is of
+    the order of an ulp of ``alpha``, so ``alpha + fold`` rounds away part of
+    it, which the TwoSum's error carries into ``alpha_lo``.  The public pair
+    must then be the solver's pair plus the fold, to the fold's own rounding
+    (a difference and a product per column, then a correctly rounded
+    ``fsum``: ``gamma_3`` on the terms' magnitudes, Higham 2002, Lemma 3.1)
+    and the one addition that forms the public ``alpha_lo`` (``gamma_1``);
+    the TwoSum itself is exact (Knuth, TAOCP vol. 2, 4.2.2, Theorem B).  The
+    previous test's fold is zero, so it cannot see this.  Mutations: the
+    TwoSum's error dropped, or ``alpha + fold`` added plainly (Claude review
+    of #425, Low): both leave the gap at the rounded part of the fold.
+    """
+    rng = np.random.default_rng(5)
+    n = 400
+    x = rng.normal(5.0, 1.0, n)
+    s = rng.uniform(0.0, 1.0, n)
+    y = 2.0 + 0.3 * x + np.sin(4.0 * s) + 0.1 * rng.normal(size=n)
+    term = Spline(n_knots=6) if folded == "spline" else Polynomial(degree=3)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={"x": Numeric(), "s": term}
+    ).fit(pd.DataFrame({"x": x, "s": s}), y)
+
+    solver, public = model._solver_pirls_result(), model.result
+    alpha, alpha_lo = solver.centred_intercept, solver.centred_intercept_lo
+    assert alpha_lo is not None and public.centred_intercept_lo is not None
+    centre = np.asarray(solver.state_center, dtype=np.float64)
+    beta = np.asarray(solver.beta, dtype=np.float64)
+    shifts = np.zeros(centre.size)
+    for term_state in model._runtime_canonical_state["terms"].values():
+        if term_state["applied_to_public_model"]:
+            for group_state in term_state["groups"]:
+                lo, hi = group_state["solver_slice"]
+                shifts[lo:hi] = group_state["column_means"]
+    columns = np.asarray(public.state_center) == 0.0
+    terms = [
+        (Fraction(float(m)) - Fraction(float(c))) * Fraction(float(b))
+        for m, c, b in zip(shifts[columns], centre[columns], beta[columns], strict=True)
+    ]
+    fold = sum(terms, Fraction(0))
+    # the fold is real and alpha + fold rounds it, so only alpha_lo can carry the rest
+    assert fold != 0 and Fraction(alpha + float(fold)) != Fraction(alpha) + fold
+    gap = Fraction(public.centred_intercept) + Fraction(public.centred_intercept_lo)
+    gap -= Fraction(alpha) + Fraction(alpha_lo) + fold
+    bound = Fraction(_gamma(3)) * sum(map(abs, terms), Fraction(0))
+    bound += Fraction(_gamma(1)) * abs(Fraction(public.centred_intercept_lo))
+    assert abs(gap) <= bound, f"gap {float(gap):.3g}, fold {float(fold):.3g}"
+
+
 # ------------------------------------- 7. the gram and QR paths at 1e16
 def _even_grid_frame(shift: float):
     """An even-integer column (exact at 1e16) beside a four-level categorical."""
@@ -1308,7 +1362,27 @@ def test_a_proximal_fit_predicts_the_deviance_it_reports(entry, shift):
     at most 2 here, of the mean) and ``|alpha| <= max|mu| + R |beta|``.  Per
     row they differ by at most ``delta = 2 gamma_4 (max|mu| + 2 R |beta|)``,
     so the deviances differ by at most ``2 delta sum|r| + n delta^2 + 2
-    gamma_n D``.  Mutation: the result published without its centred state.
+    gamma_n D``.
+
+    The refit must also be path point 3 itself, as ``PathResult`` promises.
+    One penalized column of a Gaussian identity fit: the slope's objective is
+    quadratic with curvature ``L = sum (z - zbar)^2``, so the certificate's
+    proximal step ``d`` lands on the optimum and ``|d| <= tol s + a`` bounds
+    each converged fit's distance from it
+    (``test_the_proximal_solver_centres_a_dense_column``).  The scale ``s``
+    holds the score step ``|beta - b0|``, ``b0`` the unpenalized slope, so ``s
+    <= |b0| + |d|`` (the shrunk slope lies between 0 and ``b0``), not
+    ``|beta|``; ``a`` is the certificate's arithmetic allowance, ``gamma'_{n
+    + 5} (||y|| + ||mu||) / sqrt(L) + gamma'_6 3 |b0|`` (``gamma'`` counts
+    ``eps``).  Each slope is within ``(tol |b0| + a) / (1 - tol)`` of the
+    optimum, the two within twice that, and the deviances, quadratic in the
+    slope, differ by at most ``L |beta_r - beta_p| (|beta_r - b0| + |beta_p -
+    b0|)``, plus each intercept's error, at most ``((tol + gamma'_{n+2})
+    sum(|y| + |mu|))^2 / n``, and each deviance's rounding, half the bound
+    above.  ``fit_path`` runs ``fit_pirls`` at its default ``tol``, equal to
+    the model's default.  Mutations: the result published without its
+    centred state; path point 3 fitted at ``lambda_seq[4]`` or at
+    ``lambda_seq[3] (1 + 1e-3)``; ``deviance_path`` published one point off.
     """
     z = np.tile([-2.0, 0.0, 2.0, 4.0], 100)
     y = 3.0 + 0.2 * z + np.tile([0.01, -0.02, 0.03, -0.02], 100)
@@ -1343,6 +1417,22 @@ def test_a_proximal_fit_predicts_the_deviance_it_reports(entry, shift):
     delta = 2.0 * gamma(4) * (float(np.max(np.abs(mu))) + 2.0 * spread * slope)
     bound = 2.0 * delta * float(np.sum(np.abs(residual))) + n * delta**2 + 2.0 * gamma(n) * reported
     assert abs(float(np.sum(residual**2)) - reported) <= bound
+    if entry != "refit_at_a_path_point":
+        return
+    assert path.converged_path[3]
+    tol = model._tol
+    centred = z - np.mean(z)
+    curvature = float(np.sum(centred**2))
+    unpenalized = float(np.sum(centred * (y - np.mean(y)))) / curvature
+    allowance = gamma(2 * (n + 5)) * float(np.linalg.norm(y) + np.linalg.norm(mu)) / np.sqrt(
+        curvature
+    ) + gamma(12) * 3.0 * abs(unpenalized)
+    distance = (tol * abs(unpenalized) + allowance) / (1.0 - tol)
+    refit, point = float(model.result.beta[0]), float(path.coef_path[3, 0])
+    assert abs(refit - point) <= 2.0 * distance
+    moved = 2.0 * distance * curvature * (abs(refit - unpenalized) + abs(point - unpenalized))
+    intercept = ((tol + gamma(2 * (n + 2))) * float(np.sum(np.abs(y) + np.abs(mu)))) ** 2 / n
+    assert abs(reported - float(path.deviance_path[3])) <= moved + 2.0 * intercept + bound
 
 
 def test_cross_validation_scores_a_selection_fit_the_same_at_an_offset():
@@ -1389,16 +1479,68 @@ def test_cross_validation_scores_a_selection_fit_the_same_at_an_offset():
         assert abs(float(shifted.fold_scores["deviance"].iloc[fold]) - m) <= bound
 
 
+def _merge_rounding_count(sizes: list[int]) -> int:
+    """``N``: each entry of ``_anchored_weighted_moments``'s merge is within ``gamma_N sqrt(C_ii C_jj)``.
+
+    ``sizes`` are the row counts of the ``K`` chunks that carry weight, ``n``
+    the largest.  The co-moment is ``C = S + B``: ``S`` the chunks'
+    co-moments ``C^t`` about their own means, ``B`` the merge terms ``T_t =
+    m_t d_t d_t'``, which sum to the chunks' scatter ``sum_t w_t (mean_t -
+    M)(mean_t - M)'`` about the overall mean ``M`` (Chan, Golub & LeVeque
+    1979).  Every part is positive semidefinite, so Cauchy-Schwarz bounds a
+    sum of ``|part_ij|`` by its diagonal pair.  Counting each rounding
+    relative to the value it rounds, to first order in ``u`` (Higham 2002,
+    §3.1, Lemma 3.3, §4.2):
+
+    - a chunk co-moment, ``n_t + 7`` of ``sum w |r_i| |r_j|``, ``r`` the rows
+      about the chunk's pair ``(hi, lo)``: the rows ``(x - hi) - lo``, 2 in
+      each factor; ``w`` times a row, 1; the dot product, ``n_t``; the
+      profiled intercept's subtraction and the symmetrising sum, 2.  The
+      profiled term is the square of the pair's error;
+    - merge term ``t``, ``t + 13`` of ``|T_t,ij|``: ``d``, 2 in each factor;
+      ``sqrt(m)``, 4 in each (two square roots, their product, the share's sum
+      and quotient); ``sqrt(m) d``, 1 in each; the outer product, 1; the
+      running total, ``t - 2`` additions;
+    - the sum of the ``2K - 1`` parts, ``2K - 2``;
+    - a chunk's weight, ``n_t - 1`` additions, and its mean, off by
+      ``gamma_{n_t+1} sum w |x - hi| / w_t`` (``lo``'s dot product).  ``B`` is
+      stationary in ``M``, so these move it only through each chunk's own
+      term, by at most ``gamma_{n-1} sqrt(B_ii B_jj)`` and ``gamma_{n+1}
+      (sqrt(B_ii S_jj) + sqrt(S_ii B_jj))`` in all;
+    - the running mean, moved from the heavier side by the lighter side's
+      share ``l`` of ``d``: ``t + 4`` roundings of ``l |d|`` (``d``, 2; the
+      share, 2 and the running total's ``t - 2``; the product, 1; the tail's
+      sum, 1; TwoSum is exact).  An error ``e`` in the mean ``M_t`` of the
+      first ``t`` chunks, of weight ``W_t``, moves ``B`` by ``W_t ((M_t - M)
+      e' + e (M_t - M)')``.  With ``W_t (M_t - M)_i^2 <= B_ii`` and ``sqrt(W_t) l |d| <=
+      sqrt(T_t,ii)``, the ``K - 1`` steps add ``2 (K + 4) sqrt(K - 1) u
+      sqrt(B_ii B_jj)``.
+
+    So ``sqrt(S_ii S_jj)`` carries at most ``n + 2K + 5`` roundings,
+    ``sqrt(B_ii B_jj)`` ``n + 3K + 10 + 2 (K + 4) sqrt(K - 1)`` and the mixed
+    pair ``n + 1``.  As a 2x2 form in the vectors ``(sqrt S_ii, sqrt B_ii)``,
+    of length ``sqrt C_ii``, the total is at most the larger diagonal plus
+    the off-diagonal (Gershgorin), ``N``.  Dropped: products of roundings,
+    and the tails' roundings, ``u^2`` times a mean, below ``u`` times a
+    spread while each mean is within ``1/u`` spreads of zero (``1e12`` here).
+    """
+    count = len(sizes)
+    steps = 2.0 * (count + 4) * math.sqrt(count - 1)
+    return 2 * max(sizes) + 3 * count + 11 + math.ceil(steps)
+
+
 def test_the_metrics_gram_does_not_anchor_on_a_far_first_chunk():
     """The streamed centred Gram merges chunk co-moments, so no one chunk sets its anchor.
 
     Codex's case: the first chunk holds 100 rows of negligible weight at
     ``1e8 + z``, the rest 900 rows of unit weight at ``z``.  About the first
     chunk's mean the Gram subtracted ``sum w (x - a)^2`` and ``(sum w (x -
-    a))^2 / sum w``, both near ``9e18``, and kept nothing of the 900.  The
-    pairwise merge (Chan, Golub & LeVeque 1979) errs by at most ``4
-    gamma_{n+4} C + 6 u R sqrt(C W)``, ``R`` the largest row about that
-    chunk's mean.  Mutation: the one-anchor formula.
+    a))^2 / sum w``, both near ``9e18``, and kept nothing of the 900.  Each
+    chunk is now centred about its own mean and the co-moments merged
+    pairwise (Chan, Golub & LeVeque 1979), so the result is within the
+    merge's bound, ``gamma_N C`` with ``N = _merge_rounding_count`` of ten
+    chunks of 100 rows (325), against the exact co-moment; the error is
+    3.3e-3 of it.  Mutation: the one-anchor formula.
     """
     from superglm.inference._metrics_design import _anchored_weighted_moments
 
@@ -1411,15 +1553,11 @@ def test_the_metrics_gram_does_not_anchor_on_a_far_first_chunk():
             yield start, start + 100, x[start : start + 100, None]
 
     _, _, centred = _anchored_weighted_moments(chunks, W, 1)
-    total = math.fsum(W)
-    mean = math.fsum(W * x) / total
-    reference = math.fsum(W * (x - mean) ** 2)
-    u = np.finfo(np.float64).eps / 2.0
-    k = len(x) + 4
-    gamma = k * u / (1.0 - k * u)
-    spread = float(np.max(np.abs(x - np.mean(x[:100]))))
-    bound = 4.0 * gamma * reference + 6.0 * u * spread * math.sqrt(reference * total)
-    assert abs(float(centred[0, 0]) - reference) <= bound
+    total = _exact_product_sum((value,) for value in W)
+    first = _exact_product_sum(zip(W, x, strict=True))
+    exact = _exact_product_sum(zip(W, x, x, strict=True)) - first * first / total
+    bound = _gamma(_merge_rounding_count([100] * 10)) * float(exact)
+    assert abs(Fraction(float(centred[0, 0])) - exact) <= Fraction(bound)
 
 
 @pytest.mark.parametrize(
@@ -1496,22 +1634,21 @@ def test_the_metrics_gram_merge_meets_its_bound_against_exact_arithmetic():
     every chunk to one offset ``+-10^e_c`` with a spread of 1e-12 to 1e-4 of
     it, the chunks' means a few spreads apart.  The exponents are drawn so a
     row's ``w x^2`` lies within 1e+-290 (every exact entry then
-    representable, the products normal).  Each term
-    of the merge is a chunk co-moment or a merge term formed to a few
-    roundings of its own size, so every entry lies within ``16
-    gamma_{n + 2K} sqrt(C_ii C_jj)`` of the exact co-moment, ``K`` the chunks
-    (Cauchy-Schwarz bounds an off-diagonal term by its diagonal pair), and is
-    never inf, NaN, or a zero diagonal.  On these 600 draws the largest error
-    is 0.52 of ``gamma_{n + 2K} sqrt(C_ii C_jj)``; master's row-0 anchor
-    fails 271 (483 entries NaN or infinite, 108 zero diagonals) and
-    d7971d77's merge fails 204.  Mutations: the raw share; the running mean
-    stepped from the lighter side; the means' tails dropped from ``d``; ``m``
-    applied after ``d d'``.
+    representable, the products normal).  Every entry lies within ``gamma_N
+    sqrt(C_ii C_jj)`` of the exact co-moment, ``N`` the merge's rounding
+    count (``_merge_rounding_count``: ``2 n + 3K + 11 + 2 (K + 4) sqrt(K -
+    1)``, ``n`` the largest chunk, ``K`` the chunks), and is never inf, NaN,
+    or a zero diagonal.  On these 600 draws the largest error is 0.11 of
+    that bound.  Against the looser ``16 gamma_{n + 2K}``, which ``gamma_N``
+    never exceeds here, master's row-0 anchor failed 271 (483 entries NaN or
+    infinite, 108 zero diagonals) and d7971d77's merge 204.  Mutations: the
+    raw share; the running mean stepped from the lighter side; the means'
+    tails dropped from ``d``; ``m`` applied after ``d d'``; the running
+    mean's tail dropped.
     """
     from superglm.inference._metrics_design import _anchored_weighted_moments
 
     rng = np.random.default_rng(4300)
-    u = np.finfo(np.float64).eps / 2.0
     for draw in range(600):
         blocks, weights = [], []
         # every third draw translates all its chunks to one far offset: a
@@ -1553,13 +1690,12 @@ def test_the_metrics_gram_merge_meets_its_bound_against_exact_arithmetic():
             for i in range(2)
         ]
         diagonal = [float(exact[i][i]) for i in range(2)]
-        k = len(x) + 2 * len(blocks)
-        gamma = k * u / (1.0 - k * u)
+        gamma = _gamma(_merge_rounding_count([len(block) for block in blocks]))
         for i in range(2):
             assert centred[i, i] > 0.0
             for j in range(2):
                 assert np.isfinite(centred[i, j])
-                bound = 16.0 * gamma * np.sqrt(diagonal[i]) * np.sqrt(diagonal[j])
+                bound = gamma * np.sqrt(diagonal[i]) * np.sqrt(diagonal[j])
                 assert abs(Fraction(float(centred[i, j])) - exact[i][j]) <= Fraction(bound)
 
 
