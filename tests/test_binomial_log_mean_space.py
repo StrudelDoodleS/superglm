@@ -1014,7 +1014,7 @@ def test_a_bridge_between_two_crossed_cycles_is_the_only_joint_cell_set() -> Non
     singular = np.linalg.svd(incidence, compute_uv=False)
     rank = int(np.sum(singular > max(incidence.shape) * np.finfo(float).eps * singular[0]))
     tolerance = 4 * max(incidence.shape) * np.finfo(float).eps * singular[0] / singular[rank - 1]
-    moved = dm.matvec(sets.cell_directions[0])
+    moved = dm.matvec(sets.cell_directions[[0]].toarray().ravel())
     np.testing.assert_allclose(moved - moved[~kept][0], kept.astype(float), rtol=0, atol=tolerance)
 
 
@@ -1839,6 +1839,201 @@ def test_reml_with_a_separated_level_converges_as_on_master(design: str, direct_
         model.fit_reml(frame, y)
     assert model.result.converged
     assert model.diagnostics()["c"]["weakly_identified"] == [1]  # level r
+
+
+def _separated_region_districts() -> tuple[pd.DataFrame, np.ndarray]:
+    """25 regions of 12 districts of 8 rows; the base region and two more without events."""
+    rng = np.random.default_rng(5)
+    regions, districts, per = 25, 12, 8
+    probability = rng.uniform(0.05, 0.3, regions)
+    probability[:3] = 0.0
+    region = np.repeat(np.arange(regions), districts * per)
+    district = np.repeat(np.arange(regions * districts), per)
+    shift = rng.normal(0.0, 0.3, regions * districts)
+    p = np.minimum(probability[region] * np.exp(shift[district]), 0.9)
+    y = (rng.uniform(size=len(p)) < p).astype(np.float64)
+    frame = pd.DataFrame({"c": [f"r{k:02d}" for k in region], "g": [f"d{k:04d}" for k in district]})
+    return frame, y
+
+
+def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A constant offset with an intercept does not move lambda-hat, with a level without events.
+
+    The base region and two others have no events, so their directions'
+    supremum is at ``eta -> -infinity``.  1ffcacec's true-likelihood REML read
+    those directions' vanishing curvature into ``log|H|`` at wherever PIRLS
+    stopped its drift.  V(lambda) then moved with the offset by far more than
+    its stop rule, the search never converged, and lambda-hat landed between
+    2.2 and 5.1 for offsets 0, +1.5, -3 and a lowered start.  The Laplace term
+    now leaves those directions out (``reml.identified.separated_directions``).
+    And a Newton step on a truncated structured factor now keeps the
+    iterate's component along a truncated direction: solving for the iterate
+    reset a separated region's coefficient each step, the full step was
+    refused and the inner fits stagnated (without it three of the four
+    searches end unconverged).
+
+    Each fit converges, the four objectives agree within twice the REML stop
+    rule ``reml_tol (1 + |V|)`` (as the two backends' do), and the four
+    lambda-hats within what that resolution allows on V's curvature
+    ``V''`` in ``log lambda``, measured beside the optimum:
+    ``|rho_a - rho_b| <= 2 sqrt(2 epsilon / V'')`` with ``epsilon`` twice the
+    stop rule.  The criterion at a fixed lambda agrees across offsets within
+    the same resolution.  The fourth offset lowers the start into the mean
+    space, checked.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+
+    lowered: list[bool] = []
+    interior_start = irls_direct.interior_start_intercept
+
+    def recording(family, link, eta, weights, intercept, **kwargs):
+        start = interior_start(family, link, eta, weights, intercept, **kwargs)
+        lowered.append(start != intercept)
+        return start
+
+    monkeypatch.setattr(irls_direct, "interior_start_intercept", recording)
+    frame, y = _separated_region_districts()
+
+    def fit(offset_value: float, policy=None) -> SuperGLM:
+        model = SuperGLM(
+            family="binomial",
+            link="log",
+            selection_penalty=0.0,
+            features={
+                "c": Categorical(base="first"),
+                "g": RandomEffect() if policy is None else RandomEffect(lambda_policy=policy),
+            },
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(frame, y, offset=np.full(len(y), offset_value))
+        return model
+
+    lowering = -float(np.log(np.mean(y))) + 0.5
+    fits = {}
+    for offset_value in (0.0, 1.5, -3.0, lowering):
+        lowered.clear()
+        fits[offset_value] = fit(offset_value)
+        assert any(lowered) is (offset_value == lowering), offset_value
+    for model in fits.values():
+        assert model._reml_result.converged
+        assert model.result.converged
+    objectives = np.array([float(model._reml_result.objective) for model in fits.values()])
+    tolerance = float(fits[0.0]._reml_profile["reml_tol_resolved"])
+    epsilon = 2.0 * tolerance * (1.0 + float(np.max(np.abs(objectives))))
+    assert float(np.ptp(objectives)) <= epsilon
+    rho = np.log([float(next(iter(model._reml_lambdas.values()))) for model in fits.values()])
+    beside = float(np.exp(rho[0] + 0.5))
+    away = {
+        offset_value: fit(offset_value, LambdaPolicy.fixed(beside)) for offset_value in (0.0, -3.0)
+    }
+    values = [float(model._reml_result.objective) for model in away.values()]
+    assert abs(values[0] - values[1]) <= epsilon
+    curvature = 2.0 * (values[0] - float(objectives[0])) / 0.5**2
+    assert curvature > 0.0
+    assert float(np.ptp(rho)) <= 2.0 * math.sqrt(2.0 * epsilon / curvature)
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+def test_a_penalized_set_whose_distance_bar_underflows_is_judged_by_its_score(
+    direct_solve: str,
+) -> None:
+    """``S_override = 1e-16 I`` on a Categorical with a reference level, prior weights 1e300, a lowered start.
+
+    In the weights' units the reference direction's curvature ``1' S_B 1``
+    is ``2e-16`` times ``2^-998``, about 7e-317, and ``bar`` times it rounds to
+    0.  1ffcacec divided by that product and raised ZeroDivisionError.  The
+    set is now judged by its relative score alone, never passed on the
+    distance.  The fit converges with each level within ``4 bar`` of its own
+    maximum ``log(ybar_level)``: a level set's relative score within the bar
+    puts its eta within ``2 bar (1 - mu)``, doubled for the curvature's change.
+    """
+    rng = np.random.default_rng(4)
+    n = 300
+    level = np.repeat(["a", "b", "c"], n // 3)
+    y = (rng.uniform(size=n) < np.repeat([0.15, 0.25, 0.35], n // 3)).astype(np.float64)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"c": Categorical(base="first")},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(pd.DataFrame({"c": level}), y)
+        result, _ = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=np.full(n, 1e300),
+            family=Binomial(),
+            link=LogLink(),
+            groups=model._groups,
+            lambda2=0.0,
+            S_override=1e-16 * np.eye(model._dm.p),
+            offset=np.full(n, 2.0),
+            direct_solve=direct_solve,
+            weight_semantics="frequency",
+        )
+    assert result.converged
+    eta = model._dm.matvec(result.beta) + result.intercept + 2.0
+    for name in ("a", "b", "c"):
+        rows = level == name
+        error = np.abs(eta[rows] - math.log(float(np.mean(y[rows]))))
+        assert float(np.max(error)) <= 4.0 * MODE_CERTIFICATION_BAR, name
+
+
+def test_a_wide_design_keeps_its_joint_cell_sets() -> None:
+    """A light base cell of a 2 x 2 interaction beside a 1.5-million-column block is still judged.
+
+    1ffcacec held the kept cells' directions dense, ``(cells, p)``, and dropped
+    every cell set past 2^22 entries: three cells beside 1.5 million columns
+    left the base cell uncertified, while every level and reference set was
+    judged.  The directions are held sparse now.  The scores put every level
+    and reference set within the bar, and the light base cell (a0, b0) at a
+    third of its own rows' size from stationary: only its own set refuses.
+    """
+    from scipy import sparse
+
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix, SparseGroupMatrix
+    from superglm.solvers.mode_score import row_set_residual, row_sets
+
+    width = 1_500_000
+    first = np.array(
+        [-1, -1, -1, -1, 0, 0, 0, 0]
+    )  # a1's column; cells (a0,b0) (a0,b1) (a1,b0) (a1,b1)
+    second = np.array([-1, -1, 0, 0, -1, -1, 0, 0])  # b1's column
+    both = np.array([-1, -1, -1, -1, -1, -1, 0, 0])  # a1:b1's column
+    blocks = [
+        CategoricalGroupMatrix(first, 1),
+        CategoricalGroupMatrix(second, 1),
+        CategoricalGroupMatrix(both, 1),
+        SparseGroupMatrix(sparse.csr_matrix((8, width))),
+    ]
+    dm = DesignMatrix(blocks, n=8, p=3 + width)
+    sets = row_sets(dm)
+    assert sets.cell_of_row is not None
+    base = int(sets.cell_of_row[0])
+    assert base >= 0
+    moved = dm.matvec(sets.cell_directions[[base]].toarray().ravel())
+    np.testing.assert_array_equal(moved - moved[2], [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    score = np.array([-1e-8, 2e-8, -5.0, 5.0 - 1e-8, -5.0, 5.0 - 1e-8, -5.0, 5.0 + 1e-8])
+    ratio = row_set_residual(
+        sets=sets,
+        row_score=score,
+        response=np.tile([0.0, 1.0], 4),
+        fisher_weights=np.ones(8),
+        positive_prior=np.ones(8, dtype=bool),
+        eta=np.full(8, math.log(0.5)),
+        column_penalty=np.zeros(dm.p),
+        column_penalty_size=np.zeros(dm.p),
+        column_curvature=np.zeros(dm.p),
+        set_curvature=np.zeros(len(sets.blocks) + sets.cell_directions.shape[0]),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio > 1.0
 
 
 def test_reml_keeps_a_zero_weight_row_at_the_clip() -> None:

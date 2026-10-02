@@ -92,10 +92,12 @@ import math
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
+from scipy import sparse
 
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -937,8 +939,6 @@ _ROW_SET_CELL_LIMIT = 4096
 # The cells elimination leaves (the incidence's core) are decided by one SVD,
 # formed only while its cost ``m k min(m, k)`` stays within this many flops.
 _ROW_SET_CORE_FLOPS = 2**31
-# Kept cells' directions are held dense, ``(cells, p)``, up to this many entries.
-_ROW_SET_DIRECTION_ENTRIES = 2**22
 # The design's row sets, in its ``_structured_layout_cache`` (``row_sets``).
 _ROW_SETS_KEY = "row_sets"
 
@@ -950,14 +950,15 @@ class RowSets:
     ``blocks`` holds ``(first column, matrix)`` for each
     ``CategoricalGroupMatrix``.  ``cell_of_row`` gives each row's kept joint
     cell (``-1`` for a row in none), or is ``None`` when no cell is kept.
-    ``cell_directions`` is ``(cells, p)``: the slope part of a coefficient
-    direction that moves the kept cell's rows and no other row (its
-    intercept part carries no penalty).
+    ``cell_directions`` is ``(cells, p)``, sparse (CSR): the slope part of a
+    coefficient direction that moves the kept cell's rows and no other row
+    (its intercept part carries no penalty).  Held sparse, it costs its
+    nonzeros, so no width of the design drops a cell set.
     """
 
     blocks: tuple[tuple[int, CategoricalGroupMatrix], ...]
     cell_of_row: NDArray | None
-    cell_directions: NDArray
+    cell_directions: Any
 
     def directions(self, p: int) -> list[NDArray]:
         """The slope parts ``(p,)`` of each block's reference direction, then of each kept cell's."""
@@ -966,7 +967,8 @@ class RowSets:
             reference = np.zeros(p)
             reference[start : start + matrix.n_levels] = -1.0
             out.append(reference)
-        out.extend(np.array(row, dtype=np.float64) for row in self.cell_directions)
+        held = self.cell_directions
+        out.extend(held[[row]].toarray().ravel() for row in range(held.shape[0]))
         return out
 
 
@@ -1038,7 +1040,7 @@ def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: in
     less each eliminated cell's direction times the amount ``d`` moves it.
     The core is formed only while ``m k min(m, k) <= _ROW_SET_CORE_FLOPS``.
     """
-    none = RowSets(blocks, None, np.zeros((0, p)))
+    none = RowSets(blocks, None, sparse.csr_matrix((0, p)))
     if len(blocks) < 2:
         return none
     stacked = np.column_stack([matrix.codes for _, matrix in blocks])
@@ -1085,13 +1087,16 @@ def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: in
     if core.size and np.any(~duplicate[core]):
         _decide_core(core, columns_of, duplicate, live, direction)
     kept = sorted(cell for cell in direction if not duplicate[cell])
-    if not kept or len(kept) * p > _ROW_SET_DIRECTION_ENTRIES:
+    if not kept:
         return none
-    held = np.zeros((len(kept), p))
+    rows, columns, values = [], [], []
     for row, cell in enumerate(kept):
         for column, value in direction[cell].items():
-            if column:
-                held[row, column - 1] = value
+            if column and value:
+                rows.append(row)
+                columns.append(column - 1)
+                values.append(value)
+    held = sparse.csr_matrix((values, (rows, columns)), shape=(len(kept), p))
     index = np.full(count, -1, dtype=np.intp)
     index[kept] = np.arange(len(kept))
     return RowSets(blocks, index[cell_of_row], held)
@@ -1282,7 +1287,9 @@ def row_set_residual(
             + _gamma(p + 2) * direction_size
         )
         ratio = math.inf if bar * scale <= underflow else residual / max(bar * scale, floor)
-        if penalized and math.isfinite(quadratic):
+        # a curvature whose bar underflows to 0 bounds nothing: the set is
+        # judged by its relative score alone, never passed on the distance
+        if penalized and math.isfinite(quadratic) and bar * quadratic > 0.0:
             ratio = min(ratio, (residual + floor + underflow) / (bar * quadratic))
         worst = max(worst, ratio)
 
@@ -1315,8 +1322,8 @@ def row_set_residual(
         for values in (score, absolute, represented, carried, rising, falling)
     ]
     with np.errstate(over="ignore", invalid="ignore"):
-        cell_penalty = held @ penalty
-        cell_size = np.abs(held) @ size
+        cell_penalty = np.asarray(held @ penalty).ravel()
+        cell_size = np.asarray(abs(held) @ size).ravel()
     for cell in range(kept):
         judge(
             *_set_totals(sums, cell),

@@ -2439,12 +2439,21 @@ class FactorSmoothLeafFactor:
         return np.einsum("kij,kjm->kim", self._D_inv_cache, rhs, optimize=True)
 
     # -- solves ---------------------------------------------------------------
-    def solve(self, rhs: NDArray, *, centred: bool = False) -> NDArray:
+    def solve(
+        self,
+        rhs: NDArray,
+        *,
+        centred: bool = False,
+        border_centred: NDArray | None = None,
+    ) -> NDArray:
         """``H^-1 rhs`` in raw coordinates for ``(p,)`` or ``(p, m)``, through the centred factor.
 
         ``R' r`` in (the border rows lose ``c`` times the intercept row), the
         centred solve, then ``R x`` out (only the intercept entry moves; with
         ``centred`` it stays the centred ``alpha``), as ``NestedSchurFactor``.
+        ``border_centred``, when given, is the border part of ``rhs`` already
+        in centred coordinates, in place of that subtraction, as
+        ``SumToZeroTreeFactor.solve``'s.
         """
         values = np.asarray(rhs, dtype=np.float64)
         vector_rhs = values.ndim == 1
@@ -2457,6 +2466,10 @@ class FactorSmoothLeafFactor:
             )
         rhs_small = values[self.small_indices]
         rhs_small = rhs_small - self._c_full[:, None] * rhs_small[:1]
+        if border_centred is not None:
+            rhs_small[1:] = np.asarray(border_centred, dtype=np.float64).reshape(
+                len(self.small_indices) - 1, -1
+            )
         rhs_structured = values[self.structured_indices]
         D_inv_rhs = self._local_solve(rhs_structured)
         # C' D^-1 r_t = F' r_t

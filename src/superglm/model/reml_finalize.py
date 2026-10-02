@@ -428,7 +428,7 @@ def _disclose_weak_identification(
                 penalties=reml_penalties,
             )
         )
-    flagged.update(int(index) for index in identified.excluded)
+    flagged.update(int(index) for index in identified.weak)
     # A factor that tells the columns a weak direction names from those it
     # moves (an sz balance tree) discloses the named ones; the certificate
     # left every moved column ungated, so its own flags count beyond those.
@@ -445,10 +445,19 @@ def _disclose_weak_identification(
     labels = coefficient_labels(model._groups, indices)
     profile["reml_weakly_identified"] = indices
     profile["reml_weakly_identified_labels"] = labels
-    profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.excluded)
+    profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.weak)
     excluded_labels = coefficient_labels(
-        model._groups, tuple(int(index) for index in identified.excluded)
+        model._groups, tuple(int(index) for index in identified.weak)
     )
+    # the coordinates standing for separated unpenalized directions, which the
+    # Laplace term also leaves out (``reml.identified.separated_directions``)
+    separated = tuple(
+        int(index)
+        for index in identified.excluded
+        if int(index) not in {int(weak) for weak in identified.weak}
+    )
+    profile["reml_laplace_separated"] = separated
+    profile["reml_laplace_separated_labels"] = coefficient_labels(model._groups, separated)
     profile["reml_laplace_excluded_labels"] = excluded_labels
     if labels:
         left_out = (
@@ -554,7 +563,14 @@ def finalize_reml_fit(
             model._groups,
         )
         if not qp_passthrough:
-            identified = IdentifiedLaplace.for_design(model._dm, sample_weight, reml_penalties)
+            identified = IdentifiedLaplace.for_design(
+                model._dm,
+                sample_weight,
+                reml_penalties,
+                y=y,
+                distribution=model._distribution,
+                link=model._link,
+            )
         observed_terminal = terminal_curvature == "observed" and not qp_passthrough
         # One-engine design §3.8: the terminal refit of every route auto uses,
         # exact and discrete, gram and structured, stops on the certificate's
@@ -609,7 +625,7 @@ def finalize_reml_fit(
             trace_run=trace_run,
             trace_purpose="reml_final",
             weight_semantics=model_weight_semantics(model),
-            _laplace_excluded=tuple(int(index) for index in identified.excluded),
+            _laplace_excluded=tuple(int(index) for index in identified.weak),
             _mode_bar=terminal_bar,
         )
         if len(final_output) != 3:  # pragma: no cover - return_xtwx contract
@@ -811,7 +827,7 @@ def finalize_reml_fit(
                 geometry=terminal_geometry,
                 lambdas=lambdas if structured_linear_state is not None else None,
                 reml_penalties=reml_penalties if structured_linear_state is not None else None,
-                excluded=identified.excluded,
+                excluded=identified.weak,
                 bar=terminal_bar,
             )
         except ObservedGeometryInfeasibleError as exc:

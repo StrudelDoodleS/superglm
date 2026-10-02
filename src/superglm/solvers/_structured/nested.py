@@ -1970,13 +1970,33 @@ class NestedSchurFactor:
         return self._diagonal_cache
 
     # -- protocol: solves, determinant, selected inverse ------------------
-    def solve(self, rhs: NDArray, *, centred: bool = False) -> NDArray:
+    def solve(
+        self,
+        rhs: NDArray,
+        *,
+        centred: bool = False,
+        border_centred: NDArray | None = None,
+    ) -> NDArray:
         """Return ``H^-1 rhs`` for ``(p,)`` or ``(p, m)`` (§3.6); see ``_solve``.
+
+        ``border_centred``, when given, is the border slopes' part of ``rhs``
+        already in the factor's centred coordinates (as
+        ``SumToZeroTreeFactor.solve``'s; ``solve_data`` takes the intercept's
+        row with it, which here is ``rhs``'s own).
 
         With ``centred`` the intercept entry stays the centred ``alpha``, as in
         ``solve_data``.
         """
-        return self._solve(rhs, lambda border: self._Q_inverse @ border, centred=centred)
+        if border_centred is not None:
+            head = np.asarray(rhs, dtype=np.float64)[:1].reshape(1, -1)
+            tail = np.asarray(border_centred, dtype=np.float64).reshape(len(self._center) - 1, -1)
+            border_centred = np.vstack((head, tail))
+        return self._solve(
+            rhs,
+            lambda border: self._Q_inverse @ border,
+            border_centred=border_centred,
+            centred=centred,
+        )
 
     def _border_apply_data(self, values: NDArray) -> NDArray:
         """``Q^+ values`` for data-derived border vectors ``(q,)`` or ``(q, r)``, factored.

@@ -2847,8 +2847,8 @@ def _fit_irls_direct_once(
                     intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
                 else:
                     intercept = float(beta_aug[0])
-                if augmented_factor.rank_truncated and isinstance(
-                    augmented_factor, SumToZeroTreeFactor
+                if augmented_factor.rank_truncated and (
+                    isinstance(augmented_factor, SumToZeroTreeFactor) or newton_score is not None
                 ):
                     # A truncated factor is a generalized inverse, and its
                     # normal-equations solution ``H^+ [1 X]'Wz`` is the minimum-norm
