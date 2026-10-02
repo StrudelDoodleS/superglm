@@ -20,8 +20,8 @@ from superglm.diagnostics.exact_banding import (
     _representable_bounds,
     exact_bands,
 )
-from superglm.export._ppform import extract_ppform
 from superglm.export.rating_tables import build_rating_table_payload
+from superglm.features import _spline_runtime
 from superglm.model import base
 
 _UNIT_ROUNDOFF = 2.0**-53
@@ -618,7 +618,97 @@ def _row_of(table, value):
     raise AssertionError(f"no row holds {value}")
 
 
-def test_exact_tables_follow_the_limit(banded_model):
+def _gamma(k):
+    """gamma_k = k u / (1 - k u), exactly (Higham 2002, Lemma 3.1)."""
+    return k * _U / (1 - k * _U)
+
+
+@pytest.fixture
+def one_basis_per_value(monkeypatch):
+    """Evaluate each term's basis once per value and give every caller that row.
+
+    A basis row is itself a BLAS product (``B R^-1`` for a spline, a triangular
+    solve for a polynomial), and a BLAS need not return the same bits for equal
+    operands in another batch or at another address.  Served one evaluation,
+    two paths differ only by the products each forms itself, which the bounds
+    below count.  A reproducible BLAS returns the same values either way.
+    """
+    rows = {}
+
+    def shared(transform):
+        def evaluate(spec, x):
+            x = np.asarray(x, dtype=np.float64).ravel()
+            if x.size == 0:
+                return transform(spec, x)
+            new = np.unique([v for v in x.tolist() if (id(spec), v) not in rows])
+            if new.size:
+                fresh = np.asarray(transform(spec, new), dtype=np.float64)
+                rows.update(
+                    ((id(spec), v), row) for v, row in zip(new.tolist(), fresh, strict=True)
+                )
+            return np.array([rows[id(spec), v] for v in x.tolist()])
+
+        return evaluate
+
+    monkeypatch.setattr(_spline_runtime, "transform", shared(_spline_runtime.transform))
+    monkeypatch.setattr(Polynomial, "transform", shared(Polynomial.transform))
+
+
+def _term_basis(model, name, x):
+    """The term's basis at ``x`` and the covariance block of its coefficients."""
+    cov, active = model._coef_covariance
+    indices = np.concatenate([np.arange(g.start, g.end) for g in active if g.feature_name == name])
+    return model._specs[name].transform(x), cov[np.ix_(indices, indices)]
+
+
+def _curve_and_error(basis, beta):
+    """Per row of ``M``, the exact ``M beta`` and the bound on a computed one's error.
+
+    A computed inner product of length p is within gamma_p |M| |beta| of the
+    exact one in any order of summation (Higham 2002, section 3.1), and each of
+    its p products can add 2**-1075 more by underflowing (Demmel 1984), which
+    p 2**-1074 covers after the additions.
+    """
+    exact = [[Fraction(m) * Fraction(b) for m, b in zip(row, beta, strict=True)] for row in basis]
+    p = len(beta)
+    return [sum(t) for t in exact], [
+        _gamma(p) * sum(map(abs, t)) + p * Fraction(2) ** -1074 for t in exact
+    ]
+
+
+def _variance_gap(basis, cov):
+    """Per row of ``M``, a bound on ``|s**2 - r**2|`` for two computed standard errors.
+
+    Each is ``sqrt(max(v, 0))`` with ``v`` the row sum of ``fl(M @ C) * M``: every
+    term ``M_ij C_jk M_ik`` meets at most p roundings in its inner product, one
+    in the product and p - 1 in the row sum, so ``v`` is within gamma_2p A of
+    ``diag(M C M')``, with ``A = diag(|M| |C| |M|')`` (Higham 2002, section 3.1
+    and Lemma 3.1), plus ``eta = p (sum |M_i| + 1) 2**-1074`` from underflow
+    (Demmel 1984).  The clip at zero moves neither closer, and the root and an
+    exact square give ``v (1 + d)**2``, ``|d| <= u``.  So the squares differ by
+    at most ``2 (gamma_2p A + eta) + 2 gamma_2 ((1 + gamma_2p) A + eta)``, which
+    is within ``2 gamma_(2p + 2) A + 2 (1 + gamma_2) eta``.
+    """
+    c = [[abs(Fraction(x)) for x in row] for row in cov]
+    p = len(c)
+    gaps = []
+    for row in basis:
+        m = [abs(Fraction(x)) for x in row]
+        a = sum(
+            x * sum(y * z for y, z in zip(r, m, strict=True)) for x, r in zip(m, c, strict=True)
+        )
+        eta = p * (sum(m) + 1) * Fraction(2) ** -1074
+        gaps.append(2 * _gamma(2 * p + 2) * a + 2 * (1 + _gamma(2)) * eta)
+    return gaps
+
+
+def _age_term(model):
+    """The age term's coefficients and the spec that scores it, as the export reads them."""
+    term = next(t for t in base._prediction_plan(model)["features"] if t["name"] == "age")
+    return term["spec"], model.result.beta[np.asarray(term["beta_idx"], dtype=np.intp)]
+
+
+def test_exact_tables_follow_the_limit(banded_model, one_basis_per_value):
     model, df, y, w = banded_model
     result = model.discretization_impact(
         df, y, sample_weight=w, n_bins=150, bin_strategy="exact", features=["age"]
@@ -629,31 +719,74 @@ def test_exact_tables_follow_the_limit(banded_model):
     assert set(table["bin_from"]) <= set(np.unique(df["age"]))
     assert diag["tolerance_factor"] == 1.0
     values = np.unique(df["age"].to_numpy())
-    curve = extract_ppform(model, "age").evaluate(values)
+    # The curve the banding measures against, the model's own score of the term,
+    # here in exact arithmetic on the basis the banding used.
+    spec, beta = _age_term(model)
+    curve, curve_error = _curve_and_error(spec.transform(values), beta)
     se = _term_se_at(model, "age", values)
     tol = np.minimum(se, np.log1p(0.10))
-    for value, s_v, tol_v in zip(values, curve, tol, strict=True):
+    gap = _variance_gap(*_term_basis(model, "age", values))
+    for value, s_v, err_v, se_v, tol_v, gap_v in zip(
+        values, curve, curve_error, se, tol, gap, strict=True
+    ):
         row = _row_of(table, value)
-        # ppform reproduces the fitted curve to its certified 1e-11.
-        assert abs(s_v - row["log_relativity"]) <= tol_v + 1e-9
+        # The banding holds its own curve within its own tolerance exactly.  Its
+        # curve is within err_v of the exact one, and its SE, the same quadratic
+        # form evaluated again, within gap_v / se_v of se_v, as
+        # |a - b| = |a**2 - b**2| / (a + b); the cap at log1p(0.10) only narrows that.
+        slack = err_v + gap_v / Fraction(se_v)
+        excess = abs(s_v - Fraction(row["log_relativity"])) - Fraction(tol_v)
+        assert excess <= slack, (
+            f"{value}: {float(excess):.3g} past its tolerance, {float(slack):.3g} allowed"
+        )
 
 
-def test_band_factor_is_the_weighted_mean_of_the_curve(banded_model):
+def test_band_factor_is_the_weighted_mean_of_the_curve(banded_model, one_basis_per_value):
     model, df, y, w = banded_model
     result = model.discretization_impact(
         df, y, sample_weight=w, n_bins=150, bin_strategy="exact", features=["age"]
     )
     table = result.tables["age"]
-    age = df["age"].to_numpy()
-    curve = extract_ppform(model, "age").evaluate(age)
+    values, inverse, rows = np.unique(df["age"].to_numpy(), return_inverse=True, return_counts=True)
+    spec, beta = _age_term(model)
+    curve, curve_error = _curve_and_error(spec.transform(values), beta)
     # Bands average with the geometry mass the other strategies use: replication
     # mass under frequency weights, one unit per physical row under prior weights.
     _, geometry = _validated_discretization_weights(model, w, len(df))
+    mass = [sum(map(Fraction, geometry[inverse == v])) for v in range(len(values))]
     last = len(table) - 1
     for k, row in table.iterrows():
-        inside = (age >= row["bin_from"]) & ((age < row["bin_to"]) | (k == last))
-        expected = np.average(curve[inside], weights=geometry[inside])
-        assert abs(row["log_relativity"] - expected) <= 1e-9
+        band = np.flatnonzero(
+            (values >= row["bin_from"]) & ((values < row["bin_to"]) | (k == last))
+        )
+        expected = sum(mass[v] * curve[v] for v in band) / sum(mass[v] for v in band)
+        # The factor is the band's mean in the banding's own weights,
+        # fl(mass / largest mass), of the banding's own curve, which is within
+        # err of the exact one.  Against this exact mean it errs by at most:
+        # - err, from the curve;
+        # - gamma_2n spread, n the most rows at one value: each mass sums n rows
+        #   and is divided once, a relative gamma_n, and weights off by
+        #   e_v <= gamma_n move a mean by sum m_v e_v (s_v - mean) / sum m_v (1 + e_v),
+        #   at most gamma_n / (1 - gamma_n) <= gamma_2n times the spread;
+        # - gamma_(2k + 2) spread + gamma_2 level, for the banding's mean of k
+        #   values: its sums and division, in the frame of its first value, err by
+        #   gamma_(2k + 1) spread, adding that value back by u (level + that), and
+        #   moving the factor inside the tolerances, which hold the exact mean,
+        #   by less than an ulp, 2 u |factor|;
+        # - 2**-1072 times the masses' ratio, for underflow: exact_bands'
+        #   _underflow_margin at weights no lighter than half the least mass
+        #   ratio, and a subnormal ulp.
+        # spread and level carry the curve's error, and gamma_K with
+        # K = 2n + 2k + 2 covers all three gamma terms (Higham 2002, Lemma 3.1).
+        err = max(curve_error[v] for v in band)
+        spread = max(curve[v] for v in band) - min(curve[v] for v in band) + 2 * err
+        level = max(abs(curve[v]) for v in band) + err
+        K = 2 * int(rows[band].max()) + 2 * len(band) + 2
+        bound = err + _gamma(K) * (spread + level) + Fraction(2) ** -1072 * max(mass) / min(mass)
+        miss = abs(Fraction(row["log_relativity"]) - expected)
+        assert miss <= bound, (
+            f"band {k}: {float(miss):.3g} from its mean, {float(bound):.3g} allowed"
+        )
 
 
 def test_every_value_is_its_own_band_when_the_limit_is_tiny(banded_model):
@@ -702,16 +835,23 @@ def test_zero_weight_rows_do_not_move_edges(banded_model):
     assert table["n_obs"].sum() == len(df)
 
 
-def test_term_se_at_matches_the_library_grid(banded_model):
+def test_term_se_at_matches_the_library_grid(banded_model, one_basis_per_value):
     model, _, _, _ = banded_model
     cov, active = model._coef_covariance
     for name in ("age", "density"):
         spec = model._specs[name]
         grid = np.linspace(spec._lo, spec._hi, 50)
         expected = model._feature_se_from_cov(name, cov, active, n_points=50)
-        # Both evaluate sqrt(diag(M Cov M')) with the same operations on the same
-        # grid, so they agree bit for bit; a tolerance would hide a change to either.
-        np.testing.assert_array_equal(_term_se_at(model, name, grid), expected)
+        actual = _term_se_at(model, name, grid)
+        # Both evaluate sqrt(diag(M Cov M')) as the row sums of (M @ Cov) * M on
+        # one basis.  Bit equality would also need the BLAS to repeat M @ Cov
+        # exactly, so they are held to that product's rounding instead.
+        gaps = _variance_gap(*_term_basis(model, name, grid))
+        for x, a, b, gap in zip(grid, actual, expected, gaps, strict=True):
+            apart = abs(Fraction(a) ** 2 - Fraction(b) ** 2)
+            assert apart <= gap, (
+                f"{name} at {x}: variances {float(apart):.3g} apart, {float(gap):.3g} allowed"
+            )
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, np.nan, np.inf, True, "1"])
