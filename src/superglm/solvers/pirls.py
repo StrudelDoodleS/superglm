@@ -337,9 +337,15 @@ class PIRLSResult:
     # evaluates as above, bit for bit.
     centred_sum_compensated: bool = False
     # Positive-weight rows the returned state holds at the boundary of the
-    # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
-    # only with ``termination_reason == "mean_space_boundary"``.
+    # family's mean space (``irls_state.mean_space_boundary_rows``), or, when
+    # it holds none, the rows the returned state's own judgement found rising
+    # towards it along a direction the factorization truncates
+    # (``mean_space_boundary_unresolved``); nonzero only with
+    # ``termination_reason == "mean_space_boundary"``.
     mean_space_boundary_rows: int = 0
+    # The boundary verdict came from such truncated rows, not from rows the
+    # clip holds (``irls_direct``; ``TruncatedDirection.boundary``).
+    mean_space_boundary_unresolved: bool = False
     # The returned state was certified on the binomial/log true score
     # (``irls_direct``): its stop was that certificate under Newton steps, or
     # a Fisher stop it confirmed while the clip held a row.  The state is the
@@ -349,9 +355,15 @@ class PIRLSResult:
     # ``reml.observed_geometry.build_observed_reml_geometry``).
     mean_space_true_mode: bool = False
     # Rows a direction the factorization truncated moves, each judged on those
-    # rows at the returned state (``mode_score.truncated_direction_ratio``):
-    # at their own maximum (weakly identified), or beyond float64's
-    # resolution (the fit is not converged).
+    # rows (``mode_score.truncated_direction_ratio``): at their own maximum
+    # (weakly identified), beyond float64's resolution, rising towards the
+    # boundary, or along a direction the basis cannot resolve
+    # (``unresolved_basis``, naming the rows it visibly moves, possibly none);
+    # the fit is not converged in all but the first.  The judgement of the
+    # returned state when it was judged (``irls_direct``), the only one that
+    # decides the verdict; otherwise, for a fit that is not converged, the
+    # latest judgement that found any, each record marked ``earlier`` as
+    # history; otherwise empty.
     truncated_directions: tuple = ()
 
     def __setattr__(self, name: str, value: object) -> None:
