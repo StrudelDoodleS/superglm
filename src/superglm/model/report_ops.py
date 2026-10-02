@@ -77,19 +77,30 @@ def diagnostics(model) -> dict[str, Any]:
         ),
     }
     # rows a direction the factorization truncated moves (binomial/log,
-    # ``mode_score.truncated_direction_ratio``): at their own maximum, or not
-    # certifiable at float64 precision (the fit is not converged)
+    # ``mode_score.truncated_direction_ratio``): at their own maximum, not
+    # certifiable at float64 precision, or rising towards the boundary,
+    # probability 1, along it (the fit is not converged in either of those)
     from superglm.reml.identified import coefficient_labels
 
-    for key, at_maximum in (("weakly_identified_rows", True), ("unresolved_rows", False)):
+    records = getattr(res, "truncated_directions", ()) or ()
+    for key, keep in (
+        ("weakly_identified_rows", lambda record: record.at_maximum),
+        ("unresolved_rows", lambda record: not record.at_maximum and not record.boundary),
+        ("boundary_rows", lambda record: record.boundary),
+    ):
         out["_model"][key] = [
             {
                 "rows": list(record.rows),
+                "row_count": record.row_count,
                 "coefficients": list(coefficient_labels(model._groups, record.columns)),
                 "information_ratio": record.information_ratio,
+                # judged at an iterate before the one returned: history
+                "earlier": bool(getattr(record, "earlier", False)),
+                # the basis could not show whether the direction moves rows
+                "unresolved_basis": bool(getattr(record, "unresolved_basis", False)),
             }
-            for record in getattr(res, "truncated_directions", ()) or ()
-            if record.at_maximum is at_maximum
+            for record in records
+            if keep(record)
         ]
     if out["_model"]["weakly_identified"]:
         from superglm.reml.identified import WEAK_IDENTIFICATION_NOTE

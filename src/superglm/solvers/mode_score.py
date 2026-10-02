@@ -106,7 +106,9 @@ from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
+    DiscretizedSSPGroupMatrix,
     FactorSmoothGroupMatrix,
+    SparseSSPGroupMatrix,
 )
 
 _UNIT_ROUNDOFF = 2.0**-53
@@ -1955,49 +1957,113 @@ def row_set_residual(
 class TruncatedDirection:
     """Rows a direction the factorization truncates moves, judged on those rows (``truncated_direction_ratio``).
 
-    ``rows`` are the positive-weight rows the direction moves, ``columns`` the
-    coefficients it leans on most (at most eight, by size), and
-    ``information_ratio`` the Fisher information of the other rows that share
-    those coefficients over that of the moved rows.  ``at_maximum`` says the
-    rows sit at their own maximum along the direction (weakly identified);
-    otherwise the fit cannot be certified in float64.
+    The positive-weight rows the direction moves are held as half-open runs
+    ``row_ranges`` of consecutive rows, ``row_count`` of them in all (``rows``
+    expands them), so a light region of many rows costs a few runs, not an
+    index each.  ``columns`` are the coefficients it leans on most (at most
+    eight, by size), and ``information_ratio`` the Fisher information of the
+    other rows that share those coefficients over that of the moved rows.
+    ``at_maximum`` says the rows sit at their own maximum along the direction
+    (weakly identified).  Otherwise the fit cannot be certified in float64;
+    ``boundary`` then says every row it moves improves along it and some are
+    events, which under the log link rise until one reaches ``eta = 0``: the
+    rows' supremum is on the boundary of the parameter space, a probability of
+    one, not an interior maximum.  ``unresolved_basis`` says the
+    factorization's basis is too inaccurate to show whether the direction moves
+    rows at all: ``rows`` are those it visibly moves, possibly none, and the
+    claim is refused.  ``earlier`` marks a record judged at an iterate before
+    the one the fit returned: history, which never decides the fit's verdict
+    (``irls_direct``).
     """
 
-    rows: tuple[int, ...]
+    row_ranges: tuple[tuple[int, int], ...]
+    row_count: int
     columns: tuple[int, ...]
     information_ratio: float
     at_maximum: bool
+    boundary: bool = False
+    earlier: bool = False
+    unresolved_basis: bool = False
+
+    @property
+    def rows(self) -> tuple[int, ...]:
+        """Every row the direction moves, in order."""
+        return tuple(row for start, stop in self.row_ranges for row in range(start, stop))
+
+    def __setstate__(self, state: dict) -> None:
+        # v0.36.0 pickled every moved row as ``rows``; a saved model still loads
+        state = dict(state)
+        if "row_ranges" not in state:
+            rows = np.asarray(state.pop("rows", ()), dtype=np.int64)
+            state["row_ranges"] = row_ranges(rows)
+            state["row_count"] = int(rows.size)
+        state.setdefault("boundary", False)
+        state.setdefault("earlier", False)
+        state.setdefault("unresolved_basis", False)
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
 
 
-# The design's bound on any row's l1 norm, in its ``_structured_layout_cache``.
-_ROW_L1_KEY = "row_l1_bound"
+def _unresolved(rows: NDArray | None = None, columns: tuple[int, ...] = ()) -> TruncatedDirection:
+    """A refusal's record when the judgement cannot be formed: the rows it can name, or none."""
+    rows = np.zeros(0, dtype=np.int64) if rows is None else np.asarray(rows, dtype=np.int64)
+    return TruncatedDirection(
+        row_ranges(rows), int(rows.size), columns, 0.0, False, unresolved_basis=True
+    )
 
 
-def row_l1_bound(dm: DesignMatrix) -> float:
-    """``max_i sum_j |x_ij|`` bounded by ``sum_j max_i |x_ij|``, formed once per design.
+def row_ranges(rows: NDArray) -> tuple[tuple[int, int], ...]:
+    """Increasing row indices as half-open runs ``(start, stop)`` of consecutive rows."""
+    rows = np.asarray(rows, dtype=np.int64)
+    if rows.size == 0:
+        return ()
+    breaks = np.flatnonzero(np.diff(rows) != 1) + 1
+    starts = rows[np.concatenate(([0], breaks))]
+    stops = rows[np.concatenate((breaks - 1, [rows.size - 1]))] + 1
+    return tuple((int(start), int(stop)) for start, stop in zip(starts, stops, strict=True))
 
-    A one-hot block contributes 1 (a row holds one of its columns or none);
-    any other block the largest entry of each column, one product per column.
-    Owner, lifetime and invalidation as ``row_sets``: it reads the design's
-    entries alone.
+
+# Each row's l1 sum on the design, in its ``_structured_layout_cache``.
+_ROW_ABS_KEY = "row_abs_sums"
+
+
+def row_abs_sums(dm: DesignMatrix) -> NDArray:
+    """Each row's ``sum_j |x_ij|``, or a bound on it, formed once per design.
+
+    A one-hot block contributes its row's own entry (1, or 0 on its base
+    level) and a dense block ``|M| 1``, both exact.  A spline block stored as
+    a basis ``B`` and a reparameterisation ``R`` (``X = B R``, sparse or
+    binned) contributes ``|B| (|R| 1)``, which bounds its row's sum.  Any
+    other block contributes the sum of its columns' largest entries, one
+    product per column, which bounds every row.  Owner, lifetime and
+    invalidation as ``row_sets``: it reads the design's entries alone.
     """
     cache = getattr(dm, "_structured_layout_cache", None)
-    held = cache.get(_ROW_L1_KEY) if isinstance(cache, dict) else None
-    if isinstance(held, float):
+    held = cache.get(_ROW_ABS_KEY) if isinstance(cache, dict) else None
+    if isinstance(held, np.ndarray):
         return held
-    bound = 0.0
+    sums = np.zeros(dm.n)
     for matrix in dm.group_matrices:
-        if isinstance(matrix, CategoricalGroupMatrix):
-            bound += 1.0
-            continue
         width = matrix.shape[1]
-        for column in range(width):
-            unit = np.zeros(width)
-            unit[column] = 1.0
-            bound += float(np.max(np.abs(np.asarray(matrix.matvec(unit))), initial=0.0))
+        if isinstance(matrix, CategoricalGroupMatrix):
+            sums += np.asarray(matrix.matvec(np.ones(width)), dtype=np.float64)
+        elif isinstance(matrix, DenseGroupMatrix):
+            sums += np.abs(np.asarray(matrix.M, dtype=np.float64)) @ np.ones(width)
+        elif type(matrix) is SparseSSPGroupMatrix:
+            spread = np.abs(np.asarray(matrix.R_inv, dtype=np.float64)) @ np.ones(width)
+            sums += abs(matrix.B) @ spread
+        elif type(matrix) is DiscretizedSSPGroupMatrix:
+            spread = np.abs(np.asarray(matrix.R_inv, dtype=np.float64)) @ np.ones(width)
+            sums += (np.abs(np.asarray(matrix.B_unique, dtype=np.float64)) @ spread)[matrix.bin_idx]
+        else:
+            for column in range(width):
+                unit = np.zeros(width)
+                unit[column] = 1.0
+                sums += float(np.max(np.abs(np.asarray(matrix.matvec(unit))), initial=0.0))
+    sums.setflags(write=False)
     if isinstance(cache, dict):
-        cache[_ROW_L1_KEY] = bound
-    return bound
+        cache[_ROW_ABS_KEY] = sums
+    return sums
 
 
 def null_basis_angle(decomposition: Any, rows: int) -> float:
@@ -2034,6 +2100,19 @@ def null_basis_angle(decomposition: Any, rows: int) -> float:
     return min(1.0, size * _EPS * largest / gap)
 
 
+def _structural_columns(basis: NDArray, column_scale: NDArray | None) -> NDArray:
+    """Which null-basis columns are structural: supported only on columns without centred data.
+
+    ``rank._null_basis`` stacks the discarded spectral directions, supported
+    on the active columns, then an exact unit vector per inactive column
+    (``column_scale == 0``).  Those move no row by construction.
+    """
+    if column_scale is None:
+        return np.zeros(basis.shape[1], dtype=bool)
+    active = np.asarray(column_scale, dtype=np.float64) > 0.0
+    return ~np.any(basis[active] != 0.0, axis=0)
+
+
 def truncated_direction_ratio(
     *,
     dm: DesignMatrix,
@@ -2047,38 +2126,94 @@ def truncated_direction_ratio(
     penalty_gradient: NDArray,
     penalty_size: NDArray,
     penalty_apply: Callable[[NDArray], NDArray],
+    penalty_size_apply: Callable[[NDArray], NDArray],
     bar: float,
     underflow: float,
+    column_scale: NDArray | None = None,
+    eta: NDArray | None = None,
 ) -> tuple[float, tuple[TruncatedDirection, ...]]:
-    """The directions the factorization truncates, judged on the rows they move.
+    """The directions the factorization truncates, each judged on the rows it moves.
 
     A light row set, weighing ~1e16 below the rows it shares coefficients
     with, adds curvature below the rounding of ``X'WX``: the factorization
     truncates its direction, and the relative score sums it beside the heavy
     rows' rounding.  ``null_basis`` ``V`` spans the truncated subspace, to
-    within ``angle`` (``null_basis_angle``).  Each row's movement ``m = (X -
-    1 mean_x') V`` is read on the design, and the rows it moves beyond the
-    basis's error (``4 (angle + (p + 2) u)`` times the row's l1 bound times
-    ``|V|``, ``row_l1_bound``) are its support.
+    within ``angle`` (``null_basis_angle``).  Its structural columns, unit
+    vectors on columns without centred data (``column_scale`` 0), move no row
+    and are dropped.  Each row's movement ``m = (X - 1 mean_x') V`` is read on
+    the design, and the subspace is turned to the right singular vectors of
+    that movement over the positive-weight rows, so that directions moving
+    different rows by different amounts are judged apart: a direction two
+    nearly collinear columns leave moves every row by ~1e-9, a light cut its
+    own rows by ~1.  A turned direction's support is the rows it moves beyond
+    the basis's error.  ``angle`` bounds ``sin theta``, so a computed ``d``
+    lies within ``angle ||d||_2`` of the true subspace (read in the basis's
+    own coordinates; the equilibrated ones the angle holds in are #431's),
+    and row ``i``'s movement within ``l1_i angle ||d||_2`` of the true one,
+    ``l1_i`` the row's own ``sum_j |x_ij - mean_j|`` (``row_abs_sums``).  The
+    movement is formed as ``(X V) t``, so its rounding is ``gamma_{p+2} l1_i
+    (max |V|) |t|`` through the turn ``t``.  The error is ``4 l1_i (angle
+    ||d||_2 + gamma_{p+2} (max |V|) |t|)``.
 
-    - **Structural.**  A direction that moves no row is aliasing: nothing to
-      judge.
-    - **Not hidden.**  Moved rows whose scores sum above ``bar`` times every
-      row's are seen by the relative score, which governs as before: two
-      nearly collinear columns move every row.
-    - **Hidden.**  The Newton step on the moved rows alone, ``delta =
-      C^+ G`` with ``C = M' F M + V' S V`` and ``G = M' s - V' S beta``
-      (score and Fisher weights of those rows only, brought to unit scale by
-      a power of two), moves each row by ``M delta`` in ``eta``.  Within
-      ``bar`` or its rounding (``gamma`` of the sums, the basis's error and
-      the penalty's size, through ``|C^+|``) on every row, the rows sit at
-      their own maximum: weakly identified.  Otherwise, where every row it
-      moves improves (a response of 0 moving down, of 1 up), the direction is
-      a separation, with no interior maximum (left to the separated sets);
-      else the fit cannot be certified in float64.
-    - **Separated.**  Moved rows whose responses are all 0, or all 1, are a
+    - **Structural.**  A direction that moves no row beyond its error is
+      aliasing: none of its rows moves resolvably.  Unless that test is
+      vacuous: a row moves at most ``l1_i ||d||_inf``, so once the error per
+      unit of ``l1_i`` reaches ``||d||_inf`` no movement can be told from the
+      error, and the claim is refused with a record (``unresolved_basis``)
+      naming the rows the direction moves beyond their rounding, if any.
+      Below that, an empty support can still hide a real movement within the
+      basis's error (a light set beside a wide column at a moderate angle);
+      telling it from an alias is left to #431.
+    - **Not hidden.**  A direction whose rows' scores, each weighted by how far
+      it moves the row, sum above ``bar`` times every row's score at its
+      largest movement, ``sum |m_i s_i| > bar max |m_i| sum |s|``, is seen by
+      the relative score, which governs as before.
+    - **Separated.**  A hidden direction whose moved rows all respond 0 is a
       separated set, read off the responses (as ``row_set_residual`` reads
       them): not judged here.
+    - **Hidden.**  The Newton step on the hidden directions' rows alone,
+      ``delta = C^+ G`` with ``C = M' F M + D' S D`` and ``G = M' s - D' S beta``
+      (score and Fisher weights of those rows only, brought to unit scale by
+      a power of two), moves each row by ``M delta`` in ``eta``.  Within
+      ``bar`` or its rounding (``gamma`` of the sums, the basis's error in the
+      rows' movement and in the pull ``D' S beta``, the penalty's size, through
+      ``|C^+|``) on every row, the rows sit at their own maximum: weakly
+      identified.  Otherwise, if every row the step moves beyond its rounding
+      improves along it (a response of 0 moving down, of 1 up):
+      - along directions the penalty does not bend (``D' S D`` within its
+        error), the step is a recession direction of the rows' likelihood:
+        with responses of 0 only, a separation (left to the separated sets);
+        with an event among them, under the log link, a supremum on the
+        boundary ``eta = 0``, refused and disclosed as such;
+      - along a penalized direction the penalized objective has a finite
+        maximum along the step, which the Newton step estimates: a supremum
+        on the boundary only when that step carries a moved row to ``eta >=
+        0`` (``eta``, the rows' current predictor; without it, never).
+      Else the fit cannot be certified in float64.
+
+    Arithmetic that cannot form the judgement (a non-finite movement or
+    score, scores and weights that vanish, or a scaled system that overflows)
+    refuses (``inf``) with a record that names no rows (``unresolved_basis``).
+
+    The penalty's bend ``d' S d`` is judged against its error: the basis's,
+    ``2 r ||d||_2 ||S d||_2 + ||S||_inf (r ||d||_2)^2`` with ``r = 4 (angle +
+    gamma_{p+2})`` (``||S||_inf`` from ``penalty_size_apply``, ``|S| |v|``,
+    bounding ``||S||_2``), and its rounding.  Forming ``S d`` sums at most
+    ``p`` terms per penalty component, scales each by its ``lambda`` and adds
+    the components on a coordinate, at most ``p + 2`` of them; the product
+    ``d' fl(S d)`` adds ``p`` more: ``gamma_{3p + 5} |d|' |S| |d|`` in all.
+    ``S`` is PSD, so along a direction whose computed bend lies within that
+    error the true bend lies in ``[0, 2 error]`` and may be 0, and a PSD
+    matrix with a zero diagonal entry has that row and column zero (``b_jk^2
+    <= b_jj b_kk``).  That row and column are set to 0 before ``C`` is
+    formed, as a Cholesky factorization with complete pivoting treats a pivot
+    within its tolerance (LAPACK ``dpstrf``; Higham 1990).  ``C`` along the
+    direction is then the rows' own ``M' F M``, non-negative: a negative
+    round-off bend can no longer make it negative and drop the direction from
+    ``C^+``.  The system formed is one the true bend allows, so a
+    certificate that holds for every bend the arithmetic allows still holds;
+    along one direction it is the extreme case, the step ``|m g| / (a + b)``
+    being largest at ``b = 0``.
 
     Returns the largest ``|M delta| / max(bar, floor)`` over uncertifiable
     directions (0 where none) and the hidden directions found.  Nothing in
@@ -2088,6 +2223,9 @@ def truncated_direction_ratio(
     """
     basis = np.asarray(null_basis, dtype=np.float64)
     if basis.ndim != 2 or basis.shape[1] == 0:
+        return 0.0, ()
+    basis = basis[:, ~_structural_columns(basis, column_scale)]
+    if basis.shape[1] == 0:
         return 0.0, ()
     positive = np.asarray(positive_prior, dtype=bool)
     score = np.asarray(row_score, dtype=np.float64)
@@ -2101,68 +2239,132 @@ def truncated_direction_ratio(
             for k in range(basis.shape[1])
         ]
     )
-    reach = row_l1_bound(dm) + float(np.sum(np.abs(mean)))
-    error = 4.0 * (angle + _gamma(p + 2)) * reach * np.max(np.abs(basis), axis=0)
-    support = positive & np.any(np.abs(moved) > error[None, :], axis=1)
-    if not support.any():
-        return 0.0, ()
-    responses = observed[support]
-    if np.all(responses == 0.0) or np.all(responses == 1.0):
-        # a separated set, read off its responses as ``row_set_residual``
-        # does: no interior maximum.  Not off its scores' or its step's signs:
-        # at means near 0 the rows' scores and curvature vanish, and the
-        # penalty's gradient or rounding sets the step's sign.
-        return 0.0, ()
+    # each row's own l1 sum of its centred entries
+    reach = row_abs_sums(dm) + float(np.sum(np.abs(mean)))
+    resolution = 4.0 * (angle + _gamma(p + 2))
+    if not np.any(positive) or not np.all(np.isfinite(moved[positive])):
+        return math.inf, (_unresolved(),)
+    # the subspace turned to the right singular vectors of its movement
+    _, _, right = np.linalg.svd(moved[positive], full_matrices=False)
+    turn = right.T
+    directions = basis @ turn
+    movement = moved @ turn
+    lengths = np.linalg.norm(directions, axis=0)
+    peaks = np.max(np.abs(directions), axis=0)
+    # row i's movement along direction k is within this, per unit of l1_i:
+    # the basis's error, and the rounding of ``(X V) t`` through ``|t|``
+    basis_rounding = 4.0 * _gamma(p + 2) * (np.max(np.abs(basis), axis=0) @ np.abs(turn))
+    reach_error = 4.0 * angle * lengths + basis_rounding
+    error = reach[:, None] * reach_error[None, :]
     total = float(np.sum(np.abs(score[positive])))
-    hidden = float(np.sum(np.abs(score[support])))
-    if not (math.isfinite(total) and math.isfinite(hidden)) or hidden > bar * total:
+    if not math.isfinite(total):
+        return math.inf, (_unresolved(),)
+    hidden: list[int] = []
+    for k in range(directions.shape[1]):
+        support = positive & (np.abs(movement[:, k]) > error[:, k])
+        if not support.any():
+            if reach_error[k] < peaks[k]:
+                continue  # aliasing
+            # every row's error reaches the most it can move: unresolved
+            rounding = reach * float(basis_rounding[k])
+            visible = np.flatnonzero(positive & (np.abs(movement[:, k]) > rounding))
+            leaning = np.abs(directions[:, k])
+            named = tuple(
+                int(j)
+                for j in np.argsort(-leaning)[:8]
+                if leaning[j] > resolution * float(peaks[k])
+            )
+            return math.inf, (_unresolved(visible, named),)
+        weighted = float(np.sum(np.abs(movement[support, k]) * np.abs(score[support])))
+        largest_move = float(np.max(np.abs(movement[support, k])))
+        if not math.isfinite(weighted) or weighted > bar * largest_move * total:
+            continue  # seen by the relative score
+        if np.all(observed[support] == 0.0):
+            # a separated set, read off its responses as ``row_set_residual``
+            # does: no interior maximum.  Not off its scores' or its step's
+            # signs: at means near 0 the rows' scores and curvature vanish,
+            # and the penalty's gradient or rounding sets the step's sign.
+            continue
+        hidden.append(k)
+    if not hidden:
         return 0.0, ()
-    rows_moved = moved[support]
-    _, singular, right = np.linalg.svd(rows_moved, full_matrices=False)
-    keep = singular > float(np.max(singular, initial=0.0)) * 4.0 * rows_moved.shape[0] * _EPS
-    if not np.any(keep):
-        return 0.0, ()
-    turn = right[keep].T
-    local = rows_moved @ turn
-    direction = basis @ turn
-    still = right[~keep].T
-    if still.shape[1]:
-        # less what the directions that move no row add: the least-norm
-        # direction that moves these rows, so the coefficients named are its own
-        structural = basis @ still
-        direction = direction - structural @ np.linalg.lstsq(structural, direction, rcond=None)[0]
+    support = positive & np.any(np.abs(movement[:, hidden]) > error[:, hidden], axis=1)
+    local = movement[support][:, hidden]
+    direction = directions[:, hidden]
+    lengths = lengths[hidden]
     s_local, f_local = score[support], fisher[support]
+    # the gradient's error from the rows' movement error, per direction
+    movement_error = reach_error[hidden] * float(reach[support] @ np.abs(s_local))
     largest = float(np.max(np.concatenate([np.abs(s_local), f_local]), initial=0.0))
     if not (math.isfinite(largest) and largest > 0.0):
-        return 0.0, ()
+        return math.inf, (_unresolved(),)
     exponent = -int(np.frexp(largest)[1])
+    gradient_at = np.asarray(penalty_gradient, dtype=np.float64)
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         s_local = np.ldexp(s_local, exponent)
         f_local = np.ldexp(f_local, exponent)
-        pull = np.ldexp(direction.T @ np.asarray(penalty_gradient, dtype=np.float64), exponent)
+        pull = np.ldexp(direction.T @ gradient_at, exponent)
         pull_size = np.ldexp(
             np.abs(direction).T @ np.asarray(penalty_size, dtype=np.float64), exponent
         )
+        # the basis's error reaches the pull too: ``|e' S beta| <= ||e||_2
+        # ||S beta||_2`` with ``||e||_2 <= angle ||d||_2``
+        pull_error = np.ldexp(resolution * lengths * float(np.linalg.norm(gradient_at)), exponent)
+        movement_error = np.ldexp(movement_error, exponent)
         stiffness = np.column_stack(
             [
                 np.ldexp(np.asarray(penalty_apply(direction[:, j]), dtype=np.float64), exponent)
                 for j in range(direction.shape[1])
             ]
         )
-        curvature = local.T @ (f_local[:, None] * local) + direction.T @ stiffness
+        bending = direction.T @ stiffness
         gradient = local.T @ s_local - pull
-    if not (np.all(np.isfinite(curvature)) and np.all(np.isfinite(gradient))):
-        return 0.0, ()
+        # the penalty's curvature along each direction, and its error:
+        # the basis's, ``|d' S d - d*' S d*| = |e' S (2 d - e)|``, and the
+        # rounding of forming ``S d`` and ``d' S d``
+        bent_size = np.column_stack(
+            [
+                np.ldexp(
+                    np.asarray(penalty_size_apply(np.abs(direction[:, j])), dtype=np.float64),
+                    exponent,
+                )
+                for j in range(direction.shape[1])
+            ]
+        )
+        penalty_norm = float(
+            np.max(np.ldexp(np.asarray(penalty_size_apply(np.ones(p)), dtype=np.float64), exponent))
+        )
+        bending_error = (
+            2.0 * resolution * lengths * np.linalg.norm(stiffness, axis=0)
+            + penalty_norm * (resolution * lengths) ** 2
+            + _gamma(3 * p + 5) * np.sum(np.abs(direction) * bent_size, axis=0)
+        )
+        # S is PSD, so a bend within its error may truly be 0, and a PSD
+        # matrix with a zero diagonal entry has that row and column zero: the
+        # bend enters the Newton system only along directions it resolvably
+        # bends, never as round-off of either sign
+        bent = np.diag(bending) > bending_error
+        bending[~bent, :] = 0.0
+        bending[:, ~bent] = 0.0
+        curvature = local.T @ (f_local[:, None] * local) + bending
+    if not (
+        np.all(np.isfinite(curvature))
+        and np.all(np.isfinite(gradient))
+        and np.all(np.isfinite(pull_error))
+        and np.all(np.isfinite(movement_error))
+        and np.all(np.isfinite(bending_error))
+    ):
+        return math.inf, (_unresolved(),)
     curvature = 0.5 * (curvature + curvature.T)
     values, vectors = np.linalg.eigh(curvature)
     kept = values > float(np.max(np.abs(values), initial=0.0)) * 4.0 * len(values) * _EPS
     inverse = (vectors[:, kept] / values[kept]) @ vectors[:, kept].T
     steps = local @ (inverse @ gradient)
-    local_error = error @ np.abs(turn)  # each direction's movement error, per unit
     rounding = (
         _gamma(len(s_local) + 2) * (np.abs(local).T @ np.abs(s_local))
-        + np.abs(s_local) @ np.ones((len(s_local), 1)) * local_error
+        + movement_error
         + _gamma(p + 2) * pull_size
+        + pull_error
         + np.ldexp(underflow, exponent)
     ).ravel()
     floor = np.abs(local) @ (np.abs(inverse) @ rounding) + _gamma(4 * len(s_local)) * np.abs(steps)
@@ -2171,7 +2373,7 @@ def truncated_direction_ratio(
     rows = np.flatnonzero(support)
     weights = np.abs(direction).max(axis=1)
     # a coefficient the direction leans on beyond its basis's error
-    significant = weights > 4.0 * (angle + _gamma(p + 2)) * float(np.max(weights))
+    significant = weights > resolution * float(np.max(weights))
     columns = tuple(int(j) for j in np.argsort(-weights)[:8] if significant[j])
     shared = np.zeros(dm.n, dtype=bool)
     for column in np.flatnonzero(significant):
@@ -2180,14 +2382,33 @@ def truncated_direction_ratio(
         shared |= np.asarray(dm.matvec(unit)) != 0.0
     shared &= positive & ~support
     information = float(np.sum(fisher[shared])) / max(float(np.sum(fisher[support])), _TINY)
+    runs = row_ranges(rows)
     if not over.any():
-        return 0.0, (TruncatedDirection(tuple(int(i) for i in rows), columns, information, True),)
-    y_moved, step_moved = observed[rows[over]], steps[over]
-    improving = ((y_moved == 0.0) & (step_moved < 0.0)) | ((y_moved == 1.0) & (step_moved > 0.0))
-    if np.all(improving):
-        return 0.0, ()  # a separation: no interior maximum
+        return 0.0, (TruncatedDirection(runs, int(rows.size), columns, information, True),)
+    y_moved = observed[rows]
+    # a recession direction of the rows' likelihood: every row the step moves
+    # beyond its rounding improves (a row moving the wrong way, however
+    # little, bounds the likelihood along the ray)
+    improving = ((y_moved == 0.0) & (steps < 0.0)) | ((y_moved == 1.0) & (steps > 0.0))
+    determined = np.abs(steps) > floor
     ratio = float(np.max(np.abs(steps) / limit))
-    record = TruncatedDirection(tuple(int(i) for i in rows), columns, information, False)
+    rising = improving & determined & (y_moved == 1.0)
+    if np.all(improving | ~determined):
+        if not np.any(bent):
+            if not np.any(rising):
+                return 0.0, ()  # a separation: no interior maximum
+            # events rising: under the log link their supremum is the boundary
+            # eta = 0 at finite coefficients, not a separation
+            record = TruncatedDirection(runs, int(rows.size), columns, information, False, True)
+            return ratio, (record,)
+        # the penalty bends a direction: the penalized maximum along the step
+        # is finite, on the boundary only if the step carries a row past it
+        if eta is not None and np.any(rising):
+            reached = np.asarray(eta, dtype=np.float64)[rows] + steps
+            if np.any(reached[rising] >= 0.0):
+                record = TruncatedDirection(runs, int(rows.size), columns, information, False, True)
+                return ratio, (record,)
+    record = TruncatedDirection(runs, int(rows.size), columns, information, False)
     return ratio, (record,)
 
 

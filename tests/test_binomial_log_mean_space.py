@@ -30,6 +30,7 @@ from superglm import (
     Numeric,
     PSpline,
     RandomEffect,
+    Spline,
     SuperGLM,
 )
 from superglm.diagnostics.separation import SeparationWarning
@@ -294,17 +295,78 @@ def _assert_at_the_two_level_mle(model: SuperGLM, offset_a: float, offset_b: flo
 
 @pytest.mark.parametrize("direct_solve", ["auto", "gram"])
 def test_a_lowered_start_reaches_a_trial_inside_the_space(direct_solve: str) -> None:
-    """Sol's #437 fixture: the first step needs more than the ordinary 20 halvings.
+    """Sol's #437 fixture: the first step lies past the ordinary 20 halvings.
 
     With offsets -16 and +1.3 the lowered start puts level a at eta ~ -18 and
     the Fisher proposal moves it by ~3e7, so only a fraction below ~6e-7 of
     the step stays inside ``eta < 0``: past 2^-20.  Backtracking reaches the
     fraction to the boundary instead of rejecting the step, and the fit
-    reaches the maximum.
+    reaches the maximum.  The halvings above the boundary are refused
+    without being evaluated (``irls_state.mean_space_first_halving``): the
+    proposal and one trial, at the depth #437 reached through 21 trials
+    outside the space.
     """
     model = _two_level_fit(-16.0, 1.3, direct_solve)
-    assert model.result.iteration_log[0].step_halvings > 20
+    first = model.result.iteration_log[0]
+    assert first.step_halvings > 20
+    assert first.trials_attempted == 2
     _assert_at_the_two_level_mle(model, -16.0, 1.3)
+
+
+def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small analogue of #431's blhi: exposure offsets, eta <= -2.4, a random effect, REML.
+
+    The offset lowers the start, and in inner solves at some smoothing
+    parameters the clipped Fisher proposal keeps landing just above the
+    boundary: each step then has to stop short of it, and the iterate creeps
+    towards ``eta = 0``.  Halving from the full step evaluated every fraction
+    above the boundary first, up to ``floor(log2(1 / t)) + 21`` states per
+    step (188 at most here on #437's merge, 17,578 in all).  With those
+    refused unevaluated, a line search evaluates the proposal and at most
+    ``max_halving + 2`` trials: the depths from the first inside the space to
+    the extended budget's limit, ``max_halving`` past the first depth below
+    the computed fraction ``t``, which the first inside precedes by at most
+    one (the trial at ``2^-j >= t`` is outside but for rounding).  The fit
+    converges.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.irls_state import _select_irls_trial
+
+    decisions = []
+
+    def counted(**kwargs):
+        decision = _select_irls_trial(**kwargs)
+        decisions.append(decision)
+        return decision
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", counted)
+    rng = np.random.default_rng(3)
+    n, levels = 800, 10
+    X = pd.DataFrame({"s0": rng.uniform(size=n), "s1": rng.uniform(size=n)})
+    X["f"] = rng.integers(0, 4, n).astype(str)
+    X["g"] = rng.integers(0, levels, n).astype(str)
+    exposure = rng.uniform(0.5, 8.0, n)
+    eta = -2.5 - X["s0"] ** 2 - 0.8 * X["s1"] + rng.normal(0.0, 0.1, levels)[X["g"].astype(int)]
+    y = (rng.uniform(size=n) < exposure * np.exp(np.minimum(eta, -2.4))).astype(float)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        features={
+            "s0": Spline(k=6),
+            "s1": Spline(k=6),
+            "f": Categorical(),
+            "g": RandomEffect(),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y, offset=np.log(exposure))
+    assert model._reml_result.converged
+    max_halving = 20  # irls_direct's ordinary budget
+    assert max(decision.trials_attempted for decision in decisions) <= 1 + max_halving + 2
+    assert sum(decision.skipped for decision in decisions) > 0
 
 
 @pytest.mark.parametrize("direct_solve", ["auto", "gram"])
@@ -1236,6 +1298,768 @@ def test_a_light_cut_without_events_is_left_to_separation() -> None:
 
 
 @pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+def test_a_visible_truncated_direction_does_not_hide_a_light_cut(direct_solve: str) -> None:
+    """claude's #437 Medium (r4164942997): the light cut beside two nearly collinear columns.
+
+    The factorization truncates both the cut and ``x1 - x2``, which moves
+    every row by ~1e-9.  #437 judged the union of the truncated directions'
+    rows on unweighted score sums, so ``x1 - x2`` made every row visible and
+    the cut was never judged: the fit was certified after one iteration with
+    the light cells at their start.  Each direction is now judged on its own
+    rows, weighted by how far it moves them, so the cut is refused with its
+    rows, which the record holds as one run of rows.
+    """
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0)
+    rng = np.random.default_rng(0)
+    cell = pd.factorize(frame["A"] + frame["B"])[0]
+    frame["x1"] = rng.uniform(size=cell.max() + 1)[cell]
+    frame["x2"] = frame["x1"] + 1e-9 * rng.normal(size=len(frame))
+    light = np.array([(a, b) in _TWO_LINKS for a, b in zip(frame["A"], frame["B"], strict=True)])
+    features = {
+        "A": Categorical(base="a0"),
+        "B": Categorical(base="b0"),
+        "x1": Numeric(),
+        "x2": Numeric(),
+    }
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features=features,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame[list(features)], y, **fit)
+    assert not model.result.converged
+    (unresolved,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert unresolved["rows"] == np.flatnonzero(light).tolist()
+    assert unresolved["row_count"] == int(np.count_nonzero(light))
+    (record,) = model.result.truncated_directions
+    assert record.row_ranges == ((16, 20),)
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+def test_an_all_events_light_cut_is_a_boundary_supremum(direct_solve: str) -> None:
+    """claude's #437 Medium (r4164944703): a light cut whose rows are all events.
+
+    An event row's log-likelihood ``w eta`` rises until ``eta = 0``, so under
+    the log link the cut's supremum is on the boundary of the parameter space
+    at finite coefficients, not a separation.  #437 read every event row
+    rising as a separation and certified the fit after one iteration with the
+    light rows at ``p ~ e^-22``.  It is now the boundary verdict: not
+    converged, ``mean_space_boundary`` with the cut's rows counted, listed in
+    ``diagnostics()["_model"]["boundary_rows"]`` and named in a plain-words
+    warning.
+    """
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0, link_responses=(1.0, 1.0))
+    light = np.array([(a, b) in _TWO_LINKS for a, b in zip(frame["A"], frame["B"], strict=True)])
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert not model.result.converged
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert model.result.mean_space_boundary_rows == int(np.count_nonzero(light))
+    assert model.result.mean_space_boundary_unresolved
+    diagnostics = model.diagnostics()["_model"]
+    assert diagnostics["unresolved_rows"] == []
+    (boundary,) = diagnostics["boundary_rows"]
+    assert boundary["rows"] == np.flatnonzero(light).tolist()
+    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    assert any("towards probability 1" in message for message in messages)
+    # REML's refusal names such rows as rising towards the boundary, and rows
+    # the clip holds as before
+    from superglm.reml.direct import _mean_space_boundary_message
+
+    assert "4 row(s) rise towards probability 1 along a direction float64 cannot resolve" in (
+        _mean_space_boundary_message(4, estimated=False, unresolved=True)
+    )
+    assert "4 row(s) are fitted at probability 1, the boundary" in (
+        _mean_space_boundary_message(4, estimated=False)
+    )
+
+
+def test_a_refused_direction_keeps_its_record_through_a_rejected_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude's #437 Low (r4164946634): a refusal's record survives an exit without a certificate.
+
+    The light cut is refused at the first iteration's stop.  Every later step
+    is then made to fail its line search, so the fit ends ``step_rejected``,
+    an exit on which the certificate does not run.  #437 cleared the record
+    at the top of each iteration, so the fit was published not converged
+    with no record and no warning.  A rejected step returns the committed
+    state, the one the refusal judged, so that judgement is the fit's own.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.irls_state import _IRLSStepDecision, _select_irls_trial
+
+    calls: list[int] = []
+
+    def first_then_rejected(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return _select_irls_trial(**kwargs)
+        return _IRLSStepDecision(0.0, 0, True)
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", first_then_rejected)
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert len(calls) >= 2
+    assert not model.result.converged
+    assert model.result.termination_reason == "step_rejected"
+    (unresolved,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert unresolved["rows"] == [16, 17, 18, 19]
+    assert any("less information" in str(w.message) for w in caught)
+
+
+def _two_level_design(z: np.ndarray):
+    """Base level a and level c heavy (weight 1e8), level b light (1e-8), each a 0 and a 1 at p = 1/2.
+
+    Columns: b, c (one-hot) and a dense ``z``.  Every row sits at its own
+    maximum: score ``w (y - (1 - y))`` and Fisher weight ``w``.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, DesignMatrix
+
+    codes = np.array([-1, -1, -1, -1, 0, 0, 1, 1, 1, 1])
+    response = np.array([0.0, 1.0] * 5)
+    weight = np.where(codes == 0, 1e-8, 1e8)
+    dm = DesignMatrix(
+        [CategoricalGroupMatrix(codes, 2), DenseGroupMatrix(z[:, None])], n=len(codes), p=3
+    )
+    return dm, response, weight * (2.0 * response - 1.0), weight
+
+
+def test_an_earlier_boundary_record_never_decides_the_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P2 and claude's Medium on #454: only the returned state's judgement decides.
+
+    The first certificate is made to find a boundary set; every later one,
+    at the iterates the fit moves on to, refuses for a direction it cannot
+    judge, with a record that names no rows (``inf``, as an unresolved basis
+    or a non-finite system does).  The fit then runs out of iterations.
+    a9d5870a kept the first record because no later judgement found rows,
+    and relabelled the exit ``mean_space_boundary`` with that record's rows,
+    the string REML's restoration loop keys on.  The returned state's own
+    judgement now decides: the loop's own exit, no boundary rows, and that
+    state's own record, not the earlier one.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.mode_score import TruncatedDirection, _unresolved
+
+    calls: list[int] = []
+
+    def boundary_then_none(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            stale = TruncatedDirection(((16, 20),), 4, (2, 3), 1e16, False, True)
+            return 10.0, (stale,)
+        return math.inf, (_unresolved(),)
+
+    monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_then_none)
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        max_iter=5,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert len(calls) >= 2
+    assert not model.result.converged
+    assert model.result.termination_reason in ("max_iter", "score_stagnated")
+    assert model.result.mean_space_boundary_rows == 0
+    assert not model.result.mean_space_boundary_unresolved
+    (record,) = model.result.truncated_directions
+    assert record.unresolved_basis and not record.earlier and record.row_count == 0
+    assert model.diagnostics()["_model"]["boundary_rows"] == []
+    assert not [w for w in caught if "probability 1" in str(w.message)]
+
+
+def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boundary record from an earlier iterate is disclosed as history and decides nothing.
+
+    The first certificate finds a boundary set and refuses; the certificate
+    is then kept from running (no later stop is claimed), so the returned
+    state is never judged.  The record is published with ``earlier`` set,
+    named in the warning as found at an earlier iterate, and the fit keeps
+    the loop's own exit with no boundary rows.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.mode_score import TruncatedDirection
+
+    calls: list[int] = []
+    real = irls_direct._irls_objective_relative_change
+
+    def boundary_once(**kwargs):
+        calls.append(1)
+        stale = TruncatedDirection(((16, 20),), 4, (2, 3), 1e16, False, True)
+        return 10.0, (stale,)
+
+    def no_stop_after_the_first(**kwargs):
+        # the deviance stop passes once (the certificate then runs and
+        # refuses) and never again, so the certificate is not consulted on
+        # the later iterates
+        return 0.0 if not calls else real(**kwargs) + 1.0
+
+    monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_once)
+    monkeypatch.setattr(irls_direct, "_irls_objective_relative_change", no_stop_after_the_first)
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="qr",
+        max_iter=4,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert calls == [1]
+    assert not model.result.converged
+    assert model.result.termination_reason == "max_iter"
+    assert model.result.mean_space_boundary_rows == 0
+    (record,) = model.result.truncated_directions
+    assert record.boundary and record.earlier
+    (entry,) = model.diagnostics()["_model"]["boundary_rows"]
+    assert entry["earlier"] and entry["rows"] == [16, 17, 18, 19]
+    assert any("At an earlier iterate, rows 16" in str(w.message) for w in caught)
+
+
+def test_an_unresolved_basis_is_refused_and_named_in_the_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The returned state's refusal for an unresolved basis is the fit's own record, in plain words.
+
+    The light cut at its own maximum, judged as if its basis were computed
+    only to ``angle = 0.3``: no row's movement can be shown flat, so the
+    certificate refuses at every iterate.  04cc5e7b returned that refusal
+    with no record, so the fit was published not converged with nothing
+    named.  The returned state's record now names the four light rows the
+    direction visibly moves, with a warning that says the basis is too
+    inaccurate to show whether they move, and no earlier record is shown as
+    history.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+
+    judge = irls_direct.truncated_direction_ratio
+    monkeypatch.setattr(
+        irls_direct,
+        "truncated_direction_ratio",
+        lambda **kwargs: judge(**{**kwargs, "angle": 0.3}),
+    )
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        max_iter=6,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert not model.result.converged
+    (record,) = model.result.truncated_directions
+    assert record.unresolved_basis and not record.earlier
+    (entry,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert entry["rows"] == [16, 17, 18, 19] and entry["unresolved_basis"]
+    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    assert any("too inaccurately to show whether rows 16, 17, 18, 19" in m for m in messages)
+    assert not any("At an earlier iterate" in m for m in messages)
+
+
+def test_a_refusal_with_no_rows_to_name_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated-direction refusal that cannot name rows is still disclosed, plainly.
+
+    The judgement is made to refuse without being able to form the rows'
+    movement (a non-finite movement, a vanishing or overflowing system).
+    The fit is not converged; ``diagnostics()`` records the refusal with no
+    rows, and the warning says no record of the rows exists.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.mode_score import _unresolved
+
+    monkeypatch.setattr(
+        irls_direct, "truncated_direction_ratio", lambda **kwargs: (math.inf, (_unresolved(),))
+    )
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        max_iter=6,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert not model.result.converged
+    (entry,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert entry["rows"] == [] and entry["row_count"] == 0 and entry["unresolved_basis"]
+    assert any("no record of which rows it moves exists" in str(w.message) for w in caught)
+
+
+@pytest.mark.parametrize("design", ["duplicated column", "nested factors"])
+@pytest.mark.parametrize("direct_solve", ["qr", "gram"])
+def test_an_exact_alias_on_a_large_design_is_not_refused(
+    monkeypatch: pytest.MonkeyPatch, design: str, direct_solve: str
+) -> None:
+    """claude's High on 7e6ef1ee: an exact alias with an ordinary condition ratio certifies.
+
+    100,000 rows, an offset of +2 so the start is lowered and the true-score
+    certificate decides, and an exact alias: ``x2 = x1``, or a factor ``A``
+    nested in ``B``.  A third column ``x3 = x1 + 0.005 noise`` gives the
+    retained spectrum an ordinary ratio, ``sigma_max / gap ~ 240``, so the
+    basis angle ``n eps sigma_max / gap`` is about 5e-9, above ``bar / 4``.
+    7e6ef1ee refused every empty support that was not flat to ``bar``, so it
+    refused these aliases (``score_stagnated``, a record naming no rows); 0.36.0
+    and master certify them.  An empty support is aliasing again unless the
+    test is vacuous, at an angle near 1/4.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+
+    angles: list[float] = []
+    measure = irls_direct.null_basis_angle
+    monkeypatch.setattr(
+        irls_direct,
+        "null_basis_angle",
+        lambda decomposition, rows: angles.append(measure(decomposition, rows)) or angles[-1],
+    )
+    rng = np.random.default_rng(431)
+    n = 100_000
+    x1 = rng.uniform(-1.0, 1.0, n)
+    level = rng.integers(0, 12, n)
+    frame = pd.DataFrame(
+        {
+            "x1": x1,
+            "x2": x1.copy(),
+            "x3": x1 + 0.005 * rng.normal(size=n),
+            "A": (level // 3).astype(str),
+            "B": level.astype(str),
+        }
+    )
+    y = (rng.uniform(size=n) < np.exp(-1.2 + 0.3 * x1 + 0.1 * (level % 3))).astype(float)
+    features = (
+        {"x1": Numeric(), "x2": Numeric(), "x3": Numeric()}
+        if design == "duplicated column"
+        else {"x1": Numeric(), "x3": Numeric(), "A": Categorical(), "B": Categorical()}
+    )
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features=features,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame[list(features)], y, offset=np.full(n, 2.0))
+    assert max(angles) > MODE_CERTIFICATION_BAR / 4.0  # the range 7e6ef1ee refused
+    assert model.result.converged
+    assert model.result.termination_reason == "converged"
+    assert not any(record.unresolved_basis for record in model.result.truncated_directions)
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["positive", "negative"])
+def test_a_direction_in_a_penalty_null_space_is_not_bent(sign: float) -> None:
+    """claude's Low on 7e6ef1ee and Medium on 4558acb8: a bend within its error is no bend, of either sign.
+
+    Three light levels whose rows are all events, along the direction ``(1,
+    2, 3) / 4``: linear, so a second-difference penalty ``S = lambda D'D``
+    does not bend it, and ``S d`` is exactly 0 in any summation order (every
+    product and partial sum is a multiple of 1/4).  A penalty summed over
+    components ``M`` and ``M - S`` with ``|M| ~ 1e6`` forms ``S d`` with
+    rounding up to ``gamma_{p+2} (|M| + |M - S|) |d|``.  That rounding is
+    injected here, ``sign eta d`` with ``eta`` a power of two inside that
+    bound, so the bend ``d' fl(S d)`` is exactly ``sign eta |d|^2`` on every
+    platform: inside its error (``gamma_{3p+5} |d|' |S| |d|``), and some
+    1e8 times the rows' own curvature.  Both signs read as unbent: a
+    recession direction whose events rise, a boundary supremum.  4558acb8
+    added the negative bend to ``C``, which went negative; the eigensolver
+    dropped it, the step was 0, and the rows were certified at their own
+    maximum (ratio 0).  Read as bent, the positive one would be refused as
+    unresolved (no ``eta`` is given, so no crossing could be confirmed).
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    def gamma(k: int) -> float:
+        return k * _U / (1.0 - k * _U)
+
+    codes = np.array([-1, -1, -1, -1, 0, 0, 1, 1, 2, 2])
+    response = np.array([0.0, 1.0, 0.0, 1.0] + [1.0] * 6)
+    weight = np.where(codes < 0, 1e8, 1e-8)
+    odds = math.exp(-20.0) / -math.expm1(-20.0)
+    score = np.where(codes < 0, weight * (2.0 * response - 1.0), weight)
+    fisher = np.where(codes < 0, weight, weight * odds)
+    dm = DesignMatrix([CategoricalGroupMatrix(codes, 3)], n=10, p=3)
+    second = np.array([[1.0, -2.0, 1.0]])
+    penalty = 1e6 * (second.T @ second)
+    spread = np.random.default_rng(4).normal(size=(3, 3))
+    component = 1e6 * (spread + spread.T)
+    magnitude = np.abs(component) + np.abs(component - penalty)
+    direction = np.array([[1.0], [2.0], [3.0]]) / 4.0
+    d = direction[:, 0]
+    assert np.all(penalty @ d == 0.0) and np.all(penalty @ -d == 0.0)
+    # the largest power of two whose ``eta |d|`` lies inside forming S d's rounding
+    eta = 2.0 ** math.floor(math.log2(np.min(gamma(5) * (magnitude @ d) / d)))
+    assert eta * float(d @ d) < gamma(14) * float(d @ (magnitude @ d))  # within the bend's error
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=direction,
+        angle=1e-12,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=fisher,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: penalty @ np.asarray(v) + sign * eta * np.asarray(v),
+        penalty_size_apply=lambda v: magnitude @ np.abs(np.asarray(v)),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio > 1.0
+    (record,) = found
+    assert record.boundary and not record.unresolved_basis and not record.at_maximum
+    assert record.rows == (4, 5, 6, 7, 8, 9)
+
+
+@pytest.mark.parametrize("binned", [False, True])
+def test_a_spline_block_bounds_each_row_s_own_l1_sum(binned: bool) -> None:
+    """claude's Low on 7e6ef1ee: ``row_abs_sums`` on a spline block stored as ``B R``.
+
+    A sparse (``SparseSSPGroupMatrix``) or binned (``DiscretizedSSPGroupMatrix``)
+    block contributes ``|B| (|R| 1)``, which bounds each row's ``sum_j |(B R)_ij|``
+    for any signs, and equals it when ``B`` and ``R`` are non-negative.  Both
+    are sums of non-negative terms, so they agree to ``gamma`` of their term
+    count when they should be equal.
+    """
+    import scipy.sparse as sp
+
+    from superglm.group_matrix import (
+        DesignMatrix,
+        DiscretizedSSPGroupMatrix,
+        SparseSSPGroupMatrix,
+    )
+    from superglm.solvers.mode_score import row_abs_sums
+
+    rng = np.random.default_rng(454)
+    rows, knots, width = 40, 6, 4
+    bins = rng.integers(0, 10, rows)
+    unique = np.abs(rng.normal(size=(10, knots))) * (rng.uniform(size=(10, knots)) < 0.6)
+    basis = unique[bins]
+    for signed in (True, False):
+        reparam = rng.normal(size=(knots, width))
+        if not signed:
+            reparam = np.abs(reparam)
+        block = (
+            DiscretizedSSPGroupMatrix(unique, reparam, bins)
+            if binned
+            else SparseSSPGroupMatrix(sp.csr_matrix(basis), reparam)
+        )
+        sums = row_abs_sums(DesignMatrix([block], n=rows, p=width))
+        exact = np.abs(basis @ reparam).sum(axis=1)
+        tolerance = 2.0 * (knots * width + 2) * _U / (1.0 - (knots * width + 2) * _U)
+        assert np.all(sums >= exact * (1.0 - tolerance))
+        if not signed:
+            np.testing.assert_allclose(sums, exact, rtol=tolerance, atol=0.0)
+
+
+def _penalized_event_level(penalty: float, z: np.ndarray | None = None):
+    """``_two_level_design`` with level b's rows both events at ``eta = -20`` and its column penalized."""
+    dm, response, score, weight = _two_level_design(np.zeros(10) if z is None else z)
+    response[4:6] = 1.0
+    eta = np.full(10, math.log(0.5))
+    eta[4:6] = -20.0
+    odds = math.exp(-20.0) / -math.expm1(-20.0)
+    score[4:6] = weight[4:6]
+    fisher = weight.copy()
+    fisher[4:6] = weight[4:6] * odds
+    return dm, response, score, fisher, eta
+
+
+@pytest.mark.parametrize(("penalty", "boundary"), [(2e-8, False), (2e-10, True), (0.0, True)])
+def test_a_penalized_events_direction_is_on_the_boundary_only_past_it(
+    penalty: float, boundary: bool
+) -> None:
+    """Codex P1 and claude's Low on #454: a penalty bends the direction, so its maximum can be interior.
+
+    Level b's two light rows are events at ``eta = -20`` along a truncated
+    direction whose column carries a penalty ``s``.  Their own Newton step,
+    ``sum s_i / (sum f_i + s)``, is about ``2 w / s`` in ``eta``: +1 at ``s =
+    2w``, where the penalized maximum along the step is interior (``eta ~
+    -19``), and +100 at ``s = 2w / 100``, which carries the rows past ``eta =
+    0``: the boundary.  Without a penalty the step is a recession direction:
+    the boundary.  a9d5870a read the boundary from the step's sign alone, so
+    it labelled the interior maximum a boundary supremum.  The interior one
+    is not at its maximum either, so it is refused, but as unresolved.
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    dm, response, score, fisher, eta = _penalized_event_level(penalty)
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=np.array([[1.0], [0.0], [0.0]]),
+        angle=1e-12,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=fisher,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: np.array([penalty * float(v[0]), 0.0, 0.0]),
+        penalty_size_apply=lambda v: np.array([penalty * abs(float(v[0])), 0.0, 0.0]),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+        eta=eta,
+    )
+    assert ratio > 1.0
+    (record,) = found
+    assert record.rows == (4, 5)
+    assert not record.at_maximum
+    assert record.boundary is boundary
+
+
+@pytest.mark.parametrize(
+    "angle",
+    [
+        1e-3,
+        pytest.param(
+            1e-2,
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason="#431: an empty support within the basis's error passes as aliasing",
+            ),
+        ),
+    ],
+)
+def test_a_wide_column_does_not_hide_a_light_set_as_aliasing(angle: float) -> None:
+    """claude's Medium on #454: the basis's error is each row's own, not the design's widest.
+
+    Beside a dense column spanning -1000 to 1000, #437's bound took every
+    row's movement error as ``4 angle`` times the design's l1 bound (1001):
+    at ``angle = 1e-3`` that is 4.0, above the light rows' movement of 1, so
+    the support was empty and the direction passed as aliasing.  Each row's
+    error is now ``4 l1_i (angle ||d||_2 + gamma (max |V|) |t|)`` with its own
+    ``l1_i`` (112 on the light rows): at ``1e-3`` the light rows are judged,
+    events rising along an unpenalized direction, a boundary supremum.
+
+    At ``1e-2`` their error, 4.5, exceeds their movement again while the
+    test is not vacuous: a basis error the angle allows could explain a
+    movement of 1 on a row whose l1 sum is 112, so an alias cannot be told
+    from a real movement.  That case still passes as aliasing, as on 0.36.0:
+    the documented limit, a strict xfail on the boundary record it should
+    give, recorded in #431 with its fix (a minimum-norm check of whether the
+    movement can be explained by a basis error the angle allows).  Refusing
+    that range refused exact aliases on large or ordinarily conditioned
+    designs (7e6ef1ee).
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    dm, response, score, fisher, eta = _penalized_event_level(
+        0.0, z=np.linspace(-1000.0, 1000.0, 10)
+    )
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=np.array([[1.0], [0.0], [0.0]]),
+        angle=angle,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=fisher,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: np.zeros(3),
+        penalty_size_apply=lambda v: np.zeros(3),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+        eta=eta,
+    )
+    assert ratio > 1.0
+    (record,) = found
+    assert record.rows == (4, 5)
+    assert record.boundary and not record.unresolved_basis
+
+
+def test_reml_refuses_an_all_events_light_cut_in_plain_words() -> None:
+    """claude's Low on #454: REML's wording is read off the PIRLS result, end to end.
+
+    The all-events light cut beside a RandomEffect whose smoothing parameter
+    REML estimates.  Each inner fit ends ``mean_space_boundary`` from the
+    truncated set (``mean_space_boundary_unresolved``), restoring the penalty
+    cannot move an unpenalized cut, and REML refuses saying the rows rise
+    towards probability 1.  Master f8e5ac01 certified the inner fits and
+    returned a REML fit.
+    """
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0, link_responses=(1.0, 1.0))
+    shares = {("a1", "b2"): "a1b0", ("a1", "b3"): "a1b0"}
+    frame["g"] = [shares.get((a, b), a + b) for a, b in zip(frame["A"], frame["B"], strict=True)]
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        direct_solve="gram",
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0"), "g": RandomEffect()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(
+            ObservedModeNotConvergedError,
+            match="4 row\\(s\\) rise towards probability 1 along a direction float64 cannot resolve",
+        ):
+            model.fit_reml(frame[["A", "B", "g"]], y, **fit)
+
+
+def test_the_pull_carries_the_null_basis_error() -> None:
+    """claude's #437 Low (PRRT_kwDORfJEl86oT-0e): a light set at its maximum beside a penalized column.
+
+    The truncated direction is level b's, computed with an error of
+    ``angle`` along a penalized column ``z`` whose penalty gradient is 1.
+    That error reaches the pull ``d' S beta``: brought to the light rows'
+    units (2^26) it is ~7e-5, and with the rows' own score zero it sets a
+    Newton step of ~5e-5, above the bar.  #437's floor counted the basis
+    error in the rows' movement but not in the pull, so it refused the set.
+    With the pull's share of the error counted, the rows are at their
+    maximum: weakly identified.
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    z = np.linspace(-1.0, 1.0, 10)
+    dm, response, score, weight = _two_level_design(z)
+    angle = 1e-12
+    basis = np.array([[1.0], [0.0], [angle]])
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=basis,
+        angle=angle,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=weight,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.array([0.0, 0.0, 1.0]),
+        penalty_size=np.array([0.0, 0.0, 1.0]),
+        penalty_apply=lambda v: np.array([0.0, 0.0, float(v[2])]),
+        penalty_size_apply=lambda v: np.array([0.0, 0.0, abs(float(v[2]))]),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio == 0.0
+    (record,) = found
+    assert record.at_maximum
+    assert record.rows == (4, 5)
+
+
+@pytest.mark.parametrize("along", ["level", "column"])
+def test_an_unresolved_null_basis_refuses(along: str) -> None:
+    """claude's #437 Low (r4164945870): a basis whose error reaches every row's movement refuses.
+
+    A row moves by at most its l1 bound times the direction's largest
+    coefficient, and the basis's error is ``4 (angle + gamma)`` times that.
+    At ``angle = 0.3`` every movement lies within the error, so no row can be
+    told moved: #437 read the empty support as aliasing and passed the stop.
+    It is not resolved, so the claim is refused (``inf``), with a record
+    naming the rows the direction visibly moves: beyond the rounding of
+    forming ``(X V) t``, ``4 gamma_{p+2} l1_i (max |V|) |t|``.  Along the
+    dense column, row 4's entry ``2 gamma_{p+2}`` moves it within that
+    rounding, so it is not named (claude's Nit on 4558acb8: the record read
+    ``gamma_{p+2} l1_i ||d||_inf`` and named it).
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    z = np.linspace(-1.0, 1.0, 10)
+    gamma = 5 * _U / (1.0 - 5 * _U)  # gamma_{p+2}, p = 3
+    z[4] = 2.0 * gamma
+    dm, response, score, weight = _two_level_design(z)
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=np.array([[1.0], [0.0], [0.0]] if along == "level" else [[0.0], [0.0], [1.0]]),
+        angle=0.3,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=weight,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: np.zeros(3),
+        penalty_size_apply=lambda v: np.zeros(3),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio == math.inf
+    (record,) = found
+    named = (4, 5) if along == "level" else (0, 1, 2, 3, 5, 6, 7, 8, 9)
+    assert record.unresolved_basis and record.rows == named
+
+
+def test_structural_null_columns_are_not_read_on_the_design() -> None:
+    """claude's #437 Low (r4164947185): a column without centred data is not multiplied through.
+
+    ``rank._null_basis`` ends with an exact unit vector per column whose
+    centred data are zero (``column_scale`` 0), which moves no row by
+    construction.  #437 formed one design product for it on every
+    certificate evaluation; only the discarded spectral direction is read.
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    dm, response, _, _ = _two_level_design(np.zeros(10))
+    products: list[int] = []
+    matvec = dm.matvec
+    dm.matvec = lambda v: products.append(1) or matvec(v)
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=np.array([[1.0, 0.0], [0.0, 0.0], [0.0, 1.0]]),
+        angle=1e-12,
+        mean_x=np.zeros(3),
+        row_score=2.0 * response - 1.0,
+        fisher_weights=np.ones(10),
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: np.zeros(3),
+        penalty_size_apply=lambda v: np.zeros(3),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+        column_scale=np.array([1.0, 1.0, 0.0]),
+    )
+    assert (ratio, found) == (0.0, ())
+    assert len(products) == 1
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
 def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: str) -> None:
     """Two numeric columns 1e-9 apart: the factorization truncates their difference, and the fit certifies.
 
@@ -1306,6 +2130,7 @@ def test_a_truncated_separated_set_is_read_off_its_responses() -> None:
         penalty_gradient=np.full(2, 1e-20),
         penalty_size=np.full(2, 1e-20),
         penalty_apply=lambda v: 1e-40 * np.asarray(v),
+        penalty_size_apply=lambda v: 1e-40 * np.abs(np.asarray(v)),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
     )
@@ -3143,6 +3968,153 @@ def test_the_halving_budget_reaches_the_fraction_to_the_boundary() -> None:
     assert 2.0**-depth < fraction <= 2.0 ** -(depth - 1)
     # float64's halving depth caps it
     assert budget([-1e-320, -1.0], [1.0, -1.0]) == 1074
+
+
+def _random_steps(rng: np.random.Generator, rows: int = 64):
+    """A state inside the space and a proposal that leaves it, across float64's range.
+
+    ``eta`` from -745 to -1e-150 and steps of 1e-150 to 1e150 either way, with
+    zero-weight rows outside the space, which the space test ignores.
+    """
+    eta = -np.exp(rng.uniform(np.log(1e-150), np.log(745.0), rows))
+    move = np.exp(rng.uniform(np.log(1e-150), np.log(1e150), rows)) * rng.choice([-1.0, 1.0], rows)
+    proposal = eta + move
+    proposal[0] = abs(proposal[0]) + 1.0  # leaves the space
+    weights = np.where(rng.uniform(size=rows) < 0.1, 0.0, 1.0)
+    weights[0] = 1.0
+    eta[weights == 0.0] = 3.0
+    proposal[weights == 0.0] = 5.0
+    return eta, proposal, weights
+
+
+def test_the_first_halving_is_the_first_the_space_test_can_accept() -> None:
+    """``mean_space_first_halving`` skips only halvings the space test refuses.
+
+    Every depth above the one returned leaves a positive-weight row at
+    ``eta >= 0`` when the trial is formed as the line search forms it, ``eta +
+    2^-j (proposal - eta)``, so the halving would refuse it; at the depth
+    returned the row attaining the fraction to the boundary is inside.
+    """
+    from superglm.solvers.irls_state import mean_space_first_halving
+
+    family, link = Binomial(), LogLink()
+    rng = np.random.default_rng(431)
+
+    def first(eta, proposal, weights, link=link):
+        return mean_space_first_halving(
+            committed=SimpleNamespace(eta_unclipped=np.asarray(eta, dtype=float)),
+            proposal=SimpleNamespace(eta_unclipped=np.asarray(proposal, dtype=float)),
+            weights=np.asarray(weights, dtype=float),
+            family=family,
+            link=link,
+        )
+
+    deep = 0
+    for _ in range(400):
+        eta, proposal, weights = _random_steps(rng)
+        depth = first(eta, proposal, weights)
+        d = proposal - eta
+        for shallower in range(1, depth):
+            trial = eta + 2.0**-shallower * d
+            assert np.any((trial >= 0.0) & (weights > 0.0))
+        rising = (weights > 0.0) & (d > 0.0)
+        row = np.flatnonzero(rising)[np.argmin(-eta[rising] / d[rising])]
+        assert eta[row] + 2.0**-depth * d[row] < 0.0
+        deep += depth > 20
+    assert deep > 100  # many lie past the ordinary 20 halvings
+    # nothing to skip: a link that stays in (0, 1), a committed state outside
+    # the space, a proposal inside it, a non-finite proposal row
+    assert first([-1.0, -1.0], [5.0, -1.0], [1.0, 1.0], link=LogitLink()) == 1
+    assert first([0.0, -1.0], [5.0, -1.0], [1.0, 1.0]) == 1
+    assert first([-1.0, -1.0], [-0.5, -2.0], [1.0, 1.0]) == 1
+    assert first([-1.0, -1.0], [1.0, np.inf], [1.0, 1.0]) == 1
+
+
+def test_skipping_refused_halvings_keeps_every_decision() -> None:
+    """``_select_irls_trial`` decides the same step with and without the skip, with fewer evaluations.
+
+    On random states the merit is a convex quadratic in the step, minimised
+    at a random fraction, so the merit test refuses some feasible trials too;
+    a lowered fit's extended budget is on for half of them.  The accepted
+    fraction, its depth and a rejection agree exactly, and the skip never
+    evaluates more states.
+    """
+    from superglm.solvers.irls_state import (
+        _mean_space_halving_budget,
+        _select_irls_trial,
+        mean_space_first_halving,
+    )
+
+    family, link = Binomial(), LogLink()
+    rng = np.random.default_rng(437)
+
+    def state(eta_values, merit):
+        return SimpleNamespace(
+            beta=np.zeros(1),
+            intercept=0.0,
+            eta_unclipped=eta_values,
+            eta=eta_values,
+            mu=np.zeros_like(eta_values),
+            deviance=merit,
+            penalized_deviance=None,
+        )
+
+    saved = 0
+    for case in range(400):
+        eta, proposal, weights = _random_steps(rng)
+        target = 2.0 ** rng.uniform(-60.0, 0.0)
+        direction = proposal - eta
+        committed = state(eta, target**2)
+        full = state(proposal, (1.0 - target) ** 2)
+
+        def decide(skip, case=case, weights=weights, target=target, direction=direction):
+            calls: list[float] = []
+
+            def evaluate(alpha):
+                calls.append(alpha)
+                return state(committed.eta_unclipped + alpha * direction, (alpha - target) ** 2)
+
+            budget = lambda: _mean_space_halving_budget(  # noqa: E731
+                committed=committed,
+                proposal=full,
+                weights=weights,
+                family=family,
+                link=link,
+                default=20,
+            )
+            first = lambda: mean_space_first_halving(  # noqa: E731
+                committed=committed,
+                proposal=full,
+                weights=weights,
+                family=family,
+                link=link,
+            )
+            decision = _select_irls_trial(
+                committed=committed,
+                proposal=full,
+                evaluate_state=evaluate,
+                invalid_state=lambda candidate: bool(
+                    np.any((candidate.eta_unclipped >= 0.0) & (weights > 0.0))
+                ),
+                extended_max_halving=budget if case % 2 else None,
+                merit_delta=lambda candidate, base: candidate.deviance - base.deviance,
+                merit_roundoff=lambda candidate, base: 0.0,
+                first_halving=first if skip else None,
+            )
+            return decision, calls
+
+        halved, halved_calls = decide(False)
+        skipped, skipped_calls = decide(True)
+        assert (skipped.alpha, skipped.step_halvings, skipped.step_rejected) == (
+            halved.alpha,
+            halved.step_halvings,
+            halved.step_rejected,
+        )
+        assert set(skipped_calls) <= set(halved_calls)
+        assert skipped.trials_attempted == 1 + len(skipped_calls)
+        assert skipped.skipped == len(halved_calls) - len(skipped_calls)
+        saved += skipped.skipped
+    assert saved > 0
 
 
 def _frequency_weighted_events(*, plain: bool, direct_solve: str) -> SuperGLM:

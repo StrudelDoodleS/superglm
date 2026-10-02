@@ -51,6 +51,8 @@ class _IRLSStepDecision:
     step_halvings: int
     step_rejected: bool
     trials_attempted: int = 1
+    # halvings refused unevaluated, outside the mean space (``mean_space_first_halving``)
+    skipped: int = 0
 
 
 def _immutable_array(values: NDArray) -> NDArray:
@@ -580,6 +582,75 @@ def _mean_space_halving_budget(
     return min(depth + default, _MAX_FLOAT64_HALVING_DEPTH)
 
 
+def mean_space_first_halving(
+    *,
+    committed: _IRLSState,
+    proposal: _IRLSState,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+) -> int:
+    """The first halving depth whose trial the mean-space test can accept: ``1`` or deeper.
+
+    ``1`` unless the family and link can leave their mean space
+    (``mean_space_violation``), the committed state is inside it and the
+    proposal is not.  The binomial/log space ``{eta < 0}`` is open and convex,
+    so along the proposal step ``d = eta_prop - eta`` the trial at fraction
+    ``alpha`` stays inside exactly when ``alpha < t = min(-eta_i / d_i)`` over
+    positive-weight rows with ``d_i > 0``: the largest step to the boundary,
+    which interior-point methods compute once by this ratio test before they
+    backtrack below it (Nocedal & Wright 2006, Numerical Optimization,
+    section 19.2, eq. (19.9) and section 19.3, eq. (19.27); Waechter & Biegler
+    2006, Math. Program. 106, eq. (15)).  Halving from the full step instead
+    evaluates every power of two above ``t``, each refused by the space test:
+    about ``log2(1 / t)`` deviance passes per step, and dozens per step where
+    the iterate creeps towards the boundary.
+
+    Each depth ``j`` whose trial the row attaining ``t`` leaves outside, with
+    ``fl(eta_r + fl(2^-j d_r)) >= 0`` formed exactly as the trial forms it, is
+    a trial the space test refuses, so the search can start at the first depth
+    that row admits.  That depth is found by scanning from ``floor(log2(1 /
+    t))`` on that one row.  No trial the test could accept is skipped, so the
+    accepted step, and every fit, is the halving's own bit for bit; only the
+    refused evaluations go.  Backing off by a fixed fraction ``tau t`` instead
+    moves the iterate's path, and on #437's extreme sweep that path left 20
+    light levels the halving certified short of the bar (``score_stagnated``).
+    """
+    violates = mean_space_violation(family, link)
+    if violates is None or violates(committed.eta_unclipped, weights):
+        return 1
+    if not violates(proposal.eta_unclipped, weights):
+        return 1
+    eta = np.asarray(committed.eta_unclipped, dtype=np.float64)
+    positive = np.asarray(weights) > 0.0
+    # the direction the trials step along, formed as ``evaluate_trial`` forms it
+    step = np.asarray(proposal.eta_unclipped, dtype=np.float64) - eta
+    if not np.all(np.isfinite(step[positive])):
+        return 1
+    rising = np.flatnonzero(positive & (step > 0.0))
+    if rising.size == 0:
+        return 1
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
+        quotient = -eta[rising] / step[rising]
+    row = int(rising[int(np.argmin(quotient))])
+    base, direction = eta[row], step[row]
+    fraction = float(np.min(quotient))
+
+    def inside(depth: int) -> bool:
+        with np.errstate(under="ignore"):
+            return bool(base + 2.0**-depth * direction < 0.0)
+
+    limit = _MAX_FLOAT64_HALVING_DEPTH
+    depth = 1
+    if math.isfinite(fraction) and fraction > 0.0:
+        depth = min(max(1, math.floor(-math.log2(fraction))), limit)
+    while depth > 1 and inside(depth - 1):
+        depth -= 1
+    while depth < limit and not inside(depth):
+        depth += 1
+    return depth
+
+
 def _select_irls_trial(
     *,
     committed: _IRLSState,
@@ -591,12 +662,19 @@ def _select_irls_trial(
     merit_delta: MeritDelta | None = None,
     merit_scale: float = 1.0,
     merit_roundoff: MeritRoundoff | None = None,
+    first_halving: Callable[[], int] | None = None,
 ) -> _IRLSStepDecision:
     """Return the largest safe fixed-endpoint trial, or reject atomically.
 
     ``extended_max_halving`` is resolved only after the ordinary budget is
     exhausted.  Extreme Poisson/sqrt fits can therefore search beyond the
     default float depth without paying to derive that bound on normal steps.
+
+    ``first_halving``, resolved only once the full proposal is refused,
+    gives the first depth whose trial the space test can accept
+    (``mean_space_first_halving``): shallower depths are refused without
+    being evaluated, so the decision is the one the halving reaches, with
+    fewer evaluations.  ``trials_attempted`` counts the states evaluated.
     """
     if max_halving < 1:
         raise ValueError("max_halving must be at least 1")
@@ -610,11 +688,16 @@ def _select_irls_trial(
     ):
         return _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
 
+    first = 1 if first_halving is None else first_halving()
     trials_attempted = 1
+    skipped = 0
     for depth in range(1, max_halving + 1):
         alpha = 2.0**-depth
         if alpha == 0.0:
             return _IRLSStepDecision(0.0, 0, True, trials_attempted=trials_attempted)
+        if depth < first:
+            skipped += 1  # outside the space: the test would refuse it
+            continue
         candidate = evaluate_state(alpha)
         trials_attempted += 1
         if not _irls_trial_is_unsafe(
@@ -625,7 +708,9 @@ def _select_irls_trial(
             merit_scale,
             merit_roundoff,
         ):
-            return _IRLSStepDecision(alpha, depth, False, trials_attempted=depth + 1)
+            return _IRLSStepDecision(
+                alpha, depth, False, trials_attempted=trials_attempted, skipped=skipped
+            )
 
     if extended_max_halving is not None:
         extended_limit = extended_max_halving()
@@ -640,6 +725,9 @@ def _select_irls_trial(
                     True,
                     trials_attempted=trials_attempted,
                 )
+            if depth < first:
+                skipped += 1
+                continue
             candidate = evaluate_state(alpha)
             trials_attempted += 1
             if not _irls_trial_is_unsafe(
@@ -654,7 +742,8 @@ def _select_irls_trial(
                     alpha,
                     depth,
                     False,
-                    trials_attempted=depth + 1,
+                    trials_attempted=trials_attempted,
+                    skipped=skipped,
                 )
 
-    return _IRLSStepDecision(0.0, 0, True, trials_attempted=trials_attempted)
+    return _IRLSStepDecision(0.0, 0, True, trials_attempted=trials_attempted, skipped=skipped)

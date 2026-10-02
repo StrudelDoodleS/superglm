@@ -86,16 +86,26 @@ _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 _LEVERAGE_GRADIENT_MIN_PENALTIES = 4
 
 
-def _mean_space_boundary_message(rows: int, *, estimated: bool) -> str:
-    """Why a fit whose maximum stays at the mean-space boundary has no REML criterion."""
+def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
+    """Why a fit whose maximum stays at the mean-space boundary has no REML criterion.
+
+    ``unresolved``: the rows rise towards the boundary along a direction the
+    factorization truncates (``TruncatedDirection.boundary``) rather than
+    being fitted at it.
+    """
     where = (
         "even with every estimated smoothing parameter at its upper bound"
         if estimated
         else "at the fixed smoothing parameters"
     )
+    fitted = (
+        "rise towards probability 1 along a direction float64 cannot resolve"
+        if unresolved
+        else "are fitted at probability 1"
+    )
     return (
-        f"The binomial/log model has no interior maximum: {rows} row(s) are fitted at "
-        f"probability 1, the boundary of its parameter space, {where}. The maximum "
+        f"The binomial/log model has no interior maximum: {rows} row(s) {fitted}, the "
+        f"boundary of its parameter space, {where}. The maximum "
         "is constrained there rather than stationary, so the Laplace-approximate REML "
         "criterion is not defined at it. The unpenalized part of the model fits these "
         "rows at probability one (for example a categorical level or parametric term "
@@ -581,6 +591,7 @@ def optimize_direct_reml(
                     _mean_space_boundary_message(
                         int(pirls_result.mean_space_boundary_rows),
                         estimated=bool(np.any(estimated_mask)),
+                        unresolved=bool(pirls_result.mean_space_boundary_unresolved),
                     ),
                     infeasible_detail=(
                         "the penalized maximum lies on the boundary of the binomial mean space"
