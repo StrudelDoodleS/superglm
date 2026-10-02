@@ -91,6 +91,7 @@ decision or bound reads a lazily formed quantity.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from functools import cached_property
 
@@ -112,6 +113,11 @@ _UNDERFLOW_UNIT = 2.0**-1074
 _EPS = float(np.finfo(np.float64).eps)
 # Lemma 2.5 of Rump (2006): fl(d - phi |d|) <= a - b for d = fl(a - b).
 _PHI = _UNIT_ROUNDOFF * (1.0 + 2.0 * _UNIT_ROUNDOFF)
+
+
+def _gamma(count: float) -> float:
+    """Higham's ``gamma_n = n u / (1 - n u)`` (2002, Lemma 3.1)."""
+    return count * _UNIT_ROUNDOFF / (1.0 - count * _UNIT_ROUNDOFF)
 
 
 @dataclass(frozen=True, eq=False)
@@ -540,6 +546,41 @@ class BorderFactor:
         return np.sum((block @ side.inverse_kept) * block, axis=1)
 
 
+def _row_norms(matrix: NDArray) -> NDArray:
+    """Each row's 2-norm, scaled by its largest entry so it neither overflows nor underflows."""
+    if matrix.size == 0:
+        return np.zeros(matrix.shape[0])
+    largest = np.max(np.abs(matrix), axis=1)
+    safe = np.where(largest > 0.0, largest, 1.0)
+    return largest * np.sqrt(np.sum((matrix / safe[:, None]) ** 2, axis=1))
+
+
+def _paired_majorant(e: NDArray, g: NDArray, diagonal: NDArray) -> NDArray:
+    """``t e_i^2 + g_i^2 / t`` with ``t`` minimising its Jacobi-scaled sum, range-safe.
+
+    Majorises ``|e_i g_j| + |g_i e_j| <= sqrt(b_i b_j)`` for every ``t > 0``
+    (Cauchy-Schwarz).  With ``e = e_max e^`` and ``g = g_max g^`` the minimiser
+    is ``t = (g_max / e_max) rho``, ``rho = sqrt(sum g^^2 / d / sum e^^2 / d)``,
+    so ``b_i = e_max g_max (rho e^_i^2 + g^_i^2 / rho)``: no square of ``e``
+    or ``g`` and no quotient of their sums is formed.  Zero where every
+    product ``e_i g_j`` is.
+    """
+    e_max = float(np.max(e, initial=0.0))
+    g_max = float(np.max(g, initial=0.0))
+    if not (e_max > 0.0 and g_max > 0.0):
+        return np.zeros_like(e)
+    e_hat, g_hat = e / e_max, g / g_max
+    resolved = diagonal > 0.0
+    rho = 1.0
+    if np.any(resolved):
+        scale = diagonal[resolved] / float(np.max(diagonal[resolved]))
+        spread = float(np.sum(e_hat[resolved] ** 2 / scale))
+        reach = float(np.sum(g_hat[resolved] ** 2 / scale))
+        if spread > 0.0 and reach > 0.0 and np.isfinite(spread) and np.isfinite(reach):
+            rho = math.sqrt(reach / spread)
+    return e_max * g_max * (rho * e_hat**2 + g_hat**2 / rho)
+
+
 def _deflate(Q_d, S, U, generators):
     """Step 1: the kept generators, the deflated matrix ``Q'''``, its bound and the elimination."""
     m = Q_d.shape[0]
@@ -558,6 +599,23 @@ def _deflate(Q_d, S, U, generators):
     if not N.shape[1]:
         return None, np.arange(m), Q_d + S, np.array(U, dtype=np.float64), S, 0.0, None, None
     a_NN = 0.5 * (a_NN + a_NN.T)
+    # The generators' penalty products themselves round: |d a_MN| <= gamma_m
+    # |S||N| and |d a_NN| <= gamma_(2m) |N|'|S||N| (Higham 2002, section 3.5).
+    # A thin level's penalized alias lies almost in S's null space, so a_NN is
+    # those products' cancellation (2e-10 against |N|'|S||N| near 1e-3 on an
+    # sz term whose every level is thin), and the elimination multiplies their
+    # rounding by its multiplier G = a_MN a_NN^-1 (below).  Unresolved when
+    # ||a_NN^-1|| ||E_NN|| reaches 1/2: those generators then stay with the
+    # pivoted factorization, as an exact null does.
+    absolute_N = np.abs(N)
+    S_N = np.abs(S) @ absolute_N
+    E_MN = _gamma(m) * S_N
+    E_NN = _gamma(2 * m) * (absolute_N.T @ S_N)
+    a_values = np.linalg.eigvalsh(a_NN)
+    E_norm = float(np.linalg.norm(E_NN, 2))
+    ratio = E_norm / float(a_values[0]) if a_values[0] > 0.0 else float("inf")
+    if not ratio < 0.5:
+        return None, np.arange(m), Q_d + S, np.array(U, dtype=np.float64), S, 0.0, None, None
     keep = np.ones(m, dtype=bool)
     keep[references] = False
     M = np.flatnonzero(keep)
@@ -574,6 +632,19 @@ def _deflate(Q_d, S, U, generators):
     logdet_N = float(2.0 * np.sum(np.log(np.diag(lower))))
     # G = a_MN a_NN^-1, the elimination multiplier of L1 = [[I, 0], [G, I]]
     G = scipy.linalg.solve_triangular(lower, Y, lower=True, trans="T", check_finite=False).T
+    # The products' rounding through the elimination: at first order S_M moves
+    # by d a_MN G' + G d a_NM - G d a_NN G', and the inverse's remainder is a
+    # factor 1 / (1 - ratio).  With e_i = ||E_MN[i]|| and g_i = ||G[i]||,
+    # |e_i g_j| + |g_i e_j| <= sqrt((t e_i^2 + g_i^2 / t)(t e_j^2 + g_j^2 / t))
+    # for every t > 0 (Cauchy-Schwarz) and |g_i' d a_NN g_j| <= ||E_NN|| g_i g_j,
+    # so the column bound below keeps factor_border's |dQ_ij| <= sqrt(b_i b_j);
+    # t minimises the Jacobi-scaled sum u_s, as the border majorant's own does.
+    # Range-safe (Sol review of 0ccab297): norms by max-abs scaling and t through
+    # ratios of scaled sums, so a penalty near 1e-140 neither overflows t nor
+    # underflows e_i^2 into a spurious t = 1.
+    e = _row_norms(E_MN[M])
+    g = _row_norms(G)
+    bound = bound + _paired_majorant(e, g, np.diag(Q)) + (E_norm / (1.0 - ratio)) * g * g
     return (N, references), M, Q, bound, S_M, logdet_N, G, lower
 
 

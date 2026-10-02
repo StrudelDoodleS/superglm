@@ -294,6 +294,7 @@ def _reporting_rows(
         frame,
         offset=offset_values,
         random_effects="conditional",
+        fitted=True,
     )
     base_eta = eta - model.result.beta[group.sl][codes]
     return codes, y_values, weights, base_eta

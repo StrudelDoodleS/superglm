@@ -159,6 +159,9 @@ def relativities(model, with_se=False, centering="native"):
     if getattr(model, "_editor_inference_stale", False) and with_se:
         warnings.warn(_EDITOR_STALE_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
         with_se = False
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
     frames = _relativities(
         model._feature_order,
         model._interaction_order,
@@ -219,11 +222,15 @@ def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200
             "would be simulated from the unconstrained fit's covariance around constrained "
             "coefficients. Fit the constraint (Constraint.fit.*) if you need a band."
         )
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
     return _simultaneous_bands(
         feature,
         result=model.result,
         groups=model._groups,
         specs=model._specs,
+        interaction_specs=model._interaction_specs,
         covariance_fn=lambda: model._coef_covariance,
         alpha=alpha,
         n_sim=n_sim,
@@ -256,6 +263,9 @@ def term_inference(
         warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
         with_se = False
         simultaneous = False
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
     inference = _term_inference(
         name,
         result=model.result,
