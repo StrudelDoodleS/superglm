@@ -935,6 +935,12 @@ def _half_block_decrement(hessian: NDArray, gradient: NDArray) -> float:
 _ROW_SET_CELL_LIMIT = 4096
 
 
+def _set_totals(sums: list, index: int) -> tuple[float, float, float, float, float, float]:
+    """One set's (score, |score|, represented, count, rising, falling) totals."""
+    own, absolute, represented, count, up, down = (float(total[index]) for total in sums)
+    return own, absolute, represented, count, up, down
+
+
 def row_set_residual(
     *,
     dm: DesignMatrix,
@@ -1061,7 +1067,7 @@ def row_set_residual(
                     float(np.sum(size[columns])),
                     float(np.sum(curvature[columns])),
                 )
-            judge(*(float(total[level]) for total in sums), *direction)
+            judge(*_set_totals(sums, level), *direction)
     if len(groups) < 2:
         return worst
     stacked = np.column_stack([matrix.codes for _, matrix in groups])
@@ -1093,7 +1099,7 @@ def row_set_residual(
         direction = solve @ basis[cell]  # (1 + one-hot columns,): intercept first
         weights_on_columns = direction[1:]
         judge(
-            *(float(total[cell]) for total in sums),
+            *_set_totals(sums, int(cell)),
             float(weights_on_columns @ penalty[column_index]),
             float(np.abs(weights_on_columns) @ size[column_index]),
             float(np.abs(weights_on_columns) @ curvature[column_index]),
