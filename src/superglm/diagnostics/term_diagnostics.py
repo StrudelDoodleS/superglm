@@ -337,7 +337,9 @@ def _drop_term_holdout(
         compensated=centre is not None
         and bool(getattr(model.result, "centred_sum_compensated", False)),
     )
-    contributions: dict[str, tuple[NDArray[np.floating], ...]] = {}
+    # Each term as ``(pieces, contribution)`` expansions (``base.EtaSum``): the drop
+    # removes them all, a compensated pair's carried ``c' beta`` included.
+    contributions: dict[str, list[tuple[tuple, NDArray[np.floating]]]] = {}
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
@@ -354,18 +356,19 @@ def _drop_term_holdout(
             contribution, _ = base._score_unidentified_factor_smooth(
                 term, X_val, beta, population=False
             )
+            expansion = ((contribution,), contribution)
         elif block is not None and np.any(block != 0.0):
-            contribution = (
-                base._centred_term_pieces(term, X_val, beta, block)
-                if accumulated.compensated
-                else (base._centred_term_contribution(term, X_val, beta, block),)
-            )
+            if accumulated.compensated:
+                expansion = base._centred_term_expansion(term, X_val, beta, block)
+            else:
+                contribution = base._centred_term_contribution(term, X_val, beta, block)
+                expansion = ((contribution,), contribution)
             centre_shifts[term["name"]] = math.fsum(block * beta[term["beta_idx"]])
         else:
             contribution = base._score_prediction_term_exact(term, X_val, beta)
-        pieces = contribution if isinstance(contribution, tuple) else (contribution,)
-        contributions[term["name"]] = pieces
-        accumulated.add_pieces(pieces)
+            expansion = ((contribution,), contribution)
+        contributions[term["name"]] = [expansion]
+        accumulated.add_expansion(*expansion)
         if accumulated.compensated and centre_shifts[term["name"]] != 0.0:
             # A compensated pair holds a carried c dbeta that the dropped term's
             # c' beta cancels: subtract it inside the sum, as exact products,
@@ -373,9 +376,8 @@ def _drop_term_holdout(
             from superglm.solvers.mode_score import two_product
 
             shift = two_product(block, np.asarray(beta[term["beta_idx"]], dtype=np.float64))
-            contributions[term["name"]] = pieces + tuple(
-                float(value) for part in shift for value in np.ravel(part)
-            )
+            pieces = tuple(float(value) for part in shift for value in np.ravel(part))
+            contributions[term["name"]].append((pieces, centre_shifts[term["name"]]))
             centre_shifts[term["name"]] = 0.0
 
     eta_full = stabilize_eta(accumulated.finish() + offset_arr, model._link)

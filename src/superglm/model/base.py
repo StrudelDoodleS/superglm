@@ -461,9 +461,10 @@ class EtaSum:
     into the pair (``PIRLSResult.centred_sum_compensated``), ``alpha`` holds
     that column's ``c dbeta`` and can cancel against a row's ``(x - c) beta``.
     The sum is then compensated (``mode_score.CompensatedSum``), with ``alpha``
-    first, each centred column as its exact pieces (``_centred_term_pieces``)
-    and ``alpha_lo`` joining the errors last.  ``mode_score.linear_predictor``
-    evaluates the solver's pair the same way.
+    first, each centred column as its exact pieces (``_centred_term_expansion``)
+    and ``alpha_lo`` joining the errors last.  A row the expansion cannot
+    finish takes the plain predictor (``CompensatedSum``).
+    ``mode_score.linear_predictor`` evaluates the solver's pair the same way.
     """
 
     __slots__ = ("compensated", "intercept", "intercept_lo", "total")
@@ -476,7 +477,7 @@ class EtaSum:
         self.intercept, self.intercept_lo = intercept, intercept_lo
         self.compensated = bool(compensated)
         self.total: NDArray | CompensatedSum = (
-            CompensatedSum(np.full(n, intercept, dtype=np.float64))
+            CompensatedSum(np.full(n, intercept, dtype=np.float64), float(intercept_lo or 0.0))
             if self.compensated
             else start_eta(n, intercept, intercept_lo)
         )
@@ -491,23 +492,29 @@ class EtaSum:
         self.add(values)
         return self
 
-    def add_pieces(self, pieces) -> None:
-        for piece in pieces:
-            self.add(piece)
+    def add_expansion(self, pieces, contribution) -> None:
+        """Add a term as its exact ``pieces``, ``contribution`` the term as fitted scores it."""
+        if self.compensated:
+            self.total.add_expansion(pieces, contribution)
+        else:
+            self.total += contribution
 
     def finish(self, without=()) -> NDArray:
-        """The predictor, less the addends ``without`` (a dropped term's pieces)."""
+        """The predictor, less the ``(pieces, contribution)`` terms ``without`` (a drop)."""
         if not self.compensated:
             total = self.total
-            for piece in without:
-                total = total - piece
+            for _, contribution in without:
+                total = total - contribution
             return finish_eta(total, self.intercept, self.intercept_lo)
         total = self.total
         if without:
             total = self.total.copy()
-            for piece in without:
-                total.add(-np.asarray(piece, dtype=np.float64))
-        return total.value(float(self.intercept_lo or 0.0))
+            for pieces, contribution in without:
+                total.add_expansion(
+                    tuple(-np.asarray(piece, dtype=np.float64) for piece in pieces),
+                    -np.asarray(contribution, dtype=np.float64),
+                )
+        return total.value()
 
 
 def scores_centred(spec) -> bool:
@@ -556,26 +563,27 @@ def _term_columns(term: dict[str, Any], X: EagerFrame) -> tuple[NDArray, ...]:
     return (left, right)
 
 
-def _centred_term_pieces(
+def _centred_term_expansion(
     term: dict[str, Any],
     X: EagerFrame,
     beta_all: NDArray,
     centre: NDArray,
-) -> tuple[NDArray, ...]:
-    """``(B - 1 c') beta`` as addends whose exact sum it is, for a compensated ``EtaSum``.
+) -> tuple[tuple[NDArray, ...], NDArray]:
+    """``(B - 1 c') beta`` as ``(pieces, contribution)`` for a compensated ``EtaSum``.
 
-    A column scored about its centre gives ``mode_score.centred_column_pieces``
-    of its values (exact to ``u^2``); any other term gives its one
-    contribution (``_centred_term_contribution``).
+    A column scored about its centre gives ``mode_score.centred_column_expansion``
+    of its values: pieces exact to ``u^2`` and its fitted ``(x - c) beta`` bit for
+    bit.  Any other term is its one contribution (``_centred_term_contribution``).
     """
     spec = term["spec"]
     if not scores_centred(spec):
-        return (_centred_term_contribution(term, X, beta_all, centre),)
-    from superglm.solvers.mode_score import centred_column_pieces
+        contribution = _centred_term_contribution(term, X, beta_all, centre)
+        return (contribution,), contribution
+    from superglm.solvers.mode_score import centred_column_expansion
 
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64).ravel()
     values = np.asarray(spec._centred_values(*_term_columns(term, X)), dtype=np.float64).ravel()
-    return centred_column_pieces(values, float(centre[0]), float(beta[0]))
+    return centred_column_expansion(values, float(centre[0]), float(beta[0]))
 
 
 def _score_prediction_term_fast_discrete(
@@ -653,7 +661,7 @@ def _predict_eta(
             block = centre[term["beta_idx"]]
             if np.any(block != 0.0):
                 if eta.compensated:
-                    eta.add_pieces(_centred_term_pieces(term, frame, beta_all, block))
+                    eta.add_expansion(*_centred_term_expansion(term, frame, beta_all, block))
                 else:
                     eta.add(_centred_term_contribution(term, frame, beta_all, block))
                 return

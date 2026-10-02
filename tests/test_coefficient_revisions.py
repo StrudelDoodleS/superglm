@@ -601,11 +601,23 @@ def test_holdout_drop_term_reads_a_slope_edit_exactly():
     compensated sum had rounded at ``|alpha|``, and ``alpha`` holds the carried
     ``c dbeta``.  On Sol's P2a fixture with a slope of 1.1 and holdout rows at
     ``x = 0``, where dropping ``x`` changes nothing, the drop read 4.0 against
-    2.3333 and ``delta_deviance`` was 16.7.  v0.36.0 read 0.  The shift is now
-    subtracted inside the sum as exact products.  Bound: the two predictors
-    differ by at most twice the compensated sum's ``u |eta| + gamma_k^2``
-    magnitudes ``d``, so the deviances differ by ``2 sum |r| d + n d^2``.
+    2.3333 and ``delta_deviance`` was 13.3.  v0.36.0 read 0.  The shift is now
+    subtracted inside the sum as exact products.
+
+    Bound, from the two sums' own addends.  At ``x = 0`` both predictors have
+    the exact sum ``alpha + alpha_lo - c beta``.  The full one is ``alpha``, the
+    three pieces of ``(0 - c) beta`` and ``alpha_lo``; the drop adds the pieces
+    negated and the two TwoProduct pieces of ``c beta``.  Sum2 over ``n``
+    addends with ``alpha_lo`` joining the errors is within ``u |eta| +
+    gamma_(n-1)^2 A + gamma_(n-1) |alpha_lo|`` of the exact sum, ``A`` the other
+    addends' magnitudes (Ogita, Rump & Oishi 2005, Proposition 4.5), so the
+    predictors differ by at most ``D``, the two budgets' sum.  The deviances
+    then differ by ``2 sum |r| D + n D^2``, plus each one's own rounding,
+    ``gamma_(n+1)`` of itself (Higham 2002, section 3.1).  Everything is doubled
+    for the magnitudes' own rounding.
     """
+    from superglm.solvers.mode_score import centred_column_expansion, two_product
+
     frame = pd.DataFrame({"x": 1e16 * np.resize([0.0, 1.0, 2.0], 60)})
     y = np.resize([2.0, 3.0, 2.0], 60)
     model = _numeric_fit(frame, y)
@@ -617,13 +629,27 @@ def test_holdout_drop_term_reads_a_slope_edit_exactly():
     table = edited.term_drop_diagnostics(
         frame, y, mode="holdout", X_val=holdout, y_val=y_holdout
     ).set_index("feature")
+
     result = edited.result
-    p = result.beta.size
-    magnitude = abs(float(result.centred_intercept)) + abs(result.centred_intercept_lo or 0.0)
-    magnitude += abs(float(np.asarray(result.state_center)[0]) * float(result.beta[0]))
+    centre, beta = float(np.asarray(result.state_center)[0]), float(result.beta[0])
+    alpha = abs(float(result.centred_intercept))
+    alpha_lo = abs(result.centred_intercept_lo or 0.0)
+    pieces, _ = centred_column_expansion(_public_columns(edited, holdout)[:, 0], centre, beta)
+    term = sum(np.abs(piece) for piece in pieces)
+    shift = sum(np.abs(np.asarray(piece)) for piece in two_product(np.array([centre]), beta))
     eta = edited.predict(holdout)
-    d = 2.0 * ((_gamma(3 * p + 4) ** 2 + _U**2) * magnitude + _U * float(np.max(np.abs(eta))))
-    bound = 2.0 * float(np.sum(np.abs(y_holdout - eta))) * d + len(eta) * d**2
+
+    def budget(count, magnitude):
+        gamma = _gamma(count - 1)
+        return _U * np.abs(eta) + gamma**2 * magnitude + gamma * alpha_lo
+
+    gap = 2.0 * (budget(5, alpha + term) + budget(10, alpha + 2.0 * term + shift))
+    residual = np.abs(y_holdout - eta)
+    n = len(eta)
+    deviances = float(np.sum(residual**2)) + float(np.sum((residual + gap) ** 2))
+    bound = 2.0 * (
+        2.0 * float(np.sum(residual * gap)) + float(np.sum(gap**2)) + _gamma(n + 1) * deviances
+    )
     assert abs(float(table.loc["x", "delta_deviance"])) <= bound
 
 
@@ -635,16 +661,20 @@ def test_a_compensated_sum_whose_running_total_overflows_returns_the_plain_sum(s
     returns ``inf`` and a ``nan`` error (Codex's review of #453).  The rows whose
     compensated value is not finite take the plain sum of the addends, the
     start added last; every other row keeps the compensated value bit for bit.
+    The second row's ``2.5 + 1e16 + 1 - 1e16`` (with ``0.25`` remaining) is 3.75
+    compensated and 2.75 plain, so a fallback taken for the whole array, not
+    row by row, reads 2.75 there (Claude's second review of #453).
     """
     from superglm.solvers.mode_score import CompensatedSum
 
     start = np.array([sign * 1e308, 2.5])
-    total = CompensatedSum(start)
+    total = CompensatedSum(start, 0.25)
     total.add(np.array([sign * 1e308, 1e16]))
+    total.add(np.array([0.0, 1.0]))
     total.add(np.array([-sign * 1e308, -1e16]))
-    value = total.value(0.25)
+    value = total.value()
     assert value[0] == sign * 1e308
-    assert value[1] == 2.75
+    assert value[1] == 3.75
 
 
 def test_the_intercept_check_refuses_a_relation_that_overflows():
@@ -706,3 +736,119 @@ def test_a_carried_change_past_the_float_range_falls_back_to_the_raw_intercept()
         warnings.simplefilter("ignore")
         with pytest.raises(RuntimeError, match="fit candidate scalar results must be finite"):
             _slope_edited(model, frame, y, {"x": 1e306})
+
+
+def test_a_carried_change_past_the_float_range_commits_under_a_clipping_link():
+    """Under the log link the year-column edit of 1e306 commits, as on v0.36.0.
+
+    Claude's second review of #453: only the identity link refuses this edit.
+    The revision drops the centred pair, whose ``c dbeta`` is past the binary64
+    range, and keeps the raw intercept.  Every training row's ``x beta`` then
+    overflows, and each row predicts the log link's clipped limit, as v0.36.0
+    and 31544462 do.
+    """
+    year = 2000.0 + np.resize(np.arange(20.0), 60)
+    frame = pd.DataFrame({"x": year})
+    y = np.exp(0.5 + 0.01 * (year - 2010.0)) + np.resize([0.1, -0.1, 0.05], 60)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()}).fit(
+            frame, y
+        )
+        edited = _slope_edited(model, frame, y, {"x": 1e306})
+        predicted = edited.predict(frame)
+    result = edited.result
+    assert result.centred_intercept is None and result.state_center is None
+    assert not result.centred_sum_compensated
+    assert result.intercept == model.result.intercept
+    expected = _clipped_limits(edited, np.full(len(frame), np.inf))
+    assert np.all(np.isfinite(expected))
+    assert np.array_equal(predicted, expected)
+
+
+def _clipped_limits(model, eta) -> np.ndarray:
+    """The mean the model's link and family give ``eta``: ``stabilize_eta``, then ``clip_mu``."""
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+
+    eta = np.asarray(eta, dtype=np.float64)
+    return clip_mu(model._link.inverse(stabilize_eta(eta, model._link)), model._distribution)
+
+
+def _far_slope_edit(family: str, slope: float, columns=("x",)):
+    """Sol's fixture on #453: ``x`` at 0.01, 0.02, 0.03 and ``y`` at 2, 3, 2, ``x``'s slope edited.
+
+    With ``columns=("x", "z")`` a second numeric column ``z`` sits beside it.
+    """
+    frame = pd.DataFrame({"x": np.resize([0.01, 0.02, 0.03], 60)})
+    if "z" in columns:
+        frame["z"] = np.resize([1.0, 2.0, 3.0, 4.0], 60)
+    y = np.resize([2.0, 3.0, 2.0], 60)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family=family,
+            selection_penalty=0.0,
+            features={name: Numeric() for name in frame.columns},
+        ).fit(frame, y)
+        return model, _slope_edited(model, frame, y, {"x": slope}), frame, y
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["up", "down"])
+def test_a_slope_edit_past_the_float_range_predicts_its_clipped_limit_far_out(sign):
+    """A row whose ``(x - c) beta`` overflows predicts the link's clipped limit, as on v0.36.0.
+
+    Sol's review of #453: with the slope edited to ``1e308``, the row at ``x =
+    1e300`` expanded ``(x - c) beta`` into pieces ``[inf, -inf, ~-2e306]``, and
+    both the compensated sum and its plain-sum fallback read NaN, fresh and
+    pickled.  v0.36.0 reads the signed overflow, which the log link clips to its
+    limit.  A row whose expansion is not finite now takes the un-expanded
+    predictor, so it keeps that signed overflow and the clipping.
+    """
+    _, edited, _, _ = _far_slope_edit("poisson", sign * 1e308)
+    assert edited.result.centred_sum_compensated
+    far = pd.DataFrame({"x": [1e300, -1e300]})
+    expected = _clipped_limits(edited, [sign * np.inf, -sign * np.inf])
+    assert np.all(np.isfinite(expected))
+    for label, model in (("fresh", edited), ("pickled", pickle.loads(pickle.dumps(edited)))):
+        assert np.array_equal(model.predict(far), expected), label
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["up", "down"])
+def test_holdout_drop_term_beside_a_slope_past_the_float_range_reads_zero(sign):
+    """Dropping a finite term at rows where another overflows changes nothing, as on v0.36.0.
+
+    Sol's review of #453, through the holdout drop-term diagnostics: with ``z``
+    beside Sol's ``x`` and ``x``'s slope at ``1e308``, both holdout rows'
+    predictors overflow with and without ``z``, so both clip to the same limits
+    and dropping ``z`` reads a ``delta_deviance`` of exactly 0.  #453's previous
+    head read NaN.  Dropping ``x`` itself subtracts an infinite term (``inf -
+    inf``) and reads NaN on v0.36.0 as well, so it is not asserted.
+    """
+    _, edited, frame, y = _far_slope_edit("poisson", sign * 1e308, ("x", "z"))
+    holdout = pd.DataFrame({"x": [1e300, -1e300], "z": [2.0, 3.0]})
+    table = edited.term_drop_diagnostics(
+        frame, y, mode="holdout", X_val=holdout, y_val=np.array([2.0, 3.0])
+    ).set_index("feature")
+    assert table.loc["z", "delta_deviance"] == 0.0
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["up", "down"])
+def test_an_identity_link_slope_edit_overflows_far_out_with_its_sign(sign):
+    """The identity-link mirror of Sol's #453 fixture: a far row overflows to a signed infinity.
+
+    A Gaussian slope of ``1e150`` commits, since the training rows and their
+    deviance stay finite.  Rows at ``x = 1e300`` and ``x = -1e300`` predict
+    infinities signed by the slope and the row, as on v0.36.0; #453's previous
+    head read NaN.  The training rows keep the slope-edit bound, so rows whose
+    pieces are finite stay on the compensated sum.
+    """
+    model, edited, frame, y = _far_slope_edit("gaussian", sign * 1e150)
+    far = pd.DataFrame({"x": [1e300, -1e300]})
+    expected = np.array([sign * np.inf, -sign * np.inf])
+    for label, values in (
+        ("predict", edited.predict(far)),
+        ("pickled", pickle.loads(pickle.dumps(edited)).predict(far)),
+    ):
+        assert np.array_equal(values, expected), label
+    _assert_edit_reads(model, edited, frame, y, {"x": sign * 1e150})

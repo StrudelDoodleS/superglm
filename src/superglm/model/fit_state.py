@@ -734,9 +734,11 @@ def _carry_revised_columns(model, beta_before) -> None:
             public.centred_sum_compensated = True
             return
     # A change past the binary64 range cannot be carried.  The predictor falls
-    # back to the raw intercept, as 31544462's editor left every slope edit.  A
-    # row whose ``x beta`` overflows is not finite on any version, and the
-    # edit's refreshed deviance refuses it as v0.36.0 does.
+    # back to the raw intercept, as 31544462's editor left every slope edit.
+    # Rows near the centre then overflow on every version.  Under the identity
+    # link the edit's refreshed deviance refuses it, as v0.36.0 does; a link that
+    # clips ``eta`` (log, logit, ...) commits it with v0.36.0's clipped
+    # predictions (Claude's second review of #453).
     for field_name in ("centred_intercept", "state_center", "centred_intercept_lo"):
         setattr(public, field_name, None)
     public.centred_sum_compensated = False
