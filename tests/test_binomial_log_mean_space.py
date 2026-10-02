@@ -1452,16 +1452,17 @@ def test_an_earlier_boundary_record_never_decides_the_verdict(
     """Codex P2 and claude's Medium on #454: only the returned state's judgement decides.
 
     The first certificate is made to find a boundary set; every later one,
-    at the iterates the fit moves on to, finds none and refuses without a
-    record (``inf``, as an unresolved basis does).  The fit then runs out of
-    iterations.  a9d5870a kept the first record because a later judgement
-    found nothing, and relabelled the exit ``mean_space_boundary`` with that
-    record's rows, the string REML's restoration loop keys on.  The returned
-    state's own judgement, which found nothing, now decides: the loop's own
-    exit, no boundary rows, and nothing published for that state.
+    at the iterates the fit moves on to, refuses for a direction it cannot
+    judge, with a record that names no rows (``inf``, as an unresolved basis
+    or a non-finite system does).  The fit then runs out of iterations.
+    a9d5870a kept the first record because no later judgement found rows,
+    and relabelled the exit ``mean_space_boundary`` with that record's rows,
+    the string REML's restoration loop keys on.  The returned state's own
+    judgement now decides: the loop's own exit, no boundary rows, and that
+    state's own record, not the earlier one.
     """
     import superglm.solvers.irls_direct as irls_direct
-    from superglm.solvers.mode_score import TruncatedDirection
+    from superglm.solvers.mode_score import TruncatedDirection, _unresolved
 
     calls: list[int] = []
 
@@ -1470,7 +1471,7 @@ def test_an_earlier_boundary_record_never_decides_the_verdict(
         if len(calls) == 1:
             stale = TruncatedDirection(((16, 20),), 4, (2, 3), 1e16, False, True)
             return 10.0, (stale,)
-        return math.inf, ()
+        return math.inf, (_unresolved(),)
 
     monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_then_none)
     frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
@@ -1490,7 +1491,8 @@ def test_an_earlier_boundary_record_never_decides_the_verdict(
     assert model.result.termination_reason in ("max_iter", "score_stagnated")
     assert model.result.mean_space_boundary_rows == 0
     assert not model.result.mean_space_boundary_unresolved
-    assert model.result.truncated_directions == ()
+    (record,) = model.result.truncated_directions
+    assert record.unresolved_basis and not record.earlier and record.row_count == 0
     assert model.diagnostics()["_model"]["boundary_rows"] == []
     assert not [w for w in caught if "probability 1" in str(w.message)]
 
@@ -1624,6 +1626,163 @@ def test_a_refusal_with_no_rows_to_name_says_so(monkeypatch: pytest.MonkeyPatch)
     assert any("no record of which rows it moves exists" in str(w.message) for w in caught)
 
 
+@pytest.mark.parametrize("design", ["duplicated column", "nested factors"])
+@pytest.mark.parametrize("direct_solve", ["qr", "gram"])
+def test_an_exact_alias_on_a_large_design_is_not_refused(
+    monkeypatch: pytest.MonkeyPatch, design: str, direct_solve: str
+) -> None:
+    """claude's High on 7e6ef1ee: an exact alias with an ordinary condition ratio certifies.
+
+    100,000 rows, an offset of +2 so the start is lowered and the true-score
+    certificate decides, and an exact alias: ``x2 = x1``, or a factor ``A``
+    nested in ``B``.  A third column ``x3 = x1 + 0.005 noise`` gives the
+    retained spectrum an ordinary ratio, ``sigma_max / gap ~ 240``, so the
+    basis angle ``n eps sigma_max / gap`` is about 5e-9, above ``bar / 4``.
+    7e6ef1ee refused every empty support that was not flat to ``bar``, so it
+    refused these aliases (``score_stagnated``, a record naming no rows); 0.36.0
+    and master certify them.  An empty support is aliasing again unless the
+    test is vacuous, at an angle near 1/4.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+
+    angles: list[float] = []
+    measure = irls_direct.null_basis_angle
+    monkeypatch.setattr(
+        irls_direct,
+        "null_basis_angle",
+        lambda decomposition, rows: angles.append(measure(decomposition, rows)) or angles[-1],
+    )
+    rng = np.random.default_rng(431)
+    n = 100_000
+    x1 = rng.uniform(-1.0, 1.0, n)
+    level = rng.integers(0, 12, n)
+    frame = pd.DataFrame(
+        {
+            "x1": x1,
+            "x2": x1.copy(),
+            "x3": x1 + 0.005 * rng.normal(size=n),
+            "A": (level // 3).astype(str),
+            "B": level.astype(str),
+        }
+    )
+    y = (rng.uniform(size=n) < np.exp(-1.2 + 0.3 * x1 + 0.1 * (level % 3))).astype(float)
+    features = (
+        {"x1": Numeric(), "x2": Numeric(), "x3": Numeric()}
+        if design == "duplicated column"
+        else {"x1": Numeric(), "x3": Numeric(), "A": Categorical(), "B": Categorical()}
+    )
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features=features,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame[list(features)], y, offset=np.full(n, 2.0))
+    assert max(angles) > MODE_CERTIFICATION_BAR / 4.0  # the range 7e6ef1ee refused
+    assert model.result.converged
+    assert model.result.termination_reason == "converged"
+    assert not any(record.unresolved_basis for record in model.result.truncated_directions)
+
+
+def test_a_direction_in_a_penalty_null_space_is_not_bent() -> None:
+    """claude's Low on 7e6ef1ee: a hidden direction along a second-difference penalty's null vector.
+
+    Three light levels whose rows are all events, along the direction ``(1,
+    2, 3) / sqrt(14)``: linear, so a second-difference penalty ``S = lambda
+    D'D`` does not bend it.  ``S d`` is formed as two components that cancel,
+    ``M d - (M - S) d`` with ``|M| ~ 1e6``, as a penalty summed over
+    components forms it, so ``fl(S d)`` carries rounding of order ``u |M|
+    |d|`` (a bend of about 1e-9 here) and nothing else.  The bend is judged
+    against the basis's error and both roundings of ``d' fl(S d)``
+    (``gamma_{3p+5} |d|' |S| |d|``, with ``|S| |v|`` the components'
+    magnitudes), so the direction reads as unbent: a recession direction
+    whose events rise, a boundary supremum.  Read as bent, it would be
+    refused as unresolved (no ``eta`` is given, so no crossing could be
+    confirmed); with the rounding term dropped it is, wherever the
+    round-off's sign makes the bend positive.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    codes = np.array([-1, -1, -1, -1, 0, 0, 1, 1, 2, 2])
+    response = np.array([0.0, 1.0, 0.0, 1.0] + [1.0] * 6)
+    weight = np.where(codes < 0, 1e8, 1e-8)
+    odds = math.exp(-20.0) / -math.expm1(-20.0)
+    score = np.where(codes < 0, weight * (2.0 * response - 1.0), weight)
+    fisher = np.where(codes < 0, weight, weight * odds)
+    dm = DesignMatrix([CategoricalGroupMatrix(codes, 3)], n=10, p=3)
+    second = np.array([[1.0, -2.0, 1.0]])
+    penalty = 1e6 * (second.T @ second)
+    spread = np.random.default_rng(4).normal(size=(3, 3))
+    component = 1e6 * (spread + spread.T)
+    rest = component - penalty
+    direction = np.array([[1.0], [2.0], [3.0]]) / math.sqrt(14.0)
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=direction,
+        angle=1e-12,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=fisher,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: component @ np.asarray(v) - rest @ np.asarray(v),
+        penalty_size_apply=lambda v: (np.abs(component) + np.abs(rest)) @ np.abs(np.asarray(v)),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio > 1.0
+    (record,) = found
+    assert record.boundary and not record.unresolved_basis
+    assert record.rows == (4, 5, 6, 7, 8, 9)
+
+
+@pytest.mark.parametrize("binned", [False, True])
+def test_a_spline_block_bounds_each_row_s_own_l1_sum(binned: bool) -> None:
+    """claude's Low on 7e6ef1ee: ``row_abs_sums`` on a spline block stored as ``B R``.
+
+    A sparse (``SparseSSPGroupMatrix``) or binned (``DiscretizedSSPGroupMatrix``)
+    block contributes ``|B| (|R| 1)``, which bounds each row's ``sum_j |(B R)_ij|``
+    for any signs, and equals it when ``B`` and ``R`` are non-negative.  Both
+    are sums of non-negative terms, so they agree to ``gamma`` of their term
+    count when they should be equal.
+    """
+    import scipy.sparse as sp
+
+    from superglm.group_matrix import (
+        DesignMatrix,
+        DiscretizedSSPGroupMatrix,
+        SparseSSPGroupMatrix,
+    )
+    from superglm.solvers.mode_score import row_abs_sums
+
+    rng = np.random.default_rng(454)
+    rows, knots, width = 40, 6, 4
+    bins = rng.integers(0, 10, rows)
+    unique = np.abs(rng.normal(size=(10, knots))) * (rng.uniform(size=(10, knots)) < 0.6)
+    basis = unique[bins]
+    for signed in (True, False):
+        reparam = rng.normal(size=(knots, width))
+        if not signed:
+            reparam = np.abs(reparam)
+        block = (
+            DiscretizedSSPGroupMatrix(unique, reparam, bins)
+            if binned
+            else SparseSSPGroupMatrix(sp.csr_matrix(basis), reparam)
+        )
+        sums = row_abs_sums(DesignMatrix([block], n=rows, p=width))
+        exact = np.abs(basis @ reparam).sum(axis=1)
+        tolerance = 2.0 * (knots * width + 2) * _U / (1.0 - (knots * width + 2) * _U)
+        assert np.all(sums >= exact * (1.0 - tolerance))
+        if not signed:
+            np.testing.assert_allclose(sums, exact, rtol=tolerance, atol=0.0)
+
+
 def _penalized_event_level(penalty: float, z: np.ndarray | None = None):
     """``_two_level_design`` with level b's rows both events at ``eta = -20`` and its column penalized."""
     dm, response, score, weight = _two_level_design(np.zeros(10) if z is None else z)
@@ -1668,6 +1827,7 @@ def test_a_penalized_events_direction_is_on_the_boundary_only_past_it(
         penalty_gradient=np.zeros(3),
         penalty_size=np.zeros(3),
         penalty_apply=lambda v: np.array([penalty * float(v[0]), 0.0, 0.0]),
+        penalty_size_apply=lambda v: np.array([penalty * abs(float(v[0])), 0.0, 0.0]),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
         eta=eta,
@@ -1681,19 +1841,24 @@ def test_a_penalized_events_direction_is_on_the_boundary_only_past_it(
 
 @pytest.mark.parametrize("angle", [1e-3, 1e-2])
 def test_a_wide_column_does_not_hide_a_light_set_as_aliasing(angle: float) -> None:
-    """claude's Mediums on #454: the basis's error is each row's own, and an alias must be shown flat.
+    """claude's Medium on #454: the basis's error is each row's own, not the design's widest.
 
     Beside a dense column spanning -1000 to 1000, #437's bound took every
     row's movement error as ``4 angle`` times the design's l1 bound (1001):
     at ``angle = 1e-3`` that is 4.0, above the light rows' movement of 1, so
     the support was empty and the direction passed as aliasing.  Each row's
-    error is now ``4 l1_i (angle ||d||_2 + gamma ||d||_inf)`` with its own
+    error is now ``4 l1_i (angle ||d||_2 + gamma (max |V|) |t|)`` with its own
     ``l1_i`` (112 on the light rows): at ``1e-3`` the light rows are judged,
-    events rising along an unpenalized direction, a boundary supremum.  At
-    ``1e-2`` their error, 4.5, exceeds their movement again, so a real
-    movement cannot be told from an alias's; 04cc5e7b passed it as aliasing.
-    What is not shown flat to the bar is refused, naming the rows the
-    direction visibly moves.
+    events rising along an unpenalized direction, a boundary supremum.
+
+    At ``1e-2`` their error, 4.5, exceeds their movement again while the
+    test is not vacuous: a basis error the angle allows could explain a
+    movement of 1 on a row whose l1 sum is 112, so an alias cannot be told
+    from a real movement.  That case passes as aliasing, as on 0.36.0: the
+    documented limit, recorded in #431 with its fix (a minimum-norm check of
+    whether the movement can be explained by a basis error the angle
+    allows).  Refusing that range refused exact aliases on large or
+    ordinarily conditioned designs (7e6ef1ee).
     """
     from superglm.solvers.mode_score import truncated_direction_ratio
 
@@ -1712,17 +1877,18 @@ def test_a_wide_column_does_not_hide_a_light_set_as_aliasing(angle: float) -> No
         penalty_gradient=np.zeros(3),
         penalty_size=np.zeros(3),
         penalty_apply=lambda v: np.zeros(3),
+        penalty_size_apply=lambda v: np.zeros(3),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
         eta=eta,
     )
+    if angle == 1e-2:
+        assert (ratio, found) == (0.0, ())  # the documented limit
+        return
     assert ratio > 1.0
     (record,) = found
     assert record.rows == (4, 5)
-    if angle == 1e-3:
-        assert record.boundary and not record.unresolved_basis
-    else:
-        assert record.unresolved_basis and not record.boundary
+    assert record.boundary and not record.unresolved_basis
 
 
 def test_reml_refuses_an_all_events_light_cut_in_plain_words() -> None:
@@ -1783,6 +1949,7 @@ def test_the_pull_carries_the_null_basis_error() -> None:
         penalty_gradient=np.array([0.0, 0.0, 1.0]),
         penalty_size=np.array([0.0, 0.0, 1.0]),
         penalty_apply=lambda v: np.array([0.0, 0.0, float(v[2])]),
+        penalty_size_apply=lambda v: np.array([0.0, 0.0, abs(float(v[2]))]),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
     )
@@ -1818,6 +1985,7 @@ def test_an_unresolved_null_basis_refuses() -> None:
         penalty_gradient=np.zeros(3),
         penalty_size=np.zeros(3),
         penalty_apply=lambda v: np.zeros(3),
+        penalty_size_apply=lambda v: np.zeros(3),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
     )
@@ -1852,6 +2020,7 @@ def test_structural_null_columns_are_not_read_on_the_design() -> None:
         penalty_gradient=np.zeros(3),
         penalty_size=np.zeros(3),
         penalty_apply=lambda v: np.zeros(3),
+        penalty_size_apply=lambda v: np.zeros(3),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
         column_scale=np.array([1.0, 1.0, 0.0]),
@@ -1931,6 +2100,7 @@ def test_a_truncated_separated_set_is_read_off_its_responses() -> None:
         penalty_gradient=np.full(2, 1e-20),
         penalty_size=np.full(2, 1e-20),
         penalty_apply=lambda v: 1e-40 * np.asarray(v),
+        penalty_size_apply=lambda v: 1e-40 * np.abs(np.asarray(v)),
         bar=MODE_CERTIFICATION_BAR,
         underflow=0.0,
     )

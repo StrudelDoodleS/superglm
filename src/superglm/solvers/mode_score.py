@@ -1773,11 +1773,11 @@ def truncated_direction_ratio(
     penalty_gradient: NDArray,
     penalty_size: NDArray,
     penalty_apply: Callable[[NDArray], NDArray],
+    penalty_size_apply: Callable[[NDArray], NDArray],
     bar: float,
     underflow: float,
     column_scale: NDArray | None = None,
     eta: NDArray | None = None,
-    penalty_size_apply: Callable[[NDArray], NDArray] | None = None,
 ) -> tuple[float, tuple[TruncatedDirection, ...]]:
     """The directions the factorization truncates, each judged on the rows it moves.
 
@@ -1796,19 +1796,21 @@ def truncated_direction_ratio(
     the basis's error.  ``angle`` bounds ``sin theta``, so a computed ``d``
     lies within ``angle ||d||_2`` of the true subspace (read in the basis's
     own coordinates; the equilibrated ones the angle holds in are #431's),
-    and row ``i``'s
-    movement within ``l1_i angle ||d||_2`` of the true one, ``l1_i`` the
-    row's own ``sum_j |x_ij - mean_j|`` (``row_abs_sums``); the movement's
-    rounding adds ``gamma_{p+2} l1_i ||d||_inf``.  The error is ``4 l1_i
-    (angle ||d||_2 + gamma_{p+2} ||d||_inf)``.
+    and row ``i``'s movement within ``l1_i angle ||d||_2`` of the true one,
+    ``l1_i`` the row's own ``sum_j |x_ij - mean_j|`` (``row_abs_sums``).  The
+    movement is formed as ``(X V) t``, so its rounding is ``gamma_{p+2} l1_i
+    (max |V|) |t|`` through the turn ``t``.  The error is ``4 l1_i (angle
+    ||d||_2 + gamma_{p+2} (max |V|) |t|)``.
 
     - **Structural.**  A direction that moves no row beyond its error is
-      aliasing only where it is shown flat to the certificate's own
-      resolution: on every row, the movement and its error together within
-      ``bar l1_i ||d||_inf``, ``bar`` times the most the row can move.
-      Otherwise an alias cannot be told from a real movement, and the claim
-      is refused with a record (``unresolved_basis``) naming the rows the
-      direction visibly moves, if any.
+      aliasing: none of its rows moves resolvably.  Unless that test is
+      vacuous: a row moves at most ``l1_i ||d||_inf``, so once the error per
+      unit of ``l1_i`` reaches ``||d||_inf`` no movement can be told from the
+      error, and the claim is refused with a record (``unresolved_basis``)
+      naming the rows the direction moves beyond their rounding, if any.
+      Below that, an empty support can still hide a real movement within the
+      basis's error (a light set beside a wide column at a moderate angle);
+      telling it from an alias is left to #431.
     - **Not hidden.**  A direction whose rows' scores, each weighted by how far
       it moves the row, sum above ``bar`` times every row's score at its
       largest movement, ``sum |m_i s_i| > bar max |m_i| sum |s|``, is seen by
@@ -1843,7 +1845,10 @@ def truncated_direction_ratio(
     The penalty's bend ``d' S d`` is judged against its error: the basis's,
     ``2 r ||d||_2 ||S d||_2 + ||S||_inf (r ||d||_2)^2`` with ``r = 4 (angle +
     gamma_{p+2})`` (``||S||_inf`` from ``penalty_size_apply``, ``|S| |v|``,
-    bounding ``||S||_2``), and its rounding, ``gamma_{p+2} |d|' |S| |d|``.
+    bounding ``||S||_2``), and its rounding.  Forming ``S d`` sums at most
+    ``p`` terms per penalty component, scales each by its ``lambda`` and adds
+    the components on a coordinate, at most ``p + 2`` of them; the product
+    ``d' fl(S d)`` adds ``p`` more: ``gamma_{3p + 5} |d|' |S| |d|`` in all.
 
     Returns the largest ``|M delta| / max(bar, floor)`` over uncertifiable
     directions (0 where none) and the hidden directions found.  Nothing in
@@ -1881,8 +1886,11 @@ def truncated_direction_ratio(
     movement = moved @ turn
     lengths = np.linalg.norm(directions, axis=0)
     peaks = np.max(np.abs(directions), axis=0)
-    # row i's movement along direction k is within this
-    reach_error = 4.0 * (angle * lengths + _gamma(p + 2) * peaks)
+    # row i's movement along direction k is within this, per unit of l1_i:
+    # the basis's error, and the rounding of ``(X V) t`` through ``|t|``
+    reach_error = 4.0 * (
+        angle * lengths + _gamma(p + 2) * (np.max(np.abs(basis), axis=0) @ np.abs(turn))
+    )
     error = reach[:, None] * reach_error[None, :]
     total = float(np.sum(np.abs(score[positive])))
     if not math.isfinite(total):
@@ -1891,12 +1899,11 @@ def truncated_direction_ratio(
     for k in range(directions.shape[1]):
         support = positive & (np.abs(movement[:, k]) > error[:, k])
         if not support.any():
-            # aliasing only where shown flat to the certificate's resolution:
-            # each row's movement and error within bar of its largest
-            flat_level = bar * reach * peaks[k]
-            if np.all((np.abs(movement[:, k]) + error[:, k] <= flat_level)[positive]):
+            if reach_error[k] < peaks[k]:
                 continue  # aliasing
-            visible = np.flatnonzero(positive & (np.abs(movement[:, k]) > flat_level))
+            # every row's error reaches the most it can move: unresolved
+            rounding = reach * (_gamma(p + 2) * float(peaks[k]))
+            visible = np.flatnonzero(positive & (np.abs(movement[:, k]) > rounding))
             leaning = np.abs(directions[:, k])
             named = tuple(
                 int(j)
@@ -1952,26 +1959,22 @@ def truncated_direction_ratio(
         # the penalty's curvature along each direction, and its error:
         # the basis's, ``|d' S d - d*' S d*| = |e' S (2 d - e)|``, and the
         # rounding of forming ``S d`` and ``d' S d``
-        size_apply = (
-            penalty_size_apply
-            if penalty_size_apply is not None
-            else (lambda v: np.abs(np.asarray(penalty_apply(v), dtype=np.float64)))
-        )
         bent_size = np.column_stack(
             [
                 np.ldexp(
-                    np.asarray(size_apply(np.abs(direction[:, j])), dtype=np.float64), exponent
+                    np.asarray(penalty_size_apply(np.abs(direction[:, j])), dtype=np.float64),
+                    exponent,
                 )
                 for j in range(direction.shape[1])
             ]
         )
         penalty_norm = float(
-            np.max(np.ldexp(np.asarray(size_apply(np.ones(p)), dtype=np.float64), exponent))
+            np.max(np.ldexp(np.asarray(penalty_size_apply(np.ones(p)), dtype=np.float64), exponent))
         )
         bending_error = (
             2.0 * resolution * lengths * np.linalg.norm(stiffness, axis=0)
             + penalty_norm * (resolution * lengths) ** 2
-            + _gamma(p + 2) * np.sum(np.abs(direction) * bent_size, axis=0)
+            + _gamma(3 * p + 5) * np.sum(np.abs(direction) * bent_size, axis=0)
         )
     if not (
         np.all(np.isfinite(curvature))
