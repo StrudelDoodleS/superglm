@@ -305,6 +305,22 @@ def test_the_structured_solver_error_is_catchable_from_the_root():
     assert issubclass(superglm.StructuredSolverError, np.linalg.LinAlgError)
 
 
+def test_the_observed_mode_errors_are_catchable_from_the_root():
+    """A REML fit through observed geometry can raise ``ObservedModeNotConvergedError``
+    (0.36.0 notes), a subclass of ``ObservedModeNotCertifiedError``; both are named
+    from ``superglm`` and are the classes ``observed_geometry`` raises (#449)."""
+    import superglm
+    from superglm import ObservedModeNotCertifiedError, ObservedModeNotConvergedError
+    from superglm.reml import observed_geometry
+
+    for name in ("ObservedModeNotCertifiedError", "ObservedModeNotConvergedError"):
+        assert name in superglm.__all__
+    assert ObservedModeNotCertifiedError is observed_geometry.ObservedModeNotCertifiedError
+    assert ObservedModeNotConvergedError is observed_geometry.ObservedModeNotConvergedError
+    assert issubclass(ObservedModeNotConvergedError, ObservedModeNotCertifiedError)
+    assert issubclass(ObservedModeNotCertifiedError, RuntimeError)
+
+
 def test_public_model_signatures_do_not_expose_private_frame_adapter():
     from superglm import SuperGLM
 

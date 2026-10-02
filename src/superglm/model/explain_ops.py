@@ -72,7 +72,18 @@ _SHAPE_REPAIRED_INFERENCE_MESSAGE = (
 
 
 def metrics(model, X, y, sample_weight=None, offset=None):
-    """Compute comprehensive diagnostics for the fitted model."""
+    """Compute comprehensive diagnostics for the fitted model.
+
+    Every statistic of the fitted mean is computed from the model's
+    predictions on ``X``, the values ``predict`` returns.  The fit's own mean,
+    likelihood and null statistics are not reused, even for the fit's own
+    objects.  On a discrete fit they belong to the binned design, and on any
+    fit they come from a different evaluation than ``predict``, so reusing
+    them for identical objects only made the result depend on object identity
+    and on whether the model had been saved (#441).  What the fit's own
+    objects still keep is the cached result object, the fit geometry that
+    leverage reads, and skipping the weight-contract check the fit already ran.
+    """
     from superglm.inference.metrics import ModelMetrics
 
     cache_signature = (id(model.result), id(getattr(model, "_reml_penalties", None)))
@@ -102,11 +113,6 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     ):
         return model._fit_metrics_cache
 
-    use_fit_mu = same_fit_refs and (
-        (offset is None and model._fit_offset is None)
-        or offset is getattr(model, "_fit_offset_ref", None)
-    )
-
     metrics_obj = ModelMetrics(
         model,
         X,
@@ -114,9 +120,7 @@ def metrics(model, X, y, sample_weight=None, offset=None):
         sample_weight,
         offset,
         _fit_data_matches=same_fit_refs,
-        _mu=model._fit_mu if use_fit_mu else None,
-        _null_mu=model._fit_null_mu if same_fit_refs else None,
-        _fit_stats=model._fit_stats if same_fit_refs else None,
+        _contract_checked=same_fit_refs,
     )
     if same_fit_refs:
         model._fit_metrics_cache = metrics_obj

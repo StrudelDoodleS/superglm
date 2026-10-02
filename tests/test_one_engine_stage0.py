@@ -893,11 +893,11 @@ def test_a_coefficient_revision_carries_the_centred_state():
     raw predictor ``X beta + intercept`` moves by ``x dbeta``.  Keeping ``(alpha,
     c)`` as it was left ``linear_predictor`` off by ``c' dbeta`` (1e4 here);
     clearing it dropped every dense column's centring (Sol's review of #445).
-    ``publish_revised_coefficients`` re-centres the moved column where its old
-    and new terms agree, ``c' = c beta_before / beta``, carries the exactly
-    rounded ``c' beta - c beta_before`` into the pair and reads the solver state
-    from the published one: both results keep their pair and both predictors
-    read ``X beta + intercept`` at the revised coefficients.  Bound: each evaluation's
+    ``publish_revised_coefficients`` keeps the fitted centre, carries ``c beta -
+    c beta_before`` into the pair from exact products, marks the pair for a
+    compensated evaluation and reads the solver state from the published one:
+    both results keep their pair and centre, and both predictors read ``X beta
+    + intercept`` at the revised coefficients (#449).  Bound: each evaluation's
     ``gamma_(p+3)`` on the sum of both evaluations' magnitudes, which covers
     the intercepts' roundings and the carried products (Higham 2002, section
     3.1).  (A null revision keeps the state, and predictions bit for bit:
@@ -926,15 +926,12 @@ def test_a_coefficient_revision_carries_the_centred_state():
     beta_before = np.array(revised.result.beta, dtype=np.float64)
     _patch_beta_block(revised, [t], revised.result.beta[t.sl] + 0.01)
     publish_revised_coefficients(revised, beta_before)
-    # The moved column is centred where its old and new terms agree: c' beta = c beta_before
-    # to gamma_4, the quotient and product forming c' and the two products compared here.
-    gamma_4 = 4 * (EPS / 2.0) / (1.0 - 4 * (EPS / 2.0))
-    centre = float(np.asarray(model.result.state_center)[t.sl][0])
-    agreed = centre * float(beta_before[t.sl][0])
-    for result in (revised._result, revised._solver_result):
-        assert result.centred_intercept is not None and result.state_center is not None
-        moved = float(np.asarray(result.state_center)[t.sl][0]) * float(result.beta[t.sl][0])
-        assert abs(moved - agreed) <= gamma_4 * abs(agreed)
+    for result, fitted in (
+        (revised._result, model.result),
+        (revised._solver_result, copied._solver_result),
+    ):
+        assert result.centred_intercept is not None and result.centred_sum_compensated
+        np.testing.assert_array_equal(result.state_center, fitted.state_center)
     solver = revised._solver_result
     design = revised._dm.toarray()
     raw = revised._dm.matvec(solver.beta) + solver.intercept

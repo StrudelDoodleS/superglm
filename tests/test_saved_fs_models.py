@@ -119,6 +119,32 @@ def assert_predicts_as_saved(model, frame, saved) -> None:
     assert np.all(excess <= 1.0), (int(np.argmax(excess)), float(np.max(excess)))
 
 
+def saved_se_scale(model, frame, y) -> float:
+    """The factor that restates v0.35.0's ``coefficient_se`` at today's dispersion.
+
+    For a known-scale family ``coefficient_se`` scales the covariance by
+    ``pearson_chi2 / residual_df``.  Given the fit's own objects, v0.35.0 read
+    ``pearson_chi2`` from the fit's statistics (``model._fit_stats``), which on
+    a discrete fit belong to the binned design.  ``metrics`` now evaluates it
+    on ``predict``'s mean (#441).  The factor is formed here from an
+    independent Pearson sum on that mean, not from ``metrics``, so the
+    comparison still pins the dispersion ``coefficient_se`` applies.
+
+    Rounding: each Pearson sum has ``n`` non-negative terms and is within
+    ``gamma_(n+3)`` of the exact sum, so the two agree within
+    ``2 gamma_(n+3)`` relative; the ratio, square root and the multiply add a
+    few units of roundoff.  Both are far below ``_se_tolerance``'s
+    ``n u kappa``, which they leave unchanged.  The fixtures carry no weights or
+    offsets.
+    """
+    if not model._distribution.scale_known:
+        return 1.0
+    mu = np.asarray(model.predict(frame), dtype=np.float64)
+    response = np.asarray(y, dtype=np.float64)
+    pearson = float(np.sum((response - mu) ** 2 / model._distribution.variance(mu)))
+    return float(np.sqrt(pearson / model._fit_stats.pearson_chi2))
+
+
 @pytest.mark.parametrize("name", ["fs_gaussian_exact", "fs_poisson_discrete"])
 def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(name) -> None:
     """T8 row "retired-class shim removed": without the module ``__getattr__`` of
@@ -144,7 +170,9 @@ def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(
     assert isinstance(model._linear_system_state.augmented_factor, FactorSmoothLeafFactor)
 
     tolerance = _se_tolerance(model)
+    scale = saved_se_scale(model, frame, y)
     for term, saved in record["se"].items():
+        saved = scale * np.asarray(saved, dtype=float)
         rebuilt = np.asarray(se[term], dtype=float)
         np.testing.assert_array_equal(np.isfinite(rebuilt), np.isfinite(saved))
         finite = np.isfinite(saved)

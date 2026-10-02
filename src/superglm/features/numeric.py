@@ -49,12 +49,15 @@ class Numeric:
         x = _numeric_values(x)
         return x * float(beta[0])
 
+    def _centred_values(self, x: NDArray) -> NDArray[np.float64]:
+        """The column ``_score_centred`` differences about its centre."""
+        return _numeric_values(x)
+
     def _score_centred(
         self, x: NDArray, beta: NDArray[np.floating], centre: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         """``(x - c) beta``: the contribution about the fit's column centre, differenced first."""
-        x = _numeric_values(x)
-        return (x - float(centre[0])) * float(beta[0])
+        return (self._centred_values(x) - float(centre[0])) * float(beta[0])
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Reconstruct the coefficient on the original scale."""

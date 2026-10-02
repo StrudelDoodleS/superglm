@@ -14,6 +14,7 @@ from superglm.editor.evaluation import (
     named_metrics_dataset,
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
+from superglm.solvers.working_rows import pearson_chi2
 
 METRIC_LABELS = {
     "deviance": "Deviance",
@@ -103,71 +104,80 @@ def metrics_payload(
 
 
 def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, float]:
+    """Score ``dataset`` with the model's predictions, as ``model.metrics`` does.
+
+    A dataset holding the fit's own objects is scored the same way: the fit's
+    own statistics belong to its fitting design, which on a discrete fit is
+    the binned one that ``predict`` does not reproduce (#441).  When those
+    objects are unchanged since the fit (its data guard), the reports the fit
+    already gave are not repeated: the weight-contract check, the
+    custom-family prior-weight report and ``predict``'s own warnings, as in
+    ``model.metrics``.  The predicted values are the same either way.
+    """
     validated_weights = _validate_evaluation_weights(
         dataset.sample_weight,
         dataset.n_obs,
         family=model._distribution,
         weight_semantics=model_weight_semantics(model),
     )
-    fit_artifacts = _fit_artifact_metrics(model, dataset)
-    if fit_artifacts is not None:
-        return fit_artifacts
     weights = validated_weights
     if weights is None:
         weights = np.ones(dataset.n_obs, dtype=np.float64)
-    return _compute_metrics(model, dataset.X, dataset.y, weights, dataset.offset)
+    return _compute_metrics(
+        model,
+        dataset.X,
+        dataset.y,
+        weights,
+        dataset.offset,
+        contract_checked=_same_fit_dataset(model, dataset),
+    )
 
 
 def _same_fit_dataset(model, dataset: EvaluationDataset) -> bool:
+    """Whether ``dataset`` holds the fit's own rows, unchanged since the fit checked them.
+
+    Identity alone is not enough: an array mutated in place keeps its
+    identity.  The fit's data guard confirms the values, as
+    ``explain_ops.metrics`` does.
+    """
     fit_weight_ref = getattr(model, "_fit_sample_weight_ref", None)
     fit_weights = getattr(model, "_fit_weights", None)
     fit_offset_ref = getattr(model, "_fit_offset_ref", None)
     fit_offset = getattr(model, "_fit_offset", None)
     weights_match = dataset.sample_weight is fit_weight_ref or dataset.sample_weight is fit_weights
     offset_matches = dataset.offset is fit_offset_ref or dataset.offset is fit_offset
-    return (
+    fit_data_guard = getattr(model, "_fit_data_guard", None)
+    return bool(
         dataset.X is getattr(model, "_fit_X_ref", None)
         and dataset.y is getattr(model, "_fit_y_ref", None)
         and weights_match
         and offset_matches
+        and fit_data_guard is not None
+        and fit_data_guard.matches(
+            dataset.X,
+            dataset.y,
+            dataset.sample_weight,
+            dataset.offset,
+            fit_weights=fit_weights,
+            fit_offset=fit_offset,
+        )
     )
 
 
-def _fit_artifact_metrics(model, dataset: EvaluationDataset) -> dict[str, float] | None:
-    fit_stats = getattr(model, "_fit_stats", None)
-    if fit_stats is None or not _same_fit_dataset(model, dataset):
-        return None
-
-    edf = float(model.result.effective_df)
-    n = dataset.n_obs
-    weights = dataset.sample_weight
-    if weights is None:
-        weights = np.ones(n, dtype=np.float64)
-    likelihood_size = dispersion_likelihood_size(
-        weights,
-        weight_semantics=model_weight_semantics(model),
-    )
-    log_likelihood = float(fit_stats.log_likelihood)
-    aic = float(-2.0 * log_likelihood + 2.0 * edf)
-    bic = float(-2.0 * log_likelihood + np.log(likelihood_size) * edf)
-    denom = likelihood_size - edf - 1.0
-    return {
-        "deviance": float(model.result.deviance),
-        "aic": aic,
-        "aicc": float(aic + 2.0 * edf * (edf + 1.0) / denom) if denom > 0 else float("inf"),
-        "bic": bic,
-        "log_likelihood": log_likelihood,
-        "explained_deviance": float(fit_stats.explained_deviance),
-        "pearson_chi2": float(fit_stats.pearson_chi2),
-        "effective_df": edf,
-    }
-
-
-def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
+def _compute_metrics(
+    model, X, y, weights, offset, *, contract_checked: bool = False
+) -> dict[str, float]:
     y_arr = np.asarray(y, dtype=np.float64).ravel()
     w = np.asarray(weights, dtype=np.float64).ravel()
     offset_arg = None if offset is None else np.asarray(offset, dtype=np.float64).ravel()
-    mu = np.asarray(model.predict(X, offset=offset_arg), dtype=np.float64).ravel()
+    if contract_checked:
+        from superglm.model import base
+
+        # ``predict``'s values without its warnings, as ``model.metrics`` scores.
+        predicted = base.predict_exact(model, X, offset=offset_arg, warn=False)
+    else:
+        predicted = model.predict(X, offset=offset_arg)
+    mu = np.asarray(predicted, dtype=np.float64).ravel()
     if w.size != y_arr.size:
         raise ValueError(f"sample_weight has length {w.size}, expected {y_arr.size}.")
     if offset_arg is not None and offset_arg.size != y_arr.size:
@@ -184,13 +194,20 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
     deviance = float(np.sum(w * family.deviance_unit(y_arr, mu)))
     # `compute_dataset_metrics` bypasses `ModelMetrics` entirely, so the
     # evaluation-boundary check is repeated here for editor validation and
-    # test splits.
-    from superglm.model.input_validation import check_weight_contract
+    # test splits.  The fit's own objects were checked by the fit.
+    if not contract_checked:
+        from superglm.model.input_validation import check_weight_contract
 
-    check_weight_contract(y_arr, w, family, model_weight_semantics(model))
+        check_weight_contract(y_arr, w, family, model_weight_semantics(model))
     log_likelihood = float(
         weighted_log_likelihood(
-            family, y_arr, mu, w, phi, weight_semantics=model_weight_semantics(model)
+            family,
+            y_arr,
+            mu,
+            w,
+            phi,
+            weight_semantics=model_weight_semantics(model),
+            report_contract=not contract_checked,
         )
     )
     aic = float(-2.0 * log_likelihood + 2.0 * edf)
@@ -199,8 +216,9 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
     aicc = float(aic + 2.0 * edf * (edf + 1.0) / denom) if denom > 0 else float("inf")
     null_deviance, null_mu = _null_deviance_and_mu(model, y_arr, w, offset_arg)
     explained = _explained_deviance(deviance, null_deviance, y_arr, null_mu, w)
-    variance = np.maximum(family.variance(mu), 1e-300)
-    pearson = float(np.sum(w * (y_arr - mu) ** 2 / variance))
+    pearson = float(
+        pearson_chi2(distribution=family, y=y_arr, mu=mu, sample_weight=w, variance_floor=0.0)
+    )
     return {
         "deviance": deviance,
         "aic": aic,

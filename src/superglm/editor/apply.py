@@ -499,6 +499,16 @@ def _patch_beta_block(model, groups: list[GroupSlice], beta_new: NDArray) -> Non
 def _adjust_intercept(model, delta: float) -> None:
     # The solver's intercepts are read from the published ones when the
     # revision is published (``publish_revised_coefficients``).
+    #
+    # The skip is absolute on purpose.  An edit's intercept change is a
+    # log-effect, and the editor resolves log-effects absolutely: a term counts
+    # as edited when it moves by more than 1e-14 (``edited_terms``).  A least-
+    # squares intercept below 1e-15 is the projection's rounding (-2.7e-17 when
+    # #447's spline is halved), not a change anyone asked for.  A relative form
+    # would scale with the intercept, which at an offset of 1e16 (about 2e15)
+    # would swallow a real change of 0.1 (#447, part 2).  It would also need
+    # the projection's conditioning to tell rounding from intent.  Skipping
+    # keeps every edit that moves no intercept bit for bit (#449).
     if abs(delta) < 1e-15:
         return
     move_public_intercept(model, delta)

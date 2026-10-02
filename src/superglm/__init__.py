@@ -135,6 +135,10 @@ from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning
 from superglm.profiling.tweedie import TweedieProfileResult
 from superglm.reml import REMLResult
 from superglm.reml.identified import WeakIdentificationWarning
+from superglm.reml.observed_geometry import (
+    ObservedModeNotCertifiedError,
+    ObservedModeNotConvergedError,
+)
 from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
 from superglm.solvers.irls_direct import StructuredSolverError
 from superglm.stats.davies import psum_chisq, satterthwaite
@@ -297,6 +301,8 @@ __all__ = [
     "SeparationWarning",
     "WeakIdentificationWarning",
     "StructuredSolverError",
+    "ObservedModeNotCertifiedError",
+    "ObservedModeNotConvergedError",
     "SplineRedundancyReport",
     "cross_validate",
     "CrossValidationResult",
