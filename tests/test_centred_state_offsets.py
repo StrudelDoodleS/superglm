@@ -2262,6 +2262,36 @@ def test_the_dense_block_takes_the_corrected_two_pass_at_every_offset(route, shi
     assert abs(Fraction(float(system.data_gram[0, 0])) - exact) <= Fraction(bound)
 
 
+def test_a_design_of_dense_columns_only_forms_no_raw_weighted_sum(monkeypatch):
+    """A ``Numeric``-and-``Polynomial``-only design reads its columns in the two passes alone.
+
+    Such a design always takes the whole-design path (it has no bounded half),
+    and every one of its means is a dense anchor, so a raw ``X'W`` would be
+    read and discarded.  The system is not formed with one, and its anchors are
+    ``weighted_mean_pair``'s.  Mutation: ``dm.rmatvec(W)`` formed for every
+    design.
+    """
+    from superglm.solvers import centered_system
+
+    rng = np.random.default_rng(458)
+    n = 3000
+    values = 1e8 + rng.integers(-40, 41, size=(n, 3)).astype(np.float64)
+    dm = DesignMatrix([DenseGroupMatrix(values[:, :1]), DenseGroupMatrix(values[:, 1:])], n=n, p=3)
+    W = rng.uniform(0.5, 2.0, n)
+    raw = []
+    real_rmatvec = DesignMatrix.rmatvec
+
+    def counted(self, w):
+        raw.append(self is dm)
+        return real_rmatvec(self, w)
+
+    monkeypatch.setattr(DesignMatrix, "rmatvec", counted)
+    system = _whole_system(dm, W, rng.normal(size=n), monkeypatch)
+    assert not any(raw), raw
+    _, hi, _ = centered_system.weighted_mean_pair(dm, W, float(np.sum(W)))
+    assert system.mean_hi is not None and np.array_equal(system.mean_hi, hi)
+
+
 @pytest.mark.parametrize("shift", [0.0, 1e16])
 @pytest.mark.parametrize("route", ["gram", "proximal"])
 def test_a_working_mean_far_from_the_unweighted_mean_keeps_the_two_pass_bound(

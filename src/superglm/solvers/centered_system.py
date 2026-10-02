@@ -536,8 +536,11 @@ def build_centered_system(
     # every other column about its weighted mean, as above, and every dense
     # column by the corrected two-pass algorithm, as in ``_attach_dense_split``
     # -- rows about the rounded mean ``a`` (``dense_anchor``), its remainder
-    # from the same rows' first moments by Björck's correction.
-    mean_hi = np.where(dense, dense_anchor(dm, W, sum_w), dm.rmatvec(W) / sum_w)
+    # from the same rows' first moments by Björck's correction.  A design of
+    # dense columns only has no other mean to read, so its raw ``X'W``, which
+    # would be discarded, is not formed.
+    anchor = dense_anchor(dm, W, sum_w)
+    mean_hi = anchor if np.all(dense) else np.where(dense, anchor, dm.rmatvec(W) / sum_w)
     first = np.zeros(dm.p, dtype=np.float64)
     data_gram, rhs = centered_gram_rhs(
         dm=dm, W=W, mean_x=mean_hi, z_centered=z_centered, first=first
