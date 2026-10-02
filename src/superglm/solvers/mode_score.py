@@ -1216,7 +1216,8 @@ def row_set_residual(
       Above ``_ROW_SET_CELL_LIMIT`` cells these are not formed.
 
     **A penalized set** is also certified by its distance to its own maximum.
-    The log-likelihood is concave in ``eta``, so the penalized objective
+    Precondition: the log-likelihood is concave in ``eta``, as binomial/log's
+    is (the only caller; Gaussian/log's is not).  So the penalized objective
     along ``d_R`` is at least ``d_R' S d_R``-strongly concave, and its
     maximum along ``d_R`` lies within ``|g_R| / d_R' S d_R`` of the iterate,
     in the units of ``eta`` on ``R``'s rows.  That distance, with ``g_R``'s
@@ -1287,9 +1288,11 @@ def row_set_residual(
             + _gamma(p + 2) * direction_size
         )
         ratio = math.inf if bar * scale <= underflow else residual / max(bar * scale, floor)
-        # a curvature whose bar underflows to 0 bounds nothing: the set is
-        # judged by its relative score alone, never passed on the distance
-        if penalized and math.isfinite(quadratic) and bar * quadratic > 0.0:
+        # only a normal ``bar d'Sd`` bounds the distance: below 2^-1022 the
+        # product carries up to 2^-1075 of absolute error and the curvature's
+        # own scaling may have rounded up, and at 0 it bounds nothing.  There
+        # the set is judged by its relative score alone, the refusing side.
+        if penalized and math.isfinite(quadratic) and bar * quadratic >= _TINY:
             ratio = min(ratio, (residual + floor + underflow) / (bar * quadratic))
         worst = max(worst, ratio)
 

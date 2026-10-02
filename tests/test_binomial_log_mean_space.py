@@ -1984,6 +1984,40 @@ def test_a_penalized_set_whose_distance_bar_underflows_is_judged_by_its_score(
         assert float(np.max(error)) <= 4.0 * MODE_CERTIFICATION_BAR, name
 
 
+@pytest.mark.parametrize("curvature", [1e-320, 1e-310])
+def test_a_distance_bar_below_the_normal_range_never_passes_a_set(curvature: float) -> None:
+    """``row_set_residual`` on a penalized reference set whose ``bar d'Sd`` is not a normal number.
+
+    The reference rows' score is 1e-320 against a size of 2e-314 (their
+    Fisher weights in the same units), so the relative test refuses them
+    (50 bars).  Their distance bound would pass
+    them, at 0.01 bars, if ``bar d'Sd`` counted.  At a curvature of 1e-320
+    that product is 0, and 1ffcacec raised ZeroDivisionError.  At 1e-310 it
+    is 1e-318, subnormal, carrying up to ``2^-1075`` of absolute error, and
+    1ffcacec passed the set on it.  Only a normal product bounds the
+    distance, so the set is refused in both.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import row_set_residual, row_sets
+
+    dm = DesignMatrix([CategoricalGroupMatrix(np.array([-1, -1, 0, 0]), 1)], n=4, p=1)
+    ratio = row_set_residual(
+        sets=row_sets(dm),
+        row_score=np.array([1e-314, -1e-314 + 1e-320, -1.0, 1.0]),
+        response=np.tile([1.0, 0.0], 2),
+        fisher_weights=np.array([1e-314, 1e-314, 1.0, 1.0]),
+        positive_prior=np.ones(4, dtype=bool),
+        eta=np.full(4, math.log(0.5)),
+        column_penalty=np.zeros(1),
+        column_penalty_size=np.zeros(1),
+        column_curvature=np.zeros(1),
+        set_curvature=np.array([curvature]),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert ratio > 1.0
+
+
 def test_a_wide_design_keeps_its_joint_cell_sets() -> None:
     """A light base cell of a 2 x 2 interaction beside a 1.5-million-column block is still judged.
 
