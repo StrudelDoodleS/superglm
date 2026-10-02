@@ -15,6 +15,7 @@ state), never from what passed locally.
 
 from __future__ import annotations
 
+import math
 import warnings
 
 import numpy as np
@@ -669,10 +670,13 @@ def test_gram_and_qr_fits_are_translation_invariant_at_1e16(family, direct_solve
     s`` at an offset ``s``, which adds ``sum W d d'`` to the Gram (``d`` that
     rounding): at 1e16 a Gaussian fit's eta moved 1.1e-3 while reporting
     converged and a Poisson fit ended ``step_rejected``.  The rows are now
-    ``(x - x_ref) - lo`` (``centered_system.weighted_mean_pair``): ``x - x_ref``
-    is the same exact difference at every offset and ``lo`` is formed on it,
-    so the two fits' centred systems agree to rounding and the ``(u s /
-    sigma)^2`` term is gone.  Their predictors then agree to the forward error
+    ``(x - hi) - lo`` (``centered_system.weighted_mean_pair``), ``hi`` the
+    rounded weighted mean and ``lo`` the remainder formed on rows differenced
+    from it.  ``hi`` lands on a different float at each offset, so the two
+    fits' centred rows are not bitwise equal: ``x - hi`` is exact by Sterbenz
+    at 1e16 and rounds at the spread's scale at 0, and ``lo`` absorbs the
+    difference in ``hi``.  They agree to ``O(u spread)`` per entry, and the
+    ``(u s / sigma)^2`` term is gone.  Their predictors then agree to the forward error
     of the solves, ``gamma_n kappa(H) max|eta|``, ``kappa`` the centred
     Hessian's condition; the intercept reads ``mean_x - c`` on centred rows
     too (``centre_offset_mean``).  Mutation: ``mean_lo`` dropped in
@@ -1157,37 +1161,135 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
     assert ranks[1] == ranks[0]
 
 
-def test_the_proximal_certificate_reads_a_dense_column_about_its_pair():
-    """A proximal fit never claims convergence at a wrong slope for a column at 1e12.
+def test_the_proximal_certificate_rejects_an_unresolved_slope():
+    """The composite KKT certificate reads a dense column's score and curvature about its pair.
 
-    The composite KKT certificate read raw scores and raw curvature: the
-    intercept's residual times the offset hid the slope's, and the curvature,
-    ``offset^2`` times the weight, shrank the proximal step to nothing.  The
-    fit reported convergence after one iteration with its slope at 1e-24,
-    where the penalized optimum has 0.199995 (Sol; also on master).  The
-    certificate now centres a dense column's score and curvature about its
-    pair.  A converged claim must sit at the optimum: the slope's centred
-    score within the model's stationarity tolerance (``tol``, 1e-6) of its
-    magnitude.  The proximal solver does not reach the optimum at this offset
-    (a follow-up), so the fit now reports it has not converged.  Mutation:
-    the raw certificate.
+    ``x = 1e12 + z``, ``y = 3 + 0.2 z`` and the slope at 1e-12, the predictor
+    ``3.2 + 1e-12 z``.  Raw, the curvature ``offset^2 sum W`` shrank the
+    proximal step to 1e-24 against a slope of 1e-12, a violation of 1.6e-13,
+    and the state passed as converged: the false convergence of the raw
+    solver, which stopped with its slope near zero.  Centred, the step is the
+    slope's whole error and the violation is 1.  Mutation: the raw
+    certificate.
     """
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.penalties.group_lasso import GroupLasso
+    from superglm.solvers.irls_state import _evaluate_irls_state
+    from superglm.solvers.pirls import _composite_kkt_violation
+    from superglm.types import GroupSlice
+
     z = np.tile([-2.0, 0.0, 2.0, 4.0], 100)
-    frame = pd.DataFrame({"x": 1e12 + z})
+    x = 1e12 + z
     y = 3.0 + 0.2 * z
-    model = SuperGLM(family="gaussian", features={"x": Numeric()}, selection_penalty=0.01)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        model.fit(frame, y)
-    result = model.result
-    # The proximal solver itself does not reach this optimum (a follow-up):
-    # the fit reports that, rather than a false convergence.
-    assert not result.converged and result.termination_reason == "max_iter"
-    if result.converged:  # pragma: no cover - once the solver is centred
-        eta = linear_predictor(model._dm, model._solver_pirls_result(), None)
-        residual = y - eta
-        score = float(np.sum((z - z.mean()) * residual))
-        assert abs(score) <= model._tol * float(np.sum(np.abs(z - z.mean()) * np.abs(y)))
+    dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=len(x), p=1)
+    groups = [GroupSlice("x", 0, 1, weight=1.0)]
+    weights, offset = np.ones(len(x)), np.zeros(len(x))
+    beta = np.array([1e-12])
+    state = _evaluate_irls_state(dm, y, weights, Gaussian(), IdentityLink(), offset, beta, 2.2)
+    tol = 1e-6
+    violation = _composite_kkt_violation(
+        dm=dm,
+        state=state,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        offset=offset,
+        groups=groups,
+        penalty=GroupLasso(lambda1=0.01),
+        S=None,
+        has_smooth_penalty=False,
+        tol=tol,
+    )
+    assert violation >= tol
+
+
+def _proximal_fixture(family: str, shift: float):
+    """An even-integer column (exact at every offset) and a response from it."""
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], 100)
+    rng = np.random.default_rng(40)
+    if family == "poisson":
+        y = rng.poisson(np.exp(0.3 + 0.1 * z)).astype(float)
+    else:
+        y = 3.0 + 0.2 * z + np.tile([0.01, -0.02, 0.03, -0.02], 100)
+    return pd.DataFrame({"x": shift + z}), y
+
+
+@pytest.mark.parametrize("shift", [40.0, 2010.0, 1e5, 1e12])
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_the_proximal_solver_centres_a_dense_column(family, shift):
+    """A selection fit and its path reach the same certified optimum at every offset.
+
+    The proximal solver ran block coordinate descent in raw coordinates: the
+    intercept and a column at offset ``m`` with spread ``s`` shared a curvature
+    ``(m^2 + s^2) sum W``, so each sweep shrank the slope's error by only
+    ``m^2 / (m^2 + s^2)``.  On master an offset of 40 took 99 iterations to a
+    slope 5e-4 off, 2010 never converged, and 1e5 and 1e12 claimed
+    convergence with the slope at zero.  A dense column is now updated about
+    its exact pair and the state is kept about the prior-weighted centre (the
+    unpenalized intercept separates from centred columns; Friedman, Hastie &
+    Tibshirani 2010, §2.6), so the fit takes the iterations it takes at no
+    offset.  One penalized column: its curvature is its own strong convexity,
+    so the certificate puts each fit within ``tol`` of the optimum's slope and
+    the two within ``2 tol``.  Mutation: the raw block update.
+    """
+    model = SuperGLM(family=family, features={"x": Numeric()}, selection_penalty=0.01)
+    tol = model._tol
+
+    def fit(shift: float):
+        frame, y = _proximal_fixture(family, shift)
+        model = SuperGLM(family=family, features={"x": Numeric()}, selection_penalty=0.01)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(frame, y)
+            path = SuperGLM(
+                family=family, features={"x": Numeric()}, selection_penalty=0.01
+            ).fit_path(frame, y, n_lambda=8)
+        return model.result, path
+
+    base, base_path = fit(0.0)
+    result, path = fit(shift)
+    assert base.converged and result.converged
+    assert result.n_iter <= base.n_iter + 1
+    slope = float(base.beta[0])
+    assert abs(float(result.beta[0]) - slope) <= 2.0 * tol * abs(slope)
+    assert np.all(path.converged_path)
+    scale = float(np.max(np.abs(base_path.coef_path)))
+    assert np.max(np.abs(path.coef_path - base_path.coef_path)) <= 2.0 * tol * scale
+
+
+def test_the_metrics_gram_does_not_anchor_on_a_far_first_chunk():
+    """The streamed centred Gram merges chunk co-moments, so no one chunk sets its anchor.
+
+    Codex's case: the first chunk holds 100 rows of negligible weight at
+    ``1e8 + z``, the rest 900 rows of unit weight at ``z``.  About the first
+    chunk's mean the Gram subtracted ``sum w (x - a)^2`` and ``(sum w (x -
+    a))^2 / sum w``, both near ``9e18``, and kept nothing of the 900.  The
+    pairwise merge (Chan, Golub & LeVeque 1979) errs by at most ``4
+    gamma_{n+4} C + 6 u R sqrt(C W)``, ``R`` the largest row about that
+    chunk's mean.  Mutation: the one-anchor formula.
+    """
+    from superglm.inference._metrics_design import _anchored_weighted_moments
+
+    rng = np.random.default_rng(440)
+    x = np.concatenate((1e8 + rng.normal(size=100), rng.normal(size=900)))
+    W = np.concatenate((np.full(100, 1e-20), np.ones(900)))
+
+    def chunks():
+        for start in range(0, len(x), 100):
+            yield start, start + 100, x[start : start + 100, None]
+
+    _, _, centred = _anchored_weighted_moments(chunks, W, 1)
+    total = math.fsum(W)
+    mean = math.fsum(W * x) / total
+    reference = math.fsum(W * (x - mean) ** 2)
+    u = np.finfo(np.float64).eps / 2.0
+    k = len(x) + 4
+    gamma = k * u / (1.0 - k * u)
+    spread = float(np.max(np.abs(x - np.mean(x[:100]))))
+    bound = 4.0 * gamma * reference + 6.0 * u * spread * math.sqrt(reference * total)
+    assert abs(float(centred[0, 0]) - reference) <= bound
 
 
 @pytest.mark.parametrize("position", ["first", "last"])
@@ -1256,3 +1358,87 @@ def test_a_dense_column_takes_the_exact_pair_at_every_offset(rung):
         )
         assert system.mean_lo is not None
         assert "centered_raw_moment_hits" not in profile
+
+
+@pytest.mark.parametrize("bounded", ["discrete_categorical", "spline"])
+def test_the_dense_split_matches_the_exact_pair_reference(bounded, monkeypatch):
+    """``build_centered_system``'s dense/bounded split against the full exact-pair system.
+
+    Beside a dense column the bounded columns' block comes from a raw rung
+    and the dense columns join it centred about their exact pair, with the
+    cross block ``N' (W D~) - m_N (1' W D~)`` (``_attach_dense_split``).  The
+    reference centres the whole design about ``weighted_mean_pair``'s ``(hi,
+    lo)``.  Each entry agrees to ``4 gamma_{n+p+4}`` times the same entry
+    formed on absolute rows: a dense column's centred rows, a bounded
+    column's ``|x| + |m|`` (its raw rung subtracts the mean's outer product).
+    Mutation: the cross block formed without ``W``, which is the same at
+    every offset, so the translation tests cannot see it.
+    """
+    import scipy.sparse as sp
+
+    from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        SparseSSPGroupMatrix,
+    )
+    from superglm.solvers import centered_system
+
+    rng = np.random.default_rng(439)
+    n = 9000  # above the raw rungs' size crossovers for both bounded halves
+    dense = DenseGroupMatrix(2010.0 + 5.0 * rng.normal(size=(n, 2)))
+    if bounded == "discrete_categorical":
+        support = rng.normal(size=(8, 3))
+        support -= support.mean(axis=0)
+        others = [
+            DiscretizedSSPGroupMatrix(support, np.eye(3), np.arange(n, dtype=np.intp) % 8),
+            CategoricalGroupMatrix(np.arange(n, dtype=np.intp) % 120, n_levels=120),
+        ]
+    else:
+        others = []
+        for width, phase in ((12, 0), (10, 3)):
+            rows = np.repeat(np.arange(n, dtype=np.intp), 4)
+            columns = (rows + np.tile(np.arange(4, dtype=np.intp), n) + phase) % width
+            values = np.tile(np.array([0.1, 0.4, 0.4, 0.1]), n)
+            basis = sp.csr_matrix((values, (rows, columns)), shape=(n, width))
+            others.append(SparseSSPGroupMatrix(basis, np.eye(width)))
+    groups = [dense, *others]
+    dm = DesignMatrix(groups, n=n, p=sum(group.shape[1] for group in groups))
+    W = rng.uniform(0.5, 2.0, size=n)
+    z = rng.normal(size=n)
+    attached = []
+    real_attach = centered_system._attach_dense_split
+
+    def recording_attach(split, **kwargs):
+        attached.append(split)
+        return real_attach(split, **kwargs)
+
+    monkeypatch.setattr(centered_system, "_attach_dense_split", recording_attach)
+    system = centered_system.build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_split=dm.tabmat_centering_split,
+        tabmat_state=centered_system.TabmatCenteringState(),
+    )
+    assert attached, "the bounded half took no raw rung: the split was not exercised"
+
+    sum_w = float(np.sum(W))
+    mean_x, hi, lo = centered_system.weighted_mean_pair(dm, W, sum_w)
+    z_centered = z - system.mean_z
+    gram, rhs = centered_gram_rhs(dm=dm, W=W, mean_x=hi, z_centered=z_centered, mean_lo=lo)
+    X = dm.toarray()
+    is_dense = np.zeros(dm.p, dtype=bool)
+    is_dense[: dense.shape[1]] = True
+    magnitude = np.where(is_dense, np.abs((X - hi) - lo), np.abs(X) + np.abs(mean_x))
+    u = np.finfo(np.float64).eps / 2.0
+    k = n + dm.p + 4
+    gamma = k * u / (1.0 - k * u)
+    assert np.all(
+        np.abs(system.data_gram - gram) <= 4.0 * gamma * (magnitude.T @ (W[:, None] * magnitude))
+    )
+    assert np.all(
+        np.abs(system.rhs - rhs) <= 4.0 * gamma * (magnitude.T @ (W * np.abs(z_centered)))
+    )
+    assert np.all(np.abs(system.mean_x - mean_x) <= 4.0 * gamma * (np.abs(X).T @ W) / sum_w)

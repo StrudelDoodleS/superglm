@@ -621,10 +621,20 @@ class _DenseSplit:
     bounded_index: NDArray
 
 
-# One split per design, built on first use and dropped with the design: the
-# bounded design owns its own rung caches (execution plan, Tabmat split,
-# bin-space plan), so they persist across a fit's iterations.
+# One split per design, built on first use.  The bounded design owns its own
+# rung caches (execution plan, Tabmat split, bin-space plan, raw-spline Tabmat
+# plan), so they persist across a fit's iterations.  Owner: the fit workspace
+# that holds the design.  Lifetime: until the fit is published, when
+# ``release_dense_split`` drops it with the full design's raw-spline plan
+# (``capture_fit_state``), or until the design itself is collected.  The split
+# depends only on the design's groups, never on weights, parameters, penalty or
+# precision, so nothing else invalidates it; a later fit rebuilds it on use.
 _DENSE_SPLITS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def release_dense_split(dm: DesignMatrix) -> None:
+    """Drop ``dm``'s dense/bounded split and with it every cache of its bounded design."""
+    _DENSE_SPLITS.pop(dm, None)
 
 
 def _dense_split(dm: DesignMatrix) -> _DenseSplit:

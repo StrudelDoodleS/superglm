@@ -49,7 +49,13 @@ from superglm.solvers.irls_state import (
     _select_irls_trial,
     _stable_penalized_deviance_delta,
 )
-from superglm.solvers.mode_score import dense_centred_rmatvec, dense_columns
+from superglm.solvers.mode_score import (
+    centred_matvec,
+    dense_centred_matvec,
+    dense_centred_rmatvec,
+    dense_columns,
+    prior_weighted_centre,
+)
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
@@ -465,19 +471,71 @@ def _freeze_result_arrays(value: object, memo: dict[int, object]) -> object:
     return value
 
 
+def _dense_group_centring(
+    dm: DesignMatrix, groups: list[GroupSlice], W: NDArray
+) -> list[tuple[DesignMatrix, NDArray, NDArray] | None] | None:
+    """Per group, ``(design, hi, lo)`` for a ``DenseGroupMatrix`` about the ``W``-weighted exact pair.
+
+    ``None`` for every other group, and ``None`` overall without a dense
+    group or a positive weight total.  The pair is
+    ``centered_system.dense_mean_pair``: rows ``(x - hi) - lo`` are the
+    group's columns centred about their working-weighted mean, so ``X~' W 1 =
+    0`` and the unpenalized intercept separates from the group (Friedman,
+    Hastie & Tibshirani 2010, J. Stat. Softw. 33(1), §2 and §2.6: "we always
+    center each predictor variable", and the intercept, not regularized, is
+    then the mean).
+    """
+    matrices = dm.group_matrices
+    if not any(type(matrix) is DenseGroupMatrix for matrix in matrices):
+        return None
+    sum_w = float(np.sum(W))
+    if not (sum_w > 0.0 and np.isfinite(sum_w)):
+        return None
+    pair = dense_mean_pair(dm, W, sum_w)
+    if pair is None:  # pragma: no cover - a dense group is present
+        return None
+    hi, lo = pair
+    return [
+        (
+            DesignMatrix([matrix], n=dm.n, p=matrix.shape[1]),
+            hi[group.sl].copy(),
+            lo[group.sl].copy(),
+        )
+        if type(matrix) is DenseGroupMatrix
+        else None
+        for matrix, group in zip(matrices, groups, strict=True)
+    ]
+
+
+def _centred_group_gram(centring: tuple[DesignMatrix, NDArray, NDArray], W: NDArray) -> NDArray:
+    """``X~_g' W X~_g`` of a dense group, its rows centred about the exact pair."""
+    design, hi, lo = centring
+    gram, _ = centered_gram_rhs(
+        dm=design, W=W, mean_x=hi, z_centered=np.zeros(design.n, dtype=np.float64), mean_lo=lo
+    )
+    return gram
+
+
 def _build_group_hessians(
     gms: list[GroupMatrix],
     W: NDArray,
     groups: list[GroupSlice] | None = None,
     S: NDArray | None = None,
+    centring: list | None = None,
 ) -> list[NDArray]:
-    """Build the exact per-group Hessians of the smooth subproblem."""
+    """Build the exact per-group Hessians of the smooth subproblem.
+
+    A group with a ``centring`` entry takes the Gram of its centred rows.
+    """
     if S is not None and groups is None:
         raise ValueError("groups are required when a smooth penalty matrix is supplied")
 
     hessians: list[NDArray] = []
     for index, gm in enumerate(gms):
-        hessian = gm.gram(W)
+        if centring is not None and centring[index] is not None:
+            hessian = _centred_group_gram(centring[index], W)
+        else:
+            hessian = gm.gram(W)
         if S is not None:
             assert groups is not None
             group_slice = groups[index].sl
@@ -782,13 +840,7 @@ def _centred_dense_certificate(
         if type(matrix) is not DenseGroupMatrix:
             continue
         block = DesignMatrix([matrix], n=dm.n, p=matrix.shape[1])
-        hessian, _ = centered_gram_rhs(
-            dm=block,
-            W=W,
-            mean_x=hi[group.sl],
-            z_centered=np.zeros(dm.n, dtype=np.float64),
-            mean_lo=lo[group.sl],
-        )
+        hessian = _centred_group_gram((block, hi[group.sl], lo[group.sl]), W)
         hessian = 0.5 * (hessian + hessian.T)
         if S is not None:
             hessian = hessian + S[group.sl, group.sl]
@@ -1044,6 +1096,24 @@ def _fit_pirls_inner(
     gms = list(dm.group_matrices)
     n_groups = len(groups)
     can_zero_groups = penalty_can_zero_groups(penalty)
+    any_dense_group = any(type(gm) is DenseGroupMatrix for gm in gms)
+    # One-engine design §3.8, as irls_direct keeps it: beside a dense column the
+    # state is (alpha, beta) about the fixed prior-weighted centre c0, eta =
+    # alpha + (X - 1 c0') beta + offset, and the raw intercept alpha - c0' beta
+    # is only its reading.  ``intercept`` below is then that centred alpha.
+    state_center = prior_weighted_centre(dm, weights) if any_dense_group else None
+
+    def working_residual(
+        z_values: NDArray, beta_values: NDArray, intercept_value: float
+    ) -> NDArray:
+        """``z - eta``, ``eta = alpha + X beta + offset`` about the state centre when there is one.
+
+        Without one the raw residual keeps its own order of operations, so a
+        design with no dense column reproduces its fit bit for bit.
+        """
+        if state_center is None:
+            return z_values - dm.matvec(beta_values) - intercept_value - offset
+        return z_values - (intercept_value + centred_matvec(dm, beta_values, state_center) + offset)
 
     # The fitted composite objective is
     #   0.5 * D(beta) + 0.5 * beta' S beta + penalty.eval(beta).
@@ -1108,6 +1178,7 @@ def _fit_pirls_inner(
         outer_iteration: int,
         alpha: float | None = None,
         eta_unclipped: NDArray | None = None,
+        centred_intercept: float | None = None,
     ) -> _IRLSState:
         if trace_enabled:
             assert trace_run is not None
@@ -1116,6 +1187,16 @@ def _fit_pirls_inner(
         else:
             state_id = None
             evaluation_id = None
+        if state_center is not None:
+            # a state entering from raw coordinates (the start) is centred once
+            shift = math.fsum(state_center * np.asarray(beta_values, dtype=np.float64))
+            if centred_intercept is None:
+                centred_intercept = float(intercept_value) + shift
+            if eta_unclipped is None:
+                eta_unclipped = (
+                    centred_intercept + centred_matvec(dm, beta_values, state_center) + offset
+                )
+            intercept_value = centred_intercept - shift
         state = _evaluate_irls_state(
             dm,
             y,
@@ -1143,6 +1224,8 @@ def _fit_pirls_inner(
                 + nonsmooth_merit(state.beta)
             ),
         )
+        if centred_intercept is not None:
+            state = replace(state, centred_intercept=float(centred_intercept))
         if trace_enabled:
             assert trace_run is not None
             trace_run.emit_lazy(
@@ -1230,7 +1313,7 @@ def _fit_pirls_inner(
         beta_prev = committed.beta
         intercept_prev = committed.intercept
         beta = committed.beta.copy()
-        intercept = committed.intercept
+        intercept = committed.centred_intercept if state_center is not None else committed.intercept
 
         # Current predictions are the complete retained snapshot.
         eta_unclipped = committed.eta_unclipped
@@ -1250,6 +1333,14 @@ def _fit_pirls_inner(
         W = working_rows.weights
         z = working_rows.response
 
+        # A dense group is updated in coordinates centred about its exact pair
+        # (issue #430): its score and curvature are those of the centred rows,
+        # and a step d moves eta by X~ d, the intercept absorbing -(hi + lo)' d.
+        # Raw, the intercept and a column at offset m with spread s shared a
+        # curvature (m^2 + s^2) sum W, and block coordinate descent shrank the
+        # slope's error by only m^2 / (m^2 + s^2) per sweep.
+        dense_centring = _dense_group_centring(dm, groups, W) if any_dense_group else None
+
         # Per-group Hessians and Lipschitz constants
         t0 = time.perf_counter()
         block_hessians = _build_group_hessians(
@@ -1257,6 +1348,7 @@ def _fit_pirls_inner(
             W,
             groups if has_smooth_penalty else None,
             S if has_smooth_penalty else None,
+            centring=dense_centring,
         )
         if type(penalty) in (GroupLasso, GroupElasticNet):
             radial_penalty = cast(GroupLasso | GroupElasticNet, penalty)
@@ -1283,7 +1375,7 @@ def _fit_pirls_inner(
         t_lipschitz_total += time.perf_counter() - t0
 
         # Initialize residual
-        r = z - dm.matvec(beta) - intercept - offset
+        r = working_residual(z, beta, intercept)
         if has_smooth_penalty:
             assert S is not None
             S_beta = S @ beta
@@ -1301,7 +1393,7 @@ def _fit_pirls_inner(
         for inner in range(max_iter_inner):
             # Periodic residual refresh to avoid float drift
             if inner > 0 and inner % 5 == 0:
-                r = z - dm.matvec(beta) - intercept - offset
+                r = working_residual(z, beta, intercept)
                 if has_smooth_penalty:
                     assert S is not None
                     S_beta = S @ beta
@@ -1324,8 +1416,12 @@ def _fit_pirls_inner(
 
                 bg_old = beta[g.sl].copy()
                 step_curvature = L_g if L_g > 0.0 else 1.0
+                centring_g = dense_centring[gi] if dense_centring is not None else None
 
-                grad_g = -gm.rmatvec(W * r)
+                if centring_g is None:
+                    grad_g = -gm.rmatvec(W * r)
+                else:
+                    grad_g = -dense_centred_rmatvec(centring_g[0], W * r, *centring_g[1:])
                 if S_beta is not None:
                     grad_g = grad_g + S_beta[g.sl]
 
@@ -1360,7 +1456,17 @@ def _fit_pirls_inner(
 
                 d = bg_new - bg_old
                 if np.any(d != 0):
-                    r -= gm.matvec(d)
+                    if centring_g is None:
+                        r -= gm.matvec(d)
+                    else:
+                        # eta moves by X~ d = (X - 1 c0') d - (hi - c0 + lo)' d:
+                        # hi - c0 is exact (Sterbenz) beside the state centre
+                        _, hi_g, lo_g = centring_g
+                        assert state_center is not None
+                        r -= dense_centred_matvec(centring_g[0], d, hi_g, lo_g)
+                        intercept -= math.fsum(
+                            np.concatenate(((hi_g - state_center[g.sl]) * d, lo_g * d))
+                        )
                     beta[g.sl] = bg_new
                     if S_beta is not None:
                         assert S is not None
@@ -1373,7 +1479,12 @@ def _fit_pirls_inner(
                         # point of the penalty's own proximal operator.  This
                         # works for group, sparse-group, elastic-net, and custom
                         # penalties without duplicating their subgradients.
-                        grad_after = -gm.rmatvec(W * r)
+                        if centring_g is None:
+                            grad_after = -gm.rmatvec(W * r)
+                        else:
+                            grad_after = -dense_centred_rmatvec(
+                                centring_g[0], W * r, *centring_g[1:]
+                            )
                         if S_beta is not None:
                             grad_after = grad_after + S_beta[g.sl]
                         zero_probe = penalty.prox_group(
@@ -1400,6 +1511,7 @@ def _fit_pirls_inner(
             phase="proposal",
             outer_iteration=outer + 1,
             alpha=1.0,
+            centred_intercept=intercept if state_center is not None else None,
         )
         trial_cache: dict[float, _IRLSState] = {1.0: proposal}
         trial_directions: tuple[NDArray, float, NDArray] | None = None
@@ -1409,12 +1521,19 @@ def _fit_pirls_inner(
             if trial_directions is None:
                 trial_directions = (
                     proposal.beta - committed.beta,
-                    proposal.intercept - committed.intercept,
+                    (
+                        proposal.centred_intercept - committed.centred_intercept
+                        if state_center is not None
+                        else proposal.intercept - committed.intercept
+                    ),
                     proposal.eta_unclipped - committed.eta_unclipped,
                 )
             beta_direction, intercept_direction, eta_direction = trial_directions
             beta_trial = committed.beta + alpha * beta_direction
-            intercept_trial = committed.intercept + alpha * intercept_direction
+            base_intercept = (
+                committed.centred_intercept if state_center is not None else committed.intercept
+            )
+            intercept_trial = base_intercept + alpha * intercept_direction
             eta_trial = committed.eta_unclipped + alpha * eta_direction
             candidate = evaluate_state(
                 beta_trial,
@@ -1423,6 +1542,7 @@ def _fit_pirls_inner(
                 outer_iteration=outer + 1,
                 alpha=alpha,
                 eta_unclipped=eta_trial,
+                centred_intercept=intercept_trial if state_center is not None else None,
             )
             trial_cache[alpha] = candidate
             return candidate

@@ -414,49 +414,71 @@ def weighted_center(design: MetricsDesign, W: NDArray) -> NDArray:
 
 
 def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDArray, NDArray]:
-    """Raw Gram, ``X'W1`` and the centred Gram, the latter about a weighted-mean anchor, in one traversal.
+    """Raw Gram, ``X'W1`` and the centred Gram, the latter merged from chunk co-moments, in one traversal.
 
-    The anchor is the rounded weighted mean of the first chunk that carries
-    weight (``mode_score.rounded_weighted_mean`` on that chunk, already in
-    memory), so neither a zero-weight row nor a far row of negligible weight
-    sets it, and the design is still transformed once.  The centred Gram is
-    formed on rows shifted by the anchor and corrected by the shifted rows'
-    own ``X'W1`` (the corrected two-pass formula; Chan, Golub & LeVeque 1983),
-    so it rounds at the columns' spread about the anchor.  The anchor was row
-    0 whatever its weight: a zero-weight row at ``x = 0`` before Numeric rows
-    at 1e12 read a centred Gram of 2^36 for 2000, and a slope standard error
-    5,862 times too small.
+    Each chunk that carries weight is centred about its own rounded weighted
+    mean (the corrected two-pass formula on the chunk in memory; Chan, Golub
+    & LeVeque 1983), and the chunks' co-moments are merged by the pairwise
+    update ``C = C_a + C_b + (w_a w_b / (w_a + w_b)) d d'``, ``d = m_b -
+    m_a``, the running mean moving by ``d w_b / (w_a + w_b)`` (Chan, Golub &
+    LeVeque 1979; the weighted multivariate form in Pebay, Terriberry, Kolla
+    & Bennett 2016, Comput. Stat. 31:1305).  Rows are first shifted by the
+    first weighted chunk's rounded mean, so the means the merge carries sit
+    at the data's spread about that chunk, never at a column's offset, and
+    no term subtracts two quantities of that size squared: the error is
+    ``O(u (1 + R / s))`` relative, ``R`` the largest shifted row and ``s``
+    the weighted spread.  A centred Gram formed about one fixed anchor
+    cancelled ``sum w (x - a)^2`` against ``(sum w (x - a))^2 / sum w`` and
+    lost ``u D^2 / s^2`` when the anchor lay ``D`` from the weighted mean:
+    row 0 whatever its weight (a zero-weight row at 0 before Numeric rows at
+    1e12 read a centred Gram of 2^36 for 2000), and then the first weighted
+    chunk's mean when that chunk sat apart from the rest (Codex).  Working
+    weights are Fisher weights, never negative; a chunk without weight adds
+    nothing.
     """
     from superglm.solvers.mode_score import rounded_weighted_mean
 
-    sum_w = float(np.sum(W))
-    anchor = None
     gram = np.zeros((p, p), dtype=np.float64)
     xtw1 = np.zeros(p, dtype=np.float64)
-    anchored_gram = np.zeros((p, p), dtype=np.float64)
-    anchored_xtw1 = np.zeros(p, dtype=np.float64)
+    anchor = None
+    total = 0.0
+    mean = np.zeros(p, dtype=np.float64)
+    comoment = np.zeros((p, p), dtype=np.float64)
     for start, stop, block in chunks():
         weights = W[start:stop]
         gram += block.T @ (weights[:, None] * block)
         xtw1 += block.T @ weights
+        chunk_weight = float(np.sum(weights))
+        if not chunk_weight > 0.0:
+            continue
+        count = stop - start
+        rows = np.asarray(block, dtype=np.float64)
         if anchor is None:
-            chunk_weight = float(np.sum(weights))
-            if not chunk_weight > 0.0:
-                # no weight yet: these rows add nothing to the anchored moments
-                continue
-            local = np.asarray(block, dtype=np.float64)
             anchor = rounded_weighted_mean(
-                lambda local=local, count=stop - start: iter(((0, count, local),)),
-                weights,
-                chunk_weight,
-                p,
+                lambda rows=rows: iter(((0, count, rows),)), weights, chunk_weight, p
             )
-        shifted = block - anchor
-        anchored_gram += shifted.T @ (weights[:, None] * shifted)
-        anchored_xtw1 += shifted.T @ weights
+        shifted = rows - anchor
+        chunk_mean = rounded_weighted_mean(
+            lambda shifted=shifted: iter(((0, count, shifted),)), weights, chunk_weight, p
+        )
+        centred = shifted - chunk_mean
+        chunk_comoment = centered_gram_from_moments(
+            centred.T @ (weights[:, None] * centred), centred.T @ weights, chunk_weight
+        )
+        if total == 0.0:
+            mean, comoment, total = chunk_mean, chunk_comoment, chunk_weight
+            continue
+        delta = chunk_mean - mean
+        merged = total + chunk_weight
+        comoment = (
+            comoment + chunk_comoment + (total * (chunk_weight / merged)) * np.outer(delta, delta)
+        )
+        mean = mean + delta * (chunk_weight / merged)
+        total = merged
+    if not total > 0.0:
+        raise ValueError("working weights must have positive total weight")
     gram = 0.5 * (gram + gram.T)
-    centered = centered_gram_from_moments(anchored_gram, anchored_xtw1, sum_w)
-    return gram, xtw1, centered
+    return gram, xtw1, 0.5 * (comoment + comoment.T)
 
 
 def weighted_moments(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArray, NDArray]:

@@ -55,13 +55,18 @@ def _mixed_discrete_design(
 
 
 def _mixed_rung_system(dm: DesignMatrix, W: np.ndarray, z: np.ndarray, state: TabmatCenteringState):
-    """The mixed bin-space rung as ``build_centered_system`` ran it, then its stable fallback.
+    """The mixed bin-space rung driven directly, then its stable fallback.
 
-    ``build_centered_system`` keeps a design with a ``DenseGroupMatrix`` off
-    every raw rung by type (issue #430), so these tests of the bin-space
-    plan's dense blocks drive the rung directly, with the builder's preflight
-    and lockout bookkeeping; a rejection falls back to the builder's
-    exact-pair system, as it did.
+    Unit tests of the plan's dense ("ordinary numeric") blocks, which no fit
+    reaches any more: beside a ``DenseGroupMatrix`` ``build_centered_system``
+    hands the raw rungs only the bounded half of the design (the dense/bounded
+    split, issue #430), and the dense columns join it about their exact pair.
+    They are kept, and labelled, while the plan still carries that support;
+    removing it is a follow-up recorded on PR #439.  The route fits take is
+    pinned against the exact-pair reference by
+    ``test_centred_state_offsets.py::test_the_dense_split_matches_the_exact_pair_reference``.
+    Here the rung runs with the builder's preflight and lockout bookkeeping,
+    and a rejection falls back to the builder's exact-pair system.
     """
     W = np.asarray(W, dtype=np.float64)
     sum_w = float(np.sum(W, dtype=np.float64))
