@@ -826,9 +826,9 @@ def _mean_bound(values, weights, exact):
     )
     largest_weight = max(Fraction(w) for w in weights)
     total = sum(Fraction(w) for w in weights)
-    scaling = Fraction(2) ** -1074 * (
-        1 + 9 * len(values) * (largest_product + abs(exact) * largest_weight) / total
-    )
+    # L = 1 on the unscaled path, the products' scale on the overflow fallback
+    scale = max(Fraction(1), largest_product + abs(exact) * largest_weight)
+    scaling = Fraction(2) ** -1074 * (2 + 16 * (len(values) + 5) * scale / total)
     return (u + 10 * u * u) * abs(exact) + scaling
 
 
@@ -846,8 +846,18 @@ def _exact_mean(values, weights):
         ([0.0, 1.0, 1.0], [5e-324] * 3),
         ([1e300, -1e300, 1.0], [1.0] * 3),
         ([0.0, 1e300], [1e300, 1e-300]),
+        ([1e150, -1e150, 1e-200], [1.0] * 3),
+        ([float(np.finfo(float).max)] * 2, [0.01, 0.02]),
+        ([1e-20, 3e-20, 3e-20], [1e-300] * 3),
     ],
-    ids=["subnormal_weights", "wide_range", "mixed_exponents"],
+    ids=[
+        "subnormal_weights",
+        "wide_range",
+        "mixed_exponents",
+        "cancelling_giants",
+        "largest_float",
+        "subnormal_products",
+    ],
 )
 def test_the_compensated_mean_keeps_every_product_and_error_term(values, weights):
     """``compensated_weighted_mean`` on subnormal weights, values of +-1e300 and mixed exponents.
@@ -859,9 +869,14 @@ def test_the_compensated_mean_keeps_every_product_and_error_term(values, weights
     version returned 0.333 for 2/3 (subnormal products), 0.556 for 1/3 (each
     error term absorbed into its head), and its fix, scaling the weights by
     the largest one's power of two, erased ``1e-300`` beside ``1e300`` and
-    returned 0 for ``1e-300`` (Sol; ``np.average`` gets it).  Mutations: the
-    weights scaled by the largest one with raw products, or ``W (h + e)``
-    summed per row.
+    returned 0 for ``1e-300`` (Sol; ``np.average`` gets it).  Its successor,
+    scaling every product by the largest one's power of two, lost ``1e-200``
+    before ``1e150 - 1e150`` cancelled (0 for ``3.3e-201``), and the quotient
+    of two ``finfo.max`` raised ``OverflowError`` in ``math.ldexp`` (Sol):
+    the products are now summed unscaled, the subnormal ones carried at a
+    shifted scale, and a quotient past the range falls back instead of
+    raising.  Mutations: the weights scaled by the largest one, or the TwoSum
+    error dropped.
     """
     from fractions import Fraction
 
@@ -889,10 +904,16 @@ def test_the_compensated_mean_meets_its_bound_across_the_exponent_range():
     from superglm.solvers.mode_score import compensated_weighted_mean
 
     rng = np.random.default_rng(430)
-    for _ in range(100):
+    for draw in range(120):
         n = int(rng.integers(2, 40))
-        values = (rng.choice([-1.0, 1.0], n) * 10.0 ** rng.uniform(-300, 300, n)).tolist()
-        weights = (10.0 ** rng.uniform(-300, 300, n)).tolist()
+        values = rng.choice([-1.0, 1.0], n) * 10.0 ** rng.uniform(-300, 300, n)
+        if draw % 3 == 0:
+            # giants that cancel exactly, beside small terms
+            half = n // 2
+            values[:half] = 10.0 ** rng.uniform(100, 300, half)
+            values[half : 2 * half] = -values[:half]
+        values = values.tolist()
+        weights = (10.0 ** rng.uniform(-300, 300, n) if draw % 4 else np.ones(n)).tolist()
         exact = _exact_mean(values, weights)
         mean = compensated_weighted_mean(np.array(values), np.array(weights))
         assert abs(Fraction(mean) - exact) <= _mean_bound(values, weights, exact)
@@ -906,6 +927,37 @@ def test_the_compensated_mean_meets_its_bound_across_the_exponent_range():
         weight_semantics="prior",
     )
     np.testing.assert_array_equal(null, np.full(2, 1e-300))
+
+    largest = float(np.finfo(float).max)
+    frame = pd.DataFrame(index=range(2))
+    model = SuperGLM(family="gaussian", features={}, selection_penalty=0).fit(
+        frame, np.array([largest, largest]), sample_weight=np.array([0.01, 0.02])
+    )
+    np.testing.assert_array_equal(model.predict(frame), np.full(2, largest))
+    assert model.result.deviance == 0.0
+
+
+def test_the_intercept_remainder_never_worsens_the_mean():
+    """An intercept-only Gaussian fit on ``[1e12, -1e12, 1]`` predicts the correctly rounded 1/3.
+
+    ``centred_intercept_remainder`` added each residual's TwoSum error back into
+    its large head before an ordinary reduction, so the errors were absorbed
+    and the remainder was noise: the fit predicted 0.3333062 where master
+    predicts 1/3 (Sol).  The residual is now carried as four floats and summed
+    exactly, so the pair ``(alpha, alpha_lo)`` is the mean to ``3u
+    |alpha_lo|``, and the prediction rounds to the correctly rounded mean.
+    Mutation: the remainder from the absorbed residual.
+    """
+    from fractions import Fraction
+
+    frame = pd.DataFrame(index=range(3))
+    y = np.array([1e12, -1e12, 1.0])
+    model = SuperGLM(family="gaussian", features={}, selection_penalty=0).fit(frame, y)
+    exact = Fraction(1, 3)
+    np.testing.assert_array_equal(model.predict(frame), np.full(3, float(exact)))
+    solver = model._solver_pirls_result()
+    pair = Fraction(float(solver.intercept)) + Fraction(float(solver.centred_intercept_lo))
+    assert abs(pair - exact) <= 3 * Fraction(_U) * abs(Fraction(solver.centred_intercept_lo))
 
 
 # ------------------------------------------- 10. the anchor of the exact pair
@@ -1095,6 +1147,67 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
             se = model.metrics(rows, y).coefficient_se
             assert np.all(np.isnan(se["a"])) and np.all(np.isnan(se["b"]))
     assert ranks[1] == ranks[0]
+
+
+def test_the_proximal_certificate_reads_a_dense_column_about_its_pair():
+    """A proximal fit never claims convergence at a wrong slope for a column at 1e12.
+
+    The composite KKT certificate read raw scores and raw curvature: the
+    intercept's residual times the offset hid the slope's, and the curvature,
+    ``offset^2`` times the weight, shrank the proximal step to nothing.  The
+    fit reported convergence after one iteration with its slope at 1e-24,
+    where the penalized optimum has 0.199995 (Sol; also on master).  The
+    certificate now centres a dense column's score and curvature about its
+    pair.  A converged claim must sit at the optimum: the slope's centred
+    score within the model's stationarity tolerance (``tol``, 1e-6) of its
+    magnitude.  The proximal solver does not reach the optimum at this offset
+    (a follow-up), so the fit now reports it has not converged.  Mutation:
+    the raw certificate.
+    """
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], 100)
+    frame = pd.DataFrame({"x": 1e12 + z})
+    y = 3.0 + 0.2 * z
+    model = SuperGLM(family="gaussian", features={"x": Numeric()}, selection_penalty=0.01)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    result = model.result
+    if result.converged:
+        eta = linear_predictor(model._dm, model._solver_pirls_result(), None)
+        residual = y - eta
+        score = float(np.sum((z - z.mean()) * residual))
+        assert abs(score) <= model._tol * float(np.sum(np.abs(z - z.mean()) * np.abs(y)))
+
+
+@pytest.mark.parametrize("position", ["first", "last"])
+def test_metrics_on_new_rows_ignore_where_a_zero_weight_row_sits(position):
+    """``metrics()`` on rows with a zero-weight row far from the data reads the fit's standard error.
+
+    The evaluation design anchored its raw-moment subtraction on row 0
+    whatever its weight: a zero-weight row at ``x = 0`` before Numeric rows
+    at 1e12 formed a centred Gram of 2^36 for 2000, which passed as
+    authoritative, and the slope's standard error read 7.9e-8 for 4.65e-4
+    (Sol; also on master).  The moments are now anchored on the rounded
+    weighted mean, so the row's position does not matter.  The bound: a 1x1
+    Gram on ``n`` rows and the scale from the same residuals, ``8 gamma_n``
+    relative.  Mutation: the anchor back on row 0.
+    """
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], 100)
+    frame = pd.DataFrame({"x": 1e12 + z})
+    y = 3.0 + 0.2 * z + np.tile([0.01, -0.02, 0.03, -0.02], 100)
+    model = SuperGLM(family="gaussian", features={"x": Numeric()}, selection_penalty=0).fit(
+        frame, y
+    )
+    far = pd.DataFrame({"x": [0.0]})
+    if position == "first":
+        rows = pd.concat([far, frame], ignore_index=True)
+        response, weights = np.r_[0.0, y], np.r_[0.0, np.ones(len(z))]
+    else:
+        rows = pd.concat([frame, far], ignore_index=True)
+        response, weights = np.r_[y, 0.0], np.r_[np.ones(len(z)), 0.0]
+    reference = float(model.metrics(frame, y).coefficient_se["x"][0])
+    se = float(model.metrics(rows, response, sample_weight=weights).coefficient_se["x"][0])
+    assert abs(se - reference) <= 8.0 * _gamma(len(rows)) * reference
 
 
 # ------------------------------------------- 12. dense columns take the pair

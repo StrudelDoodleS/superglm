@@ -285,27 +285,7 @@ class EvaluationDesign:
         W = np.asarray(W, dtype=np.float64)
         if W.shape != (self.n,):
             raise ValueError("working weights must match evaluation design rows")
-        gram = np.zeros((self.p, self.p), dtype=np.float64)
-        xtw1 = np.zeros(self.p, dtype=np.float64)
-        anchored_gram = np.zeros((self.p, self.p), dtype=np.float64)
-        anchored_xtw1 = np.zeros(self.p, dtype=np.float64)
-        anchor = None
-        for start, stop, block in self.iter_dense_chunks():
-            weights = W[start:stop]
-            gram += block.T @ (weights[:, None] * block)
-            xtw1 += block.T @ weights
-            if anchor is None and len(block):
-                anchor = block[0].copy()
-            shifted = block if anchor is None else block - anchor
-            anchored_gram += shifted.T @ (weights[:, None] * shifted)
-            anchored_xtw1 += shifted.T @ weights
-        gram = 0.5 * (gram + gram.T)
-        centered = centered_gram_from_moments(
-            anchored_gram,
-            anchored_xtw1,
-            float(np.sum(W)),
-        )
-        return gram, xtw1, centered
+        return _anchored_weighted_moments(self.iter_dense_chunks, W, self.p)
 
 
 MetricsDesign = DesignMatrix | EvaluationDesign | NDArray
@@ -433,6 +413,52 @@ def weighted_center(design: MetricsDesign, W: NDArray) -> NDArray:
     return anchor + total / float(np.sum(W))
 
 
+def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDArray, NDArray]:
+    """Raw Gram, ``X'W1`` and the centred Gram, the latter about a weighted-mean anchor, in one traversal.
+
+    The anchor is the rounded weighted mean of the first chunk that carries
+    weight (``mode_score.rounded_weighted_mean`` on that chunk, already in
+    memory), so neither a zero-weight row nor a far row of negligible weight
+    sets it, and the design is still transformed once.  The centred Gram is
+    formed on rows shifted by the anchor and corrected by the shifted rows'
+    own ``X'W1`` (the corrected two-pass formula; Chan, Golub & LeVeque 1983),
+    so it rounds at the columns' spread about the anchor.  The anchor was row
+    0 whatever its weight: a zero-weight row at ``x = 0`` before Numeric rows
+    at 1e12 read a centred Gram of 2^36 for 2000, and a slope standard error
+    5,862 times too small.
+    """
+    from superglm.solvers.mode_score import rounded_weighted_mean
+
+    sum_w = float(np.sum(W))
+    anchor = None
+    gram = np.zeros((p, p), dtype=np.float64)
+    xtw1 = np.zeros(p, dtype=np.float64)
+    anchored_gram = np.zeros((p, p), dtype=np.float64)
+    anchored_xtw1 = np.zeros(p, dtype=np.float64)
+    for start, stop, block in chunks():
+        weights = W[start:stop]
+        gram += block.T @ (weights[:, None] * block)
+        xtw1 += block.T @ weights
+        if anchor is None:
+            chunk_weight = float(np.sum(weights))
+            if not chunk_weight > 0.0:
+                # no weight yet: these rows add nothing to the anchored moments
+                continue
+            local = np.asarray(block, dtype=np.float64)
+            anchor = rounded_weighted_mean(
+                lambda local=local, count=stop - start: iter(((0, count, local),)),
+                weights,
+                chunk_weight,
+                p,
+            )
+        shifted = block - anchor
+        anchored_gram += shifted.T @ (weights[:, None] * shifted)
+        anchored_xtw1 += shifted.T @ weights
+    gram = 0.5 * (gram + gram.T)
+    centered = centered_gram_from_moments(anchored_gram, anchored_xtw1, sum_w)
+    return gram, xtw1, centered
+
+
 def weighted_moments(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     """Return raw Gram, intercept cross-product, and centered data Gram."""
     W = np.asarray(W, dtype=np.float64)
@@ -442,25 +468,9 @@ def weighted_moments(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArra
     if isinstance(design, np.ndarray):
         if W.shape != (design.shape[0],):
             raise ValueError("working weights must match dense design rows")
-        p = design.shape[1]
-        gram = np.zeros((p, p), dtype=np.float64)
-        xtw1 = np.zeros(p, dtype=np.float64)
-        anchored_gram = np.zeros((p, p), dtype=np.float64)
-        anchored_xtw1 = np.zeros(p, dtype=np.float64)
-        anchor = None
-        for start, stop, block in iter_dense_chunks(design):
-            weights = W[start:stop]
-            gram += block.T @ (weights[:, None] * block)
-            xtw1 += block.T @ weights
-            if anchor is None and len(block):
-                anchor = block[0].copy()
-            shifted = block if anchor is None else block - anchor
-            anchored_gram += shifted.T @ (weights[:, None] * shifted)
-            anchored_xtw1 += shifted.T @ weights
-        gram = 0.5 * (gram + gram.T)
-        sum_w = float(np.sum(W))
-        centered = centered_gram_from_moments(anchored_gram, anchored_xtw1, sum_w)
-        return gram, xtw1, centered
+        return _anchored_weighted_moments(
+            lambda: iter_dense_chunks(design), W, int(design.shape[1])
+        )
 
     from superglm.solvers.centered_system import build_centered_system
 

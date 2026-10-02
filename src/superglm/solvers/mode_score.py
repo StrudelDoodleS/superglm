@@ -500,48 +500,81 @@ def two_sum(a, b):
 
 
 def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) -> float:
-    """``(N 2^K) / (D 2^L)`` without forming either scaled sum."""
-    return math.ldexp(numerator[0] / denominator[0], numerator[1] - denominator[1])
+    """``(N 2^K) / (D 2^L)`` without forming either scaled sum, and without raising.
+
+    The quotient's own exponent is added before scaling back, so a result past
+    the binary64 range is a signed infinity (or a signed zero below it), never
+    the ``OverflowError`` ``math.ldexp`` raises.
+    """
+    quotient = numerator[0] / denominator[0]
+    if quotient == 0.0 or not math.isfinite(quotient):
+        return quotient
+    mantissa, exponent = math.frexp(quotient)
+    exponent += numerator[1] - denominator[1]
+    if exponent > 1024:
+        return math.copysign(math.inf, quotient)
+    if exponent < -1100:
+        return math.copysign(0.0, quotient)
+    return math.ldexp(mantissa, exponent)
+
+
+def _exact_sum(
+    weights: NDArray, values: NDArray, shift: float, mode: int
+) -> tuple[float, int, bool]:
+    """``(S, K, ok)`` with the sum ``S 2^K``: unscaled in one pass, scaled only if that overflows."""
+    from superglm.solvers._exact_sums import scaled_exact_sum, unscaled_exact_sum
+
+    total, exponent, ok = unscaled_exact_sum(weights, values, shift, mode)
+    if ok:
+        return total, exponent, True
+    return scaled_exact_sum(weights, values, shift, mode)
 
 
 def compensated_weighted_mean(values: NDArray, weights: NDArray) -> float:
     """``m* = sum w v / sum w`` from exact products, refined once with an exact residual.
 
-    Each sum runs in a compiled kernel (``_exact_sums.scaled_exact_sum``) that
-    streams the rows twice and holds only Shewchuk's partials, so it needs no
-    memory that grows with the rows.  Every product ``w_i v_i`` is split
-    exactly into two floats on the operands' ``frexp`` mantissas, its exponent
-    kept apart; each sum is scaled by its own largest product's power of two
-    and rounded once, as ``math.fsum`` rounds.  No weight is rescaled on its
-    own, so a contribution survives whatever its exponent: scaling the weights
-    by the largest one erased ``1e-300`` beside ``1e300`` and returned 0 for a
-    mean of ``1e-300``.  The first quotient ``m0`` is then refined by the
-    residual ``v - m0 = h + e`` (TwoSum, exact), whose products are formed the
-    same way.  With ``n`` rows, ``u`` the unit roundoff and ``W = sum w``:
+    Each sum runs in a compiled kernel (``_exact_sums``) that streams the rows
+    and holds only Shewchuk's partials, so it needs no memory that grows with
+    the rows.  Every product ``w_i v_i`` is split exactly into two floats and
+    the partials are rounded once, as ``math.fsum`` rounds them.  The products
+    are added unscaled, so no contribution underflows before the large terms
+    cancel (``[1e150, -1e150, 1e-200]`` keeps its ``1e-200``); a product below
+    ``2^-969``, where TwoProduct stops being exact, is formed on the operands'
+    mantissas and carried exactly at a shifted scale.  Only if a
+    split, product or partial overflows does that sum fall back to the scaled
+    kernel: products on the operands' ``frexp`` mantissas, each sum scaled by
+    its own largest power of two (so ``1e-300`` beside ``1e300`` survives
+    there too).  The first quotient ``m0`` is then refined by the residual
+    ``v - m0 = h + e`` (TwoSum, exact), whose products are formed the same
+    way.  With ``n`` rows, ``u`` the unit roundoff and ``W = sum w``:
 
-        |m - m*| <= (u + 10 u^2) |m*| + 2^-1074 (1 + 9 n (max |w v| + |m*| max w) / W),
+        |m - m*| <= (u + 10 u^2) |m*| + 2^-1074 (2 + 16 (n + 5) L / W),
 
-    the second term the pieces scaled below the normal range (each at most
-    ``2^-1075`` of its sum's largest power of two) and the subnormal results
-    (Higham 2002 §2.2).  On two levels of adjacent floats, on subnormal
-    weights and on values of ``+-1e300`` the mean is correctly rounded.  Six
-    passes over the rows in all.  Falls back to ``np.average`` on non-finite
-    input, a zero weight sum or a non-finite residual.
+    ``L = 1`` on the unscaled path (the merge of the scaled-up partials of
+    products below ``2^-969``, half a unit of ``2^-1074`` per partial) and
+    ``L = max |w v| + |m*| max w`` on the overflow fallback (a piece scaled
+    below the normal range, at most ``2^-1075`` of its sum's largest power of
+    two), plus the subnormal results (Higham 2002 §2.2).  On
+    two levels of adjacent floats, on subnormal weights and on values of
+    ``+-1e300`` the mean is correctly rounded.  Three passes over the rows,
+    two more for a sum that overflows.  A quotient past the binary64 range,
+    a zero weight sum, non-finite input or a non-finite residual falls back
+    to ``np.average``.
     """
-    from superglm.solvers._exact_sums import native_operand, scaled_exact_sum
+    from superglm.solvers._exact_sums import native_operand
 
     v = native_operand(values)
     w = native_operand(weights)
     if not (np.all(np.isfinite(v)) and np.all(np.isfinite(w))):
         return float(np.average(v, weights=w))
-    total, total_exponent, total_ok = scaled_exact_sum(w, v, 0.0, 0)
+    total, total_exponent, total_ok = _exact_sum(w, v, 0.0, 0)
     if not total_ok or total == 0.0:
         return float(np.average(v, weights=w))
-    numerator, numerator_exponent, numerator_ok = scaled_exact_sum(w, v, 0.0, 1)
+    numerator, numerator_exponent, numerator_ok = _exact_sum(w, v, 0.0, 1)
     first = _scaled_ratio((numerator, numerator_exponent), (total, total_exponent))
     if not numerator_ok or not math.isfinite(first):
         return float(np.average(v, weights=w))
-    residual, residual_exponent, residual_ok = scaled_exact_sum(w, v, first, 2)
+    residual, residual_exponent, residual_ok = _exact_sum(w, v, first, 2)
     if not residual_ok:
         return float(np.average(v, weights=w))
     mean = first + _scaled_ratio((residual, residual_exponent), (total, total_exponent))
@@ -583,6 +616,18 @@ def corrected_two_pass_pair(chunks, weights: NDArray, sum_w: float, width: int):
     gives ``anchor = x_ref`` and ``lo = 0`` exactly.
     """
     weights = np.asarray(weights, dtype=np.float64)
+    anchor = rounded_weighted_mean(chunks, weights, sum_w, width)
+    return anchor, _anchored_total(chunks, weights, anchor) / sum_w
+
+
+def rounded_weighted_mean(chunks, weights: NDArray, sum_w: float, width: int) -> NDArray:
+    """Pass one of ``corrected_two_pass_pair``: the weighted mean, shifted by the first weighted row.
+
+    ``fl(x_ref + sum w (x - x_ref) / sum w)``: within ``u |m| + gamma_k sum |w| |x
+    - x_ref| / |sum w|`` of the mean, whichever row seeds it; zeros without a
+    weighted row.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
     reference = None
     for start, stop, block in chunks():
         carried = np.flatnonzero(weights[start:stop] != 0.0)
@@ -590,9 +635,8 @@ def corrected_two_pass_pair(chunks, weights: NDArray, sum_w: float, width: int):
             reference = np.array(np.asarray(block, dtype=np.float64)[carried[0]], copy=True)
             break
     if reference is None:
-        return np.zeros(width, dtype=np.float64), np.zeros(width, dtype=np.float64)
-    anchor = reference + _anchored_total(chunks, weights, reference) / sum_w
-    return anchor, _anchored_total(chunks, weights, anchor) / sum_w
+        return np.zeros(width, dtype=np.float64)
+    return reference + _anchored_total(chunks, weights, reference) / sum_w
 
 
 def centred_intercept_remainder(
@@ -612,28 +656,35 @@ def centred_intercept_remainder(
     and by at least the half ulp ``alpha*`` loses when it is not representable
     (the midpoint of two adjacent floats).  One step of iterative refinement
     with the residual formed error-free (Demmel et al. 2009 for least squares)
-    recovers it: ``y - o`` and ``- alpha`` are TwoSums, so the residual ``d =
-    y - o - alpha - t`` rounds at its own size, and
+    recovers it.  Each row's residual ``d = y - o - alpha - t`` is carried as
+    four floats by TwoSum and weighted by TwoProduct into one exact sum
+    (``_exact_sums.weighted_residual_sum``), never added back into its head
+    before the reduction (that absorbed the errors: ``y = [1e12, -1e12, 1]``
+    predicted 0.3333062 for 1/3).  The sum and ``sum w`` are each rounded
+    once, so
 
-        |alpha + alpha_lo - alpha*| <= gamma_{n+3} sum w |d| / sum w
-                                       + gamma_n |alpha_lo| + O(u^2) mean_w |y - o|,
+        |alpha + alpha_lo - alpha*| <= 3u |alpha_lo| + 2^-1074 (1 + 5 m / sum w),
 
-    which scales with the residuals, not with ``|eta|`` as ``alpha``'s own
-    error does.  ``None`` when there is no positive weight or the residual
-    overflows, and the predictor stays ``alpha + t``.
+    ``m`` the weighted rows, the last term a product's error below the normal
+    range.  ``None`` when there is no positive weight or a part overflows,
+    and the predictor stays ``alpha + t``.
     """
-    w = np.asarray(weights, dtype=np.float64)
-    total = float(np.sum(w))
-    if not total > 0.0:
+    from superglm.solvers._exact_sums import native_operand, weighted_residual_sum
+
+    w = native_operand(weights)
+    total, total_exponent, total_ok = _exact_sum(w, w, 0.0, 0)
+    if not total_ok or not total > 0.0:
         return None
-    response = np.asarray(y, dtype=np.float64)
-    tail = 0.0
-    if offset is not None and np.any(offset):
-        response, tail = two_sum(response, -np.asarray(offset, dtype=np.float64))
-    head, error = two_sum(response, -float(alpha))
-    residual = (head - contribution) + (error + tail)
-    with np.errstate(over="ignore", invalid="ignore"):
-        remainder = float(np.sum(w * residual)) / total
+    response = native_operand(y)
+    contribution = native_operand(contribution)
+    has_offset = offset is not None and bool(np.any(offset))
+    shift = native_operand(offset) if has_offset else native_operand(np.zeros(0))
+    residual, residual_exponent, ok = weighted_residual_sum(
+        w, response, shift, has_offset, float(alpha), contribution
+    )
+    if not ok:
+        return None
+    remainder = _scaled_ratio((residual, residual_exponent), (total, total_exponent))
     return remainder if math.isfinite(remainder) else None
 
 

@@ -17,6 +17,7 @@ import scipy.optimize
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
+from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
 from superglm.distributions import Distribution
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -34,6 +35,7 @@ from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.solvers.centered_system import (
     build_centered_system,
+    dense_mean_pair,
     grouped_augmented_factor,
     grouped_weighted_factor,
 )
@@ -47,6 +49,7 @@ from superglm.solvers.irls_state import (
     _select_irls_trial,
     _stable_penalized_deviance_delta,
 )
+from superglm.solvers.mode_score import dense_centred_rmatvec, dense_columns
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
@@ -754,6 +757,45 @@ def _solve_radial_block(
     return result
 
 
+def _centred_dense_certificate(
+    *,
+    dm: DesignMatrix,
+    W: NDArray,
+    weighted_residual: NDArray,
+    loss_gradient: NDArray,
+    L_groups: list[float],
+    groups: list[GroupSlice],
+    S: NDArray | None,
+    pair: tuple[NDArray, NDArray],
+) -> tuple[NDArray, list[float]]:
+    """The certificate's score and step curvature with dense columns centred about ``pair``.
+
+    The score of a ``DenseGroupMatrix`` column is ``-sum W r ((x - hi) - lo)``
+    and its block's curvature that of the centred rows (plus the smooth
+    penalty's block); every other column keeps the raw reading.
+    """
+    hi, lo = pair
+    dense = dense_columns(dm)
+    gradient = np.where(dense, -dense_centred_rmatvec(dm, weighted_residual, hi, lo), loss_gradient)
+    curvature = list(L_groups)
+    for index, (matrix, group) in enumerate(zip(dm.group_matrices, groups, strict=True)):
+        if type(matrix) is not DenseGroupMatrix:
+            continue
+        block = DesignMatrix([matrix], n=dm.n, p=matrix.shape[1])
+        hessian, _ = centered_gram_rhs(
+            dm=block,
+            W=W,
+            mean_x=hi[group.sl],
+            z_centered=np.zeros(dm.n, dtype=np.float64),
+            mean_lo=lo[group.sl],
+        )
+        hessian = 0.5 * (hessian + hessian.T)
+        if S is not None:
+            hessian = hessian + S[group.sl, group.sl]
+        curvature[index] = _block_lipschitz(hessian)
+    return gradient, curvature
+
+
 def _composite_kkt_violation(
     *,
     dm: DesignMatrix,
@@ -796,11 +838,6 @@ def _composite_kkt_violation(
     z = working_rows.response
     working_residual = z - state.eta
     loss_gradient = -dm.rmatvec(W * working_residual)
-    if has_smooth_penalty:
-        assert S is not None
-        smooth_gradient = loss_gradient + S @ state.beta
-    else:
-        smooth_gradient = loss_gradient
     if L_groups is None or curvature_weights is None or not np.array_equal(W, curvature_weights):
         L_groups, _ = _compute_group_hessians(
             list(dm.group_matrices),
@@ -808,6 +845,33 @@ def _composite_kkt_violation(
             groups if has_smooth_penalty else None,
             S if has_smooth_penalty else None,
         )
+    # A dense column's score and curvature are read about its exact pair, by
+    # type, as every other certificate reads them (issue #430).  Raw, the
+    # intercept's residual times the column's offset hid an unresolved slope,
+    # and the raw curvature, ``offset^2`` times the weight, shrank the proximal
+    # step to nothing: at a 1e12 offset a Gaussian fit reported convergence
+    # after one iteration with its slope at 1e-24 for 0.2.  The intercept is
+    # unpenalized, so at its stationary point the centred and raw scores agree.
+    dense = dense_columns(dm)
+    sum_w = float(np.sum(W))
+    if np.any(dense) and sum_w > 0.0 and np.isfinite(sum_w):
+        pair = dense_mean_pair(dm, W, sum_w)
+        if pair is not None:
+            loss_gradient, L_groups = _centred_dense_certificate(
+                dm=dm,
+                W=W,
+                weighted_residual=W * working_residual,
+                loss_gradient=loss_gradient,
+                L_groups=L_groups,
+                groups=groups,
+                S=S if has_smooth_penalty else None,
+                pair=pair,
+            )
+    if has_smooth_penalty:
+        assert S is not None
+        smooth_gradient = loss_gradient + S @ state.beta
+    else:
+        smooth_gradient = loss_gradient
 
     with np.errstate(over="ignore", invalid="ignore"):
         intercept_residual = abs(float(np.sum(W * working_residual)))
