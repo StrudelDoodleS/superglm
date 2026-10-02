@@ -453,7 +453,11 @@ def term_inference(
 
     # ── Spline ───────────────────────────────────────────────────
     if isinstance(spec, _SplineBase):
+        from superglm.features.factor_smooth import with_population_curve
+
         raw = spec.reconstruct(beta_combined, n_points=n_points)
+        # the population curve when an sz term moves it (#432), as its errors are
+        raw = with_population_curve(raw, name, interaction_specs, groups, beta)
         x_grid = raw["x"]
         log_rel = raw["log_relativity"]
         rel = raw["relativity"]
@@ -482,6 +486,7 @@ def term_inference(
                     result=result,
                     groups=groups,
                     specs=specs,
+                    interaction_specs=interaction_specs,
                     covariance_fn=covariance_fn,
                     alpha=alpha,
                     n_sim=n_sim,

@@ -380,9 +380,12 @@ def _install_tweedie_profile(final_model, *, X, y, offset, result) -> None:
     not reach the model's summary.
     """
     # The canonical public mean: on a discretized model the internal design's
-    # matvec is a binned approximation of it.
+    # matvec is a binned approximation of it.  predict's values without its
+    # warning, which is the user's, not this library evaluation's (#440 review)
+    from superglm.model import base
+
     _synchronize_tweedie_profile_refit(
-        final_model, y, final_model.predict(X, offset=offset), result
+        final_model, y, base.predict_exact(final_model, X, offset, warn=False), result
     )
     # The estimate is converged only if the fit it is published with is.
     reml = getattr(final_model, "_reml_result", None)

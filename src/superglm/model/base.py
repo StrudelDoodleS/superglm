@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import warnings
 from collections.abc import Hashable, Mapping
 from typing import Any, Literal, cast
 
@@ -390,6 +391,28 @@ def _score_prediction_term_exact(
     )
 
 
+# ``model.predict`` -> ``_predict_exact`` -> ``predict_exact`` -> ``predict_eta_exact``
+# -> ``_predict_eta``: a prediction warning names the caller of ``predict``.
+_PREDICTION_WARNING_STACKLEVEL = 6
+
+
+def _score_unidentified_factor_smooth(
+    term: dict[str, Any],
+    X: EagerFrame,
+    beta_all: NDArray,
+    *,
+    population: bool,
+) -> tuple[NDArray[np.floating], tuple]:
+    """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``)."""
+    left_name, right_name = term["parent_names"]
+    left_spec, right_spec = term.get("parent_specs", (None, None))
+    spec = term["spec"]
+    _, left = resolve_interaction_parent_of(spec, left_spec, X.column_array(left_name))
+    _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
+    beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
+    return spec._score_identified(left, right, beta, population=population)
+
+
 def prediction_centred_state(result) -> tuple[float, NDArray | None, float | None]:
     """The intercept, column centre and intercept remainder a public result's predictor starts from.
 
@@ -494,8 +517,18 @@ def _predict_eta(
     fast_discrete: bool,
     random_effects: str,
     stabilize: bool = True,
+    fitted: bool = False,
+    warn: bool = True,
 ) -> NDArray[np.floating]:
-    """Predict the raw or stabilized linear predictor on canonical blocks."""
+    """Predict the raw or stabilized linear predictor on canonical blocks.
+
+    ``fitted`` scores every term at the fit's own coefficients, the fit's
+    linear predictor on its training rows, for the library's evaluations of
+    the fit (screening's working score, random-effect reporting, the
+    discretization deltas); ``predict`` instead treats ``sz`` levels the data
+    identify only in part (#432, ``FactorSmooth._identified_blocks``), and
+    warns of them unless ``warn`` is false.
+    """
     if random_effects not in ("conditional", "population"):
         raise ValueError(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
@@ -539,15 +572,38 @@ def _predict_eta(
             continue
         eta += score(term)
 
+    if not fitted:
+        from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+        _ensure_factor_smooth_levels_recorded(model)
+    unidentified: list[str] = []
     for term in plan["interactions"]:
-        if random_effects == "population" and isinstance(term["spec"], FactorSmooth):
+        spec = term["spec"]
+        if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
+            contribution, named = _score_unidentified_factor_smooth(
+                term, frame, beta_all, population=random_effects == "population"
+            )
+            eta += contribution
+            if named:
+                unidentified.append(f"term {term['name']!r} levels {', '.join(map(str, named))}")
+            continue
+        if random_effects == "population" and isinstance(spec, FactorSmooth):
             left_name, right_name = term["parent_names"]
-            term["spec"].validate_population_prediction_values(
+            spec.validate_population_prediction_values(
                 frame.column_array(left_name),
                 frame.column_array(right_name),
             )
             continue
         eta += score(term)
+    if unidentified and warn:
+        warnings.warn(
+            "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than the "
+            "penalty's null space keep the curve their rows identify and follow the population "
+            "curve's shape where their rows say nothing; levels without weight are predicted at "
+            "the population value: " + "; ".join(unidentified) + ".",
+            UserWarning,
+            stacklevel=_PREDICTION_WARNING_STACKLEVEL,
+        )
 
     eta = finish_eta(eta, intercept, intercept_lo)
     if offset is not None:
@@ -561,14 +617,21 @@ def predict_eta_exact(
     offset: NDArray | None = None,
     *,
     random_effects: str = "conditional",
+    fitted: bool = False,
+    warn: bool = True,
 ) -> NDArray[np.floating]:
-    """Predict the stabilized linear predictor through the exact canonical contract."""
+    """Predict the stabilized linear predictor through the exact canonical contract.
+
+    ``fitted`` and ``warn`` as ``_predict_eta``'s.
+    """
     return _predict_eta(
         model,
         X,
         offset,
         fast_discrete=False,
         random_effects=random_effects,
+        fitted=fitted,
+        warn=warn,
     )
 
 
@@ -618,11 +681,12 @@ def predict_exact(
     offset: NDArray | None = None,
     *,
     random_effects: str = "conditional",
+    warn: bool = True,
 ) -> NDArray:
     """Predict the response mean through the exact canonical contract."""
     return _eta_to_mu(
         model,
-        predict_eta_exact(model, X, offset, random_effects=random_effects),
+        predict_eta_exact(model, X, offset, random_effects=random_effects, warn=warn),
     )
 
 

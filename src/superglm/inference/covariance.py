@@ -381,6 +381,8 @@ def _active_penalty_matrix(
     reml_penalties: list | None = None,
 ) -> NDArray:
     """Build ``S`` directly in compact active coordinates."""
+    from superglm.reml.penalty_algebra import ssp_penalty_matrix
+
     p_active = sum(group.size for group in active_groups)
     if p_active == 0:
         return np.empty((0, 0), dtype=np.float64)
@@ -420,7 +422,7 @@ def _active_penalty_matrix(
             omega = (
                 component.omega_ssp
                 if component.omega_ssp is not None
-                else gm.R_inv.T @ component.omega_raw @ gm.R_inv
+                else ssp_penalty_matrix(gm.R_inv, component.omega_raw)
             )
             omega = _expanded_component_omega(
                 component,
@@ -461,7 +463,9 @@ def _active_penalty_matrix(
                     lam_j = resolve_component_lambda(lambda2, group.name, suffix)
                     if lam_j == 0:
                         continue
-                    S[active_group.sl, active_group.sl] += lam_j * (gm.R_inv.T @ omega_j @ gm.R_inv)
+                    S[active_group.sl, active_group.sl] += lam_j * ssp_penalty_matrix(
+                        gm.R_inv, omega_j
+                    )
                 continue
             lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
             if lam == 0:
@@ -469,7 +473,7 @@ def _active_penalty_matrix(
             omega = gm.omega
             if omega is None:
                 omega = _second_diff_penalty(gm.R_inv.shape[0])
-            S[active_group.sl, active_group.sl] += lam * gm.R_inv.T @ omega @ gm.R_inv
+            S[active_group.sl, active_group.sl] += lam * ssp_penalty_matrix(gm.R_inv, omega)
         elif group.scop_reparameterization is not None:
             lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
             if lam == 0:

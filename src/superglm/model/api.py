@@ -197,6 +197,11 @@ class SuperGLM:
             governs the in-solver backstop that fires when an exhausted,
             stagnant IRLS run shows the extreme-working-weight signature of
             separation the build scan cannot see.
+            A ``FactorSmooth(basis="sz")`` level whose unpenalized line
+            separates the response is named in a ``SeparationWarning`` at fit
+            under ``"warn"`` and ``"error"`` alike (never refused) and left
+            out of the term's population curve; ``"ignore"`` silences the
+            warning only.
         group_pricing : {"rank", "spanned"}
             Dimension ``p_g`` at which the selection penalty and the fallback
             df ledger price a group whose spec emits fewer columns than the
@@ -1804,9 +1809,12 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         random_effects: str = "conditional",
+        fitted: bool = False,
     ) -> NDArray:
-        """Private exact canonical predictor on the link scale."""
-        return base.predict_eta_exact(self, X, offset, random_effects=random_effects)
+        """Private exact canonical predictor on the link scale (``fitted``: ``base._predict_eta``)."""
+        return base.predict_eta_exact(
+            self, X, offset, random_effects=random_effects, fitted=fitted, warn=not fitted
+        )
 
     def _predict_eta_raw_exact(
         self,
@@ -1882,7 +1890,10 @@ class SuperGLM:
         random_effects : {"conditional", "population"}
             Whether to include fitted random-effect and factor-smooth
             deviations. Population prediction sets all such contributions to
-            zero.
+            zero, except that a ``basis="sz"`` FactorSmooth with levels its
+            data identify only in part, or levels whose line separates the
+            response, contributes its population curve's offset (see "SZ
+            levels the data cannot identify" in the interactions guide).
 
         Returns
         -------

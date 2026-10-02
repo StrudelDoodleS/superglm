@@ -332,17 +332,27 @@ def _drop_term_holdout(
     intercept, centre, intercept_lo = base.prediction_centred_state(model.result)
     accumulated = base.start_eta(n_val, intercept, intercept_lo)
     contributions: dict[str, NDArray[np.floating]] = {}
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+    _ensure_factor_smooth_levels_recorded(model)
     # Dropping a term zeros its raw contribution x' beta = (x - c)' beta + c' beta:
     # the c' beta its centred contribution leaves in the intercept goes too.
     centre_shifts: dict[str, float] = {}
     for term in terms:
+        spec = term["spec"]
         block = None if centre is None else centre[term["beta_idx"]]
-        if block is not None and np.any(block != 0.0):
+        centre_shifts[term["name"]] = 0.0
+        if isinstance(spec, FactorSmooth) and spec._has_population_offset:
+            # as ``predict`` scores it (#432): thin and unseen levels from the population
+            contribution, _ = base._score_unidentified_factor_smooth(
+                term, X_val, beta, population=False
+            )
+        elif block is not None and np.any(block != 0.0):
             contribution = base._centred_term_contribution(term, X_val, beta, block)
             centre_shifts[term["name"]] = math.fsum(block * beta[term["beta_idx"]])
         else:
             contribution = base._score_prediction_term_exact(term, X_val, beta)
-            centre_shifts[term["name"]] = 0.0
         contributions[term["name"]] = contribution
         accumulated += contribution
 

@@ -207,6 +207,16 @@ class FactorSmooth:
         self._natural_map = None
         self._base_penalty_components: tuple[tuple[str, Any], ...] = ()
         self._marginal_build_backend: _MarginalBuildBackend | None = None
+        # What the fit's data identify of each sz level (#432), by code
+        # (``_record_unidentified_levels``; ``_free_directions`` None until a
+        # fit records it): the thin levels, the directions of the penalty's null
+        # space each leaves free, the weightless ones, and the levels whose
+        # unpenalized line separates the response.
+        self._unidentified_levels: tuple[int, ...] = ()
+        self._free_directions: tuple[NDArray, ...] | None = None
+        self._weightless_levels: tuple[int, ...] = ()
+        self._separated_levels: tuple[int, ...] = ()
+        self._population_null_space: NDArray | None = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -641,6 +651,213 @@ class FactorSmooth:
         )
         return result
 
+    def _record_unidentified_levels(
+        self,
+        design,
+        prior_weights: NDArray | None,
+        response: NDArray | None = None,
+        boundaries: tuple[str, ...] = (),
+    ) -> tuple[int, ...]:
+        """Record what the fit's data identify of each ``sz`` level (#432); return the separated.
+
+        A level whose rows of positive weight hold fewer distinct ``x`` values
+        than the penalty's null space ``N_P`` has directions of its polynomial
+        deviation the data cannot tell from the main effect
+        (``layout.sz_level_identification``).  A level whose unpenalized line
+        separates the response (``boundaries``, the family's response
+        boundaries reached at infinite ``eta``) has no finite line
+        (``diagnostics.separation.separated_factor_smooth_levels``).  Both
+        stay out of the population curve (``_population_map``).
+        """
+        from superglm.diagnostics.separation import separated_factor_smooth_levels
+        from superglm.solvers._structured.layout import sz_level_identification
+
+        self._unidentified_levels = ()
+        self._free_directions = ()
+        self._weightless_levels = ()
+        self._separated_levels = ()
+        self._population_null_space = None
+        if self.basis != "sz":
+            return ()
+        rows = sz_level_identification(design, prior_weights)
+        separated: tuple[int, ...] = ()
+        if response is not None and boundaries:
+            separated = separated_factor_smooth_levels(
+                design, rows.null_space, prior_weights, response, boundaries
+            )
+        self._unidentified_levels = rows.thin
+        self._free_directions = rows.free
+        self._weightless_levels = rows.weightless
+        self._separated_levels = separated
+        self._population_null_space = rows.null_space if (rows.thin or separated) else None
+        return separated
+
+    @property
+    def _unidentified_level_names(self) -> tuple:
+        """The fitted ``sz`` levels the data identify only in part (``_record_unidentified_levels``)."""
+        return tuple(self._levels[code] for code in getattr(self, "_unidentified_levels", ()))
+
+    @property
+    def _has_population_offset(self) -> bool:
+        """Whether some level stays out of the population curve, which then moves off the main effect."""
+        return bool(getattr(self, "_unidentified_levels", ())) or bool(
+            getattr(self, "_separated_levels", ())
+        )
+
+    @property
+    def _population_convention(self) -> str:
+        """How the population curve is fixed (``_population_map``).
+
+        ``"main"`` (no level left out: the main effect, as the sum-to-zero
+        constraint makes it), ``"mean"`` (the mean of the levels the data
+        identify), ``"separated_mean"`` (every level the data identify
+        separates: their mean, which follows how far the fit walked their
+        lines) or ``"canonical"`` (every level thin).
+        """
+        if not self._has_population_offset:
+            return "main"
+        excluded = set(self._unidentified_levels) | set(self._separated_levels)
+        if len(excluded) < len(self._levels):
+            return "mean"
+        if len(self._unidentified_levels) < len(self._levels):
+            return "separated_mean"
+        return "canonical"
+
+    def _population_map(self) -> tuple[NDArray, NDArray] | None:
+        """``(levels, V)``: the population offset ``c = sum_i V_i beta_{levels_i}`` (natural basis).
+
+        A thin level ``t`` leaves a part ``r_t`` of its polynomial deviation
+        free (``r_t`` in the span of ``_free_directions[t]``): shifting it,
+        every level by ``-R / K`` and the main effect by ``+R / K`` (``R =
+        sum_t r_t``) keeps the sum-to-zero constraint, every other level's
+        curve and every level's fit at its own rows.  A separated level's
+        line walks the same way without bound.  The fit's coefficients are
+        one point of that family, and the main effect, so the population
+        curve, moved with it.  The population curve is therefore
+        ``main + b(x)' c`` with ``c`` the polynomial part of the mean of the
+        levels the data identify, ``c = P_N sum_{l in I} beta_l / |I|``
+        (``P_N = N_P N_P'``): along the family each of them moves by
+        ``-R / K``, so ``c`` does as well and ``main + b(x)' c`` does not
+        depend on the fit's point.  This is the constraint without the levels
+        left out, as mgcv drops unused factor levels before it fits and lme4
+        predicts the population for a level it did not see.  ``V`` is one
+        ``(k, k)`` matrix shared by the levels, or one per level.
+
+        With every level separated or thin there is no such mean.  If some
+        level is not thin (every one of those separates) the mean is over
+        them, and it follows the separated lines (a warning at fit).  If every
+        level is thin the population is the canonical point of the family,
+        where each level's free part is zero, ``Pi_t (beta_t + s_t - S / K)
+        = 0`` (``Pi_t`` the projector on ``_free_directions[t]``, ``S = sum_t
+        s_t``): ``S = -(I - M / K)^+ sum_t Pi_t beta_t`` with ``M = sum_t
+        Pi_t``, unique when no direction of ``N_P`` is free in every level,
+        and ``c = S / K``.  ``None`` when no level is left out.
+        """
+        if not self._has_population_offset:
+            return None
+        n_levels = len(self._levels)
+        null_space = np.asarray(self._population_null_space, dtype=np.float64)
+        projector = null_space @ null_space.T
+        thin = tuple(self._unidentified_levels)
+        excluded = set(thin) | set(self._separated_levels)
+        identified = [level for level in range(n_levels) if level not in excluded]
+        if not identified:
+            identified = [level for level in range(n_levels) if level not in set(thin)]
+        if identified:
+            return np.asarray(identified, dtype=np.intp), projector / len(identified)
+        free = [np.asarray(f, dtype=np.float64) for f in self._free_directions]
+        projectors = np.stack([f @ f.T for f in free])
+        local = null_space.T @ (np.eye(len(projector)) - projectors.sum(axis=0) / n_levels)
+        local = local @ null_space
+        values, vectors = np.linalg.eigh(0.5 * (local + local.T))
+        # ``I - M / K`` has its eigenvalues in [0, 1]: the eigensolver resolves
+        # them to ``m eps`` (its backward error on a unit-norm matrix)
+        keep = values > len(values) * np.finfo(np.float64).eps
+        inverse = (vectors[:, keep] / values[keep]) @ vectors[:, keep].T
+        lifted = -(null_space @ inverse @ null_space.T) / n_levels
+        return np.asarray(thin, dtype=np.intp), lifted @ projectors
+
+    def _population_offset(self, blocks: NDArray) -> NDArray[np.float64]:
+        """The population curve's offset ``c`` (natural basis) from the level blocks (``_population_map``)."""
+        mapping = self._population_map()
+        if mapping is None:
+            return np.zeros(blocks.shape[1])
+        levels, V = mapping
+        if V.ndim == 2:
+            return V @ np.sum(blocks[levels], axis=0)
+        return np.einsum("lij,lj->i", V, blocks[levels], optimize=True)
+
+    def _population_contrast(self) -> NDArray[np.float64] | None:
+        """``c`` as a map of the term's ``(K - 1) k`` free coefficients, ``(k, (K - 1) k)``.
+
+        The free blocks are levels ``0 .. K - 2``; the last level is minus
+        their sum (``expand_sum_to_zero_blocks``).  ``None`` when no level is
+        left out of the population.
+        """
+        mapping = self._population_map()
+        if mapping is None:
+            return None
+        levels, V = mapping
+        n_levels, k = len(self._levels), self.k
+        raw = np.zeros((n_levels, k, k))
+        raw[levels] = V
+        free = raw[:-1] - raw[-1][None, :, :]
+        return np.ascontiguousarray(free.transpose(1, 0, 2).reshape(k, (n_levels - 1) * k))
+
+    def _identified_blocks(
+        self, blocks: NDArray
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """``(blocks', c)``: each level's coefficients as predicted, and the population offset.
+
+        A thin level keeps what its rows identify and takes the population's
+        part in the directions they leave free, ``beta_t - Pi_t (beta_t -
+        c)`` (``Pi_t`` the projector on ``_free_directions[t]``): along the
+        family ``beta_t - c`` moves by ``r_t``, which ``Pi_t`` removes, so the
+        level's prediction moves by ``-R / K`` exactly as the main effect
+        moves by ``+R / K``, and at its own rows ``b(x)' Pi_t = 0`` keeps the
+        fit.  A level without weight is predicted at the population value.
+        Every other level keeps its coefficients.
+        """
+        coefficients = np.array(blocks, dtype=np.float64, copy=True)
+        offset = self._population_offset(coefficients)
+        weightless = set(getattr(self, "_weightless_levels", ()))
+        for level, free in zip(self._unidentified_levels, self._free_directions, strict=True):
+            if level in weightless:
+                coefficients[level] = offset
+                continue
+            directions = np.asarray(free, dtype=np.float64)
+            coefficients[level] -= directions @ (directions.T @ (blocks[level] - offset))
+        return coefficients, offset
+
+    def _score_identified(
+        self,
+        x: NDArray,
+        group: NDArray,
+        beta: NDArray,
+        *,
+        population: bool,
+    ) -> tuple[NDArray[np.float64], tuple]:
+        """Score the term as predicted when some level stays out of the population (#432).
+
+        Returns the term's contribution and the thin levels among the rows.
+        Each level takes its ``_identified_blocks`` coefficients; an unseen
+        level, and every row under ``population``, the population offset
+        ``b(x)' c``.
+        """
+        if population:
+            numeric, _ = self._validated_prediction_inputs(x, group)
+            codes = np.full(len(numeric), -1, dtype=np.intp)
+        else:
+            numeric, codes = self.validate_prediction_values(x, group)
+        basis = self.marginal_basis(numeric)
+        blocks, offset = self._identified_blocks(self._level_blocks(beta))
+        coefficients = blocks[np.maximum(codes, 0)]
+        coefficients[codes < 0] = offset
+        result = np.einsum("ij,ij->i", basis, coefficients, optimize=True)
+        thin = np.isin(codes, np.asarray(self._unidentified_levels, dtype=np.intp))
+        named = tuple(self._levels[code] for code in np.unique(codes[thin]))
+        return result, named
+
     def _level_blocks(self, beta: NDArray) -> NDArray[np.float64]:
         """Return coefficients for every fitted level in marginal coordinates."""
         coefficient_levels = len(self._levels) if self.basis == "fs" else len(self._levels) - 1
@@ -672,8 +889,20 @@ class FactorSmooth:
         return result
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
-        """Return fitted natural-basis coefficients by level."""
+        """Return fitted natural-basis coefficients by level.
+
+        With ``sz`` levels left out of the population (#432,
+        ``_population_map``) each level's coefficients are its deviation from
+        the population curve as predicted, ``_identified_blocks`` minus the
+        offset ``c``, which the result carries as ``population_offset`` (the
+        main effect's reported curve adds ``b(x)' c``).
+        """
         blocks = self._level_blocks(beta)
+        extra: dict[str, Any] = {}
+        if self.basis == "sz" and self._has_population_offset:
+            identified, offset = self._identified_blocks(blocks)
+            blocks = identified - offset[None, :]
+            extra["population_offset"] = offset
         return {
             "variable": self.variable,
             "group": self.group,
@@ -682,7 +911,63 @@ class FactorSmooth:
             "coefficients": {
                 level: block.copy() for level, block in zip(self._levels, blocks, strict=True)
             },
+            **extra,
         }
+
+
+def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any, FactorSmooth]]:
+    """``(interaction name, spec)`` of the ``sz`` terms that move feature ``name``'s population curve.
+
+    An ``sz`` term on ``x`` needs the global Spline on ``x`` and, with levels
+    left out of its population (#432, ``FactorSmooth._population_map``), its
+    population curve is ``main(x) + b(x)' c``: the reported main-effect curve
+    carries ``b(x)' c``.
+    """
+    return [
+        (key, spec)
+        for key, spec in (interaction_specs or {}).items()
+        if isinstance(spec, FactorSmooth)
+        and spec.basis == "sz"
+        and spec.variable == name
+        and spec._has_population_offset
+    ]
+
+
+def population_curve_shift(
+    name: Any, x: NDArray, interaction_specs: Any, groups: Any, beta: NDArray
+) -> NDArray[np.float64] | None:
+    """``sum_terms b(x)' c`` on ``x`` for feature ``name`` (``population_curve_terms``), or None."""
+    terms = population_curve_terms(name, interaction_specs)
+    if not terms:
+        return None
+    shift = np.zeros(len(x), dtype=np.float64)
+    for key, spec in terms:
+        coefficients = np.concatenate([beta[g.sl] for g in groups if g.feature_name == key])
+        offset = spec._population_offset(spec._level_blocks(coefficients))
+        shift += spec.marginal_basis(np.asarray(x, dtype=np.float64)) @ offset
+    return shift
+
+
+def with_population_curve(
+    raw: dict[str, Any], name: Any, interaction_specs: Any, groups: Any, beta: NDArray
+) -> dict[str, Any]:
+    """A main-effect curve shifted onto its ``sz`` terms' population curve (#432).
+
+    With ``sz`` levels left out of the population the curve the model
+    predicts for the population is ``main(x) + b(x)' c``
+    (``population_curve_shift``), so every report of the main effect's curve
+    (relativities, reconstruct, term inference, bands) is that one; a curve
+    no ``sz`` term moves is returned as it is.
+    """
+    if "x" not in raw or "log_relativity" not in raw:
+        return raw
+    shift = population_curve_shift(name, raw["x"], interaction_specs, groups, beta)
+    if shift is None:
+        return raw
+    shifted = dict(raw)
+    shifted["log_relativity"] = np.asarray(raw["log_relativity"], dtype=np.float64) + shift
+    shifted["relativity"] = np.exp(shifted["log_relativity"])
+    return shifted
 
 
 __all__ = ["FactorSmooth"]

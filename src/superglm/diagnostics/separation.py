@@ -319,3 +319,174 @@ def validate_separation_mode(mode: str) -> str:
     if mode not in ("warn", "error", "ignore"):
         raise ValueError(f"separation must be 'warn', 'error', or 'ignore', got {mode!r}")
     return mode
+
+
+# ── sz factor smooths: each level's unpenalized line ───────────────────────
+
+
+def _rounding(count: int) -> float:
+    """Higham's ``gamma_n = n u / (1 - n u)`` (2002, Lemma 3.1), ``u = eps / 2``."""
+    unit = float(np.finfo(np.float64).eps) / 2.0
+    return count * unit / (1.0 - count * unit)
+
+
+def _recedes(sign: NDArray, natural: NDArray, null_space: NDArray, free: NDArray) -> bool:
+    """Whether some ``g = b(x)' N_P Z h`` has ``sign * g >= 0`` on every row, ``> 0`` on one.
+
+    ``natural`` are the boundary rows' natural basis rows and ``sign`` the
+    side each must keep (``-1``: ``g <= 0`` where the response sits on the
+    lower boundary, ``+1``: the upper one); ``free`` (``Z``) spans the
+    directions of ``N_P`` the level's interior rows do not see.  A
+    least-squares direction with ``sign * g = 1`` settles complete
+    separation; one free direction is its two signs; otherwise the linear
+    program over the rows (Konis 2007; Geyer 2009, directions of recession)
+    maximizes ``sum sign * g`` within ``|h| <= 1``.  A direction counts only
+    when its evaluation clears its own rounding, ``gamma_(k + m + q)`` times
+    ``|b| |N_P| |Z| |h|`` (Higham 2002, section 3.5).
+    """
+    rows = natural @ null_space @ free
+    D = sign[:, None] * rows
+    k, m, q = natural.shape[1], null_space.shape[1], free.shape[1]
+    scale = np.abs(natural) @ (np.abs(null_space) @ np.abs(free))
+    slack = _rounding(k + m + q)
+
+    def certified(h: NDArray) -> bool:
+        g = D @ h
+        rho = slack * (scale @ np.abs(h))
+        return bool(np.all(g >= -rho) and np.any(g > rho))
+
+    direction = np.linalg.lstsq(D, np.ones(len(D)), rcond=None)[0]
+    if certified(direction):
+        return True
+    if q == 1:
+        return certified(np.ones(1)) or certified(-np.ones(1))
+    from scipy.optimize import linprog
+
+    program = linprog(
+        -D.sum(axis=0),
+        A_ub=-D,
+        b_ub=np.zeros(len(D)),
+        bounds=[(-1.0, 1.0)] * q,
+        method="highs",
+    )
+    return bool(program.status == 0 and certified(np.asarray(program.x, dtype=np.float64)))
+
+
+def separated_factor_smooth_levels(
+    dominant: Any,
+    null_space: NDArray,
+    prior_weights: NDArray | None,
+    y: NDArray,
+    boundaries: tuple[str, ...],
+) -> tuple[int, ...]:
+    """The ``sz`` levels whose unpenalized line separates the response.
+
+    An ``sz`` level's deviation keeps its polynomial part ``b(x)' N_P f``
+    unpenalized, and moving it with every level by ``-1 / K`` and the main
+    effect's polynomial by ``+1 / K`` changes the level's linear predictor
+    alone.  So the level has no finite estimate when some such ``g`` is
+    ``<= 0`` on its rows at the lower boundary (``y == 0`` under a log link
+    with mass at zero), ``>= 0`` on those at the upper one (``y == 1``,
+    binomial), zero on its interior rows and not zero throughout: a direction
+    of recession (Geyer 2009, Theorem 4), the categorical scan's rule above
+    for a block of indicators.  Only a level with fewer than ``m`` distinct
+    interior ``x`` values can have one.  A level whose rows all sit on one
+    boundary separates along the constant when the basis reproduces it
+    (``b(x)' N_P v = raw(x)' w`` with ``w`` the unit vector, a partition of
+    unity, positive on every row): one sparse product for every such level.
+    Any other candidate is decided on its own rows (``_recedes``).
+    """
+    from superglm.solvers._structured.layout import (
+        first_distinct_level_rows,
+        level_natural_rows,
+    )
+
+    nullity = null_space.shape[1]
+    if not boundaries or not nullity:
+        return ()
+    n_levels = int(dominant.n_levels)
+    codes = np.asarray(dominant.codes, dtype=np.intp)
+    weights = (
+        np.ones(len(codes)) if prior_weights is None else np.asarray(prior_weights, np.float64)
+    )
+    response = np.asarray(y, dtype=np.float64)
+    positive = weights > 0.0
+    lower = positive & (response <= 0.0) if "zero" in boundaries else np.zeros(len(codes), bool)
+    upper = positive & (response >= 1.0) if "one" in boundaries else np.zeros(len(codes), bool)
+    inside = positive & ~lower & ~upper
+    count, _ = first_distinct_level_rows(dominant, inside.astype(np.float64), nullity)
+    n_lower = np.bincount(codes[lower], minlength=n_levels)
+    n_upper = np.bincount(codes[upper], minlength=n_levels)
+    candidates = (count < nullity) & ((n_lower > 0) | (n_upper > 0))
+    if not np.any(candidates):
+        return ()
+    separated = np.zeros(n_levels, dtype=bool)
+
+    one_sided = candidates & (count == 0) & ((n_lower == 0) | (n_upper == 0))
+    if np.any(one_sided):
+        natural_map = np.asarray(dominant.natural_map, dtype=np.float64)
+        spanned = natural_map @ null_space
+        unit = np.ones(natural_map.shape[0])
+        v = np.linalg.lstsq(spanned, unit, rcond=None)[0]
+        w = spanned @ v
+        # the representation test of ``balance_tree._penalized_aliases``
+        if np.linalg.norm(w - unit) <= np.sqrt(np.finfo(np.float64).eps) * np.linalg.norm(unit):
+            if dominant.is_discrete:
+                support = np.asarray(dominant.B_unique, dtype=np.float64)
+                value = (support @ w)[dominant.bin_idx]
+                bound = (np.abs(support) @ np.abs(w))[dominant.bin_idx]
+                nnz = support.shape[1]
+            else:
+                value = dominant.B @ w
+                bound = abs(dominant.B) @ np.abs(w)
+                nnz = int(np.max(np.diff(dominant.B.indptr), initial=0))
+            clear = value > _rounding(nnz) * bound
+            unclear = np.bincount(codes[positive & ~clear], minlength=n_levels)
+            separated |= one_sided & (unclear == 0)
+
+    general = np.flatnonzero(candidates & ~separated)
+    if len(general):
+        rows = np.flatnonzero(positive & np.isin(codes, general))
+        rows = rows[np.argsort(codes[rows], kind="stable")]
+        starts = np.searchsorted(codes[rows], general, side="left")
+        stops = np.searchsorted(codes[rows], general, side="right")
+        for level, start, stop in zip(general, starts, stops, strict=True):
+            level_rows = rows[start:stop]
+            natural = level_natural_rows(dominant, level_rows)
+            unique, inverse = np.unique(natural, axis=0, return_inverse=True)
+            inverse = np.asarray(inverse).reshape(-1)
+            at_lower = np.zeros(len(unique), dtype=bool)
+            at_upper = np.zeros(len(unique), dtype=bool)
+            within = np.zeros(len(unique), dtype=bool)
+            np.logical_or.at(at_lower, inverse, lower[level_rows])
+            np.logical_or.at(at_upper, inverse, upper[level_rows])
+            np.logical_or.at(within, inverse, inside[level_rows])
+            # an x with responses on both boundaries holds g at zero as an interior one does
+            anchor = within | (at_lower & at_upper)
+            anchored = unique[anchor] @ null_space
+            held = min(len(anchored), nullity)
+            if held >= nullity:
+                continue
+            free = (
+                np.eye(nullity)
+                if not held
+                else np.linalg.svd(anchored, full_matrices=True)[2][held:].T
+            )
+            side = np.where(anchor, 0.0, np.where(at_lower, -1.0, 1.0))
+            edge = side != 0.0
+            if np.any(edge) and _recedes(side[edge], unique[edge], null_space, free):
+                separated[level] = True
+    return tuple(int(level) for level in np.flatnonzero(separated))
+
+
+def format_factor_smooth_separation(name: str, labels: list[Any], n_levels: int) -> str:
+    """The warning for ``sz`` levels whose unpenalized line separates (``separated_factor_smooth_levels``)."""
+    return (
+        f"FactorSmooth {name!r} (basis='sz'): {len(labels)} of {n_levels} levels have an "
+        f"unpenalized line that separates the response: {_format_labels(labels)}. The "
+        "likelihood keeps increasing along each such line, so their fitted values walk to "
+        "the response boundary for as long as the fit runs. They are left out of the "
+        "population curve, the mean of the levels the data identify. Merge them into "
+        "neighbouring levels, or model the group with a RandomEffect, to give them finite "
+        "estimates; separation='ignore' silences this warning."
+    )

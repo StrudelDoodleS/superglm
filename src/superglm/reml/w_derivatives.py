@@ -785,11 +785,15 @@ def reml_w_correction(
             raise RuntimeError("An fs or sz weight derivative needs its profiled leaf factor.")
         fit_system = factor.augmented_factor.system
         fit_centre = centred_data_operator(fit_system).center
+        # An sz operator also carries its per-level cross, which its factor's
+        # traces read (``ProfiledSumToZeroTreeFactor._trace_form``).
         moment_sets = factor_smooth_moment_operators(
-            fs_layout, [a for _, a in fs_pending], center=fit_system.leaf.center
+            fs_layout, [a for _, a in fs_pending], center=fit_system.leaf.center, level_cross=True
         )
-        for (i, _), (raw, cross, total) in zip(fs_pending, moment_sets, strict=True):
-            C_j = CenteredBlockOperator(raw=raw, cross=cross, total=total, center=fit_centre)
+        for (i, _), (raw, cross, total, level) in zip(fs_pending, moment_sets, strict=True):
+            C_j = CenteredBlockOperator(
+                raw=raw, cross=cross, total=total, center=fit_centre, raw_structured_cross=level
+            )
             grad_correction[i] += 0.5 * factor.trace_inverse_operator(C_j)
             dH_extra[i] = C_j
 

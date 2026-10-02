@@ -427,7 +427,10 @@ class ModelMetrics:
         if _mu is not None:
             self._mu = _mu
         else:
-            self._mu = model.predict(self._X, offset=offset)
+            from superglm.model import base
+
+            # ``predict``'s values without its warning: a library evaluation
+            self._mu = base.predict_exact(model, self._X, offset=offset, warn=False)
 
         # Evaluation takes its OWN rows and weights, so the fit-time check does
         # not cover it: a clean fitted model can be scored on holdout rows whose
@@ -524,7 +527,7 @@ class ModelMetrics:
         else:
             from superglm.model import base
 
-            eta = base.predict_eta_exact(self._model, self._X, offset=self._offset)
+            eta = base.predict_eta_exact(self._model, self._X, offset=self._offset, warn=False)
         mu = clip_mu(self._link.inverse(eta), self._family)
         return eta, mu
 

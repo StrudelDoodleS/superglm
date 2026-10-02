@@ -190,6 +190,9 @@ def warmup() -> None:
     _warmup_exact_sums()
     _warmup_small_group_panels()
     _warmup_global_moments()
+    from superglm._numba_compile import forget_compiles
+
+    forget_compiles()
 
 
 # The root export list is the reviewed public surface and is pinned by
