@@ -89,8 +89,11 @@ class.
 from __future__ import annotations
 
 import math
+import threading
+import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -333,6 +336,95 @@ def centred_data_score(dm: DesignMatrix, row_score: NDArray, mean_x: NDArray) ->
     return result
 
 
+# Dense blocks centred once.  A fit centres each ``DenseGroupMatrix`` block
+# once about its fixed state centre ``c`` (``prior_weighted_centre``, or a
+# structured factor's border centre) and the centred kernels below read those
+# rows, ``fl(x - c)``, instead of forming them again in every pass.  The held
+# rows are the rows the kernels form without them, one IEEE subtraction per
+# entry in the source's layout, read in the same chunks, so holding them
+# changes no result, only the work.  A cache, then:
+# - owner: the solve that enters ``centred_dense_rows`` (``fit_irls_direct``,
+#   ``fit_pirls``);
+# - lifetime: that block; nested holders of the same rows share one copy;
+# - invalidation: the block's source array and the centre's bytes key an
+#   entry, so another centre or another design holds its own.  No weight,
+#   parameter, penalty or precision enters the rows.
+# It costs one copy of the dense columns while held.
+
+
+@dataclass
+class _HeldRows:
+    source: weakref.ref
+    rows: NDArray
+    holders: int
+
+
+_HELD_ROWS: dict[tuple[int, bytes], _HeldRows] = {}
+_HELD_ROWS_LOCK = threading.Lock()
+
+
+def _held_key(values: NDArray, centre: NDArray) -> tuple[int, bytes]:
+    return id(values), np.ascontiguousarray(centre, dtype=np.float64).tobytes()
+
+
+@contextmanager
+def centred_dense_rows(dm: DesignMatrix, center: NDArray | None):
+    """Hold every dense block of ``dm`` centred once about ``center`` while the block runs.
+
+    ``center`` ``None`` (no centred state) holds nothing.
+    """
+    held: list[tuple[int, bytes]] = []
+    try:
+        if center is not None and hasattr(dm, "group_matrices"):
+            center = np.asarray(center, dtype=np.float64)
+            offset = 0
+            for matrix in dm.group_matrices:
+                width = matrix.shape[1]
+                if type(matrix) is DenseGroupMatrix:
+                    values = matrix.M
+                    centre = center[offset : offset + width]
+                    key = _held_key(values, centre)
+                    with _HELD_ROWS_LOCK:
+                        entry = _HELD_ROWS.get(key)
+                        if entry is not None and entry.source() is values:
+                            entry.holders += 1
+                        else:
+                            rows = np.asarray(values - centre, dtype=np.float64)
+                            rows.setflags(write=False)
+                            _HELD_ROWS[key] = _HeldRows(weakref.ref(values), rows, 1)
+                    held.append(key)
+                offset += width
+        yield
+    finally:
+        with _HELD_ROWS_LOCK:
+            for key in held:
+                entry = _HELD_ROWS.get(key)
+                if entry is None:  # pragma: no cover - holders release their own keys
+                    continue
+                entry.holders -= 1
+                if entry.holders <= 0:
+                    del _HELD_ROWS[key]
+
+
+def _held_rows(values: NDArray, centre: NDArray) -> NDArray | None:
+    """The rows ``fl(values - centre)`` a solve holds (``centred_dense_rows``), else ``None``."""
+    if not _HELD_ROWS:
+        return None
+    entry = _HELD_ROWS.get(_held_key(values, centre))
+    if entry is None or entry.source() is not values:
+        return None
+    return entry.rows
+
+
+def _centred_chunk(
+    values: NDArray, held: NDArray | None, centre: NDArray, start: int, stop: int
+) -> NDArray:
+    """Rows ``start:stop`` of ``fl(values - centre)``: the held rows, or formed as they were."""
+    if held is not None:
+        return held[start:stop]
+    return values[start:stop] - centre
+
+
 def centred_matvec(dm: DesignMatrix, beta: NDArray, center: NDArray) -> NDArray:
     """``(X - 1 center') beta`` by column type (module docstring).
 
@@ -342,7 +434,8 @@ def centred_matvec(dm: DesignMatrix, beta: NDArray, center: NDArray) -> NDArray:
     ``center' beta``.  With the centred intercept ``alpha`` this evaluates
     ``eta = alpha + X~ beta + offset`` without the cancellation of ``X beta``
     against the raw intercept that a column's offset forces (one-engine
-    design §3.8: the PIRLS state is ``(alpha, beta)``).
+    design §3.8: the PIRLS state is ``(alpha, beta)``).  A block a solve holds
+    centred (``centred_dense_rows``) is read, not formed.
     """
     beta = np.asarray(beta, dtype=np.float64)
     result = np.zeros(dm.n)
@@ -353,9 +446,10 @@ def centred_matvec(dm: DesignMatrix, beta: NDArray, center: NDArray) -> NDArray:
         centre = center[offset : offset + width]
         if type(matrix) is DenseGroupMatrix:
             values = matrix.M
+            held = _held_rows(values, centre)
             for lo in range(0, dm.n, _CHUNK):
                 hi = min(lo + _CHUNK, dm.n)
-                result[lo:hi] += (values[lo:hi] - centre) @ part
+                result[lo:hi] += _centred_chunk(values, held, centre, lo, hi) @ part
         else:
             result += matrix.matvec(part) - float(centre @ part)
         offset += width
@@ -373,12 +467,6 @@ def dense_columns(dm: DesignMatrix) -> NDArray:
     return mask
 
 
-def _dense_rows(matrix, start, stop, centre, centre_lo):
-    """Rows ``start:stop`` of a dense block, ``(x - c) - c_lo`` (``c_lo`` ``None``: ``x - c``)."""
-    rows = matrix.M[start:stop] - centre
-    return rows if centre_lo is None else rows - centre_lo
-
-
 def dense_centred_matvec(
     dm: DesignMatrix, values: NDArray, center: NDArray, center_lo: NDArray | None = None
 ) -> NDArray:
@@ -386,22 +474,34 @@ def dense_centred_matvec(
 
     The dense blocks' share of ``centred_matvec`` in its fixed chunks, for a
     caller that applies every other block through its own (structured)
-    product.  ``center_lo`` makes the centre an exact pair, rows ``(x - c) -
-    c_lo`` (``centered_system.weighted_mean_pair``).
+    product.  ``center_lo`` makes the centre a pair ``(c, d)``, rows ``(x - c)
+    - d`` (``centered_system.dense_mean_pair``), applied as a rank-one
+    correction: ``(X_d - 1 c_d') v_d - (d' v_d) 1``.  The pair's ``d`` is the
+    shift of the weighted mean from ``c``, within one weighted standard
+    deviation of the rows' spread when ``c`` is a fit's centre (the
+    certificate ``dense_mean_pair`` applies), so the correction rounds at the
+    rows' own scale.
     """
     result = np.zeros(dm.n)
     values = np.asarray(values, dtype=np.float64)
+    shift: list[float] = []
     offset = 0
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
         if type(matrix) is DenseGroupMatrix:
             part = values[offset : offset + width]
             centre = center[offset : offset + width]
-            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            source = matrix.M
+            held = _held_rows(source, centre)
             for start in range(0, dm.n, _CHUNK):
                 stop = min(start + _CHUNK, dm.n)
-                result[start:stop] += _dense_rows(matrix, start, stop, centre, centre_lo) @ part
+                result[start:stop] += _centred_chunk(source, held, centre, start, stop) @ part
+            if center_lo is not None:
+                shift.extend(center_lo[offset : offset + width] * part)
         offset += width
+    correction = math.fsum(shift)
+    if correction != 0.0:
+        result -= correction
     return result
 
 
@@ -410,21 +510,26 @@ def dense_centred_rmatvec(
 ) -> NDArray:
     """``(X_d - 1 c_d')' r`` on the ``DenseGroupMatrix`` columns (zero elsewhere), centred row by row.
 
-    ``center_lo`` as ``dense_centred_matvec``.
+    ``center_lo`` as ``dense_centred_matvec``: the rank-one correction ``-d
+    (1' r)``.
     """
     result = np.zeros(dm.p)
     rows = np.asarray(rows, dtype=np.float64)
+    total = float(np.sum(rows)) if center_lo is not None else 0.0
     offset = 0
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
         if type(matrix) is DenseGroupMatrix:
             centre = center[offset : offset + width]
-            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            source = matrix.M
+            held = _held_rows(source, centre)
             accumulated = np.zeros(width)
             for start in range(0, dm.n, _CHUNK):
                 stop = min(start + _CHUNK, dm.n)
-                block = _dense_rows(matrix, start, stop, centre, centre_lo)
+                block = _centred_chunk(source, held, centre, start, stop)
                 accumulated += block.T @ rows[start:stop]
+            if center_lo is not None:
+                accumulated -= center_lo[offset : offset + width] * total
             result[offset : offset + width] = accumulated
         offset += width
     return result
@@ -569,10 +674,11 @@ def centre_offset_mean(
         if type(matrix) is DenseGroupMatrix:
             centre = center[offset : offset + width]
             values = matrix.M
+            held = _held_rows(values, centre)
             accumulated = np.zeros(width)
             for lo in range(0, dm.n, _CHUNK):
                 hi = min(lo + _CHUNK, dm.n)
-                accumulated += (values[lo:hi] - centre).T @ w[lo:hi]
+                accumulated += _centred_chunk(values, held, centre, lo, hi).T @ w[lo:hi]
             offset_mean[offset : offset + width] = accumulated / sum_w
         offset += width
     return offset_mean

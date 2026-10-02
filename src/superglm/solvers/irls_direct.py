@@ -23,7 +23,7 @@ import math
 import time
 import warnings
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -112,8 +112,10 @@ from superglm.solvers.mode_score import (
     _gamma,
     centre_offset_mean,
     centred_data_score,
+    centred_dense_rows,
     centred_intercept_remainder,
     centred_matvec,
+    dense_columns,
     null_basis_angle,
     penalized_mode_residual,
     prior_weighted_centre,
@@ -426,6 +428,25 @@ def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
     centre, centre_lo = system.centre_pair()
     rows = X - centre
     return rows if centre_lo is None else rows - centre_lo
+
+
+def _system_offset_mean(
+    dm: DesignMatrix, W: NDArray, system: CenteredSystem, state_center: NDArray
+) -> NDArray:
+    """``mean_x - c``, the working mean's offset from the state's centre, read from the system's pair.
+
+    A system whose dense pair is anchored at the state's centre, ``(c, d)``
+    (``centered_system.dense_mean_pair``), carries the offset as ``d``,
+    formed on the rows held centred about ``c``: no pass.  Any other system
+    takes ``centre_offset_mean``'s pass over centred rows.
+    """
+    if system.mean_hi is not None and system.mean_lo is not None:
+        dense = dense_columns(dm)
+        if np.array_equal(system.mean_hi[dense], state_center[dense]):
+            offset_mean = np.asarray(system.mean_x, dtype=np.float64) - state_center
+            offset_mean[dense] = system.mean_lo[dense]
+            return offset_mean
+    return centre_offset_mean(dm, W, float(system.sum_w), state_center, system.mean_x)
 
 
 def _structured_score_centre(
@@ -844,6 +865,7 @@ def fit_irls_direct(
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
     _centred_init: tuple[float, NDArray] | None = None,
+    _held_rows: ExitStack | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS (see ``_fit_irls_direct_once``).
 
@@ -853,6 +875,7 @@ def fit_irls_direct(
     fit fails or ends unconverged.
     """
     result = None
+    held_rows = ExitStack()
     try:
         if max_iter < 1:
             raise ValueError(f"max_iter must be at least 1, got {max_iter}")
@@ -901,9 +924,11 @@ def fit_irls_direct(
             _mode_bar=_mode_bar,
             _compensate_centred_intercept=_compensate_centred_intercept,
             _centred_init=_centred_init,
+            _held_rows=held_rows,
         )
         return result
     finally:
+        held_rows.close()
         if _fisher_data_reuse is not None and (result is None or not result[0].converged):
             _fisher_data_reuse.clear()
 
@@ -954,6 +979,7 @@ def _fit_irls_direct_once(
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
     _centred_init: tuple[float, NDArray] | None = None,
+    _held_rows: ExitStack | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -1855,6 +1881,13 @@ def _fit_irls_direct_once(
         # 1e-11 relative, so no Newton step near the mode was accepted and
         # the score stalled at 1e-6).
         _state_center = prior_weighted_centre(dm, weights)
+    if _held_rows is not None and _state_center is not None:
+        # Each dense block centred once about the state's fixed centre, held
+        # until the fit returns (``mode_score.centred_dense_rows``): every
+        # centred product of this fit reads those rows instead of forming
+        # them, and its working-weighted shift enters as a rank-one
+        # correction (``centered_system.dense_mean_pair``).
+        _held_rows.enter_context(centred_dense_rows(dm, _state_center))
     _scop_curvature = "fisher"
     if _has_scop:
         from superglm.reml.observed_geometry import classify_scop_reml_curvature
@@ -2240,6 +2273,7 @@ def _fit_irls_direct_once(
             tabmat_state=_tabmat_centering_state,
             profile=profile,
             _data=data,
+            centre=_state_center,
         )
         if fisher is not None and fisher.data is None:
             fisher.remember(W_current, system)
@@ -2646,9 +2680,7 @@ def _fit_irls_direct_once(
             intercept = centered.mean_z - float(centered.mean_x @ beta)
             _last_working_offset_mean = None
             if _state_center is not None:
-                _last_working_offset_mean = centre_offset_mean(
-                    dm, W, centered.sum_w, _state_center, centered.mean_x
-                )
+                _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
                 proposal_centred_intercept = centered.mean_z - math.fsum(
                     _last_working_offset_mean * beta
                 )
@@ -3014,9 +3046,7 @@ def _fit_irls_direct_once(
                     # the intercept about the state's centre, from the offset
                     # of the working mean to it, formed on centred rows
                     # (``centre_offset_mean``): no raw-scale cancellation
-                    _last_working_offset_mean = centre_offset_mean(
-                        dm, W, centered.sum_w, _state_center, centered.mean_x
-                    )
+                    _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
                     proposal_centred_intercept = centered.mean_z - math.fsum(
                         _last_working_offset_mean * beta
                     )
@@ -4185,9 +4215,7 @@ def _fit_irls_direct_once(
             offset_mean_final = (
                 None
                 if _state_center is None or cache_out is None
-                else centre_offset_mean(
-                    dm, W, centered_final.sum_w, _state_center, centered_final.mean_x
-                )
+                else _system_offset_mean(dm, W, centered_final, _state_center)
             )
         XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
         sum_W = centered_final.sum_w

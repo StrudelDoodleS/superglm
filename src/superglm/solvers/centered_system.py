@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import (
+    _compensated_add,
     _try_mixed_discrete_centering,
     _try_raw_spline_tabmat_centering,
     _try_tabmat_centering,
@@ -20,6 +21,8 @@ from superglm._group_matrix._group_matrix_centered import (
 )
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.solvers.mode_score import (
+    _centred_chunk,
+    _held_rows,
     corrected_two_pass_pair,
     dense_centred_matvec,
     dense_centred_rmatvec,
@@ -452,8 +455,16 @@ def build_centered_system(
     profile: dict | None = None,
     _force_chunked: bool = False,
     _data: tuple | None = None,
+    centre: NDArray | None = None,
 ) -> CenteredSystem:
-    """Build a stably centered data Gram, RHS, and penalized Hessian."""
+    """Build a stably centered data Gram, RHS, and penalized Hessian.
+
+    ``centre`` is the fit's fixed state centre (``mode_score.prior_weighted_centre``):
+    a dense column's weighted mean is then read as the pair ``(centre, d)``,
+    ``d`` the shift of its working-weighted mean from the centre, and the
+    dense block is centred by a rank-one correction of its rows centred once
+    about the centre (``dense_mean_pair``, ``_attach_dense_split``).
+    """
     n, p = dm.shape
     W = np.asarray(W, dtype=float)
     z_off = np.asarray(z_off, dtype=float)
@@ -522,9 +533,10 @@ def build_centered_system(
                     mean_z=mean_z,
                     packed=packed,
                     penalty=penalty,
+                    centre=centre,
                 )
 
-    mean_x, mean_hi, mean_lo = weighted_mean_pair(dm, W, sum_w)
+    mean_x, mean_hi, mean_lo = weighted_mean_pair(dm, W, sum_w, anchor=centre)
     data_gram, rhs = centered_gram_rhs(
         dm=dm,
         W=W,
@@ -704,32 +716,66 @@ def _attach_dense_split(
     mean_z: float,
     packed: tuple[NDArray, NDArray, NDArray],
     penalty: NDArray,
+    centre: NDArray | None = None,
 ) -> CenteredSystem:
-    """The centred system from a raw rung on the bounded columns and the exact pair on the dense ones.
+    """The centred system from a raw rung on the bounded columns and the dense ones centred apart.
 
-    The dense block ``D~' W D~`` and its right-hand side come from rows
-    ``(x - hi) - lo`` (``centered_gram_rhs``).  The cross block is ``N~' W
-    D~ = N' (W D~) - m_N (1' W D~)``: one transpose product of the bounded
-    design per dense column, with ``1' W D~`` zero to rounding, so the
-    bounded columns' raw values never meet a dense column's offset.  The
-    bounded block is the rung's own.
+    With the fit's ``centre`` the dense rows ``x~ = fl(x - c)``, held
+    centred once (``mode_score.centred_dense_rows``), give ``t = sum W x~``,
+    ``G = sum W x~ x~'`` and ``r = sum W z x~`` in one pass
+    (``anchored_dense_moments``).  The working-weighted mean is the pair ``(c,
+    d)``, ``d = t / sum W``, and the block is centred by the rank-one
+    correction ``G - t d'`` (``r - d sum W z``): the textbook formula on data
+    shifted by ``c`` (Chan, Golub & LeVeque 1983, §3), within its rounding
+    envelope while ``d`` lies within one weighted standard deviation of the
+    rows (``_anchored_remainder``).  The cross block is ``N~' W D~ = N' (W
+    x~) - m_N t'``, one transpose product of the bounded design per dense
+    column, ``d``'s share ``d (N'W - m_N sum W)`` vanishing with ``m_N``'s
+    definition.
+
+    Without a centre, or past that certificate, the dense block ``D~' W D~``
+    and its right-hand side come from rows ``(x - hi) - lo`` about the exact
+    pair (``dense_mean_pair``, ``centered_gram_rhs``), and the cross block is
+    ``N' (W D~) - m_N (1' W D~)``, with ``1' W D~`` zero to rounding.  Either
+    way the bounded columns' raw values never meet a dense column's offset,
+    and the bounded block is the rung's own.
     """
     mean_bounded, gram_bounded, rhs_bounded = packed
-    pair = dense_mean_pair(split.dense, W, sum_w)
-    if pair is None:  # pragma: no cover - the split holds a dense column
-        raise RuntimeError("A dense split formed no centre pair.")
-    hi, lo = pair
-    gram_dense, rhs_dense = centered_gram_rhs(
-        dm=split.dense, W=W, mean_x=hi, z_centered=z_centered, mean_lo=lo
-    )
     dense_width = split.dense.p
     cross = np.empty((split.bounded.p, dense_width), dtype=np.float64)
-    unit = np.zeros(dense_width, dtype=np.float64)
-    for column in range(dense_width):
-        unit[column] = 1.0
-        weighted = W * dense_centred_matvec(split.dense, unit, hi, lo)
-        unit[column] = 0.0
-        cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(np.sum(weighted))
+    anchored = None
+    if centre is not None:
+        anchor = np.asarray(centre, dtype=np.float64)[split.dense_index]
+        first, gram, response = anchored_dense_moments(split.dense, W, anchor, z_centered)
+        remainder = _anchored_remainder(first, np.diag(gram), sum_w)
+        if remainder is not None and response is not None:
+            anchored = anchor, remainder, first, gram, response
+    if anchored is not None:
+        hi, lo, first, gram, response = anchored
+        gram_dense = gram - np.outer(first, lo)
+        gram_dense = 0.5 * (gram_dense + gram_dense.T)
+        rhs_dense = response - lo * float(np.dot(W, z_centered))
+        for column, values in _dense_centred_columns(split.dense, hi):
+            weighted = W * values
+            cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(
+                np.sum(weighted)
+            )
+    else:
+        pair = dense_mean_pair(split.dense, W, sum_w)
+        if pair is None:  # pragma: no cover - the split holds a dense column
+            raise RuntimeError("A dense split formed no centre pair.")
+        hi, lo = pair
+        gram_dense, rhs_dense = centered_gram_rhs(
+            dm=split.dense, W=W, mean_x=hi, z_centered=z_centered, mean_lo=lo
+        )
+        unit = np.zeros(dense_width, dtype=np.float64)
+        for column in range(dense_width):
+            unit[column] = 1.0
+            weighted = W * dense_centred_matvec(split.dense, unit, hi, lo)
+            unit[column] = 0.0
+            cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(
+                np.sum(weighted)
+            )
     p = dense_width + split.bounded.p
     dense_index, bounded_index = split.dense_index, split.bounded_index
     data_gram = np.empty((p, p), dtype=np.float64)
@@ -752,18 +798,142 @@ def _attach_dense_split(
     )
 
 
-def dense_mean_pair(dm: DesignMatrix, W: NDArray, sum_w: float) -> tuple[NDArray, NDArray] | None:
+def _dense_sources(
+    dm: DesignMatrix, anchor: NDArray
+) -> list[tuple[NDArray, NDArray | None, NDArray]]:
+    """Per dense block ``(values, held rows or None, centre)``, the centre read from ``anchor``."""
+    sources = []
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            centre = np.ascontiguousarray(anchor[offset : offset + width], dtype=np.float64)
+            sources.append((matrix.M, _held_rows(matrix.M, centre), centre))
+        offset += width
+    return sources
+
+
+def _dense_centred_columns(dm: DesignMatrix, anchor: NDArray) -> Iterator[tuple[int, NDArray]]:
+    """``(k, fl(x_k - c_k))`` for the ``k``-th dense column, whole: held rows read, else formed."""
+    column = 0
+    for values, held, centre in _dense_sources(dm, anchor):
+        for index in range(values.shape[1]):
+            yield column, (held[:, index] if held is not None else values[:, index] - centre[index])
+            column += 1
+
+
+def anchored_dense_moments(
+    dm: DesignMatrix, W: NDArray, anchor: NDArray, response: NDArray | None = None
+) -> tuple[NDArray, NDArray, NDArray | None]:
+    """``(t, G, r)`` over the dense columns of ``dm``, rows ``x~ = fl(x - anchor)``, in one pass.
+
+    ``t = sum W x~``, ``G = sum W x~ x~'`` and ``r = sum W z x~`` (``z`` the
+    ``response``; ``r`` is ``None`` without one), each accumulated across
+    row chunks with Kahan's compensation, in ``dense_columns`` order.  Rows a
+    solve holds centred (``mode_score.centred_dense_rows``) are read, not
+    formed.
+    """
+    W = np.asarray(W, dtype=np.float64)
+    sources = _dense_sources(dm, np.asarray(anchor, dtype=np.float64))
+    width = sum(values.shape[1] for values, _, _ in sources)
+    first = np.zeros(width, dtype=np.float64)
+    first_compensation = np.zeros_like(first)
+    gram = np.zeros((width, width), dtype=np.float64)
+    gram_compensation = np.zeros_like(gram)
+    rhs = None if response is None else np.zeros(width, dtype=np.float64)
+    rhs_compensation = np.zeros(width, dtype=np.float64)
+    for start in range(0, dm.n, _FACTOR_CHUNK_ROWS):
+        stop = min(start + _FACTOR_CHUNK_ROWS, dm.n)
+        blocks = [
+            _centred_chunk(values, held, centre, start, stop) for values, held, centre in sources
+        ]
+        rows = blocks[0] if len(blocks) == 1 else np.hstack(blocks)
+        weights = W[start:stop]
+        weighted = rows * weights[:, None]
+        _compensated_add(first, first_compensation, rows.T @ weights)
+        _compensated_add(gram, gram_compensation, rows.T @ weighted)
+        if rhs is not None and response is not None:
+            _compensated_add(rhs, rhs_compensation, weighted.T @ response[start:stop])
+    return first, 0.5 * (gram + gram.T), rhs
+
+
+def _anchored_remainder(first: NDArray, second: NDArray, sum_w: float) -> NDArray | None:
+    """``d = t / sum W``, the weighted mean's shift from the anchor, or ``None`` past the certificate.
+
+    ``second`` is ``sum W x~^2``.  The rank-one correction ``sum W x~^2 -
+    sum W d^2`` (the textbook formula on shifted data) carries ``n u kappa^2``
+    relative, ``kappa^2 = sum W x~^2 / S = 1 + sum W d^2 / S`` with ``S =
+    sum W (x~ - d)^2`` (Chan, Golub & LeVeque 1983, eq. 3.2 and Table 1;
+    Chan & Lewis 1979 for the condition number).  It is taken only where
+    ``d`` lies within one weighted standard deviation, ``sum W d^2 <= S``,
+    i.e. ``kappa^2 <= 2`` (their eq. 3.3 with ``p = 1``), the envelope
+    ``_raw_centering_well_scaled`` sets for every raw-moment rung.  Weights
+    must be non-negative.
+    """
+    if not (np.isfinite(sum_w) and sum_w > 0.0):
+        return None
+    with np.errstate(over="ignore", invalid="ignore"):
+        remainder = first / sum_w
+        shifted = 2.0 * sum_w * remainder * remainder
+        within = np.isfinite(remainder) & np.isfinite(second) & (shifted <= second)
+    return remainder if bool(np.all(within)) else None
+
+
+def _dense_anchored_pair(
+    dm: DesignMatrix, W: NDArray, sum_w: float, anchor: NDArray
+) -> tuple[NDArray, NDArray] | None:
+    """``(anchor, d)`` on the dense columns from one pass, or ``None`` past ``_anchored_remainder``."""
+    first_parts: list[NDArray] = []
+    second_parts: list[NDArray] = []
+    for values, held, centre in _dense_sources(dm, anchor):
+        width = values.shape[1]
+        first = np.zeros(width, dtype=np.float64)
+        first_compensation = np.zeros_like(first)
+        second = np.zeros(width, dtype=np.float64)
+        second_compensation = np.zeros_like(second)
+        for start in range(0, dm.n, _FACTOR_CHUNK_ROWS):
+            stop = min(start + _FACTOR_CHUNK_ROWS, dm.n)
+            rows = _centred_chunk(values, held, centre, start, stop)
+            weights = W[start:stop]
+            _compensated_add(first, first_compensation, rows.T @ weights)
+            _compensated_add(second, second_compensation, (rows * rows).T @ weights)
+        first_parts.append(first)
+        second_parts.append(second)
+    remainder = _anchored_remainder(
+        np.concatenate(first_parts), np.concatenate(second_parts), sum_w
+    )
+    if remainder is None:
+        return None
+    dense = dense_columns(dm)
+    hi = np.zeros(dm.p, dtype=np.float64)
+    lo = np.zeros(dm.p, dtype=np.float64)
+    hi[dense] = anchor[dense]
+    lo[dense] = remainder
+    return hi, lo
+
+
+def dense_mean_pair(
+    dm: DesignMatrix, W: NDArray, sum_w: float, anchor: NDArray | None = None
+) -> tuple[NDArray, NDArray] | None:
     """``(hi, lo)`` over all ``p`` columns, zero off the ``DenseGroupMatrix`` ones; ``None`` without one.
 
-    Each dense column's weighted mean ``sum W x / sum W`` as an exact pair,
-    by the corrected two-pass algorithm (``mode_score.corrected_two_pass_pair``):
-    ``hi`` the rounded mean, ``lo`` the remainder formed on rows differenced
-    from it.  ``W`` may be signed (observed geometry); ``sum_w`` is the
-    caller's own.
+    Each dense column's weighted mean ``sum W x / sum W`` as a pair whose sum
+    it is, read without cancellation.  With the fit's fixed centre ``anchor``
+    (non-negative ``W``), ``hi`` is that centre and ``lo`` the shift of the
+    weighted mean from it, ``sum W x~ / sum W`` on the rows held centred once
+    (one pass), while the shift stays within one weighted standard deviation
+    (``_anchored_remainder``).  Otherwise, by the corrected two-pass algorithm
+    (``mode_score.corrected_two_pass_pair``): ``hi`` the rounded mean, ``lo``
+    the remainder formed on rows differenced from it.  ``W`` may be signed
+    (observed geometry); ``sum_w`` is the caller's own.
     """
     if not any(type(matrix) is DenseGroupMatrix for matrix in dm.group_matrices):
         return None
     W = np.asarray(W, dtype=np.float64)
+    if anchor is not None and not np.any(W < 0.0):
+        pair = _dense_anchored_pair(dm, W, sum_w, np.asarray(anchor, dtype=np.float64))
+        if pair is not None:
+            return pair
     hi = np.zeros(dm.p, dtype=np.float64)
     lo = np.zeros(dm.p, dtype=np.float64)
     offset = 0
@@ -785,7 +955,7 @@ def dense_mean_pair(dm: DesignMatrix, W: NDArray, sum_w: float) -> tuple[NDArray
 
 
 def weighted_mean_pair(
-    dm: DesignMatrix, W: NDArray, sum_w: float
+    dm: DesignMatrix, W: NDArray, sum_w: float, anchor: NDArray | None = None
 ) -> tuple[NDArray, NDArray, NDArray | None]:
     """``(mean_x, hi, lo)``: the weighted column mean and the exact pair it rounds.
 
@@ -804,10 +974,12 @@ def weighted_mean_pair(
     d'`` (``d`` that rounding) to the profiled Gram, which at a 1e16 offset
     moved a Gaussian fit's eta by 1e-3 (issue #430).  Every other column,
     bounded by its type, has ``hi = mean_x = X'W / sum W`` and ``lo = 0``;
-    ``lo`` is ``None`` for a design without a dense column.
+    ``lo`` is ``None`` for a design without a dense column.  With the fit's
+    centre ``anchor`` the dense pair is ``(anchor, d)`` while the certificate
+    of ``dense_mean_pair`` holds.
     """
     mean = dm.rmatvec(W) / sum_w
-    pair = dense_mean_pair(dm, W, sum_w)
+    pair = dense_mean_pair(dm, W, sum_w, anchor=anchor)
     if pair is None:
         return mean, mean.copy(), None
     dense = dense_columns(dm)

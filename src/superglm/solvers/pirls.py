@@ -8,6 +8,7 @@ import math
 import time
 import warnings
 from collections.abc import Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Literal, cast, get_args
 
@@ -34,6 +35,8 @@ from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.solvers.centered_system import (
+    _anchored_remainder,
+    anchored_dense_moments,
     build_centered_system,
     dense_mean_pair,
     grouped_augmented_factor,
@@ -50,6 +53,7 @@ from superglm.solvers.irls_state import (
     _stable_penalized_deviance_delta,
 )
 from superglm.solvers.mode_score import (
+    centred_dense_rows,
     centred_matvec,
     dense_centred_matvec,
     dense_centred_rmatvec,
@@ -493,18 +497,31 @@ def _freeze_result_arrays(value: object, memo: dict[int, object]) -> object:
 
 
 def _dense_group_centring(
-    dm: DesignMatrix, groups: list[GroupSlice], W: NDArray
-) -> list[tuple[DesignMatrix, NDArray, NDArray] | None] | None:
-    """Per group, ``(design, hi, lo)`` for a ``DenseGroupMatrix`` about the ``W``-weighted exact pair.
+    dm: DesignMatrix,
+    groups: list[GroupSlice],
+    W: NDArray,
+    anchor: NDArray | None = None,
+    response: NDArray | None = None,
+) -> list[tuple | None] | None:
+    """Per group, ``(design, hi, lo, gram, score)`` for a ``DenseGroupMatrix`` about its ``W``-weighted mean.
 
     ``None`` for every other group, and ``None`` overall without a dense
-    group or a positive weight total.  The pair is
-    ``centered_system.dense_mean_pair``: rows ``(x - hi) - lo`` are the
-    group's columns centred about their working-weighted mean, so ``X~' W 1 =
-    0`` and the unpenalized intercept separates from the group (Friedman,
-    Hastie & Tibshirani 2010, J. Stat. Softw. 33(1), §2 and §2.6: "we always
-    center each predictor variable", and the intercept, not regularized, is
-    then the mean).
+    group or a positive weight total.  Rows ``(x - hi) - lo`` are the group's
+    columns centred about their working-weighted mean, so ``X~' W 1 = 0`` and
+    the unpenalized intercept separates from the group (Friedman, Hastie &
+    Tibshirani 2010, J. Stat. Softw. 33(1), §2 and §2.6: "we always center
+    each predictor variable", and the intercept, not regularized, is then the
+    mean).
+
+    With the fit's centre ``anchor`` each group takes one pass over its rows
+    held centred once about it (``centered_system.anchored_dense_moments``):
+    ``hi`` is the centre, ``lo = t / sum W`` the working mean's shift from it,
+    and ``gram`` the centred Gram by the rank-one correction ``G - t lo'``,
+    while ``lo`` lies within one weighted standard deviation
+    (``centered_system._anchored_remainder``); ``score`` is ``X~_raw' W z``
+    for a ``response`` ``z`` (``None`` without one).  A group past that
+    certificate, or every group without an anchor, takes the exact pair
+    (``centered_system.dense_mean_pair``) with ``gram`` and ``score`` ``None``.
     """
     matrices = dm.group_matrices
     if not any(type(matrix) is DenseGroupMatrix for matrix in matrices):
@@ -512,25 +529,34 @@ def _dense_group_centring(
     sum_w = float(np.sum(W))
     if not (sum_w > 0.0 and np.isfinite(sum_w)):
         return None
-    pair = dense_mean_pair(dm, W, sum_w)
-    if pair is None:  # pragma: no cover - a dense group is present
-        return None
-    hi, lo = pair
-    return [
-        (
-            DesignMatrix([matrix], n=dm.n, p=matrix.shape[1]),
-            hi[group.sl].copy(),
-            lo[group.sl].copy(),
-        )
-        if type(matrix) is DenseGroupMatrix
-        else None
-        for matrix, group in zip(matrices, groups, strict=True)
-    ]
+    pair: tuple[NDArray, NDArray] | None = None
+    centring: list[tuple | None] = []
+    for matrix, group in zip(matrices, groups, strict=True):
+        if type(matrix) is not DenseGroupMatrix:
+            centring.append(None)
+            continue
+        design = DesignMatrix([matrix], n=dm.n, p=matrix.shape[1])
+        if anchor is not None:
+            hi = np.array(anchor[group.sl], dtype=np.float64)
+            first, gram, score = anchored_dense_moments(design, W, hi, response)
+            lo = _anchored_remainder(first, np.diag(gram), sum_w)
+            if lo is not None:
+                centred = gram - np.outer(first, lo)
+                centring.append((design, hi, lo, 0.5 * (centred + centred.T), score))
+                continue
+        if pair is None:
+            pair = dense_mean_pair(dm, W, sum_w)
+            if pair is None:  # pragma: no cover - a dense group is present
+                return None
+        centring.append((design, pair[0][group.sl].copy(), pair[1][group.sl].copy(), None, None))
+    return centring
 
 
-def _centred_group_gram(centring: tuple[DesignMatrix, NDArray, NDArray], W: NDArray) -> NDArray:
-    """``X~_g' W X~_g`` of a dense group, its rows centred about the exact pair."""
-    design, hi, lo = centring
+def _centred_group_gram(centring: tuple, W: NDArray) -> NDArray:
+    """``X~_g' W X~_g`` of a dense group: its rank-one corrected Gram, else formed on centred rows."""
+    design, hi, lo, gram = centring[:4]
+    if gram is not None:
+        return gram
     gram, _ = centered_gram_rhs(
         dm=design, W=W, mean_x=hi, z_centered=np.zeros(design.n, dtype=np.float64), mean_lo=lo
     )
@@ -570,6 +596,7 @@ def _compute_group_hessians(
     W: NDArray,
     groups: list[GroupSlice] | None = None,
     S: NDArray | None = None,
+    centring: list | None = None,
 ) -> tuple[list[float], list[NDArray]]:
     """Return per-group smooth Hessians and their Lipschitz constants.
 
@@ -580,7 +607,7 @@ def _compute_group_hessians(
     For typical group sizes (p_g <= 20) this is trivially cheap.
     Total cost is O(n * p) across all groups.
     """
-    hessians = _build_group_hessians(gms, W, groups, S)
+    hessians = _build_group_hessians(gms, W, groups, S, centring=centring)
     L_groups = [_block_lipschitz(hessian) for hessian in hessians]
     return L_groups, hessians
 
@@ -861,7 +888,7 @@ def _centred_dense_certificate(
         if type(matrix) is not DenseGroupMatrix:
             continue
         block = DesignMatrix([matrix], n=dm.n, p=matrix.shape[1])
-        hessian = _centred_group_gram((block, hi[group.sl], lo[group.sl]), W)
+        hessian = _centred_group_gram((block, hi[group.sl], lo[group.sl], None), W)
         hessian = 0.5 * (hessian + hessian.T)
         if S is not None:
             hessian = hessian + S[group.sl, group.sl]
@@ -885,6 +912,7 @@ def _composite_kkt_violation(
     L_groups: list[float] | None = None,
     curvature_weights: NDArray | None = None,
     tol: float = 1e-6,
+    centre: NDArray | None = None,
 ) -> float:
     """Return homogeneous proximal stationarity with represented-score roundoff.
 
@@ -910,24 +938,58 @@ def _composite_kkt_violation(
     W = working_rows.weights
     z = working_rows.response
     working_residual = z - state.eta
-    loss_gradient = -dm.rmatvec(W * working_residual)
-    if L_groups is None or curvature_weights is None or not np.array_equal(W, curvature_weights):
-        L_groups, _ = _compute_group_hessians(
-            list(dm.group_matrices),
-            W,
-            groups if has_smooth_penalty else None,
-            S if has_smooth_penalty else None,
-        )
-    # A dense column's score and curvature are read about its exact pair, by
+    weights_changed = (
+        L_groups is None or curvature_weights is None or not np.array_equal(W, curvature_weights)
+    )
+    # A dense column's score and curvature are read about its working mean, by
     # type, as every other certificate reads them (issue #430).  Raw, the
     # intercept's residual times the column's offset hid an unresolved slope,
     # and the raw curvature, ``offset^2`` times the weight, shrank the proximal
     # step to nothing: at a 1e12 offset a Gaussian fit reported convergence
     # after one iteration with its slope at 1e-24 for 0.2.  The intercept is
     # unpenalized, so at its stationary point the centred and raw scores agree.
+    # With the fit's centre each dense group's score and curvature come from
+    # one pass over its rows held centred once (``_dense_group_centring``),
+    # and no raw product of the group is formed.
+    dense_centring = (
+        _dense_group_centring(dm, groups, W, centre, working_residual)
+        if centre is not None
+        else None
+    )
+    if dense_centring is not None:
+        weighted_residual = W * working_residual
+        residual_total = float(np.sum(weighted_residual))
+        loss_gradient = np.zeros(p, dtype=np.float64)
+        for gm, group, centring in zip(dm.group_matrices, groups, dense_centring, strict=True):
+            if centring is None:
+                loss_gradient[group.sl] = -gm.rmatvec(weighted_residual)
+            elif centring[4] is not None:
+                loss_gradient[group.sl] = -(centring[4] - centring[2] * residual_total)
+            else:
+                loss_gradient[group.sl] = -dense_centred_rmatvec(
+                    centring[0], weighted_residual, centring[1], centring[2]
+                )
+        if weights_changed:
+            L_groups, _ = _compute_group_hessians(
+                list(dm.group_matrices),
+                W,
+                groups if has_smooth_penalty else None,
+                S if has_smooth_penalty else None,
+                centring=dense_centring,
+            )
+    else:
+        loss_gradient = -dm.rmatvec(W * working_residual)
+        if weights_changed:
+            L_groups, _ = _compute_group_hessians(
+                list(dm.group_matrices),
+                W,
+                groups if has_smooth_penalty else None,
+                S if has_smooth_penalty else None,
+            )
+    assert L_groups is not None
     dense = dense_columns(dm)
     sum_w = float(np.sum(W))
-    if np.any(dense) and sum_w > 0.0 and np.isfinite(sum_w):
+    if dense_centring is None and np.any(dense) and sum_w > 0.0 and np.isfinite(sum_w):
         pair = dense_mean_pair(dm, W, sum_w)
         if pair is not None:
             loss_gradient, L_groups = _centred_dense_certificate(
@@ -1089,6 +1151,7 @@ def _fit_pirls_inner(
     separation: str = "warn",
     *,
     weight_semantics: str,
+    _held_rows: ExitStack | None = None,
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with a composite block-coordinate inner solver."""
     n, p = dm.shape
@@ -1123,6 +1186,11 @@ def _fit_pirls_inner(
     # alpha + (X - 1 c0') beta + offset, and the raw intercept alpha - c0' beta
     # is only its reading.  ``intercept`` below is then that centred alpha.
     state_center = prior_weighted_centre(dm, weights) if any_dense_group else None
+    if _held_rows is not None and state_center is not None:
+        # every dense block centred once about c0 for this fit
+        # (``mode_score.centred_dense_rows``); the working-weighted shift of
+        # each outer iteration enters as a rank-one correction
+        _held_rows.enter_context(centred_dense_rows(dm, state_center))
 
     def working_residual(
         z_values: NDArray, beta_values: NDArray, intercept_value: float
@@ -1360,7 +1428,9 @@ def _fit_pirls_inner(
         # Raw, the intercept and a column at offset m with spread s shared a
         # curvature (m^2 + s^2) sum W, and block coordinate descent shrank the
         # slope's error by only m^2 / (m^2 + s^2) per sweep.
-        dense_centring = _dense_group_centring(dm, groups, W) if any_dense_group else None
+        dense_centring = (
+            _dense_group_centring(dm, groups, W, state_center) if any_dense_group else None
+        )
 
         # Per-group Hessians and Lipschitz constants
         t0 = time.perf_counter()
@@ -1442,7 +1512,9 @@ def _fit_pirls_inner(
                 if centring_g is None:
                     grad_g = -gm.rmatvec(W * r)
                 else:
-                    grad_g = -dense_centred_rmatvec(centring_g[0], W * r, *centring_g[1:])
+                    grad_g = -dense_centred_rmatvec(
+                        centring_g[0], W * r, centring_g[1], centring_g[2]
+                    )
                 if S_beta is not None:
                     grad_g = grad_g + S_beta[g.sl]
 
@@ -1481,8 +1553,9 @@ def _fit_pirls_inner(
                         r -= gm.matvec(d)
                     else:
                         # eta moves by X~ d = (X - 1 c0') d - (hi - c0 + lo)' d:
-                        # hi - c0 is exact (Sterbenz) beside the state centre
-                        _, hi_g, lo_g = centring_g
+                        # hi - c0 is exact (Sterbenz) beside the state centre,
+                        # and zero for a pair anchored at it
+                        _, hi_g, lo_g = centring_g[:3]
                         assert state_center is not None
                         r -= dense_centred_matvec(centring_g[0], d, hi_g, lo_g)
                         intercept -= math.fsum(
@@ -1504,7 +1577,7 @@ def _fit_pirls_inner(
                             grad_after = -gm.rmatvec(W * r)
                         else:
                             grad_after = -dense_centred_rmatvec(
-                                centring_g[0], W * r, *centring_g[1:]
+                                centring_g[0], W * r, centring_g[1], centring_g[2]
                             )
                         if S_beta is not None:
                             grad_after = grad_after + S_beta[g.sl]
@@ -1643,6 +1716,7 @@ def _fit_pirls_inner(
                 L_groups=L_groups,
                 curvature_weights=W,
                 tol=tol,
+                centre=state_center,
             )
             convergence_value = max(convergence_value, kkt_violation)
             iteration_converged = convergence_value < tol
@@ -2129,6 +2203,62 @@ def fit_pirls(
         trace_run.next_basis_id() if trace_run is not None and trace_run.enabled else None
     )
 
+    # Each stage holds the dense rows centred about its state centre until it
+    # returns; the stack releases them when the fit does.
+    with ExitStack() as held_rows:
+        return _fit_pirls_stages(
+            dm,
+            y,
+            weights,
+            family,
+            link,
+            groups,
+            penalty,
+            offset,
+            beta_init,
+            intercept_init,
+            max_iter_outer,
+            max_iter_inner,
+            tol,
+            active_set,
+            lambda2,
+            record_diagnostics,
+            convergence,
+            S_override,
+            trace_run,
+            trace_basis_id,
+            separation,
+            weight_semantics,
+            held_rows,
+        )
+
+
+def _fit_pirls_stages(
+    dm: DesignMatrix,
+    y: NDArray,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+    groups: list[GroupSlice],
+    penalty: Penalty,
+    offset: NDArray,
+    beta_init: NDArray | None,
+    intercept_init: float | None,
+    max_iter_outer: int,
+    max_iter_inner: int,
+    tol: float,
+    active_set: bool,
+    lambda2: float | dict[str, float],
+    record_diagnostics: bool,
+    convergence: str,
+    S_override: NDArray | None,
+    trace_run: TraceRun | None,
+    trace_basis_id: int | None,
+    separation: str,
+    weight_semantics: str,
+    held_rows: ExitStack,
+) -> PIRLSResult:
+    """``fit_pirls``'s stage 1 and, for a flavored penalty, its warm-started stage 2."""
     # Stage 1: initial fit
     result = _fit_pirls_inner(
         dm,
@@ -2156,6 +2286,7 @@ def fit_pirls(
         # returned fit carries the separation backstop.
         separation="ignore" if penalty.flavor is not None else separation,
         weight_semantics=weight_semantics,
+        _held_rows=held_rows,
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -2187,6 +2318,7 @@ def fit_pirls(
             trace_purpose="adjusted_flavor_fit",
             separation=separation,
             weight_semantics=weight_semantics,
+            _held_rows=held_rows,
         )
 
     return result

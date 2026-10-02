@@ -448,13 +448,16 @@ def reml_w_correction(
             mean_x = np.asarray(factor_mean, dtype=np.float64)
             sum_w = float(factor_sum_w)
 
-    # Every dense column is centred about an exact pair, by type (issue #430):
-    # ``(x - c) - d`` with ``c`` the rounded mean and ``d`` the remainder formed
-    # on rows differenced from it (``centered_system.dense_mean_pair``, the
-    # corrected two-pass algorithm), with the weights ``mean_x`` carries -- the
-    # geometry's, else the Fisher weights at the mode -- and its own
-    # ``sum_w``.  No row and no state centre seeds it beyond pass one's
-    # rounding.  About the rounded ``mean_x`` the direction
+    # Every dense column is centred about a pair, by type (issue #430):
+    # ``(x - c) - d`` with ``c`` the fit's state centre and ``d`` the working
+    # mean's shift from it, formed in one pass on rows centred about ``c``,
+    # while ``d`` stays within one weighted standard deviation; otherwise ``c``
+    # the rounded mean and ``d`` the remainder formed on rows differenced from
+    # it, the corrected two-pass algorithm (``centered_system.dense_mean_pair``).
+    # Either is formed with the weights ``mean_x`` carries -- the geometry's,
+    # else the Fisher weights at the mode -- and its own ``sum_w``, and ``d``
+    # enters every product below as a rank-one correction.  About the rounded
+    # ``mean_x`` the direction
     # ``X dbeta - mean_x' dbeta``, the signed Grams and the leverage rows all
     # cancel ``c' dbeta`` at a column's offset (at 1e16 the correction was 9.2%
     # off, 17.1% on the leverage route, and exact REML ended
@@ -479,7 +482,9 @@ def reml_w_correction(
                 ),
             )
         )
-        pair = dense_mean_pair(dm, mean_weights, sum_w)
+        pair = dense_mean_pair(
+            dm, mean_weights, sum_w, anchor=getattr(pirls_result, "state_center", None)
+        )
         if pair is None:  # pragma: no cover - a dense column is present
             raise RuntimeError("A dense column formed no centre pair.")
         centre_hi = np.where(dense, pair[0], mean_x)
