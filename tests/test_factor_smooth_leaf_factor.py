@@ -73,6 +73,8 @@ def _agreement(dense, levels, Z, X, w, local, small, *, roundings=0) -> tuple[fl
     for level in range(local.shape[0]):
         start = 1 + q + level * k
         magnitude[start : start + k, start : start + k] += np.abs(local[level])
+    # r >= 10/9: the spare tenth of each delta term (``_product_bounds``)
+    assert 0.9 * p * np.max(magnitude) >= np.linalg.norm(magnitude, 2)
     eta = p * _gamma(len(w) + p + 1 + roundings) * np.max(magnitude) / np.linalg.norm(dense, 2)
     kappa_eta = float(np.linalg.cond(dense) * eta)
     assert kappa_eta < 0.5
@@ -280,7 +282,12 @@ def _product_bounds(block, spread, operator, route=None):
     any one term takes.  ``_agreement`` charges ``p`` times the largest entry
     of ``|D|'|W||D| + |S|`` where its 2-norm suffices (``|dH|`` is below
     ``gamma`` times it entrywise, and the 2-norm is monotone on nonnegative
-    matrices), five times more on these rows, which covers it.
+    matrices), ``r`` times more (five to seven on these rows), so ``1 - 1/r``
+    of each ``delta`` term is spare.  That holds 5% of a bound when ``(1 -
+    1/r) s >= 0.05``, ``s`` the ``delta`` term's share of it: ``_agreement``
+    asserts ``r >= 10/9``, and the bounds here and in ``_cross_bound`` that
+    their own rounding is at most the ``delta`` term (``s >= 1/2``; it is
+    under 0.1% on these rows).
     """
     m, delta = spread
     p = block.shape[0]
@@ -290,12 +297,14 @@ def _product_bounds(block, spread, operator, route=None):
     norm = max(np.linalg.norm(side, 2) for side in sides)
     columns = np.max([np.linalg.norm(side, axis=0) for side in sides], axis=0)
     magnitude = np.abs(block) @ majorant
-    return (
-        delta * nuclear + _gamma(2 * p + 5) * np.trace(magnitude),
-        delta * columns + _gamma(p + 5) * np.diag(magnitude),
-        (2.0 * delta * m + delta**2) * norm * columns
-        + _gamma(3 * p + 10) * np.einsum("ij,ji->i", magnitude, magnitude),
+    delta_terms = (delta * nuclear, delta * columns, (2.0 * delta * m + delta**2) * norm * columns)
+    roundings = (
+        _gamma(2 * p + 5) * np.trace(magnitude),
+        _gamma(p + 5) * np.diag(magnitude),
+        _gamma(3 * p + 10) * np.einsum("ij,ji->i", magnitude, magnitude),
     )
+    assert all(np.all(r <= t) for r, t in zip(roundings, delta_terms, strict=True))
+    return tuple(t + r for t, r in zip(delta_terms, roundings, strict=True))
 
 
 def _cross_bound(block, spread, left, right) -> float:
@@ -315,7 +324,9 @@ def _cross_bound(block, spread, left, right) -> float:
     )
     absolute = np.abs(block)
     rounding = _gamma(4 * block.shape[0] + 10) * np.trace(absolute @ a_bar @ absolute @ b_bar)
-    return (2.0 * delta * m + delta**2) * norms + rounding
+    delta_term = (2.0 * delta * m + delta**2) * norms
+    assert rounding <= delta_term  # the spare share (``_product_bounds``)
+    return delta_term + rounding
 
 
 def test_leaf_factor_penalty_traces_match_dense() -> None:

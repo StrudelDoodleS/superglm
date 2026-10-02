@@ -39,7 +39,8 @@ follow-ups):
 
 - the nested per-level cross traces multiply two weight-sized quantities
   (``_operator_pair``, ``_rho ** 4``): the Hessian is finite and wrong from
-  about ``2^506`` and not finite from ``2^512`` or below ``2^-520``;
+  about ``2^506`` and not finite from ``2^512`` or below ``2^-520`` (those
+  cases pass every other check and expect only ``_NonFiniteHessianError``);
 - ``reml_w_correction``'s second-order term divides by the Python float
   ``sum_w ** 2`` (``OverflowError`` or ``ZeroDivisionError``, every backend);
 - ``fit_reml``'s bootstrap PIRLS runs at absolute lambdas even when every
@@ -85,6 +86,7 @@ Where the tolerances come from.
 
 from __future__ import annotations
 
+import itertools
 import math
 import warnings
 from functools import cache
@@ -296,24 +298,58 @@ def _derivative_bounds(layer: dict, moved: np.ndarray, tau: float):
     ``b_k`` by at most ``sqrt(moved' |D_k| moved)``: the bilinear terms move
     by at most ``M(a + sqrt(p) f, b + db) - M(a, b)``.  The rounding is
     ``tau`` relative to ``M`` (module docstring).
+
+    With ``w_correction_order=2`` the entry also carries ``tr(H^-1 A'
+    diag(d2w_kl) A) / 2`` (the code's centred trace plus ``d2 sum_w / (2
+    sum_w)``: the Schur complement on the intercept), ``d2w_kl = W (deta_k
+    deta_l + d2eta_kl)`` for Poisson/log, so at most ``p (d_k d_l + e_kl) /
+    2`` (``A' W A <= H``), ``e_kl = max |d2eta_kl|`` with ``d2theta_kl =
+    delta_kl dtheta_k - H^-1 (A' W deta_k deta_l + D_l dtheta_k + D_k
+    dtheta_l)``; the centring's mean products add ``sum_w dm_k' H_c^-1 dm_l
+    <= d_k d_l`` and ``dsum_w_k dsum_w_l / (2 sum_w^2) <= d_k d_l / 2``.  No
+    first-order term holds ``e_kl``.  The moved mode moves ``e_kl`` by at
+    most ``de_kl``, the same expansion with ``dtheta_k`` moved by ``|H^-1|
+    |D_k| moved`` (the move ``f_k`` reads through ``|A|``).
     """
     mode, gradient, ranks = layer["mode"], np.abs(layer["gradient"]), layer["ranks"]
+    directions, order2 = layer["directions"], layer["order"] == 2
     inverse = np.linalg.inv(mode.H)
     p = mode.H.shape[0]
-    A = mode.A
-    d = np.array([np.max(np.abs(A @ (inverse @ (D @ mode.theta)))) for D in layer["directions"]])
-    f = np.array(
-        [np.max(np.abs(A) @ (np.abs(inverse) @ (np.abs(D) @ moved))) for D in layer["directions"]]
-    )
-    db = np.sqrt([moved @ np.abs(D) @ moved for D in layer["directions"]])
+    A, absolute, absolute_inverse = mode.A, np.abs(mode.A), np.abs(inverse)
+    dtheta = [-(inverse @ (D @ mode.theta)) for D in directions]
+    deta = [A @ v for v in dtheta]
+    shift = [absolute_inverse @ (np.abs(D) @ moved) for D in directions]
+    shift_eta = [absolute @ v for v in shift]
+    d = np.array([np.max(np.abs(v)) for v in deta])
+    f = np.array([np.max(v) for v in shift_eta])
+    second, second_moved = np.zeros((2, len(directions), len(directions)))
+    pairs = itertools.combinations_with_replacement(range(len(directions)), 2) if order2 else ()
+    for k, j in pairs:
+        product = deta[k] * deta[j]
+        rhs = A.T @ (mode.W * product) + directions[j] @ dtheta[k] + directions[k] @ dtheta[j]
+        moved_product = np.abs(deta[k]) * shift_eta[j] + shift_eta[k] * (
+            np.abs(deta[j]) + shift_eta[j]
+        )
+        moved_rhs = (
+            absolute.T @ (mode.W * moved_product)
+            + np.abs(directions[j]) @ shift[k]
+            + np.abs(directions[k]) @ shift[j]
+        )
+        own = float(k == j)
+        second[k, j] = second[j, k] = np.max(np.abs(A @ (own * dtheta[k] - inverse @ rhs)))
+        moved_second = absolute @ (own * shift[k] + absolute_inverse @ moved_rhs)
+        second_moved[k, j] = second_moved[j, k] = np.max(moved_second)
+    db = np.sqrt([moved @ np.abs(D) @ moved for D in directions])
     a = np.sqrt(ranks) + math.sqrt(p) * d
     b = np.sqrt(2.0 * gradient + ranks)
     logdet = 0.5 * (np.sqrt(np.outer(ranks, ranks)) + np.diag(ranks))
 
-    def size(a, b):
-        return 0.5 * np.outer(a, a) + np.outer(b, b) + np.diag(gradient + 2.0 * ranks) + logdet
+    def size(a, b, d, e):
+        first = 0.5 * np.outer(a, a) + np.outer(b, b) + np.diag(gradient + 2.0 * ranks) + logdet
+        return first + order2 * (0.5 * (p + 3) * np.outer(d, d) + 0.5 * p * e)
 
-    exact, perturbed = size(a, b), size(a + math.sqrt(p) * f, b + db)
+    exact = size(a, b, d, second)
+    perturbed = size(a + math.sqrt(p) * f, b + db, d + f, second + second_moved)
     gradient_bound = tau * (gradient + 2.0 * ranks) + 0.5 * ((b + db) ** 2 - b**2)
     return gradient_bound, tau * perturbed + (perturbed - exact)
 
@@ -387,6 +423,7 @@ def _factor_layer(reference: SuperGLM, exponent: int, order: int, factor_type) -
         "directions": directions,
         "ranks": ranks,
         "rank": int(result.reml_hessian_rank),
+        "order": order,
     }
 
 
@@ -395,18 +432,28 @@ def _reference_layer(route: str, order: int) -> dict:
     return _factor_layer(_reference(route), 0, order, ROUTES[route][0])
 
 
+class _NonFiniteHessianError(AssertionError):
+    """The REML Hessian left float64: the one failure ``_NESTED_TRACES`` expects."""
+
+
 def _assert_factor_layer(reference: dict, scaled: dict) -> None:
-    """Same rank, mode and REML derivatives; the W correction is finite."""
+    """Same rank, mode and REML derivatives; the W correction is finite.
+
+    The Hessian is checked last, so every other check is an ordinary
+    assertion even where its non-finiteness is a known defect.
+    """
     ref_mode, mode = reference["mode"], scaled["mode"]
     assert scaled["rank"] == reference["rank"]
     eta_bound = _assert_same_mode(ref_mode, mode)
-    for key in ("gradient", "correction", "hessian"):
+    for key in ("gradient", "correction"):
         assert np.all(np.isfinite(scaled[key])), key
     # two fits, at most four budget-carrying factors per entry each
     tau = 8.0 * (ref_mode.kappa_eta() + math.expm1(float(np.max(eta_bound))))
     moved = ref_mode.gap() + mode.gap()
     gradient_bound, hessian_bound = _derivative_bounds(reference, moved, tau)
     np.testing.assert_array_less(np.abs(scaled["gradient"] - reference["gradient"]), gradient_bound)
+    if not np.all(np.isfinite(scaled["hessian"])):
+        raise _NonFiniteHessianError(f"non-finite REML Hessian {scaled['hessian']}")
     np.testing.assert_array_less(np.abs(scaled["hessian"] - reference["hessian"]), hessian_bound)
 
 
@@ -446,7 +493,7 @@ _NESTED_TRACES = (
     _xfail(
         "the nested per-level cross traces multiply two weight-sized quantities "
         "(_operator_pair, _rho ** 4), so the REML Hessian leaves float64",
-        AssertionError,
+        _NonFiniteHessianError,
     ),
     pytest.mark.filterwarnings("ignore::RuntimeWarning"),
 )

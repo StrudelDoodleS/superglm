@@ -38,6 +38,7 @@ from superglm.types import PenaltyComponent
 from tests._leaf_systems import leaf_system_from_rows
 
 EPS = np.finfo(float).eps
+_U = EPS / 2.0
 
 
 def _case(
@@ -154,6 +155,43 @@ def _kappa(H: np.ndarray) -> float:
 def _pdet(H: np.ndarray, N: np.ndarray) -> float:
     """``log pdet(H) = log det(H + N N') - log det(N'N)`` for ``N`` spanning the null space."""
     return float(np.linalg.slogdet(H + N @ N.T)[1] - np.linalg.slogdet(N.T @ N)[1])
+
+
+def _gamma(count: float) -> float:
+    return count * _U / (1.0 - count * _U)
+
+
+def _magnitude(case) -> np.ndarray:
+    """``|X|'|W||X| + |S|`` over ``_dense``'s design and penalty: what ``H``'s entries round against."""
+    _, X, Omega = _dense(case)
+    S = case["lam"] * Omega
+    S[1 : 1 + case["q"], 1 : 1 + case["q"]] = case["S_b"]
+    return np.abs(X).T @ (np.abs(case["W"])[:, None] * np.abs(X)) + np.abs(S)
+
+
+def _cholesky_logdet(B: np.ndarray) -> float:
+    return 2.0 * float(np.sum(np.log(np.diag(np.linalg.cholesky(B)))))
+
+
+def _logdet_agreement(B: np.ndarray, magnitude: np.ndarray, count: int) -> float:
+    """What two backward-stable factorizations agree on ``log det B`` to, ``B`` positive definite.
+
+    Each factors ``B + dB`` with ``|dB| <= gamma_count magnitude`` entrywise:
+    the rows' accumulation (``fl(X'WX + S)``, Higham 2002, section 3.5) and a
+    Cholesky-class factor, of the formed matrix (Theorem 10.3; ``|R'||R|`` is
+    below ``sqrt(B_ii B_jj) <= sqrt(magnitude_ii magnitude_jj)``) or of the
+    rows (Theorem 19.4).  On the Jacobi-scaled ``B``, whose diagonal is one,
+    ``||dB||_2 <= eta = p gamma_count max_ij magnitude_ij / sqrt(B_ii B_jj)``
+    and ``|log det(I + E)| <= -p log(1 - ||E||_2) <= p kappa eta / (1 - kappa
+    eta)`` (``||B_s^-1||_2 <= kappa``); two factorizations by twice that
+    (``_agreement`` in ``test_factor_smooth_leaf_factor.py``).
+    """
+    p = B.shape[0]
+    scale = 1.0 / np.sqrt(np.diag(B))
+    eta = p * _gamma(count) * float(np.max(scale[:, None] * magnitude * scale[None, :]))
+    kappa_eta = float(np.linalg.cond(scale[:, None] * B * scale[None, :])) * eta
+    assert kappa_eta < 0.5
+    return 2.0 * p * kappa_eta / (1.0 - kappa_eta)
 
 
 def test_the_balance_basis_is_orthonormal_and_sums_to_zero() -> None:
@@ -677,8 +715,10 @@ def test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out() -
     assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
     assert factor.border_certificate.deflated == 2
     assert factor.rank == H.shape[0]
-    tolerance = 50 * H.shape[0] * EPS * _kappa(H)
-    assert factor.logdet() == pytest.approx(np.linalg.slogdet(H)[1], abs=tolerance)
+    # n + 2 roundings forming H, p + 1 in its Cholesky (``_logdet_agreement``)
+    n, p = len(case["W"]), H.shape[0]
+    tolerance = _logdet_agreement(H, _magnitude(case), n + p + 3)
+    assert abs(factor.logdet() - _cholesky_logdet(H)) <= tolerance
 
     w = np.array([1.0, -1.0, 1.0, 1.0, 1.0])
     factor, case = _alias_beside_a_random_effect(5.0 * np.eye(5) - np.outer(w, w))
@@ -689,13 +729,21 @@ def test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out() -
     for level in range(K - 1):
         share = K - 1.0 if level == 0 else -1.0
         N[1 + q + level * k + 2 : 1 + q + (level + 1) * k] = (share, -share)
-    assert np.max(np.abs(H @ N)) <= 64 * EPS * np.max(np.abs(H)) * np.max(np.abs(N))
-    Hc = H[1:, 1:] - np.outer(H[1:, 0], H[0, 1:]) / H[0, 0]
-    tolerance = 50 * H.shape[0] * EPS * _kappa(H + np.outer(N, N))
+    # H N = 0 exactly; fl(H) is within gamma_{n+2} |X|'|W||X| + |S| (the scaled
+    # rows, the sum, the added penalty) and the product adds gamma_p (Higham
+    # 2002, section 3.5 and Lemma 3.3)
+    magnitude = _magnitude(case)
+    assert np.all(np.abs(H @ N) <= _gamma(n + p + 2) * (magnitude @ np.abs(N)))
+    # log H_00 + log pdet(H_c) = log det(H + t t') - log(t't), t = (0, N_1):
+    # the Schur complement on the intercept, N_1 spanning H_c's null space;
+    # one more rounding where t t' (exact) is added
+    tail = np.r_[0.0, N[1:]]
+    B = H + np.outer(tail, tail)
+    tolerance = _logdet_agreement(B, magnitude + np.outer(np.abs(tail), np.abs(tail)), n + p + 4)
     assert factor._alias_x is None
     assert factor.border_certificate.deflated == 1
     assert factor.rank == H.shape[0] - 1
-    assert factor.logdet() == pytest.approx(np.log(H[0, 0]) + _pdet(Hc, N[1:, None]), abs=tolerance)
+    assert abs(factor.logdet() - (_cholesky_logdet(B) - np.log(tail @ tail))) <= tolerance
 
 
 def _pinv_known_nullity(H: np.ndarray, nullity: int) -> np.ndarray:
