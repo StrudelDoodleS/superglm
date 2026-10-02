@@ -900,6 +900,36 @@ def test_the_compensated_mean_keeps_every_product_and_error_term(values, weights
     assert abs(Fraction(mean) - exact) <= 2 * Fraction(_U) * abs(exact) + Fraction(2) ** -1075
 
 
+def test_the_scaled_ratio_divides_mantissas_whichever_sum_is_larger(monkeypatch):
+    """Every finite non-zero pair of scaled sums takes the mantissa path.
+
+    Products below ``2^-969`` are carried at ``K = -1126`` and a weight total
+    above ``2^-968`` at ``K = 0``.  The quotient of the stored sums is then
+    ``2^146 / 2^-960 = 2^1106``: the guard tested that quotient, returned
+    ``inf``, and the compensated mean fell back to ``np.average`` (Claude).
+    The mirror arrangement is the one ``weights_below_the_merge`` pins.  Here
+    the fallback is made to raise, and the mean must equal the exact
+    ``Fraction`` mean.  Mutation: the guard on the quotient.
+    """
+    from fractions import Fraction
+
+    from superglm.solvers.mode_score import _scaled_ratio, compensated_weighted_mean
+
+    assert _scaled_ratio((2.0**146, -1126), (2.0**-960, 0)) == 2.0**-20
+    assert _scaled_ratio((2.0**-20, 0), (2.0**146, -1126)) == 2.0**960
+
+    def no_fallback(*args, **kwargs):
+        raise AssertionError("the compensated mean fell back to np.average")
+
+    monkeypatch.setattr(np, "average", no_fallback)
+    values = np.array([2.0**-20, 3.0 * 2.0**-21])
+    weights = np.array([2.0**-960, 2.0**-959])
+    exact = sum(Fraction(v) * Fraction(w) for v, w in zip(values, weights, strict=True)) / sum(
+        Fraction(w) for w in weights
+    )
+    assert compensated_weighted_mean(values, weights) == float(exact)
+
+
 def test_the_compensated_mean_meets_its_bound_across_the_exponent_range():
     """Signed values and weights drawn across ``1e-300 .. 1e300``, against ``fractions.Fraction``.
 

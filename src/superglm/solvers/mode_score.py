@@ -502,14 +502,21 @@ def two_sum(a, b):
 def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) -> float:
     """``(N 2^K) / (D 2^L)`` without forming either scaled sum, and without raising.
 
-    The two significands are divided as ``frexp`` mantissas, so the quotient
-    neither under- nor overflows when the sums sit at different scales (a
-    weight total carried at ``2^-1126`` beside a numerator at ``2^0`` read
-    ``1e10 * 2^-1126`` and rounded to 0).  The exponents are added before
-    scaling back: a result past the binary64 range is a signed infinity, one
-    below it a signed zero, never the ``OverflowError`` ``math.ldexp`` raises.
+    Every finite non-zero pair divides its significands as ``frexp``
+    mantissas, whose quotient lies in ``(1/2, 2)``, so it neither under- nor
+    overflows whichever sum sits at the larger scale: a weight total carried
+    at ``2^-1126`` beside a numerator at ``2^0`` read ``1e10 * 2^-1126`` and
+    rounded to 0, and a numerator at ``2^-1126`` beside a total at ``2^0``
+    read ``2^146 / 2^-960 = inf`` before the guard tested the operands.  The
+    exponents are added before scaling back: a result past the binary64 range
+    is a signed infinity, one below it a signed zero, never the
+    ``OverflowError`` ``math.ldexp`` raises.
     """
-    if numerator[0] == 0.0 or not math.isfinite(numerator[0] / denominator[0]):
+    if (
+        numerator[0] == 0.0
+        or denominator[0] == 0.0
+        or not (math.isfinite(numerator[0]) and math.isfinite(denominator[0]))
+    ):
         return numerator[0] / denominator[0]
     numerator_mantissa, numerator_exponent = math.frexp(numerator[0])
     denominator_mantissa, denominator_exponent = math.frexp(denominator[0])
