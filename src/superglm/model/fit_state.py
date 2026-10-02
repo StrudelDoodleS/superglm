@@ -482,6 +482,40 @@ def _centred_state_reads_the_coefficients(model) -> bool:
     return float(solver.intercept) == float(alpha) - math.fsum(np.asarray(centre) * beta)
 
 
+def _public_intercept_follows_the_coefficients(model) -> bool:
+    """Whether the public intercept was re-read at the revised ``beta`` (its shift ``m' beta``).
+
+    A shape repair re-derives the solver intercept from the public one and
+    records the shift ``m' beta`` at the repaired ``beta``
+    (``shape_ops._synchronize_repaired_intercept_state``).  The editor keeps
+    the public intercept authoritative and the shift at its old ``beta``: its
+    public pair is then not the solver state's, so republishing it would move
+    each prediction by ``m' (beta_new - beta_old)`` (Claude review of #445).
+    The recorded shift is compared with the one at the current ``beta`` to
+    the two sums' rounding, ``gamma_(k+1) sum |m| |beta|`` each over ``k``
+    terms in any order (Higham 2002, section 3.1).
+    """
+    state = getattr(model, "_runtime_canonical_state", None)
+    public = getattr(model, "_result", None)
+    if not isinstance(state, dict) or public is None:
+        return True
+    beta = np.asarray(public.beta, dtype=np.float64)
+    shift = magnitude = 0.0
+    count = 0
+    for term_state in state.get("terms", {}).values():
+        if not term_state.get("applied_to_public_model", False):
+            continue
+        for group_state in term_state.get("groups", []):
+            start, end = group_state["solver_slice"]
+            means = np.asarray(group_state["column_means"], dtype=np.float64)
+            shift += float(means @ beta[start:end])
+            magnitude += float(np.abs(means) @ np.abs(beta[start:end]))
+            count += end - start
+    unit = float(np.finfo(np.float64).eps) / 2.0
+    gamma = (count + 1) * unit / (1.0 - (count + 1) * unit)
+    return abs(float(state.get("intercept_shift", 0.0)) - shift) <= 2.0 * gamma * magnitude
+
+
 def _republish_centred_state(model) -> None:
     """Read a kept solver centred state in the public coordinates at the revised ``beta``.
 
@@ -513,7 +547,9 @@ def invalidate_revised_coefficient_mode(model) -> None:
     # intercept it does not cover would leave alpha + (X - 1 c') beta at the
     # old mean, so eta (mode_score.linear_predictor, prediction) returns to the
     # raw beta and intercept the revision wrote.
-    keep_centred = _centred_state_reads_the_coefficients(model)
+    keep_centred = _centred_state_reads_the_coefficients(
+        model
+    ) and _public_intercept_follows_the_coefficients(model)
     updated: set[int] = set()
     for result_name in ("_result", "_solver_result"):
         result = getattr(model, result_name, None)

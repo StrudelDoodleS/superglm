@@ -762,6 +762,50 @@ def test_a_kept_centred_state_is_read_again_at_the_revised_coefficients():
     assert np.all(np.abs(revised.predict(frame) - raw) <= bound)
 
 
+def test_a_revision_that_keeps_the_public_intercept_predicts_from_it():
+    """The editor's revision keeps the public intercept, so the centred state is cleared.
+
+    The editor writes a term's new ``beta`` into both results and moves both
+    intercepts by the same least-squares delta, skipped below ``1e-15``, and
+    leaves the recorded shift ``m' beta`` at the old ``beta``: the public
+    intercept is authoritative.  With a zero delta the solver relation still
+    holds, and republishing the pair at the new ``beta`` moved every
+    prediction by ``m' (beta_new - beta_old)`` from what the edit wrote
+    (Claude review of #445, Low).  Check: the prediction is the raw public
+    predictor ``intercept_pub + X_pub beta``, to each evaluation's
+    ``gamma_(p+2)``.  Fails on 16ac340b.
+    """
+    from superglm.model import shape_ops
+    from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
+
+    x = np.linspace(0.0, 1.0, 60)
+    y = 1.5 - 1.1 * x + 0.08 * np.sin(7.0 * x)
+    weights = np.resize(np.array([1.0, 3.0, 2.0, 4.0]), x.size)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.8,
+        features={"x": PSpline(n_knots=6, knot_strategy="uniform")},
+        weight_semantics="frequency",
+    ).fit(frame, y, sample_weight=weights)
+    assert model.result.centred_intercept is not None
+
+    revision = FittedStateRevision.start(model)
+    work = revision.model
+    beta = 0.5 * np.asarray(work.result.beta, dtype=np.float64)
+    shape_ops._replace_result_beta(work, beta)  # both intercepts as they were
+    invalidate_revised_coefficient_mode(work)
+    revised = revision.commit()
+    public = revised.result
+    assert public.centred_intercept is None
+
+    columns = np.asarray(revised._specs["x"].transform(x), dtype=np.float64)
+    raw = float(public.intercept) + columns @ beta
+    magnitude = np.abs(columns) @ np.abs(beta) + abs(float(public.intercept))
+    assert np.all(np.abs(revised.predict(frame) - raw) <= 2.0 * _gamma(beta.size + 2) * magnitude)
+
+
 # ------------------------------------- 7. the gram and QR paths at 1e16
 def _even_grid_frame(shift: float):
     """An even-integer column (exact at 1e16) beside a four-level categorical."""
