@@ -1236,6 +1236,41 @@ def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
             assert np.all(se == 0.0)
 
 
+def test_a_tweedie_profile_raises_no_predict_warning_of_its_own() -> None:
+    """``estimate_p`` restates its refit through ``predict``'s values, not its warning (#440 review).
+
+    The Claude review of 52c6b730 (Low): ``_install_tweedie_profile`` read the
+    refit's means through public ``predict``, so a Tweedie profile of a model
+    with a thin ``sz`` level raised ``predict``'s user-facing warning from
+    library frames.  Mutation: public ``predict`` again.
+    """
+    from superglm import families
+
+    rng = np.random.default_rng(6)
+    K, n = 8, 1600
+    g = rng.integers(0, K, n)
+    x = rng.uniform(size=n)
+    x[g == 2] = 0.37
+    mu = np.exp(0.2 + np.sin(3 * x) + rng.normal(0, 0.3, K)[g])
+    y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.8)
+    frame = pd.DataFrame({"x": x, "g": np.array([f"g{v}" for v in g], dtype=object)})
+    model = SuperGLM(
+        family=families.tweedie(p=1.5),
+        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+            )
+        ],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.estimate_p(frame, y, fit_mode="reml", p_bounds=(1.4, 1.6), xatol=0.05)
+    assert model._interaction_specs["x:g:sz"]._unidentified_level_names == ("g2",)
+    assert not _thin_warnings(caught)
+
+
 def test_a_holdout_drop_term_starts_from_the_predicted_predictor() -> None:
     """Holdout drop-term deltas start from ``predict``'s predictor (#432; Claude review, Low).
 
