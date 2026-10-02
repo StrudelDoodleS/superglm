@@ -590,10 +590,13 @@ def _structured_solver_errors():
     except StructuredSolverError:
         raise
     except np.linalg.LinAlgError as error:
+        # ``str`` leaves out a refusal's notes (the largest Levenberg shift's
+        # own refusal, ``_build_iterate_factor``): each joins the message
+        notes = "".join(f" {str(note).rstrip('.')}." for note in getattr(error, "__notes__", ()))
         raise StructuredSolverError(
-            f"The structured solver cannot proceed: {str(error).rstrip('.')}. This should "
-            "not happen for a model its data identify; direct_solve='gram' fits it with "
-            "the dense solver instead."
+            f"The structured solver cannot proceed: {str(error).rstrip('.')}.{notes} This "
+            "should not happen for a model its data identify; direct_solve='gram' fits it "
+            "with the dense solver instead."
         ) from error
 
 

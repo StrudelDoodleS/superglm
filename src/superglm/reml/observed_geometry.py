@@ -1182,10 +1182,16 @@ def schur_curvature_is_negative(eigenvalues: NDArray, certificate) -> bool:
     ``eigenvalues`` are the computed eigenvalues of the factor's Jacobi-scaled
     deflated border matrix and ``certificate`` its ``BorderCertificate``.  An
     eigenvalue below minus ``certificate.curvature_floor(||Q_s||_2)`` (the
-    certified uncertainty ``tau`` plus the eigensolver's rounding) is negative
-    curvature the factor's own certificate calls material; one above it is
-    within what the factor truncates as a null, so the gate refuses exactly
-    the curvature the border factorization would.
+    certified uncertainty ``tau`` plus the eigensolver's rounding, ``2 width
+    eps ||Q_s||_2``) is negative curvature the factor's own certificate calls
+    material.  The gate is the stricter of the two checks on that matrix,
+    not a copy of the factor's: its floor is below the factor's step-4 floor
+    ``tau + 2 n_live^2 eps`` whenever ``width ||Q_s||_2 < n_live^2``, and
+    step 4 tests the smallest Ritz value, which bounds the smallest
+    eigenvalue only from above.  It runs only on a factor step 4 accepted, so
+    it never admits what the factor refuses, and each refusal it adds
+    certifies an indefinite observed Hessian, which a certified maximum
+    cannot have.
     """
     values = np.asarray(eigenvalues, dtype=np.float64)
     if not values.size:

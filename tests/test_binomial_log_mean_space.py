@@ -156,12 +156,19 @@ def test_reml_reaches_the_interior_maximum_on_both_backends() -> None:
 
     The two backends stop within the REML stopping rule ``reml_tol (1 + |V|)``
     of the same optimum, so their objectives agree within twice it.
+    ``"auto"`` is asserted to take the structured solver, so a change of the
+    crossover or of the fixture cannot quietly compare gram with gram, and
+    the bootstrap's boundary start is asserted to run the restoration loop
+    (#425, r4154948497 and r4154950836).
     """
     fits = {direct_solve: _fit(direct_solve) for direct_solve in ("auto", "gram")}
     for model in fits.values():
         assert model._reml_result.converged
         assert model.result.converged
         assert float(_eta(model).max()) < 0.0
+    assert fits["auto"].result.direct_backend == "structured"
+    assert fits["gram"].result.direct_backend == "gram"
+    assert fits["auto"]._reml_profile["reml_mean_space_restorations"] >= 1
     objectives = [float(model._reml_result.objective) for model in fits.values()]
     tolerance = float(fits["auto"]._reml_profile["reml_tol_resolved"])
     assert abs(objectives[0] - objectives[1]) <= 2.0 * tolerance * (1.0 + abs(objectives[0]))
