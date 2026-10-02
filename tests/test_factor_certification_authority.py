@@ -1245,11 +1245,17 @@ def _kronecker_sum(k: int, ratio: float) -> np.ndarray:
 
 
 def _resolved_modes(S: np.ndarray) -> int:
-    """Eigenvalues of the Jacobi equilibration above its eigensolver resolution ``n eps ||A||_2``."""
+    """Eigenvalues of the Jacobi equilibration certainly above its resolution ``c = n eps ||A||_2``.
+
+    The root's own eigensolver and this one each sit within ``c`` of the exact
+    eigenvalue (LAPACK Users' Guide, 3rd ed., section 4.7, with ``p(n) = n``),
+    so a value above ``3c`` here is above ``c`` there: the root keeps at least
+    this many modes, whatever either run's rounding.
+    """
     scale = np.sqrt(np.diag(S))
     values = np.linalg.eigvalsh(0.5 * (S / np.outer(scale, scale) + (S / np.outer(scale, scale)).T))
     cut = len(S) * float(np.finfo(np.float64).eps) * float(np.max(np.abs(values)))
-    return int(np.count_nonzero(values > cut))
+    return int(np.count_nonzero(values > 3.0 * cut))
 
 
 @pytest.mark.parametrize(
@@ -1257,12 +1263,12 @@ def _resolved_modes(S: np.ndarray) -> int:
     [
         (_coupled_graded_block(1e-1), 60),
         (_coupled_graded_block(1e-2), 60),
-        (_coupled_graded_block(1e-3), None),
+        (_coupled_graded_block(1e-3), 60),
         (_kronecker_sum(8, 1e11), 60),
         (_kronecker_sum(12, 1e10), 140),
-        (_kronecker_sum(12, 1e11), None),
+        (_kronecker_sum(12, 1e11), 140),
         (_second_difference(300, 3), 297),
-        (_second_difference(200, 4), None),
+        (_second_difference(200, 4), 196),
     ],
     ids=[
         "coupled-1e-1",
@@ -1276,15 +1282,18 @@ def _resolved_modes(S: np.ndarray) -> int:
     ],
 )
 def test_penalty_factor_keeps_every_mode_its_eigensolver_resolves(S, rank) -> None:
-    """A coupled graded block keeps each mode above its eigensolver resolution, and no other.
+    """A coupled graded block keeps each mode its eigensolver resolves, and no exact null.
 
     One coupled block per case (no diagonal margin splits it): a coupled
     second-difference margin at ``1e10`` beside a rotated one, Kronecker sums
     of second differences at ratios ``1e10`` and ``1e11``, and exact integer
-    ``D_m'D_m``.  The root keeps exactly the eigenvalues of ``A = D S D``
-    above ``n eps ||A||_2``; on these the kept ones sit at least 4 times
-    above it and the dropped ones below it.  Where every mode is resolved the
-    count is the exact rank.  Fails on b5080877, whose cut added the
+    ``D_m'D_m``.  The root keeps the eigenvalues of ``A = D S D`` above
+    ``c = n eps ||A||_2``, so its rows lie between the modes certainly above
+    ``c`` (``_resolved_modes``, above ``3c`` in another run) and the exact
+    rank (an exact null computes within ``c`` of zero).  Where every mode is
+    resolved the two meet and the count is the exact rank; three cases keep
+    modes within a few ``c`` of the cut, and only the bracket is certified
+    there (Claude review of 52c6b730).  Fails on b5080877, whose cut added the
     worst-case formation term ``n gamma_(2n+7)``: 58 and 52 rows on the
     coupled block at ``1e-2`` and ``1e-3``, 137 of 140 on the Kronecker sum,
     296 of 297 on ``D_3'D_3`` (Opus review of #440, P2).  Mutation: the cut
@@ -1292,9 +1301,7 @@ def test_penalty_factor_keeps_every_mode_its_eigensolver_resolves(S, rank) -> No
     eigensolver's.
     """
     rows = penalty_factor(S).shape[0]
-    assert rows == _resolved_modes(S)
-    if rank is not None:
-        assert rows == rank
+    assert _resolved_modes(S) <= rows <= rank
 
 
 def test_penalty_factor_keeps_a_reml_tensors_curvature_at_extreme_lambdas() -> None:
