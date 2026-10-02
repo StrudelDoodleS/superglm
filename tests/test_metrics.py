@@ -1,6 +1,7 @@
 """Tests for ModelMetrics diagnostics module."""
 
 import pickle
+import warnings
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -106,13 +107,36 @@ class TestLogLikelihood:
         assert np.isfinite(metrics_obj.log_likelihood)
 
 
-class TestMetricsCaching:
-    def test_metrics_on_training_data_use_the_models_predictions(self, fitted_poisson):
-        """metrics() on the fit's own objects evaluates predict, not the fit's mean (#441)."""
-        model, X, y, w = fitted_poisson
-        metrics = model.metrics(X, y, sample_weight=w)
+def _offset_poisson_fit(discrete: bool):
+    """A two-spline Poisson REML fit with an exposure offset (#441's shape)."""
+    rng = np.random.default_rng(441)
+    n = 4000
+    X = pd.DataFrame({"a": rng.uniform(size=n), "b": rng.uniform(size=n)})
+    exposure = rng.uniform(0.2, 1.0, n)
+    offset = np.log(exposure)
+    signal = -1.0 + np.sin(6.0 * X["a"].to_numpy()) + 0.5 * X["b"].to_numpy() ** 2
+    y = rng.poisson(exposure * np.exp(signal)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Spline(n_knots=12), "b": Spline(n_knots=12)},
+        discrete=discrete,
+    )
+    model.fit_reml(X, y, offset=offset)
+    return model, X, y, offset
 
-        np.testing.assert_array_equal(metrics._mu, model.predict(X))
+
+class TestMetricsCaching:
+    def test_metrics_on_training_data_use_the_models_predictions(self):
+        """metrics() on a discrete fit's own objects evaluates predict, not the binned mean.
+
+        The fit's own mean belongs to the binned design, about 1e-2 relative
+        away from ``predict`` here, which is what reusing it reported (#441).
+        """
+        model, X, y, offset = _offset_poisson_fit(discrete=True)
+        metrics = model.metrics(X, y, offset=offset)
+
+        assert metrics._uses_fit_design  # the fit's own objects were recognised
+        np.testing.assert_array_equal(metrics._mu, model.predict(X, offset=offset))
 
     @pytest.mark.parametrize("discrete", [True, False], ids=["discrete", "exact"])
     def test_metrics_do_not_depend_on_object_identity(self, discrete):
@@ -123,25 +147,19 @@ class TestMetricsCaching:
         these three calls.  Each call now runs the same code on equal inputs,
         so the results are identical, not merely close.
         """
-        rng = np.random.default_rng(441)
-        n = 4000
-        X = pd.DataFrame({"a": rng.uniform(size=n), "b": rng.uniform(size=n)})
-        exposure = rng.uniform(0.2, 1.0, n)
-        offset = np.log(exposure)
-        signal = -1.0 + np.sin(6.0 * X["a"].to_numpy()) + 0.5 * X["b"].to_numpy() ** 2
-        y = rng.poisson(exposure * np.exp(signal)).astype(float)
-        model = SuperGLM(
-            family="poisson",
-            features={"a": Spline(n_knots=12), "b": Spline(n_knots=12)},
-            discrete=discrete,
-        )
-        model.fit_reml(X, y, offset=offset)
+        model, X, y, offset = _offset_poisson_fit(discrete)
 
         calls = {
             "fit objects": model.metrics(X, y, offset=offset),
             "copies": model.metrics(X.copy(), y.copy(), offset=offset.copy()),
             "pickled model": pickle.loads(pickle.dumps(model)).metrics(X, y, offset=offset),
         }
+
+        # The first call took the fit's own branch; the others could not.
+        assert calls["fit objects"] is model._fit_metrics_cache
+        assert calls["fit objects"]._uses_fit_design
+        assert not calls["copies"]._uses_fit_design
+        assert not calls["pickled model"]._uses_fit_design
 
         reference = calls["copies"]
         for label, metrics in calls.items():
@@ -161,6 +179,45 @@ class TestMetricsCaching:
                 metrics.residuals("deviance"), reference.residuals("deviance"), err_msg=label
             )
         np.testing.assert_array_equal(reference._mu, model.predict(X, offset=offset))
+
+    def test_training_rows_do_not_repeat_a_custom_family_contract_warning(self):
+        """The fit reports a custom family's prior-weight warning; its own rows do not again.
+
+        Before #441 ``metrics`` reused the fit's likelihoods for the fit's own
+        objects, so nothing re-evaluated them.  Recomputing them from
+        ``predict`` must not repeat the warning the fit already gave, there or
+        on the editor's training split; equal copies are new rows and still
+        warn.
+        """
+        from superglm.editor.evaluation import EvaluationDataset
+        from superglm.editor.metrics import compute_dataset_metrics
+
+        from .test_family_conformance import InverseGaussianLike
+
+        x = np.linspace(0.0, 1.0, 80)
+        X = pd.DataFrame({"x": x})
+        y = 1.0 + 0.3 * x + 0.1 * np.sin(17.0 * x)
+        w = np.full(80, 2.0)
+        model = SuperGLM(
+            family=InverseGaussianLike(),
+            features={"x": Numeric()},
+            selection_penalty=0,
+            weight_semantics="prior",
+        )
+        with pytest.warns(UserWarning, match="not a SuperGLM-shipped family"):
+            model.fit(X, y, sample_weight=w)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            own = model.metrics(X, y, sample_weight=w)
+            log_likelihoods = (own.log_likelihood, own.null_log_likelihood)
+            editor = compute_dataset_metrics(
+                model, EvaluationDataset("train", "Train", X, y, sample_weight=w)
+            )
+        with pytest.warns(UserWarning, match="not a SuperGLM-shipped family"):
+            copies = model.metrics(X.copy(), y.copy(), sample_weight=w.copy())
+            assert (copies.log_likelihood, copies.null_log_likelihood) == log_likelihoods
+        assert editor["log_likelihood"] == log_likelihoods[0]
 
     def test_metrics_returns_cached_object_for_same_fit_refs(self, fitted_poisson):
         """Repeated metrics() on the exact fit refs should return the cached object."""

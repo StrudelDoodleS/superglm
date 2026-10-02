@@ -302,17 +302,19 @@ class ModelMetrics:
     -----
     The fitted mean and linear predictor are the model's predictions on ``X``,
     the values ``predict`` returns, and the deviance, likelihoods, Pearson
-    statistic and residuals are computed from them.  They do not depend on
-    whether ``X``, ``y`` and ``offset`` are the objects the model was fitted
-    on: a discrete fit's own mean belongs to its binned design, which
-    ``predict`` does not reproduce.
+    statistic and ``residuals()`` are computed from them.  They do not depend
+    on whether ``X``, ``y``, ``sample_weight`` and ``offset`` are the objects
+    the model was fitted on: a discrete fit's own mean belongs to its binned
+    design, which ``predict`` does not reproduce.  ``SuperGLM.summary``
+    reports the fit's own statistics instead.
 
     On the frame a model was fitted on, leverage and effective degrees of
-    freedom come from the fit itself.  Equal copies of that frame, or a pickled
-    model, are recognised as the training rows only when the model keeps a
-    structured or shape-constrained covariance.  Otherwise leverage is
-    re-formed on the rows passed, which for a discrete fit can differ slightly
-    from its binned fit.
+    freedom come from the fit itself, and so do the standardized residuals
+    and Cook's distance built on that leverage.  Equal copies of that frame,
+    or a pickled model, are recognised as the training rows only when the
+    model keeps a structured or shape-constrained covariance.  Otherwise
+    leverage is re-formed on the rows passed, which for a discrete fit can
+    differ slightly from its binned fit.
     """
 
     def __init__(
@@ -328,6 +330,7 @@ class ModelMetrics:
         _contract_checked: bool = False,
     ):
         self._model = model
+        self._contract_checked = _contract_checked
         self._family = model._distribution
         self._link = model._link
         self._groups = model._groups
@@ -467,7 +470,8 @@ class ModelMetrics:
         # `explain_ops.metrics` sets `_contract_checked` when the caller passed
         # the training arrays themselves, verified unchanged: the fit already
         # checked these rows, so checking again reports one condition twice
-        # for one fit.
+        # for one fit.  The likelihoods below leave out the custom-family
+        # contract report for the same reason.
         #
         # Holdout evaluation is unaffected: its rows were never checked, which
         # is exactly the case the check exists for.
@@ -553,6 +557,7 @@ class ModelMetrics:
             self._weights,
             self.phi,
             weight_semantics=self._weight_semantics,
+            report_contract=not self._contract_checked,
         )
 
     @cached_property
@@ -579,6 +584,7 @@ class ModelMetrics:
             self._weights,
             self.phi,
             weight_semantics=self._weight_semantics,
+            report_contract=not self._contract_checked,
         )
 
     @cached_property

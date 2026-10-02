@@ -103,19 +103,30 @@ def metrics_payload(
 
 
 def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, float]:
+    """Score ``dataset`` with the model's predictions, as ``model.metrics`` does.
+
+    A dataset holding the fit's own objects is scored the same way: the fit's
+    own statistics belong to its fitting design, which on a discrete fit is
+    the binned one that ``predict`` does not reproduce (#441).  Only the
+    weight-contract check is skipped for those objects, since the fit ran it.
+    """
     validated_weights = _validate_evaluation_weights(
         dataset.sample_weight,
         dataset.n_obs,
         family=model._distribution,
         weight_semantics=model_weight_semantics(model),
     )
-    fit_artifacts = _fit_artifact_metrics(model, dataset)
-    if fit_artifacts is not None:
-        return fit_artifacts
     weights = validated_weights
     if weights is None:
         weights = np.ones(dataset.n_obs, dtype=np.float64)
-    return _compute_metrics(model, dataset.X, dataset.y, weights, dataset.offset)
+    return _compute_metrics(
+        model,
+        dataset.X,
+        dataset.y,
+        weights,
+        dataset.offset,
+        contract_checked=_same_fit_dataset(model, dataset),
+    )
 
 
 def _same_fit_dataset(model, dataset: EvaluationDataset) -> bool:
@@ -133,37 +144,9 @@ def _same_fit_dataset(model, dataset: EvaluationDataset) -> bool:
     )
 
 
-def _fit_artifact_metrics(model, dataset: EvaluationDataset) -> dict[str, float] | None:
-    fit_stats = getattr(model, "_fit_stats", None)
-    if fit_stats is None or not _same_fit_dataset(model, dataset):
-        return None
-
-    edf = float(model.result.effective_df)
-    n = dataset.n_obs
-    weights = dataset.sample_weight
-    if weights is None:
-        weights = np.ones(n, dtype=np.float64)
-    likelihood_size = dispersion_likelihood_size(
-        weights,
-        weight_semantics=model_weight_semantics(model),
-    )
-    log_likelihood = float(fit_stats.log_likelihood)
-    aic = float(-2.0 * log_likelihood + 2.0 * edf)
-    bic = float(-2.0 * log_likelihood + np.log(likelihood_size) * edf)
-    denom = likelihood_size - edf - 1.0
-    return {
-        "deviance": float(model.result.deviance),
-        "aic": aic,
-        "aicc": float(aic + 2.0 * edf * (edf + 1.0) / denom) if denom > 0 else float("inf"),
-        "bic": bic,
-        "log_likelihood": log_likelihood,
-        "explained_deviance": float(fit_stats.explained_deviance),
-        "pearson_chi2": float(fit_stats.pearson_chi2),
-        "effective_df": edf,
-    }
-
-
-def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
+def _compute_metrics(
+    model, X, y, weights, offset, *, contract_checked: bool = False
+) -> dict[str, float]:
     y_arr = np.asarray(y, dtype=np.float64).ravel()
     w = np.asarray(weights, dtype=np.float64).ravel()
     offset_arg = None if offset is None else np.asarray(offset, dtype=np.float64).ravel()
@@ -184,13 +167,20 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
     deviance = float(np.sum(w * family.deviance_unit(y_arr, mu)))
     # `compute_dataset_metrics` bypasses `ModelMetrics` entirely, so the
     # evaluation-boundary check is repeated here for editor validation and
-    # test splits.
-    from superglm.model.input_validation import check_weight_contract
+    # test splits.  The fit's own objects were checked by the fit.
+    if not contract_checked:
+        from superglm.model.input_validation import check_weight_contract
 
-    check_weight_contract(y_arr, w, family, model_weight_semantics(model))
+        check_weight_contract(y_arr, w, family, model_weight_semantics(model))
     log_likelihood = float(
         weighted_log_likelihood(
-            family, y_arr, mu, w, phi, weight_semantics=model_weight_semantics(model)
+            family,
+            y_arr,
+            mu,
+            w,
+            phi,
+            weight_semantics=model_weight_semantics(model),
+            report_contract=not contract_checked,
         )
     )
     aic = float(-2.0 * log_likelihood + 2.0 * edf)

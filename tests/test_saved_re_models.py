@@ -55,15 +55,14 @@ def test_a_random_effect_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(name
     assert_predicts_as_saved(model, frame, record["prediction"])
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        metrics = model.metrics(frame, y)
-        se = metrics.coefficient_se
+        se = model.metrics(frame, y).coefficient_se
     assert sum(NOTICE in str(item.message) for item in caught) == 1
     factor = model._linear_system_state.augmented_factor
     assert isinstance(factor, NestedSchurFactor)
     assert factor.chain_group_names == ("g",)
 
     tolerance = _se_tolerance(model)
-    scale = saved_se_scale(model, metrics)
+    scale = saved_se_scale(model, frame, y)
     for term, saved in record["se"].items():
         saved = scale * np.asarray(saved, dtype=float)
         rebuilt = np.asarray(se[term], dtype=float)

@@ -204,12 +204,29 @@ def weighted_offset_fit():
     return model, X, y, sample_weight, offset
 
 
+_METRIC_NAMES = (
+    "deviance",
+    "aic",
+    "aicc",
+    "bic",
+    "log_likelihood",
+    "explained_deviance",
+    "pearson_chi2",
+    "effective_df",
+)
+
+
 @pytest.mark.parametrize("use_retained_arrays", [False, True])
-def test_matching_fit_dataset_uses_fit_artifacts_without_model_scoring(
+def test_training_split_metrics_score_the_model_like_metrics(
     weighted_offset_fit,
     monkeypatch,
     use_retained_arrays,
 ):
+    """A dataset holding the fit's own objects is scored with predict, once (#441).
+
+    The editor no longer returns the fit's own statistics for those objects:
+    it evaluates the model's predictions, as ``model.metrics`` does.
+    """
     model, X, y, sample_weight, offset = weighted_offset_fit
     dataset = EvaluationDataset(
         "train",
@@ -220,68 +237,55 @@ def test_matching_fit_dataset_uses_fit_artifacts_without_model_scoring(
         offset=model._fit_offset if use_retained_arrays else offset,
         source="retained_fit_data" if use_retained_arrays else "supplied",
     )
+    calls = 0
+    original_predict = model.predict
 
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("fit-identity metrics must not score the model")
+    def counted_predict(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_predict(*args, **kwargs)
 
-    monkeypatch.setattr(model, "predict", forbidden)
-    monkeypatch.setattr(model, "metrics", forbidden)
-
+    monkeypatch.setattr(model, "predict", counted_predict)
     metrics = compute_dataset_metrics(model, dataset)
+    monkeypatch.undo()
+    core = model.metrics(X, y, sample_weight=sample_weight, offset=offset)
 
-    fit_stats = model._fit_stats
-    assert fit_stats is not None
-    edf = float(model.result.effective_df)
-    log_likelihood = float(fit_stats.log_likelihood)
-    aic = -2.0 * log_likelihood + 2.0 * edf
-    likelihood_size = float(np.sum(sample_weight))
-    denom = likelihood_size - edf - 1.0
-    assert set(metrics) == {
-        "deviance",
-        "aic",
-        "aicc",
-        "bic",
-        "log_likelihood",
-        "explained_deviance",
-        "pearson_chi2",
-        "effective_df",
-    }
-    assert metrics["deviance"] == pytest.approx(model.result.deviance)
-    assert metrics["aic"] == pytest.approx(aic)
-    assert metrics["aicc"] == pytest.approx(aic + 2.0 * edf * (edf + 1.0) / denom)
-    assert metrics["bic"] == pytest.approx(-2.0 * log_likelihood + np.log(likelihood_size) * edf)
-    assert metrics["log_likelihood"] == pytest.approx(fit_stats.log_likelihood)
-    assert metrics["explained_deviance"] == pytest.approx(fit_stats.explained_deviance)
-    assert metrics["pearson_chi2"] == pytest.approx(fit_stats.pearson_chi2)
-    assert metrics["effective_df"] == pytest.approx(edf)
+    assert calls == 1
+    assert set(metrics) == set(_METRIC_NAMES)
+    for name in ("deviance", "log_likelihood", "aic", "aicc", "bic", "effective_df"):
+        assert metrics[name] == getattr(core, name), name
+    # Two Pearson sums over n non-negative terms are gamma_n relative apart.
+    n = len(y)
+    pearson_bound = n * np.finfo(np.float64).eps / (1.0 - n * np.finfo(np.float64).eps)
+    assert metrics["pearson_chi2"] == pytest.approx(core.pearson_chi2, rel=pearson_bound, abs=0.0)
+    assert metrics["explained_deviance"] == core.explained_deviance
 
 
-def test_matching_unweighted_fit_dataset_uses_fit_artifacts(monkeypatch):
-    X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 40)})
-    y = 0.4 + 0.2 * X["x"].to_numpy()
+def test_training_split_metrics_on_a_discrete_fit_match_metrics():
+    """#441: on a discrete fit the editor's training split is predict's, not the binned fit's."""
+    from superglm import Spline
+
+    rng = np.random.default_rng(441)
+    n = 4000
+    X = pd.DataFrame({"a": rng.uniform(size=n), "b": rng.uniform(size=n)})
+    exposure = rng.uniform(0.2, 1.0, n)
+    offset = np.log(exposure)
+    signal = -1.0 + np.sin(6.0 * X["a"].to_numpy()) + 0.5 * X["b"].to_numpy() ** 2
+    y = rng.poisson(exposure * np.exp(signal)).astype(float)
     model = SuperGLM(
-        family="gaussian",
-        selection_penalty=0.0,
-        features={"x": Numeric()},
+        family="poisson",
+        features={"a": Spline(n_knots=12), "b": Spline(n_knots=12)},
+        discrete=True,
     )
-    model.fit(X, y)
-    dataset = EvaluationDataset("train", "Train", X, y)
-
-    monkeypatch.setattr(
-        model,
-        "predict",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("predict called")),
-    )
-    monkeypatch.setattr(
-        model,
-        "metrics",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("metrics called")),
-    )
+    model.fit_reml(X, y, offset=offset)
+    dataset = EvaluationDataset("train", "Train", X, y, offset=offset)
 
     metrics = compute_dataset_metrics(model, dataset)
+    core = model.metrics(X, y, offset=offset)
 
-    assert metrics["deviance"] == pytest.approx(model.result.deviance)
-    assert metrics["log_likelihood"] == pytest.approx(model._fit_stats.log_likelihood)
+    assert metrics["deviance"] == core.deviance
+    assert metrics["log_likelihood"] == core.log_likelihood
+    assert metrics["deviance"] != model.result.deviance  # the binned fit's own deviance
 
 
 @pytest.mark.parametrize(
@@ -431,28 +435,24 @@ def test_editor_bic_preserves_fractional_frequency_likelihood_size():
 
 
 def test_editor_tweedie_criteria_keep_physical_row_count():
+    from superglm.links import LogLink
+
     n = 7
     X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, n)})
     y = np.linspace(0.0, 2.0, n)
     weights = np.linspace(0.25, 3.0, n)
-    fit_stats = SimpleNamespace(
-        log_likelihood=-12.5,
-        explained_deviance=0.35,
-        pearson_chi2=4.2,
-    )
+    mu = np.linspace(0.5, 1.5, n)
     model = SimpleNamespace(
         _distribution=Tweedie(p=1.5),
-        _fit_stats=fit_stats,
+        _link=LogLink(),
+        predict=lambda _X, offset=None: mu,
         _fit_X_ref=X,
         _fit_y_ref=y,
         _fit_sample_weight_ref=weights,
         _fit_weights=weights,
         _fit_offset_ref=None,
         _fit_offset=None,
-        result=SimpleNamespace(
-            effective_df=2.25,
-            deviance=8.0,
-        ),
+        result=SimpleNamespace(effective_df=2.25, phi=1.3),
     )
     dataset = EvaluationDataset(
         "train",
@@ -464,9 +464,12 @@ def test_editor_tweedie_criteria_keep_physical_row_count():
 
     metrics = compute_dataset_metrics(model, dataset)
     edf = model.result.effective_df
-    aic = -2.0 * fit_stats.log_likelihood + 2.0 * edf
+    log_likelihood = metrics["log_likelihood"]
+    aic = -2.0 * log_likelihood + 2.0 * edf
 
-    assert metrics["bic"] == pytest.approx(-2.0 * fit_stats.log_likelihood + np.log(n) * edf)
+    # The prior-weight Tweedie likelihood counts the n rows, not sum(w).
+    assert np.sum(weights) != n
+    assert metrics["bic"] == pytest.approx(-2.0 * log_likelihood + np.log(n) * edf)
     assert metrics["aicc"] == pytest.approx(aic + 2.0 * edf * (edf + 1.0) / (n - edf - 1.0))
 
 
@@ -530,32 +533,3 @@ def test_dataset_metric_fallback_rejects_column_vector_weights(
     assert np.isfinite(flat_metrics["deviance"])
     with pytest.raises(ValueError, match="sample_weight must be one-dimensional"):
         compute_dataset_metrics(model, column)
-
-
-def test_fit_identity_falls_back_when_scalar_fit_artifacts_are_unavailable(
-    weighted_offset_fit,
-    monkeypatch,
-):
-    model, X, y, sample_weight, offset = weighted_offset_fit
-    dataset = EvaluationDataset(
-        "train",
-        "Train",
-        X,
-        y,
-        sample_weight=sample_weight,
-        offset=offset,
-    )
-    calls = 0
-    original_predict = model.predict
-
-    def counted_predict(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return original_predict(*args, **kwargs)
-
-    monkeypatch.setattr(model, "predict", counted_predict)
-    monkeypatch.setattr(model, "_fit_stats", None)
-
-    compute_dataset_metrics(model, dataset)
-
-    assert calls == 1
