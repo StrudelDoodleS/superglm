@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import tomllib
+from datetime import datetime
 from pathlib import Path
 
 from packaging.version import Version
@@ -466,6 +467,21 @@ def _span_days(span: str) -> float:
     return 7 * weeks + days + hours_part / 24
 
 
+def _instant(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp)
+
+
+def _upload_times(lock: dict, keep) -> list[datetime]:
+    """Upload instants of every locked file of the packages ``keep`` accepts by name."""
+    return [
+        _instant(artifact["upload-time"])
+        for package in lock["package"]
+        if keep(package["name"])
+        for artifact in [package.get("sdist", {}), *package.get("wheels", [])]
+        if "upload-time" in artifact
+    ]
+
+
 def test_lock_bumps_wait_out_a_minimum_release_age():
     """Every resolution skips files younger than the cooldown, and the lock was resolved under it.
 
@@ -501,14 +517,15 @@ def test_lock_bumps_wait_out_a_minimum_release_age():
         assert isinstance(cutoff, str) and re.fullmatch(
             r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", cutoff
         ), f"{name}: an exemption is a fixed cutoff, not {cutoff!r}"
-        uploads = [
-            artifact["upload-time"]
-            for package in lock["package"]
-            if package["name"] == name
-            for artifact in [package.get("sdist", {}), *package.get("wheels", [])]
-            if "upload-time" in artifact
-        ]
-        assert uploads and max(uploads) <= cutoff, f"{name} is locked past its exemption"
+        uploads = _upload_times(lock, lambda package, name=name: package == name)
+        assert uploads and max(uploads) <= _instant(cutoff), f"{name} is locked past its exemption"
+        # A file the window admitted is newer than the exemption's cutoff only once
+        # the window has passed the exempted release, whose cutoff then only refuses
+        # later ones (a security fix among them): drop it at that lock bump.
+        others = _upload_times(lock, lambda package: package not in exempt)
+        assert max(others) <= _instant(cutoff), (
+            f"the cooldown has passed {name}'s exempted release: drop its exemption"
+        )
 
     dependabot = _read(".github/dependabot.yml")
     uv_config = dependabot.split('package-ecosystem: "uv"', maxsplit=1)[1].split(

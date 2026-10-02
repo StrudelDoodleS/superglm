@@ -1190,24 +1190,21 @@ def test_the_structured_gate_refuses_negative_curvature_the_border_truncates(kin
     block is nearly singular.  Each fixture has an eigenvalue below ``-tau``,
     certified in exact arithmetic, that step 4 truncates as a null: raising
     the gate's floor to step 4's admits ``floor``, and trusting step 4's Ritz
-    value admits both.
+    value admits both.  The fixture must reach the gate: if step 4 ever
+    refuses it (or keeps full rank), ``factor_border`` raises or the rank check
+    fails here, and the fixture needs revisiting rather than passing through
+    another refusal (Claude review of #445, Nit).
     """
     from superglm.solvers._structured.border import factor_border
 
     matrix, bound = _border_matrix_with_truncated_negative_curvature(kind)
     size = matrix.shape[0]
-    try:
-        border = factor_border(matrix, np.zeros((size, size)), bound, None, term_name="probe")
-    except np.linalg.LinAlgError:
-        refused, tau = True, None
-    else:
-        tau = border.certificate.tau
-        eigenvalues = np.linalg.eigvalsh(border.scaled_matrix)
-        refused = schur_curvature_is_negative(eigenvalues, border.certificate)
-    if tau is not None:
-        # the unit diagonal makes the stored matrix its own Jacobi scaling
-        assert _has_eigenvalue_below(matrix, -tau)
-    assert refused
+    border = factor_border(matrix, np.zeros((size, size)), bound, None, term_name="probe")
+    assert border.certificate.rank < size  # step 4 truncated, as the fixture claims
+    # the unit diagonal makes the stored matrix its own Jacobi scaling
+    assert _has_eigenvalue_below(matrix, -border.certificate.tau)
+    eigenvalues = np.linalg.eigvalsh(border.scaled_matrix)
+    assert schur_curvature_is_negative(eigenvalues, border.certificate)
 
 
 def test_observed_geometry_rejects_indefinite_penalty_and_total_curvature() -> None:
