@@ -800,7 +800,10 @@ class FactorSmooth:
         constraint makes it), ``"mean"`` (the mean of the levels the data
         identify), ``"separated_mean"`` (every level the data identify
         separates: their mean, which follows how far the fit walked their
-        lines) or ``"canonical"`` (every level thin).
+        lines) or ``"canonical"`` (every level thin).  A fit penalizes the
+        lines instead where a line separates or every level is thin (#444),
+        unless the term's policy is ``LambdaPolicy.off()``; the last two
+        conventions serve such terms and the models 0.36.0 saved.
         """
         if not self._has_population_offset:
             return "main"
@@ -833,7 +836,8 @@ class FactorSmooth:
 
         With every level separated or thin there is no such mean.  If some
         level is not thin (every one of those separates) the mean is over
-        them, and it follows the separated lines (a warning at fit).  If every
+        them, and it follows the separated lines (a warning at fit, for a
+        ``LambdaPolicy.off()`` term; others take the lines' penalty).  If every
         level is thin the population is the canonical point of the family,
         where each level's free part is zero, ``Pi_t (beta_t + s_t - S / K)
         = 0`` (``Pi_t`` the projector on ``_free_directions[t]``, ``S = sum_t
