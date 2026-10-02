@@ -91,6 +91,7 @@ decision or bound reads a lazily formed quantity.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from functools import cached_property
 
@@ -545,6 +546,41 @@ class BorderFactor:
         return np.sum((block @ side.inverse_kept) * block, axis=1)
 
 
+def _row_norms(matrix: NDArray) -> NDArray:
+    """Each row's 2-norm, scaled by its largest entry so it neither overflows nor underflows."""
+    if matrix.size == 0:
+        return np.zeros(matrix.shape[0])
+    largest = np.max(np.abs(matrix), axis=1)
+    safe = np.where(largest > 0.0, largest, 1.0)
+    return largest * np.sqrt(np.sum((matrix / safe[:, None]) ** 2, axis=1))
+
+
+def _paired_majorant(e: NDArray, g: NDArray, diagonal: NDArray) -> NDArray:
+    """``t e_i^2 + g_i^2 / t`` with ``t`` minimising its Jacobi-scaled sum, range-safe.
+
+    Majorises ``|e_i g_j| + |g_i e_j| <= sqrt(b_i b_j)`` for every ``t > 0``
+    (Cauchy-Schwarz).  With ``e = e_max e^`` and ``g = g_max g^`` the minimiser
+    is ``t = (g_max / e_max) rho``, ``rho = sqrt(sum g^^2 / d / sum e^^2 / d)``,
+    so ``b_i = e_max g_max (rho e^_i^2 + g^_i^2 / rho)``: no square of ``e``
+    or ``g`` and no quotient of their sums is formed.  Zero where every
+    product ``e_i g_j`` is.
+    """
+    e_max = float(np.max(e, initial=0.0))
+    g_max = float(np.max(g, initial=0.0))
+    if not (e_max > 0.0 and g_max > 0.0):
+        return np.zeros_like(e)
+    e_hat, g_hat = e / e_max, g / g_max
+    resolved = diagonal > 0.0
+    rho = 1.0
+    if np.any(resolved):
+        scale = diagonal[resolved] / float(np.max(diagonal[resolved]))
+        spread = float(np.sum(e_hat[resolved] ** 2 / scale))
+        reach = float(np.sum(g_hat[resolved] ** 2 / scale))
+        if spread > 0.0 and reach > 0.0 and np.isfinite(spread) and np.isfinite(reach):
+            rho = math.sqrt(reach / spread)
+    return e_max * g_max * (rho * e_hat**2 + g_hat**2 / rho)
+
+
 def _deflate(Q_d, S, U, generators):
     """Step 1: the kept generators, the deflated matrix ``Q'''``, its bound and the elimination."""
     m = Q_d.shape[0]
@@ -603,13 +639,12 @@ def _deflate(Q_d, S, U, generators):
     # for every t > 0 (Cauchy-Schwarz) and |g_i' d a_NN g_j| <= ||E_NN|| g_i g_j,
     # so the column bound below keeps factor_border's |dQ_ij| <= sqrt(b_i b_j);
     # t minimises the Jacobi-scaled sum u_s, as the border majorant's own does.
-    e2 = np.sum(E_MN[M] ** 2, axis=1)
-    g2 = np.sum(G * G, axis=1)
-    resolved = np.diag(Q) > 0.0
-    spread = float(np.sum(e2[resolved] / np.diag(Q)[resolved]))
-    reach = float(np.sum(g2[resolved] / np.diag(Q)[resolved]))
-    t = float(np.sqrt(reach / spread)) if spread > 0.0 and reach > 0.0 else 1.0
-    bound = bound + t * e2 + g2 / t + E_norm / (1.0 - ratio) * g2
+    # Range-safe (Sol review of 0ccab297): norms by max-abs scaling and t through
+    # ratios of scaled sums, so a penalty near 1e-140 neither overflows t nor
+    # underflows e_i^2 into a spurious t = 1.
+    e = _row_norms(E_MN[M])
+    g = _row_norms(G)
+    bound = bound + _paired_majorant(e, g, np.diag(Q)) + (E_norm / (1.0 - ratio)) * g * g
     return (N, references), M, Q, bound, S_M, logdet_N, G, lower
 
 
