@@ -736,6 +736,11 @@ class FactorSmooth:
                 }
             self._lines_penalized = True
             self._all_levels_thin = all_thin
+            # A level without weight has no data term: the sum-to-zero
+            # constraint alone fixes its block, so it is predicted at the
+            # population curve, which every level stays in (#444 review).
+            self._weightless_levels = rows.weightless
+            self._population_null_space = rows.null_space if rows.weightless else None
             return separated
         self._unidentified_levels = rows.thin
         self._free_directions = rows.free
@@ -746,14 +751,17 @@ class FactorSmooth:
 
     @property
     def _line_penalty_off(self) -> bool:
-        """Whether one policy for the whole term fixes every smoothing parameter at zero.
+        """Whether the term's ``wiggle`` smoothing parameter is fixed at zero.
 
-        The lines' penalty would then add no curvature, so the fit keeps the
-        unpenalized lines and #440's record instead (``LambdaPolicy.off()``).
+        ``LambdaPolicy.off()``, as the term's one policy or its ``"wiggle"``
+        entry.  The lines' penalty would then leave each level's ``k - m``
+        wiggle coordinates without curvature, so it neither bounds a
+        separated level nor identifies a thin one: the fit keeps the
+        unpenalized lines and #440's record instead.
         """
-        policy = self._lambda_policy
+        policy = (self._resolve_lambda_policies() or {}).get("wiggle")
         return (
-            isinstance(policy, LambdaPolicy)
+            policy is not None
             and policy.mode == "fixed"
             and float(cast(float, policy.value)) == 0.0
         )
@@ -787,9 +795,16 @@ class FactorSmooth:
 
     @property
     def _has_population_offset(self) -> bool:
-        """Whether some level stays out of the population curve, which then moves off the main effect."""
-        return bool(getattr(self, "_unidentified_levels", ())) or bool(
-            getattr(self, "_separated_levels", ())
+        """Whether some level stays out of the population curve, which then moves off the main effect.
+
+        A weightless level beside penalized lines also stays out: it is
+        predicted at the population curve, which the other levels' lines,
+        all identified, then fix at the main effect (``c = 0``).
+        """
+        return (
+            bool(getattr(self, "_unidentified_levels", ()))
+            or bool(getattr(self, "_separated_levels", ()))
+            or bool(getattr(self, "_weightless_levels", ()))
         )
 
     @property
@@ -915,10 +930,11 @@ class FactorSmooth:
         weightless = set(getattr(self, "_weightless_levels", ()))
         for level, free in zip(self._unidentified_levels, self._free_directions, strict=True):
             if level in weightless:
-                coefficients[level] = offset
                 continue
             directions = np.asarray(free, dtype=np.float64)
             coefficients[level] -= directions @ (directions.T @ (blocks[level] - offset))
+        for level in weightless:
+            coefficients[level] = offset
         return coefficients, offset
 
     def _score_identified(

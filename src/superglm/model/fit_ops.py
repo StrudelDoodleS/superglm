@@ -808,9 +808,9 @@ def _record_unidentified_factor_smooth_levels(
         if penalized and getattr(spec, "_all_levels_thin", False):
             warnings.warn(
                 f"FactorSmooth {group.name!r} (basis='sz'): every level holds fewer distinct x "
-                f"values than its unpenalized polynomial part has coefficients ({spec.m}, with "
-                f"m={spec.m}), so the data cannot tell the levels' polynomial parts from the "
-                "main effect's. The fit therefore penalizes every level's polynomial part, "
+                f"values than its unpenalized polynomial part has coefficients (m={spec.m}), so "
+                "the data cannot tell the levels' polynomial parts from the main effect's. "
+                "The fit therefore penalizes every level's polynomial part, "
                 "with a 'null' smoothing parameter of its own (as basis='fs' does), which "
                 "shrinks them toward the population curve: the population curve is the main "
                 "effect, fitted through the trend across the levels, and every level's curve "

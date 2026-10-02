@@ -202,7 +202,9 @@ If every level is in this position, no level identifies the population curve:
 the data cannot tell the levels' straight lines from the global curve's. The
 fit then penalizes every level's line, as described next, and warns. The
 global curve is fitted through the trend across the levels, and the
-population curve is the global curve.
+population curve is the global curve. A term whose wiggle policy is
+`LambdaPolicy.off()` keeps the lines unpenalized instead and its population
+curve is set by a convention, as the next section says.
 
 To give a level its own curve, give it weighted rows at enough distinct values.
 
@@ -237,9 +239,12 @@ lines as random effects, as `basis="fs"` does.
   report that it did not converge. The lines are still finite there.
 - A lambda policy given as one `LambdaPolicy` for the whole term also fixes
   `null`. A dict of policies leaves `null` to REML.
-- `LambdaPolicy.off()` for the whole term keeps the lines unpenalized. Separated
-  lines then move toward zero (or one) for as long as the fit runs, and the
-  population curve leaves them out.
+- `LambdaPolicy.off()` for the term's wiggle, alone or as the term's one
+  policy, keeps the lines unpenalized. Separated lines then move toward zero
+  (or one) for as long as the fit runs, and the population curve leaves them
+  out.
+- A level whose rows all have zero weight is predicted at the population
+  curve.
 - A model saved by superglm 0.36.0 keeps the rules it was saved with: its
   population curve leaves its separated levels out.
 

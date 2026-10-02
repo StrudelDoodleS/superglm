@@ -201,8 +201,10 @@ class SuperGLM:
             separates the response is named in a ``SeparationWarning`` at fit
             under ``"warn"`` and ``"error"`` alike (never refused), and the
             fit penalizes every level's line of that term (its ``null``
-            smoothing parameter), which gives every level a finite curve;
-            ``"ignore"`` silences the warning only.
+            smoothing parameter), which gives every level a finite curve,
+            unless the term's ``wiggle`` policy is ``LambdaPolicy.off()``
+            (its lines then stay unpenalized and out of the population
+            curve); ``"ignore"`` silences the warning only.
         group_pricing : {"rank", "spanned"}
             Dimension ``p_g`` at which the selection penalty and the fallback
             df ledger price a group whose spec emits fewer columns than the
@@ -1919,8 +1921,9 @@ class SuperGLM:
             zero, except that a ``basis="sz"`` FactorSmooth with levels its
             data identify only in part contributes its population curve's
             offset (see "SZ levels the data cannot identify" in the
-            interactions guide), as does one saved by 0.36.0 with levels
-            whose line separates the response.
+            interactions guide), as does one with levels whose line
+            separates the response that kept its lines unpenalized
+            (``LambdaPolicy.off()``, or saved by 0.36.0).
 
         Returns
         -------

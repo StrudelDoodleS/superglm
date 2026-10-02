@@ -1352,20 +1352,37 @@ def test_a_separated_sz_line_is_penalized_and_stays_bounded() -> None:
     assert np.array_equal(dm.repeated_penalty_components[1][1], components[1][1])
 
 
-def test_an_off_sz_term_keeps_its_lines_unpenalized() -> None:
-    """``LambdaPolicy.off()`` for the whole term keeps the lines unpenalized and #440's record (#444).
+@pytest.mark.parametrize("form", ["term", "wiggle"])
+def test_an_off_sz_term_keeps_its_lines_unpenalized(form) -> None:
+    """``LambdaPolicy.off()`` on the term's wiggle keeps the lines unpenalized and #440's record (#444).
 
-    The policy fixes every smoothing parameter at zero, so a ``null``
-    component would add no curvature: the fit keeps the term's lines as
-    0.36.0 did, records the separated levels, leaves them out of the
-    population curve and says so.  Mutation: the off policy copied onto the
-    lines' component, which marked the lines penalized and dropped the record
-    (Codex and Claude reviews of 55eda85f).
+    Off as the term's one policy or as its ``"wiggle"`` entry: each level's
+    wiggle coordinates then carry no penalty, so a ``null`` component would
+    neither bound a separated level nor identify a thin one.  The fit keeps
+    the term's lines as 0.36.0 did, records the separated levels, leaves
+    them out of the population curve and says so.  Mutations: the off policy
+    copied onto the lines' component, which marked the lines penalized and
+    dropped the record (Codex and Claude reviews of 55eda85f); the guard
+    reading only a term-wide policy (Codex review of 4dd54555).
     """
     frame, y = _separated_poisson()
+    off = LambdaPolicy.off()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model = _separated_model(lines=LambdaPolicy.off(), direct_solve="gram").fit_reml(frame, y)
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    lambda_policy=off if form == "term" else {"wiggle": off},
+                )
+            ],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(frame, y)
     spec = model._interaction_specs["x:g:sz"]
     assert "x:g:sz:null" not in model._reml_lambdas
     assert not spec._lines_penalized
@@ -1398,6 +1415,62 @@ def test_an_all_thin_sz_term_with_a_separated_line_still_names_the_penalty() -> 
         thin = [w for w in caught if "every level holds fewer distinct x" in str(w.message)]
         assert len(thin) == 1 and "m=2" in str(thin[0].message)
         assert len([w for w in caught if "unpenalized line" in str(w.message)]) == separated
+
+
+def test_an_all_thin_sz_warning_names_the_terms_m() -> None:
+    """The all-thin warning states the term's own ``m`` (Codex review of 55eda85f, P3).
+
+    ``m = 3``: every level at two distinct ``x`` values is thin.  On 55eda85f
+    the warning said "its line, with m=2" whatever the term's ``m``.
+    """
+    rng = np.random.default_rng(13)
+    g = np.repeat(np.arange(8), 100)
+    x = np.where(np.arange(800) % 2 == 0, 0.1, 0.6) + 0.04 * g
+    y = np.sin(3 * x) + 0.2 * rng.normal(size=800)
+    frame = pd.DataFrame({"x": x, "g": np.array([f"g{v:03d}" for v in g], dtype=object)})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+            interactions=[FactorSmooth("x", group="g", basis="sz", m=3)],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(frame, y)
+    assert "x:g:sz:null" in model._reml_lambdas
+    thin = [w for w in caught if "every level holds fewer distinct x" in str(w.message)]
+    assert len(thin) == 1 and "(m=3)" in str(thin[0].message)
+
+
+def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() -> None:
+    """A level without weight is predicted at the population curve when the lines are penalized (#444).
+
+    The level has no data term, so the sum-to-zero constraint alone fixes its
+    block: minus the other levels' deviations, shrunk but not zero.  As in
+    every other ``sz`` fit and for an unseen level, it is predicted at the
+    population curve, which the identified levels then fix at the main effect
+    (``c = 0`` to the rule's rounding).  Mutation: the penalized record
+    without the weightless levels (Claude review of 4dd54555).
+    """
+    from superglm.model import base
+
+    frame, y = _separated_poisson()
+    weight = np.where(frame["g"].to_numpy() == "g005", 0.0, 1.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _separated_model(direct_solve="gram").fit_reml(frame, y, sample_weight=weight)
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._lines_penalized
+    assert spec._weightless_levels == (5,)
+    grid = pd.DataFrame({"x": np.linspace(0.0, 1.0, 21), "g": "g005"})
+    eta = base.predict_eta_exact(model, grid, warn=False)
+    population = base.predict_eta_exact(model, grid, random_effects="population", warn=False)
+    assert np.array_equal(eta, population)
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    offset = spec._population_offset(blocks)
+    count = len(blocks) * spec.k + 4 * spec.k + 2
+    assert np.all(np.abs(offset) <= _gamma(count) * np.abs(blocks).sum(axis=0))
 
 
 @pytest.mark.parametrize(
