@@ -300,12 +300,21 @@ class ModelMetrics:
 
     Notes
     -----
+    The fitted mean and linear predictor are the model's predictions on ``X``,
+    the values ``predict`` returns, and the deviance, likelihoods, Pearson
+    statistic and ``residuals()`` are computed from them.  They do not depend
+    on whether ``X``, ``y``, ``sample_weight`` and ``offset`` are the objects
+    the model was fitted on: a discrete fit's own mean belongs to its binned
+    design, which ``predict`` does not reproduce.  ``SuperGLM.summary``
+    reports the fit's own statistics instead.
+
     On the frame a model was fitted on, leverage and effective degrees of
-    freedom come from the fit itself.  Equal copies of that frame, or a pickled
-    model, are recognised as the training rows only when the model keeps a
-    structured or shape-constrained covariance.  Otherwise the metrics are
-    re-formed on the rows passed, which for a discrete fit can differ slightly
-    from its binned fit.
+    freedom come from the fit itself, and so do the standardized residuals
+    and Cook's distance built on that leverage.  Equal copies of that frame,
+    or a pickled model, are recognised as the training rows only when the
+    model keeps a structured or shape-constrained covariance.  Otherwise
+    leverage is re-formed on the rows passed, which for a discrete fit can
+    differ slightly from its binned fit.
     """
 
     def __init__(
@@ -318,10 +327,10 @@ class ModelMetrics:
         *,
         _fit_data_matches: bool | None = None,
         _mu: NDArray | None = None,
-        _null_mu: NDArray | None = None,
-        _fit_stats=None,
+        _contract_checked: bool = False,
     ):
         self._model = model
+        self._contract_checked = _contract_checked
         self._family = model._distribution
         self._link = model._link
         self._groups = model._groups
@@ -458,15 +467,15 @@ class ModelMetrics:
                 "they must describe the same observations"
             )
 
-        # Only when a likelihood is genuinely about to be evaluated here.
-        # `explain_ops.metrics` hands back `_fit_stats` when the caller passed
-        # the training arrays themselves, in which case this reuses the
-        # likelihood the fit already computed -- and already checked -- so
-        # checking again reports one condition twice for one fit.
+        # `explain_ops.metrics` sets `_contract_checked` when the caller passed
+        # the training arrays themselves, verified unchanged: the fit already
+        # checked these rows, so checking again reports one condition twice
+        # for one fit.  The likelihoods below leave out the custom-family
+        # contract report for the same reason.
         #
-        # Holdout evaluation is unaffected: it has no `_fit_stats` to reuse,
-        # which is exactly the case the check exists for.
-        if _fit_stats is None:
+        # Holdout evaluation is unaffected: its rows were never checked, which
+        # is exactly the case the check exists for.
+        if not _contract_checked:
             from superglm.model.input_validation import check_weight_contract
 
             check_weight_contract(
@@ -475,14 +484,6 @@ class ModelMetrics:
                 self._family,
                 self._weight_semantics,
             )
-        if _null_mu is not None:
-            self.__dict__["_null_mu"] = _null_mu
-        if _fit_stats is not None:
-            self.__dict__["log_likelihood"] = _fit_stats.log_likelihood
-            self.__dict__["null_log_likelihood"] = _fit_stats.null_log_likelihood
-            self.__dict__["null_deviance"] = _fit_stats.null_deviance
-            self.__dict__["explained_deviance"] = _fit_stats.explained_deviance
-            self.__dict__["pearson_chi2"] = _fit_stats.pearson_chi2
 
     def _build_S_from_penalties(self, lam2) -> NDArray | None:
         """Build full penalty matrix from model._reml_penalties if available."""
@@ -515,19 +516,16 @@ class ModelMetrics:
 
     @cached_property
     def _working_eta_mu(self) -> tuple[NDArray, NDArray]:
-        """Unclipped-link eta and guarded mu for this diagnostic evaluation."""
+        """The predicted eta on these rows and its guarded mu.
+
+        Never the fit's own linear predictor: on a discrete fit that belongs to
+        the binned design, and reading it only for the fit's own objects made
+        ``eta`` depend on object identity (#441).
+        """
         from superglm.distributions import clip_mu
-        from superglm.links import stabilize_eta
+        from superglm.model import base
 
-        if self._uses_fit_design:
-            from superglm.solvers.mode_score import linear_predictor
-
-            solver = self._model._solver_pirls_result()
-            eta = stabilize_eta(linear_predictor(self._dm, solver, self._offset), self._link)
-        else:
-            from superglm.model import base
-
-            eta = base.predict_eta_exact(self._model, self._X, offset=self._offset, warn=False)
+        eta = base.predict_eta_exact(self._model, self._X, offset=self._offset, warn=False)
         mu = clip_mu(self._link.inverse(eta), self._family)
         return eta, mu
 
@@ -559,6 +557,7 @@ class ModelMetrics:
             self._weights,
             self.phi,
             weight_semantics=self._weight_semantics,
+            report_contract=not self._contract_checked,
         )
 
     @cached_property
@@ -585,6 +584,7 @@ class ModelMetrics:
             self._weights,
             self.phi,
             weight_semantics=self._weight_semantics,
+            report_contract=not self._contract_checked,
         )
 
     @cached_property

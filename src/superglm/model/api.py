@@ -1184,6 +1184,13 @@ class SuperGLM:
         :meth:`metrics` through ``coefficient_se``, ``intercept_se``, and
         ``feature_se``. The dict-like ``standard_errors`` payload labels its
         coefficient-SE scale explicitly as ``"fitted-family"``.
+
+        The deviance, log-likelihood, information criteria and Pearson
+        statistic reported here are the fit's own, computed when it was
+        fitted on its fitting design.  On a ``discrete=True`` fit that design
+        is the binned one, so these differ slightly from
+        :meth:`metrics` on the same data, which evaluates the model's
+        predictions on the rows passed.
         """
         return report_ops.summary(
             self,
@@ -1213,7 +1220,21 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
     ) -> ModelMetrics:
-        """Compute comprehensive diagnostics for the fitted model."""
+        """Compute comprehensive diagnostics for the fitted model.
+
+        The deviance, likelihoods, Pearson statistic and ``residuals()`` are
+        computed from the model's predictions on ``X``, the values ``predict``
+        returns.  They do not depend on object identity: equal copies of the
+        training data and a saved and reloaded model give the same values as
+        the objects the model was fitted on.  Leverage-based diagnostics do
+        depend on it.  On the fit's own objects, ``leverage``, the standardized
+        residuals and Cook's distance read the fit's own geometry; see the
+        :class:`ModelMetrics` notes.
+
+        :meth:`summary` instead reports the fit's own statistics from its
+        fitting design.  On a ``discrete=True`` fit that design is the binned
+        one, so the two differ slightly on the training data.
+        """
         return explain_ops.metrics(self, X, y, sample_weight, offset)
 
     def drop1(
