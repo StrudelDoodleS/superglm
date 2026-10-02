@@ -1367,6 +1367,7 @@ def test_an_all_events_light_cut_is_a_boundary_supremum(direct_solve: str) -> No
     assert not model.result.converged
     assert model.result.termination_reason == "mean_space_boundary"
     assert model.result.mean_space_boundary_rows == int(np.count_nonzero(light))
+    assert model.result.mean_space_boundary_unresolved
     diagnostics = model.diagnostics()["_model"]
     assert diagnostics["unresolved_rows"] == []
     (boundary,) = diagnostics["boundary_rows"]
@@ -1394,7 +1395,8 @@ def test_a_refused_direction_keeps_its_record_through_a_rejected_step(
     is then made to fail its line search, so the fit ends ``step_rejected``,
     an exit on which the certificate does not run.  #437 cleared the record
     at the top of each iteration, so the fit was published not converged
-    with no record and no warning.  The last record found is kept.
+    with no record and no warning.  A rejected step returns the committed
+    state, the one the refusal judged, so that judgement is the fit's own.
     """
     import superglm.solvers.irls_direct as irls_direct
     from superglm.solvers.irls_state import _IRLSStepDecision, _select_irls_trial
@@ -1442,6 +1444,228 @@ def _two_level_design(z: np.ndarray):
         [CategoricalGroupMatrix(codes, 2), DenseGroupMatrix(z[:, None])], n=len(codes), p=3
     )
     return dm, response, weight * (2.0 * response - 1.0), weight
+
+
+def test_an_earlier_boundary_record_never_decides_the_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P2 and claude's Medium on #454: only the returned state's judgement decides.
+
+    The first certificate is made to find a boundary set; every later one,
+    at the iterates the fit moves on to, finds none and refuses without a
+    record (``inf``, as an unresolved basis does).  The fit then runs out of
+    iterations.  a9d5870a kept the first record because a later judgement
+    found nothing, and relabelled the exit ``mean_space_boundary`` with that
+    record's rows, the string REML's restoration loop keys on.  The returned
+    state's own judgement, which found nothing, now decides: the loop's own
+    exit, no boundary rows, and nothing published for that state.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.mode_score import TruncatedDirection
+
+    calls: list[int] = []
+
+    def boundary_then_none(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            stale = TruncatedDirection(((16, 20),), 4, (2, 3), 1e16, False, True)
+            return 10.0, (stale,)
+        return math.inf, ()
+
+    monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_then_none)
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        max_iter=5,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert len(calls) >= 2
+    assert not model.result.converged
+    assert model.result.termination_reason in ("max_iter", "score_stagnated")
+    assert model.result.mean_space_boundary_rows == 0
+    assert not model.result.mean_space_boundary_unresolved
+    assert model.result.truncated_directions == ()
+    assert model.diagnostics()["_model"]["boundary_rows"] == []
+    assert not [w for w in caught if "probability 1" in str(w.message)]
+
+
+def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boundary record from an earlier iterate is disclosed as history and decides nothing.
+
+    The first certificate finds a boundary set and refuses; the certificate
+    is then kept from running (no later stop is claimed), so the returned
+    state is never judged.  The record is published with ``earlier`` set,
+    named in the warning as found at an earlier iterate, and the fit keeps
+    the loop's own exit with no boundary rows.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.mode_score import TruncatedDirection
+
+    calls: list[int] = []
+    real = irls_direct._irls_objective_relative_change
+
+    def boundary_once(**kwargs):
+        calls.append(1)
+        stale = TruncatedDirection(((16, 20),), 4, (2, 3), 1e16, False, True)
+        return 10.0, (stale,)
+
+    def no_stop_after_the_first(**kwargs):
+        # the deviance stop passes once (the certificate then runs and
+        # refuses) and never again, so the certificate is not consulted on
+        # the later iterates
+        return 0.0 if not calls else real(**kwargs) + 1.0
+
+    monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_once)
+    monkeypatch.setattr(irls_direct, "_irls_objective_relative_change", no_stop_after_the_first)
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="qr",
+        max_iter=4,
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert calls == [1]
+    assert not model.result.converged
+    assert model.result.termination_reason == "max_iter"
+    assert model.result.mean_space_boundary_rows == 0
+    (record,) = model.result.truncated_directions
+    assert record.boundary and record.earlier
+    (entry,) = model.diagnostics()["_model"]["boundary_rows"]
+    assert entry["earlier"] and entry["rows"] == [16, 17, 18, 19]
+    assert any("At an earlier iterate, rows 16" in str(w.message) for w in caught)
+
+
+def _penalized_event_level(penalty: float, z: np.ndarray | None = None):
+    """``_two_level_design`` with level b's rows both events at ``eta = -20`` and its column penalized."""
+    dm, response, score, weight = _two_level_design(np.zeros(10) if z is None else z)
+    response[4:6] = 1.0
+    eta = np.full(10, math.log(0.5))
+    eta[4:6] = -20.0
+    odds = math.exp(-20.0) / -math.expm1(-20.0)
+    score[4:6] = weight[4:6]
+    fisher = weight.copy()
+    fisher[4:6] = weight[4:6] * odds
+    return dm, response, score, fisher, eta
+
+
+@pytest.mark.parametrize(("penalty", "boundary"), [(2e-8, False), (2e-10, True), (0.0, True)])
+def test_a_penalized_events_direction_is_on_the_boundary_only_past_it(
+    penalty: float, boundary: bool
+) -> None:
+    """Codex P1 and claude's Low on #454: a penalty bends the direction, so its maximum can be interior.
+
+    Level b's two light rows are events at ``eta = -20`` along a truncated
+    direction whose column carries a penalty ``s``.  Their own Newton step,
+    ``sum s_i / (sum f_i + s)``, is about ``2 w / s`` in ``eta``: +1 at ``s =
+    2w``, where the penalized maximum along the step is interior (``eta ~
+    -19``), and +100 at ``s = 2w / 100``, which carries the rows past ``eta =
+    0``: the boundary.  Without a penalty the step is a recession direction:
+    the boundary.  a9d5870a read the boundary from the step's sign alone, so
+    it labelled the interior maximum a boundary supremum.  The interior one
+    is not at its maximum either, so it is refused, but as unresolved.
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    dm, response, score, fisher, eta = _penalized_event_level(penalty)
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=np.array([[1.0], [0.0], [0.0]]),
+        angle=1e-12,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=fisher,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: np.array([penalty * float(v[0]), 0.0, 0.0]),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+        eta=eta,
+    )
+    assert ratio > 1.0
+    (record,) = found
+    assert record.rows == (4, 5)
+    assert not record.at_maximum
+    assert record.boundary is boundary
+
+
+def test_a_wide_column_does_not_hide_a_light_set_as_aliasing() -> None:
+    """claude's Medium on #454: the basis's error is each row's own, not the design's widest.
+
+    Beside a dense column spanning -1000 to 1000, #437's bound took every
+    row's movement error as ``4 angle`` times the design's l1 bound (1001):
+    at ``angle = 1e-3`` that is 4.0, above the light rows' movement of 1, so
+    the support was empty and the direction passed as aliasing.  Each row's
+    error is now ``4 (angle + gamma) l1_i ||d||_2`` with its own ``l1_i``
+    (112 on the light rows), so the light rows are judged: events rising
+    along an unpenalized direction, a boundary supremum.
+    """
+    from superglm.solvers.mode_score import truncated_direction_ratio
+
+    dm, response, score, fisher, eta = _penalized_event_level(
+        0.0, z=np.linspace(-1000.0, 1000.0, 10)
+    )
+    ratio, found = truncated_direction_ratio(
+        dm=dm,
+        null_basis=np.array([[1.0], [0.0], [0.0]]),
+        angle=1e-3,
+        mean_x=np.zeros(3),
+        row_score=score,
+        fisher_weights=fisher,
+        response=response,
+        positive_prior=np.ones(10, dtype=bool),
+        penalty_gradient=np.zeros(3),
+        penalty_size=np.zeros(3),
+        penalty_apply=lambda v: np.zeros(3),
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+        eta=eta,
+    )
+    assert ratio > 1.0
+    (record,) = found
+    assert record.boundary and record.rows == (4, 5)
+
+
+def test_reml_refuses_an_all_events_light_cut_in_plain_words() -> None:
+    """claude's Low on #454: REML's wording is read off the PIRLS result, end to end.
+
+    The all-events light cut beside a RandomEffect whose smoothing parameter
+    REML estimates.  Each inner fit ends ``mean_space_boundary`` from the
+    truncated set (``mean_space_boundary_unresolved``), restoring the penalty
+    cannot move an unpenalized cut, and REML refuses saying the rows rise
+    towards probability 1.  Master f8e5ac01 certified the inner fits and
+    returned a REML fit.
+    """
+    frame, y, fit = _light_cut(_TWO_LINKS, -20.0, link_responses=(1.0, 1.0))
+    shares = {("a1", "b2"): "a1b0", ("a1", "b3"): "a1b0"}
+    frame["g"] = [shares.get((a, b), a + b) for a, b in zip(frame["A"], frame["B"], strict=True)]
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        direct_solve="gram",
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0"), "g": RandomEffect()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(
+            ObservedModeNotConvergedError,
+            match="4 row\\(s\\) rise towards probability 1 along a direction float64 cannot resolve",
+        ):
+            model.fit_reml(frame[["A", "B", "g"]], y, **fit)
 
 
 def test_the_pull_carries_the_null_basis_error() -> None:

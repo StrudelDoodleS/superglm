@@ -591,9 +591,7 @@ def optimize_direct_reml(
                     _mean_space_boundary_message(
                         int(pirls_result.mean_space_boundary_rows),
                         estimated=bool(np.any(estimated_mask)),
-                        unresolved=any(
-                            record.boundary for record in pirls_result.truncated_directions
-                        ),
+                        unresolved=bool(pirls_result.mean_space_boundary_unresolved),
                     ),
                     infeasible_detail=(
                         "the penalized maximum lies on the boundary of the binomial mean space"

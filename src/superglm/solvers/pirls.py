@@ -330,9 +330,15 @@ class PIRLSResult:
     # ``None`` for every other fit, which evaluates as before.
     centred_intercept_lo: float | None = None
     # Positive-weight rows the returned state holds at the boundary of the
-    # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
-    # only with ``termination_reason == "mean_space_boundary"``.
+    # family's mean space (``irls_state.mean_space_boundary_rows``), or, when
+    # it holds none, the rows the returned state's own judgement found rising
+    # towards it along a direction the factorization truncates
+    # (``mean_space_boundary_unresolved``); nonzero only with
+    # ``termination_reason == "mean_space_boundary"``.
     mean_space_boundary_rows: int = 0
+    # The boundary verdict came from such truncated rows, not from rows the
+    # clip holds (``irls_direct``; ``TruncatedDirection.boundary``).
+    mean_space_boundary_unresolved: bool = False
     # The returned state was certified on the binomial/log true score
     # (``irls_direct``): its stop was that certificate under Newton steps, or
     # a Fisher stop it confirmed while the clip held a row.  The state is the

@@ -1071,7 +1071,23 @@ def _warn_unresolved_rows(model) -> None:
         if record.row_count > 6:
             shown += f" and {record.row_count - 6} more"
         labels = ", ".join(coefficient_labels(model._groups, record.columns))
-        if record.boundary:
+        key = "boundary_rows" if record.boundary else "unresolved_rows"
+        if record.earlier:
+            # judged at an earlier iterate, not at the fit returned
+            found = (
+                "their likelihood rose towards probability 1 along a direction float64 "
+                "cannot resolve"
+                if record.boundary
+                else "they could not be certified at float64 precision"
+            )
+            message = (
+                f"At an earlier iterate, rows {shown} carried about "
+                f"{record.information_ratio:.0e} times less information than the other rows "
+                f"that share their coefficients ({labels}), and {found}. The fit is reported "
+                "as not converged. Check the weights and offsets on these rows; "
+                f"diagnostics()['_model']['{key}'] lists them."
+            )
+        elif record.boundary:
             message = (
                 f"Rows {shown} carry about {record.information_ratio:.0e} times less "
                 f"information than the other rows that share their coefficients ({labels}), "

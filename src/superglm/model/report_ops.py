@@ -94,6 +94,8 @@ def diagnostics(model) -> dict[str, Any]:
                 "row_count": record.row_count,
                 "coefficients": list(coefficient_labels(model._groups, record.columns)),
                 "information_ratio": record.information_ratio,
+                # judged at an iterate before the one returned: history
+                "earlier": bool(getattr(record, "earlier", False)),
             }
             for record in records
             if keep(record)
