@@ -502,19 +502,23 @@ def two_sum(a, b):
 def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) -> float:
     """``(N 2^K) / (D 2^L)`` without forming either scaled sum, and without raising.
 
-    The quotient's own exponent is added before scaling back, so a result past
-    the binary64 range is a signed infinity (or a signed zero below it), never
-    the ``OverflowError`` ``math.ldexp`` raises.
+    The two significands are divided as ``frexp`` mantissas, so the quotient
+    neither under- nor overflows when the sums sit at different scales (a
+    weight total carried at ``2^-1126`` beside a numerator at ``2^0`` read
+    ``1e10 * 2^-1126`` and rounded to 0).  The exponents are added before
+    scaling back: a result past the binary64 range is a signed infinity, one
+    below it a signed zero, never the ``OverflowError`` ``math.ldexp`` raises.
     """
-    quotient = numerator[0] / denominator[0]
-    if quotient == 0.0 or not math.isfinite(quotient):
-        return quotient
-    mantissa, exponent = math.frexp(quotient)
-    exponent += numerator[1] - denominator[1]
+    if numerator[0] == 0.0 or not math.isfinite(numerator[0] / denominator[0]):
+        return numerator[0] / denominator[0]
+    numerator_mantissa, numerator_exponent = math.frexp(numerator[0])
+    denominator_mantissa, denominator_exponent = math.frexp(denominator[0])
+    mantissa, exponent = math.frexp(numerator_mantissa / denominator_mantissa)
+    exponent += numerator_exponent - denominator_exponent + numerator[1] - denominator[1]
     if exponent > 1024:
-        return math.copysign(math.inf, quotient)
+        return math.copysign(math.inf, mantissa)
     if exponent < -1100:
-        return math.copysign(0.0, quotient)
+        return math.copysign(0.0, mantissa)
     return math.ldexp(mantissa, exponent)
 
 

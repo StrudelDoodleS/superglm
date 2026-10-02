@@ -849,6 +849,8 @@ def _exact_mean(values, weights):
         ([1e150, -1e150, 1e-200], [1.0] * 3),
         ([float(np.finfo(float).max)] * 2, [0.01, 0.02]),
         ([1e-20, 3e-20, 3e-20], [1e-300] * 3),
+        ([1e10, 1e10], [1e-300, 1e-300]),
+        ([1e-310, 2e-310], [1e10, 1e10]),
     ],
     ids=[
         "subnormal_weights",
@@ -857,6 +859,8 @@ def _exact_mean(values, weights):
         "cancelling_giants",
         "largest_float",
         "subnormal_products",
+        "weights_below_the_merge",
+        "values_below_the_merge",
     ],
 )
 def test_the_compensated_mean_keeps_every_product_and_error_term(values, weights):
@@ -875,8 +879,11 @@ def test_the_compensated_mean_keeps_every_product_and_error_term(values, weights
     of two ``finfo.max`` raised ``OverflowError`` in ``math.ldexp`` (Sol):
     the products are now summed unscaled, the subnormal ones carried at a
     shifted scale, and a quotient past the range falls back instead of
-    raising.  Mutations: the weights scaled by the largest one, or the TwoSum
-    error dropped.
+    raising.  The weight total and the numerator can then sit at different
+    scales (``2^-1126`` and ``2^0``); dividing their significands first
+    rounded ``1e10 * 2^-1126`` to 0 for a mean of 1e10 (Claude).  Mutations:
+    the weights scaled by the largest one, the TwoSum error dropped, or the
+    significands divided before their scales.
     """
     from fractions import Fraction
 
@@ -885,7 +892,8 @@ def test_the_compensated_mean_keeps_every_product_and_error_term(values, weights
     exact = _exact_mean(values, weights)
     mean = compensated_weighted_mean(np.array(values), np.array(weights))
     assert abs(Fraction(mean) - exact) <= _mean_bound(values, weights, exact)
-    assert abs(Fraction(mean) - exact) <= 2 * Fraction(_U) * abs(exact)
+    # beyond the subnormal results, the mean is within two roundings of exact
+    assert abs(Fraction(mean) - exact) <= 2 * Fraction(_U) * abs(exact) + Fraction(2) ** -1075
 
 
 def test_the_compensated_mean_meets_its_bound_across_the_exponent_range():
@@ -1172,7 +1180,10 @@ def test_the_proximal_certificate_reads_a_dense_column_about_its_pair():
         warnings.simplefilter("ignore")
         model.fit(frame, y)
     result = model.result
-    if result.converged:
+    # The proximal solver itself does not reach this optimum (a follow-up):
+    # the fit reports that, rather than a false convergence.
+    assert not result.converged and result.termination_reason == "max_iter"
+    if result.converged:  # pragma: no cover - once the solver is centred
         eta = linear_predictor(model._dm, model._solver_pirls_result(), None)
         residual = y - eta
         score = float(np.sum((z - z.mean()) * residual))
