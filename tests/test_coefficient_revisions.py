@@ -109,18 +109,48 @@ def _gaussian_repair_bound(edited, columns, beta_edit, beta_repaired, y, w, refe
     ) * residual / math.fsum(w)
 
 
+def _projected_reference(edited, x, y, w):
+    """The repair's definition applied outside any revision: projection, then exact profile.
+
+    ``apply_shape_postfit`` projects the term's coefficients onto the shape
+    cone (``MonotoneRepairer`` on the grid weights) and profiles the intercept
+    at them; for a Gaussian identity fit that is the weighted mean residual,
+    ``a = sum w (y - X_pub beta_r) / sum w``, formed here in exact arithmetic.
+    Returns the projected coefficients, the public columns and the reference.
+    """
+    spec, groups = edited._specs["x"], list(edited._groups)
+    beta_edit = np.asarray(edited.result.beta, dtype=np.float64)
+    projected = MonotoneRepairer(direction="increasing").repair(
+        spec, beta_edit, groups, weights=shape_ops._grid_weights(spec, x, w, 80), n_grid=80
+    )
+    beta_reference = np.asarray(projected.repaired_beta_reparam, dtype=np.float64)
+    columns = np.asarray(spec.transform(x), dtype=np.float64)
+    curve = [
+        sum(
+            (Fraction(float(c)) * Fraction(float(b)) for c, b in zip(row, beta_reference)),
+            Fraction(0),
+        )
+        for row in columns
+    ]
+    intercept = _weighted_mean([Fraction(float(v)) - c for v, c in zip(y, curve)], w)
+    return beta_reference, columns, np.array([float(intercept + c) for c in curve])
+
+
 @pytest.mark.parametrize("reload", [False, True], ids=["fresh", "pickled"])
 def test_a_repair_after_an_edit_predicts_the_weighted_mean(reload):
     """The issue's fixture: the repair flattens the edited curve to the weighted mean.
 
     Halving a decreasing curve keeps it decreasing, so the increasing repair
-    sets every spline coefficient to zero and the profiled Gaussian intercept
-    is the weighted mean of ``y``.  It predicted 0.94969657 against 0.94614946
-    on 0.35.0 and 31544462, off by the shift ``m' (beta_new - beta_old)`` the
-    editor left in the solver predictor; a pickle round trip of the edited
-    model kept it.  Metrics read the same solver predictor on the fit rows
-    (``metrics(...).eta``) and were off by as much.  Mutation: drop
-    ``_read_solver_state_from_public`` from ``publish_revised_coefficients``.
+    flattens it and the profiled Gaussian intercept is the weighted mean of
+    ``y``.  It predicted 0.94969657 against 0.94614946 on 0.35.0 and 31544462,
+    off by the shift ``m' (beta_new - beta_old)`` the editor left in the solver
+    predictor; a pickle round trip of the edited model kept it.  Metrics read
+    the same solver predictor on the fit rows (``metrics(...).eta``) and were
+    off by as much.  The reference is the exact profile at the projected
+    coefficients (``_projected_reference``), the weighted mean to the size of
+    whatever curve the optimizer leaves, so no exact zero is asserted.
+    Mutation: drop ``_read_solver_state_from_public`` from
+    ``publish_revised_coefficients``.
     """
     x = np.linspace(0.0, 1.0, 60)
     y = 1.5 - 1.1 * x + 0.08 * np.sin(7.0 * x)
@@ -139,13 +169,12 @@ def test_a_repair_after_an_edit_predicts_the_weighted_mean(reload):
     assert np.all(
         np.abs(eta - published) <= _evaluation_bound(edited, columns, beta_edit, beta_edit)
     )
-    mean = float(_weighted_mean(y, w))
-    reference = np.full(x.size, mean)
-    bound = _gaussian_repair_bound(edited, columns, beta_edit, beta_edit, y, w, reference)
+    beta_reference, _, reference = _projected_reference(edited, x, y, w)
+    bound = _gaussian_repair_bound(edited, columns, beta_edit, beta_reference, y, w, reference)
     edited.apply_shape_postfit(frame, n_grid=80)
 
-    assert not np.any(edited.result.beta)
-    error = np.abs(edited.predict(frame) - mean)
+    np.testing.assert_array_equal(edited.result.beta, beta_reference)
+    error = np.abs(edited.predict(frame) - reference)
     assert np.all(error <= bound), f"max error {float(np.max(error)):.3g}, bound {bound:.3g}"
 
 
@@ -169,23 +198,9 @@ def test_a_repair_after_an_edit_projects_the_edited_curve(shift):
         warnings.simplefilter("ignore")
         model = _shaped_fit(y, x, w)
         edited, _, _ = _edit(model, frame, y, w, "x", 0.5, shift)
-    spec, groups = edited._specs["x"], list(edited._groups)
     beta_edit = np.asarray(edited.result.beta, dtype=np.float64).copy()
-    projected = MonotoneRepairer(direction="increasing").repair(
-        spec, beta_edit, groups, weights=shape_ops._grid_weights(spec, x, w, 80), n_grid=80
-    )
-    beta_reference = np.asarray(projected.repaired_beta_reparam, dtype=np.float64)
+    beta_reference, columns, reference = _projected_reference(edited, x, y, w)
     assert np.any(beta_reference) and not np.array_equal(beta_reference, beta_edit)
-    columns = np.asarray(spec.transform(x), dtype=np.float64)
-    curve = [
-        sum(
-            (Fraction(float(c)) * Fraction(float(b)) for c, b in zip(row, beta_reference)),
-            Fraction(0),
-        )
-        for row in columns
-    ]
-    intercept = _weighted_mean([Fraction(float(v)) - c for v, c in zip(y, curve)], w)
-    reference = np.array([float(intercept + c) for c in curve])
     bound = _gaussian_repair_bound(edited, columns, beta_edit, beta_reference, y, w, reference)
     edited.apply_shape_postfit(frame, n_grid=80)
 
@@ -324,8 +339,10 @@ def test_a_revision_starts_from_the_published_predictor_of_an_older_edit():
     its pre-edit coefficients; a pickle carries them.  It is emulated here by
     writing the fit's values back over an edit's.  ``predict`` reads the
     published pair either way; a revision has to start from it, or the repair
-    profiles from the old shift as before the fix.  Check: the issue's
-    weighted mean, to the first test's bound.  Mutation: drop the reconcile in
+    profiles from the old shift as before the fix.  For this edit the editor
+    skips its -2.7e-17 intercept change, so these are the values 31544462
+    wrote: a pickle of its edit matches them field for field.  Check: the
+    first test's reference and bound.  Mutation: drop the reconcile in
     ``FittedStateRevision.start``.
     """
     x = np.linspace(0.0, 1.0, 60)
@@ -344,11 +361,105 @@ def test_a_revision_starts_from_the_published_predictor_of_an_older_edit():
     np.testing.assert_array_equal(stale.predict(frame), edited.predict(frame))
 
     beta_edit = np.asarray(edited.result.beta, dtype=np.float64)
-    columns = np.asarray(edited._specs["x"].transform(x), dtype=np.float64)
+    beta_reference, columns, reference = _projected_reference(edited, x, y, w)
     stale.apply_shape_postfit(frame, n_grid=80)
-    assert not np.any(stale.result.beta)
-    mean = float(_weighted_mean(y, w))
-    reference = np.full(x.size, mean)
-    bound = _gaussian_repair_bound(edited, columns, beta_edit, beta_edit, y, w, reference)
-    error = np.abs(stale.predict(frame) - mean)
+    np.testing.assert_array_equal(stale.result.beta, beta_reference)
+    bound = _gaussian_repair_bound(edited, columns, beta_edit, beta_reference, y, w, reference)
+    error = np.abs(stale.predict(frame) - reference)
     assert np.all(error <= bound), f"max error {float(np.max(error)):.3g}, bound {bound:.3g}"
+
+
+def _slope_edit_bound(model, edited, frame, expected) -> np.ndarray:
+    """Each row's evaluation error in the coordinates a slope edit is defined in.
+
+    The edit pivots at ``x = 0``, so the rows read ``intercept + x beta``:
+    each evaluation (the fit's, the edit's) is within ``gamma_(p+3)`` of the
+    raw magnitudes ``|eta| + |x| (|beta_old| + |beta_new|)``, plus the fit's
+    centred constant ``|c beta_old|`` that the edit moves into the intercept
+    (one product rounding), and the reference's own rounding ``u |eta|``.
+    """
+    x = frame["x"].to_numpy(dtype=np.float64)
+    old, new = abs(float(model.result.beta[0])), abs(float(edited.result.beta[0]))
+    centre = abs(float(np.asarray(model.result.state_center)[0]))
+    magnitude = np.abs(model.predict(frame)) + np.abs(x) * (old + new) + centre * old
+    return 2.0 * _gamma(model.result.beta.size + 3) * magnitude + _U * np.abs(expected)
+
+
+def _slope_edited(model, frame, y, slope) -> SuperGLM:
+    session = EditorSession.from_model(model, terms=["x"], train_data=(frame, y))
+    session.terms["x"].edited_log_effect = np.array([slope], dtype=np.float64)
+    return session.to_model()
+
+
+def _raw_reference(model, frame, slope) -> np.ndarray:
+    """``eta_before + x (slope - beta_old)``, exact before its one rounding."""
+    change = Fraction(slope) - Fraction(float(model.result.beta[0]))
+    return np.array(
+        [
+            float(Fraction(float(b)) + Fraction(float(v)) * change)
+            for b, v in zip(model.predict(frame), frame["x"])
+        ]
+    )
+
+
+@pytest.mark.parametrize("slope", [1.0, -1.0], ids=["up", "down"])
+@pytest.mark.parametrize("scale", [1e16, -1e16])
+def test_a_numeric_slope_edit_keeps_the_intercept_remainder(scale, slope):
+    """A slope edit on a column spanning zero to 2e16 predicts its raw intercept at zero.
+
+    Sol's review of #448 (P2): ``x = 1e16 {0, 1, 2}`` beside ``y = {2, 3, 2}``
+    fits a slope of about 5e-35 about the centre 1e16 and the raw intercept
+    2.3333333333333335.  An editor slope is defined about ``x = 0``, so the row
+    at zero predicts that intercept.  26321fd6 carried ``c dbeta`` into the
+    pair, which became ``(1e16 + 2, 1/3)``, and predicted 2.0 there: the
+    remainder joined the row's ``-1e16`` before that cancelled the high part.
+    The moved column is now scored about zero (``_recentre_revised_columns``).
+    Reference: ``eta_before + x dbeta`` exactly; bound ``_slope_edit_bound``;
+    through ``predict``, ``metrics`` on the fit rows and a pickle round trip.
+    """
+    x = scale * np.resize([0.0, 1.0, 2.0], 60)
+    y = np.resize([2.0, 3.0, 2.0], 60)
+    frame = pd.DataFrame({"x": x})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()}).fit(
+            frame, y
+        )
+        edited = _slope_edited(model, frame, y, slope)
+    expected = _raw_reference(model, frame, slope)
+    bound = _slope_edit_bound(model, edited, frame, expected)
+    for label, values in (
+        ("predict", edited.predict(frame)),
+        ("metrics", edited.metrics(frame, y).eta),
+        ("pickled", pickle.loads(pickle.dumps(edited)).predict(frame)),
+    ):
+        error = np.abs(values - expected)
+        assert np.all(error <= bound), f"{label}: max error {float(np.max(error)):.3g}"
+
+
+@pytest.mark.parametrize("slopes", [(-1e308, 1e308), (1e308, -1e308)], ids=["up", "down"])
+@pytest.mark.parametrize("scale", [1e-308, 1e-300])
+def test_slope_edits_across_the_float_range_form_no_coefficient_difference(scale, slopes):
+    """Successive slope edits of -1e308 and 1e308 complete and predict ``intercept + x beta``.
+
+    Sol's review of #448 (P2): ``x = scale {-1, 0, 1}`` has a zero centre, so a
+    slope edit moves no centred column.  26321fd6 formed ``beta - beta_before``,
+    which overflowed to ``inf`` on the second edit, and ``0 * inf`` poisoned the
+    pair: the revision refused with non-finite scalars where 31544462 predicted
+    about ``2.33 +- 1`` (or ``+- 1e8``).  A zero-centre column is now skipped
+    without a product.  Reference and bound as in the previous test.
+    """
+    x = scale * np.resize([-1.0, 0.0, 1.0], 60)
+    y = np.resize([2.0, 3.0, 2.0], 60)
+    frame = pd.DataFrame({"x": x})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()}).fit(
+            frame, y
+        )
+        first = _slope_edited(model, frame, y, slopes[0])
+        second = _slope_edited(first, frame, y, slopes[1])
+    for edited, slope in ((first, slopes[0]), (second, slopes[1])):
+        expected = _raw_reference(model, frame, slope)
+        error = np.abs(edited.predict(frame) - expected)
+        assert np.all(error <= _slope_edit_bound(model, edited, frame, expected))

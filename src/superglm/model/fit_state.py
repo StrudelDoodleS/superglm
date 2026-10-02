@@ -627,30 +627,79 @@ def _read_solver_state_from_public(model) -> None:
     solver.centred_intercept_lo = float(alpha_public_lo) + error
 
 
+def _recentre_revised_columns(model, beta_before) -> None:
+    """Re-centre each centred column a revision moved where its old and new terms agree.
+
+    A revision writes raw coordinates: a numeric column's new slope pivots at
+    ``x = 0``, so the column must contribute ``x beta - c beta_before``, its
+    fitted centred term ``(x - c) beta_before`` plus the edit's ``x dbeta``.
+    About ``c' = c beta_before / beta`` that is ``(x - c') beta + K``, ``K =
+    c' beta - c beta_before``, which is zero but for the roundings of ``c'``;
+    ``K`` is formed exactly and rounded once (``mode_score._exact_sum``) and
+    the pair takes it by TwoSum.  Each row then adds the remainder ``alpha_lo``
+    to a contribution of the size of the fitted term plus the edit's, never to
+    a constant that a contribution must cancel: at the old centre the pair
+    carried ``c dbeta``, ``1e16 + 2`` beside a row's ``-1e16``, and the
+    remainder was lost before they cancelled; about zero it carried ``c
+    beta_before``, which a near-identity slope edit at an offset of 1e16 cancels
+    against ``x beta`` (Sol's review of #448, and the sweep behind it).  A slope
+    edited to zero, or a quotient past the binary64 range, is centred at zero.
+    A zero-centre column is skipped, and no coefficient difference is formed:
+    one from -1e308 to 1e308 overflowed (the same review).  The solver's
+    centre on these columns is the public one, a numeric column's training
+    means being zero.
+    """
+    public = model._result
+    centre = getattr(public, "state_center", None)
+    if centre is None or getattr(public, "centred_intercept", None) is None:
+        return
+    centre = np.asarray(centre, dtype=np.float64)
+    before = np.asarray(beta_before, dtype=np.float64)
+    beta = np.asarray(public.beta, dtype=np.float64)
+    moved = np.flatnonzero((centre != 0.0) & (beta != before))
+    if not moved.size:
+        return
+    from superglm.solvers._exact_sums import native_operand
+    from superglm.solvers.mode_score import _exact_sum
+
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        recentred = centre[moved] * (before[moved] / beta[moved])
+    recentred = np.where(np.isfinite(recentred), recentred, 0.0)
+    total, exponent, exact = _exact_sum(
+        native_operand(np.concatenate([recentred, -centre[moved]])),
+        native_operand(np.concatenate([beta[moved], before[moved]])),
+        0.0,
+        1,
+    )
+    if not exact:  # pragma: no cover - finite operands always sum
+        raise RuntimeError("the re-centred intercept change is not finite")
+    _carry_into_centred_pair(public, (math.ldexp(total, exponent),))
+    for result in {id(r): r for r in (public, model._solver_result) if r is not None}.values():
+        result_centre = getattr(result, "state_center", None)
+        if result_centre is not None:
+            updated = np.array(result_centre, dtype=np.float64)
+            updated[moved] = recentred
+            result.state_center = updated
+
+
 def publish_revised_coefficients(model, beta_before) -> None:
     """Publish a revision of the fitted coefficients as one predictor in every coordinate.
 
     A revision (an editor edit, a post-fit shape repair) writes ``beta`` into
     both results and moves the public intercept through
     ``move_public_intercept``; the raw public predictor ``intercept_pub +
-    X_pub beta`` states what it means.  The centred pair moves by the ``c_pub'
-    (beta - beta_before)`` its centred columns no longer carry, so that
-    ``alpha_pub + (X_pub - 1 c_pub') beta`` predicts the same rows: zero
-    unless the revision moved a column the pair keeps centred (a numeric
-    one).  The solver state is then read from the published one
+    X_pub beta`` states what it means.  A column the pair keeps centred (a
+    numeric one) that the revision moved is re-centred where its old and new
+    terms agree (``_recentre_revised_columns``), so that ``alpha_pub + (X_pub -
+    1 c_pub') beta`` predicts the same rows; every other column carries no
+    centre and nothing moves.  The solver state is then read from the published one
     (``_read_solver_state_from_public``) and the fitted mode's identity is
     cleared.  The pair is carried, never dropped: clearing it dropped every
     dense column's centring (Sol's review of #445, P2), and keeping the
     solver's pre-revision pair beside it left the solver predictor at the old
     coefficients (#447).
     """
-    public = model._result
-    centre = getattr(public, "state_center", None)
-    if centre is not None:
-        change = np.asarray(public.beta, dtype=np.float64) - np.asarray(
-            beta_before, dtype=np.float64
-        )
-        _carry_into_centred_pair(public, np.asarray(centre, dtype=np.float64) * change)
+    _recentre_revised_columns(model, beta_before)
     _read_solver_state_from_public(model)
 
     updated: set[int] = set()

@@ -421,8 +421,9 @@ def prediction_centred_state(result) -> tuple[float, NDArray | None, float | Non
     the public coordinates by ``runtime_canonicalize._public_centred_state``),
     the remainder ``None`` unless the fit published a compensated intercept
     (``mode_score.centred_intercept_remainder``), else the raw ``(intercept,
-    None, None)``: a model saved before the state existed, or one whose
-    coefficients were revised after the fit, predicts as before.
+    None, None)``: a model saved before the state existed predicts as before.
+    A revision of the coefficients carries the state with it
+    (``fit_state.publish_revised_coefficients``).
     """
     alpha = getattr(result, "centred_intercept", None)
     centre = getattr(result, "state_center", None)
