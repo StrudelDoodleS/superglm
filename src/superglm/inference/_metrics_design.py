@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import operator
 from collections.abc import Iterator
 
@@ -470,9 +471,14 @@ def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDA
             continue
         delta = chunk_mean - mean
         merged = total + chunk_weight
-        comoment = (
-            comoment + chunk_comoment + (total * (chunk_weight / merged)) * np.outer(delta, delta)
-        )
+        # The merge term m d d' with m = w_a w_b / (w_a + w_b), formed as the
+        # outer product of sqrt(m) d with itself: d d' alone overflows or
+        # underflows before m rescales it (d = 1e160 at weights 1e-24 read an
+        # infinite Gram; d = 1e-200 at weights 1e100 read 0).  m = w_a (w_b /
+        # (w_a + w_b)) <= w_a cannot overflow, so the term over- or underflows
+        # only where its value does.
+        scaled = delta * math.sqrt(total * (chunk_weight / merged))
+        comoment = comoment + chunk_comoment + np.outer(scaled, scaled)
         mean = mean + delta * (chunk_weight / merged)
         total = merged
     if not total > 0.0:

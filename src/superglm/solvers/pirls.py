@@ -2025,6 +2025,13 @@ def _fit_pirls_inner(
     )
     phi = pearson_sum / df_resid
 
+    # The retained state's centred intercept and the centre it is read about
+    # (one-engine design §3.8), published as irls_direct publishes them: the
+    # deviance above is that predictor's, and ``mode_score.linear_predictor``
+    # and prediction read it.  The raw ``intercept = alpha - c' beta`` cancels
+    # at a column's offset (issue #430: at 1e16 a fit of deviance 0.172
+    # predicted a squared error of 2.58).  Proximal fits carry no compensated
+    # remainder, so ``centred_intercept_lo`` stays ``None``.
     return PIRLSResult(
         beta=beta,
         intercept=intercept,
@@ -2040,6 +2047,8 @@ def _fit_pirls_inner(
         state_space=retained.state_space,
         basis_id=retained.basis_id,
         termination_reason=termination_reason,
+        centred_intercept=None if state_center is None else retained.centred_intercept,
+        state_center=None if state_center is None else state_center.copy(),
     )
 
 

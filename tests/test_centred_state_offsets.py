@@ -1259,6 +1259,50 @@ def test_the_proximal_solver_centres_a_dense_column(family, shift):
     assert np.max(np.abs(path.coef_path - base_path.coef_path)) <= 2.0 * tol * scale
 
 
+@pytest.mark.parametrize("entry", ["fit", "fit_path"])
+@pytest.mark.parametrize("shift", [0.0, 40.0, 1e12, 1e16])
+def test_a_proximal_fit_predicts_the_deviance_it_reports(entry, shift):
+    """``predict()`` on the training rows reproduces a selection fit's reported deviance.
+
+    The proximal solver keeps its intercept centred (item 13), but its result
+    published only the raw reading ``alpha - c' beta``, which cancels at a
+    column's offset: at 1e16 a Gaussian fit reported deviance 0.172 and
+    predicted the levels [2.75, 3, 3.5, 3.75], a squared error of 2.58, and
+    ``fit_path``'s final model did the same (Sol).  Both predictors are
+    ``alpha + (x - c) beta``, each row formed with at most four roundings,
+    with ``|x - c| <= R = max|z| + 2`` (``c`` lies within one grid spacing,
+    at most 2 here, of the mean) and ``|alpha| <= max|mu| + R |beta|``.  Per
+    row they differ by at most ``delta = 2 gamma_4 (max|mu| + 2 R |beta|)``,
+    so the deviances differ by at most ``2 delta sum|r| + n delta^2 + 2
+    gamma_n D``.  Mutation: the result published without its centred state.
+    """
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], 100)
+    y = 3.0 + 0.2 * z + np.tile([0.01, -0.02, 0.03, -0.02], 100)
+    frame = pd.DataFrame({"x": shift + z})
+    model = SuperGLM(family="gaussian", features={"x": Numeric()}, selection_penalty=0.01)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if entry == "fit":
+            model.fit(frame, y)
+            reported = float(model.result.deviance)
+        else:
+            reported = float(model.fit_path(frame, y, n_lambda=8).deviance_path[-1])
+    assert model.result.converged
+    mu = np.asarray(model.predict(frame), dtype=np.float64)
+    residual = y - mu
+    n = len(y)
+    u = np.finfo(np.float64).eps / 2.0
+
+    def gamma(k: int) -> float:
+        return k * u / (1.0 - k * u)
+
+    spread = float(np.max(np.abs(z))) + 2.0
+    slope = float(np.max(np.abs(model.result.beta)))
+    delta = 2.0 * gamma(4) * (float(np.max(np.abs(mu))) + 2.0 * spread * slope)
+    bound = 2.0 * delta * float(np.sum(np.abs(residual))) + n * delta**2 + 2.0 * gamma(n) * reported
+    assert abs(float(np.sum(residual**2)) - reported) <= bound
+
+
 def test_the_metrics_gram_does_not_anchor_on_a_far_first_chunk():
     """The streamed centred Gram merges chunk co-moments, so no one chunk sets its anchor.
 
@@ -1290,6 +1334,37 @@ def test_the_metrics_gram_does_not_anchor_on_a_far_first_chunk():
     spread = float(np.max(np.abs(x - np.mean(x[:100]))))
     bound = 4.0 * gamma * reference + 6.0 * u * spread * math.sqrt(reference * total)
     assert abs(float(centred[0, 0]) - reference) <= bound
+
+
+@pytest.mark.parametrize(
+    "gap, weight",
+    [(1e160, 1e-24), (1e-200, 1e100)],
+    ids=["large_gap_small_weight", "small_gap_large_weight"],
+)
+def test_the_metrics_gram_merges_chunks_without_over_or_underflow(gap, weight):
+    """The pairwise merge's term ``m d d'`` is formed as ``(sqrt(m) d)(sqrt(m) d)'``.
+
+    Two chunks of 8192 rows at 0 and at ``gap``, every row of weight
+    ``weight``: the centred Gram is ``W gap^2 / 4``, 4.096e299 and 4.096e-297,
+    which master's one-anchor formula reads.  Formed as ``d d'`` before the
+    weight, the merge read ``inf`` and 0 (Sol).  The result must lie within
+    ``4 gamma_{n+4}`` of that value.  Mutation: ``m * outer(d, d)``.
+    """
+    from superglm.inference._metrics_design import _anchored_weighted_moments
+
+    x = np.repeat([0.0, gap], 8192)
+    W = np.full(x.size, weight)
+
+    def chunks():
+        for start in range(0, x.size, 8192):
+            yield start, start + 8192, x[start : start + 8192, None]
+
+    _, _, centred = _anchored_weighted_moments(chunks, W, 1)
+    exact = (x.size * weight / 4.0) * gap * gap
+    u = np.finfo(np.float64).eps / 2.0
+    k = x.size + 4
+    assert np.isfinite(centred[0, 0])
+    assert abs(float(centred[0, 0]) - exact) <= 4.0 * (k * u / (1.0 - k * u)) * exact
 
 
 @pytest.mark.parametrize("position", ["first", "last"])
