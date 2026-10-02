@@ -2329,8 +2329,10 @@ def test_the_proximal_rows_serve_the_block_products_of_their_outer_iteration():
     ``X~ d = R d - lo' d`` (``_centred_group_step``).  Against the chunked
     products about the same pair (``dense_centred_rmatvec``,
     ``dense_centred_matvec``) they differ only in their summation order, at
-    most ``2 gamma_{n+2}`` of the products formed on absolute rows; the Gram
-    is the one formed without a buffer.  A two-column group at a 1e16 offset,
+    most ``2 gamma_{n+2}`` of the products formed on absolute rows.  The
+    remainder and the Gram agree with those formed without a buffer within
+    twice their bounds, never asserted bit for bit: that would assert BLAS's
+    order on a differently aligned array.  A two-column group at a 1e16 offset,
     where the pair's remainder is not negligible.  Mutations: ``- lo (1'v)``
     dropped from the score; ``- lo'd`` dropped from the step.
     """
@@ -2355,10 +2357,15 @@ def test_the_proximal_rows_serve_the_block_products_of_their_outer_iteration():
     entry = buffered[0]
     assert entry is not None and entry[5] is not None and formed[0][5] is None
     design, hi, lo, gram, _, rows = entry
-    assert np.array_equal(hi, formed[0][1]) and np.array_equal(lo, formed[0][2])
+    assert np.array_equal(hi, formed[0][1])
     assert np.array_equal(rows, values - hi)
     assert np.all(np.abs(lo) > 0.0)
-    np.testing.assert_array_equal(gram, formed[0][3])
+    # Both reductions run the same chunked products, but whether the buffer's
+    # alignment changes BLAS's order is the driver's business: each meets
+    # its own bound, so they agree within twice it.
+    spread = (W @ np.abs(rows)) / float(np.sum(W))
+    assert np.all(np.abs(lo - formed[0][2]) <= 2.0 * _gamma(n + 4) * spread)
+    assert np.all(np.abs(gram - formed[0][3]) <= 2.0 * _two_pass_bound(values, W))
     v = W * rng.normal(1.0, 1.0, n)
     absolute = np.abs(rows).T @ np.abs(v) + np.abs(lo) * float(np.sum(np.abs(v)))
     score = _centred_group_score(entry, v)
@@ -2379,23 +2386,29 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     (Poisson): no PIRLS iteration forms #439's separate remainder pass
     (``corrected_two_pass_pair``) or the offset of the working mean from the
     state centre (``centre_offset_mean``), and the weight derivative forms no
-    pair, reading the final system's.  The pass counts per iteration are in
-    the PR.  Mutations, each failing it alone: the split's remainder formed by
-    ``dense_mean_pair``; the offset formed by ``centre_offset_mean``; the
-    geometry summary without its pair.
+    pair, reading the final system's.  Witnesses show each guarded route ran,
+    so a change of route cannot pass it by forming nothing: the split, the
+    offset read from the system's pair, the weight derivative with a carried
+    pair, and the proximal centring into its row buffer.  The pass counts per
+    iteration are in the PR.  Mutations, each failing it alone: the split's
+    remainder formed by ``dense_mean_pair``; the offset formed by
+    ``centre_offset_mean``; the geometry summary without its pair; the split
+    declined (the whole-design path taken).
     """
     import collections
 
-    from superglm.reml import w_derivatives
-    from superglm.solvers import centered_system, irls_direct
+    from superglm.reml import direct, w_derivatives
+    from superglm.solvers import centered_system, irls_direct, pirls
 
     calls: collections.Counter = collections.Counter()
+    ran: collections.Counter = collections.Counter()
 
-    def count(module, name):
+    def count(module, name, tally=calls, witness=None):
         real = getattr(module, name)
 
         def counted(*args, **kwargs):
-            calls[name] += 1
+            if witness is None or witness(*args, **kwargs):
+                tally[name] += 1
             return real(*args, **kwargs)
 
         monkeypatch.setattr(module, name, counted)
@@ -2403,6 +2416,15 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     count(centered_system, "corrected_two_pass_pair")
     count(irls_direct, "centre_offset_mean")
     count(w_derivatives, "dense_mean_pair")
+    count(centered_system, "_attach_dense_split", ran)
+    count(irls_direct, "_system_offset_mean", ran)
+
+    def carries_pair(*args, **kwargs):
+        summary = args[3].reml_geometry
+        return kwargs.get("geometry") is None and getattr(summary, "mean_lo", None) is not None
+
+    count(direct, "reml_w_correction", ran, carries_pair)
+    count(pirls, "_dense_group_centring", ran, lambda *a, **k: k.get("buffer") is not None)
     rng = np.random.default_rng(12)
     n = 9000
     frame = pd.DataFrame(
@@ -2419,6 +2441,8 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     assert model._reml_result.converged
     assert model._reml_profile.get("direct_backend") == "gram"
     assert sum(calls.values()) == 0, dict(calls)
+    for route in ("_attach_dense_split", "_system_offset_mean", "reml_w_correction"):
+        assert ran[route] > 0, dict(ran)
     counts = rng.poisson(np.exp(-1.0 + 0.1 * frame["x"] + 0.3 * np.sin(4.0 * frame["s"])))
     selection = SuperGLM(
         family="poisson", features={"x": Numeric(), "s": Spline(k=8)}, selection_penalty=0.01
@@ -2428,3 +2452,4 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
         selection.fit(frame[["x", "s"]], counts.astype(float))
     assert selection.result.converged
     assert sum(calls.values()) == 0, dict(calls)
+    assert ran["_dense_group_centring"] > 0, dict(ran)
