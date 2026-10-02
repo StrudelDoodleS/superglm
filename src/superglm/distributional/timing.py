@@ -104,6 +104,42 @@ class FitPhaseSnapshot:
         }
 
 
+class _FitWindow:
+    """One fit's stretch of a recorder: its accumulators at the fit's first reading and after it.
+
+    The fit opens ``fit_total`` with its first reading, which first charges
+    the interval before it to whatever phase was already open; the window
+    starts after that charge, so a caller's earlier time stays out.  It stops
+    without reading the clock, so the interval after the fit's last reading
+    stays out as well.  A caller's own measurements made while the fit runs
+    sit on the same stack in clock order and fall inside the window once.
+    """
+
+    def __init__(self) -> None:
+        self.start: tuple[dict[str, float], ...] | None = None
+        self.stop: tuple[dict[str, float], ...] | None = None
+        self.start_reading = 0.0
+        self.stop_reading = 0.0
+
+    def snapshot(self) -> FitPhaseSnapshot:
+        """The window's own timings; ``fit_total`` is the fit's span, whatever enclosed it."""
+
+        zero = {name: 0.0 for name in PHASE_NAMES}
+        start = self.start if self.start is not None else (zero, zero, zero, zero)
+        stop = self.stop if self.start is not None else start
+        seconds, exclusive, manual, counts = (
+            {name: after[name] - before[name] for name in PHASE_NAMES}
+            for before, after in zip(start, stop, strict=True)
+        )
+        seconds["fit_total"] = self.stop_reading - self.start_reading
+        return FitPhaseSnapshot(
+            seconds=seconds,
+            counts={name: int(counts[name]) for name in PHASE_NAMES},
+            exclusive_seconds=exclusive,
+            manual_seconds=manual,
+        )
+
+
 class FitPhaseRecorder:
     """Mutable per-fit accumulator; never shared through module-level state.
 
@@ -124,8 +160,8 @@ class FitPhaseRecorder:
         self._manual = {name: 0.0 for name in PHASE_NAMES}
         self._counts = {name: 0 for name in PHASE_NAMES}
         self._open: list[str] = []
-        self._first_reading: float | None = None
         self._last_reading = 0.0
+        self._starting: list[_FitWindow] = []
 
     def add(self, name: str, seconds: float) -> None:
         """Add one completed observation to a phase.
@@ -162,9 +198,12 @@ class FitPhaseRecorder:
             if not math.isfinite(interval) or interval < 0.0:
                 raise RuntimeError("phase clock must return finite monotonic values")
             _accumulate(self._exclusive, self._open[-1], interval)
-        if self._first_reading is None:
-            self._first_reading = reading
         self._last_reading = reading
+        if self._starting:
+            state = self._state()
+            for window in self._starting:
+                window.start, window.start_reading = state, reading
+            self._starting.clear()
 
     @contextmanager
     def measure(self, name: str) -> Iterator[None]:
@@ -192,25 +231,27 @@ class FitPhaseRecorder:
                 _accumulate(self._seconds, phase, elapsed)
             self._counts[phase] += 1
 
-    def _absorb(self, timed: FitPhaseRecorder) -> None:
-        """Fold in a finished recorder that read this clock, as one nested interval.
+    def _state(self) -> tuple[dict[str, float], ...]:
+        return (
+            dict(self._seconds),
+            dict(self._exclusive),
+            dict(self._manual),
+            {name: float(count) for name, count in self._counts.items()},
+        )
 
-        A fit is timed on a recorder of its own, so its profile holds the fit
-        alone whatever this recorder has open.  Folding it in charges the time
-        before the fit's first reading to the phase open here, adds the fit's
-        observations, and leaves the time after its last reading for this
-        recorder's next reading.
-        """
+    @contextmanager
+    def _fit_window(self) -> Iterator[_FitWindow]:
+        """Delimit one fit on this recorder; see ``_FitWindow``.  Never raises on exit."""
 
-        if timed._first_reading is not None:
-            self._advance(timed._first_reading)
-            self._last_reading = timed._last_reading
-        for name in PHASE_NAMES:
-            if name not in self._open:
-                _accumulate(self._seconds, name, timed._seconds[name])
-            _accumulate(self._exclusive, name, timed._exclusive[name])
-            _accumulate(self._manual, name, timed._manual[name])
-            self._counts[name] += timed._counts[name]
+        window = _FitWindow()
+        self._starting.append(window)
+        try:
+            yield window
+        finally:
+            if window in self._starting:
+                self._starting.remove(window)
+            else:
+                window.stop, window.stop_reading = self._state(), self._last_reading
 
     def snapshot(self) -> FitPhaseSnapshot:
         """Return an owned immutable view of the current accumulators."""

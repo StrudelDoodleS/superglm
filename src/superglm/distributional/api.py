@@ -667,10 +667,10 @@ class SuperLSS:
         phase_recorder: FitPhaseRecorder | None = None,
     ) -> SuperLSS:
         next_revision = 1 if self._model is None else self._model.fit_state.revision + 1
-        # The fit is timed on a recorder of its own, so its profile is the fit
-        # alone, then folded into a caller's recorder as one nested interval.
-        recorder = FitPhaseRecorder(clock=None if phase_recorder is None else phase_recorder._clock)
-        with solver_blas_threads():
+        recorder = FitPhaseRecorder() if phase_recorder is None else phase_recorder
+        # The profile is the fit's own stretch of the recorder: a caller's
+        # phases open around it stay out, and its measurements during it count once.
+        with solver_blas_threads(), recorder._fit_window() as window:
             try:
                 candidate = fit_dense_distributional(
                     X,
@@ -702,10 +702,7 @@ class SuperLSS:
                 if translated is not None:
                     raise translated from failure
                 raise
-            finally:
-                if phase_recorder is not None:
-                    phase_recorder._absorb(recorder)
-        phase_snapshot = recorder.snapshot()
+        phase_snapshot = window.snapshot()
         self._model = candidate
         self._fit_phase_snapshot = phase_snapshot
         frame = as_eager_frame(X)

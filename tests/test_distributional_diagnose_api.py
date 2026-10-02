@@ -425,6 +425,46 @@ def test_a_caller_fit_total_wrapping_a_fit_counts_its_inclusive_time_once() -> N
     assert profile.fit_seconds == own < measured.seconds["fit_total"]
 
 
+@pytest.mark.parametrize("clock", ["default", "counting"])
+def test_a_caller_measurement_during_the_fit_keeps_the_fit_published(clock) -> None:
+    """A caller's phase measured while the fit runs is counted once, in order.
+
+    The family's ``bind_likelihood`` measures the caller's ``serialization`` on
+    the caller's recorder during the fit, inside the caller's own open
+    ``serialization``.  The fit is published and diagnosed, as on master, and
+    on a counting clock the caller's recorder counts every tick once.
+    """
+    readings = itertools.count()
+    recorder = (
+        FitPhaseRecorder(clock=lambda: float(next(readings)))
+        if clock == "counting"
+        else FitPhaseRecorder()
+    )
+
+    class MeasuredGaussianLS(GaussianLS):
+        def bind_likelihood(self, y, weights, observation):
+            with recorder.measure("serialization"):
+                return super().bind_likelihood(y, weights, observation)
+
+    family = MeasuredGaussianLS()
+    frame, response = _fixed_fit_inputs()
+    model = SuperLSS(family, family.location("x"), family.scale())
+
+    with recorder.measure("serialization"):
+        model.fit_reml(frame, response, phase_recorder=recorder)
+    measured = recorder.snapshot()
+
+    profile = model.diagnose().profile
+
+    assert profile is not None
+    assert profile.fit_seconds is not None and profile.fit_seconds > 0.0
+    assert measured.counts["serialization"] == 2
+    if clock == "counting":
+        own = model._fit_phase_snapshot.seconds["fit_total"]
+        assert profile.fit_seconds == own == measured.seconds["fit_total"]
+        assert sum(measured.exclusive_seconds.values()) == measured.seconds["serialization"]
+
+
 def test_a_reused_recorder_profiles_each_fit_on_its_own() -> None:
     """The second fit on a recorder reports its own phases, not the running totals."""
     readings = itertools.count()

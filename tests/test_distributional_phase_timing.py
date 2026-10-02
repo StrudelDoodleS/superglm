@@ -109,6 +109,22 @@ def test_finite_spans_that_sum_past_the_largest_float_are_refused() -> None:
     assert snapshot.manual_seconds["serialization"] == 1.0e308
 
 
+def test_an_inclusive_total_that_overflows_alone_is_refused() -> None:
+    # Each layout observation spans 1e308, charged to a different nested phase,
+    # so only layout's inclusive total overflows.
+    readings = iter((-1.0e308, -1.0e308, 0.0, 0.0, 0.0, 0.0, 1.0e308, 1.0e308))
+    recorder = FitPhaseRecorder(clock=lambda: next(readings))
+    with recorder.measure("layout_penalty_assembly"):
+        with recorder.measure("dense_predictor_matrices"):
+            pass
+
+    with pytest.raises(RuntimeError, match="totals must stay finite"):
+        with recorder.measure("layout_penalty_assembly"):
+            with recorder.measure("predictor_compilation"):
+                pass
+    recorder.snapshot()
+
+
 def test_a_manual_sample_inside_an_open_phase_stays_out_of_the_partition() -> None:
     # fit_total spans one second of clock; a one-second manual sample taken
     # inside it would otherwise be counted on top of that second.
