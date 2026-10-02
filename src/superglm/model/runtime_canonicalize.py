@@ -500,13 +500,7 @@ def _public_centred_state(
     for group in model._groups:
         if scores_centred(specs.get(group.feature_name)):
             differenced[group.start : group.end] = True
-    shifts = np.zeros(centre.size, dtype=np.float64)
-    for term_state in term_states.values():
-        if not term_state["applied_to_public_model"]:
-            continue
-        for group_state in term_state["groups"]:
-            lo, hi = group_state["solver_slice"]
-            shifts[lo:hi] = np.asarray(group_state["column_means"], dtype=np.float64)
+    shifts = _public_column_shifts(term_states, centre.size)
     public_centre = np.where(dense & differenced & (centre != 0.0), centre - shifts, 0.0)
     alpha_lo = getattr(solver, "centred_intercept_lo", None)
     # A compensated intercept keeps its pair even when every column folds into
@@ -515,12 +509,43 @@ def _public_centred_state(
     # the fit published.
     if not np.any(public_centre != 0.0) and alpha_lo is None:
         return None, None, None
+    alpha_public, alpha_public_lo = _fold_public_pair(
+        alpha, alpha_lo, centre, public_centre, shifts, beta
+    )
+    return alpha_public, public_centre, alpha_public_lo
+
+
+def _public_column_shifts(term_states: dict[str, dict[str, Any]], size: int) -> NDArray[np.float64]:
+    """The training means ``m`` each materialized public column loses, zero elsewhere."""
+    shifts = np.zeros(size, dtype=np.float64)
+    for term_state in term_states.values():
+        if not term_state["applied_to_public_model"]:
+            continue
+        for group_state in term_state["groups"]:
+            lo, hi = group_state["solver_slice"]
+            shifts[lo:hi] = np.asarray(group_state["column_means"], dtype=np.float64)
+    return shifts
+
+
+def _fold_public_pair(
+    alpha: float,
+    alpha_lo: float | None,
+    centre: NDArray[np.float64],
+    public_centre: NDArray[np.float64],
+    shifts: NDArray[np.float64],
+    beta: NDArray[np.float64],
+) -> tuple[float, float | None]:
+    """``alpha + (m - c)' beta`` over the folded columns (zero public centre), compensated.
+
+    The fold is one correctly rounded ``fsum``; with a remainder ``alpha_lo``
+    the sum with ``alpha`` is a TwoSum whose error joins the remainder.
+    """
     folded = public_centre == 0.0
     fold = math.fsum((shifts[folded] - centre[folded]) * beta[folded])
     if alpha_lo is None:
-        return float(alpha) + fold, public_centre, None
+        return float(alpha) + fold, None
     alpha_public, fold_error = two_sum(float(alpha), fold)
-    return alpha_public, public_centre, float(alpha_lo) + fold_error
+    return alpha_public, float(alpha_lo) + fold_error
 
 
 def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSResult:

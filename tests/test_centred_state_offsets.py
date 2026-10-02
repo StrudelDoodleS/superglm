@@ -763,7 +763,7 @@ def test_a_kept_centred_state_is_read_again_at_the_revised_coefficients():
 
 
 def test_a_revision_that_keeps_the_public_intercept_predicts_from_it():
-    """The editor's revision keeps the public intercept, so the centred state is cleared.
+    """The editor's revision keeps the public intercept, and its published pair with it.
 
     The editor writes a term's new ``beta`` into both results and moves both
     intercepts by the same least-squares delta, skipped below ``1e-15``, and
@@ -771,9 +771,13 @@ def test_a_revision_that_keeps_the_public_intercept_predicts_from_it():
     intercept is authoritative.  With a zero delta the solver relation still
     holds, and republishing the pair at the new ``beta`` moved every
     prediction by ``m' (beta_new - beta_old)`` from what the edit wrote
-    (Claude review of #445, Low).  Check: the prediction is the raw public
-    predictor ``intercept_pub + X_pub beta``, to each evaluation's
-    ``gamma_(p+2)``.  Fails on 16ac340b.
+    (Claude review of #445, Low); clearing the pair instead dropped every
+    dense column's centring (Sol's review of #445, P2).  The published pair
+    still predicts what the edit wrote, to ``c_pub' (beta_new - beta_old)``,
+    zero on these columns.  Check: the pair is the published one, and the
+    prediction is the raw public predictor ``intercept_pub + X_pub beta`` to
+    each evaluation's ``gamma_(p+2)``, the remainder and the two intercepts'
+    rounding.  Fails on 16ac340b (moved) and eab2d550 (cleared).
     """
     from superglm.model import shape_ops
     from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
@@ -789,7 +793,8 @@ def test_a_revision_that_keeps_the_public_intercept_predicts_from_it():
         features={"x": PSpline(n_knots=6, knot_strategy="uniform")},
         weight_semantics="frequency",
     ).fit(frame, y, sample_weight=weights)
-    assert model.result.centred_intercept is not None
+    published = (model.result.centred_intercept, model.result.centred_intercept_lo)
+    assert published[0] is not None
 
     revision = FittedStateRevision.start(model)
     work = revision.model
@@ -798,12 +803,135 @@ def test_a_revision_that_keeps_the_public_intercept_predicts_from_it():
     invalidate_revised_coefficient_mode(work)
     revised = revision.commit()
     public = revised.result
-    assert public.centred_intercept is None
+    assert (public.centred_intercept, public.centred_intercept_lo) == published
 
     columns = np.asarray(revised._specs["x"].transform(x), dtype=np.float64)
     raw = float(public.intercept) + columns @ beta
-    magnitude = np.abs(columns) @ np.abs(beta) + abs(float(public.intercept))
-    assert np.all(np.abs(revised.predict(frame) - raw) <= 2.0 * _gamma(beta.size + 2) * magnitude)
+    magnitude = np.abs(columns) @ np.abs(beta) + abs(float(public.centred_intercept))
+    bound = (
+        2.0 * _gamma(beta.size + 3) * magnitude
+        + abs(float(public.centred_intercept_lo or 0.0))
+        + 2.0 * _U * (abs(float(public.centred_intercept)) + abs(float(public.intercept)))
+    )
+    assert np.all(np.abs(revised.predict(frame) - raw) <= bound)
+
+
+def _edit_moves_predictions_by_its_columns(model, edited, frame, term: str) -> None:
+    """The edited predictions are the pre-edit ones moved by the edited term's own columns.
+
+    With no intercept change, ``eta_after - eta_before = X_t (beta_t_new -
+    beta_t_old)`` exactly; the centred predictor evaluates each side to
+    ``gamma_(p+3)`` of its magnitudes ``|alpha| + |x - c| |beta| + |X| |beta|
+    + |alpha_lo|`` (Higham 2002, section 3.1), and the reference adds its own
+    product and one addition.  Read from the raw intercept at an offset of
+    1e16 the predictions are off by tenths, so a dropped centring fails it.
+    """
+    assert float(edited.result.intercept) == float(model.result.intercept)
+    group = next(g for g in model._groups if g.feature_name == term)
+    old = np.asarray(model.result.beta, dtype=np.float64)
+    new = np.asarray(edited.result.beta, dtype=np.float64)
+    columns = np.asarray(model._specs[term].transform(frame[term].to_numpy()), dtype=np.float64)
+    if columns.ndim == 1:
+        columns = columns[:, None]
+    change = new[group.sl] - old[group.sl]
+    expected = model.predict(frame) + columns @ change
+    public = model.result
+    centre = np.asarray(public.state_center, dtype=np.float64)
+    x_slot = next(g for g in model._groups if g.feature_name == "x").sl  # the centred column
+    x = frame["x"].to_numpy(dtype=np.float64)
+    spread = np.abs(x - centre[x_slot][0]) * abs(float(old[x_slot][0]))
+    term_size = np.abs(columns) @ (np.abs(old[group.sl]) + np.abs(new[group.sl]))
+    magnitude = (
+        abs(float(public.centred_intercept))
+        + abs(float(public.centred_intercept_lo or 0.0))
+        + spread
+        + term_size
+    )
+    p = old.size
+    bound = 2.0 * _gamma(p + 3) * magnitude + _gamma(p + 1) * (
+        np.abs(columns) @ np.abs(change) + np.abs(expected)
+    )
+    error = np.abs(edited.predict(frame) - expected)
+    assert np.all(error <= bound), f"max error {float(np.max(error)):.3g}"
+
+
+@pytest.mark.parametrize("offset", [1e12, 1e16])
+def test_editing_a_spline_keeps_the_numeric_columns_centring(offset):
+    """An editor edit of a spline beside an offset numeric keeps the centred predictor (#445).
+
+    Sol's review of eab2d550 (P2): halving the spline's effect moves the
+    intercept by 2.6e-18, which the editor skips, so the solver relation still
+    holds; eab2d550 then declined to republish and cleared the whole centred
+    state, numeric column included, and the edited predictions came from the
+    raw intercept: 0.19 off at 1e16, 2.3e-5 at 1e12.  Master kept them to
+    8.9e-16.  Check: ``_edit_moves_predictions_by_its_columns``.
+    """
+    from superglm.editor import EditorSession
+
+    rng = np.random.default_rng(445)
+    n = 120
+    z = 2.0 * rng.integers(-4, 5, n)
+    s = rng.uniform(0.0, 1.0, n)
+    frame = pd.DataFrame({"x": offset + z, "s": s})
+    y = 3.0 + 0.2 * z + 0.3 * np.sin(4.0 * s)
+    weights = np.resize(np.array([1.0, 3.0, 2.0, 4.0]), n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=0.8,
+            features={"x": Numeric(), "s": PSpline(n_knots=6, knot_strategy="uniform")},
+            weight_semantics="frequency",
+        ).fit(frame, y, sample_weight=weights)
+        session = EditorSession.from_model(model, terms=["s"], train_data=(frame, y, weights))
+        term = session.terms["s"]
+        term.edited_log_effect = 0.5 * np.asarray(term.edited_log_effect, dtype=np.float64)
+        edited = session.to_model()
+    assert edited.result.centred_intercept is not None
+    _edit_moves_predictions_by_its_columns(model, edited, frame, "s")
+
+
+@pytest.mark.parametrize("offset", [1e12, 1e16])
+def test_an_edit_without_the_design_keeps_the_published_centred_pair(offset):
+    """With ``retain_fit_state=False`` an edit keeps the published pair it cannot rebuild (#445).
+
+    Sol's review of eab2d550 (P2): after a pickle reload the model holds no
+    design, ``_public_centred_state`` returned ``(None, None, None)`` and the
+    republication erased the published pair; the edited categorical's
+    predictions came from the raw intercept, 0.15 off at 1e16.  The pair is
+    now re-read from the published public centre, which names the folded
+    columns without the design.  Check: the pair is unchanged (the edit moves
+    only folded, uncentred columns) and ``_edit_moves_predictions_by_its_columns``.
+    """
+    import pickle
+
+    from superglm.editor import EditorSession
+
+    rng = np.random.default_rng(445)
+    n = 120
+    z = 2.0 * rng.integers(-4, 5, n)
+    g = np.resize(np.array(["a", "b", "c", "d"], dtype=object), n)
+    frame = pd.DataFrame({"x": offset + z, "g": g})
+    y = 3.0 + 0.2 * z + np.resize(np.array([0.0, 0.2, 0.3, -0.4]), n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric(), "g": Categorical(base="first")},
+            retain_fit_state=False,
+        ).fit(frame, y)
+        model = pickle.loads(pickle.dumps(fitted))
+        assert model._dm is None
+        session = EditorSession.from_model(model, terms=["g"], train_data=(frame, y))
+        term = session.terms["g"]
+        term.edited_log_effect = 0.5 * np.asarray(term.edited_log_effect, dtype=np.float64)
+        edited = session.to_model()
+    published = (model.result.centred_intercept, model.result.centred_intercept_lo)
+    assert published[0] is not None
+    assert (edited.result.centred_intercept, edited.result.centred_intercept_lo) == published
+    _edit_moves_predictions_by_its_columns(model, edited, frame, "g")
 
 
 # ------------------------------------- 7. the gram and QR paths at 1e16
