@@ -931,18 +931,21 @@ def test_gram_and_qr_fits_are_translation_invariant_at_1e16(family, direct_solve
     ``x - mean_x``, ``mean_x`` the one-float weighted mean.  It rounds at ``u
     s`` at an offset ``s``, which adds ``sum W d d'`` to the Gram (``d`` that
     rounding): at 1e16 a Gaussian fit's eta moved 1.1e-3 while reporting
-    converged and a Poisson fit ended ``step_rejected``.  The rows are now
+    converged and a Poisson fit ended ``step_rejected``.  The QR's rows are now
     ``(x - hi) - lo`` (``centered_system.weighted_mean_pair``), ``hi`` the
     rounded weighted mean and ``lo`` the remainder formed on rows differenced
-    from it.  ``hi`` lands on a different float at each offset, so the two
+    from it; the gram route forms the same centred Gram by the corrected
+    two-pass algorithm about ``hi`` (``two_pass_centred_gram``) and publishes
+    the same pair.  ``hi`` lands on a different float at each offset, so the two
     fits' centred rows are not bitwise equal: ``x - hi`` is exact by Sterbenz
     at 1e16 and rounds at the spread's scale at 0, and ``lo`` absorbs the
     difference in ``hi``.  They agree to ``O(u spread)`` per entry, and the
     ``(u s / sigma)^2`` term is gone.  Their predictors then agree to the forward error
     of the solves, ``gamma_n kappa(H) max|eta|``, ``kappa`` the centred
-    Hessian's condition; the intercept reads ``mean_x - c`` on centred rows
-    too (``centre_offset_mean``).  Mutation: ``mean_lo`` dropped in
-    ``build_centered_system`` (gram) or ``_centred_rows`` (QR).
+    Hessian's condition; the intercept reads ``mean_x - c`` from the system's
+    pair too (``_system_offset_mean``).  Mutation: Björck's correction dropped
+    in ``two_pass_centred_gram`` (gram) or ``mean_lo`` dropped in
+    ``_centred_rows`` (QR).
     """
     fits = {}
     for shift in (0.0, 1e16):
@@ -1005,9 +1008,10 @@ def test_reml_on_the_gram_and_qr_paths_at_1e16(family, direct_solve):
     refreshes only the right-hand side, whose dense columns are read on
     centred rows.  Gaussian/log has signed observed weights, so its REML
     Hessian comes from the observed geometry's dense branch, which centres
-    rows about the pair.  Mutation: as the previous test, or the one-float
-    mean back in the right-hand-side refresh or in the observed geometry's
-    signed Gram.
+    rows about the pair.  Mutation: Björck's correction dropped, or the
+    whole-design path's remainder dropped (``build_centered_system``), or the
+    one-float mean back in the right-hand-side refresh or in the observed
+    geometry's signed Gram.
     """
     _assert_same_reml(
         _gram_qr_reml(family, direct_solve, 0.0), _gram_qr_reml(family, direct_solve, 1e16)
@@ -2185,19 +2189,48 @@ def _split_system(dm, W, z, monkeypatch):
     return system
 
 
-@pytest.mark.parametrize("shift", [0.0, 1e8, 1e16])
-def test_the_dense_block_takes_the_corrected_two_pass_at_every_offset(shift, monkeypatch):
-    """The split's dense block, by the corrected two-pass, against the exact pair and exact rationals.
+def _whole_system(dm, W, z, monkeypatch):
+    """``build_centered_system`` with every raw rung declined: the whole design in one pass of rows."""
+    from superglm.solvers import centered_system
 
-    The system agrees with #439's reference, centred row by row about
+    def declined(**kwargs):
+        return None
+
+    def no_split(split, **kwargs):
+        raise AssertionError("the split was taken")
+
+    monkeypatch.setattr(centered_system, "_raw_rung_system", declined)
+    monkeypatch.setattr(centered_system, "_attach_dense_split", no_split)
+    return centered_system.build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_split=dm.tabmat_centering_split,
+        tabmat_state=centered_system.TabmatCenteringState(),
+    )
+
+
+@pytest.mark.parametrize("shift", [0.0, 1e8, 1e16])
+@pytest.mark.parametrize("route", ["split", "whole"])
+def test_the_dense_block_takes_the_corrected_two_pass_at_every_offset(route, shift, monkeypatch):
+    """The dense block, by the corrected two-pass, against the exact pair and exact rationals.
+
+    On the split (a raw rung takes the bounded half) and on the whole-design
+    path (every rung declined: ``centered_gram_rhs`` accumulates the first
+    moments, and a bounded x dense entry takes ``G - e l'``), the system
+    agrees with #439's reference, centred row by row about
     ``weighted_mean_pair``'s ``(hi, lo)``, to ``5 gamma_{n+p+4}`` of the
     entry formed on absolute rows (a dense column's ``|x - hi| + |(x - hi) -
     lo|``, a bounded column's ``|x| + |m|``), and its dense diagonal meets
     ``_two_pass_bound`` against the exact rational value.  The pair it
-    publishes is the exact pair's anchor and a remainder below the anchor's
-    rounding.  Mutations: Björck's correction dropped (``G`` for ``G - e e' /
-    sum W``), which at 1e16 leaves the anchor's rounding, a ulp of the
-    offset, in the Gram; pass one taken without the working weights.
+    publishes is the exact pair's anchor and a remainder within ``2
+    gamma_{n+4}`` of the weighted spread of the exact pair's (each lies within
+    ``gamma_{n+4}`` of the exact remainder).  Mutations: Björck's correction
+    dropped (``G`` for ``G - e e' / sum W``), which at 1e16 leaves the
+    anchor's rounding, a ulp of the offset, in the Gram; the whole-design
+    path's remainder dropped; the split publishing no remainder; pass one
+    taken without the working weights.
     """
     from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
     from superglm.solvers.centered_system import weighted_mean_pair
@@ -2205,14 +2238,16 @@ def test_the_dense_block_takes_the_corrected_two_pass_at_every_offset(shift, mon
     n = 9000
     dm, W = _split_design(n, shift, tilt=False)
     z = np.random.default_rng(6).normal(size=n)
-    system = _split_system(dm, W, z, monkeypatch)
+    system = (_split_system if route == "split" else _whole_system)(dm, W, z, monkeypatch)
     sum_w = float(np.sum(W))
     mean_x, hi, lo = weighted_mean_pair(dm, W, sum_w)
+    X = dm.toarray()
     assert system.mean_hi is not None and system.mean_lo is not None
     assert system.mean_hi[0] == hi[0]
+    spread = float(W @ np.abs(X[:, 0] - hi[0])) / sum_w
+    assert abs(system.mean_lo[0] - lo[0]) <= 2.0 * _gamma(n + 4) * spread
     z_centered = z - system.mean_z
     gram, rhs = centered_gram_rhs(dm=dm, W=W, mean_x=hi, z_centered=z_centered, mean_lo=lo)
-    X = dm.toarray()
     magnitude = np.abs(X) + np.abs(mean_x)
     magnitude[:, 0] = np.abs(X[:, 0] - hi[0]) + np.abs((X[:, 0] - hi[0]) - lo[0])
     gamma = _gamma(n + dm.p + 4)

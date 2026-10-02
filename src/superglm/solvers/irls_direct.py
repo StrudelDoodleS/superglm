@@ -1278,7 +1278,7 @@ def _fit_irls_direct_once(
         resolved once every relative score is within ``MODE_RESOLVE_CAP``
         (``solvers.mode_score``).  The floors read the iterate's intercept
         about ``mean_x``; a centred state reads it from its own ``alpha`` and
-        the offset of ``mean_x`` from the centre (``centre_offset_mean``), not
+        the offset of ``mean_x`` from the centre (``_system_offset_mean``), not
         from the raw intercept, which cancels ``c' beta`` at a column's offset.
         """
         assert _score_centre is not None
@@ -2375,7 +2375,7 @@ def _fit_irls_direct_once(
     _t_eta = 0.0
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
-    # its mean_x less the state's centre (``centre_offset_mean``), None without one
+    # its mean_x less the state's centre (``_system_offset_mean``), None without one
     _last_working_offset_mean: NDArray | None = None
     _last_working_structured: (
         FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
