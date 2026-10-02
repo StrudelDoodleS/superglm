@@ -169,9 +169,11 @@ scoring run outside the widget mutation lock against a captured request. Evaluat
 weights, offsets, and the fitted design matrix are shared by identity rather than copied. Temporary
 prediction arrays are reduced to scalars and released.
 
-The training split can reuse exact fitted artifacts when its X, y, weights, and offset are the same
-objects used for fitting. Validation and test splits use exact scoring and then share their cached
-scalar dictionaries between the metric strip and reports.
+Every split, the training split included, is scored through the model's predictions, so the
+training split matches `SuperGLM.metrics` on the same data. The fit's own statistics belong to its
+fitting design, which on a discrete fit is the binned one. When the training split holds the
+objects used for fitting, only the weight-contract check is skipped, because the fit already ran
+it. The splits share their cached scalar dictionaries between the metric strip and reports.
 
 ## Run Frontend Checks
 

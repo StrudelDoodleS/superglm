@@ -809,13 +809,15 @@ def weighted_log_likelihood(
     phi: float = 1.0,
     *,
     weight_semantics: str,
+    report_contract: bool = True,
 ) -> float:
     """Return the log-likelihood the declared weight contract defines.
 
     A custom distribution that SuperGLM does not ship owns its own weight
     contract, because only it knows its normalizer; its ``log_likelihood`` is
     used as written and a mismatch with a declared ``"prior"`` contract is
-    reported rather than silently substituted.
+    reported rather than silently substituted.  ``report_contract=False``
+    leaves that report out, for rows whose fit already gave it.
     """
     if weight_semantics == "frequency":
         return _frequency_weight_log_likelihood(family, y, mu, weights, phi)
@@ -834,7 +836,7 @@ def weighted_log_likelihood(
     # Zero-weight rows are carried through the same test because they
     # contribute nothing under either reading.
     carried = np.asarray(weights, dtype=np.float64)
-    if np.all((carried == 0.0) | (carried == 1.0)):
+    if np.all((carried == 0.0) | (carried == 1.0)) or not report_contract:
         return float(family.log_likelihood(y, mu, weights, phi))
     import warnings
 
