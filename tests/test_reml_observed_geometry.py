@@ -1125,6 +1125,88 @@ def test_the_structured_indefiniteness_gate_is_the_border_certificate_s_floor() 
     assert not schur_curvature_is_negative(np.array([-tau_tight / 2, 1.0, 1.0]), tight.certificate)
 
 
+def _has_eigenvalue_below(matrix: np.ndarray, level: float) -> bool:
+    """Exact certificate that the stored ``matrix`` has an eigenvalue below ``level``.
+
+    Rational LDL' of ``matrix - level I`` without pivoting: positive leading
+    pivots up to a negative one give a leading principal block with a negative
+    determinant, so by Cauchy interlacing the matrix has an eigenvalue below
+    ``level``.  No floating-point rounding enters.
+    """
+    from fractions import Fraction
+
+    size = matrix.shape[0]
+    work = [[Fraction(float(matrix[i, j])) for j in range(size)] for i in range(size)]
+    for i in range(size):
+        work[i][i] -= Fraction(float(level))
+    for k in range(size):
+        pivot = work[k][k]
+        if pivot <= 0:
+            return pivot < 0
+        for i in range(k + 1, size):
+            multiplier = work[i][k] / pivot
+            for j in range(k + 1, size):
+                work[i][j] -= multiplier * work[k][j]
+    return False
+
+
+def _border_matrix_with_truncated_negative_curvature(kind: str) -> tuple[np.ndarray, np.ndarray]:
+    """``(Q, U)``: a unit-diagonal border whose eigenvalue below ``-tau`` step 4 truncates.
+
+    ``floor``: ``I_10`` with one pair ``1 + 175 eps``, eigenvalues ``-175 eps``,
+    ``2 + 175 eps`` and ones, ``U = 0`` so ``tau = c_R(10) = 55 eps``.  Its Ritz
+    value ``-175 eps`` clears step 4's ``tau + 2 n_live^2 eps = 255 eps`` and not
+    the gate's ``tau + 2 width eps ||Q_s||_2 = 95 eps``.
+    ``ritz``: a near rank-one ``3 x 3`` with ``U = 1e-12`` (``tau`` about 3e-12)
+    and ``||Q_s||_2 = n``, so the two floors agree; its retained block's smallest
+    eigenvalue sits near ``tau``, and the truncated Ritz value ``-0.82 tau`` lies
+    far above ``lambda_min = -3.0 tau``.
+    """
+    eps = np.finfo(np.float64).eps
+    if kind == "floor":
+        matrix = np.eye(10)
+        matrix[0, 1] = matrix[1, 0] = 1.0 + 175.0 * eps
+        return matrix, np.zeros(10)
+    matrix = np.array(
+        [
+            [1.0, 0.9999999999992688, -0.9999999999969175],
+            [0.9999999999992688, 1.0, -0.9999999999655182],
+            [-0.9999999999969175, -0.9999999999655182, 1.0],
+        ]
+    )
+    return matrix, np.full(3, 1e-12)
+
+
+@pytest.mark.parametrize("kind", ["floor", "ritz"])
+def test_the_structured_gate_refuses_negative_curvature_the_border_truncates(kind: str) -> None:
+    """A scaled border certifiably below ``-tau`` is refused, by ``factor_border`` or by the gate.
+
+    Step 4 of ``factor_border`` refuses on its smallest Ritz value against
+    ``tau + 2 n_live^2 eps``; the gate refuses on every eigenvalue of the
+    scaled matrix against ``tau + 2 width eps ||Q_s||_2``.  The gate is the
+    stricter test twice over (issue #433): its floor is lower whenever
+    ``width ||Q_s||_2 < n_live^2``, and a Ritz value only bounds
+    ``lambda_min`` from above (Rayleigh-Ritz), far above it when the retained
+    block is nearly singular.  Each fixture has an eigenvalue below ``-tau``,
+    certified in exact arithmetic, that step 4 truncates as a null: raising
+    the gate's floor to step 4's admits ``floor``, and trusting step 4's Ritz
+    value admits both.  The fixture must reach the gate: if step 4 ever
+    refuses it (or keeps full rank), ``factor_border`` raises or the rank check
+    fails here, and the fixture needs revisiting rather than passing through
+    another refusal (Claude review of #445, Nit).
+    """
+    from superglm.solvers._structured.border import factor_border
+
+    matrix, bound = _border_matrix_with_truncated_negative_curvature(kind)
+    size = matrix.shape[0]
+    border = factor_border(matrix, np.zeros((size, size)), bound, None, term_name="probe")
+    assert border.certificate.rank < size  # step 4 truncated, as the fixture claims
+    # the unit diagonal makes the stored matrix its own Jacobi scaling
+    assert _has_eigenvalue_below(matrix, -border.certificate.tau)
+    eigenvalues = np.linalg.eigvalsh(border.scaled_matrix)
+    assert schur_curvature_is_negative(eigenvalues, border.certificate)
+
+
 def test_observed_geometry_rejects_indefinite_penalty_and_total_curvature() -> None:
     X = np.arange(-3.0, 4.0)[:, None]
     dm = DesignMatrix([DenseGroupMatrix(X)], n=len(X), p=1)

@@ -286,11 +286,20 @@ result.n_iter_path
 
 After `fit_path()` the model is fitted at the last lambda, so `model.predict()`
 predicts at that point. To predict at another point, fit with
-`selection_penalty=result.lambda_seq[i]` and predict with that model.
+`selection_penalty=result.lambda_seq[i]` and predict with that model. The
+refit matches point `i` to the solver's tolerance, not exactly, because it
+starts from scratch instead of from the previous point.
 
-Rebuilding predictions as `X @ coef_path[i] + intercept_path[i]` works only
-when every numeric column sits near zero. A column far from zero, such as a
-year or an epoch time, cancels against the intercept and loses accuracy.
+You can also rebuild predictions as `X @ coef_path[i] + intercept_path[i]`.
+When a numeric column's values sit far from zero, its term and the intercept
+cancel. Each rebuilt prediction is then off by about $2^{-52}$ times the
+column's offset times its coefficient:
+
+- **Years, and epoch times in seconds that span months or more,** keep 12
+  or more significant digits of the column's effect.
+- **A column whose offset is many orders of magnitude larger than its
+  spread**, such as a raw ID or a nanosecond timestamp spanning a few
+  seconds, loses visible accuracy. Predict with a refitted model instead.
 
 Next:
 

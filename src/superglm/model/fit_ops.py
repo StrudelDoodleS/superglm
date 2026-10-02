@@ -108,13 +108,21 @@ class PathResult:
     """Immutable container for regularization path results.
 
     ``coef_path`` and ``intercept_path`` are each point's public coefficients
-    and raw intercept, and ``deviance_path`` its fitted deviance.  Beside a
-    numeric column far from zero (a year, an epoch time), ``X @ coef_path[i]
-    + intercept_path[i]`` cancels the column's offset against the intercept
-    and loses the rounding of that offset (tenths at 1e16), so it does not
-    reproduce ``deviance_path[i]``.  Predict with the fitted model, which
-    holds the last point, or refit at ``selection_penalty=lambda_seq[i]`` and
-    predict with that model: both carry the centred predictor.
+    and raw intercept, and ``deviance_path`` its fitted deviance.  Rebuilding
+    a point's predictor as ``X @ coef_path[i] + intercept_path[i]`` cancels
+    each numeric column's offset ``c`` against the raw intercept ``alpha -
+    c' beta``.  The product and the intercept each round at about ``2^-53
+    |c' beta|``, so a row errs by about ``2^-52 |c' beta|``, or ``2^-52 c /
+    s`` of the term's effect, ``s`` the column's spread.  A year (``c / s``
+    near 300) or an epoch time in seconds over months stays within about
+    ``1e-13`` of the effect; only an offset many orders of magnitude above
+    the spread loses visible digits, such as a raw ID or a nanosecond
+    timestamp over a few seconds (tenths of the effect at 1e16 over a spread
+    of 6).  The fitted model predicts at the last point with the centred
+    predictor.  To predict at point ``i``, refit at
+    ``selection_penalty=lambda_seq[i]``: the refit reproduces the point to the
+    solver's ``tol``, not exactly, because it starts cold instead of from the
+    previous point.
     """
 
     lambda_seq: NDArray  # shape (n_lambda,)

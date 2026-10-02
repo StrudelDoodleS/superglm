@@ -1094,21 +1094,27 @@ def test_full_rank_ill_conditioned_geometry_is_certified_by_the_factor() -> None
 def test_penalty_factor_keeps_each_blocks_resolved_curvature_and_no_rounding() -> None:
     """The penalty's square root carries the curvature ``S`` certifies, block by block.
 
-    Three diagonal blocks, every entry exact: a ridge at ``1e-6``, an integer
-    second-difference penalty at ``1e10`` (an exact two-dimensional null
-    space), and an ``sz``-like block whose exactly zero rows (unpenalized
-    natural coordinates) interleave its penalized ones.  The factor has
-    exactly the rank of ``S``, nothing on the zero rows, and reproduces each
-    block to within twice its eigensolver resolution ``n_b eps ||S_b||_2``.
-    Fails on 6544d2bc, where one ``eigh`` of the whole matrix kept every
-    positive rounding eigenvalue (rows on the zero coordinates: the rounding
-    curvature that made an sz alias identified on gram).  Mutation: one bar
-    for the whole matrix, ``n eps ||S||_2``, drops the ridge beside the
-    ``1e10`` block, a curvature its own block resolves.
+    Three diagonal blocks, every entry exact: a coupled second-difference
+    penalty plus a ridge at ``2^-20`` (about ``1e-6``; positive definite,
+    rank 3), an integer second-difference penalty at ``1e10`` (an exact
+    two-dimensional null space), and an ``sz``-like block whose exactly zero
+    rows (unpenalized natural coordinates) interleave its penalized ones.
+    The factor has exactly the rank of ``S``, nothing on the zero rows, and
+    reproduces each block within twice the eigensolver resolution of its
+    Jacobi equilibration ``A_b``, ``2 n_b eps ||A_b||_2``, entrywise in
+    ``sqrt(S_ii S_jj)`` (``penalty_factor`` cuts there).  Fails on 6544d2bc,
+    where one ``eigh`` of the whole matrix kept every positive rounding
+    eigenvalue (rows on the zero coordinates: the rounding curvature that
+    made an sz alias identified on gram).  Mutation: one bar for the whole
+    matrix, ``n_b eps ||S||_2`` (``9e-5``), drops the small block, whose
+    eigenvalues (``9.5e-7`` and ``6.7e-6``) its own equilibration resolves;
+    the block is coupled because a diagonal one is a set of ``1 x 1`` blocks
+    that never meet a bar (Opus review of #425, P3).
     """
     second = np.diff(np.eye(6), n=2, axis=0)
+    small = np.diff(np.eye(3), n=2, axis=0)
     blocks = [
-        np.diag([1e-6, 2e-6, 3e-6]),
+        2.0**-20 * (small.T @ small + np.eye(3)),
         1e10 * (second.T @ second),
         np.kron(np.array([[2.0, 1.0], [1.0, 2.0]]), np.diag([4.0, 1.0, 0.0])),
     ]
@@ -1124,8 +1130,12 @@ def test_penalty_factor_keeps_each_blocks_resolved_curvature_and_no_rounding() -
     eps = float(np.finfo(np.float64).eps)
     for start, block in zip(starts, blocks, strict=True):
         span = slice(start, start + len(block))
-        norm = float(np.linalg.norm(block, 2))
-        assert np.linalg.norm(gram[span, span] - block, 2) <= 2.0 * len(block) * eps * norm
+        live = np.diag(block) > 0.0
+        scale = np.sqrt(np.diag(block))
+        equilibrated = block[np.ix_(live, live)] / np.outer(scale[live], scale[live])
+        resolution = 2.0 * len(equilibrated) * eps * float(np.linalg.norm(equilibrated, 2))
+        error = np.abs(gram[span, span] - block)
+        assert np.all(error <= resolution * np.outer(scale, scale))
         assert not np.any(gram[span, :start]) and not np.any(gram[span, span.stop :])
 
 

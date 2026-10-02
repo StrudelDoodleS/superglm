@@ -177,9 +177,23 @@ def test_postfit_shape_repair_uses_frequency_weight_likelihood_size() -> None:
     assert weighted.result.phi == pytest.approx(expected, rel=2e-13, abs=2e-13)
 
 
-def test_postfit_shape_repair_frequency_weights_match_row_replication() -> None:
+@pytest.mark.parametrize(
+    ("spline_penalty", "level"), [(0.8, 1.5), (0.5, 1.8), (1.3, 1.58)], ids=["base", "a", "b"]
+)
+def test_postfit_shape_repair_frequency_weights_match_row_replication(
+    spline_penalty: float, level: float
+) -> None:
+    """A repair that flattens the curve publishes the weighted mean, as the replicated rows do.
+
+    The repaired fit keeps its centred state when its profiled intercept rounds
+    back to the solver's ``alpha`` bit for bit; the public intercept then has to
+    be re-read at the repaired ``beta``, or it predicts the unweighted fitted
+    mean (``fit_state._republish_centred_state``; #433, master's Windows CI on
+    the base case).  Cases a and b keep it on Linux x86-64 OpenBLAS: they failed
+    by 0.0154 and 0.0157 before the republication.
+    """
     x = np.linspace(0.0, 1.0, 28)
-    y = 1.5 - 1.1 * x + 0.08 * np.sin(7.0 * x)
+    y = level - 1.1 * x + 0.08 * np.sin(7.0 * x)
     weights = np.resize(np.array([1, 3, 2, 4], dtype=np.float64), x.size)
     frame = pd.DataFrame({"x": x})
     repeated_indices = np.repeat(np.arange(x.size), weights.astype(int))
@@ -189,7 +203,7 @@ def test_postfit_shape_repair_frequency_weights_match_row_replication() -> None:
         return SuperGLM(
             family="gaussian",
             selection_penalty=0.0,
-            spline_penalty=0.8,
+            spline_penalty=spline_penalty,
             features={
                 "x": PSpline(
                     n_knots=6,

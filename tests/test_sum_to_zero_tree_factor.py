@@ -13,6 +13,7 @@ against ``det(H + N N') / det(N'N)``.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import numpy as np
@@ -26,6 +27,7 @@ from superglm.solvers._structured.balance_tree import (
     SumToZeroTreeFactor,
     balance_tree,
 )
+from superglm.solvers._structured.border import BorderGenerators
 from superglm.solvers._structured.operators import (
     CenteredBlockOperator,
     LowRankSymmetricOperator,
@@ -36,6 +38,7 @@ from superglm.types import PenaltyComponent
 from tests._leaf_systems import leaf_system_from_rows
 
 EPS = np.finfo(float).eps
+_U = EPS / 2.0
 
 
 def _case(
@@ -152,6 +155,43 @@ def _kappa(H: np.ndarray) -> float:
 def _pdet(H: np.ndarray, N: np.ndarray) -> float:
     """``log pdet(H) = log det(H + N N') - log det(N'N)`` for ``N`` spanning the null space."""
     return float(np.linalg.slogdet(H + N @ N.T)[1] - np.linalg.slogdet(N.T @ N)[1])
+
+
+def _gamma(count: float) -> float:
+    return count * _U / (1.0 - count * _U)
+
+
+def _magnitude(case) -> np.ndarray:
+    """``|X|'|W||X| + |S|`` over ``_dense``'s design and penalty: what ``H``'s entries round against."""
+    _, X, Omega = _dense(case)
+    S = case["lam"] * Omega
+    S[1 : 1 + case["q"], 1 : 1 + case["q"]] = case["S_b"]
+    return np.abs(X).T @ (np.abs(case["W"])[:, None] * np.abs(X)) + np.abs(S)
+
+
+def _cholesky_logdet(B: np.ndarray) -> float:
+    return 2.0 * float(np.sum(np.log(np.diag(np.linalg.cholesky(B)))))
+
+
+def _logdet_agreement(B: np.ndarray, magnitude: np.ndarray, count: int) -> float:
+    """What two backward-stable factorizations agree on ``log det B`` to, ``B`` positive definite.
+
+    Each factors ``B + dB`` with ``|dB| <= gamma_count magnitude`` entrywise:
+    the rows' accumulation (``fl(X'WX + S)``, Higham 2002, section 3.5) and a
+    Cholesky-class factor, of the formed matrix (Theorem 10.3; ``|R'||R|`` is
+    below ``sqrt(B_ii B_jj) <= sqrt(magnitude_ii magnitude_jj)``) or of the
+    rows (Theorem 19.4).  On the Jacobi-scaled ``B``, whose diagonal is one,
+    ``||dB||_2 <= eta = p gamma_count max_ij magnitude_ij / sqrt(B_ii B_jj)``
+    and ``|log det(I + E)| <= -p log(1 - ||E||_2) <= p kappa eta / (1 - kappa
+    eta)`` (``||B_s^-1||_2 <= kappa``); two factorizations by twice that
+    (``_agreement`` in ``test_factor_smooth_leaf_factor.py``).
+    """
+    p = B.shape[0]
+    scale = 1.0 / np.sqrt(np.diag(B))
+    eta = p * _gamma(count) * float(np.max(scale[:, None] * magnitude * scale[None, :]))
+    kappa_eta = float(np.linalg.cond(scale[:, None] * B * scale[None, :])) * eta
+    assert kappa_eta < 0.5
+    return 2.0 * p * kappa_eta / (1.0 - kappa_eta)
 
 
 def test_the_balance_basis_is_orthonormal_and_sums_to_zero() -> None:
@@ -602,6 +642,108 @@ def test_an_exhausted_subtree_is_deferred_against_its_unreduced_columns(
     np.testing.assert_allclose(
         fitted[live], expected[live], atol=tolerance * np.max(np.abs(expected))
     )
+
+
+def _alias_beside_a_random_effect(S_b: np.ndarray):
+    """A one-row level beside a random effect, built by hand: ``(factor, case)``.
+
+    ``K = 8``, ``k = 4``, ``omega = diag(1, 1, 0, 0)``.  Level 0's single row
+    has unpenalized coordinates ``(1, 1)``, so its free direction is ``(1,
+    -1)``.  The border holds ``z_2`` and ``z_3`` (the global Spline's share
+    of the null-space functions, which represents the alias) and a complete
+    three-level one-hot block, whose sum is the generator.  ``thin_counts``
+    is set as ``layout.thin_level_counts`` would set it.
+    """
+    K, k, n, lam = 8, 4, 400, 0.3
+    rng = np.random.default_rng(7)
+    levels = rng.integers(1, K, n)
+    levels[0] = 0
+    x = rng.uniform(size=n)
+    Z = np.column_stack([x**j for j in range(k)]) + 0.1 * rng.normal(size=(n, k))
+    Z[0, 2:] = 1.0
+    effect = rng.integers(0, 3, n)
+    effect[:3] = np.arange(3)
+    X = np.column_stack((Z[:, 2:], np.eye(3)[effect]))
+    q = X.shape[1]
+    W = rng.uniform(0.5, 2.0, n)
+    z = rng.normal(size=n)
+    system = leaf_system_from_rows(
+        Z,
+        X,
+        levels,
+        W,
+        W * z,
+        n_levels=K,
+        small_indices=np.arange(q),
+        structured_indices=np.arange(q, q + (K - 1) * k).reshape(K - 1, k),
+        generators=BorderGenerators(matrix=np.array([[0.0, 0.0, 1.0, 1.0, 1.0]]).T, references=[2]),
+        basis="sz",
+    )
+    system = dataclasses.replace(system, thin_counts=(np.array([0]), np.array([1])))
+    omega = np.diag([1.0, 1.0, 0.0, 0.0])
+    penalized = SumToZeroPenalizedOperator.with_penalties(
+        system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy()
+    )
+    case = dict(K=K, k=k, q=q, levels=levels, Z=Z, X=X, W=W, z=z, omega=omega, lam=lam, S_b=S_b)
+    return SumToZeroTreeFactor(system, penalized), case
+
+
+def test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out() -> None:
+    """The alias deflation's coupled-penalty fallback (``_penalized_aliases``), driven directly.
+
+    A thin level's penalized alias ``A`` is deflated with the border's
+    structural generators ``G`` as one block, ``a_NN = [G A]' S [G A]``, and
+    certified on ``A'SA`` alone: exact when ``a_NN = diag(G'SG, A'SA)``, as
+    ``A`` is zero on ``G``'s columns and a penalty is block diagonal by term.
+    A penalty with ``G'SA != 0`` voids that, and the aliases stay with the
+    pivoted factorization.  No public model builds such a penalty (a random
+    effect's ridge is its own diagonal block), so the leaf is built by hand
+    (``_alias_beside_a_random_effect``).  Block diagonal ``S_b``: the alias is
+    deflated beside the generator, ``H`` has full rank and ``log|H| = log
+    det H``.  ``S_b = 5 I - w w'``, ``w = (1, -1, 1, 1, 1)`` the border part
+    of the generator plus eight times the alias (exact entries):
+    ``G'SG = A'SA = 6`` but ``a_NN`` is singular, and the generator plus the
+    alias is an exact null of ``H``.  The alias stays out, the generator alone
+    is deflated, and the factor has ``H``'s rank and pseudo-determinant.
+    Mutation: the guard removed: the alias joins the deflation and, its
+    ``a_NN`` unresolved, ``_deflate`` declines every generator (none
+    deflated); on c9ac978b, before that check, the Cholesky of ``a_NN``
+    raised ``LinAlgError`` (Claude review of #425, Nit).
+    """
+    factor, case = _alias_beside_a_random_effect(np.diag([0.5, 0.7, 0.3, 0.4, 0.6]))
+    H, _, _ = _dense(case)
+    assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
+    assert factor.border_certificate.deflated == 2
+    assert factor.rank == H.shape[0]
+    # n + 2 roundings forming H, p + 1 in its Cholesky (``_logdet_agreement``)
+    n, p = len(case["W"]), H.shape[0]
+    tolerance = _logdet_agreement(H, _magnitude(case), n + p + 3)
+    assert abs(factor.logdet() - _cholesky_logdet(H)) <= tolerance
+
+    w = np.array([1.0, -1.0, 1.0, 1.0, 1.0])
+    factor, case = _alias_beside_a_random_effect(5.0 * np.eye(5) - np.outer(w, w))
+    H, _, _ = _dense(case)
+    K, k, q = case["K"], case["k"], case["q"]
+    N = np.zeros(H.shape[0])
+    N[: 1 + q] = (-1.0, 1.0, -1.0, 1.0, 1.0, 1.0)  # intercept, z_2 and z_3, the effect's levels
+    for level in range(K - 1):
+        share = K - 1.0 if level == 0 else -1.0
+        N[1 + q + level * k + 2 : 1 + q + (level + 1) * k] = (share, -share)
+    # H N = 0 exactly; fl(H) is within gamma_{n+2} |X|'|W||X| + |S| (the scaled
+    # rows, the sum, the added penalty) and the product adds gamma_p (Higham
+    # 2002, section 3.5 and Lemma 3.3)
+    magnitude = _magnitude(case)
+    assert np.all(np.abs(H @ N) <= _gamma(n + p + 2) * (magnitude @ np.abs(N)))
+    # log H_00 + log pdet(H_c) = log det(H + t t') - log(t't), t = (0, N_1):
+    # the Schur complement on the intercept, N_1 spanning H_c's null space;
+    # one more rounding where t t' (exact) is added
+    tail = np.r_[0.0, N[1:]]
+    B = H + np.outer(tail, tail)
+    tolerance = _logdet_agreement(B, magnitude + np.outer(np.abs(tail), np.abs(tail)), n + p + 4)
+    assert factor._alias_x is None
+    assert factor.border_certificate.deflated == 1
+    assert factor.rank == H.shape[0] - 1
+    assert abs(factor.logdet() - (_cholesky_logdet(B) - np.log(tail @ tail))) <= tolerance
 
 
 def _pinv_known_nullity(H: np.ndarray, nullity: int) -> np.ndarray:
