@@ -499,54 +499,6 @@ def two_sum(a, b):
     return s, (a - (s - b_virtual)) + (b - b_virtual)
 
 
-_VELTKAMP = 134217729.0  # 2^27 + 1, the binary64 splitting constant
-
-
-def _split(a: NDArray) -> tuple[NDArray, NDArray]:
-    """Veltkamp's split: ``a = hi + lo`` exactly, each half 26 bits wide."""
-    c = _VELTKAMP * a
-    hi = c - (c - a)
-    return hi, a - hi
-
-
-def two_product(a: NDArray, b: NDArray) -> tuple[NDArray, NDArray]:
-    """Dekker's TwoProduct: ``p = fl(ab)`` and its error, ``ab = p + e`` exactly.
-
-    Exact when neither the product nor the split over- or underflows (Dekker
-    1971; Ogita, Rump & Oishi 2005, Algorithm 3.3 and Theorem 3.4), which holds
-    for the ``frexp`` mantissas ``compensated_weighted_mean`` passes, all in
-    ``[0.5, 1)`` or zero.  No fused multiply-add: Python 3.12 has none.
-    """
-    p = a * b
-    a_hi, a_lo = _split(a)
-    b_hi, b_lo = _split(b)
-    return p, ((a_hi * b_hi - p) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo
-
-
-def _scaled_exact_dot(a: NDArray, b: NDArray) -> tuple[float, int]:
-    """``(S, K)`` with ``sum a_i b_i = S 2^K`` up to the scaling loss.
-
-    Each product is formed exactly on the operands' ``frexp`` mantissas, its
-    binary exponent kept apart; every piece is scaled by ``2^-K``, ``K`` the
-    largest product exponent, and ``math.fsum`` rounds the sum once
-    (Shewchuk 1997).  A piece pushed below the normal range loses at most
-    ``2^-1075`` of ``2^K``, and ``2^K <= 4 max |a_i b_i|``.
-    """
-    mantissa_a, exponent_a = np.frexp(a)
-    mantissa_b, exponent_b = np.frexp(b)
-    head, tail = two_product(mantissa_a, mantissa_b)
-    exponent = exponent_a.astype(np.int32) + exponent_b.astype(np.int32)
-    carried = head != 0.0
-    if not np.any(carried):
-        return 0.0, 0
-    top = int(np.max(exponent[carried]))
-    shift = (exponent - top).astype(np.int32)
-    # ``tolist`` hands fsum Python floats: iterating a NumPy array boxes each
-    # element, several times the cost per element
-    pieces = np.concatenate((np.ldexp(head, shift), np.ldexp(tail, shift)))
-    return math.fsum(pieces.tolist()), top
-
-
 def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) -> float:
     """``(N 2^K) / (D 2^L)`` without forming either scaled sum."""
     return math.ldexp(numerator[0] / denominator[0], numerator[1] - denominator[1])
@@ -555,40 +507,44 @@ def _scaled_ratio(numerator: tuple[float, int], denominator: tuple[float, int]) 
 def compensated_weighted_mean(values: NDArray, weights: NDArray) -> float:
     """``m* = sum w v / sum w`` from exact products, refined once with an exact residual.
 
-    Every product ``w_i v_i`` is split exactly into two floats on the
-    operands' ``frexp`` mantissas (``two_product``), its exponent kept apart,
-    and each sum is scaled by its own largest product's power of two and
-    rounded once by ``math.fsum`` (``_scaled_exact_dot``).  No weight is
-    rescaled on its own, so a contribution survives whatever its exponent:
-    scaling the weights by the largest one erased ``1e-300`` beside ``1e300``
-    and returned 0 for a mean of ``1e-300``.  The first quotient ``m0`` is then
-    refined by the residual ``v - m0 = h + e`` (TwoSum, exact), whose
-    products are formed the same way.  With ``n`` rows, ``u`` the unit
-    roundoff and ``W = sum w``:
+    Each sum runs in a compiled kernel (``_exact_sums.scaled_exact_sum``) that
+    streams the rows twice and holds only Shewchuk's partials, so it needs no
+    memory that grows with the rows.  Every product ``w_i v_i`` is split
+    exactly into two floats on the operands' ``frexp`` mantissas, its exponent
+    kept apart; each sum is scaled by its own largest product's power of two
+    and rounded once, as ``math.fsum`` rounds.  No weight is rescaled on its
+    own, so a contribution survives whatever its exponent: scaling the weights
+    by the largest one erased ``1e-300`` beside ``1e300`` and returned 0 for a
+    mean of ``1e-300``.  The first quotient ``m0`` is then refined by the
+    residual ``v - m0 = h + e`` (TwoSum, exact), whose products are formed the
+    same way.  With ``n`` rows, ``u`` the unit roundoff and ``W = sum w``:
 
         |m - m*| <= (u + 10 u^2) |m*| + 2^-1074 (1 + 9 n (max |w v| + |m*| max w) / W),
 
     the second term the pieces scaled below the normal range (each at most
     ``2^-1075`` of its sum's largest power of two) and the subnormal results
     (Higham 2002 §2.2).  On two levels of adjacent floats, on subnormal
-    weights and on values of ``+-1e300`` the mean is correctly rounded.
-    Falls back to ``np.average`` on non-finite input or a zero weight sum.
+    weights and on values of ``+-1e300`` the mean is correctly rounded.  Six
+    passes over the rows in all.  Falls back to ``np.average`` on non-finite
+    input, a zero weight sum or a non-finite residual.
     """
-    v = np.asarray(values, dtype=np.float64).ravel()
-    w = np.asarray(weights, dtype=np.float64).ravel()
+    from superglm.solvers._exact_sums import native_operand, scaled_exact_sum
+
+    v = native_operand(values)
+    w = native_operand(weights)
     if not (np.all(np.isfinite(v)) and np.all(np.isfinite(w))):
         return float(np.average(v, weights=w))
-    total = _scaled_exact_dot(w, np.ones_like(w))
-    if total[0] == 0.0:
+    total, total_exponent, total_ok = scaled_exact_sum(w, v, 0.0, 0)
+    if not total_ok or total == 0.0:
         return float(np.average(v, weights=w))
-    first = _scaled_ratio(_scaled_exact_dot(w, v), total)
-    head, error = two_sum(v, -first)
-    if not (math.isfinite(first) and np.all(np.isfinite(head))):
+    numerator, numerator_exponent, numerator_ok = scaled_exact_sum(w, v, 0.0, 1)
+    first = _scaled_ratio((numerator, numerator_exponent), (total, total_exponent))
+    if not numerator_ok or not math.isfinite(first):
         return float(np.average(v, weights=w))
-    correction = _scaled_ratio(
-        _scaled_exact_dot(np.concatenate((w, w)), np.concatenate((head, error))), total
-    )
-    mean = first + correction
+    residual, residual_exponent, residual_ok = scaled_exact_sum(w, v, first, 2)
+    if not residual_ok:
+        return float(np.average(v, weights=w))
+    mean = first + _scaled_ratio((residual, residual_exponent), (total, total_exponent))
     return mean if math.isfinite(mean) else first
 
 

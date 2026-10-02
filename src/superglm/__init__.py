@@ -181,11 +181,13 @@ def warmup() -> None:
     from superglm.distributional.solver._global_moments import _warmup_global_moments
     from superglm.distributional.solver._small_group_panels import _warmup_small_group_panels
     from superglm.reml._compensated import _warmup_compensated
+    from superglm.solvers._exact_sums import _warmup_exact_sums
 
     _warmup_tweedie()
     _warmup_tweedie_series()
     _warmup_group_matrix_kernels()
     _warmup_compensated()
+    _warmup_exact_sums()
     _warmup_small_group_panels()
     _warmup_global_moments()
 
