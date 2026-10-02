@@ -584,11 +584,14 @@ def _dense_group_centring(
             if rows is None:
                 first, gram, score = anchored_dense_moments(design, W, hi, response)
             else:
-                weighted = rows * W[:, None]
-                first = rows.T @ W
-                gram = rows.T @ weighted
+                # one read of the held rows, scaled by sqrt(W) as a Gram's
+                # rows are (``DenseGroupMatrix.gram``)
+                root = np.sqrt(W)
+                scaled = rows * root[:, None]
+                first = scaled.T @ root
+                gram = scaled.T @ scaled
                 gram = 0.5 * (gram + gram.T)
-                score = None if response is None else weighted.T @ response
+                score = None if response is None else scaled.T @ (root * response)
             lo = _anchored_remainder(first, np.diag(gram), sum_w)
             if lo is not None:
                 centring.append(
@@ -2073,10 +2076,12 @@ def _fit_pirls_inner(
         W=W_final,
         z_off=z_final - offset,
         penalty=selected_penalty,
+        centre=None if state_center is None else state_center[selected_columns],
     )
     # The certificates centre their rows exactly as the Gram did: a dense
-    # column about its exact pair (issue #430).  About the one-float mean a
-    # column at 1e16 certified a rank one above the Gram's.
+    # column about its pair (issue #430), ``(c0, d)`` beside the fit's centre.
+    # About the one-float mean a column at 1e16 certified a rank one above
+    # the Gram's.
     centre, centre_lo = centered.centre_pair()
     data_rank = decompose_gram_if_authoritative(centered.data_gram)
     if data_rank is None:

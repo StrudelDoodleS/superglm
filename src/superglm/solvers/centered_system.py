@@ -752,8 +752,11 @@ def _attach_dense_split(
         hi, lo, first, gram, response = anchored
         gram_dense = rank_one_centred_gram(first, gram, lo)
         rhs_dense = response - lo * float(np.dot(W, z_centered))
-        for column, values in _dense_centred_columns(split.dense, hi):
-            weighted = W * values
+        # one rows-long buffer serves every dense column: W (x_k - c_k)
+        weighted = np.empty(split.dense.n, dtype=np.float64)
+        for column, (values, centre) in enumerate(_dense_columns_of(split.dense, hi)):
+            np.subtract(values, centre, out=weighted)
+            weighted *= W
             cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(
                 np.sum(weighted)
             )
@@ -808,13 +811,11 @@ def _dense_sources(dm: DesignMatrix, anchor: NDArray) -> list[tuple[NDArray, NDA
     return sources
 
 
-def _dense_centred_columns(dm: DesignMatrix, anchor: NDArray) -> Iterator[tuple[int, NDArray]]:
-    """``(k, fl(x_k - c_k))`` for the ``k``-th dense column of ``dm``, whole."""
-    column = 0
+def _dense_columns_of(dm: DesignMatrix, anchor: NDArray) -> Iterator[tuple[NDArray, float]]:
+    """``(x_k, c_k)`` for each dense column of ``dm`` in order: its values and its centre."""
     for values, centre in _dense_sources(dm, anchor):
         for index in range(values.shape[1]):
-            yield column, values[:, index] - centre[index]
-            column += 1
+            yield values[:, index], float(centre[index])
 
 
 def anchored_dense_moments(
