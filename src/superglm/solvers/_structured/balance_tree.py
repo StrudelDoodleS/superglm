@@ -1503,7 +1503,8 @@ class SumToZeroTreeFactor:
                 raise ValueError("An excluded border column cannot carry a structural generator.")
             if aliases is not None:
                 # an alias through a column the Laplace term leaves out stays with
-                # the pivoted factorization (it is not deflated)
+                # the pivoted factorization (it is not deflated); the aliases are
+                # represented without those columns, so none is (exact zeros)
                 aliases = aliases[:, ~np.any(aliases[rest] != 0.0, axis=0)]
             Q_rest, S_rest, rest_bound = Q_rest.copy(), S_rest.copy(), rest_bound.copy()
             Q_rest[rest, :] = Q_rest[:, rest] = 0.0
@@ -1614,6 +1615,15 @@ class SumToZeroTreeFactor:
         generators = leaf.generators
         if generators is not None:
             scale[1:][np.any(generators.matrix != 0.0, axis=1)] = 0.0
+        # The border columns the Laplace term leaves out (``excluded``) stay out
+        # too: ``_factor_border`` zeroes them and keeps only the aliases exactly
+        # zero there, and a least-squares coefficient the alias does not need
+        # is rounding, never 0.0, so every alias went back to the pivoted
+        # factorization whenever a column was excluded (#432).  Without them
+        # the misfit test below decides whether the rest still represent the
+        # null-space functions.
+        if self.excluded:
+            scale[self._small_position[np.asarray(self.excluded, dtype=np.intp)]] = 0.0
         scaled = scipy.linalg.lstsq(
             scale[:, None] * G_BB * scale[None, :],
             scale[:, None] * G_BZ,
@@ -3044,6 +3054,54 @@ class ProfiledSumToZeroTreeFactor:
     def _form(self, operator) -> _LevelForm:
         return self.augmented_factor._operator_form(operator, False)
 
+    def _trace_form(self, operator) -> _LevelForm:
+        """A centred weight-derivative operator for traces, in the augmented coordinates.
+
+        A thin level's penalized alias ``(a_0, v)`` (``_penalized_aliases``) is
+        a null of ``[1, X]`` on the weighted rows, so a centred operator ``O_c =
+        J' O~ J`` (``O~ = [1 X]' diag(a) [1 X]`` on the ``c0``-shifted rows,
+        ``J = [-c'; I]``) vanishes along ``v``; its variance is ``1 / (lambda
+        a'Sa)``.  The profiled form holds ``O_c`` as the slopes' raw moments
+        plus a rank-two centring, which do not vanish along ``v`` one by one
+        (``raw v = -a_0 X'a``): both meet that variance and their traces cancel
+        to its rounding.  ``K' O~ K`` with ``K = I - e_0 g'``, ``g = [1; c]``,
+        is zero on ``alpha`` and ``O_c`` on the slopes, so every trace is the
+        same; it is ``O~`` less ``g r' + r g' - (1'a) g g'``, ``r = O~ e_0``, and
+        with the intercept column held per level (``Z_l' a_l``) each part
+        annihilates ``(a_0, v)`` row by row, to its own rounding.  Any other
+        operator keeps the profiled form.
+        """
+        augmented = self.augmented_factor
+        if not (
+            isinstance(operator, CenteredBlockOperator)
+            and isinstance(operator.raw, SumToZeroBlockOperator)
+            and operator.raw_structured_cross is not None
+        ):
+            return self._form(operator)
+        own = augmented.system.centred_data_operator
+        if own.raw_structured_cross is None or not np.array_equal(operator.center, own.center):
+            return self._form(operator)
+        raw = self._form(operator.raw)
+        _, small, x_positions, _ = augmented._coordinates(False)
+        total = operator.total
+        border_cross = operator.cross[small]
+        Ax = raw.Ax.copy()
+        Ax[0, 0] = total
+        Ax[0, x_positions] = border_cross
+        Ax[x_positions, 0] = border_cross
+        Cx = raw.Cx.copy()
+        Cx[:, :, 0] = operator.raw_structured_cross
+        K, k = augmented.n_levels, augmented.block_size
+        Ul = np.empty((K, k, 2))
+        Ul[:, :, 0] = operator.raw_structured_cross
+        Ul[:, :, 1] = own.raw_structured_cross / own.total
+        Ux = np.zeros((augmented._n_x, 2))
+        Ux[0] = (total, 1.0)
+        Ux[x_positions, 0] = border_cross
+        Ux[x_positions, 1] = operator.center[small]
+        core = np.array([[0.0, -1.0], [-1.0, total]])
+        return _LevelForm(raw.D, Cx, Ax, raw.low + ((Ul, Ux, core),))
+
     def solve(self, rhs: NDArray) -> NDArray:
         values = np.asarray(rhs, dtype=np.float64)
         vector_rhs = values.ndim == 1
@@ -3092,7 +3150,7 @@ class ProfiledSumToZeroTreeFactor:
             raise ValueError("Operator and factor dimensions must match.")
         if self._is_own_data(operator):
             return float(np.sum(self.augmented_factor._identity_diagonal(self.xtw, self.sum_w)))
-        return self.augmented_factor._trace(self._form(operator))
+        return self.augmented_factor._trace(self._trace_form(operator))
 
     def inverse_operator_diagonal(self, operator: CompactSymmetricOperator) -> NDArray:
         if operator.shape != self.shape:
@@ -3113,14 +3171,15 @@ class ProfiledSumToZeroTreeFactor:
     ) -> float:
         if left.shape != self.shape or right.shape != self.shape:
             raise ValueError("Operators and factor dimensions must match.")
-        return self.augmented_factor._cross_trace(self._form(left), self._form(right))
+        return self.augmented_factor._cross_trace(self._trace_form(left), self._trace_form(right))
 
     def penalty_operator_cross_trace(
         self, component: PenaltyComponent, scale: float, operator: CompactSymmetricOperator
     ) -> float:
         augmented = self.augmented_factor
         return augmented._cross_trace(
-            augmented._penalty_form(self._shift_component(component), scale), self._form(operator)
+            augmented._penalty_form(self._shift_component(component), scale),
+            self._trace_form(operator),
         )
 
     def derivative_cross_traces(self, directions: Sequence[DerivativeDirection]) -> NDArray:
@@ -3129,4 +3188,4 @@ class ProfiledSumToZeroTreeFactor:
             (self._shift_component(component), scale, operator)
             for component, scale, operator in directions
         ]
-        return augmented._cross_matrix(augmented._direction_forms(shifted, self._form))
+        return augmented._cross_matrix(augmented._direction_forms(shifted, self._trace_form))

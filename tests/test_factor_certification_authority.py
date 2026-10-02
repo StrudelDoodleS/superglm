@@ -10,7 +10,7 @@ import pytest
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from superglm import Numeric, SuperGLM
+from superglm import Numeric, PSpline, SuperGLM
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributions import Gamma, Gaussian
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
@@ -1163,11 +1163,18 @@ def test_penalty_factor_cuts_a_graded_block_on_its_equilibration() -> None:
     equilibration, entrywise in ``sqrt(S_ii S_jj)``.  The fit reaches the
     dense reference: ``log n + log det(Q' H_c Q)`` over the range ``Q`` of
     the duplicate pair, and edf ``1 + tr(H^-1 X_c'X_c)`` there, both on the
-    Jacobi equilibration ``A`` of ``Q' H_c Q``.  The centred Gram rounds
-    entrywise within ``gamma_n sqrt(H_ii H_jj)``, which moves each of the
-    ``p`` eigenvalues by at most ``||A^-1||_2 p gamma_n`` relatively (Drmac
-    2020, arXiv:2006.02753, Thm 3.11), so each sum is within ``p^2 gamma_n
-    ||A^-1||_2``.
+    Jacobi equilibration ``A`` of ``Q' H_c Q``.  Three perturbations of
+    ``H``, each entrywise in ``sqrt(H_ii H_jj)``, separate the two: the
+    reference's centred Gram rounds within ``gamma_n``; the fit's factor
+    route, a Householder QR of ``[sqrt(W) X_c; R]`` (``n + 2`` rows), has the
+    columnwise backward error ``gamma~_((n+2)p) ||f_j||`` (Higham 2002, Thm
+    19.4; ``gamma~_k = gamma_(10k)``, the constant of order 10 his Problem
+    19.2 gives a computed Householder matrix); and ``R'R`` is ``S`` only
+    within the root's ``resolution``, in ``sqrt(S_ii S_jj) <= sqrt(H_ii
+    H_jj)``.  Each moves each of the ``p`` eigenvalues by at most ``||A^-1||_2
+    p eta`` relatively (Drmac 2020, arXiv:2006.02753, Thm 3.11), so each sum
+    is within ``p^2 (gamma_n + gamma~_((n+2)p) + resolution) ||A^-1||_2``
+    (the bound covered the reference alone: Claude review of #425, Low).
     """
     eps = float(np.finfo(np.float64).eps)
     S = _GradedPenaltyPair.penalty
@@ -1206,10 +1213,229 @@ def test_penalty_factor_cuts_a_graded_block_on_its_equilibration() -> None:
     edf = 1.0 + np.trace(np.linalg.solve(A, data / np.outer(diagonal, diagonal)))
     p = len(A)
     gamma = n * eps / (1.0 - n * eps)
-    bound = p**2 * gamma * float(np.linalg.norm(np.linalg.inv(A), 2))
+    rows = 10 * (n + 2) * p
+    householder = rows * (eps / 2.0) / (1.0 - rows * (eps / 2.0))
+    bound = p**2 * (gamma + householder + resolution) * float(np.linalg.norm(np.linalg.inv(A), 2))
     assert model.result.converged
     assert abs(float(model.result.log_det_H) - log_det) <= bound
     assert abs(float(model.result.effective_df) - edf) <= bound
+
+
+def _second_difference(k: int, order: int = 2) -> np.ndarray:
+    D = np.diff(np.eye(k), n=order, axis=0)
+    return D.T @ D
+
+
+def _coupled_graded_block(lam2: float) -> np.ndarray:
+    """``1e10 D'D (x) I + lam2 I (x) Q' M Q``: a coupled second-difference margin, rank 60 of 64."""
+    k = 8
+    rotation, _ = np.linalg.qr(np.random.default_rng(0).normal(size=(k, k)))
+    margin = np.diag(np.r_[0.0, 0.0, np.linspace(1.0, 50.0, k - 2)])
+    S = 1e10 * np.kron(_second_difference(k), np.eye(k)) + lam2 * np.kron(
+        np.eye(k), rotation.T @ margin @ rotation
+    )
+    return 0.5 * (S + S.T)
+
+
+def _kronecker_sum(k: int, ratio: float) -> np.ndarray:
+    S = ratio * np.kron(_second_difference(k), np.eye(k)) + np.kron(
+        np.eye(k), _second_difference(k)
+    )
+    return 0.5 * (S + S.T)
+
+
+def _resolved_modes(S: np.ndarray) -> int:
+    """Eigenvalues of the Jacobi equilibration certainly above its resolution ``c = n eps ||A||_2``.
+
+    The root's own eigensolver and this one each sit within ``c`` of the exact
+    eigenvalue (LAPACK Users' Guide, 3rd ed., section 4.7, with ``p(n) = n``),
+    so a value above ``3c`` here is above ``c`` there: the root keeps at least
+    this many modes, whatever either run's rounding.
+    """
+    scale = np.sqrt(np.diag(S))
+    values = np.linalg.eigvalsh(0.5 * (S / np.outer(scale, scale) + (S / np.outer(scale, scale)).T))
+    cut = len(S) * float(np.finfo(np.float64).eps) * float(np.max(np.abs(values)))
+    return int(np.count_nonzero(values > 3.0 * cut))
+
+
+@pytest.mark.parametrize(
+    ("S", "rank"),
+    [
+        (_coupled_graded_block(1e-1), 60),
+        (_coupled_graded_block(1e-2), 60),
+        (_coupled_graded_block(1e-3), 60),
+        (_kronecker_sum(8, 1e11), 60),
+        (_kronecker_sum(12, 1e10), 140),
+        (_kronecker_sum(12, 1e11), 140),
+        (_second_difference(300, 3), 297),
+        (_second_difference(200, 4), 196),
+    ],
+    ids=[
+        "coupled-1e-1",
+        "coupled-1e-2",
+        "coupled-1e-3",
+        "kron8-1e11",
+        "kron12-1e10",
+        "kron12-1e11",
+        "d3-k300",
+        "d4-k200",
+    ],
+)
+def test_penalty_factor_keeps_every_mode_its_eigensolver_resolves(S, rank) -> None:
+    """A coupled graded block keeps each mode its eigensolver resolves, and no exact null.
+
+    One coupled block per case (no diagonal margin splits it): a coupled
+    second-difference margin at ``1e10`` beside a rotated one, Kronecker sums
+    of second differences at ratios ``1e10`` and ``1e11``, and exact integer
+    ``D_m'D_m``.  The root keeps the eigenvalues of ``A = D S D`` above
+    ``c = n eps ||A||_2``, so its rows lie between the modes certainly above
+    ``c`` (``_resolved_modes``, above ``3c`` in another run) and the exact
+    rank (an exact null computes within ``c`` of zero).  Where every mode is
+    resolved the two meet and the count is the exact rank; three cases keep
+    modes within a few ``c`` of the cut, and only the bracket is certified
+    there (Claude review of 52c6b730).  Fails on b5080877, whose cut added the
+    worst-case formation term ``n gamma_(2n+7)``: 58 and 52 rows on the
+    coupled block at ``1e-2`` and ``1e-3``, 137 of 140 on the Kronecker sum,
+    296 of 297 on ``D_3'D_3`` (Opus review of #440, P2).  Mutation: the cut
+    raised to ``n gamma_(2n+7)`` or ``sqrt(n) gamma_(2n+7)`` above the
+    eigensolver's.
+    """
+    rows = penalty_factor(S).shape[0]
+    assert _resolved_modes(S) <= rows <= rank
+
+
+def test_penalty_factor_keeps_a_reml_tensors_curvature_at_extreme_lambdas() -> None:
+    """A 529-column REML tensor penalty keeps its 528 resolved modes at lambdas REML can reach.
+
+    ``build_penalty_matrix`` of an ``nk = 20`` tensor at ``(1e8, 1e-6)`` and
+    ``(1e10, 1e-4)``, inside REML's ``[1e-6, 1e10]`` clip.  b5080877 kept 507
+    rows (the formation term in the cut, Opus review of #440, P2).
+    """
+    import warnings
+
+    from superglm import Spline
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    rng = np.random.default_rng(1)
+    n = 4000
+    x1, x2 = rng.uniform(size=n), rng.uniform(size=n)
+    mu = np.sin(2 * np.pi * x1) + np.cos(2 * np.pi * x2) + 2.0 * (x1 - 0.5) * np.sin(4 * np.pi * x2)
+    frame = pd.DataFrame({"x1": x1, "x2": x2})
+    model = SuperGLM(
+        family="gaussian",
+        features={"x1": Spline(n_knots=20), "x2": Spline(n_knots=20)},
+        interactions=[("x1", "x2")],
+        selection_penalty=0,
+        direct_solve="gram",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, mu + rng.normal(0, 0.3, n), max_reml_iter=1)
+    group = next(group for group in model._groups if group.name == "x1:x2")
+    for lam1, lam2 in ((1e8, 1e-6), (1e10, 1e-4)):
+        lambdas = {"x1": 1.0, "x2": 1.0, "x1:x2:margin_x1": lam1, "x1:x2:margin_x2": lam2}
+        S = build_penalty_matrix(
+            model._dm.group_matrices, model._groups, lambdas, model._dm.p, model._reml_penalties
+        )
+        block = S[group.sl, group.sl]
+        rows = penalty_factor(block).shape[0]
+        assert rows == _resolved_modes(block) == block.shape[0] - 1
+
+
+def test_penalty_factor_keeps_a_graded_tensor_blocks_curvature() -> None:
+    """A Kronecker-sum block with a ``1e10`` margin keeps all 60 of its curvatures.
+
+    ``1e10 D1 (x) I + lambda2 I (x) Q'D2 Q`` (diagonal margins with two exact
+    nulls each, the second rotated) has exact rank ``60`` of ``64`` at
+    ``lambda2 = 1e-3`` and ``1e-5``.  The unscaled cut ``n eps ||S||_2`` of
+    623230ac kept 58 and 48.  The diagonal margins split it into eight
+    blocks; the coupled cases are the test above.
+    """
+    rng = np.random.default_rng(0)
+    k = 8
+    margin = np.diag(np.r_[0.0, 0.0, np.linspace(1.0, 50.0, k - 2)])
+    rotation, _ = np.linalg.qr(rng.normal(size=(k, k)))
+    for lam2 in (1e-3, 1e-5):
+        S = 1e10 * np.kron(margin, np.eye(k)) + lam2 * np.kron(
+            np.eye(k), rotation.T @ margin @ rotation
+        )
+        assert penalty_factor(0.5 * (S + S.T)).shape[0] == 60
+
+
+def _clustered_spline_fit():
+    """Sol's #434 fixture: a quadratic P-spline on ``x`` within ``1e-8`` of 0.5, beside ``x`` itself."""
+    a = np.linspace(-1.0, 1.0, 80)
+    x = 0.5 + 1e-8 * a
+    y = 1.0 + 0.4 * a + 0.1 * np.cos(np.arange(80))
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": PSpline(n_knots=0, degree=2, m=2, boundary=(-1.0, 2.0), knot_strategy="uniform"),
+            "u": Numeric(),
+        },
+        selection_penalty=0,
+        spline_penalty=1e-6,
+        direct_solve="gram",
+    )
+    model.fit(pd.DataFrame({"x": x, "u": x}), y)
+    return model
+
+
+def test_a_fixed_lambda_penalty_keeps_its_constructions_null_space() -> None:
+    """The fixed-lambda penalty of a whitened spline has the rank its construction declares (#434).
+
+    The spline's three coefficients carry a second-difference penalty of rank
+    one.  Its data whiten to a basis ``R_inv`` whose entries (near ``7e3``)
+    cancel, and the congruence ``R_inv' Omega R_inv`` rounded within
+    ``gamma_k |R_inv|'|Omega||R_inv|`` (Higham 2002, eq. 3.13), ``6.7e-11`` of
+    the scaled block: a rounding eigenvalue of ``1.2e-14`` cleared the cut,
+    and its root row (``1e-7``, above the factor's ``sqrt(eps)`` cut)
+    identified the exact data null that ``u = x`` makes with the spline:
+    augmented rank 3 and log|H| -66.92 on a2a909ef.  The penalty is now the
+    Gram of the transported rank-one root, so the root has one row and the
+    fit's rank is the dense reference's, 2 (plus the intercept).
+
+    The reference is ``log n + log pdet(H_c)`` from the top two eigenvalues
+    of ``H_c = X_c'X_c + lambda (w R_inv)'(w R_inv)``, ``w = Omega[:, 0] /
+    sqrt(Omega_00)`` the root of the rank-one ``Omega``.  The two sides
+    perturb ``H_c`` by at most ``eta tr(H_c)`` in the 2-norm (the reference's
+    Gram, ``gamma_(n+3)``; the fit's Householder QR of ``n + 3`` rows, twice
+    ``gamma~_((n+3)p)`` with ``gamma~_k = gamma_(10k)``, Higham 2002, Thm
+    19.4; the root's formation, ``gamma_(2p+7)``), which moves each kept
+    eigenvalue ``mu_i`` by at most that (Weyl), so ``log mu_i`` by at most
+    ``-log(1 - eta tr(H_c) / mu_i)``.  Mutation: ``build_penalty_matrix``
+    forming the congruence as a2a909ef did, ``lam * R_inv.T @ omega @
+    R_inv`` (whether a direct congruence's rounding lands above the cut
+    depends on its order of operations; this one's does).
+    """
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    eps = float(np.finfo(np.float64).eps)
+    model = _clustered_spline_fit()
+    dm = model._dm
+    spline = dm.group_matrices[0]
+    S = build_penalty_matrix(dm.group_matrices, model._groups, 1e-6, dm.p)
+    assert penalty_factor(S).shape[0] == 1
+    assert model.result.reml_hessian_rank == dm.p  # rank 2 of 3, plus the intercept
+
+    n, p = 80, dm.p
+    X = dm.toarray()
+    X_c = X - X.mean(axis=0)
+    omega = spline.omega
+    w = omega[:, 0] / np.sqrt(omega[0, 0])
+    root = np.sqrt(1e-6) * (w @ spline.R_inv)
+    hessian = X_c.T @ X_c
+    hessian[:2, :2] += np.outer(root, root)
+    top = np.linalg.eigvalsh(hessian)[1:]
+    reference = np.log(n) + float(np.sum(np.log(top)))
+
+    def gamma(k):
+        return k * (eps / 2.0) / (1.0 - k * (eps / 2.0))
+
+    eta = gamma(n + 3) + 2.0 * gamma(10 * (n + 3) * p) + gamma(2 * p + 7)
+    shift = eta * float(np.trace(hessian))
+    bound = float(-np.sum(np.log1p(-shift / top)))
+    assert abs(float(model.result.log_det_H) - reference) <= bound
 
 
 @pytest.mark.parametrize(

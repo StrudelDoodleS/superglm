@@ -242,7 +242,13 @@ class _PowerProfile:
         )
         # The clone follows the model's retain_fit_state; a released fit keeps
         # its coefficients but not its fitted mean.
-        mu = clone._fit_mu if clone._retain_fit_state else clone.predict(self.X, self.offset)
+        if clone._retain_fit_state:
+            mu = clone._fit_mu
+        else:
+            from superglm.model import base
+
+            # predict's values without its warning: a library evaluation (#440 review)
+            mu = base.predict_exact(clone, self.X, self.offset, warn=False)
         # None for a model with no REML-eligible term: fit_reml is an ordinary fit.
         return mu, bool(clone.result.converged), clone._reml_result
 

@@ -166,7 +166,63 @@ population = model.predict(test, random_effects="population")
 
 `random_effects="population"` removes `RandomEffect` and `FactorSmooth`
 contributions while retaining fixed effects and the global spline. For SZ,
-that is exactly the global curve.
+that is the global curve, adjusted as described next when the training data
+cannot identify some levels.
+
+### SZ levels the data cannot identify
+
+Some SZ levels do not carry enough information for their whole curve:
+
+- a level whose training rows all have zero weight;
+- a level with fewer distinct values of the smooth's variable than the
+  penalty leaves unpenalized (with the default `m=2`, a single distinct value).
+
+For such a level, part of its curve can trade places with the global curve
+without changing any fitted value, so the data do not decide that part. A
+`fit_reml` fit on the structured solver names these levels when it fits;
+every fit records them, and `predict` names them when it meets them. At
+prediction:
+
+- a level with data keeps the value its rows identify, so predictions on its
+  training rows reproduce the fit;
+- where its rows say nothing (with `m=2`, its slope), the level follows the
+  shape of the population curve;
+- a level without weight is predicted at the population value;
+- each call to `predict` that meets such a level warns once and names it;
+- every other level predicts exactly as fitted.
+
+The population curve is the one around which the identified levels'
+unpenalized parts (straight lines, with `m=2`) average to zero, as if the
+other levels were not in the model. `factor_smooth()`, `reconstruct_feature()`
+and `relativities()` report on the same footing: each level's curve is its
+deviation from the population curve, and the global curve is the population
+curve.
+
+If every level is in this position, no level identifies the population curve.
+Its unpenalized part is then set by a convention: each level's unidentified
+part is zero. Away from the levels' own values, the curves still depend on
+where the fit landed along the global smooth's unpenalized curve, wherever
+that curve is not a polynomial. The fit warns.
+
+To give a level its own curve, give it weighted rows at enough distinct values.
+
+### SZ levels whose line separates the response
+
+Under a log link with zero responses (Poisson, Tweedie, negative binomial), or
+under a binomial link, an SZ level's unpenalized straight line can separate
+the response. Two examples are a level with no claims, and a level whose claims
+all sit at one value of the variable with its other rows to one side. The
+likelihood then keeps increasing along that line, so the level's fitted values
+move toward zero (or one) for as long as the fit runs.
+
+- The fit warns with a `SeparationWarning` that names these levels.
+- `separation="ignore"` silences the warning; `separation="error"` does not
+  refuse the fit for this case.
+- The population curve leaves these levels out of its average, so it does not
+  follow their lines.
+
+To give such levels finite estimates, merge them into neighbouring levels or
+model the group with a `RandomEffect`.
 
 ## Separated cells: exposure without response
 

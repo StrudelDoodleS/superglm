@@ -431,6 +431,1257 @@ def test_sz_aliased_levels_converge_under_reml(variant) -> None:
     assert model._reml_result.termination_reason != "line_search_failed"
 
 
+_UNIDENTIFIED = {"weightless": ("g003", "g007"), "one_row": ("g000", "g001"), "same_x": ("g005",)}
+
+
+def _thin_warnings(caught) -> list:
+    return [w for w in caught if "follow the population" in str(w.message)]
+
+
+def _fitted_eta(model: SuperGLM) -> np.ndarray:
+    """The fit's own linear predictor on its training rows."""
+    from superglm.links import stabilize_eta
+    from superglm.solvers.mode_score import linear_predictor
+
+    solver = model._solver_pirls_result()
+    return stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
+
+
+def _sz_rule(spec, beta: np.ndarray):
+    """``_sz_rule_blocks`` on the term's free coefficients."""
+    return _sz_rule_blocks(spec, spec._level_blocks(beta))
+
+
+def _sz_rule_blocks(spec, blocks: np.ndarray):
+    """``(blocks, predicted blocks, c)`` of the ``sz`` term, and the rule's float64 magnitude.
+
+    ``beta_t' = beta_t - F F' (beta_t - c)`` and ``c = sum_i V_i beta_i``
+    (``FactorSmooth._identified_blocks``): each entry is within
+    ``gamma_(K k + 4 k)`` of ``|beta_t| + |c| + |F| |F'| (|beta_t| + |c|)``
+    with ``|c|`` itself bounded by ``sum_i |V_i| |beta_i|`` (Higham 2002,
+    section 3.5); returned per level, ``(K, k)``.
+    """
+    predicted, offset = spec._identified_blocks(blocks)
+    mapping = spec._population_map()
+    reach = np.zeros(blocks.shape[1])
+    if mapping is not None:
+        levels, V = mapping
+        stacked = np.broadcast_to(np.abs(V), (len(levels), *V.shape[-2:]))
+        reach = np.einsum("lij,lj->i", stacked, np.abs(blocks[levels]))
+    magnitude = np.abs(blocks) + np.abs(predicted) + reach[None, :]
+    for level, free in zip(spec._unidentified_levels, spec._free_directions, strict=True):
+        F = np.abs(np.asarray(free))
+        magnitude[level] += F @ (F.T @ (np.abs(blocks[level]) + reach))
+    return blocks, predicted, offset, magnitude
+
+
+def _eta_magnitude(model: SuperGLM, frame: pd.DataFrame) -> np.ndarray:
+    """Per row, the magnitudes every float64 operation of ``predict`` and of the fit touches.
+
+    ``|alpha|``, each spline's ``|T(x)| |gamma|``, the ``sz`` term's
+    ``|b(x)|`` against ``_sz_rule``'s magnitude of its level, and any other
+    term's one product or coefficient: any order of the predictor's ``p``
+    products and sums is then within ``gamma_(p + K k + 4 k + 2)`` of it
+    (Higham 2002, sections 3.1 and 3.5).
+    """
+    from superglm._frame import as_eager_frame
+    from superglm.features.spline import _SplineBase
+    from superglm.model.base import _prediction_plan, _score_prediction_term_exact
+
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    eager = as_eager_frame(frame)
+    total = np.full(len(frame), abs(float(model.result.intercept)))
+    centred = getattr(model.result, "centred_intercept", None)
+    if centred is not None:
+        total += abs(float(centred))
+    centre = getattr(model.result, "state_center", None)
+    if centre is not None:
+        total += float(np.abs(np.asarray(centre)) @ np.abs(beta))
+    plan = _prediction_plan(model)
+    for term in plan["features"] + plan["interactions"]:
+        spec = term["spec"]
+        coefficients = beta[term["beta_idx"]]
+        if isinstance(spec, _SplineBase):
+            columns = np.abs(spec.transform(frame[term["name"]].to_numpy(dtype=float)))
+            total += columns @ np.abs(coefficients)
+        elif isinstance(spec, FactorSmooth):
+            _, _, _, magnitude = _sz_rule(spec, coefficients)
+            codes = pd.Index(spec._levels).get_indexer(frame["g"].to_numpy())
+            basis = np.abs(spec.marginal_basis(frame["x"].to_numpy(dtype=float)))
+            total += np.einsum("ij,ij->i", basis, magnitude[np.maximum(codes, 0)])
+        else:
+            total += np.abs(_score_prediction_term_exact(term, eager, beta))
+    return total
+
+
+def _own_row_misfit(model: SuperGLM, frame: pd.DataFrame, weight: np.ndarray) -> np.ndarray:
+    """Per row, how far a thin level's rule may move its own rows in exact arithmetic.
+
+    ``b(x_i)' F F' (beta_t - c)`` is zero where the free directions ``F``
+    are the exact null space of the level's distinct rows on ``N_P``; the
+    computed ``F`` is that of the rows perturbed by the SVD's backward error,
+    ``m u ||E_t||_2`` (this module's eigensolver convention), so the term is
+    within that times ``||F' (beta_t - c)||_2``.
+    """
+    spec = model._interaction_specs["x:g:sz"]
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks, _, offset, _ = _sz_rule(spec, np.asarray(model.result.beta[group.sl]))
+    nullity = spec._population_null_space.shape[1]
+    codes = pd.Index(spec._levels).get_indexer(frame["g"].to_numpy())
+    misfit = np.zeros(len(frame))
+    for level, free in zip(spec._unidentified_levels, spec._free_directions, strict=True):
+        rows = (codes == level) & (weight > 0.0)
+        if not np.any(rows):
+            continue
+        seen = spec.marginal_basis(frame["x"].to_numpy(dtype=float)[rows])
+        seen = np.unique(seen, axis=0) @ spec._population_null_space
+        size = nullity * _U * float(np.linalg.norm(seen, 2))
+        misfit[rows] = size * float(np.linalg.norm(np.asarray(free).T @ (blocks[level] - offset)))
+    return misfit
+
+
+def _rounding_bound(model: SuperGLM, frame: pd.DataFrame) -> np.ndarray:
+    spec = model._interaction_specs["x:g:sz"]
+    count = model._dm.p + len(spec._levels) * spec.k + 4 * spec.k + 2
+    return _gamma(count) * _eta_magnitude(model, frame)
+
+
+@pytest.mark.parametrize(
+    ("variant", "response", "solve"),
+    [
+        ("weightless", "signed", "auto"),
+        ("weightless", "fisher", "auto"),
+        ("weightless", "fisher", "gram"),
+        ("one_row", "signed", "auto"),
+        ("same_x", "fisher", "auto"),
+    ],
+)
+def test_thin_sz_levels_keep_what_their_rows_identify(variant, response, solve) -> None:
+    """A thin level keeps the fit at its own rows; one without weight takes the population (#432 a).
+
+    Two weightless levels, two one-row levels or one level at a single ``x``
+    leave part of each level's polynomial deviation free: shifting it, every
+    level the other way by ``1 / K`` and the main effect with them keeps every
+    other level's curve and every level's fit at its own rows, so the fit's
+    coefficients hold an arbitrary point of that family.  The level keeps
+    what its rows identify and takes the population's part where they say
+    nothing, ``beta_t - Pi_t (beta_t - c)`` (owner decision 2026-10-01; the
+    Opus and Claude reviews): ``predict`` on the training rows is the fit's
+    own predictor to its rounding (``_rounding_bound`` for each predictor,
+    ``_own_row_misfit`` for the free directions' backward error), as on
+    master, with one warning per call naming the levels; a level without
+    weight predicts the population value exactly.  On b5080877 the whole
+    deviation went to the population: g005's 132 rows at ``x = 0.37``
+    predicted 0.3508 against a mean response and fit of 0.0562.  Recorded
+    from the design and prior weights, so gram fits alike.  Mutation: every
+    thin level's deviation set to the population offset.
+    """
+    from superglm.model import base
+
+    frame, y, weight = _signed_aliased_frame(variant, response=response)
+    family = "gaussian" if response == "fisher" else "gaussian_log"
+    model = _fit(_model(family, solve, lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    expected = _UNIDENTIFIED[variant]
+    assert spec._unidentified_level_names == expected
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        eta = base.predict_eta_exact(model, frame)
+    named = _thin_warnings(caught)
+    assert len(named) == 1
+    assert all(level in str(named[0].message) for level in expected)
+    positive = weight > 0.0
+    bound = 2.0 * _rounding_bound(model, frame) + _own_row_misfit(model, frame, weight)
+    assert np.all(np.abs(eta - _fitted_eta(model))[positive] <= bound[positive])
+    population = base.predict_eta_exact(model, frame, random_effects="population", warn=False)
+    weightless = np.isin(frame["g"].to_numpy(), expected) & ~positive
+    assert np.array_equal(eta[weightless], population[weightless])
+
+
+def _family_shift(spec, blocks: np.ndarray, levels, scale: float, seed: int = 0) -> tuple:
+    """Move every given level along a free direction: ``r_t`` in, ``-R / K`` from every level.
+
+    ``r_t = F_t a_t`` for a thin level (``_free_directions``) and any
+    ``N_P a_t`` for a separated one; ``R = sum_t r_t``.  The main effect then
+    moves by ``+b(x)' R / K``, so ``predict`` is unchanged when every
+    predicted block, and ``c``, moves by ``-R / K``.  Returns the shifted
+    blocks and ``R / K``.
+    """
+    rng = np.random.default_rng(seed)
+    free = dict(zip(spec._unidentified_levels, spec._free_directions, strict=True))
+    shifted = np.array(blocks, copy=True)
+    total = np.zeros(blocks.shape[1])
+    for level in levels:
+        directions = np.asarray(free.get(level, spec._population_null_space))
+        r = directions @ rng.normal(size=directions.shape[1])
+        r *= scale / np.linalg.norm(r)
+        shifted[level] += r
+        total += r
+    shifted -= total[None, :] / len(blocks)
+    return shifted, total / len(blocks)
+
+
+def _assert_rule_follows(spec, blocks: np.ndarray, shifted: np.ndarray, step: np.ndarray, keep=()):
+    """``predicted' + R / K == predicted`` and ``c' + R / K == c``, to the rule's rounding.
+
+    Each side is within ``gamma_(K k + 4 k)`` of its ``_sz_rule`` magnitude,
+    and the shift's own two roundings add ``gamma_2 (|blocks| + |R / K|)``.
+    ``keep`` are levels whose own curve legitimately moves (a separated line).
+    """
+    count = len(blocks) * blocks.shape[1] + 4 * blocks.shape[1] + 2
+    _, before, c0, m0 = _sz_rule_blocks(spec, blocks)
+    _, after, c1, m1 = _sz_rule_blocks(spec, shifted)
+    slack = _gamma(count) * (m0 + m1) + _gamma(2) * (np.abs(blocks) + np.abs(step)[None, :])
+    moved = np.abs(after + step[None, :] - before)
+    rows = [level for level in range(len(blocks)) if level not in set(keep)]
+    assert np.all(moved[rows] <= slack[rows])
+    assert np.all(np.abs(c1 + step - c0) <= np.max(slack, axis=0))
+
+
+@pytest.mark.parametrize("variant", ["same_x", "one_row", "weightless"])
+def test_sz_predictions_do_not_move_along_the_alias_family(variant) -> None:
+    """Shifting the fit along a thin level's alias moves no prediction (#432 a; Claude review).
+
+    The family: ``r_t`` in a thin level's free directions, ``-R / K`` from
+    every level, ``+b(x)' R / K`` into the main effect.  ``predict`` is
+    ``main + b(x)' beta'_t`` and the population ``main + b(x)' c``, so neither
+    moves when every predicted block and ``c`` move by ``-R / K``: checked to
+    the rule's rounding with a shift as large as the coefficients
+    themselves.  Mutations: ``c`` the mean over every level (zero by the
+    constraint), or no offset at all.
+    """
+    frame, y, weight = _signed_aliased_frame(variant, response="fisher")
+    model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    scale = float(np.max(np.abs(blocks)))
+    shifted, step = _family_shift(spec, blocks, spec._unidentified_levels, scale)
+    _assert_rule_follows(spec, blocks, shifted, step)
+
+
+def _all_thin_frame():
+    """The Sol review's reproduction: ten levels, each with 100 rows at one ``x``."""
+    rng = np.random.default_rng(4)
+    x = np.repeat(np.linspace(0.01, 0.99, 10), 100)
+    y = np.sin(4 * x) + 0.2 * rng.normal(size=1000)
+    frame = pd.DataFrame({"x": x, "g": np.repeat([f"g{i}" for i in range(10)], 100)})
+    return frame, y
+
+
+def _all_thin_model(solve: str = "auto") -> SuperGLM:
+    return SuperGLM(
+        family="gaussian",
+        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+            )
+        ],
+        selection_penalty=0,
+        direct_solve=solve,
+    )
+
+
+def test_an_sz_term_whose_every_level_is_thin_reproduces_its_fit() -> None:
+    """Every level at one ``x``: the canonical population, a warning, and the fit kept (#432 b).
+
+    No level identifies the population curve, so ``_population_offset`` was
+    zero and every level's deviation went to it: the conditional training
+    predictions spanned -260702 to 260703 on b5080877 against master's -0.726
+    to 0.954 (Codex and Sol reviews, P1).  The population is now the family's
+    canonical point, where each level's free part is zero, named in a warning
+    at fit; the predictions on the training rows are the fit's own to their
+    rounding, and the rule follows the family there as well.
+    """
+    from superglm.model import base
+
+    frame, y = _all_thin_frame()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _all_thin_model().fit_reml(frame, y)
+    assert [w for w in caught if "fixed by convention" in str(w.message)]
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._population_convention == "canonical"
+    eta = base.predict_eta_exact(model, frame, warn=False)
+    weight = np.ones(len(frame))
+    bound = 2.0 * _rounding_bound(model, frame) + _own_row_misfit(model, frame, weight)
+    assert np.all(np.abs(eta - _fitted_eta(model)) <= bound)
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    shifted, step = _family_shift(spec, blocks, (0, 4, 9), float(np.max(np.abs(blocks))))
+    _assert_rule_follows(spec, blocks, shifted, step)
+
+
+def test_the_all_thin_border_decision_does_not_follow_the_penalty_products_rounding(
+    monkeypatch,
+) -> None:
+    """The border's rank decision beside a near-null alias holds at every rounding of the products.
+
+    Every level thin: the one penalized alias the border deflates has penalty
+    curvature ``a_NN = 2e-10`` against ``|N|'|S||N|`` near ``1e-3``, and the
+    elimination multiplied the products' rounding by ``a_MN a_NN^-1``, which
+    the column bound left out.  Its truncated subspace then carried Ritz values
+    from -8.7e-11 to +6e-11 (scaled) with BLAS's kernel: the fit refused on
+    OpenBLAS's Haswell, Zen, Sandybridge, Nehalem and Prescott kernels, on
+    Windows and on ARM64, and passed on SkylakeX alone (CI at 52c6b730).  The
+    bound now carries ``gamma_m |S||N|`` and ``gamma_(2m) |N|'|S||N|`` through
+    the elimination (``border._deflate``).  Check: the fit's own first border
+    inputs with the penalty under the congruence ``D S D``, ``D = diag(1 +
+    4 u xi)`` (exactly the same null structure, every product rounded anew),
+    give one decision and no refusal over 32 draws; on 52c6b730, 13 of 64
+    draws refused and the rest kept a rank the Haswell kernel did not.
+    """
+    import superglm.solvers._structured.balance_tree as tree_module
+
+    calls = []
+    original = tree_module.factor_border
+
+    def record(Q, S, U, generators, **kwargs):
+        if not calls:
+            calls.append((np.array(Q), np.array(S), np.array(U), generators, kwargs))
+        return original(Q, S, U, generators, **kwargs)
+
+    monkeypatch.setattr(tree_module, "factor_border", record)
+    frame, y = _all_thin_frame()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _all_thin_model().fit_reml(frame, y)
+    Q, S, U, generators, kwargs = calls[0]
+    assert generators is not None and generators.count
+    decisions = set()
+    for seed in range(32):
+        xi = np.random.default_rng(seed).uniform(-1.0, 1.0, len(S))
+        D = 1.0 + 4.0 * _U * xi
+        factor = original(Q, D[:, None] * S * D[None, :], U, generators, **kwargs)
+        decisions.add((factor.certificate.rank, factor.null.shape[1]))
+    assert len(decisions) == 1
+
+
+@pytest.mark.parametrize("scale", [1e-140, 1e-160, 1e-300])
+def test_the_deflation_bound_keeps_a_contrast_beside_a_tiny_penalty(scale) -> None:
+    """The deflation's product bound is range-safe at tiny penalties (Sol review of 0ccab297, P2).
+
+    ``Q_d = 1e-3 [[1, -1], [-1, 1]]``, ``S = scale I`` and the generator
+    ``N = [1, 1]'``: the contrast is identified by the data alone.  On 0ccab297
+    the bound's ``t`` overflowed (``reach / spread`` near ``1e311`` at
+    ``1e-140``), or ``e_i^2`` underflowed into a spurious ``t = 1`` (a bound of
+    0.25 at ``1e-160``), so the contrast went to the null space (rank 0);
+    master keeps it.  ``_paired_majorant`` scales by ``e_max g_max`` and never
+    forms ``e_i^2`` or the quotient of the sums.
+    """
+    from superglm.solvers._structured.border import BorderGenerators, factor_border
+
+    Q_d = 1e-3 * np.array([[1.0, -1.0], [-1.0, 1.0]])
+    generators = BorderGenerators(matrix=np.array([[1.0], [1.0]]), references=np.array([0]))
+    border = factor_border(Q_d, scale * np.eye(2), np.zeros(2), generators, term_name="t")
+    assert border.certificate.rank == 1
+    assert border.null.shape[1] == 0
+
+
+def test_an_fs_fit_beside_a_random_effect_at_a_tiny_fixed_lambda_converges() -> None:
+    """The complete fit of the Sol review of 0ccab297: an fs term beside a near-unpenalized RE.
+
+    A three-level random effect at a fixed ``lambda = 1e-140`` and prior
+    weights ``1e-6``: its generator's penalty curvature is near ``1e-140``,
+    and on 0ccab297 the deflation bound overflowed, sent the identified
+    contrast to the null space and the fit stopped unconverged; master and
+    this branch converge to the same fit.
+    """
+    rng = np.random.default_rng(3)
+    n, K = 1200, 6
+    g = rng.integers(0, K, n)
+    h = rng.integers(0, 3, n)
+    x = rng.uniform(size=n)
+    y = np.sin(3 * x) + rng.normal(0, 0.3, K)[g] + np.array([0.2, -0.1, 0.05])[h]
+    y = y + rng.normal(0, 0.01, n)
+    frame = pd.DataFrame(
+        dict(
+            x=x,
+            g=np.char.add("g", g.astype(str)).astype(object),
+            h=np.char.add("h", h.astype(str)).astype(object),
+        )
+    )
+    policy = dict.fromkeys(("wiggle", "null_0", "null_1"), LambdaPolicy.fixed(1.0))
+    model = SuperGLM(
+        family="gaussian",
+        features=dict(h=RandomEffect(lambda_policy=LambdaPolicy.fixed(1e-140))),
+        interactions=[FactorSmooth("x", group="g", k=6, lambda_policy=policy)],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y, sample_weight=np.full(n, 1e-6))
+    assert bool(model.result.converged)
+
+
+def test_metrics_on_a_copy_of_the_training_rows_are_the_fits() -> None:
+    """``metrics`` reads the same deviance from the training frame and from a copy (#432; Sol P1).
+
+    The training frame's own object reuses the fit's means; a copy is
+    predicted.  On b5080877 the copy predicted the same-x level g00 (80 rows
+    at ``x = 0.37``, response 10) at the population value: deviance 6540.76
+    against 27.99.  Now ``predict`` keeps that level's fit, and the two agree
+    to the predictions' rounding ``rho`` (``_rounding_bound`` twice and
+    ``_own_row_misfit``): ``|D_1 - D_2| <= sum w (2 |y - mu| rho + rho^2)``
+    plus each sum's ``gamma_n D`` (identity link, ``mu = eta``).  Library
+    evaluations do not raise ``predict``'s warning (Opus review, P3).
+    """
+    rng = np.random.default_rng(4)
+    n = 800
+    g = np.repeat(np.arange(10), 80)
+    x = rng.uniform(size=n)
+    x[g == 0] = 0.37
+    y = np.sin(4 * x) + rng.normal(0, 0.2, n)
+    y[g == 0] = 10.0
+    frame = pd.DataFrame({"x": x, "g": np.array([f"g{i:02d}" for i in g], dtype=object)})
+    model = _all_thin_model("structured")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        own = model.metrics(frame, y).deviance
+        copied = model.metrics(frame.copy(), y.copy()).deviance
+    assert not _thin_warnings(caught)
+    weight = np.ones(n)
+    rho = 2.0 * _rounding_bound(model, frame) + _own_row_misfit(model, frame, weight)
+    residual = np.abs(y - _fitted_eta(model))
+    bound = float(np.sum(2.0 * residual * rho + rho * rho)) + 2.0 * _gamma(n) * own
+    assert abs(own - copied) <= bound
+
+
+@pytest.mark.parametrize(("variant", "solve"), [("weightless", "auto"), ("same_x", "gram")])
+def test_the_sz_population_is_the_identified_levels_mean(variant, solve) -> None:
+    """The population curve is the one the identified levels' polynomial deviations sum to zero from.
+
+    On a grid of ``x``, the identified levels' deviations from the population,
+    ``sum_l (eta_l - eta_pop) = b(x)' sum_l (beta_l - c)``, are recovered as
+    coefficients ``gamma`` by least squares on the term's basis ``b``; their
+    part in the penalty's null space ``N_P' gamma`` is zero (``c`` the
+    population offset, ``_population_offset``): as if the unidentified levels
+    were not in the model.  On a2a909ef it was minus the unidentified levels'
+    polynomial deviations, hundreds to thousands on these fits.  Bound: each
+    predictor's rounding ``gamma_(T+2)`` times the sum of its terms'
+    magnitudes ``M`` (``T`` terms), two predictors per row and ``L`` levels,
+    through ``||b^+||_2``, plus the least-squares solve's own backward error
+    ``k u kappa(b) ||gamma||``.  Fisher rows (identity link), the auto and
+    gram backends.
+    """
+    from superglm._frame import as_eager_frame
+    from superglm.model.base import _prediction_plan, _score_prediction_term_exact
+
+    frame, y, weight = _signed_aliased_frame(variant, response="fisher")
+    model = _fit(_model("gaussian", solve, lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    identified = [level for level in spec._levels if level not in spec._unidentified_level_names]
+    grid = np.linspace(0.02, 0.98, 3 * spec.k)
+    rows = pd.DataFrame(
+        {
+            "x": np.tile(grid, len(identified)),
+            "x1": 0.0,
+            "x10": 10.0,
+            "cat": frame["cat"].iloc[0],
+            "g": np.repeat(identified, len(grid)),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        deviations = model.predict(rows) - model.predict(rows, random_effects="population")
+    total = deviations.reshape(len(identified), len(grid)).sum(axis=0)
+    basis = spec.marginal_basis(grid)
+    gamma, *_ = np.linalg.lstsq(basis, total, rcond=None)
+    null_part = spec._population_null_space.T @ gamma
+
+    plan = _prediction_plan(model)
+    terms = plan["features"] + plan["interactions"]
+    eager = as_eager_frame(rows)
+    magnitude = abs(float(model.result.intercept)) + sum(
+        np.abs(_score_prediction_term_exact(term, eager, model.result.beta)) for term in terms
+    )
+    rounding = _gamma(len(terms) + 2) * float(np.max(magnitude))
+    singular = np.linalg.svd(basis, compute_uv=False)
+    bound = (2.0 * len(identified) * math.sqrt(len(grid)) * rounding) / singular[-1] + (
+        spec.k * _U * singular[0] / singular[-1] * float(np.linalg.norm(gamma))
+    )
+    assert float(np.max(np.abs(null_part))) <= bound
+
+
+def _clear_level_records(spec) -> None:
+    """The ``sz`` spec as if no level were thin or separated (the fit's own coordinates)."""
+    spec._unidentified_levels = ()
+    spec._free_directions = ()
+    spec._weightless_levels = ()
+    spec._separated_levels = ()
+    spec._population_null_space = None
+
+
+def test_library_evaluations_read_the_fits_own_predictor(monkeypatch) -> None:
+    """Library evaluations read the fit on its rows and ``predict``'s rule off them (Claude reviews).
+
+    On b5080877 screening, random-effect reporting and the discretization
+    baseline met the thin-level rule on the training rows, where it then
+    replaced the same-x level's fit with the population value.  The rule now
+    keeps that fit, and:
+
+    - ``random_effects()``, whose rows are the training rows by its guard,
+      reads the fit's own coefficients: its table is bit for bit the one with
+      no level recorded;
+    - screening and the discretization baseline read ``predict``'s predictor
+      (the Claude review of 52c6b730: the fit's raw coordinates gave a new
+      frame's thin levels the alias's arbitrary point back), checked on a
+      frame whose same-x level sits at a new ``x``;
+    - none of them raises ``predict``'s warning.
+
+    Mutations: the ``fitted`` switch ignored; screening on the fit's coordinates.
+    """
+    import superglm.model.screening_ops as screening_ops
+    from superglm.model import base
+
+    frame, y, weight = _signed_aliased_frame("same_x", response="fisher")
+    rng = np.random.default_rng(11)
+    frame["h"] = np.array([f"h{v}" for v in rng.integers(0, 10, len(frame))], dtype=object)
+    model = _fit(_random_effect_model("auto", (2462.0, 566.8, 16.28)), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._unidentified_level_names == ("g005",)
+
+    def reported() -> pd.DataFrame:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            table = model.random_effects("h", X=frame, y=y, sample_weight=weight).table
+        assert not _thin_warnings(caught)
+        return table
+
+    recorded = reported()
+    held = {
+        name: getattr(spec, name)
+        for name in (
+            "_unidentified_levels",
+            "_free_directions",
+            "_weightless_levels",
+            "_separated_levels",
+            "_population_null_space",
+        )
+    }
+    _clear_level_records(spec)
+    try:
+        cleared = reported()
+    finally:
+        for name, value in held.items():
+            setattr(spec, name, value)
+    pd.testing.assert_frame_equal(recorded, cleared, check_exact=True)
+
+    moved = frame.copy()
+    moved.loc[moved["g"] == "g005", "x"] = 0.8
+    seen = []
+    original = screening_ops.working_score
+
+    def capture(y_, mu, eta, *args, **kwargs):
+        seen.append(np.array(eta, copy=True))
+        return original(y_, mu, eta, *args, **kwargs)
+
+    monkeypatch.setattr(screening_ops, "working_score", capture)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.screen_interactions(moved, y, weight, candidates=[("x1", "cat")])
+        impact = model.discretization_impact(moved, y, weight, features=["x"])
+    assert not _thin_warnings(caught)
+    expected = base.predict_eta_exact(model, moved, warn=False)
+    assert seen and np.array_equal(seen[0], expected)
+    assert np.array_equal(impact.original_predictions, base.predict_exact(model, moved, warn=False))
+
+
+def _separated_poisson():
+    """A Poisson ``sz`` fit with a zero-claim level, a one-sided level and a two-sided one.
+
+    g000 has no claim; g001's claims all sit at ``x = 0.2`` with its other
+    rows above it (the line ``-(x - 0.2)`` separates); g002's claims sit at
+    ``x = 0.5`` with rows on both sides (no line separates).
+    """
+    rng = np.random.default_rng(21)
+    K, n = 12, 3600
+    g = rng.integers(0, K, n)
+    x = rng.uniform(size=n)
+    y = rng.poisson(np.exp(0.2 + np.sin(3 * x) + rng.normal(0, 0.3, K)[g])).astype(float)
+    y[g == 0] = 0.0
+    one, two = np.flatnonzero(g == 1), np.flatnonzero(g == 2)
+    x[one] = 0.25 + 0.7 * rng.uniform(size=len(one))
+    x[one[:3]] = 0.2
+    y[one] = 0.0
+    y[one[:3]] = 1.0
+    y[two] = 0.0
+    x[two[:3]] = 0.5
+    y[two[:3]] = 2.0
+    frame = pd.DataFrame({"x": x, "g": np.array([f"g{v:03d}" for v in g], dtype=object)})
+    return frame, y
+
+
+def _separated_model(separation: str = "warn") -> SuperGLM:
+    return SuperGLM(
+        family="poisson",
+        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+            )
+        ],
+        selection_penalty=0,
+        separation=separation,
+    )
+
+
+def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> None:
+    """A level whose unpenalized line separates the response is named, and stays out (Opus P2).
+
+    On pg17's make model 26 of 71 identified makes had no claim; their lines
+    walked toward ``-inf`` for as long as each fit ran, so the population
+    curve, the mean of the levels with them, sat at ``[-37, -9.6]`` (auto)
+    against ``[-80, 80]`` (gram).  The scan (``separated_factor_smooth_levels``)
+    names a zero-claim level and a one-sided one, not a level with claims
+    inside its rows, in a ``SeparationWarning`` (``separation="ignore"``
+    silences it and still leaves them out).  Along a separated line, ``d``
+    into the level and ``-d / K`` from every level, the population and every
+    other level do not move (``_assert_rule_follows``).  The binomial scan,
+    on the same design, finds the level whose ones all lie above its zeros
+    (the linear program's side).  Mutations: no scan; the separated levels
+    kept in the mean.
+    """
+    from superglm.diagnostics.separation import (
+        SeparationWarning,
+        separated_factor_smooth_levels,
+    )
+
+    frame, y = _separated_poisson()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _separated_model().fit_reml(frame, y)
+    spec = model._interaction_specs["x:g:sz"]
+    assert [spec._levels[code] for code in spec._separated_levels] == ["g000", "g001"]
+    named = [w for w in caught if "unpenalized line" in str(w.message)]
+    assert len(named) == 1
+    assert issubclass(named[0].category, SeparationWarning)
+    assert "'g000'" in str(named[0].message) and "'g001'" in str(named[0].message)
+    assert "'g002'" not in str(named[0].message)
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    shifted, step = _family_shift(spec, blocks, (0, 1), float(np.max(np.abs(blocks))))
+    _assert_rule_follows(spec, blocks, shifted, step, keep=(0, 1))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        quiet = _separated_model("ignore").fit_reml(frame, y)
+    assert not [w for w in caught if "unpenalized line" in str(w.message)]
+    assert quiet._interaction_specs["x:g:sz"]._separated_levels == spec._separated_levels
+
+    dm = model._dm.group_matrices[model._groups.index(group)]
+    codes = np.asarray(dm.codes)
+    binary = (y > 0).astype(float)
+    level = np.flatnonzero(codes == 3)
+    binary[level] = (frame["x"].to_numpy()[level] > 0.6).astype(float)
+    found = separated_factor_smooth_levels(
+        dm, spec._population_null_space, None, binary, ("zero", "one")
+    )
+    assert 3 in found and 2 not in found
+
+
+def test_an_sz_model_saved_before_the_record_predicts_as_refitted() -> None:
+    """A v0.35.0 or master pickle records its thin levels at the first prediction (Opus P3).
+
+    Their specs carry no record, and on b5080877 they predicted bit for bit
+    as before, silently (the one-row model's population spanned 1.8e-35 to
+    5.5e34).  The fit's design and prior weights, which such a model keeps,
+    rebuild the record: the loaded model predicts as the fitted one, bit for
+    bit, and names the levels.
+    """
+    import pickle
+
+    from superglm.model import base
+
+    frame, y, weight = _signed_aliased_frame("one_row", response="fisher")
+    model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    expected = base.predict_eta_exact(model, frame, warn=False)
+    population = base.predict_eta_exact(model, frame, random_effects="population", warn=False)
+    spec = model._interaction_specs["x:g:sz"]
+    for name in (
+        "_unidentified_levels",
+        "_free_directions",
+        "_weightless_levels",
+        "_separated_levels",
+        "_population_null_space",
+    ):
+        delattr(spec, name)
+    loaded = pickle.loads(pickle.dumps(model))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        eta = base.predict_eta_exact(loaded, frame)
+    assert _thin_warnings(caught)
+    assert np.array_equal(eta, expected)
+    assert np.array_equal(
+        base.predict_eta_exact(loaded, frame, random_effects="population", warn=False), population
+    )
+
+
+@pytest.mark.parametrize("variant", ["weightless", "one_row"])
+def test_sz_reports_agree_with_the_population_prediction(variant) -> None:
+    """``factor_smooth``, ``reconstruct_feature`` and ``relativities`` report what ``predict`` does.
+
+    With levels left out of the population a level's curve is ``predict(level)
+    - predict(population)`` and the global curve the population's
+    (``_population_deviations``, ``with_population_curve``).  On b5080877
+    ``factor_smooth`` showed the fit's coordinates: identified g000 from -379
+    to +316 where the predictions differ by -0.13 to -0.21, and weightless
+    g003 about +-5000 against a predicted deviation of exactly zero (Opus
+    review, P2).  Checked on training ``x`` values to the predictions'
+    rounding (``_rounding_bound`` for each predictor and ``gamma_k`` for the
+    reported product); a weightless level's curve and its error are zero.
+    Mutation: the reports unshifted.
+    """
+    from superglm.model import base
+
+    frame, y, weight = _signed_aliased_frame(variant, response="fisher")
+    model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    xs = np.sort(frame["x"].to_numpy()[:: len(frame) // 25])
+    levels = list(dict.fromkeys(["g000", "g002", *spec._unidentified_level_names]))
+    result = model.factor_smooth("x:g:sz", grid=xs, levels=levels)
+    reconstructed = model.reconstruct_feature("x:g:sz")["coefficients"]
+    k = spec.k
+    for level in levels:
+        rows = pd.DataFrame(
+            {"x": xs, "x1": 0.0, "x10": 10.0, "cat": frame["cat"].iloc[0], "g": level}
+        )
+        own = base.predict_eta_exact(model, rows, warn=False)
+        population = base.predict_eta_exact(model, rows, random_effects="population", warn=False)
+        bound = _rounding_bound(model, rows) + _rounding_bound(model, rows.assign(g="unseen-level"))
+        curve = result.curves[result.curves["level"] == level]
+        effect = curve["effect"].to_numpy()
+        basis = spec.marginal_basis(xs)
+        product = basis @ reconstructed[level]
+        assert np.all(
+            np.abs(effect - (own - population))
+            <= bound + _gamma(k) * np.abs(basis) @ np.abs(reconstructed[level])
+        )
+        assert np.all(
+            np.abs(product - effect)
+            <= 2.0 * _gamma(k) * np.abs(basis) @ np.abs(reconstructed[level])
+        )
+        if level in spec._levels and spec._levels.index(level) in spec._weightless_levels:
+            assert np.all(effect == 0.0)
+            assert np.all(curve["posterior_se"].to_numpy() == 0.0)
+
+    relativity = model.relativities()["x"]
+    grid = relativity["x"].to_numpy()
+    rows = pd.DataFrame(
+        {"x": grid, "x1": 0.0, "x10": 10.0, "cat": frame["cat"].iloc[0], "g": "unseen-level"}
+    )
+    population = base.predict_eta_exact(model, rows, random_effects="population", warn=False)
+    reported = relativity["log_relativity"].to_numpy()
+    drift = (reported - reported[0]) - (population - population[0])
+    bound = _rounding_bound(model, rows)
+    assert np.all(np.abs(drift) <= 2.0 * (bound + bound[0]))
+
+
+def test_term_inference_and_bands_report_the_population_curve() -> None:
+    """``term_inference`` (so ``plot`` and the editor) and the bands report the population curve.
+
+    The Claude review of 52c6b730: ``term_inference`` paired the unshifted
+    main-effect curve with the shifted curve's errors, and the simultaneous
+    bands drew the unshifted curve.  Every surface now takes the curve from
+    ``with_population_curve`` and its errors from ``_population_curve_map``:
+    ``term_inference`` equals ``relativities`` bit for bit, values and errors,
+    and the bands' values and errors are the same curve to the rounding of
+    their own products, ``gamma_(p + k)`` of ``|M||gamma| + |b||c|`` and
+    ``gamma_(2p + 4k)`` of ``|g|'|V||g|`` on a gram fit's dense covariance.
+    Mutation: ``term_inference`` unshifted.
+    """
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    relativity = model.relativities(with_se=True)["x"]
+    inference = model.term_inference("x", with_se=True)
+    assert np.array_equal(inference.log_relativity, relativity["log_relativity"].to_numpy())
+    assert np.array_equal(inference.se_log_relativity, relativity["se_log_relativity"].to_numpy())
+
+    bands = model.simultaneous_bands("x", n_sim=2_000)
+    grid = bands["x"].to_numpy()
+    main = model._specs["x"]
+    group = next(g for g in model._groups if g.name == "x")
+    term = next(g for g in model._groups if g.name == "x:g:sz")
+    gamma = np.asarray(model.result.beta[group.sl])
+    blocks = spec._level_blocks(np.asarray(model.result.beta[term.sl]))
+    offset = spec._population_offset(blocks)
+    M, B = main.transform(grid), spec.marginal_basis(grid)
+    size = np.abs(M) @ np.abs(gamma) + np.abs(B) @ np.abs(offset)
+    count = len(gamma) + spec.k
+    assert np.all(
+        np.abs(bands["log_relativity"].to_numpy() - relativity["log_relativity"].to_numpy())
+        <= 2.0 * _gamma(count) * size
+    )
+    covariance, active = model._coef_covariance
+    V = np.asarray(covariance, dtype=np.float64)
+    main_active = next(g for g in active if g.feature_name == "x")
+    term_active = next(g for g in active if g.feature_name == "x:g:sz")
+    G = np.zeros((len(grid), len(V)))
+    G[:, main_active.start : main_active.end] = M
+    G[:, term_active.start : term_active.end] = B @ spec._population_contrast()
+    reach = np.einsum("ij,jk,ik->i", np.abs(G), np.abs(V), np.abs(G))
+    se = bands["se"].to_numpy()
+    reference = relativity["se_log_relativity"].to_numpy()
+    assert np.all(
+        np.abs(se * se - reference * reference) <= 4.0 * _gamma(2 * len(V) + 4 * spec.k) * reach
+    )
+
+
+def test_an_editor_edit_of_the_main_spline_moves_predictions_by_the_edit() -> None:
+    """Editing the population curve moves every prediction by the edit, not by ``b(x)' c`` (#432).
+
+    The Claude review of 84bef26 (High): the editor builds the main spline's
+    editable curve from ``term_inference``, which now reports the population
+    curve ``main + b(x)' c``, and wrote an edit back by projecting that whole
+    curve onto the main effect, so every prediction also moved by about
+    ``b(x)' c`` (hundreds on this fixture).  The projection now subtracts the
+    offset, which stays with the ``sz`` term.  Check: raising the whole curve
+    by ``0.1`` raises every training prediction by ``0.1`` (identity link), to
+    the projection's backward error ``k u kappa(B) (||B|| ||gamma|| + 0.1)``
+    on the editor's grid and each predictor's rounding (``_rounding_bound``).
+    Mutation: the offset projected into the main effect again.
+    """
+    from superglm.editor import EditorSession
+    from superglm.editor.apply import apply_edits_to_model_copy_with_data
+    from superglm.model import base
+
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        session = EditorSession.from_model(model, terms=["x"])
+        term = session.terms["x"]
+        delta = 0.1
+        term.edited_log_effect = np.asarray(term.edited_log_effect, dtype=np.float64) + delta
+        edited = apply_edits_to_model_copy_with_data(model, session.terms)
+    before = base.predict_eta_exact(model, frame, warn=False)
+    after = base.predict_eta_exact(edited, frame, warn=False)
+    grid = np.asarray(term.x, dtype=np.float64)
+    design = np.column_stack([np.ones(len(grid)), model._specs["x"].transform(grid)])
+    singular = np.linalg.svd(design, compute_uv=False)
+    group = next(g for g in model._groups if g.name == "x")
+    gamma = np.asarray(model.result.beta[group.sl])
+    projection = (
+        design.shape[1]
+        * _U
+        * singular[0]
+        / singular[-1]
+        * (singular[0] * float(np.linalg.norm(gamma)) + delta)
+    )
+    bound = _rounding_bound(model, frame) + _rounding_bound(edited, frame) + projection
+    assert np.all(np.abs(after - before - delta) <= bound)
+
+
+def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
+    """The reported curves' errors are those of the contrasts they report (#432; Opus P2).
+
+    ``factor_smooth``'s level curve ``b(x)' Q_t (beta_t - c)``
+    (``_population_deviations``) and the global curve ``T(x) gamma + b(x)'
+    c`` (``_population_curve_se``) are linear in the coefficients, so each
+    error is ``sqrt(g' V g)`` for its contrast ``g``.  On a gram fit the
+    covariance is dense, and both routes are sums of products of its entries:
+    each within ``gamma_(2 p + 4 k)`` of ``|g|' |V| |g|`` (Higham 2002,
+    section 3.5).  A weightless level's curve has no error.  Mutation: the
+    unshifted curves' errors.
+    """
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    contrast = spec._population_contrast()
+    K, k = len(spec._levels), spec.k
+
+    def check(G: np.ndarray, V: np.ndarray, se: np.ndarray) -> None:
+        quad = np.einsum("ij,jk,ik->i", G, V, G)
+        size = np.einsum("ij,jk,ik->i", np.abs(G), np.abs(V), np.abs(G))
+        assert np.all(np.abs(se * se - quad) <= 2.0 * _gamma(2 * len(V) + 4 * k) * size)
+
+    covariance, active = model._coef_covariance
+    V = np.asarray(covariance, dtype=np.float64)
+    main = next(group for group in active if group.feature_name == "x")
+    term = next(group for group in active if group.feature_name == "x:g:sz")
+    relativity = model.relativities(with_se=True)["x"]
+    grid = relativity["x"].to_numpy()
+    G = np.zeros((len(grid), len(V)))
+    G[:, main.start : main.end] = model._specs["x"].transform(grid)
+    G[:, term.start : term.end] = spec.marginal_basis(grid) @ contrast
+    check(G, V, relativity["se_log_relativity"].to_numpy())
+
+    inference = model._fit_inference_info
+    augmented = float(model.result.phi) * np.asarray(inference["XtWX_inv_aug"], dtype=np.float64)
+    group = next(a for a in inference["active_groups"] if a.name == "x:g:sz")
+    xs = grid[::25]
+    levels = ["g000", "g002", *spec._unidentified_level_names, spec._levels[-1]]
+    result = model.factor_smooth("x:g:sz", grid=xs, levels=levels)
+    free = dict(zip(spec._unidentified_levels, spec._free_directions, strict=True))
+    basis = spec.marginal_basis(xs)
+    for level in levels:
+        code = spec._levels.index(level)
+        select = np.zeros((k, (K - 1) * k))
+        if code < K - 1:
+            select[:, code * k : (code + 1) * k] = np.eye(k)
+        else:
+            select[:] = -np.tile(np.eye(k), (1, K - 1))
+        keep = np.eye(k)
+        if code in free:
+            F = np.asarray(free[code])
+            keep = np.zeros((k, k)) if code in spec._weightless_levels else keep - F @ F.T
+        G = np.zeros((len(xs), len(augmented)))
+        G[:, 1 + group.start : 1 + group.end] = basis @ keep @ (select - contrast)
+        se = result.curves.loc[result.curves["level"] == level, "posterior_se"].to_numpy()
+        check(G, augmented, se)
+        if code in spec._weightless_levels:
+            assert np.all(se == 0.0)
+
+
+@pytest.mark.parametrize("retain", [True, False])
+def test_a_tweedie_profile_raises_no_predict_warning_of_its_own(retain) -> None:
+    """``estimate_p`` restates its refit through ``predict``'s values, not its warning (#440 review).
+
+    The Claude review of 52c6b730 (Low): ``_install_tweedie_profile`` read the
+    refit's means through public ``predict``, so a Tweedie profile of a model
+    with a thin ``sz`` level raised ``predict``'s user-facing warning from
+    library frames; without retained fit state each candidate ``p``'s clone
+    did too (review of 84bef26).  Mutation: public ``predict`` again.
+    """
+    from superglm import families
+
+    rng = np.random.default_rng(6)
+    K, n = 8, 1600
+    g = rng.integers(0, K, n)
+    x = rng.uniform(size=n)
+    x[g == 2] = 0.37
+    mu = np.exp(0.2 + np.sin(3 * x) + rng.normal(0, 0.3, K)[g])
+    y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.8)
+    frame = pd.DataFrame({"x": x, "g": np.array([f"g{v}" for v in g], dtype=object)})
+    model = SuperGLM(
+        family=families.tweedie(p=1.5),
+        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+            )
+        ],
+        selection_penalty=0,
+        retain_fit_state=retain,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.estimate_p(frame, y, fit_mode="reml", p_bounds=(1.4, 1.6), xatol=0.05)
+    assert model._interaction_specs["x:g:sz"]._unidentified_level_names == ("g2",)
+    assert not _thin_warnings(caught)
+
+
+def test_a_holdout_drop_term_starts_from_the_predicted_predictor() -> None:
+    """Holdout drop-term deltas start from ``predict``'s predictor (#432; Claude review, Low).
+
+    ``term_drop_diagnostics(mode="holdout")`` summed the terms at the fit's
+    coordinates, so a weightless level's rows took the fit's arbitrary point
+    along its alias (about +-5000 on this fixture) where ``predict`` gives the
+    population.  For the numeric ``x1`` the delta is ``D(eta - x1 b) -
+    D(eta)``; with ``eta`` from ``predict``, each deviance is within its rows'
+    predictor rounding ``rho`` (``2 |y - mu| rho + rho^2`` a row, identity
+    link) and each sum's ``gamma_n D``.
+    """
+    from superglm.diagnostics.term_diagnostics import term_drop_diagnostics
+    from superglm.model import base
+
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    rows = frame["g"].isin(["g003", "g007", "g010"]).to_numpy()
+    held = frame[rows].reset_index(drop=True)
+    target = y[rows]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        table = term_drop_diagnostics(
+            model,
+            frame,
+            y,
+            weight,
+            mode="holdout",
+            X_val=held,
+            y_val=target,
+            sample_weight_val=np.ones(len(held)),
+        )
+    reported = float(table.loc[table["feature"] == "x1", "delta_deviance"].iloc[0])
+    eta = base.predict_eta_exact(model, held, warn=False)
+    x1 = next(g for g in model._groups if g.name == "x1")
+    term = held["x1"].to_numpy() * float(model.result.beta[x1.sl][0])
+    full = float(np.sum((target - eta) ** 2))
+    dropped = float(np.sum((target - (eta - term)) ** 2))
+    rho = 2.0 * _rounding_bound(model, held) + _gamma(2) * np.abs(term)
+    bound = (
+        float(np.sum(2.0 * np.abs(target - eta) * rho + rho * rho))
+        + float(np.sum(2.0 * np.abs(target - eta + term) * rho + rho * rho))
+        + _gamma(len(held)) * (full + dropped)
+    )
+    assert abs(reported - (dropped - full)) <= bound
+
+
+def test_sz_aliased_levels_converge_beside_a_laplace_excluded_column(monkeypatch) -> None:
+    """Two weightless levels beside ``xt``, which only two rows of weight 1e-15 move (#432 e).
+
+    ``xt`` is left out of the Laplace term, so REML reads ``log|H_II|`` from
+    the factor rebuilt without it, which deflates the levels' penalized alias
+    only where the alias is exactly zero on ``xt``.  Represented over every
+    border column, the alias took a least-squares coefficient on ``xt`` that
+    it does not need (2e-16 of the largest in the scaled solve, never 0.0),
+    so the rebuild handed it to the pivoted factorization: the rank went
+    190 -> 189 between each accepted iterate and every trial 0.7% away
+    (``log|H_II|`` +13.4), and REML stopped ``line_search_failed`` 0.0088
+    above its optimum.  The rank of ``H_II`` does not depend on positive
+    smoothing parameters, so every rebuild has one rank.  Mutation: the
+    excluded columns back in the representation (``_penalized_aliases``).
+    """
+    from superglm.solvers._structured.balance_tree import SumToZeroTreeFactor
+
+    frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
+    rows = np.flatnonzero((weight > 0) & (frame["g"].to_numpy() == "g029"))[:2]
+    frame["xt"] = 5.0
+    frame.loc[frame.index[rows], "xt"] = [6.0, 7.0]
+    weight[rows] = 1e-15
+    build = SumToZeroTreeFactor.__init__
+    ranks: list[int] = []
+
+    def recording(self, *args, excluded=(), **kwargs):
+        build(self, *args, excluded=excluded, **kwargs)
+        if excluded:
+            ranks.append(int(self.rank))
+
+    monkeypatch.setattr(SumToZeroTreeFactor, "__init__", recording)
+    model = _fit(
+        _model("gaussian", "auto", lam=None, numerics=("x1", "x10", "xt")), frame, y, weight
+    )
+    assert model._reml_profile["direct_backend"] == "structured"
+    xt = next(group.start for group in model._groups if group.name == "xt")
+    assert model._reml_profile["reml_laplace_excluded"] == (xt,)
+    assert ranks and len(set(ranks)) == 1
+    assert bool(model._reml_result.converged)
+    assert model._reml_result.termination_reason != "line_search_failed"
+
+
+def _penalty_root(model: SuperGLM, p: int) -> tuple[np.ndarray, float]:
+    """``R`` with ``R'R = S``, and its blocks' eigensolver backward error ``sum 2 p_k u ||S_k||_2``.
+
+    An ``sz`` block is ``kron([I; -1'], omega^1/2)``: its ``omega`` is diagonal
+    (the natural parameterization), so its root is exact to ``u`` entrywise.  A
+    dense block's root comes from its eigendecomposition, exact for ``S_k``
+    perturbed by ``p_k u ||S_k||`` and by as much again for the clipped
+    negative eigenvalues.
+    """
+    rows, backward = [], 0.0
+    for component in model._reml_penalties:
+        lam = model._reml_lambdas[component.name]
+        omega = lam * np.asarray(component.omega_ssp, dtype=np.float64)
+        if component.penalty_kind == "sum_to_zero":
+            assert np.array_equal(omega, np.diag(np.diag(omega)))
+            K = component.repeat_count
+            contrast = np.vstack((np.eye(K - 1), -np.ones((1, K - 1))))
+            block = np.kron(contrast, np.diag(np.sqrt(np.diag(omega))))
+        else:
+            assert component.penalty_kind == "dense"
+            values, vectors = np.linalg.eigh(omega)
+            block = np.sqrt(np.clip(values, 0.0, None))[:, None] * vectors.T
+            backward += 2.0 * len(values) * _U * float(np.max(np.abs(values)))
+        root = np.zeros((block.shape[0], p))
+        root[:, component.group_sl] = block
+        rows.append(root)
+    return np.vstack(rows), backward
+
+
+def _dense_cross_trace(model: SuperGLM, X, W, rates, rank: int) -> tuple[float, float]:
+    """``t = tr(H^+ C H^+ C)`` from square roots, and a bound ``beta`` on ``sqrt(t)``'s error.
+
+    ``H = A'A``, ``A = [W^1/2 X_c; R]`` (Fisher rows centred on their weighted
+    mean ``c``, ``R'R = S``), and ``C = G'JG``, ``G = |a|^1/2 X_c``, ``J =
+    sign(a)``.  Householder QR of ``A``, then the SVD ``U s V'`` of its
+    triangle, give ``t = ||F'JF||_F^2``, ``F = G V_r / s_r``, at the factor's
+    rank ``r``.  ``t`` is invariant under ``H, C -> B'HB, B'CB`` for any
+    invertible ``B``, so ``V_r`` may span any complement of ``H``'s exact
+    nulls once ``C`` annihilates them too.  No Gram is formed: the alias
+    (``s_r`` near ``1e-6``) costs ``kappa(A)``, not ``kappa(A)^2 = 1e16``.
+
+    Rounding perturbs the square roots.  ``dA = (gamma_mp + gamma_2) ||A||_F
+    + p u s_1 + sqrt(sum W) ||dc||``: Householder QR column by column (Higham
+    2002, Theorem 19.4, its constant taken as 1 as in Connolly & Higham 2022,
+    section 7), the entries, the SVD (``p u ||A||_2``, its factors orthogonal
+    to ``p u``) and the computed mean, ``||dc|| <= gamma_(2n+1) || |X|'W || /
+    sum W``.  ``dG = (gamma_2 + gamma_p sqrt(p)) ||G||_F + sqrt(sum |a|)
+    ||dc||``, the second term the product ``G V_r``.  Each costs ``1 /
+    sigma``, ``sigma^2 = (s_r - dA)^2 - dS`` a lower bound on the exact
+    ``s_r^2`` (Weyl; ``dS`` from ``_penalty_root``): ``rho = dA / sigma``,
+    ``rho_G = dG / sigma``.  The weights' relative rounding ``delta`` (the
+    predictor's ``gamma_(p+1) (|X||b| + |b_0|)``, with ``|X||b|`` up to
+    ``1e6`` here, then ``exp``, the products and ``W^1/2``) costs no ``1 /
+    sigma``: ``c`` stays a weighted mean and ``W^1/2 X_c H^-1/2`` has norm 1,
+    so ``H`` moves by ``2 delta`` and ``C`` by ``delta ||F||_F^2 + 2 w phi +
+    w^2`` (``w = delta kappa / (1 - delta)``, ``kappa^2 = sum |a| / sum W``,
+    ``phi >= ||G H^-1/2||_2``) in the scaling below.  So the computed ``H``
+    is ``H^1/2 (I + E) H^1/2`` with ``||E|| <= eta = (1 + 2 delta)(1 + 2 rho
+    + rho^2 + 2 p u + dS / sigma^2) - 1``, and ``M = H^-1/2 C H^-1/2`` moves by
+    ``dM <=`` the weights' term plus ``(1 + 2 delta)(2 phi rho_G + rho_G^2 +
+    gamma_(n+4) ||F||_F^2)`` (the last ``F'JF``).  With ``K = (I + E)^-1/2``
+    the computed trace is ``||K (M + dM) K||_F^2``, so its square root is
+    within ``(eta sqrt(t) + dM) / (1 - eta)`` of ``sqrt(t)``; with ``sqrt(t)``
+    taken from the computed one, ``beta = (eta sqrt(t~) + dM) / (1 - 2 eta)``,
+    plus the final sum's ``2 gamma_(r^2) sqrt(t~)``.
+    """
+    n, p = X.shape
+    total = float(np.sum(W))
+    Xc = X - (X.T @ W) / total
+    root, dS = _penalty_root(model, p)
+    A = np.vstack((np.sqrt(W)[:, None] * Xc, root))
+    G = np.sqrt(np.abs(rates))[:, None] * Xc
+    _, s, Vt = np.linalg.svd(np.linalg.qr(A, mode="r"))
+    F = (G @ Vt[:rank].T) / s[:rank]
+    M = F.T @ (np.sign(rates)[:, None] * F)
+    reference = float(np.sum(M * M))
+
+    predictor = np.abs(X) @ np.abs(model.result.beta) + abs(float(model.result.intercept))
+    delta = math.expm1(2.0 * _gamma(p + 1) * float(np.max(predictor))) * (1.0 + _gamma(9))
+    delta += _gamma(9)
+    dc = _gamma(2 * n + 1) * float(np.linalg.norm(np.abs(X).T @ W)) / total
+    absolute = float(np.sum(np.abs(rates)))
+    dA = (_gamma(A.shape[0] * p) + _gamma(2)) * float(np.linalg.norm(A)) + p * _U * s[0]
+    dA += math.sqrt(total) * dc
+    dG = (_gamma(2) + _gamma(p) * math.sqrt(p)) * float(np.linalg.norm(G))
+    dG += math.sqrt(absolute) * dc
+    assert np.all(s[rank:] <= dA)  # the factor's truncated directions: exact nulls
+    assert s[rank - 1] > dA and (s[rank - 1] - dA) ** 2 > dS
+    sigma = math.sqrt((s[rank - 1] - dA) ** 2 - dS)
+    rho, rho_G = dA / sigma, dG / sigma
+    eta = (1.0 + 2.0 * delta) * (1.0 + 2.0 * rho + rho * rho + 2.0 * p * _U + dS / sigma**2) - 1.0
+    assert eta < 0.5
+    phi = (float(np.linalg.norm(F, 2)) + rho_G) * math.sqrt(1.0 + eta)
+    frobenius = (float(np.linalg.norm(F)) + rho_G) ** 2 * (1.0 + eta)
+    w = delta * math.sqrt(absolute / total) / (1.0 - delta)
+    dM = delta * frobenius + 2.0 * w * phi + w * w
+    dM += (1.0 + 2.0 * delta) * (2.0 * phi * rho_G + rho_G**2 + _gamma(n + 4) * frobenius)
+    root_t = math.sqrt(reference)
+    beta = (eta * root_t + dM) / (1.0 - 2.0 * eta) + 2.0 * _gamma(rank * rank) * root_t
+    return reference, beta
+
+
+@pytest.mark.parametrize(
+    ("variant", "lam_x"), [("same_x", 8e-4), ("same_x", 1e-4), ("one_row", 1e-4)]
+)
+def test_an_sz_weight_derivative_cross_trace_survives_the_alias_variance(variant, lam_x) -> None:
+    """``tr(H^+ C H^+ C)`` of a centred weight-derivative operator is the dense trace (#432 d).
+
+    The REML Hessian traces each weight-derivative operator ``C`` (centred:
+    ``J' O J`` over ``[1, X]``) against the profiled sz factor.  With
+    ``lambda_x`` small a thin level's penalized alias has a variance of
+    ``1e11`` to ``1e12``, and ``C`` vanishes along it; held as raw moments
+    plus a rank-two centring, the two parts met that variance separately and
+    the trace cancelled to their rounding.  ``_trace_form`` (the intercept
+    column per level, each part annihilating the alias) keeps the dense
+    trace.  The reference (``_dense_cross_trace``) is within ``beta`` of the
+    exact trace in its square root and the factor is allowed as much, so
+    ``|t - t_ref| <= 2 beta (2 sqrt(t_ref) + 2 beta)``: here ``7e-5``,
+    ``1e-4`` and ``2e-3`` against ``0.48``, ``1.8`` and ``1.8``.  Mutation
+    (``_trace_form`` returning ``self._form(operator)``): ``-1.0e5``,
+    ``-1.05e7`` and ``+4.7e7``; origin/master: ``-3.0e5``, ``+1.3e7`` and
+    ``-2.5e7``: the positive two would pass a check of the sign alone.  The
+    rates vanish where ``W`` does, as ``dW/drho = 2 W deta/drho`` does on a
+    log link's Fisher rows: ``C`` then annihilates every exact null of ``H``
+    (``one_row``'s level below the link's range has ``W = 0``), so every
+    generalized inverse gives the one trace.
+    """
+    from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
+    from superglm.solvers._structured.operators import CenteredBlockOperator
+    from superglm.solvers._structured.state import centred_data_operator
+    from superglm.solvers.structured import get_structured_layout
+
+    frame, y, weight = _signed_aliased_frame(variant)
+    model = _model("gaussian_log", "auto", lam=1.29, main_lam=lam_x, numerics=("x1", "x10"))
+    model = _fit(model, frame, y, weight)
+    factor = model._linear_system_state.profiled_factor
+    system = factor.augmented_factor.system
+    assert not system.leaf.signed  # the terminal refit's rows are Fisher's, W = w mu^2
+    X = np.asarray(model._dm.toarray(), dtype=np.float64)
+    mu = np.exp(X @ model.result.beta + model.result.intercept)
+    W = weight * mu * mu
+    rates = np.random.default_rng(0).normal(size=len(W)) * W
+    layout = get_structured_layout(
+        model._dm, model._groups, dominant_group_index=system.dominant_group_index
+    )
+    ((raw, cross, total, level),) = factor_smooth_moment_operators(
+        layout, [rates], center=system.leaf.center, level_cross=True
+    )
+    operator = CenteredBlockOperator(
+        raw=raw,
+        cross=cross,
+        total=total,
+        center=centred_data_operator(system).center,
+        raw_structured_cross=level,
+    )
+    reference, beta = _dense_cross_trace(model, X, W, rates, factor.rank)
+    both = 2.0 * beta
+    error = factor.operator_cross_trace(operator, operator) - reference
+    assert abs(error) <= both * (2.0 * math.sqrt(reference) + both)
+
+
+@pytest.mark.threads
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "An observation, not a certified property: no error analysis makes a BLAS "
+        "build's bits independent of its thread count (MKL without CNR, Accelerate). "
+        "On a2a909ef this fit took 14 REML iterations at one BLAS thread and 13 at "
+        "eight (OpenBLAS); test_an_sz_weight_derivative_cross_trace_survives_the_alias_variance "
+        "guards the cause, _trace_form, with a derived bound."
+    ),
+)
+def test_sz_same_x_reml_decisions_do_not_follow_the_blas_thread_count(monkeypatch) -> None:
+    """REML's decisions beside a same-x level are the same at 1 and N BLAS threads (#432 d).
+
+    Recorded as an expected-to-hold observation (``xfail``, not strict): the
+    owner's rule is that decisions match across thread counts, but a test
+    cannot certify that for every BLAS build (Claude review of 52c6b730).
+
+    The level's penalized alias ``(a_0, v)`` is a null of ``[1, X]``, so every
+    centred weight-derivative operator vanishes along it, while its variance is
+    ``1 / (lambda_x a'Sa)`` (1.8e8 in the border at the first iterate).  Held
+    as raw moments plus a rank-two centring, the two parts met that variance
+    separately and the outer Hessian's wiggle entry cancelled to its rounding,
+    so the first Newton step, and then the iteration count (14 at one BLAS
+    thread against 13 at eight on a2a909ef), followed the thread count.
+    ``ProfiledSumToZeroTreeFactor._trace_form`` holds the
+    same operator as ``K' O K`` with the intercept column per level, each part
+    annihilating the alias.  ``native`` keeps the pools live inside the fit
+    (the default caps them to one thread below 1500 columns, which hides it).
+    """
+    from threadpoolctl import ThreadpoolController, threadpool_limits
+
+    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "native")
+    native = max(
+        (
+            pool["num_threads"]
+            for pool in ThreadpoolController().info()
+            if pool.get("user_api") == "blas"
+        ),
+        default=1,
+    )
+    if native < 2:
+        pytest.skip("one BLAS thread: nothing to compare")
+    frame, y, weight = _signed_aliased_frame("same_x")
+    runs = []
+    for threads in (1, min(native, 8)):
+        with threadpool_limits(threads, user_api="blas"):
+            model = _fit(
+                _model("gaussian_log", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight
+            )
+        result = model._reml_result
+        runs.append(
+            (int(result.n_reml_iter), result.termination_reason, len(result.lambda_history))
+        )
+    assert runs[0] == runs[1]
+
+
 def test_a_dense_penalty_charges_nothing_along_its_null_space() -> None:
     """The main spline's penalty quadratic over its range: a null-space coefficient adds nothing.
 

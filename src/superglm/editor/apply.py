@@ -203,9 +203,27 @@ def _apply_projected_term(
 ) -> None:
     B = _as_dense(spec.transform(x_values))
     weights = _term_weights(term)
+    target = native_log_effect_values(term)
+    # The editable curve is the population curve when an sz term moves it
+    # (#432: main(x) + b(x)' c, ``term_inference``); the main effect's own
+    # coefficients carry the curve without the offset, which stays with the
+    # sz term (the Claude review of 84bef26: an edit wrote b'c into main).
+    from superglm.features.factor_smooth import population_curve_shift, population_curve_terms
+
+    shift = None
+    if population_curve_terms(term.name, model._interaction_specs):
+        shift = population_curve_shift(
+            term.name,
+            np.asarray(x_values, dtype=np.float64),
+            model._interaction_specs,
+            model._groups,
+            np.asarray(model.result.beta),
+        )
+    if shift is not None:
+        target = np.asarray(target, dtype=np.float64) - shift
     intercept_delta, beta_new = _solve_with_intercept(
         B,
-        native_log_effect_values(term),
+        target,
         weights,
     )
     _adjust_intercept(model, intercept_delta)
