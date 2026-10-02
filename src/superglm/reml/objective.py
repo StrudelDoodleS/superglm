@@ -35,6 +35,7 @@ from superglm.reml.scale import (
 )
 from superglm.reml.scop_geometry import decompose_on_scop_resolved_range
 from superglm.solvers.dispersion import dispersion_likelihood_size, validate_weight_semantics
+from superglm.solvers.irls_state import mean_space_log_likelihood_rows
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_gram
@@ -286,7 +287,28 @@ def reml_laml_objective(
             centered_hessian_rank = decomposition.rank
             logdet_m = decomposition.log_pdet
 
-    penalized_deviance = float(result.deviance + penalty_quad)
+    # A binomial/log state certified on the model's own score under Newton
+    # steps (``PIRLSResult.mean_space_true_mode``) is the model's mode, where
+    # the clipped likelihood is not stationary: there the criterion reads the
+    # model's own likelihood, so that its value and the envelope gradient
+    # ``lambda_j beta' S_j beta / 2`` describe one objective.  The change is
+    # ``sum (l_true - l_clipped)`` over the rows, the true rows by
+    # ``log1mexp`` from the unclipped eta (``mean_space_log_likelihood_rows``)
+    # and the clipped rows as the family's likelihood and deviance read them.
+    true_mode_gain: float | None = None
+    if getattr(result, "mean_space_true_mode", False):
+        eta_unclipped = linear_predictor(dm, result, offset_arr)
+        mu_clipped = clip_mu(link.inverse(stabilize_eta(eta_unclipped, link)), distribution)
+        true_rows = mean_space_log_likelihood_rows(y, sample_weight, eta_unclipped)
+        clipped_rows = np.asarray(sample_weight, dtype=np.float64) * (
+            y * np.log(mu_clipped) + (1.0 - y) * np.log1p(-mu_clipped)
+        )
+        true_mode_gain = float(np.sum(true_rows - clipped_rows))
+    penalized_deviance = (
+        float(result.deviance + penalty_quad)
+        if true_mode_gain is None
+        else float(result.deviance - 2.0 * true_mode_gain + penalty_quad)
+    )
 
     # phi-profiled REML for estimated-scale families
     scale_known = getattr(distribution, "scale_known", True)
@@ -409,6 +431,8 @@ def reml_laml_objective(
             eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
             mu = clip_mu(link.inverse(eta), distribution)
         nll = -distribution.log_likelihood(y, mu, sample_weight, phi=1.0)
+    if true_mode_gain is not None:
+        nll = nll - true_mode_gain
     evaluation = REMLObjectiveEvaluation(
         value=float(nll + 0.5 * (penalty_quad + logdet_m - logdet_s)),
         profiled_scale=None,

@@ -1309,6 +1309,7 @@ def _fit_irls_direct_once(
         the same relative form, bar and floor, in the weights' units (a latent
         penalty that overflows there is refused).
         """
+        _last_true_residual[0] = None
         positive = weights > 0.0
         largest_weight = float(np.max(weights[positive], initial=0.0)) if np.any(positive) else 0.0
         weight_exponent = _even_exponent(largest_weight)
@@ -1393,6 +1394,7 @@ def _fit_irls_direct_once(
             column_shift=shift,
             decrement_noise=likelihood_noise,
         )
+        _last_true_residual[0] = residual
         rows_n = int(np.count_nonzero(positive))
         underflow = _underflow_allowance(rows_n)
         assert residual.scale is not None
@@ -1443,12 +1445,11 @@ def _fit_irls_direct_once(
                 )
             )
         if latent_parts:
-            # The joint step truncates one factor across every SCOP group and
-            # hands each group its own columns of each discarded direction, so
-            # the groups' blocks reassemble row by row into the joint
-            # directions; groups solved one at a time carry directions
-            # confined to themselves (``reml.scop_geometry``'s
-            # ``_scop_discarded_model_directions``).  The concatenated latent
+            # The joint step (``_scop_joint``) truncates one factor across every
+            # SCOP group and hands each group its own columns of each discarded
+            # direction, so the groups' blocks reassemble row by row into the
+            # joint directions; groups solved one at a time carry directions
+            # confined to themselves, block by block.  The concatenated latent
             # score is projected once off their span, which an SVD finds with
             # its rank (a QR would invent a direction for a zero block).
             widths = [part[1].size for part in latent_parts]
@@ -1462,8 +1463,15 @@ def _fit_irls_direct_once(
             ]
             gradient = np.concatenate([part[2] for part in latent_parts])
             if blocks:
-                counts = {rows.shape[0] for _, rows in blocks}
-                if len(counts) == 1 and len(blocks) > 1:
+                if _scop_joint:
+                    # one joint factor: every group holds its own columns of
+                    # the same discarded directions (a group absent here holds
+                    # zeros in them)
+                    counts = {rows.shape[0] for _, rows in blocks}
+                    if len(counts) != 1:  # pragma: no cover - joint-step invariant
+                        raise RuntimeError(
+                            "the joint SCOP step handed its groups different discarded directions"
+                        )
                     directions = np.zeros((counts.pop(), int(offsets[-1])))
                     for k, rows in blocks:
                         directions[:, offsets[k] : offsets[k + 1]] = rows
@@ -1619,6 +1627,8 @@ def _fit_irls_direct_once(
         fit_converged: bool,
         convergence_value: float | None,
         termination_reason: TerminationReason | None,
+        convergence_label: str | None = None,
+        convergence_tolerance: float | None = None,
     ) -> None:
         if not trace_enabled:
             return
@@ -1639,9 +1649,13 @@ def _fit_irls_direct_once(
                 "deviance": state.deviance,
                 "penalized_deviance": state.penalized_deviance,
                 "fit_converged": fit_converged,
-                "convergence_criterion": convergence,
+                "convergence_criterion": convergence
+                if convergence_label is None
+                else convergence_label,
                 "convergence_value": convergence_value,
-                "convergence_tolerance": tol,
+                "convergence_tolerance": tol
+                if convergence_tolerance is None
+                else convergence_tolerance,
                 "termination_reason": termination_reason,
             },
             channel="pirls",
@@ -2201,6 +2215,13 @@ def _fit_irls_direct_once(
     # QR route (whose least squares cannot carry a zero-curvature row's
     # score) or the SCOP route (which takes its own Newton steps)
     _mean_space_newton = False
+    # Whether the true-score certificate decided the last iteration under
+    # Newton steps, its ratio there, and its last residual: the diagnostics
+    # then publish that rule's numbers, and ``PIRLSResult.mean_space_true_mode``
+    # tells a criterion read at the state that it is the model's own mode.
+    _true_stop = False
+    _true_stop_ratio = math.inf
+    _last_true_residual: list[ModeResidual | None] = [None]
 
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
@@ -3227,6 +3248,8 @@ def _fit_irls_direct_once(
         proposal_state = proposal_scop.irls if _has_scop else proposal
         dev_rel_change = None
         coef_change = None
+        convergence_label: str = convergence
+        convergence_tolerance = tol
         if np.isfinite(dev):
             if convergence == "mode_score" and _score_centre is not None:
                 # One-engine design §3.8: stop on the certificate's own score,
@@ -3342,6 +3365,11 @@ def _fit_irls_direct_once(
             if newton_stop:
                 converged_this_iter = bool(true_ratio <= 1.0)
                 score_stagnated = False
+                # this rule decided: its numbers are the ones published
+                convergence_label = "mean_space_mode_score"
+                convergence_value = mode_bar * true_ratio
+                convergence_tolerance = mode_bar
+                _true_stop_ratio = true_ratio
             if not true_ratio <= 1.0:
                 converged_this_iter = False
                 _true_ratios.append(true_ratio)
@@ -3365,6 +3393,8 @@ def _fit_irls_direct_once(
                     _mean_space_newton = True
                     _true_ratios.clear()
                     score_stagnated = False
+
+        _true_stop = bool(newton_stop and not at_boundary)
 
         constraints_feasible_this_iter = True
         if has_constraints:
@@ -3432,9 +3462,9 @@ def _fit_irls_direct_once(
                     "trials_attempted": decision.trials_attempted,
                     "step_rejected": decision.step_rejected,
                     "fit_converged": converged_this_iter,
-                    "convergence_criterion": convergence,
+                    "convergence_criterion": convergence_label,
                     "convergence_value": convergence_value,
-                    "convergence_tolerance": tol,
+                    "convergence_tolerance": convergence_tolerance,
                     "termination_reason": termination_reason,
                     "working_curvature": (
                         working_rows.curvature_source if newton_score is None else "observed"
@@ -3450,6 +3480,8 @@ def _fit_irls_direct_once(
                 fit_converged=converged_this_iter,
                 convergence_value=convergence_value,
                 termination_reason=termination_reason,
+                convergence_label=convergence_label,
+                convergence_tolerance=convergence_tolerance,
             )
 
         working_eta_clipped = False
@@ -3518,9 +3550,9 @@ def _fit_irls_direct_once(
                     evaluation_id=retained.evaluation_id,
                     state_space=retained.state_space,
                     basis_id=retained.basis_id,
-                    convergence_criterion=convergence,
+                    convergence_criterion=convergence_label,
                     convergence_value=convergence_value,
-                    convergence_tolerance=tol,
+                    convergence_tolerance=convergence_tolerance,
                     termination_reason=termination_reason,
                 )
             )
@@ -3843,7 +3875,18 @@ def _fit_irls_direct_once(
             profile["irls_mean_space_boundary_calls"] = (
                 profile.get("irls_mean_space_boundary_calls", 0) + 1
             )
-        if _last_mode_residual is not None:
+        if _true_stop and _last_true_residual[0] is not None:
+            # the true-score certificate decided the last iteration (Newton
+            # steps): its score, floors and exclusions are the stop rule's
+            true_residual = _last_true_residual[0]
+            profile["irls_mode_rule"] = "mean_space_mode_score"
+            profile["irls_mode_score"] = mode_bar * _true_stop_ratio
+            profile["irls_mode_bar"] = mode_bar
+            profile["irls_mode_floor_binding"] = true_residual.floor_binding
+            profile["irls_mode_weakly_identified"] = tuple(
+                int(index) for index in np.flatnonzero(true_residual.excluded)
+            )
+        elif _last_mode_residual is not None:
             # §3.8, §3.9: the stop rule's last score, whether a derived floor
             # bound it, and the slopes it flagged weakly identified and kept.
             profile["irls_mode_score"] = mode_bar * _last_mode_residual.ratio()
@@ -4233,6 +4276,7 @@ def _fit_irls_direct_once(
         state_center=None if retained.centred_intercept is None else _state_center,
         centred_intercept_lo=centred_intercept_lo,
         mean_space_boundary_rows=_boundary_rows,
+        mean_space_true_mode=bool(converged and _true_stop),
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.

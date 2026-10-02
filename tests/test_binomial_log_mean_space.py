@@ -42,7 +42,7 @@ from superglm.solvers.irls_state import (
     _mean_space_halving_budget,
     mean_space_boundary_rows,
     mean_space_clipped_rows,
-    mean_space_deviance_delta,
+    mean_space_log_likelihood_rows,
     mean_space_newton_rows,
     mean_space_score_rows,
     mean_space_violation,
@@ -527,9 +527,19 @@ def test_newton_steps_run_on_the_dense_and_constrained_routes(constrained: bool)
             offset=offset,
             weight_semantics="frequency",
             profile=profile,
+            record_diagnostics=True,
         )
     assert result.converged
+    assert result.mean_space_true_mode
     assert profile["irls_mean_space_newton_iters"] > 0
+    # the stop rule that decided is the one published: the true-score
+    # certificate's score against its bar, on the iteration log and profile
+    last = result.iteration_log[-1]
+    assert last.convergence_criterion == "mean_space_mode_score"
+    assert last.convergence_tolerance == MODE_CERTIFICATION_BAR
+    assert last.convergence_value <= last.convergence_tolerance
+    assert profile["irls_mode_rule"] == "mean_space_mode_score"
+    assert profile["irls_mode_score"] <= profile["irls_mode_bar"] == MODE_CERTIFICATION_BAR
     design = np.column_stack([np.ones_like(x), x])
     theta = _log_binomial_maximum(design, y, offset)
     eta = x * result.beta[0] + result.intercept + offset
@@ -932,14 +942,18 @@ def test_a_constrained_lowered_fit_is_certified_with_its_multipliers(direct_solv
 def test_the_weighted_centring_matches_its_definition_on_each_block_type() -> None:
     """``weighted_column_centring`` against ``sum w (x - mean)^2`` formed column by column.
 
-    The function forms the diagonal one pass per block (a dense block in
-    chunks, a spline block from its weighted Gram, a one-hot block in closed
-    form); the reference forms every column through a design product and
-    sums with ``math.fsum``.  A dense column carries an offset of ``1e6``,
-    which the chunked pass centres before squaring.  Tolerances: ``n``
-    roundings of each summed term, ``8 n eps sum w x~^2``, plus for a dense
-    column the mean's own rounding, ``eps max|x|`` on each of its ``sum w
-    |x~|`` terms; a raw-moment block's terms are ``sum w x^2``.
+    The function forms the diagonal one pass per block (a one-hot block in
+    closed form, every other block over its rows in chunks by the corrected
+    two-pass algorithm about the rounded mean); the reference forms every
+    column through a design product and sums with ``math.fsum``.  A dense
+    column carries an offset of ``1e6``.  A second set of weights puts all
+    but 1e-15 of the mass on one row, so a spline column is nearly constant
+    over it: its ``Var_w / E_w x^2`` is far below ``n u``, where the raw
+    moments of eec69403 (``sum w x^2 - sum_w mean^2``) carry an error of
+    ``u sum w x^2``.  Tolerances: ``n`` roundings of each summed term, ``8 n
+    eps sum w x~^2``, plus the mean's own rounding, ``eps max|x|`` on each of
+    the ``sum w |x~|`` terms; the one-hot closed form's terms are ``sum w
+    x^2``.
     """
     rng = np.random.default_rng(11)
     n = 300
@@ -963,26 +977,30 @@ def test_the_weighted_centring_matches_its_definition_on_each_block_type() -> No
     )
     model.fit(frame, rng.poisson(1.0, n).astype(np.float64))
     dm = model._dm
-    weights = rng.uniform(0.1, 2.0, n)
-    mean_x, sum_w, diagonal = weighted_column_centring(dm, weights, weights > 0.0)
-    dense = np.concatenate(
-        [np.full(m.shape[1], type(m).__name__ == "DenseGroupMatrix") for m in dm.group_matrices]
+    one_hot = np.concatenate(
+        [
+            np.full(m.shape[1], type(m).__name__ == "CategoricalGroupMatrix")
+            for m in dm.group_matrices
+        ]
     )
-    for j in range(dm.p):
-        unit = np.zeros(dm.p)
-        unit[j] = 1.0
-        column = np.asarray(dm.matvec(unit), dtype=np.float64)
-        mean = math.fsum(weights * column) / math.fsum(weights)
-        centred = column - mean
-        expected = math.fsum(weights * centred**2)
-        terms = 8.0 * n * _EPS * math.fsum(weights * (centred**2 if dense[j] else column**2))
-        if dense[j]:
+    concentrated = np.full(n, 1e-15)
+    concentrated[int(np.argmax(frame["s"].to_numpy() > 0.5))] = 1.0
+    for weights in (rng.uniform(0.1, 2.0, n), concentrated):
+        mean_x, sum_w, diagonal = weighted_column_centring(dm, weights, weights > 0.0)
+        for j in range(dm.p):
+            unit = np.zeros(dm.p)
+            unit[j] = 1.0
+            column = np.asarray(dm.matvec(unit), dtype=np.float64)
+            mean = math.fsum(weights * column) / math.fsum(weights)
+            centred = column - mean
+            expected = math.fsum(weights * centred**2)
+            terms = 8.0 * n * _EPS * math.fsum(weights * (column**2 if one_hot[j] else centred**2))
             terms += (
                 4.0 * _EPS * float(np.max(np.abs(column))) * math.fsum(weights * np.abs(centred))
             )
-        assert abs(diagonal[j] - expected) <= terms
-        assert abs(mean_x[j] - mean) <= 4.0 * n * _EPS * float(np.max(np.abs(column)))
-    assert sum_w == pytest.approx(float(np.sum(weights)), rel=4.0 * n * _EPS)
+            assert abs(diagonal[j] - expected) <= terms, (j, diagonal[j], expected, terms)
+            assert abs(mean_x[j] - mean) <= 4.0 * n * _EPS * float(np.max(np.abs(column)))
+        assert sum_w == pytest.approx(float(np.sum(weights)), rel=4.0 * n * _EPS)
 
 
 def test_weight_and_penalty_scales_never_certify_a_wrong_maximum() -> None:
@@ -1083,8 +1101,178 @@ def test_an_intercept_only_fit_at_the_smallest_weight_is_never_certified_wrong()
     reference = _log_binomial_maximum(
         np.ones((4, 1)), np.array([0.0, 1.0, 0.0, 1.0]), np.array([2.0, 2.0, 3.0, 3.0])
     )
-    at_maximum = abs(float(eta[0] - (reference[0] + 2.0))) <= 1e-6
+    # the certificate is relative, so its bound does not depend on the
+    # weights' scale: unit weights give the same value as nextafter(0, 1)
+    bound = _certified_eta_bound(
+        np.ones((4, 1)), np.array([0.0, 1.0, 0.0, 1.0]), np.array([2.0, 2.0, 3.0, 3.0]), reference
+    )
+    at_maximum = abs(float(eta[0] - (reference[0] + 2.0))) <= bound
     assert not model.result.converged or at_maximum
+
+
+def _true_laml(design: np.ndarray, y: np.ndarray, offset: np.ndarray, rho: float):
+    """``(V, size, condition)``: the model's own LAML at ``rho``, its terms' sizes and ``H``'s condition.
+
+    ``V = -l(theta) + (lambda |b|^2 + log|H| - q rho) / 2`` at the penalized
+    mode ``theta = (alpha, b)``, found by Newton's method on the exact
+    score with halved steps that stay inside the mean space; ``l`` is the
+    exact log-likelihood by ``log1mexp`` and ``H`` the observed information
+    plus ``lambda`` on the ``q`` random effects.
+    """
+    lam = math.exp(rho)
+    q = design.shape[1] - 1
+    penalty = np.diag([0.0] + [lam] * q)
+
+    def log_likelihood(eta: np.ndarray) -> np.ndarray:
+        complement = np.where(eta > -math.log(2.0), np.log(-np.expm1(eta)), np.log1p(-np.exp(eta)))
+        return y * eta + (1.0 - y) * complement
+
+    theta = np.zeros(design.shape[1])
+    theta[0] = -1.0 - float(np.max(offset))
+    for _ in range(200):
+        eta = design @ theta + offset
+        odds = np.exp(eta) / -np.expm1(eta)
+        score = design.T @ (y - (1.0 - y) * odds) - penalty @ theta
+        information = design.T @ (((1.0 - y) * odds / -np.expm1(eta))[:, None] * design) + penalty
+        step = np.linalg.solve(information, score)
+        fraction = 1.0
+        while np.any(design @ (theta + fraction * step) + offset >= 0.0):
+            fraction /= 2.0
+        theta = theta + fraction * step
+        if np.max(np.abs(fraction * step)) <= 4.0 * _EPS * (1.0 + np.max(np.abs(theta))):
+            break
+    eta = design @ theta + offset
+    odds = np.exp(eta) / -np.expm1(eta)
+    information = design.T @ (((1.0 - y) * odds / -np.expm1(eta))[:, None] * design) + penalty
+    rows = log_likelihood(eta)
+    quadratic = lam * float(theta[1:] @ theta[1:])
+    log_det = float(np.linalg.slogdet(information)[1])
+    value = -float(np.sum(rows)) + 0.5 * (quadratic + log_det - q * rho)
+    size = float(np.sum(np.abs(rows))) + quadratic + abs(log_det) + q * abs(rho)
+    return value, size, float(np.linalg.cond(information))
+
+
+def _deep_event_levels():
+    """Eight levels of 20 rows (1 to 12 events), plus one event row per level at offset -25."""
+    events = [1, 3, 6, 10, 2, 8, 4, 12]
+    levels, y, offset = [], [], []
+    for k, count in enumerate(events):
+        for r in range(20):
+            levels.append(f"l{k}")
+            y.append(1.0 if r < count else 0.0)
+            offset.append(0.0)
+        levels.append(f"l{k}")
+        y.append(1.0)
+        offset.append(-25.0)
+    levels_arr = np.array(levels)
+    design = np.column_stack(
+        [np.ones(len(levels))]
+        + [(levels_arr == name).astype(np.float64) for name in sorted(set(levels))]
+    )
+    return levels_arr, np.array(y), np.array(offset), design
+
+
+def _laml_noise(design: np.ndarray, size: float, condition: float) -> float:
+    """The rounding of ``_true_laml``'s sum: ``gamma_{n+p+4}`` of its sizes, ``p gamma_p cond(H)`` for ``log|H|``."""
+    n, p = design.shape
+
+    def gamma(k: int) -> float:
+        return k * _U / (1.0 - k * _U)
+
+    return gamma(n + p + 4) * size + p * gamma(p) * condition
+
+
+def test_reml_reads_the_models_own_laml_at_a_true_score_mode() -> None:
+    """At a fixed lambda, the REML criterion at a true-score mode is the model's own LAML.
+
+    The inner solve ends on the binomial/log certificate under Newton steps
+    (``PIRLSResult.mean_space_true_mode``), so the criterion reads the
+    model's likelihood, and its observed curvature at the unclipped mean.
+    eec69403 read both off the clip: its criterion sat -1.3e-5 from the
+    model's here, most of it from the event rows' curvature (about -5e-5 a
+    row at the clip, zero in the model).  The two sides share no additive
+    constant to remove (the binomial likelihood has none), so they agree to
+    the rounding of each, ``_laml_noise``.
+    """
+    levels_arr, y_arr, offset_arr, design = _deep_event_levels()
+    rho = 1.36
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"g": RandomEffect(lambda_policy=LambdaPolicy.fixed(math.exp(rho)))},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(pd.DataFrame({"g": levels_arr}), y_arr, offset=offset_arr)
+    assert model._reml_result.pirls_result.mean_space_true_mode
+    value, size, condition = _true_laml(design, y_arr, offset_arr, rho)
+    noise = _laml_noise(design, size, condition)
+    assert abs(model._reml_result.objective - value) <= 2.0 * noise
+
+
+def test_reml_with_an_estimated_lambda_minimises_the_models_own_laml() -> None:
+    """claude's #437 finding: a REML criterion read off the clip at the model's own mode.
+
+    Eight levels of 20 rows (1 to 12 events each) and one event row per level
+    at offset -25, below the clip floor; the random effect's lambda is
+    estimated.  Under Newton steps the inner solves stop at the model's own
+    mode, where the clipped likelihood is not stationary, but eec69403 still
+    read the clipped likelihood and the clip's curvature there (an event row
+    below the floor, whose observed curvature is zero, read about -5e-5): its
+    lambda-hat sat 0.0085 from the model's LAML minimum in log lambda.
+    Master certifies the clipped mode and its own criterion, 0.42 away.
+
+    The reference is a brute-force grid in ``rho = log lambda``, refined by a
+    golden section, of the model's own LAML (``_true_laml``).  It locates the
+    minimum to within ``sqrt(2 eps_V / V'')``, ``eps_V`` the rounding of its
+    sum of terms (``gamma_{n+p+4}`` of their sizes, plus ``p gamma_p`` times
+    the information's condition for its log-determinant).  The fit's
+    stop resolves ``rho`` to ``reml_tol (1 + |V|) / V''``.  Each is doubled
+    for ``V''``'s change across the interval.
+    """
+    levels_arr, y_arr, offset_arr, design = _deep_event_levels()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"g": RandomEffect()},
+    )
+    reml_tol = 1e-9
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(pd.DataFrame({"g": levels_arr}), y_arr, offset=offset_arr, reml_tol=reml_tol)
+    assert model.result.converged
+    assert model._reml_profile["irls_mean_space_newton_iters"] > 0
+    rho_hat = math.log(next(iter(model._reml_lambdas.values())))
+
+    grid = np.arange(-2.0, 4.0 + 1e-12, 0.05)
+    values = [_true_laml(design, y_arr, offset_arr, r)[0] for r in grid]
+    best = int(np.argmin(values))
+    low, high = grid[best - 1], grid[best + 1]
+    golden = (math.sqrt(5.0) - 1.0) / 2.0
+    for _ in range(60):
+        left, right = high - golden * (high - low), low + golden * (high - low)
+        if (
+            _true_laml(design, y_arr, offset_arr, left)[0]
+            < _true_laml(design, y_arr, offset_arr, right)[0]
+        ):
+            high = right
+        else:
+            low = left
+    rho_star = 0.5 * (low + high)
+    value, size, condition = _true_laml(design, y_arr, offset_arr, rho_star)
+    step = 1e-2
+    curvature = (
+        _true_laml(design, y_arr, offset_arr, rho_star + step)[0]
+        - 2.0 * value
+        + _true_laml(design, y_arr, offset_arr, rho_star - step)[0]
+    ) / step**2
+    noise = _laml_noise(design, size, condition)
+    resolution = 2.0 * reml_tol * (1.0 + abs(value)) / curvature + 2.0 * math.sqrt(
+        2.0 * noise / curvature
+    )
+    assert abs(rho_hat - rho_star) <= resolution, (rho_hat, rho_star, resolution)
 
 
 @pytest.mark.parametrize("direct_solve", ["gram", "structured"])
@@ -1117,6 +1305,10 @@ def test_reml_newton_steps_are_certified_by_the_models_score(direct_solve: str) 
     assert model.result.termination_reason == "converged"
     assert model._reml_profile["direct_backend"] == direct_solve
     assert model._reml_profile["irls_mean_space_newton_iters"] > 0
+    # the profile publishes the rule that stopped the inner solve, not the
+    # clipped residual, which cannot pass at this mode
+    assert model._reml_profile["irls_mode_rule"] == "mean_space_mode_score"
+    assert model._reml_profile["irls_mode_score"] <= model._reml_profile["irls_mode_bar"]
     # certified: the intercept's score within bar sum|s| (sum|s| = 8 at the
     # mode: per level two events of score 1 and a non-event of 2) against the
     # non-events' observed curvature p / (1 - p)^2 = 6 per level, 12 in all,
@@ -1230,7 +1422,9 @@ def test_the_clip_and_the_true_score_are_read_off_the_unclipped_eta() -> None:
             assert abs(curvature[k] - expected) <= 5.0 * _EPS * abs(expected)
     assert mean_space_newton_rows(np.ones(2), np.ones(2), np.array([-1.0, -2.0])) is None
     # the true deviance difference, -2 sum w [y d_eta + (1 - y) d log(1 - e^eta)],
-    # below the clip floor too, where the clipped deviance is flat
+    # below the clip floor too, where the clipped deviance is flat: the rows'
+    # differences summed pairwise, as the Newton line search forms it from the
+    # committed state's cached rows (``irls_direct``'s ``_newton_deviance_delta``)
     before, after = np.array([-40.0, -1.0, -1e-9]), np.array([-39.0, -0.5, -2e-9])
     y = np.array([0.0, 1.0, 0.0])
     weights = np.array([1e14, 1.0, 3.0])
@@ -1243,7 +1437,12 @@ def test_the_clip_and_the_true_score_are_read_off_the_unclipped_eta() -> None:
             expected += (
                 -2 * w * (yk * (a - b) + (1 - yk) * ((1 - a.exp()).ln() - (1 - b.exp()).ln()))
             )
-    delta = mean_space_deviance_delta(y, weights, after, before)
+    delta = -2.0 * float(
+        np.sum(
+            mean_space_log_likelihood_rows(y, weights, after)
+            - mean_space_log_likelihood_rows(y, weights, before)
+        )
+    )
     assert abs(delta - float(expected)) <= 8.0 * _EPS * abs(float(expected))
 
 

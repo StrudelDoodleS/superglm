@@ -324,6 +324,12 @@ class PIRLSResult:
     # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
     # only with ``termination_reason == "mean_space_boundary"``.
     mean_space_boundary_rows: int = 0
+    # The returned state's stop was the binomial/log true-score certificate
+    # under Newton steps (``irls_direct``): the state is the model's own
+    # penalized mode, where the clipped objective is not stationary, so a
+    # criterion read at it uses the model's own deviance
+    # (``reml.objective.reml_laml_objective``).
+    mean_space_true_mode: bool = False
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):

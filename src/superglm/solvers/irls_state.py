@@ -282,20 +282,6 @@ def mean_space_log_likelihood_rows(y: NDArray, weights: NDArray, eta_unclipped: 
     return rows
 
 
-def mean_space_deviance_delta(
-    y: NDArray, weights: NDArray, candidate_eta: NDArray, committed_eta: NDArray
-) -> float:
-    """``D(candidate) - D(committed)`` of the binomial/log deviance, ``-2`` times the rows' log-likelihood change.
-
-    Each row's difference is formed first (``mean_space_log_likelihood_rows``)
-    and summed pairwise (``np.sum``).
-    """
-    change = mean_space_log_likelihood_rows(
-        y, weights, candidate_eta
-    ) - mean_space_log_likelihood_rows(y, weights, committed_eta)
-    return float(-2.0 * np.sum(change))
-
-
 def interior_start_intercept(
     family: Distribution,
     link: Link,

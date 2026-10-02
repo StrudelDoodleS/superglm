@@ -400,12 +400,22 @@ def weighted_column_centring(
     weights instead of a solve's centred system.  The means take one
     transpose product, a dense column's anchored at its first positive-weight
     row (``prior_weighted_centre``).  The diagonal takes one pass per block:
-    a one-hot block in closed form, a dense block centred row by row in
-    fixed chunks, a factor-smooth ``fs`` block through its level sums
-    (``column_sums``), and any other block, whose entries its type bounds,
-    from its weighted Gram's diagonal less ``sum_w mean^2`` (clamped at 0; a
-    cancelled diagonal is the centring resolution ``penalized_mode_residual``
-    already floors).  Zeros when no weight is positive.
+    a one-hot block in closed form, a factor-smooth ``fs`` block through its
+    level sums (``column_sums``, centred row by row), and every other block,
+    dense or not, over its rows in fixed chunks by the corrected two-pass
+    algorithm (Chan, Golub & LeVeque 1983) about the rounded weighted mean
+    ``m``, never a row of the data:
+
+        D_jj = sum w (x - m)^2 - (sum w (x - m))^2 / sum w,
+
+    clamped at 0.  Without the correction the two-pass relative error is
+    within ``n u + n^2 kappa^2 u^2``, ``kappa^2 = sum w x^2 / D_jj`` (Chan,
+    Golub & LeVeque 1983), and the correction (Bjorck's) reduces the
+    second-order term.  Raw moments, ``sum w x^2 - sum_w m^2``, carried
+    ``(n + 3) u sum w x^2``, ``kappa^2`` times larger: enough to leave a
+    column that is nearly constant over the weighted mass with an inflated
+    diagonal and so a deflated relative score.  Zeros when no weight is
+    positive.
     """
     w = np.asarray(weights, dtype=np.float64)
     sum_w = float(np.sum(w))
@@ -428,10 +438,10 @@ def weighted_column_centring(
     diagonal[one_hot] = (
         on_weight[one_hot] * (1.0 - centre) ** 2 + (sum_w - on_weight[one_hot]) * centre**2
     )
-    # every other block in one pass of its own: a dense block centred row by
-    # row in fixed chunks, an fs block through its level sums, and any other
-    # block (entries bounded by its type) from its weighted Gram's diagonal
-    # less sum_w mean^2 -- never a design product per column
+    # every other block in one pass of its own over its rows: an fs block
+    # through its level sums, and any other block in fixed chunks of rows by
+    # the corrected two-pass algorithm about the rounded mean -- never a
+    # design product per column, never raw moments
     factor_smooth: list[NDArray] = []
     offset = 0
     for matrix in dm.group_matrices:
@@ -440,19 +450,23 @@ def weighted_column_centring(
         offset += width
         if isinstance(matrix, CategoricalGroupMatrix):
             continue
-        if type(matrix) is DenseGroupMatrix:
-            values = matrix.M
-            centre = mean_x[columns]
-            accumulated = np.zeros(width)
-            for lo in range(0, dm.n, _CHUNK):
-                hi = min(lo + _CHUNK, dm.n)
-                accumulated += w[lo:hi] @ (values[lo:hi] - centre) ** 2
-            diagonal[columns] = accumulated
-        elif isinstance(matrix, FactorSmoothGroupMatrix) and matrix.factor_basis == "fs":
+        if isinstance(matrix, FactorSmoothGroupMatrix) and matrix.factor_basis == "fs":
             factor_smooth.append(np.arange(columns.start, columns.stop))
-        else:
-            raw = np.diag(np.asarray(matrix.gram(w), dtype=np.float64))
-            diagonal[columns] = np.maximum(raw - sum_w * mean_x[columns] ** 2, 0.0)
+            continue
+        dense_values = matrix.M if type(matrix) is DenseGroupMatrix else None
+        centre = mean_x[columns]
+        squares = np.zeros(width)
+        firsts = np.zeros(width)
+        for lo in range(0, dm.n, _CHUNK):
+            hi = min(lo + _CHUNK, dm.n)
+            rows = (
+                dense_values[lo:hi]
+                if dense_values is not None
+                else np.asarray(matrix.row_subset(np.arange(lo, hi)).toarray(), dtype=np.float64)
+            ) - centre
+            squares += w[lo:hi] @ rows**2
+            firsts += w[lo:hi] @ rows
+        diagonal[columns] = np.maximum(squares - firsts**2 / sum_w, 0.0)
     if factor_smooth:
         chosen = np.concatenate(factor_smooth)
         zeros = np.zeros(dm.n)

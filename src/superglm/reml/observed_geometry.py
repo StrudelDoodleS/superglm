@@ -1200,7 +1200,14 @@ def build_observed_reml_geometry(
         raise ObservedGeometryInfeasibleError("result.intercept must be finite")
 
     eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
-    mu = clip_mu(link.inverse(eta), distribution)
+    mu = link.inverse(eta)
+    # A binomial/log state certified on the model's own score under Newton
+    # steps (``PIRLSResult.mean_space_true_mode``) is the model's mode: its
+    # curvature and weight derivatives are the model's, at the unclipped mean.
+    # At the clip an event row below the floor, whose observed curvature is
+    # zero, read about -5e-5 at eta = -26 and -2e-2 at eta = -20.
+    if not getattr(result, "mean_space_true_mode", False):
+        mu = clip_mu(mu, distribution)
     observed_w, weight_derivative, weight_second_derivative = _compute_observed_row_bundle(
         distribution,
         link,
