@@ -98,6 +98,7 @@ from superglm.solvers.irls_state import (
     interior_start_intercept,
     mean_space_boundary_rows,
     mean_space_clipped_rows,
+    mean_space_first_halving,
     mean_space_log_likelihood_rows,
     mean_space_newton_rows,
     mean_space_score_rows,
@@ -1371,6 +1372,8 @@ def _fit_irls_direct_once(
         penalty that overflows there is refused).
         """
         _last_true_residual[0] = None
+        # this state is judged: no truncated direction unless one is found below
+        _judged_truncated[0] = (eta_values, ())
         positive = weights > 0.0
         largest_weight = float(np.max(weights[positive], initial=0.0)) if np.any(positive) else 0.0
         weight_exponent = _even_exponent(largest_weight)
@@ -1544,9 +1547,22 @@ def _fit_irls_direct_once(
                     penalty_apply=lambda v: np.ldexp(penalty_matvec(v), -weight_exponent),
                     bar=mode_bar,
                     underflow=underflow,
+                    column_scale=held_rank.column_scale,
+                    eta=eta_values,
+                    penalty_size_apply=lambda v: np.ldexp(
+                        penalty_matvec(v, magnitude=True), -weight_exponent
+                    ),
                 )
             ratio = max(ratio, truncated_ratio)
-            _last_truncated[0] = truncated
+            _judged_truncated[0] = (eta_values, truncated)
+            if truncated:
+                _last_truncated[0] = (eta_values, truncated)
+            if truncated_ratio == math.inf and profile is not None:
+                # refused because the basis or the arithmetic cannot resolve
+                # the truncated rows (an ``unresolved_basis`` record)
+                profile["irls_truncated_unresolved"] = (
+                    profile.get("irls_truncated_unresolved", 0) + 1
+                )
         resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
         latent_parts = []
         for group_state in scop_groups or ():
@@ -2374,10 +2390,15 @@ def _fit_irls_direct_once(
     _true_confirmed = False
     _true_stop_ratio = math.inf
     _last_true_residual: list[ModeResidual | None] = [None]
-    # the decomposition this iteration's solve holds (gram and qr routes), and
-    # the truncated directions its certificate judged (``truncated_direction_ratio``)
+    # the decomposition this iteration's solve holds (gram and qr routes); the
+    # latest certificate's judgement of the truncated directions
+    # (``truncated_direction_ratio``) with the state it judged (its eta), and
+    # the latest judgement that found any.  Only a judgement of the returned
+    # state decides the fit's verdict; an earlier one is published as history
+    # (below)
     _held_rank: list = [None]
-    _last_truncated: list[tuple] = [()]
+    _judged_truncated: list[tuple] = [(None, ())]
+    _last_truncated: list[tuple] = [(None, ())]
 
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
@@ -2549,7 +2570,6 @@ def _fit_irls_direct_once(
 
     for it in range(max_iter):
         _held_rank[0] = None
-        _last_truncated[0] = ()
         beta_prev = committed.beta
         intercept_prev = committed.intercept
         beta = committed.beta.copy()
@@ -3412,7 +3432,20 @@ def _fit_irls_direct_once(
                     else _newton_deviance_delta(candidate, base),
                 ),
                 merit_roundoff=None if newton_score is None else _newton_merit_roundoff,
+                # a proposal that leaves the space: the halvings above the
+                # boundary are refused without a deviance pass each
+                first_halving=lambda: mean_space_first_halving(
+                    committed=committed,
+                    proposal=proposal,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                ),
             )
+            if decision.skipped and profile is not None:
+                profile["irls_halvings_skipped"] = (
+                    profile.get("irls_halvings_skipped", 0) + decision.skipped
+                )
             if (
                 has_constraints
                 and decision.step_rejected
@@ -3991,6 +4024,45 @@ def _fit_irls_direct_once(
             "the penalized maximum is constrained, fit is not converged.",
             _boundary_rows,
         )
+    # The truncated directions published.  A judgement of the returned state
+    # (the certificate read its eta) is the fit's own: published as it is, and
+    # the only one that may decide the verdict.  The returned state of a
+    # rejected step is the committed one, so its judgement counts.  When the
+    # returned state was never judged, a fit that is not converged publishes
+    # the latest judgement that found any as history (``earlier``), so a
+    # refusal stays disclosed, and it decides nothing.
+    _judged_eta, _judged = _judged_truncated[0]
+    if _judged_eta is not None and _judged_eta is eta_unclipped:
+        _published_truncated = _judged
+    elif converged:
+        _published_truncated = ()
+    else:
+        _published_truncated = tuple(
+            replace(record, earlier=True) for record in _last_truncated[0][1]
+        )
+    _boundary_sets = [
+        record for record in _published_truncated if record.boundary and not record.earlier
+    ]
+    # rows rising to the boundary along a direction the factorization
+    # truncates relabel only an exit the loop ran out on, never a
+    # non-finite deviance or a constraint's verdict
+    _truncated_boundary = bool(
+        not converged
+        and not _boundary_rows
+        and _boundary_sets
+        and termination_reason in ("max_iter", "score_stagnated", "step_rejected")
+    )
+    if _truncated_boundary:
+        # rows whose supremum along a direction the factorization truncates
+        # is the boundary (``TruncatedDirection.boundary``): the same verdict
+        # as rows held at it, though float64 cannot carry them there
+        termination_reason = "mean_space_boundary"
+        _boundary_rows = sum(record.row_count for record in _boundary_sets)
+        logger.info(
+            "fit_irls_direct: %d row(s) rise towards the boundary of the family's mean "
+            "space along a direction float64 cannot resolve; fit is not converged.",
+            _boundary_rows,
+        )
 
     if _has_scop:
         # Final Gram and SCOP Hessian caches must describe the retained model,
@@ -4521,7 +4593,8 @@ def _fit_irls_direct_once(
         centred_intercept_lo=centred_intercept_lo,
         mean_space_boundary_rows=_boundary_rows,
         mean_space_true_mode=bool(converged and _true_confirmed),
-        truncated_directions=_last_truncated[0],
+        truncated_directions=_published_truncated,
+        mean_space_boundary_unresolved=_truncated_boundary,
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.
