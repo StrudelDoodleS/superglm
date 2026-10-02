@@ -201,7 +201,7 @@ curve.
 If every level is in this position, no level identifies the population curve:
 the data cannot tell the levels' straight lines from the global curve's. The
 fit then penalizes every level's line, as described next, and warns. The
-global curve is then fitted through the trend across the levels, and the
+global curve is fitted through the trend across the levels, and the
 population curve is the global curve.
 
 To give a level its own curve, give it weighted rows at enough distinct values.
@@ -227,10 +227,11 @@ lines as random effects, as `basis="fs"` does.
 - The population curve is the global curve, and every level predicts its own
   fitted curve.
 - The `SeparationWarning` names the levels whose line separates.
-  `separation="ignore"` silences it and keeps the penalty.
-  `separation="error"` does not refuse the fit for this case.
-- The penalty shrinks every level's line, so it changes the fit of the other
-  levels too. Every other SZ fit keeps the lines unpenalized.
+- `separation="ignore"` silences the warning and keeps the penalty.
+- `separation="error"` does not refuse the fit for this case.
+- The penalty shrinks every level's line, so it changes the other levels'
+  curves too.
+- Every other SZ fit keeps the lines unpenalized.
 - The smoothing parameter needs enough levels to estimate. With very few
   levels and one of them separated, REML can drive it to its lower bound and
   report that it did not converge. The lines are still finite there.
