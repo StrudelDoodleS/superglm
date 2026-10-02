@@ -687,33 +687,22 @@ def test_a_subnormal_weight_level_publishes_finite_degrees_of_freedom(
     )
 
 
-def _two_level_log_likelihood(weights: np.ndarray, eta: np.ndarray) -> np.ndarray:
-    """Each row's ``w [y eta + (1 - y) log(1 - e^eta)]`` for ``y = (0, 1, 0, 1)``, ``log1mexp`` by branch."""
-    y = np.array([0.0, 1.0, 0.0, 1.0])
-    complement = np.where(
-        eta > -math.log(2.0),
-        np.log(-np.expm1(np.minimum(eta, -1e-300))),
-        np.log1p(-np.exp(np.minimum(eta, 0.0))),
-    )
-    return weights * (y * eta + (1.0 - y) * complement)
+# How far a certified level of the two-level fixture can sit from log(1/2),
+# per level, where every row's score is +-w and its observed curvature 2w a
+# level (the non-event's w p / (1 - p)^2 at p = 1/2):
+# - identified, the level's score is within the bar of its own scale,
+#   zeta_level sqrt(D) = sqrt(2w) sqrt(2w) = 2w (``level_zeta``), so its eta
+#   is within bar; the intercept's within bar of its own sum |s|;
+# - excluded as weak, half its decrement 2w deta^2 / 2 is within the noise
+#   of its own rows, gamma_6 2w log 2, so deta <= sqrt(2 gamma_6 log 2);
+# each doubled for the curvature's change along the way.  The floors, of
+# order u times the offsets, stay far below either.
+_GAMMA_6 = 6.0 * 2.0**-53 / (1.0 - 6.0 * 2.0**-53)
+_TWO_LEVEL_BOUND = 2.0 * max(MODE_CERTIFICATION_BAR, math.sqrt(2.0 * _GAMMA_6 * math.log(2.0)))
 
 
-def _certified_two_level_fit(weights: np.ndarray, offset: np.ndarray, direct_solve: str):
-    """``(converged, deviance excess, its certified bound)`` of a two-level fit whose maximum is ``p = 1/2``.
-
-    Each level holds one event and one non-event, so at the maximum every
-    row's score is ``+-w`` and its Fisher weight ``w``: ``sum |s| = F = sum
-    w``, and level a (the intercept) carries ``F_a >= F / 2``.  A certified
-    fit holds the intercept's score within ``bar F`` and level b's centred
-    score within ``bar zeta sqrt(D_bb)`` (``zeta = sqrt(F)``, ``D_bb = F_a
-    F_b / F``), or excludes level b with half its Newton decrement within
-    ``gamma_4 sum |l|``.  The floors, of order ``u`` times the offsets, stay
-    below the bar here.  Per level the log-likelihood gap is ``S^2 / (2 F)``,
-    so the two give at most ``(bar F)^2 ((1 + sqrt 2)^2 / F_a + 2 / F) / 2``
-    plus that noise, doubled for the curvature's change along the way and
-    again for the deviance; the test's own two sums add ``2 gamma_4`` times
-    their sizes.
-    """
+def _two_level_levels(weights: np.ndarray, offset: np.ndarray, direct_solve: str):
+    """``(converged, largest |eta_level - log(1/2)|)`` of a two-level fit whose maxima are ``p = 1/2``."""
     model = SuperGLM(
         family="binomial",
         link="log",
@@ -731,63 +720,66 @@ def _certified_two_level_fit(weights: np.ndarray, offset: np.ndarray, direct_sol
             sample_weight=weights,
         )
     eta = model._dm.matvec(model.result.beta) + model.result.intercept + offset
-    at_maximum = _two_level_log_likelihood(weights, np.full(4, math.log(0.5)))
-    published = _two_level_log_likelihood(weights, eta)
-    excess = 2.0 * (float(np.sum(at_maximum)) - float(np.sum(published)))
-    if np.any(eta >= 0.0):  # outside the mean space: no likelihood
-        excess = math.inf
-    total, level_a = float(np.sum(weights)), float(np.sum(weights[:2]))
-    gamma_4 = 4.0 * _U / (1.0 - 4.0 * _U)
-    noise = gamma_4 * float(np.sum(np.abs(at_maximum)))
-    gap = (MODE_CERTIFICATION_BAR * total) ** 2 * (
-        (1.0 + math.sqrt(2.0)) ** 2 / level_a + 2.0 / total
-    ) / 2.0 + noise
-    rounding = (
-        2.0 * gamma_4 * (float(np.sum(np.abs(at_maximum))) + float(np.sum(np.abs(published))))
-    )
-    return bool(model.result.converged), excess, 4.0 * gap + rounding
+    return bool(model.result.converged), float(np.max(np.abs(eta[[0, 2]] - math.log(0.5))))
 
 
 @pytest.mark.parametrize("direct_solve", ["auto", "gram", "qr"])
-def test_a_level_weak_only_at_an_unfinished_iterate_is_not_certified(direct_solve: str) -> None:
-    """Sol's #437 fixture: level a of weight 1e4 at offset +1.3, level b of weight 1e-8 at -30.
+@pytest.mark.parametrize(
+    ("weights", "level_b_offset"),
+    [
+        ((1e4, 1e4, 1e-8, 1e-8), -30.0),  # Sol, on 6b2f2bed: p_b = 7.07e-7
+        ((1e8, 1e8, 1e-8, 1e-8), -20.0),  # Sol, on 2357a43a: p_b = 0.0676
+    ],
+)
+def test_a_light_level_is_never_certified_away_from_its_own_maximum(
+    weights: tuple, level_b_offset: float, direct_solve: str
+) -> None:
+    """Sol's #437 fixtures: a heavy level at offset +1.3 and a light one far below the clip floor.
 
-    6b2f2bed certified it after one iteration at ``p_b = 7.07e-7`` (maximum
-    1/2): level b's Fisher curvature is tiny there only because ``p_b`` is
-    far off, so the weak test excluded it and the intercept alone passed.
-    Its half Newton decrement there, ``w_b / (4 p_b)`` (about 3.5e-3) against
-    noise of ``gamma_4 sum |l|`` (about 6e-12), now keeps it in, and the fit
-    runs on.
+    Both levels' maxima are ``p = 1/2``.  6b2f2bed excluded the light level as
+    weak on its curvature at an unfinished iterate.  2357a43a measured its
+    block decrement against the noise of every row, dominated by the heavy
+    level, and certified ``p_b = 0.0676``.  The noise is now the light
+    level's own rows', and its relative score is scaled by its own rows'
+    ``zeta``.  The assertion is per level: an aggregate deviance hides a
+    light level's error.
     """
-    converged, excess, bound = _certified_two_level_fit(
-        np.array([1e4, 1e4, 1e-8, 1e-8]), np.array([1.3, 1.3, -30.0, -30.0]), direct_solve
+    converged, error = _two_level_levels(
+        np.array(weights), np.array([1.3, 1.3, level_b_offset, level_b_offset]), direct_solve
     )
-    assert not converged or excess <= bound
+    assert not converged or error <= _TWO_LEVEL_BOUND, error
 
 
 @pytest.mark.parametrize("direct_solve", ["auto", "gram", "qr"])
-def test_a_weight_ratio_never_certifies_a_wrong_two_level_maximum(direct_solve: str) -> None:
-    """Level b at ``1 / ratio`` of level a's weight, ratio 1 to 1e12, at offsets -5 to -40."""
-    for ratio in (1.0, 1e3, 1e6, 1e9, 1e12):
+def test_a_weight_ratio_never_certifies_a_level_away_from_its_maximum(direct_solve: str) -> None:
+    """Level weights ``sqrt(ratio)`` and ``1 / sqrt(ratio)``, ratio 1 to 1e16, light level at -5 to -40.
+
+    Every fit is per level within ``_TWO_LEVEL_BOUND`` of its own maximum, or
+    is not converged.  2357a43a certified levels up to 0.98 away in eta at
+    ratio 1e16.
+    """
+    for ratio in (1.0, 1e4, 1e8, 1e12, 1e16):
+        heavy, light = math.sqrt(ratio), 1.0 / math.sqrt(ratio)
         for level_b_offset in (-5.0, -10.0, -20.0, -30.0, -40.0):
-            converged, excess, bound = _certified_two_level_fit(
-                np.array([1e4, 1e4, 1e4 / ratio, 1e4 / ratio]),
+            converged, error = _two_level_levels(
+                np.array([heavy, heavy, light, light]),
                 np.array([1.3, 1.3, level_b_offset, level_b_offset]),
                 direct_solve,
             )
-            assert not converged or excess <= bound, (ratio, level_b_offset, excess, bound)
+            assert not converged or error <= _TWO_LEVEL_BOUND, (ratio, level_b_offset, error)
 
 
 @pytest.mark.parametrize(
-    ("low_scores", "excluded"),
+    ("low_scores", "second", "excluded"),
     [
-        ((1e-16, 0.0), True),  # at the mode along the pair: excluded
-        ((1e-12, 0.0), False),  # far from it: refused
-        ((1e-16, -2e-13), False),  # each slope passes alone, the pair does not
+        ((1e-16, 0.0), 1e-3, True),  # at the mode along the pair: excluded
+        ((1e-12, 0.0), 1e-3, False),  # far from it: refused
+        ((1e-16, -2e-13), 1e-3, False),  # each slope passes alone, the pair does not
+        ((1e-16, 0.0), 0.0, True),  # identical columns: H_BB singular, g in its range
     ],
 )
 def test_the_weak_exclusion_reads_the_block_newton_decrement(
-    low_scores: tuple[float, float], excluded: bool
+    low_scores: tuple[float, float], second: float, excluded: bool
 ) -> None:
     """``penalized_mode_residual``'s weak exclusion, by table: allowed, refused, refused as a block.
 
@@ -804,15 +796,19 @@ def test_the_weak_exclusion_reads_the_block_newton_decrement(
     - ``a = 1e-12``: about 5e-5, refused.
     - ``g = (a, -a)``, along the small eigenvector: each slope's own term is
       ``a^2 / 2e-20``, summing to 1e-12 (within the noise, so 430a423a
-      excluded both), but the block's is about ``a^2 / 5e-27 = 4e-6``,
+      excluded both), but the block's half decrement is about ``a^2 / 5e-27 = 2e-6``,
       refused.
+    - Identical columns (``x2 = e_8``): ``H_BB`` is singular and ``g = (a,
+      a)`` lies in its range.  Its null eigenvalue comes back from LAPACK at
+      the rounding, of either sign; decided in ``u``, it is null, ``g``'s
+      projection on it is within rounding, and the exclusion is allowed.
     """
     from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
     from superglm.solvers.mode_score import penalized_mode_residual
 
     columns = np.zeros((10, 2))
     columns[8] = 1.0
-    columns[9, 1] = 1e-3
+    columns[9, 1] = second
     dm = DesignMatrix([DenseGroupMatrix(columns)], n=10, p=2)
     fisher = np.append(np.ones(8), [1e-20, 1e-20])
     score = np.append(np.tile([1.0, -1.0], 4), low_scores)
@@ -834,7 +830,7 @@ def test_the_weak_exclusion_reads_the_block_newton_decrement(
         penalty_curvature=np.zeros(2),
         sum_w=sum_w,
         bar=MODE_CERTIFICATION_BAR,
-        decrement_noise=lambda: 1e-10,
+        decrement_noise=lambda support: 1e-10,
     )
     assert np.all(residual.relative[1:] > MODE_CERTIFICATION_BAR)
     assert bool(np.all(residual.excluded)) is excluded
@@ -849,6 +845,33 @@ def test_the_underflow_allowance_is_representable() -> None:
     assert _SUBNORMAL_SPACING == np.nextafter(0.0, 1.0) > 0.0
     for rows in (0, 1, 4, 10**6):
         assert _underflow_allowance(rows) == (rows + 2) * _SUBNORMAL_SPACING > 0.0
+
+
+@pytest.mark.parametrize(("row", "refused"), [(-(2.0**-52), False), (-1e-3, True)])
+def test_a_scop_observed_row_is_signed_only_beyond_its_rounding(row: float, refused: bool) -> None:
+    """SCOP's observed rows: a negative row within its rounding is zero, one beyond it is refused.
+
+    A binomial/log event row's observed information is exactly zero, and its
+    terms cancel, so the computed row is the platform's rounding: -1.1e-16
+    and -2.2e-16 on the macOS, Windows and ARM64 runners, where 2357a43a's
+    ``test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates`` raised
+    "signed observed-information rows are not supported".  Rows are within
+    ``8u`` of their terms' scale (``observed_row_error_scale``, at least 1
+    here: the Fisher part of a row at ``p = 1/2``).
+    """
+    from superglm.reml.observed_geometry import compute_scop_observed_information_weights
+
+    class FixedRows(Binomial):
+        def scop_observed_information_weights(self, link, y, mu, eta, sample_weight):
+            return np.array([row, 1.0])
+
+    eta = np.full(2, math.log(0.5))
+    arguments = (FixedRows(), LogLink(), np.array([1.0, 0.0]), np.exp(eta), eta, np.ones(2))
+    if refused:
+        with pytest.raises(ValueError, match="signed observed-information rows"):
+            compute_scop_observed_information_weights(*arguments)
+    else:
+        assert np.array_equal(compute_scop_observed_information_weights(*arguments), [0.0, 1.0])
 
 
 def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates() -> None:

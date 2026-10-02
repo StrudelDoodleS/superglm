@@ -591,35 +591,56 @@ class ModeResidual:
         return bool(np.any(self.bar_effective[identified] > self.bar))
 
 
+# The most weak slopes one evaluation forms a block for: above it the
+# exclusion is refused (the safe direction), so the block, an ``n x k`` array
+# and ``k`` design products, stays small.
+_WEAK_BLOCK_LIMIT = 32
+
+
 def _centred_block_gram(
     dm: DesignMatrix, columns: NDArray, mean_x: NDArray, weights: NDArray
-) -> NDArray:
-    """``sum w (x_B - m_B)(x_B - m_B)'`` less its correction, for a few columns ``B`` formed directly.
+) -> tuple[NDArray, NDArray]:
+    """``(gram, support)`` for a few columns ``B`` formed directly.
 
-    The corrected two-pass cross products (Chan, Golub & LeVeque 1983) about
-    the rounded means ``m_B``: one design product per column, for the small
-    block of weakly identified slopes ``penalized_mode_residual`` tests.
+    ``gram`` is ``sum w (x_B - m_B)(x_B - m_B)'`` less its correction, the
+    corrected two-pass cross products (Chan, Golub & LeVeque 1983) about the
+    rounded means ``m_B``, accumulated over fixed chunks of rows.
+    ``support`` marks the rows where any column of ``B`` is nonzero: the rows
+    a step in ``B`` changes, with the intercept held.  One design product per
+    column, for the small block of weakly identified slopes
+    ``penalized_mode_residual`` tests (``_WEAK_BLOCK_LIMIT``).
     """
     columns = np.asarray(columns, dtype=np.intp)
     weights = np.asarray(weights, dtype=np.float64)
     centred = np.empty((dm.n, len(columns)))
+    support = np.zeros(dm.n, dtype=bool)
     for position, column in enumerate(columns):
         unit = np.zeros(dm.p)
         unit[column] = 1.0
-        centred[:, position] = np.asarray(dm.matvec(unit), dtype=np.float64) - mean_x[column]
+        raw = np.asarray(dm.matvec(unit), dtype=np.float64)
+        support |= raw != 0.0
+        centred[:, position] = raw - mean_x[column]
     firsts = weights @ centred
+    gram = np.zeros((len(columns), len(columns)))
+    for lo in range(0, dm.n, _CHUNK):
+        block = centred[lo : lo + _CHUNK]
+        gram += (block * weights[lo : lo + _CHUNK, None]).T @ block
     total = float(np.sum(weights))
-    gram = (centred * weights[:, None]).T @ centred
     if total > 0.0:
         gram = gram - np.outer(firsts, firsts) / total
-    return 0.5 * (gram + gram.T)
+    return 0.5 * (gram + gram.T), support
 
 
 def _half_block_decrement(hessian: NDArray, gradient: NDArray) -> float:
-    """``g' H^-1 g / 2`` over ``H``'s eigenvectors; ``inf`` where ``g`` meets a non-positive eigenvalue.
+    """``g' H^-1 g / 2`` over ``H``'s eigenvectors, its null space decided in ``u``.
 
-    ``inf`` too when ``H`` or ``g`` is not finite: the gain cannot be bounded,
-    so the exclusion it would license is refused.
+    An eigenvalue within ``4 k u lambda_max`` of zero (``k`` the block's
+    size) is null to the eigensolver's resolution: a projection of ``g`` on
+    it beyond its own rounding, ``4 k u |g|``, cannot be bounded, so the gain
+    is ``inf`` and the exclusion it would license is refused; one within that
+    rounding adds nothing.  Deciding at exact zero would follow the sign
+    LAPACK gives a null eigenvalue.  ``inf`` too when ``H`` or ``g`` is not
+    finite.
     """
     if not (np.all(np.isfinite(hessian)) and np.all(np.isfinite(gradient))):
         return math.inf
@@ -627,11 +648,15 @@ def _half_block_decrement(hessian: NDArray, gradient: NDArray) -> float:
         values, vectors = np.linalg.eigh(hessian)
     except np.linalg.LinAlgError:
         return math.inf
+    k = len(values)
+    resolution = 4.0 * k * _UNIT_ROUNDOFF
+    largest = float(np.max(np.abs(values), initial=0.0))
     projection = vectors.T @ gradient
-    positive = values > 0.0
-    if np.any(~positive & (projection != 0.0)):
+    null = values <= resolution * largest
+    if np.any(null & (np.abs(projection) > resolution * float(np.linalg.norm(gradient)))):
         return math.inf
-    return 0.5 * float(np.sum(projection[positive] ** 2 / values[positive]))
+    kept = ~null
+    return 0.5 * float(np.sum(projection[kept] ** 2 / values[kept]))
 
 
 def penalized_mode_residual(
@@ -652,8 +677,9 @@ def penalized_mode_residual(
     excluded: NDArray | None = None,
     resolve_cap: float = float("inf"),
     column_shift: NDArray | None = None,
-    decrement_noise: Callable[[], float] | None = None,
+    decrement_noise: Callable[[NDArray], float] | None = None,
     penalty_block: Callable[[NDArray], NDArray] | None = None,
+    level_zeta: bool = False,
 ) -> ModeResidual:
     """Evaluate the shared relative score (module docstring) at one iterate.
 
@@ -677,10 +703,10 @@ def penalized_mode_residual(
     larger than the data's scale from overflowing beside it.  The powers of
     two are exact, and the even shift keeps ``zeta``'s square root exact.
 
-    ``decrement_noise`` (``None`` for none) returns the objective's rounding
-    noise in the weights' units.  When given, the weak test may exclude a
-    slope only where the iterate is already at the mode along it, to that
-    noise.  The weak test reads curvature alone, and at an unfinished
+    ``decrement_noise`` (``None`` for none) maps a boolean row mask to the
+    rounding noise of the objective over those rows, in the weights' units.
+    When given, the weak test may exclude a slope only where the iterate is
+    already at the mode along it, to that noise.  The weak test reads curvature alone, and at an unfinished
     iterate a slope's curvature can be tiny only because its rows' means are
     still far off.  Half the Newton decrement, ``lambda^2 / 2`` with
     ``lambda^2 = g' H^-1 g``, is the predicted gain of a Newton step (Boyd &
@@ -696,10 +722,33 @@ def penalized_mode_residual(
       corrected two-pass algorithm (the block is small), plus
       ``penalty_block(B)``, the penalty's block in the weights' units
       (``None``: its diagonal, ``penalty_curvature``).
-    - The gain is ``inf`` when ``H_BB`` has a non-positive eigenvalue that
-      ``g_B`` does not miss exactly.
+    - The gain is ``inf`` when ``H_BB`` has an eigenvalue null to the
+      eigensolver's resolution that ``g_B`` meets beyond its own rounding
+      (``_half_block_decrement``), and when more than ``_WEAK_BLOCK_LIMIT``
+      slopes are newly weak.
+    - The noise is the objective's own over the rows the block touches,
+      ``decrement_noise(S)`` for ``S`` the support of ``X_B``, the rows where
+      any of its columns is nonzero.  A Newton step in ``B`` with the
+      intercept held changes ``eta`` on ``S`` alone, so the objective's
+      change is ``sum_{i in S} [l_i(eta_i + x_iB' d) - l_i(eta_i)]``, and
+      evaluating it in float64 carries about ``gamma_{|S|}`` times ``sum_{i
+      in S} |l_i|`` (each row's own few roundings add a few ``u |l_i|``).  A
+      gain within that noise cannot be told from none; one beyond it is a
+      step the fit has not taken.  Rows outside ``S`` carry noise the step
+      never meets: a heavy level's rounding must not hide a light level's
+      gain.  For one-hot levels ``S`` is the levels' own rows; for a dense
+      or spline column it is its nonzero rows, possibly all of them.
     If the gain exceeds the noise, no slope of this evaluation is excluded as
     weak.
+
+    ``level_zeta`` scales each one-hot level by its own rows' ``zeta``,
+    ``sum_level |s| / sqrt(sum_level w)``, in place of the global one.  The
+    global ``zeta`` is set by the heaviest rows: a level carrying ``w`` of
+    the total weight ``W`` passes it while its own score is about ``sqrt(W /
+    w)`` bars from zero, so at ``W / w = 1e16`` a level's probability could be
+    certified anywhere.  Against its own rows' scale the level is held to the
+    bar on its own score, and its floors to its own rows' rounding.  Other
+    columns keep the global ``zeta``.
     """
     n, p = dm.n, dm.p
     total = float(np.sum(row_score))
@@ -720,6 +769,23 @@ def penalized_mode_residual(
         if column_shift is None
         else np.ldexp(np.full(p, zeta), -(np.asarray(column_shift) // 2))
     )
+    if level_zeta:
+        levels = one_hot_columns(dm)
+        if np.any(levels):
+            level_weight = np.asarray(
+                dm.rmatvec(np.asarray(fisher_weights, dtype=np.float64)), dtype=np.float64
+            )[levels]
+            level_score = np.asarray(dm.rmatvec(absolute), dtype=np.float64)[levels]
+            own = np.full(p, zeta)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                own[levels] = np.where(
+                    level_weight > 0.0,
+                    level_score / np.sqrt(np.maximum(level_weight, _TINY)),
+                    zeta,
+                )
+            column_zeta = (
+                own if column_shift is None else np.ldexp(own, -(np.asarray(column_shift) // 2))
+            )
     curvature_root = np.sqrt(
         shifted((np.maximum(centered_scale, resolution) * root_weight) ** 2)
         + np.maximum(np.asarray(penalty_curvature, dtype=np.float64), 0.0)
@@ -794,7 +860,10 @@ def penalized_mode_residual(
                 chosen = slopes[newly_weak]
                 resolvable = np.maximum(np.abs(slope_score[chosen]) - score_floor[newly_weak], 0.0)
                 gain = 0.0
-                if np.any(resolvable > 0.0):
+                support = None
+                if len(chosen) > _WEAK_BLOCK_LIMIT:
+                    gain = math.inf
+                elif np.any(resolvable > 0.0):
                     gradient = np.copysign(resolvable, slope_score[chosen])
                     with np.errstate(over="ignore", invalid="ignore"):
                         # each coordinate's own units back to the weights'
@@ -811,9 +880,10 @@ def penalized_mode_residual(
                             )
                         else:
                             penalty = np.asarray(penalty_block(chosen), dtype=np.float64)
-                        hessian = _centred_block_gram(dm, chosen, mean_x, weights) + penalty
+                        gram, support = _centred_block_gram(dm, chosen, mean_x, weights)
+                        hessian = gram + penalty
                     gain = _half_block_decrement(hessian, gradient)
-                if not gain <= decrement_noise():
+                if gain > 0.0 and not (support is not None and gain <= decrement_noise(support)):
                     newly_weak[:] = False
             weak[slopes] = newly_weak
     return ModeResidual(

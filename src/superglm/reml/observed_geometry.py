@@ -52,7 +52,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
 )
 from superglm.solvers.hessian_factor import HessianFactor
-from superglm.solvers.mode_score import linear_predictor, penalized_mode_residual
+from superglm.solvers.mode_score import _UNIT_ROUNDOFF, linear_predictor, penalized_mode_residual
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
@@ -616,11 +616,20 @@ def compute_scop_observed_information_weights(
     if observed.shape != y.shape or not np.all(np.isfinite(observed)):
         raise ValueError("SCOP observed-information rows must be finite and match y")
     if np.any(observed < 0.0):
-        minimum = float(np.min(observed))
-        raise ValueError(
-            "signed observed-information rows are not supported by the current stable SCOP "
-            f"moment kernels (minimum row={minimum:.3e})"
-        )
+        # A row whose terms cancel (a binomial/log event row's is zero) is
+        # computed to a few ulps of its terms' sizes (``observed_row_error_scale``),
+        # so its sign there is the platform's rounding (-1.1e-16 and -2.2e-16 on
+        # the macOS, Windows and ARM64 runners): within 8u of that scale the row
+        # is zero.  A row negative beyond it is signed and refused.
+        scale = observed_row_error_scale(distribution, link, y, mu, eta, sample_weight, observed)
+        rounding = (observed < 0.0) & (-observed <= 8.0 * _UNIT_ROUNDOFF * scale)
+        observed = np.where(rounding, 0.0, observed)
+        if np.any(observed < 0.0):
+            minimum = float(np.min(observed))
+            raise ValueError(
+                "signed observed-information rows are not supported by the current stable SCOP "
+                f"moment kernels (minimum row={minimum:.3e})"
+            )
     return observed
 
 

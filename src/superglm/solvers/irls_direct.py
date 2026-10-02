@@ -1289,9 +1289,10 @@ def _fit_irls_direct_once(
           of the ratio only while the iterate is at the mode along them: half
           their block Newton decrement, over their penalised curvature block
           (``weak_penalty_block`` for the penalty's part), within the
-          log-likelihood sum's own rounding, ``gamma_n sum |l_i|``
-          (``penalized_mode_residual``'s ``decrement_noise``).  The penalty's
-          rounding is left out of that noise, which can only refuse.
+          log-likelihood's own rounding over the rows the block touches,
+          ``gamma_{|S| + 4} sum_{i in S} |l_i|`` (``penalized_mode_residual``'s
+          ``decrement_noise``).  The penalty's rounding is left out of that
+          noise, which can only refuse.
 
         **Constraints.** ``active_rows`` are the hard constraints ``a' beta >=
         b`` active at the iterate.  A constrained mode is stationary when ``G
@@ -1369,11 +1370,24 @@ def _fit_irls_direct_once(
                 penalty_magnitude = penalty_magnitude + np.abs(rows).T @ multipliers
         centre_shift = float(mean_x @ beta_values)
 
-        def likelihood_noise() -> float:
-            rows_l = mean_space_log_likelihood_rows(
-                y, np.ldexp(weights, -weight_exponent), eta_values
+        likelihood_rows: list = []
+
+        def likelihood_noise(support: NDArray) -> float:
+            # the log-likelihood's rounding over the rows a weak block touches
+            # (``penalized_mode_residual``): gamma for the terms summed there,
+            # plus each row's own few roundings
+            if not likelihood_rows:
+                likelihood_rows.append(
+                    np.abs(
+                        mean_space_log_likelihood_rows(
+                            y, np.ldexp(weights, -weight_exponent), eta_values
+                        )
+                    )
+                )
+            touched = np.asarray(support, dtype=bool) & positive
+            noise = _gamma(int(np.count_nonzero(touched)) + 4) * float(
+                np.sum(likelihood_rows[0][touched])
             )
-            noise = _gamma(int(np.count_nonzero(positive))) * float(np.sum(np.abs(rows_l)))
             return noise if math.isfinite(noise) else 0.0
 
         def weak_penalty_block(columns: NDArray) -> NDArray:
@@ -1406,6 +1420,7 @@ def _fit_irls_direct_once(
             column_shift=shift,
             decrement_noise=likelihood_noise,
             penalty_block=weak_penalty_block,
+            level_zeta=True,
         )
         _last_true_residual[0] = residual
         rows_n = int(np.count_nonzero(positive))
