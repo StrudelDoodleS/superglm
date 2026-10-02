@@ -461,10 +461,15 @@ class EtaSum:
     into the pair (``PIRLSResult.centred_sum_compensated``), ``alpha`` holds
     that column's ``c dbeta`` and can cancel against a row's ``(x - c) beta``.
     The sum is then compensated (``mode_score.CompensatedSum``), with ``alpha``
-    first, each centred column as its exact pieces (``_centred_term_expansion``)
-    and ``alpha_lo`` joining the errors last.  A row the expansion cannot
-    finish takes the plain predictor (``CompensatedSum``).
+    first, each centred column as its exact pieces (``_add_centred_term``) and
+    ``alpha_lo`` joining the errors last, in row chunks.  A row the expansion
+    cannot finish takes the plain predictor (``CompensatedSum``).
     ``mode_score.linear_predictor`` evaluates the solver's pair the same way.
+
+    ``add`` takes a term's rows or a callable giving them, and returns the
+    handle ``finish(without=...)`` drops: the rows as added, or the
+    compensated sum's addend, whose callable recomputes the rows if a row's
+    fallback needs them, so the sum holds no term's rows.
     """
 
     __slots__ = ("compensated", "intercept", "intercept_lo", "total")
@@ -477,44 +482,40 @@ class EtaSum:
         self.intercept, self.intercept_lo = intercept, intercept_lo
         self.compensated = bool(compensated)
         self.total: NDArray | CompensatedSum = (
-            CompensatedSum(np.full(n, intercept, dtype=np.float64), float(intercept_lo or 0.0))
+            CompensatedSum(float(intercept), float(intercept_lo or 0.0), n=n)
             if self.compensated
             else start_eta(n, intercept, intercept_lo)
         )
 
-    def add(self, values) -> None:
+    def add(self, values):
+        """Add a term's rows (or a callable giving them); the handle a drop removes."""
         if self.compensated:
-            self.total.add(values)
-        else:
-            self.total += values
+            return self.total.add(values)
+        values = values() if callable(values) else values
+        self.total += values
+        return values
 
     def __iadd__(self, values) -> EtaSum:
         self.add(values)
         return self
 
-    def add_expansion(self, pieces, contribution) -> None:
-        """Add a term as its exact ``pieces``, ``contribution`` the term as fitted scores it."""
-        if self.compensated:
-            self.total.add_expansion(pieces, contribution)
-        else:
-            self.total += contribution
+    def finish(self, without=(), consume: bool = False) -> NDArray:
+        """The predictor, less the terms whose handles are ``without`` (a drop).
 
-    def finish(self, without=()) -> NDArray:
-        """The predictor, less the ``(pieces, contribution)`` terms ``without`` (a drop)."""
+        ``consume`` lets a compensated sum write the predictor over its own
+        running total, which ends the sum.
+        """
         if not self.compensated:
             total = self.total
-            for _, contribution in without:
+            for contribution in without:
                 total = total - contribution
             return finish_eta(total, self.intercept, self.intercept_lo)
-        total = self.total
-        if without:
-            total = self.total.copy()
-            for pieces, contribution in without:
-                total.add_expansion(
-                    tuple(-np.asarray(piece, dtype=np.float64) for piece in pieces),
-                    -np.asarray(contribution, dtype=np.float64),
-                )
-        return total.value()
+        if not without:
+            return self.total.value(consume=consume)
+        total = self.total.copy()
+        for addend in without:
+            total.subtract(addend)
+        return total.value(consume=True)
 
 
 def scores_centred(spec) -> bool:
@@ -563,27 +564,30 @@ def _term_columns(term: dict[str, Any], X: EagerFrame) -> tuple[NDArray, ...]:
     return (left, right)
 
 
-def _centred_term_expansion(
+def _add_centred_term(
+    eta: EtaSum,
     term: dict[str, Any],
     X: EagerFrame,
     beta_all: NDArray,
     centre: NDArray,
-) -> tuple[tuple[NDArray, ...], NDArray]:
-    """``(B - 1 c') beta`` as ``(pieces, contribution)`` for a compensated ``EtaSum``.
+):
+    """Add ``(B - 1 c') beta`` to a compensated ``EtaSum``; the handle a drop removes.
 
-    A column scored about its centre gives ``mode_score.centred_column_expansion``
-    of its values: pieces exact to ``u^2`` and its fitted ``(x - c) beta`` bit for
-    bit.  Any other term is its one contribution (``_centred_term_contribution``).
+    A column scored about its centre is added as
+    ``mode_score.centred_column_expansion`` of its values: pieces exact to
+    ``u^2`` and its fitted ``(x - c) beta`` bit for bit.  Any other term is its
+    one contribution (``_centred_term_contribution``).  Either is recomputed
+    from ``X`` if a row's fallback needs it.
     """
     spec = term["spec"]
     if not scores_centred(spec):
-        contribution = _centred_term_contribution(term, X, beta_all, centre)
-        return (contribution,), contribution
-    from superglm.solvers.mode_score import centred_column_expansion
-
+        return eta.add(lambda: _centred_term_contribution(term, X, beta_all, centre))
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64).ravel()
-    values = np.asarray(spec._centred_values(*_term_columns(term, X)), dtype=np.float64).ravel()
-    return centred_column_expansion(values, float(centre[0]), float(beta[0]))
+    return eta.total.add_column(
+        lambda: np.asarray(spec._centred_values(*_term_columns(term, X)), dtype=np.float64).ravel(),
+        float(centre[0]),
+        float(beta[0]),
+    )
 
 
 def _score_prediction_term_fast_discrete(
@@ -661,14 +665,15 @@ def _predict_eta(
             block = centre[term["beta_idx"]]
             if np.any(block != 0.0):
                 if eta.compensated:
-                    eta.add_expansion(*_centred_term_expansion(term, frame, beta_all, block))
+                    _add_centred_term(eta, term, frame, beta_all, block)
                 else:
                     eta.add(_centred_term_contribution(term, frame, beta_all, block))
                 return
+        # A callable, so a compensated sum need not hold the term's rows.
         if fast_discrete:
-            eta.add(scorer(model, term, frame, beta_all))
+            eta.add(lambda: scorer(model, term, frame, beta_all))
         else:
-            eta.add(scorer(term, frame, beta_all))
+            eta.add(lambda: scorer(term, frame, beta_all))
 
     for term in plan["features"]:
         if random_effects == "population" and isinstance(term["spec"], RandomEffect):
@@ -709,7 +714,7 @@ def _predict_eta(
             stacklevel=_PREDICTION_WARNING_STACKLEVEL,
         )
 
-    total = eta.finish()
+    total = eta.finish(consume=True)
     if offset is not None:
         total = total + offset
     return stabilize_eta(total, model._link) if stabilize else total

@@ -852,3 +852,67 @@ def test_an_identity_link_slope_edit_overflows_far_out_with_its_sign(sign):
     ):
         assert np.array_equal(values, expected), label
     _assert_edit_reads(model, edited, frame, y, {"x": sign * 1e150})
+
+
+@pytest.mark.parametrize(
+    ("family", "offset", "slope"),
+    [("poisson", 0.0, 1e308), ("gaussian", 1e16, 1.1)],
+    ids=["fallback_rows", "compensated_rows"],
+)
+def test_a_compensated_predictor_reads_the_same_in_any_row_chunks(
+    monkeypatch, family, offset, slope
+):
+    """The compensated sum gives every row the same value whatever its row chunks.
+
+    Claude's summary of 4b1d7bc9: evaluated over whole arrays, the compensated
+    path held about 15 rows-long arrays where the fitted path holds 3.  It now
+    adds each addend ``_CHUNK`` rows at a time and replays its addends only on
+    the rows whose fallback it needs.  Every operation is elementwise, so the
+    chunks cannot change a row.  Public predict, the solver's predictor and the
+    holdout drop-term table read the same, bit for bit, in chunks of 3 rows
+    as in one chunk.  Under a slope of 1e308, rows at ``x = +-1e300`` and the
+    training rows the solver's predictor overflows take the fallback, spread
+    over many chunks, beside a spline and a factor.
+    """
+    from superglm.solvers import mode_score
+
+    rng = np.random.default_rng(453)
+    n = 40
+    x = (
+        offset + np.resize([0.01, 0.02, 0.03], n)
+        if offset == 0.0
+        else offset + 2.0 * rng.integers(-4, 5, n)
+    )
+    s = rng.uniform(0.0, 1.0, n)
+    frame = pd.DataFrame({"x": x, "s": s, "g": np.resize(["a", "b", "c", "d"], n)})
+    y = np.resize([2.0, 3.0, 2.0, 4.0, 1.0], n) + np.sin(4.0 * s)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family=family,
+            selection_penalty=0.0,
+            features={"x": Numeric(), "s": PSpline(n_knots=6), "g": Categorical(base="first")},
+        ).fit(frame, y)
+        edited = _slope_edited(model, frame, y, {"x": slope})
+    assert edited.result.centred_sum_compensated
+    far = frame.copy()
+    far.loc[[1, 2, 7, 20, 38], "x"] = [1e300, -1e300, 1e300, -1e300, 1e300]
+
+    def evaluations():
+        table = edited.term_drop_diagnostics(
+            frame, y, mode="holdout", X_val=far, y_val=y
+        ).set_index("feature")
+        return (
+            edited.predict(far),
+            mode_score.linear_predictor(edited._dm, edited._solver_result, None),
+            table["delta_deviance"].to_numpy(),
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        monkeypatch.setattr(mode_score, "_CHUNK", 10**9)
+        whole = evaluations()
+        monkeypatch.setattr(mode_score, "_CHUNK", 3)
+        chunked = evaluations()
+    for label, a, b in zip(("predict", "solver", "drop"), whole, chunked, strict=True):
+        assert np.array_equal(a, b, equal_nan=True), label

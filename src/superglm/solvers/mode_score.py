@@ -642,6 +642,53 @@ def centred_column_expansion(
         return pieces, difference * float(beta)
 
 
+@dataclass(frozen=True)
+class _Addend:
+    """One addend of a ``CompensatedSum``, kept so that a row's fallback can replay it.
+
+    ``source`` holds the addend's rows, or a callable that recomputes them.
+    With ``centre`` it is a centred column ``(v - centre) beta``, expanded
+    exactly (``centred_column_expansion``), and otherwise one plain addend.  A
+    ``source`` of ``None`` is the scalar ``constants``, whose plain value is
+    ``original``.  ``sign`` -1 negates every piece, which is exact.
+    """
+
+    source: NDArray | Callable[[], NDArray] | None
+    centre: float | None = None
+    beta: float = 0.0
+    constants: tuple[float, ...] = ()
+    original: float = 0.0
+    sign: float = 1.0
+
+    def negated(self) -> _Addend:
+        return _Addend(
+            self.source, self.centre, self.beta, self.constants, self.original, -self.sign
+        )
+
+    def data(self) -> NDArray | None:
+        """The addend's rows, recomputed when only their recipe is held."""
+        return self.source() if callable(self.source) else self.source
+
+    def expand(self, data: NDArray | None, rows) -> tuple[tuple[NDArray, ...], NDArray]:
+        """``(pieces, original)`` on ``rows`` of ``data`` (``data()``): exact pieces, plain value."""
+        if self.source is None:
+            pieces = tuple(np.asarray(value, dtype=np.float64) for value in self.constants)
+            original = np.asarray(self.original, dtype=np.float64)
+        elif self.centre is None:
+            original = np.asarray(data[rows], dtype=np.float64)
+            pieces = (original,)
+        else:
+            pieces, original = centred_column_expansion(data[rows], self.centre, self.beta)
+        if self.sign < 0.0:
+            return tuple(-piece for piece in pieces), -original
+        return pieces, original
+
+
+def constant_addend(pieces, original: float) -> _Addend:
+    """Scalar ``pieces`` whose exact sum is ``original``'s, for ``CompensatedSum.subtract``."""
+    return _Addend(None, constants=tuple(float(value) for value in pieces), original=original)
+
+
 class CompensatedSum:
     """Ogita, Rump & Oishi's Sum2 (2005, Algorithm 4.4) over arrays, row by row.
 
@@ -662,69 +709,102 @@ class CompensatedSum:
       evaluates it.  It keeps the signed overflow, which a link then clips as
       before.
     Every other row keeps the compensated value bit for bit.
+
+    The sum holds two rows-long arrays, its running total and error, and its
+    addends' sources, never their pieces: each addend is expanded and added
+    ``_CHUNK`` rows at a time, as ``centred_matvec`` forms its products
+    (Claude's review of #453).  Every operation is elementwise and the rows
+    independent, so ``value`` replays the addends on just the rows whose
+    fallback it needs, recomputing a recomputable source once, and every row
+    reads what a whole-array evaluation gives, bit for bit.
     """
 
-    __slots__ = ("error", "expanded", "original", "plain", "remainder", "start", "total")
+    __slots__ = ("addends", "error", "remainder", "start", "total")
 
-    def __init__(self, start: NDArray, remainder: float = 0.0) -> None:
-        self.start = np.array(start, dtype=np.float64)
+    def __init__(self, start, remainder: float = 0.0, n: int | None = None) -> None:
+        self.start = np.asarray(start, dtype=np.float64)
         self.remainder = float(remainder)
-        self.total = self.start.copy()
+        self.total = np.full(n, float(self.start)) if self.start.ndim == 0 else self.start.copy()
         self.error = np.zeros_like(self.total)
-        self.plain = np.zeros_like(self.total)
-        self.original = np.full_like(self.total, self.remainder)
-        self.expanded = np.ones(self.total.shape, dtype=bool)
+        self.addends: list[_Addend] = []
 
-    def _add_piece(self, values: NDArray) -> None:
+    def _join(self, addend: _Addend) -> _Addend:
+        data = addend.data()
+        n = self.total.shape[0]
         with np.errstate(over="ignore", invalid="ignore"):
-            self.total, error = two_sum(self.total, values)
-            self.error = self.error + error
-            self.plain = self.plain + values
-        self.expanded &= np.isfinite(values)
+            for lo in range(0, n, _CHUNK):
+                rows = slice(lo, min(lo + _CHUNK, n))
+                pieces, _ = addend.expand(data, rows)
+                for piece in pieces:
+                    self.total[rows], error = two_sum(self.total[rows], piece)
+                    self.error[rows] += error
+        self.addends.append(addend)
+        return addend
 
-    def add(self, values) -> None:
-        """Add one term's contribution, its own plain value."""
-        values = np.asarray(values, dtype=np.float64)
-        self._add_piece(values)
-        with np.errstate(over="ignore", invalid="ignore"):
-            self.original = self.original + values
+    def add(self, values) -> _Addend:
+        """Add one term's contribution, its own plain value: rows, or a callable giving them."""
+        return self._join(_Addend(values))
 
-    def add_expansion(self, pieces, original) -> None:
-        """Add a term as exact pieces, with ``original`` its plain contribution."""
-        for piece in pieces:
-            self._add_piece(np.asarray(piece, dtype=np.float64))
-        with np.errstate(over="ignore", invalid="ignore"):
-            self.original = self.original + np.asarray(original, dtype=np.float64)
+    def add_column(self, values, centre: float, beta: float) -> _Addend:
+        """Add ``(values - centre) beta`` as its exact pieces (``centred_column_expansion``)."""
+        return self._join(_Addend(values, float(centre), float(beta)))
+
+    def subtract(self, addend: _Addend) -> None:
+        """Add ``addend`` negated: a term an earlier ``add`` returned, or a ``constant_addend``."""
+        self._join(addend.negated())
 
     def copy(self) -> CompensatedSum:
-        twin = CompensatedSum(self.start, self.remainder)
+        twin = CompensatedSum.__new__(CompensatedSum)
+        twin.start, twin.remainder = self.start, self.remainder
         twin.total, twin.error = self.total.copy(), self.error.copy()
-        twin.plain, twin.original = self.plain.copy(), self.original.copy()
-        twin.expanded = self.expanded.copy()
+        twin.addends = list(self.addends)
         return twin
 
-    def value(self) -> NDArray:
-        """The sum; a row the compensation cannot finish takes its fallback."""
+    def value(self, consume: bool = False) -> NDArray:
+        """The sum, a row the compensation cannot finish at its fallback.
+
+        ``consume`` writes it over the running total, which ends the sum.
+        """
+        n = self.total.shape[0]
+        out = self.total if consume else np.empty_like(self.total)
+        unfinished = []
         with np.errstate(over="ignore", invalid="ignore"):
-            compensated = self.total + (self.error + self.remainder)
-            if np.all(np.isfinite(compensated)):
-                return compensated
-            fallback = np.where(
-                self.expanded,
-                self.start + (self.remainder + self.plain),
-                self.start + self.original,
-            )
-        return np.where(np.isfinite(compensated), compensated, fallback)
+            for lo in range(0, n, _CHUNK):
+                rows = slice(lo, min(lo + _CHUNK, n))
+                out[rows] = self.total[rows] + (self.error[rows] + self.remainder)
+                failed = np.flatnonzero(~np.isfinite(out[rows]))
+                if failed.size:
+                    unfinished.append(failed + lo)
+        if unfinished:
+            rows = np.concatenate(unfinished)
+            out[rows] = self._fallback(rows)
+        return out
+
+    def _fallback(self, rows: NDArray) -> NDArray:
+        """The plain sums of ``rows``: of their pieces, or of their terms where a piece is not finite."""
+        plain = np.zeros(rows.size)
+        original = np.full(rows.size, self.remainder)
+        expanded = np.ones(rows.size, dtype=bool)
+        with np.errstate(over="ignore", invalid="ignore"):
+            for addend in self.addends:
+                pieces, value = addend.expand(addend.data(), rows)
+                for piece in pieces:
+                    plain = plain + piece
+                    expanded &= np.isfinite(piece)
+                original = original + value
+            start = self.start if self.start.ndim == 0 else self.start[rows]
+            return np.where(expanded, start + (self.remainder + plain), start + original)
 
 
-def _centred_expansions(
-    dm: DesignMatrix, beta: NDArray, center: NDArray
-) -> Iterator[tuple[tuple[NDArray, ...], NDArray]]:
-    """``(X - 1 center') beta`` as ``(pieces, plain)`` per term, a dense block column by column.
+def _add_centred_columns(
+    total: CompensatedSum, dm: DesignMatrix, beta: NDArray, center: NDArray
+) -> None:
+    """Add ``(X - 1 center') beta`` to ``total``, a dense block column by column.
 
-    Every other block's entries and centre are bounded by its type, so its
-    product less ``center' beta`` is one addend, its own plain value, as in
-    ``centred_matvec``.
+    A dense column is added as its exact pieces about its centre.  Every other
+    block's entries and centre are bounded by its type, so its product less
+    ``center' beta`` is one addend, its own plain value, as in
+    ``centred_matvec``, and is recomputed if a row's fallback needs it.
     """
     beta = np.asarray(beta, dtype=np.float64)
     offset = 0
@@ -734,12 +814,13 @@ def _centred_expansions(
         centre = center[offset : offset + width]
         if type(matrix) is DenseGroupMatrix:
             for column in range(width):
-                yield centred_column_expansion(
-                    matrix.M[:, column], float(centre[column]), float(part[column])
-                )
+                total.add_column(matrix.M[:, column], float(centre[column]), float(part[column]))
         else:
-            contribution = matrix.matvec(part) - float(centre @ part)
-            yield (contribution,), contribution
+            total.add(
+                lambda matrix=matrix, part=part, centre=centre: (
+                    matrix.matvec(part) - float(centre @ part)
+                )
+            )
         offset += width
 
 
@@ -970,9 +1051,10 @@ def linear_predictor(dm: DesignMatrix, result, offset: NDArray | None) -> NDArra
     the remainder's bound.  A pair a revision carried a centred column's change
     into (``centred_sum_compensated``) is evaluated as one compensated sum of
     ``alpha``, every column's exact centred product and ``alpha_lo``
-    (``CompensatedSum``, ``centred_column_expansion``): ``alpha`` then holds the
-    column's ``c dbeta`` and can cancel against a row's ``(x - c) beta``, so the
-    rows may not round before it does.  ``offset`` ``None`` adds nothing.
+    (``CompensatedSum``, ``centred_column_expansion``), in row chunks:
+    ``alpha`` then holds the column's ``c dbeta`` and can cancel against a
+    row's ``(x - c) beta``, so the rows may not round before it does.
+    ``offset`` ``None`` adds nothing.
     """
     alpha = getattr(result, "centred_intercept", None)
     center = getattr(result, "state_center", None)
@@ -980,13 +1062,10 @@ def linear_predictor(dm: DesignMatrix, result, offset: NDArray | None) -> NDArra
         eta = dm.matvec(result.beta) + result.intercept
     elif getattr(result, "centred_sum_compensated", False):
         total = CompensatedSum(
-            np.full(dm.n, float(alpha)),
-            float(getattr(result, "centred_intercept_lo", None) or 0.0),
+            float(alpha), float(getattr(result, "centred_intercept_lo", None) or 0.0), n=dm.n
         )
-        centre = np.asarray(center, dtype=np.float64)
-        for pieces, contribution in _centred_expansions(dm, result.beta, centre):
-            total.add_expansion(pieces, contribution)
-        eta = total.value()
+        _add_centred_columns(total, dm, result.beta, np.asarray(center, dtype=np.float64))
+        eta = total.value(consume=True)
     else:
         eta = centred_matvec(dm, result.beta, center)
         alpha_lo = getattr(result, "centred_intercept_lo", None)
