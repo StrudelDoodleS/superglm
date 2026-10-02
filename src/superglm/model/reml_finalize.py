@@ -458,6 +458,17 @@ def _disclose_weak_identification(
         + separated_labels
     )
     profile["reml_laplace_excluded_labels"] = excluded_labels
+    # a separated set the Laplace term leaves out is explained in plain words,
+    # beside any weakly identified coefficient or alone (a reference level
+    # without events has no coefficient of its own)
+    separated = (
+        f" Every response on the rows of {', '.join(separated_labels)} is 0, or every one "
+        "is 1, so the model has no finite estimate for them. They stay in the model, their "
+        "fitted means approach that limit, and they are left out of smoothing-parameter "
+        "selection."
+        if separated_labels
+        else ""
+    )
     if labels:
         left_out = (
             f" Left out of smoothing-parameter selection: {', '.join(excluded_labels)}."
@@ -468,22 +479,12 @@ def _disclose_weak_identification(
             "These coefficients carry information only at the noise level of the data "
             "(a factor level or column with little or no weight, observations or "
             f"information): {', '.join(labels)}. They stay in the model, and their "
-            f"estimates and standard errors carry little information.{left_out}",
+            f"estimates and standard errors carry little information.{left_out}{separated}",
             WeakIdentificationWarning,
             stacklevel=4,
         )
-    elif separated_labels:
-        # a separated set the Laplace term leaves out is disclosed in plain
-        # words even where no coefficient is flagged weak (a reference level
-        # without events has no coefficient of its own)
-        warnings.warn(
-            "Every response on these rows is 0, or every one is 1, so the model has no "
-            f"finite estimate for them: {', '.join(separated_labels)}. They stay in the "
-            "model, their fitted means sit at that limit, and they are left out of "
-            "smoothing-parameter selection.",
-            WeakIdentificationWarning,
-            stacklevel=4,
-        )
+    elif separated:
+        warnings.warn(separated.strip(), WeakIdentificationWarning, stacklevel=4)
 
 
 def finalize_reml_fit(

@@ -933,12 +933,17 @@ def _half_block_decrement(hessian: NDArray, gradient: NDArray) -> float:
     return 0.5 * float(np.sum(projection[kept] ** 2 / values[kept]))
 
 
-# Above this many joint cells of the one-hot blocks the cell sets are not
-# formed; every level and reference set still is.
+# Above this many joint cells of three or more one-hot blocks, the cells of
+# all of them together are not decided; every level, reference and two-block
+# bridge set still is.
 _ROW_SET_CELL_LIMIT = 4096
 # The cells elimination leaves (the incidence's core) are decided by one SVD,
 # formed only while its cost ``m k min(m, k)`` stays within this many flops.
 _ROW_SET_CORE_FLOPS = 2**31
+# The most nonzeros the two-block bridge sets' directions hold in one design
+# (about 50 MB): past it a bridge is held without its direction
+# (``RowSets.bounded``).  Only a long chain of single-cell links reaches it.
+_ROW_SET_BRIDGE_NONZEROS = 2**22
 # The design's row sets, in its ``_structured_layout_cache`` (``row_sets``).
 _ROW_SETS_KEY = "row_sets"
 
@@ -948,26 +953,31 @@ class RowSets:
     """The sets of rows a design's one-hot blocks move on their own (``row_sets``).
 
     ``blocks`` holds ``(first column, matrix)`` for each
-    ``CategoricalGroupMatrix``.  ``cell_of_row`` gives each row's kept joint
-    cell (``-1`` for a row in none), or is ``None`` when no cell is kept.
-    ``cell_directions`` is ``(cells, p)``, sparse (CSR): the slope part of a
-    coefficient direction that moves the kept cell's rows and no other row
-    (its intercept part carries no penalty).  Held sparse, it costs its
-    nonzeros, so no width of the design drops a cell set.  ``cell_codes`` is
-    ``(cells, blocks)``: each kept cell's code in each block (a block's
-    ``n_levels`` for its reference).
+    ``CategoricalGroupMatrix``.  The kept joint sets are unions of the
+    design's distinct joint cells: ``row_cell`` gives each row's joint cell,
+    or is ``None`` when no joint set is kept, and ``cell_sets`` is ``(cells,
+    sets)``, sparse, 1 where a cell belongs to a set.  ``cell_directions`` is
+    ``(sets, p)``, sparse (CSR): the slope part of a coefficient direction
+    that moves the set's rows and no other row (its intercept part carries
+    no penalty).  Held sparse, it costs its nonzeros, so no width of the
+    design drops a set.  ``cell_codes`` is ``(sets, blocks)``: each set's
+    code in each block it names (a block's ``n_levels`` for its reference),
+    ``-1`` in a block it does not name.  ``bounded`` marks a set held
+    without its direction, past ``_ROW_SET_BRIDGE_NONZEROS``.
     """
 
     blocks: tuple[tuple[int, CategoricalGroupMatrix], ...]
-    cell_of_row: NDArray | None
+    row_cell: NDArray | None
+    cell_sets: Any
     cell_directions: Any
     cell_codes: NDArray
+    bounded: NDArray
 
-    def directions(self, p: int) -> Iterator[NDArray]:
-        """The slope parts ``(p,)`` of each block's reference direction, then of each kept cell's.
+    def directions(self, p: int) -> Iterator[NDArray | None]:
+        """The slope parts ``(p,)`` of each block's reference direction, then of each joint set's.
 
-        One at a time: a single dense ``(p,)`` vector is alive, whatever the
-        number of sets.
+        ``None`` for a ``bounded`` set.  One at a time: a single dense
+        ``(p,)`` vector is alive, whatever the number of sets.
         """
         for start, matrix in self.blocks:
             reference = np.zeros(p)
@@ -975,7 +985,15 @@ class RowSets:
             yield reference
         held = self.cell_directions
         for row in range(held.shape[0]):
-            yield held[[row]].toarray().ravel()
+            yield None if self.bounded[row] else held[[row]].toarray().ravel()
+
+    def named_columns(self, index: int, p: int) -> NDArray:
+        """``(p,)`` bool: the columns of the blocks joint set ``index`` names."""
+        columns = np.zeros(p, dtype=bool)
+        for (start, matrix), code in zip(self.blocks, self.cell_codes[index], strict=True):
+            if code >= 0:
+                columns[start : start + matrix.n_levels] = True
+        return columns
 
 
 def row_sets(dm: DesignMatrix) -> RowSets:
@@ -1009,14 +1027,244 @@ def row_sets(dm: DesignMatrix) -> RowSets:
 
 
 def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: int) -> RowSets:
-    """The joint cells of two or more one-hot blocks that are sets of their own (``row_sets``).
+    """The joint sets of two or more one-hot blocks: rows the model moves on their own (``row_sets``).
+
+    A union ``R`` of joint cells is a set when its indicator lies in the
+    range of the cells' incidence (columns: the intercept and every one-hot
+    column; a block's reference has no column), so that some ``d`` moves
+    ``R``'s rows by one and no other row.  A set that is the rows of one
+    level, or of a block's reference, is judged there already: it is not
+    kept.
+
+    **Two blocks.**  The intercept and a pair of blocks' columns span every
+    level indicator of both, the column space of the unsigned incidence of
+    the levels' bipartite graph, whose edges are the joint cells present.
+    Negating one block's columns makes it the signed incidence, with the same
+    column space, where a row's leverage is its edge's effective resistance
+    (Spielman & Srivastava 2011, Lemma 3; Kline, Saggio & Solvsten 2020,
+    Example 4: below one exactly when a path avoids the edge).  So a joint
+    cell of the pair is a set exactly when it is a bridge of that graph,
+    found from depth-first lowpoints in linear time (Tarjan 1974): integer
+    arithmetic, no rank decision and no size limit.  A bridge with an
+    endpoint of degree one is that level's rows.  Its direction is a
+    potential on one side ``X`` of the bridge, ``s`` on the first block's
+    levels in ``X`` and ``-s`` on the second's: every cell inside or outside
+    ``X`` keeps its predictor and the bridge moves by one.  A level's slope is
+    its potential less its block reference's.  The side whose slopes have
+    fewer nonzeros is held, while the design's total stays within
+    ``_ROW_SET_BRIDGE_NONZEROS``; past it a bridge is held without its
+    direction (``bounded``).  With three or more blocks every pair's bridges
+    are still sets, since more columns only enlarge the range.
+
+    **Three or more blocks** also have cells of all of them together, which
+    no graph decides: their connectedness is a rank condition (Srivastava &
+    Anderson 1970; Godolphin 2013), decided here by ``_joint_cell_sets``
+    within ``_ROW_SET_CELL_LIMIT`` cells.
+    """
+    count_blocks = len(blocks)
+    none = RowSets(
+        blocks,
+        None,
+        sparse.csr_matrix((0, 0)),
+        sparse.csr_matrix((0, p)),
+        np.zeros((0, count_blocks), dtype=np.intp),
+        np.zeros(0, dtype=bool),
+    )
+    if count_blocks < 2:
+        return none
+    stacked = np.column_stack([matrix.codes for _, matrix in blocks])
+    cells, inverse = np.unique(stacked, axis=0, return_inverse=True)
+    member_cells: list[NDArray] = []
+    member_sets: list[NDArray] = []
+    codes: list[NDArray] = []
+    directions: list[dict[int, float] | None] = []
+    budget = _ROW_SET_BRIDGE_NONZEROS
+    for first in range(count_blocks):
+        for second in range(first + 1, count_blocks):
+            budget = _bridge_sets(
+                cells, blocks, first, second, budget, member_cells, member_sets, codes, directions
+            )
+    if count_blocks > 2:
+        for cell, direction in _joint_cell_sets(cells, blocks):
+            member_cells.append(np.array([cell], dtype=np.intp))
+            member_sets.append(np.array([len(codes)], dtype=np.intp))
+            codes.append(np.asarray(cells[cell], dtype=np.intp))
+            directions.append(direction)
+    if not codes:
+        return none
+    kept = len(codes)
+    rows_of = np.concatenate(member_cells)
+    cell_sets = sparse.csr_matrix(
+        (np.ones(len(rows_of)), (rows_of, np.concatenate(member_sets))), shape=(len(cells), kept)
+    )
+    rows, columns, values = [], [], []
+    for index, direction in enumerate(directions):
+        for column, value in (direction or {}).items():
+            rows.append(index)
+            columns.append(column)
+            values.append(value)
+    held = sparse.csr_matrix((values, (rows, columns)), shape=(kept, p))
+    bounded = np.array([direction is None for direction in directions], dtype=bool)
+    return RowSets(
+        blocks, np.asarray(inverse).reshape(-1), cell_sets, held, np.stack(codes), bounded
+    )
+
+
+def _level_graph_bridges(
+    heads: NDArray, tails: NDArray, nodes: int
+) -> tuple[NDArray, NDArray, list[tuple[int, int, int, int]]]:
+    """``(order, end, found)``: the bridges of a simple graph (Tarjan 1974).
+
+    Edge ``e`` joins ``heads[e]`` and ``tails[e]``.  An iterative depth-first
+    search numbers the nodes in preorder (``order``; a node's subtree is
+    ``order[position : end]``) and keeps each node's lowpoint, the least
+    preorder number its subtree reaches by one non-tree edge.  A tree edge
+    into ``child`` is a bridge exactly when ``child``'s lowpoint exceeds its
+    parent's number.  ``found`` holds ``(edge, child, component start,
+    component end)`` per bridge, in preorder positions.
+    """
+    edges = len(heads)
+    ends = np.concatenate([heads, tails])
+    others = np.concatenate([tails, heads])
+    ids = np.concatenate([np.arange(edges), np.arange(edges)])
+    sort = np.argsort(ends, kind="stable")
+    first = np.searchsorted(ends[sort], np.arange(nodes + 1)).tolist()
+    neighbour = others[sort].tolist()
+    edge_of = ids[sort].tolist()
+    position = [-1] * nodes
+    low = [0] * nodes
+    via = [-1] * nodes
+    end = [0] * nodes
+    cursor = first[:-1]
+    order: list[int] = []
+    found: list[tuple[int, int, int, int]] = []
+    for root in range(nodes):
+        if position[root] >= 0 or first[root] == first[root + 1]:
+            continue
+        start = len(order)
+        position[root] = low[root] = start
+        order.append(root)
+        stack = [root]
+        bridges: list[tuple[int, int]] = []
+        while stack:
+            node = stack[-1]
+            at = cursor[node]
+            if at < first[node + 1]:
+                cursor[node] = at + 1
+                if edge_of[at] == via[node]:
+                    continue
+                reached = neighbour[at]
+                if position[reached] < 0:
+                    via[reached] = edge_of[at]
+                    position[reached] = low[reached] = len(order)
+                    order.append(reached)
+                    stack.append(reached)
+                elif position[reached] < low[node]:
+                    low[node] = position[reached]
+                continue
+            stack.pop()
+            end[node] = len(order)
+            if stack:
+                parent = stack[-1]
+                low[parent] = min(low[parent], low[node])
+                if low[node] > position[parent]:
+                    bridges.append((via[node], node))
+        found.extend((edge, child, start, len(order)) for edge, child in bridges)
+    return np.asarray(order, dtype=np.intp), np.asarray(end, dtype=np.intp), found
+
+
+def _bridge_sets(
+    cells: NDArray,
+    blocks: tuple[tuple[int, CategoricalGroupMatrix], ...],
+    first: int,
+    second: int,
+    budget: int,
+    member_cells: list[NDArray],
+    member_sets: list[NDArray],
+    codes: list[NDArray],
+    directions: list[dict[int, float] | None],
+) -> int:
+    """Append the bridge sets of blocks ``first`` and ``second`` (``_form_row_sets``); the budget left."""
+    (start_a, block_a), (start_b, block_b) = blocks[first], blocks[second]
+    levels_a, levels_b = block_a.n_levels, block_b.n_levels
+    key = cells[:, first] * (levels_b + 1) + cells[:, second]
+    pairs, pair_of_cell = np.unique(key, return_inverse=True)
+    pair_of_cell = np.asarray(pair_of_cell).reshape(-1)
+    heads = pairs // (levels_b + 1)
+    tails = levels_a + 1 + pairs % (levels_b + 1)
+    nodes = levels_a + levels_b + 2
+    order, end, found = _level_graph_bridges(heads, tails, nodes)
+    if not found:
+        return budget
+    degree = np.bincount(heads, minlength=nodes) + np.bincount(tails, minlength=nodes)
+    position = np.full(nodes, -1, dtype=np.intp)
+    position[order] = np.arange(len(order))
+    in_a = np.concatenate(([0], np.cumsum(order < levels_a)))
+    in_b = np.concatenate(([0], np.cumsum((order > levels_a) & (order < nodes - 1))))
+    reference_a, reference_b = int(position[levels_a]), int(position[nodes - 1])
+    set_of_pair = np.full(len(pairs), -1, dtype=np.intp)
+    for edge, child, low, high in found:
+        if degree[heads[edge]] == 1 or degree[tails[edge]] == 1:
+            continue  # the only cell of one of its levels: that level's set
+        lo, hi = int(position[child]), int(end[child])
+        sign = 1.0 if child <= levels_a else -1.0  # the first block's endpoint on side T
+        sides = []
+        for flip in (False, True):
+
+            def inside(at: int, flip=flip, lo=lo, hi=hi, low=low, high=high) -> bool:
+                return (low <= at < high and not lo <= at < hi) if flip else lo <= at < hi
+
+            count_a = (
+                (in_a[high] - in_a[low] - in_a[hi] + in_a[lo]) if flip else in_a[hi] - in_a[lo]
+            )
+            count_b = (
+                (in_b[high] - in_b[low] - in_b[hi] + in_b[lo]) if flip else in_b[hi] - in_b[lo]
+            )
+            holds_a, holds_b = inside(reference_a), inside(reference_b)
+            nonzeros = int(
+                (levels_a - count_a if holds_a else count_a)
+                + (levels_b - count_b if holds_b else count_b)
+            )
+            sides.append((nonzeros, flip, holds_a, holds_b))
+        nonzeros, flip, holds_a, holds_b = min(sides, key=lambda side: side[0])
+        named = np.full(len(blocks), -1, dtype=np.intp)
+        named[first], named[second] = heads[edge], tails[edge] - levels_a - 1
+        set_of_pair[edge] = len(codes)
+        codes.append(named)
+        if nonzeros > budget:
+            directions.append(None)
+            continue
+        budget -= nonzeros
+        side = np.concatenate((order[low:lo], order[hi:high])) if flip else order[lo:hi]
+        potential = -sign if flip else sign
+        side_a = side[side < levels_a]
+        side_b = side[(side > levels_a) & (side < nodes - 1)] - levels_a - 1
+        if holds_a:
+            side_a, value_a = np.setdiff1d(np.arange(levels_a), side_a), -potential
+        else:
+            value_a = potential
+        if holds_b:
+            side_b, value_b = np.setdiff1d(np.arange(levels_b), side_b), potential
+        else:
+            value_b = -potential
+        direction = {int(start_a + level): value_a for level in side_a.tolist()}
+        direction.update({int(start_b + level): value_b for level in side_b.tolist()})
+        directions.append(direction)
+    set_of_cell = set_of_pair[pair_of_cell]
+    held = np.flatnonzero(set_of_cell >= 0)
+    member_cells.append(held)
+    member_sets.append(set_of_cell[held])
+    return budget
+
+
+def _joint_cell_sets(
+    cells: NDArray, blocks: tuple[tuple[int, CategoricalGroupMatrix], ...]
+) -> list[tuple[int, dict[int, float]]]:
+    """The cells of all the blocks together that are sets, with their slope directions (``_form_row_sets``).
 
     A cell is a set when its indicator ``e_c`` lies in the range of the
-    cells' incidence ``M`` (columns: the intercept and every one-hot column;
-    a block's reference has no column), so that some ``d`` with ``M d =
-    e_c`` moves its rows alone.  A cell that is the only cell of a level, or
-    of a block's reference rows, has that set's rows and is judged there
-    already: it is not kept.
+    cells' incidence ``M``.  A cell that is the only cell of a level, or of a
+    block's reference rows, is that set's rows: it is not kept.
 
     **Elimination.**  A column that holds one remaining cell is that cell's
     indicator less the indicators of cells already eliminated, so ``d_c =
@@ -1038,31 +1286,21 @@ def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: in
     orthogonality).  A cell is a set exactly when its leverage is 1, so it is
     kept when ``1 - ||U_c||^2`` lies within that resolution.  A kept cell
     that is not a set can only be refused: its direction does not move its
-    rows alone, so at the exact mode its test reads a nonzero residual.  For
-    two blocks a cell that is not a set has ``1 - h_c = 1 / (1 + r_c) >= 1
-    / m``, ``r_c`` the resistance between its two levels with the cell
-    removed, so the decision is exact while the resolution is below
-    ``1 / (2m)``.  A core cell's direction is the SVD's minimum-norm ``d``,
-    less each eliminated cell's direction times the amount ``d`` moves it.
-    The core is formed only while ``m k min(m, k) <= _ROW_SET_CORE_FLOPS``.
+    rows alone, so at the exact mode its test reads a nonzero residual.  A
+    core cell's direction is the SVD's minimum-norm ``d``, less each
+    eliminated cell's direction times the amount ``d`` moves it.  Formed
+    within ``_ROW_SET_CELL_LIMIT`` cells, the core only while ``m k min(m,
+    k) <= _ROW_SET_CORE_FLOPS``.
     """
-    none = RowSets(
-        blocks, None, sparse.csr_matrix((0, p)), np.zeros((0, len(blocks)), dtype=np.intp)
-    )
-    if len(blocks) < 2:
-        return none
-    stacked = np.column_stack([matrix.codes for _, matrix in blocks])
-    cells, inverse = np.unique(stacked, axis=0, return_inverse=True)
-    cell_of_row = np.asarray(inverse).reshape(-1)
     count = len(cells)
     if count > _ROW_SET_CELL_LIMIT:
-        return none
+        return []
     duplicate = np.zeros(count, dtype=bool)
     for position, (_, matrix) in enumerate(blocks):
         per_code = np.bincount(cells[:, position], minlength=matrix.n_levels + 1)
         duplicate |= per_code[cells[:, position]] == 1
     if np.all(duplicate):
-        return none
+        return []
     # incidence column 0 is the intercept, column 1 + j slope j
     columns_of: list[list[int]] = [[0] for _ in range(count)]
     cells_of: dict[int, list[int]] = {0: list(range(count))}
@@ -1094,20 +1332,10 @@ def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: in
     core = np.flatnonzero(live)
     if core.size and np.any(~duplicate[core]):
         _decide_core(core, columns_of, duplicate, live, direction)
-    kept = sorted(cell for cell in direction if not duplicate[cell])
-    if not kept:
-        return none
-    rows, columns, values = [], [], []
-    for row, cell in enumerate(kept):
-        for column, value in direction[cell].items():
-            if column and value:
-                rows.append(row)
-                columns.append(column - 1)
-                values.append(value)
-    held = sparse.csr_matrix((values, (rows, columns)), shape=(len(kept), p))
-    index = np.full(count, -1, dtype=np.intp)
-    index[kept] = np.arange(len(kept))
-    return RowSets(blocks, index[cell_of_row], held, cells[kept])
+    return [
+        (cell, {column - 1: value for column, value in direction[cell].items() if column and value})
+        for cell in sorted(cell for cell in direction if not duplicate[cell])
+    ]
 
 
 def _decide_core(
@@ -1163,10 +1391,19 @@ def row_set_quadratics(sets: RowSets, p: int, apply: Callable[..., NDArray]) -> 
     which bounds the product's rounding, so ``d' S d - gamma_{2p+4} |d|' |S|
     |d|`` is a lower bound.  Where the penalty is positive along ``d`` but
     that bound is not, the entry is ``nan``: penalized, with no curvature
-    bound.  One penalty product per reference and per kept cell.
+    bound.  One penalty product per reference and per joint set.  A
+    ``bounded`` set's entry is 0 where the penalty is zero on the columns of
+    the blocks it names, so along any direction in them, and ``nan``
+    otherwise.
     """
     out = []
-    for direction in sets.directions(p):
+    for index, direction in enumerate(sets.directions(p)):
+        if direction is None:
+            named = sets.named_columns(index - len(sets.blocks), p)
+            with np.errstate(over="ignore", invalid="ignore"):
+                reach = apply(named.astype(np.float64), magnitude=True)
+            out.append(0.0 if np.all(reach[named] == 0.0) else math.nan)
+            continue
         with np.errstate(over="ignore", invalid="ignore"):
             product = float(direction @ apply(direction))
             size = float(np.abs(direction) @ apply(direction, magnitude=True))
@@ -1218,10 +1455,17 @@ def row_set_residual(
     - each block's reference rows, the rows no column of it holds, summed
       directly over those rows, ``d_R`` the intercept less the block's
       columns;
-    - with two or more blocks, each joint cell of their codes whose
-      indicator lies in that span and that is not already one of the sets
-      above: the cells of a saturated interaction, base cells included.
-      Above ``_ROW_SET_CELL_LIMIT`` cells these are not formed.
+    - with two or more blocks, each union of joint cells whose indicator
+      lies in that span and that is not already one of the sets above
+      (``_form_row_sets``): every bridge of each pair of blocks' level
+      graph, whatever the design's size, and with three or more blocks the
+      cells of all of them together within ``_ROW_SET_CELL_LIMIT`` cells,
+      such as a saturated interaction's, base cells included.
+    A set held without its direction (``bounded``) is judged with ``|d_R'
+    (S beta)|`` bounded by the sum of ``|S beta|`` over the columns of the
+    blocks it names, which holds its direction, and with no penalty size in
+    its scale: the refusing side, exact where the penalty's gradient is zero
+    there.
 
     **A penalized set** is also certified by its distance to its own maximum.
     Precondition: the log-likelihood is concave in ``eta``, as binomial/log's
@@ -1278,6 +1522,7 @@ def row_set_residual(
         direction_penalty,
         direction_size,
         quadratic,
+        slack=0.0,
     ):
         nonlocal worst
         if count <= 0.0:
@@ -1286,10 +1531,10 @@ def row_set_residual(
         if not penalized and (up == 0.0 or down == 0.0):
             return  # separated along an unpenalized direction: no interior maximum
         scale = absolute_sum + direction_size
-        if not (math.isfinite(scale) and math.isfinite(direction_penalty)):
+        if not (math.isfinite(scale) and math.isfinite(direction_penalty) and math.isfinite(slack)):
             worst = math.inf
             return
-        residual = abs(own - direction_penalty)
+        residual = abs(own - direction_penalty) + slack
         floor = (
             _gamma(int(count) + 2) * absolute_sum
             + _UNIT_ROUNDOFF * represented_sum
@@ -1323,24 +1568,31 @@ def row_set_residual(
                     float(quadratics[position]),
                 )
             judge(*_set_totals(sums, level), *direction)
-    if sets.cell_of_row is None:
+    if sets.row_cell is None:
         return worst
     held = sets.cell_directions
-    kept = held.shape[0]
-    on_cells = sets.cell_of_row >= 0
+    membership = sets.cell_sets.T.tocsr()
+    cells = sets.cell_sets.shape[0]
+    # each cell's totals over its own rows, then each set's over its cells:
+    # every term still passes through fewer additions than the set has rows
     sums = [
-        np.bincount(sets.cell_of_row[on_cells], weights=values[on_cells], minlength=kept)
+        np.asarray(membership @ np.bincount(sets.row_cell, weights=values, minlength=cells)).ravel()
         for values in (score, absolute, represented, carried, rising, falling)
     ]
     with np.errstate(over="ignore", invalid="ignore"):
         cell_penalty = np.asarray(held @ penalty).ravel()
         cell_size = np.asarray(abs(held) @ size).ravel()
-    for cell in range(kept):
+    for index in range(held.shape[0]):
+        slack = 0.0
+        if sets.bounded[index]:
+            with np.errstate(over="ignore", invalid="ignore"):
+                slack = float(np.sum(np.abs(penalty[sets.named_columns(index, p)])))
         judge(
-            *_set_totals(sums, cell),
-            float(cell_penalty[cell]),
-            float(cell_size[cell]),
-            float(quadratics[len(groups) + cell]),
+            *_set_totals(sums, index),
+            float(cell_penalty[index]),
+            float(cell_size[index]),
+            float(quadratics[len(groups) + index]),
+            slack,
         )
     return worst
 

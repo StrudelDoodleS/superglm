@@ -222,7 +222,8 @@ def separated_directions(
 
     **The class.**  A set of rows the one-hot blocks move on their own
     (``mode_score.row_sets``: a level, a block's reference rows, a kept joint
-    cell) whose positive-weight responses are all 0, or all 1, along a
+    set; a set held without its direction, past the bridge budget, is judged
+    but not left out here) whose positive-weight responses are all 0, or all 1, along a
     direction no penalty touches has no interior maximum.  The likelihood's
     supremum along it is at ``eta -> -infinity`` (or at the mean space's
     boundary), where the rows' log-likelihood and their observed curvature
@@ -296,23 +297,27 @@ def separated_directions(
                 direction = np.zeros(width)
                 direction[start : start + levels] = -1.0
             candidates.append((direction, ((start, level if level < levels else None),)))
-    if sets.cell_of_row is not None:
+    if sets.row_cell is not None:
         held = sets.cell_directions
-        on_cells = sets.cell_of_row >= 0
+        membership = sets.cell_sets.T.tocsr()
+        cells = sets.cell_sets.shape[0]
         count, up, down = (
-            np.bincount(
-                sets.cell_of_row[on_cells], weights=values[on_cells], minlength=held.shape[0]
-            )
+            np.asarray(
+                membership @ np.bincount(sets.row_cell, weights=values, minlength=cells)
+            ).ravel()
             for values in (carried, rising, falling)
         )
-        for cell in np.flatnonzero((count > 0.0) & ((up == 0.0) | (down == 0.0))).tolist():
-            direction = held[[cell]].toarray().ravel()
+        separated = (count > 0.0) & ((up == 0.0) | (down == 0.0)) & ~sets.bounded
+        for index in np.flatnonzero(separated).tolist():
+            direction = held[[index]].toarray().ravel()
             if np.any(covered & (direction != 0.0)):
                 continue
-            codes_of_cell = sets.cell_codes[cell].tolist()
             described = tuple(
                 (start, code if code < matrix.n_levels else None)
-                for (start, matrix), code in zip(sets.blocks, codes_of_cell, strict=True)
+                for (start, matrix), code in zip(
+                    sets.blocks, sets.cell_codes[index].tolist(), strict=True
+                )
+                if code >= 0
             )
             candidates.append((direction, described))
     pivots: list[int] = []

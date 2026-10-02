@@ -986,13 +986,11 @@ def test_a_reference_level_is_separated_only_by_its_responses(
 def test_a_bridge_between_two_crossed_cycles_is_the_only_joint_cell_set() -> None:
     """``mode_score.row_sets`` on two crossed blocks whose cells are two 4-cycles joined by one cell.
 
-    Every column holds two or more cells, so elimination leaves all nine to
-    the core's SVD.  A cell is a set exactly when it is a bridge of the
-    levels' graph (leverage 1); a cycle's cell has ``1 - h = 1 / (1 + 3)``,
-    far outside the derived resolution.  The bridge's direction moves its
-    rows by one and every other row by the same amount, which the intercept
-    returns to zero, to within the SVD's backward error times the
-    incidence's condition number.
+    A cell is a set exactly when it is a bridge of the levels' graph
+    (leverage 1, Spielman & Srivastava 2011); a cycle's cell has ``1 - h = 1
+    / (1 + 3)``.  The bridge's direction, a potential on one side of it,
+    moves its rows by one and every other row by the same amount, which the
+    intercept returns to zero, exactly: it is integer.
     """
     from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
     from superglm.solvers.mode_score import row_sets
@@ -1004,19 +1002,237 @@ def test_a_bridge_between_two_crossed_cycles_is_the_only_joint_cell_set() -> Non
     blocks = [CategoricalGroupMatrix(first, 3), CategoricalGroupMatrix(second, 3)]
     dm = DesignMatrix(blocks, n=len(rows), p=6)
     sets = row_sets(dm)
-    assert sets.cell_of_row is not None
-    kept = sets.cell_of_row >= 0
+    assert sets.row_cell is not None
+    assert sets.cell_directions.shape[0] == 1
+    kept = sets.cell_sets.toarray()[sets.row_cell, 0] > 0
     assert np.array_equal(kept, np.array([pair == (1, 2) for pair in rows]))
-    incidence = np.column_stack(
-        [np.ones(len(pairs))]
-        + [np.array([a == level for a, _ in pairs], dtype=float) for level in (1, 2, 3)]
-        + [np.array([b == level for _, b in pairs], dtype=float) for level in (1, 2, 3)]
-    )
-    singular = np.linalg.svd(incidence, compute_uv=False)
-    rank = int(np.sum(singular > max(incidence.shape) * np.finfo(float).eps * singular[0]))
-    tolerance = 4 * max(incidence.shape) * np.finfo(float).eps * singular[0] / singular[rank - 1]
     moved = dm.matvec(sets.cell_directions[[0]].toarray().ravel())
-    np.testing.assert_allclose(moved - moved[~kept][0], kept.astype(float), rtol=0, atol=tolerance)
+    np.testing.assert_array_equal(moved - moved[~kept][0], kept.astype(float))
+
+
+def _light_bridge(
+    base: tuple[str, str], direct_solve: str
+) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, dict]:
+    """Sol's r4163828657 design: two crossed 2 x 2 blocks joined by a light bridge, beside a 64 x 64 block.
+
+    Every cell holds a 0 and a 1 of weight 1e8 at offset 1.3, so each cell's
+    maximum is ``p = 0.5``.  The bridge (a1, b2) weighs 1e-8 at offset -20.
+    The 64 x 64 block shares no level with the rest; with it the design has
+    4,105 joint cells, past 4a563fc7's 4,096-cell limit.
+    """
+    cells = [(a, b, 1e8, 1.3) for a in ("a0", "a1") for b in ("b0", "b1")]
+    cells += [(a, b, 1e8, 1.3) for a in ("a2", "a3") for b in ("b2", "b3")]
+    cells += [("a1", "b2", 1e-8, -20.0)]
+    cells += [(f"a{i:03d}", f"b{j:03d}", 1e8, 1.3) for i in range(4, 68) for j in range(4, 68)]
+    rows = [(a, b, response, w, off) for a, b, w, off in cells for response in (0.0, 1.0)]
+    frame = pd.DataFrame(rows, columns=["A", "B", "y", "w", "off"])
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        features={"A": Categorical(base=base[0]), "B": Categorical(base=base[1])},
+    )
+    fit = {"sample_weight": frame["w"].to_numpy(), "offset": frame["off"].to_numpy()}
+    return model, frame, frame["y"].to_numpy(), fit
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "qr"])
+@pytest.mark.parametrize("base", [("a0", "b0"), ("a1", "b2")], ids=["bridge", "bridge_is_base"])
+def test_a_light_bridge_past_the_old_cell_limit_is_not_certified(
+    direct_solve: str, base: tuple[str, str]
+) -> None:
+    """Sol's r4163828657: past 4,096 joint cells 4a563fc7 formed no cell set and certified a light bridge.
+
+    Moving a2, a3 down and b2, b3 up moves the bridge's rows alone, so it
+    needs a certificate on its own rows: the heavy levels' score sums round
+    away its score (7e-17 against 3e-16).  4a563fc7 certified after one
+    iteration with the bridge at ``p = 2.8e-10``, its maximum 0.5, on gram
+    and qr, and with the bridge as both blocks' reference cell.  Every
+    bridge of two blocks' level graph is now a set at any size, so the fit
+    is not certified.  A float64 Newton step cannot stand in for that set:
+    both factorizations drop the bridge's direction (curvature 4e-26 against
+    6e3), and the step moves its rows by 2e-14 where the exact step is 1.8e9.
+    """
+    from superglm.solvers.mode_score import row_sets
+
+    model, frame, y, fit = _light_bridge(base, direct_solve)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame[["A", "B"]], y, **fit)
+    assert not model.result.converged
+    sets = row_sets(model._dm)
+    assert sets.row_cell is not None
+    bridge = ((frame["A"] == "a1") & (frame["B"] == "b2")).to_numpy()
+    (index,) = np.flatnonzero(sets.cell_sets.toarray()[sets.row_cell[bridge][0]])
+    assert np.array_equal(sets.cell_sets.toarray()[sets.row_cell, index] > 0, bridge)
+
+
+def test_a_large_clean_crossing_still_certifies() -> None:
+    """Two crossed 70-level Categoricals, every one of the 4,900 cells with events and non-events.
+
+    Past the old 4,096-cell limit; refusing every such design would refuse
+    this one.  A complete crossing has no bridge: every cell lies on a
+    4-cycle, so no joint set is formed and the fit certifies.
+    """
+    from superglm.solvers.mode_score import row_sets
+
+    rng = np.random.default_rng(7)
+    effect_a, effect_b = rng.normal(0.0, 0.3, 70), rng.normal(0.0, 0.3, 70)
+    level_a, level_b = np.meshgrid(np.arange(70), np.arange(70), indexing="ij")
+    probability = np.exp(-2.0 + effect_a[level_a.ravel()] + effect_b[level_b.ravel()])
+    events = np.clip(rng.binomial(8, np.minimum(probability, 0.9)), 1, 7)
+    y = (np.arange(8)[None, :] < events[:, None]).astype(np.float64).ravel()
+    frame = pd.DataFrame(
+        {
+            "A": np.repeat([f"a{i:02d}" for i in level_a.ravel()], 8),
+            "B": np.repeat([f"b{j:02d}" for j in level_b.ravel()], 8),
+        }
+    )
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"A": Categorical(base="first"), "B": Categorical(base="first")},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    assert model.result.converged
+    assert row_sets(model._dm).row_cell is None
+
+
+def _random_blocks(rng: np.random.Generator, count: int) -> tuple[list, int]:
+    """A few one-hot blocks over random joint cells, chains and trees among them (``_form_row_sets``)."""
+    from superglm.group_matrix import CategoricalGroupMatrix
+
+    levels = rng.integers(1, 9, size=count)
+    cells = int(rng.integers(2, 30))
+    raw = np.column_stack([rng.integers(0, level + 1, size=cells) for level in levels])
+    if rng.uniform() < 0.4:  # mostly chain-like: many bridges
+        raw[:, 1] = (raw[:, 0] + rng.integers(0, 2, size=cells)) % (levels[1] + 1)
+    codes = np.repeat(raw, rng.integers(1, 4, size=cells), axis=0)
+    blocks = [
+        CategoricalGroupMatrix(np.where(codes[:, k] == levels[k], -1, codes[:, k]), int(levels[k]))
+        for k in range(count)
+    ]
+    return blocks, int(levels.sum())
+
+
+def test_two_blocks_joint_sets_are_the_bridges_the_svd_keeps() -> None:
+    """On 200 random two-block designs the bridge sets are the cells the incidence's SVD keeps.
+
+    The SVD decides a cell by its leverage, within the LAPACK-derived
+    resolution (``_joint_cell_sets``); Tarjan's lowpoints decide it as a
+    bridge, in integers.  Leverage 1 is a bridge (Spielman & Srivastava 2011,
+    Lemma 3), so the two must agree on every design.  Each bridge's direction
+    moves its rows by one and every other row by one common amount, exactly.
+    """
+    from superglm.group_matrix import DesignMatrix
+    from superglm.solvers import mode_score
+
+    rng = np.random.default_rng(0)
+    bridges = 0
+    for _ in range(200):
+        blocks, p = _random_blocks(rng, 2)
+        held = ((0, blocks[0]), (blocks[0].n_levels, blocks[1]))
+        cells = np.unique(np.column_stack([m.codes for m in blocks]), axis=0)
+        expected = sorted(cell for cell, _ in mode_score._joint_cell_sets(cells, held))
+        sets = mode_score._form_row_sets(held, p)
+        found = [] if sets.row_cell is None else sets.cell_sets.toarray() > 0
+        assert sorted(int(np.flatnonzero(column)[0]) for column in np.transpose(found)) == expected
+        dm = DesignMatrix(blocks, n=len(blocks[0].codes), p=p)
+        for index in range(len(expected)):
+            bridges += 1
+            rows = found[sets.row_cell, index]
+            moved = dm.matvec(sets.cell_directions[[index]].toarray().ravel())
+            shift = moved[~rows][0] if np.any(~rows) else 0.0
+            np.testing.assert_array_equal(moved - shift, rows.astype(np.float64))
+    assert bridges > 100
+
+
+def test_a_bridge_of_two_of_three_blocks_is_a_set_the_joint_cells_miss() -> None:
+    """Two crossed 2 x 2 blocks joined by one cell of A and B, a third block C splitting every cell.
+
+    No cell of all three blocks is a set: two cells differing only in C differ
+    by ``e_c0 - e_c1``, which the other cells span.  Their union, the (a1,
+    b2) cell of A and B, is: it is a bridge of A and B's level graph, and
+    adding C's columns only enlarges the range.  4a563fc7 decided the cells
+    of all three blocks only, so it held no set there.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers import mode_score
+
+    pairs = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 2), (2, 3), (3, 2), (3, 3), (1, 2)]
+    rows = [(a, b, c) for a, b in pairs for c in (0, 1)]
+    blocks = [
+        CategoricalGroupMatrix(np.array([row[k] for row in rows]) - 1, n_levels)
+        for k, n_levels in enumerate((3, 3, 1))
+    ]
+    held = ((0, blocks[0]), (3, blocks[1]), (6, blocks[2]))
+    cells = np.unique(np.column_stack([m.codes for m in blocks]), axis=0)
+    assert mode_score._joint_cell_sets(cells, held) == []
+    sets = mode_score._form_row_sets(held, 7)
+    assert sets.cell_directions.shape[0] == 1
+    assert sets.cell_codes.tolist() == [[0, 1, -1]]  # codes are levels less one
+    kept = sets.cell_sets.toarray()[sets.row_cell, 0] > 0
+    assert np.array_equal(kept, np.array([(a, b) == (1, 2) for a, b, _ in rows]))
+    moved = DesignMatrix(blocks, n=len(rows), p=7).matvec(
+        sets.cell_directions[[0]].toarray().ravel()
+    )
+    np.testing.assert_array_equal(moved - moved[~kept][0], kept.astype(np.float64))
+
+
+@pytest.mark.parametrize(
+    ("score", "penalty", "certified"),
+    [
+        ((-1e-12, 1e-12), 0.0, True),  # at its maximum, no penalty gradient: exact
+        ((-1e-12, 1.5e-12), 0.0, False),  # off its maximum
+        ((-1e-12, 1e-12), 1e-16, False),  # a gradient (constraint multipliers) it cannot place
+    ],
+)
+def test_a_bridge_past_the_direction_budget_is_judged_without_its_direction(
+    monkeypatch: pytest.MonkeyPatch, score: tuple, penalty: float, certified: bool
+) -> None:
+    """``row_set_residual`` on the two-cycle bridge with ``_ROW_SET_BRIDGE_NONZEROS = 0``.
+
+    Past the budget a bridge holds no direction.  Its ``|d' S beta|`` is
+    bounded by the sum of ``|S beta|`` over its two blocks' columns, since
+    the direction's entries are 0 or +-1 there, and its scale leaves the
+    penalty's size out: exact where that gradient is zero, refusing where
+    it is not.  The bridge's rows weigh 1e-12 beside rows of weight 1, so
+    every level and reference set passes whatever the bridge's score: only
+    its own set decides.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix
+    from superglm.solvers import mode_score
+
+    monkeypatch.setattr(mode_score, "_ROW_SET_BRIDGE_NONZEROS", 0)
+    pairs = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 2), (2, 3), (3, 2), (3, 3), (1, 2)]
+    rows = [pair for pair in pairs for _ in range(2)]
+    blocks = [CategoricalGroupMatrix(np.array([row[k] for row in rows]) - 1, 3) for k in range(2)]
+    sets = mode_score._form_row_sets(((0, blocks[0]), (3, blocks[1])), 6)
+    assert sets.bounded.tolist() == [True]
+    assert sets.cell_directions.nnz == 0
+    quadratics = mode_score.row_set_quadratics(sets, 6, lambda v, magnitude=False: np.zeros_like(v))
+    assert quadratics[-1] == 0.0
+    row_score = np.tile([-1.0, 1.0], len(pairs))
+    row_score[-2:] = score
+    ratio = mode_score.row_set_residual(
+        sets=sets,
+        row_score=row_score,
+        response=np.tile([0.0, 1.0], len(pairs)),
+        fisher_weights=np.concatenate((np.ones(len(rows) - 2), [1e-12, 1e-12])),
+        positive_prior=np.ones(len(rows), dtype=bool),
+        eta=np.full(len(rows), math.log(0.5)),
+        column_penalty=np.full(6, penalty),
+        column_penalty_size=np.full(6, abs(penalty)),
+        column_curvature=np.zeros(6),
+        set_curvature=quadratics,
+        bar=MODE_CERTIFICATION_BAR,
+        underflow=0.0,
+    )
+    assert (ratio <= 1.0) is certified
 
 
 def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1060,7 +1276,7 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     assert len(designs) > len(set(designs))
     assert len(formed) == len(set(designs))
     assert decided == []
-    assert mode_score.row_sets(model._dm).cell_of_row is None
+    assert mode_score.row_sets(model._dm).row_cell is None
 
 
 @pytest.mark.parametrize(("slopes", "excluded"), [(32, True), (33, False)])
@@ -2118,9 +2334,8 @@ def test_a_wide_design_keeps_its_joint_cell_sets() -> None:
     ]
     dm = DesignMatrix(blocks, n=8, p=3 + width)
     sets = row_sets(dm)
-    assert sets.cell_of_row is not None
-    base = int(sets.cell_of_row[0])
-    assert base >= 0
+    assert sets.row_cell is not None
+    (base,) = np.flatnonzero(sets.cell_sets.toarray()[sets.row_cell[0]])
     moved = dm.matvec(sets.cell_directions[[base]].toarray().ravel())
     np.testing.assert_array_equal(moved - moved[2], [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     score = np.array([-1e-8, 2e-8, -5.0, 5.0 - 1e-8, -5.0, 5.0 - 1e-8, -5.0, 5.0 + 1e-8])
@@ -2187,6 +2402,35 @@ def test_the_left_out_coefficients_pair_with_their_labels() -> None:
                 assert 0 <= index < regions - 1 and index not in levels
             else:
                 assert index == int(label[2:-1]), (index, label)
+
+
+def test_a_separated_level_beside_a_weak_one_is_explained() -> None:
+    """A level without events, z, beside a weakly identified level, w, whose rows weigh 1e-17.
+
+    Where a coefficient is flagged weak the warning lists everything left
+    out of smoothing-parameter selection.  3227c731 listed z there without
+    saying why, and said only in the warning for a separated set alone that
+    its rows' responses are all 0 or all 1.  Both are now explained, and the
+    means are said to approach the limit, since a fit stops at a finite
+    predictor.
+    """
+    rng = np.random.default_rng(15)
+    level = np.array(["a"] * 200 + ["b"] * 200 + ["w"] * 20 + ["z"] * 100)
+    group = rng.choice([f"g{k}" for k in range(6)], len(level))
+    y = np.concatenate(
+        [rng.uniform(size=200) < 0.2, rng.uniform(size=200) < 0.3, np.arange(20) % 2 == 0]
+        + [np.zeros(100, dtype=bool)]
+    ).astype(np.float64)
+    weights = np.where(level == "w", 1e-17, 1.0)
+    model, messages = _left_out(pd.DataFrame({"c": level, "g": group}), y, weights)
+    assert "c[1]" in model._reml_profile["reml_weakly_identified_labels"]
+    assert model._reml_profile["reml_laplace_separated_labels"] == ("c[2]",)
+    assert any(
+        "c[1]" in message
+        and "rows of c[2] is 0, or every one is 1" in message
+        and "approach that limit" in message
+        for message in messages
+    )
 
 
 def test_a_separated_level_that_is_also_weak_is_disclosed_once() -> None:
@@ -2271,6 +2515,41 @@ def test_a_qp_passthrough_fit_discloses_what_its_search_left_out() -> None:
     assert any("c[1]" in message and "no finite estimate" in message for message in messages)
 
 
+def test_a_qp_passthrough_fit_discloses_a_weak_slope_in_any_family() -> None:
+    """The passthrough's disclosure of a weakly identified slope, on a Poisson fit.
+
+    A QP-monotone spline with an estimated lambda beside a Categorical level
+    whose rows weigh 1e-17.  The stage-1 search leaves the level's slope out
+    of its Laplace term in every family, and the finished fit now says so:
+    4a563fc7 published ``()``, no label and no warning for it.
+    """
+    rng = np.random.default_rng(22)
+    n = 900
+    x = rng.uniform(0.0, 1.0, n)
+    level = rng.choice(["a", "b", "w"], n)
+    y = rng.poisson(0.5 + x).astype(np.float64)
+    weights = np.where(level == "w", 1e-17, 1.0)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "x": BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing),
+            "c": Categorical(base="first"),
+        },
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(pd.DataFrame({"x": x, "c": level}), y, sample_weight=weights)
+    assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"
+    profile = model._reml_profile
+    start = next(group.start for group in model._groups if group.name == "c")
+    assert start + 1 in profile["reml_weakly_identified"]
+    assert profile["reml_laplace_excluded"] == (start + 1,)
+    assert profile["reml_laplace_excluded_labels"] == ("c[1]",)
+    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    assert any("c[1]" in message for message in messages)
+
+
 def test_the_weak_slopes_seed_the_separated_directions_elimination() -> None:
     """``separated_directions`` on a block whose base level a has no events, beside a weak level m and an ordinary z.
 
@@ -2297,12 +2576,8 @@ def test_the_weak_slopes_seed_the_separated_directions_elimination() -> None:
     )
     assert pivots.tolist() == [1]
     assert sets == (((0, None),),)
-    left_out = np.zeros((2, 2))
-    left_out[0, weak] = 1.0
-    left_out[1, pivots] = 1.0
-    reference = -np.ones(2)
-    residual = reference - left_out.T @ np.linalg.lstsq(left_out.T, reference, rcond=None)[0]
-    assert float(np.max(np.abs(residual))) == 0.0
+    # the left-out coordinates are both columns, so they span -(e_m + e_z)
+    assert sorted(weak.tolist() + pivots.tolist()) == [0, 1]
 
 
 def test_reml_keeps_a_zero_weight_row_at_the_clip() -> None:
