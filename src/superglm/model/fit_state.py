@@ -431,6 +431,12 @@ class FittedStateRevision:
                 reml_copy.pirls_result = replacement
                 work_model._reml_result = reml_copy
 
+        if not _recorded_shift_reads_the_coefficients(work_model):
+            # A model an editor revised before #447 kept the solver state of
+            # its pre-edit coefficients: every revision starts from the
+            # published predictor.
+            _read_solver_state_from_public(work_model)
+
         current_state = getattr(model, "_fit_state", None)
         current_revision = int(getattr(model, "_fit_revision", 0))
         current_repair_revision = int(
@@ -462,38 +468,35 @@ class FittedStateRevision:
         return self.target_model
 
 
-def _centred_state_reads_the_coefficients(model) -> bool:
-    """Whether the fit's centred state ``(alpha, c)`` still reads the current coefficients.
+def canonical_intercept_shift(model, beta) -> float:
+    """The public intercept's shift ``m' beta`` over the materialized public columns.
 
-    PIRLS publishes ``intercept = alpha - fsum(c * beta)`` (``irls_direct``),
-    so the relation holds bit for bit until a revision writes a ``beta`` or
-    intercept it does not cover; a revision that moves only columns with a
-    zero centre, or nothing at all, keeps it.
+    ``m`` are the training means a materialized term's public columns lose
+    (``runtime_canonicalize._apply_r_inv_centering``), so ``intercept_pub =
+    intercept_solver + m' beta`` reads one predictor in both coordinates.
     """
-    solver = getattr(model, "_solver_result", None)
-    public = getattr(model, "_result", None)
-    alpha = getattr(solver, "centred_intercept", None)
-    centre = getattr(solver, "state_center", None)
-    if solver is None or public is None or alpha is None or centre is None:
-        return False
-    beta = np.asarray(solver.beta, dtype=np.float64)
-    if not np.array_equal(np.asarray(public.beta, dtype=np.float64), beta):
-        return False
-    return float(solver.intercept) == float(alpha) - math.fsum(np.asarray(centre) * beta)
+    runtime_state = getattr(model, "_runtime_canonical_state", None)
+    if not isinstance(runtime_state, dict):
+        return 0.0
+    shift = 0.0
+    for term_state in runtime_state.get("terms", {}).values():
+        if not term_state.get("applied_to_public_model", False):
+            continue
+        for group_state in term_state.get("groups", []):
+            start, end = group_state["solver_slice"]
+            means = np.asarray(group_state["column_means"], dtype=np.float64)
+            shift += float(means @ np.asarray(beta[start:end], dtype=np.float64))
+    return shift
 
 
-def _public_intercept_follows_the_coefficients(model) -> bool:
-    """Whether the public intercept was re-read at the revised ``beta`` (its shift ``m' beta``).
+def _recorded_shift_reads_the_coefficients(model) -> bool:
+    """Whether the recorded shift ``m' beta`` is the one at the current ``beta``.
 
-    A shape repair re-derives the solver intercept from the public one and
-    records the shift ``m' beta`` at the repaired ``beta``
-    (``shape_ops._synchronize_repaired_intercept_state``).  The editor keeps
-    the public intercept authoritative and the shift at its old ``beta``: its
-    public pair is then not the solver state's, so republishing it would move
-    each prediction by ``m' (beta_new - beta_old)`` (Claude review of #445).
-    The recorded shift is compared with the one at the current ``beta`` to
-    the two sums' rounding, ``gamma_(k+1) sum |m| |beta|`` each over ``k``
-    terms in any order (Higham 2002, section 3.1).
+    Every revision records it again (``_read_solver_state_from_public``); an
+    editor edit made before #447 left it, and the solver state it describes,
+    at the pre-edit ``beta``.  The recorded shift is compared with the one at
+    the current ``beta`` to the two sums' rounding, ``gamma_(k+1) sum |m|
+    |beta|`` each over ``k`` terms in any order (Higham 2002, section 3.1).
     """
     state = getattr(model, "_runtime_canonical_state", None)
     public = getattr(model, "_result", None)
@@ -518,66 +521,138 @@ def _public_intercept_follows_the_coefficients(model) -> bool:
     return abs(float(state.get("intercept_shift", 0.0)) - shift) <= 2.0 * gamma * magnitude
 
 
-def _republish_centred_state(model) -> None:
-    """Read a kept solver centred state in the public coordinates at the revised ``beta``.
+def _carry_into_centred_pair(result, values) -> None:
+    """Add ``fsum(values)`` to a result's centred intercept, keeping a compensated pair's error.
 
-    The public pair is ``alpha + (m - c)' beta`` over the columns it folds
-    (``runtime_canonicalize._fold_public_pair``, ``m`` the means the public
-    columns lose), so a revision that moves a folded column with a zero solver
-    centre keeps the solver relation and changes the public intercept.  Left
-    as published, it predicted the pre-revision fold: after a post-fit shape
-    repair whose profiled intercept rounded back to ``alpha`` bit for bit, a
-    frequency-weighted fit predicted its unweighted fitted mean (#433;
-    master's Windows CI).  The published public centre names the folded
-    columns and does not move with ``beta``, so the pair is re-read without
-    the design, which a model with ``retain_fit_state=False`` does not keep
-    (Sol's review of #445); with no published pair there is nothing to read.
+    ``math.fsum`` rounds the sum once (correctly under IEEE-754 binary64
+    round-to-nearest, the Python documentation's condition); with a remainder
+    ``alpha_lo`` the addition is a TwoSum whose error joins it (Knuth, TAOCP
+    vol. 2, 4.2.2, Theorem B), so the pair moves by the sum to one rounding of
+    the remainder.  A zero sum leaves the pair as it is, bit for bit.
+    """
+    alpha = getattr(result, "centred_intercept", None)
+    if alpha is None or getattr(result, "state_center", None) is None:
+        return
+    move = math.fsum(values)
+    if move == 0.0:
+        return
+    alpha_lo = getattr(result, "centred_intercept_lo", None)
+    if alpha_lo is None:
+        result.centred_intercept = float(alpha) + move
+        return
+    from superglm.solvers.mode_score import two_sum
+
+    result.centred_intercept, error = two_sum(float(alpha), move)
+    result.centred_intercept_lo = float(alpha_lo) + error
+
+
+def move_public_intercept(model, delta: float) -> None:
+    """Move the published predictor by ``delta``: its raw intercept and its centred pair alike.
+
+    A revision's intercept change has to reach the pair the model predicts
+    from.  Added to the raw intercepts alone it rounded away beside a numeric
+    column at an offset of 1e16, whose raw intercept is about -2e15 (#447);
+    a post-fit shape repair lost its profiled intercept the same way.  The
+    solver's intercepts are read from the published ones when the revision is
+    published (``publish_revised_coefficients``).
+    """
+    public = model._result
+    public.intercept = float(public.intercept + delta)
+    _carry_into_centred_pair(public, (float(delta),))
+
+
+def _read_solver_state_from_public(model) -> None:
+    """Read the solver's intercept, shift and centred pair from the published predictor.
+
+    The public predictor is ``intercept_pub + X_pub beta`` raw and
+    ``alpha_pub + (X_pub - 1 c_pub') beta`` centred, ``X_pub = X - 1 m'`` over
+    the materialized columns (``runtime_canonicalize._fold_public_pair``).
+    The solver's reads the same rows' values from ``intercept_pub - m' beta``
+    raw and from ``alpha = alpha_pub - (m - c)' beta`` over the columns the
+    public pair folds (``c_pub = 0``), centred: the inverse fold, a correctly
+    rounded ``fsum`` and a TwoSum into the remainder.  Every other column's
+    ``c_pub`` is ``c - m``, so it adds nothing.  Left at its pre-revision
+    values, the solver predictor, which a post-fit shape repair profiles its
+    intercept from and metrics read on the training rows, read the old
+    coefficients' shift ``m' beta_old`` after an editor edit, and the repair
+    published the difference (#447).  With no published pair the public
+    predictor is raw, and so is the solver's.
     """
     public = getattr(model, "_result", None)
     solver = getattr(model, "_solver_result", None)
-    terms = (getattr(model, "_runtime_canonical_state", None) or {}).get("terms")
-    if public is None or public is solver or terms is None:
+    state = getattr(model, "_runtime_canonical_state", None)
+    if public is None or solver is None or public is solver or not isinstance(state, dict):
         return
-    public_centre = getattr(public, "state_center", None)
-    alpha = getattr(solver, "centred_intercept", None)
+    # The canonical state is shared with the model the revision started from.
+    state = copy.deepcopy(state)
+    model._runtime_canonical_state = state
+    beta = np.asarray(public.beta, dtype=np.float64)
+    shift = canonical_intercept_shift(model, beta)
+    state["intercept_shift"] = float(shift)
+    diagnostics = state.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        diagnostics["intercept_shift"] = float(shift)
+        diagnostics["coefficients_revised"] = True
+    for term_state in state.get("terms", {}).values():
+        term_shift = 0.0
+        for group_state in term_state.get("groups", []):
+            start, end = group_state["solver_slice"]
+            means = np.asarray(group_state["column_means"], dtype=np.float64)
+            term_shift += float(means @ beta[start:end])
+        term_state["intercept_shift"] = term_shift
+    solver.intercept = float(public.intercept) - shift
+
     centre = getattr(solver, "state_center", None)
-    if public_centre is None or getattr(public, "centred_intercept", None) is None:
+    if getattr(solver, "centred_intercept", None) is None or centre is None:
         return
-    if alpha is None or centre is None:
+    alpha_public = getattr(public, "centred_intercept", None)
+    public_centre = getattr(public, "state_center", None)
+    if alpha_public is None or public_centre is None:
+        for field_name in ("centred_intercept", "state_center", "centred_intercept_lo"):
+            setattr(solver, field_name, None)
         return
-    from superglm.model.runtime_canonicalize import _fold_public_pair, _public_column_shifts
+    from superglm.model.runtime_canonicalize import _public_column_shifts
+    from superglm.solvers.mode_score import two_sum
 
     centre = np.asarray(centre, dtype=np.float64)
-    alpha_public, alpha_public_lo = _fold_public_pair(
-        alpha,
-        getattr(solver, "centred_intercept_lo", None),
-        centre,
-        np.asarray(public_centre, dtype=np.float64),
-        _public_column_shifts(terms, centre.size),
-        np.asarray(solver.beta, dtype=np.float64),
-    )
-    public.centred_intercept = alpha_public
-    public.centred_intercept_lo = alpha_public_lo
+    folded = np.asarray(public_centre, dtype=np.float64) == 0.0
+    shifts = _public_column_shifts(state.get("terms", {}), centre.size)
+    fold = math.fsum((shifts[folded] - centre[folded]) * beta[folded])
+    alpha_public_lo = getattr(public, "centred_intercept_lo", None)
+    if alpha_public_lo is None:
+        solver.centred_intercept = float(alpha_public) - fold
+        solver.centred_intercept_lo = None
+        return
+    solver.centred_intercept, error = two_sum(float(alpha_public), -fold)
+    solver.centred_intercept_lo = float(alpha_public_lo) + error
 
 
-def invalidate_revised_coefficient_mode(model) -> None:
-    """Clear artifacts that identify or describe the pre-revision coefficient mode."""
-    # The centred state (alpha, c) reads the fitted mode: a revised beta or
-    # intercept it does not cover would leave alpha + (X - 1 c') beta at the
-    # old mean, so eta (mode_score.linear_predictor, prediction) returns to the
-    # raw beta and intercept the revision wrote.
-    #
-    # When the solver relation holds, the public pair is re-read at the revised
-    # beta only if the revision also re-read the public intercept there (a shape
-    # repair: _synchronize_repaired_intercept_state).  The editor keeps the
-    # public intercept authoritative and moves both intercepts by the same
-    # delta (skipped below 1e-15); its published pair then still predicts what
-    # it wrote, to c_pub' (beta_new - beta_old), zero unless it moved a column
-    # the public pair keeps centred, which would have broken the solver
-    # relation.  Clearing it instead dropped every dense column's centring
-    # because a spline was edited (Sol's review of #445, P2).
-    keep_centred = _centred_state_reads_the_coefficients(model)
-    republish = keep_centred and _public_intercept_follows_the_coefficients(model)
+def publish_revised_coefficients(model, beta_before) -> None:
+    """Publish a revision of the fitted coefficients as one predictor in every coordinate.
+
+    A revision (an editor edit, a post-fit shape repair) writes ``beta`` into
+    both results and moves the public intercept through
+    ``move_public_intercept``; the raw public predictor ``intercept_pub +
+    X_pub beta`` states what it means.  The centred pair moves by the ``c_pub'
+    (beta - beta_before)`` its centred columns no longer carry, so that
+    ``alpha_pub + (X_pub - 1 c_pub') beta`` predicts the same rows: zero
+    unless the revision moved a column the pair keeps centred (a numeric
+    one).  The solver state is then read from the published one
+    (``_read_solver_state_from_public``) and the fitted mode's identity is
+    cleared.  The pair is carried, never dropped: clearing it dropped every
+    dense column's centring (Sol's review of #445, P2), and keeping the
+    solver's pre-revision pair beside it left the solver predictor at the old
+    coefficients (#447).
+    """
+    public = model._result
+    centre = getattr(public, "state_center", None)
+    if centre is not None:
+        change = np.asarray(public.beta, dtype=np.float64) - np.asarray(
+            beta_before, dtype=np.float64
+        )
+        _carry_into_centred_pair(public, np.asarray(centre, dtype=np.float64) * change)
+    _read_solver_state_from_public(model)
+
     updated: set[int] = set()
     for result_name in ("_result", "_solver_result"):
         result = getattr(model, result_name, None)
@@ -595,13 +670,7 @@ def invalidate_revised_coefficient_mode(model) -> None:
         ):
             if hasattr(result, field_name):
                 setattr(result, field_name, value)
-        if not keep_centred:
-            for field_name in ("centred_intercept", "state_center", "centred_intercept_lo"):
-                if hasattr(result, field_name):
-                    setattr(result, field_name, None)
         updated.add(id(result))
-    if republish:
-        _republish_centred_state(model)
 
     reml_result = getattr(model, "_reml_result", None)
     if reml_result is not None:

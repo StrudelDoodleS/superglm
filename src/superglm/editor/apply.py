@@ -19,7 +19,11 @@ from superglm.features.ordered_categorical import (
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
-from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
+from superglm.model.fit_state import (
+    FittedStateRevision,
+    move_public_intercept,
+    publish_revised_coefficients,
+)
 from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.mode_score import linear_predictor
 
@@ -114,10 +118,11 @@ def apply_edits_to_model_copy_with_data(
         freeze_auxiliary_arrays=bool(changed_terms or has_scoring_data),
     )
     edited_model = revision.model
+    beta_before = np.array(edited_model._result.beta, dtype=np.float64)
     for term in changed_terms:
         _apply_term_edit(edited_model, term)
     if changed_terms:
-        invalidate_revised_coefficient_mode(edited_model)
+        publish_revised_coefficients(edited_model, beta_before)
     edited_terms = [term.name for term in changed_terms]
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
@@ -492,12 +497,11 @@ def _patch_beta_block(model, groups: list[GroupSlice], beta_new: NDArray) -> Non
 
 
 def _adjust_intercept(model, delta: float) -> None:
+    # The solver's intercepts are read from the published ones when the
+    # revision is published (``publish_revised_coefficients``).
     if abs(delta) < 1e-15:
         return
-    for result_name in ("_result", "_solver_result"):
-        result = getattr(model, result_name, None)
-        if result is not None:
-            result.intercept = float(result.intercept + delta)
+    move_public_intercept(model, delta)
 
 
 def _invalidate_model_caches(model, *, keep_inference: bool = False) -> None:

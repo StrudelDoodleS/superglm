@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 
 import numpy as np
@@ -10,7 +9,12 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.group_matrix import GroupMatrix
-from superglm.model.fit_state import FittedStateRevision
+from superglm.model.fit_state import (
+    FittedStateRevision,
+    canonical_intercept_shift,
+    move_public_intercept,
+    publish_revised_coefficients,
+)
 from superglm.solvers.dispersion import (
     model_weight_semantics,
     pearson_residual_degrees_of_freedom,
@@ -73,22 +77,6 @@ def _replace_result_beta(model, beta) -> None:
         updated.add(id(result))
 
 
-def _canonical_intercept_shift(model, beta) -> float:
-    """Return the solver-to-public intercept shift implied by ``beta``."""
-    runtime_state = getattr(model, "_runtime_canonical_state", None)
-    if not isinstance(runtime_state, dict):
-        return 0.0
-    shift = 0.0
-    for term_state in runtime_state.get("terms", {}).values():
-        if not term_state.get("applied_to_public_model", False):
-            continue
-        for group_state in term_state.get("groups", []):
-            start, end = group_state["solver_slice"]
-            means = np.asarray(group_state["column_means"], dtype=np.float64)
-            shift += float(means @ np.asarray(beta[start:end], dtype=np.float64))
-    return shift
-
-
 def _term_publishes_a_centred_contribution(model, groups) -> bool:
     """Whether the published basis for this term asserts a zero-mean contribution.
 
@@ -128,35 +116,6 @@ def _term_publishes_a_centred_contribution(model, groups) -> bool:
         for group_state in term_state.get("groups", [])
     }
     return any((group.start, group.end) in registered for group in groups)
-
-
-def _synchronize_repaired_intercept_state(model) -> None:
-    """Keep solver/public intercepts coherent after a public-basis coefficient repair."""
-    public_result = model._result
-    solver_result = model._solver_result
-    if public_result is None or solver_result is None:
-        raise RuntimeError("Shape repair cannot synchronize missing fitted results")
-    shift = _canonical_intercept_shift(model, public_result.beta)
-    if solver_result is public_result:
-        if abs(shift) > 1e-13:
-            raise RuntimeError("Shape repair cannot apply a nonzero canonical intercept shift")
-    else:
-        solver_result.intercept = float(public_result.intercept) - shift
-
-    runtime_state = model._runtime_canonical_state
-    runtime_state["intercept_shift"] = float(shift)
-    diagnostics = runtime_state.get("diagnostics")
-    if isinstance(diagnostics, dict):
-        diagnostics["intercept_shift"] = float(shift)
-        diagnostics["coefficients_revised"] = True
-    beta = np.asarray(public_result.beta, dtype=np.float64)
-    for term_state in runtime_state.get("terms", {}).values():
-        term_shift = 0.0
-        for group_state in term_state.get("groups", []):
-            start, end = group_state["solver_slice"]
-            means = np.asarray(group_state["column_means"], dtype=np.float64)
-            term_shift += float(means @ beta[start:end])
-        term_state["intercept_shift"] = term_shift
 
 
 @dataclass(frozen=True)
@@ -457,7 +416,7 @@ def _shape_term_eta_delta(model, current_beta, candidate_beta, groups) -> np.nda
     ):
         if (group.name, group.start, group.end) in group_keys:
             contribution += np.asarray(group_matrix.matvec(delta[group.sl]), dtype=np.float64)
-    contribution -= _canonical_intercept_shift(model, delta)
+    contribution -= canonical_intercept_shift(model, delta)
     if not np.all(np.isfinite(contribution)):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: non-finite term predictor"
@@ -853,12 +812,9 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
 
     revision = FittedStateRevision.start(model)
     work_model = revision.model
-    # FittedStateRevision intentionally shares immutable/heavy fit projections.
-    # Canonicalization metadata is nested and is revised term-by-term below, so
-    # give this transaction its own copy before the first mutation.
-    work_model._runtime_canonical_state = copy.deepcopy(model._runtime_canonical_state)
     work_model._shape_repairs = dict(getattr(model, "_shape_repairs", {}))
     work_model._monotone_repairs = dict(getattr(model, "_monotone_repairs", {}))
+    revision_beta = np.array(work_model.result.beta, dtype=np.float64)
 
     scoring_weight = (
         sample_weight if sample_weight is not None else getattr(work_model, "_fit_weights", None)
@@ -934,16 +890,13 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         # and no boundary to sit on.
         projected = not np.array_equal(candidate_beta, beta_before)
         _replace_result_beta(work_model, candidate_beta)
-        work_model._result.intercept = float(work_model._result.intercept) + intercept_shift
-        _synchronize_repaired_intercept_state(work_model)
+        move_public_intercept(work_model, intercept_shift)
         if projected:
             work_model._shape_repairs[name] = repair_result
             if kind in {"increasing", "decreasing"}:
                 work_model._monotone_repairs[name] = repair_result
 
-    from superglm.model.fit_state import invalidate_revised_coefficient_mode
-
-    invalidate_revised_coefficient_mode(work_model)
+    publish_revised_coefficients(work_model, revision_beta)
     _invalidate_repair_caches(work_model)
     from superglm.editor.apply import _refresh_fit_statistics
 

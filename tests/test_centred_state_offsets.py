@@ -701,27 +701,32 @@ def test_the_public_intercept_pair_carries_the_fold_exactly(folded):
     assert abs(gap) <= bound, f"gap {float(gap):.3g}, fold {float(fold):.3g}"
 
 
-def test_a_kept_centred_state_is_read_again_at_the_revised_coefficients():
-    """A revision that keeps the solver's centred state republishes the public pair (#433).
+@pytest.mark.parametrize("change", [0.0, 0.0123], ids=["no_intercept_change", "intercept_change"])
+def test_a_revision_publishes_one_predictor_in_both_coordinates(change):
+    """A revision's published pair and its solver predictor read the revised coefficients.
 
     A ``PSpline``'s columns are sparse, so the solver centres none of them
     (``c = 0``) and the public pair folds the means its public columns lose:
     ``alpha_pub = alpha + m' beta``, ``m`` the unweighted means, which differ
-    from the weighted centre under unequal weights.  A post-fit shape repair writes a new
-    ``beta`` and a profiled intercept; when that intercept rounds back to
-    ``alpha`` bit for bit, the solver relation ``intercept = alpha - fsum(c
-    beta)`` still holds and the revision keeps the centred state, but
-    ``alpha_pub`` was the pre-revision fold: a frequency-weighted fit then
-    predicted its unweighted fitted mean (master's Windows CI,
-    ``test_pearson_scale_weights``).  Here the coincidence is set directly:
-    ``beta`` halved and the solver intercept left at ``alpha``.  The public
-    prediction must be the raw public predictor ``intercept_pub + X_pub beta``
-    of the same revision, to the remainder ``alpha_lo`` it adds, two roundings
-    of each intercept and each evaluation's ``gamma_(p+2)`` (Higham 2002,
-    section 3.1).  Fails on a7871319 by ``m' beta / 2``.
+    from the weighted centre under unequal weights.  The revision halves
+    ``beta`` and moves the public intercept by ``change``, as an editor edit
+    (with and without an intercept change) or a shape repair (its profiled
+    shift) does.  The published pair moves by the change alone, bit for bit
+    without one, since the moved columns carry no centre, and predicts the
+    raw public predictor ``intercept_pub + X_pub beta`` of the same revision to
+    the remainder ``alpha_lo``, two roundings of each intercept and each
+    evaluation's ``gamma_(p+3)`` (Higham 2002, section 3.1).  The solver
+    predictor reads the same rows from ``alpha_pub - m' beta`` about the solver
+    columns, to both evaluations and the fold's ``gamma_2``.  Before #447 the
+    solver predictor kept the old ``m' beta`` (off by ``m' beta / 2``), and
+    re-reading the pair from it moved the public one by as much (#433, a7871319).
     """
     from superglm.model import shape_ops
-    from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
+    from superglm.model.fit_state import (
+        FittedStateRevision,
+        move_public_intercept,
+        publish_revised_coefficients,
+    )
 
     x = np.linspace(0.0, 1.0, 60)
     y = 1.5 - 1.1 * x + 0.08 * np.sin(7.0 * x)
@@ -737,73 +742,23 @@ def test_a_kept_centred_state_is_read_again_at_the_revised_coefficients():
     solver = model._solver_pirls_result()
     assert solver.state_center is not None and not np.any(solver.state_center)
     assert model.result.centred_intercept != solver.centred_intercept  # m' beta is folded in
-
-    revision = FittedStateRevision.start(model)
-    work = revision.model
-    beta = 0.5 * np.asarray(work.result.beta, dtype=np.float64)
-    shape_ops._replace_result_beta(work, beta)
-    shift = shape_ops._canonical_intercept_shift(work, beta)
-    work._result.intercept = float(solver.centred_intercept) + shift
-    shape_ops._synchronize_repaired_intercept_state(work)
-    work._solver_result.intercept = float(solver.centred_intercept)  # the coincidence
-    invalidate_revised_coefficient_mode(work)
-    revised = revision.commit()
-    public = revised.result
-    assert public.centred_intercept is not None  # the solver relation held: kept
-
-    columns = np.asarray(revised._specs["x"].transform(x), dtype=np.float64)
-    raw = float(public.intercept) + columns @ beta
-    magnitude = np.abs(columns) @ np.abs(beta) + abs(float(public.centred_intercept))
-    bound = (
-        abs(float(public.centred_intercept_lo or 0.0))
-        + 2.0 * _U * (abs(float(public.centred_intercept)) + abs(float(public.intercept)))
-        + 2.0 * _gamma(beta.size + 2) * magnitude
-    )
-    assert np.all(np.abs(revised.predict(frame) - raw) <= bound)
-
-
-def test_a_revision_that_keeps_the_public_intercept_predicts_from_it():
-    """The editor's revision keeps the public intercept, and its published pair with it.
-
-    The editor writes a term's new ``beta`` into both results and moves both
-    intercepts by the same least-squares delta, skipped below ``1e-15``, and
-    leaves the recorded shift ``m' beta`` at the old ``beta``: the public
-    intercept is authoritative.  With a zero delta the solver relation still
-    holds, and republishing the pair at the new ``beta`` moved every
-    prediction by ``m' (beta_new - beta_old)`` from what the edit wrote
-    (Claude review of #445, Low); clearing the pair instead dropped every
-    dense column's centring (Sol's review of #445, P2).  The published pair
-    still predicts what the edit wrote, to ``c_pub' (beta_new - beta_old)``,
-    zero on these columns.  Check: the pair is the published one, and the
-    prediction is the raw public predictor ``intercept_pub + X_pub beta`` to
-    each evaluation's ``gamma_(p+2)``, the remainder and the two intercepts'
-    rounding.  Fails on 16ac340b (moved) and eab2d550 (cleared).
-    """
-    from superglm.model import shape_ops
-    from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
-
-    x = np.linspace(0.0, 1.0, 60)
-    y = 1.5 - 1.1 * x + 0.08 * np.sin(7.0 * x)
-    weights = np.resize(np.array([1.0, 3.0, 2.0, 4.0]), x.size)
-    frame = pd.DataFrame({"x": x})
-    model = SuperGLM(
-        family="gaussian",
-        selection_penalty=0.0,
-        spline_penalty=0.8,
-        features={"x": PSpline(n_knots=6, knot_strategy="uniform")},
-        weight_semantics="frequency",
-    ).fit(frame, y, sample_weight=weights)
     published = (model.result.centred_intercept, model.result.centred_intercept_lo)
-    assert published[0] is not None
 
     revision = FittedStateRevision.start(model)
     work = revision.model
-    beta = 0.5 * np.asarray(work.result.beta, dtype=np.float64)
-    shape_ops._replace_result_beta(work, beta)  # both intercepts as they were
-    invalidate_revised_coefficient_mode(work)
+    before = np.array(work.result.beta, dtype=np.float64)
+    beta = 0.5 * before
+    shape_ops._replace_result_beta(work, beta)
+    move_public_intercept(work, change)
+    publish_revised_coefficients(work, before)
     revised = revision.commit()
     public = revised.result
-    assert (public.centred_intercept, public.centred_intercept_lo) == published
+    if change == 0.0:
+        assert (public.centred_intercept, public.centred_intercept_lo) == published
+    lo = Fraction(public.centred_intercept_lo or 0.0)
+    moved = Fraction(public.centred_intercept) + lo
+    moved -= Fraction(published[0]) + Fraction(published[1] or 0.0)
+    assert abs(moved - Fraction(change)) <= Fraction(_U) * abs(lo)
 
     columns = np.asarray(revised._specs["x"].transform(x), dtype=np.float64)
     raw = float(public.intercept) + columns @ beta
@@ -813,7 +768,22 @@ def test_a_revision_that_keeps_the_public_intercept_predicts_from_it():
         + abs(float(public.centred_intercept_lo or 0.0))
         + 2.0 * _U * (abs(float(public.centred_intercept)) + abs(float(public.intercept)))
     )
-    assert np.all(np.abs(revised.predict(frame) - raw) <= bound)
+    predicted = revised.predict(frame)
+    assert np.all(np.abs(predicted - raw) <= bound)
+
+    solver = revised._solver_pirls_result()
+    means = np.asarray(
+        revised._runtime_canonical_state["terms"]["x"]["groups"][0]["column_means"],
+        dtype=np.float64,
+    )
+    solver_magnitude = (np.abs(columns) + np.abs(means)) @ np.abs(beta) + abs(
+        float(solver.centred_intercept)
+    )
+    solver_bound = 2.0 * _gamma(beta.size + 3) * (magnitude + solver_magnitude) + _gamma(2) * (
+        np.abs(means) @ np.abs(beta)
+    )
+    solver_bound += 2.0 * _U * abs(float(public.centred_intercept))
+    assert np.all(np.abs(linear_predictor(revised._dm, solver, None) - predicted) <= solver_bound)
 
 
 def _edit_moves_predictions_by_its_columns(model, edited, frame, term: str) -> None:
@@ -899,9 +869,9 @@ def test_an_edit_without_the_design_keeps_the_published_centred_pair(offset):
     Sol's review of eab2d550 (P2): after a pickle reload the model holds no
     design, ``_public_centred_state`` returned ``(None, None, None)`` and the
     republication erased the published pair; the edited categorical's
-    predictions came from the raw intercept, 0.15 off at 1e16.  The pair is
-    now re-read from the published public centre, which names the folded
-    columns without the design.  Check: the pair is unchanged (the edit moves
+    predictions came from the raw intercept, 0.15 off at 1e16.  The edit now
+    carries the published pair (``publish_revised_coefficients``), which needs
+    no design.  Check: the pair is unchanged (the edit moves
     only folded, uncentred columns) and ``_edit_moves_predictions_by_its_columns``.
     """
     import pickle

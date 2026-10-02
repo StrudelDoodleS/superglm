@@ -886,20 +886,21 @@ def test_a_fit_without_a_dense_column_scores_its_terms_uncentred(family):
     np.testing.assert_array_equal(model._predict_eta_raw_exact(frame), expected)
 
 
-def test_a_coefficient_revision_returns_the_predictor_to_the_raw_state():
-    """The centred state is the fitted mode's: a revision it does not cover clears it.
+def test_a_coefficient_revision_carries_the_centred_state():
+    """The centred state is carried through a revision of the coefficients (#447).
 
-    The editor's revision writes raw coordinates (``_patch_beta_block``); keeping
-    ``(alpha, c)`` left ``linear_predictor`` at the old intercept, off by ``c' dbeta``
-    (1e4 here).  After ``invalidate_revised_coefficient_mode`` both results read
-    ``X beta + intercept`` and prediction scores the revised coefficients.  (A null
-    revision keeps the state, and predictions bit for bit: ``test_piecewise_editor``.)
+    The editor's revision writes raw coordinates (``_patch_beta_block``): the
+    raw predictor ``X beta + intercept`` moves by ``x dbeta``.  Keeping ``(alpha,
+    c)`` as it was left ``linear_predictor`` off by ``c' dbeta`` (1e4 here);
+    clearing it dropped every dense column's centring (Sol's review of #445).
+    ``publish_revised_coefficients`` moves the pair by ``c' dbeta`` and reads the
+    solver state from the published one, so both results keep their pair and
+    both predictors read ``X beta + intercept`` at the revised coefficients, to
+    each evaluation's ``gamma_(p+3)``.  (A null revision keeps the state, and
+    predictions bit for bit: ``test_piecewise_editor``.)
     """
     from superglm.editor.apply import _copy_model_for_editor_edits, _patch_beta_block
-    from superglm.model.fit_state import (
-        FittedStateRevision,
-        invalidate_revised_coefficient_mode,
-    )
+    from superglm.model.fit_state import FittedStateRevision, publish_revised_coefficients
     from superglm.solvers.mode_score import linear_predictor
 
     rng = np.random.default_rng(0)
@@ -918,13 +919,22 @@ def test_a_coefficient_revision_returns_the_predictor_to_the_raw_state():
     copied = _copy_model_for_editor_edits(model, share_transient_state=True)
     revised = FittedStateRevision.start(copied, increment=True, freeze_auxiliary_arrays=True).model
     t = next(group for group in revised._groups if group.name == "t")
+    beta_before = np.array(revised.result.beta, dtype=np.float64)
     _patch_beta_block(revised, [t], revised.result.beta[t.sl] + 0.01)
-    invalidate_revised_coefficient_mode(revised)
+    publish_revised_coefficients(revised, beta_before)
     for result in (revised._result, revised._solver_result):
-        assert result.centred_intercept is None and result.state_center is None
+        assert result.centred_intercept is not None and result.state_center is not None
     solver = revised._solver_result
+    design = revised._dm.toarray()
     raw = revised._dm.matvec(solver.beta) + solver.intercept
-    np.testing.assert_array_equal(linear_predictor(revised._dm, solver, None), raw)
-    magnitude = abs(solver.intercept) + np.abs(revised._dm.toarray()) @ np.abs(solver.beta)
-    bound = 2.0 * (revised._dm.p + 2) * EPS * magnitude
+    centred = np.abs(design - np.asarray(solver.state_center)[None, :]) @ np.abs(solver.beta)
+    magnitude = (
+        abs(solver.intercept)
+        + np.abs(design) @ np.abs(solver.beta)
+        + abs(solver.centred_intercept)
+        + abs(solver.centred_intercept_lo or 0.0)
+        + centred
+    )
+    bound = 2.0 * (revised._dm.p + 3) * EPS * magnitude
+    np.testing.assert_array_less(np.abs(linear_predictor(revised._dm, solver, None) - raw), bound)
     np.testing.assert_array_less(np.abs(revised._predict_eta_raw_exact(frame) - raw), bound)
