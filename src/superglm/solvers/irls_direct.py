@@ -372,9 +372,18 @@ def _feature_edf(
     return np.diag(scaled.pseudo_inverse() @ np.ldexp(centered.data_gram, -exponent)).copy()
 
 
-# Half the spacing of the subnormal numbers: the largest absolute error
-# gradual underflow adds to one operation (Higham 2002, section 2.1).
-_HALF_SUBNORMAL_SPACING = 2.0**-1075
+# The spacing of the subnormal numbers, 2^-1074, the smallest positive
+# float64.  Gradual underflow adds at most half of it to one operation
+# (Higham 2002, section 2.1); half is not representable (2.0**-1075 rounds to
+# 0), so the bounds below count the whole spacing per operation.
+_SUBNORMAL_SPACING = 2.0**-1074
+
+
+def _underflow_allowance(rows: int) -> float:
+    """The absolute error gradual underflow can add to a sum over ``rows`` rows and its two companions."""
+    return (rows + 2) * _SUBNORMAL_SPACING
+
+
 # The largest a coordinate's penalty terms may grow to in the certificate's
 # units, short of float64's 2^1024 by enough for the sums that use them.
 _PENALTY_HEADROOM_EXPONENT = 1000
@@ -1267,12 +1276,21 @@ def _fit_irls_direct_once(
           than ``2^-2000`` below the penalty beside it.
         - Powers of two are exact on normal and subnormal values, and an even
           one keeps ``zeta``'s square root exact.
-        - Gradual underflow adds at most ``eta = 2^-1075`` of absolute error
-          to each operation (Higham 2002, section 2.1), so a sum over ``n``
-          rows carries at most ``2 n eta`` beyond its ``gamma_n`` relative
-          error.  Where that is not below the bar's allowance, ``bar`` times
-          an identified coordinate's scale, the certificate cannot resolve
-          the score and refuses: ``inf``, never a pass.
+        - Gradual underflow adds at most half the subnormal spacing
+          ``2^-1074`` of absolute error to each operation (Higham 2002,
+          section 2.1), so a sum over ``n`` rows carries at most ``(n + 2)
+          2^-1074`` beyond its ``gamma_n`` relative error
+          (``_underflow_allowance``, the whole spacing per operation since
+          half of it is not representable).  Where that is not below the
+          bar's allowance, ``bar`` times an identified coordinate's scale,
+          the certificate cannot resolve the score and refuses: ``inf``,
+          never a pass.
+        - A slope the weak test finds at rounding-level curvature is left out
+          of the ratio only while the iterate is at the mode along it: half
+          its Newton decrement within the log-likelihood sum's own rounding,
+          ``gamma_n sum |l_i|`` (``penalized_mode_residual``'s
+          ``decrement_noise``).  The penalty's rounding is left out of that
+          noise, which can only refuse.
 
         **Constraints.** ``active_rows`` are the hard constraints ``a' beta >=
         b`` active at the iterate.  A constrained mode is stationary when ``G
@@ -1348,6 +1366,14 @@ def _fit_irls_direct_once(
                 penalty_score = penalty_score - rows.T @ multipliers
                 penalty_magnitude = penalty_magnitude + np.abs(rows).T @ multipliers
         centre_shift = float(mean_x @ beta_values)
+
+        def likelihood_noise() -> float:
+            rows_l = mean_space_log_likelihood_rows(
+                y, np.ldexp(weights, -weight_exponent), eta_values
+            )
+            noise = _gamma(int(np.count_nonzero(positive))) * float(np.sum(np.abs(rows_l)))
+            return noise if math.isfinite(noise) else 0.0
+
         residual = penalized_mode_residual(
             dm=dm,
             row_score=score,
@@ -1365,9 +1391,10 @@ def _fit_irls_direct_once(
             excluded=excluded,
             resolve_cap=MODE_RESOLVE_CAP,
             column_shift=shift,
+            decrement_noise=likelihood_noise,
         )
         rows_n = int(np.count_nonzero(positive))
-        underflow = 2.0 * (rows_n + 2) * _HALF_SUBNORMAL_SPACING
+        underflow = _underflow_allowance(rows_n)
         assert residual.scale is not None
         identified = np.concatenate(([True], ~residual.excluded))
         if np.any(mode_bar * residual.scale[identified] <= underflow):

@@ -677,6 +677,107 @@ def test_a_subnormal_weight_level_publishes_finite_degrees_of_freedom(
     )
 
 
+def _two_level_log_likelihood(weights: np.ndarray, eta: np.ndarray) -> np.ndarray:
+    """Each row's ``w [y eta + (1 - y) log(1 - e^eta)]`` for ``y = (0, 1, 0, 1)``, ``log1mexp`` by branch."""
+    y = np.array([0.0, 1.0, 0.0, 1.0])
+    complement = np.where(
+        eta > -math.log(2.0),
+        np.log(-np.expm1(np.minimum(eta, -1e-300))),
+        np.log1p(-np.exp(np.minimum(eta, 0.0))),
+    )
+    return weights * (y * eta + (1.0 - y) * complement)
+
+
+def _certified_two_level_fit(weights: np.ndarray, offset: np.ndarray, direct_solve: str):
+    """``(converged, deviance excess, its certified bound)`` of a two-level fit whose maximum is ``p = 1/2``.
+
+    Each level holds one event and one non-event, so at the maximum every
+    row's score is ``+-w`` and its Fisher weight ``w``: ``sum |s| = F = sum
+    w``, and level a (the intercept) carries ``F_a >= F / 2``.  A certified
+    fit holds the intercept's score within ``bar F`` and level b's centred
+    score within ``bar zeta sqrt(D_bb)`` (``zeta = sqrt(F)``, ``D_bb = F_a
+    F_b / F``), or excludes level b with half its Newton decrement within
+    ``gamma_4 sum |l|``.  The floors, of order ``u`` times the offsets, stay
+    below the bar here.  Per level the log-likelihood gap is ``S^2 / (2 F)``,
+    so the two give at most ``(bar F)^2 ((1 + sqrt 2)^2 / F_a + 2 / F) / 2``
+    plus that noise, doubled for the curvature's change along the way and
+    again for the deviance; the test's own two sums add ``2 gamma_4`` times
+    their sizes.
+    """
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        weight_semantics="frequency",
+        features={"g": Categorical(base="first")},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(
+            pd.DataFrame({"g": ["a", "a", "b", "b"]}),
+            np.array([0.0, 1.0, 0.0, 1.0]),
+            offset=offset,
+            sample_weight=weights,
+        )
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept + offset
+    at_maximum = _two_level_log_likelihood(weights, np.full(4, math.log(0.5)))
+    published = _two_level_log_likelihood(weights, eta)
+    excess = 2.0 * (float(np.sum(at_maximum)) - float(np.sum(published)))
+    if np.any(eta >= 0.0):  # outside the mean space: no likelihood
+        excess = math.inf
+    total, level_a = float(np.sum(weights)), float(np.sum(weights[:2]))
+    gamma_4 = 4.0 * _U / (1.0 - 4.0 * _U)
+    noise = gamma_4 * float(np.sum(np.abs(at_maximum)))
+    gap = (MODE_CERTIFICATION_BAR * total) ** 2 * (
+        (1.0 + math.sqrt(2.0)) ** 2 / level_a + 2.0 / total
+    ) / 2.0 + noise
+    rounding = (
+        2.0 * gamma_4 * (float(np.sum(np.abs(at_maximum))) + float(np.sum(np.abs(published))))
+    )
+    return bool(model.result.converged), excess, 4.0 * gap + rounding
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram", "qr"])
+def test_a_level_weak_only_at_an_unfinished_iterate_is_not_certified(direct_solve: str) -> None:
+    """Sol's #437 fixture: level a of weight 1e4 at offset +1.3, level b of weight 1e-8 at -30.
+
+    6b2f2bed certified it after one iteration at ``p_b = 7.07e-7`` (maximum
+    1/2): level b's Fisher curvature is tiny there only because ``p_b`` is
+    far off, so the weak test excluded it and the intercept alone passed.
+    Its half Newton decrement there, ``w_b / (4 p_b)`` (about 3.5e-3) against
+    noise of ``gamma_4 sum |l|`` (about 6e-12), now keeps it in, and the fit
+    runs on.
+    """
+    converged, excess, bound = _certified_two_level_fit(
+        np.array([1e4, 1e4, 1e-8, 1e-8]), np.array([1.3, 1.3, -30.0, -30.0]), direct_solve
+    )
+    assert not converged or excess <= bound
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "gram", "qr"])
+def test_a_weight_ratio_never_certifies_a_wrong_two_level_maximum(direct_solve: str) -> None:
+    """Level b at ``1 / ratio`` of level a's weight, ratio 1 to 1e12, at offsets -5 to -40."""
+    for ratio in (1.0, 1e3, 1e6, 1e9, 1e12):
+        for level_b_offset in (-5.0, -10.0, -20.0, -30.0, -40.0):
+            converged, excess, bound = _certified_two_level_fit(
+                np.array([1e4, 1e4, 1e4 / ratio, 1e4 / ratio]),
+                np.array([1.3, 1.3, level_b_offset, level_b_offset]),
+                direct_solve,
+            )
+            assert not converged or excess <= bound, (ratio, level_b_offset, excess, bound)
+
+
+def test_the_underflow_allowance_is_representable() -> None:
+    """Half the subnormal spacing, ``2.0**-1075``, rounds to 0; the allowance counts the whole spacing."""
+    from superglm.solvers.irls_direct import _SUBNORMAL_SPACING, _underflow_allowance
+
+    assert 2.0**-1075 == 0.0
+    assert _SUBNORMAL_SPACING == np.nextafter(0.0, 1.0) > 0.0
+    for rows in (0, 1, 4, 10**6):
+        assert _underflow_allowance(rows) == (rows + 2) * _SUBNORMAL_SPACING > 0.0
+
+
 def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates() -> None:
     """Sol's #437 fixture: an increasing PSpline (SCOP) with a constant offset of +2.
 

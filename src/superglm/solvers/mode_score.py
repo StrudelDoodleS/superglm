@@ -89,6 +89,7 @@ class.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -592,6 +593,7 @@ def penalized_mode_residual(
     excluded: NDArray | None = None,
     resolve_cap: float = float("inf"),
     column_shift: NDArray | None = None,
+    decrement_noise: Callable[[], float] | None = None,
 ) -> ModeResidual:
     """Evaluate the shared relative score (module docstring) at one iterate.
 
@@ -614,6 +616,21 @@ def penalized_mode_residual(
     together, so the shift leaves it unchanged; it only keeps a penalty far
     larger than the data's scale from overflowing beside it.  The powers of
     two are exact, and the even shift keeps ``zeta``'s square root exact.
+
+    ``decrement_noise`` (``None`` for none) returns the objective's rounding
+    noise in the weights' units.  When given, the weak test may exclude a
+    slope only where the iterate is already at the mode along it, to that
+    noise.  The weak test reads curvature alone, and at an unfinished
+    iterate a slope's curvature can be tiny only because its rows' means are
+    still far off.  Half the Newton decrement, ``lambda^2 / 2`` with
+    ``lambda^2 = g' H^-1 g``, is the predicted gain of a Newton step (Boyd &
+    Vandenberghe 2004, section 9.5.1).  For each newly weak slope it is
+    formed from the part of its score above the score's rounding floor and
+    its curvature ``d_jj``: ``(|g_j| - floor_j)_+^2 / (2 d_jj)``, ``inf`` when
+    ``d_jj`` is 0 and the score is resolved.  Their sum (the block form
+    ``g_B' H_BB^-1 g_B / 2`` when ``H_BB`` is diagonal, and never below any
+    one coordinate's) must lie within the noise, or no slope of this
+    evaluation is excluded as weak.
     """
     n, p = dm.n, dm.p
     total = float(np.sum(row_score))
@@ -695,14 +712,29 @@ def penalized_mode_residual(
             curvature = shifted(curvature, slopes)
             largest_column = shifted(np.full(len(slopes), largest), slopes)
             magnitude = penalty_magnitude[slopes]
-            floor = (
+            score_floor = (
                 gamma_rows * evaluation
                 + gamma_penalty * magnitude
                 + _UNIT_ROUNDOFF * (represented + magnitude)
-            ) / slope_scale[slopes]
+            )
+            floor = score_floor / slope_scale[slopes]
             bar_effective[slopes + 1] = np.maximum(bar, floor)
             diagonal = np.asarray(penalty_curvature, dtype=np.float64)[slopes]
-            weak[slopes] = curvature + diagonal <= _gamma(row_count) * largest_column * mass
+            newly_weak = curvature + diagonal <= _gamma(row_count) * largest_column * mass
+            if decrement_noise is not None and np.any(newly_weak):
+                resolvable = np.maximum(np.abs(slope_score[slopes]) - score_floor, 0.0)
+                hessian = np.maximum(curvature + diagonal, 0.0)
+                with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                    half_decrement = np.where(
+                        resolvable > 0.0, resolvable**2 / (2.0 * hessian), 0.0
+                    )
+                    # each coordinate's own units back to the weights'
+                    if column_shift is not None:
+                        half_decrement = np.ldexp(half_decrement, np.asarray(column_shift)[slopes])
+                    gain = float(np.sum(half_decrement[newly_weak]))
+                if not gain <= decrement_noise():
+                    newly_weak[:] = False
+            weak[slopes] = newly_weak
     return ModeResidual(
         intercept_score=total,
         slope_score=slope_score,
