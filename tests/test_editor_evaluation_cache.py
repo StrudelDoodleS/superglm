@@ -18,6 +18,7 @@ from superglm.editor.evaluation_cache import (
     model_metric_signature,
 )
 from superglm.editor.metrics import compute_dataset_metrics
+from superglm.model import base as base_module
 
 
 def _key(role: str, revision: int, *, split: str = "validation") -> EvaluationKey:
@@ -239,30 +240,85 @@ def test_training_split_metrics_score_the_model_like_metrics(
         source="retained_fit_data" if use_retained_arrays else "supplied",
     )
     calls = 0
-    original_predict = model.predict
+    original_predict = base_module.predict_exact
 
     def counted_predict(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original_predict(*args, **kwargs)
 
-    monkeypatch.setattr(model, "predict", counted_predict)
+    monkeypatch.setattr(base_module, "predict_exact", counted_predict)
     metrics = compute_dataset_metrics(model, dataset)
     monkeypatch.undo()
     core = model.metrics(X, y, sample_weight=sample_weight, offset=offset)
 
     assert calls == 1
     assert set(metrics) == set(_METRIC_NAMES)
-    for name in ("deviance", "log_likelihood", "aic", "aicc", "bic", "effective_df"):
+    # The same predictions through the same kernels as metrics().
+    for name in _METRIC_NAMES:
         assert metrics[name] == getattr(core, name), name
-    # Each Pearson sum has n non-negative terms of about four roundings each,
-    # so each is within gamma_(n+3) of the exact sum and the two differ by at
-    # most 2 gamma_(n+3), in the unit roundoff u.
-    n = len(y)
-    u = np.finfo(np.float64).eps / 2.0
-    pearson_bound = 2.0 * (n + 3) * u / (1.0 - (n + 3) * u)
-    assert metrics["pearson_chi2"] == pytest.approx(core.pearson_chi2, rel=pearson_bound, abs=0.0)
-    assert metrics["explained_deviance"] == core.explained_deviance
+
+
+@pytest.mark.parametrize("excluded_weight", [0.0, 1.0e-200], ids=["zero", "tiny"])
+def test_training_split_pearson_uses_the_stable_kernel(excluded_weight):
+    """A 1e200 response on a zero or tiny weight leaves the Pearson statistic finite.
+
+    The editor's own residual square overflowed to NaN or inf here; the
+    ``pearson_chi2`` kernel that ``metrics()`` uses does not.
+    """
+    y = np.r_[1.0e200, np.tile([1.0, 2.0, 3.0], 6), 2.0]
+    weights = np.r_[excluded_weight, np.ones(19)]
+    X = pd.DataFrame({"x": np.zeros(20)})
+    model = SuperGLM(family="poisson", features={}, weight_semantics="prior")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, sample_weight=weights)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        metrics = compute_dataset_metrics(
+            model, EvaluationDataset("train", "Train", X, y, sample_weight=weights)
+        )
+    core = model.metrics(X, y, sample_weight=weights).pearson_chi2
+
+    assert np.isfinite(metrics["pearson_chi2"])
+    assert metrics["pearson_chi2"] == core
+
+
+def test_verified_training_rows_score_without_prediction_warnings():
+    """The fit's own rows score quietly, as ``metrics()`` does, with the same values.
+
+    A thin ``sz`` level makes public ``predict`` warn; the fit already
+    reported it, and ``metrics()`` on the same rows stays quiet.
+    """
+    from superglm import FactorSmooth, Spline
+    from superglm.types import LambdaPolicy
+
+    x = np.r_[np.linspace(0.0, 1.0, 40), np.linspace(0.0, 1.0, 40), 0.37]
+    X = pd.DataFrame({"x": x, "g": ["a"] * 40 + ["b"] * 40 + ["thin"]})
+    y = 1.0 + np.sin(4.0 * x) + np.r_[np.zeros(40), np.full(40, 0.2), 0.5]
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", k=6, lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+            )
+        ],
+        selection_penalty=0.0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y)
+    with pytest.warns(UserWarning, match="sz"):
+        model.predict(X)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        metrics = compute_dataset_metrics(model, EvaluationDataset("train", "Train", X, y))
+        core = model.metrics(X, y)
+
+    assert metrics["deviance"] == core.deviance
 
 
 @pytest.mark.parametrize("mutated", ["response", "weights"])

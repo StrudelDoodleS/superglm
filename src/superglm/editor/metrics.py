@@ -14,6 +14,7 @@ from superglm.editor.evaluation import (
     named_metrics_dataset,
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
+from superglm.solvers.working_rows import pearson_chi2
 
 METRIC_LABELS = {
     "deviance": "Deviance",
@@ -107,8 +108,11 @@ def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, floa
 
     A dataset holding the fit's own objects is scored the same way: the fit's
     own statistics belong to its fitting design, which on a discrete fit is
-    the binned one that ``predict`` does not reproduce (#441).  Only the
-    weight-contract check is skipped for those objects, since the fit ran it.
+    the binned one that ``predict`` does not reproduce (#441).  When those
+    objects are unchanged since the fit (its data guard), the reports the fit
+    already gave are not repeated: the weight-contract check, the
+    custom-family prior-weight report and ``predict``'s own warnings, as in
+    ``model.metrics``.  The predicted values are the same either way.
     """
     validated_weights = _validate_evaluation_weights(
         dataset.sample_weight,
@@ -166,7 +170,14 @@ def _compute_metrics(
     y_arr = np.asarray(y, dtype=np.float64).ravel()
     w = np.asarray(weights, dtype=np.float64).ravel()
     offset_arg = None if offset is None else np.asarray(offset, dtype=np.float64).ravel()
-    mu = np.asarray(model.predict(X, offset=offset_arg), dtype=np.float64).ravel()
+    if contract_checked:
+        from superglm.model import base
+
+        # ``predict``'s values without its warnings, as ``model.metrics`` scores.
+        predicted = base.predict_exact(model, X, offset=offset_arg, warn=False)
+    else:
+        predicted = model.predict(X, offset=offset_arg)
+    mu = np.asarray(predicted, dtype=np.float64).ravel()
     if w.size != y_arr.size:
         raise ValueError(f"sample_weight has length {w.size}, expected {y_arr.size}.")
     if offset_arg is not None and offset_arg.size != y_arr.size:
@@ -205,8 +216,9 @@ def _compute_metrics(
     aicc = float(aic + 2.0 * edf * (edf + 1.0) / denom) if denom > 0 else float("inf")
     null_deviance, null_mu = _null_deviance_and_mu(model, y_arr, w, offset_arg)
     explained = _explained_deviance(deviance, null_deviance, y_arr, null_mu, w)
-    variance = np.maximum(family.variance(mu), 1e-300)
-    pearson = float(np.sum(w * (y_arr - mu) ** 2 / variance))
+    pearson = float(
+        pearson_chi2(distribution=family, y=y_arr, mu=mu, sample_weight=w, variance_floor=0.0)
+    )
     return {
         "deviance": deviance,
         "aic": aic,
