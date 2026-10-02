@@ -54,10 +54,13 @@ type _EvidenceProvenance = Literal[
 type _FindingSeverity = Literal["error", "warning", "info"]
 type _FindingConfidence = Literal["certified", "strong", "suggestive", "unresolved"]
 type _CurvatureMatrixKind = Literal["data", "penalized"]
-# Recorded phases that never enclose another recorded phase, so their seconds
-# add up without double counting; ``initialization`` and
-# ``terminal_observed_retry_fallback`` wrap leaf phases and are left out.  The
-# left name is the recorder's, the right name is the profile's.
+# Phases the profile reports by name, with their exclusive seconds: the
+# recorder charges each clock interval to the innermost open phase alone, so
+# these never double count even where one encloses another
+# (``layout_penalty_assembly`` builds the dense predictor matrices on the EFS
+# path).  The exclusive seconds of every other phase, including the fit's own
+# time outside any phase, form the orchestration row.  The left name is the
+# recorder's, the right name is the profile's.
 _PROFILE_LEAF_PHASES = (
     ("frame_normalization", "frame_normalization"),
     ("predictor_compilation", "predictor_compilation"),
@@ -1076,8 +1079,10 @@ def _build_profile(
     """Summarise the accepted fit's work, timing shares, and smoothing outcomes.
 
     Every published number is one the profile records validate: shares lie in
-    [0, 1], leaf phase seconds plus the unmeasured remainder sum to the fit
-    total, and an exact-face outcome names the iteration that activated it.
+    [0, 1], the phase seconds sum to the fit time, and an exact-face outcome
+    names the iteration that activated it.  The phases are disjoint exclusive
+    times, and the fit time is their sum rather than a separate reading, so
+    no timing can make the profile inconsistent.
     """
     smoothing = context.smoothing
     if smoothing is None:
@@ -1172,34 +1177,33 @@ def _build_profile(
         fit_seconds = None
         phases: tuple[FitPhaseProfile, ...] = ()
     else:
-        fit_seconds = float(phase_snapshot.seconds["fit_total"])
-        leaf_phases = tuple(
-            FitPhaseProfile(
-                name=profile_name,
-                seconds=float(phase_snapshot.seconds[source_name]),
-                fit_share=(
-                    float(phase_snapshot.seconds[source_name]) / fit_seconds
-                    if fit_seconds > 0.0
-                    else 0.0
-                ),
-                calls=phase_snapshot.counts[source_name],
-            )
+        exclusive = phase_snapshot.exclusive_seconds
+        reported = {source_name for source_name, _ in _PROFILE_LEAF_PHASES}
+        parts = [
+            (profile_name, float(exclusive[source_name]), phase_snapshot.counts[source_name])
             for source_name, profile_name in _PROFILE_LEAF_PHASES
             if phase_snapshot.counts[source_name] > 0
+        ]
+        parts.append(
+            (
+                "orchestration_and_unmeasured",
+                sum(float(seconds) for name, seconds in exclusive.items() if name not in reported),
+                0,
+            )
         )
-        measured_seconds = sum(item.seconds for item in leaf_phases)
-        timing_error = 64.0 * np.finfo(np.float64).eps * max(fit_seconds, measured_seconds, 1.0)
-        if measured_seconds > fit_seconds + timing_error:
-            raise ValueError("leaf phase timings cannot exceed the total fit time")
-        unmeasured_seconds = max(fit_seconds - measured_seconds, 0.0)
-        phases = (
-            *leaf_phases,
+        # Disjoint intervals of the fit sum to its wall time.  Summing the same
+        # values in the same order as the profile's own check makes the two
+        # totals identical, where a remainder against ``fit_total`` would need
+        # a rounding allowance.
+        fit_seconds = sum(seconds for _, seconds, _ in parts)
+        phases = tuple(
             FitPhaseProfile(
-                name="orchestration_and_unmeasured",
-                seconds=unmeasured_seconds,
-                fit_share=(unmeasured_seconds / fit_seconds if fit_seconds > 0.0 else 0.0),
-                calls=0,
-            ),
+                name=name,
+                seconds=seconds,
+                fit_share=seconds / fit_seconds if fit_seconds > 0.0 else 0.0,
+                calls=calls,
+            )
+            for name, seconds, calls in parts
         )
 
     return FitWorkProfile(

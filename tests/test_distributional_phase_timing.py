@@ -46,6 +46,101 @@ def test_nested_phase_measurements_accumulate_counts_and_inclusive_seconds() -> 
     assert snapshot.seconds["fit_total"] >= snapshot.seconds["predictor_compilation"]
 
 
+def test_exclusive_seconds_charge_each_interval_to_the_innermost_open_phase() -> None:
+    # fit_total [0, 12] holds layout [1, 10], which holds dense [3, 4] and a
+    # second layout observation [6, 7] nested in the first.
+    readings = iter((0.0, 1.0, 3.0, 4.0, 6.0, 7.0, 10.0, 12.0))
+    recorder = FitPhaseRecorder(clock=lambda: next(readings))
+
+    with recorder.measure("fit_total"):
+        with recorder.measure("layout_penalty_assembly"):
+            with recorder.measure("dense_predictor_matrices"):
+                pass
+            with recorder.measure("layout_penalty_assembly"):
+                pass
+
+    snapshot = recorder.snapshot()
+    assert snapshot.exclusive_seconds["fit_total"] == 3.0
+    assert snapshot.exclusive_seconds["layout_penalty_assembly"] == 8.0
+    assert snapshot.exclusive_seconds["dense_predictor_matrices"] == 1.0
+    # Disjoint by construction: the parts add up to the enclosing wall time.
+    assert sum(snapshot.exclusive_seconds.values()) == snapshot.seconds["fit_total"] == 12.0
+    # Inclusive time counts a phase nested in itself once, as cProfile's cumtime does.
+    assert snapshot.seconds["layout_penalty_assembly"] == 9.0
+    assert snapshot.counts["layout_penalty_assembly"] == 2
+
+
+@pytest.mark.parametrize(
+    "readings",
+    [(-1.0e308, 1.0e308), (-1.0e308, 0.0, 1.0e308, 1.0e308)],
+    ids=["interval", "observation"],
+)
+def test_finite_readings_infinitely_far_apart_are_refused(readings) -> None:
+    # Each reading is finite and monotonic, but an interval between two of them
+    # (or an outer observation spanning both halves) overflows to infinity.
+    clock = iter(readings)
+    recorder = FitPhaseRecorder(clock=lambda: next(clock))
+
+    with pytest.raises(RuntimeError, match="finite monotonic"):
+        with recorder.measure("fit_total"):
+            if len(readings) == 4:
+                with recorder.measure("predictor_compilation"):
+                    pass
+    recorder.snapshot()  # the refused span was never accumulated
+
+
+def test_finite_spans_that_sum_past_the_largest_float_are_refused() -> None:
+    # Two sibling observations of 1e308 each: every span is finite, but their
+    # inclusive and exclusive totals would overflow.
+    readings = iter((-1.0e308, 0.0, 0.0, 1.0e308))
+    recorder = FitPhaseRecorder(clock=lambda: next(readings))
+    with recorder.measure("likelihood_evaluation"):
+        pass
+
+    with pytest.raises(RuntimeError, match="totals must stay finite"):
+        with recorder.measure("likelihood_evaluation"):
+            pass
+    recorder.add("serialization", 1.0e308)
+    with pytest.raises(RuntimeError, match="totals must stay finite"):
+        recorder.add("serialization", 1.0e308)
+
+    snapshot = recorder.snapshot()  # every total kept is still finite
+    assert snapshot.exclusive_seconds["likelihood_evaluation"] == 1.0e308
+    assert snapshot.manual_seconds["serialization"] == 1.0e308
+
+
+def test_an_inclusive_total_that_overflows_alone_is_refused() -> None:
+    # Each layout observation spans 1e308, charged to a different nested phase,
+    # so only layout's inclusive total overflows.
+    readings = iter((-1.0e308, -1.0e308, 0.0, 0.0, 0.0, 0.0, 1.0e308, 1.0e308))
+    recorder = FitPhaseRecorder(clock=lambda: next(readings))
+    with recorder.measure("layout_penalty_assembly"):
+        with recorder.measure("dense_predictor_matrices"):
+            pass
+
+    with pytest.raises(RuntimeError, match="totals must stay finite"):
+        with recorder.measure("layout_penalty_assembly"):
+            with recorder.measure("predictor_compilation"):
+                pass
+    recorder.snapshot()
+
+
+def test_a_manual_sample_inside_an_open_phase_stays_out_of_the_partition() -> None:
+    # fit_total spans one second of clock; a one-second manual sample taken
+    # inside it would otherwise be counted on top of that second.
+    readings = iter((0.0, 1.0))
+    recorder = FitPhaseRecorder(clock=lambda: next(readings))
+
+    with recorder.measure("fit_total"):
+        recorder.add("serialization", 1.0)
+
+    snapshot = recorder.snapshot()
+    assert sum(snapshot.exclusive_seconds.values()) == snapshot.seconds["fit_total"] == 1.0
+    assert snapshot.manual_seconds["serialization"] == 1.0
+    assert snapshot.seconds["serialization"] == 1.0
+    assert snapshot.counts["serialization"] == 1
+
+
 def test_snapshot_is_immutable_owned_and_records_manual_samples() -> None:
     recorder = FitPhaseRecorder(clock=lambda: 0.0)
     recorder.add("serialization", 0.25)
@@ -53,6 +148,8 @@ def test_snapshot_is_immutable_owned_and_records_manual_samples() -> None:
     recorder.add("serialization", 0.75)
 
     assert snapshot.seconds["serialization"] == 0.25
+    assert snapshot.manual_seconds["serialization"] == 0.25
+    assert snapshot.exclusive_seconds["serialization"] == 0.0
     assert snapshot.counts["serialization"] == 1
     with pytest.raises(TypeError):
         snapshot.seconds["serialization"] = 2.0  # type: ignore[index]
@@ -186,3 +283,32 @@ def test_efs_fit_threads_one_recorder_through_every_coefficient_refit() -> None:
     assert snapshot.counts["terminal_observed_retry_fallback"] == len(
         model.smoothing.coefficient_fits
     )
+
+
+def test_every_phase_of_an_efs_fit_partitions_the_fit_total() -> None:
+    # Automatic starting lambdas (initial_lambda=None, fit_reml's default) make
+    # EFS initialisation build the dense matrices inside
+    # layout_penalty_assembly (#446).  A counting clock keeps the sums exact.
+    frame, response, predictors = _efs_fixture()
+    readings = iter(range(1, 10**9))
+    recorder = FitPhaseRecorder(clock=lambda: float(next(readings)))
+
+    fit_dense_distributional(
+        frame,
+        response,
+        family=GaussianLS(),
+        weight_contract=WeightContract(semantics="prior"),
+        predictors=predictors,
+        efs_config=DistributionalEFSConfig(
+            max_iterations=2, tolerance=1.0e-12, initial_lambda=None
+        ),
+        phase_recorder=recorder,
+    )
+
+    snapshot = recorder.snapshot()
+    nested = (
+        snapshot.seconds["layout_penalty_assembly"]
+        - snapshot.exclusive_seconds["layout_penalty_assembly"]
+    )
+    assert nested >= snapshot.seconds["dense_predictor_matrices"] > 0.0
+    assert sum(snapshot.exclusive_seconds.values()) == snapshot.seconds["fit_total"]
