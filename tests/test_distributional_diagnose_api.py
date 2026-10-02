@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 import superglm
+import superglm.distributional.solver.solver as solver_module
 from superglm import SuperLSS
 from superglm.diagnostics.fit_report import (
     FitDiagnosticReport,
@@ -37,7 +38,9 @@ def profiled_face_fit() -> tuple[SuperLSS, FitPhaseSnapshot]:
     sign = np.tile(np.array([-1.0, 1.0]), 9)
     response = 0.4 + 0.006 * x + np.exp(-1.2 + 0.003 * z) * sign
     ticks = itertools.count()
-    recorder = FitPhaseRecorder(clock=lambda: next(ticks) * 0.001)
+    # A dyadic tick keeps every timing sum exact, so the profile's total can
+    # be compared with the recorded fit total without a rounding allowance.
+    recorder = FitPhaseRecorder(clock=lambda: next(ticks) * 2.0**-10)
     model = model_from_templates(
         family=GaussianLS(scale_floor=0.0),
         predictors=(
@@ -244,7 +247,7 @@ def test_diagnose_leads_with_work_timing_and_smoothing_metrics(
     assert profile.backtracked_proposals >= profile.rejected_proposals
     likelihood = next(item for item in profile.phases if item.name == "likelihood_evaluation")
     assert likelihood.calls == measured.counts["likelihood_evaluation"]
-    assert likelihood.seconds == measured.seconds["likelihood_evaluation"]
+    assert likelihood.seconds == measured.exclusive_seconds["likelihood_evaluation"]
     assert likelihood.fit_share == pytest.approx(likelihood.seconds / profile.fit_seconds)
     assert sum(item.fit_share for item in profile.phases) == pytest.approx(1.0)
     assert {item.name for item in profile.phases}.isdisjoint(
@@ -254,11 +257,11 @@ def test_diagnose_leads_with_work_timing_and_smoothing_metrics(
     terminal = next(
         item for item in profile.phases if item.name == "terminal_inference_and_null_fit"
     )
-    assert terminal.seconds == measured.seconds["inference_edf"]
+    assert terminal.seconds == measured.exclusive_seconds["inference_edf"]
     assert all(item.name != "inference_edf" for item in profile.phases)
     dense = next(item for item in profile.phases if item.name == "dense_predictor_matrices")
     assert dense.calls == measured.counts["dense_predictor_matrices"]
-    assert dense.seconds == measured.seconds["dense_predictor_matrices"]
+    assert dense.seconds == measured.exclusive_seconds["dense_predictor_matrices"]
     assert report.findings == diagnose_distributional_fit(fitted).findings
 
     rendered = report.render()
@@ -269,6 +272,221 @@ def test_diagnose_leads_with_work_timing_and_smoothing_metrics(
     assert "Coefficient fits" in rendered
     assert "Time distribution" in rendered
     assert "Smoothing parameters" in rendered
+
+
+def _smooth_lss_fit_inputs() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
+    """An unfitted EFS model with automatic starting lambdas and its data."""
+    x = np.linspace(0.0, 1.0, 80)
+    response = 0.3 + np.sin(2.0 * np.pi * x) + np.random.default_rng(446).normal(0.0, 0.25, 80)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor(
+                "location",
+                {
+                    "x": Spline(
+                        kind="cr", n_knots=6, lambda_policy={"wiggle": LambdaPolicy.estimate()}
+                    )
+                },
+            ),
+            Predictor("scale", {}),
+        ),
+    )
+    return model, pd.DataFrame({"x": x}), response
+
+
+def test_diagnose_counts_a_phase_nested_in_another_once(monkeypatch) -> None:
+    """Issue #446: a phase timed inside another is not charged to both.
+
+    With automatic lambdas, EFS initialisation builds the dense predictor
+    matrices inside ``layout_penalty_assembly``.  The fake clock jumps by
+    ``jump`` whenever the matrices are built, so counting the nested build in
+    both phases puts the reported phases past the fit total, which the
+    unfixed profile refused with a ValueError.  Integer readings keep every
+    sum exact.
+    """
+    jump = 2.0**20
+    readings = itertools.count()
+    offset = [0.0]
+    original = solver_module.dense_predictor_matrices
+
+    def slow_build(layout):
+        offset[0] += jump
+        return original(layout)
+
+    monkeypatch.setattr(solver_module, "dense_predictor_matrices", slow_build)
+    recorder = FitPhaseRecorder(clock=lambda: float(next(readings)) + offset[0])
+    model, frame, response = _smooth_lss_fit_inputs()
+    model.fit_reml(frame, response, phase_recorder=recorder)
+    measured = recorder.snapshot()
+    assert measured.seconds["layout_penalty_assembly"] > jump  # the build ran inside it
+
+    profile = model.diagnose().profile
+
+    assert profile is not None
+    phases = {item.name: item for item in profile.phases}
+    assert phases["dense_predictor_matrices"].seconds >= jump
+    assert phases["layout_penalty_assembly"].seconds < jump
+    assert profile.fit_seconds == measured.seconds["fit_total"]
+    assert sum(item.seconds for item in profile.phases) == profile.fit_seconds
+
+
+def _fixed_fit_inputs() -> tuple[pd.DataFrame, np.ndarray]:
+    """Data for ``_fixed_model``: a fit short enough to time tick by tick."""
+    x = np.linspace(-1.0, 1.0, 48)
+    return pd.DataFrame({"x": x}), 0.4 + 0.7 * x + 0.15 * np.sin(7.0 * x)
+
+
+def test_diagnose_leaves_out_time_a_caller_spent_before_the_fit() -> None:
+    """A caller's phase open on the recorder before the fit is not the fit's time.
+
+    The fit runs inside the caller's ``serialization`` phase, after a
+    10,000-tick delay in it.  The fit's profile is its own ``fit_total``, as on
+    master, and holds none of the delay; the unfixed profile added it.  The
+    caller's recorder still sees every tick once.
+    """
+    readings = itertools.count()
+    offset = [0.0]
+    recorder = FitPhaseRecorder(clock=lambda: float(next(readings)) + offset[0])
+    frame, response = _fixed_fit_inputs()
+    model = _fixed_model()
+
+    with recorder.measure("serialization"):
+        offset[0] += 10_000.0
+        model.fit_reml(frame, response, phase_recorder=recorder)
+    measured = recorder.snapshot()
+
+    profile = model.diagnose().profile
+
+    assert profile is not None
+    own = model._fit_phase_snapshot.seconds["fit_total"]
+    assert profile.fit_seconds == own == measured.seconds["fit_total"] < 10_000.0
+    assert sum(measured.exclusive_seconds.values()) == measured.seconds["serialization"]
+
+
+def test_a_manual_sample_during_the_fit_stays_out_of_its_time(monkeypatch) -> None:
+    """A sample ``add``-ed while the fit runs is not counted on top of the clock.
+
+    A hook in the fit's first dense-matrix build advances the clock 1,000
+    ticks and also records them with ``add``.  The fit's time is its own
+    ``fit_total``, which spans those ticks once, as master reports; counting
+    the manual sample in the exclusive partition added them again.  (The
+    null model's later build is left alone.)
+    """
+    readings = itertools.count()
+    offset = [0.0]
+    recorder = FitPhaseRecorder(clock=lambda: float(next(readings)) + offset[0])
+    original = solver_module.dense_predictor_matrices
+    builds = itertools.count()
+
+    def sampled_build(layout):
+        if next(builds) == 0:
+            offset[0] += 1_000.0
+            recorder.add("serialization", 1_000.0)
+        return original(layout)
+
+    monkeypatch.setattr(solver_module, "dense_predictor_matrices", sampled_build)
+    frame, response = _fixed_fit_inputs()
+    model = _fixed_model().fit_reml(frame, response, phase_recorder=recorder)
+    measured = recorder.snapshot()
+
+    profile = model.diagnose().profile
+
+    assert profile is not None
+    own = model._fit_phase_snapshot.seconds["fit_total"]
+    assert profile.fit_seconds == own == measured.seconds["fit_total"]
+    assert 1_000.0 < profile.fit_seconds < 2_000.0  # the jump once, the sample never
+    assert measured.manual_seconds["serialization"] == 1_000.0
+    assert sum(measured.exclusive_seconds.values()) == measured.seconds["fit_total"]
+
+
+def test_a_caller_fit_total_wrapping_a_fit_counts_its_inclusive_time_once() -> None:
+    """A phase nested in itself across recorders is counted at its outermost observation.
+
+    The caller wraps the fit in its own ``fit_total``.  Folding the fit in
+    must not add the fit's ``fit_total`` on top of the caller's, which already
+    spans it.
+    """
+    readings = itertools.count()
+    recorder = FitPhaseRecorder(clock=lambda: float(next(readings)))
+    frame, response = _fixed_fit_inputs()
+    model = _fixed_model()
+
+    with recorder.measure("fit_total"):
+        model.fit_reml(frame, response, phase_recorder=recorder)
+    measured = recorder.snapshot()
+
+    profile = model.diagnose().profile
+
+    assert profile is not None
+    assert measured.counts["fit_total"] == 2
+    assert sum(measured.exclusive_seconds.values()) == measured.seconds["fit_total"]
+    own = model._fit_phase_snapshot.seconds["fit_total"]
+    assert profile.fit_seconds == own < measured.seconds["fit_total"]
+
+
+@pytest.mark.parametrize("clock", ["default", "counting"])
+def test_a_caller_measurement_during_the_fit_keeps_the_fit_published(clock) -> None:
+    """A caller's phase measured while the fit runs is counted once, in order.
+
+    The family's ``bind_likelihood`` measures the caller's ``serialization`` on
+    the caller's recorder during the fit, inside the caller's own open
+    ``serialization``.  The fit is published and diagnosed, as on master, and
+    on a counting clock the caller's recorder counts every tick once.
+    """
+    readings = itertools.count()
+    recorder = (
+        FitPhaseRecorder(clock=lambda: float(next(readings)))
+        if clock == "counting"
+        else FitPhaseRecorder()
+    )
+
+    class MeasuredGaussianLS(GaussianLS):
+        def bind_likelihood(self, y, weights, observation):
+            with recorder.measure("serialization"):
+                return super().bind_likelihood(y, weights, observation)
+
+    family = MeasuredGaussianLS()
+    frame, response = _fixed_fit_inputs()
+    model = SuperLSS(family, family.location("x"), family.scale())
+
+    with recorder.measure("serialization"):
+        model.fit_reml(frame, response, phase_recorder=recorder)
+    measured = recorder.snapshot()
+
+    profile = model.diagnose().profile
+
+    assert profile is not None
+    assert profile.fit_seconds is not None and profile.fit_seconds > 0.0
+    assert measured.counts["serialization"] == 2
+    if clock == "counting":
+        own = model._fit_phase_snapshot.seconds["fit_total"]
+        assert profile.fit_seconds == own == measured.seconds["fit_total"]
+        assert sum(measured.exclusive_seconds.values()) == measured.seconds["serialization"]
+
+
+def test_a_reused_recorder_profiles_each_fit_on_its_own() -> None:
+    """The second fit on a recorder reports its own phases, not the running totals."""
+    readings = itertools.count()
+    recorder = FitPhaseRecorder(clock=lambda: float(next(readings)))
+    model, frame, response = _smooth_lss_fit_inputs()
+    model.fit_reml(frame, response, phase_recorder=recorder)
+
+    before = recorder.snapshot()
+    model.fit_reml(frame, response, phase_recorder=recorder)
+    after = recorder.snapshot()
+    profile = model.diagnose().profile
+
+    assert profile is not None
+    assert profile.fit_seconds == after.seconds["fit_total"] - before.seconds["fit_total"]
+    likelihood = next(item for item in profile.phases if item.name == "likelihood_evaluation")
+    assert likelihood.seconds == (
+        after.exclusive_seconds["likelihood_evaluation"]
+        - before.exclusive_seconds["likelihood_evaluation"]
+    )
+    assert likelihood.calls == (
+        after.counts["likelihood_evaluation"] - before.counts["likelihood_evaluation"]
+    )
 
 
 def test_exact_face_profile_names_the_driving_terms_without_contradicting_itself(

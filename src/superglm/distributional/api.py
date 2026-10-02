@@ -436,17 +436,6 @@ def _prediction_index(X: FrameLike | EagerFrame, n_observations: int) -> pd.Inde
     return pd.RangeIndex(n_observations)
 
 
-def _phase_delta(
-    after: FitPhaseSnapshot,
-    before: FitPhaseSnapshot,
-) -> FitPhaseSnapshot:
-    """The phase timing of one fit, isolated from whatever the recorder held before it."""
-    return FitPhaseSnapshot(
-        seconds={name: after.seconds[name] - before.seconds[name] for name in after.seconds},
-        counts={name: after.counts[name] - before.counts[name] for name in after.counts},
-    )
-
-
 #: Renderer module and figure names of each engine, imported only when asked
 #: for, so ``plotly`` is never a requirement of importing this module.
 _RENDERERS = {
@@ -679,8 +668,9 @@ class SuperLSS:
     ) -> SuperLSS:
         next_revision = 1 if self._model is None else self._model.fit_state.revision + 1
         recorder = FitPhaseRecorder() if phase_recorder is None else phase_recorder
-        before = recorder.snapshot()
-        with solver_blas_threads():
+        # The profile is the fit's own stretch of the recorder: a caller's
+        # phases open around it stay out, and its measurements during it count once.
+        with solver_blas_threads(), recorder._fit_window() as window:
             try:
                 candidate = fit_dense_distributional(
                     X,
@@ -712,7 +702,7 @@ class SuperLSS:
                 if translated is not None:
                     raise translated from failure
                 raise
-        phase_snapshot = _phase_delta(recorder.snapshot(), before)
+        phase_snapshot = window.snapshot()
         self._model = candidate
         self._fit_phase_snapshot = phase_snapshot
         frame = as_eager_frame(X)
