@@ -236,6 +236,9 @@ class FactorSmooth:
         # saved before has neither.
         self._lines_penalized = False
         self._all_levels_thin = False
+        # ``(thin, separated)`` level codes that made the fit penalize the
+        # lines: for reports only, never read by the population curve.
+        self._line_penalty_record: tuple[tuple[int, ...], tuple[int, ...]] = ((), ())
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -711,6 +714,7 @@ class FactorSmooth:
         if penalize:
             self._lines_penalized = False
             self._all_levels_thin = False
+            self._line_penalty_record = ((), ())
         if self.basis != "sz":
             return ()
         if penalize:
@@ -736,6 +740,7 @@ class FactorSmooth:
                 }
             self._lines_penalized = True
             self._all_levels_thin = all_thin
+            self._line_penalty_record = (rows.thin, separated)
             # A level without weight has no data term: the sum-to-zero
             # constraint alone fixes its block, so it is predicted at the
             # population curve, which every level stays in (#444 review).

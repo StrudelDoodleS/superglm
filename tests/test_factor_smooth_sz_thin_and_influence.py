@@ -1451,9 +1451,11 @@ def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() 
     population curve, which stays the main effect (``c = 0`` to the rule's
     rounding), and ``predict`` names it.  ``factor_smooth()`` reports a curve
     of zero with no band, as for an unpenalized fit
-    (``test_sz_reports_agree_with_the_population_prediction``).  Mutations:
-    the penalized record without the weightless levels (Claude review of
-    4dd54555); the report's band kept for it (Claude review of 8fbdadda).
+    (``test_sz_reports_agree_with_the_population_prediction``), and names the
+    levels that made the fit penalize the lines.  Mutations: the penalized
+    record without the weightless levels (Claude review of 4dd54555); the
+    report's band kept for it (Claude review of 8fbdadda); the report's level
+    lists read from the unpenalized record (Claude review of ddaf4416).
     """
     from superglm.model import base
 
@@ -1479,6 +1481,8 @@ def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() 
     assert np.all(report.curves["effect"].to_numpy() == 0.0)
     assert np.all(report.curves["posterior_se"].to_numpy() == 0.0)
     assert report.diagnostics["population_convention"] == "main"
+    assert report.diagnostics["separated_levels"] == ["g000", "g001"]
+    assert report.diagnostics["thin_levels"] == ["g005"]
     group = next(g for g in model._groups if g.name == "x:g:sz")
     blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
     offset = spec._population_offset(blocks)
