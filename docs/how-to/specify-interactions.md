@@ -237,6 +237,9 @@ lines as random effects, as `basis="fs"` does.
   report that it did not converge. The lines are still finite there.
 - A lambda policy given as one `LambdaPolicy` for the whole term also fixes
   `null`. A dict of policies leaves `null` to REML.
+- `LambdaPolicy.off()` for the whole term keeps the lines unpenalized. Separated
+  lines then move toward zero (or one) for as long as the fit runs, and the
+  population curve leaves them out.
 - A model saved by superglm 0.36.0 keeps the rules it was saved with: its
   population curve leaves its separated levels out.
 

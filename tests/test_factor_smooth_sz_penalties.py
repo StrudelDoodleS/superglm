@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -10,6 +12,7 @@ from superglm.factor_smooth_geometry import sum_to_zero_contrast
 from superglm.group_matrix import FactorSmoothGroupMatrix
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml.penalty_algebra import (
+    _compute_penalty_logdet_evaluation,
     build_penalty_components,
     build_penalty_matrix,
     compute_logdet_s_derivatives,
@@ -177,3 +180,50 @@ def test_sz_rejects_noncanonical_penalty_component_geometry(components) -> None:
 
     with pytest.raises(ValueError, match="require a 'wiggle' component, optionally"):
         build_penalty_components([gm], collect_reml_groups([group], [gm]))
+
+
+@pytest.mark.parametrize(
+    "lambdas", [(1.7, 0.3), (1e-3, 4e5), (2.5, 0.0)], ids=["mixed", "far", "null_off"]
+)
+def test_sz_wiggle_and_null_penalty_log_pseudo_determinant(lambdas) -> None:
+    """``log|S|+`` of an ``sz`` term with its lines' ``null`` component (#444).
+
+    ``S = (C'C) kron P``, ``P = lambda_w W + lambda_n N`` with ``C'C = I + 1
+    1'`` (eigenvalues ``1``, ``K - 2`` times, and ``K``), so ``log|S|+ = (K - 1)
+    sum log p_i + r log K`` over ``P``'s ``r`` positive diagonal entries: a
+    closed form outside the library.  The library returns its own bound on
+    the evaluation's error; the reference sums ``2 k`` logarithms, each
+    within one ulp, by ``math.fsum``.  The ranks and the gradient (disjoint
+    components: ``(K - 1)`` times each component's positive count) are exact.
+    Mutations: the two-component branch without ``r log K``, or with ``K``
+    repeats.
+    """
+    n_levels, block_size = 4, 6
+    wiggle = np.diag([2.0, 0.8, 0.3, 0.1, 0.0, 0.0])
+    null = np.diag([0.0, 0.0, 0.0, 0.0, 1.0, 1.0])
+    gm = FactorSmoothGroupMatrix(
+        sp.csr_matrix(np.eye(block_size)[np.arange(24) % block_size]),
+        np.arange(24, dtype=np.intp) % n_levels,
+        n_levels,
+        natural_map=np.eye(block_size),
+        levels=("a", "b", "c", "d"),
+        repeated_penalty_components=(("wiggle", wiggle), ("null", null)),
+        factor_basis="sz",
+    )
+    group = GroupSlice(name="x:group:sz", start=0, end=(n_levels - 1) * block_size)
+    components = build_penalty_components([gm], collect_reml_groups([group], [gm]))
+    assert [c.name for c in components] == ["x:group:sz:wiggle", "x:group:sz:null"]
+    assert [c.penalty_kind for c in components] == ["sum_to_zero", "sum_to_zero"]
+    lam_w, lam_n = lambdas
+    evaluation = _compute_penalty_logdet_evaluation(
+        {"x:group:sz:wiggle": lam_w, "x:group:sz:null": lam_n}, components
+    )
+    local = lam_w * np.diag(wiggle) + lam_n * np.diag(null)
+    positive = local[local > 0.0]
+    terms = [(n_levels - 1) * math.log(value) for value in positive]
+    reference = math.fsum([*terms, len(positive) * math.log(n_levels)])
+    rounding = 2 * len(terms) * np.finfo(float).eps * math.fsum(abs(t) for t in terms)
+    assert evaluation.rank == (n_levels - 1) * len(positive)
+    assert abs(evaluation.logdet - reference) <= evaluation.logdet_error + rounding
+    assert evaluation.gradient["x:group:sz:wiggle"] == (n_levels - 1) * 4
+    assert evaluation.gradient["x:group:sz:null"] == (n_levels - 1) * 2 * (lam_n > 0.0)

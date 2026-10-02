@@ -127,8 +127,9 @@ class FactorSmooth:
     parameter, which reads the lines as random effects shrunk toward the
     population curve, as ``basis="fs"`` does with its ``null_j``
     components.  Its smoothing parameter is estimated by REML unless
-    ``lambda_policy`` is a single policy for the whole term.  Every other
-    ``sz`` fit keeps the lines unpenalized.
+    ``lambda_policy`` is a single policy for the whole term; with
+    ``LambdaPolicy.off()`` the lines stay unpenalized, as in 0.36.0.  Every
+    other ``sz`` fit keeps the lines unpenalized.
     """
 
     structured_kind = "factor_smooth"
@@ -230,9 +231,11 @@ class FactorSmooth:
         self._weightless_levels: tuple[int, ...] = ()
         self._separated_levels: tuple[int, ...] = ()
         self._population_null_space: NDArray | None = None
-        # Whether the fit penalized the levels' lines (#444,
-        # ``_record_unidentified_levels``); a model saved before has none.
+        # Whether the fit penalized the levels' lines, and whether because
+        # every level is thin (#444, ``_record_unidentified_levels``); a model
+        # saved before has neither.
         self._lines_penalized = False
+        self._all_levels_thin = False
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -707,6 +710,7 @@ class FactorSmooth:
         self._population_null_space = None
         if penalize:
             self._lines_penalized = False
+            self._all_levels_thin = False
         if self.basis != "sz":
             return ()
         if penalize:
@@ -718,7 +722,8 @@ class FactorSmooth:
             separated = separated_factor_smooth_levels(
                 design, rows.null_space, prior_weights, response, boundaries
             )
-        if penalize and (separated or len(rows.thin) == len(self._levels)):
+        all_thin = len(rows.thin) == len(self._levels)
+        if penalize and (separated or all_thin) and not self._line_penalty_off:
             suffix, omega = self._level_line_penalty()
             design.repeated_penalty_components = (
                 *self._base_penalty_components,
@@ -730,6 +735,7 @@ class FactorSmooth:
                     suffix: self._lambda_policy,
                 }
             self._lines_penalized = True
+            self._all_levels_thin = all_thin
             return separated
         self._unidentified_levels = rows.thin
         self._free_directions = rows.free
@@ -737,6 +743,20 @@ class FactorSmooth:
         self._separated_levels = separated
         self._population_null_space = rows.null_space if (rows.thin or separated) else None
         return separated
+
+    @property
+    def _line_penalty_off(self) -> bool:
+        """Whether one policy for the whole term fixes every smoothing parameter at zero.
+
+        The lines' penalty would then add no curvature, so the fit keeps the
+        unpenalized lines and #440's record instead (``LambdaPolicy.off()``).
+        """
+        policy = self._lambda_policy
+        return (
+            isinstance(policy, LambdaPolicy)
+            and policy.mode == "fixed"
+            and float(cast(float, policy.value)) == 0.0
+        )
 
     def _level_line_penalty(self) -> tuple[str, NDArray[np.float64]]:
         """``("null", S*)``: the penalty on each level's polynomial part (#444).
