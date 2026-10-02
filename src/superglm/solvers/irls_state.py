@@ -174,6 +174,148 @@ def mean_space_boundary_rows(
     return int(np.count_nonzero((eta_unclipped >= _BINOMIAL_LOG_CAP_ETA) & (weights > 0.0)))
 
 
+def mean_space_clipped_rows(
+    family: Distribution, link: Link, eta_unclipped: NDArray, weights: NDArray
+) -> int:
+    """Positive-weight rows whose mean ``clip_mu`` replaces, for a family with a mean space.
+
+    Zero for a family and link whose means cannot leave the mean space
+    (``mean_space_violation`` is ``None``).  ``clip_mu`` holds a binomial mean
+    inside ``[1e-7, 1 - 1e-7]``.  A row whose mean leaves that band, event or
+    non-event, carries a deviance flat in ``eta`` and a score that is not the
+    binomial/log score, so a stop rule read off the clipped objective there
+    says nothing about the model's likelihood (``mean_space_score_rows``).
+    """
+    if mean_space_violation(family, link) is None:
+        return 0
+    with np.errstate(under="ignore"):
+        mean = link.inverse(stabilize_eta(np.asarray(eta_unclipped, dtype=float), link))
+    return int(np.count_nonzero((clip_mu(mean, family) != mean) & (weights > 0.0)))
+
+
+def mean_space_score_rows(
+    y: NDArray, weights: NDArray, eta_unclipped: NDArray
+) -> tuple[NDArray, NDArray]:
+    """The binomial/log row score and Fisher weight in ``eta``, from the unclipped ``eta``.
+
+    With ``mu = exp(eta)`` and ``1 - mu = -expm1(eta)``, exact near ``eta =
+    0``, the row log-likelihood ``w [y log mu + (1 - y) log(1 - mu)]`` has
+    derivative ``s = w [y - (1 - y) mu / (1 - mu)]`` and Fisher weight ``w mu
+    / (1 - mu)`` (``w mu'^2 / V(mu)``).  The score is the difference of two
+    non-negative terms, so it cancels only where it vanishes; the textbook
+    ``w (y - mu) / (1 - mu)`` loses ``y - mu`` as ``mu -> 1``.  ``clip_mu``'s
+    band does not enter.  Below ``eta ~ -745`` ``exp`` underflows to the
+    exact limits ``s = w y`` and weight 0.  A positive-weight row outside the
+    space (``eta >= 0``) has no likelihood and gives a non-finite score; a
+    zero-weight row gives 0.
+    """
+    eta = np.asarray(eta_unclipped, dtype=np.float64)
+    response = np.asarray(y, dtype=np.float64)
+    prior = np.asarray(weights, dtype=np.float64)
+    with np.errstate(under="ignore", over="ignore", divide="ignore", invalid="ignore"):
+        odds = np.exp(eta) / -np.expm1(eta)
+        odds = np.where(eta < 0.0, odds, np.inf)
+        score = prior * response - prior * (1.0 - response) * odds
+        fisher = prior * odds
+    # a zero-weight row carries nothing, wherever its eta is
+    carried = prior > 0.0
+    return np.where(carried, score, 0.0), np.where(carried, fisher, 0.0)
+
+
+def mean_space_newton_rows(
+    y: NDArray, weights: NDArray, eta_unclipped: NDArray
+) -> tuple[NDArray, NDArray] | None:
+    """Newton rows for binomial/log: ``(observed curvature, score)`` in ``eta``, or ``None``.
+
+    The row log-likelihood is concave in ``eta``, with observed information
+    ``-d2l/deta2 = w (1 - y) mu / (1 - mu)^2``: never negative, and zero on
+    an event row, whose log-likelihood ``w eta`` is linear.  Fisher scoring
+    weights that row by ``w mu / (1 - mu)`` instead, which grows without
+    bound as ``mu -> 1``; near the boundary the two informations part, and
+    scoring converges linearly at a rate set by their mismatch (Osborne
+    1992, Int. Stat. Rev. 60; Green 1984, JRSSB 46, sections 1.2 and 2.3).
+    Newton's method on the observed information converges quadratically
+    there.  The step is taken in score form, ``(X' W X + S) delta = X' u - S
+    beta`` with these ``W`` and the score ``u`` of ``mean_space_score_rows``,
+    so an event row's zero curvature never divides its score.  ``None`` when
+    a row is not finite or no row carries curvature (every positive-weight
+    row an event: the boundary supremum), and the caller keeps its rows.
+    """
+    eta = np.asarray(eta_unclipped, dtype=np.float64)
+    prior = np.asarray(weights, dtype=np.float64)
+    score, _ = mean_space_score_rows(y, weights, eta)
+    with np.errstate(under="ignore", over="ignore", divide="ignore", invalid="ignore"):
+        complement = -np.expm1(eta)
+        curvature = prior * (1.0 - np.asarray(y, dtype=np.float64)) * (np.exp(eta) / complement)
+        curvature = curvature / complement
+    curvature = np.where(prior > 0.0, curvature, 0.0)
+    total = float(np.sum(curvature))
+    finite = bool(np.all(np.isfinite(curvature)) and np.all(np.isfinite(score)))
+    if not (finite and math.isfinite(total) and total > 0.0 and np.all(curvature >= 0.0)):
+        return None
+    return curvature, score
+
+
+def mean_space_log_likelihood_rows(y: NDArray, weights: NDArray, eta_unclipped: NDArray) -> NDArray:
+    """Each row's binomial/log log-likelihood ``w [y eta + (1 - y) log(1 - e^eta)]`` at the unclipped eta.
+
+    The model's own likelihood, up to the saturated term: ``clip_mu``'s band
+    does not enter, so a row below its floor still counts.  ``log(1 -
+    e^eta)`` is Maechler's (2012) ``log1mexp``, ``log(-expm1(eta))`` above
+    ``-log 2`` and ``log1p(-exp(eta))`` below, each branch evaluated on its
+    own non-event rows only.  Zero on a zero-weight row.
+    """
+    eta = np.asarray(eta_unclipped, dtype=np.float64)
+    response = np.asarray(y, dtype=np.float64)
+    prior = np.asarray(weights, dtype=np.float64)
+    rows = np.zeros_like(eta)
+    carried = prior > 0.0
+    near = carried & (response < 1.0) & (eta > -math.log(2.0))
+    far = carried & (response < 1.0) & ~near
+    complement = np.zeros_like(eta)
+    with np.errstate(divide="ignore", invalid="ignore", under="ignore"):
+        complement[near] = np.log(-np.expm1(eta[near]))
+        complement[far] = np.log1p(-np.exp(eta[far]))
+        rows[carried] = prior[carried] * (
+            response[carried] * eta[carried] + (1.0 - response[carried]) * complement[carried]
+        )
+    return rows
+
+
+def interior_start_intercept(
+    family: Distribution,
+    link: Link,
+    eta_unclipped: NDArray,
+    weights: NDArray,
+    intercept: float,
+    level: float,
+) -> float:
+    """An intercept that puts a starting state inside the mean space.
+
+    ``intercept`` unchanged when the family and link cannot leave their mean
+    space or every positive-weight row starts inside it (``eta < 0`` for
+    binomial/log, ``mean_space_violation``).  Otherwise it is lowered until
+    the largest positive-weight ``eta`` is ``level``, the intercept-only
+    start's own ``log(mean) < 0``.  Every log-binomial solver but the
+    augmented-Lagrangian ones needs a start inside the parameter space, and
+    with an intercept the simple one is ``(a, 0, ..., 0)`` with ``a < 0``
+    (Schwendinger, Gruen & Hornik 2021, Comput. Stat. 36, section 4.2); an
+    offset moves that bound to ``a < -max(offset)``, which the default
+    intercept, chosen before the offset, ignores.  A constant offset ``c``
+    then starts at ``intercept - c``, the no-offset start shifted with the
+    optimum.  A start already inside is left alone, so a fit without an
+    offset starts exactly as before.
+    """
+    violates = mean_space_violation(family, link)
+    eta = np.asarray(eta_unclipped, dtype=float)
+    if violates is None or not violates(eta, weights):
+        return float(intercept)
+    top = float(np.max(eta[weights > 0.0]))
+    if not math.isfinite(top):
+        return float(intercept)
+    return float(intercept) - (top - float(level))
+
+
 StateInvalid = Callable[[_IRLSState], bool]
 MeritDelta = Callable[[_IRLSState, _IRLSState], float]
 MeritRoundoff = Callable[[_IRLSState, _IRLSState], float]
@@ -184,6 +326,7 @@ def _stable_penalized_deviance_delta(
     committed: _IRLSState,
     penalty_matvec: Callable[[NDArray], NDArray] | NDArray | None = None,
     nonsmooth_penalty: Callable[[NDArray], float] | None = None,
+    deviance_delta: float | None = None,
 ) -> float:
     """Compare penalized deviances without subtracting two large quadratics.
 
@@ -205,8 +348,14 @@ def _stable_penalized_deviance_delta(
     ``nonsmooth_penalty`` supplies any non-quadratic penalty term as a
     function of ``beta``, already scaled to match the caller's merit
     convention; its two evaluations enter the same ``math.fsum``.
+    ``deviance_delta``, when given, replaces the two states' deviances with
+    an already-formed difference of the data term.
     """
-    terms = [float(candidate.deviance), -float(committed.deviance)]
+    terms = (
+        [float(candidate.deviance), -float(committed.deviance)]
+        if deviance_delta is None
+        else [float(deviance_delta)]
+    )
 
     if penalty_matvec is not None:
         delta_beta = candidate.beta - committed.beta
@@ -386,6 +535,49 @@ def _irls_trial_is_unsafe(
         delta = float(merit_delta(candidate, committed))
         return not np.isfinite(delta) or bool(delta > roundoff)
     return bool(candidate_merit > committed_merit + roundoff)
+
+
+def _mean_space_halving_budget(
+    *,
+    committed: _IRLSState,
+    proposal: _IRLSState,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+    default: int,
+) -> int:
+    """Extend backtracking from a state inside the mean space until a trial is back inside.
+
+    ``default`` unless the family and link can leave their mean space
+    (``mean_space_violation``), the committed state is inside it and the
+    proposal is not.  The binomial/log space ``{eta < 0}`` is open and
+    convex, so from a committed ``eta`` strictly inside it the trial at
+    fraction ``alpha`` of the proposal step ``d`` stays inside exactly when
+    ``alpha < t = min(-eta / d)`` over positive-weight rows with ``d > 0``:
+    the fraction to the boundary of interior-point methods (Nocedal & Wright
+    2006, Numerical Optimization, chapter 19).  A feasible trial always
+    exists, but when ``t <= 2^-default`` every budgeted halving leaves the
+    space and the step is rejected.  The budget then reaches the first
+    halving below ``t``, depth ``floor(log2(1 / t)) + 1``, plus the ordinary
+    budget for the objective test from there, within float64's halving
+    depth.  ``_select_irls_trial`` reads it only after the ordinary budget
+    has failed, and ``fit_irls_direct`` asks for it only in a fit whose start
+    ``interior_start_intercept`` lowered, so every other fit is unchanged.
+    """
+    violates = mean_space_violation(family, link)
+    if violates is None or violates(committed.eta_unclipped, weights):
+        return default
+    eta = np.asarray(committed.eta_unclipped, dtype=np.float64)
+    step = np.asarray(proposal.eta_unclipped, dtype=np.float64) - eta
+    rising = (weights > 0.0) & (step > 0.0)
+    if not np.any(rising):
+        return default
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        fraction = float(np.min(-eta[rising] / step[rising]))
+    if not (math.isfinite(fraction) and 0.0 < fraction <= 2.0**-default):
+        return default
+    depth = math.floor(-math.log2(fraction)) + 1
+    return min(depth + default, _MAX_FLOAT64_HALVING_DEPTH)
 
 
 def _select_irls_trial(

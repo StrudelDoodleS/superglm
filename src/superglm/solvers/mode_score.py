@@ -89,11 +89,15 @@ class.
 from __future__ import annotations
 
 import math
+from collections import deque
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
+from scipy import sparse
 
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -457,6 +461,92 @@ def prior_weighted_centre(dm: DesignMatrix, prior_weights: NDArray) -> NDArray:
     return centre
 
 
+def weighted_column_centring(
+    dm: DesignMatrix, weights: NDArray, positive_prior: NDArray
+) -> tuple[NDArray, float, NDArray]:
+    """``(mean_x, sum_w, D)``: the ``weights``-weighted column means and centred diagonal.
+
+    ``D_jj = sum_r w_r (x_rj - mean_j)^2``, the centring
+    ``penalized_mode_residual`` scales a score by, formed from given working
+    weights instead of a solve's centred system.  The means take one
+    transpose product, a dense column's anchored at its first positive-weight
+    row (``prior_weighted_centre``).  The diagonal takes one pass per block:
+    a one-hot block in closed form, a factor-smooth ``fs`` block through its
+    level sums (``column_sums``, centred row by row), and every other block,
+    dense or not, over its rows in fixed chunks by the corrected two-pass
+    algorithm (Chan, Golub & LeVeque 1983) about the rounded weighted mean
+    ``m``, never a row of the data:
+
+        D_jj = sum w (x - m)^2 - (sum w (x - m))^2 / sum w,
+
+    clamped at 0.  Without the correction the two-pass relative error is
+    within ``n u + n^2 kappa^2 u^2``, ``kappa^2 = sum w x^2 / D_jj`` (Chan,
+    Golub & LeVeque 1983), and the correction (Bjorck's) reduces the
+    second-order term.  Raw moments, ``sum w x^2 - sum_w m^2``, carried
+    ``(n + 3) u sum w x^2``, ``kappa^2`` times larger: enough to leave a
+    column that is nearly constant over the weighted mass with an inflated
+    diagonal and so a deflated relative score.  Zeros when no weight is
+    positive.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    sum_w = float(np.sum(w))
+    p = dm.p
+    if not sum_w > 0.0:
+        return np.zeros(p), 0.0, np.zeros(p)
+    on_weight = dm.rmatvec(w)
+    mean_x = on_weight / sum_w
+    dense = np.zeros(p, dtype=bool)
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        dense[offset : offset + width] = type(matrix) is DenseGroupMatrix
+        offset += width
+    if np.any(dense):
+        mean_x[dense] = prior_weighted_centre(dm, w)[dense]
+    diagonal = np.empty(p)
+    one_hot = one_hot_columns(dm)
+    centre = mean_x[one_hot]
+    diagonal[one_hot] = (
+        on_weight[one_hot] * (1.0 - centre) ** 2 + (sum_w - on_weight[one_hot]) * centre**2
+    )
+    # every other block in one pass of its own over its rows: an fs block
+    # through its level sums, and any other block in fixed chunks of rows by
+    # the corrected two-pass algorithm about the rounded mean -- never a
+    # design product per column, never raw moments
+    factor_smooth: list[NDArray] = []
+    offset = 0
+    for matrix in dm.group_matrices:
+        width = matrix.shape[1]
+        columns = slice(offset, offset + width)
+        offset += width
+        if isinstance(matrix, CategoricalGroupMatrix):
+            continue
+        if isinstance(matrix, FactorSmoothGroupMatrix) and matrix.factor_basis == "fs":
+            factor_smooth.append(np.arange(columns.start, columns.stop))
+            continue
+        dense_values = matrix.M if type(matrix) is DenseGroupMatrix else None
+        centre = mean_x[columns]
+        squares = np.zeros(width)
+        firsts = np.zeros(width)
+        # a wide block's chunk holds about 2^20 entries (8 MB), not 8192 rows
+        chunk = max(256, min(_CHUNK, (1 << 20) // max(width, 1)))
+        for lo in range(0, dm.n, chunk):
+            hi = min(lo + chunk, dm.n)
+            rows = (
+                dense_values[lo:hi]
+                if dense_values is not None
+                else np.asarray(matrix.row_subset(np.arange(lo, hi)).toarray(), dtype=np.float64)
+            ) - centre
+            squares += w[lo:hi] @ rows**2
+            firsts += w[lo:hi] @ rows
+        diagonal[columns] = np.maximum(squares - firsts**2 / sum_w, 0.0)
+    if factor_smooth:
+        chosen = np.concatenate(factor_smooth)
+        zeros = np.zeros(dm.n)
+        diagonal[chosen] = column_sums(dm, chosen, mean_x, (zeros, zeros, w), positive_prior)[2]
+    return mean_x, sum_w, diagonal
+
+
 def centre_offset_mean(
     dm: DesignMatrix, weights: NDArray, sum_w: float, center: NDArray, mean_x: NDArray
 ) -> NDArray:
@@ -747,7 +837,9 @@ class ModeResidual:
     it.  ``weak`` ``(p,)`` marks the weakly identified coefficients this
     evaluation found and ``excluded`` those plus the ones the caller excluded.
     ``resolved`` says every coefficient that missed the fixed bar had its floor
-    and weak test evaluated.
+    and weak test evaluated.  ``scale`` ``(p + 1,)`` holds the denominators of
+    ``relative`` (``sum |s|`` for the intercept, then each slope's), each in
+    its coordinate's own units.
     """
 
     intercept_score: float
@@ -758,6 +850,7 @@ class ModeResidual:
     excluded: NDArray
     resolved: bool
     bar: float
+    scale: NDArray | None = None
 
     def ratio(self) -> float:
         """``max relative / bar_effective`` over the intercept and the identified slopes."""
@@ -770,6 +863,979 @@ class ModeResidual:
         """Whether a derived floor raised the bar for an identified coefficient."""
         identified = np.concatenate(([True], ~self.excluded))
         return bool(np.any(self.bar_effective[identified] > self.bar))
+
+
+# The most weak slopes one evaluation forms a block for: above it the
+# exclusion is refused (the safe direction), so the block, an ``n x k`` array
+# and ``k`` design products, stays small.
+_WEAK_BLOCK_LIMIT = 32
+
+
+def _centred_block_gram(
+    dm: DesignMatrix, columns: NDArray, mean_x: NDArray, weights: NDArray
+) -> tuple[NDArray, NDArray]:
+    """``(gram, support)`` for a few columns ``B`` formed directly.
+
+    ``gram`` is ``sum w (x_B - m_B)(x_B - m_B)'`` less its correction, the
+    corrected two-pass cross products (Chan, Golub & LeVeque 1983) about the
+    rounded means ``m_B``, accumulated over fixed chunks of rows.
+    ``support`` marks the rows where any column of ``B`` is nonzero: the rows
+    a step in ``B`` changes, with the intercept held.  One design product per
+    column, for the small block of weakly identified slopes
+    ``penalized_mode_residual`` tests (``_WEAK_BLOCK_LIMIT``).
+    """
+    columns = np.asarray(columns, dtype=np.intp)
+    weights = np.asarray(weights, dtype=np.float64)
+    centred = np.empty((dm.n, len(columns)))
+    support = np.zeros(dm.n, dtype=bool)
+    for position, column in enumerate(columns):
+        unit = np.zeros(dm.p)
+        unit[column] = 1.0
+        raw = np.asarray(dm.matvec(unit), dtype=np.float64)
+        support |= raw != 0.0
+        centred[:, position] = raw - mean_x[column]
+    firsts = weights @ centred
+    gram = np.zeros((len(columns), len(columns)))
+    for lo in range(0, dm.n, _CHUNK):
+        block = centred[lo : lo + _CHUNK]
+        gram += (block * weights[lo : lo + _CHUNK, None]).T @ block
+    total = float(np.sum(weights))
+    if total > 0.0:
+        gram = gram - np.outer(firsts, firsts) / total
+    return 0.5 * (gram + gram.T), support
+
+
+def _half_block_decrement(hessian: NDArray, gradient: NDArray) -> float:
+    """``g' H^-1 g / 2`` over ``H``'s eigenvectors, its null space decided in ``u``.
+
+    An eigenvalue within ``4 k u lambda_max`` of zero (``k`` the block's
+    size) is null to the eigensolver's resolution: a projection of ``g`` on
+    it beyond its own rounding, ``4 k u |g|``, cannot be bounded, so the gain
+    is ``inf`` and the exclusion it would license is refused; one within that
+    rounding adds nothing.  Deciding at exact zero would follow the sign
+    LAPACK gives a null eigenvalue.  ``inf`` too when ``H`` or ``g`` is not
+    finite.
+    """
+    if not (np.all(np.isfinite(hessian)) and np.all(np.isfinite(gradient))):
+        return math.inf
+    try:
+        values, vectors = np.linalg.eigh(hessian)
+    except np.linalg.LinAlgError:
+        return math.inf
+    k = len(values)
+    resolution = 4.0 * k * _UNIT_ROUNDOFF
+    largest = float(np.max(np.abs(values), initial=0.0))
+    projection = vectors.T @ gradient
+    null = values <= resolution * largest
+    if np.any(null & (np.abs(projection) > resolution * float(np.linalg.norm(gradient)))):
+        return math.inf
+    kept = ~null
+    return 0.5 * float(np.sum(projection[kept] ** 2 / values[kept]))
+
+
+# Above this many joint cells of three or more one-hot blocks, the cells of
+# all of them together are not decided; every level, reference and two-block
+# bridge set still is.
+_ROW_SET_CELL_LIMIT = 4096
+# The cells elimination leaves (the incidence's core) are decided by one SVD,
+# formed only while its cost ``m k min(m, k)`` stays within this many flops.
+_ROW_SET_CORE_FLOPS = 2**31
+# The most nonzeros the two-block bridge sets' directions hold in one design
+# (about 50 MB retained as CSR; formation first holds them in Python
+# dictionaries, several times that): past it a bridge is held without its direction
+# (``RowSets.bounded``).  Only a long chain of single-cell links reaches it.
+_ROW_SET_BRIDGE_NONZEROS = 2**22
+# The design's row sets, in its ``_structured_layout_cache`` (``row_sets``).
+_ROW_SETS_KEY = "row_sets"
+
+
+@dataclass(frozen=True)
+class RowSets:
+    """The sets of rows a design's one-hot blocks move on their own (``row_sets``).
+
+    ``blocks`` holds ``(first column, matrix)`` for each
+    ``CategoricalGroupMatrix``.  The kept joint sets are unions of the
+    design's distinct joint cells: ``row_cell`` gives each row's joint cell,
+    or is ``None`` when no joint set is kept, and ``cell_sets`` is ``(cells,
+    sets)``, sparse, 1 where a cell belongs to a set.  ``cell_directions`` is
+    ``(sets, p)``, sparse (CSR): the slope part of a coefficient direction
+    that moves the set's rows and no other row (its intercept part carries
+    no penalty).  Held sparse, it costs its nonzeros, so no width of the
+    design drops a set.  ``cell_codes`` is ``(sets, blocks)``: each set's
+    code in each block it names (a block's ``n_levels`` for its reference),
+    ``-1`` in a block it does not name.  ``bounded`` marks a set held
+    without its direction, past ``_ROW_SET_BRIDGE_NONZEROS``.
+    """
+
+    blocks: tuple[tuple[int, CategoricalGroupMatrix], ...]
+    row_cell: NDArray | None
+    cell_sets: Any
+    cell_directions: Any
+    cell_codes: NDArray
+    bounded: NDArray
+
+    def directions(self, p: int) -> Iterator[NDArray | None]:
+        """The slope parts ``(p,)`` of each block's reference direction, then of each joint set's.
+
+        ``None`` for a ``bounded`` set.  One at a time: a single dense
+        ``(p,)`` vector is alive, whatever the number of sets.
+        """
+        for start, matrix in self.blocks:
+            reference = np.zeros(p)
+            reference[start : start + matrix.n_levels] = -1.0
+            yield reference
+        held = self.cell_directions
+        for row in range(held.shape[0]):
+            yield None if self.bounded[row] else held[[row]].toarray().ravel()
+
+    def named_columns(self, index: int, p: int) -> NDArray:
+        """``(p,)`` bool: the columns of the blocks joint set ``index`` names."""
+        columns = np.zeros(p, dtype=bool)
+        for (start, matrix), code in zip(self.blocks, self.cell_codes[index], strict=True):
+            if code >= 0:
+                columns[start : start + matrix.n_levels] = True
+        return columns
+
+
+def row_sets(dm: DesignMatrix) -> RowSets:
+    """The design's ``RowSets``, formed once per design and held in its ``_structured_layout_cache``.
+
+    Owner: the design's one-hot blocks.  Lifetime: the design (the layout
+    cache is not pickled).  Invalidation: none, since the cells, their
+    elimination and their directions read the blocks' codes alone, never a
+    weight, response, coefficient or penalty, and no fit changes a code.  A
+    held entry is reused only for the same block objects at the same columns.
+    """
+    found = []
+    offset = 0
+    for matrix in dm.group_matrices:
+        if isinstance(matrix, CategoricalGroupMatrix):
+            found.append((offset, matrix))
+        offset += matrix.shape[1]
+    blocks = tuple(found)
+    cache = getattr(dm, "_structured_layout_cache", None)
+    held = cache.get(_ROW_SETS_KEY) if isinstance(cache, dict) else None
+    if (
+        isinstance(held, RowSets)
+        and len(held.blocks) == len(blocks)
+        and all(a == c and b is d for (a, b), (c, d) in zip(held.blocks, blocks, strict=True))
+    ):
+        return held
+    sets = _form_row_sets(blocks, dm.p)
+    if isinstance(cache, dict):
+        cache[_ROW_SETS_KEY] = sets
+    return sets
+
+
+def _form_row_sets(blocks: tuple[tuple[int, CategoricalGroupMatrix], ...], p: int) -> RowSets:
+    """The joint sets of two or more one-hot blocks: rows the model moves on their own (``row_sets``).
+
+    A union ``R`` of joint cells is a set when its indicator lies in the
+    range of the cells' incidence (columns: the intercept and every one-hot
+    column; a block's reference has no column), so that some ``d`` moves
+    ``R``'s rows by one and no other row.  A set that is the rows of one
+    level, or of a block's reference, is judged there already: it is not
+    kept.
+
+    **Two blocks.**  The intercept and a pair of blocks' columns span every
+    level indicator of both, the column space of the unsigned incidence of
+    the levels' bipartite graph, whose edges are the joint cells present.
+    Negating one block's columns makes it the signed incidence, with the same
+    column space, where a row's leverage is its edge's effective resistance
+    (Spielman & Srivastava 2011, Lemma 3; Kline, Saggio & Solvsten 2020,
+    Example 4: below one exactly when a path avoids the edge).  So a joint
+    cell of the pair is a set exactly when it is a bridge of that graph,
+    found from depth-first lowpoints in linear time (Tarjan 1974): integer
+    arithmetic, no rank decision and no size limit.  A bridge with an
+    endpoint of degree one is that level's rows.  Its direction is a
+    potential on one side ``X`` of the bridge, ``s`` on the first block's
+    levels in ``X`` and ``-s`` on the second's: every cell inside or outside
+    ``X`` keeps its predictor and the bridge moves by one.  A level's slope is
+    its potential less its block reference's.  The side whose slopes have
+    fewer nonzeros is held, while the design's total stays within
+    ``_ROW_SET_BRIDGE_NONZEROS``; past it a bridge is held without its
+    direction (``bounded``).  With three or more blocks every pair's bridges
+    are still sets, since more columns only enlarge the range.
+
+    **Three or more blocks** also have cells of all of them together, which
+    no graph decides: their connectedness is a rank condition (Srivastava &
+    Anderson 1970; Godolphin 2013), decided here by ``_joint_cell_sets``
+    within ``_ROW_SET_CELL_LIMIT`` cells.
+    """
+    count_blocks = len(blocks)
+    none = RowSets(
+        blocks,
+        None,
+        sparse.csr_matrix((0, 0)),
+        sparse.csr_matrix((0, p)),
+        np.zeros((0, count_blocks), dtype=np.intp),
+        np.zeros(0, dtype=bool),
+    )
+    if count_blocks < 2:
+        return none
+    stacked = np.column_stack([matrix.codes for _, matrix in blocks])
+    cells, inverse = np.unique(stacked, axis=0, return_inverse=True)
+    member_cells: list[NDArray] = []
+    member_sets: list[NDArray] = []
+    codes: list[NDArray] = []
+    directions: list[dict[int, float] | None] = []
+    budget = _ROW_SET_BRIDGE_NONZEROS
+    for first in range(count_blocks):
+        for second in range(first + 1, count_blocks):
+            budget = _bridge_sets(
+                cells, blocks, first, second, budget, member_cells, member_sets, codes, directions
+            )
+    if count_blocks > 2:
+        for cell, direction in _joint_cell_sets(cells, blocks):
+            member_cells.append(np.array([cell], dtype=np.intp))
+            member_sets.append(np.array([len(codes)], dtype=np.intp))
+            codes.append(np.asarray(cells[cell], dtype=np.intp))
+            directions.append(direction)
+    if not codes:
+        return none
+    kept = len(codes)
+    rows_of = np.concatenate(member_cells)
+    cell_sets = sparse.csr_matrix(
+        (np.ones(len(rows_of)), (rows_of, np.concatenate(member_sets))), shape=(len(cells), kept)
+    )
+    rows, columns, values = [], [], []
+    for index, direction in enumerate(directions):
+        for column, value in (direction or {}).items():
+            rows.append(index)
+            columns.append(column)
+            values.append(value)
+    held = sparse.csr_matrix((values, (rows, columns)), shape=(kept, p))
+    bounded = np.array([direction is None for direction in directions], dtype=bool)
+    return RowSets(
+        blocks, np.asarray(inverse).reshape(-1), cell_sets, held, np.stack(codes), bounded
+    )
+
+
+def _level_graph_bridges(
+    heads: NDArray, tails: NDArray, nodes: int
+) -> tuple[NDArray, NDArray, list[tuple[int, int, int, int]]]:
+    """``(order, end, found)``: the bridges of a simple graph (Tarjan 1974).
+
+    Edge ``e`` joins ``heads[e]`` and ``tails[e]``.  An iterative depth-first
+    search numbers the nodes in preorder (``order``; a node's subtree is
+    ``order[position : end]``) and keeps each node's lowpoint, the least
+    preorder number its subtree reaches by one non-tree edge.  A tree edge
+    into ``child`` is a bridge exactly when ``child``'s lowpoint exceeds its
+    parent's number.  ``found`` holds ``(edge, child, component start,
+    component end)`` per bridge, in preorder positions.
+    """
+    edges = len(heads)
+    ends = np.concatenate([heads, tails])
+    others = np.concatenate([tails, heads])
+    ids = np.concatenate([np.arange(edges), np.arange(edges)])
+    sort = np.argsort(ends, kind="stable")
+    first = np.searchsorted(ends[sort], np.arange(nodes + 1)).tolist()
+    neighbour = others[sort].tolist()
+    edge_of = ids[sort].tolist()
+    position = [-1] * nodes
+    low = [0] * nodes
+    via = [-1] * nodes
+    end = [0] * nodes
+    cursor = first[:-1]
+    order: list[int] = []
+    found: list[tuple[int, int, int, int]] = []
+    for root in range(nodes):
+        if position[root] >= 0 or first[root] == first[root + 1]:
+            continue
+        start = len(order)
+        position[root] = low[root] = start
+        order.append(root)
+        stack = [root]
+        bridges: list[tuple[int, int]] = []
+        while stack:
+            node = stack[-1]
+            at = cursor[node]
+            if at < first[node + 1]:
+                cursor[node] = at + 1
+                if edge_of[at] == via[node]:
+                    continue
+                reached = neighbour[at]
+                if position[reached] < 0:
+                    via[reached] = edge_of[at]
+                    position[reached] = low[reached] = len(order)
+                    order.append(reached)
+                    stack.append(reached)
+                elif position[reached] < low[node]:
+                    low[node] = position[reached]
+                continue
+            stack.pop()
+            end[node] = len(order)
+            if stack:
+                parent = stack[-1]
+                low[parent] = min(low[parent], low[node])
+                if low[node] > position[parent]:
+                    bridges.append((via[node], node))
+        found.extend((edge, child, start, len(order)) for edge, child in bridges)
+    return np.asarray(order, dtype=np.intp), np.asarray(end, dtype=np.intp), found
+
+
+def _bridge_sets(
+    cells: NDArray,
+    blocks: tuple[tuple[int, CategoricalGroupMatrix], ...],
+    first: int,
+    second: int,
+    budget: int,
+    member_cells: list[NDArray],
+    member_sets: list[NDArray],
+    codes: list[NDArray],
+    directions: list[dict[int, float] | None],
+) -> int:
+    """Append the bridge sets of blocks ``first`` and ``second`` (``_form_row_sets``); the budget left."""
+    (start_a, block_a), (start_b, block_b) = blocks[first], blocks[second]
+    levels_a, levels_b = block_a.n_levels, block_b.n_levels
+    key = cells[:, first] * (levels_b + 1) + cells[:, second]
+    pairs, pair_of_cell = np.unique(key, return_inverse=True)
+    pair_of_cell = np.asarray(pair_of_cell).reshape(-1)
+    heads = pairs // (levels_b + 1)
+    tails = levels_a + 1 + pairs % (levels_b + 1)
+    nodes = levels_a + levels_b + 2
+    order, end, found = _level_graph_bridges(heads, tails, nodes)
+    if not found:
+        return budget
+    degree = np.bincount(heads, minlength=nodes) + np.bincount(tails, minlength=nodes)
+    position = np.full(nodes, -1, dtype=np.intp)
+    position[order] = np.arange(len(order))
+    in_a = np.concatenate(([0], np.cumsum(order < levels_a)))
+    in_b = np.concatenate(([0], np.cumsum((order > levels_a) & (order < nodes - 1))))
+    reference_a, reference_b = int(position[levels_a]), int(position[nodes - 1])
+    set_of_pair = np.full(len(pairs), -1, dtype=np.intp)
+    for edge, child, low, high in found:
+        if degree[heads[edge]] == 1 or degree[tails[edge]] == 1:
+            continue  # the only cell of one of its levels: that level's set
+        lo, hi = int(position[child]), int(end[child])
+        sign = 1.0 if child <= levels_a else -1.0  # the first block's endpoint on side T
+        sides = []
+        for flip in (False, True):
+
+            def inside(at: int, flip=flip, lo=lo, hi=hi, low=low, high=high) -> bool:
+                return (low <= at < high and not lo <= at < hi) if flip else lo <= at < hi
+
+            count_a = (
+                (in_a[high] - in_a[low] - in_a[hi] + in_a[lo]) if flip else in_a[hi] - in_a[lo]
+            )
+            count_b = (
+                (in_b[high] - in_b[low] - in_b[hi] + in_b[lo]) if flip else in_b[hi] - in_b[lo]
+            )
+            holds_a, holds_b = inside(reference_a), inside(reference_b)
+            nonzeros = int(
+                (levels_a - count_a if holds_a else count_a)
+                + (levels_b - count_b if holds_b else count_b)
+            )
+            sides.append((nonzeros, flip, holds_a, holds_b))
+        nonzeros, flip, holds_a, holds_b = min(sides, key=lambda side: side[0])
+        named = np.full(len(blocks), -1, dtype=np.intp)
+        named[first], named[second] = heads[edge], tails[edge] - levels_a - 1
+        set_of_pair[edge] = len(codes)
+        codes.append(named)
+        if nonzeros > budget:
+            directions.append(None)
+            continue
+        budget -= nonzeros
+        side = np.concatenate((order[low:lo], order[hi:high])) if flip else order[lo:hi]
+        potential = -sign if flip else sign
+        side_a = side[side < levels_a]
+        side_b = side[(side > levels_a) & (side < nodes - 1)] - levels_a - 1
+        if holds_a:
+            side_a, value_a = np.setdiff1d(np.arange(levels_a), side_a), -potential
+        else:
+            value_a = potential
+        if holds_b:
+            side_b, value_b = np.setdiff1d(np.arange(levels_b), side_b), potential
+        else:
+            value_b = -potential
+        direction = {int(start_a + level): value_a for level in side_a.tolist()}
+        direction.update({int(start_b + level): value_b for level in side_b.tolist()})
+        directions.append(direction)
+    set_of_cell = set_of_pair[pair_of_cell]
+    held = np.flatnonzero(set_of_cell >= 0)
+    member_cells.append(held)
+    member_sets.append(set_of_cell[held])
+    return budget
+
+
+def _joint_cell_sets(
+    cells: NDArray, blocks: tuple[tuple[int, CategoricalGroupMatrix], ...]
+) -> list[tuple[int, dict[int, float]]]:
+    """The cells of all the blocks together that are sets, with their slope directions (``_form_row_sets``).
+
+    A cell is a set when its indicator ``e_c`` lies in the range of the
+    cells' incidence ``M``.  A cell that is the only cell of a level, or of a
+    block's reference rows, is that set's rows: it is not kept.
+
+    **Elimination.**  A column that holds one remaining cell is that cell's
+    indicator less the indicators of cells already eliminated, so ``d_c =
+    e_column - sum d_eliminated`` and the cell is a set, exactly (integer
+    arithmetic).  Eliminating it may leave another column with one cell.
+    Elimination never decides a remaining cell's rank, because only the
+    eliminated cell has a nonzero in its pivot column.  It decides every
+    cell of nested blocks (each a duplicate) and of a saturated interaction.
+
+    **The core** the elimination leaves is decided by one SVD.  The computed
+    SVD is the exact SVD of ``M + E`` with ``||E||_2 <= p(m, k) eps ||M||_2``,
+    and its leading ``r`` left singular vectors lie within an angle ``p(m,
+    k) eps ||M||_2 / gap`` of the true subspace (LAPACK Users' Guide, 3rd
+    ed., section 4.9.1), the gap being ``sigma_r`` for an incidence whose
+    other singular values are zero.  With ``p(m, k) = max(m, k)``, the rank
+    tolerance's own constant, a cell's leverage ``||U_c||^2`` is within
+    ``tol / (sigma_r - tol) + gamma_{r+2} + r eps`` of its value (``tol =
+    max(m, k) eps sigma_1``; the last two terms its sum and ``U``'s
+    orthogonality).  A cell is a set exactly when its leverage is 1, so it is
+    kept when ``1 - ||U_c||^2`` lies within that resolution.  A kept cell
+    that is not a set can only be refused: its direction does not move its
+    rows alone, so at the exact mode its test reads a nonzero residual.  A
+    core cell's direction is the SVD's minimum-norm ``d``, less each
+    eliminated cell's direction times the amount ``d`` moves it.  Formed
+    within ``_ROW_SET_CELL_LIMIT`` cells, the core only while ``m k min(m,
+    k) <= _ROW_SET_CORE_FLOPS``.
+    """
+    count = len(cells)
+    if count > _ROW_SET_CELL_LIMIT:
+        return []
+    duplicate = np.zeros(count, dtype=bool)
+    for position, (_, matrix) in enumerate(blocks):
+        per_code = np.bincount(cells[:, position], minlength=matrix.n_levels + 1)
+        duplicate |= per_code[cells[:, position]] == 1
+    if np.all(duplicate):
+        return []
+    # incidence column 0 is the intercept, column 1 + j slope j
+    columns_of: list[list[int]] = [[0] for _ in range(count)]
+    cells_of: dict[int, list[int]] = {0: list(range(count))}
+    for position, (start, matrix) in enumerate(blocks):
+        for cell, code in enumerate(cells[:, position].tolist()):
+            if code < matrix.n_levels:
+                columns_of[cell].append(1 + start + code)
+                cells_of.setdefault(1 + start + code, []).append(cell)
+    live = np.ones(count, dtype=bool)
+    remaining = {column: len(members) for column, members in cells_of.items()}
+    queue = deque(column for column, size in remaining.items() if size == 1)
+    direction: dict[int, dict[int, float]] = {}
+    while queue:
+        pivot = queue.popleft()
+        if remaining[pivot] != 1:
+            continue
+        cell = next(member for member in cells_of[pivot] if live[member])
+        moved = {pivot: 1.0}
+        for member in cells_of[pivot]:
+            if member != cell:
+                for column, value in direction[member].items():
+                    moved[column] = moved.get(column, 0.0) - value
+        direction[cell] = moved
+        live[cell] = False
+        for column in columns_of[cell]:
+            remaining[column] -= 1
+            if remaining[column] == 1:
+                queue.append(column)
+    core = np.flatnonzero(live)
+    if core.size and np.any(~duplicate[core]):
+        _decide_core(core, columns_of, duplicate, live, direction)
+    return [
+        (cell, {column - 1: value for column, value in direction[cell].items() if column and value})
+        for cell in sorted(cell for cell in direction if not duplicate[cell])
+    ]
+
+
+def _decide_core(
+    core: NDArray,
+    columns_of: list[list[int]],
+    duplicate: NDArray,
+    live: NDArray,
+    direction: dict[int, dict[int, float]],
+) -> None:
+    """Add the directions of the core's sets (``_form_row_sets``) to ``direction``."""
+    core_columns = sorted({column for cell in core.tolist() for column in columns_of[cell]})
+    m, k = len(core), len(core_columns)
+    if m * k * min(m, k) > _ROW_SET_CORE_FLOPS:
+        return
+    where = {column: index for index, column in enumerate(core_columns)}
+    incidence = np.zeros((m, k))
+    for row, cell in enumerate(core.tolist()):
+        incidence[row, [where[column] for column in columns_of[cell]]] = 1.0
+    left, singular, right = np.linalg.svd(incidence, full_matrices=False)
+    tolerance = max(m, k) * _EPS * float(singular[0])
+    rank = int(np.sum(singular > tolerance))
+    if rank == 0 or float(singular[rank - 1]) <= 2.0 * tolerance:
+        return
+    resolution = (
+        tolerance / (float(singular[rank - 1]) - tolerance) + _gamma(rank + 2) + rank * _EPS
+    )
+    if resolution >= 0.5:
+        return
+    leverage = np.sum(left[:, :rank] ** 2, axis=1)
+    eliminated = np.flatnonzero(~live).tolist()
+    for row in np.flatnonzero((1.0 - leverage <= resolution) & ~duplicate[core]).tolist():
+        solution = right[:rank].T @ (left[row, :rank] / singular[:rank])
+        moved = {core_columns[i]: float(value) for i, value in enumerate(solution) if value}
+        base = dict(moved)
+        for cell in eliminated:
+            carried = sum(base.get(column, 0.0) for column in columns_of[cell])
+            if carried:
+                for column, value in direction[cell].items():
+                    moved[column] = moved.get(column, 0.0) - carried * value
+        direction[int(core[row])] = moved
+
+
+def _set_totals(sums: list, index: int) -> tuple[float, float, float, float, float, float]:
+    """One set's (score, |score|, represented, count, rising, falling) totals."""
+    own, absolute, represented, count, up, down = (float(total[index]) for total in sums)
+    return own, absolute, represented, count, up, down
+
+
+def row_set_quadratics(sets: RowSets, p: int, apply: Callable[..., NDArray]) -> NDArray:
+    """A lower bound on ``d' S d`` along each of ``sets.directions(p)``, in ``apply``'s units.
+
+    ``apply(v)`` is ``S v`` and ``apply(v, magnitude=True)`` is ``|S| |v|``,
+    which bounds the product's rounding, so ``d' S d - gamma_{2p+4} |d|' |S|
+    |d|`` is a lower bound.  Where the penalty is positive along ``d`` but
+    that bound is not, the entry is ``nan``: penalized, with no curvature
+    bound.  One penalty product per reference and per joint set.  A
+    ``bounded`` set's entry is 0 where the penalty is zero on the columns of
+    the blocks it names, so along any direction in them, and ``nan``
+    otherwise.
+    """
+    out = []
+    for index, direction in enumerate(sets.directions(p)):
+        if direction is None:
+            named = sets.named_columns(index - len(sets.blocks), p)
+            with np.errstate(over="ignore", invalid="ignore"):
+                reach = apply(named.astype(np.float64), magnitude=True)
+            out.append(0.0 if np.all(reach[named] == 0.0) else math.nan)
+            continue
+        with np.errstate(over="ignore", invalid="ignore"):
+            product = float(direction @ apply(direction))
+            size = float(np.abs(direction) @ apply(direction, magnitude=True))
+            lower = product - _gamma(2 * p + 4) * size
+        if not product > 0.0:
+            out.append(0.0 if product == 0.0 else math.nan)
+        else:
+            out.append(lower if lower > 0.0 else math.nan)
+    return np.asarray(out, dtype=np.float64)
+
+
+def row_set_residual(
+    *,
+    sets: RowSets,
+    row_score: NDArray,
+    response: NDArray,
+    fisher_weights: NDArray,
+    positive_prior: NDArray,
+    eta: NDArray,
+    column_penalty: NDArray,
+    column_penalty_size: NDArray,
+    column_curvature: NDArray,
+    set_curvature: NDArray,
+    bar: float,
+    underflow: float,
+) -> float:
+    """The largest relative score of a set of rows the one-hot blocks move on their own.
+
+    The relative penalized score scales every coordinate by one global
+    ``zeta``, which the heaviest rows set: a level carrying ``w`` of the
+    weight ``W`` then passes about ``sqrt(W / w)`` bars from its own maximum.
+    And a reference level has no column of its own, so a light reference
+    level is read only through the intercept, whose scale the heavy levels
+    set.  Every set ``R`` of rows the model can move independently is
+    therefore certified on its own rows: the score along its indicator, less
+    the penalty's gradient along the coefficient direction ``d_R`` that moves
+    it,
+
+        g_R = sum_{i in R} s_i - d_R' (S beta),
+
+    within the bar of its own terms' size, ``sum_{i in R} |s_i| + |d_R|'
+    (|S| |beta|)``, or of their rounding, ``gamma_{|R| + 2}`` of the rows'
+    sum, ``u`` of their predictor's representation ``sum f_i |eta_i|`` and
+    ``gamma_{p + 2}`` of the penalty's size.  The sets (``row_sets``, formed
+    once per design), by one rule (an indicator in the span of the intercept
+    and the one-hot columns):
+    - each level of each one-hot block (``CategoricalGroupMatrix``, random
+      effects included), ``d_R`` its column;
+    - each block's reference rows, the rows no column of it holds, summed
+      directly over those rows, ``d_R`` the intercept less the block's
+      columns;
+    - with two or more blocks, each union of joint cells whose indicator
+      lies in that span and that is not already one of the sets above
+      (``_form_row_sets``): every bridge of each pair of blocks' level
+      graph, whatever the design's size, and with three or more blocks the
+      cells of all of them together within ``_ROW_SET_CELL_LIMIT`` cells,
+      such as a saturated interaction's, base cells included.
+    A set held without its direction (``bounded``) is judged with ``|d_R'
+    (S beta)|`` bounded by the sum of ``|S beta|`` over the columns of the
+    blocks it names, which holds its direction, and with no penalty size in
+    its scale: the refusing side, exact where the penalty's gradient is zero
+    there.
+
+    **A penalized set** is also certified by its distance to its own maximum.
+    Precondition: the log-likelihood is concave in ``eta``, as binomial/log's
+    is (the only caller; Gaussian/log's is not).  So the penalized objective
+    along ``d_R`` is at least ``d_R' S d_R``-strongly concave, and its
+    maximum along ``d_R`` lies within ``|g_R| / d_R' S d_R`` of the iterate,
+    in the units of ``eta`` on ``R``'s rows.  That distance, with ``g_R``'s
+    floor and ``underflow`` added, within ``bar`` passes the set
+    (``set_curvature`` and ``diag S`` for a level: lower bounds on ``d_R' S
+    d_R``).  It is what certifies a penalized set whose rows' scores vanish
+    together with its penalty's gradient: a random-effect level inside a
+    level without events, whose free column carries the separation while
+    each step returns the random effect to zero.
+
+    A set whose positive-weight rows' responses are all zero, or all one, and
+    whose direction carries no penalty has no interior maximum (its supremum
+    is at infinity, or at the mean space's boundary): it is the separation
+    the weak test discloses, and it is not tested here.  That is read off
+    the responses, not off the scores' signs: a non-event's score ``-w
+    odds`` underflows to zero at small enough weights and means, and would
+    hide a level's event rows behind it.  A separated set along a penalized
+    direction has a finite penalized maximum and is tested.  A set whose bar
+    falls within ``underflow`` and that the distance does not pass cannot be
+    resolved and is refused (``inf``).  ``column_*`` are per column in the
+    weights' units: the penalty gradient (with any active constraint's
+    multipliers), its size ``|S| |beta|``, and ``diag S``; ``set_curvature``
+    is ``row_set_quadratics`` in the same units.
+    """
+    groups = sets.blocks
+    if not groups:
+        return 0.0
+    score = np.asarray(row_score, dtype=np.float64)
+    positive = np.asarray(positive_prior, dtype=bool)
+    absolute = np.abs(score)
+    represented = np.asarray(fisher_weights, dtype=np.float64) * np.abs(eta)
+    observed = np.asarray(response, dtype=np.float64)
+    rising = (positive & (observed > 0.0)).astype(np.float64)
+    falling = (positive & (observed < 1.0)).astype(np.float64)
+    carried = positive.astype(np.float64)
+    penalty = np.asarray(column_penalty, dtype=np.float64)
+    size = np.asarray(column_penalty_size, dtype=np.float64)
+    curvature = np.asarray(column_curvature, dtype=np.float64)
+    quadratics = np.asarray(set_curvature, dtype=np.float64)
+    p = len(penalty)
+    worst = 0.0
+
+    def judge(
+        own,
+        absolute_sum,
+        represented_sum,
+        count,
+        up,
+        down,
+        direction_penalty,
+        direction_size,
+        quadratic,
+        slack=0.0,
+    ):
+        nonlocal worst
+        if count <= 0.0:
+            return
+        penalized = not quadratic <= 0.0  # nan: penalized, with no curvature bound
+        if not penalized and (up == 0.0 or down == 0.0):
+            return  # separated along an unpenalized direction: no interior maximum
+        scale = absolute_sum + direction_size
+        if not (math.isfinite(scale) and math.isfinite(direction_penalty) and math.isfinite(slack)):
+            worst = math.inf
+            return
+        residual = abs(own - direction_penalty) + slack
+        floor = (
+            _gamma(int(count) + 2) * absolute_sum
+            + _UNIT_ROUNDOFF * represented_sum
+            + _gamma(p + 2) * direction_size
+        )
+        ratio = math.inf if bar * scale <= underflow else residual / max(bar * scale, floor)
+        # only a normal ``bar d'Sd`` bounds the distance: below 2^-1022 the
+        # product carries up to 2^-1075 of absolute error and the curvature's
+        # own scaling may have rounded up, and at 0 it bounds nothing.  There
+        # the set is judged by its relative score alone, the refusing side.
+        if penalized and math.isfinite(quadratic) and bar * quadratic >= _TINY:
+            ratio = min(ratio, (residual + floor + underflow) / (bar * quadratic))
+        worst = max(worst, ratio)
+
+    for position, (start, matrix) in enumerate(groups):
+        levels = matrix.n_levels
+        codes = matrix.codes
+        columns = slice(start, start + levels)
+        sums = [
+            np.bincount(codes, weights=values, minlength=levels + 1)
+            for values in (score, absolute, represented, carried, rising, falling)
+        ]
+        for level in range(levels + 1):
+            if level < levels:
+                column = start + level
+                direction = (penalty[column], size[column], curvature[column])
+            else:  # the reference rows: intercept less every column of the block
+                direction = (
+                    -float(np.sum(penalty[columns])),
+                    float(np.sum(size[columns])),
+                    float(quadratics[position]),
+                )
+            judge(*_set_totals(sums, level), *direction)
+    if sets.row_cell is None:
+        return worst
+    held = sets.cell_directions
+    membership = sets.cell_sets.T.tocsr()
+    cells = sets.cell_sets.shape[0]
+    # each cell's totals over its own rows, then each set's over its cells:
+    # every term still passes through fewer additions than the set has rows
+    sums = [
+        np.asarray(membership @ np.bincount(sets.row_cell, weights=values, minlength=cells)).ravel()
+        for values in (score, absolute, represented, carried, rising, falling)
+    ]
+    with np.errstate(over="ignore", invalid="ignore"):
+        cell_penalty = np.asarray(held @ penalty).ravel()
+        cell_size = np.asarray(abs(held) @ size).ravel()
+    for index in range(held.shape[0]):
+        slack = 0.0
+        if sets.bounded[index]:
+            with np.errstate(over="ignore", invalid="ignore"):
+                slack = float(np.sum(np.abs(penalty[sets.named_columns(index, p)])))
+        judge(
+            *_set_totals(sums, index),
+            float(cell_penalty[index]),
+            float(cell_size[index]),
+            float(quadratics[len(groups) + index]),
+            slack,
+        )
+    return worst
+
+
+@dataclass(frozen=True)
+class TruncatedDirection:
+    """Rows a direction the factorization truncates moves, judged on those rows (``truncated_direction_ratio``).
+
+    ``rows`` are the positive-weight rows the direction moves, ``columns`` the
+    coefficients it leans on most (at most eight, by size), and
+    ``information_ratio`` the Fisher information of the other rows that share
+    those coefficients over that of the moved rows.  ``at_maximum`` says the
+    rows sit at their own maximum along the direction (weakly identified);
+    otherwise the fit cannot be certified in float64.
+    """
+
+    rows: tuple[int, ...]
+    columns: tuple[int, ...]
+    information_ratio: float
+    at_maximum: bool
+
+
+# The design's bound on any row's l1 norm, in its ``_structured_layout_cache``.
+_ROW_L1_KEY = "row_l1_bound"
+
+
+def row_l1_bound(dm: DesignMatrix) -> float:
+    """``max_i sum_j |x_ij|`` bounded by ``sum_j max_i |x_ij|``, formed once per design.
+
+    A one-hot block contributes 1 (a row holds one of its columns or none);
+    any other block the largest entry of each column, one product per column.
+    Owner, lifetime and invalidation as ``row_sets``: it reads the design's
+    entries alone.
+    """
+    cache = getattr(dm, "_structured_layout_cache", None)
+    held = cache.get(_ROW_L1_KEY) if isinstance(cache, dict) else None
+    if isinstance(held, float):
+        return held
+    bound = 0.0
+    for matrix in dm.group_matrices:
+        if isinstance(matrix, CategoricalGroupMatrix):
+            bound += 1.0
+            continue
+        width = matrix.shape[1]
+        for column in range(width):
+            unit = np.zeros(width)
+            unit[column] = 1.0
+            bound += float(np.max(np.abs(np.asarray(matrix.matvec(unit))), initial=0.0))
+    if isinstance(cache, dict):
+        cache[_ROW_L1_KEY] = bound
+    return bound
+
+
+def null_basis_angle(decomposition: Any, rows: int) -> float:
+    """The angle within which a rank decision's discarded subspace is computed, or 1 without a gap.
+
+    The computed invariant subspace of an eigenvalue cluster lies within
+    ``p(n) eps ||A||_2 / gap`` of the true one, ``gap`` the distance from the
+    cluster to the nearest other eigenvalue (LAPACK Users' Guide, 3rd ed.,
+    section 4.7, after Parlett), and the singular subspace of a factor
+    likewise with its singular values (section 4.9).  The discarded cluster
+    holds every eigenvalue at or below the cutoff, so its gap is the smallest
+    retained one less the cutoff: a light set's vanishing curvature lies
+    inside the cluster and does not shrink it.  ``p(n)`` is the matrix's
+    larger dimension.  Without a gap the subspace is not resolved: 1.
+    """
+    retained = np.asarray(
+        decomposition.retained_values if decomposition.retained_values is not None else (),
+        dtype=np.float64,
+    )
+    width = int(decomposition.width)
+    if retained.size == 0:
+        return 1.0
+    if decomposition.method == "qr_svd":
+        sigma = np.sqrt(retained)
+        gap = float(np.min(sigma)) - float(decomposition.cutoff)
+        size = max(rows, width)
+        largest = float(np.max(sigma))
+    else:
+        gap = float(np.min(retained)) - float(decomposition.cutoff)
+        size = width
+        largest = float(np.max(retained))
+    if not gap > 0.0:
+        return 1.0
+    return min(1.0, size * _EPS * largest / gap)
+
+
+def truncated_direction_ratio(
+    *,
+    dm: DesignMatrix,
+    null_basis: NDArray,
+    angle: float,
+    mean_x: NDArray,
+    row_score: NDArray,
+    fisher_weights: NDArray,
+    response: NDArray,
+    positive_prior: NDArray,
+    penalty_gradient: NDArray,
+    penalty_size: NDArray,
+    penalty_apply: Callable[[NDArray], NDArray],
+    bar: float,
+    underflow: float,
+) -> tuple[float, tuple[TruncatedDirection, ...]]:
+    """The directions the factorization truncates, judged on the rows they move.
+
+    A light row set, weighing ~1e16 below the rows it shares coefficients
+    with, adds curvature below the rounding of ``X'WX``: the factorization
+    truncates its direction, and the relative score sums it beside the heavy
+    rows' rounding.  ``null_basis`` ``V`` spans the truncated subspace, to
+    within ``angle`` (``null_basis_angle``).  Each row's movement ``m = (X -
+    1 mean_x') V`` is read on the design, and the rows it moves beyond the
+    basis's error (``4 (angle + (p + 2) u)`` times the row's l1 bound times
+    ``|V|``, ``row_l1_bound``) are its support.
+
+    - **Structural.**  A direction that moves no row is aliasing: nothing to
+      judge.
+    - **Not hidden.**  Moved rows whose scores sum above ``bar`` times every
+      row's are seen by the relative score, which governs as before: two
+      nearly collinear columns move every row.
+    - **Hidden.**  The Newton step on the moved rows alone, ``delta =
+      C^+ G`` with ``C = M' F M + V' S V`` and ``G = M' s - V' S beta``
+      (score and Fisher weights of those rows only, brought to unit scale by
+      a power of two), moves each row by ``M delta`` in ``eta``.  Within
+      ``bar`` or its rounding (``gamma`` of the sums, the basis's error and
+      the penalty's size, through ``|C^+|``) on every row, the rows sit at
+      their own maximum: weakly identified.  Otherwise, where every row it
+      moves improves (a response of 0 moving down, of 1 up), the direction is
+      a separation, with no interior maximum (left to the separated sets);
+      else the fit cannot be certified in float64.
+    - **Separated.**  Moved rows whose responses are all 0, or all 1, are a
+      separated set, read off the responses (as ``row_set_residual`` reads
+      them): not judged here.
+
+    Returns the largest ``|M delta| / max(bar, floor)`` over uncertifiable
+    directions (0 where none) and the hidden directions found.  Nothing in
+    the literature certifies a maximum beyond float64's resolution
+    (Schwendinger, Grun & Hornik 2021 compare log-binomial solvers by the best
+    log-likelihood any of them reaches): this detects it and refuses.
+    """
+    basis = np.asarray(null_basis, dtype=np.float64)
+    if basis.ndim != 2 or basis.shape[1] == 0:
+        return 0.0, ()
+    positive = np.asarray(positive_prior, dtype=bool)
+    score = np.asarray(row_score, dtype=np.float64)
+    fisher = np.asarray(fisher_weights, dtype=np.float64)
+    observed = np.asarray(response, dtype=np.float64)
+    mean = np.asarray(mean_x, dtype=np.float64)
+    p = dm.p
+    moved = np.column_stack(
+        [
+            np.asarray(dm.matvec(basis[:, k]), dtype=np.float64) - float(mean @ basis[:, k])
+            for k in range(basis.shape[1])
+        ]
+    )
+    reach = row_l1_bound(dm) + float(np.sum(np.abs(mean)))
+    error = 4.0 * (angle + _gamma(p + 2)) * reach * np.max(np.abs(basis), axis=0)
+    support = positive & np.any(np.abs(moved) > error[None, :], axis=1)
+    if not support.any():
+        return 0.0, ()
+    responses = observed[support]
+    if np.all(responses == 0.0) or np.all(responses == 1.0):
+        # a separated set, read off its responses as ``row_set_residual``
+        # does: no interior maximum.  Not off its scores' or its step's signs:
+        # at means near 0 the rows' scores and curvature vanish, and the
+        # penalty's gradient or rounding sets the step's sign.
+        return 0.0, ()
+    total = float(np.sum(np.abs(score[positive])))
+    hidden = float(np.sum(np.abs(score[support])))
+    if not (math.isfinite(total) and math.isfinite(hidden)) or hidden > bar * total:
+        return 0.0, ()
+    rows_moved = moved[support]
+    _, singular, right = np.linalg.svd(rows_moved, full_matrices=False)
+    keep = singular > float(np.max(singular, initial=0.0)) * 4.0 * rows_moved.shape[0] * _EPS
+    if not np.any(keep):
+        return 0.0, ()
+    turn = right[keep].T
+    local = rows_moved @ turn
+    direction = basis @ turn
+    still = right[~keep].T
+    if still.shape[1]:
+        # less what the directions that move no row add: the least-norm
+        # direction that moves these rows, so the coefficients named are its own
+        structural = basis @ still
+        direction = direction - structural @ np.linalg.lstsq(structural, direction, rcond=None)[0]
+    s_local, f_local = score[support], fisher[support]
+    largest = float(np.max(np.concatenate([np.abs(s_local), f_local]), initial=0.0))
+    if not (math.isfinite(largest) and largest > 0.0):
+        return 0.0, ()
+    exponent = -int(np.frexp(largest)[1])
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        s_local = np.ldexp(s_local, exponent)
+        f_local = np.ldexp(f_local, exponent)
+        pull = np.ldexp(direction.T @ np.asarray(penalty_gradient, dtype=np.float64), exponent)
+        pull_size = np.ldexp(
+            np.abs(direction).T @ np.asarray(penalty_size, dtype=np.float64), exponent
+        )
+        stiffness = np.column_stack(
+            [
+                np.ldexp(np.asarray(penalty_apply(direction[:, j]), dtype=np.float64), exponent)
+                for j in range(direction.shape[1])
+            ]
+        )
+        curvature = local.T @ (f_local[:, None] * local) + direction.T @ stiffness
+        gradient = local.T @ s_local - pull
+    if not (np.all(np.isfinite(curvature)) and np.all(np.isfinite(gradient))):
+        return 0.0, ()
+    curvature = 0.5 * (curvature + curvature.T)
+    values, vectors = np.linalg.eigh(curvature)
+    kept = values > float(np.max(np.abs(values), initial=0.0)) * 4.0 * len(values) * _EPS
+    inverse = (vectors[:, kept] / values[kept]) @ vectors[:, kept].T
+    steps = local @ (inverse @ gradient)
+    local_error = error @ np.abs(turn)  # each direction's movement error, per unit
+    rounding = (
+        _gamma(len(s_local) + 2) * (np.abs(local).T @ np.abs(s_local))
+        + np.abs(s_local) @ np.ones((len(s_local), 1)) * local_error
+        + _gamma(p + 2) * pull_size
+        + np.ldexp(underflow, exponent)
+    ).ravel()
+    floor = np.abs(local) @ (np.abs(inverse) @ rounding) + _gamma(4 * len(s_local)) * np.abs(steps)
+    limit = np.maximum(bar, floor)
+    over = np.abs(steps) > limit
+    rows = np.flatnonzero(support)
+    weights = np.abs(direction).max(axis=1)
+    # a coefficient the direction leans on beyond its basis's error
+    significant = weights > 4.0 * (angle + _gamma(p + 2)) * float(np.max(weights))
+    columns = tuple(int(j) for j in np.argsort(-weights)[:8] if significant[j])
+    shared = np.zeros(dm.n, dtype=bool)
+    for column in np.flatnonzero(significant):
+        unit = np.zeros(p)
+        unit[column] = 1.0
+        shared |= np.asarray(dm.matvec(unit)) != 0.0
+    shared &= positive & ~support
+    information = float(np.sum(fisher[shared])) / max(float(np.sum(fisher[support])), _TINY)
+    if not over.any():
+        return 0.0, (TruncatedDirection(tuple(int(i) for i in rows), columns, information, True),)
+    y_moved, step_moved = observed[rows[over]], steps[over]
+    improving = ((y_moved == 0.0) & (step_moved < 0.0)) | ((y_moved == 1.0) & (step_moved > 0.0))
+    if np.all(improving):
+        return 0.0, ()  # a separation: no interior maximum
+    ratio = float(np.max(np.abs(steps) / limit))
+    record = TruncatedDirection(tuple(int(i) for i in rows), columns, information, False)
+    return ratio, (record,)
 
 
 def penalized_mode_residual(
@@ -789,6 +1855,9 @@ def penalized_mode_residual(
     bar: float,
     excluded: NDArray | None = None,
     resolve_cap: float = float("inf"),
+    column_shift: NDArray | None = None,
+    decrement_noise: Callable[[NDArray], float] | None = None,
+    penalty_block: Callable[[NDArray], NDArray] | None = None,
 ) -> ModeResidual:
     """Evaluate the shared relative score (module docstring) at one iterate.
 
@@ -801,20 +1870,83 @@ def penalized_mode_residual(
     coefficient that misses the fixed bar: one-hot columns in closed form from
     transpose products, every other column from its own entries (one design
     product each).
+
+    ``column_shift`` (``(p,)`` even non-negative integers, ``None`` for none)
+    puts slope ``j`` in its own units: every data-side quantity of the column
+    (its score, curvature, floors' sums and the weak test's weight) is
+    multiplied by ``2^-shift_j``, and ``zeta`` by ``2^(-shift_j / 2)``, while
+    ``penalty_*`` arrive already in those units.  Each relative score is a
+    ratio of quantities of one degree in the weights and the penalty taken
+    together, so the shift leaves it unchanged; it only keeps a penalty far
+    larger than the data's scale from overflowing beside it.  The powers of
+    two are exact, and the even shift keeps ``zeta``'s square root exact.
+
+    ``decrement_noise`` (``None`` for none) maps a boolean row mask to the
+    rounding noise of the objective over those rows, in the weights' units.
+    When given, the weak test may exclude a slope only where the iterate is
+    already at the mode along it, to that noise.  The weak test reads curvature alone, and at an unfinished
+    iterate a slope's curvature can be tiny only because its rows' means are
+    still far off.  Half the Newton decrement, ``lambda^2 / 2`` with
+    ``lambda^2 = g' H^-1 g``, is the predicted gain of a Newton step (Boyd &
+    Vandenberghe 2004, section 9.5.1).  It is formed over the block ``B`` of
+    newly weak slopes at once, ``g_B' H_BB^-1 g_B / 2``: no sum of the
+    coordinates' own decrements bounds it, since each ``g_j^2 / H_jj`` is a
+    lower bound on the block's and two coupled slopes can hide a direction
+    along their difference whose gain is far larger.
+    - ``g_B`` is each slope's score less its rounding floor, ``sign(g_j)
+      (|g_j| - floor_j)_+``, in the weights' units.
+    - ``H_BB`` is the penalised curvature block of those slopes: their
+      weighted, centred data Gram, formed directly from their columns by the
+      corrected two-pass algorithm (the block is small), plus
+      ``penalty_block(B)``, the penalty's block in the weights' units
+      (``None``: its diagonal, ``penalty_curvature``).
+    - The gain is ``inf`` when ``H_BB`` has an eigenvalue null to the
+      eigensolver's resolution that ``g_B`` meets beyond its own rounding
+      (``_half_block_decrement``), and when more than ``_WEAK_BLOCK_LIMIT``
+      slopes are newly weak.
+    - The noise is the objective's own over the rows the block touches,
+      ``decrement_noise(S)`` for ``S`` the support of ``X_B``, the rows where
+      any of its columns is nonzero.  A step ``d`` in ``B`` with the raw
+      intercept held changes ``eta`` on ``S`` alone, so the objective's
+      change is ``sum_{i in S} [l_i(eta_i + x_iB' d) - l_i(eta_i)]``, and
+      evaluating it in float64 carries about ``gamma_{|S|}`` times ``sum_{i
+      in S} |l_i|`` (each row's own few roundings add a few ``u |l_i|``).  The
+      decrement itself is formed in centred coordinates, whose step also
+      moves every row by ``-m_B' d``: the profiled gain, never below the
+      held-intercept one, so measuring it against ``S``'s noise can only
+      refuse more.  A gain within that noise cannot be told from none; one
+      beyond it is a step the fit has not taken.  Rows outside ``S`` carry
+      noise that a step on ``S`` alone never meets: a heavy level's rounding
+      must not hide a light level's gain.  For one-hot levels ``S`` is the
+      levels' own rows; for a dense or spline column it is its nonzero
+      rows, possibly all of them.
+    If the gain exceeds the noise, no slope of this evaluation is excluded as
+    weak.
     """
     n, p = dm.n, dm.p
     total = float(np.sum(row_score))
     absolute = np.abs(row_score)
     intercept_scale = max(_TINY, float(np.sum(absolute)))
-    slope_score = centred_data_score(dm, row_score, mean_x) - penalty_score
+
+    def shifted(values, columns=slice(None)):
+        if column_shift is None:
+            return values
+        return np.ldexp(np.asarray(values, dtype=np.float64), -np.asarray(column_shift)[columns])
+
+    slope_score = shifted(centred_data_score(dm, row_score, mean_x)) - penalty_score
     resolution = n * _EPS * np.abs(mean_x)
     root_weight = math.sqrt(max(float(sum_w), _TINY))
     zeta = intercept_scale / root_weight
+    column_zeta = (
+        zeta
+        if column_shift is None
+        else np.ldexp(np.full(p, zeta), -(np.asarray(column_shift) // 2))
+    )
     curvature_root = np.sqrt(
-        (np.maximum(centered_scale, resolution) * root_weight) ** 2
+        shifted((np.maximum(centered_scale, resolution) * root_weight) ** 2)
         + np.maximum(np.asarray(penalty_curvature, dtype=np.float64), 0.0)
     )
-    slope_scale = np.maximum(_TINY, zeta * curvature_root + np.abs(penalty_score))
+    slope_scale = np.maximum(_TINY, column_zeta * curvature_root + np.abs(penalty_score))
     relative = np.concatenate(([abs(total) / intercept_scale], np.abs(slope_score) / slope_scale))
     bar_effective = np.full(p + 1, float(bar))
     weak = np.zeros(p, dtype=bool)
@@ -866,15 +1998,50 @@ def penalized_mode_residual(
                 )
                 evaluation[~one_hot], represented[~one_hot] = sums[0], sums[1]
                 curvature[~one_hot], mass[~one_hot] = sums[2], sums[3]
+            evaluation = shifted(evaluation, slopes)
+            represented = shifted(represented, slopes)
+            curvature = shifted(curvature, slopes)
+            largest_column = shifted(np.full(len(slopes), largest), slopes)
             magnitude = penalty_magnitude[slopes]
-            floor = (
+            score_floor = (
                 gamma_rows * evaluation
                 + gamma_penalty * magnitude
                 + _UNIT_ROUNDOFF * (represented + magnitude)
-            ) / slope_scale[slopes]
+            )
+            floor = score_floor / slope_scale[slopes]
             bar_effective[slopes + 1] = np.maximum(bar, floor)
             diagonal = np.asarray(penalty_curvature, dtype=np.float64)[slopes]
-            weak[slopes] = curvature + diagonal <= _gamma(row_count) * largest * mass
+            newly_weak = curvature + diagonal <= _gamma(row_count) * largest_column * mass
+            if decrement_noise is not None and np.any(newly_weak):
+                chosen = slopes[newly_weak]
+                resolvable = np.maximum(np.abs(slope_score[chosen]) - score_floor[newly_weak], 0.0)
+                gain = 0.0
+                support = None
+                if len(chosen) > _WEAK_BLOCK_LIMIT:
+                    gain = math.inf
+                elif np.any(resolvable > 0.0):
+                    gradient = np.copysign(resolvable, slope_score[chosen])
+                    with np.errstate(over="ignore", invalid="ignore"):
+                        # each coordinate's own units back to the weights'
+                        if column_shift is not None:
+                            gradient = np.ldexp(gradient, np.asarray(column_shift)[chosen])
+                        if penalty_block is None:
+                            penalty = np.diag(
+                                np.asarray(penalty_curvature, dtype=np.float64)[chosen]
+                                if column_shift is None
+                                else np.ldexp(
+                                    np.asarray(penalty_curvature, dtype=np.float64)[chosen],
+                                    np.asarray(column_shift)[chosen],
+                                )
+                            )
+                        else:
+                            penalty = np.asarray(penalty_block(chosen), dtype=np.float64)
+                        gram, support = _centred_block_gram(dm, chosen, mean_x, weights)
+                        hessian = gram + penalty
+                    gain = _half_block_decrement(hessian, gradient)
+                if gain > 0.0 and not (support is not None and gain <= decrement_noise(support)):
+                    newly_weak[:] = False
+            weak[slopes] = newly_weak
     return ModeResidual(
         intercept_score=total,
         slope_score=slope_score,
@@ -884,6 +2051,7 @@ def penalized_mode_residual(
         excluded=excluded | weak,
         resolved=resolved,
         bar=float(bar),
+        scale=np.concatenate(([intercept_scale], slope_scale)),
     )
 
 

@@ -53,6 +53,7 @@ from superglm.solvers.centered_system import (
 )
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
+    _gamma,
     centre_offset_mean,
     centred_matvec,
     corrected_two_pass_pair,
@@ -623,11 +624,24 @@ def compute_scop_observed_information_weights(
     if observed.shape != y.shape or not np.all(np.isfinite(observed)):
         raise ValueError("SCOP observed-information rows must be finite and match y")
     if np.any(observed < 0.0):
-        minimum = float(np.min(observed))
-        raise ValueError(
-            "signed observed-information rows are not supported by the current stable SCOP "
-            f"moment kernels (minimum row={minimum:.3e})"
-        )
+        # A row whose terms cancel (a binomial/log event row's is zero) is
+        # computed to the rounding of its terms' sizes (``observed_row_error_scale``),
+        # so its sign there is the platform's rounding (-1.1e-16 and -2.2e-16 on
+        # the macOS, Windows and ARM64 runners).  The generic row ``w (u^2/V +
+        # (y - mu)(u^2 V'/V^2 - v/V))`` takes about ten roundings for ``a =
+        # u^2 V'/V^2``, four for ``b = v/V``, five more for ``a - b``, ``y - mu``,
+        # the product, the sum and ``w``, and ``u``, ``v`` and ``mu`` each carry
+        # one library call's own error, 22 in all: within ``gamma_22`` of that
+        # scale the row is zero.  A row negative beyond it is signed and refused.
+        scale = observed_row_error_scale(distribution, link, y, mu, eta, sample_weight, observed)
+        rounding = (observed < 0.0) & (-observed <= _gamma(22) * scale)
+        observed = np.where(rounding, 0.0, observed)
+        if np.any(observed < 0.0):
+            minimum = float(np.min(observed))
+            raise ValueError(
+                "signed observed-information rows are not supported by the current stable SCOP "
+                f"moment kernels (minimum row={minimum:.3e})"
+            )
     return observed
 
 
@@ -1168,10 +1182,16 @@ def schur_curvature_is_negative(eigenvalues: NDArray, certificate) -> bool:
     ``eigenvalues`` are the computed eigenvalues of the factor's Jacobi-scaled
     deflated border matrix and ``certificate`` its ``BorderCertificate``.  An
     eigenvalue below minus ``certificate.curvature_floor(||Q_s||_2)`` (the
-    certified uncertainty ``tau`` plus the eigensolver's rounding) is negative
-    curvature the factor's own certificate calls material; one above it is
-    within what the factor truncates as a null, so the gate refuses exactly
-    the curvature the border factorization would.
+    certified uncertainty ``tau`` plus the eigensolver's rounding, ``2 width
+    eps ||Q_s||_2``) is negative curvature the factor's own certificate calls
+    material.  The gate is the stricter of the two checks on that matrix,
+    not a copy of the factor's: its floor is below the factor's step-4 floor
+    ``tau + 2 n_live^2 eps`` whenever ``width ||Q_s||_2 < n_live^2``, and
+    step 4 tests the smallest Ritz value, which bounds the smallest
+    eigenvalue only from above.  It runs only on a factor step 4 accepted, so
+    it never admits what the factor refuses, and each refusal it adds
+    certifies an indefinite observed Hessian, which a certified maximum
+    cannot have.
     """
     values = np.asarray(eigenvalues, dtype=np.float64)
     if not values.size:
@@ -1250,7 +1270,21 @@ def build_observed_reml_geometry(
         raise ObservedGeometryInfeasibleError("result.intercept must be finite")
 
     eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
-    mu = clip_mu(link.inverse(eta), distribution)
+    mu = link.inverse(eta)
+    # A binomial/log state certified on the model's own score
+    # (``PIRLSResult.mean_space_true_mode``) is the model's mode: its
+    # curvature and weight derivatives are the model's, at the unclipped mean.
+    # At the clip an event row below the floor, whose observed curvature is
+    # zero, read about -5e-5 at eta = -26 and -2e-2 at eta = -20.  A
+    # zero-weight row is no part of that mode (PIRLS never holds its eta in
+    # the mean space) and keeps the clip: unclipped, its mean can pass one,
+    # where the variance floor overflows its derivatives.
+    if getattr(result, "mean_space_true_mode", False):
+        held = ~(np.asarray(sample_weight, dtype=np.float64) > 0.0)
+        if np.any(held):
+            mu = np.where(held, clip_mu(mu, distribution), mu)
+    else:
+        mu = clip_mu(mu, distribution)
     observed_w, weight_derivative, weight_second_derivative = _compute_observed_row_bundle(
         distribution,
         link,

@@ -202,6 +202,157 @@ def laplace_excluded_coefficients(
     return np.flatnonzero(weak).astype(np.intp)
 
 
+def binomial_log(distribution: Any, link: Any) -> bool:
+    """Whether the family is binomial with the log link: the true-score mean space (#437)."""
+    from superglm.distributions import Binomial
+    from superglm.links import LogLink
+
+    return isinstance(distribution, Binomial) and isinstance(link, LogLink)
+
+
+def separated_directions(
+    dm: DesignMatrix,
+    y: NDArray,
+    sample_weight: NDArray,
+    penalized: NDArray,
+    generator_columns: NDArray,
+    weak: NDArray | Sequence[int] = (),
+) -> tuple[NDArray, tuple]:
+    """``(pivots, sets)``: a binomial/log fit's separated unpenalized directions.
+
+    **The class.**  A set of rows the one-hot blocks move on their own
+    (``mode_score.row_sets``: a level, a block's reference rows, a kept joint
+    set; a set held without its direction, past the bridge budget, is judged
+    but not left out here) whose positive-weight responses are all 0, or all 1, along a
+    direction no penalty touches has no interior maximum.  The likelihood's
+    supremum along it is at ``eta -> -infinity`` (or at the mean space's
+    boundary), where the rows' log-likelihood and their observed curvature
+    are both 0.  A fit stops somewhere along that drift.  Where it stops moves
+    ``log|H|`` by the log of the rows' vanishing curvature, so the criterion
+    and its smoothing parameters move with the stopping point: with a
+    constant offset, with the start, with the solver's path.  The Laplace
+    approximation is therefore taken at the supremum along these directions:
+    they are left out of it, as the weakly identified slopes are.  (Their
+    rows' log-likelihood, about the sum of their means, has underflowed to
+    0 where the fits measured for #437 stop, so it is left as it is.)  The
+    set is decided once per fit from the design,
+    the responses, the prior weights and which columns a penalty covers, so
+    no classification changes between REML candidates.  A penalized set (a
+    random-effect level inside a level without events) is not in the class:
+    its penalized maximum is finite.
+
+    **Pivots.**  ``IdentifiedLaplace`` leaves out coordinates.  Each
+    direction is reduced by the directions already taken (Gaussian
+    elimination) and stands for one coordinate where it is largest, among the
+    unpenalized columns outside a random-effect block (``generator_columns``,
+    which a structured rebuild cannot leave out).  A level's direction is its
+    own column.  A block's reference direction is the intercept less the
+    block's columns, ``-1_B`` once the intercept is profiled, and stands for
+    one of the block's other columns.  The change of basis that makes it a
+    coordinate is unimodular, and at the supremum ``H`` is singular along
+    it, so the determinant left over differs from the pseudo-determinant of
+    the rest by a constant that no smoothing parameter moves.  A direction
+    with no such column, or spanned by those already taken, adds none.  The
+    ``weak`` slopes, which the Laplace term leaves out already, come first in
+    the elimination: no pivot is a weak column, and a set whose direction a
+    weak slope already spans (a separated level that is also weak) takes none
+    and is disclosed once, as weak.  ``pivots`` are in the order the sets are
+    found, and ``sets`` match them one to one, each a tuple of ``(block's
+    first column, level code or None for its reference)`` over the blocks it
+    names (``separated_set_labels``).
+    """
+    from superglm.solvers.mode_score import row_sets
+
+    width = dm.p
+    response = np.asarray(y, dtype=np.float64)
+    positive = np.asarray(sample_weight, dtype=np.float64) > 0.0
+    covered = np.asarray(penalized, dtype=bool)
+    allowed = ~covered
+    allowed[np.asarray(generator_columns, dtype=np.intp)] = False
+    seeded = np.zeros(width, dtype=bool)
+    seeded[np.asarray(weak, dtype=np.intp)] = True
+    allowed &= ~seeded
+    rising = (positive & (response > 0.0)).astype(np.float64)
+    falling = (positive & (response < 1.0)).astype(np.float64)
+    carried = positive.astype(np.float64)
+    candidates: list[tuple[NDArray, tuple]] = []
+    sets = row_sets(dm)
+    for start, matrix in sets.blocks:
+        levels = matrix.n_levels
+        codes = matrix.codes
+        count, up, down = (
+            np.bincount(codes, weights=values, minlength=levels + 1)
+            for values in (carried, rising, falling)
+        )
+        separated = (count > 0.0) & ((up == 0.0) | (down == 0.0))
+        for level in np.flatnonzero(separated).tolist():
+            if level < levels:
+                if covered[start + level]:
+                    continue
+                direction = np.zeros(width)
+                direction[start + level] = 1.0
+            else:
+                if np.any(covered[start : start + levels]):
+                    continue
+                direction = np.zeros(width)
+                direction[start : start + levels] = -1.0
+            candidates.append((direction, ((start, level if level < levels else None),)))
+    if sets.row_cell is not None:
+        held = sets.cell_directions
+        membership = sets.cell_sets.T.tocsr()
+        cells = sets.cell_sets.shape[0]
+        count, up, down = (
+            np.asarray(
+                membership @ np.bincount(sets.row_cell, weights=values, minlength=cells)
+            ).ravel()
+            for values in (carried, rising, falling)
+        )
+        separated = (count > 0.0) & ((up == 0.0) | (down == 0.0)) & ~sets.bounded
+        for index in np.flatnonzero(separated).tolist():
+            direction = held[[index]].toarray().ravel()
+            if np.any(covered & (direction != 0.0)):
+                continue
+            described = tuple(
+                (start, code if code < matrix.n_levels else None)
+                for (start, matrix), code in zip(
+                    sets.blocks, sets.cell_codes[index].tolist(), strict=True
+                )
+                if code >= 0
+            )
+            candidates.append((direction, described))
+    pivots: list[int] = []
+    taken: list[NDArray] = []
+    named: list[tuple] = []
+    for direction, described in candidates:
+        reduced = direction.copy()
+        reduced[seeded] = 0.0  # the weak slopes' unit directions, taken first
+        for pivot, basis in zip(pivots, taken, strict=True):
+            if reduced[pivot] != 0.0:
+                reduced = reduced - (reduced[pivot] / basis[pivot]) * basis
+        size = float(np.max(np.abs(direction)))
+        magnitude = np.where(allowed, np.abs(reduced), 0.0)
+        pivot = int(np.argmax(magnitude))
+        if magnitude[pivot] <= width * _UNIT_ROUNDOFF * size:
+            continue
+        pivots.append(pivot)
+        taken.append(reduced)
+        named.append(described)
+    return np.asarray(pivots, dtype=np.intp), tuple(named)
+
+
+def separated_set_labels(groups: Sequence, sets: Sequence[tuple]) -> tuple[str, ...]:
+    """``group[level]`` or ``group[reference]`` per block a separated set names, joined by `` x ``."""
+    labels = []
+    for described in sets:
+        parts = []
+        for start, level in described:
+            group = next((g for g in groups if g.start == int(start)), None)
+            name = f"coef[{int(start)}]" if group is None else group.name
+            parts.append(f"{name}[{'reference' if level is None else int(level)}]")
+        labels.append(" x ".join(parts))
+    return tuple(labels)
+
+
 def dense_hessian(cache: dict | None) -> tuple[NDArray, float] | None:
     """``(H_c, sum w)`` a dense PIRLS left in its ``cache_out``; ``None`` without one.
 
@@ -225,7 +376,10 @@ class _IdentifiedPart:
 class IdentifiedLaplace:
     """The identified part of one fit's Laplace approximation (module docstring).
 
-    ``excluded`` holds the slope indices ``W``.  The identified part is read
+    ``excluded`` holds the slope indices ``W`` the Laplace term leaves out:
+    the weakly identified slopes (``weak``, which the fit also leaves ungated
+    and discloses) and, for binomial/log, the pivots standing for its
+    separated unpenalized directions (``separated_directions``).  The identified part is read
     from ONE factorization of ``H_II`` itself, so its inverse, ``log|H_II|``
     and coefficient rank always describe the same matrix: a structured factor
     is rebuilt by its own engine with the ``W`` border columns left out (its
@@ -260,24 +414,67 @@ class IdentifiedLaplace:
         excluded: NDArray | Sequence[int] = (),
         *,
         generator_columns: NDArray | Sequence[int] = (),
+        weak: NDArray | Sequence[int] | None = None,
+        separated_pivots: NDArray | Sequence[int] = (),
+        separated_sets: tuple = (),
     ):
         self.excluded = np.asarray(excluded, dtype=np.intp)
+        self.weak = self.excluded if weak is None else np.asarray(weak, dtype=np.intp)
+        self.separated_pivots = np.asarray(separated_pivots, dtype=np.intp)
+        self.separated_sets = tuple(separated_sets)
         self.generator_columns = np.asarray(generator_columns, dtype=np.intp)
         self.unsupported = 0
         self._memo: tuple | None = None
 
     @classmethod
     def for_design(
-        cls, dm: DesignMatrix, sample_weight: NDArray, penalties: Sequence | None
+        cls,
+        dm: DesignMatrix,
+        sample_weight: NDArray,
+        penalties: Sequence | None,
+        *,
+        y: NDArray | None = None,
+        distribution: Any = None,
+        link: Any = None,
     ) -> IdentifiedLaplace:
-        """The fit's identified part: ``laplace_excluded_coefficients`` and the generator columns."""
-        excluded = laplace_excluded_coefficients(dm, sample_weight, penalties)
-        if not excluded.size:  # nothing to restrict: no generator test either
-            return cls(excluded)
-        return cls(excluded, generator_columns=random_effect_columns(dm))
+        """The fit's identified part: ``laplace_excluded_coefficients``, the separated directions' pivots and the generator columns."""
+        weak = laplace_excluded_coefficients(dm, sample_weight, penalties)
+        pivots: NDArray = np.zeros(0, dtype=np.intp)
+        separated: tuple = ()
+        if y is not None and binomial_log(distribution, link):
+            pivots, separated = separated_directions(
+                dm,
+                y,
+                sample_weight,
+                penalized_columns(dm.p, penalties),
+                random_effect_columns(dm),
+                weak,
+            )
+        if not pivots.size:
+            if not weak.size:  # nothing to restrict: no generator test either
+                return cls(weak)
+            return cls(weak, generator_columns=random_effect_columns(dm))
+        return cls(
+            np.union1d(weak, pivots).astype(np.intp),
+            generator_columns=random_effect_columns(dm),
+            weak=weak,
+            separated_pivots=pivots,
+            separated_sets=separated,
+        )
 
     def __bool__(self) -> bool:
         return bool(self.excluded.size)
+
+    @property
+    def disclosed(self) -> tuple[int, ...]:
+        """The left-out coordinates in disclosure order: the weak slopes, then each separated set's pivot.
+
+        Pairs one to one with ``coefficient_labels`` of the weak slopes
+        followed by ``separated_set_labels`` of ``separated_sets``.
+        """
+        return tuple(int(index) for index in self.weak) + tuple(
+            int(index) for index in self.separated_pivots
+        )
 
     def _part(self, inverse, dense) -> _IdentifiedPart | None:
         hessian = None if dense is None else dense[0]

@@ -368,6 +368,33 @@ def test_refusal_is_one_clear_error(monkeypatch, site: str) -> None:
     assert calls == ["auto"]
 
 
+def test_a_refusals_notes_reach_the_clear_error() -> None:
+    """``_structured_solver_errors`` keeps the notes a factor's refusal carries.
+
+    ``_build_iterate_factor`` attaches the largest Levenberg shift's refusal
+    to an observed iterate's own refusal as a note, and ``str(error)`` leaves
+    notes out, so the clear error named only the unshifted cause (#433).
+    Fails without the notes in the message.
+    """
+    refusal = np.linalg.LinAlgError(
+        "Nested chain 'g' has a tree pivot 0 within its certified uncertainty 1e-16."
+    )
+    refusal.add_note(
+        "No Levenberg shift up to 1e+08 certified the iterate either; the largest "
+        "shift's factor refused with: border curvature -0.03 is material."
+    )
+    with pytest.raises(irls_direct.StructuredSolverError) as refused:
+        with irls_direct._structured_solver_errors():
+            raise refusal
+    message = str(refused.value)
+    assert "tree pivot 0 within its certified uncertainty 1e-16." in message
+    assert (
+        "No Levenberg shift up to 1e+08 certified the iterate either; the largest "
+        "shift's factor refused with: border curvature -0.03 is material." in message
+    )
+    assert "direct_solve='gram'" in message
+
+
 def test_a_non_finite_outer_hessian_is_the_clear_error(monkeypatch) -> None:
     """A structured REML outer Hessian out of float64 range has no Newton step
     (Opus review of #425: a uniform prior weight of 1e-200 does it): the fit

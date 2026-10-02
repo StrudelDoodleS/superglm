@@ -25,6 +25,7 @@ from superglm.reml.identified import (
     coefficient_labels,
     dense_hessian,
     final_mode_weak_slopes,
+    separated_set_labels,
 )
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
@@ -428,7 +429,7 @@ def _disclose_weak_identification(
                 penalties=reml_penalties,
             )
         )
-    flagged.update(int(index) for index in identified.excluded)
+    flagged.update(int(index) for index in identified.weak)
     # A factor that tells the columns a weak direction names from those it
     # moves (an sz balance tree) discloses the named ones; the certificate
     # left every moved column ungated, so its own flags count beyond those.
@@ -445,11 +446,29 @@ def _disclose_weak_identification(
     labels = coefficient_labels(model._groups, indices)
     profile["reml_weakly_identified"] = indices
     profile["reml_weakly_identified_labels"] = labels
-    profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.excluded)
-    excluded_labels = coefficient_labels(
-        model._groups, tuple(int(index) for index in identified.excluded)
+    # everything the Laplace term leaves out, each index paired with its
+    # label: the weakly identified slopes, then the separated unpenalized
+    # sets (``reml.identified.separated_directions``) by their pivots
+    profile["reml_laplace_excluded"] = identified.disclosed
+    separated_labels = separated_set_labels(model._groups, identified.separated_sets)
+    profile["reml_laplace_separated"] = tuple(int(index) for index in identified.separated_pivots)
+    profile["reml_laplace_separated_labels"] = separated_labels
+    excluded_labels = (
+        coefficient_labels(model._groups, tuple(int(index) for index in identified.weak))
+        + separated_labels
     )
     profile["reml_laplace_excluded_labels"] = excluded_labels
+    # a separated set the Laplace term leaves out is explained in plain words,
+    # beside any weakly identified coefficient or alone (a reference level
+    # without events has no coefficient of its own)
+    separated = (
+        f" Every response on the rows of {', '.join(separated_labels)} is 0, or every one "
+        "is 1, so the model has no finite estimate for them. They stay in the model, their "
+        "fitted means approach that limit, and they are left out of smoothing-parameter "
+        "selection."
+        if separated_labels
+        else ""
+    )
     if labels:
         left_out = (
             f" Left out of smoothing-parameter selection: {', '.join(excluded_labels)}."
@@ -460,10 +479,12 @@ def _disclose_weak_identification(
             "These coefficients carry information only at the noise level of the data "
             "(a factor level or column with little or no weight, observations or "
             f"information): {', '.join(labels)}. They stay in the model, and their "
-            f"estimates and standard errors carry little information.{left_out}",
+            f"estimates and standard errors carry little information.{left_out}{separated}",
             WeakIdentificationWarning,
             stacklevel=4,
         )
+    elif separated:
+        warnings.warn(separated.strip(), WeakIdentificationWarning, stacklevel=4)
 
 
 def finalize_reml_fit(
@@ -529,7 +550,11 @@ def finalize_reml_fit(
     # The Laplace approximation's identified part (design §3.9,
     # ``reml.identified``): the terminal objective leaves out the same slopes
     # the optimizer's did, so it scores the state it publishes consistently.
+    # ``disclosed`` is the same record for the disclosure: on the QP
+    # passthrough the terminal objective keeps the full Laplace term, but the
+    # search that chose lambda left these out, and they are disclosed.
     identified = IdentifiedLaplace()
+    disclosed = identified
     if use_direct:
         old_gms = model._dm.group_matrices
         model._dm = rebuild_dm_with_lambdas(model, lambdas, sample_weight)
@@ -553,8 +578,16 @@ def finalize_reml_fit(
             model._dm.group_matrices,
             model._groups,
         )
+        disclosed = IdentifiedLaplace.for_design(
+            model._dm,
+            sample_weight,
+            reml_penalties,
+            y=y,
+            distribution=model._distribution,
+            link=model._link,
+        )
         if not qp_passthrough:
-            identified = IdentifiedLaplace.for_design(model._dm, sample_weight, reml_penalties)
+            identified = disclosed
         observed_terminal = terminal_curvature == "observed" and not qp_passthrough
         # One-engine design §3.8: the terminal refit of every route auto uses,
         # exact and discrete, gram and structured, stops on the certificate's
@@ -609,7 +642,7 @@ def finalize_reml_fit(
             trace_run=trace_run,
             trace_purpose="reml_final",
             weight_semantics=model_weight_semantics(model),
-            _laplace_excluded=tuple(int(index) for index in identified.excluded),
+            _laplace_excluded=tuple(int(index) for index in identified.weak),
             _mode_bar=terminal_bar,
         )
         if len(final_output) != 3:  # pragma: no cover - return_xtwx contract
@@ -811,7 +844,7 @@ def finalize_reml_fit(
                 geometry=terminal_geometry,
                 lambdas=lambdas if structured_linear_state is not None else None,
                 reml_penalties=reml_penalties if structured_linear_state is not None else None,
-                excluded=identified.excluded,
+                excluded=identified.weak,
                 bar=terminal_bar,
             )
         except ObservedGeometryInfeasibleError as exc:
@@ -974,7 +1007,7 @@ def finalize_reml_fit(
     _disclose_weak_identification(
         model,
         profile=profile,
-        identified=identified,
+        identified=disclosed,
         result=corrected,
         factor=final_factor,
         sample_weight=sample_weight,

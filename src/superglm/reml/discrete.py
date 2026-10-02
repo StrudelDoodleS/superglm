@@ -431,7 +431,9 @@ def optimize_discrete_reml_cached_w(
     p = dm.p
     # The Laplace approximation's identified part (design §3.9,
     # ``reml.identified``): decided once, from the design and prior weights.
-    identified = IdentifiedLaplace.for_design(dm, sample_weight, penalties)
+    identified = IdentifiedLaplace.for_design(
+        dm, sample_weight, penalties, y=y, distribution=distribution, link=link
+    )
     # The cached trials' linear predictor about the fixed prior-weighted
     # centre (one-engine design §3.8), as every PIRLS state is: a column
     # translated by 1e10 otherwise costs eta ~1e-6 per row in X beta against

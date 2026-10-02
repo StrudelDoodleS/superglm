@@ -201,9 +201,10 @@ class REMLGeometrySummary:
 # sentinel: it labels an iteration that ended without ending the loop, so it
 # reaches the per-iteration diagnostics and the trace but never a result, which
 # carries only a reason that actually ended the fit. ``score_stagnated`` ends a
-# ``convergence="mode_score"`` solve whose certificate score stopped
-# contracting short of its bar (``irls_direct``: the iterate is at its
-# limiting accuracy; the mode is published as not converged, never refused).
+# solve whose certificate score stopped contracting short of its bar: a
+# ``convergence="mode_score"`` solve's, or a binomial/log fit's own score at
+# the stops it refused (``irls_direct``: the iterate is at its limiting
+# accuracy; the mode is published as not converged, never refused).
 # The gap runs the other way exactly once, and deliberately: the fitted-state
 # invalidation path stamps a synthetic marker of its own over the field through
 # a dynamic ``setattr`` this annotation cannot see, and that records a revision
@@ -332,6 +333,19 @@ class PIRLSResult:
     # family's mean space (``irls_state.mean_space_boundary_rows``); nonzero
     # only with ``termination_reason == "mean_space_boundary"``.
     mean_space_boundary_rows: int = 0
+    # The returned state was certified on the binomial/log true score
+    # (``irls_direct``): its stop was that certificate under Newton steps, or
+    # a Fisher stop it confirmed while the clip held a row.  The state is the
+    # model's own penalized mode, where the clipped objective need not be
+    # stationary, so a criterion read at it uses the model's own likelihood
+    # and curvature (``reml.objective.reml_laml_objective``,
+    # ``reml.observed_geometry.build_observed_reml_geometry``).
+    mean_space_true_mode: bool = False
+    # Rows a direction the factorization truncated moves, each judged on those
+    # rows at the returned state (``mode_score.truncated_direction_ratio``):
+    # at their own maximum (weakly identified), or beyond float64's
+    # resolution (the fit is not converged).
+    truncated_directions: tuple = ()
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):

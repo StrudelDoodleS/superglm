@@ -256,7 +256,9 @@ def optimize_direct_reml(
     mode_bar = mode_certification_bar(reml_tol)
     # The Laplace approximation's identified part (design §3.9,
     # ``reml.identified``): decided once, from the design and prior weights.
-    identified = IdentifiedLaplace.for_design(dm, sample_weight, penalties)
+    identified = IdentifiedLaplace.for_design(
+        dm, sample_weight, penalties, y=y, distribution=distribution, link=link
+    )
     # A dense Fisher evaluation's identified part restricts the centred
     # Hessian its PIRLS decomposed; the cache holds it (no extra pass).
     identified_dense = bool(identified) and not use_structured
@@ -518,7 +520,7 @@ def optimize_direct_reml(
             weight_semantics=weight_semantics,
             _raw_moment_policy=raw_moment_policy,
             _fisher_data_reuse=fisher_data_reuse,
-            _laplace_excluded=tuple(int(index) for index in identified.excluded),
+            _laplace_excluded=tuple(int(index) for index in identified.weak),
             _mode_bar=mode_bar,
             cache_out=fit_cache,
         )
@@ -701,7 +703,7 @@ def optimize_direct_reml(
                     geometry=geometry,
                     lambdas=cand_lambdas if use_structured else None,
                     reml_penalties=penalties if use_structured else None,
-                    excluded=identified.excluded,
+                    excluded=identified.weak,
                     bar=mode_bar,
                 )
             except ObservedGeometryInfeasibleError as exc:
@@ -1285,7 +1287,7 @@ def optimize_direct_reml(
                     _initial_data_reuse=_initial_data_reuse,
                     _raw_moment_policy=raw_moment_policy,
                     _fisher_data_reuse=fisher_data_reuse,
-                    _laplace_excluded=tuple(int(index) for index in identified.excluded),
+                    _laplace_excluded=tuple(int(index) for index in identified.weak),
                     _mode_bar=mode_bar,
                     cache_out=trial_cache,
                 )
@@ -1379,7 +1381,7 @@ def optimize_direct_reml(
                         geometry=trial_geometry,
                         lambdas=trial_lambdas if use_structured else None,
                         reml_penalties=penalties if use_structured else None,
-                        excluded=identified.excluded,
+                        excluded=identified.weak,
                         bar=mode_bar,
                     )
                 except ObservedGeometryInfeasibleError:
@@ -1587,7 +1589,7 @@ def optimize_direct_reml(
         profile["reml_n_linesearch_fits"] = _n_linesearch_fits
         profile["reml_n_outer_iter"] = n_iter
         profile["reml_mean_space_restorations"] = n_mean_space_restorations
-        profile["reml_laplace_excluded"] = tuple(int(index) for index in identified.excluded)
+        profile["reml_laplace_excluded"] = identified.disclosed
         profile["reml_laplace_exclusion_unsupported"] = int(identified.unsupported)
 
     return REMLResult(
