@@ -524,6 +524,27 @@ def test_widget_http_collapse_reads_keep_reference_from_the_body(body, reference
         widget.close()
 
 
+@pytest.mark.parametrize(
+    ("body", "reference"),
+    [
+        ({}, {"level": "C", "policy": "kept"}),
+        ({"keep_reference": False}, {"level": "B", "policy": "most_exposed"}),
+    ],
+    ids=["default", "off"],
+)
+def test_widget_http_ungroup_reads_keep_reference_from_the_body(body, reference):
+    session = _declared_grouping_session()
+    widget = session.widget()
+    try:
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [3]})
+        payload = _post_json(
+            f"{widget.url}/ungroup_levels", {"term": "region", "method": "fit", **body}
+        )
+        assert payload["state"]["terms"]["region"]["reference"] == reference
+    finally:
+        widget.close()
+
+
 @pytest.mark.parametrize("route", ["collapse_levels", "ungroup_levels"])
 def test_widget_http_refuses_a_keep_reference_that_is_not_a_boolean(region_model, route):
     model, _ = region_model
