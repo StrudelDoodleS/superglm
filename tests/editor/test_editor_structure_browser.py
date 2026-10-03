@@ -96,13 +96,16 @@ def _drawn_y(page) -> list[float]:
 
 
 def _history_sections(page) -> dict[str, list[str]]:
-    """The History pane's rows by section, top to bottom."""
+    """The History pane's steps by section, top to bottom, by step id.
+
+    The applied list ends at the opened model, its root, which has no id.
+    """
     return page.evaluate(
         """() => Object.fromEntries(['waiting', 'applied', 'undone'].map(kind => [
             kind,
             Array.from(
-                document.querySelectorAll(`#historyFrame .history-section.${kind} .history-label`),
-                node => node.textContent,
+                document.querySelectorAll(`#historyFrame .history-section.${kind} .history-item`),
+                node => node.dataset.stepId ?? node.querySelector('.history-label').textContent,
             ),
         ]))"""
     )
@@ -114,9 +117,10 @@ def _timeline_sections(session) -> dict[str, list[str]]:
     marker = next(i for i, entry in enumerate(timeline) if entry["kind"] == "marker")
     done = timeline[:marker][::-1]
     return {
-        "waiting": [entry["label"] for entry in done if entry.get("status") == "waiting"],
-        "applied": [entry["label"] for entry in done if entry.get("status") != "waiting"],
-        "undone": [entry["label"] for entry in timeline[marker + 1 :]],
+        "waiting": [entry["id"] for entry in done if entry.get("status") == "waiting"],
+        "applied": [entry["id"] for entry in done if entry.get("status") != "waiting"]
+        + ["Opened model"],
+        "undone": [entry["id"] for entry in timeline[marker + 1 :]],
     }
 
 
@@ -364,8 +368,12 @@ def test_history_lists_waiting_changes_above_applied_ones_with_ids_and_notes(ope
         page.locator("#historyTab").click()
         page.locator("#historyFrame .history-section.waiting").wait_for()
         assert _history_sections(page) == _timeline_sections(session)
-        assert _history_sections(page)["waiting"] == [step.label]
+        assert _history_sections(page)["waiting"] == [step.step_id]
         waiting = page.locator(f'#historyFrame [data-step-id="{step.step_id}"]')
+        # The message says what the step does; the meta line names the term.
+        assert step.label == "Line 6–8 in curve"
+        assert waiting.locator(".history-label").text_content() == "Line 6 – 8"
+        assert waiting.locator(".history-meta").text_content() == "curve · shape"
         assert waiting.locator(".history-id").text_content() == step.step_id
         # Undo takes the newest step, which is the waiting one.
         assert page.locator("#historyFrame .history-undo-chip").count() == 1
@@ -512,6 +520,18 @@ def test_waiting_changes_show_in_the_feature_list_status_line_and_export(open_ed
         assert (
             page.locator('#featureList [data-term="territory"] .feature-row-waiting').count() == 1
         )
+        # The dot sits right after the term's name, on its line.
+        collapsed = page.locator("#featureList").get_attribute("data-open") == "false"
+        if collapsed:
+            page.locator("#featureListToggle").click()
+        name = page.locator('#featureList [data-term="territory"] .feature-row-name').bounding_box()
+        dot = page.locator(
+            '#featureList [data-term="territory"] .feature-row-waiting'
+        ).bounding_box()
+        assert 0 <= dot["x"] - (name["x"] + name["width"]) <= 10
+        assert name["y"] <= dot["y"] + dot["height"] / 2 <= name["y"] + name["height"]
+        if collapsed:
+            page.locator("#featureListToggle").click()
 
         page.locator("#exportAction").click()
         note = page.locator("#exportPendingNote")

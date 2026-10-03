@@ -190,16 +190,16 @@ function featureRow(doc, name, { terms, activeTerm, tabStop, waiting }) {
   row.dataset.term = name;
   row.tabIndex = name === tabStop ? 0 : -1;
   if (name === activeTerm) row.setAttribute("aria-current", "true");
+  row.append(span(doc, "feature-row-name", name));
+  if (waiting.has(name)) row.append(waitingDot(doc));
   row.append(
-    span(doc, "feature-row-name", name),
     span(doc, "feature-row-kind", term.term_type || term.kind || "term"),
     span(doc, "feature-row-edf", edfLabel(term.effective_df)),
   );
-  if (waiting.has(name)) row.append(waitingDot(doc));
   return row;
 }
 
-/** An amber dot on a term with a change waiting for Refit. @param {Document} doc */
+/** An amber dot right after the name of a term with a change waiting for Refit. @param {Document} doc */
 function waitingDot(doc) {
   const dot = doc.createElement("span");
   dot.className = "feature-row-waiting";

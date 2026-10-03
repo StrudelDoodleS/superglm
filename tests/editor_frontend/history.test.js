@@ -40,7 +40,7 @@ test("waiting changes sit above the applied ones, newest first, and the undone o
   renderHistory(TIMELINE, node);
   assert.deepEqual(sections(node), [
     ["waiting", ["Collapse B10 + B11"]],
-    ["applied", ["Line 18 – 26", "Shift 3 – 5"]],
+    ["applied", ["Line 18 – 26", "Shift 3 – 5", "Opened model"]],
     ["undone", ["Collapse B13 + B14"]],
   ]);
   assert.match(node.innerHTML, /Notes are saved with the exported Python model\./);
@@ -93,9 +93,98 @@ test("a timeline from before step ids still lists its edits and steps, with no p
     { kind: "structural", label: "Line 30–45 in age", redo: false },
     { kind: "marker" },
   ], node);
-  assert.deepEqual(sections(node), [["applied", ["Line 30–45 in age", "shift age"]]]);
+  assert.deepEqual(sections(node), [["applied", ["Line 30–45 in age", "Shift age", "Opened model"]]]);
   assert.match(node.innerHTML, /<code class="history-id">a1b2c3d<\/code>/);
   assert.doesNotMatch(node.innerHTML, /history-note-edit/);
+});
+
+// Entries as the state payload sends them. The backend's labels name the term
+// ("collapse B10 + B11 in VehBrand") for the Undo popover; a waiting or
+// applied change carries its parameters by label.
+const BACKEND = [
+  { kind: "edit", status: "edit", id: "a000001", time: at(13, 58), note: null,
+    label: "shift DrivAge", term: "DrivAge", operation: "shift", n_points: 3, params: {},
+    redo: false },
+  { kind: "pending", status: "applied", id: "a000002", time: at(14, 0), note: null,
+    label: "collapse <B1> + B11 in VehBrand", term: "VehBrand", operation: "collapse",
+    params: { levels: ["<B1>", "B11"], group_label: null }, redo: false },
+  { kind: "pending", status: "applied", id: "a000003", time: at(14, 1), note: null,
+    label: "Line 18–26 in DrivAge", term: "DrivAge", operation: "shape",
+    params: { lo: 18, hi: 26, degree: 1, join: "tangent" }, redo: false },
+  { kind: "structural", status: "applied", id: "a000004", time: at(14, 2), note: null,
+    label: "Refit · 2 changes", term: null, operation: "refit_pending", redo: false },
+  { kind: "structural", status: "applied", id: "a000005", time: at(14, 2), note: null,
+    label: "Hand edits carried over: DrivAge, VehAge", term: null, operation: "carry_edits",
+    redo: false },
+  { kind: "pending", status: "waiting", id: "a000006", time: at(14, 3), note: null,
+    label: "ungroup B10 in VehBrand", term: "VehBrand", operation: "ungroup",
+    params: { levels: ["B10"] }, redo: false },
+  { kind: "pending", status: "waiting", id: "a000007", time: at(14, 4), note: null,
+    label: "set reference of VehBrand to B2", term: "VehBrand", operation: "set_reference",
+    params: { level: "B2" }, redo: false },
+  { kind: "marker" },
+];
+
+test("each step reads as a message built from what it did, without its term", () => {
+  const node = { innerHTML: "" };
+  renderHistory(BACKEND, node);
+  assert.deepEqual(sections(node), [
+    ["waiting", ["Set reference B2", "Ungroup B10"]],
+    ["applied", [
+      "Hand edits carried over: DrivAge, VehAge",
+      "Refit · 2 changes",
+      "Line 18 – 26",
+      "Collapse &lt;B1&gt; + B11",
+      "Shift DrivAge",
+      "Opened model",
+    ]],
+  ]);
+  // The meta line is what names the term.
+  assert.match(row(node, "a000002"), /class="history-meta">VehBrand · collapse</);
+});
+
+test("a change refitted at once reads the same as a staged one", () => {
+  // Refit after every change lists the change once, as its step, without params.
+  const node = { innerHTML: "" };
+  renderHistory([
+    { kind: "structural", status: "applied", id: "b000001", label: "collapse B10 + B11 in VehBrand",
+      term: "VehBrand", operation: "collapse_levels", redo: false },
+    { kind: "structural", status: "applied", id: "b000002", label: "ungroup B10, B11 in VehBrand",
+      term: "VehBrand", operation: "ungroup_levels", redo: false },
+    { kind: "structural", status: "applied", id: "b000003", label: "set reference of VehBrand to B2",
+      term: "VehBrand", operation: "set_reference", redo: false },
+    { kind: "structural", status: "applied", id: "b000004", label: "Cubic 18.5–26 in DrivAge",
+      term: "DrivAge", operation: "shape_range", redo: false },
+    { kind: "structural", status: "applied", id: "b000005", label: "revert to original model",
+      term: null, operation: "revert_to_original", redo: false },
+    { kind: "marker" },
+  ], node);
+  assert.deepEqual(sections(node), [["applied", [
+    "Revert to original model",
+    "Cubic 18.5 – 26",
+    "Set reference B2",
+    "Ungroup B10, B11",
+    "Collapse B10 + B11",
+    "Opened model",
+  ]]]);
+});
+
+test("the history ends at its root, the opened model, below every applied step", () => {
+  const node = { innerHTML: "" };
+  renderHistory(TIMELINE.slice(0, 4), node);
+  const last = node.innerHTML.slice(node.innerHTML.lastIndexOf("<li"));
+  assert.match(last, /^<li class="history-item root">/);
+  assert.match(last, /class="history-label">Opened model</);
+  // The state payload has no id or time for the session's start, so the root
+  // shows none, and has no note to write.
+  assert.doesNotMatch(last, /data-step-id|history-id|<time|history-note-edit|Undo takes this/);
+
+  // With nothing applied yet, the root is the applied list on its own.
+  renderHistory([TIMELINE[2], { kind: "marker" }], node);
+  assert.deepEqual(sections(node), [
+    ["waiting", ["Collapse B10 + B11"]],
+    ["applied", ["Opened model"]],
+  ]);
 });
 
 test("a timeline holding only the marker, or none at all, says nothing happened yet", () => {

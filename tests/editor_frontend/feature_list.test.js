@@ -358,3 +358,15 @@ test("a term with a change waiting for refit carries a dot on its row; the other
   render();
   assert.ok(rows().every((row) => row.children.length === 3));
 });
+
+test("the waiting dot sits right after the term's name, ahead of its kind and EDF", () => {
+  const { render, rows } = fixture();
+  render({ waiting: new Set(["region"]) });
+  const row = rows()[2];
+  assert.deepEqual(
+    row.children.map((part) => part.className),
+    ["feature-row-name", "feature-row-waiting", "feature-row-kind", "feature-row-edf"],
+  );
+  const name = row.children.find((part) => part.className === "feature-row-name");
+  assert.equal(row.children[row.children.indexOf(name) + 1].className, "feature-row-waiting");
+});

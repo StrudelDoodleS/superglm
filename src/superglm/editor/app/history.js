@@ -1,10 +1,12 @@
 // @ts-check
 // The History pane: the session newest first, git-style. The changes waiting
-// for Refit come first, then the applied ones, then what Redo would put back.
-// Each step shows its short id, its time and an automatic message. A pencil
-// writes a note in place, and notes are saved with the exported Python model.
+// for Refit come first, then the applied ones down to the opened model, then
+// what Redo would put back. Each step shows its short id, its time and an
+// automatic message. A pencil writes a note in place, and notes are saved with
+// the exported Python model.
 
 import { escapeHTML } from "./format.js";
+import { SHAPE_NAMES } from "./shapes.js";
 
 /** @typedef {import('./api/contracts.js').TimelineEntry} TimelineEntry */
 
@@ -27,6 +29,27 @@ const OPERATION_WORDS = Object.freeze({
   carry_edits: "edits carried over",
   revert_to_original: "revert",
 });
+
+/**
+ * Each structural operation by the change it makes; a change refitted at once
+ * is named by its route.
+ * @type {Readonly<Record<string, string>>}
+ */
+const CHANGES = Object.freeze({
+  collapse: "collapse",
+  collapse_levels: "collapse",
+  ungroup: "ungroup",
+  ungroup_levels: "ungroup",
+  set_reference: "set_reference",
+  shape: "shape",
+  shape_range: "shape",
+});
+
+// The session's root, below every applied step. The state payload carries no
+// id or time for the session's start, so the root shows neither, and it takes
+// no note.
+const OPENED_ITEM = '<li class="history-item root"><div class="history-row">'
+  + '<div class="history-body"><div class="history-label">Opened model</div></div></div></li>';
 
 /** The timeline each pane last drew, so a cancelled note can put it back. */
 const drawn = new WeakMap();
@@ -58,7 +81,7 @@ export function renderHistory(timeline, node) {
     ),
     historySection(
       "applied", "Applied",
-      newestFirst.filter((entry) => entryStatus(entry) !== "waiting"), newest
+      newestFirst.filter((entry) => entryStatus(entry) !== "waiting"), newest, "", OPENED_ITEM
     ),
     historySection("undone", "Undone", undone, null, "Redo puts back the top one first."),
     `<p class="history-foot">Notes are saved with the exported Python model.</p>`
@@ -147,10 +170,11 @@ export function bindHistory(node, { onNote }) {
 /**
  * @param {string} kind @param {string} title @param {TimelineEntry[]} entries
  * @param {TimelineEntry|null} newest @param {string} [hint]
+ * @param {string} [last] an item that ends the list, whatever it holds
  */
-function historySection(kind, title, entries, newest, hint = "") {
-  if (!entries.length) return "";
-  const items = entries.map((entry) => historyItem(entry, entry === newest)).join("");
+function historySection(kind, title, entries, newest, hint = "", last = "") {
+  if (!entries.length && !last) return "";
+  const items = entries.map((entry) => historyItem(entry, entry === newest)).join("") + last;
   const hintHTML = hint ? `<p class="history-section-hint">${hint}</p>` : "";
   return `<section class="history-section ${kind}" aria-label="${title}">`
     + `<h3 class="history-section-title">${title}</h3>${hintHTML}`
@@ -172,7 +196,7 @@ function historyItem(entry, takesUndo) {
     ? `<p class="history-note">${PENCIL}<span>${escapeHTML(note)}</span></p>`
     : "";
   return `<li class="${classes}"${idAttribute}><div class="history-row">`
-    + `<div class="history-body"><div class="history-label">${escapeHTML(entry.label || "")}</div>`
+    + `<div class="history-body"><div class="history-label">${escapeHTML(entryMessage(entry, status))}</div>`
     + `<div class="history-meta">${escapeHTML(entryMeta(entry, status))}</div></div>`
     + `${chip}<div class="history-stamp">${stamp}</div>${id ? noteButton(note) : ""}</div>`
     + `${noteHTML}</li>`;
@@ -186,6 +210,87 @@ function historyItem(entry, takesUndo) {
 function entryStatus(entry) {
   if (entry.status && STATUSES.has(entry.status)) return entry.status;
   return entry.kind === "edit" ? "edit" : "applied";
+}
+
+/**
+ * The step's automatic message, sentence-cased and without its term, which the
+ * meta line names: "Collapse B10 + B11", "Line 18 – 26", "Refit · 2 changes".
+ * A structural change is told from its operation and parameters. A change
+ * refitted at once on its own is listed as its step, which carries no
+ * parameters, so its message comes from its label, the backend's fixed
+ * sentence for that operation. An edit keeps its label. The labels themselves
+ * stay as they are: the Undo popover reads them.
+ * @param {TimelineEntry} entry @param {"applied"|"waiting"|"edit"} status
+ */
+function entryMessage(entry, status) {
+  const label = String(entry.label ?? "");
+  if (status === "edit") return sentenceCase(label);
+  const change = CHANGES[String(entry.operation ?? "")] ?? "";
+  const term = typeof entry.term === "string" ? entry.term : "";
+  return changeMessage(change, entry.params ?? {})
+    ?? sentenceCase(spacedRange(change, withoutTerm(label, change, term)));
+}
+
+/**
+ * The message for a structural change from its parameters, or null when they
+ * do not say it.
+ * @param {string} change @param {Record<string, unknown>} params @returns {string|null}
+ */
+function changeMessage(change, params) {
+  const levels = Array.isArray(params.levels) && params.levels.length
+    ? params.levels.map(String)
+    : null;
+  if (change === "collapse" && levels) return `Collapse ${levels.join(" + ")}`;
+  if (change === "ungroup" && levels) return `Ungroup ${levels.join(", ")}`;
+  if (change === "set_reference" && params.level !== undefined && params.level !== null) {
+    return `Set reference ${String(params.level)}`;
+  }
+  const shape = typeof params.degree === "number" ? SHAPE_NAMES[params.degree] : undefined;
+  if (change === "shape" && shape && params.lo !== undefined && params.hi !== undefined) {
+    return `${shape} ${edgeText(params.lo)} – ${edgeText(params.hi)}`;
+  }
+  return null;
+}
+
+/**
+ * The backend's label without its mention of the term: "collapse B10 + B11 in
+ * VehBrand" reads "collapse B10 + B11", "set reference of VehBrand to B2" reads
+ * "set reference B2".
+ * @param {string} label @param {string} change @param {string} term
+ */
+function withoutTerm(label, change, term) {
+  if (!term) return label;
+  const reference = `set reference of ${term} to `;
+  if (change === "set_reference" && label.startsWith(reference)) {
+    return `set reference ${label.slice(reference.length)}`;
+  }
+  const suffix = ` in ${term}`;
+  return label.endsWith(suffix) ? label.slice(0, -suffix.length) : label;
+}
+
+/**
+ * A shape's range with its dash spaced, as a message built from its edges
+ * writes it: "Line 18–26" reads "Line 18 – 26".
+ * @param {string} change @param {string} text
+ */
+function spacedRange(change, text) {
+  return change === "shape" ? text.replace(/(\S)–(\S)/u, "$1 – $2") : text;
+}
+
+/**
+ * A range edge as the backend writes it: a band's label as it is, a number to
+ * six significant figures.
+ * @param {unknown} edge
+ */
+function edgeText(edge) {
+  return typeof edge === "number" && Number.isFinite(edge)
+    ? String(Number(edge.toPrecision(6)))
+    : String(edge);
+}
+
+/** @param {string} text */
+function sentenceCase(text) {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /** @param {TimelineEntry} entry @param {string} status */
