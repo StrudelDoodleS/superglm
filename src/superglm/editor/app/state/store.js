@@ -196,6 +196,26 @@ function invalidatePriorEvidence(state, revision) {
   return { ...state.request, evidence };
 }
 
+/**
+ * The anchor is a source index, and a level reorder (a drag, its Undo or Redo,
+ * Reset order) renumbers its term's levels. The anchor follows its level, as
+ * the selection does, and goes when that level is gone.
+ *
+ * @param {EditorState['view']['selectionAnchor']} anchor
+ * @param {EditorSnapshot|null} previous
+ * @param {EditorSnapshot} next
+ */
+function anchorFollowingItsLevel(anchor, previous, next) {
+  if (!anchor) return anchor;
+  const before = previous?.terms?.[anchor.term]?.levels;
+  const after = next.terms?.[anchor.term]?.levels;
+  if (!Array.isArray(before) || !Array.isArray(after)) return anchor;
+  const level = before[anchor.index];
+  if (after[anchor.index] === level) return anchor;
+  const index = after.indexOf(level);
+  return index >= 0 ? { term: anchor.term, index } : null;
+}
+
 /** @param {EditorState} state @param {EditorSnapshot} snapshot */
 export function commitRemote(state, snapshot) {
   if (isOlderGeneratedSnapshot(state.remote.snapshot, snapshot)) {
@@ -205,6 +225,9 @@ export function commitRemote(state, snapshot) {
   const request = previousRevision !== undefined && previousRevision !== snapshot.model_revision
     ? invalidatePriorEvidence(state, snapshot.model_revision)
     : state.request;
+  const selectionAnchor = anchorFollowingItsLevel(
+    state.view.selectionAnchor, state.remote.snapshot, snapshot
+  );
   /** @type {EditorState} */
   const candidate = {
     ...state,
@@ -213,7 +236,7 @@ export function commitRemote(state, snapshot) {
       summary: state.remote.summary,
       chartEpoch: state.remote.chartEpoch + 1
     },
-    view: { ...state.view, preview: null, selectionPreview: null },
+    view: { ...state.view, preview: null, selectionPreview: null, selectionAnchor },
     request
   };
   return {

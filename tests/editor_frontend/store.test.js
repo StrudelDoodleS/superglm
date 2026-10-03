@@ -353,6 +353,48 @@ test("remote commit clears preview and preserves valid view state", () => {
   assert.deepEqual(selectCurrentSelection(state), [0]);
 });
 
+/**
+ * A snapshot whose chart shows a categorical "brand" with its levels in order.
+ * @param {string[]} levels @param {number} [revision]
+ */
+function brandSnapshot(levels, revision = 0) {
+  const base = snapshot(revision);
+  const ones = levels.map(() => 1);
+  base.terms.brand = {
+    ...base.terms.age, kind: "categorical", term_type: "categorical",
+    x: levels.map((_, index) => index), y: ones, original_y: ones,
+    levels: levels.slice(), n_points: levels.length
+  };
+  base.selected_term = "brand";
+  base.selection.brand = [];
+  return base;
+}
+
+test("a level reorder moves the selection anchor with its level", () => {
+  let state = createInitialEditorState(brandSnapshot(["a", "b", "c", "d"]));
+  state = patchView(state, { selectionAnchor: { term: "brand", index: 1 } });
+
+  // A drag, its Undo or Redo, or Reset order renumbers the levels: b goes to 3.
+  state = commitRemote(state, brandSnapshot(["a", "c", "d", "b"], 1));
+  assert.deepEqual(state.view.selectionAnchor, { term: "brand", index: 3 });
+
+  // The same order keeps the anchor object.
+  const anchor = state.view.selectionAnchor;
+  state = commitRemote(state, brandSnapshot(["a", "c", "d", "b"], 2));
+  assert.strictEqual(state.view.selectionAnchor, anchor);
+
+  // An anchor on a term without levels is left alone.
+  const spline = commitRemote(
+    patchView(state, { selectionAnchor: { term: "age", index: 0 } }),
+    brandSnapshot(["d", "c", "b", "a"], 3)
+  );
+  assert.deepEqual(spline.view.selectionAnchor, { term: "age", index: 0 });
+
+  // A level that is gone takes the anchor with it.
+  state = commitRemote(state, brandSnapshot(["a", "c", "d"], 4));
+  assert.equal(state.view.selectionAnchor, null);
+});
+
 test("a new model revision marks every prior evidence panel stale", () => {
   let state = createInitialEditorState(snapshot(2));
   const panels = /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"]);
