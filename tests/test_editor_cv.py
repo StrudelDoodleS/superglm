@@ -656,3 +656,292 @@ def test_job_routes_run_a_job_off_the_widget_lock(cv_fit):
     assert finished["status"] == "cancelled"
     assert published == []
     assert unknown == (400, {"error": "Unknown job kind."})
+
+
+# ── Run CV and Final fit ─────────────────────────────────────────
+
+
+class _Context:
+    """A job context that never cancels and records progress."""
+
+    def __init__(self):
+        self.entries = []
+
+    def check(self):
+        return None
+
+    def progress(self, phase, **details):
+        self.entries.append({"phase": phase, **details})
+
+
+@pytest.fixture
+def fit_rows(monkeypatch):
+    """The row count of every SuperGLM.fit call, in order."""
+    rows = []
+    fit = SuperGLM.fit
+
+    def counted(self, X, y, *args, **kwargs):
+        rows.append(len(y))
+        return fit(self, X, y, *args, **kwargs)
+
+    monkeypatch.setattr(SuperGLM, "fit", counted)
+    return rows
+
+
+def test_run_cv_reproduces_the_supplied_scores_when_nothing_is_edited(cv_frame, cv_fit, fit_rows):
+    from superglm.editor.cv import capture_cv_run, run_cv
+
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    context = _Context()
+
+    run = run_cv(capture_cv_run(session), context)
+
+    assert fit_rows == [len(train) for train, _test in supplied.fold_indices]
+    assert [entry["fold"] for entry in context.entries if entry["phase"] == "fold"] == [1, 2, 3]
+    # The same folds, structure and scorers in this thread: the same numbers.
+    for name in ("deviance", "gini", "nll"):
+        np.testing.assert_array_equal(run.result.fold_scores[name], supplied.fold_scores[name])
+    assert run.result.pooled_scores == supplied.pooled_scores
+    assert run.result.splitter == "KFold"
+
+
+def test_run_cv_job_puts_the_hand_edits_back_on_every_fold(cv_frame, cv_fit, fit_rows):
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.select_levels("region", ["C"])
+    session.shift("region", 0.1)
+    widget = session.widget()
+    try:
+        started = _post_json(f"{widget.url}/job_start", {"kind": "cv"})
+        finished = _post_json(
+            f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True}
+        )
+        report = _post_json(f"{widget.url}/report", {"report": "cv"})
+    finally:
+        widget.close()
+
+    assert finished["status"] == "done"
+    assert [entry["fold"] for entry in finished["progress"] if entry["phase"] == "fold"] == [
+        1,
+        2,
+        3,
+    ]
+    assert len(fit_rows) == 3
+    supplied_result, current = report["results"]
+    assert (current["label"], current["origin"], current["stale"]) == (
+        "Current model",
+        "run",
+        False,
+    )
+    for edited_fold, supplied_fold in zip(current["folds"], supplied_result["folds"], strict=True):
+        assert edited_fold["scores"]["deviance"] != supplied_fold["scores"]["deviance"]
+    assert report["relativities"]["origin"] == "run"
+    region = next(item for item in report["relativities"]["terms"] if item["name"] == "region")
+    # Every fold carries the edited curve, so the folds agree on region exactly.
+    for fold in region["folds"]:
+        np.testing.assert_allclose(fold["values"], region["edited"], rtol=64 * _U)
+    assert region["spread"] <= 64 * _U
+
+
+def test_run_cv_is_refused_with_its_reason(cv_frame, cv_fit):
+    from superglm.editor.cv import ROWS_MISMATCH
+
+    X, y, w = cv_frame
+    model, supplied = cv_fit
+    waiting = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    waiting.stage_structural("collapse", "region", {"levels": ["B", "C"], "group_label": None})
+    mismatched = EditorSession.from_model(
+        model, cv=supplied, cv_data=(X.iloc[:399], y[:399], w[:399])
+    )
+    seen = {}
+    for name, session in {"waiting": waiting, "mismatched": mismatched}.items():
+        widget = session.widget()
+        try:
+            report = widget._report("cv")
+            seen[name] = (report, _post_error(f"{widget.url}/job_start", {"kind": "cv"}))
+        finally:
+            widget.close()
+
+    report, refused = seen["waiting"]
+    assert report["run_cv"] == {
+        "available": False,
+        "reason": "Refit first: 1 change is waiting.",
+        "note": None,
+    }
+    assert refused == (400, {"error": "Refit first: 1 change is waiting."})
+    assert report["final_fit"]["note"] == "1 waiting change is not included."
+    report, refused = seen["mismatched"]
+    assert report["run_cv"]["reason"] == ROWS_MISMATCH.format(rows=399, expected=400)
+    assert refused == (400, {"error": report["run_cv"]["reason"]})
+
+
+def test_run_cv_cancelled_mid_run_publishes_nothing(cv_frame, cv_fit, fit_rows, monkeypatch):
+    from superglm.editor.jobs import JobContext
+
+    model, supplied = cv_fit
+    widget = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame)).widget()
+    progress = JobContext.progress
+
+    def cancel_before_the_second_fold(self, phase, **details):
+        progress(self, phase, **details)
+        if details.get("fold") == 2:
+            widget._job_cancel(self.job_id)
+
+    monkeypatch.setattr(JobContext, "progress", cancel_before_the_second_fold)
+    try:
+        started = _post_json(f"{widget.url}/job_start", {"kind": "cv"})
+        finished = _post_json(
+            f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True}
+        )
+        report = widget._report("cv")
+    finally:
+        widget.close()
+
+    assert finished["status"] == "cancelled"
+    assert [entry["fold"] for entry in finished["progress"]] == [1, 2]
+    assert len(fit_rows) == 1
+    assert [result["origin"] for result in report["results"]] == ["supplied"]
+    assert report["relativities"]["origin"] == "supplied"
+    assert report["jobs"]["cv"]["status"] == "cancelled"
+
+
+def test_run_cv_result_is_dropped_when_the_model_changes_mid_run(cv_frame, cv_fit, monkeypatch):
+    from superglm.editor.cv import SUPERSEDED
+    from superglm.editor.jobs import JobContext
+
+    model, supplied = cv_fit
+    widget = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame)).widget()
+    progress = JobContext.progress
+
+    def edit_during_the_first_fold(self, phase, **details):
+        progress(self, phase, **details)
+        if details.get("fold") == 1:
+            widget._drag("region", [1], delta=0.1)
+
+    monkeypatch.setattr(JobContext, "progress", edit_during_the_first_fold)
+    try:
+        started = _post_json(f"{widget.url}/job_start", {"kind": "cv"})
+        finished = _post_json(
+            f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True}
+        )
+        report = widget._report("cv")
+    finally:
+        widget.close()
+
+    assert (finished["status"], finished["error"]) == ("failed", SUPERSEDED)
+    assert [result["origin"] for result in report["results"]] == ["supplied"]
+
+
+def test_final_fit_refits_train_and_validation_and_export_offers_it(cv_frame, cv_fit, fit_rows):
+    from superglm.editor.cv import FINAL_NOT_RUN, FINAL_STALE
+    from superglm.editor.errors import EditorValueError
+    from superglm.editor.persistence import joblib_load_bytes
+
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.select_levels("region", ["C"])
+    session.shift("region", 0.1)
+    edited = session.terms["region"].edited_log_effect.copy()
+    widget = session.widget()
+    try:
+        with pytest.raises(EditorValueError) as before:
+            widget._export_bytes("final")
+        started = _post_json(f"{widget.url}/job_start", {"kind": "final_fit"})
+        finished = _post_json(
+            f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True}
+        )
+        state = _get_json(f"{widget.url}/state")
+        section = widget._report("final")["final_fit"]
+        exported = widget._export_bytes("final")
+        history = session.editor_history_records()
+        kept = widget._final_fit.model
+        widget._drag("region", [0], delta=0.05)
+        with pytest.raises(EditorValueError) as stale:
+            widget._export_bytes("final")
+    finally:
+        widget.close()
+
+    assert before.value.public_message == FINAL_NOT_RUN
+    assert finished["status"] == "done"
+    # Train and validation rows, one fit; the test split stays held out (D6).
+    assert finished["result"]["n_rows"] == 500
+    assert fit_rows == [500]
+    assert state["final_fit"] == {"available": True, "stale": False}
+    assert (section["n_rows"], section["splits"], section["carried"]) == (
+        500,
+        ["train", "validation"],
+        ["region"],
+    )
+    assert exported.filename == "superglm_final_model.joblib"
+    final_model = joblib_load_bytes(exported.data)
+    # Like the edited model's export, it carries the editor's history; the
+    # Final fit model the widget keeps is left without it.
+    assert final_model._editor_history == history
+    assert not hasattr(kept, "_editor_history")
+    probe = pd.DataFrame({"age": [40.0] * 3, "power": [0.0] * 3, "region": ["A", "B", "C"]})
+    log_mu = np.log(final_model.predict(probe))
+    # The hand edit is put back as set: the final model's region relativities are the edited ones.
+    np.testing.assert_allclose(
+        log_mu - log_mu[0],
+        edited - edited[0],
+        rtol=0.0,
+        atol=64 * _U * max(1.0, np.max(np.abs(log_mu))),
+    )
+    assert stale.value.public_message == FINAL_STALE
+
+
+def test_run_cv_takes_the_in_force_fit_method_and_the_supplied_scorers(cv_frame, cv_fit):
+    from superglm.editor.cv import capture_cv_run
+
+    X, y, w = cv_frame
+    model, supplied = cv_fit
+    reml = _model().fit_reml(X.iloc[:400], y[:400], sample_weight=w[:400])
+    scores = supplied.fold_scores
+    deviance_only = dataclasses.replace(supplied, fold_scores=scores.drop(columns=["gini", "nll"]))
+    no_builtins = dataclasses.replace(
+        supplied, fold_scores=scores.drop(columns=["deviance", "gini", "nll"])
+    )
+
+    def plan(fitted, result):
+        return capture_cv_run(EditorSession.from_model(fitted, cv=result, **_splits(cv_frame)))
+
+    assert plan(model, supplied).fit_mode == "fit"
+    assert plan(reml, supplied).fit_mode == "fit_reml"
+    assert plan(model, deviance_only).scoring == ("deviance",)
+    assert plan(model, no_builtins).scoring == ("deviance", "gini", "nll")
+
+
+@pytest.mark.filterwarnings(_EXPECTED_PIN)
+def test_run_cv_scores_every_fold_when_one_fold_never_trained_on_a_level(rare_level):
+    """Run CV on rows where region D sits in the first fold's test rows only.
+
+    cross_validate's shared universe gives that fold D with no training
+    rows, so it holds D pinned. The edit, which moves D too, still lands on
+    the rest of that fold's region: every fold scores, and the first fold's
+    region curve has a gap at D instead of a value.
+    """
+    from superglm.editor.cv import capture_cv_run, run_cv
+
+    X_rows, y_rows, w_rows, supplied = rare_level
+    model = _model().fit(X_rows, y_rows, sample_weight=w_rows)
+    # The fingerprint hashes y and the weights, which D did not change.
+    session = EditorSession.from_model(model, cv=supplied, train_data=(X_rows, y_rows, w_rows))
+    session.select_levels("region", ["C", "D"])
+    session.shift("region", 0.1)
+    assert session.cv_check.reason is None
+
+    run = run_cv(capture_cv_run(session), _Context())
+
+    for name in ("deviance", "gini", "nll"):
+        assert np.all(np.isfinite(run.result.fold_scores[name]))
+    region = next(item for item in run.terms if item["name"] == "region")
+    assert region["levels"] == ["A", "B", "C", "D"]
+    folds = {fold["label"]: np.asarray(fold["values"]) for fold in region["folds"]}
+    assert list(folds) == ["Fold 1", "Fold 2", "Fold 3"]
+    assert np.isnan(folds["Fold 1"][3])
+    assert not np.isnan(folds["Fold 2"]).any() and not np.isnan(folds["Fold 3"]).any()
+    # Each fold carries the edit wherever it has a value.
+    for values in folds.values():
+        valued = ~np.isnan(values)
+        np.testing.assert_allclose(values[valued], region["edited"][valued], rtol=64 * _U)

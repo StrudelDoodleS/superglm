@@ -15,15 +15,27 @@ Every refusal is a fixed sentence (``editor/errors.py``).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import as_eager_frame
+from superglm.editor.carry import model_with_edited_curves
+from superglm.editor.errors import EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
-from superglm.model_selection import CrossValidationResult, _data_fingerprint
+from superglm.editor.refit import fit_refit_model
+from superglm.editor.terms import resolve_refit_method
+from superglm.model_selection import (
+    _BUILTIN_SCORERS,
+    _POOLED_PARTS,
+    CrossValidationResult,
+    _data_fingerprint,
+    cross_validate,
+)
 from superglm.plotting.comparison import _feature_beta, _score_levels
 from superglm.plotting.curve_similarity import _summarize_against_fold_mean
 
@@ -59,12 +71,17 @@ NO_ESTIMATORS = (
 )
 NO_FINAL_ROWS = "Final fit needs train_data, or a model that kept its fit data."
 TRAIN_ONLY = "No validation data was supplied, so Final fit uses the train rows only."
+SUPERSEDED = "The model changed while the job ran, so its result was not kept. Run it again."
+MIXED_FRAMES = "Train and validation data must both be pandas or both be Polars data frames."
+FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
+FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
 
 _METRICS = (
     ("deviance", "Mean deviance", True),
     ("gini", "Gini", False),
     ("nll", "Negative log-likelihood", True),
 )
+_DEFAULT_SCORING = tuple(name for name, _label, _lower in _METRICS)
 _FOLD_COLUMNS = ("fold", "n_train", "n_test", "fit_time_s", "converged", "n_iter", "effective_df")
 
 
@@ -527,3 +544,237 @@ def _relativities(view: CVTabView) -> dict[str, Any]:
         "note": None,
         "terms": fold_term_items(view.terms, curves),
     }
+
+
+# ── Run CV ───────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CVRunPlan:
+    """Everything Run CV reads, captured under the widget lock."""
+
+    model: Any
+    model_revision: int
+    rows: EvaluationDataset
+    folds: tuple[tuple[NDArray[np.intp], NDArray[np.intp]], ...]
+    terms: dict[str, EditableTerm]
+    edited: dict[str, EditableTerm]
+    fit_mode: str
+    scoring: tuple[str, ...]
+    splitter: str | None
+    n_points: int
+
+    def is_current(self, session) -> bool:
+        return session.model_revision == self.model_revision and session.model is self.model
+
+
+def capture_cv_run(session) -> CVRunPlan:
+    """Capture Run CV's inputs; refuse with the tab's reason while it is disabled."""
+    reason = run_cv_reason(session)
+    if reason is not None:
+        raise EditorValueError(reason)
+    cv = session.cv
+    terms = {name: term.copy() for name, term in session.terms.items()}
+    supplied = tuple(name for name in _DEFAULT_SCORING if name in cv.fold_scores.columns)
+    return CVRunPlan(
+        model=session.model,
+        model_revision=session.model_revision,
+        rows=session.cv_check.rows,
+        folds=tuple(
+            (np.asarray(train, dtype=np.intp), np.asarray(test, dtype=np.intp))
+            for train, test in cv.fold_indices
+        ),
+        terms=terms,
+        edited={name: terms[name] for name in session.edited_terms()},
+        fit_mode=resolve_refit_method(session.model, "auto"),
+        scoring=supplied or _DEFAULT_SCORING,
+        splitter=cv.splitter,
+        n_points=session.n_points,
+    )
+
+
+def run_cv(plan: CVRunPlan, context) -> CVRun:
+    """Replay the stored folds on the in-force structure with the hand edits put back."""
+    recorder = _FoldRecorder(plan, context)
+    result = cross_validate(
+        plan.model,
+        plan.rows.X,
+        plan.rows.y,
+        cv=StoredFolds(plan.folds, before_fold=recorder.before_fold),
+        sample_weight=plan.rows.sample_weight,
+        offset=plan.rows.offset,
+        fit_mode=plan.fit_mode,
+        scoring=recorder.score,
+    )
+    context.check()
+    context.progress("curves")
+    return CVRun(
+        result=replace(result, pooled_scores=recorder.pooled_scores(), splitter=plan.splitter),
+        terms=fold_term_items(plan.terms, recorder.curves),
+        model_revision=plan.model_revision,
+        carried=tuple(sorted(plan.edited)),
+    )
+
+
+class _FoldRecorder:
+    """Run CV's per-fold hooks: progress and cancel between folds, edits before scoring.
+
+    ``cross_validate`` fits each fold and hands the fitted model to
+    :meth:`score`, which puts the hand edits back (D5) and computes the
+    built-in scores on that edited model. A callable scorer's dict is not
+    pooled by ``cross_validate``, so the pooled deviance and NLL are summed
+    here from the same numerator and denominator parts it pools.
+    """
+
+    def __init__(self, plan: CVRunPlan, context) -> None:
+        self._plan = plan
+        self._context = context
+        self._fold = -1
+        self._frame = as_eager_frame(plan.rows.X)
+        self._y = np.asarray(plan.rows.y, dtype=np.float64)
+        self._totals = {name: [0.0, 0.0] for name in plan.scoring if name in _POOLED_PARTS}
+        self.curves: dict[int, dict[str, NDArray[np.float64]]] = {}
+
+    def before_fold(self, index: int) -> None:
+        self._context.progress("fold", fold=index + 1, n_folds=len(self._plan.folds))
+        self._context.check()
+        self._fold = index
+
+    def score(self, model, X, y, *, sample_weight=None, offset=None) -> dict[str, float]:
+        if self._plan.edited:
+            train = self._plan.folds[self._fold][0]
+            model = model_with_edited_curves(
+                model,
+                self._plan.edited,
+                self._frame.take_rows(train),
+                self._y[train],
+                _take(self._plan.rows.sample_weight, train),
+                _take(self._plan.rows.offset, train),
+                n_points=self._plan.n_points,
+            )
+        scores: dict[str, float] = {}
+        parts: dict[str, tuple[float, float]] = {}
+        for name in self._plan.scoring:
+            pooled = _POOLED_PARTS.get(name)
+            if pooled is None:
+                scorer = _BUILTIN_SCORERS[name]
+                scores[name] = float(
+                    scorer(model, X, y, sample_weight=sample_weight, offset=offset)
+                )
+                continue
+            numerator, denominator = pooled(model, X, y, sample_weight=sample_weight, offset=offset)
+            parts[name] = (numerator, denominator)
+            scores[name] = numerator / denominator
+        # Only a fold that scored completely joins the pooled totals.
+        for name, (numerator, denominator) in parts.items():
+            self._totals[name][0] += numerator
+            self._totals[name][1] += denominator
+        self.curves[self._fold] = fold_log_curves(model, self._plan.terms)
+        return scores
+
+    def pooled_scores(self) -> dict[str, float]:
+        return {
+            name: numerator / denominator
+            for name, (numerator, denominator) in self._totals.items()
+            if denominator > 0.0
+        }
+
+
+def _take(values, rows: NDArray[np.intp]):
+    return None if values is None else np.asarray(values, dtype=np.float64)[rows]
+
+
+# ── Final fit ────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FinalFitPlan:
+    """Everything Final fit reads, captured under the widget lock."""
+
+    model: Any
+    model_revision: int
+    datasets: tuple[EvaluationDataset, ...]
+    edited: dict[str, EditableTerm]
+    pending: int
+    n_points: int
+
+    def is_current(self, session) -> bool:
+        return session.model_revision == self.model_revision and session.model is self.model
+
+
+def capture_final_fit(session) -> FinalFitPlan:
+    """Capture Final fit's inputs; refuse when there are no training rows."""
+    datasets = final_fit_datasets(session)
+    if not datasets:
+        raise EditorValueError(NO_FINAL_ROWS)
+    return FinalFitPlan(
+        model=session.model,
+        model_revision=session.model_revision,
+        datasets=datasets,
+        edited={name: session.terms[name].copy() for name in session.edited_terms()},
+        pending=len(session.pending),
+        n_points=session.n_points,
+    )
+
+
+def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
+    """Refit the in-force structure on train and validation rows, then put the edits back."""
+    X, y, sample_weight, offset = _union_rows(plan.datasets)
+    context.progress("fitting", n_rows=int(y.size))
+    context.check()
+    model = plan.model.clone_unfitted()
+    fit_refit_model(
+        plan.model,
+        model,
+        method="auto",
+        X=X,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
+    context.check()
+    if plan.edited:
+        context.progress("carrying", terms=sorted(plan.edited))
+        model = model_with_edited_curves(
+            model, plan.edited, X, y, sample_weight, offset, n_points=plan.n_points
+        )
+        context.check()
+    return FinalFit(
+        model=model,
+        model_revision=plan.model_revision,
+        n_rows=int(y.size),
+        splits=tuple(dataset.name for dataset in plan.datasets),
+        carried=tuple(sorted(plan.edited)),
+        pending=plan.pending,
+    )
+
+
+def _union_rows(datasets: Sequence[EvaluationDataset]):
+    """The splits' rows stacked in order: one frame, response, weight and offset."""
+    frames = [as_eager_frame(dataset.X) for dataset in datasets]
+    backends = {frame.backend for frame in frames}
+    if len(backends) > 1:
+        raise EditorValueError(MIXED_FRAMES)
+    if len(frames) == 1:
+        X = frames[0].native
+    elif backends == {"pandas"}:
+        X = pd.concat([frame.native for frame in frames], ignore_index=True)
+    else:
+        import polars as pl
+
+        X = pl.concat([frame.native for frame in frames], how="vertical_relaxed")
+    y = np.concatenate([np.asarray(dataset.y, dtype=np.float64) for dataset in datasets])
+    return X, y, _stacked(datasets, "sample_weight", 1.0), _stacked(datasets, "offset", 0.0)
+
+
+def _stacked(datasets: Sequence[EvaluationDataset], name: str, fill: float):
+    """One column across the splits, ``fill`` where a split lacks it; None if all do."""
+    columns = [getattr(dataset, name) for dataset in datasets]
+    if all(column is None for column in columns):
+        return None
+    return np.concatenate(
+        [
+            np.full(dataset.n_obs, fill) if column is None else np.asarray(column, dtype=float)
+            for dataset, column in zip(datasets, columns, strict=True)
+        ]
+    )

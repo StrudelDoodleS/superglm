@@ -23,7 +23,17 @@ import numpy as np
 from superglm.editor import metrics as metrics_module
 from superglm.editor import persistence, rating_preview
 from superglm.editor.apply import materialize_edit_request
-from superglm.editor.cv import CVRun, FinalFit
+from superglm.editor.cv import (
+    FINAL_NOT_RUN,
+    FINAL_STALE,
+    SUPERSEDED,
+    CVRun,
+    FinalFit,
+    capture_cv_run,
+    capture_final_fit,
+    run_cv,
+    run_final_fit,
+)
 from superglm.editor.errors import EditorClientError, EditorKeyError, EditorValueError
 from superglm.editor.evaluation import (
     default_metrics_dataset,
@@ -65,11 +75,14 @@ _LOGGER = logging.getLogger(__name__)
 _EXPORT_MEDIA_TYPES = {
     "joblib": "application/octet-stream",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "final": "application/octet-stream",
 }
 _EXPORT_DEFAULT_FILENAMES = {
     "joblib": "superglm_edited_model.joblib",
     "xlsx": "superglm_rating_tables.xlsx",
+    "final": "superglm_final_model.joblib",
 }
+_EXPORT_SUFFIXES = {"joblib": ".joblib", "xlsx": ".xlsx", "final": ".joblib"}
 _EXCEL_NEEDS_TRAINING_DATA = (
     "Excel export requires train_data or retained fit data; "
     "validation/test data are not substituted."
@@ -94,6 +107,8 @@ def _normalise_export_format(format: str) -> str:
         return "joblib"
     if normalized in {"xlsx", "excel"}:
         return "xlsx"
+    if normalized in {"final", "final_fit"}:
+        return "final"
     raise EditorValueError(f"Unsupported export format: {format!r}")
 
 
@@ -105,7 +120,7 @@ def _safe_export_filename(format: str, filename: str | None) -> str:
     if any(ord(character) < 32 or ord(character) == 127 for character in name):
         raise EditorValueError("filename must not contain control characters")
     suffix = Path(name).suffix.lower()
-    expected = f".{format}"
+    expected = _EXPORT_SUFFIXES[format]
     if suffix and suffix != expected:
         raise EditorValueError(f"filename extension must be {expected} for {format} exports")
     if not suffix:
@@ -145,7 +160,7 @@ class EditorWidget:
         self._job_starters: dict[
             str,
             Callable[[], tuple[Callable[[JobContext], Any], Callable[[Any], dict[str, Any]]]],
-        ] = {}
+        ] = {"cv": self._cv_job, "final_fit": self._final_fit_job}
         self._rating_preview: RatingPreview | None = None
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
@@ -205,6 +220,12 @@ class EditorWidget:
                 # With the live edits, this says whether Revert has anything to
                 # change: a structural step or a re-profile each make it False.
                 "in_force_is_original": self.session.model is self.session.reference_model,
+                # Export offers the Final fit model while it is current (D6).
+                "final_fit": {
+                    "available": self._final_fit is not None,
+                    "stale": self._final_fit is not None
+                    and self._final_fit.model_revision != self.session.model_revision,
+                },
             }
             self._state_generation += 1
             state["state_generation"] = self._state_generation
@@ -585,6 +606,7 @@ class EditorWidget:
             if revision != self.session.model_revision:
                 return _superseded_payload(revision, request_sequence)
             datasets = tuple(evaluation_datasets(self.session))
+            final_fit = self._final_fit
             reference_model = getattr(self.session, "reference_model", self.session.model)
             if reference_model is None:
                 return report_payload(
@@ -626,6 +648,7 @@ class EditorWidget:
             model_revision=revision,
             request_sequence=request_sequence,
             model_override=summary_model,
+            final_fit=final_fit,
         )
         with self._lock:
             if revision != self.session.model_revision:
@@ -654,8 +677,12 @@ class EditorWidget:
         safe_name = _safe_export_filename(canonical_format, filename)
 
         validation_scope: str | None = None
-        if canonical_format == "joblib":
-            model, revision = self._current_model_for_evidence()
+        if canonical_format in {"joblib", "final"}:
+            model, revision = (
+                self._final_fit_for_export()
+                if canonical_format == "final"
+                else self._current_model_for_evidence()
+            )
             if model is None:
                 raise RuntimeError("Export request was superseded.")
             with self._lock:
@@ -750,6 +777,16 @@ class EditorWidget:
         if payload is None:
             return RatingPreview(revision, None, rating_preview.SUPERSEDED)
         return RatingPreview(revision, payload, None)
+
+    def _final_fit_for_export(self):
+        """The Final fit model and its revision; refused before a run or once stale."""
+        with self._lock:
+            final = self._final_fit
+            if final is None:
+                raise EditorValueError(FINAL_NOT_RUN)
+            if final.model_revision != self.session.model_revision:
+                raise EditorValueError(FINAL_STALE)
+            return final.model, final.model_revision
 
     def _export_file(
         self,
@@ -993,6 +1030,32 @@ class EditorWidget:
         with self._lock:
             work, publish = starter()
         return self._jobs.status(self._jobs.start(kind, work, publish))
+
+    def _cv_job(self):
+        """Run CV on the in-force structure (D5, D7); the caller holds the lock."""
+        plan = capture_cv_run(self.session)
+
+        def publish(run: CVRun) -> dict[str, Any]:
+            with self._lock:
+                if not plan.is_current(self.session):
+                    raise EditorValueError(SUPERSEDED)
+                self._cv_run = run
+            return {"model_revision": plan.model_revision, "n_folds": len(plan.folds)}
+
+        return (lambda context: run_cv(plan, context)), publish
+
+    def _final_fit_job(self):
+        """Final fit on train and validation rows (D6); the caller holds the lock."""
+        plan = capture_final_fit(self.session)
+
+        def publish(final: FinalFit) -> dict[str, Any]:
+            with self._lock:
+                if not plan.is_current(self.session):
+                    raise EditorValueError(SUPERSEDED)
+                self._final_fit = final
+            return {"model_revision": plan.model_revision, "n_rows": final.n_rows}
+
+        return (lambda context: run_final_fit(plan, context)), publish
 
     def _job_status(self, job_id: str, *, wait: bool = False) -> dict[str, Any]:
         return self._jobs.status(job_id, wait=wait)
