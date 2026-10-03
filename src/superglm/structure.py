@@ -106,6 +106,10 @@ _UNIVERSE = (
     "The levels of {feature!r} in the structure are not the levels the model declares for "
     "it; apply the structure to a model declared with the same levels."
 )
+_OUTSIDE_DECLARED = (
+    "The data holds levels of {feature!r} that the model's levels= leaves out: {levels}; "
+    "add them to its levels= or leave those rows out."
+)
 _NOT_APPLIED = (
     "The structure could not be applied to {feature!r}: the model's declaration of it does "
     "not accept these decisions."
@@ -331,7 +335,8 @@ class Structure:
             levels of a grouped term that the structure does not list. Those
             go where the structure sends new levels, into its ``unseen`` group,
             or each into a level of its own when that is ``"error"`` or
-            ``"base"``, with one warning per feature. Without ``X`` a grouped
+            ``"base"``, with one warning per feature; a model that declares
+            its levels with ``levels=`` refuses them. Without ``X`` a grouped
             term covers only the structure's levels, and a fit on data holding
             others refuses them.
 
@@ -492,13 +497,16 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, frame):
 
     levels = list(entry.levels)
     groups = {label: list(members) for label, members in entry.groups.items()}
-    if groups and frame is not None and name in frame.columns:
-        levels, groups = _placed_new_levels(name, entry, levels, groups, frame.column_array(name))
-    grouping = _grouping(levels, groups, order=[str(level) for level in levels])
     declared = spec._declared_levels
-    if grouping is not None and declared is not None:
-        if any(str(level) not in grouping.original_to_group for level in declared):
-            raise StructureError(_UNIVERSE.format(feature=name))
+    # A grouping covers its levels at fit, so under one the levels the model
+    # declares must be the structure's exactly: a level the grouping missed
+    # would be refused, and a member the declaration leaves out admitted.
+    if groups and declared is not None and _texts(declared) != _texts(levels):
+        raise StructureError(_UNIVERSE.format(feature=name))
+    if groups and frame is not None and name in frame.columns:
+        column = frame.column_array(name)
+        levels, groups = _placed_new_levels(name, entry, levels, groups, column, declared)
+    grouping = _grouping(levels, groups, order=[str(level) for level in levels])
     # A grouped term is declared with the structure's universe, as levels=
     # declares one: a group or reference whose levels have no rows in the
     # next fit is then pinned to the base with the library's warning, not
@@ -522,12 +530,15 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, frame):
     )
 
 
-def _placed_new_levels(name: str, entry: FeatureStructure, levels: list, groups: dict, column):
+def _placed_new_levels(
+    name: str, entry: FeatureStructure, levels: list, groups: dict, column, declared
+):
     """``levels`` and ``groups`` with the column's unlisted levels placed where new levels go.
 
     Into the ``unseen`` group when it names one, else each as a level of its
     own; one warning names them and their rows. Missing values are left to
-    the fit, which refuses them.
+    the fit, which refuses them. A model that ``declared`` its levels refuses
+    unlisted ones: placing them would widen its declaration.
     """
     import pandas as pd
 
@@ -539,6 +550,8 @@ def _placed_new_levels(name: str, entry: FeatureStructure, levels: list, groups:
         return levels, groups
     new = list({str(value): value for value in values[unlisted]}.values())
     new.sort(key=str)
+    if declared is not None:
+        raise StructureError(_OUTSIDE_DECLARED.format(feature=name, levels=new))
     rows = int(unlisted.sum())
     if entry.unseen in _POLICIES:
         destination = "are fitted as levels of their own"
@@ -810,6 +823,11 @@ def _check_groups(name: str, groups, texts: list[str]) -> set[str]:
         if label in known and label not in {str(member) for member in members}:
             raise StructureError(_GROUP_NAME.format(group=label, feature=name))
     return set(groups) | {text for text in texts if text not in owner}
+
+
+def _texts(levels) -> set[str]:
+    """Levels as the text a grouping matches them by."""
+    return {str(level) for level in levels}
 
 
 def _check_numeric_range(name: str, r: PolynomialRange) -> None:

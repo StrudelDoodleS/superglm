@@ -643,6 +643,12 @@ APPLY_REFUSALS = {
         "The levels of 'brand' in the structure are not the levels the model declares for it; "
         "apply the structure to a model declared with the same levels.",
     ),
+    "a group member the declared levels leave out": (
+        _brand_structure,
+        lambda: _plain(brand=Categorical(base="first", levels=BRANDS[:-1])),
+        "The levels of 'brand' in the structure are not the levels the model declares for it; "
+        "apply the structure to a model declared with the same levels.",
+    ),
 }
 
 
@@ -653,6 +659,18 @@ def test_apply_refuses_with_its_fixed_sentence(structure, model, sentence):
     with pytest.raises(StructureError) as refused:
         structure().apply(model())
     assert str(refused.value) == sentence
+
+
+def test_apply_refuses_levels_in_x_that_the_declared_levels_leave_out():
+    # Placing them in a group would widen the universe the model declares.
+    next_year, _ = _frame(seed=2027, brands=[*BRANDS, "B99"])
+    declared = _plain(brand=Categorical(base="first", levels=BRANDS))
+    with pytest.raises(StructureError) as refused:
+        _brand_structure().apply(declared, X=next_year)
+    assert str(refused.value) == (
+        "The data holds levels of 'brand' that the model's levels= leaves out: ['B99']; "
+        "add them to its levels= or leave those rows out."
+    )
 
 
 def test_an_unexpected_library_error_becomes_the_features_refusal(monkeypatch):
