@@ -150,6 +150,11 @@ input[type="number"] {
   width: 92px;
   accent-color: var(--blue);
 }
+/* Narrower in the toolbar, so its row keeps the Chart / Table switch, Contrib
+   and Build together. */
+.handle-count input {
+  width: 64px;
+}
 .handle-count output,
 .build-duration output {
   min-width: 18px;

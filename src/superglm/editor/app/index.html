@@ -235,10 +235,12 @@
           <input id="handleCount" type="range" min="3" max="12" value="12">
           <output id="handleCountValue">12</output>
         </label>
-        <button id="basisToggle" type="button" hidden aria-pressed="false"
-          title="Show spline basis contributions">Contrib</button>
-        <button id="contribPlay" type="button" hidden
-          title="Animate basis contributions into the spline">Build</button>
+        <span id="contribTools" class="contrib-tools" hidden>
+          <button id="basisToggle" type="button" hidden aria-pressed="false"
+            title="Show spline basis contributions">Contrib</button>
+          <button id="contribPlay" type="button" hidden
+            title="Animate basis contributions into the spline">Build</button>
+        </span>
         <div class="toolbar-actions">
         <button id="ciToggle" type="button" aria-pressed="false" aria-label="Reference CI"
           title="Show the fitted term's confidence band">Reference CI</button>

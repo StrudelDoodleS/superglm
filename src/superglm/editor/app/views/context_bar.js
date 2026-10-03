@@ -16,6 +16,34 @@ const REFERENCE_POLICY = Object.freeze({
 /** The status line's note while changes wait and nothing is selected. */
 const FROM_LAST_REFIT = "the curve and metrics are from the last refit";
 
+/**
+ * Whether the Chart / Table switch steps to the end of the toolbar row:
+ * Contrib and Build are shown and, with the switch in its place, are not on
+ * its row. Rows are told apart by vertical overlap.
+ * @param {{top:number, bottom:number}} toggle the switch in its place
+ * @param {{top:number, bottom:number}|null} tools Contrib and Build, null when not shown
+ */
+export function viewToggleGoesLast(toggle, tools) {
+  return tools !== null && !(tools.top < toggle.bottom && toggle.top < tools.bottom);
+}
+
+/**
+ * Contrib and Build never part; when the switch's row cannot hold them too,
+ * the switch gives way to the end of the row. It is measured in its place
+ * each time, so the outcome does not depend on where it stood before.
+ * @param {HTMLElement} bar the context bar @param {HTMLElement} toggle the Chart / Table switch
+ * @param {HTMLElement} tools the group holding Contrib and Build
+ */
+export function placeTermViewToggle(bar, toggle, tools) {
+  bar.dataset.viewToggle = "inline";
+  const shown = tools.getClientRects().length > 0;
+  const last = viewToggleGoesLast(
+    toggle.getBoundingClientRect(),
+    shown ? tools.getBoundingClientRect() : null,
+  );
+  if (last) bar.dataset.viewToggle = "last";
+}
+
 /** @param {number} count */
 export function waitingLabel(count) {
   return `${count} ${count === 1 ? "change" : "changes"} waiting for refit`;

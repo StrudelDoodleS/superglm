@@ -52,7 +52,7 @@ import {
 } from "./summary.js";
 import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
-import { renderContextBar } from "./views/context_bar.js";
+import { placeTermViewToggle, renderContextBar } from "./views/context_bar.js";
 import { bindExportDialog } from "./views/export_dialog.js";
 import {
   bindFeatureList,
@@ -155,6 +155,7 @@ const handleCount = document.getElementById("handleCount");
 const handleCountValue = document.getElementById("handleCountValue");
 const basisToggle = document.getElementById("basisToggle");
 const contribPlay = document.getElementById("contribPlay");
+const contribTools = document.getElementById("contribTools");
 const resetZoom = document.getElementById("resetZoom");
 const ciToggle = document.getElementById("ciToggle");
 const resetOrder = document.getElementById("resetOrder");
@@ -407,6 +408,17 @@ syncViewport();
 // redraw never changes the chart's layout, so it cannot loop. A hidden chart
 // keeps its drawing until it is shown again.
 new ResizeObserver(redrawChartToFit).observe(svg);
+
+// The toolbar's rows change with its width and its fonts, not with where the
+// Chart / Table switch stands, which changes only its height; so a width that
+// has not changed asks for nothing, and placing the switch cannot loop.
+let contextBarWidth = 0;
+new ResizeObserver(([entry]) => {
+  if (entry.contentRect.width === contextBarWidth) return;
+  contextBarWidth = entry.contentRect.width;
+  placeTermViewToggle(contextBar, termViewToggle, contribTools);
+}).observe(contextBar);
+document.fonts?.ready.then(() => placeTermViewToggle(contextBar, termViewToggle, contribTools));
 
 function redrawChartToFit() {
   const drawn = svg.viewBox.baseVal;
@@ -1012,6 +1024,7 @@ function renderChartWorkspace() {
       range: selectionSpanRange(term, selection, chartContext)
     }
   );
+  placeTermViewToggle(contextBar, termViewToggle, contribTools);
 }
 
 // Table puts the term's rating-table block where the chart was; the chart
@@ -1555,6 +1568,7 @@ function updateHandleCount(term) {
   const canShowContrib = active && Array.isArray(controls.basis) && controls.basis.length > 0;
   basisToggle.hidden = !canShowContrib;
   contribPlay.hidden = !canShowContrib;
+  contribTools.hidden = !canShowContrib;
   contribPlay.disabled = buildFrame !== null;
   basisToggle.setAttribute("aria-pressed", String(Boolean(view.showContrib && canShowContrib)));
   if (!canShowContrib) {

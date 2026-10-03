@@ -193,3 +193,51 @@ def test_handles_draw_the_level_dots_on_the_spline_and_carry_them_through_a_drag
             arg=AGE_BANDS,
         )
         dots_on_curve()
+
+
+# The Chart / Table switch, Contrib and Build as [left, right, top, bottom],
+# measured once the toolbar has settled after a resize.
+_TOOLBAR_BOXES = """async () => {
+    await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+    return ['#termViewToggle', '#basisToggle', '#contribPlay'].map(selector => {
+        const box = document.querySelector(selector).getBoundingClientRect();
+        return [box.left, box.right, box.top, box.bottom];
+    });
+}"""
+
+
+def _same_row(a, b) -> bool:
+    return a[2] < b[3] and b[2] < a[3]
+
+
+def test_contrib_and_build_share_a_toolbar_row_and_the_view_switch_gives_way(open_editor_page):
+    # Mutation checks: without the switch stepping to the end of the row, at
+    # 1440 px it stays ahead of Contrib and Build, on the row above them; with
+    # the handle-count slider at its old 92 px, the 1600 px row is 4 px short
+    # and the switch has to give way there too.
+    wide = {"width": 1600, "height": 900}
+    with open_editor_page(selected_term="age_band", viewport=wide) as (page, _session):
+        _handles_tool(page).click()
+        page.locator("#contribPlay").wait_for()
+
+        def side_by_side(contrib, build):
+            assert _same_row(contrib, build)
+            assert 0 <= build[0] - contrib[1] <= 8
+
+        # At 1600 px the switch, Contrib and Build share one row, in place.
+        switch, contrib, build = page.evaluate(_TOOLBAR_BOXES)
+        side_by_side(contrib, build)
+        assert _same_row(switch, contrib) and switch[1] <= contrib[0]
+
+        # Too narrow for that row: Contrib and Build stay together, and the
+        # switch steps to the end of the row after them.
+        page.set_viewport_size({"width": 1440, "height": 900})
+        switch, contrib, build = page.evaluate(_TOOLBAR_BOXES)
+        side_by_side(contrib, build)
+        assert switch[2] >= build[3] or (_same_row(switch, build) and switch[0] >= build[1])
+
+        # Room again, and the switch is back in its place.
+        page.set_viewport_size(wide)
+        switch, contrib, build = page.evaluate(_TOOLBAR_BOXES)
+        side_by_side(contrib, build)
+        assert _same_row(switch, contrib) and switch[1] <= contrib[0]

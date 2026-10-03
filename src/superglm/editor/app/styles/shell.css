@@ -172,6 +172,24 @@ body {
   padding: 0 0 2px;
 }
 
+/* Contrib and Build wrap as one. When the Chart / Table switch's row cannot
+   hold them as well, views/context_bar.js sends the switch to the end of the
+   row, ahead of the view actions, rather than part them. */
+.contrib-tools {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+
+.context-bar[data-view-toggle="last"] #termViewToggle {
+  order: 1;
+}
+
+.context-bar[data-view-toggle="last"] .toolbar-actions {
+  order: 2;
+}
+
 /* A reference a waiting change will pin, until Refit. */
 .context-chip[data-waiting="true"] {
   background: var(--sig-weak-bg);
@@ -245,7 +263,7 @@ body {
 
 /* Table view: the rating table takes the chart's place, and the controls
    that only act on the chart step aside. */
-.plot-column.is-table-view :is(#handleCountWrap, #basisToggle, #contribPlay, #ciToggle,
+.plot-column.is-table-view :is(#handleCountWrap, #contribTools, #ciToggle,
   #resetZoom, #selectionMenu) {
   display: none !important;
 }
