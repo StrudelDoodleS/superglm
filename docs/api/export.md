@@ -27,5 +27,10 @@ ranges. `Structure.apply` builds them into another model, ready to fit.
    :nosignatures:
 
    superglm.Structure
+   superglm.FeatureStructure
    superglm.read_structure
 ```
+
+A file or call it refuses raises {py:exc}`superglm.StructureError`, documented
+with the rest of the package's errors on
+[Warnings and exceptions](warnings-and-exceptions.md).

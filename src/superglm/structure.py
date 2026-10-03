@@ -373,12 +373,12 @@ class Structure:
 
 
 def read_structure(path_or_mapping) -> Structure:
-    """Read a structure file written by :meth:`Structure.to_json`.
+    """Read a structure file.
 
     Parameters
     ----------
     path_or_mapping : str, path-like or Mapping
-        The file's path, or its parsed JSON.
+        The path of a file :meth:`Structure.to_json` wrote, or its parsed JSON.
 
     Returns
     -------
