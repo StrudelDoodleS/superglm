@@ -6621,8 +6621,8 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "formatEvidenceTimingDetails" in main_js
     assert "formatTimingDetails" in main_js
     assert "Refit completed in" in main_js
-    assert 'id="advancedTiming"' in html
-    assert "advancedTiming.textContent" in main_js
+    assert 'id="settingsTiming"' in html
+    assert "settingsTiming.textContent" in main_js
     assert 'summaryNote.textContent = payload.note || ""' in main_js
     assert "collapseTransition" in main_js[:refit_start]
     assert "ungroupTransition" in main_js[:refit_start]
@@ -6686,7 +6686,7 @@ def test_editor_structural_steps_run_their_side_effects_without_asking_first():
     assert ".export-dialog" in dialog_css
 
 
-def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
+def test_editor_inspector_has_summary_history_settings_and_help_tabs():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     html = (root / "index.html").read_text()
     main_js = (root / "main.js").read_text()
@@ -6696,11 +6696,14 @@ def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
     assert 'aria-label="Model inspector"' in html
     assert ">Summary</button>" in html
     assert ">History</button>" in html
-    assert ">Advanced</button>" in html
+    assert "</svg>Settings</button>" in html
+    assert "Advanced" not in html
     assert ">Help</button>" in html
     assert "historyFrame" in html
-    assert "advancedTiming" in html
+    assert 'id="settingsPane"' in html
+    assert "settingsTiming" in html
     assert html.count('id="buildDurationWrap"') == 1
+    assert 'from "./views/settings.js"' in main_js
     assert 'from "./history.js"' in main_js
     assert ".inspector" in css
     assert ".help-pane" in css
@@ -6769,6 +6772,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "interactions.js",
             "views/inspector.js",
             "views/help_drawer.js",
+            "views/settings.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:

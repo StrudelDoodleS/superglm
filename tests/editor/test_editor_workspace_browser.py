@@ -1857,7 +1857,7 @@ def test_existing_svg_selection_operation_posts_linearise_unchanged(open_editor_
         assert session.history[-1].operation == "linear_interpolate"
 
 
-def test_inspector_uses_one_slot_for_summary_history_advanced_and_help(open_editor_page):
+def test_inspector_uses_one_slot_for_summary_history_settings_and_help(open_editor_page):
     with open_editor_page() as (page, _session):
         inspector = page.get_by_role("complementary", name="Model inspector")
 
@@ -1865,14 +1865,14 @@ def test_inspector_uses_one_slot_for_summary_history_advanced_and_help(open_edit
         assert inspector.get_by_role("tab").all_inner_texts() == [
             "Summary",
             "History",
-            "Advanced",
+            "Settings",
             "Help",
         ]
 
-        inspector.get_by_role("tab", name="Advanced").click()
-        advanced = inspector.get_by_role("tabpanel", name="Advanced")
-        assert advanced.is_visible()
-        assert advanced.get_by_label("Build animation duration").is_visible()
+        inspector.get_by_role("tab", name="Settings").click()
+        settings = inspector.get_by_role("tabpanel", name="Settings")
+        assert settings.is_visible()
+        assert settings.get_by_label("Build animation duration").is_visible()
         assert page.locator("#buildDurationWrap").count() == 1
 
         page.get_by_role("button", name="Help", exact=True).click()

@@ -99,9 +99,9 @@ There is no successful post-refit `/state` fetch.
 Every JSON response also exposes `Server-Timing: json;dur=...`, which measures JSON-safe conversion
 and serialization separately from the route's model work.
 
-The Advanced pane keeps browser request wait, synchronous store/DOM commit, and the two-frame paint
-boundary as separate timings. Metrics, summary, and report completion are recorded independently as
-panel evidence timings; they are not folded back into the blocking refit duration.
+Settings › Request timings shows browser request wait, synchronous store/DOM commit, and the
+two-frame paint boundary as separate timings. Metrics, summary, and report completion are recorded
+independently as panel evidence timings; they are not folded back into the blocking refit duration.
 
 Metrics, summaries, and reports echo the requested revision and sequence. A response is accepted
 only when both still match the panel's current request. Superseded work and late responses never

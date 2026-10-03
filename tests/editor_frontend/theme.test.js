@@ -180,3 +180,32 @@ test("the dark palette restates every colour token of the light one and no other
   assert.deepEqual(missing, []);
   assert.deepEqual([...dark].filter((name) => !light.has(name)), []);
 });
+
+test("the Settings pane reads and sets the choice, and hears every change", () => {
+  const storage = memoryStorage();
+  const button = new FakeButton();
+  const root = { dataset: {} };
+  const media = new FakeMedia(true);
+  const changes = [];
+  const control = mountThemeControl({
+    button, root, media, storage, onChange: (choice) => changes.push(choice),
+  });
+  assert.equal(control.choice(), "auto");
+
+  control.setChoice("light");
+  assert.deepEqual(
+    [control.choice(), root.dataset.theme, storage.getItem(THEME_STORAGE_KEY), button.dataset.choice],
+    ["light", "light", "light", "light"],
+  );
+  // The control's own click is reported too: Light, with a dark browser, goes to it.
+  button.click();
+  assert.equal(control.choice(), "dark");
+  control.setChoice("auto");
+  assert.equal(storage.getItem(THEME_STORAGE_KEY), null);
+  control.setChoice("sepia");
+  assert.equal(control.choice(), "auto");
+  assert.deepEqual(changes, ["light", "dark", "auto"]);
+
+  control.destroy();
+  assert.equal(button.listeners.size + media.listeners.size, 0);
+});

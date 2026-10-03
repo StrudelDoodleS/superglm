@@ -204,6 +204,14 @@ export const HELP_SECTIONS = Object.freeze([
     items: Object.freeze([
       "The theme icon in the application bar cycles through Auto, Light and Dark. Auto follows the browser's light or dark setting, which inside a notebook is not always the notebook's own; a chosen theme wins over it.",
       "The choice is kept through a reload of the page.",
+      "Settings › Follow the browser's light or dark setting goes back to Auto. Turning it off keeps the theme now showing.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Settings",
+    items: Object.freeze([
+      "Settings, in the inspector, holds preferences kept in this browser: refit after every structural change, keep the reference level when collapsing, follow the browser's light or dark setting, how groups show when a term opens, the Build animation's length, and request timings.",
+      "Where the browser blocks storage, as some private windows do, the choices last until the page closes.",
     ]),
   }),
   Object.freeze({

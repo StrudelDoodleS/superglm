@@ -185,7 +185,7 @@
  * @property {SummaryLevelDisplay} summaryLevelDisplay
  * @property {Record<string, unknown>} zoomByTerm
  * @property {Record<string, string>} groupModeByTerm
- * @property {'summary'|'history'|'advanced'|'help'} inspectorPane
+ * @property {'summary'|'history'|'settings'|'help'} inspectorPane
  * @property {boolean} inspectorOpen
  * @property {{term:string, payload:TermPayload, selection:number[]}|null} preview
  * @property {{term:string, indices:number[]}|null} selectionPreview

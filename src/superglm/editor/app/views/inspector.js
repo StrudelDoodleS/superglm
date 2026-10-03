@@ -159,7 +159,7 @@ export function renderInspector({ root, toggle, scrim, panel, open, narrow }) {
 
 /** @param {string|undefined} value @returns {InspectorPane|null} */
 function inspectorPane(value) {
-  return value === "summary" || value === "history" || value === "advanced" || value === "help"
+  return value === "summary" || value === "history" || value === "settings" || value === "help"
     ? value
     : null;
 }

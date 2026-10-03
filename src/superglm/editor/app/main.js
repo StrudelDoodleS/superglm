@@ -58,7 +58,14 @@ import {
   storeShapeJoin
 } from "./views/join_toggle.js";
 import { bindPopovers } from "./views/popover.js";
-import { mountThemeControl } from "./views/theme.js";
+import {
+  bindSettingsPane,
+  loadSettings,
+  onSettingsChange,
+  renderSettingsPane,
+  saveSettings
+} from "./views/settings.js";
+import { mountThemeControl, resolveTheme } from "./views/theme.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
 const appBar = document.getElementById("appBar");
@@ -115,8 +122,6 @@ const handleCount = document.getElementById("handleCount");
 const handleCountValue = document.getElementById("handleCountValue");
 const basisToggle = document.getElementById("basisToggle");
 const contribPlay = document.getElementById("contribPlay");
-const buildDuration = document.getElementById("buildDuration");
-const buildDurationValue = document.getElementById("buildDurationValue");
 const resetZoom = document.getElementById("resetZoom");
 const ciToggle = document.getElementById("ciToggle");
 const resetOrder = document.getElementById("resetOrder");
@@ -165,7 +170,13 @@ const summaryStatus = document.getElementById("summaryStatus");
 const summaryRetry = document.getElementById("summaryRetry");
 const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
-const advancedTiming = document.getElementById("advancedTiming");
+const settingsTiming = document.getElementById("settingsTiming");
+const settingsNodes = Object.freeze({
+  root: document.getElementById("settingsPane"),
+  buildDuration: document.getElementById("buildDuration"),
+  buildDurationValue: document.getElementById("buildDurationValue"),
+  timing: settingsTiming
+});
 const historyFrame = document.getElementById("historyFrame");
 const statusNode = document.getElementById("status");
 const uiPopover = document.getElementById("uiPopover");
@@ -191,7 +202,7 @@ const actions = createEditorActions({
   scheduleVisibleEvidence
 });
 const evidenceTiming = createEvidenceTimingTracker({
-  onComplete: () => renderAdvancedTiming()
+  onComplete: () => renderTimingReadout()
 });
 
 const undo = () => actions.executeStateMutation({
@@ -217,11 +228,38 @@ bindAppBar({
   onRevert: () => runStructuralRefit(revertTransition()),
   onRefresh: refreshFromPython
 });
-mountThemeControl({
+// Until I2: the theme key decides and "Follow the browser" mirrors it. A
+// theme chosen with the icon turns the setting off and Auto turns it on;
+// turning the setting on removes the key, and turning it off keeps the theme
+// now showing. I2's switch takes this over (S7).
+const darkMedia = window.matchMedia("(prefers-color-scheme: dark)");
+const themeControl = mountThemeControl({
   button: document.getElementById("themeAction"),
   root: document.documentElement,
-  media: window.matchMedia("(prefers-color-scheme: dark)")
+  media: darkMedia,
+  onChange: (choice) => saveSettings({ followBrowserTheme: choice === "auto" })
 });
+onSettingsChange((settings) => {
+  const choice = themeControl.choice();
+  if (settings.followBrowserTheme === (choice === "auto")) return;
+  themeControl.setChoice(
+    settings.followBrowserTheme ? "auto" : resolveTheme(choice, darkMedia.matches)
+  );
+});
+saveSettings({ followBrowserTheme: themeControl.choice() === "auto" });
+
+// Settings keep their choices in this browser (views/settings.js).
+function renderSettingsView() {
+  renderSettingsPane(settingsNodes, { settings: loadSettings() });
+}
+
+bindSettingsPane(settingsNodes, {
+  onToggle: (key) => saveSettings({ [key]: !loadSettings()[key] }),
+  onGroupsDefault: (groupsDefault) => saveSettings({ groupsDefault }),
+  onBuildDuration: (buildDurationMs) => saveSettings({ buildDurationMs })
+});
+onSettingsChange(renderSettingsView);
+renderSettingsView();
 
 async function refreshFromPython() {
   const result = await actions.refreshFromPython();
@@ -710,18 +748,19 @@ function showTimingStatus(payload, timing) {
   if (summaryStatus) {
     summaryStatus.textContent = `Refit completed in ${formatMilliseconds(timing.client_total_ms)}`;
   }
-  renderAdvancedTiming();
+  renderTimingReadout();
   if (summaryNote) summaryNote.textContent = payload.note || "";
 }
 
-function renderAdvancedTiming() {
-  if (!advancedTiming) return;
+// Settings › Request timings: the last refit's and each panel's durations.
+function renderTimingReadout() {
+  if (!settingsTiming) return;
   const sections = [];
   if (latestTransitionTiming) sections.push(formatTimingDetails(latestTransitionTiming));
   const evidenceDetails = formatEvidenceTimingDetails(evidenceTiming.durations());
   if (evidenceDetails) sections.push(evidenceDetails);
   const details = sections.filter(Boolean).join(" · ");
-  advancedTiming.textContent = latestTimingNote && details
+  settingsTiming.textContent = latestTimingNote && details
     ? `${latestTimingNote} · ${details}`
     : latestTimingNote || details;
 }
@@ -1287,7 +1326,6 @@ function updateHandleCount(term) {
   basisToggle.hidden = !canShowContrib;
   contribPlay.hidden = !canShowContrib;
   contribPlay.disabled = buildFrame !== null;
-  updateBuildDurationLabel();
   basisToggle.setAttribute("aria-pressed", String(Boolean(view.showContrib && canShowContrib)));
   if (!canShowContrib) {
     stopContributionBuild();
@@ -1310,6 +1348,7 @@ function updateHandleCount(term) {
 function applyTermDefaults(term) {
   const view = store.getState().view;
   const patch = {};
+  // A grouped term opens as Settings' "Groups shown as" says.
   if (
     term.group_display &&
     term.group_display.available &&
@@ -1317,7 +1356,7 @@ function applyTermDefaults(term) {
   ) {
     patch.groupModeByTerm = {
       ...view.groupModeByTerm,
-      [selectedTerm()]: term.group_display.default_mode || "expanded"
+      [selectedTerm()]: loadSettings().groupsDefault
     };
   }
   if (!term.controls) {
@@ -1343,14 +1382,7 @@ function canShowContributions(term) {
 }
 
 function buildDurationMs() {
-  return Math.max(500, Number(buildDuration.value) || 10000);
-}
-
-function updateBuildDurationLabel() {
-  const seconds = buildDurationMs() / 1000;
-  buildDurationValue.textContent = Number.isInteger(seconds)
-    ? `${seconds}s`
-    : `${seconds.toFixed(1)}s`;
+  return loadSettings().buildDurationMs;
 }
 
 function startContributionBuild() {
@@ -1502,9 +1534,6 @@ basisToggle.addEventListener("click", () => {
 });
 
 contribPlay.addEventListener("click", startContributionBuild);
-
-buildDuration.addEventListener("input", updateBuildDurationLabel);
-buildDuration.addEventListener("change", updateBuildDurationLabel);
 
 handleCount.addEventListener("input", () => {
   handleCountValue.textContent = handleCount.value;

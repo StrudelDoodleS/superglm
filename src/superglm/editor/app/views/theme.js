@@ -98,11 +98,15 @@ export function renderThemeControl(button, choice, prefersDark) {
 
 /**
  * Mount the control: apply the remembered choice, cycle it on a click, and
- * follow the browser's setting while the choice is Auto.
- * @param {{button:HTMLElement, root:HTMLElement, media:DarkMedia, storage?:ThemeStorage}} options
- * @returns {{destroy:()=>void}}
+ * follow the browser's setting while the choice is Auto. Settings' "Follow
+ * the browser" mirrors the choice through the returned handle, and
+ * `onChange` hears every change, the control's own clicks included. I2
+ * replaces this control with the DAY/NIGHT switch.
+ * @param {{button:HTMLElement, root:HTMLElement, media:DarkMedia, storage?:ThemeStorage,
+ *   onChange?:(choice:ThemeChoice)=>void}} options
+ * @returns {{choice:()=>ThemeChoice, setChoice:(choice:string)=>void, destroy:()=>void}}
  */
-export function mountThemeControl({ button, root, media, storage }) {
+export function mountThemeControl({ button, root, media, storage, onChange = () => {} }) {
   let choice = readThemeChoice(storage);
 
   function render() {
@@ -110,16 +114,25 @@ export function mountThemeControl({ button, root, media, storage }) {
     renderThemeControl(button, choice, media.matches);
   }
 
-  function onClick() {
-    choice = nextThemeChoice(choice, media.matches);
+  /** @param {string} next */
+  function setChoice(next) {
+    if (!isThemeChoice(next)) return;
+    choice = next;
     storeThemeChoice(choice, storage);
     render();
+    onChange(choice);
+  }
+
+  function onClick() {
+    setChoice(nextThemeChoice(choice, media.matches));
   }
 
   button.addEventListener("click", onClick);
   media.addEventListener("change", render);
   render();
   return Object.freeze({
+    choice: () => choice,
+    setChoice,
     destroy() {
       button.removeEventListener("click", onClick);
       media.removeEventListener("change", render);

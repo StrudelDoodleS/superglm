@@ -223,7 +223,7 @@
         </button>
         <button id="inspectorToggle" class="icon-button" type="button" aria-expanded="true"
           aria-controls="inspector" aria-label="Inspector" data-popover-title="Inspector"
-          data-popover-body="Show or hide the summary, history, advanced controls and help.">
+          data-popover-body="Show or hide the summary, history, settings and help.">
           <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
             <rect x="3" y="5" width="18" height="14" rx="2"></rect>
             <path d="M15 5v14"></path>
@@ -436,9 +436,12 @@
           <button id="historyTab" class="sidepanel-tab" type="button" role="tab"
             data-inspector-tab="history" aria-selected="false" aria-controls="historyPane"
             tabindex="-1">History</button>
-          <button id="advancedTab" class="sidepanel-tab" type="button" role="tab"
-            data-inspector-tab="advanced" aria-selected="false" aria-controls="advancedPane"
-            tabindex="-1">Advanced</button>
+          <button id="settingsTab" class="sidepanel-tab" type="button" role="tab"
+            data-inspector-tab="settings" aria-selected="false" aria-controls="settingsPane"
+            tabindex="-1"><svg class="sidepanel-tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path>
+            </svg>Settings</button>
           <button id="helpTab" class="sidepanel-tab" type="button" role="tab"
             data-inspector-tab="help" aria-selected="false" aria-controls="helpPane"
             tabindex="-1">Help</button>
@@ -482,16 +485,70 @@
         aria-labelledby="historyTab" data-inspector-pane="history" hidden>
         <div id="historyFrame" class="history-frame"></div>
       </div>
-      <div id="advancedPane" class="sidepanel-pane" role="tabpanel"
-        aria-labelledby="advancedTab" data-inspector-pane="advanced" hidden>
-        <h2>Advanced editor controls</h2>
-        <label id="buildDurationWrap" class="build-duration">
-          <span>Build animation duration</span>
-          <input id="buildDuration" type="range" min="4000" max="30000" step="500"
-            value="10000" aria-label="Build animation duration">
-          <output id="buildDurationValue">10s</output>
-        </label>
-        <div id="advancedTiming" class="advanced-timing" aria-live="polite"></div>
+      <div id="settingsPane" class="sidepanel-pane settings-pane" role="tabpanel"
+        aria-labelledby="settingsTab" data-inspector-pane="settings" hidden>
+        <h3 class="settings-heading">Refitting</h3>
+        <div class="setting-row">
+          <div class="setting-text">
+            <span id="settingRefitEveryChangeLabel" class="setting-title">Refit after every structural change</span>
+            <span id="settingRefitEveryChangeHint" class="setting-hint">Off: Collapse, Ungroup, Set reference and the shapes wait for the Refit button, so you can make several in one go.</span>
+          </div>
+          <button id="settingRefitEveryChange" class="setting-switch" type="button" role="switch"
+            aria-checked="false" aria-labelledby="settingRefitEveryChangeLabel"
+            aria-describedby="settingRefitEveryChangeHint" data-setting="refitEveryChange"></button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-text">
+            <span id="settingKeepReferenceLabel" class="setting-title">Keep the reference level when collapsing</span>
+            <span id="settingKeepReferenceHint" class="setting-hint">The reference stays where it is. Collapse it into a group and that group becomes the reference.</span>
+          </div>
+          <button id="settingKeepReference" class="setting-switch" type="button" role="switch"
+            aria-checked="true" aria-labelledby="settingKeepReferenceLabel"
+            aria-describedby="settingKeepReferenceHint" data-setting="keepReference"></button>
+        </div>
+        <h3 class="settings-heading">Display</h3>
+        <div class="setting-row">
+          <div class="setting-text">
+            <span id="settingFollowBrowserThemeLabel" class="setting-title">Follow the browser's light or dark setting</span>
+            <span id="settingFollowBrowserThemeHint" class="setting-hint">On until you choose a theme in the top bar.</span>
+          </div>
+          <button id="settingFollowBrowserTheme" class="setting-switch" type="button" role="switch"
+            aria-checked="true" aria-labelledby="settingFollowBrowserThemeLabel"
+            aria-describedby="settingFollowBrowserThemeHint" data-setting="followBrowserTheme"></button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-text">
+            <span id="settingGroupsDefaultLabel" class="setting-title">Groups shown as</span>
+            <span class="setting-hint">How collapsed levels are drawn when a term opens.</span>
+          </div>
+          <div class="summary-level-segments setting-segments" role="radiogroup"
+            aria-labelledby="settingGroupsDefaultLabel">
+            <label><input type="radio" name="settingGroupsDefault" value="expanded" checked><span>Expanded</span></label>
+            <label><input type="radio" name="settingGroupsDefault" value="collapsed"><span>Collapsed</span></label>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-text">
+            <span class="setting-title">Build animation</span>
+            <span class="setting-hint">How long Build takes to add the basis functions.</span>
+          </div>
+          <label id="buildDurationWrap" class="build-duration">
+            <input id="buildDuration" type="range" min="4000" max="30000" step="500"
+              value="10000" aria-label="Build animation duration">
+            <output id="buildDurationValue" for="buildDuration">10 s</output>
+          </label>
+        </div>
+        <h3 class="settings-heading">Diagnostics</h3>
+        <div class="setting-row">
+          <div class="setting-text">
+            <span id="settingShowTimingsLabel" class="setting-title">Request timings</span>
+            <span id="settingShowTimingsHint" class="setting-hint">How long the last refit and each panel took.</span>
+            <div id="settingsTiming" class="settings-timing" aria-live="polite" hidden></div>
+          </div>
+          <button id="settingShowTimings" class="setting-switch" type="button" role="switch"
+            aria-checked="false" aria-labelledby="settingShowTimingsLabel"
+            aria-describedby="settingShowTimingsHint" data-setting="showTimings"></button>
+        </div>
       </div>
       <div id="helpPane" class="sidepanel-pane help-pane" role="tabpanel"
         aria-labelledby="helpTab" data-inspector-pane="help" hidden></div>
