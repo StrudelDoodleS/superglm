@@ -315,7 +315,10 @@ class Structure:
         the model's declared spec with the structure's grouping, reference,
         unseen policy and polynomial ranges, by the builders the editor uses;
         every other feature is copied as it is. Groupings are built from the
-        structure's level universe, so no data is needed. Ranges on a ``ps``
+        structure's level universe, so no data is needed, and a grouped term
+        is declared with that universe as ``levels=`` declares one: a group
+        or reference whose levels have no rows in the fit is pinned to the
+        base, with the library's warning, rather than refused. Ranges on a ``ps``
         or ``ns`` spline rebuild it as a ``bs`` spline with the same knots,
         degree and penalty order, as the editor does.
 
@@ -496,6 +499,15 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, frame):
     if grouping is not None and declared is not None:
         if any(str(level) not in grouping.original_to_group for level in declared):
             raise StructureError(_UNIVERSE.format(feature=name))
+    # A grouped term is declared with the structure's universe, as levels=
+    # declares one: a group or reference whose levels have no rows in the
+    # next fit is then pinned to the base with the library's warning, not
+    # dropped from the universe. The order puts the fitted levels in the
+    # sorted group order a fit without levels= gives, so the design is the same.
+    universe = None
+    if grouping is not None and declared is None:
+        to_group = grouping.original_to_group
+        universe = sorted(levels, key=lambda level: (to_group[str(level)], str(level)))
     # Grouped, the design speaks the grouping's text; ungrouped, the builder
     # gives the reference its native type from the levels.
     base = entry.reference if grouping is None else str(entry.reference)
@@ -506,6 +518,7 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, frame):
         grouping=grouping,
         data=np.asarray(levels, dtype=object),
         unseen=entry.unseen,
+        levels=universe,
     )
 
 

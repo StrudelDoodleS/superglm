@@ -421,6 +421,8 @@ def test_round_trip_through_the_editor_rebuilds_the_in_force_model(tmp_path):
     ours, theirs = applied._specs["brand"], in_force._specs["brand"]
     assert ours._grouping.group_to_originals == theirs._grouping.group_to_originals
     assert ours._grouping.group_to_originals["B10+B11"] == ["B10", "B11"]
+    # The same design columns in the same order, so the same fit.
+    assert ours._levels == theirs._levels
     assert ours._base_level == theirs._base_level == "B2"
     assert ours.unseen == theirs.unseen == "Other"
     assert applied._specs["age"].polynomial_ranges == in_force._specs["age"].polynomial_ranges
@@ -480,6 +482,36 @@ def test_apply_fits_new_levels_in_x_as_their_own_without_an_unseen_group():
     ]
     model.fit(next_year, next_y)
     assert "B99" in model._specs["brand"]._levels
+
+
+def test_a_group_whose_levels_have_no_rows_next_year_is_pinned_and_still_takes_new_levels():
+    # The rare levels a book groups into "Other" are the ones most likely to vanish.
+    X, y = _frame(brands=["B1", "B2", "B10", "B11", "B12"])
+    with pytest.warns(UserWarning, match=r"pinned to base .*\['Other'\]"):
+        model = _brand_structure().apply(_plain()).fit(X, y)
+    assert model._specs["brand"]._pinned_levels == ["Other"]
+    new = (X["brand"] == "B12").to_numpy()
+    with pytest.warns(UserWarning, match=r"to the group 'Other' \(unseen='Other'\): \['B99'\]"):
+        mu = model.predict(X.assign(brand=np.where(new, "B99", X["brand"])))
+    # "Other" had no rows, so it rates at the reference B1.
+    assert np.array_equal(mu, model.predict(X.assign(brand=np.where(new, "B1", X["brand"]))))
+
+
+def test_a_reference_group_with_no_rows_next_year_falls_back_like_a_declared_level():
+    X, y = _frame(brands=["B1", "B2", "B10", "B11", "B12"])
+    structure = Structure(
+        features={
+            "brand": FeatureStructure(
+                kind="categorical",
+                levels=sorted(BRANDS),
+                groups={"Other": ["B13", "B14"]},
+                reference="Other",
+            )
+        }
+    )
+    with pytest.warns(UserWarning, match="base level 'Other' has no effective training rows"):
+        model = structure.apply(_plain()).fit(X, y)
+    assert model._specs["brand"]._base_fallback[0] == "Other"
 
 
 def test_apply_never_fits_and_leaves_the_other_features_alone():
