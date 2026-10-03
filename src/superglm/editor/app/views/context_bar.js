@@ -10,6 +10,7 @@ const REFERENCE_POLICY = Object.freeze({
   most_exposed: "most exposed",
   first: "first",
   pinned: "pinned",
+  kept: "kept",
 });
 
 /**

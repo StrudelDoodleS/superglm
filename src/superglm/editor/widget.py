@@ -974,10 +974,13 @@ class EditorWidget:
         method: str = "auto",
         *,
         level_display: str = "expanded",
+        keep_reference: bool = True,
     ) -> dict[str, Any]:
         return self._structural_step(
             "collapse_levels",
-            lambda target: self.session.replace_with_collapsed_levels(target, method=method),
+            lambda target: self.session.replace_with_collapsed_levels(
+                target, method=method, keep_reference=keep_reference
+            ),
             term=term,
             level_display=level_display,
         )
@@ -988,10 +991,13 @@ class EditorWidget:
         method: str = "auto",
         *,
         level_display: str = "expanded",
+        keep_reference: bool = True,
     ) -> dict[str, Any]:
         return self._structural_step(
             "ungroup_levels",
-            lambda target: self.session.replace_with_ungrouped_levels(target, method=method),
+            lambda target: self.session.replace_with_ungrouped_levels(
+                target, method=method, keep_reference=keep_reference
+            ),
             term=term,
             level_display=level_display,
         )

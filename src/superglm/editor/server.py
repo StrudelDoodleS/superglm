@@ -252,6 +252,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 None if "term" not in payload else str(payload["term"]),
                 str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
+                keep_reference=_keep_reference(payload),
             )
         )
 
@@ -262,6 +263,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 None if "term" not in payload else str(payload["term"]),
                 str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
+                keep_reference=_keep_reference(payload),
             )
         )
 
@@ -515,6 +517,13 @@ def _level_display(payload: dict[str, Any]) -> str:
     value = str(payload.get("level_display", "expanded"))
     if value not in {"expanded", "grouped"}:
         raise EditorValueError("level_display must be 'expanded' or 'grouped'.")
+    return value
+
+
+def _keep_reference(payload: dict[str, Any]) -> bool:
+    value = payload.get("keep_reference", True)
+    if not isinstance(value, bool):
+        raise EditorValueError("keep_reference must be true or false.")
     return value
 
 

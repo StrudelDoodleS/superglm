@@ -4870,9 +4870,10 @@ def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
     try:
         session.select_indices("region", [1, 2])
 
-        def replace_with_smaller_term(term, *, method="auto"):
+        def replace_with_smaller_term(term, *, method="auto", keep_reference=True):
             assert term == "region"
             assert method == "fit"
+            assert keep_reference is True
             session.terms["region"] = EditableTerm(
                 name="region",
                 kind="categorical",
@@ -4912,7 +4913,7 @@ def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
         monkeypatch.setattr(
             session,
             "replace_with_collapsed_levels",
-            lambda term, *, method="auto": editor_model,
+            lambda term, *, method="auto", keep_reference=True: editor_model,
         )
         monkeypatch.setattr(
             widget_module,

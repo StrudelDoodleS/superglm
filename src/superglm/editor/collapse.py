@@ -9,6 +9,7 @@ from itertools import chain
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
@@ -22,6 +23,9 @@ from superglm.features.ordered_categorical import (
 from superglm.features.piecewise import Piecewise
 
 _SYMBOLIC_BASE_POLICIES = {"first", "most_exposed"}
+# Marks a spec whose reference a collapse or ungroup held in place. The state
+# payload reads it to label the reference "kept".
+KEPT_REFERENCE_ATTRIBUTE = "_editor_kept_reference"
 
 
 def collapsed_feature_spec(
@@ -31,8 +35,15 @@ def collapsed_feature_spec(
     *,
     X,
     group_label: str | None = None,
+    keep_reference: bool = True,
 ) -> tuple[Any, dict[str, Any]]:
-    """Return a replacement feature spec that collapses selected levels."""
+    """Return a replacement feature spec that collapses selected levels.
+
+    ``keep_reference`` holds the reference the in-force fit resolved, or the
+    new group when it takes that level in. ``False`` hands the declared base
+    to the refit, where a symbolic policy (``most_exposed``, ``first``)
+    resolves again and can move the reference.
+    """
     if term.levels is None:
         raise EditorTypeError(f"Term {term.name!r} does not expose categorical levels.")
     if selected_indices.size < 2:
@@ -92,7 +103,8 @@ def collapsed_feature_spec(
         selected_levels=selected_levels,
         group_label=label,
     )
-    base = _collapsed_base(spec.base, selected_levels, label, existing, grouping)
+    declared = _in_force_reference(spec) if keep_reference else spec.base
+    base = _collapsed_base(declared, selected_levels, label, existing, grouping)
 
     if isinstance(spec, OrderedCategorical):
         replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=values)
@@ -101,6 +113,8 @@ def collapsed_feature_spec(
             base=base,
             grouping=grouping,
         )
+    if keep_reference:
+        setattr(replacement, KEPT_REFERENCE_ATTRIBUTE, True)
 
     metadata = {
         "format": "superglm.editor.level_collapse.v1",
@@ -119,8 +133,14 @@ def ungrouped_feature_spec(
     selected_indices: np.ndarray,
     *,
     X,
+    keep_reference: bool = True,
 ) -> tuple[Any, dict[str, Any]]:
-    """Return a replacement feature spec that removes selected levels from groups."""
+    """Return a replacement feature spec that removes selected levels from groups.
+
+    ``keep_reference`` holds the in-force reference: a reference group that
+    loses members follows the members that stay. ``False`` hands the declared
+    base on, as ``collapsed_feature_spec`` does.
+    """
     if term.levels is None:
         raise EditorTypeError(f"Term {term.name!r} does not expose categorical levels.")
 
@@ -151,13 +171,23 @@ def ungrouped_feature_spec(
     )
     replacement_grouping = None if _is_identity_grouping(grouping) else grouping
 
-    base = _valid_base_after_ungroup(spec.base, selected_levels, grouping)
+    if keep_reference:
+        base = _kept_base_after_ungroup(
+            _in_force_reference(spec), selected_levels, existing, grouping
+        )
+    else:
+        base = _valid_base_after_ungroup(spec.base, selected_levels, grouping)
     if isinstance(spec, OrderedCategorical):
         replacement = rebuilt_ordered_spec(
             spec, grouping=replacement_grouping, base=base, data=values
         )
     else:
+        # Without a grouping the fit reads native values (3, not "3").
+        if replacement_grouping is None:
+            base = _native_level(base, values)
         replacement = Categorical(base=base, grouping=replacement_grouping)
+    if keep_reference:
+        setattr(replacement, KEPT_REFERENCE_ATTRIBUTE, True)
 
     metadata = {
         "format": "superglm.editor.level_ungroup.v1",
@@ -503,8 +533,27 @@ def _ordered_original_values(
     return native_values, native_base
 
 
+def _in_force_reference(spec) -> Any:
+    """The reference ``spec``'s fit resolved, in its native type (3, not "3").
+
+    Before a fit there is none, and the declared base stands in.
+    """
+    level = getattr(spec, "_base_level", "")
+    return spec.base if level == "" else level
+
+
+def _native_level(label: Any, data) -> Any:
+    """``label`` as the column spells it; a symbolic policy passes through."""
+    if label in _SYMBOLIC_BASE_POLICIES:
+        return label
+    native: dict[str, Any] = {}
+    for raw in pd.unique(np.asarray(data).ravel()).tolist():
+        native.setdefault(str(raw), raw)
+    return native.get(str(label), label)
+
+
 def _collapsed_base(
-    base: str,
+    base: Any,
     selected_levels: list[str],
     group_label: str,
     existing_grouping: LevelGrouping | None,
@@ -553,6 +602,31 @@ def _valid_base_after_ungroup(
     if base in valid:
         return base
     return selected_levels[0] if selected_levels else "most_exposed"
+
+
+def _kept_base_after_ungroup(
+    base: Any,
+    selected_levels: list[str],
+    existing: LevelGrouping,
+    grouping: LevelGrouping,
+) -> str:
+    """The level holding the in-force reference once ``selected_levels`` leave their groups.
+
+    A reference group that loses members follows the new level holding most of
+    them (the collapse rule in ``_collapsed_base``); a tie goes to a level that
+    was not pulled out. A reference the old grouping does not know keeps the
+    declared-base rule.
+    """
+    base = str(base)
+    if base in _SYMBOLIC_BASE_POLICIES or base in grouping.grouped_levels:
+        return base
+    members = _base_original_members(base, existing)
+    if not members:
+        return _valid_base_after_ungroup(base, selected_levels, grouping)
+    mapped = [str(grouping.original_to_group.get(member, member)) for member in members]
+    pulled = set(selected_levels)
+    counts = {label: mapped.count(label) for label in dict.fromkeys(mapped)}
+    return max(counts, key=lambda label: (counts[label], label not in pulled))
 
 
 def _is_identity_grouping(grouping: LevelGrouping) -> bool:

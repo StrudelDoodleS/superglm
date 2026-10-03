@@ -45,7 +45,7 @@
 /**
  * @typedef {Object} TermReference
  * @property {string} level
- * @property {'most_exposed'|'first'|'pinned'} policy
+ * @property {'most_exposed'|'first'|'pinned'|'kept'} policy
  */
 /**
  * A range of a term pinned to a polynomial. Edges are x values on a numeric

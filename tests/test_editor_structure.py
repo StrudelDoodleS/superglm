@@ -292,6 +292,103 @@ def test_a_pinned_reference_survives_a_later_collapse(region_model):
     assert session.model._specs["region"]._base_level == "C"
 
 
+def _exposed_region_session(base: str) -> EditorSession:
+    """B is the most exposed level; C + D outweigh it, and A + B weigh less than C + D."""
+    rng = np.random.default_rng(20261003)
+    region = rng.permutation(np.repeat(["A", "B", "C", "D", "E"], [180, 360, 330, 330, 100]))
+    effects = {"A": -0.1, "B": 0.0, "C": 0.15, "D": 0.2, "E": 0.05}
+    y = 0.5 + np.array([effects[r] for r in region]) + rng.normal(0.0, 0.05, region.size)
+    weight = np.ones(region.size)
+    X = pd.DataFrame({"region": region})
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={"region": Categorical(base=base)}
+    )
+    model.fit(X, y, sample_weight=weight)
+    assert model._specs["region"]._base_level == "B", "precondition: B is the reference"
+    return EditorSession.from_model(model, terms=["region"], train_data=(X, y, weight))
+
+
+@pytest.mark.parametrize(
+    ("options", "reference"),
+    [
+        ({}, {"level": "B", "policy": "kept"}),
+        ({"keep_reference": False}, {"level": "C+D", "policy": "most_exposed"}),
+    ],
+    ids=["kept", "off"],
+)
+def test_a_collapse_keeps_a_most_exposed_reference(options, reference):
+    # C + D outweigh B, so most_exposed, chosen again at the refit, moves the reference.
+    session = _exposed_region_session("most_exposed")
+    session.select_levels("region", ["C", "D"])
+    session.replace_with_collapsed_levels("region", method="fit", **options)
+    assert session_payload(session)["region"]["reference"] == reference
+
+
+def test_collapsing_the_reference_makes_its_group_the_reference():
+    session = _exposed_region_session("most_exposed")
+    session.select_levels("region", ["C", "D"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    # A + B weigh less than C + D, which most_exposed alone would pick.
+    session.select_levels("region", ["A", "B"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    assert session.model._specs["region"]._base_level == "A+B"
+
+
+@pytest.mark.parametrize(
+    ("pulled", "options", "reference"),
+    [
+        (["D"], {}, "B+C"),
+        (["B"], {}, "C+D"),
+        (["B", "C"], {}, "D"),
+        # Off, the declared-base rule is unchanged: the first level pulled out.
+        (["D"], {"keep_reference": False}, "D"),
+    ],
+    ids=["majority", "reference-pulled", "tie", "off"],
+)
+def test_a_partial_ungroup_leaves_the_reference_with_the_levels_that_stay(
+    pulled, options, reference
+):
+    session = _exposed_region_session("B")
+    # A + E stays grouped, so no ungroup here can reuse the pre-collapse fit.
+    session.select_levels("region", ["A", "E"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    session.select_levels("region", ["B", "C", "D"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    assert session.model._specs["region"]._base_level == "B+C+D"
+
+    session.select_levels("region", pulled)
+    session.replace_with_ungrouped_levels("region", method="fit", **options)
+    assert session.model._specs["region"]._base_level == reference
+
+
+def test_keeping_the_reference_keeps_integer_levels_native():
+    rng = np.random.default_rng(20261004)
+    band = rng.permutation(np.repeat([1, 2, 10], [250, 400, 350]))
+    y = 0.5 + 0.1 * (band == 10) + rng.normal(0.0, 0.05, band.size)
+    weight = np.ones(band.size)
+    X = pd.DataFrame({"band": band})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"band": Categorical(base="most_exposed")},
+    )
+    model.fit(X, y, sample_weight=weight)
+    assert model._specs["band"]._base_level == 2, "precondition: native integer levels"
+
+    setup = EditorSession.from_model(model, terms=["band"], train_data=(X, y, weight))
+    setup.select_levels("band", ["1", "10"])
+    collapsed = setup.replace_with_collapsed_levels("band", method="fit")
+    # 1 + 10 outweigh 2, which stays the reference; a grouped fit spells levels as text.
+    assert collapsed._specs["band"]._base_level == "2"
+
+    # A fresh session has no pre-collapse fit to reuse, so the ungroup refits.
+    session = EditorSession.from_model(collapsed, terms=["band"], train_data=(X, y, weight))
+    session.select_levels("band", ["1", "10"])
+    session.replace_with_ungrouped_levels("band", method="fit")
+    assert session.model._specs["band"]._base_level == 2
+    assert session_payload(session)["band"]["reference"] == {"level": "2", "policy": "kept"}
+
+
 def test_set_reference_refuses_a_special_level():
     rng = np.random.default_rng(20260927)
     levels = ["0", "1", "2", "3", "4", "5"]
@@ -366,6 +463,45 @@ def test_widget_http_set_reference_returns_transition_envelope(region_model):
             "policy": "pinned",
         }
         assert payload["state"]["undo_redo"]["undo"] == "set reference of region to C"
+    finally:
+        widget.close()
+
+
+@pytest.mark.parametrize(
+    ("body", "reference"),
+    [
+        ({}, {"level": "B", "policy": "kept"}),
+        ({"keep_reference": False}, {"level": "C+D", "policy": "most_exposed"}),
+    ],
+    ids=["default", "off"],
+)
+def test_widget_http_collapse_reads_keep_reference_from_the_body(body, reference):
+    session = _exposed_region_session("most_exposed")
+    widget = session.widget()
+    try:
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [2, 3]})
+        payload = _post_json(
+            f"{widget.url}/collapse_levels", {"term": "region", "method": "fit", **body}
+        )
+        assert payload["state"]["terms"]["region"]["reference"] == reference
+    finally:
+        widget.close()
+
+
+@pytest.mark.parametrize("route", ["collapse_levels", "ungroup_levels"])
+def test_widget_http_refuses_a_keep_reference_that_is_not_a_boolean(region_model, route):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region"])
+    widget = session.widget()
+    try:
+        session.select_levels("region", ["B", "C"])
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _post_json(f"{widget.url}/{route}", {"term": "region", "keep_reference": "no"})
+        assert error.value.code == 400
+        assert json.loads(error.value.read().decode("utf-8")) == {
+            "error": "keep_reference must be true or false."
+        }
+        assert session.model is model and session.structure_history == []
     finally:
         widget.close()
 

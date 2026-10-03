@@ -303,8 +303,8 @@ def test_refresh_pulls_a_notebook_side_structural_change(open_editor_page):
         assert undo.get_attribute("data-popover-body") == "Undo: collapse T01 + T02 in territory"
         page.locator("#chart .level-group-marker").first.wait_for()
         assert page.locator("#chart .level-group-marker").count() == 2
-        # The first level now sits inside the new group, so the group is the reference.
-        assert reference.text_content() == "reference T01+T02 · first"
+        # The reference T01 now sits inside the new group, which keeps it.
+        assert reference.text_content() == "reference T01+T02 · kept"
 
 
 def test_revert_is_one_step_that_undo_takes_back(open_editor_page):

@@ -910,10 +910,17 @@ class EditorSession:
         return result
 
     def refit_with_collapsed_levels(
-        self, term: str, *, group_label: str | None = None, **refit_kwargs: Any
+        self,
+        term: str,
+        *,
+        group_label: str | None = None,
+        keep_reference: bool = True,
+        **refit_kwargs: Any,
     ):
         """Collapse selected categorical levels and refit a full model copy.
 
+        ``keep_reference`` holds the in-force reference level, or the group
+        that takes it in; ``False`` lets the declared base policy choose again.
         ``refit_kwargs`` are ``X``, ``y``, ``sample_weight``, ``offset``,
         ``method``, ``lambda1``, ``lambda2`` and fit keywords.
         """
@@ -923,7 +930,12 @@ class EditorSession:
             return self._refit_replacing(
                 term,
                 lambda X_ref: collapsed_feature_spec(
-                    self.model, editable, idx, X=X_ref, group_label=group_label
+                    self.model,
+                    editable,
+                    idx,
+                    X=X_ref,
+                    group_label=group_label,
+                    keep_reference=keep_reference,
                 ),
                 **refit_kwargs,
             )
@@ -947,13 +959,21 @@ class EditorSession:
             label=refit_model._editor_step["label"],
         )
 
-    def refit_with_ungrouped_levels(self, term: str, **refit_kwargs: Any):
-        """Remove selected levels from collapsed groups and refit a model copy."""
+    def refit_with_ungrouped_levels(
+        self, term: str, *, keep_reference: bool = True, **refit_kwargs: Any
+    ):
+        """Remove selected levels from collapsed groups and refit a model copy.
+
+        ``keep_reference`` holds the in-force reference; a reference group that
+        loses members follows the members that stay.
+        """
         editable = self._require_term(term)
         idx = self._require_selection(term)
         return self._refit_replacing(
             term,
-            lambda X_ref: ungrouped_feature_spec(self.model, editable, idx, X=X_ref),
+            lambda X_ref: ungrouped_feature_spec(
+                self.model, editable, idx, X=X_ref, keep_reference=keep_reference
+            ),
             **refit_kwargs,
         )
 

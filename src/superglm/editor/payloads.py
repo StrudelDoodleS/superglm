@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from superglm.editor._types import StructuralStep
+from superglm.editor.collapse import KEPT_REFERENCE_ATTRIBUTE
 from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES
 from superglm.editor.group_display import build_group_display
 from superglm.editor.shapes import shape_payload
@@ -263,7 +264,10 @@ def _reference_payload(session, name: str) -> dict[str, str] | None:
     level = getattr(spec, "_base_level", "")
     if level == "":
         return None
-    policy = spec.base if spec.base in {"most_exposed", "first"} else "pinned"
+    if getattr(spec, KEPT_REFERENCE_ATTRIBUTE, False):
+        policy = "kept"
+    else:
+        policy = spec.base if spec.base in {"most_exposed", "first"} else "pinned"
     return {"level": str(level), "policy": policy}
 
 
