@@ -17,6 +17,12 @@ const EXPORTS = Object.freeze({
       ]),
     }),
   }),
+  final: Object.freeze({
+    filename: "superglm_final_model.joblib",
+    description: "Final fit model",
+    validationDescription: "Validated final fit model",
+    accept: Object.freeze({ "application/octet-stream": Object.freeze([".joblib"]) }),
+  }),
 });
 
 /** @typedef {keyof typeof EXPORTS} ExportFormat */
@@ -42,6 +48,7 @@ const EXPORTS = Object.freeze({
  * @property {ExportDialogNodes} nodes
  * @property {(blob:Blob, filename:string, metadata:{description:string,accept:Readonly<Record<string,readonly string[]>>})=>Promise<string|null>} saveBlobToFile
  * @property {()=>number} [pendingCount] how many structural changes wait for Refit
+ * @property {()=>boolean} [finalFitAvailable] whether a current Final fit model exists
  */
 
 /** @param {unknown} error */
@@ -78,7 +85,7 @@ function hasValidationScope(value) {
 
 /** @param {string} message @param {ExportFormat} format @param {string|null} validation */
 function successMessage(message, format, validation) {
-  if (format !== "joblib") return message;
+  if (format === "xlsx") return message;
   if (validation === "artifact+predictions") {
     return `${message} Round-trip validated; predictions validated.`;
   }
@@ -100,13 +107,27 @@ export function pendingExportNote(count) {
  *
  * @param {ExportDialogContext} context
  */
-export function bindExportDialog({ client, nodes, saveBlobToFile, pendingCount = () => 0 }) {
+export function bindExportDialog({
+  client, nodes, saveBlobToFile, pendingCount = () => 0, finalFitAvailable = () => false,
+}) {
   let pending = false;
 
   /** @returns {ExportFormat} */
   function selectedFormat() {
     const value = nodes.formatInputs.find((input) => input.checked)?.value;
-    return value === "xlsx" ? "xlsx" : "joblib";
+    return value === "xlsx" || value === "final" ? value : "joblib";
+  }
+
+  // Export offers the Final fit model only while one is current (D6).
+  function syncFinalFit() {
+    const finalInput = nodes.formatInputs.find((input) => input.value === "final");
+    if (!finalInput) return;
+    finalInput.disabled = !finalFitAvailable();
+    if (!finalInput.disabled || !finalInput.checked) return;
+    finalInput.checked = false;
+    const joblib = nodes.formatInputs.find((input) => input.value === "joblib");
+    if (joblib) joblib.checked = true;
+    normaliseFilename();
   }
 
   function normaliseFilename() {
@@ -146,6 +167,7 @@ export function bindExportDialog({ client, nodes, saveBlobToFile, pendingCount =
   }
 
   async function openDialog() {
+    syncFinalFit();
     nodes.status.textContent = "";
     if (nodes.pendingNote) {
       const note = pendingExportNote(pendingCount());

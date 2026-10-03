@@ -131,3 +131,24 @@ test("client and compatibility facade expose only the supported surface", () => 
     "requestJSON"
   ]);
 });
+
+test("client job calls post to the job routes", async () => {
+  /** @type {Array<{url:string, body:unknown}>} */
+  const requests = [];
+  const client = createEditorClient({
+    fetchImpl: async (url, options) => {
+      requests.push({ url: String(url), body: JSON.parse(String(options?.body)) });
+      return new Response(JSON.stringify({ job_id: "cv-1", status: "running" }), { status: 200 });
+    }
+  });
+
+  await client.jobStart("cv");
+  await client.jobStatus("cv-1", true);
+  await client.jobCancel("cv-1");
+
+  assert.deepEqual(requests, [
+    { url: "/job_start", body: { kind: "cv" } },
+    { url: "/job_status", body: { job_id: "cv-1", wait: true } },
+    { url: "/job_cancel", body: { job_id: "cv-1" } }
+  ]);
+});

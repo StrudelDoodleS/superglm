@@ -53,6 +53,7 @@ import {
 import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { placeTermViewToggle, renderContextBar } from "./views/context_bar.js";
+import { createCVTab } from "./views/cv_tab.js";
 import { bindExportDialog } from "./views/export_dialog.js";
 import {
   bindFeatureList,
@@ -249,6 +250,20 @@ const actions = createEditorActions({
 });
 const evidenceTiming = createEvidenceTimingTracker({
   onComplete: () => renderTimingReadout()
+});
+
+// The Cross-validation tab draws into the report frame, which the other
+// reports share, so it draws a job's progress only while it is the open view.
+// A finished Run CV or Final fit changes the tab, and a Final fit also what
+// Export offers.
+const cvTab = createCVTab({
+  frame: reportFrame,
+  client: editorClient,
+  onJobSettled: async (kind) => {
+    if (kind === "final_fit") await actions.refreshFromPython();
+    await refreshActiveReport();
+  },
+  isShown: () => store.getState().view.activeView === "cv"
 });
 
 const undo = () => actions.executeStateMutation({
@@ -682,7 +697,11 @@ bindExportDialog({
     pendingNote: exportPendingNote instanceof HTMLElement ? exportPendingNote : null
   },
   saveBlobToFile,
-  pendingCount: () => selectPendingSteps(store.getState()).length
+  pendingCount: () => selectPendingSteps(store.getState()).length,
+  finalFitAvailable: () => {
+    const finalFit = store.getState().remote.snapshot?.final_fit;
+    return Boolean(finalFit?.available && !finalFit.stale);
+  }
 });
 
 async function refreshMetricsView() {
@@ -950,7 +969,7 @@ function formatMilliseconds(value) {
 }
 
 async function showView(view) {
-  const activeView = view === "final" ? "final" : view === "validation" ? "validation" : "editor";
+  const activeView = ["validation", "cv", "final"].includes(view) ? view : "editor";
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -1356,6 +1375,12 @@ function renderMetricsEvidence(evidence) {
   });
 }
 
+const REPORT_TITLES = Object.freeze({
+  validation: "Validation Report",
+  cv: "Cross-validation",
+  final: "Final Fit Report"
+});
+
 function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
   reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
@@ -1363,9 +1388,9 @@ function renderReportEvidence(evidence, activeView) {
   if (activeView === "editor") return;
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
-    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame });
+    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame }, cvTab);
   } else {
-    reportTitle.textContent = activeView === "final" ? "Final Fit Report" : "Validation Report";
+    reportTitle.textContent = REPORT_TITLES[activeView] || REPORT_TITLES.validation;
     reportFrame.innerHTML = "";
   }
   if (!payloadMatchesView && evidence.status !== "error" && evidence.status !== "stale") {

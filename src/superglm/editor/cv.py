@@ -311,12 +311,14 @@ def fold_term_items(
     ``rmse_to_mean`` on that scale, and ``min_correlation`` the lowest
     ``correlation_to_mean`` (``plotting.curve_similarity``). A level a fold
     never saw is a gap (NaN) in that fold's curve, and its distances skip it.
+    Each fold's curve keeps its fold number, so a fold missing from a term
+    keeps its colour and its place in the tab's charts.
     """
     items = []
     for name, term in terms.items():
         grid = _term_grid(term)
         curves = {
-            f"Fold {index + 1}": by_term[name]
+            index: by_term[name]
             for index, by_term in sorted(fold_curves.items())
             if name in by_term
         }
@@ -346,7 +348,7 @@ def _term_item(name: str, term: EditableTerm, grid: _TermGrid, curves) -> dict[s
             point_weights = np.ones(point_weights.size, dtype=np.float64)
         return np.exp(values - np.average(values[points], weights=point_weights))
 
-    folds = {label: centred(values) for label, values in curves.items()}
+    folds = {f"Fold {index + 1}": centred(values) for index, values in curves.items()}
     vs_mean = _summarize_against_fold_mean(folds, weights)
     fit = term.original_log_effect[grid.order]
     edited = term.edited_log_effect[grid.order]
@@ -357,7 +359,10 @@ def _term_item(name: str, term: EditableTerm, grid: _TermGrid, curves) -> dict[s
         "x": None if grid.kind == "levels" else grid.points,
         "levels": grid.labels,
         "weights": weights,
-        "folds": [{"label": label, "values": values} for label, values in folds.items()],
+        "folds": [
+            {"fold": index, "label": label, "values": values}
+            for index, (label, values) in zip(curves, folds.items(), strict=True)
+        ],
         "fit": centred(fit),
         "edited": centred(edited) if changed else None,
         "spread": float(vs_mean["rmse_to_mean"].mean()),

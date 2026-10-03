@@ -945,3 +945,43 @@ def test_run_cv_scores_every_fold_when_one_fold_never_trained_on_a_level(rare_le
     for values in folds.values():
         valued = ~np.isnan(values)
         np.testing.assert_allclose(values[valued], region["edited"][valued], rtol=64 * _U)
+
+
+# ── The tab in the app ───────────────────────────────────────────
+
+
+def test_app_has_a_cross_validation_tab_and_a_final_fit_export():
+    from pathlib import Path
+
+    import superglm.editor
+
+    root = Path(superglm.editor.__file__).parent / "app"
+    html = (root / "index.html").read_text()
+
+    assert html.index('id="validationTab"') < html.index('id="cvTab"') < html.index('id="finalTab"')
+    assert 'data-view="cv"' in html
+    assert 'id="exportFinalFit" type="radio" name="exportFormat" value="final"' in html
+    assert '<link rel="stylesheet" href="/assets/styles/cv.css">' in html
+
+
+def test_cv_report_folds_carry_their_own_fold_number(cv_frame, cv_fit):
+    """A term's fold curves name their fold, so a fold missing from a term
+    keeps its colour and its place in the tab's charts."""
+    from superglm.editor.cv import capture_cv_view, cv_tab_payload
+
+    model, supplied = cv_fit
+    estimators = list(supplied.estimators)
+    estimators[1] = None
+    session = EditorSession.from_model(
+        model, cv=dataclasses.replace(supplied, estimators=estimators), **_splits(cv_frame)
+    )
+
+    view = capture_cv_view(session, run=None, final_fit=None)
+    terms = cv_tab_payload(view, jobs={})["relativities"]["terms"]
+
+    assert {item["name"] for item in terms} == {"age", "region"}
+    for item in terms:
+        assert [(fold["fold"], fold["label"]) for fold in item["folds"]] == [
+            (0, "Fold 1"),
+            (2, "Fold 3"),
+        ]

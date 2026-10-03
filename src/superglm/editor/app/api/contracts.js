@@ -1,6 +1,6 @@
 // @ts-check
 
-/** @typedef {'editor'|'validation'|'final'} AppView */
+/** @typedef {'editor'|'validation'|'cv'|'final'} AppView */
 /** @typedef {'select'|'move'|'zoom'|'handles'} EditorMode */
 /** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
@@ -215,6 +215,7 @@
  * @property {TimelineEntry[]} timeline
  * @property {boolean} in_force_is_original
  * @property {PendingStep[]} [pending]
+ * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
  */
 /**
  * @typedef {Object} StructuralTransitionTiming
@@ -301,6 +302,78 @@
  * @property {{snapshot:EditorSnapshot|null, summary:SummaryPayload|null, chartEpoch:number}} remote
  * @property {EditorViewState} view
  * @property {EditorRequestState} request
+ */
+/** @typedef {'cv'|'final_fit'} JobKind */
+/**
+ * A background job's status (/job_start, /job_status). ``progress`` entries
+ * carry a ``phase`` ("fold", "curves", "fitting", "carrying") and its details.
+ * @typedef {Object} JobStatus
+ * @property {string} job_id
+ * @property {JobKind} kind
+ * @property {'running'|'done'|'failed'|'cancelled'} status
+ * @property {Array<Record<string, unknown>>} progress
+ * @property {Record<string, unknown>|null} result
+ * @property {string|null} [error]
+ * @property {boolean} [cancel_requested]
+ */
+/**
+ * @typedef {Object} CVFoldRow
+ * @property {number} fold
+ * @property {number} n_train
+ * @property {number} n_test
+ * @property {number|null} fit_time_s
+ * @property {boolean} converged
+ * @property {number|null} effective_df
+ * @property {Record<string, number|null>} scores
+ */
+/**
+ * One cross-validation run: the supplied result, or Run CV on the current model.
+ * @typedef {Object} CVResultPayload
+ * @property {string} label
+ * @property {'supplied'|'run'} origin
+ * @property {number|null} model_revision
+ * @property {boolean} stale
+ * @property {CVFoldRow[]} folds
+ * @property {Record<string, number|null>} mean
+ * @property {Record<string, number|null>} std
+ * @property {Record<string, number>} pooled
+ */
+/**
+ * One fold's curve for a term: ``fold`` is its 0-based number, which picks
+ * its colour and its place within a level; ``values`` is null where the
+ * fold has no value, a level it never saw.
+ * @typedef {{fold:number, label:string, values:Array<number|null>}} CVFoldCurve
+ */
+/**
+ * One term's relativities by fold, each curve re-centred on its
+ * exposure-weighted mean log; levels in the model's order.
+ * @typedef {Object} CVTermItem
+ * @property {string} name
+ * @property {'levels'|'continuous'} kind
+ * @property {number[]|null} x
+ * @property {string[]|null} levels
+ * @property {number[]} weights
+ * @property {CVFoldCurve[]} folds
+ * @property {number[]} fit
+ * @property {number[]|null} edited
+ * @property {number|null} spread
+ * @property {number|null} min_correlation
+ */
+/**
+ * The /report payload for the Cross-validation tab.
+ * @typedef {Object} CVReportPayload
+ * @property {'cv'} report
+ * @property {string} title
+ * @property {string} note
+ * @property {number} model_revision
+ * @property {{supplied:boolean, n_folds:number, splitter:string|null, n_rows:number|null}} header
+ * @property {number} pending
+ * @property {{available:boolean, reason:string|null, note:string|null}} run_cv
+ * @property {{available:boolean, reason:string|null, note:string|null, done:boolean, stale:boolean, n_rows:number|null}} final_fit
+ * @property {Array<{name:string, label:string, lower_is_better:boolean}>} metrics
+ * @property {CVResultPayload[]} results
+ * @property {{available:boolean, origin:string|null, stale:boolean, note:string|null, terms:CVTermItem[]}} relativities
+ * @property {Record<JobKind, JobStatus|null>} jobs
  */
 /** @typedef {{panel:EvidencePanel, revision:number, sequence:number}} EvidenceToken */
 /** @typedef {{ok:true, snapshot:EditorSnapshot}|{ok:false, skipped?:boolean, error:Error}} ActionResult */

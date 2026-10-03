@@ -6739,6 +6739,7 @@ def test_widget_serves_editor_app_assets(editor_model):
         assert '<link rel="stylesheet" href="/assets/styles/chart.css">' in shell
         assert '<link rel="stylesheet" href="/assets/styles/panels.css">' in shell
         assert '<link rel="stylesheet" href="/assets/styles/dialogs.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/cv.css">' in shell
         assert '<script type="module" src="/assets/main.js"></script>' in shell
         assert "<style>" not in shell
         assert "<script>\nconst svg" not in shell
@@ -6778,6 +6779,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "views/help_drawer.js",
             "views/settings.js",
             "chart/pending_overlay.js",
+            "views/cv_tab.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -6790,6 +6792,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "styles/chart.css",
             "styles/panels.css",
             "styles/dialogs.css",
+            "styles/cv.css",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:

@@ -26,6 +26,7 @@
 <link rel="stylesheet" href="/assets/styles/chart.css">
 <link rel="stylesheet" href="/assets/styles/panels.css">
 <link rel="stylesheet" href="/assets/styles/dialogs.css">
+<link rel="stylesheet" href="/assets/styles/cv.css">
 </head>
 <body>
   <div class="app-shell">
@@ -55,6 +56,8 @@
           role="tab" aria-selected="true" aria-controls="editorView">Editor</button>
         <button id="validationTab" class="app-tab" type="button" data-view="validation"
           role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Validation</button>
+        <button id="cvTab" class="app-tab" type="button" data-view="cv"
+          role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Cross-validation</button>
         <button id="finalTab" class="app-tab" type="button" data-view="final"
           role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Final Fit</button>
       </div>
@@ -695,6 +698,14 @@
           <span>
             <strong>Excel rating workbook</strong>
             <small>Rating tables and structured fit summary</small>
+          </span>
+        </label>
+        <label class="export-format-card">
+          <input id="exportFinalFit" type="radio" name="exportFormat" value="final"
+            aria-label="Final fit model" disabled>
+          <span>
+            <strong>Final fit model</strong>
+            <small>Refitted on train and validation rows, hand edits put back</small>
           </span>
         </label>
       </div>

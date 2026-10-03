@@ -260,10 +260,21 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    title: "Cross-validation",
+    items: Object.freeze([
+      "Pass a cross_validate() result to edit(model, cv=result). The tab shows each fold's scores and, when the result kept its fold models (return_estimators=True), every term's relativities by fold, least stable first.",
+      "Each fold keeps its colour and its place within a level, fold 1 leftmost. Hover or focus a fold in a chart's legend to pick it out; a fold with no value at a level, one it never saw, leaves a gap there.",
+      "Run CV on current model refits the current structure on the same folds and puts your hand edits back on each fold before scoring. It waits while changes wait for Refit, and needs the rows the folds were drawn on: cv_data=, or train data with the same row count.",
+      "Final fit on all rows refits the current structure on train and validation rows and puts your hand edits back; the test split stays held out. Export then offers it as Final fit model.",
+      "Both run in the background with a Cancel button. A job whose model changed while it ran is not kept.",
+    ]),
+  }),
+  Object.freeze({
     title: "Exporting",
     items: Object.freeze([
       "Python model exports are round-trip validated and prediction-checked when evaluation rows are available.",
       "Excel rating workbooks require training or retained fit data and include structured summary tables.",
+      "Final fit model is the latest Final fit on all rows, offered while the model has not changed since.",
     ]),
   }),
 ]);

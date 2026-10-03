@@ -1,0 +1,333 @@
+/* cv.css: the Cross-validation tab (views/cv_tab.js). Folds take the trace
+   palette by fold number, the all-rows fit the current-edit blue, exposure
+   the chart's yellow; every colour is a token, so dark.css restyles it.
+   Some fold colours sit close together, so each fold also has a fixed place
+   within a level and its own legend entry, which picks it out. */
+
+.cv-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 16px;
+}
+.cv-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cv-chip {
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+}
+.cv-chip[data-tone="waiting"],
+.cv-chip[data-tone="stale"] {
+  background: var(--sig-weak-bg);
+  color: var(--sig-weak-fg);
+}
+.cv-actions {
+  display: flex;
+  gap: 8px;
+}
+.cv-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+}
+.cv-action.is-primary {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: var(--surface);
+}
+.cv-action:not(:disabled):hover {
+  background: var(--surface-hover);
+}
+.cv-action.is-primary:not(:disabled):hover {
+  background: var(--blue);
+  filter: brightness(1.08);
+}
+.cv-reason,
+.cv-job {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.cv-job[data-status="failed"] {
+  color: var(--danger);
+}
+.cv-cancel {
+  margin-left: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cv-jobs {
+  display: contents;
+}
+.cv-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.cv-section-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.cv-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.cv-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+.cv-card {
+  display: grid;
+  gap: 8px;
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  background: var(--surface-subtle);
+}
+.cv-card-title {
+  color: var(--muted);
+  font-size: 12px;
+}
+.cv-card-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--font-mono);
+}
+.cv-card-value strong {
+  font-size: 18px;
+  font-weight: 500;
+}
+.cv-card-label {
+  font-family: var(--font-sans);
+  color: var(--muted);
+  font-size: 12px;
+}
+.cv-card-spread {
+  color: var(--muted);
+  font-size: 12px;
+}
+.cv-strip {
+  display: block;
+  width: 220px;
+  height: 24px;
+}
+.cv-strip-axis {
+  stroke: var(--border);
+  stroke-width: 2;
+}
+.cv-mean {
+  stroke: var(--text);
+  stroke-width: 1.5;
+}
+.cv-fold-table td {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.cv-fold-table td:first-child {
+  font-family: var(--font-sans);
+}
+.cv-fold-table td[data-converged="true"] {
+  color: var(--better);
+}
+.cv-fold-table td[data-converged="false"] {
+  color: var(--danger);
+}
+.cv-fold-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  border-radius: 50%;
+}
+.cv-mean-row td {
+  font-weight: 600;
+}
+.cv-rel-layout {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+.cv-term-panel {
+  display: grid;
+  gap: 4px;
+  border-radius: var(--radius-lg);
+  padding: 10px 8px;
+  background: var(--surface-subtle);
+}
+.cv-search {
+  height: var(--control-height);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+.cv-term-head,
+.cv-term {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 56px 48px;
+  align-items: center;
+  padding: 6px 8px;
+  text-align: right;
+}
+.cv-term-head {
+  color: var(--muted);
+  font-size: 11px;
+}
+.cv-term-head > :first-child,
+.cv-term-name {
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cv-term {
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.cv-term:hover {
+  background: var(--surface-hover);
+}
+.cv-term-name {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+}
+.cv-term[aria-current="true"] {
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 var(--blue);
+}
+.cv-term mark {
+  background: var(--blue-soft);
+  color: inherit;
+}
+.cv-chart {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border-radius: var(--radius-lg);
+  padding: 10px 12px;
+  background: var(--surface-subtle);
+}
+.cv-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px 12px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.cv-key,
+.cv-fold-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cv-fold-key {
+  height: 22px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: default;
+}
+.cv-fold-key.is-lit {
+  color: var(--text);
+  font-weight: 600;
+}
+.cv-key-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+.cv-fold-key .cv-key-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.cv-legend-fit { background: var(--blue); }
+.cv-legend-edited {
+  background: repeating-linear-gradient(90deg, var(--orange) 0 5px, transparent 5px 8px);
+}
+.cv-legend-range { background: var(--grey); }
+.cv-key-swatch.cv-legend-exposure {
+  height: 8px;
+  border-radius: 1px;
+  background: var(--yellow);
+  opacity: 0.35;
+}
+.cv-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  font-size: 11px;
+}
+.cv-grid { stroke: var(--grid); }
+.cv-chart-svg .exposure,
+.cv-chart-svg .exposure-density { fill-opacity: 0.35; }
+.cv-tick,
+.cv-level { fill: var(--muted); }
+.cv-axis-title { fill: var(--text); font-weight: 600; }
+.cv-range { stroke: var(--grey); stroke-width: 2; stroke-opacity: 0.6; }
+.cv-fold-dot { fill-opacity: 0.9; }
+.cv-fit,
+.cv-fit-line { fill: none; stroke: var(--blue); stroke-width: 2.6; }
+.cv-edited,
+.cv-edited-line { fill: none; stroke: var(--orange); stroke-width: 2; stroke-dasharray: 5 4; }
+.cv-fold-line { fill: none; stroke-width: 1.3; stroke-opacity: 0.85; }
+.cv-envelope { fill: var(--blue-band); stroke: none; }
+/* A legend entry hovered or focused picks its fold out (highlightFold). */
+.cv-chart-svg .is-dimmed { opacity: 0.15; }
+.cv-fold-dot.is-lit { fill-opacity: 1; }
+.cv-fold-line.is-lit { stroke-width: 2.4; stroke-opacity: 1; }
+
+/* Translucent yellow over the dark ground reads dim, as on the editor's
+   chart (dark.css), but the strip sits behind fold marks here: 0.55. */
+:root[data-theme="dark"] .cv-chart-svg .exposure,
+:root[data-theme="dark"] .cv-chart-svg .exposure-density {
+  fill-opacity: 0.55;
+}
+:root[data-theme="dark"] .cv-key-swatch.cv-legend-exposure {
+  opacity: 0.55;
+}
+
+@media (max-width: 760px) {
+  .cv-toolbar,
+  .cv-rel-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

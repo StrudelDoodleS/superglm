@@ -89,7 +89,22 @@ export function createEditorClient({
     return postJSON("/rating_table", { term });
   }
 
-  return { requestJSON, postJSON, requestBlob, getState, ratingTable };
+  /** @param {string} kind "cv" or "final_fit" */
+  function jobStart(kind) {
+    return postJSON("/job_start", { kind });
+  }
+
+  /** @param {string} jobId @param {boolean} [wait] wait up to 30 s for the job to stop running */
+  function jobStatus(jobId, wait = false) {
+    return postJSON("/job_status", { job_id: jobId, wait });
+  }
+
+  /** @param {string} jobId */
+  function jobCancel(jobId) {
+    return postJSON("/job_cancel", { job_id: jobId });
+  }
+
+  return { requestJSON, postJSON, requestBlob, getState, ratingTable, jobStart, jobStatus, jobCancel };
 }
 
 export const editorClient = createEditorClient();
