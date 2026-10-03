@@ -96,3 +96,51 @@ def test_a_shaped_band_turns_handles_off_and_says_why(open_editor_page):
         handles.click(force=True)
         assert handles.get_attribute("aria-checked") == "false"
         assert page.locator("#chart .control-handle").count() == 0
+
+
+def test_a_level_edit_the_spline_cannot_follow_joins_the_level_dots(open_editor_page):
+    # age_band has five basis columns over six levels, so one level's change
+    # leaves the levels off every spline of the basis. Mutation check:
+    # `spline_fits_levels` answering True draws the least-change spline on the
+    # grid instead, which misses the edited dot.
+    with open_editor_page(selected_term="age_band") as (page, session):
+        grid_points = ORDERED_SPLINE_GRID_STEPS * (AGE_BANDS - 1) + 1
+        assert _path_points(page, "#chart path.edited") == grid_points
+        page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+            "radio", name="Select", exact=True
+        ).click()
+        with page.expect_response(_posted("/select")):
+            page.locator('#chart circle.point[data-index="2"]').click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        before = page.locator("#chart path.edited").get_attribute("d")
+        with page.expect_response(_posted("/op")) as response_info:
+            page.get_by_role("button", name="Increase selection", exact=True).click()
+        assert response_info.value.status == 200
+        assert session.history[-1].indices.tolist() == [2]
+
+        page.wait_for_function(
+            "d => document.querySelector('#chart path.edited').getAttribute('d') !== d",
+            arg=before,
+        )
+        assert _path_points(page, "#chart path.edited") == AGE_BANDS
+        drawn = page.evaluate(
+            """() => ({
+                vertices: [...document.querySelector('#chart path.edited').getAttribute('d')
+                    .matchAll(/[ML] (-?[\\d.]+) (-?[\\d.]+)/g)]
+                    .map(match => [Number(match[1]), Number(match[2])]),
+                dots: [...document.querySelectorAll(
+                    '#chart circle.point[data-index]:not([data-selection-supplemental])'
+                )].map(node => [
+                    Number(node.dataset.index),
+                    Number(node.getAttribute('cx')),
+                    Number(node.getAttribute('cy')),
+                ]).sort((a, b) => a[0] - b[0]),
+            })"""
+        )
+        # The line joins the dots, the edited one included: each vertex is its
+        # level dot's centre written to two decimals.
+        assert [dot[0] for dot in drawn["dots"]] == list(range(AGE_BANDS))
+        for (x, y), (_, cx, cy) in zip(drawn["vertices"], drawn["dots"], strict=True):
+            assert abs(x - cx) <= 0.005 + 1e-9 and abs(y - cy) <= 0.005 + 1e-9
+        # The fit it is compared against is still drawn as its spline.
+        assert _path_points(page, "#chart path.original") == grid_points

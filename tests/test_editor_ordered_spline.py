@@ -240,6 +240,42 @@ def test_a_level_edit_keeps_the_spline_through_the_levels_and_a_handle_keeps_the
     )
 
 
+def test_a_level_edit_the_basis_cannot_follow_joins_the_levels_until_a_handle_move(narrow):
+    # Mutation check: `spline_fits_levels` answering True whatever the edit
+    # has the chart draw the least-change spline, which misses the shifted
+    # level; answering False after a handle move joins levels that lie on it.
+    model, _ = narrow
+    session = EditorSession.from_model(model, terms=["band"])
+    term = session.terms["band"]
+    basis, *_ = _spline_parts(model)
+    assert np.linalg.matrix_rank(basis) < len(SMOOTH), "precondition: K < S at the levels"
+    start = session.ordered_spline("band").fitted
+    session.select_levels("band", ["3"])
+    session.shift("band", 0.2)
+    effects = term.edited_log_effect[: len(SMOOTH)].copy()
+    geometry = session.ordered_spline("band")
+    current = session.ordered_spline_coefficients("band", geometry)
+
+    # Were the edited levels a spline of the basis, the least-change residual
+    # would be within this bound; it is not, so no spline passes through them.
+    residual = np.linalg.norm(basis @ current - effects)
+    assert residual > _least_squares_bound(basis, start, current, effects)
+    assert session_payload(session)["band"]["spline_view"]["fits_levels"] is False
+
+    # A handle move writes every smooth level as B(level positions) @ c.
+    controls = session.control_points("band")
+    session.move_control_point("band", 0, float(controls["log_effect"][0] + 0.1))
+    assert session_payload(session)["band"]["spline_view"]["fits_levels"] is True
+
+    # Undo takes the move back: the shift is again the latest level edit.
+    session.undo()
+    assert session_payload(session)["band"]["spline_view"]["fits_levels"] is False
+    # Undoing the shift restores the fitted levels, which lie on the fit.
+    session.undo()
+    np.testing.assert_array_equal(term.edited_log_effect, term.original_log_effect)
+    assert session_payload(session)["band"]["spline_view"]["fits_levels"] is True
+
+
 def test_handles_are_off_with_a_reason_once_levels_are_grouped(wide):
     model, _ = wide
     session = EditorSession.from_model(model, terms=["band"])
