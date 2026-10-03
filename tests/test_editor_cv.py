@@ -287,6 +287,22 @@ def test_cv_data_is_checked_against_the_folds(cv_frame, cv_fit):
     noted = EditorSession.from_model(model, terms=["region"], cv=older, cv_data=reordered)
     assert noted.cv_check.reason is None
     assert noted.cv_check.note == NO_FINGERPRINT
+    # Without a fingerprint the row count is still checked, and refuses with no note.
+    older_fewer = EditorSession.from_model(
+        model, terms=["region"], cv=older, cv_data=(X.iloc[:399], y[:399], w[:399])
+    )
+    assert older_fewer.cv_check.rows is None
+    assert (older_fewer.cv_check.reason, older_fewer.cv_check.note) == (
+        ROWS_MISMATCH.format(rows=399, expected=400),
+        None,
+    )
+    older_wider = EditorSession.from_model(
+        model, terms=["region"], train_data=(X.iloc[:500], y[:500], w[:500]), cv=older
+    )
+    assert (older_wider.cv_check.reason, older_wider.cv_check.note) == (
+        TRAIN_ROWS_MISMATCH.format(rows=500, expected=400),
+        None,
+    )
 
     assert EditorSession.from_model(model, terms=["region"]).cv_check.reason == NO_CV
     with pytest.raises(TypeError, match="not a splitter"):
