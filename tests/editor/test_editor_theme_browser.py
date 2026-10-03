@@ -22,6 +22,8 @@ SWITCH_ANIMATIONS = """() => [...document.querySelectorAll('#themeSwitch, #theme
 DARK_GROUND = "rgb(29, 32, 33)"
 DARK_EDIT = "rgb(131, 168, 232)"
 FOLLOW = "Follow the browser's light or dark setting"
+THEME_KEY = "superglm.editor.theme"
+APP_MODULE = "**/assets/main.js*"
 BLOCK_STORAGE = """
 Object.defineProperty(window, 'localStorage', {
   configurable: true,
@@ -68,7 +70,6 @@ def test_switch_flips_to_the_warm_dark_and_survives_a_reload(open_editor_page):
         assert settings["followBrowserTheme"] is False
 
         page.reload(wait_until="domcontentloaded")
-        # The first-paint script restores the choice before the app loads.
         assert page.evaluate(THEME) == "dark"
         page.locator("#chart path.edited").first.wait_for()
         assert page.get_by_role("switch", name="Dark theme").is_checked()
@@ -86,6 +87,21 @@ def test_switch_flips_to_the_warm_dark_and_survives_a_reload(open_editor_page):
         # Each flip restarts the keyframes under the theme it reaches.
         page.get_by_role("switch", name="Dark theme").click()
         assert page.evaluate(KNOB) == "theme-knob-to-night"
+
+
+def test_the_first_paint_script_alone_restores_the_stored_theme(open_editor_page):
+    """index.html sets the theme before the app's module runs, so a reload
+    never paints the browser's theme first when a choice is stored."""
+    with open_editor_page() as (page, _session):
+        for scheme, stored in (("light", "dark"), ("dark", "light")):
+            page.emulate_media(color_scheme=scheme)
+            page.evaluate("([key, value]) => localStorage.setItem(key, value)", [THEME_KEY, stored])
+            # Hold the app's module back, so only the first-paint script runs.
+            page.route(APP_MODULE, lambda route: route.abort())
+            page.reload(wait_until="domcontentloaded")
+            assert page.locator("#chart path.edited").count() == 0
+            assert page.evaluate(THEME) == stored
+            page.unroute(APP_MODULE)
 
 
 def test_following_the_browser_again_hands_it_the_switch(open_editor_page):

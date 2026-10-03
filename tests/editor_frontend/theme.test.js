@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 import {
   FADE_CLASS,
@@ -292,9 +293,50 @@ test("destroy removes every listener", () => {
   assert.equal(button.listeners.size + media.listeners.size + settings.listenerCount(), 0);
 });
 
-test("index.html paints the stored theme first and carries the switch", () => {
+/**
+ * Run index.html's first-paint script alone, as the browser does before any
+ * module loads, and return the theme it writes.
+ * @param {{stored?: string|null, prefersDark: boolean, blocked?: boolean}} page
+ */
+function firstPaintTheme({ stored = null, prefersDark, blocked = false }) {
+  const source = /<script>([\s\S]*?)<\/script>/.exec(appFile("index.html"))?.[1];
+  assert.ok(source, "index.html has an inline first-paint script");
+  const root = { dataset: {} };
+  const storage = { getItem: (key) => (key === THEME_STORAGE_KEY ? stored : null) };
+  const context = {
+    document: { documentElement: root },
+    matchMedia: (query) => ({ matches: query === "(prefers-color-scheme: dark)" && prefersDark }),
+  };
+  Object.defineProperty(context, "localStorage", {
+    get() {
+      if (blocked) throw new Error("The operation is insecure.");
+      return storage;
+    },
+  });
+  vm.runInNewContext(source, context);
+  return root.dataset.theme;
+}
+
+test("the first-paint script paints the theme theme.js will keep", () => {
+  const pages = [
+    { stored: "dark", prefersDark: false },
+    { stored: "light", prefersDark: true },
+    { stored: null, prefersDark: true },
+    { stored: null, prefersDark: false },
+    { stored: "sepia", prefersDark: true },
+    { blocked: true, prefersDark: true },
+    { blocked: true, prefersDark: false },
+  ];
+  const painted = pages.map(firstPaintTheme);
+  assert.deepEqual(painted, ["dark", "light", "dark", "light", "dark", "dark", "light"]);
+  // theme.js takes over from the same key, so nothing changes when the app loads.
+  const kept = pages.map(({ stored = null, prefersDark, blocked = false }) =>
+    resolveTheme(readThemeChoice(blocked ? BLOCKED : { getItem: () => stored }), prefersDark));
+  assert.deepEqual(painted, kept);
+});
+
+test("index.html carries the switch", () => {
   const html = appFile("index.html");
-  assert.ok(html.includes(`localStorage.getItem("${THEME_STORAGE_KEY}")`));
   assert.ok(!html.includes('id="themeAction"'));
   const start = html.indexOf('<button id="themeSwitch"');
   assert.notEqual(start, -1);
