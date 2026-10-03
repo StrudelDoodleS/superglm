@@ -153,7 +153,7 @@ def model_with_unseen(model, term: str, policy: str):
     copied = _copy_model_for_editor_edits(model)
     spec = copied._specs[term]
     spec.unseen = policy
-    declared = dict(getattr(copied._config, "feature_templates", ())).get(term)
+    declared = dict(getattr(getattr(copied, "_config", None), "feature_templates", ())).get(term)
     if isinstance(declared, Categorical):
         declared.unseen = policy
     try:

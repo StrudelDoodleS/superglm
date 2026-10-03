@@ -556,8 +556,8 @@ class EditorSession:
         reference) or the label of one of the term's groups (give them that
         group's effect). Only a plain categorical has the choice. Nothing is
         refit: the in-force model becomes a copy with the new policy, and the
-        choice is one entry that Undo takes back
-        (:func:`superglm.editor.unseen.set_unseen`).
+        choice is one entry that Undo takes back. The body lives in
+        ``superglm.editor.unseen``.
         """
         unseen.set_unseen(self, term, policy)
         return self

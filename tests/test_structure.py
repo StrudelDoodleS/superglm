@@ -400,7 +400,7 @@ def _linear_predictor_bound(X, *models) -> float:
 def test_round_trip_through_the_editor_rebuilds_the_in_force_model(tmp_path):
     X, y = _frame()
     grouping = collapse_levels(X["brand"], groups={"Other": ["B13", "B14"]})
-    model = _plain(brand=Categorical(base="first", grouping=grouping, unseen="Other"))
+    model = _plain(brand=Categorical(base="first", grouping=grouping))
     model.fit(X, y)
     session = EditorSession.from_model(model, terms=["brand", "age"])
     session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
@@ -408,9 +408,10 @@ def test_round_trip_through_the_editor_rebuilds_the_in_force_model(tmp_path):
     session.stage_structural("shape", "age", {"lo": 30.0, "hi": 45.0, "degree": 1})
     session.stage_structural("shape", "age", {"lo": 60.0, "hi": 70.0, "degree": 0, "join": "kink"})
     session.refit_pending(method="fit")
+    session.set_unseen("brand", "Other")
     in_force = session.model
     path = tmp_path / "structure.json"
-    Structure.from_model(in_force).to_json(path)
+    session.export_structure(path)
 
     fresh = _plain()
     applied = read_structure(path).apply(fresh)

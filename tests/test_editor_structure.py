@@ -1843,6 +1843,11 @@ def test_new_levels_carries_through_a_refit_and_comes_back_with_its_undo():
     session.stage_structural("shape", "x", {"lo": 2.0, "hi": 6.0, "degree": 1})
     session.refit_pending(method="fit")
     assert session.model._specs["region"].unseen == "Other"
+    # A change to the term itself is built on the in-force spec, so it keeps the choice too.
+    regrouped = EditorSession.from_model(session.model, terms=["region"])
+    regrouped.stage_structural("collapse", "region", {"levels": ["A", "B"]})
+    regrouped.refit_pending(method="fit")
+    assert regrouped.model._specs["region"].unseen == "Other"
     # Run CV and Final fit refit the in-force model's declaration.
     assert session.model.clone_unfitted()._specs["region"].unseen == "Other"
     assert chosen.clone_unfitted()._specs["region"].unseen == "Other"
