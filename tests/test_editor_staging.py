@@ -149,6 +149,61 @@ def test_keep_reference_after_a_waiting_change_that_let_the_policy_choose(book):
     assert after.base == "first"
 
 
+def test_keep_reference_finds_its_level_again_when_a_waiting_group_breaks_up(book):
+    model, X, y = book
+    # B2 sorts after B10 and B11, so a tie settled by order alone would lose it.
+    in_force = clone_with_replaced_features(model, {"brand": Categorical(base="B2")})
+    fit_refit_model(model, in_force, method="fit", X=X, y=y)
+    brand = _term(in_force, "brand")
+    collapsed, _ = collapsed_feature_spec(in_force, brand, _at(brand, "B10", "B2"), X=X)
+    assert collapsed.base == "B10+B2"
+    # Ungrouping the whole group leaves every member on its own: B2 is the reference again.
+    dissolved, _ = ungrouped_feature_spec(
+        in_force, brand, _at(brand, "B10", "B2"), X=X, draft_spec=collapsed
+    )
+    assert dissolved._grouping is None and dissolved.base == "B2"
+    # Taking B2 into a new group leaves B10 alone: the reference goes with B2.
+    moved, _ = collapsed_feature_spec(
+        in_force, brand, _at(brand, "B2", "B11"), X=X, draft_spec=collapsed
+    )
+    assert moved.base == "B11+B2"
+    # A waiting reference is the one kept, not the one in force (B1 in the book).
+    term = _term(model, "brand")
+    pinned, _ = reference_feature_spec(model, term, "B2", X=X)
+    grouped, _ = collapsed_feature_spec(model, term, _at(term, "B1", "B2"), X=X, draft_spec=pinned)
+    dissolved, _ = ungrouped_feature_spec(
+        model, term, _at(term, "B1", "B2"), X=X, draft_spec=grouped
+    )
+    assert dissolved.base == "B2"
+
+
+@pytest.mark.parametrize("staged", [True, False], ids=["waiting", "refitted-at-once"])
+def test_keep_reference_keeps_the_reference_through_its_own_group_and_back(staged):
+    rng = np.random.default_rng(20261005)
+    code = rng.choice([1, 2, 3, 10], 400)
+    y = 0.5 + 0.1 * (code == 2) - 0.1 * (code == 10) + rng.normal(0.0, 0.05, 400)
+    X = pd.DataFrame({"code": code})
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={"code": Categorical(base=3)}
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["code"])
+    if staged:
+        session.stage_structural("collapse", "code", {"levels": ["1", "3"]})
+        session.stage_structural("ungroup", "code", {"levels": ["1", "3"]})
+        session.refit_pending(method="fit")
+    else:
+        session.select_levels("code", ["1", "3"])
+        session.replace_with_collapsed_levels("code", method="fit")
+        # A second group keeps the ungroup from reusing the fit before the collapse.
+        session.select_levels("code", ["2", "10"])
+        session.replace_with_collapsed_levels("code", method="fit")
+        session.select_levels("code", ["1", "3"])
+        session.replace_with_ungrouped_levels("code", method="fit")
+    # Ungrouped, the reference is native (3); beside a group, the fit spells it as text.
+    assert session.model._specs["code"]._base_level == (3 if staged else "3")
+
+
 def test_collapse_and_ungroup_keep_the_level_universe_and_the_unseen_policy():
     rng = np.random.default_rng(20261004)
     area = rng.choice(["A", "B", "C", "D"], 400)
