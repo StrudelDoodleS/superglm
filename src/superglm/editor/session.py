@@ -11,8 +11,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
-from superglm.editor import apply, persistence
-from superglm.editor._types import EditableTerm, EditRecord, SessionState, StructuralStep
+from superglm.editor import apply, persistence, staging
+from superglm.editor._types import (
+    EditableTerm,
+    EditRecord,
+    PendingStep,
+    SessionState,
+    StructuralStep,
+)
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
     collapsed_feature_spec,
@@ -43,6 +49,7 @@ from superglm.editor.operations import (
 )
 from superglm.editor.refit import fit_refit_model
 from superglm.editor.shapes import shape_support, shaped_feature_spec
+from superglm.editor.staging import _COLLAPSE_SENTENCES, _SHAPE_SENTENCES, _range_refusal
 from superglm.editor.terms import (
     term_from_inference,
     term_offset_values,
@@ -50,70 +57,11 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
-from superglm.features._spline_ranges import (
-    ConstantRangesError,
-    NarrowGapError,
-    RangeError,
-    UndeterminedRangeError,
-    UndeterminedStretchError,
-)
 from superglm.solvers.dispersion import model_weight_semantics
 
-_SHAPE_REFUSED = (
-    "That range cannot be shaped. Choose a range with more distinct values, or a lower degree."
-)
-_CONSTANT_REFUSED = (
-    "A Flat range over the whole axis leaves the term one constant, which the intercept "
-    "already carries. Choose a Line, or leave part of the axis free."
-)
-_STRETCH_REFUSED = (
-    "That range leaves too few values beside it to fit the rest of the curve. "
-    "Widen it to the end of the axis or to the next shaped range."
-)
-
-_NARROW_REFUSED = (
-    "That range's edge falls too close to the end of the axis, another range or a knot "
-    "to fit stably. Move the edge, or let it meet the next range."
-)
-_COLLAPSE_IN_RANGE_REFUSED = (
-    "Collapsing those bands leaves a shaped range too few bands for its shape. "
-    "Collapse bands outside it, or undo the range first."
-)
-_COLLAPSE_STRETCH_REFUSED = (
-    "Collapsing those bands leaves too few bands beside a shaped range to fit the rest "
-    "of the curve. Collapse fewer bands, or undo the range first."
-)
-# Most specific first: every range refusal is a RangeError.
-_SHAPE_SENTENCES = (
-    (UndeterminedStretchError, _STRETCH_REFUSED),
-    (ConstantRangesError, _CONSTANT_REFUSED),
-    (NarrowGapError, _NARROW_REFUSED),
-    (RangeError, _SHAPE_REFUSED),
-)
-_COLLAPSE_SENTENCES = (
-    (UndeterminedRangeError, _COLLAPSE_IN_RANGE_REFUSED),
-    (UndeterminedStretchError, _COLLAPSE_STRETCH_REFUSED),
-)
-
-
-def _range_refusal(exc: BaseException, sentences) -> str | None:
-    """The sentence for the first range refusal on ``exc``'s cause chain, or None.
-
-    The fit re-raises a term's build refusal to name the term, so the
-    library's own error can sit one or more causes down. Anything else, a
-    solver failure say, is not a range refusal and keeps its own error.
-    """
-    return next(filter(None, (_sentence_for(cause, sentences) for cause in _causes(exc))), None)
-
-
-def _sentence_for(exc: BaseException, sentences) -> str | None:
-    return next((sentence for kind, sentence in sentences if isinstance(exc, kind)), None)
-
-
-def _causes(exc: BaseException | None):
-    while exc is not None:
-        yield exc
-        exc = exc.__cause__
+# Re-profiling replaces the model and cannot be undone, so it would drop
+# waiting changes with no way back.
+_PROFILE_WHILE_WAITING = "Refit or undo the waiting changes before re-profiling."
 
 
 class EditorSession:
@@ -152,6 +100,12 @@ class EditorSession:
         # the session, so Undo never refits: memory grows by one fit per step.
         self.structure_history: list[StructuralStep] = []
         self.structure_redo: list[StructuralStep] = []
+        # Structural changes waiting for one Refit (spec D1), oldest first, and
+        # the ones Undo took back, latest last. Notes are kept by step id, apart
+        # from the undo states, so they survive undo and redo.
+        self.pending: list[PendingStep] = []
+        self.pending_redo: list[PendingStep] = []
+        self.step_notes: dict[str, str] = {}
         self._model_revision = 0
         self._edit_epoch = 0
         self._materialized_edit_model = None
@@ -365,6 +319,7 @@ class EditorSession:
         if not np.array_equal(before, restored):
             # A change is a new action: the undone steps' future is gone.
             self.structure_redo.clear()
+            self.pending_redo.clear()
             self._advance_model_revision()
         return self
 
@@ -611,20 +566,30 @@ class EditorSession:
         return self
 
     def undo(self, term: str | None = None) -> EditorSession:
-        """Undo the latest edit or, with none since it, the latest structural step.
+        """Undo the latest action, in time: an edit, a waiting change or an applied step.
 
-        Undoing a step puts back the whole editor state from before it, edits
-        included, without refitting. ``term`` limits the undo to that term's
-        latest edit since the last structural step.
+        Undoing a waiting change puts back the term's previous draft; the model
+        and the curves are unchanged, so the model revision stays. Undoing an
+        applied step puts back the whole editor state from before it, edits and
+        waiting changes included, without refitting. ``term`` limits the undo
+        to that term's latest edit since the last structural step.
         """
-        if term is None and not self.history and self.structure_history:
+        target = self.undo_target() if term is None else None
+        if isinstance(target, PendingStep):
+            self.pending_redo.append(self.pending.pop())
+            return self
+        if isinstance(target, StructuralStep):
             self._step_across(self.structure_history, self.structure_redo)
             return self
         if not self.history:
             return self
-        record = self._pop_record(self.history, term)
-        if record is None:
+        index = self._latest_index(self.history, term)
+        if index is None:
             return self
+        record = self.history[index]
+        self._rewrite_history(
+            [None if i == index else kept for i, kept in enumerate(self.history)], undone=True
+        )
         current = self.terms[record.term].edited_log_effect[record.indices].copy()
         self.terms[record.term].edited_log_effect[record.indices] = record.before
         self.redo_stack.append(record)
@@ -633,8 +598,12 @@ class EditorSession:
         return self
 
     def redo(self, term: str | None = None) -> EditorSession:
-        """Redo the latest undone edit or, with none, the latest undone structural step."""
-        if term is None and not self.redo_stack and self.structure_redo:
+        """Redo the latest undone action, in the order Undo took them back."""
+        target = self.redo_target() if term is None else None
+        if isinstance(target, PendingStep):
+            self.pending.append(self.pending_redo.pop())
+            return self
+        if isinstance(target, StructuralStep):
             self._step_across(self.structure_redo, self.structure_history)
             return self
         if not self.redo_stack:
@@ -648,6 +617,46 @@ class EditorSession:
         if not np.array_equal(current, record.after):
             self._advance_model_revision()
         return self
+
+    def undo_target(self) -> EditRecord | PendingStep | StructuralStep | None:
+        """What a plain :meth:`undo` takes next: the latest edit or waiting change, else a step."""
+        return staging.undo_target(self)
+
+    def redo_target(self) -> EditRecord | PendingStep | StructuralStep | None:
+        """What a plain :meth:`redo` puts back next, in the reverse of the order Undo took."""
+        return staging.redo_target(self)
+
+    # Structural changes wait for one Refit (spec D1); the bodies live in
+    # ``superglm.editor.staging``.
+    def draft_spec(self, term: str):
+        """``term``'s spec as waiting changes leave it (:func:`staging.draft_spec`)."""
+        return staging.draft_spec(self, term)
+
+    def stage_structural(
+        self,
+        operation: str,
+        term: str,
+        params: dict[str, Any],
+        *,
+        keep_reference: bool = True,
+        X=None,
+    ) -> PendingStep:
+        """Stage one structural change to wait for a Refit (:func:`staging.stage_structural`)."""
+        return staging.stage_structural(
+            self, operation, term, params, keep_reference=keep_reference, X=X
+        )
+
+    def timeline_items(self) -> tuple[list[tuple[Any, str]], list[tuple[Any, str]]]:
+        """Every action, split at the current position (:func:`staging.timeline_items`)."""
+        return staging.timeline_items(self)
+
+    def set_step_note(self, step_id: str, note: str | None) -> None:
+        """Write ``note`` on the timeline entry ``step_id``; an empty note removes it."""
+        staging.set_step_note(self, step_id, note)
+
+    def editor_history_records(self) -> list[dict[str, Any]]:
+        """The timeline up to now as an exported model's ``_editor_history``."""
+        return staging.editor_history_records(self)
 
     def to_model(self, *, X=None, y=None, sample_weight=None, offset=None):
         """Return an edited copy of the source model.
@@ -860,6 +869,8 @@ class EditorSession:
         """Explicitly re-estimate a distribution parameter for the in-force model."""
         if self.model is None:
             raise RuntimeError("Cannot reprofile without a source model.")
+        if self.pending:
+            raise EditorValueError(_PROFILE_WHILE_WAITING)
         if self.edited_terms():
             raise RuntimeError(
                 "Cannot re-profile distribution parameters while manual coefficient edits "
@@ -1134,8 +1145,8 @@ class EditorSession:
         The step keeps the state before it. Like any new action, it ends the
         future of whatever was undone, so the kept state holds no redo.
         """
-        step = StructuralStep(self._capture_state(), operation, term, label)
-        step.state.redo_stack.clear()
+        state = replace(self._capture_state(), redo_stack=[], pending_redo=())
+        step = StructuralStep(state, operation, term, label)
         self.replace_in_force_model(model, level_orders=level_orders)
         self.structure_history.append(step)
         self.structure_redo.clear()
@@ -1150,6 +1161,8 @@ class EditorSession:
             level_orders={name: list(labels) for name, labels in self._level_orders.items()},
             history=list(self.history),
             redo_stack=list(self.redo_stack),
+            pending=tuple(self.pending),
+            pending_redo=tuple(self.pending_redo),
         )
 
     def _step_across(self, source: list[StructuralStep], target: list[StructuralStep]) -> None:
@@ -1162,6 +1175,8 @@ class EditorSession:
         self._level_orders = step.state.level_orders
         self.history = step.state.history
         self.redo_stack = step.state.redo_stack
+        self.pending = list(step.state.pending)
+        self.pending_redo = list(step.state.pending_redo)
         self._advance_model_revision()
 
     def replace_in_force_model(
@@ -1174,6 +1189,7 @@ class EditorSession:
         """Replace the editable in-force model while retaining the original reference model.
 
         Display level reorders carry over unless ``level_orders`` replaces them.
+        Edits and waiting changes do not carry over.
         """
         train_data = self._evaluation_data.get("train")
         new_terms = self._editable_terms_from_model(
@@ -1191,6 +1207,7 @@ class EditorSession:
         old_selection = self._selection
         old_history = self.history
         old_redo_stack = self.redo_stack
+        old_pending, old_pending_redo = self.pending, self.pending_redo
         old_level_orders = self._level_orders
         carried_orders = old_level_orders if level_orders is None else level_orders
 
@@ -1200,6 +1217,7 @@ class EditorSession:
             self._selection = new_selection
             self.history = []
             self.redo_stack = []
+            self.pending, self.pending_redo = [], []
             self._level_orders = {name: list(labels) for name, labels in carried_orders.items()}
             self._reapply_level_orders()
         except Exception:
@@ -1208,6 +1226,7 @@ class EditorSession:
             self._selection = old_selection
             self.history = old_history
             self.redo_stack = old_redo_stack
+            self.pending, self.pending_redo = old_pending, old_pending_redo
             self._level_orders = old_level_orders
             raise
 
@@ -1553,6 +1572,7 @@ class EditorSession:
         )
         self.redo_stack.clear()
         self.structure_redo.clear()
+        self.pending_redo.clear()
         if changed:
             self._advance_model_revision()
 
@@ -1565,42 +1585,68 @@ class EditorSession:
                 return records.pop(i)
         return None
 
+    def _latest_index(self, records: list[EditRecord], term: str | None) -> int | None:
+        """Index of the latest record, or of ``term``'s latest; None when there is none."""
+        if term is None:
+            return len(records) - 1 if records else None
+        self._require_term(term)
+        return next((i for i in range(len(records) - 1, -1, -1) if records[i].term == term), None)
+
+    def _rewrite_history(self, records: list[EditRecord | None], *, undone: bool = False) -> None:
+        """Keep ``records``' survivors as the history; waiting changes keep their place.
+
+        ``records`` is the history with each dropped record replaced by None. A
+        change staged after k records now follows the survivors among them.
+        A record Undo takes back (``undone``) is not lost: it is redone before
+        any change Undo took back earlier, so those changes keep their places.
+        """
+        kept = np.cumsum([0, *(record is not None for record in records)])
+        dropped = np.arange(kept.size) - kept
+
+        def moved(step: PendingStep) -> PendingStep:
+            shift = int(dropped[min(step.history_position, len(records))])
+            return (
+                step
+                if shift == 0
+                else replace(step, history_position=step.history_position - shift)
+            )
+
+        self.pending = [moved(step) for step in self.pending]
+        if not undone:
+            self.pending_redo = [moved(step) for step in self.pending_redo]
+        self.history = [record for record in records if record is not None]
+
     def _clear_term_history(self, term: str) -> None:
         self._require_term(term)
-        self.history = [record for record in self.history if record.term != term]
+        self._rewrite_history([None if record.term == term else record for record in self.history])
         self.redo_stack = [record for record in self.redo_stack if record.term != term]
 
     def _trim_term_history(self, term: str, reset_indices: NDArray[np.intp]) -> None:
         self._require_term(term)
         reset = set(np.asarray(reset_indices, dtype=np.intp).tolist())
-        self.history = self._records_without_indices(self.history, term, reset)
-        self.redo_stack = self._records_without_indices(self.redo_stack, term, reset)
+        self._rewrite_history(
+            [self._record_without_indices(record, term, reset) for record in self.history]
+        )
+        trimmed = (self._record_without_indices(record, term, reset) for record in self.redo_stack)
+        self.redo_stack = [record for record in trimmed if record is not None]
 
     @staticmethod
-    def _records_without_indices(
-        records: list[EditRecord],
-        term: str,
-        reset: set[int],
-    ) -> list[EditRecord]:
-        out: list[EditRecord] = []
-        for record in records:
-            if record.term != term:
-                out.append(record)
-                continue
-            keep = np.array([int(index) not in reset for index in record.indices], dtype=bool)
-            if not bool(np.any(keep)):
-                continue
-            out.append(
-                EditRecord(
-                    term=record.term,
-                    operation=record.operation,
-                    indices=record.indices[keep].copy(),
-                    before=record.before[keep].copy(),
-                    after=record.after[keep].copy(),
-                    params=dict(record.params),
-                )
-            )
-        return out
+    def _record_without_indices(
+        record: EditRecord, term: str, reset: set[int]
+    ) -> EditRecord | None:
+        """``record`` less ``term``'s reset points, keeping its id; None when nothing is left."""
+        if record.term != term:
+            return record
+        keep = np.array([int(index) not in reset for index in record.indices], dtype=bool)
+        if not bool(np.any(keep)):
+            return None
+        return replace(
+            record,
+            indices=record.indices[keep].copy(),
+            before=record.before[keep].copy(),
+            after=record.after[keep].copy(),
+            params=dict(record.params),
+        )
 
     def _level_selected(self, term: str, operation: str, mode: str) -> EditorSession:
         idx = self._require_edit_selection(term)

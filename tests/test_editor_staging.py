@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from superglm import Categorical, Spline, SuperGLM
 from superglm.editor import EditorSession
+from superglm.editor import session as session_module
+from superglm.editor import staging as staging_module
+from superglm.editor._types import new_step_id
 from superglm.editor.collapse import (
     clone_with_replaced_features,
     collapsed_feature_spec,
     reference_feature_spec,
     ungrouped_feature_spec,
 )
-from superglm.editor.errors import EditorValueError
+from superglm.editor.errors import EditorKeyError, EditorValueError
+from superglm.editor.payloads import undo_redo_payload
 from superglm.editor.refit import fit_refit_model
 from superglm.editor.shapes import shaped_feature_spec
 
@@ -58,6 +65,23 @@ def _term(model, name):
 
 def _at(term, *labels):
     return np.array([term.levels.index(label) for label in labels], dtype=np.intp)
+
+
+def _session(model, centering="native"):
+    return EditorSession.from_model(model, terms=["brand", "area", "age"], centering=centering)
+
+
+def _count_fits(monkeypatch) -> list[object]:
+    """Every refit the session fits, recorded; each still fits."""
+    fits: list[object] = []
+    fit = session_module.fit_refit_model
+
+    def counted(*args, **kwargs):
+        fits.append(args[1])
+        return fit(*args, **kwargs)
+
+    monkeypatch.setattr(session_module, "fit_refit_model", counted)
+    return fits
 
 
 def test_a_reference_can_name_the_group_a_waiting_collapse_made(book):
@@ -174,3 +198,227 @@ def test_two_waiting_shapes_on_one_spline_compose_on_the_fitted_knots(book):
     assert step["label"] == "Flat 60–70 in age"
     with pytest.raises(EditorValueError, match="^This range overlaps the Line range 30–45."):
         shaped_feature_spec(model, "age", lo=40.0, hi=50.0, degree=0, X=X, draft_spec=first)
+
+
+def test_step_ids_are_seven_hex_digits_unique_in_the_process():
+    ids = [new_step_id() for _ in range(10_000)]
+    assert len(set(ids)) == len(ids)
+    assert all(re.fullmatch(r"[0-9a-f]{7}", step_id) for step_id in ids)
+
+
+def test_the_session_stages_through_the_staging_module(book, monkeypatch):
+    model, _, _ = book
+    session = _session(model)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        staging_module, "stage_structural", lambda *args, **kwargs: calls.append(args)
+    )
+    session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    assert calls == [(session, "collapse", "brand", {"levels": ["B10", "B11"]})]
+
+
+def test_staging_waits_without_fitting_or_moving_the_model_revision(book, monkeypatch):
+    model, _, _ = book
+    session = _session(model)
+    fits = _count_fits(monkeypatch)
+    revision, epoch = session.model_revision, session.edit_epoch
+    curves = {name: term.edited_log_effect.copy() for name, term in session.terms.items()}
+
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B11", "B10"]})
+
+    assert fits == [] and session.model is model
+    assert (session.model_revision, session.edit_epoch) == (revision, epoch)
+    for name, curve in curves.items():
+        np.testing.assert_array_equal(session.terms[name].edited_log_effect, curve)
+    assert session.pending == [staged]
+    assert (staged.operation, staged.term, staged.label) == (
+        "collapse",
+        "brand",
+        "collapse B10 + B11 in brand",
+    )
+    assert staged.params == {"levels": ["B10", "B11"], "group_label": "B10+B11"}
+    assert staged.history_position == 0 and re.fullmatch(r"[0-9a-f]{7}", staged.step_id)
+    assert session.draft_spec("brand") is staged.draft_spec
+    assert session.draft_spec("area") is model._specs["area"]
+    assert undo_redo_payload(session) == {"undo": staged.label, "redo": None}
+
+
+@pytest.mark.parametrize(
+    ("operation", "term", "params", "error", "message"),
+    [
+        (
+            "shape",
+            "age",
+            {"lo": 33.0, "hi": 33.0, "degree": 1},
+            EditorValueError,
+            "Select at least two points to shape a range.",
+        ),
+        (
+            "collapse",
+            "brand",
+            {"levels": ["B10", "B99"]},
+            EditorKeyError,
+            "Unknown level(s) for term 'brand': ['B99']",
+        ),
+        ("set_reference", "brand", {}, EditorValueError, "Missing required field: level."),
+        ("merge", "brand", {}, EditorValueError, "Unknown structural change: 'merge'"),
+    ],
+)
+def test_a_change_the_builder_refuses_is_refused_at_staging(
+    book, operation, term, params, error, message
+):
+    model, _, _ = book
+    session = _session(model)
+    with pytest.raises(error) as caught:
+        session.stage_structural(operation, term, params)
+    assert caught.value.public_message == message
+    assert session.pending == []
+
+
+def test_undo_and_redo_follow_time_across_edits_and_waiting_changes(book, monkeypatch):
+    model, _, _ = book
+    session = _session(model)
+    fits = _count_fits(monkeypatch)
+    session.select_indices("age", [10, 11])
+    session.shift("age", 0.1)
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.select_levels("area", ["C"])
+    session.shift("area", -0.1)
+    age_edit, area_edit = session.history
+    assert undo_redo_payload(session) == {"undo": "shift area", "redo": None}
+
+    session.undo()
+    assert [record.step_id for record in session.history] == [age_edit.step_id]
+    assert session.pending == [staged]
+    assert undo_redo_payload(session) == {"undo": staged.label, "redo": "shift area"}
+    revision = session.model_revision
+    session.undo()
+    # A waiting change undone moves nothing: no fit, and no new model revision.
+    assert session.pending == [] and session.pending_redo == [staged]
+    assert session.model_revision == revision
+    session.undo()
+    assert session.history == [] and session.edited_terms() == []
+    assert undo_redo_payload(session) == {"undo": None, "redo": "shift age"}
+
+    session.redo()
+    assert session.edited_terms() == ["age"] and session.pending == []
+    revision = session.model_revision
+    session.redo()
+    assert session.pending == [staged] and session.model_revision == revision
+    session.redo()
+    assert [record.step_id for record in session.history] == [
+        age_edit.step_id,
+        area_edit.step_id,
+    ]
+    assert session.model is model and fits == []
+
+
+def test_a_new_action_ends_the_future_of_an_undone_waiting_change(book):
+    model, _, _ = book
+    session = _session(model)
+    session.select_levels("area", ["C"])
+    session.shift("area", 0.1)
+    session.undo()
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    # Staging is a new action: the undone edit's future is gone.
+    assert session.redo_stack == []
+    session.undo()
+    assert session.pending_redo == [staged]
+    session.select_levels("area", ["C"])
+    session.shift("area", 0.1)
+    assert session.pending_redo == []
+    session.redo()
+    assert session.pending == []
+
+
+def test_a_reset_keeps_a_waiting_change_in_its_place_among_the_edits(book):
+    model, _, _ = book
+    session = _session(model)
+    session.select_indices("age", [10])
+    session.shift("age", 0.1)
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.select_levels("area", ["C"])
+    session.shift("area", -0.1)
+    session.clear_selection("age")
+    session.reset("age")
+
+    [area_edit] = session.history
+    assert session.pending[0].step_id == staged.step_id
+    assert session.pending[0].history_position == 0
+    # The area edit came after the waiting collapse, so Undo takes it first.
+    assert session.undo_target() is area_edit
+    session.undo()
+    assert session.undo_target().step_id == staged.step_id
+
+
+def test_notes_survive_undo_and_redo_and_travel_in_the_history_records(book):
+    model, _, _ = book
+    session = _session(model)
+    session.select_levels("area", ["C"])
+    session.shift("area", 0.1)
+    [edit] = session.history
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.set_step_note(staged.step_id, "  One dealer network  ")
+    session.set_step_note(edit.step_id, "Area C rated by hand")
+    session.undo().undo().redo().redo()
+    assert session.step_notes == {
+        staged.step_id: "One dealer network",
+        edit.step_id: "Area C rated by hand",
+    }
+
+    session.set_step_note(edit.step_id, "")
+    records = session.editor_history_records()
+    assert [(r["id"], r["operation"], r["status"], r["note"]) for r in records] == [
+        (edit.step_id, "shift", "edit", None),
+        (staged.step_id, "collapse", "waiting", "One dealer network"),
+    ]
+    assert (records[1]["message"], records[1]["term"]) == (staged.label, "brand")
+    assert records[1]["predictor"] is None
+    assert datetime.fromisoformat(records[0]["time"]).tzinfo == UTC
+    with pytest.raises(EditorKeyError) as caught:
+        session.set_step_note("not-an-id", "x")
+    assert caught.value.public_message == "Unknown history entry."
+
+
+def test_revert_sets_the_waiting_changes_aside_and_undo_brings_them_back(book):
+    model, _, _ = book
+    session = _session(model)
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.revert_to_reference_model()
+    assert session.pending == []
+    session.undo()
+    assert session.pending == [staged] and session.model is model
+
+
+def test_re_profiling_waits_until_nothing_is_waiting(book):
+    model, _, _ = book
+    session = _session(model)
+    session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    with pytest.raises(EditorValueError) as caught:
+        session.reprofile_distribution("tweedie_p")
+    assert caught.value.public_message == "Refit or undo the waiting changes before re-profiling."
+
+
+def test_a_term_undo_keeps_a_waiting_change_in_its_place_among_the_edits(book):
+    model, _, _ = book
+    session = _session(model)
+    session.select_indices("age", [10])
+    session.shift("age", 0.1)
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.select_levels("area", ["C"])
+    session.shift("area", -0.1)
+    session.undo("age")
+
+    [area_edit] = session.history
+    assert session.pending[0].history_position == 0
+    # The area edit came after the waiting collapse, so Undo takes it first.
+    assert session.undo_target() is area_edit
+    # Redo puts the age edit back last, after both.
+    session.redo()
+    done, _ = session.timeline_items()
+    assert [item.step_id for item, _ in done] == [
+        staged.step_id,
+        area_edit.step_id,
+        session.history[-1].step_id,
+    ]
+    assert session.history[-1].term == "age"

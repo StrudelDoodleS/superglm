@@ -130,17 +130,11 @@ def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, A
 
 def undo_redo_payload(session) -> dict[str, str | None]:
     """What Undo and Redo would take next, for their popovers; None leaves one disabled."""
+    undo, redo = session.undo_target(), session.redo_target()
     return {
-        "undo": _next_label(session.history, session.structure_history),
-        "redo": _next_label(session.redo_stack, session.structure_redo),
+        "undo": None if undo is None else undo.label,
+        "redo": None if redo is None else redo.label,
     }
-
-
-def _next_label(records, steps) -> str | None:
-    """The live edits lie nearer than any structural step, either way, so they go first."""
-    if records:
-        return _edit_label(records[-1])
-    return steps[-1].label if steps else None
 
 
 def _edit_label(record) -> str:

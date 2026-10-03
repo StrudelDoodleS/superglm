@@ -30,8 +30,8 @@ from superglm.editor import EditorSession
 from superglm.editor import session as session_module
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload, timeline_payload, undo_redo_payload
-from superglm.editor.session import _SHAPE_REFUSED, _STRETCH_REFUSED
 from superglm.editor.shapes import EDITOR_CHOSEN_SHAPE_ATTRIBUTE, _numeric_edges, snap_edge
+from superglm.editor.staging import _SHAPE_REFUSED, _STRETCH_REFUSED
 from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
 from superglm.export.summary import build_summary_export_payload
@@ -1063,13 +1063,13 @@ def test_an_edge_snapped_a_hair_inside_an_off_grid_end_goes_onto_it(
 
 
 def test_a_narrow_gap_refusal_has_its_own_sentence():
-    from superglm.editor import session as session_module
+    from superglm.editor import staging
     from superglm.features._spline_ranges import NarrowGapError
 
     chained = ValueError("Feature 'x': ...")
     chained.__cause__ = NarrowGapError("...")
-    sentence = session_module._range_refusal(chained, session_module._SHAPE_SENTENCES)
-    assert sentence == session_module._NARROW_REFUSED
+    sentence = staging._range_refusal(chained, staging._SHAPE_SENTENCES)
+    assert sentence == staging._NARROW_REFUSED
 
 
 def test_select_all_then_flat_is_refused_in_words(aged):
