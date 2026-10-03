@@ -15,7 +15,14 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.editor._types import EditableTerm, EditRecord, PendingStep, StructuralStep
+from superglm.editor._types import (
+    EditableTerm,
+    EditRecord,
+    PendingStep,
+    SessionState,
+    StructuralStep,
+)
+from superglm.editor.carry import carried_curve
 from superglm.editor.collapse import (
     collapsed_feature_spec,
     reference_feature_spec,
@@ -85,6 +92,12 @@ _REFIT_AT_ONCE = {
 }
 _UNKNOWN_ENTRY = "Unknown history entry."
 _NOTE_LIMIT = 2000
+_REFIT_REFUSED = "The refit was refused. Undo the last waiting change and try again."
+_NOTHING_WAITING = "No changes are waiting for a refit."
+
+
+def _refit_label(count: int) -> str:
+    return f"Refit · {count} change{'' if count == 1 else 's'}"
 
 
 def _range_refusal(exc: BaseException, sentences) -> str | None:
@@ -165,6 +178,88 @@ def stage_structural(
     session.pending_redo.clear()
     session.structure_redo.clear()
     return step
+
+
+def refit_pending(
+    session: EditorSession, *, method: str = "auto", **refit_kwargs: Any
+) -> StructuralStep:
+    """Apply every waiting change in one fit, as one structural step (spec D1).
+
+    Undo of the step brings the changes back as waiting; Redo puts the refit
+    back without fitting. Hand edits on terms no change restructured are
+    carried over (spec D2) as one more entry. A fit-time refusal leaves the
+    waiting changes and the model as they were and raises one fixed
+    sentence; Python callers keep the library's error as its cause.
+    ``refit_kwargs`` are ``X``, ``y``, ``sample_weight``, ``offset``,
+    ``lambda1``, ``lambda2`` and fit keywords.
+    """
+    try:
+        return _apply_pending(session, method=method, **refit_kwargs)
+    except EditorClientError:
+        raise
+    except ValueError as exc:
+        raise EditorValueError(_REFIT_REFUSED) from exc
+
+
+def stage_and_refit(
+    session: EditorSession,
+    operation: str,
+    term: str,
+    params: dict[str, Any],
+    *,
+    keep_reference: bool = True,
+    **refit_kwargs: Any,
+):
+    """Stage one change and refit every waiting change at once: the legacy ``replace_with_*`` calls.
+
+    The step keeps the state from before the change was staged, so one Undo
+    takes the whole call back and any earlier waiting changes wait again. A
+    refusal leaves nothing staged; a library range refusal reads as the
+    operation's own fixed sentence, as it always has.
+    """
+    before = session._capture_state()
+    future = (list(session.redo_stack), list(session.pending_redo), list(session.structure_redo))
+    change = None
+    try:
+        change = stage_structural(
+            session, operation, term, params, keep_reference=keep_reference, X=refit_kwargs.get("X")
+        )
+        _apply_pending(session, before=before, alone=change, **refit_kwargs)
+    except BaseException as exc:
+        if change is not None and session.pending and session.pending[-1] is change:
+            session.pending.pop()
+            session.redo_stack, session.pending_redo, session.structure_redo = future
+        refused = isinstance(exc, ValueError) and not isinstance(exc, EditorClientError)
+        sentence = _range_refusal(exc, _STAGED_SENTENCES.get(operation, ())) if refused else None
+        if sentence is None:
+            raise
+        raise EditorValueError(sentence) from exc
+    return session.model
+
+
+def put_in_force(
+    session: EditorSession, model, *, restructured: set[str], **step: Any
+) -> StructuralStep:
+    """Push ``model`` as one structural step, then carry over edits on the terms it left alone.
+
+    ``step`` goes to the session's ``_push_structure``: ``operation``,
+    ``term``, ``label`` and optionally ``state``, ``changes`` and ``step_id``.
+    """
+    previous = session.terms
+    held = [name for name in session.edited_terms() if name not in restructured]
+    session._push_structure(model, **step)
+    pushed = session.structure_history[-1]
+    _carry_edits(session, {name: previous[name] for name in held})
+    return pushed
+
+
+def selected_labels(session: EditorSession, term: str) -> list[str]:
+    """The selected levels' labels in display order: how a waiting change names them."""
+    editable = session._require_term(term)
+    idx = np.unique(session._require_selection(term))
+    if editable.levels is None:
+        raise EditorTypeError(f"Term {term!r} does not expose categorical levels.")
+    return [str(editable.levels[int(index)]) for index in idx]
 
 
 def undo_target(session: EditorSession) -> EditRecord | PendingStep | StructuralStep | None:
@@ -256,6 +351,83 @@ def editor_history_records(session: EditorSession) -> list[dict[str, Any]]:
         }
         for item, status in done
     ]
+
+
+def _apply_pending(
+    session: EditorSession,
+    *,
+    before: SessionState | None = None,
+    alone: PendingStep | None = None,
+    **refit_kwargs: Any,
+) -> StructuralStep:
+    """Fit every waiting change in one refit and put it in force as one structural step.
+
+    ``before`` and ``alone`` come from a change refitted at once: the step
+    keeps the state from before that change was staged and, when it is the
+    only change, is that change, under its id, operation and label.
+    Nothing changes unless the fit succeeds.
+    """
+    if not session.pending:
+        raise EditorValueError(_NOTHING_WAITING)
+    changes = tuple(session.pending)
+    # A later change on a term was built on the earlier ones' draft, so the
+    # last one holds them all.
+    drafts = {change.term: change.draft_spec for change in changes}
+    refit_model, method_used = session._refit_with_drafts(drafts, **refit_kwargs)
+    if alone is not None and len(changes) == 1 and changes[0] is alone:
+        identity = {
+            "operation": _REFIT_AT_ONCE[alone.operation],
+            "label": alone.label,
+            "step_id": alone.step_id,
+        }
+        refit_model._editor_step = {**alone.metadata, "method": method_used}
+    else:
+        label = _refit_label(len(changes))
+        identity = {"operation": "refit_pending", "label": label, "step_id": None}
+        refit_model._editor_step = {
+            "format": "superglm.editor.refit.v1",
+            "label": label,
+            "changes": [dict(change.metadata) for change in changes],
+            "method": method_used,
+            "message": "The waiting structural changes were applied and the full model was refit.",
+        }
+    term = next(iter(drafts)) if len(drafts) == 1 else None
+    return put_in_force(
+        session,
+        refit_model,
+        restructured=set(drafts),
+        state=before,
+        term=term,
+        changes=changes,
+        **identity,
+    )
+
+
+def _carry_edits(session: EditorSession, edited: dict[str, EditableTerm]) -> None:
+    """Re-apply hand-edited curves over a refit, as one entry Undo takes back (spec D2).
+
+    ``edited`` holds the edited terms the refit did not restructure. Each
+    keeps its rows and ``n_points``, so its grid and labels match and its
+    curve goes back exactly (``carried_curve``); a term whose grid moved
+    anyway is left at the refit. Undo of the entry returns the carried
+    terms to the refitted curves; Undo of the refit then puts back every
+    edit, those on restructured terms included.
+    """
+    carried = {}
+    for name, term in edited.items():
+        curve = carried_curve(term, session.terms[name])
+        if curve is not None:
+            carried[name] = curve
+    if not carried:
+        return
+    refitted = session._capture_state()
+    # A fresh dict of copies: the entry's state keeps the refitted terms.
+    session.terms = {name: term.copy() for name, term in session.terms.items()}
+    for name, curve in carried.items():
+        session.terms[name].edited_log_effect = curve
+    label = f"Hand edits carried over: {', '.join(carried)}"
+    session.structure_history.append(StructuralStep(refitted, "carry_edits", None, label))
+    session._advance_model_revision()
 
 
 def _waiting_draft(session: EditorSession, term: str):

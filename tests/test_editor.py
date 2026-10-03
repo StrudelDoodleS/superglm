@@ -2423,10 +2423,11 @@ def test_auto_level_refits_use_reml_when_source_model_was_reml_fit():
     assert "age" in collapsed._reml_lambdas
 
 
-def test_collapse_levels_replaces_in_force_model_and_clears_manual_edits(editor_model):
+def test_collapse_levels_replaces_in_force_model_and_carries_edits_on_other_terms(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
     session.select_indices("x_spline", [10, 11, 12])
     session.shift("x_spline", 0.4)
+    edited = session.terms["x_spline"].edited_log_effect.copy()
     assert session.edited_terms() == ["x_spline"]
 
     session.select_levels("region", ["B", "C"])
@@ -2434,13 +2435,13 @@ def test_collapse_levels_replaces_in_force_model_and_clears_manual_edits(editor_
 
     assert session.reference_model is editor_model
     assert session.model is refit
-    assert session.edited_terms() == []
+    # The collapse left x_spline's rows and grid alone, so its hand edit is
+    # carried over the refit (spec D2), as one entry of its own.
+    assert session.edited_terms() == ["x_spline"]
     assert session.history == []
+    assert session.structure_history[-1].label == "Hand edits carried over: x_spline"
     assert session.selection("x_spline").size == 0
-    np.testing.assert_allclose(
-        session.terms["x_spline"].edited_log_effect,
-        session.terms["x_spline"].original_log_effect,
-    )
+    np.testing.assert_array_equal(session.terms["x_spline"].edited_log_effect, edited)
     grouping = session.model.features["region"]._grouping
     assert grouping.original_to_group["B"] == "B+C"
     assert grouping.original_to_group["C"] == "B+C"

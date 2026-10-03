@@ -21,8 +21,8 @@ from superglm.editor._types import (
 )
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
+    clone_with_replaced_features,
     collapsed_feature_spec,
-    reference_feature_spec,
     ungroup_label,
     ungrouped_feature_spec,
 )
@@ -48,8 +48,8 @@ from superglm.editor.operations import (
     monotone_clamp_values,
 )
 from superglm.editor.refit import fit_refit_model
-from superglm.editor.shapes import shape_support, shaped_feature_spec
-from superglm.editor.staging import _COLLAPSE_SENTENCES, _SHAPE_SENTENCES, _range_refusal
+from superglm.editor.shapes import shape_support
+from superglm.editor.staging import _COLLAPSE_SENTENCES, _range_refusal
 from superglm.editor.terms import (
     term_from_inference,
     term_offset_values,
@@ -646,6 +646,10 @@ class EditorSession:
             self, operation, term, params, keep_reference=keep_reference, X=X
         )
 
+    def refit_pending(self, *, method: str = "auto", **refit_kwargs: Any) -> StructuralStep:
+        """Apply every waiting change in one fit, as one step (:func:`staging.refit_pending`)."""
+        return staging.refit_pending(self, method=method, **refit_kwargs)
+
     def timeline_items(self) -> tuple[list[tuple[Any, str]], list[tuple[Any, str]]]:
         """Every action, split at the current position (:func:`staging.timeline_items`)."""
         return staging.timeline_items(self)
@@ -960,14 +964,24 @@ class EditorSession:
                 raise
             raise EditorValueError(sentence) from exc
 
-    def replace_with_collapsed_levels(self, term: str, **kwargs: Any):
-        """Collapse selected levels, refit, and make the refit the in-force edit model."""
-        refit_model = self.refit_with_collapsed_levels(term, **kwargs)
-        return self._push_structure(
-            refit_model,
-            operation="collapse_levels",
-            term=term,
-            label=refit_model._editor_step["label"],
+    def replace_with_collapsed_levels(
+        self,
+        term: str,
+        *,
+        group_label: str | None = None,
+        keep_reference: bool = True,
+        **refit_kwargs: Any,
+    ):
+        """Collapse the selected levels and refit at once, as one structural step.
+
+        This is :meth:`stage_structural` followed by the refit of every waiting
+        change; Undo takes the whole call back. ``refit_kwargs`` are ``X``,
+        ``y``, ``sample_weight``, ``offset``, ``method``, ``lambda1``,
+        ``lambda2`` and fit keywords.
+        """
+        params = {"levels": staging.selected_labels(self, term), "group_label": group_label}
+        return staging.stage_and_refit(
+            self, "collapse", term, params, keep_reference=keep_reference, **refit_kwargs
         )
 
     def refit_with_ungrouped_levels(
@@ -988,29 +1002,50 @@ class EditorSession:
             **refit_kwargs,
         )
 
-    def replace_with_ungrouped_levels(self, term: str, **kwargs: Any):
-        """Ungroup selected levels and put the result in force as one structural step.
+    def replace_with_ungrouped_levels(
+        self, term: str, *, keep_reference: bool = True, **refit_kwargs: Any
+    ):
+        """Ungroup the selected levels and refit at once, as one structural step.
 
-        When this ungroup removes the model's last collapsed group and the
-        model before the latest step had none, that earlier fit is exactly the
-        result, so it is reused instead of refitting.
+        With nothing waiting, an ungroup that removes the model's last collapsed
+        group, when the model before the latest step had none, reuses that
+        earlier fit instead of refitting: it is exactly the result.
         """
-        model = self._pre_collapse_model(term, **kwargs)
-        if model is None:
-            model = self.refit_with_ungrouped_levels(term, **kwargs)
-        # Read after either path has validated the selection against a grouped
-        # term, in the sorted order the ungrouped spec's own metadata uses.
-        editable = self.terms[term]
-        levels = [str(editable.levels[i]) for i in np.unique(self._require_selection(term))]
-        return self._push_structure(
-            model, operation="ungroup_levels", term=term, label=ungroup_label(term, levels)
+        if not self.pending:
+            model = self._pre_collapse_model(term, **refit_kwargs)
+            if model is not None:
+                # Read after the shortcut has validated the selection against a
+                # grouped term, in the sorted order the ungrouped spec uses.
+                label = ungroup_label(term, staging.selected_labels(self, term))
+                staging.put_in_force(
+                    self,
+                    model,
+                    restructured={term},
+                    operation="ungroup_levels",
+                    term=term,
+                    label=label,
+                )
+                return model
+        params = {"levels": staging.selected_labels(self, term)}
+        return staging.stage_and_refit(
+            self, "ungroup", term, params, keep_reference=keep_reference, **refit_kwargs
         )
 
     def _pre_collapse_model(self, term: str, **kwargs: Any):
-        """The model before the latest step, when this ungroup reproduces it exactly."""
-        if not self.structure_history or not self._ungroup_restores_reference_model(term, **kwargs):
+        """The model before the latest step, when this ungroup reproduces it exactly.
+
+        Only a step that did nothing but collapse ``term``'s levels qualifies:
+        an ungroup does not take back what the same Refit did to another term,
+        or to this term's reference.
+        """
+        step = self.structure_history[-1] if self.structure_history else None
+        if step is None or not step.changes:
             return None
-        previous = self.structure_history[-1].state.model
+        if any((change.term, change.operation) != (term, "collapse") for change in step.changes):
+            return None
+        if not self._ungroup_restores_reference_model(term, **kwargs):
+            return None
+        previous = step.state.model
         return None if self._model_has_collapsed_level_groups(previous) else previous
 
     def _ungroup_restores_reference_model(self, term: str, **kwargs: Any) -> bool:
@@ -1030,53 +1065,22 @@ class EditorSession:
         return not self._has_collapsed_level_groups_after_replacement(term, replacement)
 
     def replace_with_reference_level(self, term: str, level: str, **refit_kwargs: Any):
-        """Pin ``level`` as ``term``'s reference, refit, and put the refit in force."""
-        editable = self._require_term(term)
-        refit_model = self._refit_replacing(
-            term,
-            lambda X_ref: reference_feature_spec(self.model, editable, level, X=X_ref),
-            **refit_kwargs,
-        )
-        return self._push_structure(
-            refit_model,
-            operation="set_reference",
-            term=term,
-            label=refit_model._editor_step["label"],
+        """Pin ``level`` as ``term``'s reference and refit at once, as one structural step."""
+        return staging.stage_and_refit(
+            self, "set_reference", term, {"level": level}, **refit_kwargs
         )
 
     def replace_with_shaped_range(
         self, term: str, *, lo, hi, degree: int, join: str = "tangent", **refit_kwargs: Any
     ):
-        """Pin ``term`` to a ``degree`` polynomial on ``[lo, hi]``, refit, put it in force.
+        """Pin ``term`` to a ``degree`` polynomial on ``[lo, hi]`` and refit at once.
 
         ``lo`` and ``hi`` are values on a numeric term (snapped outward to
         three significant figures of the fitted span) and band labels on an
         ordered one. ``join`` is ``"tangent"`` or ``"kink"`` (Corner).
         """
-        self._require_term(term)
-        try:
-            refit_model = self._refit_replacing(
-                term,
-                lambda X_ref: shaped_feature_spec(
-                    self.model, term, lo=lo, hi=hi, degree=degree, join=join, X=X_ref
-                ),
-                **refit_kwargs,
-            )
-        except EditorClientError:
-            raise
-        except ValueError as exc:
-            # The library's refusal text is backend text (editor/errors.py): the
-            # analyst gets an intentional sentence, Python callers keep the cause.
-            sentence = _range_refusal(exc, _SHAPE_SENTENCES)
-            if sentence is None:
-                raise
-            raise EditorValueError(sentence) from exc
-        return self._push_structure(
-            refit_model,
-            operation="shape_range",
-            term=term,
-            label=refit_model._editor_step["label"],
-        )
+        params = {"lo": lo, "hi": hi, "degree": degree, "join": join}
+        return staging.stage_and_refit(self, "shape", term, params, **refit_kwargs)
 
     def revert_to_reference_model(self):
         """Put the opened model back in force, in its own level order, as one structural step."""
@@ -1131,6 +1135,45 @@ class EditorSession:
         refit_model._editor_step = metadata
         return refit_model
 
+    def _refit_with_drafts(
+        self,
+        drafts: dict[str, Any],
+        *,
+        X=None,
+        y=None,
+        sample_weight=None,
+        offset=None,
+        method: str = "auto",
+        lambda1=...,
+        lambda2=...,
+        **fit_kwargs: Any,
+    ):
+        """Fit one copy of the model with each term's spec replaced by its draft.
+
+        Returns the fitted copy and the fit method used; the session itself is
+        not changed. The waiting changes' Refit (:func:`staging.refit_pending`)
+        fits through here.
+        """
+        X_ref, y_ref, sample_weight_ref, base_offset = self._resolve_refit_data(
+            X, y, sample_weight, offset
+        )
+        if y_ref is None:
+            raise RuntimeError("Fit response data was not retained on the source model.")
+        refit_model = clone_with_replaced_features(
+            self.model, drafts, lambda1=lambda1, lambda2=lambda2
+        )
+        method_used = fit_refit_model(
+            self.model,
+            refit_model,
+            method=method,
+            X=X_ref,
+            y=y_ref,
+            sample_weight=sample_weight_ref,
+            offset=base_offset,
+            fit_kwargs=fit_kwargs,
+        )
+        return refit_model, method_used
+
     def _push_structure(
         self,
         model,
@@ -1139,14 +1182,24 @@ class EditorSession:
         term: str | None,
         label: str,
         level_orders: dict[str, list[str]] | None = None,
+        state: SessionState | None = None,
+        changes: tuple[PendingStep, ...] = (),
+        step_id: str | None = None,
     ):
         """Put ``model`` in force as one structural step on the undo timeline.
 
-        The step keeps the state before it. Like any new action, it ends the
-        future of whatever was undone, so the kept state holds no redo.
+        The step keeps the state before it: ``state`` when the caller captured
+        it earlier (a change refitted at once is staged after that capture),
+        else the live one. Like any new action, it ends the future of whatever
+        was undone, so the kept state holds no redo. ``changes`` are the waiting
+        changes a refit applied; ``step_id`` names the step after the one change
+        it stands for.
         """
-        state = replace(self._capture_state(), redo_stack=[], pending_redo=())
-        step = StructuralStep(state, operation, term, label)
+        kept = replace(
+            self._capture_state() if state is None else state, redo_stack=[], pending_redo=()
+        )
+        named = {} if step_id is None else {"step_id": step_id}
+        step = StructuralStep(kept, operation, term, label, changes=tuple(changes), **named)
         self.replace_in_force_model(model, level_orders=level_orders)
         self.structure_history.append(step)
         self.structure_redo.clear()
