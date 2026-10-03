@@ -438,3 +438,106 @@ three collapses, refit) at integration only.
 - Roadmap: `notes/ROADMAP.md` has no editor entries. Propose one line under
   Current position: "Editor redesign (2026-10, explicitly scoped user work);
   SuperLSS editor next."
+
+## Addendum (2026-10-03): structure file and unseen-level routing (phase 7c)
+
+Max asked for this ("build it"). It is added after the Cross-validation tab and
+before integration.
+
+### What users will notice
+
+1. **Export has a fourth format, Structure (JSON).** It carries every
+   structural decision made in the editor, per feature:
+   - groupings;
+   - the reference level;
+   - piecewise polynomial ranges (lo, hi, degree, join);
+   - where new levels go.
+
+   `session.export_structure(path)` does the same from Python. The file holds
+   no coefficients and no hand edits.
+2. **`superglm.read_structure(path)` returns a `Structure`.**
+   `structure.apply(model)` returns an unfitted copy of the model with those
+   decisions built into its features, ready to `fit` on new data.
+3. **New levels can go to a named group.** `Categorical(unseen="Other")` routes
+   a level unseen at fit to the group "Other" and warns once, naming the
+   levels and the row count. This is the same rule as scikit-learn's
+   `OneHotEncoder(handle_unknown="infrequent_if_exist")`, where unknown
+   categories "map to the infrequent category if it exists".
+4. **A categorical gets a compact "New levels →" control** in the context bar,
+   with choices Refuse / Reference / one entry per group. It changes
+   predictions only, so there is no refit and no model-revision bump, and one
+   Undo covers it.
+
+### Decisions (delegated; Max approved the feature)
+
+**S1. The file format** is JSON with
+`"format": "superglm.structure.v1"`, the superglm version, and `features`.
+Each feature entry holds:
+- `kind`: `categorical`, `ordered` or `spline`;
+- `levels`: the full level universe, in model order, with native types kept
+  (JSON numbers stay numbers);
+- `groups`: `{label: [members]}`;
+- `reference`;
+- `unseen`: `"error"`, `"base"`, or a group label;
+- `ranges`: `[{lo, hi, degree, join}]` in the feature's own units (band names
+  on an ordered term).
+
+Keys are sorted, the file is diffable, and it is written with `allow_nan=False`.
+
+**S2. What gets exported.** Export writes the in-force model, which is the
+last Refit. Changes still waiting are not included, and the dialog says so,
+as the other exports do.
+
+**S3. `apply(model, X=None)`.**
+- It never fits.
+- It rebuilds each named feature from the model's declared spec with the
+  grouping, base, unseen policy and polynomial ranges, and leaves all other
+  features untouched.
+- It needs no data: groupings are built from the stored level universe. `X`
+  is consulted only where a spec genuinely needs the column, and the call says
+  so if `X` is missing.
+- Ranges on a `ps`/`ns` spline rebuild it as `bs`, as the editor does.
+
+**S4. Refusals are one fixed sentence each, naming the feature (and the range
+or level).** Each is a `ValueError` with an actionable message, never a
+traceback from deep inside. They cover:
+- an unknown format or version;
+- a feature that is not in the model;
+- a kind that does not match;
+- a group member outside a declared level universe;
+- a reference that is not a level or group;
+- an `unseen` group that does not exist;
+- a range the spline refuses.
+
+**S5. Unseen routing in the library.**
+- `Categorical(unseen=<label>)` is valid only when the term's grouping has a
+  group with that label. It is checked at fit, with a clear error.
+- At predict, unseen levels take that group's code. They are warned like
+  `"base"`.
+- `OrderedCategorical` keeps `"error"`/`"base"`; group routing for ordered
+  terms is a follow-up.
+- `"error"` stays the library default, so nothing changes for existing users
+  (never break userspace).
+
+**S6. The editor's "New levels →" control** is a session operation
+`set_unseen` on the in-force fitted spec. It is undoable on the one history,
+with no refit. It shows in History as "New levels → Other". It is offered only
+on plain categoricals.
+
+### Tests (each must fail on the code before it)
+
+- **Round trip.** Fit a model, make groupings, a reference, two ranges and an
+  unseen policy in the editor, export, then `read_structure(...).apply(fresh
+  unfitted model)` and `fit` on the same data. The groupings, reference,
+  polynomial ranges and unseen policy equal the editor's in-force model, and
+  the predictions match to a tolerance derived from u = 2**-53 and the
+  coefficient magnitudes (the same fit path and data give the same estimates).
+- **Apply to next year's data** with a new level: it routes to the "Other"
+  group with one warning, and does not crash.
+- **Every S4 refusal**, each with its fixed message.
+- **The file is stable.** Export twice and get identical bytes. Native integer
+  levels survive the round trip.
+- **Editor:**
+  - the Export dialog's fourth card;
+  - the "New levels →" control's Undo/Redo;
+  - the control is absent on spline and ordered terms.
