@@ -440,6 +440,39 @@ test("the chart's term is open and every other term folds to one line", () => {
   assert.doesNotMatch(bonusLine[0], /summary-p-chip/);
 });
 
+test("every folded line gives its EDF to the same three significant figures", () => {
+  const terms = { age: 11.2, brand: 11, area: 9, power: 3.2, region: 123.4, district: 1234.4 };
+  const view = {
+    query: "",
+    termNames: Object.keys(terms),
+    currentTerm: "age",
+    kinds: Object.fromEntries(Object.keys(terms).map((name) => [name, "categorical"])),
+  };
+  const nodes = { ...compactSummaryNodes(), summaryView: () => view };
+  renderSummary({
+    available: true,
+    label: "Summary",
+    html: "",
+    compact: {
+      model: {},
+      level_display: "expanded",
+      has_level_groups: false,
+      level_groups: [],
+      rows: Object.entries(terms).map(([name, edf]) => ({
+        name: `${name}[B]`, group: name, kind: "coef", edf, coef: 0.1, p_value: 0.2,
+        sig_class: "sig-none"
+      }))
+    }
+  }, nodes);
+
+  const lines = [...nodes.summaryFrame.innerHTML.matchAll(
+    /<span class="summary-section-edf">([^<]*)<\/span>/g
+  )].map((match) => match[1]);
+  // A whole EDF keeps its places, so an 11 reads beside an 11.2 as 11.0; one
+  // too large for three figures keeps its whole part.
+  assert.deepEqual(lines, ["EDF 11.2", "EDF 11.0", "EDF 9.00", "EDF 3.20", "EDF 123", "EDF 1234"]);
+});
+
 test("the header shows the model as chips and four tiles and steps aside for a search", () => {
   const view = { query: "", termNames: ["region", "bonus"] };
   const nodes = {
