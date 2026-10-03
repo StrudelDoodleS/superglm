@@ -1862,6 +1862,46 @@ def test_summary_follows_the_chart_and_filters_edited_and_waiting_terms(
         assert lines() == ["curve", "territory", "age_band", "long_category"]
 
 
+def test_summary_scrolls_the_chart_term_into_view(open_editor_page, choose_feature):
+    # A short window leaves the summary frame room for a few lines only.
+    with open_editor_page(viewport={"width": 1180, "height": 560}) as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame tr.summary-section')"""
+        )
+
+        def line_in_view(term: str) -> bool:
+            # The frame scrolls its padding box, clipped by the window. The
+            # scroll offset is a whole pixel and the layout is not, so an edge
+            # it aligns may sit up to a pixel past.
+            return page.evaluate(
+                """term => {
+                    const frame = document.querySelector('#summaryFrame');
+                    const box = frame.getBoundingClientRect();
+                    const top = Math.max(box.top + frame.clientTop, 0);
+                    const bottom = Math.min(
+                        box.top + frame.clientTop + frame.clientHeight, window.innerHeight
+                    );
+                    const line = frame
+                        .querySelector(`tr.summary-section[data-term="${term}"]`)
+                        .getBoundingClientRect();
+                    return line.top >= top - 1 && line.bottom <= bottom + 1;
+                }""",
+                term,
+            )
+
+        page.locator("#summaryFrame").evaluate("node => { node.scrollTop = 0; }")
+        assert not line_in_view("long_category")
+
+        choose_feature(page, "long_category")
+        page.wait_for_function(
+            """() => document.querySelector(
+                '#summaryFrame tr.summary-section[data-term="long_category"]'
+            )?.dataset.current === 'true'"""
+        )
+        assert line_in_view("long_category")
+
+
 def test_context_bar_reports_term_kind_and_edf(open_editor_page):
     with open_editor_page(selected_term="curve") as (page, _session):
         context = page.get_by_role("region", name="Term context")
