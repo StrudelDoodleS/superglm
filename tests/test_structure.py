@@ -25,6 +25,7 @@ from superglm import (
 )
 from superglm.editor import EditorSession
 from superglm.editor import collapse as collapse_module
+from superglm.features._spline_ranges import RangeError
 from superglm.structure import FORMAT, FeatureStructure, StructureError
 
 U = 2.0**-53
@@ -568,6 +569,99 @@ def test_an_ordered_term_takes_its_groups_reference_and_band_ranges():
     assert band._base_level == "3"
     assert band._spline_obj.polynomial_ranges == (PolynomialRange("5", "7", 0, "kink"),)
     assert Structure.from_model(applied).features["band"] == structure.features["band"]
+
+
+def _narrower_next_year():
+    """Next year's rows, whose ages stop a year short of this year's oldest."""
+    X, _ = _frame()
+    top = float(X["age"].max())
+    next_year, next_y = _frame(seed=2027)
+    keep = (next_year["age"] < top - 1.0).to_numpy()
+    return top, next_year[keep].reset_index(drop=True), next_y[keep]
+
+
+def test_a_range_to_this_years_end_fits_next_years_narrower_data_as_written():
+    # The editor writes a range dragged to the end as the data's maximum.
+    top, next_year, next_y = _narrower_next_year()
+    structure = _age(PolynomialRange(70.0, top, 0, "kink"))
+    with pytest.warns(UserWarning) as placed:
+        model = structure.apply(_plain(), X=next_year)
+    assert [str(w.message) for w in placed] == [
+        f"The spline of 'age' is fitted out past this data to hold the Flat range 70–{top:g} "
+        "as written."
+    ]
+    model.fit(next_year, next_y)
+    spline = model._specs["age"]
+    assert spline.polynomial_ranges == (PolynomialRange(70.0, top, 0, "kink"),)
+    assert spline.fitted_boundary == (float(next_year["age"].min()), top)
+
+
+def test_an_ordered_band_range_to_a_band_next_year_lacks_fits_as_written():
+    X, y = _frame()
+    keep = (X["band"] != "7").to_numpy()
+    next_year, next_y = X[keep].reset_index(drop=True), y[keep]
+    structure = Structure(
+        features={
+            "band": FeatureStructure(
+                kind="ordered",
+                levels=list(BANDS),
+                reference="3",
+                ranges=[PolynomialRange("5", "7", 0, "kink")],
+            )
+        }
+    )
+    with pytest.warns(UserWarning) as placed:
+        model = structure.apply(_plain(), X=next_year)
+    assert [str(w.message) for w in placed] == [
+        "The spline of 'band' is fitted out past this data to hold the Flat range 5–7 as written."
+    ]
+    model.fit(next_year, next_y)
+    band = model._specs["band"]
+    assert band._spline_obj.polynomial_ranges == (PolynomialRange("5", "7", 0, "kink"),)
+    assert band._basis_spline.fitted_boundary[1] == band._range_edge_value("7")
+    assert np.isfinite(model.predict(next_year.iloc[:1].assign(band="7"))).all()
+
+
+def _no_old_bands():
+    X, _ = _frame()
+    return X[~X["band"].isin(["6", "7"])].reset_index(drop=True)
+
+
+@pytest.mark.parametrize(
+    ("structure", "data", "sentence"),
+    [
+        (
+            lambda: _age(PolynomialRange(100.0, 120.0, 1, "kink")),
+            lambda: _frame()[0],
+            "The spline of 'age' refuses the Line range 100–120; change or remove that range.",
+        ),
+        (
+            lambda: _age(PolynomialRange(30.0, 45.0, 1), PolynomialRange(100.0, 120.0, 0, "kink")),
+            lambda: _frame()[0],
+            "The spline of 'age' refuses the Flat range 100–120; change or remove that range.",
+        ),
+        (
+            lambda: Structure(
+                features={
+                    "band": FeatureStructure(
+                        kind="ordered",
+                        levels=list(BANDS),
+                        reference="3",
+                        ranges=[PolynomialRange("6", "7", 0, "kink")],
+                    )
+                }
+            ),
+            _no_old_bands,
+            "The spline of 'band' refuses the Flat range 6–7; change or remove that range.",
+        ),
+    ],
+    ids=["a range past the data", "beside a range it holds", "bands the data lacks"],
+)
+def test_apply_with_x_refuses_a_range_the_data_cannot_hold(structure, data, sentence):
+    with pytest.raises(StructureError) as refused:
+        structure().apply(_plain(), X=data())
+    assert str(refused.value) == sentence
+    assert isinstance(refused.value.__cause__, RangeError)
 
 
 # -- Apply refusals (S4) ---------------------------------------------------------

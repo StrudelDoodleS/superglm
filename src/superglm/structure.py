@@ -45,7 +45,7 @@ from typing import Any
 
 import numpy as np
 
-from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange
+from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange, RangeError
 from superglm.features.categorical import Categorical
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import _SplineBase
@@ -90,6 +90,9 @@ _ORDERED_UNSEEN = (
     "{feature!r} is an ordered term, which refuses new levels; set its unseen to 'error'."
 )
 _RANGE = "The spline of {feature!r} refuses the {span}; change or remove that range."
+_FITTED_OUT = (
+    "The spline of {feature!r} is fitted out past this data to hold the {spans} as written."
+)
 _UNFITTED = (
     "Structure.from_model needs a fitted model: {feature!r} has no fitted levels yet; "
     "fit the model first."
@@ -338,7 +341,11 @@ class Structure:
             ``"base"``, with one warning per feature; a model that declares
             its levels with ``levels=`` refuses them. Without ``X`` a grouped
             term covers only the structure's levels, and a fit on data holding
-            others refuses them.
+            others refuses them. ``X`` also places the ranges the structure
+            gives a spline: a spline whose boundary the model leaves to the
+            data is fitted out to hold a range that reaches past ``X``'s
+            values, with one warning, and a range the spline refuses on ``X``
+            is refused here. Without ``X`` the fit checks the ranges.
 
         Returns
         -------
@@ -485,14 +492,15 @@ def _native_levels(name: str, universe: list, spec, frame) -> dict[str, Any]:
 
 def _rebuilt(model, name: str, spec, entry: FeatureStructure, frame):
     """A fresh, unfitted spec for ``name``: ``spec`` with ``entry``'s decisions."""
+    column = frame.column_array(name) if frame is not None and name in frame.columns else None
     if entry.kind == "spline":
-        return _rebuilt_spline(model, name, spec, entry)
+        return _rebuilt_spline(model, name, spec, entry, column)
     if entry.kind == "ordered":
-        return _rebuilt_ordered(model, name, spec, entry)
-    return _rebuilt_categorical_term(name, spec, entry, frame)
+        return _rebuilt_ordered(model, name, spec, entry, column)
+    return _rebuilt_categorical_term(name, spec, entry, column)
 
 
-def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, frame):
+def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
     from superglm.editor.collapse import _rebuilt_categorical
 
     levels = list(entry.levels)
@@ -503,8 +511,7 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, frame):
     # would be refused, and a member the declaration leaves out admitted.
     if groups and declared is not None and _texts(declared) != _texts(levels):
         raise StructureError(_UNIVERSE.format(feature=name))
-    if groups and frame is not None and name in frame.columns:
-        column = frame.column_array(name)
+    if groups and column is not None:
         levels, groups = _placed_new_levels(name, entry, levels, groups, column, declared)
     grouping = _grouping(levels, groups, order=[str(level) for level in levels])
     # A grouped term is declared with the structure's universe, as levels=
@@ -584,7 +591,7 @@ def _grouping(levels: list, groups: dict, *, order: list[str]):
     )
 
 
-def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure):
+def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     from superglm.editor.collapse import _pristine_basis, rebuilt_ordered_spec
     from superglm.editor.shapes import _band_edges, _merged_ranges, _shaped_spline
 
@@ -601,8 +608,8 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure):
     knots = source._named_knots or source._explicit_knots
     boundary = source._explicit_boundary
 
-    def hosted(ranges):
-        basis = _shaped_spline(source, ranges, knots=knots, boundary=boundary)
+    def hosted(ranges, bound=boundary):
+        basis = _shaped_spline(source, ranges, knots=knots, boundary=bound)
         return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data, basis=basis)
 
     # The term without ranges places each band on the axis the ranges name.
@@ -617,10 +624,24 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure):
             ranges = _merged_ranges(tuple(ranges), new, host._range_edge_value)
         except ValueError as exc:
             raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree)) from exc
-    return hosted(ranges)
+    if column is None or not ranges:
+        return hosted(ranges)
+
+    def fits(subset, bound):
+        hosted(subset, bound).build(column)
+
+    def extent():
+        # Where the data's bands sit on the axis the spline is fitted over.
+        probe = hosted([])
+        probe.build(column)
+        return probe._basis_spline.fitted_boundary
+
+    position = host._range_edge_value
+    return hosted(ranges, _placed_boundary(name, ranges, fits, boundary, extent, position))
 
 
-def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure):
+def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
+    from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
     from superglm.editor.shapes import _merged_ranges, _shaped_spline
     from superglm.features._spline_ranges import validate_ranges
 
@@ -638,10 +659,101 @@ def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure):
         except ValueError as exc:
             raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree)) from exc
     ranges.sort(key=lambda r: r.lo)
-    # The declared knots and boundary, not a fit's: the model is fit afresh.
-    return _shaped_spline(
-        spec, ranges, knots=spec._explicit_knots, boundary=spec._explicit_boundary
-    )
+
+    def shaped(subset, bound):
+        # The declared knots, not a fit's: the model is fit afresh.
+        return _shaped_spline(spec, subset, knots=spec._explicit_knots, boundary=bound)
+
+    boundary = spec._explicit_boundary
+    if column is None or not ranges:
+        return shaped(ranges, boundary)
+    try:
+        x = np.asarray(column, dtype=np.float64).ravel()
+    except (TypeError, ValueError):
+        return shaped(ranges, boundary)  # not a numeric column: the fit says so
+    x = x[np.isfinite(x)]
+    if not x.size:
+        return shaped(ranges, boundary)
+
+    def fits(subset, bound):
+        # The fit's own range checks: knot placement on the values it sees.
+        probe = shaped(subset, bound)
+        binned = should_discretize(probe, model._discrete)
+        probe._place_knots(
+            x, None, resolve_discrete_n_bins(name, probe, model._n_bins) if binned else None
+        )
+
+    def extent():
+        return float(x.min()), float(x.max())
+
+    return shaped(ranges, _placed_boundary(name, ranges, fits, boundary, extent, float))
+
+
+def _placed_boundary(name: str, ranges: list, fits, boundary, extent, position):
+    """The boundary that holds ``ranges`` on the data, or the structure's refusal.
+
+    ``fits(subset, boundary)`` builds the term with ``subset`` of ``ranges``
+    on the data and raises the library's ``RangeError`` when the spline
+    refuses it. When the model leaves the spline's boundary to the data
+    (``boundary`` is None) and a range reaches past the data's ``extent()``,
+    the spline is fitted out to the ranges' ends, with one warning: a range
+    drawn to the end of one year's data then holds as written on the next
+    year's narrower data. ``position`` places a range edge on the axis.
+    """
+    refusal = _refusal(name, ranges, fits, boundary)
+    if refusal is None:
+        return boundary
+    if boundary is None:
+        lo, hi = _quiet(extent)
+        edges = [position(edge) for r in ranges for edge in (r.lo, r.hi)]
+        wider = (min(lo, *edges), max(hi, *edges))
+        if wider != (lo, hi):
+            refusal = _refusal(name, ranges, fits, wider)
+            if refusal is None:
+                past = [r for r in ranges if position(r.lo) < lo or position(r.hi) > hi]
+                spans = " and the ".join(_range_text(r.lo, r.hi, r.degree) for r in past)
+                warnings.warn(
+                    _FITTED_OUT.format(feature=name, spans=spans), UserWarning, stacklevel=5
+                )
+                return wider
+    raise refusal
+
+
+def _refusal(name: str, ranges: list, fits, boundary) -> StructureError | None:
+    """The range sentence for the first range the spline refuses on the data, or None.
+
+    The ranges are tried whole and, if refused, in growing prefixes in axis
+    order, so the range named is the one the spline refuses alone or beside
+    those before it. Data the term refuses for another reason is left to the
+    fit, which reports it in its own words.
+    """
+
+    def refused(subset) -> RangeError | None:
+        try:
+            _quiet(lambda: fits(subset, boundary))
+        except RangeError as exc:
+            return exc
+        except Exception:
+            return None
+        return None
+
+    if refused(ranges) is None:
+        return None
+    for count in range(1, len(ranges) + 1):
+        cause = refused(ranges[:count])
+        if cause is not None:
+            r = ranges[count - 1]
+            refusal = StructureError(_range_refusal(name, r.lo, r.hi, r.degree))
+            refusal.__cause__ = cause
+            return refusal
+    return None
+
+
+def _quiet(probe):
+    """``probe()`` with its warnings silenced: the fit gives them, once."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return probe()
 
 
 def _same_ranges(wanted, current) -> bool:
@@ -837,10 +949,15 @@ def _check_numeric_range(name: str, r: PolynomialRange) -> None:
 
 def _range_refusal(name: str, lo, hi, degree) -> str:
     """The range sentence: ``The spline of 'age' refuses the Line range 30–45; ...``."""
+    return _RANGE.format(feature=name, span=_range_text(lo, hi, degree))
+
+
+def _range_text(lo, hi, degree) -> str:
+    """A range as the sentences name it: ``Line range 30–45``."""
     span = f"{_edge_text(lo)}–{_edge_text(hi)}"
     named = isinstance(degree, Integral) and not isinstance(degree, bool) and 0 <= degree <= 3
     shape = f"{SHAPE_NAMES[int(degree)]} range" if named else "range"
-    return _RANGE.format(feature=name, span=f"{shape} {span}")
+    return f"{shape} {span}"
 
 
 def _edge_text(edge) -> str:
