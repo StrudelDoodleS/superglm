@@ -360,6 +360,40 @@ test("the inspector search is reapplied on every render and marks its matches", 
   assert.equal(nodes.summarySearchCount.textContent, "");
 });
 
+test("the inspector filter is reapplied on every render", () => {
+  /** @type {import("../../src/superglm/editor/app/views/summary_view.js").SummaryView} */
+  const view = {
+    query: "",
+    termNames: ["region", "bonus"],
+    filter: "waiting",
+    waiting: { bonus: 1 },
+    edited: ["region"]
+  };
+  const nodes = { ...compactSummaryNodes(), summaryView: () => view };
+  const regionHidden = /<tr class="summary-group-row[^"]*" data-term="region"[^>]* hidden>/;
+  const bonusHidden = /<tr class="summary-group-row[^"]*" data-term="bonus"[^>]* hidden>/;
+
+  renderSummary(bonusSummary(), nodes);
+  assert.match(nodes.summaryFrame.innerHTML, regionHidden);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, bonusHidden);
+
+  // A refit sends a new payload; the frame is rebuilt and Waiting holds.
+  const refit = bonusSummary();
+  refit.html = "<p>Refitted</p>";
+  renderSummary(refit, nodes);
+  assert.match(nodes.summaryFrame.innerHTML, regionHidden);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, bonusHidden);
+
+  // Edited, chosen on the drawn summary, holds through the next payload too.
+  view.filter = "edited";
+  applySummaryView(nodes);
+  const edit = bonusSummary();
+  edit.html = "<p>Edited</p>";
+  renderSummary(edit, nodes);
+  assert.match(nodes.summaryFrame.innerHTML, bonusHidden);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, regionHidden);
+});
+
 test("the chart's term is open and every other term folds to one line", () => {
   /** @type {import("../../src/superglm/editor/app/views/summary_view.js").SummaryView} */
   const view = {
