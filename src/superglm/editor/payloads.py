@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from itertools import chain
 from typing import Any
 
 import numpy as np
 
-from superglm.editor._types import StructuralStep
+from superglm.editor._types import PendingStep, StructuralStep
 from superglm.editor.collapse import KEPT_REFERENCE_ATTRIBUTE
 from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES
 from superglm.editor.group_display import build_group_display
-from superglm.editor.shapes import shape_payload
+from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
+from superglm.features.categorical import Categorical
+from superglm.features.ordered_categorical import OrderedCategorical
 
 _MAX_INTERACTIVE_HANDLES = 420
 
@@ -59,6 +60,7 @@ def session_payload(
             "level_order_changed": _level_order_changed(session, name),
             "reference": _reference_payload(session, name),
             "shape": shape_payload(session.model, name, term.metadata.get("shape_support")),
+            "pending": _pending_term_payload(session, name),
             "effective_df": _finite_float(term.metadata.get("edf")),
             "x_label": name,
             "y_label": "relativity",
@@ -72,40 +74,52 @@ def session_payload(
 def timeline_payload(session) -> list[dict[str, Any]]:
     """Every action in the session, oldest first, with a marker at the current position.
 
-    Before the marker: for each structural step on the undo stack, the edits
-    made before it and then the step, then the live edits. After it, what
-    Redo would put back in the order it would: the undone edits, then each
-    undone step followed by the edits undone after it. A step on the undo
-    stack holds the state before it; on the redo stack, the state it left.
+    The order is the session's own (``EditorSession.timeline_items``). Before
+    the marker comes what Undo would take back, latest last; after it, what
+    Redo would put back, in the order it would. Each action carries its id,
+    its time (seconds since the epoch), its note and its status: ``"edit"``,
+    ``"waiting"`` or ``"applied"``. A structural change a Refit applies, or
+    that still waits for one, is a ``"pending"`` entry.
     """
-    done = [
-        *chain.from_iterable(map(_before_step, session.structure_history)),
-        *session.history,
-    ]
-    undone = [
-        *reversed(session.redo_stack),
-        *chain.from_iterable(map(_after_step, reversed(session.structure_redo))),
-    ]
+    done, undone = session.timeline_items()
+    notes = getattr(session, "step_notes", {})
     entries: list[dict[str, Any]] = []
     parent: str | None = None
-    for position, item in enumerate([*done, None, *undone]):
+    for position, pair in enumerate([*done, None, *undone]):
+        if pair is None:
+            entries.append({"kind": "marker"})
+            continue
+        item, status = pair
         entry = _timeline_entry(item, parent, redo=position > len(done))
+        entry.update(
+            id=item.step_id,
+            time=float(item.created_at),
+            note=notes.get(item.step_id),
+            status=status,
+        )
         parent = entry.get("hash", parent)
         entries.append(entry)
     return entries
 
 
-def _before_step(step: StructuralStep) -> list[Any]:
-    return [*step.state.history, step]
-
-
-def _after_step(step: StructuralStep) -> list[Any]:
-    return [step, *reversed(step.state.redo_stack)]
+def pending_payload(session) -> list[dict[str, Any]]:
+    """The structural changes waiting for a Refit, oldest first."""
+    notes = getattr(session, "step_notes", {})
+    return [
+        {
+            "id": step.step_id,
+            "operation": step.operation,
+            "term": step.term,
+            "label": step.label,
+            "params": _json_safe(step.params),
+            "note": notes.get(step.step_id),
+            "time": float(step.created_at),
+        }
+        for step in getattr(session, "pending", ())
+    ]
 
 
 def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, Any]:
-    if item is None:
-        return {"kind": "marker"}
     if isinstance(item, StructuralStep):
         return {
             "kind": "structural",
@@ -114,18 +128,68 @@ def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, A
             "label": item.label,
             "redo": redo,
         }
+    if isinstance(item, PendingStep):
+        return {
+            "kind": "pending",
+            "operation": item.operation,
+            "term": item.term,
+            "label": item.label,
+            "params": _json_safe(item.params),
+            "redo": redo,
+        }
     # The hash chains through the edits in timeline order, so it names an edit
     # by its place in the session and survives its moves across the marker.
     return {
         "kind": "edit",
         "operation": str(item.operation),
         "term": str(item.term),
-        "label": _edit_label(item),
+        "label": item.label,
         "n_points": int(np.asarray(item.indices, dtype=np.intp).size),
         "params": _json_safe(item.params),
         "hash": _record_hash(item, parent_hash),
         "redo": redo,
     }
+
+
+def _pending_term_payload(session, name: str) -> dict[str, Any]:
+    """What the term's waiting changes would put in force; None or empty where they change nothing.
+
+    ``groups`` is the draft's whole grouping once a waiting collapse or
+    ungroup touches the term; ``ranges`` are the shaped ranges the draft adds
+    or changes; ``reference`` is the level or group the draft pins in place of
+    the fitted reference.
+    """
+    waiting = [step for step in getattr(session, "pending", ()) if step.term == name]
+    if not waiting:
+        return {"groups": None, "ranges": [], "reference": None}
+    draft, fitted = waiting[-1].draft_spec, session.model._specs[name]
+    regrouped = any(step.operation in {"collapse", "ungroup"} for step in waiting)
+    return {
+        "groups": _draft_groups(draft) if regrouped else None,
+        "ranges": waiting_ranges(draft, fitted),
+        "reference": _waiting_reference(draft, fitted),
+    }
+
+
+def _draft_groups(draft) -> dict[str, list[str]]:
+    grouping = getattr(draft, "_grouping", None)
+    if grouping is None:
+        return {}
+    members = {
+        str(label): [str(member) for member in grouping.group_to_originals.get(label, [])]
+        for label in grouping.grouped_levels
+    }
+    return {label: levels for label, levels in members.items() if len(levels) > 1}
+
+
+def _waiting_reference(draft, fitted) -> str | None:
+    """The level or group a draft pins in place of the fitted reference, or None."""
+    if not isinstance(draft, Categorical | OrderedCategorical):
+        return None
+    base = str(draft.base)
+    if base in {"first", "most_exposed"} or base == str(getattr(fitted, "_base_level", "")):
+        return None
+    return base
 
 
 def undo_redo_payload(session) -> dict[str, str | None]:
@@ -135,10 +199,6 @@ def undo_redo_payload(session) -> dict[str, str | None]:
         "undo": None if undo is None else undo.label,
         "redo": None if redo is None else redo.label,
     }
-
-
-def _edit_label(record) -> str:
-    return f"{record.operation.replace('_', ' ')} {record.term}"
 
 
 def _record_hash(record, parent_hash: str | None) -> str:

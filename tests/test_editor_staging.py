@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import io
+import json
 import re
+import urllib.error
 from datetime import UTC, datetime
 
+import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -21,10 +25,11 @@ from superglm.editor.collapse import (
     ungrouped_feature_spec,
 )
 from superglm.editor.errors import EditorKeyError, EditorValueError
-from superglm.editor.payloads import undo_redo_payload
+from superglm.editor.payloads import timeline_payload, undo_redo_payload
 from superglm.editor.refit import fit_refit_model
 from superglm.editor.shapes import shaped_feature_spec
 from superglm.editor.terms import native_log_effect_values
+from tests.test_editor import _post_json
 
 BRANDS = ["B1", "B2", "B10", "B11", "B12"]
 
@@ -83,6 +88,14 @@ def _count_fits(monkeypatch) -> list[object]:
 
     monkeypatch.setattr(session_module, "fit_refit_model", counted)
     return fits
+
+
+def _refused(url: str, body: dict) -> str:
+    """The fixed sentence a 400 answer carries."""
+    with pytest.raises(urllib.error.HTTPError) as error:
+        _post_json(url, body)
+    assert error.value.code == 400
+    return json.loads(error.value.read().decode("utf-8"))["error"]
 
 
 def test_a_reference_can_name_the_group_a_waiting_collapse_made(book):
@@ -642,3 +655,248 @@ def test_the_ungroup_shortcut_does_not_undo_the_rest_of_a_refit(
     assert len(fits) == 1 and session.model is not model
     assert session.model._specs["brand"]._grouping is None
     assert read(session.model) == expected
+
+
+def test_widget_http_stage_waits_without_fitting_and_says_what_waits(book, monkeypatch):
+    model, _, _ = book
+    session = _session(model)
+    fits = _count_fits(monkeypatch)
+    revision = session.model_revision
+    widget = session.widget()
+    try:
+        _post_json(
+            f"{widget.url}/stage",
+            {
+                "operation": "collapse",
+                "term": "brand",
+                "params": {"levels": ["B10", "B11"]},
+                "keep_reference": True,
+            },
+        )
+        _post_json(
+            f"{widget.url}/stage",
+            {"operation": "set_reference", "term": "area", "params": {"level": "B"}},
+        )
+        payload = _post_json(
+            f"{widget.url}/stage",
+            {
+                "operation": "shape",
+                "term": "age",
+                "params": {"lo": 30.0, "hi": 45.0, "degree": 1},
+                "level_display": "grouped",
+            },
+        )
+    finally:
+        widget.close()
+
+    assert fits == [] and session.model is model
+    assert set(payload) == {"state", "summary", "timing"}
+    assert payload["timing"]["operation"] == "stage"
+    state = payload["state"]
+    assert state["model_revision"] == revision
+    collapse = session.pending[0]
+    assert state["pending"][0] == {
+        "id": collapse.step_id,
+        "operation": "collapse",
+        "term": "brand",
+        "label": "collapse B10 + B11 in brand",
+        "params": {"group_label": "B10+B11", "levels": ["B10", "B11"]},
+        "note": None,
+        "time": collapse.created_at,
+    }
+    assert [entry["term"] for entry in state["pending"]] == ["brand", "area", "age"]
+    terms = state["terms"]
+    assert terms["brand"]["pending"] == {
+        "groups": {"B10+B11": ["B10", "B11"]},
+        "ranges": [],
+        "reference": None,
+    }
+    assert terms["area"]["pending"] == {"groups": None, "ranges": [], "reference": "B"}
+    assert terms["age"]["pending"] == {
+        "groups": None,
+        "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line", "join": "tangent"}],
+        "reference": None,
+    }
+    assert state["undo_redo"]["undo"] == "Line 30–45 in age"
+    assert [(entry["kind"], entry.get("status")) for entry in state["timeline"]] == [
+        ("pending", "waiting"),
+        ("pending", "waiting"),
+        ("pending", "waiting"),
+        ("marker", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            {"operation": "shape", "term": "age", "params": {"lo": 33.0, "hi": 33.0, "degree": 1}},
+            "Select at least two points to shape a range.",
+        ),
+        (
+            {"operation": "collapse", "term": "brand", "params": ["B10"]},
+            "params must be an object.",
+        ),
+        (
+            {"operation": "collapse", "term": "brand", "params": {"levels": "B10"}},
+            "levels must be a list of level labels.",
+        ),
+        (
+            {"operation": "merge", "term": "brand", "params": {}},
+            "Unknown structural change: 'merge'",
+        ),
+        (
+            {
+                "operation": "collapse",
+                "term": "brand",
+                "params": {"levels": ["B10", "B11"]},
+                "keep_reference": "yes",
+            },
+            "keep_reference must be true or false.",
+        ),
+    ],
+)
+def test_widget_http_stage_refuses_with_intentional_messages(book, body, message):
+    model, _, _ = book
+    session = _session(model)
+    widget = session.widget()
+    try:
+        assert _refused(f"{widget.url}/stage", body) == message
+    finally:
+        widget.close()
+    assert session.pending == []
+
+
+def test_widget_http_refit_pending_applies_every_waiting_change_in_one_step(book, monkeypatch):
+    model, _, _ = book
+    session = _session(model)
+    fits = _count_fits(monkeypatch)
+    widget = session.widget()
+    try:
+        _post_json(
+            f"{widget.url}/stage",
+            {"operation": "collapse", "term": "brand", "params": {"levels": ["B10", "B11"]}},
+        )
+        _post_json(
+            f"{widget.url}/stage",
+            {"operation": "shape", "term": "age", "params": {"lo": 30.0, "hi": 45.0, "degree": 1}},
+        )
+        payload = _post_json(f"{widget.url}/refit_pending", {"level_display": "expanded"})
+    finally:
+        widget.close()
+
+    assert len(fits) == 1
+    assert payload["timing"]["operation"] == "refit_pending"
+    state = payload["state"]
+    assert state["pending"] == []
+    assert [(e["kind"], e.get("label"), e.get("status")) for e in state["timeline"]] == [
+        ("pending", "collapse B10 + B11 in brand", "applied"),
+        ("pending", "Line 30–45 in age", "applied"),
+        ("structural", "Refit · 2 changes", "applied"),
+        ("marker", None, None),
+    ]
+    assert state["undo_redo"] == {"undo": "Refit · 2 changes", "redo": None}
+
+
+def test_widget_http_refit_pending_answers_a_refusal_with_the_fixed_sentence(book, monkeypatch):
+    model, _, _ = book
+    session = _session(model)
+    widget = session.widget()
+
+    def refused(*args, **kwargs):
+        raise ValueError("solver failed")
+
+    try:
+        _post_json(
+            f"{widget.url}/stage",
+            {"operation": "collapse", "term": "brand", "params": {"levels": ["B10", "B11"]}},
+        )
+        monkeypatch.setattr(session_module, "fit_refit_model", refused)
+        assert _refused(f"{widget.url}/refit_pending", {}) == (
+            "The refit was refused. Undo the last waiting change and try again."
+        )
+    finally:
+        widget.close()
+    assert len(session.pending) == 1 and session.model is model
+
+
+def test_widget_http_note_is_written_on_its_entry_and_unknown_ids_are_refused(book):
+    model, _, _ = book
+    session = _session(model)
+    widget = session.widget()
+    try:
+        _post_json(
+            f"{widget.url}/stage",
+            {"operation": "collapse", "term": "brand", "params": {"levels": ["B10", "B11"]}},
+        )
+        step_id = session.pending[0].step_id
+        payload = _post_json(f"{widget.url}/note", {"id": step_id, "note": "Thin exposure"})
+        assert payload["ok"] is True
+        entry, _marker = payload["state"]["timeline"]
+        assert (entry["id"], entry["note"]) == (step_id, "Thin exposure")
+        assert payload["state"]["pending"][0]["note"] == "Thin exposure"
+        assert _refused(f"{widget.url}/note", {"id": "not-an-id", "note": "x"}) == (
+            "Unknown history entry."
+        )
+        assert _refused(f"{widget.url}/note", {"id": step_id, "note": 5}) == "note must be text."
+    finally:
+        widget.close()
+
+
+def test_timeline_entries_carry_their_id_time_note_and_status(book):
+    model, _, _ = book
+    session = _session(model)
+    session.select_levels("area", ["C"])
+    session.shift("area", 0.1)
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.set_step_note(staged.step_id, "One dealer network")
+    refit = session.refit_pending(method="fit")
+    carry = session.structure_history[-1]
+    session.undo()
+
+    [edit] = refit.state.history
+    timeline = timeline_payload(session)
+    assert [(e["kind"], e.get("id"), e.get("status"), e.get("redo")) for e in timeline] == [
+        ("edit", edit.step_id, "edit", False),
+        ("pending", staged.step_id, "applied", False),
+        ("structural", refit.step_id, "applied", False),
+        ("marker", None, None, None),
+        ("structural", carry.step_id, "applied", True),
+    ]
+    assert (timeline[1]["note"], timeline[1]["time"]) == ("One dealer network", staged.created_at)
+    assert timeline[3] == {"kind": "marker"}
+
+
+def test_exported_models_carry_the_history_and_the_session_models_are_left_alone(book, tmp_path):
+    model, _, _ = book
+    session = _session(model)
+    session.select_levels("area", ["C"])
+    session.shift("area", 0.1)
+    staged = session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.set_step_note(staged.step_id, "B10 and B11 share one dealer network")
+    session.refit_pending(method="fit")
+    session.stage_structural("set_reference", "area", {"level": "B"})
+    expected = session.editor_history_records()
+
+    widget = session.widget()
+    try:
+        downloaded = joblib.load(io.BytesIO(widget._export_bytes("joblib").data))
+    finally:
+        widget.close()
+    saved = joblib.load(session.save_model(tmp_path / "edited.joblib"))
+
+    for exported in (downloaded, saved):
+        assert exported._editor_history == expected
+    assert [(record["operation"], record["status"]) for record in expected] == [
+        ("shift", "edit"),
+        ("collapse", "applied"),
+        ("refit_pending", "applied"),
+        ("carry_edits", "applied"),
+        ("set_reference", "waiting"),
+    ]
+    assert expected[1]["id"] == staged.step_id
+    assert expected[1]["note"] == "B10 and B11 share one dealer network"
+    # The export copies; the in-force and the cached edited model are untouched.
+    assert session._materialized_edit_model is not None
+    assert not hasattr(session.model, "_editor_history")
+    assert not hasattr(session._materialized_edit_model, "_editor_history")

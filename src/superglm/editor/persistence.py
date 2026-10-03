@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 from dataclasses import dataclass
@@ -172,7 +173,10 @@ def save_model(session, path: str | Path, *, model_override=None) -> Path:
     target = Path(path)
     if not target.suffix:
         target = target.with_suffix(".joblib")
-    model = edited_model_for_export(session, model_override=model_override)
+    model = with_editor_history(
+        edited_model_for_export(session, model_override=model_override),
+        session.editor_history_records(),
+    )
     data, _ = serialize_validated_model(
         model,
         dataset=default_metrics_dataset(session),
@@ -190,6 +194,17 @@ def edited_model_for_export(session, *, model_override=None):
     if request is None:
         return session.model
     return materialize_edit_request(request)
+
+
+def with_editor_history(model, records: list[dict[str, Any]]):
+    """A shallow copy of ``model`` carrying the editor's timeline as ``_editor_history`` (D11).
+
+    The copy shares every fitted attribute and owns only the new one, so the
+    in-force or cached model the editor holds is never changed.
+    """
+    exported = copy.copy(model)
+    exported._editor_history = [dict(record) for record in records]
+    return exported
 
 
 def save_session(session, path: str | Path) -> None:

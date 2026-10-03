@@ -65,6 +65,22 @@ def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dic
     }
 
 
+def waiting_ranges(draft, fitted) -> list[dict[str, Any]]:
+    """The ranges ``draft`` adds or changes against the fitted spec, in axis order.
+
+    Each is listed as the palette lists a range in force.
+    """
+    in_force = {(r.lo, r.hi, r.degree, r.join) for r in _current_ranges(fitted)}
+    ranges = _current_ranges(draft)
+    if not isinstance(draft, OrderedCategorical):
+        ranges = sorted(ranges, key=lambda r: r.lo)
+    return [
+        {"lo": r.lo, "hi": r.hi, "degree": r.degree, "label": r.label, "join": r.join}
+        for r in ranges
+        if (r.lo, r.hi, r.degree, r.join) not in in_force
+    ]
+
+
 def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[int]] | None:
     """How many values a numeric term's refit sees below and up to each grid point's edges.
 

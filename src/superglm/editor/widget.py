@@ -41,6 +41,7 @@ from superglm.editor.io import jsonable
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import (
+    pending_payload,
     session_payload,
     timeline_payload,
     undo_redo_payload,
@@ -179,6 +180,7 @@ class EditorWidget:
                 },
                 "undo_redo": undo_redo_payload(self.session),
                 "timeline": timeline_payload(self.session),
+                "pending": pending_payload(self.session),
                 # With the live edits, this says whether Revert has anything to
                 # change: a structural step or a re-profile each make it False.
                 "in_force_is_original": self.session.model is self.session.reference_model,
@@ -629,8 +631,10 @@ class EditorWidget:
             model, revision = self._current_model_for_evidence()
             if model is None:
                 raise RuntimeError("Export request was superseded.")
+            with self._lock:
+                history = self.session.editor_history_records()
             data, validation = persistence.serialize_validated_model(
-                model,
+                persistence.with_editor_history(model, history),
                 dataset=default_metrics_dataset(self.session),
             )
             validation_scope = validation.scope
@@ -1036,6 +1040,50 @@ class EditorWidget:
             term=term,
             level_display=level_display,
         )
+
+    def _stage(
+        self,
+        operation: str,
+        term: str,
+        params: dict[str, Any],
+        *,
+        keep_reference: bool = True,
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        """Stage one structural change and return its transition envelope.
+
+        Nothing is fitted, so the model revision, its evidence and any
+        fixed-offset refit all stand; only the chart redraws what waits.
+        """
+        level_display = validate_level_display(level_display)
+        with self._lock:
+            operation_start = time.perf_counter()
+            self._select_term(term)
+            stage_start = time.perf_counter()
+            self.session.stage_structural(operation, term, params, keep_reference=keep_reference)
+            stage_end = time.perf_counter()
+            self._chart_generation += 1
+            return self._structural_transition(
+                "stage",
+                operation_start=operation_start,
+                fit_start=stage_start,
+                fit_end=stage_end,
+                level_display=level_display,
+            )
+
+    def _refit_pending(self, *, level_display: str = "expanded") -> dict[str, Any]:
+        """Refit every waiting change in one fit and return the transition envelope."""
+        return self._structural_step(
+            "refit_pending",
+            lambda _target: self.session.refit_pending(),
+            level_display=level_display,
+        )
+
+    def _set_note(self, step_id: str, note: str) -> dict[str, Any]:
+        """Write a note on one timeline entry; a note changes no model, so nothing is refit."""
+        with self._lock:
+            self.session.set_step_note(step_id, note)
+            return {"ok": True, "state": self._state()}
 
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
         with self._lock:

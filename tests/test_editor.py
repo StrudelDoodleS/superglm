@@ -1465,7 +1465,13 @@ def test_widget_evidence_and_export_reuse_materialized_model(
     assert Path(saved["path"]).exists()
     assert filename == "edited-model.joblib"
     assert downloaded
-    assert dumped == [materialized, materialized]
+    # Both exports dump a copy of the one materialized model that carries the
+    # history (spec D11); the cached model itself is left as it was.
+    assert len(dumped) == 2
+    assert all(
+        model is not materialized and model._result is materialized._result for model in dumped
+    )
+    assert not hasattr(materialized, "_editor_history")
 
 
 def test_to_model_refreshes_fit_statistics_after_manual_edit(editor_model):
@@ -6878,6 +6884,9 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/collapse_levels", frozenset({"POST"})) in routes
     assert ("/ungroup_levels", frozenset({"POST"})) in routes
     assert ("/reorder_levels", frozenset({"POST"})) in routes
+    assert ("/stage", frozenset({"POST"})) in routes
+    assert ("/refit_pending", frozenset({"POST"})) in routes
+    assert ("/note", frozenset({"POST"})) in routes
     assert ("/restore_structure", frozenset({"POST"})) not in routes
     assert ("/model_source", frozenset({"POST"})) not in routes
 
