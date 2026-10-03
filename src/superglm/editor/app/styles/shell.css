@@ -172,6 +172,12 @@ body {
   padding: 0 0 2px;
 }
 
+/* A reference a waiting change will pin, until Refit. */
+.context-chip[data-waiting="true"] {
+  background: var(--sig-weak-bg);
+  color: var(--sig-weak-fg);
+}
+
 /* Tool modes as a segmented control. */
 .tool-rail {
   display: flex;

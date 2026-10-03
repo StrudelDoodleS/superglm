@@ -83,3 +83,36 @@ test("changes waiting lead the status line, then the last-refit note or the sele
   assert.equal(selecting.dataset.term, "territory");
   assert.equal(waitingLabel(1), "1 change waiting for refit");
 });
+
+/** Plain nodes, as the reference chip needs nothing more. */
+function nodes() {
+  const node = () => ({ textContent: "", hidden: false, dataset: {} });
+  return { kindNode: node(), edfNode: node(), referenceNode: node(), statusNode: node() };
+}
+
+test("a waiting reference change shows in the reference chip", () => {
+  const n = nodes();
+  renderContextBar(n, {
+    name: "VehBrand",
+    term: {
+      kind: "categorical", term_type: "categorical", effective_df: 10, n_points: 11,
+      reference: { level: "B2", policy: "kept" },
+      pending: { groups: null, ranges: [], reference: "B10 + B11" },
+    },
+    selectionSize: 0,
+  });
+  assert.equal(n.referenceNode.textContent, "reference B10 + B11 · waiting");
+  assert.equal(n.referenceNode.dataset.waiting, "true");
+});
+
+test("without a waiting reference the chip shows the fitted one", () => {
+  const n = nodes();
+  renderContextBar(n, {
+    name: "VehBrand",
+    term: { kind: "categorical", effective_df: 10, n_points: 11,
+      reference: { level: "B2", policy: "kept" } },
+    selectionSize: 0,
+  });
+  assert.equal(n.referenceNode.textContent, "reference B2 · kept");
+  assert.equal(n.referenceNode.dataset.waiting, "false");
+});

@@ -403,3 +403,70 @@ def test_waiting_changes_show_in_the_feature_list_status_line_and_export(open_ed
         session.select_levels("territory", ["T05"])
         _reload_editor(page, "territory")
         assert status.text_content().startswith("1 change waiting for refit · 1 of ")
+
+
+def test_a_waiting_collapse_is_drawn_dashed_with_a_bracket_under_the_axis(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        session.stage_structural(
+            "collapse", "territory", {"levels": ["T02", "T03"], "group_label": None}
+        )
+        _reload_editor(page, "territory")
+        bracket = page.locator("#chart .pending-group-bracket")
+        assert bracket.count() == 1
+        assert bracket.locator(".pending-group-label").text_content() == "T02 + T03 · waiting"
+        assert page.locator("#chart rect.exposure.waiting").count() == 2
+        assert page.locator("#chart .pending-group-ring").count() == 2
+        # The curve is still the last refit's: nothing is grouped in force yet.
+        assert page.locator("#chart .level-group-marker").count() == 0
+        # The bracket has its own row between the level labels and the axis title.
+        rows = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const label = svg.querySelector('.pending-group-label').getBBox();
+                const title = svg.querySelector('.x-axis-title').getBBox();
+                const ticks = Array.from(svg.querySelectorAll('.x-tick-label'), n => n.getBBox());
+                return {
+                    ticksBottom: Math.max(...ticks.map(box => box.y + box.height)),
+                    labelTop: label.y,
+                    labelBottom: label.y + label.height,
+                    titleTop: title.y,
+                };
+            }"""
+        )
+        assert rows["ticksBottom"] <= rows["labelTop"]
+        assert rows["labelBottom"] <= rows["titleTop"]
+
+
+def test_a_waiting_range_is_a_dashed_box_until_refit_pins_it(open_editor_page):
+    with open_editor_page() as (page, session):
+        session.stage_structural(
+            "shape", "curve", {"lo": 3.0, "hi": 5.0, "degree": 1, "join": "tangent"}
+        )
+        _reload_editor(page, "curve")
+        waiting = page.locator("#chart .pending-range")
+        assert waiting.count() == 1
+        assert (
+            waiting.locator(".pending-range-label").text_content().endswith(" · waiting for refit")
+        )
+        assert page.locator("#chart .shape-range").count() == 0
+        [staged] = session_payload(session)["curve"]["pending"]["ranges"]
+        extent = page.evaluate(
+            """([lo, hi]) => {
+                const svg = document.querySelector('#chart');
+                const rect = svg.querySelector('.pending-range-box');
+                const left = Number(rect.getAttribute('x'));
+                return {
+                    left,
+                    right: left + Number(rect.getAttribute('width')),
+                    expected: [svg._scale.sx(lo), svg._scale.sx(hi)],
+                };
+            }""",
+            [staged["lo"], staged["hi"]],
+        )
+        assert [extent["left"], extent["right"]] == pytest.approx(extent["expected"], abs=1e-9)
+
+        with page.expect_response(_posted("/refit_pending")):
+            page.keyboard.press("r")
+        _settled_after_refit(page)
+        assert waiting.count() == 0
+        assert page.locator("#chart .shape-range").count() == 1

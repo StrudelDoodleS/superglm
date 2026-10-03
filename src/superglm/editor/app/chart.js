@@ -1,6 +1,13 @@
 import { fmt } from "./format.js";
 import { drawShapeOverlay } from "./chart/shape_overlay.js";
 import {
+  WAITING_BRACKET_ROW,
+  drawPendingGroupBrackets,
+  drawPendingGroupRings,
+  drawPendingRanges,
+  pendingGroupMarks
+} from "./chart/pending_overlay.js";
+import {
   chartSize,
   evenlySpacedIndices,
   planCategoricalAxis,
@@ -13,6 +20,8 @@ const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
 // selected, hovered, or within the lens around the pointer.
 const DENSE_POINT_COUNT = 40;
 const LENS_HALF_WIDTH = 26;
+// The x-axis title's own row, as planCategoricalAxis reserves it by default.
+const AXIS_TITLE_HEIGHT = 14;
 const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
   "font-family",
   "font-size",
@@ -71,6 +80,12 @@ export function drawChart(term, selection, context) {
     term,
     context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
   );
+  // A waiting group is named on a bracket under the axis labels, which takes
+  // a row of its own. The handles view draws neither groups nor brackets.
+  const waitingGroups = visualMode === "handles" && term.controls
+    ? []
+    : pendingGroupMarks(term, view);
+  const bracketRow = waitingGroups.length ? WAITING_BRACKET_ROW : 0;
   const x = view.x;
   const y = view.y;
   const original = view.original_y;
@@ -95,7 +110,8 @@ export function drawChart(term, selection, context) {
         xMax,
         width - baseMargin.left - baseMargin.right,
         height,
-        baseMargin
+        baseMargin,
+        bracketRow
       )
     : null;
   if (!categoricalLayout) svg.dataset.axisMeasurementCount = "0";
@@ -145,7 +161,7 @@ export function drawChart(term, selection, context) {
 
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
   // curves and interactive handles/points.
-  exposureLayer(svg, view, sx, margin, innerW, innerH, exposure);
+  exposureLayer(svg, view, sx, margin, innerW, innerH, exposure, waitingSlots(waitingGroups));
   for (const tick of ticks(yMin, yMax, tickCount(innerH, 70))) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
     text(svg, margin.left - 8, sy(tick) + 4, fmt(tick), "tick-label", "end");
@@ -188,7 +204,7 @@ export function drawChart(term, selection, context) {
   text(
     svg,
     margin.left + innerW / 2,
-    categoricalLayout ? categoricalLayout.titleY : height - 12,
+    categoricalLayout ? categoricalLayout.titleY + bracketRow : height - 12,
     term.x_label,
     "label x-axis-title",
     "middle"
@@ -198,6 +214,7 @@ export function drawChart(term, selection, context) {
   // Shaped ranges sit above the grid and beneath the curves; a Build animation
   // shows the basis alone.
   if (!buildActive) drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH });
+  if (!buildActive) drawPendingRanges(svg, { term, view, sx, margin, innerW, innerH });
 
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
@@ -230,6 +247,17 @@ export function drawChart(term, selection, context) {
   if (!handlesMode) {
     if (view.displayIsCollapsed) drawCollapsedLevelGroups(svg, view, sx, sy);
     else drawLevelGroups(svg, view, sx, sy);
+  }
+  if (waitingGroups.length && categoricalLayout) {
+    drawPendingGroupRings(svg, waitingGroups, { view, sx, sy, color: levelGroupColor });
+    drawPendingGroupBrackets(svg, waitingGroups, {
+      view,
+      sx,
+      top: categoricalLayout.labelsBottom,
+      left: margin.left,
+      right: margin.left + innerW,
+      color: levelGroupColor
+    });
   }
   const visiblePoints = visiblePointIndices(view, displaySelected);
   const basePoints = new Set(basePointIndices(view));
@@ -464,6 +492,7 @@ function applyPlotClip(svg) {
     ".basis-build",
     ".level-group-link",
     ".level-group-marker",
+    ".pending-group-ring",
     ".point",
     ".control-stem",
     ".control-handle"
@@ -645,6 +674,15 @@ function drawLevelGroupMarker(svg, x, y, sx, sy, groupIndex) {
       points: `${cx},${cy - h} ${cx + size / 2},${cy + h / 2} ${cx - size / 2},${cy + h / 2}`
     }));
   }
+}
+
+// The palette slot of each displayed point a waiting group takes in.
+function waitingSlots(marks) {
+  const slots = new Map();
+  for (const mark of marks) {
+    for (const position of mark.display) slots.set(position, mark.slot);
+  }
+  return slots;
 }
 
 // The categorical palettes live in tokens.css, one value per theme: the SVG
@@ -1012,7 +1050,9 @@ function svgClientPoint(svg, x, y) {
   };
 }
 
-function categoricalAxisLayout(svg, view, xMin, xMax, availableWidth, svgHeight, baseMargin) {
+function categoricalAxisLayout(
+  svg, view, xMin, xMax, availableWidth, svgHeight, baseMargin, extraRow = 0
+) {
   const labels = view.levels.map(String);
   if (view.x.length !== labels.length) {
     throw new RangeError("categorical axis values and labels must have the same length");
@@ -1031,7 +1071,8 @@ function categoricalAxisLayout(svg, view, xMin, xMax, availableWidth, svgHeight,
     availableWidth,
     svgHeight,
     baseLeft: baseMargin.left,
-    baseBottom: baseMargin.bottom
+    baseBottom: baseMargin.bottom,
+    titleHeight: AXIS_TITLE_HEIGHT + extraRow
   });
 }
 
@@ -1138,7 +1179,7 @@ function ticks(min, max, n) {
   return Array.from({ length: n }, (_, i) => min + i * step);
 }
 
-function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure) {
+function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure, waiting = new Map()) {
   // Exposure uses a secondary visual scale inside the plot area. It is
   // contextual, not part of the relativity y-axis scale.
   if (!exposure || !exposure.y || !exposure.y.length) return;
@@ -1157,15 +1198,24 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure) {
       : innerW / 12;
     for (let i = 0; i < exposure.y.length; i++) {
       const h = Math.max(1, maxH * exposure.y[i] / maxWeight);
-      svg.appendChild(el("rect", {
+      const bar = el("rect", {
         x: sx(x[i]) - nominalW / 2,
         y: yBase - h,
         width: nominalW,
         height: h,
         rx: 2,
         ry: 2,
-        class: "exposure"
-      }));
+        class: waiting.has(i) ? "exposure waiting" : "exposure"
+      });
+      // A level in a waiting group shows its bar dashed, in the group's colour.
+      if (waiting.has(i)) {
+        const slot = waiting.get(i);
+        bar.setAttribute(
+          "style",
+          `fill: ${levelGroupColor(slot, 0.22)}; stroke: ${levelGroupColor(slot, 0.95)}`
+        );
+      }
+      svg.appendChild(bar);
     }
   }
   exposureAxis(svg, margin.left + innerW, yBase, maxH, maxWeight);

@@ -58,8 +58,11 @@ export function drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH }
   }
 }
 
-/** @param {SVGElement} label */
-function labelWidth(label) {
+/**
+ * A drawn label's width: measured where the SVG has layout, else estimated.
+ * @param {SVGElement} label
+ */
+export function labelWidth(label) {
   const measure = /** @type {{getComputedTextLength?:()=>number}} */ (label).getComputedTextLength;
   const measured = typeof measure === "function" ? measure.call(label) : 0;
   return measured > 0 ? measured : (label.textContent || "").length * 6.5;

@@ -6775,6 +6775,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "views/inspector.js",
             "views/help_drawer.js",
             "views/settings.js",
+            "chart/pending_overlay.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:

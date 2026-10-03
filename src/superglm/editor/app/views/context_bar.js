@@ -36,10 +36,14 @@ export function renderContextBar(
     ? "EDF unavailable"
     : `EDF ${fmt(term.effective_df)}`;
   const reference = term.reference;
-  referenceNode.hidden = !reference;
-  referenceNode.textContent = reference
-    ? `reference ${reference.level} · ${REFERENCE_POLICY[reference.policy]}`
-    : "";
+  const waitingReference = term.pending ? term.pending.reference : null;
+  referenceNode.hidden = !reference && !waitingReference;
+  referenceNode.textContent = waitingReference
+    ? `reference ${waitingReference} · waiting`
+    : reference
+      ? `reference ${reference.level} · ${REFERENCE_POLICY[reference.policy]}`
+      : "";
+  referenceNode.dataset.waiting = waitingReference ? "true" : "false";
   const impact = term.impact || {};
   const suffix = note ? ` · ${note}` : "";
   const selected = `${selectionSize} of ${term.n_points} selected · average edit relativity ${fmt(impact.weighted_mean_relativity || 1)}x · selected exposure ${fmtPercent(impact.selected_weight_share || 0)}${suffix}`;
