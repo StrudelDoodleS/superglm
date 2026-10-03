@@ -272,6 +272,10 @@
  * @property {{term:string, indices:number[]}|null} selectionPreview
  * @property {{term:string, index:number}|null} selectionAnchor the point the next
  *   Shift-click spans from: a source index of `term`, set by a click or a Ctrl/Cmd-click
+ * @property {{term:string, from:number, to:number, indices:number[]}|null} selectionSpan
+ *   the last Shift-click's span, by source index: from the anchor it spanned from to
+ *   the point clicked, and every index it selected. It describes the selection only
+ *   while the anchor is still `from` and the selection is still `indices`.
  */
 /**
  * @typedef {Object} MutationRequestState

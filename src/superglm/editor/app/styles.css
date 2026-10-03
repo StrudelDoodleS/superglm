@@ -1366,6 +1366,14 @@ input[type="number"] {
 .point-layer .point {
   transition: opacity 120ms ease;
 }
+/* The selection anchor: a ring the point sits in, and a tag naming the
+   gesture and the x, here and at a Shift-click span's far end. The tags step
+   aside while the pointer drags. */
+.anchor-ring { fill: var(--surface); stroke: var(--orange); stroke-width: 2.4; pointer-events: none; }
+.anchor-tag { pointer-events: none; }
+.anchor-tag-box { fill: var(--surface); stroke: var(--orange); stroke-width: 1; }
+.anchor-tag-label { fill: var(--orange); font-size: 11px; font-weight: 600; }
+.chart-shell[data-dragging="true"] .anchor-tag { display: none; }
 .point-tooltip { pointer-events: none; }
 .point-tooltip rect {
   fill: color-mix(in srgb, var(--surface) 97%, transparent);

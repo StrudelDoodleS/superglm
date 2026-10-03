@@ -23,11 +23,13 @@ export function waitingLabel(count) {
 
 /**
  * @param {{nameNode?:HTMLElement|null, kindNode:HTMLElement, edfNode:HTMLElement, referenceNode:HTMLElement, statusNode:HTMLElement}} nodes
- * @param {{name:string, term:TermPayload, selectionSize:number, note?:string, pendingCount?:number}} context
+ * @param {{name:string, term:TermPayload, selectionSize:number, note?:string, pendingCount?:number,
+ *   range?:{lo:string, hi:string}|null}} context `range` names the ends of a Shift-click
+ *   span, as the axis reads them, while the selection is that span
  */
 export function renderContextBar(
   { nameNode = null, kindNode, edfNode, referenceNode, statusNode },
-  { name, term, selectionSize, note = "", pendingCount = 0 },
+  { name, term, selectionSize, note = "", pendingCount = 0, range = null },
 ) {
   const kind = term.term_type || term.kind || "term";
   if (nameNode) nameNode.textContent = name;
@@ -46,7 +48,10 @@ export function renderContextBar(
   referenceNode.dataset.waiting = waitingReference ? "true" : "false";
   const impact = term.impact || {};
   const suffix = note ? ` · ${note}` : "";
-  const selected = `${selectionSize} of ${term.n_points} selected · average edit relativity ${fmt(impact.weighted_mean_relativity || 1)}x · selected exposure ${fmtPercent(impact.selected_weight_share || 0)}${suffix}`;
+  const exposure = `selected exposure ${fmtPercent(impact.selected_weight_share || 0)}${suffix}`;
+  const selected = range
+    ? `Range ${range.lo} – ${range.hi} · ${selectionSize} of ${term.n_points} points · ${exposure}`
+    : `${selectionSize} of ${term.n_points} selected · average edit relativity ${fmt(impact.weighted_mean_relativity || 1)}x · ${exposure}`;
   if (pendingCount > 0) {
     // While changes wait, the line leads with them: what is drawn is the last refit.
     const waiting = statusNode.ownerDocument.createElement("strong");

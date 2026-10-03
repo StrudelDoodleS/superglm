@@ -3,7 +3,7 @@ import { shiftedCurve } from "./chart/ordered_spline.js";
 // A press that moves no further than this many SVG units in x and in y is a
 // click; past it, a drag. The chart draws at its own CSS-pixel size, so an SVG
 // unit is a pixel.
-const CLICK_SLOP = 3;
+export const CLICK_SLOP = 3;
 // A click this close to the drawn curve, between its points, picks the point
 // nearest by x.
 const CURVE_SNAP_DISTANCE = 12;
@@ -419,7 +419,9 @@ async function clickPoint(context, displayIndex, toggle) {
 
 // A Shift-click selects every display point between the anchor and this one
 // by x, whatever their heights, and leaves the anchor where it is. With no
-// anchor on this term it is a plain click.
+// anchor on this term it is a plain click. The span is kept, by source index,
+// before it is selected, so the chart can tag its far end and the status line
+// name its range while the selection is that span.
 async function shiftClickPoint(context, displayIndex) {
   const term = context.selectedTerm();
   const anchor = anchorDisplayIndex(context, term);
@@ -427,13 +429,17 @@ async function shiftClickPoint(context, displayIndex) {
     await clickPoint(context, displayIndex, false);
     return;
   }
-  await context.actions.executeSelectionMutation({
+  const indices = sourceIndicesForDisplayIndices(
+    context,
+    displayIndicesBetween(context, anchor, displayIndex)
+  );
+  context.setSelectionSpan({
     term,
-    indices: sourceIndicesForDisplayIndices(
-      context,
-      displayIndicesBetween(context, anchor, displayIndex)
-    )
+    from: context.selectionAnchor().index,
+    to: sourceIndicesForDisplayIndices(context, [displayIndex])[0],
+    indices
   });
+  await context.actions.executeSelectionMutation({ term, indices });
 }
 
 // The anchor is a source index, so it survives a switch between the expanded

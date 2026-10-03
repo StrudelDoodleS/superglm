@@ -209,7 +209,7 @@ function gestureHarness({
   const listeners = new Map();
   const mutations = [];
   const zooms = [];
-  const state = { selection: new Set(selection), anchor };
+  const state = { selection: new Set(selection), anchor, span: null };
   const scale = {
     sx: (value) => 100 + 10 * value,
     sy: (value) => 300 - 100 * value,
@@ -240,6 +240,7 @@ function gestureHarness({
     currentSelection: () => new Set(state.selection),
     selectionAnchor: () => state.anchor,
     setSelectionAnchor(next) { state.anchor = next; },
+    setSelectionSpan(next) { state.span = next; },
     mode: () => "select",
     selectedTerm: () => "age",
     setZoom(_term, range) { zooms.push(range); },
@@ -307,6 +308,25 @@ test("Shift-click selects every point between the anchor and the point by x, wha
   assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [0, 1, 2] });
   assert.deepEqual(chart.state.anchor, { term: "age", index: 2 });
   assert.deepEqual(chart.zooms, []);
+});
+
+test("a Shift-click keeps the span it made, from the anchor to the point clicked", async () => {
+  const chart = gestureHarness({});
+
+  await chart.click(6);
+  await chart.click(2, { shiftKey: true });
+  assert.deepEqual(chart.state.span, { term: "age", from: 6, to: 2, indices: [2, 3, 4, 5, 6] });
+
+  // Drawn collapsed, each end is the source level its display point shows first.
+  const collapsed = gestureHarness({
+    x: [0, 1, 2, 3],
+    y: [1, 1.2, 0.8, 1.1],
+    levels: ["a", "b", "c", "d", "e"],
+    anchor: { term: "age", index: 4 },
+    displayToSourceIndices: [[0], [1, 2], [3], [4]],
+  });
+  await collapsed.click(1, { shiftKey: true });
+  assert.deepEqual(collapsed.state.span, { term: "age", from: 4, to: 1, indices: [1, 2, 3, 4] });
 });
 
 test("without an anchor on this term a Shift-click selects the point and anchors it", async () => {

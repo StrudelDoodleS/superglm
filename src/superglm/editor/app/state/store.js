@@ -26,7 +26,8 @@ export function createInitialEditorState(snapshot = null) {
       inspectorOpen: true,
       preview: null,
       selectionPreview: null,
-      selectionAnchor: null
+      selectionAnchor: null,
+      selectionSpan: null
     },
     request: {
       mutation: { status: "idle", operation: null, error: null },

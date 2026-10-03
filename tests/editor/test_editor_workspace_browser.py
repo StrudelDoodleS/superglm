@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 pytest.importorskip("playwright.sync_api")
@@ -575,6 +577,90 @@ def test_click_shift_click_selects_a_span_and_ctrl_click_toggles_on_a_spline(ope
         # The last Ctrl-click is the anchor: Shift-click 17 spans 17 to 20.
         _click_selects(page, point(17), modifiers=["Shift"])
         assert session.selection("curve").tolist() == [17, 18, 19, 20]
+
+
+def _tagged_x(text: str, gesture: str) -> float:
+    """The x a tag such as ``"click · 2.77"`` names."""
+    prefix = f"{gesture} · "
+    assert text.startswith(prefix), text
+    return float(text[len(prefix) :])
+
+
+def test_the_anchor_and_a_shift_click_end_are_ringed_and_tagged(open_editor_page):
+    with open_editor_page(n_points=30) as (page, session):
+        select_chart_tool(page, "Select")
+        x = session.terms["curve"].x
+        # Every x here lies in [1, 10), which the axis prints to two decimals.
+        printed = 0.005
+
+        def point(index: int):
+            return page.locator(f'#chart circle.point[data-index="{index}"]')
+
+        tags = page.locator("#chart .anchor-tag:visible")
+        rings = page.locator("#chart circle.anchor-ring:visible")
+        status = page.locator("#status")
+        assert tags.count() == 0 and rings.count() == 0
+
+        _click_selects(page, point(8))
+        [anchor_tag] = tags.all_text_contents()
+        assert abs(_tagged_x(anchor_tag, "click") - x[8]) <= printed
+        assert rings.count() == 1
+        assert rings.first.get_attribute("cx") == point(8).get_attribute("cx")
+        assert status.text_content().startswith("1 of 30 selected · ")
+
+        _click_selects(page, point(14), modifiers=["Shift"], timeout=5000)
+        anchor_tag, end_tag = tags.all_text_contents()
+        assert abs(_tagged_x(anchor_tag, "click") - x[8]) <= printed
+        assert abs(_tagged_x(end_tag, "Shift-click") - x[14]) <= printed
+        assert sorted(ring.get_attribute("cx") for ring in rings.all()) == sorted(
+            point(i).get_attribute("cx") for i in (8, 14)
+        )
+        range_line = re.fullmatch(
+            r"Range (\S+) – (\S+) · 7 of 30 points · selected exposure [\d.]+%",
+            status.text_content(),
+        )
+        assert range_line, status.text_content()
+        assert abs(float(range_line[1]) - x[8]) <= printed
+        assert abs(float(range_line[2]) - x[14]) <= printed
+
+        # A span the other way still reads low to high.
+        _click_selects(page, point(3), modifiers=["Shift"], timeout=5000)
+        range_line = re.fullmatch(
+            r"Range (\S+) – (\S+) · 6 of 30 points · .*", status.text_content()
+        )
+        assert range_line, status.text_content()
+        assert abs(float(range_line[1]) - x[3]) <= printed
+        assert abs(float(range_line[2]) - x[8]) <= printed
+
+        # While the pointer drags, the tags step aside; the rings stay.
+        corner = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const { margin } = svg._scale;
+                const at = (dx, dy) => {
+                    const p = svg.createSVGPoint();
+                    p.x = margin.left + dx;
+                    p.y = margin.top + dy;
+                    const client = p.matrixTransform(svg.getScreenCTM());
+                    return { x: client.x, y: client.y };
+                };
+                return { start: at(4, 4), end: at(24, 24) };
+            }"""
+        )
+        page.mouse.move(corner["start"]["x"], corner["start"]["y"])
+        page.mouse.down()
+        page.mouse.move(corner["end"]["x"], corner["end"]["y"], steps=3)
+        assert tags.count() == 0
+        assert rings.count() == 2
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            page.mouse.up()
+        page.wait_for_function("() => window.__superglmTest?.mutationStatus?.() !== 'running'")
+
+        # The box changed the selection, so it is no span any more: the anchor
+        # keeps its tag, and the status line its selection sentence.
+        [anchor_tag] = tags.all_text_contents()
+        assert abs(_tagged_x(anchor_tag, "click") - x[8]) <= printed
+        assert status.text_content().startswith("0 of 30 selected · ")
 
 
 def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_editor_page):

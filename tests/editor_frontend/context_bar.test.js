@@ -84,6 +84,23 @@ test("changes waiting lead the status line, then the last-refit note or the sele
   assert.equal(waitingLabel(1), "1 change waiting for refit");
 });
 
+test("a Shift-click span reads as its range on the status line", () => {
+  const range = { lo: "T02", hi: "T08" };
+  assert.equal(
+    render({ selectionSize: 7, range }).textContent,
+    "Range T02 – T08 · 7 of 10 points · selected exposure 25%",
+  );
+  assert.equal(
+    render({ selectionSize: 7, range, pendingCount: 1 }).textContent,
+    "1 change waiting for refit · Range T02 – T08 · 7 of 10 points · selected exposure 25%",
+  );
+  // Any other selection keeps the selection sentence.
+  assert.equal(
+    render({ selectionSize: 7, range: null }).textContent,
+    "7 of 10 selected · average edit relativity 1.2x · selected exposure 25%",
+  );
+});
+
 /** Plain nodes, as the reference chip needs nothing more. */
 function nodes() {
   const node = () => ({ textContent: "", hidden: false, dataset: {} });

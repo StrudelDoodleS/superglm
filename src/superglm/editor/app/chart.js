@@ -1,4 +1,10 @@
 import { fmt } from "./format.js";
+import {
+  anchorMarks,
+  createAnchorMarks,
+  placeAnchorMarks,
+  spanRange
+} from "./chart/anchor_marks.js";
 import { drawShapeOverlay } from "./chart/shape_overlay.js";
 import {
   WAITING_BRACKET_ROW,
@@ -72,6 +78,7 @@ export function drawChart(term, selection, context) {
   const { svg } = context;
   const visualMode = context.visualMode();
   svg.innerHTML = "";
+  svg._anchorMarks = null;
   // Draw at the chart's own CSS-pixel size so nothing is scaled: text keeps
   // its nominal size and the plot fills its panel. A hidden chart, or a DOM
   // without layout, draws at the fallback size.
@@ -290,6 +297,12 @@ export function drawChart(term, selection, context) {
   } else {
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
+  // The anchor is marked where points are drawn; a Build animation, which
+  // shows the basis alone, marks none.
+  svg._anchorMarks = pointLayer && !buildActive ? createAnchorMarks(svg, pointLayer) : null;
+  placeChartAnchorMarks(svg, view, selection, context, {
+    sx, sy, x, y, xMin, xMax, margin, innerW, innerH
+  });
   applyPlotClip(svg);
   const legendLayer = el("g", { class: "legend-layer" });
   svg.appendChild(legendLayer);
@@ -384,6 +397,29 @@ export function updateChartSelection(term, selection, context) {
       );
   updateSelectionBounds(svg, bounds, { top: scale.margin.top, height: scale.innerH });
   positionSelectionMenu(svg, context.selectionMenu, bounds);
+  placeChartAnchorMarks(svg, view, selection, context, scale);
+}
+
+/**
+ * The Shift-click span's ends as the axis reads them, for the status line, or
+ * null when the selection is no such span.
+ */
+export function selectionSpanRange(term, selection, context) {
+  const view = resolveDisplayTerm(
+    term,
+    context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
+  );
+  return spanRange(
+    view, context.selectedTerm(), context.selectionAnchor(), context.selectionSpan(), selection
+  );
+}
+
+function placeChartAnchorMarks(svg, view, selection, context, scale) {
+  if (!svg._anchorMarks) return;
+  const marks = anchorMarks(
+    view, context.selectedTerm(), context.selectionAnchor(), context.selectionSpan(), selection
+  );
+  placeAnchorMarks(svg._anchorMarks, marks, scale);
 }
 
 /**

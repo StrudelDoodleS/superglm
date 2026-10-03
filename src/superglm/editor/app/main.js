@@ -1,5 +1,12 @@
 import { editorClient } from "./api/client.js";
-import { bindPointLens, drawChart, groupedTerms, updateChartSelection } from "./chart.js";
+import {
+  bindPointLens,
+  drawChart,
+  groupedTerms,
+  selectionSpanRange,
+  updateChartSelection
+} from "./chart.js";
+import { bindDragWatch } from "./chart/anchor_marks.js";
 import { chartSize } from "./chart/geometry.js";
 import { bindHistory, renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
@@ -43,7 +50,7 @@ import {
   stageShapeRange,
   stageUngroup
 } from "./summary.js";
-import { bindInteractions } from "./interactions.js";
+import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { renderContextBar } from "./views/context_bar.js";
 import { bindExportDialog } from "./views/export_dialog.js";
@@ -322,7 +329,9 @@ const chartContext = {
   showCi: () => store.getState().view.showCi,
   showContrib: () => store.getState().view.showContrib,
   buildProgress: () => buildProgress,
-  groupDisplayMode: () => activeGroupDisplayMode()
+  groupDisplayMode: () => activeGroupDisplayMode(),
+  selectionAnchor: () => store.getState().view.selectionAnchor,
+  selectionSpan: () => store.getState().view.selectionSpan
 };
 
 let openHelp = () => inspectorToggle.click();
@@ -487,6 +496,10 @@ function selectionAnchor() {
 
 function setSelectionAnchor(anchor) {
   actions.patchView({ selectionAnchor: anchor });
+}
+
+function setSelectionSpan(span) {
+  actions.patchView({ selectionSpan: span });
 }
 
 function setInteractionPreview(term, payload, selection) {
@@ -995,7 +1008,8 @@ function renderChartWorkspace() {
       term,
       selectionSize: selection.size,
       note: collapsedOriginalNote,
-      pendingCount: selectPendingSteps(editorState).length
+      pendingCount: selectPendingSteps(editorState).length,
+      range: selectionSpanRange(term, selection, chartContext)
     }
   );
 }
@@ -1228,7 +1242,8 @@ function renderSelectionState({ termName, indices }) {
       term,
       selectionSize: selection.size,
       note: selectionContextNote(term),
-      pendingCount: selectPendingSteps(store.getState()).length
+      pendingCount: selectPendingSteps(store.getState()).length,
+      range: selectionSpanRange(term, selection, chartContext)
     }
   );
 }
@@ -1240,7 +1255,10 @@ function selectSelectionState(state) {
     termName,
     indices: selectCurrentSelection(state),
     weightedMeanRelativity: impact.weighted_mean_relativity,
-    selectedWeightShare: impact.selected_weight_share
+    selectedWeightShare: impact.selected_weight_share,
+    // The anchor's marks and a Shift-click's range follow them as well.
+    anchor: state.view.selectionAnchor,
+    span: state.view.selectionSpan
   };
 }
 
@@ -1249,6 +1267,8 @@ function sameSelectionState(next, previous) {
     next.termName !== previous.termName ||
     next.weightedMeanRelativity !== previous.weightedMeanRelativity ||
     next.selectedWeightShare !== previous.selectedWeightShare ||
+    next.anchor !== previous.anchor ||
+    next.span !== previous.span ||
     next.indices.length !== previous.indices.length
   ) {
     return false;
@@ -1678,6 +1698,7 @@ const interactions = bindInteractions({
   currentSelection,
   selectionAnchor,
   setSelectionAnchor,
+  setSelectionSpan,
   setPreviewTerm: setInteractionPreview,
   clearPreviewTerm: clearInteractionPreview,
   setZoom,
@@ -1685,6 +1706,8 @@ const interactions = bindInteractions({
   actions,
 });
 bindPointLens(svg);
+// The anchor's tags step aside while the pointer drags on the chart.
+bindDragWatch(svg, document.querySelector(".chart-shell"), CLICK_SLOP);
 
 async function selectFeature(term) {
   if (term === selectedTerm()) return;
