@@ -33,7 +33,9 @@ def test_table_shows_the_terms_rating_table_block_in_place_of_the_chart(
         frame = page.locator("#ratingTableFrame")
         frame.locator("table.rating-table").wait_for()
         assert page.locator("#chart").is_hidden()
-        assert page.locator("#ciToggle").is_hidden()
+        # Every control that acts on the chart alone steps aside.
+        for chart_only in ("#ciToggle", 'button[data-op="select_all"]', "#groupDisplayWrap"):
+            assert page.locator(chart_only).is_hidden(), chart_only
         assert _term_view(page, "Table").get_attribute("aria-checked") == "true"
         assert block["available"] is True
         assert frame.locator("thead th").all_inner_texts() == block["columns"]
@@ -56,6 +58,8 @@ def test_table_shows_the_terms_rating_table_block_in_place_of_the_chart(
         page.locator("#chart path.edited").first.wait_for()
         assert frame.is_hidden()
         assert page.locator("#chart").is_visible()
+        for chart_only in ("#ciToggle", 'button[data-op="select_all"]', "#groupDisplayWrap"):
+            assert page.locator(chart_only).is_visible(), chart_only
 
 
 def test_table_is_rebuilt_for_each_model_revision_while_it_is_shown(open_editor_page):

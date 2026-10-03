@@ -263,8 +263,8 @@ body {
 
 /* Table view: the rating table takes the chart's place, and the controls
    that only act on the chart step aside. */
-.plot-column.is-table-view :is(#handleCountWrap, #contribTools, #ciToggle,
-  #resetZoom, #selectionMenu) {
+.plot-column.is-table-view :is(#groupDisplayWrap, #handleCountWrap, #contribTools, #ciToggle,
+  [data-op="select_all"], #resetZoom, #selectionMenu) {
   display: none !important;
 }
 
