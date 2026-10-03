@@ -948,6 +948,35 @@ def test_run_cv_and_final_fit_fit_off_the_widget_lock(cv_frame, cv_fit, monkeypa
     assert taken == [True, True, True, True]
 
 
+def test_run_cv_and_final_fit_refit_the_structure_from_the_last_refit(cv_frame, cv_fit):
+    """After a Refit that collapses region B and C, every fold and the Final fit keep them as one.
+
+    The source model fits B and C apart, so only the refitted structure
+    gives them one value.
+    """
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.stage_structural("collapse", "region", {"levels": ["B", "C"], "group_label": None})
+    session.refit_pending(method="fit")
+
+    run = run_cv(capture_cv_run(session), _Context())
+    final = run_final_fit(capture_final_fit(session), _Context())
+
+    region = next(item for item in run.terms if item["name"] == "region")
+    assert region["levels"] == ["A", "B", "C"]
+    assert [fold["label"] for fold in region["folds"]] == ["Fold 1", "Fold 2", "Fold 3"]
+    for fold in region["folds"]:
+        _a, b, c = fold["values"]
+        np.testing.assert_allclose(c, b, rtol=64 * _U)
+    probe = pd.DataFrame({"age": [40.0] * 3, "power": [0.0] * 3, "region": ["A", "B", "C"]})
+    log_mu = np.log(final.model.predict(probe))
+    np.testing.assert_allclose(
+        log_mu[2], log_mu[1], rtol=0.0, atol=64 * _U * max(1.0, np.max(np.abs(log_mu)))
+    )
+
+
 def test_run_cv_takes_the_in_force_fit_method_and_the_supplied_scorers(cv_frame, cv_fit):
     from superglm.editor.cv import capture_cv_run
 
