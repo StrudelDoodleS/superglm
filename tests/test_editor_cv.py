@@ -907,6 +907,47 @@ def test_final_fit_refits_train_and_validation_and_export_offers_it(cv_frame, cv
     assert stale.value.public_message == FINAL_STALE
 
 
+def test_run_cv_and_final_fit_fit_off_the_widget_lock(cv_frame, cv_fit, monkeypatch):
+    """While each fit of a real Run CV or Final fit runs, another thread can take the lock.
+
+    The widget lock is re-entrant, so a probe from the job's own thread would
+    get it even if the job held it; the probe takes it from a thread of its own.
+    """
+    model, supplied = cv_fit
+    widget = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame)).widget()
+    fit = SuperGLM.fit
+    taken = []
+
+    def probed(self, X, y, *args, **kwargs):
+        got = []
+
+        def take():
+            # An unheld lock is taken at once; the timeout only bounds a regression.
+            if widget._lock.acquire(timeout=5):
+                widget._lock.release()
+                got.append(True)
+
+        other = threading.Thread(target=take)
+        other.start()
+        other.join()
+        taken.append(bool(got))
+        return fit(self, X, y, *args, **kwargs)
+
+    monkeypatch.setattr(SuperGLM, "fit", probed)
+    finished = {}
+    try:
+        for kind in ("cv", "final_fit"):
+            started = _post_json(f"{widget.url}/job_start", {"kind": kind})
+            status = widget._job_status(started["job_id"], wait=True)
+            finished[kind] = status["status"]
+    finally:
+        widget.close()
+
+    assert finished == {"cv": "done", "final_fit": "done"}
+    # Three fold fits, then the Final fit.
+    assert taken == [True, True, True, True]
+
+
 def test_run_cv_takes_the_in_force_fit_method_and_the_supplied_scorers(cv_frame, cv_fit):
     from superglm.editor.cv import capture_cv_run
 
