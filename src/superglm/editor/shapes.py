@@ -95,7 +95,7 @@ def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[in
 
 
 def shaped_feature_spec(
-    model, name: str, *, lo, hi, degree: int, join: str = "tangent", X
+    model, name: str, *, lo, hi, degree: int, join: str = "tangent", X, draft_spec=None
 ) -> tuple[Any, dict[str, Any]]:
     """A fresh spec for ``name`` with ``[lo, hi]`` pinned to a ``degree`` polynomial.
 
@@ -106,6 +106,10 @@ def shaped_feature_spec(
     numeric term keeps its fitted base knots and boundary, so the free
     part's knots never move; an ordered term rebuilds from its declaration,
     whose placement is deterministic on the same level axis.
+
+    ``draft_spec`` is the term's spec as waiting changes leave it (None: the
+    fitted spec); a numeric draft is the unfitted spline an earlier waiting
+    shape built, and keeps the fitted knots and boundary it states.
     """
     reason = _unavailable_reason(model, name)
     if reason is not None:
@@ -114,9 +118,9 @@ def shaped_feature_spec(
         raise EditorValueError("Choose a shape: Flat, Line, Quadratic or Cubic.")
     if join not in EDITOR_JOINS:
         raise EditorValueError("Choose a join: Tangent or Corner.")
-    if join == "tangent" and _source_spline(model._specs[name]).degree < 2:
+    spec = model._specs[name] if draft_spec is None else draft_spec
+    if join == "tangent" and _source_spline(spec).degree < 2:
         raise EditorValueError(_LINEAR_TANGENT)
-    spec = model._specs[name]
     ordered = isinstance(spec, OrderedCategorical)
     position = spec._range_edge_value if ordered else float
     lo, hi = _band_edges(spec, name, lo, hi) if ordered else _numeric_edges(spec, lo, hi)
@@ -127,7 +131,8 @@ def shaped_feature_spec(
         knots = source._named_knots or source._explicit_knots
         boundary = source._explicit_boundary
     else:
-        source, knots, boundary = spec, spec.fitted_base_knots, spec.fitted_boundary
+        source = spec
+        knots, boundary = _free_geometry(spec)
     basis = _shaped_spline(source, ranges, knots=knots, boundary=boundary)
     setattr(basis, EDITOR_CHOSEN_SHAPE_ATTRIBUTE, True)
     replacement = _hosted(spec, basis, name, X) if ordered else basis
@@ -207,8 +212,19 @@ def _numeric_edges(spec, lo, hi) -> tuple[float, float]:
         raise EditorValueError("Range edges on a numeric term must be finite numbers.")
     if not lo < hi:
         raise EditorValueError(_TOO_FEW_POINTS)
-    boundary = spec.fitted_boundary
+    boundary = _free_geometry(spec)[1]
     return _snapped_edge(boundary, float(lo), -1), _snapped_edge(boundary, float(hi), 1)
+
+
+def _free_geometry(spec) -> tuple[Any, tuple[float, float]]:
+    """The base knots and boundary a numeric term keeps when it is shaped.
+
+    A fitted spline reports them. A draft, the unfitted spline an earlier
+    waiting shape built (``_shaped_spline``), states the fitted ones it kept.
+    """
+    if spec.fitted_boundary is not None:
+        return spec.fitted_base_knots, spec.fitted_boundary
+    return spec._explicit_knots, spec._explicit_boundary
 
 
 def _snapped_edge(boundary: tuple[float, float], value: float, direction: int) -> float:

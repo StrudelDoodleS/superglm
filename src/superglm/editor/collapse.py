@@ -35,6 +35,7 @@ def collapsed_feature_spec(
     *,
     X,
     group_label: str | None = None,
+    draft_spec=None,
     keep_reference: bool = True,
 ) -> tuple[Any, dict[str, Any]]:
     """Return a replacement feature spec that collapses selected levels.
@@ -43,13 +44,17 @@ def collapsed_feature_spec(
     new group when it takes that level in. ``False`` hands the declared base
     to the refit, where a symbolic policy (``most_exposed``, ``first``)
     resolves again and can move the reference.
+
+    ``draft_spec`` is the term's spec as waiting changes leave it (None: the
+    fitted spec); the collapse is built on it, so changes to one term compose.
     """
     if term.levels is None:
         raise EditorTypeError(f"Term {term.name!r} does not expose categorical levels.")
     if selected_indices.size < 2:
         raise EditorValueError(f"Select at least two levels to collapse term {term.name!r}.")
 
-    spec = model._specs[term.name]
+    fitted = model._specs[term.name]
+    spec = fitted if draft_spec is None else draft_spec
     if not isinstance(spec, Categorical | OrderedCategorical):
         raise EditorTypeError(
             f"Collapse levels is only available for categorical terms, got {term.name!r}."
@@ -103,16 +108,13 @@ def collapsed_feature_spec(
         selected_levels=selected_levels,
         group_label=label,
     )
-    declared = _in_force_reference(spec) if keep_reference else spec.base
+    declared = _reference_to_keep(fitted, spec, term) if keep_reference else spec.base
     base = _collapsed_base(declared, selected_levels, label, existing, grouping)
 
     if isinstance(spec, OrderedCategorical):
         replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=values)
     else:
-        replacement = Categorical(
-            base=base,
-            grouping=grouping,
-        )
+        replacement = _rebuilt_categorical(spec, fitted, base=base, grouping=grouping, data=values)
     if keep_reference:
         setattr(replacement, KEPT_REFERENCE_ATTRIBUTE, True)
 
@@ -133,6 +135,7 @@ def ungrouped_feature_spec(
     selected_indices: np.ndarray,
     *,
     X,
+    draft_spec=None,
     keep_reference: bool = True,
 ) -> tuple[Any, dict[str, Any]]:
     """Return a replacement feature spec that removes selected levels from groups.
@@ -140,11 +143,15 @@ def ungrouped_feature_spec(
     ``keep_reference`` holds the in-force reference: a reference group that
     loses members follows the members that stay. ``False`` hands the declared
     base on, as ``collapsed_feature_spec`` does.
+
+    ``draft_spec`` is the term's spec as waiting changes leave it (None: the
+    fitted spec); the ungroup is built on it, so changes to one term compose.
     """
     if term.levels is None:
         raise EditorTypeError(f"Term {term.name!r} does not expose categorical levels.")
 
-    spec = model._specs[term.name]
+    fitted = model._specs[term.name]
+    spec = fitted if draft_spec is None else draft_spec
     if not isinstance(spec, Categorical | OrderedCategorical):
         raise EditorTypeError(
             f"Ungroup levels is only available for categorical terms, got {term.name!r}."
@@ -173,7 +180,7 @@ def ungrouped_feature_spec(
 
     if keep_reference:
         base = _kept_base_after_ungroup(
-            _in_force_reference(spec), selected_levels, existing, grouping
+            _reference_to_keep(fitted, spec, term), selected_levels, existing, grouping
         )
     else:
         base = _valid_base_after_ungroup(spec.base, selected_levels, grouping)
@@ -183,9 +190,9 @@ def ungrouped_feature_spec(
         )
     else:
         # Without a grouping the fit reads native values (3, not "3").
-        if replacement_grouping is None:
-            base = _native_level(base, values)
-        replacement = Categorical(base=base, grouping=replacement_grouping)
+        replacement = _rebuilt_categorical(
+            spec, fitted, base=base, grouping=replacement_grouping, data=values
+        )
     if keep_reference:
         setattr(replacement, KEPT_REFERENCE_ATTRIBUTE, True)
 
@@ -204,36 +211,37 @@ def ungroup_label(term_name: str, levels: list[str]) -> str:
 
 
 def reference_feature_spec(
-    model, term: EditableTerm, level: str, *, X
+    model, term: EditableTerm, level: str, *, X, draft_spec=None
 ) -> tuple[Any, dict[str, Any]]:
-    """Return a fresh replacement spec whose reference is the displayed ``level``."""
-    spec = model._specs[term.name]
+    """Return a fresh replacement spec whose reference is the displayed ``level``.
+
+    ``draft_spec`` is the term's spec as waiting changes leave it (None: the
+    fitted spec), so a reference can name a group a waiting collapse made.
+    """
+    fitted = model._specs[term.name]
+    spec = fitted if draft_spec is None else draft_spec
     if not isinstance(spec, Categorical | OrderedCategorical):
         raise EditorTypeError(
             f"Set reference is only available for categorical terms, got {term.name!r}."
         )
     _require_not_interaction_parent(model, term.name, operation="set the reference level")
     grouping = getattr(spec, "_grouping", None)
-    fitted = _fitted_level_label(spec, grouping, term, level)
+    label = _fitted_level_label(spec, grouping, term, level)
+    frame = as_eager_frame(X)
+    frame.require_columns((term.name,))
+    values = frame.column_array(term.name)
     if isinstance(spec, OrderedCategorical):
-        frame = as_eager_frame(X)
-        frame.require_columns((term.name,))
-        replacement = rebuilt_ordered_spec(
-            spec, grouping=grouping, base=fitted, data=frame.column_array(term.name)
-        )
+        replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=label, data=values)
     else:
         # Fitted levels keep their native type (an integer level stays 3, not "3").
-        native = {str(value): value for value in spec._levels}[fitted]
-        replacement = Categorical(
-            base=native, grouping=grouping, levels=spec._declared_levels, unseen=spec.unseen
-        )
+        replacement = _rebuilt_categorical(spec, fitted, base=label, grouping=grouping, data=values)
     metadata = {
         "format": "superglm.editor.reference_level.v1",
         "term": term.name,
-        "level": fitted,
-        "label": f"set reference of {term.name} to {fitted}",
+        "level": label,
+        "label": f"set reference of {term.name} to {label}",
         "message": (
-            f"The reference level of {term.name} was set to {fitted} and the full model was refit."
+            f"The reference level of {term.name} was set to {label} and the full model was refit."
         ),
     }
     return replacement, metadata
@@ -254,15 +262,28 @@ def _fitted_level_label(spec, grouping, term: EditableTerm, level: str) -> str:
     return level if grouping is None else str(grouping.original_to_group.get(level, level))
 
 
-def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., lambda2=...):
-    """Clone a model and replace one feature spec before fitting."""
+def clone_with_replaced_features(model, replacements: dict[str, Any], *, lambda1=..., lambda2=...):
+    """Clone a model and replace feature specs before fitting.
+
+    Each replacement is deep-copied in, so fitting the clone never touches the
+    caller's spec: a waiting step's draft stays unfitted, and a refit that is
+    undone and run again fits a fresh copy of the same draft.
+    """
     new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
-    new_model._specs[term] = replacement
+    for term, replacement in replacements.items():
+        new_model._specs[term] = copy.deepcopy(replacement)
     new_model._config = new_model._config.with_value(
         feature_templates=tuple((name, new_model._specs[name]) for name in new_model._feature_order)
     )
     new_model._config_revision += 1
     return new_model
+
+
+def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., lambda2=...):
+    """Clone a model and replace one feature spec before fitting."""
+    return clone_with_replaced_features(
+        model, {term: replacement}, lambda1=lambda1, lambda2=lambda2
+    )
 
 
 def interaction_users(model, term: str) -> list[str]:
@@ -542,16 +563,6 @@ def _in_force_reference(spec) -> Any:
     return spec.base if level == "" else level
 
 
-def _native_level(label: Any, data) -> Any:
-    """``label`` as the column spells it; a symbolic policy passes through."""
-    if label in _SYMBOLIC_BASE_POLICIES:
-        return label
-    native: dict[str, Any] = {}
-    for raw in pd.unique(np.asarray(data).ravel()).tolist():
-        native.setdefault(str(raw), raw)
-    return native.get(str(label), label)
-
-
 def _collapsed_base(
     base: Any,
     selected_levels: list[str],
@@ -627,6 +638,56 @@ def _kept_base_after_ungroup(
     pulled = set(selected_levels)
     counts = {label: mapped.count(label) for label in dict.fromkeys(mapped)}
     return max(counts, key=lambda label: (counts[label], label not in pulled))
+
+
+def _reference_to_keep(fitted, spec, term: EditableTerm):
+    """The reference a keep-reference step keeps, named in ``spec``'s own levels.
+
+    ``spec`` is the term's draft, or ``fitted`` when nothing waits. A draft that
+    already names a level or group (a reference an earlier waiting step kept
+    or set) keeps it. Otherwise the fitted reference is kept while the draft
+    still has that level or group; a draft regrouped by a step staged with
+    keep-reference off keeps its own policy.
+    """
+    if spec is fitted:
+        return _in_force_reference(fitted)
+    if str(spec.base) not in _SYMBOLIC_BASE_POLICIES:
+        return spec.base
+    grouping = getattr(spec, "_grouping", None)
+    names = term.levels if grouping is None else grouping.grouped_levels
+    held = {str(name) for name in names or []}
+    in_force = _in_force_reference(fitted)
+    return in_force if str(in_force) in held else spec.base
+
+
+def _native_levels(spec: Categorical, fitted: Categorical, data) -> dict[str, Any]:
+    """Each level's native value by its text: declared, then fitted, then seen in ``data``.
+
+    A draft has no fitted ``_levels``, so the in-force spec and the column stand
+    in for it. A grouped spec's fitted levels are group labels, not raw ones.
+    """
+    fitted_levels = fitted._levels if getattr(fitted, "_grouping", None) is None else []
+    observed = pd.unique(np.asarray(data).ravel()).tolist()
+    native: dict[str, Any] = {}
+    for level in chain(spec._declared_levels or [], fitted_levels, observed):
+        native.setdefault(str(level), level)
+    return native
+
+
+def _rebuilt_categorical(
+    spec: Categorical, fitted: Categorical, *, base, grouping, data
+) -> Categorical:
+    """A fresh Categorical like ``spec`` with this grouping and base.
+
+    It keeps ``levels=`` and ``unseen=``, which a collapse or ungroup used to
+    drop. Grouped, the design speaks the grouping's text labels; ungrouped,
+    the base goes back to its native value, so an integer level stays 3, not "3".
+    """
+    if grouping is None and str(base) not in _SYMBOLIC_BASE_POLICIES:
+        base = _native_levels(spec, fitted, data).get(str(base), base)
+    return Categorical(
+        base=base, grouping=grouping, levels=spec._declared_levels, unseen=spec.unseen
+    )
 
 
 def _is_identity_grouping(grouping: LevelGrouping) -> bool:
