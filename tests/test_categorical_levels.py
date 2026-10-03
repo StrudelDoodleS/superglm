@@ -333,15 +333,64 @@ class TestGroupedDeclared:
         assert bound._base_level == unbound._base_level
         assert bound._non_base == unbound._non_base
 
-    def test_novel_raw_label_still_errors_under_unseen_base(self):
-        # Documented v1 limitation: unseen='base' routes novel WORKING levels,
-        # but a grouped spec validates raw labels against the grouping domain
-        # first, so a novel RAW label still errors.
+    def test_a_novel_raw_label_takes_the_base_under_unseen_base(self):
+        # A raw label the grouping does not know is unseen too: unseen='base'
+        # rates it at the base level with the one warning, naming the raw label,
+        # as scikit-learn's OneHotEncoder(handle_unknown="ignore") encodes an
+        # unknown category as all zeros whatever its infrequent grouping.
         grouping = collapse_levels(["a", "b", "c"], groups={"grp": ["a", "b"]})
         spec = Categorical(base="first", unseen="base", grouping=grouping)
         _build(spec, ["a", "b", "c"])
-        with pytest.raises(ValueError, match="unseen categorical levels"):
-            spec.score(np.asarray(["ROGUE"], dtype=object), np.array([0.5]))
+        assert spec._levels == ["c", "grp"] and spec._non_base == ["grp"]
+        rows = np.asarray(["ROGUE", "c", "a", "ROGUE"], dtype=object)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            eta = spec.score(rows, np.array([0.5]))
+            design = spec.transform(rows)
+        routed = [str(w.message) for w in caught if "unseen at fit" in str(w.message)]
+        assert routed == 2 * [
+            "Routing rows with categorical levels unseen at fit to the base level "
+            "(unseen='base'): ['ROGUE'] over 2 row(s). They contribute nothing to the "
+            "linear predictor."
+        ]
+        assert eta.tolist() == [0.0, 0.0, 0.5, 0.0]
+        assert design.tolist() == [[0.0], [0.0], [1.0], [0.0]]
+
+    def test_missing_values_still_error_under_a_grouped_unseen_base(self):
+        grouping = collapse_levels(["a", "b", "c"], groups={"grp": ["a", "b"]})
+        spec = Categorical(base="first", unseen="base", grouping=grouping)
+        _build(spec, ["a", "b", "c"])
+        with pytest.raises(ValueError, match="missing values"):
+            spec.score(np.asarray(["a", None], dtype=object), np.array([0.5]))
+
+    def test_a_grouped_unseen_base_routes_a_novel_raw_label_through_its_interaction(self):
+        from superglm import SuperGLM
+        from superglm.features.spline import Spline
+
+        rng = np.random.default_rng(5)
+        n = 300
+        X = pd.DataFrame(
+            {
+                "x": rng.uniform(0.0, 10.0, n),
+                "g": np.asarray(rng.choice(["a", "b", "c"], size=n), dtype=object),
+            }
+        )
+        y = rng.poisson(1.0, size=n).astype(float)
+        grouping = collapse_levels(["a", "b", "c"], groups={"grp": ["b", "c"]})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "x": Spline(n_knots=5),
+                "g": Categorical(base="a", grouping=grouping, unseen="base"),
+            },
+            interactions=[("x", "g")],
+        )
+        model.fit(X, y)
+        rows = pd.DataFrame({"x": [2.5, 2.5], "g": np.asarray(["NEW", "a"], dtype=object)})
+        with pytest.warns(UserWarning, match=r"base level.*'NEW'"):
+            mu = model.predict(rows)
+        assert mu[0] == mu[1]
 
 
 class TestAdoptionHooks:

@@ -197,6 +197,10 @@ def _route_unseen_to_group(x: NDArray, grouping, universe: list, group: Any) -> 
     whose documentation says an unknown category "will map to the infrequent
     category if it exists"; here the user names the group, and the fit has
     checked that it exists.
+
+    ``group=None`` is ``unseen="base"`` under a grouping: the unseen rows keep
+    a label no fitted level matches, so they code as ``-1`` and take the base,
+    as ``handle_unknown="ignore"`` encodes an unknown category as all zeros.
     """
     import pandas as pd
 
@@ -210,7 +214,8 @@ def _route_unseen_to_group(x: NDArray, grouping, universe: list, group: Any) -> 
     codes = _codes_against(resolved, universe)
     if (codes < 0).any():
         _warn_unseen_routed(raw, codes, group=group)
-        resolved[codes < 0] = group
+        if group is not None:
+            resolved[codes < 0] = group
     return resolved
 
 
@@ -238,8 +243,9 @@ class Categorical:
         outside the universe are an error.
     unseen : str
         Predict-time policy for levels outside the universe.  'error' (default)
-        is the historical behavior; 'base' routes those rows to the base level
-        with one warning per call.  Any other value names a group of
+        is the historical behavior; 'base' routes those rows, raw labels a
+        ``grouping`` does not know included, to the base level with one warning
+        per call.  Any other value names a group of
         ``grouping``: levels unseen at fit, including raw labels the grouping
         does not know, then take that group's effect, again with one warning
         per call.  The fit checks that the group exists and has a place in the
@@ -564,6 +570,9 @@ class Categorical:
         """Resolve predict-time labels under the term's unseen policy."""
         if self.unseen not in _UNSEEN_POLICIES:
             return _route_unseen_to_group(x, self._grouping, self._levels, self.unseen)
+        if self.unseen == "base" and self._grouping is not None:
+            # A raw label the grouping does not know is unseen too.
+            return _route_unseen_to_group(x, self._grouping, self._levels, None)
         x = _resolve_categorical_labels(
             x,
             self._grouping,
@@ -578,15 +587,16 @@ class Categorical:
     def _predict_codes(self, x: NDArray) -> NDArray:
         """Codes against the fitted universe; -1 for levels the policy admits."""
         codes = _codes_against(x, self._levels)
-        if self.unseen == "base":
-            # A group policy has already routed and reported its rows.
+        if self.unseen == "base" and self._grouping is None:
+            # A group policy, or base under a grouping, has already routed and
+            # reported its rows by their raw labels.
             _warn_unseen_routed(x, codes)
         return codes
 
     def transform(self, x: NDArray) -> NDArray:
         """One-hot encode using levels learned during build()."""
         x = self._resolve_predict_labels(x)
-        if self.unseen == "base":
+        if self.unseen == "base" and self._grouping is None:
             # Equality masks already give a novel level an all-zero row, which
             # IS base routing; the codes are computed only to report it.
             self._predict_codes(x)

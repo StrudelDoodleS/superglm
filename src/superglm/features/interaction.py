@@ -79,6 +79,8 @@ def _categorical_predict_labels(
     """
     if unseen not in _UNSEEN_POLICIES:
         return _route_unseen_to_group(x, grouping, universe, unseen)
+    if unseen == "base" and grouping is not None:
+        return _route_unseen_to_group(x, grouping, universe, None)
     x = _resolve_categorical_labels(
         x,
         grouping,
