@@ -451,8 +451,14 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
     groups: dict[str, list] = {}
     if grouping is not None:
         if kind == "categorical":
-            # The fitted levels are group labels; the universe is the raw one.
-            universe = [native.get(str(level), level) for level in grouping.all_original_levels]
+            # The fitted levels are group labels; the universe is the raw one,
+            # in model order: each raw level where its group sits in the fit.
+            at = {str(level): i for i, level in enumerate(spec._levels)}
+            to_group = grouping.original_to_group
+            raws = sorted(
+                grouping.all_original_levels, key=lambda raw: at.get(str(to_group[raw]), len(at))
+            )
+            universe = [native.get(str(level), level) for level in raws]
         for label in grouping.grouped_levels:
             members = [str(member) for member in grouping.group_to_originals[label]]
             if members == [str(label)]:
@@ -517,12 +523,10 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
     # A grouped term is declared with the structure's universe, as levels=
     # declares one: a group or reference whose levels have no rows in the
     # next fit is then pinned to the base with the library's warning, not
-    # dropped from the universe. The order puts the fitted levels in the
-    # sorted group order a fit without levels= gives, so the design is the same.
-    universe = None
-    if grouping is not None and declared is None:
-        to_group = grouping.original_to_group
-        universe = sorted(levels, key=lambda level: (to_group[str(level)], str(level)))
+    # dropped from the universe. The file lists the levels in model order, so
+    # the fitted levels, and the design's columns, come out in the order of
+    # the model the structure was exported from.
+    universe = list(levels) if grouping is not None and declared is None else None
     # Grouped, the design speaks the grouping's text; ungrouped, the builder
     # gives the reference its native type from the levels.
     base = entry.reference if grouping is None else str(entry.reference)

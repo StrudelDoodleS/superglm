@@ -1711,7 +1711,8 @@ def test_export_structure_keeps_a_grouped_terms_integer_levels_native():
     session.select_levels("band", ["1", "10"])
     session.replace_with_collapsed_levels("band", method="fit")
     entry = read_structure(json.loads(session.export_structure())).features["band"]
-    assert entry.levels == [1, 2, 10]
+    # In model order: the fitted levels are "1+10" then "2".
+    assert entry.levels == [1, 10, 2]
     assert entry.groups == {"1+10": [1, 10]}
     # The fitted grouping alone knows its levels as text; the refit rows give them their types.
     assert Structure.from_model(session.model).features["band"].groups == {"1+10": ["1", "10"]}

@@ -134,7 +134,8 @@ def test_the_file_holds_every_structural_decision_and_no_coefficients():
         "brand": {
             "groups": {"Other": ["B13", "B14"]},
             "kind": "categorical",
-            "levels": ["B1", "B10", "B11", "B12", "B13", "B14", "B2"],
+            # Model order: each level where its group sits among the fitted levels.
+            "levels": ["B1", "B10", "B11", "B12", "B2", "B13", "B14"],
             "reference": "B2",
             "unseen": "Other",
         },
@@ -435,6 +436,20 @@ def test_round_trip_through_the_editor_rebuilds_the_in_force_model(tmp_path):
     assert gap <= _linear_predictor_bound(X, applied, in_force)
     # Exporting the rebuilt model gives the same file.
     assert Structure.from_model(applied).to_json() == path.read_text(encoding="utf-8")
+
+
+def test_a_categorical_column_round_trips_in_its_fitted_level_order():
+    # A categorical dtype orders a grouped term's levels by its categories, not
+    # by sorted group label, so the file has to carry the model's order.
+    X, y = _frame()
+    X = X.assign(brand=X["brand"].astype("category"))
+    grouping = collapse_levels(X["brand"], groups={"Other": ["B13", "B14"]})
+    model = _plain(brand=Categorical(base="B2", grouping=grouping, unseen="Other")).fit(X, y)
+    assert model._specs["brand"]._levels == ["B1", "B10", "B11", "B12", "Other", "B2"]
+    applied = Structure.from_model(model).apply(_plain()).fit(X, y)
+    assert applied._specs["brand"]._levels == model._specs["brand"]._levels
+    gap = np.max(np.abs(applied.predict(X) - model.predict(X)))
+    assert gap <= _linear_predictor_bound(X, applied, model)
 
 
 def test_next_years_new_level_takes_the_other_group_with_one_warning():
