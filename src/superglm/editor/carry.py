@@ -37,7 +37,7 @@ def carried_curve(edited: EditableTerm, refitted: EditableTerm) -> NDArray | Non
         return None
     if (edited.x is None) != (refitted.x is None):
         return None
-    if edited.x is not None and not np.array_equal(edited.x, refitted.x):
+    if edited.x is not None and refitted.x is not None and not np.array_equal(edited.x, refitted.x):
         return None
     return native_log_effect_values(edited) - _centring_offset(refitted)
 

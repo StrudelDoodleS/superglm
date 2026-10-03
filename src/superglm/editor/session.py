@@ -18,6 +18,7 @@ from superglm.editor._types import (
     PendingStep,
     SessionState,
     StructuralStep,
+    new_step_id,
 )
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
@@ -793,7 +794,10 @@ class EditorSession:
     # Structural changes wait for one Refit (spec D1); the bodies live in
     # ``superglm.editor.staging``.
     def draft_spec(self, term: str):
-        """``term``'s spec as waiting changes leave it (:func:`staging.draft_spec`)."""
+        """``term``'s spec as waiting changes leave it.
+
+        See ``superglm.editor.staging.draft_spec``.
+        """
         return staging.draft_spec(self, term)
 
     def stage_structural(
@@ -805,17 +809,26 @@ class EditorSession:
         keep_reference: bool = True,
         X=None,
     ) -> PendingStep:
-        """Stage one structural change to wait for a Refit (:func:`staging.stage_structural`)."""
+        """Stage one structural change to wait for a Refit.
+
+        See ``superglm.editor.staging.stage_structural``.
+        """
         return staging.stage_structural(
             self, operation, term, params, keep_reference=keep_reference, X=X
         )
 
     def refit_pending(self, *, method: str = "auto", **refit_kwargs: Any) -> StructuralStep:
-        """Apply every waiting change in one fit, as one step (:func:`staging.refit_pending`)."""
+        """Apply every waiting change in one fit, as one step.
+
+        See ``superglm.editor.staging.refit_pending``.
+        """
         return staging.refit_pending(self, method=method, **refit_kwargs)
 
     def timeline_items(self) -> tuple[list[tuple[Any, str]], list[tuple[Any, str]]]:
-        """Every action, split at the current position (:func:`staging.timeline_items`)."""
+        """Every action, split at the current position.
+
+        See ``superglm.editor.staging.timeline_items``.
+        """
         return staging.timeline_items(self)
 
     def set_step_note(self, step_id: str, note: str | None) -> None:
@@ -1373,8 +1386,14 @@ class EditorSession:
         kept = replace(
             self._capture_state() if state is None else state, redo_stack=[], pending_redo=()
         )
-        named = {} if step_id is None else {"step_id": step_id}
-        step = StructuralStep(kept, operation, term, label, changes=tuple(changes), **named)
+        step = StructuralStep(
+            kept,
+            operation,
+            term,
+            label,
+            changes=tuple(changes),
+            step_id=new_step_id() if step_id is None else step_id,
+        )
         self.replace_in_force_model(model, level_orders=level_orders)
         self.structure_history.append(step)
         self.structure_redo.clear()

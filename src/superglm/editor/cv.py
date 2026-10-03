@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -169,12 +169,13 @@ def check_cv_data(
     """
     if cv is None:
         return CVDataCheck(None, NO_CV)
-    if not cv.fold_indices:
+    folds = cv.fold_indices
+    if not folds:
         return CVDataCheck(None, NO_FOLDS)
     rows = fallback if cv_rows is None else cv_rows
     if rows is None:
         return CVDataCheck(None, NO_ROWS)
-    expected = _expected_rows(cv)
+    expected = _expected_rows(cv.n_rows, folds)
     if rows.n_obs != expected:
         sentence = TRAIN_ROWS_MISMATCH if cv_rows is None else ROWS_MISMATCH
         return CVDataCheck(None, sentence.format(rows=rows.n_obs, expected=expected))
@@ -185,11 +186,11 @@ def check_cv_data(
     return CVDataCheck(rows)
 
 
-def _expected_rows(cv: CrossValidationResult) -> int:
+def _expected_rows(n_rows: int | None, folds: Sequence[tuple[NDArray, NDArray]]) -> int:
     """The recorded row count, or one past the largest index an older result holds."""
-    if cv.n_rows is not None:
-        return int(cv.n_rows)
-    return 1 + max(int(np.max(np.concatenate(fold))) for fold in cv.fold_indices)
+    if n_rows is not None:
+        return int(n_rows)
+    return 1 + max(int(np.max(np.concatenate(fold))) for fold in folds)
 
 
 def run_cv_reason(session) -> str | None:
@@ -780,11 +781,13 @@ def _union_rows(datasets: Sequence[EvaluationDataset]):
     if len(frames) == 1:
         X = frames[0].native
     elif backends == {"pandas"}:
-        X = pd.concat([frame.native for frame in frames], ignore_index=True)
+        X = pd.concat([cast(pd.DataFrame, frame.native) for frame in frames], ignore_index=True)
     else:
         import polars as pl
 
-        X = pl.concat([frame.native for frame in frames], how="vertical_relaxed")
+        X = pl.concat(
+            [cast(pl.DataFrame, frame.native) for frame in frames], how="vertical_relaxed"
+        )
     y = np.concatenate([np.asarray(dataset.y, dtype=np.float64) for dataset in datasets])
     return X, y, _stacked(datasets, "sample_weight", 1.0), _stacked(datasets, "offset", 0.0)
 

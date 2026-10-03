@@ -744,7 +744,7 @@ class EditorWidget:
             return None, revision
         from superglm.export.rating_tables import build_rating_table_payload
 
-        options = {} if impact_bins is None else {"impact_bins": impact_bins}
+        options: dict[str, Any] = {} if impact_bins is None else {"impact_bins": impact_bins}
         payload = build_rating_table_payload(
             model,
             dataset.X,

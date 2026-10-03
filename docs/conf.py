@@ -165,8 +165,12 @@ nitpick_ignore_regex = [
     # ``InteractionSpec`` and the ``TermInput`` alias under ``superglm.terms``;
     # the spline base classes and ``StructuralContrastRow`` under
     # ``superglm.features``; ``Flavor`` under ``superglm.penalties.base``; the
-    # profile ``Interval`` record under ``superglm.profiling._scalar``; and
-    # ``EditMaterializationRequest`` under ``superglm.editor``.
+    # profile ``Interval`` record under ``superglm.profiling._scalar``; and the
+    # editor's records under ``superglm.editor``: ``EditMaterializationRequest``
+    # (``evaluation_cache``), ``EvaluationDataset`` (``evaluation``),
+    # ``OrderedSplineGeometry`` (``controls``), and the timeline's
+    # ``PendingStep`` and ``StructuralStep`` (``_types``), which
+    # ``EditorSession``'s signatures name.
     (
         "py:class",
         r"superglm\.(" + "distributional\\.(api\\.SuperLSSTrainingTelemetry|checks\\.(binned\\.BinnedCheck(2D)?|calibration\\.(ActualExpected|CalibrationPayload)|compare\\.Comparison)|families\\._predictors\\.(LocationPredictor|MeanPredictor|ScalePredictor|ShapePredictor|SkewPredictor|ThetaPredictor|TweediePredictors)|family\\.(DistributionalFamily|FamilyLikelihoodPlan)|model\\.DenseDistributionalModel|posterior\\.PosteriorDraws|residuals\\.ResidualSet|results\\.fit\\.DistributionalFitResult|surfaces\\.(DensityFan|Portfolio|RiskCurves|Spread)|terms\\.(ParameterTermEffect|TermTest)|timing\\.FitPhaseRecorder)"
@@ -177,7 +181,9 @@ nitpick_ignore_regex = [
         r"|features\.(piecewise\.StructuralContrastRow|spline\._(B?SplineBase|IntegratedPenaltySpline))"
         r"|penalties\.base\.Flavor"
         r"|profiling\._scalar\.Interval"
-        r"|editor\.evaluation_cache\.EditMaterializationRequest)",
+        r"|editor\.(evaluation_cache\.EditMaterializationRequest"
+        r"|evaluation\.EvaluationDataset|controls\.OrderedSplineGeometry"
+        r"|_types\.(PendingStep|StructuralStep)))",
     ),
     # The ``superglm.families`` module page summarises its factory functions;
     # they are module members rather than exported names, so they get no page.
