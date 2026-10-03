@@ -295,6 +295,9 @@ export function drawChart(term, selection, context) {
       drawPoint(svg, pointLayer, view, x, y, sx, sy, i, true, !basePoints.has(i));
     }
   } else {
+    // An ordered spline keeps its level dots on the curve beside the handles;
+    // they read the drag preview's values, so they move with the curve.
+    if (spline && !buildActive) drawSplineLevelDots(svg, x, y, sx, sy);
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
   // The anchor is marked where points are drawn; a Build animation, which
@@ -537,6 +540,7 @@ function applyPlotClip(svg) {
     ".level-group-marker",
     ".pending-group-ring",
     ".point",
+    ".spline-level-dot",
     ".control-stem",
     ".control-handle"
   ].join(",");
@@ -739,6 +743,20 @@ function paletteColor(palette, count, index, alpha) {
   const slot = Math.abs(Number(index) || 0) % count;
   const percent = Math.max(0, Math.min(1, Number(alpha))) * 100;
   return `color-mix(in srgb, var(--${palette}-${slot}) ${percent}%, transparent)`;
+}
+
+// The dots Select draws, levels on the curve and special levels apart, as
+// marks only: in Handles mode the handles take the pointer.
+function drawSplineLevelDots(svg, x, y, sx, sy) {
+  for (let i = 0; i < y.length; i++) {
+    svg.appendChild(el("circle", {
+      cx: sx(x[i]),
+      cy: sy(y[i]),
+      r: 3.4,
+      class: "spline-level-dot",
+      "data-level-index": i
+    }));
+  }
 }
 
 function drawControlHandles(svg, term, sx, sy, margin, innerH) {

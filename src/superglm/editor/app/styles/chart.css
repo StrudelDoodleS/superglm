@@ -186,3 +186,12 @@
   background: transparent;
   color: var(--text);
 }
+
+/* An ordered spline's level dots in Handles mode: drawn as Select draws its
+   points, but marks only, so a handle under one still takes the pointer. */
+.spline-level-dot {
+  fill: var(--blue);
+  stroke: var(--surface);
+  stroke-width: 1.5;
+  pointer-events: none;
+}

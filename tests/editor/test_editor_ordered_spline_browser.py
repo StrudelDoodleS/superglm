@@ -144,3 +144,52 @@ def test_a_level_edit_the_spline_cannot_follow_joins_the_level_dots(open_editor_
             assert abs(x - cx) <= 0.005 + 1e-9 and abs(y - cy) <= 0.005 + 1e-9
         # The fit it is compared against is still drawn as its spline.
         assert _path_points(page, "#chart path.original") == grid_points
+
+
+# Each level dot and the spline's vertex at that level: the path writes its
+# vertices to two decimals, and level k sits at grid index k * steps.
+_DOTS_ON_CURVE = """steps => {
+    const vertices = [...document.querySelector('#chart path.edited').getAttribute('d')
+        .matchAll(/[ML] (-?[\\d.]+) (-?[\\d.]+)/g)]
+        .map(match => [Number(match[1]), Number(match[2])]);
+    return [...document.querySelectorAll('#chart .spline-level-dot')].map((dot, k) => [
+        Number(dot.getAttribute('cx')), Number(dot.getAttribute('cy')), ...vertices[k * steps],
+    ]);
+}"""
+
+
+def test_handles_draw_the_level_dots_on_the_spline_and_carry_them_through_a_drag(
+    open_editor_page,
+):
+    # Mutation check: drawing no level dots in Handles mode fails the count;
+    # drawing them at the fitted values rather than the drag preview's leaves
+    # them 17 px off the dragged curve.
+    with open_editor_page(selected_term="age_band") as (page, _session):
+        _handles_tool(page).click()
+        handles = page.locator("#chart .control-handle")
+        handles.first.wait_for()
+
+        def dots_on_curve():
+            dots = page.evaluate(_DOTS_ON_CURVE, ORDERED_SPLINE_GRID_STEPS)
+            assert len(dots) == AGE_BANDS
+            for cx, cy, vx, vy in dots:
+                assert abs(cx - vx) <= 0.005 + 1e-6 and abs(cy - vy) <= 0.005 + 1e-6
+            return [cy for _cx, cy, _vx, _vy in dots]
+
+        resting = dots_on_curve()
+        box = handles.nth(1).bounding_box()
+        assert box is not None
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2 - 40, steps=4)
+        # Mid-drag the preview carries the dots with the curve.
+        dragged = dots_on_curve()
+        assert max(abs(a - b) for a, b in zip(resting, dragged, strict=True)) > 1.0
+        with page.expect_response(_posted("/control")) as response_info:
+            page.mouse.up()
+        assert response_info.value.status == 200
+        page.wait_for_function(
+            "n => document.querySelectorAll('#chart .spline-level-dot').length === n",
+            arg=AGE_BANDS,
+        )
+        dots_on_curve()
