@@ -34,7 +34,11 @@ import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from superglm.features.categorical import _grouping_labels, _validate_categorical_levels
+from superglm.features.categorical import (
+    _grouping_labels,
+    _validate_categorical_levels,
+    _validate_missing_only,
+)
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.types import GroupInfo, LinearConstraintSet
@@ -1302,12 +1306,42 @@ class OrderedCategorical:
 
         if self._grouping is not None:
             x = _grouping_labels(x)
-            _validate_categorical_levels(x, self._known_levels)
+            self._refuse_unknown_training_levels(x)
             x = pd.Series(x).map(self._grouping.original_to_group).values
         else:
-            _validate_categorical_levels(x, self._known_levels)
+            self._refuse_unknown_training_levels(x)
 
         return self._build_spline(x, reporting_weight, geometry_weight)
+
+    def _refuse_unknown_training_levels(self, x: NDArray) -> None:
+        """Refuse, as a fit, training levels outside the declaration or its grouping.
+
+        A level the fit does not admit is either not declared at all, or
+        declared but missing from a grouping built from other data; the
+        sentence says which. Predict-time levels keep their own sentence.
+        """
+        _validate_missing_only(x)
+        unknown = set(pd.unique(np.asarray(x).ravel()).tolist()) - self._known_levels
+        if not unknown:
+            return
+        declared = [*self._declared_smooth_levels, *self._special_display]
+        texts = {str(level) for level in declared}
+        undeclared = [
+            level for level in unknown if self._grouping is None or str(level) not in texts
+        ]
+        if undeclared:
+            raise ValueError(
+                f"Training data contains levels this OrderedCategorical does not declare: "
+                f"{sorted(undeclared, key=str)}. Declared: {declared}. Add them to order= or "
+                f"values=, or to specials= for a level off the ordered axis, or leave those "
+                f"rows out."
+            )
+        raise ValueError(
+            f"Training data contains levels the grouping does not cover: "
+            f"{sorted(unknown, key=str)}. Covered: "
+            f"{sorted(self._grouping.all_original_levels, key=str)}. Build the grouping from "
+            f"the full column, or leave those rows out."
+        )
 
     def _build_inner_info(
         self,
