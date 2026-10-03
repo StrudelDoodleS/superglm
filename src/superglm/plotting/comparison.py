@@ -159,6 +159,27 @@ def _native_level_values(X: EagerFrame, term: str, labels: list[str]) -> NDArray
     return np.asarray([native.get(label, label) for label in labels], dtype=object)
 
 
+def _score_levels(spec, levels: NDArray, beta: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Score a level term on ``levels``, NaN at a level the model refuses.
+
+    A fold model that never saw a level the comparison frame holds refuses
+    it as unseen. It has no value there, so that level is a gap in its
+    curve rather than a failure of the whole comparison. The levels are
+    scored one by one only when the model refuses the whole vector.
+    """
+    try:
+        return np.asarray(spec.score(levels, beta), dtype=np.float64)
+    except ValueError:
+        pass
+    values = np.full(len(levels), np.nan, dtype=np.float64)
+    for index in range(len(levels)):
+        try:
+            values[index] = spec.score(levels[index : index + 1], beta)[0]
+        except ValueError:
+            continue
+    return values
+
+
 def _support_payload(
     family: str,
     X: EagerFrame,
@@ -235,10 +256,7 @@ def _build_term_comparison_data(
             levels = _native_level_values(frame, term, domain["levels"])
             series = {
                 label: {
-                    "link": np.asarray(
-                        model._specs[term].score(levels, _feature_beta(model, term)),
-                        dtype=np.float64,
-                    ),
+                    "link": _score_levels(model._specs[term], levels, _feature_beta(model, term)),
                 }
                 for label, model in normalized_models.items()
             }

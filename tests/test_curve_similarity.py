@@ -8,6 +8,8 @@ import polars as pl
 
 from superglm import Categorical, Spline, SuperGLM
 
+_U = np.finfo(np.float64).eps / 2
+
 
 def test_pairwise_similarity_matrices_have_expected_diagonals():
     from superglm.plotting.curve_similarity import _pairwise_curve_similarity
@@ -154,3 +156,85 @@ def test_build_cv_curve_similarity_scores_integer_coded_levels_in_model_order():
         np.testing.assert_array_equal(
             similarity["code"]["curves"]["link"][label], inference.log_relativity
         )
+
+
+def test_a_fold_that_never_saw_a_level_has_a_gap_there_not_a_crash(monkeypatch):
+    """A level only one fold's test rows hold is unknown to that fold's model.
+
+    That model has no value at the level: its curve has a gap there, the
+    similarity summary reads it on the levels it has, and nothing raises.
+    """
+    from superglm.model_selection import CrossValidationResult
+    from superglm.plotting import comparison_plotly
+    from superglm.plotting.comparison import _build_term_comparison_data, _feature_beta
+    from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+    rng = np.random.default_rng(11)
+    n = 300
+    band = rng.choice(["A", "B", "C"], n)
+    band[[7, 19, 42]] = "D"  # only in the first fold's test rows, 0-99
+    x = rng.uniform(0, 10, n)
+    w = rng.uniform(0.5, 1.2, n)
+    y = rng.poisson(np.exp(-1.0 + 0.1 * np.sin(x) + 0.2 * (band == "C")) * w).astype(float)
+    X = pd.DataFrame({"x": x, "band": band})
+    folds = [(np.setdiff1d(np.arange(n), test), test) for test in np.array_split(np.arange(n), 3)]
+    models = [
+        SuperGLM(
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=5), "band": Categorical(base="first")},
+        ).fit(X.iloc[train], y[train], sample_weight=w[train])
+        for train, _test in folds
+    ]
+    assert [list(model._specs["band"]._levels) for model in models] == [
+        ["A", "B", "C"],
+        ["A", "B", "C", "D"],
+        ["A", "B", "C", "D"],
+    ]
+    labeled = {f"fold_{i}": model for i, model in enumerate(models)}
+
+    payload = _build_term_comparison_data(models=labeled, terms=["band"], X=X, sample_weight=w)
+
+    [term] = payload["terms"]
+    assert term["domain"]["levels"] == ["A", "B", "C", "D"]
+    levels = np.asarray(["A", "B", "C", "D"], dtype=object)
+    gap = np.array([False, False, False, True])
+    for label, model in labeled.items():
+        link = term["series"][label]["link"]
+        known = ~gap if label == "fold_0" else np.ones(4, dtype=bool)
+        expected = model._specs["band"].score(levels[known], _feature_beta(model, "band"))
+        np.testing.assert_array_equal(link[known], expected)
+        assert np.isnan(link[~known]).all()
+        assert np.isnan(term["series"][label]["response"][~known]).all()
+
+    similarity = build_cv_curve_similarity(models=models, X=X, sample_weight=w)
+
+    link = similarity["band"]["curves"]["link"]
+    weights = np.asarray(similarity["band"]["support"]["density"])
+    stacked = np.vstack(list(link.values()))
+    mean_curve = np.array(
+        [np.mean(stacked[~np.isnan(stacked[:, j]), j]) for j in range(stacked.shape[1])]
+    )
+    vs_mean = similarity["band"]["vs_mean"]["link"]
+    assert np.isfinite(vs_mean.to_numpy()).all()
+    # The first fold is read against the fold mean on the three levels it has;
+    # the others on all four. Each is one weighted mean of at most four
+    # squares, accurate to a few units of rounding (Higham, sec. 3.1).
+    for label, curve in link.items():
+        has = ~np.isnan(curve)
+        expected = np.sqrt(np.average((curve[has] - mean_curve[has]) ** 2, weights=weights[has]))
+        assert abs(vs_mean.loc[label, "rmse_to_mean"] - expected) <= 16 * _U * expected
+    assert np.isfinite(similarity["band"]["pairwise"]["link"]["rmse"].to_numpy()).all()
+
+    # plot_terms_by_fold reads the same payload; the renderer is stubbed so
+    # the check runs without plotly installed.
+    monkeypatch.setattr(comparison_plotly, "plot_term_comparison_plotly", lambda data, **_: data)
+    result = CrossValidationResult(
+        fold_scores=pd.DataFrame(),
+        mean_scores={},
+        pooled_scores={},
+        std_scores={},
+        fold_indices=folds,
+        estimators=models,
+    )
+    plotted = result.plot_terms_by_fold(X, sample_weight=w, terms="band")
+    assert np.isnan(plotted["terms"][0]["series"]["fold_0"]["link"][3])

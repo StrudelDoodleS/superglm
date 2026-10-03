@@ -13,9 +13,27 @@ from superglm._frame import FrameLike
 from superglm.plotting.comparison import _build_term_comparison_data
 
 
+def _both_valued(
+    left: NDArray[np.float64], right: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]]:
+    """The points where both curves have a value.
+
+    A fold model that never saw a level has NaN there (a gap), so two curves
+    are compared on the points they share.
+    """
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    shared = ~(np.isnan(left) | np.isnan(right))
+    return left[shared], right[shared], shared
+
+
 def _weighted_rmse(
     left: NDArray[np.float64], right: NDArray[np.float64], weights: NDArray[np.float64]
 ) -> float:
+    left, right, shared = _both_valued(left, right)
+    weights = np.asarray(weights, dtype=np.float64)[shared]
+    if not float(np.sum(weights)) > 0.0:
+        return float("nan")
     diff2 = (left - right) ** 2
     return float(np.sqrt(np.average(diff2, weights=weights)))
 
@@ -26,10 +44,16 @@ def _weighted_max_abs_diff(
     weights: NDArray[np.float64],
 ) -> float:
     del weights
+    left, right, _shared = _both_valued(left, right)
+    if left.size == 0:
+        return float("nan")
     return float(np.max(np.abs(left - right)))
 
 
 def _curve_correlation(left: NDArray[np.float64], right: NDArray[np.float64]) -> float:
+    left, right, _shared = _both_valued(left, right)
+    if left.size == 0:
+        return float("nan")
     if np.allclose(left, left[0]) and np.allclose(right, right[0]):
         return 1.0
     if np.std(left) < 1e-12 or np.std(right) < 1e-12:
@@ -68,10 +92,22 @@ def _summarize_against_fold_mean(
     curves: Mapping[str, NDArray[np.float64]],
     weights: NDArray[np.float64],
 ) -> pd.DataFrame:
-    """Summarize each fold curve against the fold-mean curve."""
+    """Summarize each fold curve against the fold-mean curve.
+
+    The mean at each point is over the folds that have a value there, and
+    each fold is read on its own points: a fold that never saw a level
+    leaves that level out of its distance rather than making it NaN.
+    """
     labels = list(curves)
     stacked = np.vstack([np.asarray(curves[label], dtype=np.float64) for label in labels])
-    mean_curve = np.mean(stacked, axis=0)
+    valued = ~np.isnan(stacked)
+    counts = valued.sum(axis=0)
+    mean_curve = np.divide(
+        np.where(valued, stacked, 0.0).sum(axis=0),
+        counts,
+        out=np.full(stacked.shape[1], np.nan),
+        where=counts > 0,
+    )
     rows = []
     for label in labels:
         curve = np.asarray(curves[label], dtype=np.float64)
