@@ -56,3 +56,49 @@ def test_table_shows_the_terms_rating_table_block_in_place_of_the_chart(
         page.locator("#chart path.edited").first.wait_for()
         assert frame.is_hidden()
         assert page.locator("#chart").is_visible()
+
+
+def test_table_is_rebuilt_for_each_model_revision_while_it_is_shown(open_editor_page):
+    # Mutation check: keying the table's request on the view and the term
+    # alone sends no request after an edit, an Undo or a Redo, and the table
+    # keeps showing the block of a model that is no longer in force.
+    with open_editor_page(selected_term="territory") as (page, session):
+        frame = page.locator("#ratingTableFrame")
+
+        def shown_relativity(block, level: str) -> str:
+            # The cell the table shows for `level`, once it shows the reply's.
+            row = [str(cells[0]) for cells in block["rows"]].index(level)
+            relativity = block["columns"].index("Relativity")
+            expected = f"{block['rows'][row][relativity]:.6f}"
+            page.wait_for_function(
+                "([row, column, text]) => document.querySelector("
+                "`#ratingTableFrame tbody tr:nth-child(${row}) td:nth-child(${column})`"
+                ")?.textContent === text",
+                arg=[row + 1, relativity + 1, expected],
+            )
+            return expected
+
+        with page.expect_response(_rating_table_for("territory")) as response_info:
+            _term_view(page, "Table").click()
+        frame.locator("table.rating-table").wait_for()
+        fitted = shown_relativity(response_info.value.json(), "T03")
+
+        # An edit made in the notebook, pulled in with Refresh.
+        session.select_levels("territory", ["T03"])
+        session.shift("territory", 0.2)
+        page.wait_for_function("() => !document.querySelector('#refreshAction').disabled")
+        with page.expect_response(_rating_table_for("territory")) as response_info:
+            page.locator("#refreshAction").click()
+        edited = shown_relativity(response_info.value.json(), "T03")
+        assert edited != fitted
+
+        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
+        with page.expect_response(_rating_table_for("territory")) as response_info:
+            page.locator("#undoAction").click()
+        assert shown_relativity(response_info.value.json(), "T03") == fitted
+
+        page.wait_for_function("() => !document.querySelector('#redoAction').disabled")
+        with page.expect_response(_rating_table_for("territory")) as response_info:
+            page.locator("#redoAction").click()
+        assert shown_relativity(response_info.value.json(), "T03") == edited
+        assert page.locator("#chart").is_hidden()
