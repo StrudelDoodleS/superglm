@@ -105,18 +105,33 @@ def _shared_continuous_domain(
     return {"x": np.linspace(float(values.min()), float(values.max()), n_points)}
 
 
+def _model_level_order(spec) -> list[str]:
+    """The level order a fitted level term reports in, as text.
+
+    An ordered term's declared order; a grouped categorical's original levels,
+    which is how its term inference expands the groups; otherwise the fitted
+    universe, which keeps native order (1, 2, 10, not "1", "10", "2").
+    """
+    if isinstance(spec, OrderedCategorical):
+        return [str(level) for level in spec._ordered_levels]
+    grouping = getattr(spec, "_grouping", None)
+    if grouping is not None:
+        return [str(level) for level in grouping.all_original_levels]
+    return [str(level) for level in spec._levels]
+
+
 def _shared_level_domain(
     models: Mapping[str, Any],
     X: EagerFrame,
     term: str,
 ) -> dict[str, list[str]]:
-    """Build a shared categorical/ordered level domain."""
-    ordered_levels: list[str] | None = None
-    for model in models.values():
-        spec = model._specs[term]
-        if isinstance(spec, OrderedCategorical):
-            ordered_levels = [str(level) for level in spec._ordered_levels]
-            break
+    """Build a shared categorical/ordered level domain in model order.
+
+    An ordered term's order wins; otherwise the first model's fitted order.
+    Observed labels the model order lacks follow in row order.
+    """
+    specs = [model._specs[term] for model in models.values()]
+    spec = next((s for s in specs if isinstance(s, OrderedCategorical)), specs[0])
 
     observed_levels = [
         str(level)
@@ -125,14 +140,23 @@ def _shared_level_domain(
         .drop_duplicates()
         .tolist()
     ]
-    if ordered_levels is None:
-        return {"levels": observed_levels}
-
-    merged = [level for level in ordered_levels if level in observed_levels]
-    for level in observed_levels:
-        if level not in merged:
-            merged.append(level)
+    observed = set(observed_levels)
+    merged = [level for level in _model_level_order(spec) if level in observed]
+    placed = set(merged)
+    merged.extend(level for level in observed_levels if level not in placed)
     return {"levels": merged}
+
+
+def _native_level_values(X: EagerFrame, term: str, labels: list[str]) -> NDArray:
+    """The column's own values for the domain's text labels, as predict receives them.
+
+    A fitted universe keeps native types, so an integer-coded categorical
+    refuses the text "1" as an unseen level.
+    """
+    native: dict[str, Any] = {}
+    for value in pd.Series(X.column_array(term), name=term).drop_duplicates().tolist():
+        native.setdefault(str(value), value)
+    return np.asarray([native.get(label, label) for label in labels], dtype=object)
 
 
 def _support_payload(
@@ -208,7 +232,7 @@ def _build_term_comparison_data(
             }
         else:
             domain = _shared_level_domain(normalized_models, frame, term)
-            levels = np.asarray(domain["levels"], dtype=object)
+            levels = _native_level_values(frame, term, domain["levels"])
             series = {
                 label: {
                     "link": np.asarray(

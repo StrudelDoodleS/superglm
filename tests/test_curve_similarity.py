@@ -124,5 +124,33 @@ def test_build_cv_curve_similarity_accepts_polars_without_converting_fold_models
 
     assert set(similarity) == {"x", "band"}
     assert len(similarity["x"]["domain"]["x"]) == 41
-    assert similarity["band"]["domain"]["levels"] == list(dict.fromkeys(band))
+    # Model order, not the order the rows first show each level.
+    assert similarity["band"]["domain"]["levels"] == ["A", "B", "C"]
     assert all(isinstance(model._fit_X_ref, pl.DataFrame) for model in models)
+
+
+def test_build_cv_curve_similarity_scores_integer_coded_levels_in_model_order():
+    from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+    rng = np.random.default_rng(9)
+    n = 150
+    code = np.tile([10, 1, 2], n // 3)
+    w = rng.uniform(0.5, 1.2, n)
+    y = rng.poisson(np.exp(-1.0 + 0.2 * (code == 2)) * w).astype(float)
+    X = pd.DataFrame({"code": code})
+
+    models = []
+    for seed in [1, 2, 3]:
+        idx = np.random.default_rng(seed).choice(n, size=int(0.8 * n), replace=False)
+        model = SuperGLM(features={"code": Categorical(base="first")})
+        model.fit(X.iloc[idx], y[idx], sample_weight=w[idx])
+        models.append(model)
+
+    similarity = build_cv_curve_similarity(models=models, X=X, sample_weight=w, n_points=41)
+
+    assert similarity["code"]["domain"]["levels"] == ["1", "2", "10"]
+    for label, model in zip(["fold_0", "fold_1", "fold_2"], models, strict=True):
+        inference = model.term_inference("code", with_se=False)
+        np.testing.assert_array_equal(
+            similarity["code"]["curves"]["link"][label], inference.log_relativity
+        )
