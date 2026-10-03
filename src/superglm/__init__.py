@@ -153,6 +153,7 @@ from superglm.stats.model_tests import (
     zero_inflation_index,
 )
 from superglm.stats.wood_pvalue import wood_test_smooth
+from superglm.structure import Structure, read_structure
 from superglm.terms import (
     BoundInteraction,
     BoundTerm,
@@ -238,6 +239,8 @@ __all__ = [
     "FitDiagnosticReport",
     "export_rating_tables",
     "RatingTableBaseNotRepresentableError",
+    "Structure",
+    "read_structure",
     "ModelMetrics",
     "ModelSummary",
     "RandomEffectResult",
