@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -54,6 +55,20 @@ class CrossValidationResult:
         ``None`` unless ``return_oof=True``.
     estimators : list or None
         Fitted model per fold. ``None`` unless ``return_estimators=True``.
+    n_rows : int or None
+        Number of rows the folds index: the length of ``y``.
+    data_fingerprint : str or None
+        SHA-256 of the response and sample weights the folds were scored on,
+        as little-endian float64 bytes after the row count, with unit weights
+        standing in for ``sample_weight=None``. Equal fingerprints mean the
+        same response and weights in the same row order, which is what lets
+        a later consumer, such as the editor's Run CV, replay
+        ``fold_indices`` on data it holds.
+    splitter : str or None
+        Class name of the splitter that drew the folds.
+
+    ``n_rows``, ``data_fingerprint`` and ``splitter`` are ``None`` on a
+    result made before they were recorded.
     """
 
     fold_scores: pd.DataFrame
@@ -64,6 +79,9 @@ class CrossValidationResult:
     curve_similarity: dict[str, Any] | None = None
     oof_predictions: NDArray | None = None
     estimators: list | None = None
+    n_rows: int | None = None
+    data_fingerprint: str | None = None
+    splitter: str | None = None
 
     def plot_terms_by_fold(
         self,
@@ -107,6 +125,27 @@ class CrossValidationResult:
             engine=engine,
             **kwargs,
         )
+
+
+def _data_fingerprint(y, sample_weight=None) -> str:
+    """SHA-256 of the row count, then the response and weights as little-endian float64.
+
+    Unit weights stand in for ``sample_weight=None``, which is how every
+    scorer reads it, so an unweighted result matches the same rows supplied
+    with explicit ones. The row count goes first so the boundary between the
+    two arrays is fixed. Feature columns are not hashed: the response and
+    weights identify the rows and their order in one pass over two vectors.
+    """
+    response = np.asarray(y, dtype=np.float64).ravel()
+    weights = (
+        np.ones(response.size, dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64).ravel()
+    )
+    digest = hashlib.sha256(response.size.to_bytes(8, "little"))
+    digest.update(np.ascontiguousarray(response, dtype="<f8").tobytes())
+    digest.update(np.ascontiguousarray(weights, dtype="<f8").tobytes())
+    return digest.hexdigest()
 
 
 # ── Model cloning ────────────────────────────────────────────────
@@ -557,4 +596,7 @@ def cross_validate(
         curve_similarity=curve_similarity,
         oof_predictions=oof,
         estimators=estimators_list,
+        n_rows=n,
+        data_fingerprint=_data_fingerprint(y, sample_weight),
+        splitter=type(cv).__name__,
     )

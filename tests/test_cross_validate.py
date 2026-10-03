@@ -1964,3 +1964,53 @@ class TestFullFrameLevelBinding:
         bindings = _resolve_level_bindings(model, as_eager_frame(X), None)
 
         assert set(bindings) == {"g"}
+
+
+# ── Data fingerprint (the editor's Run CV) ───────────────────────
+
+
+class TestDataFingerprint:
+    """A result records the rows its folds index, so a consumer can replay them."""
+
+    def test_result_records_row_count_fingerprint_and_splitter(self, poisson_data, base_model):
+        import hashlib
+
+        df, y, sw = poisson_data
+        result = cross_validate(base_model, df, y, cv=SimpleKFold(3), sample_weight=sw)
+
+        expected = hashlib.sha256(len(y).to_bytes(8, "little"))
+        expected.update(np.asarray(y, dtype="<f8").tobytes())
+        expected.update(np.asarray(sw, dtype="<f8").tobytes())
+        assert result.n_rows == len(y)
+        assert result.splitter == "SimpleKFold"
+        assert result.data_fingerprint == expected.hexdigest()
+
+    def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
+        self, poisson_data, base_model
+    ):
+        from superglm.model_selection import _data_fingerprint
+
+        df, y, sw = poisson_data
+        unweighted = cross_validate(base_model, df, y, cv=SimpleKFold(2))
+
+        assert unweighted.data_fingerprint == _data_fingerprint(y, np.ones(len(y)))
+        assert _data_fingerprint(y, sw) != _data_fingerprint(y[::-1], sw[::-1])
+        assert _data_fingerprint(y, sw) != _data_fingerprint(y, 2.0 * sw)
+
+    def test_result_pickled_before_the_fields_existed_reads_none(self):
+        # Such a pickle restores without the attributes; the dataclass
+        # defaults are class attributes, so the fields read as None.
+        old = CrossValidationResult.__new__(CrossValidationResult)
+        old.__dict__.update(
+            fold_scores=pd.DataFrame(),
+            mean_scores={},
+            pooled_scores={},
+            std_scores={},
+            fold_indices=None,
+            curve_similarity=None,
+            oof_predictions=None,
+            estimators=None,
+        )
+        restored = pickle.loads(pickle.dumps(old))
+
+        assert (restored.n_rows, restored.data_fingerprint, restored.splitter) == (None, None, None)
