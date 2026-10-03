@@ -170,6 +170,122 @@ body {
   opacity: 1;
 }
 
+/* The flip, on a click only: theme.js adds .is-flipping. The knob squashes,
+   overshoots and settles, the outgoing icon spins out and the incoming one
+   in, the label pops, and the halftone drifts four dots, a whole number of
+   its period. Each keyframe is named for the theme it reaches, so the next
+   click changes the name and the browser restarts it. */
+#themeSwitch.is-flipping {
+  animation: theme-track-to-day 560ms ease backwards;
+}
+
+#themeSwitch.is-flipping .theme-switch-knob {
+  animation: theme-knob-to-day 680ms cubic-bezier(0.3, 0.7, 0.2, 1) backwards;
+}
+
+:root[data-theme="dark"] #themeSwitch.is-flipping {
+  animation-name: theme-track-to-night;
+}
+
+:root[data-theme="dark"] #themeSwitch.is-flipping .theme-switch-knob {
+  animation-name: theme-knob-to-night;
+}
+
+#themeSwitch.is-flipping [data-icon="sun"],
+:root[data-theme="dark"] #themeSwitch.is-flipping [data-icon="moon"] {
+  animation: theme-icon-in 620ms cubic-bezier(0.3, 0.7, 0.2, 1) 160ms backwards;
+}
+
+#themeSwitch.is-flipping [data-icon="moon"],
+:root[data-theme="dark"] #themeSwitch.is-flipping [data-icon="sun"] {
+  animation: theme-icon-out 420ms cubic-bezier(0.3, 0.7, 0.2, 1) backwards;
+}
+
+#themeSwitch.is-flipping [data-label="day"],
+:root[data-theme="dark"] #themeSwitch.is-flipping [data-label="night"] {
+  animation: theme-label-in 560ms cubic-bezier(0.3, 0.7, 0.2, 1) 260ms backwards;
+}
+
+#themeSwitch.is-flipping [data-label="night"],
+:root[data-theme="dark"] #themeSwitch.is-flipping [data-label="day"] {
+  animation: theme-label-out 240ms cubic-bezier(0.3, 0.7, 0.2, 1) backwards;
+}
+
+@keyframes theme-knob-to-night {
+  0% { translate: 0 0; scale: 1 1; }
+  30% { scale: 1.32 0.78; }
+  68% { translate: 51px 0; scale: 0.88 1.12; }
+  84% { translate: 41.55px 0; scale: 1.05 0.96; }
+  100% { translate: 44px 0; scale: 1 1; }
+}
+
+@keyframes theme-knob-to-day {
+  0% { translate: 44px 0; scale: 1 1; }
+  30% { scale: 1.32 0.78; }
+  68% { translate: -7px 0; scale: 0.88 1.12; }
+  84% { translate: 2.45px 0; scale: 1.05 0.96; }
+  100% { translate: 0 0; scale: 1 1; }
+}
+
+@keyframes theme-track-to-night {
+  from { background-position: 0 0; }
+  to { background-position: 20px 0; }
+}
+
+@keyframes theme-track-to-day {
+  from { background-position: 0 0; }
+  to { background-position: -20px 0; }
+}
+
+@keyframes theme-icon-in {
+  0% { opacity: 0; transform: rotate(-220deg) scale(0.2); }
+  60% { opacity: 1; transform: rotate(18deg) scale(1.15); }
+  100% { opacity: 1; transform: rotate(0deg) scale(1); }
+}
+
+@keyframes theme-icon-out {
+  0% { opacity: 1; transform: rotate(0deg) scale(1); }
+  100% { opacity: 0; transform: rotate(220deg) scale(0.2); }
+}
+
+@keyframes theme-label-in {
+  0% { opacity: 0; transform: scale(0.2) rotate(-14deg); }
+  55% { opacity: 1; transform: scale(1.35) rotate(5deg); }
+  78% { transform: scale(0.92) rotate(-2deg); }
+  100% { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+
+@keyframes theme-label-out {
+  0% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.3) translateY(20%); }
+}
+
+/* tokens.css zeroes every duration under reduced motion; the delays go too,
+   so a flip lands at once. */
+@media (prefers-reduced-motion: reduce) {
+  #themeSwitch,
+  #themeSwitch * {
+    animation-delay: 0s !important;
+  }
+}
+
+/* The grounds, the app bar and the switch cross-fade with a flip, and only
+   then: theme.js puts .theme-fading on <html> for the flip and takes it off
+   when the knob lands. The rest changes at once, because a transition on
+   every element halves the frame rate while it runs. Reduced motion zeroes
+   the fade through tokens.css. */
+:root.theme-fading,
+:root.theme-fading body,
+:root.theme-fading .app-bar,
+:root.theme-fading .app-bar *,
+:root.theme-fading .feature-list,
+:root.theme-fading .editor-workspace,
+:root.theme-fading #chart,
+:root.theme-fading .inspector {
+  transition: background-color 600ms ease, border-color 600ms ease, color 600ms ease,
+    box-shadow 600ms ease;
+}
+
 /* Refit: quiet while nothing waits, the one filled action while changes do. */
 .app-actions .refit-action {
   display: inline-flex;

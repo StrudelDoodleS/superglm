@@ -14,6 +14,10 @@
 // mirrors it, and this module keeps the two equal: it reconciles them on
 // mount, a flip clears the setting, and turning the setting on or off in
 // Settings removes the key or stores the theme on screen.
+//
+// A flip plays the switch's keyframes and cross-fades the page's grounds
+// (styles/shell.css). A change from the browser or from Settings lands
+// without motion.
 
 /** @typedef {"auto"|"light"|"dark"} ThemeChoice */
 /** @typedef {"light"|"dark"} Theme */
@@ -30,6 +34,10 @@
  */
 
 export const THEME_STORAGE_KEY = "superglm.editor.theme";
+/** On the switch while a flip's keyframes may play. */
+export const FLIP_CLASS = "is-flipping";
+/** On <html> while the page's grounds cross-fade after a flip. */
+export const FADE_CLASS = "theme-fading";
 
 /** @param {unknown} value @returns {value is ThemeChoice} */
 export function isThemeChoice(value) {
@@ -131,9 +139,13 @@ export function mountThemeSwitch({ button, root, media, settings, storage }) {
     choice = resolveTheme(choice, media.matches) === "dark" ? "light" : "dark";
     storeThemeChoice(choice, storage);
     mirror();
+    button.classList.add(FLIP_CLASS);
+    root.classList.add(FADE_CLASS);
     render();
   }
 
+  // While the browser leads the switch carries no flip: a flip ends the
+  // following, and Settings clears the flip when it hands the theme back.
   function onBrowserChange() {
     if (choice === "auto") render();
   }
@@ -143,17 +155,29 @@ export function mountThemeSwitch({ button, root, media, settings, storage }) {
     if (saving || next.followBrowserTheme === (choice === "auto")) return;
     choice = next.followBrowserTheme ? "auto" : resolveTheme(choice, media.matches);
     storeThemeChoice(choice, storage);
+    // Kept, the last flip's keyframes would replay under the new theme's names.
+    button.classList.remove(FLIP_CLASS);
+    root.classList.remove(FADE_CLASS);
     render();
+  }
+
+  /** The knob has landed, and the fade with it. @param {Event} event */
+  function onAnimationEnd(event) {
+    if (/** @type {AnimationEvent} */ (event).animationName.startsWith("theme-knob-")) {
+      root.classList.remove(FADE_CLASS);
+    }
   }
 
   if (settings.load().followBrowserTheme !== (choice === "auto")) mirror();
   button.addEventListener("click", onClick);
+  button.addEventListener("animationend", onAnimationEnd);
   media.addEventListener("change", onBrowserChange);
   const unsubscribe = settings.subscribe(onSettingsChange);
   render();
   return Object.freeze({
     destroy() {
       button.removeEventListener("click", onClick);
+      button.removeEventListener("animationend", onAnimationEnd);
       media.removeEventListener("change", onBrowserChange);
       unsubscribe();
     },

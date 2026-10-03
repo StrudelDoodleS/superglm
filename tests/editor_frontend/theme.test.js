@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  FADE_CLASS,
+  FLIP_CLASS,
   THEME_STORAGE_KEY,
   describeThemeSwitch,
   mountThemeSwitch,
@@ -13,10 +15,29 @@ import {
   storeThemeChoice,
 } from "../../src/superglm/editor/app/views/theme.js";
 
+class FakeClassList {
+  constructor() {
+    this.names = new Set();
+  }
+
+  add(name) {
+    this.names.add(name);
+  }
+
+  remove(name) {
+    this.names.delete(name);
+  }
+
+  contains(name) {
+    return this.names.has(name);
+  }
+}
+
 class FakeSwitch {
   constructor() {
     this.dataset = {};
     this.attributes = new Map();
+    this.classList = new FakeClassList();
     this.listeners = new Map();
   }
 
@@ -36,8 +57,16 @@ class FakeSwitch {
     this.listeners.get("click")?.();
   }
 
+  animationEnd(animationName) {
+    this.listeners.get("animationend")?.({ animationName });
+  }
+
   get checked() {
     return this.attributes.get("aria-checked") === "true";
+  }
+
+  get flipping() {
+    return this.classList.contains(FLIP_CLASS);
   }
 }
 
@@ -102,12 +131,14 @@ function memorySettings(followBrowserTheme) {
 function mount({ stored = null, follow = true, prefersDark = false, storage = memoryStorage(), settings } = {}) {
   if (stored !== null) storage.setItem(THEME_STORAGE_KEY, stored);
   const button = new FakeSwitch();
-  const root = { dataset: {} };
+  const root = { dataset: {}, classList: new FakeClassList() };
   const media = new FakeMedia(prefersDark);
   const store = settings ?? memorySettings(follow);
   const control = mountThemeSwitch({ button, root, media, settings: store, storage });
   return { button, root, media, settings: store, storage, control };
 }
+
+const fading = (root) => root.classList.contains(FADE_CLASS);
 
 function appFile(path) {
   return readFileSync(new URL(`../../src/superglm/editor/app/${path}`, import.meta.url), "utf8");
@@ -233,6 +264,28 @@ test("with storage blocked the switch follows the browser, flips for the page, a
   assert.equal(page.root.dataset.theme, "dark");
 });
 
+test("a flip plays the switch and fades the page until the knob lands, and nothing else plays", () => {
+  const { button, root, media, settings } = mount();
+  assert.deepEqual([button.flipping, fading(root)], [false, false]);
+
+  button.click();
+  assert.deepEqual([root.dataset.theme, button.flipping, fading(root)], ["dark", true, true]);
+  // The fade ends when the knob lands, not when another keyframe does.
+  button.animationEnd("theme-icon-in");
+  assert.equal(fading(root), true);
+  button.animationEnd("theme-knob-to-night");
+  assert.equal(fading(root), false);
+  // The next flip keeps the class; its keyframes take the other theme's names.
+  button.click();
+  assert.deepEqual([root.dataset.theme, button.flipping, fading(root)], ["light", true, true]);
+
+  // Settings hands the theme back without motion, and the browser leads without it.
+  settings.save({ followBrowserTheme: true });
+  assert.deepEqual([button.flipping, fading(root)], [false, false]);
+  media.set(true);
+  assert.deepEqual([root.dataset.theme, button.flipping, fading(root)], ["dark", false, false]);
+});
+
 test("destroy removes every listener", () => {
   const { button, media, settings, control } = mount();
   control.destroy();
@@ -250,6 +303,22 @@ test("index.html paints the stored theme first and carries the switch", () => {
     assert.ok(markup.includes(part), part);
   }
   assert.match(html, /fonts\.googleapis\.com\/css2\?family=Bangers&family=Source\+Sans\+3/);
+});
+
+test("the flip's keyframes are named for the theme reached, and reduced motion lands them at once", () => {
+  const shell = appFile("styles/shell.css");
+  for (const name of [
+    "theme-knob-to-night", "theme-knob-to-day", "theme-track-to-night", "theme-track-to-day",
+    "theme-icon-in", "theme-icon-out", "theme-label-in", "theme-label-out",
+  ]) {
+    assert.ok(shell.includes(`@keyframes ${name} {`), name);
+  }
+  // tokens.css zeroes every animation and transition; shell.css drops the switch's delays.
+  assert.match(
+    appFile("styles/tokens.css"),
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\*, \*::before, \*::after \{[^}]*animation-duration: 0\.001ms !important;[^}]*transition-duration: 0\.001ms !important;/,
+  );
+  assert.match(shell, /@media \(prefers-reduced-motion: reduce\) \{\s*#themeSwitch,\s*#themeSwitch \* \{\s*animation-delay: 0s !important;/);
 });
 
 test("the dark palette restates every colour token of the light one and no other", () => {
