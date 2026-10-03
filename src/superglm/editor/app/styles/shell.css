@@ -271,9 +271,10 @@ body {
 
 /* The grounds, the app bar and the switch cross-fade with a flip, and only
    then: theme.js puts .theme-fading on <html> for the flip and takes it off
-   when the knob lands. The rest changes at once, because a transition on
-   every element halves the frame rate while it runs. Reduced motion zeroes
-   the fade through tokens.css. */
+   when the knob lands, and <html> keeps its old color-scheme until then so
+   that each colour fades once (theme.js says why). The rest changes at
+   once, because a transition on every element halves the frame rate while
+   it runs. Reduced motion zeroes the fade through tokens.css. */
 :root.theme-fading,
 :root.theme-fading body,
 :root.theme-fading .app-bar,

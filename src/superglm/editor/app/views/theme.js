@@ -18,6 +18,12 @@
 // A flip plays the switch's keyframes and cross-fades the page's grounds
 // (styles/shell.css). A change from the browser or from Settings lands
 // without motion.
+//
+// While the page fades, <html> keeps the colour scheme it had, pinned inline,
+// and takes the new one when the knob lands. Chromium restarts a colour
+// transition on every frame while an ancestor's colour transitions and the
+// root's color-scheme has changed, so text that set its own colour lagged the
+// fade by its length again, and text inheriting it dimmed back after landing.
 
 /** @typedef {"auto"|"light"|"dark"} ThemeChoice */
 /** @typedef {"light"|"dark"} Theme */
@@ -135,12 +141,25 @@ export function mountThemeSwitch({ button, root, media, settings, storage }) {
     renderThemeSwitch(button, choice, media.matches);
   }
 
+  /** @param {Theme} shown the theme on screen as the flip starts */
+  function startFade(shown) {
+    // A click mid-flip keeps the scheme the page still has.
+    if (!root.classList.contains(FADE_CLASS)) root.style.colorScheme = shown;
+    root.classList.add(FADE_CLASS);
+  }
+
+  function endFade() {
+    root.classList.remove(FADE_CLASS);
+    root.style.colorScheme = "";
+  }
+
   function onClick() {
-    choice = resolveTheme(choice, media.matches) === "dark" ? "light" : "dark";
+    const shown = resolveTheme(choice, media.matches);
+    choice = shown === "dark" ? "light" : "dark";
     storeThemeChoice(choice, storage);
     mirror();
     button.classList.add(FLIP_CLASS);
-    root.classList.add(FADE_CLASS);
+    startFade(shown);
     render();
   }
 
@@ -157,15 +176,13 @@ export function mountThemeSwitch({ button, root, media, settings, storage }) {
     storeThemeChoice(choice, storage);
     // Kept, the last flip's keyframes would replay under the new theme's names.
     button.classList.remove(FLIP_CLASS);
-    root.classList.remove(FADE_CLASS);
+    endFade();
     render();
   }
 
   /** The knob has landed, and the fade with it. @param {Event} event */
   function onAnimationEnd(event) {
-    if (/** @type {AnimationEvent} */ (event).animationName.startsWith("theme-knob-")) {
-      root.classList.remove(FADE_CLASS);
-    }
+    if (/** @type {AnimationEvent} */ (event).animationName.startsWith("theme-knob-")) endFade();
   }
 
   if (settings.load().followBrowserTheme !== (choice === "auto")) mirror();
@@ -180,6 +197,7 @@ export function mountThemeSwitch({ button, root, media, settings, storage }) {
       button.removeEventListener("animationend", onAnimationEnd);
       media.removeEventListener("change", onBrowserChange);
       unsubscribe();
+      endFade();
     },
   });
 }

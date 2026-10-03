@@ -18,9 +18,25 @@ SWITCH_ANIMATIONS = """() => [...document.querySelectorAll('#themeSwitch, #theme
   .map((node) => getComputedStyle(node))
   .filter((style) => style.animationName !== 'none')
   .map((style) => [style.animationName, parseFloat(style.animationDuration), parseFloat(style.animationDelay)])"""
+# The fade's colour transitions as they run: [element, property, start
+# relative to the knob's keyframes (None while pending), duration in ms].
+FADE_TRANSITIONS = """() => {
+  const knob = document.getAnimations().find((a) => a.animationName?.startsWith('theme-knob-'));
+  const name = (node) => `${node.tagName.toLowerCase()}#${node.id}.${node.getAttribute('class') ?? ''}`;
+  return document.getAnimations()
+    .filter((a) => a instanceof CSSTransition && /color|shadow/.test(a.transitionProperty))
+    .map((a) => [name(a.effect.target), a.transitionProperty,
+      a.startTime === null || !knob ? null : a.startTime - knob.startTime, a.effect.getTiming().duration]);
+}"""
+TWO_FRAMES = "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+SCHEME = "() => getComputedStyle(document.documentElement).colorScheme"
+# Body text, inherited text in the inspector, and a muted app-bar tab.
+TEXT = """() => ['body', '.inspector', '#validationTab']
+  .map((selector) => getComputedStyle(document.querySelector(selector)).color)"""
 # styles/dark.css: gruvbox's dark0_hard ground and the editor's own edit blue.
 DARK_GROUND = "rgb(29, 32, 33)"
 DARK_EDIT = "rgb(131, 168, 232)"
+DARK_TEXT = ["rgb(235, 219, 178)", "rgb(235, 219, 178)", "rgb(168, 153, 132)"]
 FOLLOW = "Follow the browser's light or dark setting"
 THEME_KEY = "superglm.editor.theme"
 APP_MODULE = "**/assets/main.js*"
@@ -129,6 +145,43 @@ def test_following_the_browser_again_hands_it_the_switch(open_editor_page):
         assert page.evaluate(SWITCH_ANIMATIONS) == []
         assert not page.evaluate(FADING)
         assert page.evaluate(GROUND) == DARK_GROUND
+
+
+def _restarted(fade: list) -> list:
+    """Transitions that did not start with the click's keyframes."""
+    return [row for row in fade if row[2] is None or abs(row[2]) > 1]
+
+
+def test_a_flip_is_one_cross_fade(open_editor_page):
+    """Every colour fades once, from the click, and is done when the knob lands."""
+    with open_editor_page() as (page, _session):
+        page.emulate_media(color_scheme="light")
+        _await_theme(page, "light")
+        switch = page.get_by_role("switch", name="Dark theme")
+
+        switch.click()
+        page.evaluate(TWO_FRAMES)
+        fade = page.evaluate(FADE_TRANSITIONS)
+        assert {"color", "background-color"} <= {prop for _node, prop, _start, _ms in fade}
+        assert _restarted(fade) == []
+        assert {ms for _node, _prop, _start, ms in fade} == {600}
+        # The page keeps its scheme until the knob lands.
+        assert page.evaluate(SCHEME) == "light"
+        _await_landing(page)
+        assert page.evaluate(FADE_TRANSITIONS) == []
+        assert page.evaluate(TEXT) == DARK_TEXT
+        assert page.evaluate(SCHEME) == "dark"
+
+        # Flipped back mid-flip, each colour turns round from where it is.
+        switch.click()
+        page.evaluate(TWO_FRAMES)
+        switch.click()
+        page.evaluate(TWO_FRAMES)
+        assert _restarted(page.evaluate(FADE_TRANSITIONS)) == []
+        assert page.evaluate(SCHEME) == "dark"
+        _await_landing(page)
+        assert page.evaluate(FADE_TRANSITIONS) == []
+        assert page.evaluate(TEXT) == DARK_TEXT
 
 
 def test_reduced_motion_lands_the_flip_at_once(open_editor_page):

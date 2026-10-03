@@ -132,7 +132,7 @@ function memorySettings(followBrowserTheme) {
 function mount({ stored = null, follow = true, prefersDark = false, storage = memoryStorage(), settings } = {}) {
   if (stored !== null) storage.setItem(THEME_STORAGE_KEY, stored);
   const button = new FakeSwitch();
-  const root = { dataset: {}, classList: new FakeClassList() };
+  const root = { dataset: {}, classList: new FakeClassList(), style: { colorScheme: "" } };
   const media = new FakeMedia(prefersDark);
   const store = settings ?? memorySettings(follow);
   const control = mountThemeSwitch({ button, root, media, settings: store, storage });
@@ -285,6 +285,23 @@ test("a flip plays the switch and fades the page until the knob lands, and nothi
   assert.deepEqual([button.flipping, fading(root)], [false, false]);
   media.set(true);
   assert.deepEqual([root.dataset.theme, button.flipping, fading(root)], ["dark", false, false]);
+});
+
+test("while the page fades it keeps the colour scheme it had, and takes the new one when the knob lands", () => {
+  const { button, root, settings } = mount();
+  button.click();
+  assert.deepEqual([root.dataset.theme, root.style.colorScheme], ["dark", "light"]);
+  // A second click mid-flip keeps the scheme the page still has.
+  button.click();
+  assert.deepEqual([root.dataset.theme, root.style.colorScheme], ["light", "light"]);
+  button.animationEnd("theme-knob-to-day");
+  assert.deepEqual([fading(root), root.style.colorScheme], [false, ""]);
+
+  // Settings handing the theme back mid-flip ends the fade and the pin with it.
+  button.click();
+  assert.equal(root.style.colorScheme, "light");
+  settings.save({ followBrowserTheme: true });
+  assert.deepEqual([fading(root), root.style.colorScheme], [false, ""]);
 });
 
 test("destroy removes every listener", () => {
