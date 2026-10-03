@@ -11,7 +11,8 @@
 export const TOOL_HELP = Object.freeze({
   select: Object.freeze({
     title: "Select",
-    body: "Click points or drag a box to select curve values.",
+    body:
+      "Click a point or drag a box to select curve values. Shift-click selects every point from the last one clicked; Ctrl/Cmd-click adds or removes one.",
     shortcut: "V",
   }),
   move: Object.freeze({
@@ -165,6 +166,15 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Modes",
     keys: Object.freeze(["select", "move", "zoom", "handles"]),
+  }),
+  Object.freeze({
+    title: "Selecting points",
+    items: Object.freeze([
+      "Click a point to select it. Shift-click another to select every point between the two by position along the axis, whatever their heights.",
+      "Ctrl/Cmd-click adds or removes one point, on any term. The point clicked last, with or without Ctrl/Cmd, is where the next Shift-click starts.",
+      "A click on the curve between points selects the nearest point; a click on empty space changes nothing.",
+      "Drag a box to select the points inside it. Shift-drag pans instead.",
+    ]),
   }),
   Object.freeze({
     title: "Selection operations",

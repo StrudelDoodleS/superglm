@@ -236,6 +236,8 @@
  * @property {boolean} inspectorOpen
  * @property {{term:string, payload:TermPayload, selection:number[]}|null} preview
  * @property {{term:string, indices:number[]}|null} selectionPreview
+ * @property {{term:string, index:number}|null} selectionAnchor the point the next
+ *   Shift-click spans from: a source index of `term`, set by a click or a Ctrl/Cmd-click
  */
 /**
  * @typedef {Object} MutationRequestState

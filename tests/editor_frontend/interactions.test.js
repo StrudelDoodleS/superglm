@@ -5,15 +5,25 @@ import test from "node:test";
 const interactionsModulePath = "../../src/superglm/editor/app/interactions.js";
 const { bindInteractions } = await import(interactionsModulePath);
 
+// A press draws a brush rectangle; the gestures only need it to exist.
+globalThis.document = {
+  createElementNS: () => ({ setAttribute() {}, remove() {} })
+};
+
 function selectionHarness({ displayIsCollapsed, displayToSourceIndices = undefined }) {
   const listeners = new Map();
   const mutations = [];
   const svg = {
     _scale: { displayIsCollapsed, displayToSourceIndices },
+    viewBox: { baseVal: { x: 0, y: 0, width: 100, height: 100 } },
     addEventListener(name, listener) {
       listeners.set(name, listener);
     },
     removeEventListener() {},
+    setPointerCapture() {},
+    appendChild() {},
+    getScreenCTM() { return null; },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 100 }; },
   };
   const term = {
     term_type: "categorical",
@@ -24,6 +34,8 @@ function selectionHarness({ displayIsCollapsed, displayToSourceIndices = undefin
     svg,
     currentTerm: () => term,
     currentSelection: () => new Set(),
+    selectionAnchor: () => null,
+    setSelectionAnchor() {},
     mode: () => "select",
     selectedTerm: () => "feature",
     actions: {
@@ -38,14 +50,19 @@ function selectionHarness({ displayIsCollapsed, displayToSourceIndices = undefin
   return {
     mutations,
     async ctrlClick(displayIndex) {
-      await listeners.get("pointerdown")({
+      const event = {
         button: 0,
+        pointerId: 1,
+        clientX: 10,
+        clientY: 10,
         ctrlKey: true,
         metaKey: false,
         shiftKey: false,
         target: { dataset: { index: String(displayIndex) } },
         preventDefault() {},
-      });
+      };
+      await listeners.get("pointerdown")(event);
+      await listeners.get("pointerup")(event);
     },
   };
 }
@@ -173,4 +190,188 @@ test("expanded structural groups move together without widening individual selec
   assert.deepEqual(latest.selection, [0]);
   assert.equal(latest.preview.y[0], latest.preview.y[1]);
   assert.deepEqual(harness.mutations[0].payload.indices, [0]);
+});
+
+// SVG units are client pixels here: data x maps to 100 + 10x and relativity
+// to 300 - 100y, on a plot 200 wide and 300 tall.
+const SPLINE_X = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+const SPLINE_Y = [1, 2.5, 0.5, 2, 1, 2.8, 0.2, 1.5, 1, 2];
+
+function gestureHarness({
+  x = SPLINE_X,
+  y = SPLINE_Y,
+  levels = null,
+  selection = [],
+  anchor = null,
+  displayToSourceIndices = null,
+}) {
+  const listeners = new Map();
+  const mutations = [];
+  const zooms = [];
+  const state = { selection: new Set(selection), anchor };
+  const scale = {
+    sx: (value) => 100 + 10 * value,
+    sy: (value) => 300 - 100 * value,
+    x,
+    y,
+    xMin: 0, xMax: 20, yMin: 0, yMax: 3,
+    baseXMin: 0, baseXMax: 20, baseYMin: 0, baseYMax: 3,
+    margin: { left: 100, top: 0 },
+    innerW: 200,
+    innerH: 300,
+    displayIsCollapsed: displayToSourceIndices !== null,
+    displayToSourceIndices: displayToSourceIndices ?? x.map((_, i) => [i]),
+  };
+  const svg = {
+    _scale: scale,
+    viewBox: { baseVal: { x: 0, y: 0, width: 400, height: 400 } },
+    addEventListener(name, listener) { listeners.set(name, listener); },
+    removeEventListener() {},
+    setPointerCapture() {},
+    appendChild() {},
+    getScreenCTM() { return null; },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 400, height: 400 }; },
+  };
+  const term = { term_type: levels ? "categorical" : "spline", x, y, levels };
+  const context = {
+    svg,
+    currentTerm: () => term,
+    currentSelection: () => new Set(state.selection),
+    selectionAnchor: () => state.anchor,
+    setSelectionAnchor(next) { state.anchor = next; },
+    mode: () => "select",
+    selectedTerm: () => "age",
+    setZoom(_term, range) { zooms.push(range); },
+    clearZoom() {},
+    setPreviewTerm() {},
+    clearPreviewTerm() {},
+    actions: {
+      async executeSelectionMutation(payload) {
+        mutations.push(payload);
+        state.selection = new Set(payload.indices);
+        return { ok: true };
+      },
+    },
+  };
+  bindInteractions(context);
+
+  const pointAt = (i) => ({ x: scale.sx(x[i]), y: scale.sy(y[i]) });
+  // Press, move once, release: on a point when `index` is given, else on
+  // whatever lies under `at` (the curve, or empty plot).
+  async function gesture({ index = null, at, to = at, keys = {} }) {
+    const base = {
+      button: 0,
+      pointerId: 1,
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      ...keys,
+      target: { dataset: index === null ? {} : { index: String(index) } },
+      preventDefault() {},
+    };
+    await listeners.get("pointerdown")({ ...base, clientX: at.x, clientY: at.y });
+    listeners.get("pointermove")({ ...base, clientX: to.x, clientY: to.y });
+    await listeners.get("pointerup")({ ...base, clientX: to.x, clientY: to.y });
+  }
+
+  return {
+    mutations,
+    zooms,
+    state,
+    pointAt,
+    click: (i, keys = {}) => gesture({ index: i, at: pointAt(i), keys }),
+    clickAt: (at, keys = {}) => gesture({ at, keys }),
+    drag: (i, to, keys = {}) => gesture({ index: i, at: pointAt(i), to, keys }),
+  };
+}
+
+test("a click on a point selects it alone and makes it the anchor", async () => {
+  const chart = gestureHarness({ selection: [7, 8] });
+
+  await chart.click(3);
+
+  assert.deepEqual(chart.mutations, [{ term: "age", indices: [3] }]);
+  assert.deepEqual(chart.state.anchor, { term: "age", index: 3 });
+});
+
+test("Shift-click selects every point between the anchor and the point by x, whatever their heights", async () => {
+  const chart = gestureHarness({});
+
+  await chart.click(2);
+  await chart.click(6, { shiftKey: true });
+  assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [2, 3, 4, 5, 6] });
+
+  // The anchor stays put, so another Shift-click spans from it again.
+  await chart.click(0, { shiftKey: true });
+  assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [0, 1, 2] });
+  assert.deepEqual(chart.state.anchor, { term: "age", index: 2 });
+  assert.deepEqual(chart.zooms, []);
+});
+
+test("without an anchor on this term a Shift-click selects the point and anchors it", async () => {
+  const chart = gestureHarness({ anchor: { term: "other", index: 1 } });
+
+  await chart.click(5, { shiftKey: true });
+
+  assert.deepEqual(chart.mutations, [{ term: "age", indices: [5] }]);
+  assert.deepEqual(chart.state.anchor, { term: "age", index: 5 });
+});
+
+test("a Shift press pans only once it moves past the click slop", async () => {
+  const chart = gestureHarness({});
+  const from = chart.pointAt(4);
+
+  await chart.drag(4, { x: from.x + 30, y: from.y }, { shiftKey: true });
+  assert.deepEqual(chart.mutations, []);
+  assert.ok(chart.zooms.length > 0);
+
+  const panned = chart.zooms.length;
+  await chart.drag(4, { x: from.x + 2, y: from.y - 2 }, { shiftKey: true });
+  assert.equal(chart.zooms.length, panned);
+  assert.deepEqual(chart.mutations, [{ term: "age", indices: [4] }]);
+});
+
+test("Ctrl/Cmd-click toggles one point on a spline and moves the anchor", async () => {
+  const chart = gestureHarness({ selection: [1, 2] });
+
+  await chart.click(5, { ctrlKey: true });
+  assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [1, 2, 5] });
+
+  await chart.click(2, { metaKey: true });
+  assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [1, 5] });
+  assert.deepEqual(chart.state.anchor, { term: "age", index: 2 });
+});
+
+test("a click on the curve between points snaps to the nearest point by x; off it nothing changes", async () => {
+  // Points 3, 4 and 5 sit at (130, 190), (140, 180) and (150, 180).
+  const chart = gestureHarness({ y: [1, 1, 1, 1.1, 1.2, 1.2, 1, 1, 1, 1] });
+
+  // On the line from 3 to 4, nearer 4 by x.
+  await chart.clickAt({ x: 137, y: 183 });
+  assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [4] });
+  assert.deepEqual(chart.state.anchor, { term: "age", index: 4 });
+
+  // 8 px above the line from 4 to 5, nearer 5 by x.
+  await chart.clickAt({ x: 147, y: 172 });
+  assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [5] });
+
+  // 16 px above that line, then empty plot: neither changes the selection.
+  await chart.clickAt({ x: 145, y: 164 });
+  await chart.clickAt({ x: 250, y: 20 });
+  assert.equal(chart.mutations.length, 2);
+});
+
+test("on a collapsed display the anchor is a source level and the span selects every source level in it", async () => {
+  // Display point 1 is the group b + c; the anchor, source level c, lies in it.
+  const chart = gestureHarness({
+    x: [0, 1, 2, 3],
+    y: [1, 1.2, 0.8, 1.1],
+    levels: ["a", "b", "c", "d", "e"],
+    anchor: { term: "age", index: 2 },
+    displayToSourceIndices: [[0], [1, 2], [3], [4]],
+  });
+
+  await chart.click(3, { shiftKey: true });
+
+  assert.deepEqual(chart.mutations, [{ term: "age", indices: [1, 2, 3, 4] }]);
 });

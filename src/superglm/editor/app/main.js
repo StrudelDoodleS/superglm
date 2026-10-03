@@ -450,6 +450,14 @@ function interactionMode() {
   return store.getState().view.mode;
 }
 
+function selectionAnchor() {
+  return store.getState().view.selectionAnchor;
+}
+
+function setSelectionAnchor(anchor) {
+  actions.patchView({ selectionAnchor: anchor });
+}
+
 function setInteractionPreview(term, payload, selection) {
   store.update((state) => setPreviewTermState(state, term, payload, selection));
 }
@@ -793,7 +801,12 @@ function restoreFocusAfterBusy(opener) {
 }
 
 if (new URLSearchParams(window.location.search).get("test") === "1") {
-  window.__superglmTest = Object.freeze({ setAppBusy });
+  window.__superglmTest = Object.freeze({
+    setAppBusy,
+    // A selection posts without the busy overlay; tests wait on this before
+    // the next click, which a running mutation would skip.
+    mutationStatus: () => store.getState().request.mutation.status
+  });
 }
 
 function showTimingStatus(payload, timing) {
@@ -1546,6 +1559,8 @@ const interactions = bindInteractions({
   selectedTerm,
   currentTerm,
   currentSelection,
+  selectionAnchor,
+  setSelectionAnchor,
   setPreviewTerm: setInteractionPreview,
   clearPreviewTerm: clearInteractionPreview,
   setZoom,

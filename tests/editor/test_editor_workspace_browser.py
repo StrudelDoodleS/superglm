@@ -538,6 +538,45 @@ def test_selection_menu_does_not_block_adjacent_modifier_selection(open_editor_p
         assert page.locator("#selectionMenu").is_visible()
 
 
+def _click_selects(page, point, modifiers=(), timeout=30000) -> None:
+    """Click, wait for its /select, and let the page settle before the next click.
+
+    A selection posts without the busy overlay, and a click that lands while
+    one is still running is skipped, so the next click waits for it.
+    """
+    with page.expect_response(
+        lambda response: is_select_request(response.request), timeout=timeout
+    ):
+        point.click(modifiers=list(modifiers))
+    page.wait_for_function("() => window.__superglmTest?.mutationStatus?.() !== 'running'")
+
+
+def test_click_shift_click_selects_a_span_and_ctrl_click_toggles_on_a_spline(open_editor_page):
+    # Thirty points draw every marker, so the selection palette steps around them.
+    with open_editor_page(n_points=30) as (page, session):
+        select_chart_tool(page, "Select")
+
+        def point(index: int):
+            return page.locator(f'#chart circle.point[data-index="{index}"]')
+
+        _click_selects(page, point(8))
+        _click_selects(page, point(14), modifiers=["Shift"], timeout=5000)
+        assert session.selection("curve").tolist() == list(range(8, 15))
+        # The Shift press did not pan: the chart still shows its whole x range.
+        assert page.evaluate(
+            "() => { const s = document.querySelector('#chart')._scale;"
+            " return s.xMin === s.baseXMin && s.xMax === s.baseXMax; }"
+        )
+
+        _click_selects(page, point(11), modifiers=["Control"])
+        assert session.selection("curve").tolist() == [8, 9, 10, 12, 13, 14]
+        _click_selects(page, point(20), modifiers=["Control"])
+        assert session.selection("curve").tolist() == [8, 9, 10, 12, 13, 14, 20]
+        # The last Ctrl-click is the anchor: Shift-click 17 spans 17 to 20.
+        _click_selects(page, point(17), modifiers=["Shift"])
+        assert session.selection("curve").tolist() == [17, 18, 19, 20]
+
+
 def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_editor_page):
     with open_editor_page(n_points=500) as (page, session):
         select_chart_tool(page, "Select")

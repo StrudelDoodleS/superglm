@@ -1,3 +1,11 @@
+// A press that moves no further than this many SVG units in x and in y is a
+// click; past it, a drag. The chart draws at its own CSS-pixel size, so an SVG
+// unit is a pixel.
+const CLICK_SLOP = 3;
+// A click this close to the drawn curve, between its points, picks the point
+// nearest by x.
+const CURVE_SNAP_DISTANCE = 12;
+
 export function bindInteractions(context) {
   // One active interaction at a time. Drag previews are private payload clones;
   // only the action controller may replace the confirmed remote snapshot.
@@ -9,7 +17,9 @@ export function bindInteractions(context) {
     panDrag: null,
     zoomBox: null,
     orderDrag: null,
-    pendingClickIndex: null
+    pendingClickIndex: null,
+    toggleClick: false,
+    shiftPress: null
   };
   const { svg } = context;
   const wheelOptions = { passive: false };
@@ -17,19 +27,25 @@ export function bindInteractions(context) {
   async function onPointerDown(event) {
     const activeTerm = context.currentTerm();
     if (!activeTerm) return;
-    if ((event.shiftKey || event.button === 1) && beginPan(context, interaction, event)) {
+    const index = event.target && event.target.dataset ? event.target.dataset.index : undefined;
+    // A middle press pans at once. A Shift press waits: once it moves past the
+    // click slop it pans, and released inside it, it is a Shift-click.
+    if (event.button === 1 && beginPan(context, interaction, svgPoint(context, event))) {
       event.preventDefault();
-      interaction.pendingClickIndex = null;
-      interaction.dragStart = null;
-      interaction.pointDrag = null;
-      interaction.controlDrag = null;
-      clearBoxZoom(interaction);
-      clearOrderDropPreview(interaction);
-      interaction.orderDrag = null;
+      resetPress(interaction);
       svg.setPointerCapture(event.pointerId);
       return;
     }
-    const index = event.target && event.target.dataset ? event.target.dataset.index : undefined;
+    if (event.shiftKey && svg._scale) {
+      event.preventDefault();
+      resetPress(interaction);
+      interaction.shiftPress = {
+        start: svgPoint(context, event),
+        index: index !== undefined ? Number(index) : null
+      };
+      svg.setPointerCapture(event.pointerId);
+      return;
+    }
     const controlIndex = event.target && event.target.dataset ? event.target.dataset.controlIndex : undefined;
     const mode = context.mode();
     if (mode === "handles") {
@@ -107,23 +123,11 @@ export function bindInteractions(context) {
       interaction.orderDrag = null;
       return;
     }
-    if (index !== undefined && isModifierLevelSelection(event, context.currentTerm())) {
-      event.preventDefault();
-      interaction.pendingClickIndex = null;
-      interaction.dragStart = null;
-      interaction.brush = null;
-      clearBoxZoom(interaction);
-      clearOrderDropPreview(interaction);
-      interaction.orderDrag = null;
-      const source = sourceIndicesForDisplayIndex(context, Number(index));
-      const indices = toggleSourceSelection(context.currentSelection(), source);
-      await context.actions.executeSelectionMutation({
-        term: context.selectedTerm(),
-        indices
-      });
-      return;
-    }
-    if (index !== undefined && beginOrderDrag(context, interaction, event, Number(index))) {
+    // Ctrl/Cmd marks the press a toggle; it is decided as a click or a box on
+    // release, like any other press.
+    const toggle = isToggleClick(event);
+    if (toggle) event.preventDefault();
+    if (!toggle && index !== undefined && beginOrderDrag(context, interaction, event, Number(index))) {
       event.preventDefault();
       interaction.pendingClickIndex = null;
       interaction.dragStart = null;
@@ -133,6 +137,7 @@ export function bindInteractions(context) {
       return;
     }
     interaction.pendingClickIndex = index !== undefined ? Number(index) : null;
+    interaction.toggleClick = toggle;
     interaction.dragStart = svgPoint(context, event);
     interaction.brush = svgRect({
       class: "brush",
@@ -148,6 +153,14 @@ export function bindInteractions(context) {
   function onPointerMove(event) {
     if (interaction.panDrag) {
       panZoomView(context, interaction, svgPoint(context, event));
+      return;
+    }
+    if (interaction.shiftPress) {
+      const press = interaction.shiftPress;
+      const point = svgPoint(context, event);
+      if (!movedPastClickSlop(press.start, point)) return;
+      interaction.shiftPress = null;
+      if (beginPan(context, interaction, press.start)) panZoomView(context, interaction, point);
       return;
     }
     if (interaction.controlDrag) {
@@ -200,6 +213,14 @@ export function bindInteractions(context) {
       interaction.panDrag = null;
       return;
     }
+    if (interaction.shiftPress) {
+      const press = interaction.shiftPress;
+      interaction.shiftPress = null;
+      if (context.mode() !== "select") return;
+      const target = press.index ?? curveIndexNear(context, press.start);
+      if (target !== null) await shiftClickPoint(context, target);
+      return;
+    }
     if (interaction.controlDrag) {
       const drag = interaction.controlDrag;
       const term = drag.preview;
@@ -248,6 +269,10 @@ export function bindInteractions(context) {
           path: "/reorder_levels",
           payload: { term: context.selectedTerm(), target_index: drag.targetIndex }
         });
+      } else if (!drag.active) {
+        // A click on a selected level keeps the selection for dragging and
+        // anchors the next Shift-click there.
+        context.setSelectionAnchor({ term: context.selectedTerm(), index: drag.pressed });
       }
       return;
     }
@@ -259,22 +284,25 @@ export function bindInteractions(context) {
       return;
     }
     if (!interaction.dragStart) return;
+    const start = interaction.dragStart;
     const point = svgPoint(context, event);
-    const moved = Math.abs(point.x - interaction.dragStart.x) > 3 ||
-      Math.abs(point.y - interaction.dragStart.y) > 3;
-    const displayIndices = moved ? indicesInBox(context, interaction.dragStart, point) : (
-      interaction.pendingClickIndex === null ? null : [interaction.pendingClickIndex]
-    );
+    const pressed = interaction.pendingClickIndex;
+    const toggle = interaction.toggleClick;
     if (interaction.brush) interaction.brush.remove();
     interaction.brush = null;
     interaction.dragStart = null;
     interaction.pendingClickIndex = null;
-    if (displayIndices === null) return;
-    const indices = sourceIndicesForDisplayIndices(context, displayIndices);
-    await context.actions.executeSelectionMutation({
-      term: context.selectedTerm(),
-      indices
-    });
+    interaction.toggleClick = false;
+    if (movedPastClickSlop(start, point)) {
+      await context.actions.executeSelectionMutation({
+        term: context.selectedTerm(),
+        indices: sourceIndicesForDisplayIndices(context, indicesInBox(context, start, point))
+      });
+      return;
+    }
+    // A click on empty space changes nothing.
+    const target = pressed ?? curveIndexNear(context, start);
+    if (target !== null) await clickPoint(context, target, toggle);
   }
 
   function onWheel(event) {
@@ -324,6 +352,7 @@ function hasActiveInteraction(interaction) {
     interaction.panDrag ||
     interaction.zoomBox ||
     interaction.orderDrag ||
+    interaction.shiftPress ||
     interaction.pendingClickIndex !== null
   );
 }
@@ -340,16 +369,123 @@ function cancelActiveInteraction(context, interaction) {
   interaction.panDrag = null;
   interaction.orderDrag = null;
   interaction.pendingClickIndex = null;
+  interaction.toggleClick = false;
+  interaction.shiftPress = null;
   if (hadPreview) context.clearPreviewTerm();
 }
 
-function isModifierLevelSelection(event, term) {
-  return Boolean(
-    term &&
-    Array.isArray(term.levels) &&
-    term.levels.length > 0 &&
-    (event.ctrlKey || event.metaKey)
+// Forget a press in progress before a pan or a Shift press takes over.
+function resetPress(interaction) {
+  interaction.pendingClickIndex = null;
+  interaction.toggleClick = false;
+  interaction.shiftPress = null;
+  interaction.dragStart = null;
+  interaction.pointDrag = null;
+  interaction.controlDrag = null;
+  clearBoxZoom(interaction);
+  clearOrderDropPreview(interaction);
+  interaction.orderDrag = null;
+}
+
+// Ctrl or Cmd adds or removes one point, on any term.
+function isToggleClick(event) {
+  return Boolean(event.ctrlKey || event.metaKey);
+}
+
+function movedPastClickSlop(start, point) {
+  return Math.abs(point.x - start.x) > CLICK_SLOP || Math.abs(point.y - start.y) > CLICK_SLOP;
+}
+
+// A click on one display point selects it alone, or with Ctrl/Cmd toggles it,
+// and either way makes it the anchor of the next Shift-click.
+async function clickPoint(context, displayIndex, toggle) {
+  const term = context.selectedTerm();
+  const source = sourceIndicesForDisplayIndices(context, [displayIndex]);
+  context.setSelectionAnchor({ term, index: source[0] });
+  await context.actions.executeSelectionMutation({
+    term,
+    indices: toggle ? toggleSourceSelection(context.currentSelection(), source) : source
+  });
+}
+
+// A Shift-click selects every display point between the anchor and this one
+// by x, whatever their heights, and leaves the anchor where it is. With no
+// anchor on this term it is a plain click.
+async function shiftClickPoint(context, displayIndex) {
+  const term = context.selectedTerm();
+  const anchor = anchorDisplayIndex(context, term);
+  if (anchor === null) {
+    await clickPoint(context, displayIndex, false);
+    return;
+  }
+  await context.actions.executeSelectionMutation({
+    term,
+    indices: sourceIndicesForDisplayIndices(
+      context,
+      displayIndicesBetween(context, anchor, displayIndex)
+    )
+  });
+}
+
+// The anchor is a source index, so it survives a switch between the expanded
+// and collapsed displays; this finds the display point that shows it.
+function anchorDisplayIndex(context, term) {
+  const anchor = context.selectionAnchor();
+  if (!anchor || anchor.term !== term) return null;
+  const scale = context.svg._scale || {};
+  const count = Array.isArray(scale.x) ? scale.x.length : 0;
+  if (!scale.displayIsCollapsed) return anchor.index < count ? anchor.index : null;
+  const mapping = Array.isArray(scale.displayToSourceIndices) ? scale.displayToSourceIndices : [];
+  const display = mapping.findIndex(
+    (source) => Array.isArray(source) && source.map(Number).includes(anchor.index)
   );
+  return display >= 0 ? display : null;
+}
+
+function displayIndicesBetween(context, from, to) {
+  const x = context.svg._scale.x;
+  const lo = Math.min(Number(x[from]), Number(x[to]));
+  const hi = Math.max(Number(x[from]), Number(x[to]));
+  const indices = [];
+  for (let i = 0; i < x.length; i++) {
+    const value = Number(x[i]);
+    if (value >= lo && value <= hi) indices.push(i);
+  }
+  return indices;
+}
+
+// The display point a click on the drawn curve means: the nearest by x, when
+// the click is inside the plot and within CURVE_SNAP_DISTANCE of the curve.
+function curveIndexNear(context, point) {
+  const scale = context.svg._scale;
+  if (!scale || !Array.isArray(scale.x) || !scale.x.length) return null;
+  const { sx, sy, x, y, margin, innerW, innerH } = scale;
+  if (
+    point.x < margin.left || point.x > margin.left + innerW ||
+    point.y < margin.top || point.y > margin.top + innerH
+  ) {
+    return null;
+  }
+  let nearest = 0;
+  let distance = Math.hypot(point.x - sx(x[0]), point.y - sy(y[0]));
+  for (let i = 1; i < x.length; i++) {
+    distance = Math.min(
+      distance,
+      segmentDistance(point, sx(x[i - 1]), sy(y[i - 1]), sx(x[i]), sy(y[i]))
+    );
+    if (Math.abs(sx(x[i]) - point.x) < Math.abs(sx(x[nearest]) - point.x)) nearest = i;
+  }
+  return distance <= CURVE_SNAP_DISTANCE ? nearest : null;
+}
+
+function segmentDistance(point, x0, y0, x1, y1) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const length2 = dx * dx + dy * dy;
+  const t = length2 > 0
+    ? Math.max(0, Math.min(1, ((point.x - x0) * dx + (point.y - y0) * dy) / length2))
+    : 0;
+  return Math.hypot(point.x - (x0 + t * dx), point.y - (y0 + t * dy));
 }
 
 function togglePointSelection(selection, index) {
@@ -488,6 +624,7 @@ function beginOrderDrag(context, interaction, event, index) {
   clearOrderDropPreview(interaction);
   interaction.orderDrag = {
     start: svgPoint(context, event),
+    pressed: index,
     indices: Array.from(selection).sort((a, b) => a - b),
     targetIndex: index,
     active: false,
@@ -675,13 +812,14 @@ function applyBoxZoom(context, start, end) {
   context.setZoom(context.selectedTerm(), { xMin, xMax, yMin, yMax });
 }
 
-function beginPan(context, interaction, event) {
+function beginPan(context, interaction, start) {
   // Panning is intentionally chorded behind Shift or middle click so ordinary
-  // drag-select remains the default interaction.
+  // drag-select remains the default interaction. `start` is where the press
+  // began, so a Shift press that turns into a pan keeps the ground it covered.
   if (!context.svg._scale) return false;
   const scale = context.svg._scale;
   interaction.panDrag = {
-    start: svgPoint(context, event),
+    start,
     xMin: scale.xMin,
     xMax: scale.xMax,
     yMin: scale.yMin,
