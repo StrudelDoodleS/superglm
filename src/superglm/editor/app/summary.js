@@ -277,6 +277,7 @@ export function renderSummary(payload, nodes) {
       `<div class="summary-empty">${escapeHTML(payload.error || "Summary unavailable.")}</div>`
     );
     renderSearchCount(nodes, "");
+    renderSummaryHeader(payload, nodes, "");
     return;
   }
   summaryStatus.textContent = payload.label || "Summary";
@@ -286,19 +287,22 @@ export function renderSummary(payload, nodes) {
   // inspector's search is part of the markup, so every render reapplies it.
   const view = summaryViewOf(nodes);
   const viewModel = payload.compact ? compactViewModel(payload.compact, view) : null;
-  updateSummaryMarkup(
+  const written = updateSummaryMarkup(
     summaryFrame,
     viewModel ? renderCompactSummary(payload, viewModel, view.query) : payload.html || ""
   );
   renderSearchCount(nodes, viewModel ? summaryCountText(viewModel, view.query) : "");
+  renderSummaryHeader(payload, nodes, view.query);
+  if (written && !view.query.trim()) scrollToCurrentSection(summaryFrame);
 }
 
 /**
- * Redraw the summary on show for the inspector's current search. With the
- * compact table in the DOM only its body is rewritten, so an open "Full
- * summary" keeps its frame; otherwise the last payload is rendered again.
+ * Redraw the summary on show for the inspector's current view: search,
+ * filter and open sections. With the compact table in the DOM only its body is
+ * rewritten, so an open "Full summary" keeps its frame; otherwise the last
+ * payload is rendered again. `follow` scrolls the chart's term into view.
  */
-export function applySummaryView(nodes) {
+export function applySummaryView(nodes, { follow = false } = {}) {
   const { summaryFrame } = nodes;
   const payload = summaryPayloadByFrame.get(summaryFrame);
   const shown = summaryMarkupByFrame.get(summaryFrame);
@@ -321,12 +325,48 @@ export function applySummaryView(nodes) {
     view.query
   );
   renderSearchCount(nodes, summaryCountText(viewModel, view.query));
+  renderSummaryHeader(payload, nodes, view.query);
   // The frame now holds what a full render for this view writes, so a later
   // render of the same payload and view leaves the DOM alone.
   summaryMarkupByFrame.set(summaryFrame, {
     markup: renderCompactSummary(payload, viewModel, view.query),
     firstElementChild: summaryFrame.firstElementChild
   });
+  if (follow) scrollToCurrentSection(summaryFrame);
+}
+
+// Follow the chart: bring its term's line into view in the summary frame.
+function scrollToCurrentSection(summaryFrame) {
+  if (typeof summaryFrame.querySelector !== "function") return;
+  const line = summaryFrame.querySelector('tr.summary-section[data-current="true"]:not([hidden])');
+  if (line) line.scrollIntoView({ block: "nearest" });
+}
+
+// Family, link and method as chips and four figures as tiles, beside Refit
+// offsets. The header steps aside while a search narrows the table.
+function renderSummaryHeader(payload, nodes, query) {
+  const { summaryHeader, summaryModelChips, summaryTiles } = nodes;
+  const model = payload.available && payload.compact ? payload.compact.model || {} : null;
+  if (summaryModelChips) updateSummaryMarkup(summaryModelChips, model ? renderModelChips(model) : "");
+  if (summaryTiles) updateSummaryMarkup(summaryTiles, model ? renderModelTiles(model) : "");
+  if (summaryHeader) summaryHeader.hidden = query.trim() !== "";
+}
+
+function renderModelChips(model) {
+  const link = model.link ? `${model.link} link` : "";
+  return [model.family, link, model.method]
+    .filter((value) => value !== null && value !== undefined && value !== "")
+    .map((value) => `<span class="summary-chip">${escapeHTML(value)}</span>`)
+    .join("");
+}
+
+function renderModelTiles(model) {
+  return [
+    ["Deviance", model.deviance],
+    ["AIC", model.aic],
+    ["BIC", model.bic],
+    ["Total EDF", model.effective_df]
+  ].map(([label, value]) => `<div class="summary-tile"><span>${escapeHTML(label)}</span><strong title="${escapeHTML(formatFullNumber(value))}">${escapeHTML(formatSummaryValue(value))}</strong></div>`).join("");
 }
 
 function summaryViewOf(nodes) {
@@ -345,17 +385,19 @@ function renderSearchCount(nodes, text) {
   if (nodes.summarySearchCount) nodes.summarySearchCount.textContent = text;
 }
 
+// Whether the markup was written; unchanged markup leaves the DOM alone.
 function updateSummaryMarkup(summaryFrame, markup) {
   const cached = summaryMarkupByFrame.get(summaryFrame);
   if (
     cached?.markup === markup &&
     cached.firstElementChild === summaryFrame.firstElementChild
-  ) return;
+  ) return false;
   summaryFrame.innerHTML = markup;
   summaryMarkupByFrame.set(summaryFrame, {
     markup,
     firstElementChild: summaryFrame.firstElementChild
   });
+  return true;
 }
 
 export function updateDistributionProfileActions(payload, nodes) {
@@ -601,16 +643,9 @@ function renderCompactSummary(payload, viewModel, query) {
   const model = compact.model || {};
   const rows = compactRows(compact);
   const hasLevelGroups = compact.has_level_groups === true;
-  const facts = [
-    ["Family", model.family],
-    ["Link", model.link],
-    ["Method", model.method],
-    ["Total EDF", model.effective_df],
-    ["Deviance", model.deviance],
-    ["AIC", model.aic],
-    ["BIC", model.bic],
-    ["Log lik", model.log_likelihood]
-  ];
+  // Family, link, method and the four headline figures are the header's
+  // (renderSummaryHeader); a profiled distribution parameter stays here.
+  const facts = [];
   if (model.tweedie_p !== null && model.tweedie_p !== undefined) {
     facts.push(["Tweedie p", model.tweedie_p]);
     const ci = Array.isArray(model.tweedie_p_ci) ? model.tweedie_p_ci : null;
@@ -622,9 +657,9 @@ function renderCompactSummary(payload, viewModel, query) {
   if (model.nb_theta !== null && model.nb_theta !== undefined) facts.push(["NB2 theta", model.nb_theta]);
   return `
     <div class="compact-summary">
-      <div class="summary-facts">
+      ${facts.length ? `<div class="summary-facts">
         ${facts.map(([label, value]) => renderSummaryFact(label, value)).join("")}
-      </div>
+      </div>` : ""}
       <table class="summary-table${hasLevelGroups ? " has-level-groups" : ""}" aria-label="Compact coefficient summary">
         <thead>
           <tr>
@@ -670,10 +705,11 @@ function renderRawSummaryFrame(html) {
 // search stay in the markup, hidden, each tagged with its term.
 function renderSummaryBody(rows, viewModel, hasLevelGroups, query) {
   const columnCount = hasLevelGroups ? 8 : 7;
-  return viewModel.sections.map((section) => {
-    const groupRow = section.header
-      ? `<tr class="summary-group-row" data-term="${escapeHTML(section.term)}"${section.hidden ? " hidden" : ""}><td colspan="${columnCount}">${highlightMatches(section.label, query)}</td></tr>`
-      : "";
+  const empty = viewModel.empty
+    ? `<tr class="summary-empty-row"><td colspan="${columnCount}">No terms match.</td></tr>`
+    : "";
+  return empty + viewModel.sections.map((section) => {
+    const groupRow = section.header ? renderSectionHeader(section, columnCount, query) : "";
     const sectionRows = section.rows.map((entry) => renderSummaryRow(
       rows[entry.index],
       hasLevelGroups,
@@ -683,6 +719,30 @@ function renderSummaryBody(rows, viewModel, hasLevelGroups, query) {
     ));
     return groupRow + sectionRows.join("");
   }).join("");
+}
+
+// A term's line: what it is and how it fits, folded or open. Its button opens
+// or closes the rows under it.
+function renderSectionHeader(section, columnCount, query) {
+  const term = escapeHTML(section.term);
+  const kind = section.kind
+    ? `<span class="summary-section-kind">${escapeHTML(section.kind)}</span>`
+    : "";
+  const waiting = section.waiting > 0
+    ? `<span class="summary-waiting">${section.waiting} waiting</span>`
+    : "";
+  const edf = section.edf === null
+    ? ""
+    : `<span class="summary-section-edf">EDF ${escapeHTML(formatSummaryValue(section.edf))}</span>`;
+  return `<tr class="summary-group-row summary-section" data-term="${term}" data-current="${section.current}"${section.hidden ? " hidden" : ""}><td colspan="${columnCount}"><button type="button" class="summary-section-toggle" data-summary-section="${term}" aria-expanded="${section.open}"><svg class="summary-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"></path></svg><span class="summary-section-name">${highlightMatches(section.label, query)}</span>${kind}${waiting}<span class="summary-section-fill"></span>${edf}${renderPChip(section.chip)}</button></td></tr>`;
+}
+
+// The p-value of a term's whole-term test on its line. A categorical has
+// none, so its line carries no chip.
+function renderPChip(chip) {
+  if (!chip) return "";
+  const text = `${formatP(chip.p)}${chip.sigCode ? ` ${chip.sigCode}` : ""}`;
+  return `<span class="summary-p-chip ${safeSigClass(chip.sigClass)}" title="p-value of the whole-term test">${escapeHTML(text)}</span>`;
 }
 
 function renderSummaryFact(label, value) {

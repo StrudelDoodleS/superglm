@@ -564,6 +564,107 @@ input[type="number"] {
   background: color-mix(in srgb, var(--yellow) 45%, transparent);
   color: inherit;
 }
+/* All / Edited / Waiting, and the note that the summary follows the chart. */
+.summary-view-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.summary-filter {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background: var(--surface-hover);
+}
+.summary-filter button {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+.summary-filter button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px var(--shadow);
+}
+.summary-follow {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.summary-follow-icon {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+/* The model header: chips with Refit offsets beside them, then four tiles. */
+.summary-header {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.summary-header[hidden] {
+  display: none;
+}
+.summary-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.summary-model-chips {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.summary-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.summary-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.summary-tile {
+  display: grid;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.summary-tile span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.summary-tile strong {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 #summaryStatus {
   color: var(--muted);
   font-size: 12px;
@@ -869,6 +970,87 @@ input[type="number"] {
 .summary-group-row + .summary-row td {
   border-top: 0;
 }
+/* A term's line in the summary: its whole row is the open/close button. */
+.summary-section td {
+  padding: 4px 0 2px;
+}
+.summary-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: auto;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  text-align: left;
+}
+.summary-section[data-current="true"] .summary-section-toggle {
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 var(--blue);
+}
+.summary-chevron {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.summary-section-toggle[aria-expanded="true"] .summary-chevron {
+  transform: rotate(90deg);
+}
+/* Name and kind give way, with an ellipsis, so the EDF and chips stay whole. */
+.summary-section-name,
+.summary-section-kind {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.summary-section-name {
+  font-weight: 600;
+}
+.summary-section-kind {
+  flex-shrink: 4;
+}
+.summary-section-kind,
+.summary-section-edf {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.summary-section-edf {
+  font-family: var(--font-mono);
+}
+.summary-section-fill {
+  flex: 1 1 auto;
+}
+.summary-waiting,
+.summary-p-chip {
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.summary-waiting {
+  background: var(--sig-weak-bg);
+  color: var(--sig-weak-fg);
+}
+.summary-p-chip {
+  font-family: var(--font-mono);
+}
+.summary-empty-row td {
+  padding: 10px 6px;
+  color: var(--muted);
+  text-align: left;
+}
 .summary-term span {
   display: block;
   overflow-wrap: anywhere;
@@ -893,12 +1075,12 @@ input[type="number"] {
   white-space: nowrap;
 }
 /* Significance classes are data from Python; the tints stay, one step softer. */
-.se-cell.sig-strong { background: var(--sig-strong-bg); color: var(--sig-strong-fg); }
-.se-cell.sig-medium { background: var(--sig-medium-bg); color: var(--sig-medium-fg); }
-.se-cell.sig-standard { background: var(--sig-standard-bg); color: var(--sig-standard-fg); }
-.se-cell.sig-weak { background: var(--sig-weak-bg); color: var(--sig-weak-fg); }
-.se-cell.sig-none { background: var(--sig-none-bg); color: var(--sig-none-fg); }
-.se-cell.sig-unknown { background: var(--surface-hover); color: var(--muted); }
+.se-cell.sig-strong, .summary-p-chip.sig-strong { background: var(--sig-strong-bg); color: var(--sig-strong-fg); }
+.se-cell.sig-medium, .summary-p-chip.sig-medium { background: var(--sig-medium-bg); color: var(--sig-medium-fg); }
+.se-cell.sig-standard, .summary-p-chip.sig-standard { background: var(--sig-standard-bg); color: var(--sig-standard-fg); }
+.se-cell.sig-weak, .summary-p-chip.sig-weak { background: var(--sig-weak-bg); color: var(--sig-weak-fg); }
+.se-cell.sig-none, .summary-p-chip.sig-none { background: var(--sig-none-bg); color: var(--sig-none-fg); }
+.se-cell.sig-unknown, .summary-p-chip.sig-unknown { background: var(--surface-hover); color: var(--muted); }
 .se-cell.sig-reference { background: transparent; color: var(--muted); }
 .sig-code {
   font-weight: 700;

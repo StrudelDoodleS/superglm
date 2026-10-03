@@ -70,7 +70,13 @@ import {
   renderSettingsPane,
   saveSettings
 } from "./views/settings.js";
-import { bindSummarySearch } from "./views/summary_view.js";
+import {
+  bindSummaryFilter,
+  bindSummarySearch,
+  bindSummarySections,
+  renderSummaryFilter,
+  waitingCounts
+} from "./views/summary_view.js";
 import { mountThemeControl, resolveTheme } from "./views/theme.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
@@ -181,7 +187,15 @@ const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
 const summarySearch = document.getElementById("summarySearch");
 const summarySearchCount = document.getElementById("summarySearchCount");
+const summaryFilterNode = document.getElementById("summaryFilter");
+const summaryHeader = document.getElementById("summaryHeader");
+const summaryModelChips = document.getElementById("summaryModelChips");
+const summaryTiles = document.getElementById("summaryTiles");
 let summaryQuery = "";
+let summaryFilter = "all";
+// Sections the analyst opened or closed; cleared when the chart's term or the
+// search changes, so the summary goes back to following the chart.
+const summaryToggled = new Map();
 const settingsTiming = document.getElementById("settingsTiming");
 const settingsNodes = Object.freeze({
   root: document.getElementById("settingsPane"),
@@ -524,6 +538,9 @@ function summaryNodes() {
     summaryNote,
     summaryFrame,
     summarySearchCount,
+    summaryHeader,
+    summaryModelChips,
+    summaryTiles,
     summaryView
   };
 }
@@ -531,11 +548,31 @@ function summaryNodes() {
 // What the inspector shows of the summary; summary.js reapplies it on every
 // render, so a refit or a new payload keeps the search.
 function summaryView() {
-  const snapshot = store.getState().remote.snapshot;
+  const state = store.getState();
+  const snapshot = state.remote.snapshot;
+  const terms = snapshot ? snapshot.terms : {};
+  const names = Object.keys(terms);
   return {
     query: summaryQuery,
-    termNames: snapshot ? Object.keys(snapshot.terms) : []
+    termNames: names,
+    filter: summaryFilter,
+    currentTerm: selectActiveTermName(state),
+    toggled: summaryToggled,
+    edited: names.filter((name) => terms[name].edited === true),
+    waiting: waitingCounts(snapshot?.pending ?? []),
+    kinds: Object.fromEntries(
+      names.map((name) => [name, terms[name].term_type || terms[name].kind || ""])
+    )
   };
+}
+
+// What the summary reads from the state besides its payload: which terms
+// carry hand edits and which wait for a refit.
+function selectSummaryMarks(state) {
+  const snapshot = state.remote.snapshot;
+  if (!snapshot) return "";
+  const edited = Object.keys(snapshot.terms).filter((name) => snapshot.terms[name].edited === true);
+  return JSON.stringify([edited, waitingCounts(snapshot.pending ?? [])]);
 }
 
 if (profileDialogClose && profileDialog) {
@@ -1616,6 +1653,16 @@ renderFeatureListState();
 
 bindSummarySearch(summarySearch, (query) => {
   summaryQuery = query;
+  summaryToggled.clear();
+  applySummaryView(summaryNodes());
+});
+bindSummaryFilter(summaryFilterNode, (filter) => {
+  summaryFilter = filter;
+  renderSummaryFilter(summaryFilterNode, filter);
+  applySummaryView(summaryNodes());
+});
+bindSummarySections(summaryFrame, (term, open) => {
+  summaryToggled.set(term, !open);
   applySummaryView(summaryNodes());
 });
 
@@ -1810,6 +1857,11 @@ store.subscribe(
   sameInteractionState,
 );
 store.subscribe(selectSelectionState, renderSelectionState, sameSelectionState);
+store.subscribe(selectActiveTermName, () => {
+  summaryToggled.clear();
+  applySummaryView(summaryNodes(), { follow: true });
+});
+store.subscribe(selectSummaryMarks, () => applySummaryView(summaryNodes()));
 store.subscribe((state) => state.request.recovery, renderRecovery);
 store.subscribe((state) => state.request.mutation, renderMutationBusy);
 store.subscribe(

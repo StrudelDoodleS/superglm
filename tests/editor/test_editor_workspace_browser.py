@@ -1793,6 +1793,75 @@ def test_summary_search_filters_rows_survives_a_new_payload_and_escape_clears_it
         assert page.locator("#inspector").get_attribute("data-open") == "true"
 
 
+def test_summary_follows_the_chart_and_filters_edited_and_waiting_terms(
+    open_editor_page, choose_feature
+):
+    with open_editor_page(selected_term="territory") as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame tr.summary-section')"""
+        )
+
+        def lines() -> list[str]:
+            return page.locator("#summaryFrame tr.summary-section:not([hidden])").evaluate_all(
+                "rows => rows.map(row => row.dataset.term)"
+            )
+
+        def open_lines() -> list[str]:
+            return page.locator(
+                '#summaryFrame tr.summary-section:not([hidden]) [aria-expanded="true"]'
+            ).evaluate_all("buttons => buttons.map(button => button.dataset.summarySection)")
+
+        # The chart's term is open; every other term is one line.
+        assert lines() == ["curve", "territory", "age_band", "long_category"]
+        assert open_lines() == ["territory"]
+        current = page.locator('#summaryFrame tr.summary-section[data-current="true"]')
+        assert current.get_attribute("data-term") == "territory"
+        # A spline, ordered or not, carries its whole-term test's p on its line; a
+        # categorical has no whole-term test, so its line carries no p chip.
+        chips = page.locator("#summaryFrame tr.summary-section").evaluate_all(
+            "rows => rows.map(row => [row.dataset.term, row.querySelectorAll('.summary-p-chip').length])"
+        )
+        assert chips == [["curve", 1], ["territory", 0], ["age_band", 1], ["long_category", 0]]
+
+        # Another term opens from its line and stays open while the chart stays put.
+        page.locator('#summaryFrame [data-summary-section="age_band"]').click()
+        assert open_lines() == ["territory", "age_band"]
+
+        # The chart moves on: the summary follows it, folds the rest again, and
+        # rewrites only its table body.
+        summary_child = page.locator("#summaryFrame > *").first.element_handle()
+        choose_feature(page, "curve")
+        page.wait_for_function("() => document.querySelector('#status')?.dataset.term === 'curve'")
+        assert open_lines() == ["curve"]
+        assert summary_child.evaluate(
+            "node => node === document.querySelector('#summaryFrame > *')"
+        )
+
+        # A hand edit on curve: Edited keeps it alone, and nothing is waiting.
+        select_chart_tool(page, "Select")
+        _click_selects(page, page.locator('#chart circle.point[data-index="5"]'))
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+            )
+        ):
+            page.locator('button[data-op="shift_up"]').click()
+        edited = page.get_by_role("button", name="Edited", exact=True)
+        edited.click()
+        page.wait_for_function(
+            """() => [...document.querySelectorAll('#summaryFrame tr.summary-section:not([hidden])')]
+                .map(row => row.dataset.term).join() === 'curve'"""
+        )
+        assert edited.get_attribute("aria-pressed") == "true"
+        page.get_by_role("button", name="Waiting", exact=True).click()
+        assert lines() == []
+        assert page.locator("#summaryFrame .summary-empty-row").inner_text() == "No terms match."
+        page.get_by_role("button", name="All", exact=True).click()
+        assert lines() == ["curve", "territory", "age_band", "long_category"]
+
+
 def test_context_bar_reports_term_kind_and_edf(open_editor_page):
     with open_editor_page(selected_term="curve") as (page, _session):
         context = page.get_by_role("region", name="Term context")

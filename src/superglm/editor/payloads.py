@@ -28,6 +28,7 @@ def session_payload(
     # link-scale session state to relativity-scale display arrays and includes
     # only JSON-safe primitives.
     payload: dict[str, dict[str, Any]] = {}
+    edited = set(session.edited_terms())
     for name, term in session.terms.items():
         x_values = list(range(term.size)) if term.x is None else [float(v) for v in term.x]
         weights = _term_weights(term)
@@ -62,6 +63,7 @@ def session_payload(
             "shape": shape_payload(session.model, name, term.metadata.get("shape_support")),
             "pending": _pending_term_payload(session, name),
             "effective_df": _finite_float(term.metadata.get("edf")),
+            "edited": name in edited,
             "x_label": name,
             "y_label": "relativity",
             "title": name,

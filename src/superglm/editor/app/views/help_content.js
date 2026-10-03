@@ -201,6 +201,8 @@ export const HELP_SECTIONS = Object.freeze([
     title: "Summary",
     items: Object.freeze([
       "The search box at the top of Summary keeps the terms and levels whose names contain the text, ignoring case, and counts what it found. Escape clears it. The full summary below the table is not searched.",
+      "All, Edited and Waiting show every term, the terms with hand edits, or the terms with changes waiting for refit.",
+      "Summary follows the chart: the chart's term opens and scrolls into view, and the others fold to one line with their kind, EDF and any changes waiting for refit. A spline's line also shows the p-value of its whole-term test; a categorical term has no whole-term test, so its line shows none. Open any term from its line until the chart shows another; a search opens every term it finds.",
     ]),
   }),
   Object.freeze({

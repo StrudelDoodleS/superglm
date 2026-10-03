@@ -162,6 +162,8 @@
  * @property {Array<{label:string, indices:number[]}>} [level_groups]
  * @property {TermShape} shape
  * @property {TermPending|null} [pending]
+ * @property {boolean} [edited] whether the term carries hand edits
+ *   (Python's `EditorSession.edited_terms()`)
  */
 /**
  * What Undo and Redo would take next, edits and structural steps alike; null

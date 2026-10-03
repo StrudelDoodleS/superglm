@@ -360,6 +360,93 @@ test("the inspector search is reapplied on every render and marks its matches", 
   assert.equal(nodes.summarySearchCount.textContent, "");
 });
 
+test("the chart's term is open and every other term folds to one line", () => {
+  /** @type {import("../../src/superglm/editor/app/views/summary_view.js").SummaryView} */
+  const view = {
+    query: "",
+    termNames: ["age", "region", "bonus"],
+    currentTerm: "bonus",
+    kinds: { age: "spline", region: "categorical", bonus: "categorical" },
+    waiting: { region: 1 }
+  };
+  const nodes = { ...compactSummaryNodes(), summaryView: () => view };
+  // A spline ahead of the categoricals: its whole-term test gives its line a p chip.
+  const payload = bonusSummary();
+  /** @type {Array<Record<string, unknown>>} */ (payload.compact.rows).unshift({
+    name: "age", group: "age", kind: "spline", edf: 3.2, p_value: 2e-5,
+    sig_class: "sig-strong", sig_code: "***"
+  });
+
+  renderSummary(payload, nodes);
+  const markup = nodes.summaryFrame.innerHTML;
+
+  assert.match(
+    markup,
+    /<tr class="summary-group-row summary-section" data-term="region" data-current="false">/
+  );
+  assert.match(markup, /data-summary-section="region" aria-expanded="false"/);
+  assert.match(markup, /<span class="summary-section-kind">categorical<\/span><span class="summary-waiting">1 waiting<\/span>/);
+  assert.match(markup, /<tr class="summary-row sig-reference" data-term="region" hidden>/);
+  assert.match(markup, /data-summary-section="bonus" aria-expanded="true"/);
+  assert.match(
+    markup,
+    /<span class="summary-p-chip sig-strong" title="p-value of the whole-term test">&lt;0\.001 \*\*\*<\/span>/
+  );
+  assert.doesNotMatch(markup, /data-term="bonus" hidden/);
+
+  // Opened by hand, a folded term shows its rows; the chart's term may be closed.
+  view.toggled = new Map([["region", true], ["bonus", false]]);
+  applySummaryView(nodes);
+  assert.match(nodes.summaryFrame.innerHTML, /<tr class="summary-row sig-reference" data-term="region">/);
+  assert.match(nodes.summaryFrame.innerHTML, /<tr class="summary-row sig-none" data-term="bonus" hidden>/);
+  // A categorical has no whole-term test, so its folded line carries no p chip.
+  const bonusLine = nodes.summaryFrame.innerHTML.match(/<tr class="summary-group-row summary-section" data-term="bonus".*?<\/tr>/s);
+  assert.ok(bonusLine);
+  assert.match(bonusLine[0], /aria-expanded="false"/);
+  assert.doesNotMatch(bonusLine[0], /summary-p-chip/);
+});
+
+test("the header shows the model as chips and four tiles and steps aside for a search", () => {
+  const view = { query: "", termNames: ["region", "bonus"] };
+  const nodes = {
+    ...compactSummaryNodes(),
+    summaryHeader: { hidden: false },
+    summaryModelChips: { innerHTML: "" },
+    summaryTiles: { innerHTML: "" },
+    summaryView: () => view
+  };
+  const payload = bonusSummary();
+  payload.compact.model = {
+    family: "Poisson",
+    link: "Log",
+    method: "MLE",
+    deviance: 445.3,
+    aic: 1125.7,
+    bic: 1177.3,
+    effective_df: 12.93,
+    log_likelihood: -549.9
+  };
+
+  renderSummary(payload, nodes);
+
+  assert.equal(
+    nodes.summaryModelChips.innerHTML,
+    '<span class="summary-chip">Poisson</span><span class="summary-chip">Log link</span>'
+      + '<span class="summary-chip">MLE</span>'
+  );
+  const tiles = [...nodes.summaryTiles.innerHTML.matchAll(/<span>([^<]+)<\/span><strong[^>]*>([^<]+)</g)]
+    .map((match) => [match[1], match[2]]);
+  assert.deepEqual(tiles, [
+    ["Deviance", "445.3"], ["AIC", "1125.7"], ["BIC", "1177.3"], ["Total EDF", "12.9"]
+  ]);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /summary-facts|Deviance|Log lik/);
+  assert.equal(nodes.summaryHeader.hidden, false);
+
+  view.query = "bonus";
+  applySummaryView(nodes);
+  assert.equal(nodes.summaryHeader.hidden, true);
+});
+
 test("expanded compact summary shows group indicators without a membership legend", () => {
   const nodes = compactSummaryNodes();
 

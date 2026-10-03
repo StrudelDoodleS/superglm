@@ -486,6 +486,21 @@ def test_a_mean_centred_original_line_stays_put_for_an_untouched_term(region_mod
     )
 
 
+def test_payload_marks_the_terms_that_carry_hand_edits(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    assert {name: term["edited"] for name, term in session_payload(session).items()} == {
+        "region": False,
+        "x": False,
+    }
+    session.select_indices("x", [3, 4])
+    session.shift("x", 0.1)
+    payload = session_payload(session)
+    assert (payload["x"]["edited"], payload["region"]["edited"]) == (True, False)
+    session.undo()
+    assert session_payload(session)["x"]["edited"] is False
+
+
 def test_widget_http_set_reference_returns_transition_envelope(region_model):
     model, _ = region_model
     session = EditorSession.from_model(model, terms=["region"])

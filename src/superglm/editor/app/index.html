@@ -473,6 +473,30 @@
             aria-label="Search terms and levels" autocomplete="off" spellcheck="false">
           <span id="summarySearchCount" class="summary-search-count" aria-live="polite"></span>
         </label>
+        <div class="summary-view-row">
+          <div id="summaryFilter" class="summary-filter" role="group" aria-label="Show terms">
+            <button type="button" data-summary-filter="all" aria-pressed="true">All</button>
+            <button type="button" data-summary-filter="edited" aria-pressed="false">Edited</button>
+            <button type="button" data-summary-filter="waiting" aria-pressed="false">Waiting</button>
+          </div>
+          <span class="summary-follow" tabindex="0" data-popover-title="Follows the chart"
+            data-popover-body="The chart's term opens here and scrolls into view; the others fold to one line. Open any of them until the chart shows another term.">
+            <svg class="summary-follow-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 14.5s4.5-4.6 4.5-8a4.5 4.5 0 0 0-9 0c0 3.4 4.5 8 4.5 8z"></path>
+              <circle cx="8" cy="6.5" r="1.5"></circle>
+            </svg>
+            Follows the chart
+          </span>
+        </div>
+        <div id="summaryHeader" class="summary-header">
+          <div class="summary-header-row">
+            <div id="summaryModelChips" class="summary-model-chips"></div>
+            <button id="refitOffset" type="button">Refit offsets</button>
+            <button id="reprofileTweedie" type="button" hidden>Re-profile p</button>
+            <button id="reprofileNb2" type="button" hidden>Re-estimate theta</button>
+          </div>
+          <div id="summaryTiles" class="summary-tiles"></div>
+        </div>
         <div class="summary-controls">
           <select id="summarySource" hidden>
             <option value="selected">Selected model</option>
@@ -491,9 +515,6 @@
               </label>
             </div>
           </fieldset>
-          <button id="refitOffset" type="button">Refit offsets</button>
-          <button id="reprofileTweedie" type="button" hidden>Re-profile p</button>
-          <button id="reprofileNb2" type="button" hidden>Re-estimate theta</button>
         </div>
         <div class="evidence-status-row">
           <div id="summaryStatus" class="evidence-freshness" aria-live="polite">Loading summary...</div>
