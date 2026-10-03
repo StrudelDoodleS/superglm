@@ -193,8 +193,9 @@
   min-width: 0;
 }
 
+/* The four format cards stay two by two at every width: one card alone on
+   a row would read as apart from the others. */
 @media (max-width: 620px) {
-  .export-format-grid,
   .export-fields,
   .export-actions {
     grid-template-columns: minmax(0, 1fr);

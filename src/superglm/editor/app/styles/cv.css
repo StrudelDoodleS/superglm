@@ -223,6 +223,11 @@
   font-size: 13px;
   font-weight: 600;
 }
+.cv-term-held {
+  grid-column: 2 / -1;
+  color: var(--muted);
+  font-family: var(--font-sans);
+}
 .cv-term[aria-current="true"] {
   background: var(--surface);
   box-shadow: inset 2px 0 0 var(--blue);
@@ -314,6 +319,21 @@
 .cv-chart-svg .is-dimmed { opacity: 0.15; }
 .cv-fold-dot.is-lit { fill-opacity: 1; }
 .cv-fold-line.is-lit { stroke-width: 2.4; stroke-opacity: 1; }
+
+/* The tab takes the report panel's whole width, and the panel scrolls as one
+   page: the header goes up with the cards instead of staying over them. */
+.report-panel[data-report="cv"] {
+  overflow: auto;
+  grid-template-rows: auto auto;
+  align-content: start;
+}
+.report-panel[data-report="cv"] .report-header,
+.report-panel[data-report="cv"] .report-frame {
+  max-width: none;
+}
+.report-panel[data-report="cv"] .report-frame {
+  overflow: visible;
+}
 
 /* Translucent yellow over the dark ground reads dim, as on the editor's
    chart (dark.css), but the strip sits behind fold marks here: 0.55. */

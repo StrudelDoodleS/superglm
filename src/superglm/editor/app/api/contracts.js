@@ -373,6 +373,7 @@
  * @property {CVFoldCurve[]} folds
  * @property {number[]} fit
  * @property {number[]|null} edited
+ * @property {boolean} [held] a hand edit Run CV put back on every fold; it has no spread
  * @property {number|null} spread
  * @property {number|null} min_correlation
  */

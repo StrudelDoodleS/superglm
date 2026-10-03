@@ -15,7 +15,7 @@ Every refusal is a fixed sentence (``editor/errors.py``).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -91,9 +91,10 @@ def waiting_sentence(count: int) -> str:
 
 
 def _not_included(count: int) -> str:
+    """The Final fit note on waiting changes, labelled: the tab shows it beside Run CV's reason."""
     if count == 1:
-        return "1 waiting change is not included."
-    return f"{count} waiting changes are not included."
+        return "Final fit: 1 waiting change is not included."
+    return f"Final fit: {count} waiting changes are not included."
 
 
 @dataclass(frozen=True)
@@ -303,8 +304,10 @@ def _pinned_points(spec, points: NDArray) -> NDArray[np.bool_]:
 def fold_term_items(
     terms: Mapping[str, EditableTerm],
     fold_curves: Mapping[int, Mapping[str, NDArray[np.float64]]],
+    *,
+    held: Collection[str] = (),
 ) -> list[dict[str, Any]]:
-    """One chart entry per term, least stable first.
+    """One chart entry per term, least stable first, then the terms ``held``.
 
     Every curve is re-centred on its exposure-weighted mean log and shown as
     a relativity. A term's ``spread`` is the mean over folds of
@@ -313,6 +316,10 @@ def fold_term_items(
     never saw is a gap (NaN) in that fold's curve, and its distances skip it.
     Each fold's curve keeps its fold number, so a fold missing from a term
     keeps its colour and its place in the tab's charts.
+
+    A term ``held`` is a hand edit Run CV put back on every fold: the same
+    curve on each, so its spread and min r measure nothing. It is marked
+    ``held``, carries neither, and follows the measured terms.
     """
     items = []
     for name, term in terms.items():
@@ -323,12 +330,21 @@ def fold_term_items(
             if name in by_term
         }
         if grid is not None and curves:
-            items.append(_term_item(name, term, grid, curves))
-    items.sort(key=lambda item: (-item["spread"], item["name"]))
+            items.append(_term_item(name, term, grid, curves, held=name in held))
+    items.sort(key=_least_stable_first)
     return items
 
 
-def _term_item(name: str, term: EditableTerm, grid: _TermGrid, curves) -> dict[str, Any]:
+def _least_stable_first(item: dict[str, Any]) -> tuple[bool, float, str]:
+    """Measured terms by falling spread, then the held terms; by name within each."""
+    if item["held"]:
+        return (True, 0.0, item["name"])
+    return (False, -item["spread"], item["name"])
+
+
+def _term_item(
+    name: str, term: EditableTerm, grid: _TermGrid, curves, *, held: bool
+) -> dict[str, Any]:
     weights = (
         np.ones(grid.order.size, dtype=np.float64)
         if term.weights is None
@@ -349,7 +365,7 @@ def _term_item(name: str, term: EditableTerm, grid: _TermGrid, curves) -> dict[s
         return np.exp(values - np.average(values[points], weights=point_weights))
 
     folds = {f"Fold {index + 1}": centred(values) for index, values in curves.items()}
-    vs_mean = _summarize_against_fold_mean(folds, weights)
+    vs_mean = None if held else _summarize_against_fold_mean(folds, weights)
     fit = term.original_log_effect[grid.order]
     edited = term.edited_log_effect[grid.order]
     changed = not np.allclose(edited, fit, rtol=0.0, atol=1e-14)
@@ -365,8 +381,9 @@ def _term_item(name: str, term: EditableTerm, grid: _TermGrid, curves) -> dict[s
         ],
         "fit": centred(fit),
         "edited": centred(edited) if changed else None,
-        "spread": float(vs_mean["rmse_to_mean"].mean()),
-        "min_correlation": float(vs_mean["correlation_to_mean"].min()),
+        "held": held,
+        "spread": None if vs_mean is None else float(vs_mean["rmse_to_mean"].mean()),
+        "min_correlation": None if vs_mean is None else float(vs_mean["correlation_to_mean"].min()),
     }
 
 
@@ -615,7 +632,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
     context.progress("curves")
     return CVRun(
         result=replace(result, pooled_scores=recorder.pooled_scores(), splitter=plan.splitter),
-        terms=fold_term_items(plan.terms, recorder.curves),
+        terms=fold_term_items(plan.terms, recorder.curves, held=plan.edited),
         model_revision=plan.model_revision,
         carried=tuple(sorted(plan.edited)),
     )

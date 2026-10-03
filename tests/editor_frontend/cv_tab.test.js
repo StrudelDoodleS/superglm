@@ -465,6 +465,14 @@ test("a term whose spread could not be measured reads as --", () => {
   assert.equal(count(markup, /<span>--<\/span>/g), 2);
 });
 
+test("a hand-edited term held on every fold reads as held, and says why on hover", () => {
+  const held = { ...age, held: true, spread: null, min_correlation: null };
+  const [measured, edited] = termListMarkup([brand, held], "VehBrand", "").split("<button").slice(1);
+  assert.match(measured, /<span>0\.050<\/span><span>0\.90<\/span>/);
+  assert.match(edited, /<span class="cv-term-held" data-popover-title="Hand-edited"\s+data-popover-body="The same curve on every fold\.">held<\/span>/);
+  assert.doesNotMatch(edited, /--|\d\.\d/);
+});
+
 test("the exposure behind a curve is smooth where the rows sit on whole units", () => {
   // A grid twice as fine as the data: every other point holds no rows.
   const xs = Array.from({ length: 121 }, (_unused, index) => 18 + index / 2);

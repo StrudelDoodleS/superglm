@@ -987,6 +987,8 @@ async function showView(view) {
 function renderAppView(activeView) {
   editorView.hidden = activeView !== "editor";
   reportPanel.hidden = activeView === "editor";
+  // The Cross-validation tab lays the panel out its own way (cv.css).
+  reportPanel.dataset.report = activeView;
 }
 
 function renderChartWorkspace() {

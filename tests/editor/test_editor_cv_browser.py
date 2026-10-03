@@ -48,8 +48,8 @@ def cv_widget():
         widget.close()
 
 
-def _open_cv_tab(chromium_browser, widget):
-    page = chromium_browser.new_page(viewport={"width": 1280, "height": 900})
+def _open_cv_tab(chromium_browser, widget, width: int = 1280):
+    page = chromium_browser.new_page(viewport={"width": width, "height": 900})
     page.goto(widget.app_url, wait_until="domcontentloaded")
     page.locator("#chart path.edited").first.wait_for()
     page.locator("#cvTab").click()
@@ -158,5 +158,76 @@ def test_final_fit_from_the_tab_shows_on_final_fit_and_in_export(cv_widget, chro
         assert "Refitted on 400 train and validation rows" in section.text_content()
         page.locator("#exportAction").click()
         assert page.locator("#exportFinalFit").is_enabled()
+    finally:
+        page.close()
+
+
+def test_the_tab_fills_the_report_panel_and_its_header_scrolls_with_it(cv_widget, chromium_browser):
+    page = _open_cv_tab(chromium_browser, cv_widget, width=1600)
+    try:
+        panel = page.locator("#reportPanel")
+        inner = panel.evaluate(
+            "(node) => node.clientWidth - parseFloat(getComputedStyle(node).paddingLeft)"
+            " - parseFloat(getComputedStyle(node).paddingRight)"
+        )
+        for selector in ("#reportPanel .report-header", "#reportFrame", "#reportFrame .cv-cards"):
+            assert page.locator(selector).bounding_box()["width"] >= inner - 1, selector
+        # The header scrolls away with the cards, so it never sits over them.
+        header = page.locator("#reportPanel .report-header")
+        card = page.locator("#reportFrame .cv-card").first
+        gap = card.bounding_box()["y"] - header.bounding_box()["y"]
+        card.hover()
+        page.mouse.wheel(0, 200)
+        page.wait_for_function(
+            "() => document.querySelector('#reportPanel .report-header')"
+            ".getBoundingClientRect().top < 0",
+            timeout=5000,
+        )
+        assert abs(card.bounding_box()["y"] - header.bounding_box()["y"] - gap) <= 0.5
+    finally:
+        page.close()
+
+
+def test_a_hand_edited_term_reads_held_after_run_cv_and_sorts_last(cv_widget, chromium_browser):
+    with cv_widget._lock:
+        cv_widget.session.select_levels("region", ["B"])
+        cv_widget.session.shift("region", 0.1)
+    page = _open_cv_tab(chromium_browser, cv_widget, width=1600)
+    try:
+        page.locator('#reportFrame [data-cv-start="cv"]').click()
+        page.locator('#reportFrame .cv-card-row[data-origin="run"]').first.wait_for()
+        rows = page.locator("#reportFrame .cv-term")
+        assert rows.locator(".cv-term-name").all_text_contents() == ["age", "region"]
+        held = rows.nth(1).locator(".cv-term-held")
+        assert held.text_content() == "held"
+        assert not any(char.isdigit() for char in rows.nth(1).text_content())
+        held.hover()
+        popover = page.locator("#uiPopover")
+        popover.wait_for(state="visible")
+        assert popover.locator("[data-popover-heading]").inner_text() == "Hand-edited"
+        assert popover.locator("[data-popover-description]").inner_text() == (
+            "The same curve on every fold."
+        )
+    finally:
+        page.close()
+
+
+def _card_rows(page) -> list[int]:
+    """How many export format cards sit on each row, top to bottom."""
+    tops = [
+        round(page.locator(".export-format-card").nth(index).bounding_box()["y"])
+        for index in range(page.locator(".export-format-card").count())
+    ]
+    return [tops.count(top) for top in sorted(set(tops))]
+
+
+def test_the_export_format_cards_never_leave_one_alone_on_a_row(cv_widget, chromium_browser):
+    page = _open_cv_tab(chromium_browser, cv_widget, width=1600)
+    try:
+        page.locator("#exportAction").click()
+        page.locator("#exportDialog .export-format-card").first.wait_for()
+        assert _card_rows(page) in ([2, 2], [4])
+        page.set_viewport_size({"width": 560, "height": 900})
+        assert _card_rows(page) in ([2, 2], [4])
     finally:
         page.close()

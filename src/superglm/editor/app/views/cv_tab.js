@@ -338,6 +338,10 @@ function highlighted(name, query) {
   return `${escapeHTML(name.slice(0, at))}<mark>${escapeHTML(name.slice(at, end))}</mark>${escapeHTML(name.slice(end))}`;
 }
 
+// A hand edit Run CV put back on every fold has no spread to show.
+const HELD = `<span class="cv-term-held" data-popover-title="Hand-edited"
+      data-popover-body="The same curve on every fold.">held</span>`;
+
 /**
  * The term list: name, spread and min r, each term a button that shows its chart.
  * @param {CVTermItem[]} terms @param {string} current @param {string} query
@@ -347,7 +351,7 @@ export function termListMarkup(terms, current, query) {
   return terms.map((term) => `<button type="button" class="cv-term" data-cv-term="${escapeHTML(term.name)}"
       aria-current="${term.name === current}">
       <span class="cv-term-name">${highlighted(term.name, query)}</span>
-      <span>${fixedText(term.spread, 3)}</span><span>${fixedText(term.min_correlation, 2)}</span></button>`).join("");
+      ${term.held ? HELD : `<span>${fixedText(term.spread, 3)}</span><span>${fixedText(term.min_correlation, 2)}</span>`}</button>`).join("");
 }
 
 /**

@@ -757,7 +757,11 @@ def test_run_cv_job_puts_the_hand_edits_back_on_every_fold(cv_frame, cv_fit, fit
     # Every fold carries the edited curve, so the folds agree on region exactly.
     for fold in region["folds"]:
         np.testing.assert_allclose(fold["values"], region["edited"], rtol=64 * _U)
-    assert region["spread"] <= 64 * _U
+    # Its spread measures nothing, so region reads as held, after the measured terms.
+    assert (region["held"], region["spread"], region["min_correlation"]) == (True, None, None)
+    age, held = report["relativities"]["terms"]
+    assert (age["name"], age["held"], held["name"]) == ("age", False, "region")
+    assert age["spread"] > 0.0
 
 
 def test_run_cv_is_refused_with_its_reason(cv_frame, cv_fit):
@@ -786,7 +790,7 @@ def test_run_cv_is_refused_with_its_reason(cv_frame, cv_fit):
         "note": None,
     }
     assert refused == (400, {"error": "Refit first: 1 change is waiting."})
-    assert report["final_fit"]["note"] == "1 waiting change is not included."
+    assert report["final_fit"]["note"] == "Final fit: 1 waiting change is not included."
     report, refused = seen["mismatched"]
     assert report["run_cv"]["reason"] == ROWS_MISMATCH.format(rows=399, expected=400)
     assert refused == (400, {"error": report["run_cv"]["reason"]})
