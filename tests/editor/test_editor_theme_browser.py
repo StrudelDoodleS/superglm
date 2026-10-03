@@ -18,17 +18,17 @@ SWITCH_ANIMATIONS = """() => [...document.querySelectorAll('#themeSwitch, #theme
   .map((node) => getComputedStyle(node))
   .filter((style) => style.animationName !== 'none')
   .map((style) => [style.animationName, parseFloat(style.animationDuration), parseFloat(style.animationDelay)])"""
-# The fade's colour transitions as they run: [element, property, start
-# relative to the knob's keyframes (None while pending), duration in ms].
+# The fade's colour transitions as they run: [element, property, start time
+# (None while pending), duration in ms].
 FADE_TRANSITIONS = """() => {
-  const knob = document.getAnimations().find((a) => a.animationName?.startsWith('theme-knob-'));
   const name = (node) => `${node.tagName.toLowerCase()}#${node.id}.${node.getAttribute('class') ?? ''}`;
   return document.getAnimations()
     .filter((a) => a instanceof CSSTransition && /color|shadow/.test(a.transitionProperty))
-    .map((a) => [name(a.effect.target), a.transitionProperty,
-      a.startTime === null || !knob ? null : a.startTime - knob.startTime, a.effect.getTiming().duration]);
+    .map((a) => [name(a.effect.target), a.transitionProperty, a.startTime, a.effect.getTiming().duration]);
 }"""
-TWO_FRAMES = "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+# Every animation started, then one more frame for a restart to show.
+STARTED = """() => Promise.allSettled(document.getAnimations().map((a) => a.ready))
+  .then(() => new Promise((done) => requestAnimationFrame(done)))"""
 SCHEME = "() => getComputedStyle(document.documentElement).colorScheme"
 # Body text, inherited text in the inspector, and a muted app-bar tab.
 TEXT = """() => ['body', '.inspector', '#validationTab']
@@ -148,8 +148,18 @@ def test_following_the_browser_again_hands_it_the_switch(open_editor_page):
 
 
 def _restarted(fade: list) -> list:
-    """Transitions that did not start with the click's keyframes."""
-    return [row for row in fade if row[2] is None or abs(row[2]) > 1]
+    """Transitions that did not start with the first of them, at the click."""
+    first = min((start for _node, _prop, start, _ms in fade if start is not None), default=None)
+    return [row for row in fade if row[2] is None or row[2] != first]
+
+
+def _slow_motion(page, rate: float) -> None:
+    """Run the page's animations at ``rate`` times their speed, so a loaded
+    machine still reads the fade while it runs."""
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Animation.enable")
+    cdp.send("Animation.setPlaybackRate", {"playbackRate": rate})
+    cdp.detach()
 
 
 def test_a_flip_is_one_cross_fade(open_editor_page):
@@ -159,26 +169,30 @@ def test_a_flip_is_one_cross_fade(open_editor_page):
         _await_theme(page, "light")
         switch = page.get_by_role("switch", name="Dark theme")
 
+        _slow_motion(page, 0.1)
         switch.click()
-        page.evaluate(TWO_FRAMES)
+        page.evaluate(STARTED)
         fade = page.evaluate(FADE_TRANSITIONS)
         assert {"color", "background-color"} <= {prop for _node, prop, _start, _ms in fade}
         assert _restarted(fade) == []
         assert {ms for _node, _prop, _start, ms in fade} == {600}
         # The page keeps its scheme until the knob lands.
         assert page.evaluate(SCHEME) == "light"
+        _slow_motion(page, 1)
         _await_landing(page)
         assert page.evaluate(FADE_TRANSITIONS) == []
         assert page.evaluate(TEXT) == DARK_TEXT
         assert page.evaluate(SCHEME) == "dark"
 
         # Flipped back mid-flip, each colour turns round from where it is.
+        _slow_motion(page, 0.1)
         switch.click()
-        page.evaluate(TWO_FRAMES)
+        page.evaluate(STARTED)
         switch.click()
-        page.evaluate(TWO_FRAMES)
+        page.evaluate(STARTED)
         assert _restarted(page.evaluate(FADE_TRANSITIONS)) == []
         assert page.evaluate(SCHEME) == "dark"
+        _slow_motion(page, 1)
         _await_landing(page)
         assert page.evaluate(FADE_TRANSITIONS) == []
         assert page.evaluate(TEXT) == DARK_TEXT
