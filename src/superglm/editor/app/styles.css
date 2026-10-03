@@ -720,8 +720,13 @@ input[type="number"] {
   border-radius: 50%;
   background: currentColor;
 }
+/* The waiting dot is the feature list's amber; the words take the waiting
+   text colour, which keeps 4.5:1 on the panel in both themes. */
 .history-section.waiting .history-section-title {
-  color: var(--group-0);
+  color: var(--sig-weak-fg);
+}
+.history-section.waiting .history-section-title::before {
+  background: var(--group-0);
 }
 .history-section-hint {
   margin: -2px 2px 4px;

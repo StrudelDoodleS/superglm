@@ -2,7 +2,9 @@
 //
 // Text: WCAG 2.2 contrast, (L1 + 0.05) / (L2 + 0.05) over relative luminance,
 // at least 4.5:1 (success criterion 1.4.3) for every text token on every
-// ground a rule sets it on, in both themes.
+// ground a rule sets it on, in both themes. Every token a rule sets as
+// `color`, and every ground a rule sets beside it, must be listed, so a new
+// one cannot skip the check.
 //
 // Categorical palettes, the slots a chart has to tell apart: every mark at
 // least 3:1 on the chart's ground (1.4.11), and every two neighbouring slots,
@@ -20,7 +22,7 @@
 // label under the axis, the Build's one highlighted basis, the legends.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 /** @typedef {[number, number, number]} Triple */
@@ -116,8 +118,9 @@ function slots(theme, name) {
 // Text tokens and the grounds the stylesheets set them on.
 /** @type {[string, string[]][]} */
 const TEXT_ON_GROUND = [
-  // Body text; the hover ground under hovered rows; .export-format-card when checked.
-  ["--text", ["--surface", "--surface-subtle", "--surface-hover", "--blue-soft"]],
+  // Body text; the hover ground under hovered rows; .export-format-card when
+  // checked; the theme switch's DAY/NIGHT on its track.
+  ["--text", ["--surface", "--surface-subtle", "--surface-hover", "--blue-soft", "--switch-track"]],
   // .history-chip and .se-cell.sig-unknown sit on the hover ground, the
   // checked export card's <small> on blue-soft.
   ["--muted", ["--surface", "--surface-subtle", "--surface-hover", "--blue-soft"]],
@@ -130,13 +133,16 @@ const TEXT_ON_GROUND = [
   ["--worse", ["--surface", "--surface-subtle"]],
   // .app-alert and its buttons.
   ["--danger-text", ["--danger-surface", "--surface"]],
-  // button.primary and .ui-popover, and the popover's secondary line.
-  ["--surface", ["--text", "--primary-hover"]],
+  // button.primary and .ui-popover, the Refit action while changes wait,
+  // and the popover's secondary line.
+  ["--surface", ["--text", "--primary-hover", "--blue"]],
   ["--popover-muted", ["--text"]],
   ["--sig-strong-fg", ["--sig-strong-bg"]],
   ["--sig-medium-fg", ["--sig-medium-bg"]],
   ["--sig-standard-fg", ["--sig-standard-bg"]],
-  ["--sig-weak-fg", ["--sig-weak-bg"]],
+  // Waiting chips; the status line's and History's waiting text on the
+  // workspace and the panel.
+  ["--sig-weak-fg", ["--sig-weak-bg", "--surface", "--surface-subtle"]],
   ["--sig-none-fg", ["--sig-none-bg"]],
 ];
 
@@ -151,6 +157,30 @@ test("every text token keeps 4.5:1 on every ground it is set on, in both themes"
     }
   }
   assert.deepEqual(failures, []);
+});
+
+const STYLESHEETS = [
+  "styles.css",
+  ...readdirSync(new URL("../../src/superglm/editor/app/styles/", import.meta.url))
+    .filter((name) => name.endsWith(".css"))
+    .map((name) => `styles/${name}`),
+];
+
+test("the text check lists every text colour and text ground the stylesheets set", () => {
+  const gated = new Map(TEXT_ON_GROUND.map(([text, grounds]) => [text, new Set(grounds)]));
+  const missing = [];
+  for (const file of STYLESHEETS) {
+    const css = appFile(file).replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const text = /(?<![-\w])color\s*:\s*var\((--[\w-]+)\)/.exec(body)?.[1];
+      if (!text) continue;
+      const ground = /(?<![-\w])background(?:-color)?\s*:\s*var\((--[\w-]+)\)\s*(?:;|$)/.exec(body)?.[1];
+      const rule = `${file}: ${selector.trim().replace(/\s+/g, " ")}`;
+      if (!gated.has(text)) missing.push(`${text} (${rule})`);
+      else if (ground && !gated.get(text)?.has(ground)) missing.push(`${text} on ${ground} (${rule})`);
+    }
+  }
+  assert.deepEqual(missing, []);
 });
 
 test("the dark categorical palettes keep neighbours apart in colour and in lightness", () => {
