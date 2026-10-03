@@ -282,6 +282,26 @@ class TestGroupedDeclared:
         with pytest.raises(ValueError, match="not covered by the grouping"):
             Categorical(levels=["a", "b", "c"], grouping=grouping)
 
+    def test_grouping_may_not_cover_labels_the_declared_universe_leaves_out(self):
+        # A label the grouping maps but levels= leaves out was fitted and scored
+        # through its group, though the declaration says it is not a level.
+        grouping = collapse_levels(["A", "B", "C", "D"], groups={"Other": ["C", "D"]})
+        with pytest.raises(ValueError) as refused:
+            Categorical(levels=["A", "B", "C"], grouping=grouping)
+        assert str(refused.value) == (
+            "grouping= covers labels that levels= leaves out: ['D']. Add them to levels=, "
+            "or build the grouping from the declared levels only."
+        )
+
+    def test_integer_levels_are_matched_to_the_grouping_by_their_text(self):
+        # The grouping keys raw labels as text, so 10 is the grouping's "10".
+        declared = [1, 2, 10]
+        exact = collapse_levels([1, 2, 10], groups={"Two+": ["2", "10"]})
+        assert Categorical(levels=declared, grouping=exact)._declared_levels == declared
+        wider = collapse_levels([1, 2, 10, 11], groups={"Two+": ["2", "10", "11"]})
+        with pytest.raises(ValueError, match=r"leaves out: \['11'\]\."):
+            Categorical(levels=declared, grouping=wider)
+
     def test_declared_raws_become_the_grouping_image(self):
         # 'd' is declared and absent, so it pins; 'c' is present, so the term
         # keeps an estimable non-base level and the build is identified.

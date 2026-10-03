@@ -99,9 +99,25 @@ def rebuilt_categorical(
     return Categorical(
         base=base,
         grouping=grouping,
-        levels=spec._declared_levels if levels is None else levels,
+        levels=_declared_universe(spec, grouping) if levels is None else levels,
         unseen=spec.unseen if unseen is None else unseen,
     )
+
+
+def _declared_universe(spec: Categorical, grouping) -> list | None:
+    """The universe a rebuild of ``spec`` declares: its own, widened when a frame bound it.
+
+    A universe bound from a frame or a dtype is not a declaration: the term
+    accepted every label its grouping maps, those the frame lacks included.
+    The rebuilt term declares its universe, and a declaration names every
+    label its grouping maps, so those labels follow the bound ones, which
+    keep their order and so the design's.
+    """
+    declared = spec._declared_levels
+    if declared is None or grouping is None or spec._level_source == "declared":
+        return declared
+    named = {str(level) for level in declared}
+    return [*declared, *(raw for raw in grouping.all_original_levels if raw not in named)]
 
 
 def _native_levels(spec: Categorical, fitted: Categorical, data) -> dict[str, Any]:

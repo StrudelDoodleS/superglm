@@ -257,7 +257,8 @@ class Categorical:
         Collapse original levels into groups before fitting.
     levels : list | tuple | Series | ndarray | CategoricalDtype, optional
         The level universe to bind to (spec 2026-08-11, §3.1).  With a
-        ``grouping`` this declares the RAW, pre-collapse universe.  Levels with
+        ``grouping`` this declares the RAW, pre-collapse universe, and the
+        grouping must cover exactly these levels.  Levels with
         no training rows are pinned to base rather than dropped; training rows
         outside the universe are an error.
     unseen : str
@@ -328,6 +329,17 @@ class Categorical:
                     f"levels= contains labels not covered by the grouping: "
                     f"{sorted(uncovered, key=str)}. Build the grouping from the "
                     f"full column so every declared level maps somewhere."
+                )
+            # And the other way: a label the grouping maps but levels= leaves
+            # out would be fitted and scored through its group, though the
+            # declaration says it is not a level.
+            declared = {str(lev) for lev in self._declared_levels}
+            undeclared = [raw for raw in grouping.original_to_group if raw not in declared]
+            if undeclared:
+                raise ValueError(
+                    f"grouping= covers labels that levels= leaves out: "
+                    f"{sorted(undeclared, key=str)}. Add them to levels=, or build the "
+                    f"grouping from the declared levels only."
                 )
         self._levels: list = []
         self._base_level: str = ""

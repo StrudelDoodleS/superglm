@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Spline, SuperGLM
+from superglm import Categorical, Spline, SuperGLM, collapse_levels
 from superglm.editor import EditorSession
 from superglm.editor import session as session_module
 from superglm.editor import staging as staging_module
@@ -224,6 +224,32 @@ def test_collapse_and_ungroup_keep_the_level_universe_and_the_unseen_policy():
     )
     for spec in (collapsed, ungrouped):
         assert (spec._declared_levels, spec.unseen) == (declared, "base")
+
+
+def test_a_collapse_on_a_frame_bound_universe_declares_the_labels_its_grouping_maps():
+    # bind_levels binds the frame's labels, A, B and C; the grouping also maps
+    # D, which the frame lacks, and the bound term scores D through its group.
+    # The rebuilt term declares its universe, and a declaration names every
+    # label its grouping maps, so D is declared too and still scores as CD.
+    rng = np.random.default_rng(20261006)
+    brand = rng.choice(["A", "B", "C"], 400)
+    y = 0.5 + 0.1 * (brand == "C") + rng.normal(0.0, 0.05, 400)
+    X = pd.DataFrame({"brand": brand})
+    grouping = collapse_levels(brand, groups={"CD": ["C", "D"]}, order=["A", "B", "C", "D"])
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"brand": Categorical(base="A", grouping=grouping)},
+    ).bind_levels(X)
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["brand"])
+
+    session.stage_structural("collapse", "brand", {"levels": ["A", "B"]})
+    session.refit_pending(method="fit")
+
+    assert session.model._specs["brand"]._declared_levels == ["A", "B", "C", "D"]
+    d, c = session.model.predict(pd.DataFrame({"brand": ["D", "C"]}))
+    assert d == c
 
 
 def test_ungrouping_to_no_groups_gives_an_integer_reference_its_native_type():
