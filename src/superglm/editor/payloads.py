@@ -10,7 +10,12 @@ import numpy as np
 
 from superglm.editor._types import PendingStep, StructuralStep
 from superglm.editor.collapse import KEPT_REFERENCE_ATTRIBUTE
-from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES
+from superglm.editor.controls import (
+    CONTROL_HANDLE_TERM_TYPES,
+    OrderedSplineGeometry,
+    ordered_control_points,
+    spline_fits_levels,
+)
 from superglm.editor.group_display import build_group_display
 from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
@@ -35,6 +40,8 @@ def session_payload(
         edit_delta = np.asarray(term.edited_log_effect - term.original_log_effect, dtype=np.float64)
         reference_log_effect = _reference_log_effect(session, name, term)
         ci_lower, ci_upper = _ci_payload(term, edit_delta)
+        n_handles = None if control_counts is None else control_counts.get(name)
+        ordered_controls, spline_view = _ordered_spline_payloads(session, name, term, n_handles)
         term_payload = {
             "kind": term.kind,
             "term_type": str(term.metadata.get("term_type", term.kind)),
@@ -43,12 +50,12 @@ def session_payload(
             "y": [float(v) for v in np.exp(term.edited_log_effect)],
             "original_y": [float(v) for v in np.exp(reference_log_effect)],
             "previous_y": _previous_y(session, name, term),
-            "controls": _controls_payload(
-                session,
-                name,
-                term,
-                None if control_counts is None else control_counts.get(name),
+            "controls": (
+                ordered_controls
+                if spline_view is not None
+                else _controls_payload(session, name, term, n_handles)
             ),
+            "spline_view": spline_view,
             "ci_lower_y": ci_lower,
             "ci_upper_y": ci_upper,
             "weights": weights,
@@ -388,6 +395,10 @@ def _controls_payload(
         controls = session.control_points(name, n_handles=n_handles)
     except TypeError:
         return None
+    return _control_payload(controls)
+
+
+def _control_payload(controls: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "x": [float(v) for v in controls["x"]],
         "y": [float(v) for v in np.exp(controls["log_effect"])],
@@ -406,7 +417,48 @@ def _controls_payload(
         payload["build_log_effect"] = [
             float(v) for v in np.asarray(controls["build_log_effect"], dtype=np.float64)
         ]
+    if "grid_x" in controls:
+        payload["grid_x"] = [float(v) for v in controls["grid_x"]]
     return payload
+
+
+def _ordered_spline_payloads(
+    session, name: str, term, n_handles: int | None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(controls, spline_view)`` for an ordered term with a spline basis.
+
+    ``(None, None)`` for every other term, and no controls with a
+    ``spline_view`` that carries the reason when the handles are off.  The
+    geometry and the coefficients are worked out once for both.
+    """
+    geometry = session.ordered_spline(name)
+    if geometry is None:
+        return None, None
+    if not isinstance(geometry, OrderedSplineGeometry):
+        return None, {
+            "available": False,
+            "reason": geometry,
+            "x": None,
+            "y": None,
+            "original_y": None,
+            "level_indices": None,
+            "fits_levels": False,
+        }
+    coefficients = session.ordered_spline_coefficients(name, geometry)
+    controls = ordered_control_points(geometry, coefficients, n_handles=n_handles)
+    # The fitted curve is the opened model's only while no structural step has
+    # replaced it; after one, the chart joins the original levels instead.
+    in_force_is_original = getattr(session, "reference_model", session.model) is session.model
+    original = geometry.grid_basis @ geometry.fitted if in_force_is_original else None
+    return _control_payload(controls), {
+        "available": True,
+        "reason": None,
+        "x": [float(v) for v in geometry.grid_x],
+        "y": [float(v) for v in np.exp(geometry.grid_basis @ coefficients)],
+        "original_y": None if original is None else [float(v) for v in np.exp(original)],
+        "level_indices": geometry.level_index.astype(int).tolist(),
+        "fits_levels": spline_fits_levels(geometry, term, session.history),
+    }
 
 
 def _handle_indices(term) -> np.ndarray:

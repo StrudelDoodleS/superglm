@@ -26,7 +26,15 @@ from superglm.editor.collapse import (
     ungroup_label,
     ungrouped_feature_spec,
 )
-from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES, control_curve_after_move
+from superglm.editor.controls import (
+    CONTROL_HANDLE_TERM_TYPES,
+    OrderedSplineGeometry,
+    control_curve_after_move,
+    least_change_coefficients,
+    ordered_control_after_move,
+    ordered_control_points,
+    ordered_spline_geometry,
+)
 from superglm.editor.controls import control_points as _control_points
 from superglm.editor.errors import (
     EditorClientError,
@@ -528,8 +536,39 @@ class EditorSession:
     # fitted spline basis directly or fall back to a local monotone cubic curve.
     def control_points(self, term: str, n_handles: int | None = None) -> dict[str, Any]:
         """Return fixed-x spline control handles for advanced curve editing."""
-        editable = self._require_control_term(term)
+        editable, geometry = self._require_control_term(term)
+        if geometry is not None:
+            coefficients = self.ordered_spline_coefficients(term, geometry)
+            return ordered_control_points(geometry, coefficients, n_handles=n_handles)
         return _control_points(self.model, editable, n_handles=n_handles)
+
+    def ordered_spline(self, term: str) -> OrderedSplineGeometry | str | None:
+        """The fitted spline of an ordered term on its level axis.
+
+        ``None`` unless the term is an ordered categorical with a spline basis;
+        a fixed sentence when its handles are off.
+        """
+        return ordered_spline_geometry(self.model, self._require_term(term))
+
+    def ordered_spline_coefficients(self, term: str, geometry: OrderedSplineGeometry) -> NDArray:
+        """The spline coefficients behind an ordered term's current level effects.
+
+        Starts from the coefficients the latest handle move on the term wrote,
+        else the fit's, and keeps them wherever the edits since allow
+        (``least_change_coefficients``).  Undo and Redo move the history, so
+        the handles follow them.
+        """
+        prior = next(
+            (
+                record.params["coefficients"]
+                for record in reversed(self.history)
+                if record.term == term and "coefficients" in record.params
+            ),
+            None,
+        )
+        return least_change_coefficients(
+            geometry, self._require_term(term).edited_log_effect, prior
+        )
 
     def move_control_point(
         self,
@@ -540,8 +579,13 @@ class EditorSession:
         n_handles: int | None = None,
     ) -> EditorSession:
         """Move one spline control handle vertically and refit the displayed curve."""
-        editable = self._require_control_term(term)
+        editable, geometry = self._require_control_term(term)
         handle_index = int(handle_index)
+        if geometry is not None:
+            self._move_ordered_spline_handle(
+                term, geometry, handle_index, float(log_effect), n_handles=n_handles
+            )
+            return self
         before = editable.edited_log_effect.copy()
         after, metadata = control_curve_after_move(
             self.model,
@@ -564,6 +608,42 @@ class EditorSession:
             },
         )
         return self
+
+    def _move_ordered_spline_handle(
+        self,
+        term: str,
+        geometry: OrderedSplineGeometry,
+        handle_index: int,
+        log_effect: float,
+        *,
+        n_handles: int | None,
+    ) -> None:
+        """Set one coefficient, and every smooth level to the spline it draws.
+
+        The levels become ``B(level positions) @ c``. Special levels have no
+        place on the spline, so the edit leaves them alone. The record keeps
+        the coefficients, so the next handle starts from them.
+        """
+        coefficients = self.ordered_spline_coefficients(term, geometry)
+        moved, column = ordered_control_after_move(
+            geometry, coefficients, handle_index, log_effect, n_handles=n_handles
+        )
+        smooth = geometry.level_index
+        self._commit(
+            term,
+            "control_point",
+            smooth,
+            self.terms[term].edited_log_effect[smooth].copy(),
+            geometry.level_basis @ moved,
+            {
+                "handle_index": handle_index,
+                "log_effect": log_effect,
+                "basis": "ordered_spline",
+                "basis_index": column,
+                "x": float(geometry.handle_x[column]),
+                "coefficients": [float(value) for value in moved],
+            },
+        )
 
     def undo(self, term: str | None = None) -> EditorSession:
         """Undo the latest action, in time: an edit, a waiting change or an applied step.
@@ -1486,13 +1566,19 @@ class EditorSession:
                 index_groups[index] = member_group
         return index_groups
 
-    def _require_control_term(self, term: str) -> EditableTerm:
+    def _require_control_term(self, term: str) -> tuple[EditableTerm, OrderedSplineGeometry | None]:
+        """The term and, for an ordered spline, its geometry; refuse a term without handles."""
         editable = self._require_term(term)
+        geometry = ordered_spline_geometry(self.model, editable)
+        if isinstance(geometry, OrderedSplineGeometry):
+            return editable, geometry
+        if isinstance(geometry, str):
+            raise EditorTypeError(geometry)
         if editable.x is None or editable.levels is not None:
             raise EditorTypeError(f"Term {term!r} does not expose spline control handles.")
         if str(editable.metadata.get("term_type", editable.kind)) not in CONTROL_HANDLE_TERM_TYPES:
             raise EditorTypeError(f"Term {term!r} does not expose spline control handles.")
-        return editable
+        return editable, None
 
     def _apply_level_order(
         self,
