@@ -1748,6 +1748,51 @@ def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):
         assert page.evaluate("document.documentElement.dataset.summarySandboxEscape") is None
 
 
+def test_summary_search_filters_rows_survives_a_new_payload_and_escape_clears_it(
+    open_editor_page,
+):
+    with open_editor_page(selected_term="territory") as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelectorAll('#summaryFrame .summary-row').length > 0"""
+        )
+        search = page.get_by_role("searchbox", name="Search terms and levels")
+
+        def shown_rows() -> list[str]:
+            return page.locator("#summaryFrame tr.summary-row:not([hidden])").evaluate_all(
+                "rows => rows.map(row => row.querySelector('.summary-term span').textContent)"
+            )
+
+        # T01..T10 are text: "t1" is in T10 only, and in no term's name.
+        search.fill("t1")
+        assert shown_rows() == ["territory[T10]"]
+        marks = page.locator("#summaryFrame tr.summary-row:not([hidden]) mark")
+        assert marks.all_inner_texts() == ["T1"]
+        assert page.locator("#summarySearchCount").inner_text() == "1 term · 1 row"
+
+        # A new payload rebuilds the frame, and the search is applied to it.
+        grouped = page.get_by_role("group", name="Categorical levels").get_by_role(
+            "radio", name="Grouped"
+        )
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/summary")
+            )
+        ):
+            grouped.check()
+        page.wait_for_function(
+            "() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'"
+        )
+        assert shown_rows() == ["territory[T10]"]
+
+        search.press("Escape")
+        assert search.input_value() == ""
+        assert page.locator("#summarySearchCount").inner_text() == ""
+        assert len([row for row in shown_rows() if row.startswith("territory[")]) == 10
+        assert page.locator("#inspector").get_attribute("data-open") == "true"
+
+
 def test_context_bar_reports_term_kind_and_edf(open_editor_page):
     with open_editor_page(selected_term="curve") as (page, _session):
         context = page.get_by_role("region", name="Term context")

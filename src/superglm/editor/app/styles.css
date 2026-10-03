@@ -516,6 +516,54 @@ input[type="number"] {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
+/* The inspector's search: icon, box and count in one field. */
+.summary-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  margin-bottom: 8px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--muted);
+}
+.summary-search:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px var(--blue-band);
+}
+.summary-search-icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+.summary-search input[type="search"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+}
+.summary-search-count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.summary-frame mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--yellow) 45%, transparent);
+  color: inherit;
+}
 #summaryStatus {
   color: var(--muted);
   font-size: 12px;

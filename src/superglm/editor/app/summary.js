@@ -1,6 +1,13 @@
 import { requestJSON } from "./api.js";
 import { escapeHTML, fmt } from "./format.js";
 import { SHAPE_NAMES } from "./shapes.js";
+import {
+  DEFAULT_SUMMARY_VIEW,
+  highlightMatches,
+  highlightRowName,
+  summaryCountText,
+  summaryViewModel
+} from "./views/summary_view.js";
 
 /** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
 /** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
@@ -9,6 +16,8 @@ import { SHAPE_NAMES } from "./shapes.js";
 
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
 const summaryMarkupByFrame = new WeakMap();
+// The payload each frame shows, so a change of view can redraw it unfetched.
+const summaryPayloadByFrame = new WeakMap();
 
 export async function refreshSummary(nodes, { request = requestJSON } = {}) {
   const { summarySource, summaryStatus, summaryFrame } = nodes;
@@ -258,6 +267,7 @@ export function revertTransition() {
 
 export function renderSummary(payload, nodes) {
   const { summaryStatus, summaryNote, summaryFrame } = nodes;
+  summaryPayloadByFrame.set(summaryFrame, payload);
   updateDistributionProfileActions(payload, nodes);
   if (!payload.available) {
     summaryStatus.textContent = payload.label || "Summary";
@@ -266,16 +276,73 @@ export function renderSummary(payload, nodes) {
       summaryFrame,
       `<div class="summary-empty">${escapeHTML(payload.error || "Summary unavailable.")}</div>`
     );
+    renderSearchCount(nodes, "");
     return;
   }
   summaryStatus.textContent = payload.label || "Summary";
   summaryNote.textContent = payload.note || "";
   // Prefer the typed compact payload for the immediate panel. The raw HTML is
-  // still included inside the disclosure for full notebook-style detail.
+  // still included inside the disclosure for full notebook-style detail. The
+  // inspector's search is part of the markup, so every render reapplies it.
+  const view = summaryViewOf(nodes);
+  const viewModel = payload.compact ? compactViewModel(payload.compact, view) : null;
   updateSummaryMarkup(
     summaryFrame,
-    payload.compact ? renderCompactSummary(payload) : payload.html || ""
+    viewModel ? renderCompactSummary(payload, viewModel, view.query) : payload.html || ""
   );
+  renderSearchCount(nodes, viewModel ? summaryCountText(viewModel, view.query) : "");
+}
+
+/**
+ * Redraw the summary on show for the inspector's current search. With the
+ * compact table in the DOM only its body is rewritten, so an open "Full
+ * summary" keeps its frame; otherwise the last payload is rendered again.
+ */
+export function applySummaryView(nodes) {
+  const { summaryFrame } = nodes;
+  const payload = summaryPayloadByFrame.get(summaryFrame);
+  const shown = summaryMarkupByFrame.get(summaryFrame);
+  // Only a frame still holding its last render is redrawn: one emptied while
+  // the other level display loads waits for that payload.
+  if (!payload || !shown || shown.firstElementChild !== summaryFrame.firstElementChild) return;
+  const body = payload.available && payload.compact && typeof summaryFrame.querySelector === "function"
+    ? summaryFrame.querySelector(".summary-table tbody")
+    : null;
+  if (!body) {
+    renderSummary(payload, nodes);
+    return;
+  }
+  const view = summaryViewOf(nodes);
+  const viewModel = compactViewModel(payload.compact, view);
+  body.innerHTML = renderSummaryBody(
+    compactRows(payload.compact),
+    viewModel,
+    payload.compact.has_level_groups === true,
+    view.query
+  );
+  renderSearchCount(nodes, summaryCountText(viewModel, view.query));
+  // The frame now holds what a full render for this view writes, so a later
+  // render of the same payload and view leaves the DOM alone.
+  summaryMarkupByFrame.set(summaryFrame, {
+    markup: renderCompactSummary(payload, viewModel, view.query),
+    firstElementChild: summaryFrame.firstElementChild
+  });
+}
+
+function summaryViewOf(nodes) {
+  return typeof nodes.summaryView === "function" ? nodes.summaryView() : DEFAULT_SUMMARY_VIEW;
+}
+
+function compactRows(compact) {
+  return Array.isArray(compact.rows) ? compact.rows : [];
+}
+
+function compactViewModel(compact, view) {
+  return summaryViewModel(compactRows(compact), view);
+}
+
+function renderSearchCount(nodes, text) {
+  if (nodes.summarySearchCount) nodes.summarySearchCount.textContent = text;
 }
 
 function updateSummaryMarkup(summaryFrame, markup) {
@@ -529,12 +596,11 @@ function formatProfileNumber(value) {
   return number.toPrecision(4);
 }
 
-function renderCompactSummary(payload) {
+function renderCompactSummary(payload, viewModel, query) {
   const compact = payload.compact || {};
   const model = compact.model || {};
-  const rows = Array.isArray(compact.rows) ? compact.rows : [];
+  const rows = compactRows(compact);
   const hasLevelGroups = compact.has_level_groups === true;
-  const columnCount = hasLevelGroups ? 8 : 7;
   const facts = [
     ["Family", model.family],
     ["Link", model.link],
@@ -573,7 +639,7 @@ function renderCompactSummary(payload) {
           </tr>
         </thead>
         <tbody>
-          ${renderSummaryRows(rows, hasLevelGroups, columnCount)}
+          ${renderSummaryBody(rows, viewModel, hasLevelGroups, query)}
         </tbody>
       </table>
       ${renderLevelGroupLegends(compact)}
@@ -600,25 +666,23 @@ function renderRawSummaryFrame(html) {
   `;
 }
 
-function renderSummaryRows(rows, hasLevelGroups, columnCount) {
-  let previousGroup = "";
-  return rows.map((row) => {
-    const group = summaryRowGroup(row);
-    const showGroup = group && group !== previousGroup && group !== "Intercept";
-    previousGroup = group || previousGroup;
-    const groupRow = showGroup
-      ? `<tr class="summary-group-row"><td colspan="${columnCount}">${escapeHTML(group)}</td></tr>`
+// One header row per term, then its rows. Rows and headers outside the
+// search stay in the markup, hidden, each tagged with its term.
+function renderSummaryBody(rows, viewModel, hasLevelGroups, query) {
+  const columnCount = hasLevelGroups ? 8 : 7;
+  return viewModel.sections.map((section) => {
+    const groupRow = section.header
+      ? `<tr class="summary-group-row" data-term="${escapeHTML(section.term)}"${section.hidden ? " hidden" : ""}><td colspan="${columnCount}">${highlightMatches(section.label, query)}</td></tr>`
       : "";
-    return `${groupRow}${renderSummaryRow(row, hasLevelGroups)}`;
+    const sectionRows = section.rows.map((entry) => renderSummaryRow(
+      rows[entry.index],
+      hasLevelGroups,
+      section.term,
+      query,
+      entry.hidden
+    ));
+    return groupRow + sectionRows.join("");
   }).join("");
-}
-
-function summaryRowGroup(row) {
-  const group = row && row.group ? String(row.group) : "";
-  if (group) return group;
-  const name = row && row.name ? String(row.name) : "";
-  const bracket = name.indexOf("[");
-  return bracket > 0 ? name.slice(0, bracket) : name;
 }
 
 function renderSummaryFact(label, value) {
@@ -635,17 +699,17 @@ function renderSummaryFact(label, value) {
 // added here, instead of silently rendering as a spline or as nothing at all.
 const GROUP_ROW_KINDS = new Set(["spline", "piecewise"]);
 
-function renderSummaryRow(row, hasLevelGroups) {
+function renderSummaryRow(row, hasLevelGroups, term, query, hidden) {
   // SE cell color is data-driven from Python's significance class. The browser
   // never infers significance from display text.
   const sigClass = safeSigClass(row.sig_class);
   const levelGroupCell = hasLevelGroups
-    ? `<td class="summary-level-group">${escapeHTML(row.level_group || "")}</td>`
+    ? `<td class="summary-level-group">${highlightMatches(String(row.level_group || ""), query)}</td>`
     : "";
   return `
-    <tr class="summary-row ${sigClass}">
+    <tr class="summary-row ${sigClass}" data-term="${escapeHTML(term)}"${hidden ? " hidden" : ""}>
       <td class="summary-term">
-        <span>${escapeHTML(row.name || "")}</span>
+        <span>${highlightRowName(String(row.name || ""), term, query)}</span>
         ${GROUP_ROW_KINDS.has(row.kind) ? `<em>${escapeHTML(row.kind)}</em>` : ""}
       </td>
       ${levelGroupCell}

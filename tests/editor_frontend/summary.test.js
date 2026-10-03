@@ -9,6 +9,7 @@ import {
 
 const summaryModulePath = "../../src/superglm/editor/app/summary.js";
 const {
+  applySummaryView,
   refitAtOnceTransition,
   refitPendingTransition,
   refreshSummary,
@@ -291,6 +292,72 @@ test("rendering unchanged summary markup preserves the existing table DOM", () =
 
   assert.equal(writes, 2);
   assert.match(markup, /Unavailable/);
+});
+
+/** A compact summary with integer-typed levels, as Python prints them. */
+function bonusSummary() {
+  /**
+   * @param {string} name @param {string} group @param {string} sigClass
+   * @param {Record<string, unknown>} [extra]
+   */
+  const row = (name, group, sigClass, extra = {}) => ({
+    name, group, kind: "coef", sig_class: sigClass, ...extra
+  });
+  return {
+    available: true,
+    label: "Summary",
+    html: "",
+    compact: {
+      model: {},
+      level_display: "expanded",
+      has_level_groups: false,
+      level_groups: [],
+      rows: [
+        row("region[A]", "region", "sig-reference", { kind: "reference" }),
+        row("bonus[1]", "bonus", "sig-reference", { kind: "reference" }),
+        row("bonus[2]", "bonus", "sig-none", { coef: 0.1, p_value: 0.2 }),
+        row("bonus[10]", "bonus", "sig-medium", { coef: 0.3, p_value: 0.004, sig_code: "**" })
+      ]
+    }
+  };
+}
+
+test("the inspector search is reapplied on every render and marks its matches", () => {
+  const view = { query: "1", termNames: ["region", "bonus"] };
+  const nodes = {
+    ...compactSummaryNodes(),
+    summarySearchCount: { textContent: "" },
+    summaryView: () => view
+  };
+  const payload = bonusSummary();
+
+  renderSummary(payload, nodes);
+  const first = nodes.summaryFrame.innerHTML;
+  assert.match(first, /<tr class="summary-row sig-reference" data-term="bonus">/);
+  assert.match(first, /bonus\[<mark>1<\/mark>\]/);
+  assert.match(first, /bonus\[<mark>1<\/mark>0\]/);
+  assert.match(first, /<tr class="summary-row sig-none" data-term="bonus" hidden>/);
+  assert.match(first, /<tr class="summary-group-row[^"]*" data-term="region"[^>]* hidden>/);
+  assert.equal(nodes.summarySearchCount.textContent, "1 term · 2 rows");
+
+  // A refit sends a new payload; the frame is rebuilt and the search holds.
+  const refit = bonusSummary();
+  refit.html = "<p>Refitted</p>";
+  renderSummary(refit, nodes);
+  assert.notEqual(nodes.summaryFrame.innerHTML, first);
+  assert.match(nodes.summaryFrame.innerHTML, /<tr class="summary-row sig-none" data-term="bonus" hidden>/);
+
+  // A new query redraws the last payload without fetching it again.
+  view.query = "10";
+  applySummaryView(nodes);
+  assert.match(nodes.summaryFrame.innerHTML, /bonus\[<mark>10<\/mark>\]/);
+  assert.match(nodes.summaryFrame.innerHTML, /<tr class="summary-row sig-reference" data-term="bonus" hidden>/);
+  assert.equal(nodes.summarySearchCount.textContent, "1 term · 1 row");
+
+  view.query = "";
+  applySummaryView(nodes);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, / hidden>|<mark>/);
+  assert.equal(nodes.summarySearchCount.textContent, "");
 });
 
 test("expanded compact summary shows group indicators without a membership legend", () => {

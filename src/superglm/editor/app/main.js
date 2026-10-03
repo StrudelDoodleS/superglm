@@ -30,6 +30,7 @@ import {
   createEvidenceTimingTracker
 } from "./state/timing.js";
 import {
+  applySummaryView,
   refitAtOnceTransition,
   refitPendingTransition,
   renderSummary,
@@ -69,6 +70,7 @@ import {
   renderSettingsPane,
   saveSettings
 } from "./views/settings.js";
+import { bindSummarySearch } from "./views/summary_view.js";
 import { mountThemeControl, resolveTheme } from "./views/theme.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
@@ -177,6 +179,9 @@ const summaryStatus = document.getElementById("summaryStatus");
 const summaryRetry = document.getElementById("summaryRetry");
 const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
+const summarySearch = document.getElementById("summarySearch");
+const summarySearchCount = document.getElementById("summarySearchCount");
+let summaryQuery = "";
 const settingsTiming = document.getElementById("settingsTiming");
 const settingsNodes = Object.freeze({
   root: document.getElementById("settingsPane"),
@@ -517,7 +522,19 @@ function summaryNodes() {
     ungroupLevels,
     summaryStatus,
     summaryNote,
-    summaryFrame
+    summaryFrame,
+    summarySearchCount,
+    summaryView
+  };
+}
+
+// What the inspector shows of the summary; summary.js reapplies it on every
+// render, so a refit or a new payload keeps the search.
+function summaryView() {
+  const snapshot = store.getState().remote.snapshot;
+  return {
+    query: summaryQuery,
+    termNames: snapshot ? Object.keys(snapshot.terms) : []
   };
 }
 
@@ -1596,6 +1613,11 @@ bindFeatureList(featureListNodes, {
   }
 });
 renderFeatureListState();
+
+bindSummarySearch(summarySearch, (query) => {
+  summaryQuery = query;
+  applySummaryView(summaryNodes());
+});
 
 if (groupDisplayMode) {
   groupDisplayMode.addEventListener("change", () => {

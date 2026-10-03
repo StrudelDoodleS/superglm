@@ -464,6 +464,15 @@
       </div>
       <div id="summaryPane" class="sidepanel-pane" role="tabpanel" aria-labelledby="summaryTab"
         data-inspector-pane="summary">
+        <label class="summary-search">
+          <svg class="summary-search-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.5"></circle>
+            <path d="m10.5 10.5 3.5 3.5"></path>
+          </svg>
+          <input id="summarySearch" type="search" placeholder="Search terms and levels"
+            aria-label="Search terms and levels" autocomplete="off" spellcheck="false">
+          <span id="summarySearchCount" class="summary-search-count" aria-live="polite"></span>
+        </label>
         <div class="summary-controls">
           <select id="summarySource" hidden>
             <option value="selected">Selected model</option>

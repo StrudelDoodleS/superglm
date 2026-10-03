@@ -198,6 +198,12 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    title: "Summary",
+    items: Object.freeze([
+      "The search box at the top of Summary keeps the terms and levels whose names contain the text, ignoring case, and counts what it found. Escape clears it. The full summary below the table is not searched.",
+    ]),
+  }),
+  Object.freeze({
     title: "Model structure",
     keys: Object.freeze(Object.keys(STRUCTURE_HELP)),
   }),
