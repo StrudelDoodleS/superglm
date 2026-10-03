@@ -269,7 +269,7 @@ then its task, then the contract amendments of the task's section.
 | 5 | D1 → D2 → K1a → K1b |
 | 6 | I1, I2 → I3 |
 | 7 | G1 → G2 → G3 → G4 → G5 |
-| 7b | M1 → M2 |
+| 7b | M1 → M2: **deferred** (Max, 2026-10-03: "We don't have to worry about splitting main js for now"); not run in this build |
 | 8 | Z1 |
 
 I1 has no dependencies and may run at any point. Every other frontend task
@@ -25768,7 +25768,7 @@ EOF
 - `status(wait=True)` holds a server worker for up to 30 s. Only the tests use it; the frontend polls every 250 ms without waiting.
 
 
-## Phase 7b — Frontend structure (M1, M2)
+## Phase 7b — Frontend structure (M1, M2): DEFERRED, not run in this build
 
 M1 and M2 run after G5 and before Z1. Every feature task has landed by then, so
 the split moves the final code once. They change no behaviour. The proof is
