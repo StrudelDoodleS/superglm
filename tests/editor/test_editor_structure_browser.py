@@ -455,6 +455,31 @@ def test_waiting_changes_show_in_the_feature_list_status_line_and_export(open_ed
         assert status.text_content().startswith("1 change waiting for refit · 1 of ")
 
 
+def test_a_change_staged_by_its_icon_shows_at_once_in_the_status_line_and_feature_list(
+    open_editor_page,
+):
+    # A stage keeps the model revision, so nothing redraws the page for it
+    # unless the waiting change itself is part of what the views key on.
+    with open_editor_page(selected_term="territory") as (page, session):
+        session.select_levels("territory", ["T02", "T03"])
+        _reload_editor(page, "territory")
+        status = page.locator("#status")
+        dot = page.locator('#featureList [data-term="territory"] .feature-row-waiting')
+        assert status.text_content().startswith("2 of 10 selected · ")
+        assert dot.count() == 0
+        revision = session.model_revision
+
+        with page.expect_response(_posted("/stage")) as staged:
+            page.get_by_role("button", name="Collapse", exact=True).click()
+        assert staged.value.status == 200
+        page.wait_for_function(
+            "() => document.querySelector('#refitPendingCount')?.textContent === '1'"
+        )
+        assert session.model_revision == revision
+        assert status.text_content().startswith("1 change waiting for refit · 2 of 10 selected · ")
+        assert dot.count() == 1
+
+
 def test_a_waiting_collapse_is_drawn_dashed_with_a_bracket_under_the_axis(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, session):
         session.stage_structural(
