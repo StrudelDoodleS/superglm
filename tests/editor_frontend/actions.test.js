@@ -1698,3 +1698,74 @@ test("refreshFromPython leaves state unchanged on a malformed snapshot", async (
   assert.match(result.error.message, /cannot read/);
   assert.strictEqual(store.getState(), before);
 });
+
+test("a staged change runs without blocking the page and, at an unchanged revision, asks for no evidence", async () => {
+  const envelope = transitionEnvelope(2);
+  envelope.state.pending = [{
+    id: "a1b2c3d",
+    operation: "collapse",
+    term: "age",
+    label: "Collapse 1 + 2",
+    params: { levels: ["1", "2"] },
+    note: null,
+    time: 1
+  }];
+  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+  /** @type {boolean|undefined} */
+  let blockingSeen;
+  /** @type {number[]} */
+  const scheduled = [];
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (path, payload) => {
+        blockingSeen = store.getState().request.mutation.blocking;
+        assert.equal(path, "/stage");
+        assert.deepEqual(payload, {
+          operation: "collapse", term: "age", params: { levels: ["1", "2"] }
+        });
+        return envelope;
+      },
+      getState: async () => { throw new Error("success must not recover through /state"); }
+    },
+    waitForPaint: async () => {},
+    scheduleVisibleEvidence: (revision) => { scheduled.push(revision); }
+  });
+
+  const result = await actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } },
+    blocking: false
+  });
+
+  assert.deepEqual(result, { ok: true, envelope });
+  assert.equal(blockingSeen, false);
+  assert.strictEqual(store.getState().remote.snapshot, envelope.state);
+  assert.equal(store.getState().request.mutation.status, "idle");
+  assert.deepEqual(scheduled, []);
+});
+
+test("a refused structural request shows Python's fixed sentence, not an uncertain outcome", async () => {
+  const refusal = "The refit was refused. Undo the last waiting change and try again.";
+  const store = createEditorStore(createInitialEditorState(snapshot(4)));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw Object.assign(new Error(refusal), { status: 400 }); },
+      getState: async () => snapshot(4)
+    },
+    waitForPaint: async () => {}
+  });
+
+  const result = await actions.executeStructuralMutation({
+    name: "refit 2 waiting changes",
+    path: "/refit_pending",
+    payload: {}
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(store.getState().request.recovery?.message, refusal);
+  assert.equal(store.getState().request.recovery?.retry, null);
+  assert.equal(store.getState().remote.snapshot?.model_revision, 4);
+});

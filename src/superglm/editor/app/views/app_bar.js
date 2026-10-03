@@ -2,6 +2,9 @@
 
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 
+const NOTHING_WAITING =
+  "Nothing is waiting. Collapse, Ungroup, Set reference and the shapes wait here for one refit.";
+
 /**
  * @param {object} options
  * @param {HTMLElement} options.root
@@ -9,15 +12,17 @@
  * @param {HTMLButtonElement} options.redoButton
  * @param {HTMLButtonElement} options.revertButton
  * @param {HTMLButtonElement} options.refreshButton
+ * @param {HTMLButtonElement} options.refitButton
  * @param {(view:string)=>unknown} options.onView
  * @param {()=>unknown} options.onUndo
  * @param {()=>unknown} options.onRedo
  * @param {()=>unknown} options.onRevert
  * @param {()=>unknown} options.onRefresh
+ * @param {()=>unknown} options.onRefit
  */
 export function bindAppBar({
-  root, undoButton, redoButton, revertButton, refreshButton,
-  onView, onUndo, onRedo, onRevert, onRefresh,
+  root, undoButton, redoButton, revertButton, refreshButton, refitButton,
+  onView, onUndo, onRedo, onRevert, onRefresh, onRefit,
 }) {
   const tabs = Array.from(root.querySelectorAll('[role="tab"]')).filter(
     (tab) => tab instanceof HTMLButtonElement,
@@ -53,9 +58,15 @@ export function bindAppBar({
     if (isEditableTarget(event.target) || event.altKey || document.querySelector("dialog[open]")) {
       return;
     }
-    const primary = event.ctrlKey || event.metaKey;
-    if (!primary) return;
     const key = event.key.toLowerCase();
+    if (!(event.ctrlKey || event.metaKey)) {
+      // R refits what waits; with nothing waiting the button is disabled.
+      if (key === "r" && !event.defaultPrevented && !refitButton.disabled) {
+        event.preventDefault();
+        onRefit();
+      }
+      return;
+    }
     if (key === "z" && !event.shiftKey) {
       event.preventDefault();
       if (!undoButton.disabled) onUndo();
@@ -71,6 +82,7 @@ export function bindAppBar({
   redoButton.addEventListener("click", onRedo);
   revertButton.addEventListener("click", onRevert);
   refreshButton.addEventListener("click", onRefresh);
+  refitButton.addEventListener("click", onRefit);
   document.addEventListener("keydown", onDocumentKeyDown);
 
   return Object.freeze({
@@ -81,6 +93,7 @@ export function bindAppBar({
       redoButton.removeEventListener("click", onRedo);
       revertButton.removeEventListener("click", onRevert);
       refreshButton.removeEventListener("click", onRefresh);
+      refitButton.removeEventListener("click", onRefit);
       document.removeEventListener("keydown", onDocumentKeyDown);
     },
   });
@@ -94,14 +107,17 @@ export function bindAppBar({
  * @param {HTMLButtonElement} options.redoButton
  * @param {HTMLButtonElement} options.revertButton
  * @param {HTMLButtonElement} options.refreshButton
+ * @param {HTMLButtonElement} options.refitButton
+ * @param {HTMLElement} options.refitCount the count badge inside Refit
  * @param {string|null} options.undoLabel what Undo would take back; null disables it
  * @param {string|null} options.redoLabel what Redo would put back; null disables it
  * @param {boolean} options.canRevert
  * @param {boolean} options.busy
+ * @param {number} options.pendingCount how many structural changes wait for Refit
  */
 export function renderAppBar({
-  root, activeView, undoButton, redoButton, revertButton, refreshButton,
-  undoLabel, redoLabel, canRevert, busy,
+  root, activeView, undoButton, redoButton, revertButton, refreshButton, refitButton, refitCount,
+  undoLabel, redoLabel, canRevert, busy, pendingCount,
 }) {
   for (const element of root.querySelectorAll('[role="tab"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
@@ -116,19 +132,41 @@ export function renderAppBar({
   redoButton.dataset.popoverBody = redoLabel === null ? "Nothing to redo." : `Redo: ${redoLabel}`;
   revertButton.disabled = !canRevert;
   refreshButton.disabled = busy;
+  renderRefit(refitButton, refitCount, pendingCount, busy);
 }
 
 /**
- * Whether anything differs from the opened model: a live manual edit, or an
- * in-force model a structural step or a distribution re-profile put there.
- * The live edits are the run just before the timeline's marker, so one exists
- * exactly when the entry before the marker is an edit.
+ * Refit is quiet while nothing waits and the one filled action while changes
+ * do. Its badge and its name carry the count.
+ * @param {HTMLButtonElement} button @param {HTMLElement} count
+ * @param {number} pending @param {boolean} busy
+ */
+function renderRefit(button, count, pending, busy) {
+  const waiting = pending > 0;
+  const changes = `${pending} ${pending === 1 ? "change" : "changes"}`;
+  button.disabled = busy || !waiting;
+  button.classList.toggle("has-pending", waiting);
+  button.setAttribute("aria-label", waiting ? `Refit, ${changes} waiting` : "Refit, nothing waiting");
+  button.dataset.popoverBody = waiting
+    ? `Apply ${changes} in one fit. Hand edits on terms whose structure did not change are kept.`
+    : NOTHING_WAITING;
+  count.hidden = !waiting;
+  count.textContent = String(pending);
+}
+
+/**
+ * Whether anything differs from the opened model: a live manual edit, a
+ * change waiting for Refit, or an in-force model a structural step or a
+ * distribution re-profile put there. The live edits and waiting changes are
+ * the run just before the timeline's marker, so one exists exactly when the
+ * entry before the marker is an edit or a waiting change.
  * @param {EditorSnapshot} snapshot
  */
 export function revertAvailable(snapshot) {
   const { timeline } = snapshot;
   const marker = timeline.findIndex((entry) => entry.kind === "marker");
-  return timeline[marker - 1]?.kind === "edit" || !snapshot.in_force_is_original;
+  const last = timeline[marker - 1];
+  return last?.kind === "edit" || last?.status === "waiting" || !snapshot.in_force_is_original;
 }
 
 /** @param {EventTarget | null} target */

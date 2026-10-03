@@ -20,9 +20,11 @@
 /**
  * One action on the session's timeline, oldest first. The "marker" entry is
  * the current position: Undo takes the entry before it, and the `redo`
- * entries after it are what Redo would put back, in that order.
+ * entries after it are what Redo would put back, in that order. A structural
+ * change is a "pending" entry, with status "waiting" until a Refit applies it
+ * and "applied" after. Read the status, not the kind.
  * @typedef {Object} TimelineEntry
- * @property {"edit"|"structural"|"marker"} kind
+ * @property {"edit"|"structural"|"pending"|"marker"} kind
  * @property {string} [operation]
  * @property {string|null} [term]
  * @property {string} [label]
@@ -30,6 +32,10 @@
  * @property {Record<string, unknown>} [params]
  * @property {string} [hash]
  * @property {boolean} [redo]
+ * @property {string} [id] the step's short id: 7 hex digits
+ * @property {number} [time] when the step was made, in Unix seconds
+ * @property {string|null} [note] the analyst's note, saved with the exported model
+ * @property {"applied"|"waiting"|"edit"} [status]
  */
 /**
  * @typedef {Object} GroupDisplayPayload
@@ -93,10 +99,46 @@
  */
 /**
  * The /set_reference request: a displayed level, which may be a group label.
+ * It, /shape_range, /collapse_levels and /ungroup_levels refit at once:
+ * Settings' "Refit after every structural change" sends a change this way.
  * @typedef {Object} SetReferenceRequest
  * @property {string} term
  * @property {string} level
  * @property {string} method
+ */
+/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"} StagedOperation */
+/**
+ * The /stage request: one structural change, with its parameters by label as
+ * the session stores them. Collapse and ungroup take ``levels``. Set
+ * reference takes a displayed ``level``, which may be a group label. A shape
+ * takes ``lo``, ``hi``, ``degree`` and ``join``. main.js adds the Settings
+ * that shape the change: ``keep_reference``, and ``level_display`` for the
+ * summary.
+ * @typedef {Object} StageRequest
+ * @property {StagedOperation} operation
+ * @property {string} term
+ * @property {Record<string, unknown>} params
+ * @property {boolean} [keep_reference]
+ * @property {string} [level_display]
+ */
+/**
+ * A structural change waiting for Refit. The snapshot lists them oldest first.
+ * @typedef {Object} PendingStep
+ * @property {string} id
+ * @property {StagedOperation} operation
+ * @property {string} term
+ * @property {string} label
+ * @property {Record<string, unknown>} params
+ * @property {string|null} note
+ * @property {number} time Unix seconds
+ */
+/**
+ * What a term's waiting changes make of it at the next Refit: its groups by
+ * label with their member levels, its shaped ranges, and its reference level.
+ * @typedef {Object} TermPending
+ * @property {Record<string, string[]>|null} groups
+ * @property {ShapedRange[]} ranges
+ * @property {string|null} reference
  */
 /**
  * The /revert_to_original request carries no fields.
@@ -119,6 +161,7 @@
  * @property {TermReference|null} [reference]
  * @property {Array<{label:string, indices:number[]}>} [level_groups]
  * @property {TermShape} shape
+ * @property {TermPending|null} [pending]
  */
 /**
  * What Undo and Redo would take next, edits and structural steps alike; null
@@ -138,6 +181,7 @@
  * @property {UndoRedo} undo_redo
  * @property {TimelineEntry[]} timeline
  * @property {boolean} in_force_is_original
+ * @property {PendingStep[]} [pending]
  */
 /**
  * @typedef {Object} StructuralTransitionTiming
@@ -160,7 +204,10 @@
  * @property {Record<string, unknown>} payload
  */
 /**
+ * ``blocking`` is false for a change that fits nothing, such as a stage: no
+ * busy overlay, and nothing goes inert.
  * @typedef {MutationDescriptor & {
+ *   blocking?:boolean,
  *   onRequestSettled?:()=>void|Promise<void>,
  *   onPrimaryCommitted?:()=>void|Promise<void>,
  *   onPaintSettled?:()=>void|Promise<void>

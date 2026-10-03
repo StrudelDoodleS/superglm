@@ -5,6 +5,8 @@ import json
 import numpy as np
 import pytest
 
+from superglm.editor.payloads import session_payload, timeline_payload
+
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
 
@@ -168,6 +170,15 @@ def test_structural_refit_commits_atomically_before_held_metrics(open_editor_pag
             "() => document.querySelectorAll('#chart .point.selected[data-index]').length === 2"
         )
 
+        # The collapse waits: staging fits nothing, so nothing blocks the page.
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and _path(response.url) == "/stage"
+        ) as stage_info:
+            page.get_by_role("button", name="Collapse", exact=True).click()
+        assert stage_info.value.status == 200
+        assert page.locator("#appBusyOverlay").is_hidden()
+        page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
+
         requests: list[object] = []
         held_metrics: list[object] = []
 
@@ -188,15 +199,15 @@ def test_structural_refit_commits_atomically_before_held_metrics(open_editor_pag
                 with page.expect_response(
                     lambda response: (
                         response.request.method == "POST"
-                        and _path(response.url) == "/collapse_levels"
+                        and _path(response.url) == "/refit_pending"
                     )
-                ) as collapse_info:
-                    page.get_by_role("button", name="Collapse and refit", exact=True).click()
+                ) as refit_info:
+                    page.locator("#refitPendingAction").click()
                     page.locator("#appBusyOverlay").wait_for(state="visible")
                     assert page.locator("#editorView").get_attribute("inert") == ""
                     assert page.evaluate("document.activeElement?.id") == "appBusyAnnouncement"
 
-            assert collapse_info.value.status == 200
+            assert refit_info.value.status == 200
             page.wait_for_function(
                 """revision => {
                     const overlay = document.querySelector('#appBusyOverlay');
@@ -219,7 +230,7 @@ def test_structural_refit_commits_atomically_before_held_metrics(open_editor_pag
             assert page.locator("#metricGrid").get_attribute("data-freshness") == "updating"
             assert len(held_metrics) == 1
             request_paths = [_path(request.url) for request in requests]
-            assert request_paths.count("/collapse_levels") == 1
+            assert request_paths.count("/refit_pending") == 1
             assert request_paths.count("/state") == 0
         finally:
             for route in held_metrics:
@@ -398,30 +409,43 @@ def test_a_structural_refit_over_live_edits_runs_at_once_and_undo_brings_them_ba
         _reload_editor(page, term)
         edited = session.terms[term].edited_log_effect.copy()
         records = list(session.history)
-        collapses: list[object] = []
+        model = session.model
+        stages: list[object] = []
         page.on(
             "request",
-            lambda request: _path(request.url) == "/collapse_levels" and collapses.append(request),
+            lambda request: _path(request.url) == "/stage" and stages.append(request),
         )
-        collapse = page.get_by_role("button", name="Collapse and refit", exact=True)
+        collapse = page.get_by_role("button", name="Collapse", exact=True)
 
-        # A step still waits for a running action to finish.
+        # A change still waits for a running action to finish.
         page.evaluate("window.__superglmTest.setAppBusy(true, 'Testing busy guard', 'Waiting')")
         collapse.evaluate("node => node.click()")
         page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => resolve()))")
-        assert collapses == []
+        assert stages == []
         page.evaluate("window.__superglmTest.setAppBusy(false)")
 
         with page.expect_response(
-            lambda response: (
-                response.request.method == "POST" and _path(response.url) == "/collapse_levels"
-            )
+            lambda response: response.request.method == "POST" and _path(response.url) == "/stage"
         ) as response_info:
             collapse.click()
         assert response_info.value.status == 200
+        # Staged: the model and the edits stand until Refit.
+        assert session.model is model
+        assert [id(record) for record in session.history] == [id(record) for record in records]
+        # R refits once the page has committed the waiting change and enabled Refit.
+        page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST" and _path(response.url) == "/refit_pending"
+            )
+        ) as refit_info:
+            page.keyboard.press("r")
+        assert refit_info.value.status == 200
         page.locator("#appBusyOverlay").wait_for(state="hidden")
-        # Nothing is lost, so nothing asked first.
-        assert page.locator("dialog[open]").count() == 0 and len(collapses) == 1
+        # Nothing is lost, so nothing asked first. The collapse restructured the
+        # edited term, so its edits are set aside (D2).
+        assert page.locator("dialog[open]").count() == 0 and len(stages) == 1
         assert session.history == [] and session.edited_terms() == []
 
         with page.expect_response(
@@ -431,3 +455,123 @@ def test_a_structural_refit_over_live_edits_runs_at_once_and_undo_brings_them_ba
         _wait_for_editor_idle(page)
         np.testing.assert_array_equal(session.terms[term].edited_log_effect, edited)
         assert [id(record) for record in session.history] == [id(record) for record in records]
+        # Undo of the Refit brings the collapse back as waiting.
+        assert len(session.pending) == 1
+
+
+def _stage_response(response) -> bool:
+    return response.request.method == "POST" and _path(response.url) == "/stage"
+
+
+def _refit_response(response) -> bool:
+    return response.request.method == "POST" and _path(response.url) == "/refit_pending"
+
+
+def test_two_staged_collapses_wait_and_one_refit_applies_both(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        _wait_for_editor_idle(page)
+        original = session.model
+        revision = session.model_revision
+        refit = page.locator("#refitPendingAction")
+        assert refit.is_disabled()
+        assert refit.get_attribute("aria-label") == "Refit, nothing waiting"
+        paths: list[str] = []
+        page.on(
+            "request",
+            lambda request: request.method == "POST" and paths.append(_path(request.url)),
+        )
+
+        for levels in (["T02", "T03"], ["T06", "T07"]):
+            session.select_levels("territory", levels)
+            _reload_editor(page, "territory")
+            page.locator("#selectionMenu").wait_for(state="visible")
+            assert page.locator("#selectionRefitLabel").text_content() == "Structure"
+            with page.expect_response(_stage_response) as staged:
+                page.get_by_role("button", name="Collapse", exact=True).click()
+            assert staged.value.status == 200
+            # Staging fits nothing: the page never blocks and the model stands.
+            assert page.locator("#appBusyOverlay").is_hidden()
+            assert session.model is original and session.model_revision == revision
+
+        page.wait_for_function(
+            "() => document.querySelector('#refitPendingCount')?.textContent === '2'"
+        )
+        assert refit.get_attribute("aria-label") == "Refit, 2 changes waiting"
+        assert len(session.pending) == 2
+
+        with page.expect_response(_refit_response) as refit_info:
+            page.keyboard.press("r")
+        assert refit_info.value.status == 200
+        _wait_for_editor_idle(page)
+        assert paths.count("/stage") == 2 and paths.count("/refit_pending") == 1
+        assert not {"/collapse_levels", "/ungroup_levels"} & set(paths)
+        assert session.pending == []
+        groups = session_payload(session)["territory"]["level_groups"]
+        assert sorted(group["levels"] for group in groups) == [["T02", "T03"], ["T06", "T07"]]
+        page.wait_for_function("() => document.querySelector('#refitPendingAction').disabled")
+
+
+# The routes that refit: Refit itself, and each operation's own route, which
+# stages the change and refits at once.
+_REFIT_ROUTES = frozenset(
+    {"/refit_pending", "/collapse_levels", "/ungroup_levels", "/set_reference", "/shape_range"}
+)
+
+
+def test_refit_after_every_change_is_one_step(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        _wait_for_editor_idle(page)
+        inspector = page.get_by_role("complementary", name="Model inspector")
+        inspector.get_by_role("tab", name="Settings").click()
+        switch = inspector.get_by_role("switch", name="Refit after every structural change")
+        switch.click()
+        assert switch.get_attribute("aria-checked") == "true"
+
+        session.select_levels("territory", ["T04", "T05"])
+        _reload_editor(page, "territory")
+        page.locator("#selectionMenu").wait_for(state="visible")
+        # With the setting on, the menu's structural row says its icons refit.
+        assert page.locator("#selectionRefitLabel").text_content() == "Refit"
+        before = session_payload(session)["territory"]
+        entries = len(timeline_payload(session))
+        paths: list[str] = []
+        page.on(
+            "response",
+            lambda response: (
+                response.request.method == "POST" and paths.append(_path(response.url))
+            ),
+        )
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST" and _path(response.url) == "/collapse_levels"
+            )
+        ) as refit_info:
+            page.get_by_role("button", name="Collapse", exact=True).click()
+        assert refit_info.value.status == 200
+        # The change goes to the operation's own route, with Settings' keep-reference.
+        assert refit_info.value.request.post_data_json["keep_reference"] is True
+        _wait_for_editor_idle(page)
+
+        # One refit and nothing staged first.
+        assert [path for path in paths if path in _REFIT_ROUTES | {"/stage"}] == [
+            "/collapse_levels"
+        ]
+        assert session.pending == []
+        groups = session_payload(session)["territory"]["level_groups"]
+        assert [group["levels"] for group in groups] == [["T04", "T05"]]
+        # One new entry on the timeline, and nothing waiting.
+        timeline = timeline_payload(session)
+        assert len(timeline) == entries + 1
+        assert [entry for entry in timeline if entry.get("status") == "waiting"] == []
+        page.wait_for_function("() => document.querySelector('#refitPendingAction').disabled")
+
+        # One Undo takes the whole change back.
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and _path(response.url) == "/op"
+        ):
+            page.locator("#undoAction").click()
+        _wait_for_editor_idle(page)
+        after = session_payload(session)["territory"]
+        assert after["levels"] == before["levels"]
+        assert after["level_groups"] == before["level_groups"] == []
+        assert session.pending == []

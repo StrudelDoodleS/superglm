@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from tests.test_editor_structure import EPS, _line_residual, _pinning_tolerance
 
-from superglm.editor.payloads import session_payload
+from superglm.editor.payloads import session_payload, timeline_payload
 from superglm.editor.shapes import _numeric_edges
 
 pytest.importorskip("playwright.sync_api")
@@ -50,6 +50,30 @@ def _settled_after_refit(page) -> None:
         "() => document.querySelector('#appBusyOverlay')?.hidden"
         " && !document.querySelector('#editorView')?.hasAttribute('inert')"
     )
+
+
+def _stage_and_refit(page, icon) -> None:
+    """Click a structural icon, which stages the change, then Refit it."""
+    with page.expect_response(_posted("/stage")) as staged:
+        icon.click()
+    assert staged.value.status == 200
+    page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
+    with page.expect_response(_posted("/refit_pending")) as refitted:
+        page.locator("#refitPendingAction").click()
+    assert refitted.value.status == 200
+    _settled_after_refit(page)
+
+
+def _timeline_rows(session) -> list[list[str]]:
+    """The rows the History pane draws for the session's timeline, top to bottom."""
+    rows = []
+    for entry in timeline_payload(session):
+        if entry["kind"] == "marker":
+            rows.append(["history-now", "now"])
+            continue
+        kind = f"history-item {entry['kind']}" + (" redo" if entry["redo"] else "")
+        rows.append([kind, entry["label"]])
+    return rows
 
 
 def _box_select_x(page, lo: float, hi: float) -> None:
@@ -106,10 +130,7 @@ def test_line_icon_pins_a_run_of_points_and_undo_and_redo_step_across_it(open_ed
         line = page.locator("#shapeLine")
         line.wait_for(state="visible")
         assert line.get_attribute("aria-disabled") == "false"
-        with page.expect_response(_posted("/shape_range")) as response_info:
-            line.click()
-        assert response_info.value.status == 200
-        _settled_after_refit(page)
+        _stage_and_refit(page, line)
 
         spec = session.model._specs["curve"]
         [pinned] = spec.polynomial_ranges
@@ -189,10 +210,7 @@ def test_quadratic_on_bands_spans_whole_bands_and_cubic_says_why_not(open_editor
         cubic = page.locator("#shapeCubic")
         assert cubic.get_attribute("aria-disabled") == "true"
         assert cubic.get_attribute("data-popover-body") == "Select at least 4 bands for a Cubic."
-        with page.expect_response(_posted("/shape_range")) as response_info:
-            page.locator("#shapeQuadratic").click()
-        assert response_info.value.status == 200
-        _settled_after_refit(page)
+        _stage_and_refit(page, page.locator("#shapeQuadratic"))
 
         declared = session.model._specs["age_band"]._spline_obj.polynomial_ranges
         assert [(r.lo, r.hi, r.degree) for r in declared] == [("25-34", "45-54", 2)]
@@ -222,10 +240,7 @@ def test_back_to_back_runs_give_ranges_that_meet(open_editor_page):
             session.select_indices("curve", list(range(run[0], run[1] + 1)))
             _reload_editor(page, "curve")
             page.locator("#selectionMenu").wait_for(state="visible")
-            with page.expect_response(_posted("/shape_range")) as response_info:
-                page.locator(icon).click()
-            assert response_info.value.status == 200
-            _settled_after_refit(page)
+            _stage_and_refit(page, page.locator(icon))
 
         spec = session.model._specs["curve"]
         first, second = spec.polynomial_ranges
@@ -276,9 +291,7 @@ def test_set_reference_icon_needs_exactly_one_level(open_editor_page):
         session.select_levels("territory", ["T03"])
         _reload_editor(page, "territory")
         set_reference.wait_for(state="visible")
-        with page.expect_response(_posted("/set_reference")) as response_info:
-            set_reference.click()
-        assert response_info.value.status == 200
+        _stage_and_refit(page, set_reference)
         page.wait_for_function(
             "() => document.querySelector('#termReference')?.textContent"
             " === 'reference T03 · pinned'"
@@ -341,33 +354,20 @@ def test_history_lists_the_session_in_order_and_follows_undo_and_redo(open_edito
             page.get_by_role("button", name="Increase selection").click()
         line = page.locator("#shapeLine")
         line.wait_for(state="visible")
-        with page.expect_response(_posted("/shape_range")):
-            line.click()
-        _settled_after_refit(page)
-        shape = session.structure_history[-1].label
+        _stage_and_refit(page, line)
 
         page.locator("#historyTab").click()
         rows = "document.querySelectorAll('#historyFrame .history-list > li')"
-        page.wait_for_function(f"() => {rows}.length === 3")
-        listed = [
-            ["history-item edit", "shift curve"],
-            ["history-item structural", shape],
-            ["history-now", "now"],
-        ]
+        listed = _timeline_rows(session)
+        page.wait_for_function(f"() => {rows}.length === {len(listed)}")
         assert _history_rows(page) == listed
 
         with page.expect_response(_posted("/op")):
             page.keyboard.press("Control+z")
-        page.wait_for_function(f"() => {rows}[2].classList.contains('redo')")
-        assert session.structure_redo[-1].label == shape
-        assert _history_rows(page) == [
-            ["history-item edit", "shift curve"],
-            ["history-now", "now"],
-            ["history-item structural redo", shape],
-        ]
+        page.wait_for_function("() => document.querySelector('#historyFrame .history-item.redo')")
+        assert _history_rows(page) == _timeline_rows(session)
 
         with page.expect_response(_posted("/op")):
             page.keyboard.press("Control+Shift+z")
-        page.wait_for_function(f"() => {rows}[1].classList.contains('history-item')")
-        assert session.structure_history[-1].label == shape
+        page.wait_for_function("() => !document.querySelector('#historyFrame .history-item.redo')")
         assert _history_rows(page) == listed

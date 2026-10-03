@@ -33,6 +33,7 @@ const {
   selectVisibleEvidencePanels,
   selectModelRevision,
   selectMutation,
+  selectPendingSteps,
   selectRenderableTerm,
   selectSummaryLevelDisplay,
   selectSnapshot
@@ -690,9 +691,21 @@ test("state modules expose only their requested public symbols", () => {
     "selectGroupDisplayMode",
     "selectModelRevision",
     "selectMutation",
+    "selectPendingSteps",
     "selectRenderableTerm",
     "selectSnapshot",
     "selectSummaryLevelDisplay",
     "selectVisibleEvidencePanels"
   ]);
+});
+
+test("the pending selector reads the waiting structural changes, and none without them", () => {
+  const confirmed = snapshot(7);
+  confirmed.pending = [
+    { id: "a1b2c3d", operation: "collapse", term: "age", label: "Collapse 1 + 2", params: {}, note: null, time: 1 },
+    { id: "b2c3d4e", operation: "shape", term: "age", label: "Line 1 – 2", params: {}, note: null, time: 2 }
+  ];
+  assert.strictEqual(selectPendingSteps(createInitialEditorState(confirmed)), confirmed.pending);
+  assert.deepEqual(selectPendingSteps(createInitialEditorState(snapshot(7))), []);
+  assert.deepEqual(selectPendingSteps(createInitialEditorState()), []);
 });

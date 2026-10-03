@@ -291,7 +291,7 @@ input[type="number"] {
   display: none;
 }
 .selection-group-label {
-  width: 34px;
+  width: 54px;
   flex: 0 0 auto;
   padding-left: 4px;
   color: var(--muted);

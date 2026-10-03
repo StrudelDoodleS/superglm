@@ -36,6 +36,12 @@ export const TOOL_HELP = Object.freeze({
   }),
 });
 
+// A structural change waits for Refit unless Settings says to refit after
+// every one.
+const WAITS = "It waits for Refit in the top bar, or refits at once when Settings says so.";
+// Settings › Keep the reference level when collapsing, on by default.
+const KEEPS_REFERENCE = "With Keep the reference level on in Settings, the reference stays where it is";
+
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
 export const OPERATION_HELP = Object.freeze({
   shift_up: Object.freeze({
@@ -86,40 +92,45 @@ export const OPERATION_HELP = Object.freeze({
     body: "Set selected relativities to the lowest selected value.",
   }),
   collapse_levels: Object.freeze({
-    title: "Collapse and refit",
-    body: "Combine the selected categorical levels and refit the model.",
+    title: "Collapse",
+    body: `Combine the selected levels into one group. ${WAITS} ${KEEPS_REFERENCE}, and a group that takes it in becomes the reference.`,
   }),
   ungroup_levels: Object.freeze({
-    title: "Ungroup and refit",
-    body: "Separate the selected grouped levels and refit the model.",
+    title: "Ungroup",
+    body: `Separate the selected grouped levels. ${WAITS} ${KEEPS_REFERENCE}, and a reference group follows the levels that stay in it.`,
   }),
   set_reference: Object.freeze({
-    title: "Set reference and refit",
+    title: "Set reference",
     body:
-      "Pin the selected level as the reference (relativity 1.00) and refit. Predictions stay the same unless a selection penalty is on. Unseen levels rated at the reference move with it.",
+      `Pin the selected level as the reference (relativity 1.00). ${WAITS} Predictions stay the same unless a selection penalty is on. Unseen levels rated at the reference move with it.`,
   }),
   shape_flat: Object.freeze({
-    title: "Flat and refit",
-    body: "Make the selected range flat and refit. The rest of the curve stays smooth. Undo takes it back.",
+    title: "Flat",
+    body: `Make the selected range flat; the rest of the curve stays smooth. ${WAITS} Undo takes it back.`,
   }),
   shape_line: Object.freeze({
-    title: "Line and refit",
+    title: "Line",
     body:
-      "Make the selected range a straight line and refit. The rest of the curve stays smooth. Undo takes it back.",
+      `Make the selected range a straight line; the rest of the curve stays smooth. ${WAITS} Undo takes it back.`,
   }),
   shape_quadratic: Object.freeze({
-    title: "Quadratic and refit",
+    title: "Quadratic",
     body:
-      "Make the selected range a quadratic and refit. The rest of the curve stays smooth. Undo takes it back.",
+      `Make the selected range a quadratic; the rest of the curve stays smooth. ${WAITS} Undo takes it back.`,
   }),
   shape_cubic: Object.freeze({
-    title: "Cubic and refit",
-    body: "Make the selected range a cubic and refit. The rest of the curve stays smooth. Undo takes it back.",
+    title: "Cubic",
+    body: `Make the selected range a cubic; the rest of the curve stays smooth. ${WAITS} Undo takes it back.`,
   }),
 });
 
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
 export const STRUCTURE_HELP = Object.freeze({
+  refit_pending: Object.freeze({
+    title: "Refit",
+    body: "Apply every waiting change in one fit. Hand edits on terms whose structure did not change are kept. Undo brings the changes back as waiting.",
+    shortcut: "R",
+  }),
   revert_to_original: Object.freeze({
     title: "Revert to original model",
     body: "Go back to the model the editor was opened with. Undo brings back everything it cleared.",
@@ -162,7 +173,7 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Shaped ranges",
     items: Object.freeze([
-      "Select a run of points or bands on a spline term, then choose Flat, Line, Quadratic or Cubic. That range is pinned to the shape; the rest of the term stays the fitted smooth.",
+      "Select a run of points or bands on a spline term, then choose Flat, Line, Quadratic or Cubic. That range is pinned to the shape at the next Refit; the rest of the term stays the fitted smooth.",
       "At each edge the curve leaves the shape along its slope (Tangent). The toggle beside the shape icons chooses Corner instead, where the slope may change at the edge. Select all, then a shape, for one polynomial over the whole axis.",
       "Flat fits a level. To hold the curve at its value at a range's edge instead of fitting a level, use Level from left or Level from right. That is an edit, not a refit.",
       "A new range may not overlap one already shaped, and one selected right beside it meets it. The same range with a new shape replaces it. Undo takes back the latest shape.",
@@ -193,6 +204,7 @@ export const HELP_SECTIONS = Object.freeze([
     items: Object.freeze([
       "Undo and Redo walk one history of edits and structural steps, in the order made, whichever term is shown. Their popovers name what they would undo or redo.",
       "Undoing a step brings back the model, curves, edits and selection from before it, without refitting.",
+      "Undo takes back a waiting change without refitting. Undo after a Refit brings its changes back as waiting.",
       "Ctrl/Cmd+Z: undo",
       "Ctrl/Cmd+Shift+Z or Ctrl+Y: redo",
       "Revert to original model is one more step: Undo brings back everything it cleared.",

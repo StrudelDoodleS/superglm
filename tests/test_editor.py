@@ -6402,6 +6402,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "/control" in js
         assert "/metrics" in js
         assert "/summary" in js
+        assert "/stage" in js
+        assert "/refit_pending" in js
     finally:
         widget.close()
 
@@ -6563,8 +6565,8 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     bindings_start = main_js.index("if (collapseLevels) {", refit_end)
     bindings_end = main_js.index("\nloadState().then", bindings_start)
     bindings_source = main_js[bindings_start:bindings_end]
-    collapse_start = summary_js.index("export function collapseTransition")
-    collapse_end = summary_js.index("export function ungroupTransition", collapse_start)
+    collapse_start = summary_js.index("export function stageCollapse")
+    collapse_end = summary_js.index("export function stageUngroup", collapse_start)
     collapse_source = summary_js[collapse_start:collapse_end]
     transition_start = actions_js.index("  async function executeStructuralMutation")
     transition_end = actions_js.index("\n  /**\n   * Refresh one evidence panel", transition_start)
@@ -6624,11 +6626,11 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert 'id="settingsTiming"' in html
     assert "settingsTiming.textContent" in main_js
     assert 'summaryNote.textContent = payload.note || ""' in main_js
-    assert "collapseTransition" in main_js[:refit_start]
-    assert "ungroupTransition" in main_js[:refit_start]
+    assert "stageCollapse" in main_js[:refit_start]
+    assert "stageUngroup" in main_js[:refit_start]
     assert "restoreTransition" not in main_js
-    assert "runStructuralRefit(collapseTransition(selectedTerm()))" in bindings_source
-    assert "runStructuralRefit(ungroupTransition(selectedTerm()))" in bindings_source
+    assert "runStructuralChange(stageCollapse(selectedTerm()," in bindings_source
+    assert "runStructuralChange(stageUngroup(selectedTerm()," in bindings_source
     assert "store.subscribe(selectChartRenderState" in bindings_source
     assert "sameChartRenderState" in bindings_source
     assert "(state) => state.remote.summary" in bindings_source
@@ -6637,8 +6639,8 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "renderStaleSummary" not in main_js
     assert "renderSummaryEvidence" in bindings_source
     assert "state.request.mutation" in bindings_source
-    assert 'path: "/collapse_levels"' in collapse_source
-    assert 'payload: { term, method: "auto" }' in collapse_source
+    assert 'stageTransition("collapse", term, { levels: [...levels] }' in collapse_source
+    assert 'path: "/stage"' in summary_js
     assert "requestJSON" not in collapse_source
     assert "app-busy-overlay" in css
     assert "app-shell.is-busy" in css

@@ -90,6 +90,17 @@ function isNonnegativeFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+/**
+ * A 4xx answer is a refusal: Python checked the request and changed nothing,
+ * and its message is one of the editor's fixed sentences.
+ * @param {unknown} value
+ */
+function isRefusal(value) {
+  if (!(value instanceof Error) || !("status" in value)) return false;
+  const status = value.status;
+  return typeof status === "number" && status >= 400 && status < 500;
+}
+
 /** @param {unknown} value @returns {boolean} */
 function isEditorSnapshot(value) {
   if (!isRecord(value) || !Number.isInteger(value.model_revision)) return false;
@@ -184,14 +195,19 @@ export function createEditorActions({
    * Reconciles one state-only recovery response against the current remote revision. Structural
    * recovery advances only to a newer revision. Ordinary recovery also accepts an equal revision
    * because UI-only state, such as the selected term, does not increment the model revision.
+   * A refusal's message is shown as sent; any other failed structural request leaves its outcome
+   * uncertain and says so.
    *
    * @param {unknown} error
    * @param {string} operation
    * @param {MutationDescriptor|null} retry
    * @param {(state:EditorState, snapshot:EditorSnapshot)=>EditorState} [commitRecovered]
+   * @param {boolean} [refused]
    * @returns {Promise<{ok:false, error:Error}>}
    */
-  async function recoverMutation(error, operation, retry, commitRecovered = commitRemote) {
+  async function recoverMutation(
+    error, operation, retry, commitRecovered = commitRemote, refused = false
+  ) {
     const normalizedError = normalizeError(error);
     /** @type {EditorSnapshot|null} */
     let recovered = null;
@@ -238,7 +254,7 @@ export function createEditorActions({
             error: normalizedError.message
           },
           recovery: {
-            message: retry ? normalizedError.message : STRUCTURAL_OUTCOME_UNCERTAIN,
+            message: retry || refused ? normalizedError.message : STRUCTURAL_OUTCOME_UNCERTAIN,
             retry
           }
         }
@@ -426,6 +442,7 @@ export function createEditorActions({
     name,
     path,
     payload,
+    blocking = true,
     onRequestSettled = () => {},
     onPrimaryCommitted = () => {},
     onPaintSettled = () => {}
@@ -434,12 +451,13 @@ export function createEditorActions({
       return skippedMutation("An editor mutation is already running.");
     }
 
+    const previousRevision = store.getState().remote.snapshot?.model_revision ?? -1;
     const requestPayload = snapshotPayload(payload);
     store.update((state) => ({
       ...state,
       request: {
         ...state.request,
-        mutation: { status: "running", operation: name, error: null, blocking: true },
+        mutation: { status: "running", operation: name, error: null, blocking },
         recovery: null
       }
     }));
@@ -452,7 +470,7 @@ export function createEditorActions({
       response = await client.postJSON(path, requestPayload);
     } catch (value) {
       await notifyTimingHook(onRequestSettled);
-      return recoverMutation(value, name, null);
+      return recoverMutation(value, name, null, commitRemote, isRefusal(value));
     }
     await notifyTimingHook(onRequestSettled);
     try {
@@ -478,13 +496,16 @@ export function createEditorActions({
     }
     await notifyTimingHook(onPaintSettled);
     finishStructuralMutation(null);
-    try {
-      void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {
-        immediate: true,
-        summaryCommitted: true
-      })).catch(() => {});
-    } catch {
-      // Evidence refresh cannot change an authoritative structural success.
+    // A staged change leaves the model, so its evidence, as it was.
+    if (envelope.state.model_revision !== previousRevision) {
+      try {
+        void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {
+          immediate: true,
+          summaryCommitted: true
+        })).catch(() => {});
+      } catch {
+        // Evidence refresh cannot change an authoritative structural success.
+      }
     }
     return { ok: true, envelope };
   }

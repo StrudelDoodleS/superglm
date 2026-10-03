@@ -80,6 +80,45 @@ body {
   gap: 2px;
 }
 
+/* Refit: quiet while nothing waits, the one filled action while changes do. */
+.app-actions .refit-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.app-actions .refit-action.has-pending,
+.app-actions .refit-action.has-pending:hover {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: var(--surface);
+}
+
+.refit-action-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 22%, transparent);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 18px;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .refit-action-label {
+    display: none;
+  }
+}
+
 #editorView {
   min-height: 0;
   display: grid;

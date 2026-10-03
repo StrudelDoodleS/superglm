@@ -59,6 +59,19 @@
       </div>
     </div>
     <div class="app-actions" aria-label="Edit actions">
+      <button id="refitPendingAction" class="refit-action" type="button"
+        aria-label="Refit, nothing waiting" aria-keyshortcuts="R" data-popover-title="Refit"
+        data-popover-body="Nothing is waiting. Collapse, Ungroup, Set reference and the shapes wait here for one refit."
+        disabled>
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 11a8 8 0 1 0-2.3 5.7"></path>
+          <path d="M20 4v7h-7"></path>
+          <circle cx="12" cy="12" r="1.6" fill="currentColor"></circle>
+        </svg>
+        <span class="refit-action-label">Refit</span>
+        <span id="refitPendingCount" class="refit-action-count" aria-hidden="true" hidden>0</span>
+      </button>
+      <span class="app-actions-gap" aria-hidden="true"></span>
       <button id="undoAction" class="icon-button" type="button" aria-label="Undo edit"
         aria-keyshortcuts="Control+Z Meta+Z" data-popover-title="Undo"
         data-popover-body="Nothing to undo." disabled>
@@ -331,9 +344,9 @@
           </div>
         </div>
         <div id="selectionRefitBreak" class="selection-break" aria-hidden="true"></div>
-        <span id="selectionRefitLabel" class="selection-group-label">Refit</span>
+        <span id="selectionRefitLabel" class="selection-group-label">Structure</span>
         <button id="collapseLevels" class="selection-item"
-          data-help-operation="collapse_levels" type="button" aria-label="Collapse and refit" hidden>
+          data-help-operation="collapse_levels" type="button" aria-label="Collapse" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 7h5"></path><path d="M13 7h5"></path>
             <path d="M6 17h12"></path><path d="M11 7v4"></path><path d="M13 7v4"></path>
@@ -341,7 +354,7 @@
           </svg>
         </button>
         <button id="ungroupLevels" class="selection-item"
-          data-help-operation="ungroup_levels" type="button" aria-label="Ungroup and refit" hidden>
+          data-help-operation="ungroup_levels" type="button" aria-label="Ungroup" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 7h12"></path><path d="M6 17h5"></path><path d="M13 17h5"></path>
             <path d="M12 8v8"></path><path d="m9 11 3-3 3 3"></path>
@@ -349,7 +362,7 @@
           </svg>
         </button>
         <button id="setReference" class="selection-item"
-          data-help-operation="set_reference" type="button" aria-label="Set reference and refit" hidden>
+          data-help-operation="set_reference" type="button" aria-label="Set reference" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 18c-3-3.2-4.5-5.8-4.5-8a4.5 4.5 0 0 1 9 0c0 2.2-1.5 4.8-4.5 8z"></path>
             <circle cx="12" cy="10" r="1.5"></circle>
@@ -357,28 +370,28 @@
           </svg>
         </button>
         <button id="shapeFlat" class="selection-item" data-shape-degree="0"
-          data-help-operation="shape_flat" type="button" aria-label="Flat and refit" hidden>
+          data-help-operation="shape_flat" type="button" aria-label="Flat" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path class="range-ticks" d="M4 4v16M20 4v16"></path>
             <path d="M4 12h16"></path>
           </svg>
         </button>
         <button id="shapeLine" class="selection-item" data-shape-degree="1"
-          data-help-operation="shape_line" type="button" aria-label="Line and refit" hidden>
+          data-help-operation="shape_line" type="button" aria-label="Line" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path class="range-ticks" d="M4 4v16M20 4v16"></path>
             <path d="M4 18 20 6"></path>
           </svg>
         </button>
         <button id="shapeQuadratic" class="selection-item" data-shape-degree="2"
-          data-help-operation="shape_quadratic" type="button" aria-label="Quadratic and refit" hidden>
+          data-help-operation="shape_quadratic" type="button" aria-label="Quadratic" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path class="range-ticks" d="M4 4v16M20 4v16"></path>
             <path d="M4 18Q12 -2 20 18"></path>
           </svg>
         </button>
         <button id="shapeCubic" class="selection-item" data-shape-degree="3"
-          data-help-operation="shape_cubic" type="button" aria-label="Cubic and refit" hidden>
+          data-help-operation="shape_cubic" type="button" aria-label="Cubic" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path class="range-ticks" d="M4 4v16M20 4v16"></path>
             <path d="M4 18C12 18 12 6 20 6"></path>

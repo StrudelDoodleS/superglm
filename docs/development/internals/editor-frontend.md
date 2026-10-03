@@ -96,6 +96,10 @@ The store commits `state` and `summary` in one update. The browser crosses a two
 paint boundary, releases the blocking overlay, and then starts visible evidence without awaiting it.
 There is no successful post-refit `/state` fetch.
 
+A staged change (`/stage`) returns the same envelope without fitting. Its revision is unchanged, so
+it runs without the blocking overlay and re-requests no evidence. A refused request (HTTP 400) shows
+Python's fixed sentence in the alert.
+
 Every JSON response also exposes `Server-Timing: json;dur=...`, which measures JSON-safe conversion
 and serialization separately from the route's model work.
 
@@ -226,8 +230,12 @@ its wiring:
 3. Add an `EditorWidget._...` method that calls `_structural_step` with the operation name and the
    session call. It takes the lock and returns the envelope.
 4. Add a token-guarded route in `server.py` that parses the payload explicitly.
-5. Add a descriptor next to `setReferenceTransition` in `summary.js` and run it through
-   `runStructuralRefit` from `main.js`.
+5. Add a `stage…` descriptor next to `stageReference` in `summary.js` and run it through
+   `runStructuralChange` from `main.js`. The change is staged on `/stage` and waits, drawn on the
+   chart, until Refit (`/refit_pending`, through `runStructuralRefit`) applies every waiting change
+   in one fit. Give it a case in `refitAtOnceTransition` too: with Settings' "Refit after every
+   structural change" on, the change goes to the operation's own route, which stages it and refits
+   at once as one step that one Undo takes back.
 6. Test the refit, the one pushed step and the refusals in `tests/test_editor_structure.py`, and add
    one browser case to `tests/editor/test_editor_structure_browser.py`.
 

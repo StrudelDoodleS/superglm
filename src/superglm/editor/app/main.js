@@ -12,6 +12,7 @@ import {
   selectEvidenceNeedsRefresh,
   selectGroupDisplayMode,
   selectModelRevision,
+  selectPendingSteps,
   selectRenderableTerm,
   selectSnapshot,
   selectSummaryLevelDisplay,
@@ -28,15 +29,17 @@ import {
   createEvidenceTimingTracker
 } from "./state/timing.js";
 import {
-  collapseTransition,
+  refitAtOnceTransition,
+  refitPendingTransition,
   renderSummary,
   runDistributionProfile,
   showDistributionProfileDialog,
   runOffsetRefit,
   revertTransition,
-  setReferenceTransition,
-  shapeRangeTransition,
-  ungroupTransition
+  stageCollapse,
+  stageReference,
+  stageShapeRange,
+  stageUngroup
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
@@ -73,6 +76,8 @@ const undoAction = document.getElementById("undoAction");
 const redoAction = document.getElementById("redoAction");
 const revertAction = document.getElementById("revertAction");
 const refreshAction = document.getElementById("refreshAction");
+const refitPendingAction = document.getElementById("refitPendingAction");
+const refitPendingCount = document.getElementById("refitPendingCount");
 const appShell = document.querySelector(".app-shell");
 const appBusyOverlay = document.getElementById("appBusyOverlay");
 const appBusyAnnouncement = document.getElementById("appBusyAnnouncement");
@@ -222,11 +227,13 @@ bindAppBar({
   redoButton: redoAction,
   revertButton: revertAction,
   refreshButton: refreshAction,
+  refitButton: refitPendingAction,
   onView: showView,
   onUndo: undo,
   onRedo: redo,
   onRevert: () => runStructuralRefit(revertTransition()),
-  onRefresh: refreshFromPython
+  onRefresh: refreshFromPython,
+  onRefit: refitPending
 });
 // Until I2: the theme key decides and "Follow the browser" mirrors it. A
 // theme chosen with the icon turns the setting off and Auto turns it on;
@@ -251,6 +258,8 @@ saveSettings({ followBrowserTheme: themeControl.choice() === "auto" });
 // Settings keep their choices in this browser (views/settings.js).
 function renderSettingsView() {
   renderSettingsPane(settingsNodes, { settings: loadSettings() });
+  // The selection menu names its structural row by what its icons do.
+  selectionRefitLabel.textContent = loadSettings().refitEveryChange ? "Refit" : "Structure";
 }
 
 bindSettingsPane(settingsNodes, {
@@ -643,6 +652,42 @@ function scheduleVisibleEvidenceCatchUp() {
   scheduleVisibleEvidence(revision, { immediate: true, onlyStale: true });
 }
 
+// A structural change waits: Python builds it and keeps it, drawn on the
+// chart, until Refit applies every waiting change in one fit. Nothing is
+// fitted, so nothing blocks the page. With "Refit after every structural
+// change" on in Settings, the change goes to its operation's own route
+// instead, which stages it and refits at once: one step, which one Undo
+// takes back.
+async function runStructuralChange(descriptor) {
+  const { keepReference, refitEveryChange } = loadSettings();
+  if (refitEveryChange) {
+    const atOnce = refitAtOnceTransition(descriptor);
+    return runStructuralRefit({
+      ...atOnce,
+      payload: { ...atOnce.payload, keep_reference: keepReference }
+    });
+  }
+  if (appBusyActive || store.getState().request.mutation.status !== "idle") return null;
+  stopContributionBuild();
+  const result = await actions.executeStructuralMutation({
+    ...descriptor,
+    blocking: false,
+    payload: {
+      ...descriptor.payload,
+      keep_reference: keepReference,
+      level_display: selectSummaryLevelDisplay(store.getState())
+    }
+  });
+  return result.ok ? result.envelope : null;
+}
+
+// The Refit button and its R shortcut come here.
+async function refitPending() {
+  const count = selectPendingSteps(store.getState()).length;
+  if (count === 0) return null;
+  return runStructuralRefit(refitPendingTransition(count));
+}
+
 // A structural step loses nothing: Undo puts back the state before it, edits
 // included, so it runs without asking.
 async function runStructuralRefit(descriptor) {
@@ -950,7 +995,8 @@ function selectAppBarRenderState(state) {
     undoLabel: snapshot?.undo_redo.undo ?? null,
     redoLabel: snapshot?.undo_redo.redo ?? null,
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
-    busy: state.request.mutation.status === "running"
+    busy: state.request.mutation.status === "running",
+    pendingCount: selectPendingSteps(state).length
   };
 }
 
@@ -960,7 +1006,8 @@ function sameAppBarRenderState(next, previous) {
     next.undoLabel === previous.undoLabel &&
     next.redoLabel === previous.redoLabel &&
     next.canRevert === previous.canRevert &&
-    next.busy === previous.busy;
+    next.busy === previous.busy &&
+    next.pendingCount === previous.pendingCount;
 }
 
 function renderAppBarState(state) {
@@ -975,7 +1022,10 @@ function renderAppBarState(state) {
     undoLabel: state.undoLabel,
     redoLabel: state.redoLabel,
     canRevert: state.canRevert,
-    busy: state.busy
+    busy: state.busy,
+    refitButton: refitPendingAction,
+    refitCount: refitPendingCount,
+    pendingCount: state.pendingCount
   });
 }
 
@@ -1285,6 +1335,15 @@ function renderShapeReason(button, reason) {
   }
   button.dataset.popoverTitle = button.getAttribute("aria-label");
   button.dataset.popoverBody = reason;
+}
+
+// The selected source levels by label, in axis order: what a staged change names.
+function selectedLevels(term, selection) {
+  const levels = Array.isArray(term.levels) ? term.levels : [];
+  return [...selection]
+    .sort((left, right) => left - right)
+    .filter((index) => index >= 0 && index < levels.length)
+    .map((index) => String(levels[index]));
 }
 
 // One displayed level: a single source level, or one whole collapsed group.
@@ -1612,12 +1671,16 @@ if (profileRun) {
 }
 if (collapseLevels) {
   collapseLevels.addEventListener("click", async () => {
-    await runStructuralRefit(collapseTransition(selectedTerm()));
+    const term = currentTerm();
+    if (!term) return;
+    await runStructuralChange(stageCollapse(selectedTerm(), selectedLevels(term, currentSelection())));
   });
 }
 if (ungroupLevels) {
   ungroupLevels.addEventListener("click", async () => {
-    await runStructuralRefit(ungroupTransition(selectedTerm()));
+    const term = currentTerm();
+    if (!term) return;
+    await runStructuralChange(stageUngroup(selectedTerm(), selectedLevels(term, currentSelection())));
   });
 }
 if (setReference) {
@@ -1625,7 +1688,7 @@ if (setReference) {
     const term = currentTerm();
     const label = term ? selectedLevelLabel(term, currentSelection()) : null;
     if (label === null) return;
-    await runStructuralRefit(setReferenceTransition(selectedTerm(), label));
+    await runStructuralChange(stageReference(selectedTerm(), label));
   });
 }
 for (const button of shapeButtons) {
@@ -1634,8 +1697,8 @@ for (const button of shapeButtons) {
     const range = term && shapeRangeForSelection(term, currentSelection());
     if (!range || button.getAttribute("aria-disabled") === "true") return;
     const degree = Number(button.dataset.shapeDegree);
-    await runStructuralRefit(
-      shapeRangeTransition(
+    await runStructuralChange(
+      stageShapeRange(
         selectedTerm(), range.lo, range.hi, degree,
         effectiveShapeJoin(shapeJoinChoice, term.shape.joins)
       )

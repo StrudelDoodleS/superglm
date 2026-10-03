@@ -54,13 +54,16 @@ export function shapeRangeForSelection(term, selectedIndices) {
  * A numeric run's edge: its end point, or a shaped range's facing edge when
  * no drawn point lies between the two, so back-to-back selections meet
  * instead of leaving the free sliver that snapping each outward would open.
- * Past the first or last point ``next`` is undefined and matches nothing.
+ * A range waiting for Refit is met as one in force is, so ranges staged back
+ * to back meet too. Past the first or last point ``next`` is undefined and
+ * matches nothing.
  * @param {TermPayload} term @param {number} index @param {-1|1} direction
  */
 function meetingEdge(term, index, direction) {
   const x = term.x[index];
   const next = term.x[index + direction];
-  const facing = term.shape.ranges.map((range) => Number(direction < 0 ? range.hi : range.lo));
+  const ranges = [...term.shape.ranges, ...(term.pending?.ranges ?? [])];
+  const facing = ranges.map((range) => Number(direction < 0 ? range.hi : range.lo));
   return facing.find((edge) => (edge - x) * direction > 0 && (next - edge) * direction >= 0) ?? x;
 }
 

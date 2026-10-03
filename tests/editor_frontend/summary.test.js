@@ -9,15 +9,17 @@ import {
 
 const summaryModulePath = "../../src/superglm/editor/app/summary.js";
 const {
-  collapseTransition,
+  refitAtOnceTransition,
+  refitPendingTransition,
   refreshSummary,
   renderSummary,
   runDistributionProfile,
   revertTransition,
-  setReferenceTransition,
-  shapeRangeTransition,
   runOffsetRefit,
-  ungroupTransition
+  stageCollapse,
+  stageReference,
+  stageShapeRange,
+  stageUngroup
 } = await import(summaryModulePath);
 
 /**
@@ -181,46 +183,78 @@ async function completedProfileLegend(ciStatus, parameter = "tweedie_p", ci = [n
   return nodes;
 }
 
-test("structural transition descriptors are pure route descriptions", () => {
-  assert.deepEqual(collapseTransition("region"), {
+test("structural changes are staged through one route, levels by label", () => {
+  assert.deepEqual(stageCollapse("region", ["B", "C"]), {
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "region", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "region", params: { levels: ["B", "C"] } }
   });
-  assert.deepEqual(ungroupTransition("region"), {
+  assert.deepEqual(stageUngroup("region", ["B"]), {
     name: "ungroup levels",
-    path: "/ungroup_levels",
-    payload: { term: "region", method: "auto" }
+    path: "/stage",
+    payload: { operation: "ungroup", term: "region", params: { levels: ["B"] } }
   });
-  assert.deepEqual(setReferenceTransition("region", "B"), {
-    name: "set reference and refit",
-    path: "/set_reference",
-    payload: { term: "region", level: "B", method: "auto" }
+  assert.deepEqual(stageReference("region", "B+C"), {
+    name: "set reference",
+    path: "/stage",
+    payload: { operation: "set_reference", term: "region", params: { level: "B+C" } }
   });
+  // The join is the toggle's choice; Tangent when no choice is given.
+  assert.deepEqual(stageShapeRange("age", 30, 45, 1), {
+    name: "make a Line range",
+    path: "/stage",
+    payload: {
+      operation: "shape", term: "age", params: { lo: 30, hi: 45, degree: 1, join: "tangent" }
+    }
+  });
+  assert.deepEqual(stageShapeRange("band", "B2", "B4", 0, "kink").payload.params, {
+    lo: "B2", hi: "B4", degree: 0, join: "kink"
+  });
+  assert.deepEqual(refitPendingTransition(1), {
+    name: "refit 1 waiting change",
+    path: "/refit_pending",
+    payload: {}
+  });
+  assert.equal(refitPendingTransition(3).name, "refit 3 waiting changes");
   assert.deepEqual(revertTransition(), {
     name: "revert to original model",
     path: "/revert_to_original",
     payload: {}
   });
-  // The join is the toggle's choice; Tangent when no choice is given.
-  assert.deepEqual(shapeRangeTransition("age", 30, 45, 1), {
-    name: "make a Line range",
-    path: "/shape_range",
-    payload: { term: "age", lo: 30, hi: 45, degree: 1, join: "tangent", method: "auto" }
+});
+
+test("with Refit after every change on, a change goes to its operation's own route", () => {
+  // Collapse and ungroup act on the selection Python holds; the others name their change.
+  assert.deepEqual(refitAtOnceTransition(stageCollapse("region", ["B", "C"])), {
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "region", method: "auto" }
   });
-  assert.deepEqual(shapeRangeTransition("band", "B2", "B4", 0, "kink").payload, {
-    term: "band", lo: "B2", hi: "B4", degree: 0, join: "kink", method: "auto"
+  assert.deepEqual(refitAtOnceTransition(stageUngroup("region", ["B"])), {
+    name: "ungroup levels",
+    path: "/ungroup_levels",
+    payload: { term: "region", method: "auto" }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageReference("region", "B+C")), {
+    name: "set reference",
+    path: "/set_reference",
+    payload: { term: "region", level: "B+C", method: "auto" }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageShapeRange("band", "B2", "B4", 0, "kink")), {
+    name: "make a Flat range",
+    path: "/shape_range",
+    payload: { term: "band", lo: "B2", hi: "B4", degree: 0, join: "kink", method: "auto" }
   });
 });
 
 test("transition descriptor payloads are independent caller-owned values", () => {
-  const first = collapseTransition("region");
-  first.payload.term = "mutated";
+  const levels = ["B", "C"];
+  const first = stageCollapse("region", levels);
+  first.payload.params.levels.push("D");
+  levels.push("E");
 
-  assert.deepEqual(collapseTransition("region").payload, {
-    term: "region",
-    method: "auto"
-  });
+  assert.deepEqual(first.payload.params.levels, ["B", "C", "D"]);
+  assert.deepEqual(stageCollapse("region", ["B", "C"]).payload.params, { levels: ["B", "C"] });
 });
 
 test("rendering unchanged summary markup preserves the existing table DOM", () => {

@@ -5,6 +5,7 @@ import { SHAPE_NAMES } from "./shapes.js";
 /** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
 /** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
 /** @typedef {import('./api/contracts.js').ShapeRangeRequest} ShapeRangeRequest */
+/** @typedef {import('./api/contracts.js').StageRequest} StageRequest */
 
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
 const summaryMarkupByFrame = new WeakMap();
@@ -167,47 +168,83 @@ function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-export function collapseTransition(term) {
-  return {
-    name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term, method: "auto" }
-  };
-}
-
-export function ungroupTransition(term) {
-  return {
-    name: "ungroup levels",
-    path: "/ungroup_levels",
-    payload: { term, method: "auto" }
-  };
-}
-
 /**
- * @param {string} term @param {string} level
- * @returns {{name:string, path:string, payload:SetReferenceRequest}}
+ * One structural change, staged: Python builds it and keeps it waiting,
+ * drawn on the chart, until Refit applies every waiting change in one fit.
+ * ``name`` is what the busy overlay and an alert call it.
+ * @param {StageRequest['operation']} operation @param {string} term
+ * @param {Record<string, unknown>} params @param {string} name
+ * @returns {{name:string, path:string, payload:StageRequest}}
  */
-export function setReferenceTransition(term, level) {
-  return {
-    name: "set reference and refit",
-    path: "/set_reference",
-    payload: { term, level, method: "auto" }
-  };
+function stageTransition(operation, term, params, name) {
+  return { name, path: "/stage", payload: { operation, term, params } };
+}
+
+/** @param {string} term @param {readonly string[]} levels the selected levels, by label */
+export function stageCollapse(term, levels) {
+  return stageTransition("collapse", term, { levels: [...levels] }, "collapse levels");
+}
+
+/** @param {string} term @param {readonly string[]} levels the selected levels, by label */
+export function stageUngroup(term, levels) {
+  return stageTransition("ungroup", term, { levels: [...levels] }, "ungroup levels");
+}
+
+/** @param {string} term @param {string} level a displayed level, which may be a group label */
+export function stageReference(term, level) {
+  return stageTransition("set_reference", term, { level }, "set reference");
 }
 
 /**
- * Named for its shape, which the busy overlay shows. ``join`` is how the
- * range meets the free curve: "tangent" (the default) or "kink" (Corner).
+ * Named for its shape. ``join`` is how the range meets the free curve:
+ * "tangent" (the default) or "kink" (Corner).
  * @param {string} term @param {number|string} lo @param {number|string} hi @param {number} degree
  * @param {"tangent"|"kink"} [join]
- * @returns {{name:string, path:string, payload:ShapeRangeRequest}}
  */
-export function shapeRangeTransition(term, lo, hi, degree, join = "tangent") {
+export function stageShapeRange(term, lo, hi, degree, join = "tangent") {
+  return stageTransition(
+    "shape", term, { lo, hi, degree, join }, `make a ${SHAPE_NAMES[degree]} range`
+  );
+}
+
+/**
+ * Refit: every waiting change in one fit, and one step on the timeline.
+ * @param {number} count how many changes wait, for the busy overlay
+ * @returns {{name:string, path:string, payload:EmptyStructuralRequest}}
+ */
+export function refitPendingTransition(count) {
   return {
-    name: `make a ${SHAPE_NAMES[degree]} range`,
-    path: "/shape_range",
-    payload: { term, lo, hi, degree, join, method: "auto" }
+    name: `refit ${count} waiting ${count === 1 ? "change" : "changes"}`,
+    path: "/refit_pending",
+    payload: {}
   };
+}
+
+/**
+ * The same change refitted at once, through its operation's own route, as
+ * Settings' "Refit after every structural change" asks. Python stages it and
+ * refits every waiting change in one fit: one step, which one Undo takes
+ * back, refused with the operation's own sentences. Collapse and ungroup act
+ * on the selection Python holds, the one their levels were read from.
+ * @param {{name:string, payload:StageRequest}} staged a descriptor from stageCollapse,
+ *   stageUngroup, stageReference or stageShapeRange
+ * @returns {{name:string, path:string,
+ *   payload:{term:string, method:string}|SetReferenceRequest|ShapeRangeRequest}}
+ */
+export function refitAtOnceTransition({ name, payload: { operation, term, params } }) {
+  const method = "auto";
+  switch (operation) {
+    case "collapse":
+      return { name, path: "/collapse_levels", payload: { term, method } };
+    case "ungroup":
+      return { name, path: "/ungroup_levels", payload: { term, method } };
+    case "set_reference":
+      return { name, path: "/set_reference", payload: { term, level: params.level, method } };
+    default: {
+      const { lo, hi, degree, join } = params;
+      return { name, path: "/shape_range", payload: { term, lo, hi, degree, join, method } };
+    }
+  }
 }
 
 /** @returns {{name:string, path:string, payload:EmptyStructuralRequest}} */
