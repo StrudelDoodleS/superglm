@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   pendingGroupMarks,
+  pendingUngroupMarks,
   waitingBracketText,
 } from "../../src/superglm/editor/app/chart/pending_overlay.js";
 
@@ -65,4 +66,55 @@ test("the bracket names up to three members and counts more", () => {
   assert.equal(waitingBracketText({ members: ["B10", "B11"] }), "B10 + B11 · waiting");
   assert.equal(waitingBracketText({ members: ["A", "B", "C"] }), "A + B + C · waiting");
   assert.equal(waitingBracketText({ members: ["A", "B", "C", "D", "E"] }), "5 levels · waiting");
+});
+
+test("a fitted group ungrouped in full is marked as leaving, in the group's own slot", () => {
+  const term = waiting({ "T01+T05": ["T01", "T05"] }, [
+    { label: "T01+T05", indices: [0, 4] },
+    { label: "T02+T03", indices: [2, 1] },
+  ]);
+  assert.deepEqual(pendingGroupMarks(term, expanded), []);
+  assert.deepEqual(pendingUngroupMarks(term, expanded), [
+    { leaves: "T02+T03", members: ["T02", "T03"], display: [1, 2], slot: 1 },
+  ]);
+  // An empty mapping: the waiting change regroups the term and leaves no group.
+  const dissolved = waiting({}, [{ label: "T02+T03", indices: [1, 2] }]);
+  assert.deepEqual(pendingUngroupMarks(dissolved, expanded), [
+    { leaves: "T02+T03", members: ["T02", "T03"], display: [1, 2], slot: 0 },
+  ]);
+});
+
+test("after a partial ungroup the rest of the group is not waiting; the level that leaves is", () => {
+  const term = waiting({ "T02+T03": ["T02", "T03"] }, [{ label: "T02+T03+T04", indices: [1, 2, 3] }]);
+  assert.deepEqual(pendingGroupMarks(term, expanded), []);
+  assert.deepEqual(pendingUngroupMarks(term, expanded), [
+    { leaves: "T02+T03+T04", members: ["T04"], display: [3], slot: 0 },
+  ]);
+});
+
+test("a level pulled into a new waiting group goes with it; the one left alone is leaving", () => {
+  const term = waiting({ "T03+T04": ["T03", "T04"] }, [{ label: "T02+T03", indices: [1, 2] }]);
+  assert.deepEqual(pendingGroupMarks(term, expanded), [
+    { label: "T03+T04", members: ["T03", "T04"], display: [2, 3], slot: 1 },
+  ]);
+  assert.deepEqual(pendingUngroupMarks(term, expanded), [
+    { leaves: "T02+T03", members: ["T02"], display: [1], slot: 0 },
+  ]);
+});
+
+test("nothing is leaving while no regrouping waits, and drawn collapsed a leaver maps to its group's point", () => {
+  const fitted = [{ label: "T02+T03", indices: [1, 2] }];
+  assert.deepEqual(pendingUngroupMarks(waiting(null, fitted), expanded), []);
+  assert.deepEqual(pendingUngroupMarks({ levels: LEVELS, level_groups: fitted }, expanded), []);
+  const collapsed = { x: [0, 1, 2, 3], displayToSourceIndices: [[0], [1, 2], [3], [4]] };
+  assert.deepEqual(pendingUngroupMarks(waiting({}, fitted), collapsed)[0].display, [1]);
+});
+
+test("an ungroup's bracket says the levels are ungrouped, listed with commas", () => {
+  assert.equal(waitingBracketText({ members: ["T02", "T03"], leaves: "T02+T03" }), "T02, T03 ungrouped · waiting");
+  assert.equal(waitingBracketText({ members: ["T04"], leaves: "T02+T03+T04" }), "T04 ungrouped · waiting");
+  assert.equal(
+    waitingBracketText({ members: ["A", "B", "C", "D"], leaves: "A+B+C+D" }),
+    "4 levels ungrouped · waiting",
+  );
 });

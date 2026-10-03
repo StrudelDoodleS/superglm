@@ -512,6 +512,42 @@ def test_a_waiting_collapse_is_drawn_dashed_with_a_bracket_under_the_axis(open_e
         assert rows["labelBottom"] <= rows["titleTop"]
 
 
+def test_a_waiting_ungroup_marks_the_levels_that_leave_their_group(open_editor_page):
+    with open_editor_page(
+        selected_term="territory", collapsed_levels=("territory", ("T02", "T03"))
+    ) as (page, session):
+        session.select_levels("territory", ["T02", "T03"])
+        _reload_editor(page, "territory")
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(_posted("/stage")) as staged:
+            page.get_by_role("button", name="Ungroup", exact=True).click()
+        assert staged.value.status == 200
+        page.wait_for_function(
+            "() => document.querySelector('#refitPendingCount')?.textContent === '1'"
+        )
+        # The whole group breaks up, so the draft has no group left to draw.
+        assert session_payload(session)["territory"]["pending"]["groups"] == {}
+        bracket = page.locator("#chart .pending-group-bracket.ungroup")
+        assert bracket.count() == 1
+        assert (
+            bracket.locator(".pending-group-label").text_content() == "T02, T03 ungrouped · waiting"
+        )
+        assert bracket.get_attribute("data-popover-body") == (
+            "T02, T03 leave the group T02+T03 at the next Refit."
+        )
+        assert page.locator("#chart rect.exposure.waiting").count() == 2
+        # Until Refit the fit still groups them: its markers stay, and no ring
+        # announces a new group.
+        assert page.locator("#chart .level-group-marker").count() == 2
+        assert page.locator("#chart .pending-group-ring").count() == 0
+
+        with page.expect_response(_posted("/refit_pending")):
+            page.locator("#refitPendingAction").click()
+        _settled_after_refit(page)
+        assert page.locator("#chart .pending-group-bracket").count() == 0
+        assert page.locator("#chart .level-group-marker").count() == 0
+
+
 def test_a_waiting_range_is_a_dashed_box_until_refit_pins_it(open_editor_page):
     with open_editor_page() as (page, session):
         session.stage_structural(

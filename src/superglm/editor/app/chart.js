@@ -5,7 +5,8 @@ import {
   drawPendingGroupBrackets,
   drawPendingGroupRings,
   drawPendingRanges,
-  pendingGroupMarks
+  pendingGroupMarks,
+  pendingUngroupMarks
 } from "./chart/pending_overlay.js";
 import {
   chartSize,
@@ -80,12 +81,14 @@ export function drawChart(term, selection, context) {
     term,
     context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
   );
-  // A waiting group is named on a bracket under the axis labels, which takes
-  // a row of its own. The handles view draws neither groups nor brackets.
-  const waitingGroups = visualMode === "handles" && term.controls
-    ? []
-    : pendingGroupMarks(term, view);
-  const bracketRow = waitingGroups.length ? WAITING_BRACKET_ROW : 0;
+  // A waiting group or ungroup is named on a bracket under the axis labels,
+  // which takes a row of its own. The handles view draws neither groups nor
+  // brackets.
+  const drawsGroups = !(visualMode === "handles" && term.controls);
+  const waitingGroups = drawsGroups ? pendingGroupMarks(term, view) : [];
+  const waitingUngroups = drawsGroups ? pendingUngroupMarks(term, view) : [];
+  const waitingBrackets = [...waitingUngroups, ...waitingGroups];
+  const bracketRow = waitingBrackets.length ? WAITING_BRACKET_ROW : 0;
   const x = view.x;
   const y = view.y;
   const original = view.original_y;
@@ -161,7 +164,7 @@ export function drawChart(term, selection, context) {
 
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
   // curves and interactive handles/points.
-  exposureLayer(svg, view, sx, margin, innerW, innerH, exposure, waitingSlots(waitingGroups));
+  exposureLayer(svg, view, sx, margin, innerW, innerH, exposure, waitingSlots(waitingBrackets));
   for (const tick of ticks(yMin, yMax, tickCount(innerH, 70))) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
     text(svg, margin.left - 8, sy(tick) + 4, fmt(tick), "tick-label", "end");
@@ -248,9 +251,9 @@ export function drawChart(term, selection, context) {
     if (view.displayIsCollapsed) drawCollapsedLevelGroups(svg, view, sx, sy);
     else drawLevelGroups(svg, view, sx, sy);
   }
-  if (waitingGroups.length && categoricalLayout) {
+  if (waitingBrackets.length && categoricalLayout) {
     drawPendingGroupRings(svg, waitingGroups, { view, sx, sy, color: levelGroupColor });
-    drawPendingGroupBrackets(svg, waitingGroups, {
+    drawPendingGroupBrackets(svg, waitingBrackets, {
       view,
       sx,
       top: categoricalLayout.labelsBottom,
@@ -676,7 +679,8 @@ function drawLevelGroupMarker(svg, x, y, sx, sy, groupIndex) {
   }
 }
 
-// The palette slot of each displayed point a waiting group takes in.
+// The palette slot of each displayed point a waiting group takes in, or a
+// waiting ungroup takes out of its fitted group; a group listed later wins.
 function waitingSlots(marks) {
   const slots = new Map();
   for (const mark of marks) {
@@ -1207,7 +1211,8 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure, waiting 
         ry: 2,
         class: waiting.has(i) ? "exposure waiting" : "exposure"
       });
-      // A level in a waiting group shows its bar dashed, in the group's colour.
+      // A level a waiting change groups or ungroups shows its bar dashed, in
+      // the colour of the group it joins or leaves.
       if (waiting.has(i)) {
         const slot = waiting.get(i);
         bar.setAttribute(

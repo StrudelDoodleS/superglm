@@ -4,7 +4,9 @@
 // "waiting for refit" tag. A waiting group shows its members' exposure bars
 // dashed in its group colour (chart.js colours them from pendingGroupMarks),
 // rings their points, and is named on a dashed bracket under the axis labels,
-// in a row the categorical axis keeps for it.
+// in a row the categorical axis keeps for it. A waiting ungroup marks the
+// levels that leave a fitted group the same way, in that group's colour and
+// without rings: the fitted group's markers still sit on its points.
 
 import { shapeRangeDescription, shapeRangeExtent } from "../shapes.js";
 import { labelWidth } from "./shape_overlay.js";
@@ -21,6 +23,14 @@ import { el, text } from "./svg.js";
  * @property {number[]} display the displayed points it takes in, ascending
  * @property {number} slot its colour in the level-group palette, after the fitted groups'
  */
+/**
+ * The levels a waiting ungroup takes out of one fitted group, to stand alone.
+ * @typedef {object} PendingUngroupMark
+ * @property {string} leaves the fitted group's label
+ * @property {string[]} members the levels that leave it, in axis order
+ * @property {number[]} display the displayed points they sit on, ascending
+ * @property {number} slot the fitted group's colour in the level-group palette
+ */
 
 /** The row a waiting group's bracket takes under the axis labels, in px. */
 export const WAITING_BRACKET_ROW = 20;
@@ -35,10 +45,12 @@ const TAG_HEIGHT = 20;
 const TAG_BASELINE = 20;
 
 /**
- * The waiting groups to draw: each group the waiting changes make that the
- * fitted term does not have yet, with its members' displayed points and a
- * palette slot after the fitted groups' slots. Members are matched to the
- * term's levels as strings, so levels that look like numbers match.
+ * The waiting groups to draw: each group the waiting changes make that brings
+ * together levels the fitted term does not already group, with its members'
+ * displayed points and a palette slot after the fitted groups' slots. What is
+ * left of a fitted group after a partial ungroup is not one: its members are
+ * grouped already. Members are matched to the term's levels as strings, so
+ * levels that look like numbers match.
  * @param {TermPayload} term @param {DisplayAxis} view
  * @returns {PendingGroupMark[]}
  */
@@ -46,21 +58,16 @@ export function pendingGroupMarks(term, view) {
   const groups = term.pending?.groups;
   if (!groups || !Array.isArray(term.levels)) return [];
   const levels = term.levels.map(String);
-  const fitted = new Set(
-    (term.level_groups ?? []).map((group) => [...group.indices].sort((a, b) => a - b).join(","))
-  );
+  const fitted = fittedGroupSources(term);
   /** @type {Omit<PendingGroupMark, "slot">[]} */
   const marks = [];
   for (const [label, members] of Object.entries(groups)) {
     const sources = [...new Set(members.map((member) => levels.indexOf(String(member))))]
       .filter((index) => index >= 0)
       .sort((left, right) => left - right);
-    if (sources.length < 2 || fitted.has(sources.join(","))) continue;
-    /** @type {number[]} */
-    const display = [];
-    view.displayToSourceIndices.forEach((indices, position) => {
-      if (indices.some((index) => sources.includes(index))) display.push(position);
-    });
+    if (sources.length < 2) continue;
+    if (fitted.some((group) => sources.every((index) => group.includes(index)))) continue;
+    const display = displayedPoints(view, sources);
     if (!display.length) continue;
     marks.push({ label, members: sources.map((index) => levels[index]), display });
   }
@@ -69,12 +76,75 @@ export function pendingGroupMarks(term, view) {
   return marks.map((mark, index) => ({ ...mark, slot: first + index }));
 }
 
-/** @param {{members:readonly string[]}} mark */
+/**
+ * The waiting ungroups to draw: for each fitted group, the members that stand
+ * alone once the waiting changes apply, with their displayed points and the
+ * group's own palette slot. A member that moves into another waiting group is
+ * drawn with that group instead. Nothing is regrouped while ``pending.groups``
+ * is null; an empty mapping means every fitted group breaks up.
+ * @param {TermPayload} term @param {DisplayAxis} view
+ * @returns {PendingUngroupMark[]}
+ */
+export function pendingUngroupMarks(term, view) {
+  const groups = term.pending?.groups;
+  if (!groups || !Array.isArray(term.levels)) return [];
+  const levels = term.levels.map(String);
+  const grouped = new Set(Object.values(groups).flat().map(String));
+  /** @type {PendingUngroupMark[]} */
+  const marks = [];
+  fittedGroupSources(term).forEach((sources, slot) => {
+    const leaving = sources.filter((index) => !grouped.has(levels[index]));
+    if (sources.length < 2 || !leaving.length) return;
+    const display = displayedPoints(view, leaving);
+    if (!display.length) return;
+    const leaves = String(term.level_groups?.[slot]?.label ?? "");
+    marks.push({ leaves, members: leaving.map((index) => levels[index]), display, slot });
+  });
+  return marks.sort((left, right) => left.display[0] - right.display[0]);
+}
+
+/**
+ * Each fitted group's levels as source indices, ascending, in the order the
+ * chart gives the groups their colours.
+ * @param {TermPayload} term @returns {number[][]}
+ */
+function fittedGroupSources(term) {
+  const count = Array.isArray(term.levels) ? term.levels.length : 0;
+  return (term.level_groups ?? []).map((group) => [...new Set(group.indices.map(Number))]
+    .filter((index) => index >= 0 && index < count)
+    .sort((left, right) => left - right));
+}
+
+/**
+ * The displayed points that show any of these source levels, ascending.
+ * @param {DisplayAxis} view @param {readonly number[]} sources @returns {number[]}
+ */
+function displayedPoints(view, sources) {
+  /** @type {number[]} */
+  const display = [];
+  view.displayToSourceIndices.forEach((indices, position) => {
+    if (indices.some((index) => sources.includes(index))) display.push(position);
+  });
+  return display;
+}
+
+/** @param {{members:readonly string[], leaves?:string}} mark */
 export function waitingBracketText(mark) {
-  const named = mark.members.length <= 3
-    ? mark.members.join(" + ")
-    : `${mark.members.length} levels`;
+  const many = mark.members.length > 3;
+  if (mark.leaves !== undefined) {
+    const named = many ? `${mark.members.length} levels` : mark.members.join(", ");
+    return `${named} ungrouped · waiting`;
+  }
+  const named = many ? `${mark.members.length} levels` : mark.members.join(" + ");
   return `${named} · waiting`;
+}
+
+/** @param {{members:readonly string[], leaves?:string}} mark */
+function waitingBracketPopover(mark) {
+  const members = mark.members.join(", ");
+  if (mark.leaves === undefined) return `${members} become one group at the next Refit.`;
+  const verb = mark.members.length === 1 ? "leaves" : "leave";
+  return `${members} ${verb} the group ${mark.leaves} at the next Refit.`;
 }
 
 /**
@@ -144,11 +214,12 @@ export function drawPendingGroupRings(svg, marks, { view, sx, sy, color }) {
 }
 
 /**
- * A dashed bracket under the axis labels for each waiting group, named for
- * its members. ``top`` is the bottom of the tick labels; ``left`` and
- * ``right`` bound the plot, so a zoom clips the bracket and drops a group
+ * A dashed bracket under the axis labels for each waiting group or ungroup,
+ * named for its members. ``top`` is the bottom of the tick labels; ``left``
+ * and ``right`` bound the plot, so a zoom clips the bracket and drops a group
  * zoomed out of view.
- * @param {SVGElement} svg @param {readonly PendingGroupMark[]} marks
+ * @param {SVGElement} svg
+ * @param {readonly (PendingGroupMark|PendingUngroupMark)[]} marks
  * @param {{view:{x:number[]}, sx:(v:number)=>number, top:number, left:number, right:number,
  *   color:GroupColor}} options
  */
@@ -163,9 +234,9 @@ export function drawPendingGroupBrackets(svg, marks, { view, sx, top, left, righ
     const x1 = Math.min(right, sx(last) + pad);
     if (x1 <= x0) continue;
     const bracket = el("g", {
-      class: "pending-group-bracket",
+      class: "leaves" in mark ? "pending-group-bracket ungroup" : "pending-group-bracket",
       "data-popover-title": "Waiting for refit",
-      "data-popover-body": `${mark.members.join(", ")} become one group at the next Refit.`
+      "data-popover-body": waitingBracketPopover(mark)
     });
     bracket.appendChild(el("path", {
       class: "pending-group-bracket-line",
