@@ -309,12 +309,19 @@ fitted spec and the display term. These break on an unfitted draft today:
     dot pattern) and a Bangers DAY/NIGHT label;
   - the font loaded with the existing Google Fonts link (Bangers is already the
     docs display face).
-- Animation, played only on the user's click:
-  - the knob springs across (`cubic-bezier(.34,1.56,.64,1)`, 480 ms) and turns
-    a full revolution while the sun fades out and the moon fades in;
-  - the labels swap with a scale pop;
-  - a halftone starburst flashes behind the knob's destination (460 ms keyframe);
-  - the track, ink and page colours cross-fade (320–360 ms).
+- Animation, played only on the user's click. It is a CSS keyframe animation,
+  restarted on each click by alternating two identically defined keyframe names
+  (board 7b; Max asked for "css animation" after a transition-only version read
+  as instant):
+  - the knob travels in 680 ms: squash (scale 1.32 × 0.78), overshoot past the
+    end, settle;
+  - the outgoing icon spins out (420 ms) and the incoming one spins in with a
+    small overshoot (620 ms, 160 ms delay);
+  - the label pops in (560 ms, 260 ms delay, scale 0.2 → 1.35 → 1 with a tilt);
+  - a halftone starburst flashes at the knob's destination (600 ms, 300 ms
+    delay);
+  - the track, ink, shadow, bar and page colours cross-fade, and the halftone
+    dots drift (560–600 ms).
 - `prefers-reduced-motion` turns all of it off. tokens.css already zeroes
   animations and transitions under it.
 - The pre-paint script keeps working. The "Follow the browser" setting restores
