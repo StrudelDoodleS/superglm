@@ -84,7 +84,7 @@ import {
   renderSummaryFilter,
   waitingCounts
 } from "./views/summary_view.js";
-import { mountThemeControl, resolveTheme } from "./views/theme.js";
+import { mountThemeSwitch } from "./views/theme.js";
 import {
   RATING_TABLE_FAILED,
   RATING_TABLE_LOADING,
@@ -276,25 +276,13 @@ bindAppBar({
   onRefresh: refreshFromPython,
   onRefit: refitPending
 });
-// Until I2: the theme key decides and "Follow the browser" mirrors it. A
-// theme chosen with the icon turns the setting off and Auto turns it on;
-// turning the setting on removes the key, and turning it off keeps the theme
-// now showing. I2's switch takes this over (S7).
-const darkMedia = window.matchMedia("(prefers-color-scheme: dark)");
-const themeControl = mountThemeControl({
-  button: document.getElementById("themeAction"),
+// The DAY / NIGHT switch keeps "Follow the browser" equal to the theme key.
+mountThemeSwitch({
+  button: document.getElementById("themeSwitch"),
   root: document.documentElement,
-  media: darkMedia,
-  onChange: (choice) => saveSettings({ followBrowserTheme: choice === "auto" })
+  media: window.matchMedia("(prefers-color-scheme: dark)"),
+  settings: { load: loadSettings, save: saveSettings, subscribe: onSettingsChange }
 });
-onSettingsChange((settings) => {
-  const choice = themeControl.choice();
-  if (settings.followBrowserTheme === (choice === "auto")) return;
-  themeControl.setChoice(
-    settings.followBrowserTheme ? "auto" : resolveTheme(choice, darkMedia.matches)
-  );
-});
-saveSettings({ followBrowserTheme: themeControl.choice() === "auto" });
 
 // Settings keep their choices in this browser (views/settings.js).
 function renderSettingsView() {

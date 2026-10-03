@@ -248,9 +248,8 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Theme",
     items: Object.freeze([
-      "The theme icon in the application bar cycles through Auto, Light and Dark. Auto follows the browser's light or dark setting, which inside a notebook is not always the notebook's own; a chosen theme wins over it.",
-      "The choice is kept through a reload of the page.",
-      "Settings › Follow the browser's light or dark setting goes back to Auto. Turning it off keeps the theme now showing.",
+      "The DAY / NIGHT switch in the application bar sets the theme. Until you flip it, the editor follows the browser's light or dark setting, which inside a notebook is not always the notebook's own.",
+      "A flipped switch keeps its theme through a reload of the page. Follow the browser's light or dark setting, in Settings, hands the theme back to the browser.",
     ]),
   }),
   Object.freeze({

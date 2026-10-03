@@ -160,8 +160,8 @@ def test_follow_the_browser_is_the_theme_choice(open_editor_page):
         page.wait_for_function("() => document.documentElement.dataset.theme === 'light'")
         assert page.evaluate("() => localStorage.getItem('superglm.editor.theme')") is None
 
-        # Choosing a theme in the top bar turns the switch off.
-        page.get_by_role("button", name="Theme: Auto").click()
+        # Flipping the DAY / NIGHT switch in the top bar turns the setting off.
+        page.get_by_role("switch", name="Dark theme").click()
         assert follow.get_attribute("aria-checked") == "false"
 
 

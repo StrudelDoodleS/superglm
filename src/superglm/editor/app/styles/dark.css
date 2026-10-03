@@ -88,6 +88,8 @@
   --trace-7: #458588;
   --trace-8: #8ec07c;
   --trace-9: #d65d0e;
+  --switch-track: #32302f;
+  --switch-dots: rgba(235, 219, 178, 0.22);
 }
 
 /* A translucent yellow over near-black composes to a dim gold, so the

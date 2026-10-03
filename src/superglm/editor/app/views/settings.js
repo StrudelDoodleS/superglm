@@ -4,7 +4,7 @@
 // blocked or broken never stops the page: a read falls back to the defaults
 // and a change lasts for the page. The theme keeps its own key, which the
 // first-paint script in index.html reads; "Follow the browser" mirrors it, and
-// main.js keeps the two equal.
+// views/theme.js keeps the two equal.
 
 /** @typedef {"expanded"|"collapsed"} GroupsDefault */
 /**

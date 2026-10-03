@@ -6,43 +6,22 @@ import test from "node:test";
 
 import {
   THEME_STORAGE_KEY,
-  describeThemeControl,
-  mountThemeControl,
-  nextThemeChoice,
+  describeThemeSwitch,
+  mountThemeSwitch,
   readThemeChoice,
   resolveTheme,
   storeThemeChoice,
 } from "../../src/superglm/editor/app/views/theme.js";
 
-class FakeIcon {
-  constructor(choice) {
-    this.choice = choice;
-    this.hidden = false;
-  }
-
-  getAttribute(name) {
-    return name === "data-theme-icon" ? this.choice : null;
-  }
-
-  toggleAttribute(name, force) {
-    if (name === "hidden") this.hidden = force;
-  }
-}
-
-class FakeButton {
+class FakeSwitch {
   constructor() {
     this.dataset = {};
     this.attributes = new Map();
-    this.icons = [new FakeIcon("auto"), new FakeIcon("light"), new FakeIcon("dark")];
     this.listeners = new Map();
   }
 
   setAttribute(name, value) {
     this.attributes.set(name, value);
-  }
-
-  querySelectorAll(selector) {
-    return selector === "[data-theme-icon]" ? this.icons : [];
   }
 
   addEventListener(type, listener) {
@@ -57,8 +36,8 @@ class FakeButton {
     this.listeners.get("click")?.();
   }
 
-  shownIcons() {
-    return this.icons.filter((icon) => !icon.hidden).map((icon) => icon.choice);
+  get checked() {
+    return this.attributes.get("aria-checked") === "true";
   }
 }
 
@@ -92,33 +71,53 @@ function memoryStorage() {
   };
 }
 
+const BLOCKED = {
+  getItem() { throw new Error("storage disabled"); },
+  setItem() { throw new Error("storage disabled"); },
+  removeItem() { throw new Error("storage disabled"); },
+};
+
+// The settings store as views/settings.js keeps it: the current settings in
+// memory, every listener told synchronously after a save.
+function memorySettings(followBrowserTheme) {
+  let current = { followBrowserTheme };
+  const listeners = new Set();
+  return {
+    saves: [],
+    load: () => ({ ...current }),
+    save(patch) {
+      current = { ...current, ...patch };
+      this.saves.push(patch);
+      for (const listener of [...listeners]) listener({ ...current });
+      return { ...current };
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    listenerCount: () => listeners.size,
+  };
+}
+
+function mount({ stored = null, follow = true, prefersDark = false, storage = memoryStorage(), settings } = {}) {
+  if (stored !== null) storage.setItem(THEME_STORAGE_KEY, stored);
+  const button = new FakeSwitch();
+  const root = { dataset: {} };
+  const media = new FakeMedia(prefersDark);
+  const store = settings ?? memorySettings(follow);
+  const control = mountThemeSwitch({ button, root, media, settings: store, storage });
+  return { button, root, media, settings: store, storage, control };
+}
+
 function appFile(path) {
   return readFileSync(new URL(`../../src/superglm/editor/app/${path}`, import.meta.url), "utf8");
 }
 
-test("Auto resolves to the browser's setting and a click first shows the other theme", () => {
+test("a stored choice is explicit, and no stored choice or blocked storage follows the browser", () => {
   assert.deepEqual(
     [resolveTheme("auto", false), resolveTheme("auto", true), resolveTheme("light", true), resolveTheme("dark", false)],
     ["light", "dark", "light", "dark"],
   );
-  // A light browser: Auto shows light, so the clicks go Dark, Light, Auto.
-  assert.deepEqual(["auto", "dark", "light"].map((choice) => nextThemeChoice(choice, false)), ["dark", "light", "auto"]);
-  assert.deepEqual(["auto", "light", "dark"].map((choice) => nextThemeChoice(choice, true)), ["light", "dark", "auto"]);
-});
-
-test("the control names its state and what a click does", () => {
-  assert.deepEqual(describeThemeControl("auto", false), {
-    label: "Theme: Auto",
-    body: "Follows the browser's setting, light now. Click for Dark.",
-  });
-  assert.deepEqual(describeThemeControl("dark", false), { label: "Theme: Dark", body: "Click for Light." });
-  assert.deepEqual(describeThemeControl("light", false), {
-    label: "Theme: Light",
-    body: "Click for Auto, which follows the browser's setting.",
-  });
-});
-
-test("the choice is remembered in storage and is Auto without one or with storage blocked", () => {
   const storage = memoryStorage();
   assert.equal(readThemeChoice(storage), "auto");
   storeThemeChoice("dark", storage);
@@ -128,45 +127,129 @@ test("the choice is remembered in storage and is Auto without one or with storag
   assert.equal(readThemeChoice(storage), "auto");
   storeThemeChoice("auto", storage);
   assert.equal(storage.store.size, 0);
-
-  const blocked = {
-    getItem() { throw new Error("storage disabled"); },
-    setItem() { throw new Error("storage disabled"); },
-    removeItem() { throw new Error("storage disabled"); },
-  };
-  assert.equal(readThemeChoice(blocked), "auto");
-  assert.doesNotThrow(() => storeThemeChoice("dark", blocked));
-  assert.doesNotThrow(() => storeThemeChoice("auto", blocked));
+  assert.equal(readThemeChoice(BLOCKED), "auto");
+  assert.doesNotThrow(() => storeThemeChoice("dark", BLOCKED));
+  assert.doesNotThrow(() => storeThemeChoice("auto", BLOCKED));
 });
 
-test("mounting applies the remembered choice, a click cycles it, and Auto follows the browser", () => {
-  const storage = memoryStorage();
-  storage.setItem(THEME_STORAGE_KEY, "dark");
-  const button = new FakeButton();
-  const root = { dataset: {} };
-  const media = new FakeMedia(false);
-  const control = mountThemeControl({ button, root, media, storage });
-  assert.deepEqual([root.dataset.theme, button.dataset.choice, button.shownIcons()], ["dark", "dark", ["dark"]]);
-  assert.equal(button.attributes.get("aria-label"), "Theme: Dark");
-  assert.deepEqual([button.dataset.popoverTitle, button.dataset.popoverBody], ["Theme: Dark", "Click for Light."]);
+test("the switch is on for Night and says what a click does", () => {
+  assert.deepEqual(describeThemeSwitch("auto", false), {
+    checked: false,
+    title: "Theme: Day",
+    body: "Follows the browser's setting. Click for Night; the theme then stays as you set it.",
+  });
+  assert.deepEqual(describeThemeSwitch("auto", true), {
+    checked: true,
+    title: "Theme: Night",
+    body: "Follows the browser's setting. Click for Day; the theme then stays as you set it.",
+  });
+  assert.deepEqual(describeThemeSwitch("dark", false), {
+    checked: true,
+    title: "Theme: Night",
+    body: "Click for Day. Settings can follow the browser's setting again.",
+  });
+  assert.deepEqual(describeThemeSwitch("light", true), {
+    checked: false,
+    title: "Theme: Day",
+    body: "Click for Night. Settings can follow the browser's setting again.",
+  });
+});
+
+test("a flip stores the theme and stops following the browser", () => {
+  const { button, root, media, settings, storage } = mount();
+  assert.deepEqual([root.dataset.theme, button.checked, button.dataset.popoverTitle], ["light", false, "Theme: Day"]);
+  assert.deepEqual(settings.saves, []);
+
+  button.click();
+  assert.deepEqual([root.dataset.theme, button.checked, storage.getItem(THEME_STORAGE_KEY)], ["dark", true, "dark"]);
+  assert.deepEqual(settings.saves, [{ followBrowserTheme: false }]);
+  // A flipped switch stays put when the browser changes.
+  media.set(true);
+  media.set(false);
+  assert.equal(root.dataset.theme, "dark");
 
   button.click();
   assert.deepEqual([root.dataset.theme, storage.getItem(THEME_STORAGE_KEY)], ["light", "light"]);
-  button.click();
-  assert.deepEqual([root.dataset.theme, button.dataset.choice, storage.getItem(THEME_STORAGE_KEY)], ["light", "auto", null]);
-  media.set(true);
-  assert.equal(root.dataset.theme, "dark");
-  assert.equal(button.dataset.popoverBody, "Follows the browser's setting, dark now. Click for Light.");
-  assert.deepEqual(button.shownIcons(), ["auto"]);
-
-  control.destroy();
-  assert.equal(button.listeners.size + media.listeners.size, 0);
+  assert.deepEqual(settings.saves, [{ followBrowserTheme: false }, { followBrowserTheme: false }]);
 });
 
-test("the first-paint script in index.html reads the key the control writes", () => {
+test("while following the browser the switch moves with it", () => {
+  const { button, root, media } = mount({ prefersDark: false });
+  media.set(true);
+  assert.deepEqual([root.dataset.theme, button.checked], ["dark", true]);
+  assert.equal(button.dataset.popoverBody, "Follows the browser's setting. Click for Day; the theme then stays as you set it.");
+});
+
+test("Settings hands the theme back to the browser, and turning that off keeps the theme on screen", () => {
+  const { button, root, media, settings, storage } = mount({ prefersDark: false });
+  button.click();
+  settings.save({ followBrowserTheme: true });
+  assert.deepEqual([root.dataset.theme, storage.getItem(THEME_STORAGE_KEY)], ["light", null]);
+  media.set(true);
+  assert.equal(root.dataset.theme, "dark");
+
+  settings.save({ followBrowserTheme: false });
+  assert.equal(storage.getItem(THEME_STORAGE_KEY), "dark");
+  media.set(false);
+  assert.equal(root.dataset.theme, "dark");
+});
+
+test("the theme key decides, and the setting is brought into line with it on mount", () => {
+  // A choice made before the setting existed: still explicit.
+  const legacy = mount({ stored: "dark", follow: true, prefersDark: false });
+  assert.equal(legacy.root.dataset.theme, "dark");
+  assert.deepEqual(legacy.settings.saves, [{ followBrowserTheme: false }]);
+  // No stored choice: the browser's theme, whatever the setting said.
+  const unset = mount({ stored: null, follow: false, prefersDark: true });
+  assert.equal(unset.root.dataset.theme, "dark");
+  assert.deepEqual(unset.settings.saves, [{ followBrowserTheme: true }]);
+  // In line already: nothing is saved.
+  assert.deepEqual(mount({ stored: "light", follow: false }).settings.saves, []);
+});
+
+test("with storage blocked the switch follows the browser, flips for the page, and nothing throws", () => {
+  const { button, root, media } = mount({ storage: BLOCKED, prefersDark: true });
+  assert.equal(root.dataset.theme, "dark");
+  assert.doesNotThrow(() => button.click());
+  assert.equal(root.dataset.theme, "light");
+  media.set(false);
+  media.set(true);
+  assert.equal(root.dataset.theme, "light");
+
+  // A settings store that keeps nothing echoes its defaults back; the flip holds.
+  const listeners = new Set();
+  const forgetful = {
+    load: () => ({ followBrowserTheme: true }),
+    save() {
+      for (const listener of listeners) listener({ followBrowserTheme: true });
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const page = mount({ storage: BLOCKED, prefersDark: false, settings: forgetful });
+  page.button.click();
+  assert.equal(page.root.dataset.theme, "dark");
+});
+
+test("destroy removes every listener", () => {
+  const { button, media, settings, control } = mount();
+  control.destroy();
+  assert.equal(button.listeners.size + media.listeners.size + settings.listenerCount(), 0);
+});
+
+test("index.html paints the stored theme first and carries the switch", () => {
   const html = appFile("index.html");
   assert.ok(html.includes(`localStorage.getItem("${THEME_STORAGE_KEY}")`));
-  assert.ok(html.includes('id="themeAction"'));
+  assert.ok(!html.includes('id="themeAction"'));
+  const start = html.indexOf('<button id="themeSwitch"');
+  assert.notEqual(start, -1);
+  const markup = html.slice(start, html.indexOf("</button>", start));
+  for (const part of ['role="switch"', 'aria-checked="false"', 'aria-label="Dark theme"', ">DAY<", ">NIGHT<", 'data-icon="sun"', 'data-icon="moon"']) {
+    assert.ok(markup.includes(part), part);
+  }
+  assert.match(html, /fonts\.googleapis\.com\/css2\?family=Bangers&family=Source\+Sans\+3/);
 });
 
 test("the dark palette restates every colour token of the light one and no other", () => {
@@ -179,33 +262,4 @@ test("the dark palette restates every colour token of the light one and no other
   const missing = [...light].filter((name) => !dark.has(name) && !layout.test(name) && !aliases.has(name));
   assert.deepEqual(missing, []);
   assert.deepEqual([...dark].filter((name) => !light.has(name)), []);
-});
-
-test("the Settings pane reads and sets the choice, and hears every change", () => {
-  const storage = memoryStorage();
-  const button = new FakeButton();
-  const root = { dataset: {} };
-  const media = new FakeMedia(true);
-  const changes = [];
-  const control = mountThemeControl({
-    button, root, media, storage, onChange: (choice) => changes.push(choice),
-  });
-  assert.equal(control.choice(), "auto");
-
-  control.setChoice("light");
-  assert.deepEqual(
-    [control.choice(), root.dataset.theme, storage.getItem(THEME_STORAGE_KEY), button.dataset.choice],
-    ["light", "light", "light", "light"],
-  );
-  // The control's own click is reported too: Light, with a dark browser, goes to it.
-  button.click();
-  assert.equal(control.choice(), "dark");
-  control.setChoice("auto");
-  assert.equal(storage.getItem(THEME_STORAGE_KEY), null);
-  control.setChoice("sepia");
-  assert.equal(control.choice(), "auto");
-  assert.deepEqual(changes, ["light", "dark", "auto"]);
-
-  control.destroy();
-  assert.equal(button.listeners.size + media.listeners.size, 0);
 });

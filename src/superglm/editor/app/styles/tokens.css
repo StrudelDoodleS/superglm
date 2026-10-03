@@ -89,6 +89,9 @@
      dialog's best marker is the trace palette's green. */
   --green: var(--basis-0);
   --trace-best: var(--trace-1);
+  /* The theme switch's track and its halftone dots. */
+  --switch-track: #fabd2f;
+  --switch-dots: rgba(21, 23, 28, 0.2);
   --font-sans: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --radius-sm: 4px;

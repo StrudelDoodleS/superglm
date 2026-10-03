@@ -80,6 +80,96 @@ body {
   gap: 2px;
 }
 
+/* The theme switch: a comic pill, DAY or NIGHT, in the docs site's display
+   face. At rest it follows <html data-theme>, which index.html sets before
+   first paint, so the pill is right before views/theme.js runs. The id
+   outranks the toolbar's ghost-button rules. */
+#themeSwitch {
+  position: relative;
+  flex: none;
+  box-sizing: content-box;
+  width: 76px;
+  height: 32px;
+  margin: 0 6px 0 2px;
+  padding: 0;
+  border: 2.5px solid var(--text);
+  border-radius: 999px;
+  background-color: var(--switch-track);
+  background-image: radial-gradient(circle, var(--switch-dots) 1.1px, transparent 1.4px);
+  background-size: 5px 5px;
+  box-shadow: 3px 3px 0 var(--ink);
+  color: var(--text);
+}
+
+/* Each label keeps to the side of the track the knob leaves free, 38px from
+   its left edge, so a wider fallback face, when Bangers cannot load, is cut
+   off there instead of running under the knob. */
+.theme-switch-label {
+  position: absolute;
+  top: 9.5px;
+  max-width: 38px;
+  overflow: hidden;
+  font: 15px/1 Bangers, Impact, "Arial Black", sans-serif;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.theme-switch-label[data-label="day"] {
+  left: 38px;
+}
+
+.theme-switch-label[data-label="night"] {
+  left: 8px;
+  opacity: 0;
+}
+
+.theme-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 28px;
+  height: 28px;
+  border: 2.5px solid var(--text);
+  border-radius: 50%;
+  background-color: var(--surface);
+}
+
+.theme-switch-icon {
+  position: absolute;
+  inset: 0;
+  width: 17px;
+  height: 17px;
+  margin: auto;
+  fill: none;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.theme-switch-icon[data-icon="sun"] {
+  stroke: var(--red);
+}
+
+.theme-switch-icon[data-icon="moon"] {
+  stroke: var(--surface);
+  opacity: 0;
+}
+
+:root[data-theme="dark"] .theme-switch-knob {
+  translate: 44px 0;
+  background-color: var(--blue);
+}
+
+:root[data-theme="dark"] .theme-switch-label[data-label="day"],
+:root[data-theme="dark"] .theme-switch-icon[data-icon="sun"] {
+  opacity: 0;
+}
+
+:root[data-theme="dark"] .theme-switch-label[data-label="night"],
+:root[data-theme="dark"] .theme-switch-icon[data-icon="moon"] {
+  opacity: 1;
+}
+
 /* Refit: quiet while nothing waits, the one filled action while changes do. */
 .app-actions .refit-action {
   display: inline-flex;
