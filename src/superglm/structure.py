@@ -641,7 +641,8 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
         return probe._basis_spline.fitted_boundary
 
     position = host._range_edge_value
-    return hosted(ranges, _placed_boundary(name, ranges, fits, boundary, extent, position))
+    in_order = sorted(ranges, key=lambda r: position(r.lo))
+    return hosted(ranges, _placed_boundary(name, in_order, fits, boundary, extent, position))
 
 
 def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
