@@ -52,7 +52,11 @@ import {
 } from "./summary.js";
 import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
-import { placeTermViewToggle, renderContextBar } from "./views/context_bar.js";
+import {
+  placeTermViewToggle,
+  renderContextBar,
+  renderNewLevelsControl
+} from "./views/context_bar.js";
 import { createCVTab } from "./views/cv_tab.js";
 import { bindExportDialog } from "./views/export_dialog.js";
 import {
@@ -151,6 +155,8 @@ const helpPane = document.getElementById("helpPane");
 const toolRail = document.getElementById("toolRail");
 const groupDisplayWrap = document.getElementById("groupDisplayWrap");
 const groupDisplayMode = document.getElementById("groupDisplayMode");
+const newLevelsWrap = document.getElementById("newLevelsWrap");
+const newLevelsMode = document.getElementById("newLevelsMode");
 const handleCountWrap = document.getElementById("handleCountWrap");
 const handleCount = document.getElementById("handleCount");
 const handleCountValue = document.getElementById("handleCountValue");
@@ -1009,6 +1015,7 @@ function renderChartWorkspace() {
     handlesReason: term.spline_view?.reason ?? null
   });
   updateGroupDisplayControl(term);
+  updateNewLevelsControl(term);
   updateCollapseAction(term, selection);
   updateShapeActions(term, selection);
   updateResetOrderAction(term);
@@ -1486,6 +1493,11 @@ function updateGroupDisplayControl(term) {
   groupDisplayMode.value = activeGroupDisplayMode();
 }
 
+function updateNewLevelsControl(term) {
+  if (!newLevelsWrap || !(newLevelsMode instanceof HTMLSelectElement) || !term) return;
+  renderNewLevelsControl({ wrap: newLevelsWrap, select: newLevelsMode }, term);
+}
+
 function updateCollapseAction(term, selection) {
   const type = term.term_type || term.kind || "";
   const isLevelTerm = type === "categorical" || type === "ordered categorical";
@@ -1778,6 +1790,19 @@ bindSummarySections(summaryFrame, (term, open) => {
   summaryToggled.set(term, !open);
   applySummaryView(summaryNodes());
 });
+
+// New levels → is a session operation on the in-force model: no refit, and
+// one entry on the one Undo history.
+if (newLevelsMode instanceof HTMLSelectElement) {
+  newLevelsMode.addEventListener("change", async () => {
+    await executeStateMutation("/set_unseen", {
+      term: selectedTerm(),
+      unseen: newLevelsMode.value
+    });
+    // A refused choice leaves the policy in force, which the select shows again.
+    updateNewLevelsControl(currentTerm());
+  });
+}
 
 if (groupDisplayMode) {
   groupDisplayMode.addEventListener("change", () => {

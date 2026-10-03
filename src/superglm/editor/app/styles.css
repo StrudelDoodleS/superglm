@@ -131,14 +131,16 @@ input[type="number"] {
 }
 .handle-count,
 .build-duration,
-.group-display-toggle {
+.group-display-toggle,
+.new-levels-control {
   display: inline-flex;
   height: var(--control-height);
   align-items: center;
   gap: 6px;
   color: var(--muted);
 }
-.group-display-toggle select {
+.group-display-toggle select,
+.new-levels-control select {
   min-width: 104px;
   height: 26px;
   padding: 0 4px;

@@ -140,6 +140,13 @@ export const STRUCTURE_HELP = Object.freeze({
     title: "Refresh from Python",
     body: "Re-read the Python session after changing it in the notebook.",
   }),
+  new_levels: Object.freeze({
+    title: "New levels →",
+    body: "Where levels the fit never saw go when the model predicts. Refuse stops the "
+      + "prediction with an error. Reference rates them at the reference level, relativity "
+      + "1.00. A group gives them that group's relativity, with a warning naming them. "
+      + "Nothing refits, and Undo takes the choice back. The Structure (JSON) export keeps it.",
+  }),
 });
 
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */

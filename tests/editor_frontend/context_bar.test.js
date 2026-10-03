@@ -5,8 +5,10 @@ import test from "node:test";
 
 import {
   renderContextBar,
+  renderNewLevelsControl,
   waitingLabel,
 } from "../../src/superglm/editor/app/views/context_bar.js";
+import { HELP_SECTIONS, STRUCTURE_HELP } from "../../src/superglm/editor/app/views/help_content.js";
 
 class FakeNode {
   constructor(tagName = "span") {
@@ -146,4 +148,82 @@ test("without a waiting reference the chip shows the fitted one", () => {
   });
   assert.equal(n.referenceNode.textContent, "reference B2 · kept");
   assert.equal(n.referenceNode.dataset.waiting, "false");
+});
+
+/** The "New levels →" label and its select, with the DOM calls the control makes. */
+function newLevelsNodes() {
+  const doc = { createElement: (tag) => ({ tagName: tag.toUpperCase(), value: "", textContent: "" }) };
+  const select = {
+    ownerDocument: doc,
+    options: [],
+    value: "",
+    disabled: false,
+    dataset: {},
+    replaceChildren(...options) {
+      this.options = options;
+      this.rebuilt = (this.rebuilt ?? 0) + 1;
+    },
+  };
+  return { wrap: { hidden: true, dataset: {} }, select };
+}
+
+const UNSEEN = {
+  policy: "Other",
+  choices: [
+    { value: "error", label: "Refuse" },
+    { value: "base", label: "Reference" },
+    { value: "Other", label: "Other" },
+  ],
+  reason: null,
+};
+
+test("New levels lists Refuse, Reference and each group, and shows the choice in force", () => {
+  const n = newLevelsNodes();
+  renderNewLevelsControl(n, { ...TERM, unseen: UNSEEN });
+  assert.equal(n.wrap.hidden, false);
+  assert.deepEqual(
+    n.select.options.map((option) => [option.value, option.textContent]),
+    [["error", "Refuse"], ["base", "Reference"], ["Other", "Other"]],
+  );
+  assert.equal(n.select.value, "Other");
+  assert.equal(n.select.disabled, false);
+  // Its hover popover is its Help entry, which Help lists under Model structure.
+  assert.equal(n.wrap.dataset.popoverTitle, STRUCTURE_HELP.new_levels.title);
+  assert.equal(n.wrap.dataset.popoverBody, STRUCTURE_HELP.new_levels.body);
+  assert.equal(STRUCTURE_HELP.new_levels.title, "New levels →");
+  const structure = HELP_SECTIONS.find((section) => section.title === "Model structure");
+  assert.ok(structure.keys.includes("new_levels"));
+  // The same choices again keep the open list as it is; a new group rebuilds it.
+  renderNewLevelsControl(n, { ...TERM, unseen: { ...UNSEEN, policy: "base" } });
+  assert.equal(n.select.rebuilt, 1);
+  assert.equal(n.select.value, "base");
+  const grown = [...UNSEEN.choices, { value: "B1+B2", label: "B1+B2" }];
+  renderNewLevelsControl(n, { ...TERM, unseen: { ...UNSEEN, choices: grown } });
+  assert.equal(n.select.rebuilt, 2);
+  assert.equal(n.select.options.length, 4);
+});
+
+test("New levels is absent on spline and ordered terms", () => {
+  for (const term of [
+    { ...TERM, kind: "numeric", term_type: "spline", unseen: null },
+    { ...TERM, term_type: "ordered categorical", unseen: null },
+    { ...TERM },
+  ]) {
+    const n = newLevelsNodes();
+    n.wrap.hidden = false;
+    renderNewLevelsControl(n, term);
+    assert.equal(n.wrap.hidden, true, term.term_type);
+  }
+});
+
+test("New levels is disabled, with the reason in its popover, while the choice cannot be made", () => {
+  const n = newLevelsNodes();
+  const reason = "Refit or undo the waiting changes to 'territory' before choosing where its new levels go.";
+  renderNewLevelsControl(n, { ...TERM, unseen: { ...UNSEEN, reason } });
+  assert.equal(n.wrap.hidden, false);
+  assert.equal(n.select.disabled, true);
+  assert.equal(n.wrap.dataset.popoverBody, reason);
+  renderNewLevelsControl(n, { ...TERM, unseen: UNSEEN });
+  assert.equal(n.select.disabled, false);
+  assert.equal(n.wrap.dataset.popoverBody, STRUCTURE_HELP.new_levels.body);
 });

@@ -1,6 +1,7 @@
 // @ts-check
 
 import { fmt, fmtEdf, fmtPercent } from "../format.js";
+import { STRUCTURE_HELP } from "./help_content.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('../api/contracts.js').TermReference} TermReference */
@@ -90,4 +91,33 @@ export function renderContextBar(
     statusNode.textContent = selected;
   }
   statusNode.dataset.term = name;
+}
+
+/**
+ * The "New levels →" select: where levels the fit never saw go when the model
+ * predicts. Only a plain categorical has one (`term.unseen` is null on every
+ * other term). Its options are rebuilt only when the choices change, so a
+ * render while the list is open leaves it open. While the choice cannot be
+ * made the select is disabled and its popover gives the reason.
+ * @param {{wrap:HTMLElement, select:HTMLSelectElement}} nodes
+ * @param {TermPayload} term
+ */
+export function renderNewLevelsControl({ wrap, select }, term) {
+  const unseen = term.unseen ?? null;
+  wrap.hidden = unseen === null;
+  if (unseen === null) return;
+  const choices = JSON.stringify(unseen.choices);
+  if (select.dataset.choices !== choices) {
+    select.replaceChildren(...unseen.choices.map(({ value, label }) => {
+      const option = select.ownerDocument.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }));
+    select.dataset.choices = choices;
+  }
+  select.value = unseen.policy;
+  select.disabled = unseen.reason !== null;
+  wrap.dataset.popoverTitle = STRUCTURE_HELP.new_levels.title;
+  wrap.dataset.popoverBody = unseen.reason ?? STRUCTURE_HELP.new_levels.body;
 }

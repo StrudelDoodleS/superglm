@@ -181,6 +181,23 @@
  * @property {boolean} [edited] whether the term carries hand edits
  *   (Python's `EditorSession.edited_terms()`)
  * @property {SplineView|null} [spline_view]
+ * @property {TermUnseen|null} [unseen] the New levels choice; null except on a plain categorical
+ */
+/**
+ * Where a plain categorical's levels unseen at fit go: the in-force
+ * ``policy`` ("error", "base" or a group label), the control's ``choices``
+ * (Refuse, Reference, then one per group) and the fixed ``reason`` the choice
+ * cannot be made now, else null.
+ * @typedef {Object} TermUnseen
+ * @property {string} policy
+ * @property {Array<{value:string, label:string}>} choices
+ * @property {string|null} reason
+ */
+/**
+ * The /set_unseen request: the term and the policy chosen.
+ * @typedef {Object} SetUnseenRequest
+ * @property {string} term
+ * @property {string} unseen
  */
 /**
  * The /rating_table response: the term's main-effect block of the Excel

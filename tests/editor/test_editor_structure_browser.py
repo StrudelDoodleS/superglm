@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections import Counter
 from urllib.parse import urlsplit
 
 import numpy as np
 import pytest
 from tests.test_editor_structure import EPS, _line_residual, _pinning_tolerance
 
+from superglm import read_structure
 from superglm.editor.payloads import session_payload, timeline_payload
 from superglm.editor.shapes import _numeric_edges
 
@@ -673,3 +675,59 @@ def test_a_waiting_range_is_a_dashed_box_until_refit_pins_it(open_editor_page):
         _settled_after_refit(page)
         assert waiting.count() == 0
         assert page.locator("#chart .shape-range").count() == 1
+
+
+def test_new_levels_goes_into_the_structure_file_and_undo_takes_it_back(
+    open_editor_page, choose_feature, tmp_path
+):
+    with open_editor_page(
+        selected_term="territory", collapsed_levels=("territory", ("T02", "T03"))
+    ) as (page, session):
+        collapsed = session.model
+        control = page.locator("#newLevelsWrap")
+        select = page.locator("#newLevelsMode")
+        undo = page.locator("#undoAction")
+        control.wait_for(state="visible")
+        assert control.get_attribute("data-popover-title") == "New levels →"
+        assert select.locator("option").all_text_contents() == ["Refuse", "Reference", "T02+T03"]
+        assert select.input_value() == "error"
+
+        with page.expect_response(_posted("/set_unseen")) as chosen:
+            select.select_option("T02+T03")
+        assert chosen.value.status == 200
+        page.wait_for_function(
+            "() => document.querySelector('#undoAction').dataset.popoverBody"
+            " === 'Undo: New levels → T02+T03'"
+        )
+        assert session.model._specs["territory"].unseen == "T02+T03"
+        assert select.input_value() == "T02+T03"
+
+        # Export the structure to a kernel path, from the dialog's fourth card.
+        page.locator("#exportAction").click()
+        cards = page.locator(".export-format-card")
+        cards.last.wait_for(state="visible")
+        rows = Counter(round(card.bounding_box()["y"]) for card in cards.all())
+        assert sorted(rows.values()) == [2, 2], "four cards on two rows, none alone"
+        page.get_by_role("radio", name="Structure (JSON)").check()
+        assert page.locator("#exportFilename").input_value() == "superglm_structure.json"
+        page.locator("#exportDirectory").fill(str(tmp_path))
+        with page.expect_response(_posted("/export_file")) as saved:
+            page.locator("#exportSave").click()
+        assert saved.value.status == 200
+        page.locator("#exportDialogClose").click()
+        entry = read_structure(tmp_path / "superglm_structure.json").features["territory"]
+        assert entry.unseen == "T02+T03"
+        assert entry.groups == {"T02+T03": ["T02", "T03"]}
+
+        with page.expect_response(_posted("/op")):
+            undo.click()
+        page.wait_for_function("() => document.querySelector('#newLevelsMode').value === 'error'")
+        assert session.model is collapsed
+
+        # Only a plain categorical has the choice.
+        for term in ("curve", "age_band"):
+            choose_feature(page, term)
+            page.wait_for_function(
+                "term => document.querySelector('#status')?.dataset.term === term", arg=term
+            )
+            assert control.is_hidden(), term
