@@ -23,6 +23,13 @@ const EXPORTS = Object.freeze({
     validationDescription: "Validated final fit model",
     accept: Object.freeze({ "application/octet-stream": Object.freeze([".joblib"]) }),
   }),
+  // The structural decisions alone, for superglm.read_structure (spec S1, S2).
+  structure: Object.freeze({
+    filename: "superglm_structure.json",
+    description: "Structure (JSON)",
+    validationDescription: "Structure (JSON)",
+    accept: Object.freeze({ "application/json": Object.freeze([".json"]) }),
+  }),
 });
 
 /** @typedef {keyof typeof EXPORTS} ExportFormat */
@@ -85,7 +92,7 @@ function hasValidationScope(value) {
 
 /** @param {string} message @param {ExportFormat} format @param {string|null} validation */
 function successMessage(message, format, validation) {
-  if (format === "xlsx") return message;
+  if (format === "xlsx" || format === "structure") return message;
   if (validation === "artifact+predictions") {
     return `${message} Round-trip validated; predictions validated.`;
   }
@@ -103,7 +110,8 @@ export function pendingExportNote(count) {
 }
 
 /**
- * Bind the self-contained model/workbook export dialog.
+ * Bind the self-contained export dialog: the Python model, the Excel rating
+ * workbook, the Final fit model and the structure file.
  *
  * @param {ExportDialogContext} context
  */
@@ -115,7 +123,7 @@ export function bindExportDialog({
   /** @returns {ExportFormat} */
   function selectedFormat() {
     const value = nodes.formatInputs.find((input) => input.checked)?.value;
-    return value === "xlsx" || value === "final" ? value : "joblib";
+    return value === "xlsx" || value === "final" || value === "structure" ? value : "joblib";
   }
 
   // Export offers the Final fit model only while one is current (D6).

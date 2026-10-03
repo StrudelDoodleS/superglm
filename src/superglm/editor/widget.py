@@ -76,13 +76,15 @@ _EXPORT_MEDIA_TYPES = {
     "joblib": "application/octet-stream",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "final": "application/octet-stream",
+    "structure": "application/json",
 }
 _EXPORT_DEFAULT_FILENAMES = {
     "joblib": "superglm_edited_model.joblib",
     "xlsx": "superglm_rating_tables.xlsx",
     "final": "superglm_final_model.joblib",
+    "structure": "superglm_structure.json",
 }
-_EXPORT_SUFFIXES = {"joblib": ".joblib", "xlsx": ".xlsx", "final": ".joblib"}
+_EXPORT_SUFFIXES = {"joblib": ".joblib", "xlsx": ".xlsx", "final": ".joblib", "structure": ".json"}
 _EXCEL_NEEDS_TRAINING_DATA = (
     "Excel export requires train_data or retained fit data; "
     "validation/test data are not substituted."
@@ -109,6 +111,8 @@ def _normalise_export_format(format: str) -> str:
         return "xlsx"
     if normalized in {"final", "final_fit"}:
         return "final"
+    if normalized in {"structure", "json"}:
+        return "structure"
     raise EditorValueError(f"Unsupported export format: {format!r}")
 
 
@@ -677,7 +681,12 @@ class EditorWidget:
         safe_name = _safe_export_filename(canonical_format, filename)
 
         validation_scope: str | None = None
-        if canonical_format in {"joblib", "final"}:
+        if canonical_format == "structure":
+            # No fit and no rows to score: built under the lock, on one revision.
+            with self._lock:
+                revision = self.session.model_revision
+                data = self.session.export_structure().encode("utf-8")
+        elif canonical_format in {"joblib", "final"}:
             model, revision = (
                 self._final_fit_for_export()
                 if canonical_format == "final"

@@ -891,6 +891,16 @@ class EditorSession:
     def save_model(self, path: str | Path) -> Path:
         return persistence.save_model(self, path)
 
+    def export_structure(self, path: str | Path | None = None) -> str:
+        """The in-force model's structural decisions as JSON, written to ``path`` too when given.
+
+        The groupings, references, polynomial ranges and where new levels go,
+        per feature, as :func:`superglm.read_structure` reads them; no
+        coefficients and no hand edits. Changes waiting for a Refit are not
+        included: the file is the last Refit.
+        """
+        return persistence.export_structure(self, path)
+
     # Offset refits are conditional diagnostics: edited terms become fixed
     # link-scale factors and are removed from the refitted feature set.
     def edited_terms(self) -> list[str]:

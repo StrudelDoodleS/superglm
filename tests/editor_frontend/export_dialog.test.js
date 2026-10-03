@@ -363,3 +363,42 @@ test("the Final fit model option follows availability and downloads the final ex
   assert.equal(fixture.filename.value, "superglm_edited_model.joblib");
   binding.destroy();
 });
+
+test("Structure (JSON) downloads and saves the structure file with its own default name", async () => {
+  const fixture = exportFixture();
+  const structure = new FakeElement("structure");
+  fixture.nodes.formatInputs.push(structure);
+  const pendingNote = new FakeElement();
+  const binding = bindExportDialog({
+    ...fixture.context,
+    nodes: { ...fixture.nodes, pendingNote },
+    pendingCount: () => 1,
+  });
+
+  await fixture.action.emit("click");
+  // The structure is the last refit too, so the waiting-changes note stands.
+  assert.equal(
+    pendingNote.textContent,
+    "1 waiting change is not included. The export is the last refit.",
+  );
+  fixture.joblib.checked = false;
+  structure.checked = true;
+  await structure.emit("change");
+  assert.equal(fixture.filename.value, "superglm_structure.json");
+
+  await fixture.download.emit("click");
+  assert.deepEqual(fixture.blobPaths, [
+    "/download_export?format=structure&filename=superglm_structure.json",
+  ]);
+  assert.equal(fixture.saved[0].metadata.description, "Structure (JSON)");
+  assert.deepEqual(fixture.saved[0].metadata.accept, { "application/json": [".json"] });
+  assert.equal(fixture.status.textContent, "Downloaded superglm_structure.json");
+
+  await fixture.saveToKernel.emit("click");
+  assert.deepEqual(fixture.posts.at(-1), {
+    path: "/export_file",
+    payload: { format: "structure", directory: ".", filename: "superglm_structure.json" },
+  });
+  assert.equal(fixture.status.textContent, "Saved ./superglm_structure.json");
+  binding.destroy();
+});

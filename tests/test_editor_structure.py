@@ -8,7 +8,9 @@ import json
 import pickle
 import re
 import urllib.error
+import urllib.request
 import weakref
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -23,8 +25,10 @@ from superglm import (
     Piecewise,
     Polynomial,
     Spline,
+    Structure,
     SuperGLM,
     collapse_levels,
+    read_structure,
 )
 from superglm.editor import EditorSession
 from superglm.editor import session as session_module
@@ -36,7 +40,7 @@ from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
 from superglm.export.summary import build_summary_export_payload
 from superglm.features.spline import _SplineBase
-from tests.test_editor import _post_json
+from tests.test_editor import _editor_token_header, _post_json
 
 
 @pytest.fixture
@@ -1672,3 +1676,69 @@ def test_no_shape_note_without_an_editor_chosen_shape(banded, step):
     session = EditorSession.from_model(model, terms=["band"])
     step(session)
     assert "editor_shape_terms" not in session.model.summary()._info
+
+
+# -- The structure file (spec addendum S2) ------------------------------------------
+
+
+def test_export_structure_is_the_in_force_model_without_its_waiting_changes(region_model, tmp_path):
+    model, X = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.stage_structural("collapse", "region", {"levels": ["C", "D"]})
+    path = tmp_path / "structure.json"
+    text = session.export_structure(path)
+    assert path.read_bytes() == text.encode("utf-8")
+    assert text == Structure.from_model(model, X=X).to_json()
+    assert read_structure(path).features["region"].groups == {}
+    # Once the change is refit it is in force, and in the file.
+    session.refit_pending(method="fit")
+    assert read_structure(json.loads(session.export_structure())).features["region"].groups == {
+        "C+D": ["C", "D"]
+    }
+
+
+def test_export_structure_keeps_a_grouped_terms_integer_levels_native():
+    rng = np.random.default_rng(20261003)
+    band = rng.permutation(np.repeat([1, 2, 10], [250, 400, 350]))
+    y = 0.5 + 0.1 * (band == 10) + rng.normal(0.0, 0.05, band.size)
+    X = pd.DataFrame({"band": band})
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={"band": Categorical(base="first")}
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["band"], train_data=(X, y))
+    session.select_levels("band", ["1", "10"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    entry = read_structure(json.loads(session.export_structure())).features["band"]
+    assert entry.levels == [1, 2, 10]
+    assert entry.groups == {"1+10": [1, 10]}
+    # The fitted grouping alone knows its levels as text; the refit rows give them their types.
+    assert Structure.from_model(session.model).features["band"].groups == {"1+10": ["1", "10"]}
+
+
+def test_widget_exports_the_structure_for_download_and_to_a_kernel_path(region_model, tmp_path):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?format=structure&filename=book",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data, headers = response.read(), response.headers
+        saved = _post_json(
+            f"{widget.url}/export_file",
+            {"format": "structure", "directory": str(tmp_path), "filename": "book"},
+        )
+        with pytest.raises(EditorValueError, match=r"extension must be \.json"):
+            widget._export_bytes("structure", "book.joblib")
+    finally:
+        widget.close()
+    assert data == session.export_structure().encode("utf-8")
+    assert headers["content-type"] == "application/json"
+    assert 'filename="book.json"' in headers["content-disposition"]
+    assert headers["x-superglm-model-revision"] == str(session.model_revision)
+    assert "x-superglm-validation" not in headers
+    assert Path(saved["path"]).name == "book.json"
+    assert Path(saved["path"]).read_bytes() == data

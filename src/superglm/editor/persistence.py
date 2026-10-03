@@ -13,6 +13,7 @@ import numpy as np
 
 from superglm._frame import as_eager_frame
 from superglm.editor.apply import materialize_edit_request
+from superglm.editor.errors import EditorValueError
 from superglm.editor.io import (
     jsonable,
     record_from_payload,
@@ -205,6 +206,26 @@ def with_editor_history(model, records: list[dict[str, Any]]):
     exported = copy.copy(model)
     exported._editor_history = [dict(record) for record in records]
     return exported
+
+
+def export_structure(session, path: str | Path | None = None) -> str:
+    """The in-force model's structure file as JSON text, written to ``path`` too when given.
+
+    The in-force model is the last Refit, so changes still waiting are not in
+    it (spec addendum S2), and the file holds no coefficients and no hand
+    edits. The training rows, when the session has them, give a grouped
+    term's levels their native types (``Structure.from_model``).
+    """
+    from superglm.editor.evaluation import training_export_dataset
+    from superglm.structure import Structure, StructureError
+
+    dataset = training_export_dataset(session)
+    try:
+        structure = Structure.from_model(session.model, X=None if dataset is None else dataset.X)
+    except StructureError as exc:
+        # Each refusal is one fixed sentence naming the feature, written to be shown.
+        raise EditorValueError(str(exc)) from exc
+    return structure.to_json(path)
 
 
 def save_session(session, path: str | Path) -> None:

@@ -275,6 +275,7 @@ export const HELP_SECTIONS = Object.freeze([
       "Python model exports are round-trip validated and prediction-checked when evaluation rows are available.",
       "Excel rating workbooks require training or retained fit data and include structured summary tables.",
       "Final fit model is the latest Final fit on all rows, offered while the model has not changed since.",
+      "Structure (JSON) holds each term's groupings, reference, shaped ranges and where new levels go, without coefficients or hand edits. In Python, superglm.read_structure(path).apply(model) builds them into another model, ready to fit on new data.",
     ]),
   }),
 ]);

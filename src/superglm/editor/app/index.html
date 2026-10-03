@@ -117,7 +117,7 @@
       </button>
       <button id="exportAction" class="icon-button" type="button"
         aria-label="Export model or workbook" data-popover-title="Export"
-        data-popover-body="Download a validated Python model or Excel rating workbook.">
+        data-popover-body="Download a validated Python model, an Excel rating workbook or the model's structure.">
         <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 3v12"></path>
           <path d="m7 10 5 5 5-5"></path>
@@ -676,7 +676,7 @@
     <div class="profile-dialog-head">
       <div>
         <h2 id="exportDialogTitle">Export</h2>
-        <p>Choose a validated Python model or an Excel rating workbook.</p>
+        <p>Choose a validated Python model, an Excel rating workbook or the model's structure.</p>
       </div>
       <button id="exportDialogClose" type="button" aria-label="Close export dialog">Close</button>
     </div>
@@ -706,6 +706,14 @@
           <span>
             <strong>Final fit model</strong>
             <small>Refitted on train and validation rows, hand edits put back</small>
+          </span>
+        </label>
+        <label class="export-format-card">
+          <input type="radio" name="exportFormat" value="structure"
+            aria-label="Structure (JSON)">
+          <span>
+            <strong>Structure (JSON)</strong>
+            <small>Groupings, references, shaped ranges and new levels; no coefficients</small>
           </span>
         </label>
       </div>
