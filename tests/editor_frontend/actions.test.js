@@ -1803,3 +1803,130 @@ test("a note's answer, the state wrapped as {ok, state}, commits the state it ca
   assert.strictEqual(store.getState().remote.snapshot, noted);
   assert.deepEqual(scheduled, []);
 });
+
+/** Let every queued promise reaction run. */
+async function settle() {
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+}
+
+/**
+ * A client whose /note answers when the test says, and whose other routes
+ * answer at once with the next revision.
+ * @param {number} revision
+ */
+function noteClient(revision) {
+  /** @type {string[]} */
+  const posted = [];
+  /** @type {ReturnType<typeof deferred>[]} */
+  const notes = [];
+  const client = {
+    /** @param {string} path */
+    postJSON: async (path) => {
+      posted.push(path);
+      if (path === "/note") {
+        const answer = deferred();
+        notes.push(answer);
+        return answer.promise;
+      }
+      if (path === "/refit_pending") return transitionEnvelope(revision + 1);
+      return snapshot(revision + 1);
+    },
+    getState: async () => snapshot(revision)
+  };
+  return { client, posted, notes };
+}
+
+test("an action asked for while a note saves waits for the save, then runs", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(3)));
+  const { client, posted, notes } = noteClient(3);
+  const actions = createEditorActions({ store, client, waitForPaint: async () => {} });
+
+  const note = actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "a1b2c3d", note: "Thin exposure" }
+  });
+  // Saving a note does not hold the editor, so nothing reads as busy.
+  assert.equal(store.getState().request.mutation.status, "idle");
+  // The click that took the focus from the note lands now.
+  const undo = actions.executeStateMutation({
+    name: "undo", path: "/op", payload: { operation: "undo" }
+  });
+  const refit = actions.executeStructuralMutation({
+    name: "refit", path: "/refit_pending", payload: {}, blocking: false
+  });
+  await settle();
+  assert.deepEqual(posted, ["/note"]);
+
+  notes[0].resolve({ ok: true, state: snapshot(3) });
+  assert.deepEqual(await note, { ok: true, snapshot: snapshot(3) });
+  // Undo runs first, as it was asked for first; Refit then finds it running,
+  // as a second click during any mutation does.
+  assert.equal((await undo).ok, true);
+  const second = await refit;
+  assert.equal(second.ok, false);
+  assert.equal(second.skipped, true);
+  assert.deepEqual(posted, ["/note", "/op"]);
+  assert.equal(store.getState().remote.snapshot?.model_revision, 4);
+});
+
+test("a structural action asked for while a note saves runs after it", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(3)));
+  const { client, posted, notes } = noteClient(3);
+  const actions = createEditorActions({ store, client, waitForPaint: async () => {} });
+
+  void actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "a1b2c3d", note: "Thin exposure" }
+  });
+  const refit = actions.executeStructuralMutation({
+    name: "refit", path: "/refit_pending", payload: {}
+  });
+  await settle();
+  assert.deepEqual(posted, ["/note"]);
+  notes[0].resolve({ ok: true, state: snapshot(3) });
+  assert.equal((await refit).ok, true);
+  assert.deepEqual(posted, ["/note", "/refit_pending"]);
+  assert.equal(store.getState().remote.snapshot?.model_revision, 4);
+});
+
+test("notes saved back to back post one after the other", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(3)));
+  const { client, posted, notes } = noteClient(3);
+  const actions = createEditorActions({ store, client });
+
+  const first = actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "a1b2c3d", note: "one" }
+  });
+  const second = actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "e4f5a6b", note: "two" }
+  });
+  await settle();
+  assert.equal(notes.length, 1);
+  notes[0].resolve({ ok: true, state: snapshot(3) });
+  assert.equal((await first).ok, true);
+  await settle();
+  assert.equal(notes.length, 2);
+  notes[1].resolve({ ok: true, state: snapshot(3) });
+  assert.equal((await second).ok, true);
+  assert.deepEqual(posted, ["/note", "/note"]);
+});
+
+test("a note that fails keeps its alert, and the action that waited for it does not run", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(3)));
+  const { client, posted, notes } = noteClient(3);
+  const actions = createEditorActions({ store, client });
+
+  const note = actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "a1b2c3d", note: "Thin exposure" }
+  });
+  const undo = actions.executeStateMutation({
+    name: "undo", path: "/op", payload: { operation: "undo" }
+  });
+  await settle();
+  notes[0].reject(new Error("Python is not answering."));
+  assert.equal((await note).ok, false);
+  const result = await undo;
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, true);
+  assert.deepEqual(posted, ["/note"]);
+  // The note's own alert stays, with its Retry.
+  assert.equal(store.getState().request.recovery?.retry?.path, "/note");
+});

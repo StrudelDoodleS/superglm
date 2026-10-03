@@ -423,6 +423,78 @@ def test_history_lists_waiting_changes_above_applied_ones_with_ids_and_notes(ope
         assert note in page.locator("#historyFrame .history-section.applied").text_content()
 
 
+# Holds each /note request in the page until the test releases it, so a click
+# provably lands while a History note is still saving.
+HOLD_NOTES = """(() => {
+    const realFetch = window.fetch.bind(window);
+    let gate = null;
+    window.__noteSaves = 0;
+    window.__holdNotes = () => {
+        let release;
+        gate = new Promise(resolve => { release = resolve; });
+        window.__releaseNotes = () => { gate = null; release(); };
+    };
+    window.fetch = async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+        if (url.pathname === '/note') {
+            window.__noteSaves += 1;
+            if (gate) await gate;
+        }
+        return realFetch(input, init);
+    };
+})()"""
+
+
+def _note_then_click(page, step_id: str, note: str, control, path: str) -> None:
+    """Write a note, click a control while the note saves, then let the save finish."""
+    item = page.locator(f'#historyFrame [data-step-id="{step_id}"]')
+    item.get_by_role("button", name="Add a note").click()
+    page.get_by_role("textbox", name="Note for this step").fill(note)
+    saves = page.evaluate("() => window.__noteSaves")
+    page.evaluate("() => window.__holdNotes()")
+    # The click's mousedown takes the focus from the note, which saves it.
+    control.click()
+    page.wait_for_function("n => window.__noteSaves === n", arg=saves + 1)
+    with page.expect_response(_posted(path), timeout=10_000) as answered:
+        page.evaluate("() => window.__releaseNotes()")
+    assert answered.value.status == 200
+
+
+def test_a_click_that_ends_a_history_note_still_acts(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        page.add_init_script(HOLD_NOTES)
+        session.stage_structural(
+            "collapse", "territory", {"levels": ["T02", "T03"], "group_label": None}
+        )
+        [step] = session.pending
+        _reload_editor(page, "territory")
+        page.locator("#historyTab").click()
+
+        _note_then_click(
+            page,
+            step.step_id,
+            "Thin exposure",
+            page.locator("#refitPendingAction"),
+            "/refit_pending",
+        )
+        _settled_after_refit(page)
+        assert session.pending == []
+        assert session.step_notes[step.step_id] == "Thin exposure"
+
+        refit = next(
+            entry
+            for entry in reversed(timeline_payload(session))
+            if entry.get("status") == "applied"
+        )
+        _note_then_click(
+            page, refit["id"], "Merged for stability", page.locator("#undoAction"), "/op"
+        )
+        _settled_after_refit(page)
+        # Undo of the Refit brings the collapse back as waiting; both notes stand.
+        assert [pending.step_id for pending in session.pending] == [step.step_id]
+        assert session.step_notes[refit["id"]] == "Merged for stability"
+
+
 def test_waiting_changes_show_in_the_feature_list_status_line_and_export(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, session):
         session.stage_structural(

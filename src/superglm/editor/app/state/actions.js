@@ -159,6 +159,8 @@ const STRUCTURAL_OUTCOME_UNCERTAIN =
 const STRUCTURAL_REFRESH_INCOMPLETE =
   "The model change completed, but browser refresh was incomplete.";
 const EVIDENCE_DEBOUNCE_MS = 150;
+const NOTE_PATH = "/note";
+const NOTE_NOT_SAVED = "A History note did not save, so the next action did not run.";
 
 /** @param {()=>void|Promise<void>} hook @returns {Promise<void>} */
 async function notifyTimingHook(hook) {
@@ -188,6 +190,52 @@ export function createEditorActions({
   clearTimer = globalThis.clearTimeout.bind(globalThis)
 }) {
   const evidenceTimers = new Map();
+  // A History note changes no model, so saving one does not hold the editor.
+  // Leaving the note's field saves it, so the click that took the focus, on
+  // Undo, Refit or any other action, lands while the note saves: that action
+  // waits for the save and then runs, where it would find the editor busy and
+  // be dropped. A note that fails keeps its alert, and the action does not run.
+  /** @type {Promise<ActionResult>|null} */
+  let noteSave = null;
+
+  /**
+   * Wait for one note's save; a failed save leaves the mutation status "error".
+   * @param {Promise<ActionResult>} save @returns {Promise<boolean>} whether it saved
+   */
+  async function noteSaved(save) {
+    try {
+      await save;
+    } catch {
+      // The save reports its own failure.
+    }
+    return store.getState().request.mutation.status !== "error";
+  }
+
+  /** @returns {Promise<boolean>} whether every note being saved saved */
+  async function afterNoteSave() {
+    let saved = true;
+    while (noteSave && saved) saved = await noteSaved(noteSave);
+    return saved;
+  }
+
+  /**
+   * Save a note after any note still saving, as one queue.
+   * @param {MutationDescriptor} descriptor @returns {Promise<ActionResult>}
+   */
+  function saveNote(descriptor) {
+    const previous = noteSave;
+    const saving = (async () => {
+      if (previous && !(await noteSaved(previous))) return skippedMutation(NOTE_NOT_SAVED);
+      return runStateMutation(descriptor, false);
+    })();
+    noteSave = saving;
+    const release = () => {
+      if (noteSave === saving) noteSave = null;
+    };
+    saving.then(release, release);
+    return saving;
+  }
+
   /** @param {RecoveryRequestState|null} recovery */
   function finishStructuralMutation(recovery) {
     try {
@@ -284,6 +332,7 @@ export function createEditorActions({
    * @returns {Promise<ActionResult>}
    */
   async function refreshFromPython() {
+    if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
     }
@@ -311,7 +360,19 @@ export function createEditorActions({
   }
 
   /** @param {MutationDescriptor} descriptor @returns {Promise<ActionResult>} */
-  async function executeStateMutation({ name, path, payload }) {
+  async function executeStateMutation(descriptor) {
+    if (descriptor.path === NOTE_PATH) return saveNote(descriptor);
+    if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
+    return runStateMutation(descriptor, true);
+  }
+
+  /**
+   * Post a state mutation and commit the snapshot it answers with. One that
+   * holds the editor runs alone; a note's save leaves the editor idle.
+   * @param {MutationDescriptor} descriptor @param {boolean} holdsEditor
+   * @returns {Promise<ActionResult>}
+   */
+  async function runStateMutation({ name, path, payload }, holdsEditor) {
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
     }
@@ -322,7 +383,9 @@ export function createEditorActions({
       ...state,
       request: {
         ...state.request,
-        mutation: { status: "running", operation: name, error: null, blocking: false },
+        mutation: holdsEditor
+          ? { status: "running", operation: name, error: null, blocking: false }
+          : { status: "idle", operation: null, error: null },
         recovery: null
       }
     }));
@@ -365,6 +428,7 @@ export function createEditorActions({
     { term, indices },
     { settleNoop = false } = {}
   ) {
+    if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
     }
@@ -458,6 +522,7 @@ export function createEditorActions({
     onPrimaryCommitted = () => {},
     onPaintSettled = () => {}
   }) {
+    if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
     }
