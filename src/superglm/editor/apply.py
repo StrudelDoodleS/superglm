@@ -81,8 +81,16 @@ def apply_edits_to_model_copy_with_data(
     y=None,
     sample_weight=None,
     offset=None,
+    keep_pinned: bool = False,
 ):
-    """Return a deep-copied model and refresh scalar fit stats if data is available."""
+    """Return a deep-copied model and refresh scalar fit stats if data is available.
+
+    A level with no effective training rows is pinned and has no coefficient
+    to write, so editing its term is refused. ``keep_pinned=True`` is for
+    carrying edits onto another fit (``carry.model_with_edited_curves``),
+    where such a level is one that fit never saw: it keeps its pin and the
+    rest of the term is edited.
+    """
     changed_terms = [
         term
         for term in terms.values()
@@ -120,7 +128,7 @@ def apply_edits_to_model_copy_with_data(
     edited_model = revision.model
     beta_before = np.array(edited_model._result.beta, dtype=np.float64)
     for term in changed_terms:
-        _apply_term_edit(edited_model, term)
+        _apply_term_edit(edited_model, term, keep_pinned=keep_pinned)
     if changed_terms:
         publish_revised_coefficients(edited_model, beta_before)
     edited_terms = [term.name for term in changed_terms]
@@ -159,7 +167,7 @@ def materialize_edit_request(request):
     )
 
 
-def _apply_term_edit(model, term: EditableTerm) -> None:
+def _apply_term_edit(model, term: EditableTerm, *, keep_pinned: bool = False) -> None:
     spec = model._specs[term.name]
     groups = _feature_groups(model, term.name)
 
@@ -175,11 +183,11 @@ def _apply_term_edit(model, term: EditableTerm) -> None:
                 f"Editable term {term.name!r} is a step-mode OrderedCategorical. "
                 f"{_STEP_MODE_REMOVED_MESSAGE}"
             )
-        _apply_ordered_spline_term(model, spec, groups, term)
+        _apply_ordered_spline_term(model, spec, groups, term, keep_pinned=keep_pinned)
         return
 
     if isinstance(spec, Categorical):
-        _apply_categorical_term(model, spec, groups, term)
+        _apply_categorical_term(model, spec, groups, term, keep_pinned=keep_pinned)
         return
 
     if isinstance(spec, Piecewise):
@@ -265,6 +273,8 @@ def _apply_ordered_spline_term(
     spec: OrderedCategorical,
     groups: list[GroupSlice],
     term: EditableTerm,
+    *,
+    keep_pinned: bool = False,
 ) -> None:
     """Project ordered levels onto the spline and assign special levels exactly.
 
@@ -314,19 +324,25 @@ def _apply_ordered_spline_term(
     # namespace as `specials`, for the float-domain reason above.
     pinned_display = {str(level) for level in getattr(spec, "_pinned_specials", ())}
     pinned = [level for level in specials if level in pinned_display]
-    if pinned:
+    if pinned and not keep_pinned:
         raise EditorValueError(
             f"Editable term {term.name!r} cannot be edited: special level(s) {pinned} "
             "had no effective training rows in this fit and are pinned to zero "
             "contribution, so they have no fitted coefficient to edit. Refit on data "
             "carrying those level(s) with weight, or drop them from specials=."
         )
+    # Kept pinned (a carry onto a fit that never saw them): a pinned special
+    # is a row of neither block, since it has no column and no smooth position.
+    specials = [level for level in specials if level not in pinned]
     missing = [level for level in specials if level not in labels]
     if missing:
         raise ValueError(f"Editable term {term.name!r} has no row for special level(s) {missing}.")
     row_of = {label: index for index, label in enumerate(labels)}
     special_rows = np.array([row_of[level] for level in specials], dtype=np.intp)
-    smooth_rows = np.setdiff1d(np.arange(len(labels), dtype=np.intp), special_rows)
+    pinned_rows = np.array([row_of[level] for level in pinned if level in row_of], dtype=np.intp)
+    smooth_rows = np.setdiff1d(
+        np.arange(len(labels), dtype=np.intp), np.concatenate([special_rows, pinned_rows])
+    )
     n_spline = spec._split_beta(np.zeros(B.shape[1], dtype=np.float64))[0].size
 
     intercept_delta, spline_beta = _solve_with_intercept(
@@ -344,6 +360,8 @@ def _apply_categorical_term(
     spec: Categorical,
     groups: list[GroupSlice],
     term: EditableTerm,
+    *,
+    keep_pinned: bool = False,
 ) -> None:
     if term.levels is None:
         raise NotImplementedError(f"Term {term.name!r} has no editable levels.")
@@ -357,8 +375,10 @@ def _apply_categorical_term(
     # SPECIALS guard does: the term is patched as one block, and half-applying
     # an edit is worse than declining it. Read through `getattr` so a spec
     # pickled before pinning existed pins nothing.
+    # A carry onto another fit keeps the pin (``keep_pinned``): that fit never
+    # saw the level, which predicts as the base level there.
     pinned = list(getattr(spec, "_pinned_levels", ()))
-    if pinned:
+    if pinned and not keep_pinned:
         raise EditorValueError(
             f"Editable term {term.name!r} cannot be edited: level(s) "
             f"{sorted(pinned, key=str)} had no effective training rows in this fit and "

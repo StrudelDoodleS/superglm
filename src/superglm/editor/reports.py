@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from superglm.editor.cv import cv_report_payload
 from superglm.editor.evaluation import evaluation_datasets
 from superglm.editor.metrics import METRIC_LABELS, compute_dataset_metrics
 from superglm.editor.summaries import summary_payload
@@ -83,6 +84,8 @@ def report_payload(
     model_override=None,
 ) -> dict[str, Any]:
     """Dispatch a named report for the local editor app."""
+    if report == "cv":
+        return cv_report_payload(widget, request_sequence=request_sequence)
     if report == "final":
         return final_fit_report_payload(
             widget,

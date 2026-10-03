@@ -23,6 +23,7 @@ import numpy as np
 from superglm.editor import metrics as metrics_module
 from superglm.editor import persistence, rating_preview
 from superglm.editor.apply import materialize_edit_request
+from superglm.editor.cv import CVRun, FinalFit
 from superglm.editor.errors import EditorClientError, EditorKeyError, EditorValueError
 from superglm.editor.evaluation import (
     default_metrics_dataset,
@@ -132,6 +133,10 @@ class EditorWidget:
         self._profile_jobs: dict[str, dict[str, Any]] = {}
         self._profile_job_counter = 0
         self._profile_condition = threading.Condition(threading.RLock())
+        # The Cross-validation tab's results, each kept with the revision it
+        # ran on: a newer revision marks them stale rather than dropping them.
+        self._cv_run: CVRun | None = None
+        self._final_fit: FinalFit | None = None
         self._rating_preview: RatingPreview | None = None
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
@@ -556,6 +561,12 @@ class EditorWidget:
             current_revision = self.session.model_revision
             if model_revision is not None and int(model_revision) != current_revision:
                 return _superseded_payload(int(model_revision), request_sequence)
+        if report == "cv":
+            payload = report_payload(self, report, request_sequence=request_sequence)
+            with self._lock:
+                if payload["model_revision"] != self.session.model_revision:
+                    return _superseded_payload(payload["model_revision"], request_sequence)
+            return payload
         edited_model, revision = self._current_model_for_evidence()
         if edited_model is None:
             return _superseded_payload(revision, request_sequence)

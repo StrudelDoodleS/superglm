@@ -36,6 +36,7 @@ from superglm.editor.controls import (
     ordered_spline_geometry,
 )
 from superglm.editor.controls import control_points as _control_points
+from superglm.editor.cv import check_cv_data
 from superglm.editor.errors import (
     EditorClientError,
     EditorIndexError,
@@ -43,7 +44,13 @@ from superglm.editor.errors import (
     EditorTypeError,
     EditorValueError,
 )
-from superglm.editor.evaluation import coerce_evaluation_data, default_metrics_dataset
+from superglm.editor.evaluation import (
+    EvaluationDataset,
+    coerce_dataset,
+    coerce_evaluation_data,
+    default_metrics_dataset,
+    training_export_dataset,
+)
 from superglm.editor.evaluation_cache import EditMaterializationRequest
 from superglm.editor.level_order import (
     level_order_for_direction,
@@ -65,6 +72,7 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
+from superglm.model_selection import CrossValidationResult
 from superglm.solvers.dispersion import model_weight_semantics
 
 # Re-profiling replaces the model and cannot be undone, so it would drop
@@ -115,6 +123,8 @@ class EditorSession:
         reference_model=None,
         evaluation_data: dict[str, Any] | None = None,
         cv_report: Any = None,
+        cv: CrossValidationResult | None = None,
+        cv_data: EvaluationDataset | None = None,
     ):
         self.model = model
         self.reference_model = model if reference_model is None else reference_model
@@ -123,6 +133,17 @@ class EditorSession:
         self.centering = centering
         self._evaluation_data = dict(evaluation_data or {})
         self.cv_report = cv_report
+        if cv is not None and not isinstance(cv, CrossValidationResult):
+            raise TypeError(
+                "cv= takes the CrossValidationResult that superglm.cross_validate returns, "
+                "not a splitter."
+            )
+        if cv_data is not None and cv is None:
+            raise ValueError("cv_data= holds the rows a cv= result's folds index; pass cv= too.")
+        self.cv = cv
+        # Fixed for the session's life: cv, cv_data and the train split are
+        # constructor inputs, so the rows Run CV replays never change.
+        self.cv_check = check_cv_data(cv, cv_data, training_export_dataset(self))
         self._term_names = list(terms)
         self._selection: dict[str, NDArray[np.intp]] = {
             name: np.array([], dtype=np.intp) for name in terms
@@ -158,8 +179,17 @@ class EditorSession:
         validation_data=None,
         test_data=None,
         cv_report: Any = None,
+        cv: CrossValidationResult | None = None,
+        cv_data=None,
     ) -> EditorSession:
-        """Build an editor session from fitted 1D main-effect inference."""
+        """Build an editor session from fitted 1D main-effect inference.
+
+        ``cv`` is a :func:`superglm.cross_validate` result for the
+        Cross-validation tab, and ``cv_data`` the ``(X, y[, sample_weight[,
+        offset]])`` rows its folds index. Without ``cv_data`` the train data
+        is used when its row count matches the folds. ``cv_report`` is the
+        older free-form report the Validation tab shows.
+        """
         if getattr(model, "_result", None) is None:
             raise RuntimeError("Model must be fitted before creating an editor session.")
 
@@ -167,6 +197,12 @@ class EditorSession:
             train_data=train_data,
             validation_data=validation_data,
             test_data=test_data,
+            family=model._distribution,
+            weight_semantics=model_weight_semantics(model),
+        )
+        cv_rows = coerce_dataset(
+            "cv",
+            cv_data,
             family=model._distribution,
             weight_semantics=model_weight_semantics(model),
         )
@@ -187,6 +223,8 @@ class EditorSession:
             reference_model=model,
             evaluation_data=evaluation_data,
             cv_report=cv_report,
+            cv=cv,
+            cv_data=cv_rows,
         )
 
     @staticmethod
@@ -1852,12 +1890,28 @@ def edit(
     n_points: int = 200,
     centering: str = "native",
     with_se: bool = True,
+    train_data=None,
+    validation_data=None,
+    test_data=None,
+    cv: CrossValidationResult | None = None,
+    cv_data=None,
 ) -> EditorSession:
-    """Create an editor session for a fitted model."""
+    """Create an editor session for a fitted model.
+
+    The split data are ``(X, y[, sample_weight[, offset]])`` tuples.
+    ``cv`` is a :func:`superglm.cross_validate` result for the
+    Cross-validation tab and ``cv_data`` the rows its folds index; see
+    :meth:`EditorSession.from_model`.
+    """
     return EditorSession.from_model(
         model,
         terms=terms,
         n_points=n_points,
         centering=centering,
         with_se=with_se,
+        train_data=train_data,
+        validation_data=validation_data,
+        test_data=test_data,
+        cv=cv,
+        cv_data=cv_data,
     )
