@@ -39,6 +39,7 @@ from superglm.editor.evaluation_cache import (
 )
 from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
+from superglm.editor.jobs import JobContext, JobRunner
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import (
@@ -137,6 +138,14 @@ class EditorWidget:
         # ran on: a newer revision marks them stale rather than dropping them.
         self._cv_run: CVRun | None = None
         self._final_fit: FinalFit | None = None
+        # Run CV and Final fit: one background job of each kind at a time.
+        # A starter captures a job's inputs under the widget lock and returns
+        # its work (run off the lock) and its publish step (which re-takes it).
+        self._jobs = JobRunner(name=f"editor-{id(self):x}")
+        self._job_starters: dict[
+            str,
+            Callable[[], tuple[Callable[[JobContext], Any], Callable[[Any], dict[str, Any]]]],
+        ] = {}
         self._rating_preview: RatingPreview | None = None
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
@@ -175,6 +184,7 @@ class EditorWidget:
             return
         self._closed = True
         _LIVE_WIDGETS.discard(self)
+        self._jobs.close()
         self._evidence.close()
         self._server.close()
 
@@ -974,6 +984,21 @@ class EditorWidget:
                 job["profile_estimate"] = _normalise_profile_estimate(payload["profile_estimate"])
             job["finished_at"] = time.time()
             self._profile_condition.notify_all()
+
+    def _job_start(self, kind: str) -> dict[str, Any]:
+        """Capture a job's inputs under the lock, then start it off the lock."""
+        starter = self._job_starters.get(kind)
+        if starter is None:
+            raise EditorValueError("Unknown job kind.")
+        with self._lock:
+            work, publish = starter()
+        return self._jobs.status(self._jobs.start(kind, work, publish))
+
+    def _job_status(self, job_id: str, *, wait: bool = False) -> dict[str, Any]:
+        return self._jobs.status(job_id, wait=wait)
+
+    def _job_cancel(self, job_id: str) -> dict[str, Any]:
+        return self._jobs.cancel(job_id)
 
     def _structural_transition(
         self,

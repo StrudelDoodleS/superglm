@@ -389,7 +389,7 @@ def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[st
     """The ``cv`` report: captured under the widget lock, built outside it."""
     with widget._lock:
         view = capture_cv_view(widget.session, run=widget._cv_run, final_fit=widget._final_fit)
-    jobs = {kind: None for kind in JOB_KINDS}
+    jobs = {kind: widget._jobs.latest(kind) for kind in JOB_KINDS}
     return cv_tab_payload(view, jobs=jobs, request_sequence=request_sequence)
 
 

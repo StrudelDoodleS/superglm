@@ -6890,6 +6890,9 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/profile_distribution", frozenset({"POST"})) in routes
     assert ("/profile_distribution/start", frozenset({"POST"})) in routes
     assert ("/profile_distribution/status/{job_id}", frozenset({"GET"})) in routes
+    assert ("/job_start", frozenset({"POST"})) in routes
+    assert ("/job_status", frozenset({"POST"})) in routes
+    assert ("/job_cancel", frozenset({"POST"})) in routes
     assert ("/collapse_levels", frozenset({"POST"})) in routes
     assert ("/ungroup_levels", frozenset({"POST"})) in routes
     assert ("/reorder_levels", frozenset({"POST"})) in routes

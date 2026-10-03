@@ -249,6 +249,22 @@ def create_editor_app(widget: Any) -> FastAPI:
     def profile_distribution_status(job_id: str, wait: bool = False) -> Response:
         return _guarded_json(lambda: widget._profile_distribution_status(job_id, wait=wait))
 
+    @app.post("/job_start")
+    def job_start(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._job_start(str(_required(payload, "kind"))))
+
+    @app.post("/job_status")
+    def job_status(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._job_status(
+                str(_required(payload, "job_id")), wait=payload.get("wait") is True
+            )
+        )
+
+    @app.post("/job_cancel")
+    def job_cancel(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._job_cancel(str(_required(payload, "job_id"))))
+
     @app.post("/collapse_levels")
     def collapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(

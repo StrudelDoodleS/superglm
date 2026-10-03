@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
 import urllib.error
 import urllib.request
 
@@ -96,6 +97,16 @@ def _post_json(url: str, payload: dict):
         method="POST",
         headers={"Content-Type": "application/json", "X-SuperGLM-Editor-Token": token},
     )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _get_json(url: str):
+    from superglm.editor.widget import _LIVE_WIDGETS
+
+    origin = url.rsplit("/", 1)[0]
+    token = next(widget._token for widget in _LIVE_WIDGETS if widget.url == origin)
+    request = urllib.request.Request(url, headers={"X-SuperGLM-Editor-Token": token})
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -530,3 +541,118 @@ def test_carried_ordered_edit_leaves_a_pinned_special_at_its_pin():
     assert np.all(np.isfinite(only_five))
     assert not np.array_equal(only_five, np.log(fold.predict(probe)))
     np.testing.assert_array_equal(with_special, only_five)
+
+
+# ── Background jobs ──────────────────────────────────────────────
+
+
+def _blocking_job(entered, release, published):
+    """A job that stops after its first step until ``release`` is set."""
+
+    def work(context):
+        context.progress("fold", fold=1, n_folds=2)
+        entered.set()
+        assert release.wait(30)
+        context.check()
+        context.progress("fold", fold=2, n_folds=2)
+        return "value"
+
+    def publish(value):
+        published.append(value)
+        return {"published": value}
+
+    return work, publish
+
+
+def test_job_runner_cancel_between_steps_publishes_nothing():
+    from superglm.editor.jobs import JobRunner
+
+    runner = JobRunner(name="test")
+    entered, release, published = threading.Event(), threading.Event(), []
+    job_id = runner.start("cv", *_blocking_job(entered, release, published))
+    assert entered.wait(30)
+
+    requested = runner.cancel(job_id)
+    release.set()
+    finished = runner.status(job_id, wait=True)
+    runner.close()
+
+    assert requested == {"job_id": job_id, "status": "running", "cancel_requested": True}
+    assert finished["status"] == "cancelled"
+    assert finished["progress"] == [{"phase": "fold", "fold": 1, "n_folds": 2}]
+    assert published == []
+
+
+def test_job_runner_runs_one_job_per_kind_and_keeps_the_last_of_each():
+    from superglm.editor.errors import EditorKeyError, EditorValueError
+    from superglm.editor.jobs import JobRunner
+
+    runner = JobRunner(name="test")
+    entered, release, published = threading.Event(), threading.Event(), []
+    first = runner.start("cv", *_blocking_job(entered, release, published))
+    assert entered.wait(30)
+    with pytest.raises(EditorValueError, match="already running"):
+        runner.start("cv", *_blocking_job(entered, release, published))
+    other = runner.start("final_fit", lambda context: "other", lambda value: {"value": value})
+    release.set()
+    assert runner.status(first, wait=True)["result"] == {"published": "value"}
+    assert runner.status(other, wait=True)["status"] == "done"
+
+    second = runner.start("cv", *_blocking_job(entered, release, published))
+
+    assert runner.status(second, wait=True)["status"] == "done"
+    with pytest.raises(EditorKeyError):
+        runner.status(first)
+    assert runner.latest("cv")["job_id"] == second
+    assert runner.latest("final_fit")["job_id"] == other
+    assert published == ["value", "value"]
+    runner.close()
+
+
+def test_job_runner_reports_fixed_sentences_when_a_job_fails():
+    from superglm.editor.errors import EditorValueError
+    from superglm.editor.jobs import JobRunner
+
+    def leak(context):
+        raise RuntimeError("backend detail that must not reach the browser")
+
+    def refuse(context):
+        raise EditorValueError("A sentence written for the browser.")
+
+    runner = JobRunner(name="test")
+    leaked = runner.status(runner.start("cv", leak, lambda value: {}), wait=True)
+    refused = runner.status(runner.start("final_fit", refuse, lambda value: {}), wait=True)
+    runner.close()
+
+    assert (leaked["status"], leaked["error"]) == ("failed", "internal editor error")
+    assert (refused["status"], refused["error"]) == (
+        "failed",
+        "A sentence written for the browser.",
+    )
+
+
+def test_job_routes_run_a_job_off_the_widget_lock(cv_fit):
+    model, _supplied = cv_fit
+    widget = EditorSession.from_model(model, terms=["region"]).widget()
+    entered, release, published = threading.Event(), threading.Event(), []
+    widget._job_starters["probe"] = lambda: _blocking_job(entered, release, published)
+    try:
+        started = _post_json(f"{widget.url}/job_start", {"kind": "probe"})
+        assert entered.wait(30)
+        # The work is mid-run; a request that takes the widget lock still answers.
+        assert _get_json(f"{widget.url}/state")["selected_term"] == "region"
+        cancelled = _post_json(f"{widget.url}/job_cancel", {"job_id": started["job_id"]})
+        release.set()
+        finished = _post_json(
+            f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True}
+        )
+        unknown = _post_error(f"{widget.url}/job_start", {"kind": "nonsense"})
+    finally:
+        release.set()
+        widget.close()
+
+    assert started["status"] == "running"
+    assert cancelled["cancel_requested"] is True
+    assert finished["status"] == "cancelled"
+    assert published == []
+    assert unknown == (400, {"error": "Unknown job kind."})
