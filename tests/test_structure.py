@@ -466,9 +466,16 @@ def test_apply_places_new_levels_in_x_where_the_structure_says_new_levels_go():
     ]
     assert model._specs["brand"]._grouping.group_to_originals["Other"] == ["B13", "B14", "B99"]
     model.fit(next_year, next_y)
-    # Without X the grouping covers only the structure's levels, and the fit says so.
-    with pytest.raises(ValueError, match="B99"):
+    # Without X the grouping covers only the structure's levels, and the fit
+    # says so, as a fit, with the remedy.
+    with pytest.raises(ValueError) as refused:
         _brand_structure().apply(_plain()).fit(next_year, next_y)
+    assert str(refused.value) == (
+        "Feature 'brand': Training data contains levels the grouping does not cover: ['B99']. "
+        "Covered: ['B1', 'B10', 'B11', 'B12', 'B13', 'B14', 'B2']. Build the grouping from the "
+        "full column, or pass the data to Structure.apply(model, X=data), which places them "
+        "where the structure sends new levels."
+    )
 
 
 def test_apply_fits_new_levels_in_x_as_their_own_without_an_unseen_group():

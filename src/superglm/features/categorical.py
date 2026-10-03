@@ -112,12 +112,26 @@ def _grouping_labels(x: NDArray) -> NDArray:
     return pd.Series(x).astype(str).to_numpy()
 
 
+def _refuse_uncovered_training_levels(observed: set, grouping) -> None:
+    """Raise, as a fit, for training labels that ``grouping`` does not cover."""
+    uncovered = observed - set(grouping.all_original_levels)
+    if uncovered:
+        raise ValueError(
+            f"Training data contains levels the grouping does not cover: "
+            f"{sorted(uncovered, key=str)}. Covered: "
+            f"{sorted(grouping.all_original_levels, key=str)}. Build the grouping from the "
+            f"full column, or pass the data to Structure.apply(model, X=data), which places "
+            f"them where the structure sends new levels."
+        )
+
+
 def _resolve_categorical_labels(
     x: NDArray,
     grouping,
     *,
     known_levels: set | None = None,
     context: str = "",
+    at_fit: bool = False,
 ) -> NDArray:
     """Resolve one categorical parent's raw labels into its fitted level domain.
 
@@ -126,6 +140,8 @@ def _resolve_categorical_labels(
     they may themselves be original labels with a different mapping.  Validate
     the raw domain first, apply the mapping exactly once, then (when fitted
     levels are supplied) certify that the collapsed level was present at fit.
+    ``at_fit`` reports a label the grouping does not cover as training data
+    rather than as a level unseen at fit.
     """
     x = np.asarray(x).ravel()
     if grouping is None:
@@ -136,8 +152,11 @@ def _resolve_categorical_labels(
     import pandas as pd
 
     labels = _grouping_labels(x)
+    observed = set(pd.unique(labels).tolist())
+    if at_fit:
+        _refuse_uncovered_training_levels(observed, grouping)
     _validate_observed_categorical_levels(
-        set(pd.unique(labels).tolist()),
+        observed,
         set(grouping.all_original_levels),
         context=context,
     )
@@ -407,7 +426,7 @@ class Categorical:
         """Build sparse one-hot design columns, choosing the base level from *x*."""
         import pandas as pd
 
-        x = _resolve_categorical_labels(x, self._grouping)
+        x = _resolve_categorical_labels(x, self._grouping, at_fit=True)
 
         universe = self._working_universe()
         if universe is None:
