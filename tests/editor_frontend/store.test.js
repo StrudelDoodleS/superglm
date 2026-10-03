@@ -36,7 +36,8 @@ const {
   selectPendingSteps,
   selectRenderableTerm,
   selectSummaryLevelDisplay,
-  selectSnapshot
+  selectSnapshot,
+  selectWaitingTerms
 } = selectors;
 
 /** @returns {import('../../src/superglm/editor/app/api/contracts.js').EditorSnapshot} */
@@ -695,7 +696,8 @@ test("state modules expose only their requested public symbols", () => {
     "selectRenderableTerm",
     "selectSnapshot",
     "selectSummaryLevelDisplay",
-    "selectVisibleEvidencePanels"
+    "selectVisibleEvidencePanels",
+    "selectWaitingTerms"
   ]);
 });
 
@@ -708,4 +710,15 @@ test("the pending selector reads the waiting structural changes, and none withou
   assert.strictEqual(selectPendingSteps(createInitialEditorState(confirmed)), confirmed.pending);
   assert.deepEqual(selectPendingSteps(createInitialEditorState(snapshot(7))), []);
   assert.deepEqual(selectPendingSteps(createInitialEditorState()), []);
+});
+
+test("each term with a change waiting for refit is named once", () => {
+  const confirmed = snapshot(7);
+  confirmed.pending = [
+    { id: "a1b2c3d", operation: "collapse", term: "region", label: "Collapse B + C", params: {}, note: null, time: 1 },
+    { id: "b2c3d4e", operation: "shape", term: "age", label: "Line 1 – 2", params: {}, note: null, time: 2 },
+    { id: "c3d4e5f", operation: "set_reference", term: "region", label: "Reference B", params: {}, note: null, time: 3 }
+  ];
+  assert.deepEqual(selectWaitingTerms(createInitialEditorState(confirmed)), ["region", "age"]);
+  assert.deepEqual(selectWaitingTerms(createInitialEditorState(snapshot(7))), []);
 });

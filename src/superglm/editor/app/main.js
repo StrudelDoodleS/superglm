@@ -16,7 +16,8 @@ import {
   selectRenderableTerm,
   selectSnapshot,
   selectSummaryLevelDisplay,
-  selectVisibleEvidencePanels
+  selectVisibleEvidencePanels,
+  selectWaitingTerms
 } from "./state/selectors.js";
 import {
   createEditorStore,
@@ -140,6 +141,7 @@ const exportSave = document.getElementById("exportSave");
 const exportDownload = document.getElementById("exportDownload");
 const exportStatus = document.getElementById("exportStatus");
 const exportFormatInputs = [...document.querySelectorAll('input[name="exportFormat"]')];
+const exportPendingNote = document.getElementById("exportPendingNote");
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const setReference = document.getElementById("setReference");
@@ -583,9 +585,11 @@ bindExportDialog({
     openDirectory: exportOpenDirectory instanceof HTMLButtonElement
       ? exportOpenDirectory
       : null,
-    status: exportStatus
+    status: exportStatus,
+    pendingNote: exportPendingNote instanceof HTMLElement ? exportPendingNote : null
   },
-  saveBlobToFile
+  saveBlobToFile,
+  pendingCount: () => selectPendingSteps(store.getState()).length
 });
 
 async function refreshMetricsView() {
@@ -896,7 +900,13 @@ function renderChartWorkspace() {
       referenceNode: termReference,
       statusNode
     },
-    { name: selected, term, selectionSize: selection.size, note: collapsedOriginalNote }
+    {
+      name: selected,
+      term,
+      selectionSize: selection.size,
+      note: collapsedOriginalNote,
+      pendingCount: selectPendingSteps(editorState).length
+    }
   );
 }
 
@@ -916,14 +926,16 @@ function termCatalogueKey(terms) {
   ).join("\u0001");
 }
 
-// The revision stands in for every row's EDF, which only a refit changes.
+// The revision stands in for every row's EDF, which only a refit changes; a
+// stage leaves the revision, so the waiting terms are keyed on their own.
 function selectFeatureListRenderState(state) {
   const snapshot = selectSnapshot(state);
   return {
     ready: snapshot !== null,
     catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}) : "",
     revision: selectModelRevision(state),
-    activeTerm: selectActiveTermName(state)
+    activeTerm: selectActiveTermName(state),
+    waiting: selectWaitingTerms(state).join("\u0000")
   };
 }
 
@@ -931,7 +943,8 @@ function sameFeatureListRenderState(next, previous) {
   return next.ready === previous.ready &&
     next.catalogueKey === previous.catalogueKey &&
     next.revision === previous.revision &&
-    next.activeTerm === previous.activeTerm;
+    next.activeTerm === previous.activeTerm &&
+    next.waiting === previous.waiting;
 }
 
 function renderFeatureListState() {
@@ -942,7 +955,8 @@ function renderFeatureListState() {
     terms,
     activeTerm: selectActiveTermName(state),
     query: featureQuery,
-    open: featureListOpen
+    open: featureListOpen,
+    waiting: new Set(selectWaitingTerms(state))
   });
 }
 
@@ -1077,7 +1091,8 @@ function renderSelectionState({ termName, indices }) {
       name: termName,
       term,
       selectionSize: selection.size,
-      note: selectionContextNote(term)
+      note: selectionContextNote(term),
+      pendingCount: selectPendingSteps(store.getState()).length
     }
   );
 }

@@ -298,3 +298,36 @@ test("cancelled browser save is a normal status and destroy removes every listen
   await fixture.download.emit("click");
   assert.equal(fixture.blobPaths.length, priorRequests);
 });
+
+test("the dialog says how many waiting changes the export leaves out", async () => {
+  const fixture = exportFixture();
+  const pendingNote = new FakeElement();
+  let waiting = 2;
+  const binding = bindExportDialog({
+    ...fixture.context,
+    nodes: { ...fixture.nodes, pendingNote },
+    pendingCount: () => waiting,
+  });
+
+  await fixture.action.emit("click");
+  assert.equal(pendingNote.hidden, false);
+  assert.equal(
+    pendingNote.textContent,
+    "2 waiting changes are not included. The export is the last refit.",
+  );
+
+  fixture.dialog.close();
+  waiting = 1;
+  await fixture.action.emit("click");
+  assert.equal(
+    pendingNote.textContent,
+    "1 waiting change is not included. The export is the last refit.",
+  );
+
+  fixture.dialog.close();
+  waiting = 0;
+  await fixture.action.emit("click");
+  assert.equal(pendingNote.hidden, true);
+  assert.equal(pendingNote.textContent, "");
+  binding.destroy();
+});

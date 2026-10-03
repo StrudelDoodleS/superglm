@@ -33,6 +33,7 @@ const EXPORTS = Object.freeze({
  * @property {HTMLButtonElement} saveToKernel
  * @property {HTMLButtonElement|null} [openDirectory]
  * @property {HTMLElement} status
+ * @property {HTMLElement|null} [pendingNote] says how many waiting changes the export leaves out
  */
 
 /**
@@ -40,6 +41,7 @@ const EXPORTS = Object.freeze({
  * @property {{requestBlob:(path:string)=>Promise<Response>, postJSON:(path:string,payload:Record<string,unknown>)=>Promise<unknown>}} client
  * @property {ExportDialogNodes} nodes
  * @property {(blob:Blob, filename:string, metadata:{description:string,accept:Readonly<Record<string,readonly string[]>>})=>Promise<string|null>} saveBlobToFile
+ * @property {()=>number} [pendingCount] how many structural changes wait for Refit
  */
 
 /** @param {unknown} error */
@@ -85,11 +87,20 @@ function successMessage(message, format, validation) {
 }
 
 /**
+ * What the dialog says while changes wait: the export is the last refit.
+ * @param {number} count
+ */
+export function pendingExportNote(count) {
+  if (count <= 0) return "";
+  return `${count} waiting ${count === 1 ? "change is" : "changes are"} not included. The export is the last refit.`;
+}
+
+/**
  * Bind the self-contained model/workbook export dialog.
  *
  * @param {ExportDialogContext} context
  */
-export function bindExportDialog({ client, nodes, saveBlobToFile }) {
+export function bindExportDialog({ client, nodes, saveBlobToFile, pendingCount = () => 0 }) {
   let pending = false;
 
   /** @returns {ExportFormat} */
@@ -136,6 +147,11 @@ export function bindExportDialog({ client, nodes, saveBlobToFile }) {
 
   async function openDialog() {
     nodes.status.textContent = "";
+    if (nodes.pendingNote) {
+      const note = pendingExportNote(pendingCount());
+      nodes.pendingNote.textContent = note;
+      nodes.pendingNote.hidden = note === "";
+    }
     if (nodes.dialog.open) return;
     if (typeof nodes.dialog.showModal === "function") nodes.dialog.showModal();
     else nodes.dialog.setAttribute("open", "");

@@ -344,3 +344,17 @@ test("destroy detaches every listener", () => {
   nodes.toggle.emit("click");
   assert.deepEqual(calls, { selected: [], queries: [], toggles: 0 });
 });
+
+test("a term with a change waiting for refit carries a dot on its row; the others carry none", () => {
+  const { render, rows } = fixture();
+  render({ waiting: new Set(["region"]) });
+  const dots = rows().map(
+    (row) => row.children.filter((part) => part.className === "feature-row-waiting"),
+  );
+  assert.deepEqual(dots.map((found) => found.length), [0, 0, 1, 0]);
+  assert.equal(dots[2][0].getAttribute("role"), "img");
+  assert.equal(dots[2][0].getAttribute("aria-label"), "Waiting for refit");
+
+  render();
+  assert.ok(rows().every((row) => row.children.length === 3));
+});

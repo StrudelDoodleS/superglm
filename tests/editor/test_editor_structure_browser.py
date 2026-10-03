@@ -371,3 +371,35 @@ def test_history_lists_the_session_in_order_and_follows_undo_and_redo(open_edito
             page.keyboard.press("Control+Shift+z")
         page.wait_for_function("() => !document.querySelector('#historyFrame .history-item.redo')")
         assert _history_rows(page) == listed
+
+
+def test_waiting_changes_show_in_the_feature_list_status_line_and_export(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        session.stage_structural(
+            "collapse", "territory", {"levels": ["T02", "T03"], "group_label": None}
+        )
+        _reload_editor(page, "territory")
+        status = page.locator("#status")
+        assert status.text_content() == (
+            "1 change waiting for refit · the curve and metrics are from the last refit"
+        )
+        assert page.locator("#status .status-waiting").text_content() == (
+            "1 change waiting for refit"
+        )
+        assert page.locator("#featureList .feature-row-waiting").count() == 1
+        assert (
+            page.locator('#featureList [data-term="territory"] .feature-row-waiting').count() == 1
+        )
+
+        page.locator("#exportAction").click()
+        note = page.locator("#exportPendingNote")
+        note.wait_for(state="visible")
+        assert note.text_content() == (
+            "1 waiting change is not included. The export is the last refit."
+        )
+        page.locator("#exportDialogClose").click()
+
+        # With a selection, the waiting count still leads the line.
+        session.select_levels("territory", ["T05"])
+        _reload_editor(page, "territory")
+        assert status.text_content().startswith("1 change waiting for refit · 1 of ")

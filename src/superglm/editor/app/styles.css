@@ -256,6 +256,10 @@ input[type="number"] {
 #status.is-error {
   color: var(--danger);
 }
+#status .status-waiting {
+  color: var(--sig-weak-fg);
+  font-weight: 600;
+}
 
 /* The chart canvas. */
 .chart-shell {
