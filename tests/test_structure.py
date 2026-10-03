@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import json
 import re
+import subprocess
+import sys
 import warnings
 
 import numpy as np
@@ -23,8 +25,8 @@ from superglm import (
     collapse_levels,
     read_structure,
 )
+from superglm import structure as structure_module
 from superglm.editor import EditorSession
-from superglm.editor import collapse as collapse_module
 from superglm.features._spline_ranges import RangeError
 from superglm.structure import FORMAT, FeatureStructure, StructureError
 
@@ -793,7 +795,7 @@ def test_an_unexpected_library_error_becomes_the_features_refusal(monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("deep inside")
 
-    monkeypatch.setattr(collapse_module, "_rebuilt_categorical", broken)
+    monkeypatch.setattr(structure_module, "rebuilt_categorical", broken)
     with pytest.raises(StructureError) as refused:
         _brand_structure().apply(_plain())
     assert str(refused.value) == (
@@ -801,3 +803,69 @@ def test_an_unexpected_library_error_becomes_the_features_refusal(monkeypatch):
         "not accept these decisions."
     )
     assert isinstance(refused.value.__cause__, RuntimeError)
+
+
+# -- Layering ---------------------------------------------------------------------
+
+_WITHOUT_THE_EDITOR = r"""
+import json
+import sys
+
+import numpy as np
+import pandas as pd
+
+from superglm import (
+    Categorical, OrderedCategorical, PolynomialRange, Spline, Structure, SuperGLM,
+    collapse_levels, read_structure,
+)
+
+rng = np.random.default_rng(7)
+n = 400
+X = pd.DataFrame({
+    "brand": rng.choice(["A", "B", "C", "D"], n),
+    "band": rng.choice(["0", "1", "2", "3", "4", "5"], n),
+    "age": rng.uniform(18.0, 80.0, n),
+})
+y = 0.5 + 0.1 * (X["brand"] == "C") + 0.1 * np.sin(X["age"] / 15.0) + rng.normal(0.0, 0.05, n)
+
+
+def declared(brand, band, age):
+    return SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.1,
+        features={"brand": brand, "band": band, "age": age},
+    )
+
+
+bands = ["0", "1", "2", "3", "4", "5"]
+model = declared(
+    Categorical(base="A", grouping=collapse_levels(X["brand"], groups={"CD": ["C", "D"]}), unseen="CD"),
+    OrderedCategorical(order=bands, basis=Spline(
+        kind="bs", n_knots=3, polynomial_ranges=[PolynomialRange("3", "5", 0, "kink")]
+    )),
+    Spline(kind="bs", n_knots=6, polynomial_ranges=[PolynomialRange(30.0, 45.0, 1)]),
+)
+model.fit(X, y)
+plain = declared(
+    Categorical(base="first"),
+    OrderedCategorical(order=bands, basis=Spline(kind="bs", n_knots=3)),
+    Spline(kind="bs", n_knots=6),
+)
+read_structure(json.loads(Structure.from_model(model, X).to_json())).apply(plain, X=X)
+editor = sorted(name for name in sys.modules if name.split(".")[:2] == ["superglm", "editor"])
+assert not editor, editor
+"""
+
+
+def test_reading_and_applying_a_structure_never_imports_the_editor():
+    # A fresh process: this one has imported the editor for the tests above. The
+    # script's model carries a grouping, a reference, an unseen group and ranges
+    # on a spline and an ordered term, and applying its structure to the plain
+    # declaration rebuilds every one of them.
+    completed = subprocess.run(
+        [sys.executable, "-c", _WITHOUT_THE_EDITOR],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stderr

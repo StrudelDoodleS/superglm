@@ -48,6 +48,17 @@ import numpy as np
 from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange, RangeError
 from superglm.features.categorical import Categorical
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.rebuild import (
+    band_edges,
+    clone_with_replaced_features,
+    current_ranges,
+    merged_ranges,
+    pristine_basis,
+    rebuilt_categorical,
+    rebuilt_ordered_spec,
+    shape_unavailable_reason,
+    shaped_spline,
+)
 from superglm.features.spline import _SplineBase
 
 FORMAT = "superglm.structure.v1"
@@ -360,8 +371,6 @@ class Structure:
             range. Any other error while a feature is rebuilt is reported as
             that feature's refusal, with the error as its cause.
         """
-        from superglm.editor.collapse import clone_with_replaced_features
-
         frame = None
         if X is not None:
             from superglm._frame import as_eager_frame
@@ -426,9 +435,7 @@ def _kind(spec) -> str | None:
 
 def _spec_ranges(spec) -> list[PolynomialRange]:
     """The polynomial ranges in force on ``spec``, in axis order."""
-    from superglm.editor.shapes import _current_ranges
-
-    return list(_current_ranges(spec))
+    return list(current_ranges(spec))
 
 
 def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
@@ -507,8 +514,6 @@ def _rebuilt(model, name: str, spec, entry: FeatureStructure, frame):
 
 
 def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
-    from superglm.editor.collapse import _rebuilt_categorical
-
     levels = list(entry.levels)
     groups = {label: list(members) for label, members in entry.groups.items()}
     declared = spec._declared_levels
@@ -530,7 +535,7 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
     # Grouped, the design speaks the grouping's text; ungrouped, the builder
     # gives the reference its native type from the levels.
     base = entry.reference if grouping is None else str(entry.reference)
-    return _rebuilt_categorical(
+    return rebuilt_categorical(
         spec,
         spec,
         base=base,
@@ -596,9 +601,6 @@ def _grouping(levels: list, groups: dict, *, order: list[str]):
 
 
 def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
-    from superglm.editor.collapse import _pristine_basis, rebuilt_ordered_spec
-    from superglm.editor.shapes import _band_edges, _merged_ranges, _shaped_spline
-
     declared = [str(level) for level in (*spec._declared_smooth_levels, *spec._special_display)]
     if sorted(declared) != sorted(str(level) for level in entry.levels):
         raise StructureError(_UNIVERSE.format(feature=name))
@@ -608,12 +610,12 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     if _same_ranges(entry.ranges, _spec_ranges(spec)):
         return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data)
     _require_shapes(model, name, entry)
-    source = _pristine_basis(spec)
+    source = pristine_basis(spec)
     knots = source._named_knots or source._explicit_knots
     boundary = source._explicit_boundary
 
     def hosted(ranges, bound=boundary):
-        basis = _shaped_spline(source, ranges, knots=knots, boundary=bound)
+        basis = shaped_spline(source, ranges, knots=knots, boundary=bound)
         return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data, basis=basis)
 
     # The term without ranges places each band on the axis the ranges name.
@@ -622,10 +624,10 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     for r in entry.ranges:
         try:
             bands = isinstance(r.lo, str) and isinstance(r.hi, str)
-            lo, hi = _band_edges(host, name, r.lo, r.hi) if bands else (r.lo, r.hi)
+            lo, hi = band_edges(host, name, r.lo, r.hi) if bands else (r.lo, r.hi)
             new = PolynomialRange(lo, hi, r.degree, r.join)
             _require_shape_fits(source, new)
-            ranges = _merged_ranges(tuple(ranges), new, host._range_edge_value)
+            ranges = merged_ranges(tuple(ranges), new, host._range_edge_value)
         except ValueError as exc:
             raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree)) from exc
     if column is None or not ranges:
@@ -647,7 +649,6 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
 
 def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
-    from superglm.editor.shapes import _merged_ranges, _shaped_spline
     from superglm.features._spline_ranges import validate_ranges
 
     if _same_ranges(entry.ranges, _spec_ranges(spec)):
@@ -660,14 +661,14 @@ def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
             _require_shape_fits(spec, new)
             if spec._explicit_boundary is not None:
                 validate_ranges([new], spec.degree, *spec._explicit_boundary)
-            ranges = _merged_ranges(tuple(ranges), new, float)
+            ranges = merged_ranges(tuple(ranges), new, float)
         except ValueError as exc:
             raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree)) from exc
     ranges.sort(key=lambda r: r.lo)
 
     def shaped(subset, bound):
         # The declared knots, not a fit's: the model is fit afresh.
-        return _shaped_spline(spec, subset, knots=spec._explicit_knots, boundary=bound)
+        return shaped_spline(spec, subset, knots=spec._explicit_knots, boundary=bound)
 
     boundary = spec._explicit_boundary
     if column is None or not ranges:
@@ -770,9 +771,7 @@ def _same_ranges(wanted, current) -> bool:
 
 def _require_shapes(model, name: str, entry: FeatureStructure) -> None:
     """Refuse the first range when the term's spline takes no ranges at all."""
-    from superglm.editor.shapes import _unavailable_reason
-
-    if entry.ranges and _unavailable_reason(model, name) is not None:
+    if entry.ranges and shape_unavailable_reason(model, name) is not None:
         first = entry.ranges[0]
         raise StructureError(_range_refusal(name, first.lo, first.hi, first.degree))
 

@@ -21,7 +21,6 @@ from superglm.editor._types import (
 )
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
-    clone_with_replaced_features,
     collapsed_feature_spec,
     ungroup_label,
     ungrouped_feature_spec,
@@ -73,6 +72,7 @@ from superglm.editor.terms import (
     term_weights_from_fit,
 )
 from superglm.editor.unseen import UnseenChoice
+from superglm.features.rebuild import clone_with_replaced_features
 from superglm.model_selection import CrossValidationResult
 from superglm.solvers.dispersion import model_weight_semantics
 

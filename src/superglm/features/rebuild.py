@@ -1,0 +1,343 @@
+"""Rebuild a term's spec with new structural decisions.
+
+A structural decision -- how a categorical's levels are grouped, which level
+is the reference, where new levels go, the polynomial ranges of a spline --
+is built into a fresh, unfitted spec made from the term's declaration, never
+by mutating a fitted one, and the new spec goes into a clone of the model.
+The editor's collapse, ungroup, reference and shape steps and
+:meth:`superglm.structure.Structure.apply` build terms here, so the two share
+one implementation and the library never imports the editor.
+"""
+
+from __future__ import annotations
+
+import copy
+import re
+import warnings
+from collections.abc import Callable
+from itertools import chain
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from superglm.features._spline_ranges import PolynomialRange
+from superglm.features.categorical import Categorical
+from superglm.features.grouping import LevelGrouping
+from superglm.features.ordered_categorical import (
+    _CLAMP_WARNING_PREFIX,
+    OrderedCategorical,
+    _spline_kind_name,
+)
+from superglm.features.spline import CardinalCRSpline, Spline, _SplineBase
+
+# The declared bases a fit resolves to a level itself.
+SYMBOLIC_BASE_POLICIES = frozenset({"first", "most_exposed"})
+TOO_FEW_POINTS = "Select at least two points to shape a range."
+
+
+class RangePlacementError(ValueError):
+    """A range placed where the term cannot take it.
+
+    An edge that is not a single band of an ordered term, or a range that
+    overlaps another without covering the same span. The message is one
+    sentence that can be shown to a user as it stands.
+    """
+
+
+# -- The model -------------------------------------------------------------------
+
+
+def clone_with_replaced_features(model, replacements: dict[str, Any], *, lambda1=..., lambda2=...):
+    """Clone a model and replace feature specs before fitting.
+
+    Each replacement is deep-copied in, so fitting the clone never touches the
+    caller's spec: a waiting step's draft stays unfitted, and a refit that is
+    undone and run again fits a fresh copy of the same draft.
+    """
+    new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
+    for term, replacement in replacements.items():
+        new_model._specs[term] = copy.deepcopy(replacement)
+    new_model._config = new_model._config.with_value(
+        feature_templates=tuple((name, new_model._specs[name]) for name in new_model._feature_order)
+    )
+    new_model._config_revision += 1
+    return new_model
+
+
+def interaction_users(model, term: str) -> list[str]:
+    """The interactions that use ``term`` as a parent."""
+    return [
+        str(name)
+        for name, spec in getattr(model, "_interaction_specs", {}).items()
+        if term in getattr(spec, "parent_names", ())
+    ]
+
+
+# -- Categorical terms ---------------------------------------------------------
+
+
+def rebuilt_categorical(
+    spec: Categorical,
+    fitted: Categorical,
+    *,
+    base,
+    grouping,
+    data,
+    unseen: str | None = None,
+    levels: list | None = None,
+) -> Categorical:
+    """A fresh Categorical like ``spec`` with this grouping and base.
+
+    It keeps ``levels=`` and ``unseen=``, which a collapse or ungroup used to
+    drop; ``unseen`` replaces the policy and ``levels`` the declared universe.
+    Grouped, the design speaks the grouping's text labels; ungrouped, the base
+    goes back to its native value, so an integer level stays 3, not "3".
+    """
+    if grouping is None and str(base) not in SYMBOLIC_BASE_POLICIES:
+        base = _native_levels(spec, fitted, data).get(str(base), base)
+    return Categorical(
+        base=base,
+        grouping=grouping,
+        levels=spec._declared_levels if levels is None else levels,
+        unseen=spec.unseen if unseen is None else unseen,
+    )
+
+
+def _native_levels(spec: Categorical, fitted: Categorical, data) -> dict[str, Any]:
+    """Each level's native value by its text: declared, then fitted, then seen in ``data``.
+
+    A draft has no fitted ``_levels``, so the in-force spec and the column stand
+    in for it. A grouped spec's fitted levels are group labels, not raw ones.
+    """
+    fitted_levels = fitted._levels if getattr(fitted, "_grouping", None) is None else []
+    observed = pd.unique(np.asarray(data).ravel()).tolist()
+    native: dict[str, Any] = {}
+    for level in chain(spec._declared_levels or [], fitted_levels, observed):
+        native.setdefault(str(level), level)
+    return native
+
+
+# -- Ordered terms ---------------------------------------------------------------
+
+
+def rebuilt_ordered_spec(
+    spec: OrderedCategorical,
+    *,
+    grouping: LevelGrouping | None,
+    base: Any,
+    data,
+    basis=None,
+) -> OrderedCategorical:
+    """A fresh, unfitted OrderedCategorical like ``spec`` with this grouping and base.
+
+    ``basis`` replaces the inner basis (a shaped range). By default the pristine
+    declared basis is cloned. A fitted spec is never mutated: its resolved base
+    is sticky and would silently survive a changed ``base``.
+    """
+    values, native_base = _ordered_original_values(spec, grouping, data, base)
+    # Clone the RAW declarations, not the string-coerced ``_specials``. A special
+    # declared as ``9`` on a float column matches through its raw label -- the
+    # string view renders 9.0 as "9.0", which never equals "9" -- so rebuilding
+    # from the coerced form silently drops that fallback and the special's
+    # indicator comes back all-zero on a refit.
+    specials = list(spec._special_raw) or list(spec._specials)
+    source = pristine_basis(spec) if basis is None else basis
+    # Collapsing levels shrinks the level count, so the pristine spline's
+    # ``n_knots`` routinely exceeds the new ``n_levels - 1`` and construction
+    # clamps it. That clamp is the caller's own basis being re-fitted to the
+    # levels the caller just asked to merge, not a configuration mistake, and
+    # the user-facing construction already warned if the original declaration
+    # over-specified. Do not repeat it from an internal rebuild.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=re.escape(_CLAMP_WARNING_PREFIX),
+            category=UserWarning,
+        )
+        return OrderedCategorical(
+            values=values,
+            basis=source,
+            base=native_base,
+            grouping=grouping,
+            specials=specials or None,
+        )
+
+
+def pristine_basis(spec: OrderedCategorical):
+    """A copy of the spline ``spec`` was declared with, before its level count clamped it."""
+    # Clone from the pristine caller-supplied spline, not the clamped inner
+    # copy: the new spec re-clamps against ITS OWN level count, which can
+    # exceed the current one when a grouping is being undone. `_spline_obj` is
+    # always set on a spec this version constructed; the fallback covers a
+    # pre-0.24 pickle, whose `_basis_spline` read refuses a step-mode spec
+    # loudly instead of silently cloning it onto the default P-spline.
+    #
+    # Read it with `getattr`, not `spec._spline_obj`: an attribute-less read
+    # only reaches the fallback when the key EXISTS and is None, so a pickle
+    # old enough to predate the attribute raised a bare AttributeError naming
+    # `_spline_obj` -- still loud, but without the migration sentence, and
+    # never reaching `_basis_spline` where that sentence lives.
+    spline_obj = getattr(spec, "_spline_obj", None)
+    if spline_obj is not None:
+        source = copy.deepcopy(spline_obj)
+    else:
+        # A shortcut-era pickle has no pristine declaration, only the inner
+        # spline -- and its `n_knots` was already clamped to the level count it
+        # was BUILT against. Cloning that alone keeps the reduced basis, which
+        # is wrong in exactly the direction ungrouping goes: back to MORE
+        # levels. The removed shortcut path rebuilt from the then-plain
+        # `n_knots` attribute, i.e. the count the caller REQUESTED, and that
+        # entry survives in the pickled __dict__ because the class property
+        # only shadows it. Recover it and let __init__ re-clamp against the new
+        # level count, so the clamp is still enforced -- just against the right
+        # number of levels.
+        source = copy.deepcopy(spec._basis_spline)
+        requested = spec.__dict__.get("n_knots")
+        if isinstance(requested, int | np.integer) and int(requested) > source.n_knots:
+            source.n_knots = int(requested)
+    return source
+
+
+def _ordered_original_values(
+    spec: OrderedCategorical,
+    grouping: LevelGrouping | None,
+    data,
+    base,
+) -> tuple[dict[Any, float], Any]:
+    original_values = getattr(spec, "_original_level_to_value", None)
+    if original_values is not None:
+        values = {str(k): float(v) for k, v in original_values.items()}
+    else:
+        values = {str(k): float(v) for k, v in spec._level_to_value.items()}
+    if grouping is not None:
+        return values, base
+
+    native_by_label: dict[str, Any] = {}
+    for raw in np.asarray(data, dtype=object).ravel():
+        native_by_label.setdefault(str(raw), raw)
+    native_values = {native_by_label.get(label, label): value for label, value in values.items()}
+    native_base = base if base in SYMBOLIC_BASE_POLICIES else native_by_label.get(str(base), base)
+    return native_values, native_base
+
+
+def special_labels(spec: OrderedCategorical) -> set[str]:
+    """The free (special) levels of ``spec``, in every spelling the editor displays."""
+    # Both namespaces: displayed levels arrive in the DISPLAY spelling, so
+    # matching only the str-coerced `_specials` leaves a guard INERT on a float
+    # domain ("9" vs "9.0") -- and a guard that fails open here silently smooths
+    # a level that `specials=` still reports as free.
+    return {str(level) for level in spec._specials} | {
+        str(level) for level in spec._special_display
+    }
+
+
+# -- Polynomial ranges -----------------------------------------------------------
+
+
+def shape_unavailable_reason(model, name: str) -> str | None:
+    """Why ``name`` cannot take polynomial ranges, as one sentence, or None when it can."""
+    source = source_spline(model._specs[name])
+    if source is None:
+        return "Shapes need a spline term."
+    if isinstance(source, CardinalCRSpline):
+        return "Shapes are not available for cardinal cubic regression splines."
+    if source.constraint_kind is not None:
+        return "Remove the term's shape constraint to add shaped ranges."
+    if source.select:
+        return "Remove select=True from the term to add shaped ranges."
+    if max(source._m_orders) > source.degree:
+        # A shaped term is rebuilt with a derivative penalty, whose order the
+        # degree bounds; a difference penalty (ps) is not bounded so.
+        return "Shapes need a penalty order no higher than the spline's degree."
+    if interaction_users(model, name):
+        return "A term used by an interaction cannot be reshaped."
+    return None
+
+
+def source_spline(spec) -> _SplineBase | None:
+    """The spline a term is declared with: its own spec, or an ordered term's basis."""
+    basis = getattr(spec, "_spline_obj", None) if isinstance(spec, OrderedCategorical) else spec
+    return basis if isinstance(basis, _SplineBase) else None
+
+
+def current_ranges(spec) -> tuple[PolynomialRange, ...]:
+    """The ranges in force, in axis order: band names on an ordered term, values otherwise."""
+    source = source_spline(spec)
+    if source is None:
+        return ()
+    if not isinstance(spec, OrderedCategorical):
+        return source.polynomial_ranges
+    return tuple(sorted(source.polynomial_ranges, key=lambda r: spec._range_edge_value(r.lo)))
+
+
+def band_edges(spec: OrderedCategorical, name: str, lo, hi) -> tuple[str, str]:
+    """Two single bands in axis order; a group, a special or an unknown label refuses."""
+    lo, hi = str(lo), str(hi)
+    if {lo, hi} & special_labels(spec):
+        raise RangePlacementError(
+            f"A shaped range covers only the bands of {name}; "
+            "leave its special levels out of the selection."
+        )
+    try:
+        at = {lo: spec._range_edge_value(lo), hi: spec._range_edge_value(hi)}
+    except ValueError as exc:
+        raise RangePlacementError(
+            f"A shaped range must start and end on single bands of {name}; "
+            "ungroup the bands at its ends first."
+        ) from exc
+    if at[lo] == at[hi]:
+        raise RangePlacementError(TOO_FEW_POINTS)
+    lo, hi = sorted((lo, hi), key=at.__getitem__)
+    return lo, hi
+
+
+def merged_ranges(
+    existing: tuple[PolynomialRange, ...],
+    new: PolynomialRange,
+    position: Callable[[Any], float],
+) -> list[PolynomialRange]:
+    """``existing`` plus ``new``: the same range is replaced, any other overlap refused."""
+    span = (position(new.lo), position(new.hi))
+    kept = []
+    for current in existing:
+        at = (position(current.lo), position(current.hi))
+        if at == span:
+            continue
+        if at[0] < span[1] and span[0] < at[1]:
+            raise RangePlacementError(
+                f"This range overlaps the {current.label} range "
+                f"{_edge_text(current.lo)}–{_edge_text(current.hi)}. "
+                "Undo it or choose a range outside it."
+            )
+        kept.append(current)
+    return [*kept, new]
+
+
+def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBase:
+    """``source``'s settings with ``ranges``; a ``ps``/``ns`` source becomes ``bs``.
+
+    Range edges repeat knots, which the equal-spacing difference penalties
+    cannot take; a ``bs`` with the same knots, degree and penalty order is
+    the derivative-penalty spline whose penalty can skip the pinned ranges.
+    """
+    return Spline(
+        kind="cr" if _spline_kind_name(source) == "cr" else "bs",
+        n_knots=source.n_knots,
+        knots=knots,
+        boundary=boundary,
+        degree=source.degree,
+        knot_strategy=source.knot_strategy,
+        knot_alpha=source.knot_alpha,
+        penalty=source.penalty,
+        extrapolation=source.extrapolation,
+        discrete=source.discrete,
+        n_bins=source.n_bins,
+        m=source._m_orders,
+        lambda_policy=source._lambda_policy,
+        polynomial_ranges=ranges,
+    )
+
+
+def _edge_text(edge) -> str:
+    return edge if isinstance(edge, str) else f"{edge:g}"
