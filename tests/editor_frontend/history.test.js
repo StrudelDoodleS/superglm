@@ -173,6 +173,28 @@ test("an edit names its action and the stretch of axis it changed, as the axis p
   assert.match(row(node, "c000001"), /class="history-meta">DrivAge · edit</);
 });
 
+test("an edit on levels with gaps between them names the levels, and a stretch keeps its ends", () => {
+  const node = { innerHTML: "" };
+  const edit = (id, params, term = "VehBrand") => ({
+    kind: "edit", status: "edit", id, time: at(14, 0), note: null, label: `shift ${term}`,
+    term, operation: "shift", n_points: params.levels ? params.levels.length : 3, params, redo: false,
+  });
+  renderHistory([
+    edit("d000001", { delta: -0.05, lo: "B1", hi: "B5", levels: ["B1", "B5"] }),
+    edit("d000002", { delta: 0.05, lo: "B1", hi: "B5", levels: ["B1", "B3", "B5"] }),
+    edit("d000003", { delta: -0.05, lo: "B1", hi: "B9", levels: ["B1", "B5", "B7", "B9"] }),
+    edit("d000004", { delta: 0.05, lo: "18-24", hi: "35-44" }, "DrivAgeBand"),
+    { kind: "marker" },
+  ], node);
+  assert.deepEqual(sections(node), [["applied", [
+    "Increase 18-24 – 35-44",
+    "Decrease B1, B5 +2 more",
+    "Increase B1, B3, B5",
+    "Decrease B1, B5",
+    "Opened model",
+  ]]]);
+});
+
 test("a change refitted at once reads the same as a staged one", () => {
   // Refit after every change lists the change once, as its step, without params.
   const node = { innerHTML: "" };

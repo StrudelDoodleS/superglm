@@ -1005,6 +1005,25 @@ def test_an_edit_on_a_selection_carries_the_stretch_of_axis_it_changed(book):
     ]
 
 
+def test_an_edit_on_levels_with_gaps_names_them_and_a_stretch_does_not(book):
+    model, _, _ = book
+    session = _session(model)
+    levels = session.terms["brand"].levels
+    session.select_levels("brand", [levels[3], levels[0]])
+    session.shift("brand", -0.1)
+    session.select_levels("brand", [levels[1], levels[2]])
+    session.shift("brand", 0.1)
+
+    gaps, stretch = session.history
+    # Levels with others between them are no stretch of the axis: History
+    # names them, in axis order, beside the ends it records for every edit.
+    assert gaps.params["levels"] == [levels[0], levels[3]]
+    assert (gaps.params["lo"], gaps.params["hi"]) == (levels[0], levels[3])
+    assert "levels" not in stretch.params
+    edits = [entry["params"] for entry in timeline_payload(session) if entry["kind"] == "edit"]
+    assert [params.get("levels") for params in edits] == [[levels[0], levels[3]], None]
+
+
 def test_exported_models_carry_the_history_and_the_session_models_are_left_alone(book, tmp_path):
     model, _, _ = book
     session = _session(model)

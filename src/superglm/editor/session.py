@@ -77,15 +77,21 @@ def _edit_span(term: EditableTerm, indices: NDArray[np.intp]) -> dict[str, Any]:
 
     Named as a shaped range names its edges: the level on a categorical axis,
     in the order shown when the edit was made, and the x on a numeric one.
+    Levels with others between them are no stretch of the axis, so they are
+    also listed, in axis order, as ``"levels"``, which History names instead.
     Empty when the edit touched no point or the term has no axis values.
     """
     if indices.size == 0:
         return {}
     if term.levels is not None:
-        return {
-            "lo": str(term.levels[int(indices.min())]),
-            "hi": str(term.levels[int(indices.max())]),
+        positions = np.unique(indices)
+        span: dict[str, Any] = {
+            "lo": str(term.levels[int(positions[0])]),
+            "hi": str(term.levels[int(positions[-1])]),
         }
+        if int(positions[-1] - positions[0]) + 1 != positions.size:
+            span["levels"] = [str(term.levels[int(i)]) for i in positions]
+        return span
     if term.x is None:
         return {}
     x = np.asarray(term.x, dtype=np.float64)[indices]

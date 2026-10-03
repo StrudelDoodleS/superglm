@@ -230,7 +230,8 @@ function entryStatus(entry) {
  * refitted at once on its own is listed as its step, which carries no
  * parameters, so its message comes from its label, the backend's fixed
  * sentence for that operation. An edit on a selection names its action and
- * the stretch of axis it changed, "Smooth 62.7 – 85"; any other edit keeps its
+ * the stretch of axis it changed, "Smooth 62.7 – 85", or the levels it changed
+ * where they are no stretch, "Decrease B1, B5"; any other edit keeps its
  * label. The labels themselves stay as they are: the Undo popover reads them.
  * @param {TimelineEntry} entry @param {"applied"|"waiting"|"edit"} status
  */
@@ -267,16 +268,33 @@ function changeMessage(change, params) {
 /**
  * An edit as the selection menu names its action, with the stretch of axis it
  * changed as the axis prints it: "Make increasing 18 – 30", "Decrease B10".
- * Null for an edit whose params carry no range, such as a handle move.
+ * Levels with others between them are no stretch, so they are named instead:
+ * "Decrease B1, B5". Null for an edit whose params carry no range, such as a
+ * handle move.
  * @param {TimelineEntry} entry @returns {string|null}
  */
 function editMessage(entry) {
   const params = entry.params ?? {};
-  if (params.lo === undefined || params.hi === undefined) return null;
   const operation = String(entry.operation ?? "");
+  if (Array.isArray(params.levels) && params.levels.length) {
+    return `${editAction(operation, params)} ${levelList(params.levels)}`;
+  }
+  if (params.lo === undefined || params.hi === undefined) return null;
   const lo = axisText(params.lo);
   const hi = axisText(params.hi);
   return `${editAction(operation, params)} ${lo === hi ? lo : `${lo} – ${hi}`}`;
+}
+
+/**
+ * Levels named in axis order, up to three, then the first two and a count:
+ * "B1, B5", "B1, B3, B5", "B1, B5 +2 more".
+ * @param {unknown[]} levels
+ */
+function levelList(levels) {
+  const names = levels.map(String);
+  return names.length > 3
+    ? `${names.slice(0, 2).join(", ")} +${names.length - 2} more`
+    : names.join(", ");
 }
 
 /**
