@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from numbers import Integral, Real
@@ -92,6 +93,22 @@ _RANGE = "The spline of {feature!r} refuses the {span}; change or remove that ra
 _UNFITTED = (
     "Structure.from_model needs a fitted model: {feature!r} has no fitted levels yet; "
     "fit the model first."
+)
+_ABSENT = (
+    "The structure names {feature!r}, which is not a feature of this model; remove it from "
+    "the structure or apply it to a model that has it."
+)
+_KIND = (
+    "The structure has {feature!r} as a {kind} term, but the model does not; apply it to a "
+    "model that declares {feature!r} as a {kind} term."
+)
+_UNIVERSE = (
+    "The levels of {feature!r} in the structure are not the levels the model declares for "
+    "it; apply the structure to a model declared with the same levels."
+)
+_NOT_APPLIED = (
+    "The structure could not be applied to {feature!r}: the model's declaration of it does "
+    "not accept these decisions."
 )
 _NOT_WRITABLE = (
     "{value!r} in {feature!r} cannot be written to a structure file, which holds text, "
@@ -291,6 +308,69 @@ class Structure:
         entries = {name: _entry_from_json(name, entry) for name, entry in features.items()}
         return cls(features=entries, superglm_version=version)
 
+    def apply(self, model, X=None):
+        """An unfitted copy of ``model`` with these decisions built into its features.
+
+        Nothing is fitted. Each feature the structure names is rebuilt from
+        the model's declared spec with the structure's grouping, reference,
+        unseen policy and polynomial ranges, by the builders the editor uses;
+        every other feature is copied as it is. Groupings are built from the
+        structure's level universe, so no data is needed. Ranges on a ``ps``
+        or ``ns`` spline rebuild it as a ``bs`` spline with the same knots,
+        degree and penalty order, as the editor does.
+
+        Parameters
+        ----------
+        model : SuperGLM
+            The model to build into, fitted or not. It is left unchanged.
+        X : DataFrame, optional
+            The data the model will be fit on. It is read for one thing only:
+            levels of a grouped term that the structure does not list. Those
+            go where the structure sends new levels, into its ``unseen`` group,
+            or each into a level of its own when that is ``"error"`` or
+            ``"base"``, with one warning per feature. Without ``X`` a grouped
+            term covers only the structure's levels, and a fit on data holding
+            others refuses them.
+
+        Returns
+        -------
+        SuperGLM
+            An unfitted model, ready to ``fit``.
+
+        Raises
+        ------
+        StructureError
+            If a feature is not in the model or is another kind of term, its
+            levels are not those the model declares, or its spline refuses a
+            range. Any other error while a feature is rebuilt is reported as
+            that feature's refusal, with the error as its cause.
+        """
+        from superglm.editor.collapse import clone_with_replaced_features
+
+        frame = None
+        if X is not None:
+            from superglm._frame import as_eager_frame
+
+            frame = as_eager_frame(X)
+        specs = getattr(model, "_specs", None) or {}
+        declared = dict(getattr(getattr(model, "_config", None), "feature_templates", ()))
+        replacements = {}
+        for name in sorted(self.features):
+            entry = self.features[name]
+            _check_feature(name, entry)
+            if name not in specs:
+                raise StructureError(_ABSENT.format(feature=name))
+            spec = declared.get(name, specs[name])
+            if _kind(spec) != entry.kind:
+                raise StructureError(_KIND.format(feature=name, kind=entry.kind))
+            try:
+                replacements[name] = _rebuilt(model, name, spec, entry, frame)
+            except StructureError:
+                raise
+            except Exception as exc:
+                raise StructureError(_NOT_APPLIED.format(feature=name)) from exc
+        return clone_with_replaced_features(model, replacements)
+
 
 def read_structure(path_or_mapping) -> Structure:
     """Read a structure file written by :meth:`Structure.to_json`.
@@ -390,6 +470,174 @@ def _native_levels(name: str, universe: list, spec, frame) -> dict[str, Any]:
     for value in values:
         native.setdefault(str(value), value)
     return native
+
+
+# -- Applying to a model ---------------------------------------------------------
+
+
+def _rebuilt(model, name: str, spec, entry: FeatureStructure, frame):
+    """A fresh, unfitted spec for ``name``: ``spec`` with ``entry``'s decisions."""
+    if entry.kind == "spline":
+        return _rebuilt_spline(model, name, spec, entry)
+    if entry.kind == "ordered":
+        return _rebuilt_ordered(model, name, spec, entry)
+    return _rebuilt_categorical_term(name, spec, entry, frame)
+
+
+def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, frame):
+    from superglm.editor.collapse import _rebuilt_categorical
+
+    levels = list(entry.levels)
+    groups = {label: list(members) for label, members in entry.groups.items()}
+    if groups and frame is not None and name in frame.columns:
+        levels, groups = _placed_new_levels(name, entry, levels, groups, frame.column_array(name))
+    grouping = _grouping(levels, groups, order=[str(level) for level in levels])
+    declared = spec._declared_levels
+    if grouping is not None and declared is not None:
+        if any(str(level) not in grouping.original_to_group for level in declared):
+            raise StructureError(_UNIVERSE.format(feature=name))
+    # Grouped, the design speaks the grouping's text; ungrouped, the builder
+    # gives the reference its native type from the levels.
+    base = entry.reference if grouping is None else str(entry.reference)
+    return _rebuilt_categorical(
+        spec,
+        spec,
+        base=base,
+        grouping=grouping,
+        data=np.asarray(levels, dtype=object),
+        unseen=entry.unseen,
+    )
+
+
+def _placed_new_levels(name: str, entry: FeatureStructure, levels: list, groups: dict, column):
+    """``levels`` and ``groups`` with the column's unlisted levels placed where new levels go.
+
+    Into the ``unseen`` group when it names one, else each as a level of its
+    own; one warning names them and their rows. Missing values are left to
+    the fit, which refuses them.
+    """
+    import pandas as pd
+
+    values = np.asarray(column, dtype=object).ravel()
+    values = values[~np.asarray(pd.isna(values), dtype=bool)]
+    known = {str(level) for level in levels}
+    unlisted = ~pd.Series(values, dtype=object).astype(str).isin(known).to_numpy()
+    if not unlisted.any():
+        return levels, groups
+    new = list({str(value): value for value in values[unlisted]}.values())
+    new.sort(key=str)
+    rows = int(unlisted.sum())
+    if entry.unseen in _POLICIES:
+        destination = "are fitted as levels of their own"
+    else:
+        destination = f"go to the group {entry.unseen!r}"
+        members = groups.get(entry.unseen)
+        if members is None:
+            # The policy names an ungrouped level, which becomes a group.
+            members = [level for level in levels if str(level) == entry.unseen]
+        groups[entry.unseen] = members + new
+    warnings.warn(
+        f"Levels of {name!r} the structure does not list {destination} "
+        f"(unseen={entry.unseen!r}): {new} over {rows} row(s).",
+        UserWarning,
+        stacklevel=4,
+    )
+    return levels + new, groups
+
+
+def _grouping(levels: list, groups: dict, *, order: list[str]):
+    """The LevelGrouping ``groups`` makes of ``levels``, or None without groups."""
+    if not groups:
+        return None
+    from superglm.features.grouping import collapse_levels
+
+    return collapse_levels(
+        [str(level) for level in levels],
+        groups={label: [str(member) for member in members] for label, members in groups.items()},
+        order=order,
+    )
+
+
+def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure):
+    from superglm.editor.collapse import _pristine_basis, rebuilt_ordered_spec
+    from superglm.editor.shapes import _band_edges, _merged_ranges, _shaped_spline
+
+    declared = [str(level) for level in (*spec._declared_smooth_levels, *spec._special_display)]
+    if sorted(declared) != sorted(str(level) for level in entry.levels):
+        raise StructureError(_UNIVERSE.format(feature=name))
+    grouping = _grouping(entry.levels, entry.groups, order=declared)
+    base = entry.reference if grouping is None else str(entry.reference)
+    data = np.asarray(entry.levels, dtype=object)
+    if _same_ranges(entry.ranges, _spec_ranges(spec)):
+        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data)
+    _require_shapes(model, name, entry)
+    source = _pristine_basis(spec)
+    knots = source._named_knots or source._explicit_knots
+    boundary = source._explicit_boundary
+
+    def hosted(ranges):
+        basis = _shaped_spline(source, ranges, knots=knots, boundary=boundary)
+        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data, basis=basis)
+
+    # The term without ranges places each band on the axis the ranges name.
+    host = hosted([])
+    ranges: list[PolynomialRange] = []
+    for r in entry.ranges:
+        try:
+            bands = isinstance(r.lo, str) and isinstance(r.hi, str)
+            lo, hi = _band_edges(host, name, r.lo, r.hi) if bands else (r.lo, r.hi)
+            new = PolynomialRange(lo, hi, r.degree, r.join)
+            _require_shape_fits(source, new)
+            ranges = _merged_ranges(tuple(ranges), new, host._range_edge_value)
+        except ValueError as exc:
+            raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree)) from exc
+    return hosted(ranges)
+
+
+def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure):
+    from superglm.editor.shapes import _merged_ranges, _shaped_spline
+    from superglm.features._spline_ranges import validate_ranges
+
+    if _same_ranges(entry.ranges, _spec_ranges(spec)):
+        return spec
+    _require_shapes(model, name, entry)
+    ranges: list[PolynomialRange] = []
+    for r in entry.ranges:
+        try:
+            new = PolynomialRange(float(r.lo), float(r.hi), r.degree, r.join)
+            _require_shape_fits(spec, new)
+            if spec._explicit_boundary is not None:
+                validate_ranges([new], spec.degree, *spec._explicit_boundary)
+            ranges = _merged_ranges(tuple(ranges), new, float)
+        except ValueError as exc:
+            raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree)) from exc
+    ranges.sort(key=lambda r: r.lo)
+    # The declared knots and boundary, not a fit's: the model is fit afresh.
+    return _shaped_spline(
+        spec, ranges, knots=spec._explicit_knots, boundary=spec._explicit_boundary
+    )
+
+
+def _same_ranges(wanted, current) -> bool:
+    def key(r):
+        return (r.lo, r.hi, int(r.degree), r.join)
+
+    return {key(r) for r in wanted} == {key(r) for r in current}
+
+
+def _require_shapes(model, name: str, entry: FeatureStructure) -> None:
+    """Refuse the first range when the term's spline takes no ranges at all."""
+    from superglm.editor.shapes import _unavailable_reason
+
+    if entry.ranges and _unavailable_reason(model, name) is not None:
+        first = entry.ranges[0]
+        raise StructureError(_range_refusal(name, first.lo, first.hi, first.degree))
+
+
+def _require_shape_fits(source, r: PolynomialRange) -> None:
+    """Refuse a range of higher degree than the spline, or a tangent join on a linear one."""
+    if int(r.degree) > source.degree or (r.join == "tangent" and source.degree < 2):
+        raise ValueError(f"the spline of degree {source.degree} cannot take {r}")
 
 
 # -- JSON ------------------------------------------------------------------------

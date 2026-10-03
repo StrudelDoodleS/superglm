@@ -5,22 +5,29 @@ from __future__ import annotations
 import copy
 import json
 import re
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from superglm import (
+    BSplineSmooth,
     Categorical,
     OrderedCategorical,
     PolynomialRange,
+    PSpline,
     Spline,
     Structure,
     SuperGLM,
     collapse_levels,
     read_structure,
 )
+from superglm.editor import EditorSession
+from superglm.editor import collapse as collapse_module
 from superglm.structure import FORMAT, FeatureStructure, StructureError
+
+U = 2.0**-53
 
 BRANDS = ["B1", "B2", "B10", "B11", "B12", "B13", "B14"]
 BANDS = ["0", "1", "2", "3", "4", "5", "6", "7"]
@@ -337,3 +344,293 @@ def test_a_refusal_is_a_value_error():
     payload = copy.deepcopy(READ_REFUSALS["unknown format"][0])
     with pytest.raises(ValueError):
         read_structure(payload)
+
+
+# -- Apply (S3) ------------------------------------------------------------------
+
+
+def _plain(**overrides) -> SuperGLM:
+    """The book declared with no structural decisions, as a new year's model starts."""
+    features = {
+        "brand": Categorical(base="first"),
+        "area": Categorical(base="first"),
+        "age": Spline(n_knots=6),
+        "band": OrderedCategorical(order=BANDS, basis=Spline(kind="bs", n_knots=4)),
+    }
+    features.update(overrides)
+    return _declared(features)
+
+
+def _brand_structure(unseen: str = "Other") -> Structure:
+    return Structure(
+        features={
+            "brand": FeatureStructure(
+                kind="categorical",
+                levels=sorted(BRANDS),
+                groups={"Other": ["B13", "B14"]},
+                reference="B1",
+                unseen=unseen,
+            )
+        }
+    )
+
+
+def _linear_predictor_bound(X, *models) -> float:
+    """How far two evaluations of one fitted linear predictor can round apart.
+
+    The same fit path on the same data gives the same estimates, so the
+    predictions (identity link: mu = eta) differ only in how each model
+    evaluates eta = b0 + sum_j x_j beta_j. Every product passes through at
+    most p + 1 roundings, so each evaluation errs by at most
+    gamma_(p+1) * max|x_j| * (|b0| + ||beta||_1) (Higham 2002, section 3.1).
+    """
+    bound = 0.0
+    for model in models:
+        largest = 1.0  # the intercept's column
+        for name, spec in model._specs.items():
+            design = np.asarray(spec.transform(X[name].to_numpy()), dtype=np.float64)
+            largest = max(largest, float(np.max(np.abs(design))))
+        terms = len(model.result.beta) + 1
+        gamma = terms * U / (1.0 - terms * U)
+        size = abs(model.result.intercept) + float(np.abs(model.result.beta).sum())
+        bound += gamma * largest * size
+    return bound
+
+
+def test_round_trip_through_the_editor_rebuilds_the_in_force_model(tmp_path):
+    X, y = _frame()
+    grouping = collapse_levels(X["brand"], groups={"Other": ["B13", "B14"]})
+    model = _plain(brand=Categorical(base="first", grouping=grouping, unseen="Other"))
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["brand", "age"])
+    session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.stage_structural("set_reference", "brand", {"level": "B2"})
+    session.stage_structural("shape", "age", {"lo": 30.0, "hi": 45.0, "degree": 1})
+    session.stage_structural("shape", "age", {"lo": 60.0, "hi": 70.0, "degree": 0, "join": "kink"})
+    session.refit_pending(method="fit")
+    in_force = session.model
+    path = tmp_path / "structure.json"
+    Structure.from_model(in_force).to_json(path)
+
+    fresh = _plain()
+    applied = read_structure(path).apply(fresh)
+    assert applied is not fresh and applied._result is None and fresh._result is None
+    applied.fit(X, y)
+
+    ours, theirs = applied._specs["brand"], in_force._specs["brand"]
+    assert ours._grouping.group_to_originals == theirs._grouping.group_to_originals
+    assert ours._grouping.group_to_originals["B10+B11"] == ["B10", "B11"]
+    assert ours._base_level == theirs._base_level == "B2"
+    assert ours.unseen == theirs.unseen == "Other"
+    assert applied._specs["age"].polynomial_ranges == in_force._specs["age"].polynomial_ranges
+    assert [(r.lo, r.hi, r.degree, r.join) for r in applied._specs["age"].polynomial_ranges] == [
+        (30.0, 45.0, 1, "tangent"),
+        (60.0, 70.0, 0, "kink"),
+    ]
+    gap = np.max(np.abs(applied.predict(X) - in_force.predict(X)))
+    assert gap <= _linear_predictor_bound(X, applied, in_force)
+    # Exporting the rebuilt model gives the same file.
+    assert Structure.from_model(applied).to_json() == path.read_text(encoding="utf-8")
+
+
+def test_next_years_new_level_takes_the_other_group_with_one_warning():
+    X, y = _frame()
+    model = _brand_structure().apply(_plain())
+    model.fit(X, y)
+    next_year, _ = _frame(seed=2027, n=60, brands=[*BRANDS, "B99"])
+    new = (next_year["brand"] == "B99").to_numpy()
+    assert new.any()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mu = model.predict(next_year)
+    routed = [str(w.message) for w in caught if "unseen at fit" in str(w.message)]
+    assert routed == [
+        "Routing rows with categorical levels unseen at fit to the group 'Other' "
+        f"(unseen='Other'): ['B99'] over {int(new.sum())} row(s). They take that group's effect."
+    ]
+    as_member = next_year.assign(brand=np.where(new, "B13", next_year["brand"]))
+    assert np.array_equal(mu, model.predict(as_member))
+
+
+def test_apply_places_new_levels_in_x_where_the_structure_says_new_levels_go():
+    next_year, next_y = _frame(seed=2027, brands=[*BRANDS, "B99"])
+    count = int((next_year["brand"] == "B99").sum())
+    with pytest.warns(UserWarning) as placed:
+        model = _brand_structure().apply(_plain(), X=next_year)
+    assert [str(w.message) for w in placed] == [
+        "Levels of 'brand' the structure does not list go to the group 'Other' "
+        f"(unseen='Other'): ['B99'] over {count} row(s)."
+    ]
+    assert model._specs["brand"]._grouping.group_to_originals["Other"] == ["B13", "B14", "B99"]
+    model.fit(next_year, next_y)
+    # Without X the grouping covers only the structure's levels, and the fit says so.
+    with pytest.raises(ValueError, match="B99"):
+        _brand_structure().apply(_plain()).fit(next_year, next_y)
+
+
+def test_apply_fits_new_levels_in_x_as_their_own_without_an_unseen_group():
+    next_year, next_y = _frame(seed=2027, brands=[*BRANDS, "B99"])
+    count = int((next_year["brand"] == "B99").sum())
+    with pytest.warns(UserWarning) as placed:
+        model = _brand_structure(unseen="base").apply(_plain(), X=next_year)
+    assert [str(w.message) for w in placed] == [
+        "Levels of 'brand' the structure does not list are fitted as levels of their own "
+        f"(unseen='base'): ['B99'] over {count} row(s)."
+    ]
+    model.fit(next_year, next_y)
+    assert "B99" in model._specs["brand"]._levels
+
+
+def test_apply_never_fits_and_leaves_the_other_features_alone():
+    fresh = _plain()
+    before = copy.deepcopy(fresh._specs)
+    applied = _brand_structure().apply(fresh)
+    assert applied._result is None
+    for name in ("area", "age", "band"):
+        assert applied._specs[name] is not fresh._specs[name]
+        assert type(applied._specs[name]) is type(before[name])
+        assert vars(applied._specs[name]).keys() == vars(before[name]).keys()
+    assert applied._specs["area"].base == "first"
+    assert fresh._specs["brand"]._grouping is None and fresh._specs["brand"].unseen == "error"
+    assert applied._specs["brand"]._grouping.group_to_originals["Other"] == ["B13", "B14"]
+
+
+def test_ranges_on_a_ps_spline_rebuild_it_as_bs():
+    structure = Structure(
+        features={"age": FeatureStructure(kind="spline", ranges=[PolynomialRange(30.0, 45.0, 1)])}
+    )
+    fresh = _plain()
+    assert isinstance(fresh._specs["age"], PSpline)
+    applied = structure.apply(fresh)
+    spline = applied._specs["age"]
+    assert isinstance(spline, BSplineSmooth)
+    assert (spline.n_knots, spline.degree) == (fresh._specs["age"].n_knots, 3)
+    assert spline.polynomial_ranges == (PolynomialRange(30.0, 45.0, 1),)
+
+
+def test_an_ordered_term_takes_its_groups_reference_and_band_ranges():
+    X, y = _frame()
+    structure = Structure(
+        features={
+            "band": FeatureStructure(
+                kind="ordered",
+                levels=list(BANDS),
+                groups={"0-1": ["0", "1"]},
+                reference="3",
+                ranges=[PolynomialRange("5", "7", 0, "kink")],
+            )
+        }
+    )
+    applied = structure.apply(_plain())
+    applied.fit(X, y)
+    band = applied._specs["band"]
+    assert band._grouping.group_to_originals["0-1"] == ["0", "1"]
+    assert band._base_level == "3"
+    assert band._spline_obj.polynomial_ranges == (PolynomialRange("5", "7", 0, "kink"),)
+    assert Structure.from_model(applied).features["band"] == structure.features["band"]
+
+
+# -- Apply refusals (S4) ---------------------------------------------------------
+
+
+def _age(*ranges) -> Structure:
+    return Structure(features={"age": FeatureStructure(kind="spline", ranges=list(ranges))})
+
+
+APPLY_REFUSALS = {
+    "feature not in the model": (
+        lambda: Structure(
+            features={
+                "region": FeatureStructure(kind="categorical", levels=["N", "S"], reference="N")
+            }
+        ),
+        _plain,
+        "The structure names 'region', which is not a feature of this model; remove it from "
+        "the structure or apply it to a model that has it.",
+    ),
+    "kind does not match": (
+        lambda: Structure(
+            features={"age": FeatureStructure(kind="categorical", levels=[1, 2], reference=1)}
+        ),
+        _plain,
+        "The structure has 'age' as a categorical term, but the model does not; apply it to "
+        "a model that declares 'age' as a categorical term.",
+    ),
+    "degree above the spline's": (
+        lambda: _age(PolynomialRange(30.0, 45.0, 2)),
+        lambda: _plain(age=Spline(kind="bs", n_knots=6, degree=1, m=1)),
+        "The spline of 'age' refuses the Quadratic range 30–45; change or remove that range.",
+    ),
+    "tangent on a linear spline": (
+        lambda: _age(PolynomialRange(30.0, 45.0, 1, "tangent")),
+        lambda: _plain(age=Spline(kind="bs", n_knots=6, degree=1, m=1)),
+        "The spline of 'age' refuses the Line range 30–45; change or remove that range.",
+    ),
+    "overlapping ranges": (
+        lambda: _age(PolynomialRange(30.0, 45.0, 1), PolynomialRange(40.0, 50.0, 0, "kink")),
+        _plain,
+        "The spline of 'age' refuses the Flat range 40–50; change or remove that range.",
+    ),
+    "outside a declared boundary": (
+        lambda: _age(PolynomialRange(85.0, 90.0, 1)),
+        lambda: _plain(age=Spline(kind="bs", n_knots=6, boundary=(18.0, 80.0))),
+        "The spline of 'age' refuses the Line range 85–90; change or remove that range.",
+    ),
+    "a spline that takes no shapes": (
+        lambda: _age(PolynomialRange(30.0, 45.0, 1)),
+        lambda: _plain(age=Spline(kind="bs", n_knots=6, select=True)),
+        "The spline of 'age' refuses the Line range 30–45; change or remove that range.",
+    ),
+    "a band range inside a group": (
+        lambda: Structure(
+            features={
+                "band": FeatureStructure(
+                    kind="ordered",
+                    levels=list(BANDS),
+                    groups={"6-7": ["6", "7"]},
+                    reference="3",
+                    ranges=[PolynomialRange("4", "7", 0, "kink")],
+                )
+            }
+        ),
+        _plain,
+        "The spline of 'band' refuses the Flat range 4–7; change or remove that range.",
+    ),
+    "ordered levels that are not the model's": (
+        lambda: Structure(
+            features={"band": FeatureStructure(kind="ordered", levels=BANDS[:-1], reference="3")}
+        ),
+        _plain,
+        "The levels of 'band' in the structure are not the levels the model declares for it; "
+        "apply the structure to a model declared with the same levels.",
+    ),
+    "declared levels the grouping misses": (
+        _brand_structure,
+        lambda: _plain(brand=Categorical(base="first", levels=[*BRANDS, "B15"])),
+        "The levels of 'brand' in the structure are not the levels the model declares for it; "
+        "apply the structure to a model declared with the same levels.",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("structure", "model", "sentence"), list(APPLY_REFUSALS.values()), ids=list(APPLY_REFUSALS)
+)
+def test_apply_refuses_with_its_fixed_sentence(structure, model, sentence):
+    with pytest.raises(StructureError) as refused:
+        structure().apply(model())
+    assert str(refused.value) == sentence
+
+
+def test_an_unexpected_library_error_becomes_the_features_refusal(monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("deep inside")
+
+    monkeypatch.setattr(collapse_module, "_rebuilt_categorical", broken)
+    with pytest.raises(StructureError) as refused:
+        _brand_structure().apply(_plain())
+    assert str(refused.value) == (
+        "The structure could not be applied to 'brand': the model's declaration of it does "
+        "not accept these decisions."
+    )
+    assert isinstance(refused.value.__cause__, RuntimeError)

@@ -717,18 +717,22 @@ def _native_levels(spec: Categorical, fitted: Categorical, data) -> dict[str, An
 
 
 def _rebuilt_categorical(
-    spec: Categorical, fitted: Categorical, *, base, grouping, data
+    spec: Categorical, fitted: Categorical, *, base, grouping, data, unseen: str | None = None
 ) -> Categorical:
     """A fresh Categorical like ``spec`` with this grouping and base.
 
     It keeps ``levels=`` and ``unseen=``, which a collapse or ungroup used to
-    drop. Grouped, the design speaks the grouping's text labels; ungrouped,
-    the base goes back to its native value, so an integer level stays 3, not "3".
+    drop; ``unseen`` replaces the policy. Grouped, the design speaks the
+    grouping's text labels; ungrouped, the base goes back to its native value,
+    so an integer level stays 3, not "3".
     """
     if grouping is None and str(base) not in _SYMBOLIC_BASE_POLICIES:
         base = _native_levels(spec, fitted, data).get(str(base), base)
     return Categorical(
-        base=base, grouping=grouping, levels=spec._declared_levels, unseen=spec.unseen
+        base=base,
+        grouping=grouping,
+        levels=spec._declared_levels,
+        unseen=spec.unseen if unseen is None else unseen,
     )
 
 
