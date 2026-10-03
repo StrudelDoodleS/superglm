@@ -375,3 +375,22 @@ test("on a collapsed display the anchor is a source level and the span selects e
 
   assert.deepEqual(chart.mutations, [{ term: "age", indices: [1, 2, 3, 4] }]);
 });
+
+test("a click on a collapsed display anchors the source level it shows, not the display point", async () => {
+  // Display point 3 shows source level e, index 4: the group b + c sits before it.
+  const chart = gestureHarness({
+    x: [0, 1, 2, 3],
+    y: [1, 1.2, 0.8, 1.1],
+    levels: ["a", "b", "c", "d", "e"],
+    displayToSourceIndices: [[0], [1, 2], [3], [4]],
+  });
+
+  await chart.click(3);
+  assert.deepEqual(chart.mutations, [{ term: "age", indices: [4] }]);
+  assert.deepEqual(chart.state.anchor, { term: "age", index: 4 });
+
+  // A Ctrl/Cmd-click anchors the source level too.
+  await chart.click(2, { ctrlKey: true });
+  assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [3, 4] });
+  assert.deepEqual(chart.state.anchor, { term: "age", index: 3 });
+});
