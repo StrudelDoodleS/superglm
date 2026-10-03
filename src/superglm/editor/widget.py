@@ -21,7 +21,7 @@ from typing import Any, Literal
 import numpy as np
 
 from superglm.editor import metrics as metrics_module
-from superglm.editor import persistence
+from superglm.editor import persistence, rating_preview
 from superglm.editor.apply import materialize_edit_request
 from superglm.editor.errors import EditorClientError, EditorKeyError, EditorValueError
 from superglm.editor.evaluation import (
@@ -46,6 +46,7 @@ from superglm.editor.payloads import (
     timeline_payload,
     undo_redo_payload,
 )
+from superglm.editor.rating_preview import PREVIEW_IMPACT_BINS, RatingPreview
 from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
@@ -67,6 +68,10 @@ _EXPORT_DEFAULT_FILENAMES = {
     "joblib": "superglm_edited_model.joblib",
     "xlsx": "superglm_rating_tables.xlsx",
 }
+_EXCEL_NEEDS_TRAINING_DATA = (
+    "Excel export requires train_data or retained fit data; "
+    "validation/test data are not substituted."
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,7 @@ class EditorWidget:
         self._profile_jobs: dict[str, dict[str, Any]] = {}
         self._profile_job_counter = 0
         self._profile_condition = threading.Condition(threading.RLock())
+        self._rating_preview: RatingPreview | None = None
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
         self.selected_term = next(iter(self.terms), "")
@@ -639,25 +645,11 @@ class EditorWidget:
             )
             validation_scope = validation.scope
         else:
-            dataset = training_export_dataset(self.session)
-            if dataset is None:
-                raise EditorValueError(
-                    "Excel export requires train_data or retained fit data; "
-                    "validation/test data are not substituted."
-                )
-            model, revision = self._model_materialized_for_dataset(dataset)
-            if model is None:
+            payload, revision = self._rating_table_payload()
+            if payload is None:
                 raise RuntimeError("Export request was superseded.")
             from superglm.export.excel import write_rating_table_workbook
-            from superglm.export.rating_tables import build_rating_table_payload
 
-            payload = build_rating_table_payload(
-                model,
-                dataset.X,
-                dataset.y,
-                sample_weight=dataset.sample_weight,
-                offset=dataset.offset,
-            )
             buffer = io.BytesIO()
             write_rating_table_workbook(
                 payload,
@@ -678,6 +670,65 @@ class EditorWidget:
             model_revision=revision,
             validation_scope=validation_scope,
         )
+
+    def _rating_table_payload(self, *, impact_bins: tuple[int, ...] | None = None):
+        """The Excel export's rating-table payload for the current revision.
+
+        One path for the workbook and its preview: the training split, the
+        model materialised on it, and the builder's defaults, except the
+        ``impact_bins`` the preview passes. ``(None, revision)`` when the
+        revision moved while the model was materialised.
+        """
+        dataset = training_export_dataset(self.session)
+        if dataset is None:
+            raise EditorValueError(_EXCEL_NEEDS_TRAINING_DATA)
+        model, revision = self._model_materialized_for_dataset(dataset)
+        if model is None:
+            return None, revision
+        from superglm.export.rating_tables import build_rating_table_payload
+
+        options = {} if impact_bins is None else {"impact_bins": impact_bins}
+        payload = build_rating_table_payload(
+            model,
+            dataset.X,
+            dataset.y,
+            sample_weight=dataset.sample_weight,
+            offset=dataset.offset,
+            **options,
+        )
+        return payload, revision
+
+    def _rating_table(self, term: str) -> dict[str, Any]:
+        """``term``'s block of the Excel rating table, for the Table view.
+
+        Built once per model revision, outside the lock like the export, and
+        reused while the revision stands.
+        """
+        with self._lock:
+            if term not in self.session.terms:
+                raise EditorKeyError(f"Unknown editable term: {term!r}")
+            revision = self.session.model_revision
+            preview = self._rating_preview
+        if preview is None or preview.model_revision != revision:
+            preview = self._build_rating_preview(revision)
+            with self._lock:
+                if preview.model_revision == self.session.model_revision:
+                    self._rating_preview = preview
+        return rating_preview.term_rating_table(preview, term)
+
+    def _build_rating_preview(self, revision: int) -> RatingPreview:
+        try:
+            payload, revision = self._rating_table_payload(impact_bins=PREVIEW_IMPACT_BINS)
+        except EditorClientError as exc:
+            return RatingPreview(revision, None, exc.public_message)
+        except (NotImplementedError, OverflowError, ValueError):
+            # The builder's refusals carry backend text; the browser gets a
+            # fixed sentence and the log keeps the cause.
+            _LOGGER.info("The rating-table preview was refused.", exc_info=True)
+            return RatingPreview(revision, None, rating_preview.refusal_reason(self.session.model))
+        if payload is None:
+            return RatingPreview(revision, None, rating_preview.SUPERSEDED)
+        return RatingPreview(revision, payload, None)
 
     def _export_file(
         self,

@@ -176,6 +176,10 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
+    @app.post("/rating_table")
+    def rating_table(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._rating_table(str(_required(payload, "term"))))
+
     @app.get("/download_export")
     def download_export(format: str = "joblib", filename: str | None = None) -> Response:
         return _guarded_export_download(
