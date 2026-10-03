@@ -14,6 +14,7 @@ import {
   planCategoricalAxis,
   splitLabelGraphemes
 } from "./chart/geometry.js";
+import { contributionX, levelPolyline, splineCurves } from "./chart/ordered_spline.js";
 import { el, line, text } from "./chart/svg.js";
 
 const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
@@ -138,13 +139,17 @@ export function drawChart(term, selection, context) {
   const buildEnvelope = buildActive ? buildContributionEnvelope(term) : [];
   const buildValues = buildEnvelope.flat();
   const previousValues = previous || [];
+  // A grouped display never carries a spline: the tools are off for groups.
+  const spline = view.displayIsCollapsed ? null : splineCurves(term);
+  const splineValues = spline ? [...(spline.y || []), ...(spline.originalY || [])] : [];
   const yMinRaw = Math.min(
     ...y,
     ...original,
     ...previousValues,
     ...ciValues,
     ...controlValues,
-    ...buildValues
+    ...buildValues,
+    ...splineValues
   );
   const yMaxRaw = Math.max(
     ...y,
@@ -152,7 +157,8 @@ export function drawChart(term, selection, context) {
     ...previousValues,
     ...ciValues,
     ...controlValues,
-    ...buildValues
+    ...buildValues,
+    ...splineValues
   );
   const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
   const baseYMin = yMinRaw - yPad;
@@ -239,9 +245,7 @@ export function drawChart(term, selection, context) {
     build.setAttribute("data-active-basis", String(buildCurve.activeIndex));
     build.setAttribute("style", `stroke: ${mixBuildColor(progress)}`);
   }
-  if (!buildActive) path(svg, x, original, sx, sy, "original");
-  if (!buildActive && previous) path(svg, x, previous, sx, sy, "previous-edit");
-  if (!buildActive) path(svg, x, y, sx, sy, "edited");
+  if (!buildActive) drawTermLines(svg, { x, y, original, previous, spline, sx, sy });
   const displaySelected = displaySelection(view, selection);
   const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
   const handlesMode = visualMode === "handles" && term.controls;
@@ -723,21 +727,40 @@ function drawControlHandles(svg, term, sx, sy, margin, innerH) {
   }
 }
 
+// An ordered spline draws its curves on the level-axis grid and leaves its
+// special levels as lone dots; every other term joins its points.
+function drawTermLines(svg, { x, y, original, previous, spline, sx, sy }) {
+  const join = (values) => (spline ? levelPolyline(x, values, spline.levelIndices) : { x, y: values });
+  const originalLine = spline && spline.originalY
+    ? { x: spline.x, y: spline.originalY }
+    : join(original);
+  path(svg, originalLine.x, originalLine.y, sx, sy, "original");
+  if (previous) {
+    const previousLine = join(previous);
+    path(svg, previousLine.x, previousLine.y, sx, sy, "previous-edit");
+  }
+  const editedLine = spline && spline.y ? { x: spline.x, y: spline.y } : join(y);
+  path(svg, editedLine.x, editedLine.y, sx, sy, "edited");
+}
+
+// Basis rows are sampled at contributionX(term): the ordered spline's grid,
+// or the term's own x.
 function basisContributions(svg, term, sx, sy, buildActive = false) {
   const { basis, logEffects } = contributionComponents(term);
+  const gridX = contributionX(term);
   for (let i = 0; i < basis.length; i++) {
     const row = basis[i];
-    if (!Array.isArray(row) || row.length !== term.x.length) continue;
+    if (!Array.isArray(row) || row.length !== gridX.length) continue;
     const beta = Array.isArray(logEffects) ? Number(logEffects[i] || 0) : 0;
     const y = row.map((v) => Math.exp((Number(v) || 0) * beta));
-    const contribution = path(svg, term.x, y, sx, sy, "basis-contribution");
+    const contribution = path(svg, gridX, y, sx, sy, "basis-contribution");
     contribution.setAttribute("data-basis-index", i);
   }
 }
 
 function buildAccumulationCurve(term, progress) {
   const { basis, logEffects } = contributionComponents(term);
-  const x = term.x || [];
+  const x = contributionX(term) || [];
   if (!x.length) return { x: [], y: [], activeIndex: -1 };
   const eta = new Array(x.length).fill(0);
   const activeIndex = activeBasisIndex(basis, progress);
@@ -765,21 +788,23 @@ function drawActiveBasis(svg, term, index, sx, sy) {
   if (index < 0) return;
   const { basis, logEffects } = contributionComponents(term);
   const row = basis[index];
-  if (!Array.isArray(row) || row.length !== term.x.length) return;
+  const gridX = contributionX(term);
+  if (!Array.isArray(row) || row.length !== gridX.length) return;
   const beta = Number(logEffects[index] || 0);
   const y = row.map((v) => Math.exp((Number(v) || 0) * beta));
-  const active = path(svg, term.x, y, sx, sy, "basis-active");
+  const active = path(svg, gridX, y, sx, sy, "basis-active");
   active.setAttribute("data-basis-index", index);
   active.setAttribute("style", `stroke: ${basisColor(index, 0.72)}`);
 }
 
 function buildContributionEnvelope(term) {
   const { basis, logEffects } = contributionComponents(term);
-  const finalEta = finalContributionEta(basis, logEffects, term.x.length);
+  const n = contributionX(term).length;
+  const finalEta = finalContributionEta(basis, logEffects, n);
   const values = [finalEta.map((value) => Math.exp(value))];
   for (let j = 0; j < basis.length; j++) {
     const row = basis[j];
-    if (!Array.isArray(row) || row.length !== term.x.length) continue;
+    if (!Array.isArray(row) || row.length !== n) continue;
     const beta = Number(logEffects[j] || 0);
     values.push(row.map((v) => Math.exp((Number(v) || 0) * beta)));
   }

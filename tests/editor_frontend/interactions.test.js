@@ -115,6 +115,7 @@ function moveHarness({ mutationResult, levelGroups = [], mode = "move" }) {
   bindInteractions(context);
 
   return {
+    term,
     previews,
     mutations,
     get clears() { return clears; },
@@ -393,4 +394,54 @@ test("a click on a collapsed display anchors the source level it shows, not the 
   await chart.click(2, { ctrlKey: true });
   assert.deepEqual(chart.mutations.at(-1), { term: "age", indices: [3, 4] });
   assert.deepEqual(chart.state.anchor, { term: "age", index: 3 });
+});
+
+test("a handle drag on an ordered spline moves its drawn curve with the level dots", async () => {
+  const harness = moveHarness({ mutationResult: { ok: true }, mode: "handles" });
+  const term = harness.term;
+  term.y = [1, 1, 1, 1];
+  term.controls = {
+    y: [1],
+    log_effect: [0],
+    count: 1,
+    basis_index: [0],
+    basis: [[0.5, 1, 0.5, 0]],
+    build_basis: [[0.25, 0.5, 1, 0.5, 0]],
+    build_log_effect: [0],
+    grid_x: [0, 0.5, 1, 1.5, 2],
+  };
+  term.spline_view = {
+    available: true,
+    reason: null,
+    x: [0, 0.5, 1, 1.5, 2],
+    y: [1, 1, 1, 1, 1],
+    original_y: [1, 1, 1, 1, 1],
+    level_indices: [0, 1, 2],
+    fits_levels: true,
+  };
+
+  await harness.drag(0);
+
+  const { preview } = harness.previews.at(-1);
+  const deltaLog = Math.log(preview.controls.y[0]);
+  assert.notEqual(deltaLog, 0);
+  const expected = [0.25, 0.5, 1, 0.5, 0].map((row) => Math.exp(row * deltaLog));
+  preview.spline_view.y.forEach((value, index) => {
+    assert.ok(Math.abs(value - expected[index]) <= 1e-12 * expected[index]);
+  });
+  assert.ok(Math.abs(preview.y[1] - Math.exp(deltaLog)) <= 1e-12 * Math.exp(deltaLog));
+  assert.equal(preview.y[3], 1);
+});
+
+test("a dragged level of an ordered spline is joined, not drawn on the stale spline", async () => {
+  const harness = moveHarness({ mutationResult: { ok: true } });
+  harness.term.spline_view = {
+    available: true, reason: null, x: [0, 1], y: [2, 2], original_y: [2, 2],
+    level_indices: [0, 1], fits_levels: true,
+  };
+
+  await harness.drag(0);
+
+  assert.equal(harness.previews[0].preview.spline_view.fits_levels, false);
+  assert.equal(harness.term.spline_view.fits_levels, true);
 });

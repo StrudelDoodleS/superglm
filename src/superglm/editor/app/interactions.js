@@ -1,3 +1,5 @@
+import { shiftedCurve } from "./chart/ordered_spline.js";
+
 // A press that moves no further than this many SVG units in x and in y is a
 // click; past it, a drag. The chart draws at its own CSS-pixel size, so an SVG
 // unit is a pixel.
@@ -65,7 +67,12 @@ export function bindInteractions(context) {
         startValue: preview.controls.y[i],
         value: preview.controls.y[i],
         baseY: preview.y.slice(),
-        basis: preview.controls.basis ? preview.controls.basis[i] : null
+        basis: preview.controls.basis ? preview.controls.basis[i] : null,
+        // An ordered spline also moves its drawn curve, sampled on its grid.
+        gridBasis: splineGridRow(preview.controls, i),
+        baseCurve: preview.spline_view && Array.isArray(preview.spline_view.y)
+          ? preview.spline_view.y.slice()
+          : null
       };
       svg.setPointerCapture(event.pointerId);
       return;
@@ -84,6 +91,8 @@ export function bindInteractions(context) {
         : sourceForPoint;
       const affectedIndices = structuralEditSourceIndices(activeTerm, indices);
       const preview = structuredClone(activeTerm);
+      // A dragged level leaves the spline until Python redraws it: join the dots.
+      if (preview.spline_view) preview.spline_view = { ...preview.spline_view, fits_levels: false };
       interaction.pointDrag = {
         term: context.selectedTerm(),
         preview,
@@ -875,6 +884,18 @@ function previewControlCurve(term, drag, value) {
   for (let i = 0; i < term.y.length; i++) {
     term.y[i] = Math.max(1e-12, drag.baseY[i] * Math.exp(drag.basis[i] * deltaLog));
   }
+  if (term.spline_view && drag.gridBasis && drag.baseCurve &&
+      drag.gridBasis.length === drag.baseCurve.length) {
+    term.spline_view.y = shiftedCurve(drag.baseCurve, drag.gridBasis, deltaLog);
+  }
+}
+
+// The dragged handle's basis function on an ordered spline's drawing grid;
+// null for every other term.
+function splineGridRow(controls, index) {
+  if (!Array.isArray(controls.grid_x) || !Array.isArray(controls.build_basis)) return null;
+  const row = controls.build_basis[controls.basis_index ? controls.basis_index[index] : index];
+  return Array.isArray(row) ? row : null;
 }
 
 function indicesInBox(context, a, b) {

@@ -35,7 +35,7 @@ export function bindToolRail({ root, onMode, onHelp, shortcutRoot = document }) 
     /** @type {HTMLButtonElement[]} */
     const radios = [];
     for (const element of root.querySelectorAll('[role="radio"]')) {
-      if (element instanceof HTMLButtonElement && !element.disabled) radios.push(element);
+      if (element instanceof HTMLButtonElement && !isUnavailable(element)) radios.push(element);
     }
     return radios;
   }
@@ -43,7 +43,7 @@ export function bindToolRail({ root, onMode, onHelp, shortcutRoot = document }) 
   /** @param {MouseEvent} event */
   function onClick(event) {
     const element = event.target instanceof Element ? event.target.closest("[data-tool]") : null;
-    if (!(element instanceof HTMLButtonElement) || !root.contains(element) || element.disabled) {
+    if (!(element instanceof HTMLButtonElement) || !root.contains(element) || isUnavailable(element)) {
       return;
     }
     const tool = element.dataset.tool;
@@ -92,7 +92,7 @@ export function bindToolRail({ root, onMode, onHelp, shortcutRoot = document }) 
     const mode = SHORTCUT_MODES[event.key.toLowerCase()];
     if (!mode) return;
     const button = root.querySelector(`[data-tool="${mode}"]`);
-    if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+    if (!(button instanceof HTMLButtonElement) || isUnavailable(button)) return;
     event.preventDefault();
     onMode(mode);
   }
@@ -111,19 +111,46 @@ export function bindToolRail({ root, onMode, onHelp, shortcutRoot = document }) 
 }
 
 /**
+ * Handles with a ``handlesReason`` stay focusable and hoverable, marked
+ * aria-disabled, so their popover can say why they are off; without one they
+ * are plainly disabled.
+ *
  * @param {HTMLElement} root
- * @param {{mode:ToolMode, handlesAvailable:boolean}} state
+ * @param {{mode:ToolMode, handlesAvailable:boolean, handlesReason?:string|null}} state
  */
-export function renderToolRail(root, { mode, handlesAvailable }) {
+export function renderToolRail(root, { mode, handlesAvailable, handlesReason = null }) {
   const effectiveMode = mode === "handles" && !handlesAvailable ? "select" : mode;
   for (const element of root.querySelectorAll('[role="radio"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
-    if (element.dataset.tool === "handles") element.disabled = !handlesAvailable;
+    if (element.dataset.tool === "handles") renderHandlesAvailability(element, handlesAvailable, handlesReason);
     const active = element.dataset.tool === effectiveMode;
     element.setAttribute("aria-checked", String(active));
     element.tabIndex = active ? 0 : -1;
     element.classList.toggle("active", active);
   }
+}
+
+/**
+ * @param {HTMLButtonElement} element
+ * @param {boolean} available
+ * @param {string|null} reason
+ */
+function renderHandlesAvailability(element, available, reason) {
+  const explained = !available && Boolean(reason);
+  element.disabled = !available && !explained;
+  element.setAttribute("aria-disabled", String(!available));
+  if (explained && reason) {
+    element.dataset.popoverTitle = "Handles";
+    element.dataset.popoverBody = reason;
+  } else {
+    delete element.dataset.popoverTitle;
+    delete element.dataset.popoverBody;
+  }
+}
+
+/** @param {HTMLButtonElement} element */
+function isUnavailable(element) {
+  return element.disabled || element.getAttribute("aria-disabled") === "true";
 }
 
 /** @param {string|undefined} value @returns {value is ToolMode} */

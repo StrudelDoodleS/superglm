@@ -191,6 +191,14 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    title: "Ordered splines",
+    items: Object.freeze([
+      "An ordered categorical fitted with a spline is drawn as its spline, with a dot on each level. Special levels are separate dots.",
+      "Handles edit it like a numeric spline: each handle is one spline coefficient, and moving it sets every level to the spline the handles draw, so a handle can sit off the curve. Special levels do not move. Contrib and Build show the spline's basis.",
+      "Handles are off while levels are grouped or a band is shaped; the Handles tool says which.",
+    ]),
+  }),
+  Object.freeze({
     title: "Features",
     items: Object.freeze([
       "Type in the search box to filter the feature list; Enter opens the first match and Escape clears the search.",

@@ -145,6 +145,21 @@
  * @typedef {Record<string, never>} EmptyStructuralRequest
  */
 /**
+ * An ordered categorical with a spline basis, drawn as its spline: the grid
+ * ``x`` (level ``i`` at ``i``), the current and fitted curves as relativities,
+ * and the display indices of the smooth levels. ``available`` is false, with
+ * a fixed ``reason``, while the term's handles are off; ``fits_levels`` is
+ * false while the edited levels are off the spline. Null for every other term.
+ * @typedef {Object} SplineView
+ * @property {boolean} available
+ * @property {string|null} reason
+ * @property {number[]|null} x
+ * @property {number[]|null} y
+ * @property {number[]|null} original_y
+ * @property {number[]|null} level_indices
+ * @property {boolean} fits_levels
+ */
+/**
  * @typedef {Object} TermPayload
  * @property {string} kind
  * @property {string} term_type
@@ -164,6 +179,7 @@
  * @property {TermPending|null} [pending]
  * @property {boolean} [edited] whether the term carries hand edits
  *   (Python's `EditorSession.edited_terms()`)
+ * @property {SplineView|null} [spline_view]
  */
 /**
  * What Undo and Redo would take next, edits and structural steps alike; null

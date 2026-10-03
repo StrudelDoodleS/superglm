@@ -958,7 +958,11 @@ function renderChartWorkspace() {
     : currentSelection();
   statusNode.classList.remove("is-error");
   if (updateHandleCount(term)) return;
-  renderToolRail(toolRail, { mode: view.mode, handlesAvailable: Boolean(term.controls) });
+  renderToolRail(toolRail, {
+    mode: view.mode,
+    handlesAvailable: Boolean(term.controls),
+    handlesReason: term.spline_view?.reason ?? null
+  });
   updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
   updateShapeActions(term, selection);
