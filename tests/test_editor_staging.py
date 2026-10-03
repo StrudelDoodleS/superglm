@@ -6,6 +6,7 @@ import io
 import json
 import re
 import urllib.error
+import warnings
 from datetime import UTC, datetime
 
 import joblib
@@ -250,6 +251,30 @@ def test_a_collapse_on_a_frame_bound_universe_declares_the_labels_its_grouping_m
     assert session.model._specs["brand"]._declared_levels == ["A", "B", "C", "D"]
     d, c = session.model.predict(pd.DataFrame({"brand": ["D", "C"]}))
     assert d == c
+
+
+def test_load_names_the_structural_steps_the_edit_file_did_not_restore(book, tmp_path):
+    model, _, _ = book
+    session = _session(model)
+    session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.refit_pending(method="fit")
+    session.select_indices("area", [1])
+    session.shift("area", 0.1)
+    session.stage_structural("shape", "age", {"lo": 30.0, "hi": 45.0, "degree": 1})
+    path = tmp_path / "session.json"
+    session.save(path)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = EditorSession.load(path, model=session.model)
+
+    assert [str(w.message) for w in caught if "edit file" in str(w.message)] == [
+        "The edit file holds curve edits only, so these changes were not restored: "
+        "collapse B10 + B11 in brand; Line 30–45 in age (waiting). Pass the model they "
+        "produced to load, or make them again."
+    ]
+    assert (loaded.pending, loaded.structure_history) == ([], [])
+    assert [record.operation for record in loaded.history] == ["shift"]
 
 
 def test_ungrouping_to_no_groups_gives_an_integer_reference_its_native_type():

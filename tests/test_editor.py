@@ -7,6 +7,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -4493,13 +4494,17 @@ def test_save_load_roundtrip(editor_model, tmp_path):
     path = tmp_path / "edits.json"
 
     session.save(path)
-    loaded = EditorSession.load(path, model=editor_model)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = EditorSession.load(path, model=editor_model)
 
     np.testing.assert_allclose(
         loaded.terms["x_spline"].edited_log_effect,
         session.terms["x_spline"].edited_log_effect,
     )
     assert loaded.history[-1].operation == "shift"
+    # Curve edits only: the file left nothing out, so load has nothing to disclose.
+    assert not [w for w in caught if "edit file" in str(w.message)]
 
 
 def test_load_rejects_same_shape_artifact_from_different_baseline(

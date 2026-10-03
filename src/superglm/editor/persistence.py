@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -228,12 +229,19 @@ def export_structure(session, path: str | Path | None = None) -> str:
     return structure.to_json(path)
 
 
+_LEFT_OUT = (
+    "The edit file holds curve edits only, so these changes were not restored: {changes}. "
+    "Pass the model they produced to load, or make them again."
+)
+
+
 def save_session(session, path: str | Path) -> None:
     """Write an auditable JSON edit artifact.
 
-    It holds the curve edits. A New levels choice changes the model, which
-    the artifact does not hold (the model passed to load does), so it is
-    left out, as structural steps are.
+    It holds the curve edits. A New levels choice and a structural step
+    change the model, which the artifact does not hold (the model passed to
+    load does), so they are left out; the artifact names them under
+    ``left_out``, and load warns that they were not restored.
     """
     from superglm.editor.unseen import UnseenChoice
 
@@ -251,8 +259,35 @@ def save_session(session, path: str | Path) -> None:
             for record in session.history
             if not isinstance(record, UnseenChoice)
         ],
+        "left_out": _left_out(session),
     }
     Path(path).write_text(json.dumps(jsonable(payload), indent=2, sort_keys=True))
+
+
+def _left_out(session) -> list[str]:
+    """The model changes an edit artifact does not hold, by label, oldest first.
+
+    The structural steps the in-force model was refitted through, each with
+    the New levels choices made before it; then those made since, and the
+    changes still waiting. A step's earlier choices sit in the state it
+    kept: a step starts the live history afresh.
+    """
+    from superglm.editor.unseen import UnseenChoice
+
+    def choices(history) -> list[str]:
+        return [
+            f"{record.label} in {record.term}"
+            for record in history
+            if isinstance(record, UnseenChoice)
+        ]
+
+    changes: list[str] = []
+    for step in session.structure_history:
+        changes += choices(step.state.history)
+        changes += [change.label for change in step.changes] or [step.label]
+    changes += choices(session.history)
+    changes += [f"{step.label} (waiting)" for step in session.pending]
+    return changes
 
 
 def load_session(session_cls, path: str | Path, *, model):
@@ -297,4 +332,7 @@ def load_session(session_cls, path: str | Path, *, model):
 
     session.history = [record_from_payload(record) for record in payload.get("history", [])]
     session.redo_stack = []
+    left_out = [str(change) for change in payload.get("left_out", [])]
+    if left_out:
+        warnings.warn(_LEFT_OUT.format(changes="; ".join(left_out)), UserWarning, stacklevel=3)
     return session

@@ -1964,7 +1964,7 @@ def test_reset_keeps_the_new_levels_choice():
     assert session.model is model
 
 
-def test_a_saved_session_leaves_the_new_levels_choice_to_the_model(tmp_path):
+def test_a_saved_session_leaves_the_new_levels_choice_to_the_model_and_load_says_so(tmp_path):
     # The artifact holds curve edits; the model passed to load holds the policy.
     model, _, _ = _grouped_region()
     session = EditorSession.from_model(model, terms=["region", "x"])
@@ -1972,7 +1972,13 @@ def test_a_saved_session_leaves_the_new_levels_choice_to_the_model(tmp_path):
     session.shift("x", 0.1)
     session.set_unseen("region", "Other")
     session.save(tmp_path / "session.json")
-    loaded = EditorSession.load(tmp_path / "session.json", model=model)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = EditorSession.load(tmp_path / "session.json", model=model)
+    assert [str(w.message) for w in caught if "edit file" in str(w.message)] == [
+        "The edit file holds curve edits only, so these changes were not restored: "
+        "New levels → Other in region. Pass the model they produced to load, or make them again."
+    ]
     assert [record.operation for record in loaded.history] == ["shift"]
 
 

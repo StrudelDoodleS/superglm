@@ -1478,7 +1478,12 @@ class EditorSession:
         *,
         model,
     ) -> EditorSession:
-        """Load an edit artifact against a fitted model."""
+        """Load an edit artifact against a fitted model.
+
+        The artifact holds curve edits only. When the session it came from had
+        structural steps or New levels choices, one warning names them: they
+        were not restored.
+        """
         return persistence.load_session(cls, path, model=model)
 
     def widget(self):
