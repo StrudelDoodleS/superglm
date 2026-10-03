@@ -318,8 +318,7 @@ fitted spec and the display term. These break on an unfitted draft today:
   - the outgoing icon spins out (420 ms) and the incoming one spins in with a
     small overshoot (620 ms, 160 ms delay);
   - the label pops in (560 ms, 260 ms delay, scale 0.2 → 1.35 → 1 with a tilt);
-  - a halftone starburst flashes at the knob's destination (600 ms, 300 ms
-    delay);
+  - no starburst: the board 7b version had one and Max rejected it;
   - the track, ink, shadow, bar and page colours cross-fade, and the halftone
     dots drift (560–600 ms).
 - `prefers-reduced-motion` turns all of it off. tokens.css already zeroes
