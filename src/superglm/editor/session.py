@@ -1021,6 +1021,7 @@ class EditorSession:
                     self,
                     model,
                     restructured={term},
+                    at_once=True,
                     operation="ungroup_levels",
                     term=term,
                     label=label,

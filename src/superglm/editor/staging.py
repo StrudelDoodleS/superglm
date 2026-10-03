@@ -238,18 +238,26 @@ def stage_and_refit(
 
 
 def put_in_force(
-    session: EditorSession, model, *, restructured: set[str], **step: Any
+    session: EditorSession,
+    model,
+    *,
+    restructured: set[str],
+    at_once: bool = False,
+    **step: Any,
 ) -> StructuralStep:
     """Push ``model`` as one structural step, then carry over edits on the terms it left alone.
 
     ``step`` goes to the session's ``_push_structure``: ``operation``,
     ``term``, ``label`` and optionally ``state``, ``changes`` and ``step_id``.
+    A change refitted at once (``at_once``, the legacy ``replace_with_*``
+    calls) is one step that one Undo takes back, so its carry-over is part of
+    that step; a Refit's carry-over is an entry of its own.
     """
     previous = session.terms
     held = [name for name in session.edited_terms() if name not in restructured]
     session._push_structure(model, **step)
     pushed = session.structure_history[-1]
-    _carry_edits(session, {name: previous[name] for name in held})
+    _carry_edits(session, {name: previous[name] for name in held}, own_entry=not at_once)
     return pushed
 
 
@@ -396,6 +404,7 @@ def _apply_pending(
         session,
         refit_model,
         restructured=set(drafts),
+        at_once=before is not None,
         state=before,
         term=term,
         changes=changes,
@@ -403,7 +412,9 @@ def _apply_pending(
     )
 
 
-def _carry_edits(session: EditorSession, edited: dict[str, EditableTerm]) -> None:
+def _carry_edits(
+    session: EditorSession, edited: dict[str, EditableTerm], *, own_entry: bool = True
+) -> None:
     """Re-apply hand-edited curves over a refit, as one entry Undo takes back (spec D2).
 
     ``edited`` holds the edited terms the refit did not restructure. Each
@@ -412,6 +423,10 @@ def _carry_edits(session: EditorSession, edited: dict[str, EditableTerm]) -> Non
     anyway is left at the refit. Undo of the entry returns the carried
     terms to the refitted curves; Undo of the refit then puts back every
     edit, those on restructured terms included.
+
+    Without ``own_entry`` the curves join the step just pushed: its state
+    is the one from before it, so the live terms are its own fresh ones,
+    and Undo of that step takes the carry-over back with the change.
     """
     carried = {}
     for name, term in edited.items():
@@ -419,6 +434,10 @@ def _carry_edits(session: EditorSession, edited: dict[str, EditableTerm]) -> Non
         if curve is not None:
             carried[name] = curve
     if not carried:
+        return
+    if not own_entry:
+        for name, curve in carried.items():
+            session.terms[name].edited_log_effect = curve
         return
     refitted = session._capture_state()
     # A fresh dict of copies: the entry's state keeps the refitted terms.

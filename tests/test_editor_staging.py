@@ -601,6 +601,62 @@ def test_a_change_refitted_at_once_is_its_own_step_under_its_own_id(book):
     assert session.model is model and session.pending == []
 
 
+_AT_ONCE = {
+    "collapse": lambda session: session.select_levels(
+        "brand", ["B10", "B11"]
+    ).replace_with_collapsed_levels("brand", method="fit"),
+    "set_reference": lambda session: session.replace_with_reference_level(
+        "brand", "B2", method="fit"
+    ),
+    "shape": lambda session: session.replace_with_shaped_range(
+        "age", lo=30.0, hi=45.0, degree=1, method="fit"
+    ),
+    "ungroup": lambda session: session.select_levels(
+        "brand", ["B10", "B11"]
+    ).replace_with_ungrouped_levels("brand", method="fit"),
+}
+
+
+@pytest.mark.parametrize("operation", list(_AT_ONCE))
+def test_a_change_refitted_at_once_carries_the_hand_edits_inside_its_one_step(
+    book, monkeypatch, operation
+):
+    model, _, _ = book
+    session = _session(model)
+    if operation == "ungroup":
+        # The ungroup then reuses the fit from before this collapse.
+        _AT_ONCE["collapse"](session)
+    session.select_levels("area", ["C"])
+    session.shift("area", 0.1)
+    held = session.terms["area"].edited_log_effect.copy()
+    before_model, before_history = session.model, [id(r) for r in session.history]
+    before_steps = [id(step) for step in session.structure_history]
+    before_done = [id(item) for item, _ in session.timeline_items()[0]]
+    fits = _count_fits(monkeypatch)
+
+    _AT_ONCE[operation](session)
+    refit = session.model
+
+    # One step and one timeline entry: the change itself, with area's edit
+    # carried over inside it (area kept its grid).
+    [step] = session.structure_history[len(before_steps) :]
+    assert step.operation == staging_module._REFIT_AT_ONCE[operation]
+    assert [id(item) for item, _ in session.timeline_items()[0]] == [*before_done, id(step)]
+    assert session.edited_terms() == ["area"]
+    np.testing.assert_array_equal(session.terms["area"].edited_log_effect, held)
+
+    # One Undo goes straight back to before the change.
+    session.undo()
+    assert session.model is before_model
+    assert [id(step) for step in session.structure_history] == before_steps
+    assert [id(r) for r in session.history] == before_history
+    # One Redo puts the change back, the carried edit with it, without fitting.
+    session.redo()
+    assert session.model is refit and session.edited_terms() == ["area"]
+    np.testing.assert_array_equal(session.terms["area"].edited_log_effect, held)
+    assert len(fits) == (0 if operation == "ungroup" else 1)
+
+
 def test_the_ungroup_shortcut_waits_for_nothing_else_to_be_waiting(book, monkeypatch):
     model, _, _ = book
     session = _session(model)

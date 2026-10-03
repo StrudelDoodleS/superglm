@@ -1343,13 +1343,10 @@ def test_undoing_a_collapse_brings_back_the_edits_made_before_it(region_model):
 
     session.replace_with_collapsed_levels("region", method="fit")
     # x kept its grid, so its smoothing is carried over; region was restructured,
-    # so its shift is not. Undo takes the carry-over back, then the collapse.
+    # so its shift is not. One Undo takes the collapse back, carry-over and all.
     assert session.history == [] and session.edited_terms() == ["x"]
-    assert [step.operation for step in session.structure_history] == [
-        "collapse_levels",
-        "carry_edits",
-    ]
-    session.undo().undo()
+    assert [step.operation for step in session.structure_history] == ["collapse_levels"]
+    session.undo()
     _assert_state_is(session, before)
 
 
@@ -1448,9 +1445,9 @@ def test_the_timeline_lists_every_action_around_the_current_position(region_mode
     session.select_levels("region", ["D"])
     session.shift("region", 0.1)
     session.replace_with_shaped_range("x", lo=2.0, hi=4.0, degree=1, method="fit")
-    # The shape left region alone, so its edit is carried over the refit.
-    shape, carried = (step.label for step in session.structure_history)
-    assert carried == "Hand edits carried over: region"
+    # The shape left region alone, so its edit is carried over, inside the step.
+    assert session.edited_terms() == ["region"]
+    shape = session.structure_history[-1].label
     session.select_indices("x", [0, 1])
     session.shift("x", -0.05)
     session.undo()
@@ -1458,34 +1455,31 @@ def test_the_timeline_lists_every_action_around_the_current_position(region_mode
     assert _outline(session) == [
         ("edit", "shift region", False),
         ("structural", shape, False),
-        ("structural", carried, False),
         ("marker", None, None),
         ("edit", "shift x", True),
     ]
     # The entries either side of the marker read as the Undo and Redo popovers do.
-    assert undo_redo_payload(session) == {"undo": carried, "redo": "shift x"}
+    assert undo_redo_payload(session) == {"undo": shape, "redo": "shift x"}
     undone = timeline_payload(session)[-1]
 
     session.redo()
     assert _outline(session) == [
         ("edit", "shift region", False),
         ("structural", shape, False),
-        ("structural", carried, False),
         ("edit", "shift x", False),
         ("marker", None, None),
     ]
     # An edit's hash names its place in the session, whichever side of the marker it is on.
-    assert timeline_payload(session)[3]["hash"] == undone["hash"]
+    assert timeline_payload(session)[2]["hash"] == undone["hash"]
 
-    # Undone past the steps, they and the edits after them wait in the order Redo takes them.
+    # Undone past the step, the step and the edits after it wait in the order Redo takes them.
     session.select_indices("x", [5, 6])
     session.smooth("x", 0.5)
-    session.undo().undo().undo().undo()
+    session.undo().undo().undo()
     assert _outline(session) == [
         ("edit", "shift region", False),
         ("marker", None, None),
         ("structural", shape, True),
-        ("structural", carried, True),
         ("edit", "shift x", True),
         ("edit", "smooth x", True),
     ]
@@ -1499,11 +1493,11 @@ def test_a_collapse_keeps_the_edits_made_before_it_on_the_timeline(region_model)
     session.select_levels("region", ["B", "C"])
     session.replace_with_collapsed_levels("region", method="fit")
 
-    assert session.history == []
+    # x's edit is carried over inside the collapse's step, not as an entry of its own.
+    assert session.history == [] and session.edited_terms() == ["x"]
     assert _outline(session) == [
         ("edit", "shift x", False),
         ("structural", "collapse B + C in region", False),
-        ("structural", "Hand edits carried over: x", False),
         ("marker", None, None),
     ]
 
@@ -1513,7 +1507,7 @@ def test_a_collapse_keeps_the_edits_made_before_it_on_the_timeline(region_model)
     session.select_levels("region", ["D"])
     session.shift("region", 0.1)
     session.undo().undo()
-    assert _outline(session)[3:] == [
+    assert _outline(session)[2:] == [
         ("marker", None, None),
         ("edit", "smooth x", True),
         ("edit", "shift region", True),

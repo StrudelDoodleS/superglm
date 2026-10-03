@@ -2442,10 +2442,10 @@ def test_collapse_levels_replaces_in_force_model_and_carries_edits_on_other_term
     assert session.reference_model is editor_model
     assert session.model is refit
     # The collapse left x_spline's rows and grid alone, so its hand edit is
-    # carried over the refit (spec D2), as one entry of its own.
+    # carried over the refit (spec D2), inside the collapse's own step.
     assert session.edited_terms() == ["x_spline"]
     assert session.history == []
-    assert session.structure_history[-1].label == "Hand edits carried over: x_spline"
+    assert [step.label for step in session.structure_history] == ["collapse B + C in region"]
     assert session.selection("x_spline").size == 0
     np.testing.assert_array_equal(session.terms["x_spline"].edited_log_effect, edited)
     grouping = session.model.features["region"]._grouping
