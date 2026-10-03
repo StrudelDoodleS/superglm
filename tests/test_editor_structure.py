@@ -24,6 +24,7 @@ from superglm import (
     Polynomial,
     Spline,
     SuperGLM,
+    collapse_levels,
 )
 from superglm.editor import EditorSession
 from superglm.editor import session as session_module
@@ -292,20 +293,37 @@ def test_a_pinned_reference_survives_a_later_collapse(region_model):
     assert session.model._specs["region"]._base_level == "C"
 
 
-def _exposed_region_session(base: str) -> EditorSession:
-    """B is the most exposed level; C + D outweigh it, and A + B weigh less than C + D."""
+def _exposed_region_session(
+    base: str, groups: dict[str, list[str]] | None = None, reference: str = "B"
+) -> EditorSession:
+    """B is the most exposed level; C + D outweigh it, and A + B weigh less than C + D.
+
+    ``groups`` declares a grouping on the opened model, whose fit resolves ``reference``.
+    """
     rng = np.random.default_rng(20261003)
     region = rng.permutation(np.repeat(["A", "B", "C", "D", "E"], [180, 360, 330, 330, 100]))
     effects = {"A": -0.1, "B": 0.0, "C": 0.15, "D": 0.2, "E": 0.05}
     y = 0.5 + np.array([effects[r] for r in region]) + rng.normal(0.0, 0.05, region.size)
     weight = np.ones(region.size)
     X = pd.DataFrame({"region": region})
+    grouping = None if groups is None else collapse_levels(X["region"], groups=groups)
     model = SuperGLM(
-        family="gaussian", selection_penalty=0.0, features={"region": Categorical(base=base)}
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"region": Categorical(base=base, grouping=grouping)},
     )
     model.fit(X, y, sample_weight=weight)
-    assert model._specs["region"]._base_level == "B", "precondition: B is the reference"
+    assert model._specs["region"]._base_level == reference, (
+        f"precondition: {reference} is the reference"
+    )
     return EditorSession.from_model(model, terms=["region"], train_data=(X, y, weight))
+
+
+def _declared_grouping_session() -> EditorSession:
+    """C + D (660) and A + E (280) declared under most_exposed: C + D is the reference."""
+    return _exposed_region_session(
+        "most_exposed", groups={"C+D": ["C", "D"], "A+E": ["A", "E"]}, reference="C+D"
+    )
 
 
 @pytest.mark.parametrize(
@@ -359,6 +377,24 @@ def test_a_partial_ungroup_leaves_the_reference_with_the_levels_that_stay(
     session.select_levels("region", pulled)
     session.replace_with_ungrouped_levels("region", method="fit", **options)
     assert session.model._specs["region"]._base_level == reference
+
+
+@pytest.mark.parametrize(
+    ("options", "reference"),
+    [
+        # C + D loses D; C and D tie on members, and C was not pulled out.
+        ({}, {"level": "C", "policy": "kept"}),
+        # Off, most_exposed resolves again over B (360), C, D (330 each) and A + E (280).
+        ({"keep_reference": False}, {"level": "B", "policy": "most_exposed"}),
+    ],
+    ids=["kept", "off"],
+)
+def test_a_partial_ungroup_keeps_a_most_exposed_reference(options, reference):
+    # The declared base is symbolic, so the reference to keep is the one the fit resolved.
+    session = _declared_grouping_session()
+    session.select_levels("region", ["D"])
+    session.replace_with_ungrouped_levels("region", method="fit", **options)
+    assert session_payload(session)["region"]["reference"] == reference
 
 
 def test_keeping_the_reference_keeps_integer_levels_native():
