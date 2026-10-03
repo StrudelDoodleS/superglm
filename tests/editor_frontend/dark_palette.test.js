@@ -20,6 +20,10 @@
 //     differ in lightness).
 // The 6 floor leans on a second channel, which each palette has: the group
 // label under the axis, the Build's one highlighted basis, the legends.
+//
+// SVG text takes its colour from `fill`, not `color`, so the text check
+// finds the classes the app's scripts give <text> elements and holds every
+// stylesheet fill on one of them to 4.5:1 on the ground it is drawn on.
 
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -181,6 +185,127 @@ test("the text check lists every text colour and text ground the stylesheets set
     }
   }
   assert.deepEqual(missing, []);
+});
+
+/**
+ * A call's top-level arguments, from just after its opening parenthesis.
+ * @param {string} source @param {number} start @returns {string[]}
+ */
+function callArguments(source, start) {
+  const args = [];
+  let current = "";
+  let depth = 0;
+  /** @type {string|null} */
+  let quote = null;
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote) {
+      current += ch;
+      if (ch === "\\") current += source[++i];
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if ("([{".includes(ch)) depth += 1;
+    else if (")]}".includes(ch)) {
+      if (depth === 0) return [...args, current];
+      depth -= 1;
+    } else if (ch === "," && depth === 0) {
+      args.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  return args;
+}
+
+const SCRIPTS = readdirSync(new URL("../../src/superglm/editor/app/", import.meta.url), { recursive: true })
+  .map(String)
+  .filter((name) => name.endsWith(".js"));
+
+/**
+ * The classes the app's scripts give SVG <text> elements: through chart/svg.js's
+ * text(parent, x, y, value, cls, anchor), whose class may be a choice of
+ * literals, and in markup written as strings.
+ * @returns {Set<string>}
+ */
+function svgTextClasses() {
+  const classes = new Set();
+  /** @param {string} list */
+  const add = (list) => list.split(/\s+/).filter(Boolean).forEach((name) => classes.add(name));
+  for (const file of SCRIPTS) {
+    const js = appFile(file);
+    for (const match of js.matchAll(/<text\b[^>]*?\bclass="([^"$]+)"/g)) add(match[1]);
+    for (const match of js.matchAll(/(?<![.\w])text\(/g)) {
+      const cls = callArguments(js, match.index + match[0].length)[4] ?? "";
+      for (const literal of cls.matchAll(/"([^"]*)"/g)) add(literal[1]);
+    }
+  }
+  return classes;
+}
+
+// SVG text classes and the grounds they are drawn on.
+/** @type {Record<string, string[]>} */
+const SVG_TEXT_ON_GROUND = {
+  // The editor's chart (#chart is --surface): axis titles, ticks, the
+  // legend, a focused category tick, and the point tooltip's near-opaque box.
+  label: ["--surface"],
+  "tick-label": ["--surface"],
+  "x-tick-label": ["--surface"],
+  legend: ["--surface"],
+  "point-tooltip-label": ["--surface"],
+  "point-tooltip-value": ["--surface"],
+  // The selection anchor's tags ("click · 56") and a shape's range tag sit on
+  // --surface pills; a waiting range's tag on the waiting tint.
+  "anchor-tag-label": ["--surface"],
+  "shape-range-label": ["--surface"],
+  "pending-range-label": ["--sig-weak-bg"],
+  // The profile search's trace plot.
+  "profile-trace-label": ["--surface"],
+  "profile-trace-best-label": ["--surface"],
+  // The Cross-validation tab's chart panel.
+  "cv-tick": ["--surface-subtle"],
+  "cv-level": ["--surface-subtle"],
+  "cv-axis-title": ["--surface-subtle"],
+};
+
+test("every SVG text fill keeps 4.5:1 on the ground it is drawn on, in both themes", () => {
+  const textClasses = svgTextClasses();
+  for (const name of ["anchor-tag-label", "tick-label", "point-tooltip-label", "profile-trace-label", "cv-tick"]) {
+    assert.ok(textClasses.has(name), `the script scan missed .${name}`);
+  }
+  const failures = [];
+  let checked = 0;
+  for (const file of STYLESHEETS) {
+    const css = appFile(file).replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const fill = /(?<![-\w])fill\s*:\s*var\((--[\w-]+)\)/.exec(body)?.[1];
+      if (!fill) continue;
+      for (const selector of selectors.split(",").map((part) => part.trim())) {
+        const subject = selector.split(/[\s>+~]+/).pop() ?? "";
+        const names = [...subject.matchAll(/\.([\w-]+)/g)].map((match) => match[1]);
+        for (const name of names.filter((candidate) => textClasses.has(candidate))) {
+          const grounds = SVG_TEXT_ON_GROUND[name];
+          if (!grounds) {
+            failures.push(`${file}: ${selector} sets SVG text to ${fill} on a ground not listed`);
+            continue;
+          }
+          for (const [themeName, theme] of THEMES) {
+            for (const ground of grounds) {
+              checked += 1;
+              const ratio = contrast(theme, fill, ground);
+              if (!(ratio >= 4.5)) {
+                failures.push(`${themeName} ${selector}: ${fill} on ${ground} ${ratio.toFixed(2)}:1`);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.ok(checked > 0, "no SVG text fill was checked");
+  assert.deepEqual(failures, []);
 });
 
 test("the dark categorical palettes keep neighbours apart in colour and in lightness", () => {

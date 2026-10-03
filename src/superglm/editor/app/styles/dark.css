@@ -26,6 +26,8 @@
   --blue-soft: #283244;
   --blue-band: rgba(131, 168, 232, 0.12);
   --orange: #fe8019;
+  /* gruvbox's orange already reads as text on the ground, at 6.5:1. */
+  --orange-text: #fe8019;
   --red: #fb4934;
   --yellow: #d79921;
   --yellow-border: #d79921;

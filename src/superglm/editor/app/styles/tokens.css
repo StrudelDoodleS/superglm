@@ -19,6 +19,9 @@
   --blue-soft: #e3ebfa;
   --blue-band: rgba(36, 87, 197, 0.08);
   --orange: #ea580c;
+  /* The selection orange set as text, the anchor's tags: its own hue
+     darkened to 4.9:1 on --surface, where --orange is 3.6:1. */
+  --orange-text: #c2490a;
   --red: #d6402b;
   --yellow: #f4b942;
   --yellow-border: #d9a12c;
