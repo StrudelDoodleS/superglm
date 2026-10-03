@@ -57,6 +57,20 @@ function render(context) {
   return nodes.statusNode;
 }
 
+test("the EDF chip gives three significant figures, as the feature list and the inspector do", () => {
+  const chips = [10, 5, 11.3, 4.2137].map((effective_df) => {
+    const nodes = {
+      kindNode: new FakeNode(),
+      edfNode: new FakeNode(),
+      referenceNode: new FakeNode(),
+      statusNode: new FakeNode(),
+    };
+    renderContextBar(nodes, { name: "territory", term: { ...TERM, effective_df }, selectionSize: 0 });
+    return nodes.edfNode.textContent;
+  });
+  assert.deepEqual(chips, ["EDF 10.0", "EDF 5.00", "EDF 11.3", "EDF 4.21"]);
+});
+
 test("with nothing waiting the status line is the selection sentence", () => {
   const status = render({ selectionSize: 2 });
   assert.equal(

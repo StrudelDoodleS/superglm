@@ -1,6 +1,6 @@
 // @ts-check
 
-import { fmt, fmtPercent } from "../format.js";
+import { fmt, fmtEdf, fmtPercent } from "../format.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('../api/contracts.js').TermReference} TermReference */
@@ -64,7 +64,7 @@ export function renderContextBar(
   kindNode.textContent = kind;
   edfNode.textContent = term.effective_df === null || term.effective_df === undefined
     ? "EDF unavailable"
-    : `EDF ${fmt(term.effective_df)}`;
+    : fmtEdf(term.effective_df);
   const reference = term.reference;
   const waitingReference = term.pending ? term.pending.reference : null;
   referenceNode.hidden = !reference && !waitingReference;

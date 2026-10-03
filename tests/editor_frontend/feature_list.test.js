@@ -196,8 +196,8 @@ test("rows carry name, kind and EDF under group headings; the active row is curr
     rows().map((row) => row.children.map((part) => part.textContent)),
     [
       ["age", "spline", "EDF 4.21"],
-      ["mileage", "spline", "EDF 2.5"],
-      ["region", "categorical", "EDF 3"],
+      ["mileage", "spline", "EDF 2.50"],
+      ["region", "categorical", "EDF 3.00"],
       ["territory", "categorical", "EDF —"],
     ],
   );
@@ -208,6 +208,20 @@ test("rows carry name, kind and EDF under group headings; the active row is curr
   assert.equal(nodes.strip.textContent, "mileage");
   assert.equal(nodes.root.dataset.open, "true");
   assert.equal(nodes.toggle.getAttribute("aria-expanded"), "true");
+});
+
+test("a row gives its EDF to three significant figures, as the context bar and the inspector do", () => {
+  const { render, rows } = fixture();
+  const edfs = { age: 10, mileage: 5, region: 11.3, territory: 11.2649 };
+  render({
+    terms: Object.fromEntries(
+      Object.entries(TERMS).map(([name, term]) => [name, { ...term, effective_df: edfs[name] }]),
+    ),
+  });
+  assert.deepEqual(
+    rows().map((row) => row.children.at(-1).textContent),
+    ["EDF 10.0", "EDF 5.00", "EDF 11.3", "EDF 11.3"],
+  );
 });
 
 test("a query narrows the rows, moves the tab stop to the first match when the active feature is hidden, and says when nothing matches", () => {

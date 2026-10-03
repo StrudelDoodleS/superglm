@@ -1,5 +1,5 @@
 import { requestJSON } from "./api.js";
-import { escapeHTML, fmt, fmtSignificant } from "./format.js";
+import { escapeHTML, fmt, fmtEdf } from "./format.js";
 import { SHAPE_NAMES } from "./shapes.js";
 import {
   DEFAULT_SUMMARY_VIEW,
@@ -733,7 +733,7 @@ function renderSectionHeader(section, columnCount, query) {
     : "";
   const edf = section.edf === null
     ? ""
-    : `<span class="summary-section-edf">EDF ${escapeHTML(fmtSignificant(section.edf))}</span>`;
+    : `<span class="summary-section-edf">${escapeHTML(fmtEdf(section.edf))}</span>`;
   return `<tr class="summary-group-row summary-section" data-term="${term}" data-current="${section.current}"${section.hidden ? " hidden" : ""}><td colspan="${columnCount}"><button type="button" class="summary-section-toggle" data-summary-section="${term}" aria-expanded="${section.open}"><svg class="summary-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"></path></svg><span class="summary-section-name">${highlightMatches(section.label, query)}</span>${kind}${waiting}<span class="summary-section-fill"></span>${edf}${renderPChip(section.chip)}</button></td></tr>`;
 }
 

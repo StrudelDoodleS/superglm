@@ -1,6 +1,6 @@
 // @ts-check
 
-import { fmt } from "../format.js";
+import { fmtEdf } from "../format.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {[string, string[]]} FeatureGroup */
@@ -218,7 +218,7 @@ function span(doc, className, text) {
 
 /** @param {number|null|undefined} edf */
 function edfLabel(edf) {
-  return edf === null || edf === undefined ? "EDF —" : `EDF ${fmt(edf)}`;
+  return edf === null || edf === undefined ? "EDF —" : fmtEdf(edf);
 }
 
 /** @param {HTMLElement} rows @returns {HTMLElement[]} */

@@ -36,6 +36,15 @@ export function fmtSignificant(value, figures = 3) {
     : text;
 }
 
+/**
+ * An EDF as the feature list, the context bar and the inspector's folded
+ * lines all print it: three significant figures, so 10.0, 5.00 and 11.3.
+ * @param {number} value
+ */
+export function fmtEdf(value) {
+  return `EDF ${fmtSignificant(value)}`;
+}
+
 /** @param {number} value */
 export function fmtSigned(value) {
   const formatted = fmt(value);
