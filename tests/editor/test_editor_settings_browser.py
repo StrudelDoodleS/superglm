@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -43,6 +44,12 @@ def _checked(pane) -> list[str | None]:
     return [
         pane.get_by_role("switch", name=name).get_attribute("aria-checked") for name in SWITCHES
     ]
+
+
+def _posted(path: str):
+    return lambda response: (
+        response.request.method == "POST" and urlsplit(response.url).path == path
+    )
 
 
 def test_settings_are_kept_under_one_key_and_take_effect(open_editor_page):
@@ -88,6 +95,48 @@ def test_settings_are_kept_under_one_key_and_take_effect(open_editor_page):
         assert _checked(pane) == ["true", "true", "true", "true"]
         assert pane.get_by_role("radio", name="Collapsed").is_checked()
         assert page.locator("#buildDuration").input_value() == "6000"
+
+
+def test_keep_reference_off_goes_with_each_structural_request(open_editor_page):
+    # A setting that changes what Python builds travels with every request
+    # that builds: the operation's own route, which refits at once, and
+    # /stage, which waits for Refit (D8). Territory declares base="first".
+    with open_editor_page(selected_term="territory") as (page, session):
+        pane = _settings_pane(page)
+        pane.get_by_role("switch", name="Keep the reference level when collapsing").click()
+        pane.get_by_role("switch", name="Refit after every structural change").click()
+        assert _checked(pane)[:2] == ["true", "false"]
+        reference = page.locator("#termReference")
+        collapse = page.get_by_role("button", name="Collapse", exact=True)
+
+        session.select_levels("territory", ["T04", "T05"])
+        _reload(page, "territory")
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(_posted("/collapse_levels")) as refitted:
+            collapse.click()
+        assert refitted.value.status == 200
+        assert refitted.value.request.post_data_json["keep_reference"] is False
+        page.locator("#chart .level-group-marker").first.wait_for()
+        page.locator("#appBusyOverlay").wait_for(state="hidden")
+        # The refit chose the reference by its declared rule, not kept it.
+        assert reference.text_content() == "reference T01 · first"
+
+        _settings_pane(page).get_by_role(
+            "switch", name="Refit after every structural change"
+        ).click()
+        session.select_levels("territory", ["T01", "T02"])
+        _reload(page, "territory")
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(_posted("/stage")) as staged:
+            collapse.click()
+        assert staged.value.status == 200
+        assert staged.value.request.post_data_json["keep_reference"] is False
+        page.wait_for_function(
+            "() => document.querySelector('#refitPendingCount')?.textContent === '1'"
+        )
+        # Kept, the reference would wait as the group T01+T02; it does not.
+        assert reference.get_attribute("data-waiting") == "false"
+        assert reference.text_content() == "reference T01 · first"
 
 
 def test_follow_the_browser_is_the_theme_choice(open_editor_page):
