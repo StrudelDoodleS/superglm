@@ -141,6 +141,19 @@ function structuralEnvelope(value) {
   return /** @type {StructuralTransitionEnvelope} */ (value);
 }
 
+/**
+ * A state mutation answers with the snapshot itself, or, as /note does, with
+ * `{ok: true, state}`.
+ * @param {unknown} response
+ * @returns {EditorSnapshot}
+ */
+function stateOf(response) {
+  if (isRecord(response) && response.ok === true && isEditorSnapshot(response.state)) {
+    return /** @type {EditorSnapshot} */ (response.state);
+  }
+  return /** @type {EditorSnapshot} */ (response);
+}
+
 const STRUCTURAL_OUTCOME_UNCERTAIN =
   "The model change outcome is uncertain. The operation was not retried.";
 const STRUCTURAL_REFRESH_INCOMPLETE =
@@ -317,9 +330,7 @@ export function createEditorActions({
     /** @type {EditorSnapshot} */
     let snapshot;
     try {
-      snapshot = /** @type {EditorSnapshot} */ (
-        await client.postJSON(path, descriptor.payload)
-      );
+      snapshot = stateOf(await client.postJSON(path, descriptor.payload));
     } catch (value) {
       return recoverMutation(value, name, descriptor);
     }

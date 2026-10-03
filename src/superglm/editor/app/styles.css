@@ -537,119 +537,171 @@ input[type="number"] {
   padding-top: 8px;
 }
 
-/* History: the session as a timeline, edits and steps on one rail. */
+/* History: newest first, the changes waiting for refit above the applied
+   ones and the undone ones below, each step with its id, time and note. */
 .history-frame {
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
   border-top: 1px solid var(--border);
-  padding-top: 8px;
+  padding-top: 2px;
 }
 .history-empty {
   color: var(--muted);
   font-size: 12px;
 }
-.history-list {
-  position: relative;
-  display: grid;
-  gap: 2px;
-  list-style: none;
-  margin: 0;
-  padding: 0 0 0 18px;
+.history-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 2px 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
 }
-.history-list::before {
+.history-section-title::before {
   content: "";
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: 5px;
-  border-left: 1px solid var(--border);
-}
-.history-item {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  column-gap: 8px;
-  align-items: start;
-  padding: 5px 6px 5px 4px;
-  border-radius: var(--radius-md);
-}
-.history-item:hover {
-  background: var(--surface);
-}
-.history-item::before {
-  content: "";
-  position: absolute;
-  top: 10px;
-  left: -16px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--blue);
-  box-shadow: 0 0 0 2px var(--surface-subtle);
+  background: currentColor;
 }
-.history-item.structural::before {
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-  background: var(--text);
+.history-section.waiting .history-section-title {
+  color: var(--group-0);
+}
+.history-section-hint {
+  margin: -2px 2px 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.history-list {
+  display: grid;
+  gap: 5px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.history-item {
+  padding: 8px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.history-item.waiting {
+  border: 1px dashed var(--group-0);
 }
 .history-item.redo {
-  opacity: 0.5;
+  opacity: 0.55;
 }
-.history-item.redo::before {
-  background: var(--surface-subtle);
-  box-shadow: 0 0 0 2px var(--surface-subtle), inset 0 0 0 1.5px var(--border-strong);
-}
-.history-item > .history-hash,
-.history-item > .history-chip {
-  order: 2;
-  align-self: start;
-  margin-top: 1px;
-}
-.history-item > .history-body {
-  order: 1;
-}
-.history-hash {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 0.01em;
-}
-.history-chip {
-  padding: 0 6px;
-  border-radius: 999px;
-  color: var(--muted);
-  background: var(--surface-hover);
-  font-size: 10.5px;
-  line-height: 16px;
-}
-.history-now {
-  position: relative;
+.history-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 3px 0;
-  color: var(--blue);
-  font-size: 10.5px;
-  font-weight: 600;
-}
-.history-now::before,
-.history-now::after {
-  content: "";
-  flex: 1 1 auto;
-  border-top: 1px solid var(--blue);
-  opacity: 0.6;
 }
 .history-body {
+  flex: 1 1 auto;
   min-width: 0;
-  font-size: 12.5px;
+}
+.history-label {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 .history-meta {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+.history-undo-chip {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 11.5px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.history-stamp {
+  display: grid;
+  flex: 0 0 auto;
+  justify-items: end;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.history-id {
+  font: inherit;
+  letter-spacing: 0.01em;
+}
+.history-note-edit.icon-button {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0.55;
+}
+.history-item:hover .history-note-edit,
+.history-note-edit:focus-visible {
+  opacity: 1;
+}
+.history-note-icon {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.history-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 5px 0 0;
+  color: var(--text);
+  font-size: 12.5px;
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+.history-note .history-note-icon {
+  color: var(--muted);
+}
+.history-note-editor {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin-top: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--blue);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 12%, transparent);
+  color: var(--muted);
+}
+.history-note-input[type="text"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.history-note-input:focus-visible {
+  outline: none;
+}
+.history-foot {
+  margin: 8px 2px 0;
+  color: var(--muted);
+  font-size: 11.5px;
 }
 
 /* The compact coefficient summary. */

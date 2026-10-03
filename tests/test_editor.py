@@ -6404,6 +6404,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "/summary" in js
         assert "/stage" in js
         assert "/refit_pending" in js
+        assert "/note" in js
     finally:
         widget.close()
 
@@ -6720,9 +6721,10 @@ def test_editor_history_module_renders_the_timeline():
     source = history_js_path.read_text()
 
     assert "renderHistory" in source
-    assert "history-now" in source
-    assert "history-chip" in source
-    assert "history-hash" in source
+    assert "bindHistory" in source
+    assert "history-section" in source
+    assert "history-undo-chip" in source
+    assert "history-id" in source
 
 
 def test_widget_serves_editor_app_assets(editor_model):

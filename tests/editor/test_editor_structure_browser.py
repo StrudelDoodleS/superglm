@@ -64,18 +64,6 @@ def _stage_and_refit(page, icon) -> None:
     _settled_after_refit(page)
 
 
-def _timeline_rows(session) -> list[list[str]]:
-    """The rows the History pane draws for the session's timeline, top to bottom."""
-    rows = []
-    for entry in timeline_payload(session):
-        if entry["kind"] == "marker":
-            rows.append(["history-now", "now"])
-            continue
-        kind = f"history-item {entry['kind']}" + (" redo" if entry["redo"] else "")
-        rows.append([kind, entry["label"]])
-    return rows
-
-
 def _box_select_x(page, lo: float, hi: float) -> None:
     """Drag a Select box over the whole plot height between two x values."""
     corners = page.evaluate(
@@ -107,14 +95,29 @@ def _drawn_y(page) -> list[float]:
     return page.evaluate("() => document.querySelector('#chart')._scale.y")
 
 
-def _history_rows(page) -> list[list[str]]:
-    """Each row of the History tab as [class, text], top to bottom."""
+def _history_sections(page) -> dict[str, list[str]]:
+    """The History pane's rows by section, top to bottom."""
     return page.evaluate(
-        """() => Array.from(
-            document.querySelectorAll('#historyFrame .history-list > li'),
-            row => [row.className, (row.querySelector('.history-label') ?? row).textContent],
-        )"""
+        """() => Object.fromEntries(['waiting', 'applied', 'undone'].map(kind => [
+            kind,
+            Array.from(
+                document.querySelectorAll(`#historyFrame .history-section.${kind} .history-label`),
+                node => node.textContent,
+            ),
+        ]))"""
     )
+
+
+def _timeline_sections(session) -> dict[str, list[str]]:
+    """The sections the session's timeline asks for: newest first, undone in Redo's order."""
+    timeline = timeline_payload(session)
+    marker = next(i for i, entry in enumerate(timeline) if entry["kind"] == "marker")
+    done = timeline[:marker][::-1]
+    return {
+        "waiting": [entry["label"] for entry in done if entry.get("status") == "waiting"],
+        "applied": [entry["label"] for entry in done if entry.get("status") != "waiting"],
+        "undone": [entry["label"] for entry in timeline[marker + 1 :]],
+    }
 
 
 def test_line_icon_pins_a_run_of_points_and_undo_and_redo_step_across_it(open_editor_page):
@@ -347,30 +350,77 @@ def test_revert_is_one_step_that_undo_takes_back(open_editor_page):
         assert session.model is collapsed
 
 
-def test_history_lists_the_session_in_order_and_follows_undo_and_redo(open_editor_page):
+def test_history_lists_waiting_changes_above_applied_ones_with_ids_and_notes(open_editor_page):
     with open_editor_page() as (page, session):
         _box_select_x(page, 3.0, 5.0)
         with page.expect_response(_posted("/op")):
             page.get_by_role("button", name="Increase selection").click()
-        line = page.locator("#shapeLine")
-        line.wait_for(state="visible")
-        _stage_and_refit(page, line)
+        session.stage_structural(
+            "shape", "curve", {"lo": 6.0, "hi": 8.0, "degree": 1, "join": "tangent"}
+        )
+        [step] = session.pending
+        _reload_editor(page, "curve")
 
         page.locator("#historyTab").click()
-        rows = "document.querySelectorAll('#historyFrame .history-list > li')"
-        listed = _timeline_rows(session)
-        page.wait_for_function(f"() => {rows}.length === {len(listed)}")
-        assert _history_rows(page) == listed
+        page.locator("#historyFrame .history-section.waiting").wait_for()
+        assert _history_sections(page) == _timeline_sections(session)
+        assert _history_sections(page)["waiting"] == [step.label]
+        waiting = page.locator(f'#historyFrame [data-step-id="{step.step_id}"]')
+        assert waiting.locator(".history-id").text_content() == step.step_id
+        # Undo takes the newest step, which is the waiting one.
+        assert page.locator("#historyFrame .history-undo-chip").count() == 1
+        assert waiting.locator(".history-undo-chip").count() == 1
 
+        # A note is written in place and saved on Enter.
+        note = "Young-driver tail is noise"
+        waiting.get_by_role("button", name="Add a note").click()
+        field = page.get_by_role("textbox", name="Note for this step")
+        field.fill(note)
+        with page.expect_request(
+            lambda request: request.method == "POST" and urlsplit(request.url).path == "/note"
+        ) as note_info:
+            field.press("Enter")
+        assert note_info.value.post_data_json == {"id": step.step_id, "note": note}
+        page.wait_for_function(
+            'id => document.querySelector(`[data-step-id="${id}"] .history-note`)',
+            arg=step.step_id,
+        )
+        assert waiting.locator(".history-note").text_content() == note
+        assert session.step_notes[step.step_id] == note
+
+        # Escape keeps the note as it was and sends nothing.
+        notes: list[object] = []
+        page.on(
+            "request",
+            lambda request: urlsplit(request.url).path == "/note" and notes.append(request),
+        )
+        waiting.get_by_role("button", name="Edit note").click()
+        field.fill("changed my mind")
+        field.press("Escape")
+        assert notes == []
+        assert waiting.locator(".history-note").text_content() == note
+
+        # Undo moves the waiting step under Undone, note and all; Redo puts it back.
         with page.expect_response(_posted("/op")):
             page.keyboard.press("Control+z")
-        page.wait_for_function("() => document.querySelector('#historyFrame .history-item.redo')")
-        assert _history_rows(page) == _timeline_rows(session)
-
+        page.locator("#historyFrame .history-section.undone").wait_for()
+        assert _history_sections(page) == _timeline_sections(session)
+        undone = page.locator("#historyFrame .history-section.undone .history-note")
+        assert undone.text_content() == note
         with page.expect_response(_posted("/op")):
             page.keyboard.press("Control+Shift+z")
-        page.wait_for_function("() => !document.querySelector('#historyFrame .history-item.redo')")
-        assert _history_rows(page) == listed
+        page.locator("#historyFrame .history-section.waiting").wait_for()
+        assert _history_sections(page) == _timeline_sections(session)
+
+        # After Refit the step is applied, and its note stays with it.
+        with page.expect_response(_posted("/refit_pending")):
+            page.keyboard.press("r")
+        _settled_after_refit(page)
+        page.wait_for_function(
+            "() => !document.querySelector('#historyFrame .history-section.waiting')"
+        )
+        assert _history_sections(page) == _timeline_sections(session)
+        assert note in page.locator("#historyFrame .history-section.applied").text_content()
 
 
 def test_waiting_changes_show_in_the_feature_list_status_line_and_export(open_editor_page):

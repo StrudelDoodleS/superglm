@@ -1769,3 +1769,37 @@ test("a refused structural request shows Python's fixed sentence, not an uncerta
   assert.equal(store.getState().request.recovery?.retry, null);
   assert.equal(store.getState().remote.snapshot?.model_revision, 4);
 });
+
+test("a note's answer, the state wrapped as {ok, state}, commits the state it carries", async () => {
+  const noted = snapshot(3);
+  noted.timeline = [
+    {
+      kind: "pending", status: "waiting", id: "a1b2c3d", note: "Thin exposure",
+      label: "collapse 1 + 2 in age", redo: false
+    },
+    { kind: "marker" }
+  ];
+  const store = createEditorStore(createInitialEditorState(snapshot(3)));
+  /** @type {number[]} */
+  const scheduled = [];
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (path, payload) => {
+        assert.equal(path, "/note");
+        assert.deepEqual(payload, { id: "a1b2c3d", note: "Thin exposure" });
+        return { ok: true, state: noted };
+      },
+      getState: async () => { throw new Error("success must not recover through /state"); }
+    },
+    scheduleVisibleEvidence: (revision) => { scheduled.push(revision); }
+  });
+
+  const result = await actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "a1b2c3d", note: "Thin exposure" }
+  });
+
+  assert.deepEqual(result, { ok: true, snapshot: noted });
+  assert.strictEqual(store.getState().remote.snapshot, noted);
+  assert.deepEqual(scheduled, []);
+});

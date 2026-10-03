@@ -1,7 +1,7 @@
 import { editorClient } from "./api/client.js";
 import { bindPointLens, drawChart, groupedTerms, updateChartSelection } from "./chart.js";
 import { chartSize } from "./chart/geometry.js";
-import { renderHistory } from "./history.js";
+import { bindHistory, renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
 import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
@@ -319,6 +319,12 @@ const inspector = bindInspector({
   isNarrow: () => narrowQuery.matches,
 });
 openHelp = () => inspector.open("help");
+
+// A History note is saved through the action controller like an edit, so a
+// failed save gets the same alert and Retry.
+bindHistory(historyFrame, {
+  onNote: (id, note) => executeStateMutation("/note", { id, note })
+});
 
 function renderInspectorView() {
   const view = store.getState().view;
