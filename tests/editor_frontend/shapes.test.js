@@ -4,7 +4,6 @@ import test from "node:test";
 
 import {
   GROUPED_EDGE,
-  NOT_CONTIGUOUS,
   SPECIAL_LEVEL,
   TOO_FEW_POINTS,
   shapeButtonState,
@@ -57,8 +56,10 @@ test("a run next to a shaped range meets it when no drawn point lies between the
   assert.deepEqual(shapeRangeForSelection(shaped([left]), new Set([2, 3])), { lo: 25, hi: 30 });
 });
 
-test("a gap in the selection gives no range, nor does an empty one", () => {
-  assert.equal(shapeRangeForSelection(numeric, new Set([1, 3])), null);
+test("a selection with gaps spans its first to its last point; an empty one names no range", () => {
+  // A Ctrl-clicked selection: the shape covers everything between its ends.
+  assert.deepEqual(shapeRangeForSelection(numeric, new Set([4, 1, 3])), { lo: 20, hi: 40 });
+  assert.deepEqual(shapeRangeForSelection(ordered(), new Set([4, 1])), { lo: "B2", hi: "B5" });
   assert.equal(shapeRangeForSelection(numeric, new Set()), null);
 });
 
@@ -85,11 +86,11 @@ test("categorical terms hide the icons", () => {
   assert.equal(shapeButtonState(term, new Set([0])).visible, false);
 });
 
-test("a broken run or a single point disables the icons and says so", () => {
+test("a selection with gaps enables the icons; a single point says why not", () => {
   assert.deepEqual(shapeButtonState(numeric, new Set([1, 3])), {
     visible: true,
-    enabled: false,
-    reason: NOT_CONTIGUOUS
+    enabled: true,
+    reason: null
   });
   assert.equal(shapeButtonState(numeric, new Set([2])).reason, TOO_FEW_POINTS);
   assert.deepEqual(shapeButtonState(numeric, new Set([1, 2, 3])), {
@@ -121,6 +122,9 @@ test("a run taking in a special level is refused before it is sent", () => {
   const term = { ...ordered(), shape: { ...AVAILABLE, specials: ["B6"] } };
   assert.equal(shapeButtonState(term, new Set([4, 5]), 1).reason, SPECIAL_LEVEL);
   assert.equal(shapeButtonState(term, new Set([3, 4]), 1).enabled, true);
+  // The span is what is shaped, so a special between two clicked bands counts.
+  const inside = { ...ordered(), shape: { ...AVAILABLE, specials: ["B4"] } };
+  assert.equal(shapeButtonState(inside, new Set([2, 5]), 1).reason, SPECIAL_LEVEL);
 });
 
 test("bands bound the degree an ordered range can carry", () => {

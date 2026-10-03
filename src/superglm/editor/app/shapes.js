@@ -16,7 +16,6 @@ const SHAPE_DESCRIPTIONS = Object.freeze([
   "a quadratic",
   "a cubic"
 ]);
-export const NOT_CONTIGUOUS = "Select a continuous run of points.";
 export const TOO_FEW_POINTS = "Select at least two points to shape a range.";
 export const GROUPED_EDGE =
   "A range must start and end on single bands. Ungroup the bands at its ends first.";
@@ -24,27 +23,28 @@ export const SPECIAL_LEVEL =
   "A range covers bands only. Leave special levels out of the selection.";
 
 /**
- * The selection as a run of source indices: null unless it is non-empty and
- * consecutive, which is contiguous in the displayed order on the numeric and
- * ordered axes that can take a shape.
+ * The selection's span as source indices: its first and last selected point,
+ * with any gap between them, since a shape covers the whole span and is fitted
+ * to the data across it (a Ctrl-clicked selection shapes from end to end).
+ * Source order is the displayed order on the numeric and ordered axes that can
+ * take a shape. Null when nothing is selected.
  * @param {Set<number>} selectedIndices @returns {[number, number]|null}
  */
-function selectedRun(selectedIndices) {
+function selectedSpan(selectedIndices) {
   if (!selectedIndices.size) return null;
-  const lo = Math.min(...selectedIndices);
-  const hi = Math.max(...selectedIndices);
-  return hi - lo + 1 === selectedIndices.size ? [lo, hi] : null;
+  return [Math.min(...selectedIndices), Math.max(...selectedIndices)];
 }
 
 /**
- * The range a contiguous selection names: its x extent on a numeric term,
- * its first and last band labels on an ordered one. A selected collapsed
- * group is selected by all of its source bands, so it contributes them all.
+ * The range a selection names, from its first selected point to its last: its
+ * x extent on a numeric term, its first and last band labels on an ordered
+ * one. A selected collapsed group is selected by all of its source bands, so
+ * it contributes them all.
  * @param {TermPayload} term @param {Set<number>} selectedIndices
  * @returns {{lo:number|string, hi:number|string}|null}
  */
 export function shapeRangeForSelection(term, selectedIndices) {
-  const run = selectedRun(selectedIndices);
+  const run = selectedSpan(selectedIndices);
   if (!run) return null;
   if (term.levels) return { lo: term.levels[run[0]], hi: term.levels[run[1]] };
   return { lo: meetingEdge(term, run[0], -1), hi: meetingEdge(term, run[1], 1) };
@@ -85,8 +85,8 @@ export function shapeButtonState(term, selectedIndices, degree = 0) {
 /** @param {TermPayload} term @param {Set<number>} selectedIndices @param {number} degree */
 function disabledReason(term, selectedIndices, degree) {
   if (!term.shape.available) return term.shape.reason ?? "Shapes are not available here.";
-  const run = selectedRun(selectedIndices);
-  if (!run) return NOT_CONTIGUOUS;
+  const run = selectedSpan(selectedIndices);
+  if (!run) return TOO_FEW_POINTS;
   if (run[0] === run[1]) return TOO_FEW_POINTS;
   if (!term.levels) return tooFewValues(term.shape.support, run, degree);
   const labels = term.levels.slice(run[0], run[1] + 1);
