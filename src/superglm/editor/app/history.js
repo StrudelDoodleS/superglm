@@ -5,8 +5,9 @@
 // automatic message. A pencil writes a note in place, and notes are saved with
 // the exported Python model.
 
-import { escapeHTML } from "./format.js";
+import { escapeHTML, fmt } from "./format.js";
 import { SHAPE_NAMES } from "./shapes.js";
+import { OPERATION_HELP } from "./views/help_content.js";
 
 /** @typedef {import('./api/contracts.js').TimelineEntry} TimelineEntry */
 
@@ -28,6 +29,16 @@ const OPERATION_WORDS = Object.freeze({
   refit_pending: "refit",
   carry_edits: "edits carried over",
   revert_to_original: "revert",
+});
+
+/**
+ * The selection-menu action behind each edit whose name is not its own. Its
+ * Help title, less "selection", names the edit: "Straighten", "Average".
+ * @type {Readonly<Record<string, string>>}
+ */
+const EDIT_ACTIONS = Object.freeze({
+  linear_interpolate: "linearise",
+  weighted_average: "average",
 });
 
 /**
@@ -218,13 +229,14 @@ function entryStatus(entry) {
  * A structural change is told from its operation and parameters. A change
  * refitted at once on its own is listed as its step, which carries no
  * parameters, so its message comes from its label, the backend's fixed
- * sentence for that operation. An edit keeps its label. The labels themselves
- * stay as they are: the Undo popover reads them.
+ * sentence for that operation. An edit on a selection names its action and
+ * the stretch of axis it changed, "Smooth 62.7 – 85"; any other edit keeps its
+ * label. The labels themselves stay as they are: the Undo popover reads them.
  * @param {TimelineEntry} entry @param {"applied"|"waiting"|"edit"} status
  */
 function entryMessage(entry, status) {
   const label = String(entry.label ?? "");
-  if (status === "edit") return sentenceCase(label);
+  if (status === "edit") return editMessage(entry) ?? sentenceCase(label);
   const change = CHANGES[String(entry.operation ?? "")] ?? "";
   const term = typeof entry.term === "string" ? entry.term : "";
   return changeMessage(change, entry.params ?? {})
@@ -250,6 +262,51 @@ function changeMessage(change, params) {
     return `${shape} ${edgeText(params.lo)} – ${edgeText(params.hi)}`;
   }
   return null;
+}
+
+/**
+ * An edit as the selection menu names its action, with the stretch of axis it
+ * changed as the axis prints it: "Make increasing 18 – 30", "Decrease B10".
+ * Null for an edit whose params carry no range, such as a handle move.
+ * @param {TimelineEntry} entry @returns {string|null}
+ */
+function editMessage(entry) {
+  const params = entry.params ?? {};
+  if (params.lo === undefined || params.hi === undefined) return null;
+  const operation = String(entry.operation ?? "");
+  const lo = axisText(params.lo);
+  const hi = axisText(params.hi);
+  return `${editAction(operation, params)} ${lo === hi ? lo : `${lo} – ${hi}`}`;
+}
+
+/**
+ * @param {string} operation @param {Record<string, unknown>} params
+ */
+function editAction(operation, params) {
+  const action = menuAction(operation, params);
+  return Object.hasOwn(OPERATION_HELP, action)
+    ? OPERATION_HELP[action].title.replace(/ selection$/, "")
+    : sentenceCase(operation.replaceAll("_", " "));
+}
+
+/**
+ * The selection-menu action that made an edit: a shift up or down, a fit
+ * increasing or decreasing, else the action of the edit's own name.
+ * @param {string} operation @param {Record<string, unknown>} params
+ */
+function menuAction(operation, params) {
+  if (operation === "shift") return Number(params.delta) < 0 ? "shift_down" : "shift_up";
+  if (operation === "isotonic") return params.direction === "decreasing" ? "decreasing" : "increasing";
+  return EDIT_ACTIONS[operation] ?? operation;
+}
+
+/**
+ * An edit's edge as the axis prints it: a number in the axis's tick format, a
+ * level as it is.
+ * @param {unknown} edge
+ */
+function axisText(edge) {
+  return typeof edge === "number" ? fmt(edge) : String(edge);
 }
 
 /**

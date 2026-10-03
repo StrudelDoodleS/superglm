@@ -143,6 +143,36 @@ test("each step reads as a message built from what it did, without its term", ()
   assert.match(row(node, "a000002"), /class="history-meta">VehBrand · collapse</);
 });
 
+test("an edit names its action and the stretch of axis it changed, as the axis prints it", () => {
+  const node = { innerHTML: "" };
+  const edit = (id, operation, params, label) => ({
+    kind: "edit", status: "edit", id, time: at(14, 0), note: null, label,
+    term: "DrivAge", operation, n_points: 4, params, redo: false,
+  });
+  renderHistory([
+    edit("c000001", "smooth", { strength: 1, lo: 62.68, hi: 85 }, "smooth DrivAge"),
+    edit("c000002", "isotonic", { direction: "increasing", lo: 18, hi: 30 }, "isotonic DrivAge"),
+    edit("c000003", "isotonic", { direction: "decreasing", lo: 18, hi: 30 }, "isotonic DrivAge"),
+    edit("c000004", "shift", { delta: -0.05, lo: "B10", hi: "B10" }, "shift VehBrand"),
+    edit("c000005", "linear_interpolate", { strength: 0.5, lo: 0.0177, hi: 2.5 }, "linear interpolate DrivAge"),
+    edit("c000006", "set_values", { lo: 40.3, hi: 51.5 }, "set values DrivAge"),
+    // A handle move, or an edit from before ranges were kept, keeps its label.
+    edit("c000007", "control_point", { handle_index: 2, log_effect: 0.1, x: 30 }, "control point DrivAge"),
+    { kind: "marker" },
+  ], node);
+  assert.deepEqual(sections(node), [["applied", [
+    "Control point DrivAge",
+    "Set values 40.3 – 51.5",
+    "Straighten 0.0177 – 2.5",
+    "Decrease B10",
+    "Make decreasing 18 – 30",
+    "Make increasing 18 – 30",
+    "Smooth 62.7 – 85",
+    "Opened model",
+  ]]]);
+  assert.match(row(node, "c000001"), /class="history-meta">DrivAge · edit</);
+});
+
 test("a change refitted at once reads the same as a staged one", () => {
   // Refit after every change lists the change once, as its step, without params.
   const node = { innerHTML: "" };

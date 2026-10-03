@@ -72,6 +72,26 @@ from superglm.solvers.dispersion import model_weight_semantics
 _PROFILE_WHILE_WAITING = "Refit or undo the waiting changes before re-profiling."
 
 
+def _edit_span(term: EditableTerm, indices: NDArray[np.intp]) -> dict[str, Any]:
+    """The first and last edited point by axis position, as ``{"lo", "hi"}``.
+
+    Named as a shaped range names its edges: the level on a categorical axis,
+    in the order shown when the edit was made, and the x on a numeric one.
+    Empty when the edit touched no point or the term has no axis values.
+    """
+    if indices.size == 0:
+        return {}
+    if term.levels is not None:
+        return {
+            "lo": str(term.levels[int(indices.min())]),
+            "hi": str(term.levels[int(indices.max())]),
+        }
+    if term.x is None:
+        return {}
+    x = np.asarray(term.x, dtype=np.float64)[indices]
+    return {"lo": float(x.min()), "hi": float(x.max())}
+
+
 class EditorSession:
     """Stateful editor for fitted 1D main effects.
 
@@ -606,6 +626,7 @@ class EditorSession:
                 "log_effect": float(log_effect),
                 **metadata,
             },
+            span=False,
         )
         return self
 
@@ -643,6 +664,7 @@ class EditorSession:
                 "x": float(geometry.handle_x[column]),
                 "coefficients": [float(value) for value in moved],
             },
+            span=False,
         )
 
     def undo(self, term: str | None = None) -> EditorSession:
@@ -1694,12 +1716,22 @@ class EditorSession:
         before: NDArray,
         after: NDArray,
         params: dict[str, Any],
+        *,
+        span: bool = True,
     ) -> None:
+        """Apply and record one edit.
+
+        An edit on a selection also records, as ``lo`` and ``hi``, the
+        stretch of axis it changed, which History names; ``span=False`` for
+        a handle move, which changes the whole curve.
+        """
         indices = np.asarray(indices, dtype=np.intp).copy()
         before = np.asarray(before, dtype=np.float64).copy()
         after = np.asarray(after, dtype=np.float64).copy()
         changed = not np.array_equal(before, after)
-        self.terms[term].edited_log_effect[indices] = after
+        editable = self.terms[term]
+        editable.edited_log_effect[indices] = after
+        recorded = {**params, **_edit_span(editable, indices)} if span else dict(params)
         self.history.append(
             EditRecord(
                 term=term,
@@ -1707,7 +1739,7 @@ class EditorSession:
                 indices=indices,
                 before=before,
                 after=after,
-                params=dict(params),
+                params=recorded,
             )
         )
         self.redo_stack.clear()

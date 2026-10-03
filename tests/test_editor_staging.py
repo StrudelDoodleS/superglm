@@ -978,6 +978,33 @@ def test_timeline_entries_carry_their_id_time_note_and_status(book):
     assert timeline[3] == {"kind": "marker"}
 
 
+def test_an_edit_on_a_selection_carries_the_stretch_of_axis_it_changed(book):
+    model, _, _ = book
+    session = _session(model)
+    age = session.terms["age"]
+    session.select_indices("age", [43, 40, 41])
+    session.smooth("age", 0.5)
+    session.select_levels("area", ["D", "B"])
+    session.shift("area", 0.1)
+    controls = session.control_points("age")
+    session.move_control_point("age", 1, float(controls["log_effect"][1]) + 0.1)
+
+    smooth, shift, handle = session.history
+    # Its first and last point by axis position, as a shaped range names its
+    # edges: an x on a numeric axis, a level on a categorical one.
+    assert (smooth.params["lo"], smooth.params["hi"]) == (age.x[40], age.x[43])
+    assert (shift.params["lo"], shift.params["hi"]) == ("B", "D")
+    # A handle moves the whole curve, so it names no stretch of it.
+    assert "lo" not in handle.params and "hi" not in handle.params
+    # History reads them from the timeline, which writes floats to 12 decimals.
+    edits = [entry["params"] for entry in timeline_payload(session) if entry["kind"] == "edit"]
+    assert [(params.get("lo"), params.get("hi")) for params in edits] == [
+        (round(float(age.x[40]), 12), round(float(age.x[43]), 12)),
+        ("B", "D"),
+        (None, None),
+    ]
+
+
 def test_exported_models_carry_the_history_and_the_session_models_are_left_alone(book, tmp_path):
     model, _, _ = book
     session = _session(model)
