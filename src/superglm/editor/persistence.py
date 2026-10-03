@@ -229,7 +229,14 @@ def export_structure(session, path: str | Path | None = None) -> str:
 
 
 def save_session(session, path: str | Path) -> None:
-    """Write an auditable JSON edit artifact."""
+    """Write an auditable JSON edit artifact.
+
+    It holds the curve edits. A New levels choice changes the model, which
+    the artifact does not hold (the model passed to load does), so it is
+    left out, as structural steps are.
+    """
+    from superglm.editor.unseen import UnseenChoice
+
     payload = {
         "format": "superglm.editor.v1",
         "n_points": session.n_points,
@@ -239,7 +246,11 @@ def save_session(session, path: str | Path) -> None:
         "selection": {
             name: session._selection[name].astype(int).tolist() for name in session.terms
         },
-        "history": [record_to_payload(record) for record in session.history],
+        "history": [
+            record_to_payload(record)
+            for record in session.history
+            if not isinstance(record, UnseenChoice)
+        ],
     }
     Path(path).write_text(json.dumps(jsonable(payload), indent=2, sort_keys=True))
 

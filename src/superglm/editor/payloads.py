@@ -19,6 +19,7 @@ from superglm.editor.controls import (
 from superglm.editor.group_display import build_group_display
 from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
+from superglm.editor.unseen import unseen_payload
 from superglm.features.categorical import Categorical
 from superglm.features.ordered_categorical import OrderedCategorical
 
@@ -69,6 +70,7 @@ def session_payload(
             "reference": _reference_payload(session, name),
             "shape": shape_payload(session.model, name, term.metadata.get("shape_support")),
             "pending": _pending_term_payload(session, name),
+            "unseen": unseen_payload(session, name),
             "effective_df": _finite_float(term.metadata.get("edf")),
             "edited": name in edited,
             "x_label": name,

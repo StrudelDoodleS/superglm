@@ -1238,6 +1238,15 @@ class EditorWidget:
             level_display=level_display,
         )
 
+    def _set_unseen(self, term: str, unseen: str) -> dict[str, Any]:
+        """Choose where the term's new levels go; nothing is refit (spec addendum S6)."""
+        with self._lock:
+            self._select_term(term)
+            self.session.set_unseen(term, unseen)
+            # A fixed-offset refit was cloned with the policy it replaces.
+            self._invalidate_refit()
+            return self._state()
+
     def _set_note(self, step_id: str, note: str) -> dict[str, Any]:
         """Write a note on one timeline entry; a note changes no model, so nothing is refit."""
         with self._lock:

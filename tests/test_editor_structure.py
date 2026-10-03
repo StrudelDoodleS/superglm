@@ -9,6 +9,7 @@ import pickle
 import re
 import urllib.error
 import urllib.request
+import warnings
 import weakref
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from superglm import (
 )
 from superglm.editor import EditorSession
 from superglm.editor import session as session_module
-from superglm.editor.errors import EditorValueError
+from superglm.editor.errors import EditorTypeError, EditorValueError
 from superglm.editor.payloads import session_payload, timeline_payload, undo_redo_payload
 from superglm.editor.shapes import EDITOR_CHOSEN_SHAPE_ATTRIBUTE, _numeric_edges, snap_edge
 from superglm.editor.staging import _SHAPE_REFUSED, _STRETCH_REFUSED
@@ -1742,3 +1743,278 @@ def test_widget_exports_the_structure_for_download_and_to_a_kernel_path(region_m
     assert "x-superglm-validation" not in headers
     assert Path(saved["path"]).name == "book.json"
     assert Path(saved["path"]).read_bytes() == data
+
+
+# -- Where new levels go (spec addendum S6) -------------------------------------------
+
+_NOT_CATEGORICAL = "Only a categorical term has a New levels choice; {term!r} is not one."
+
+
+def _grouped_region(unseen: str = "error"):
+    """``region`` with C and D grouped as Other, beside a spline; fitted, unseen policy declared."""
+    rng = np.random.default_rng(20261003)
+    region = rng.choice(["A", "B", "C", "D"], 600, p=[0.3, 0.3, 0.2, 0.2])
+    x = rng.uniform(0.0, 10.0, 600)
+    effects = {"A": 0.0, "B": 0.15, "C": 0.2, "D": 0.25}
+    y = 0.4 + np.array([effects[r] for r in region]) + 0.05 * x + rng.normal(0.0, 0.05, 600)
+    X = pd.DataFrame({"region": region, "x": x})
+    grouping = collapse_levels(X["region"], groups={"Other": ["C", "D"]})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={
+            "region": Categorical(base="first", grouping=grouping, unseen=unseen),
+            "x": Spline(n_knots=6),
+        },
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def _with_new_level(X, rows: int = 5):
+    new = X.iloc[:40].copy()
+    new.loc[new.index[:rows], "region"] = "Z"
+    return new
+
+
+def test_new_levels_routes_to_a_group_without_a_refit_and_undo_redo_step_across_it(
+    monkeypatch,
+):
+    model, X, _ = _grouped_region()
+    fits = []
+    monkeypatch.setattr(SuperGLM, "fit", lambda self, *args, **kwargs: fits.append(self) or self)
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.set_unseen("region", "Other")
+    assert fits == []
+    in_force = session.model
+    # The opened model is never changed: the in-force model is a copy.
+    assert in_force is not model and model._specs["region"].unseen == "error"
+    assert in_force._specs["region"].unseen == "Other"
+    new = _with_new_level(X)
+    with pytest.warns(UserWarning, match=r"group 'Other'.*\['Z'\] over 5 row\(s\)"):
+        routed = in_force.predict(new)
+    assert np.array_equal(routed, in_force.predict(new.replace({"region": {"Z": "C"}})))
+    assert timeline_payload(session)[-2]["label"] == "New levels → Other"
+    assert timeline_payload(session)[-2]["status"] == "edit"
+    assert undo_redo_payload(session)["undo"] == "New levels → Other"
+    assert session_payload(session)["region"]["unseen"] == {
+        "policy": "Other",
+        "choices": [
+            {"value": "error", "label": "Refuse"},
+            {"value": "base", "label": "Reference"},
+            {"value": "Other", "label": "Other"},
+        ],
+        "reason": None,
+    }
+
+    session.undo()
+    assert session.model is model
+    assert undo_redo_payload(session) == {"undo": None, "redo": "New levels → Other"}
+    session.redo()
+    assert session.model is in_force
+    assert fits == []
+
+
+def test_new_levels_takes_its_place_in_time_among_edits_and_waiting_changes():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_indices("x", [3, 4, 5])
+    session.shift("x", 0.1)
+    session.stage_structural("collapse", "region", {"levels": ["A", "B"]})
+    session.undo()  # the collapse waits no longer; its future is the redo
+    session.set_unseen("region", "base")
+    assert session.pending_redo == []
+    session.stage_structural("shape", "x", {"lo": 2.0, "hi": 6.0, "degree": 1})
+    # Undo takes back the latest first: the waiting shape, the choice, then the edit.
+    session.undo()
+    assert len(session.pending) == 0 and session.model._specs["region"].unseen == "base"
+    session.undo()
+    assert session.model is model and session.edited_terms() == ["x"]
+    session.undo()
+    assert session.edited_terms() == []
+
+
+def test_new_levels_carries_through_a_refit_and_comes_back_with_its_undo():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.set_unseen("region", "Other")
+    chosen = session.model
+    session.stage_structural("shape", "x", {"lo": 2.0, "hi": 6.0, "degree": 1})
+    session.refit_pending(method="fit")
+    assert session.model._specs["region"].unseen == "Other"
+    # Run CV and Final fit refit the in-force model's declaration.
+    assert session.model.clone_unfitted()._specs["region"].unseen == "Other"
+    assert chosen.clone_unfitted()._specs["region"].unseen == "Other"
+    session.undo()  # the Refit: the shape waits again
+    assert session.model is chosen and len(session.pending) == 1
+    session.undo()  # the waiting shape
+    assert session.model is chosen and session.pending == []
+    session.undo()  # the choice
+    assert session.model is model
+    # The opened model's declaration was never touched either.
+    assert model.clone_unfitted()._specs["region"].unseen == "error"
+
+
+def test_new_levels_is_offered_on_plain_categoricals_only(banded):
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    assert session_payload(session)["x"]["unseen"] is None
+    with pytest.raises(EditorTypeError) as refused:
+        session.set_unseen("x", "base")
+    assert str(refused.value) == _NOT_CATEGORICAL.format(term="x")
+    ordered = EditorSession.from_model(banded[0], terms=["band"])
+    assert session_payload(ordered)["band"]["unseen"] is None
+    with pytest.raises(EditorTypeError) as refused:
+        ordered.set_unseen("band", "base")
+    assert str(refused.value) == _NOT_CATEGORICAL.format(term="band")
+    assert ordered.history == [] and session.history == []
+
+
+def test_new_levels_refuses_a_label_that_is_not_one_of_its_groups():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    for choice in ("Rest", "A", 3):
+        with pytest.raises(EditorValueError) as refused:
+            session.set_unseen("region", choice)
+        assert str(refused.value) == (
+            f"{choice!r} is not a group of 'region'. Choose Refuse, Reference or one of its groups."
+        )
+    # Choosing the policy in force changes nothing and adds no entry.
+    session.set_unseen("region", "error")
+    assert session.history == [] and session.model is model
+
+
+def test_new_levels_waits_for_a_refit_of_its_terms_waiting_changes():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.stage_structural("set_reference", "region", {"level": "B"})
+    sentence = (
+        "Refit or undo the waiting changes to 'region' before choosing where its new levels go."
+    )
+    assert session_payload(session)["region"]["unseen"]["reason"] == sentence
+    with pytest.raises(EditorValueError) as refused:
+        session.set_unseen("region", "Other")
+    assert str(refused.value) == sentence
+    session.refit_pending(method="fit")
+    session.set_unseen("region", "Other")
+    assert session.model._specs["region"].unseen == "Other"
+
+
+def test_new_levels_refuses_a_term_an_interaction_uses():
+    rng = np.random.default_rng(20261005)
+    region = rng.choice(["A", "B", "C"], 400)
+    x = rng.uniform(0.0, 10.0, 400)
+    y = 0.4 + 0.1 * (region == "B") + 0.05 * x + rng.normal(0.0, 0.05, 400)
+    X = pd.DataFrame({"region": region, "x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"region": Categorical(base="first"), "x": Spline(n_knots=5)},
+        interactions=[("x", "region")],
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    sentence = (
+        "Cannot choose where new levels go for term 'region' because it is used by "
+        "interaction(s): x:region. Refit a model without those interactions first."
+    )
+    assert session_payload(session)["region"]["unseen"]["reason"] == sentence
+    with pytest.raises(EditorValueError) as refused:
+        session.set_unseen("region", "base")
+    assert str(refused.value) == sentence
+
+
+@pytest.mark.parametrize(
+    ("operation", "levels"),
+    [("collapse", ["B", "C"]), ("ungroup", ["C", "D"])],
+    ids=["collapse", "ungroup"],
+)
+def test_a_waiting_change_that_removes_the_new_levels_group_is_refused(operation, levels):
+    model, _, _ = _grouped_region(unseen="Other")
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural(operation, "region", {"levels": levels})
+    assert str(refused.value) == (
+        "New levels of 'region' go to the group 'Other', which that change would remove. "
+        "Choose where new levels go first, then make the change."
+    )
+    assert session.pending == []
+
+
+def test_reset_keeps_the_new_levels_choice():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_levels("region", ["A"])
+    session.shift("region", 0.1)
+    session.set_unseen("region", "Other")
+    session.clear_selection("region")
+    session.reset("region")
+    assert session.edited_terms() == []
+    assert session.model._specs["region"].unseen == "Other"
+    assert [record.label for record in session.history] == ["New levels → Other"]
+    session.undo()
+    assert session.model is model
+
+
+def test_a_saved_session_leaves_the_new_levels_choice_to_the_model(tmp_path):
+    # The artifact holds curve edits; the model passed to load holds the policy.
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_indices("x", [3, 4])
+    session.shift("x", 0.1)
+    session.set_unseen("region", "Other")
+    session.save(tmp_path / "session.json")
+    loaded = EditorSession.load(tmp_path / "session.json", model=model)
+    assert [record.operation for record in loaded.history] == ["shift"]
+
+
+def test_new_levels_moves_the_model_revision_so_new_level_metrics_refresh():
+    # Validation rows hold a level the fit never saw: base rates it at the
+    # reference, Other at Other's effect, so the validation deviance moves.
+    from superglm.editor.metrics import compute_dataset_metrics
+
+    model, X, y = _grouped_region(unseen="base")
+    validation = _with_new_level(X, rows=20)
+    session = EditorSession.from_model(
+        model, terms=["region", "x"], validation_data=(validation, y[:40])
+    )
+    widget = EditorWidget(session)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            before = widget._metrics("deviance", dataset="validation")
+            revision = session.model_revision
+            state = widget._set_unseen("region", "Other")
+            after = widget._metrics("deviance", dataset="validation")
+            expected = compute_dataset_metrics(
+                session.model, session._evaluation_data["validation"]
+            )["deviance"]
+    finally:
+        widget.close()
+    assert state["model_revision"] > revision
+    assert state["terms"]["region"]["unseen"]["policy"] == "Other"
+    assert after["edited"] == pytest.approx(expected, rel=0.0, abs=0.0)
+    assert after["edited"] != before["edited"]
+
+
+def test_widget_http_set_unseen_returns_the_state_and_refuses_with_its_sentence(tmp_path):
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    widget = session.widget()
+    try:
+        state = _post_json(f"{widget.url}/set_unseen", {"term": "region", "unseen": "Other"})
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            _post_json(f"{widget.url}/set_unseen", {"term": "x", "unseen": "base"})
+        body = json.loads(refused.value.read().decode("utf-8"))
+        saved = _post_json(
+            f"{widget.url}/export_file",
+            {"format": "structure", "directory": str(tmp_path), "filename": "book"},
+        )
+    finally:
+        widget.close()
+    assert state["terms"]["region"]["unseen"]["policy"] == "Other"
+    assert state["timeline"][-2]["label"] == "New levels → Other"
+    assert body == {"error": _NOT_CATEGORICAL.format(term="x")}
+    assert read_structure(saved["path"]).features["region"].unseen == "Other"

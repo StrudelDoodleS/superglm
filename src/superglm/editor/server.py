@@ -343,6 +343,14 @@ def create_editor_app(widget: Any) -> FastAPI:
     def refit_pending(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._refit_pending(level_display=_level_display(payload)))
 
+    @app.post("/set_unseen")
+    def set_unseen(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._set_unseen(
+                str(_required(payload, "term")), _required(payload, "unseen")
+            )
+        )
+
     @app.post("/note")
     def note(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(

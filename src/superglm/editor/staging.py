@@ -35,6 +35,7 @@ from superglm.editor.errors import (
     EditorValueError,
 )
 from superglm.editor.shapes import shaped_feature_spec
+from superglm.editor.unseen import require_group_kept
 from superglm.features._spline_ranges import (
     ConstantRangesError,
     NarrowGapError,
@@ -163,6 +164,7 @@ def stage_structural(
         if sentence is None:
             raise
         raise EditorValueError(sentence) from exc
+    require_group_kept(term, replacement)
     step = PendingStep(
         operation=operation,
         term=term,

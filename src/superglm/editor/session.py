@@ -11,7 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
-from superglm.editor import apply, persistence, staging
+from superglm.editor import apply, persistence, staging, unseen
 from superglm.editor._types import (
     EditableTerm,
     EditRecord,
@@ -72,6 +72,7 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
+from superglm.editor.unseen import UnseenChoice
 from superglm.model_selection import CrossValidationResult
 from superglm.solvers.dispersion import model_weight_semantics
 
@@ -548,6 +549,19 @@ class EditorSession:
             and term in self._level_orders
         )
 
+    def set_unseen(self, term: str, policy: str) -> EditorSession:
+        """Choose where ``term``'s levels unseen at fit go when the model predicts.
+
+        ``policy`` is ``"error"`` (refuse them), ``"base"`` (rate them at the
+        reference) or the label of one of the term's groups (give them that
+        group's effect). Only a plain categorical has the choice. Nothing is
+        refit: the in-force model becomes a copy with the new policy, and the
+        choice is one entry that Undo takes back
+        (:func:`superglm.editor.unseen.set_unseen`).
+        """
+        unseen.set_unseen(self, term, policy)
+        return self
+
     # Smoothing anchors selected runs to adjacent unselected values so it does
     # not create jumps at selection edges; isotonic regression does not.
     def isotonic(self, term: str, direction: str = "increasing") -> EditorSession:
@@ -739,7 +753,9 @@ class EditorSession:
         current = self.terms[record.term].edited_log_effect[record.indices].copy()
         self.terms[record.term].edited_log_effect[record.indices] = record.before
         self.redo_stack.append(record)
-        if not np.array_equal(current, record.before):
+        if isinstance(record, UnseenChoice):
+            unseen.step_across(self, record, undo=True)
+        elif not np.array_equal(current, record.before):
             self._advance_model_revision()
         return self
 
@@ -760,7 +776,9 @@ class EditorSession:
         current = self.terms[record.term].edited_log_effect[record.indices].copy()
         self.terms[record.term].edited_log_effect[record.indices] = record.after
         self.history.append(record)
-        if not np.array_equal(current, record.after):
+        if isinstance(record, UnseenChoice):
+            unseen.step_across(self, record, undo=False)
+        elif not np.array_equal(current, record.after):
             self._advance_model_revision()
         return self
 
@@ -1844,7 +1862,13 @@ class EditorSession:
 
     def _clear_term_history(self, term: str) -> None:
         self._require_term(term)
-        self._rewrite_history([None if record.term == term else record for record in self.history])
+        # A New levels choice moves no value, so a reset of the values keeps it.
+        self._rewrite_history(
+            [
+                None if record.term == term and not isinstance(record, UnseenChoice) else record
+                for record in self.history
+            ]
+        )
         self.redo_stack = [record for record in self.redo_stack if record.term != term]
 
     def _trim_term_history(self, term: str, reset_indices: NDArray[np.intp]) -> None:
@@ -1861,7 +1885,7 @@ class EditorSession:
         record: EditRecord, term: str, reset: set[int]
     ) -> EditRecord | None:
         """``record`` less ``term``'s reset points, keeping its id; None when nothing is left."""
-        if record.term != term:
+        if record.term != term or isinstance(record, UnseenChoice):
             return record
         keep = np.array([int(index) not in reset for index in record.indices], dtype=bool)
         if not bool(np.any(keep)):
