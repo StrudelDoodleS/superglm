@@ -84,7 +84,12 @@ export function createEditorClient({
     return requestJSON("/state");
   }
 
-  return { requestJSON, postJSON, requestBlob, getState };
+  /** @param {string} term @returns {Promise<unknown>} */
+  function ratingTable(term) {
+    return postJSON("/rating_table", { term });
+  }
+
+  return { requestJSON, postJSON, requestBlob, getState, ratingTable };
 }
 
 export const editorClient = createEditorClient();

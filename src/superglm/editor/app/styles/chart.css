@@ -8,6 +8,53 @@
   -webkit-user-select: none;
 }
 
+.rating-table-frame {
+  height: 100%;
+  min-height: 360px;
+  overflow: auto;
+  padding: 4px 2px;
+}
+
+.rating-table {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+.rating-table caption {
+  padding: 0 0 6px;
+  color: var(--muted);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.rating-table th,
+.rating-table td {
+  padding: 3px 12px 3px 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.rating-table th {
+  font-weight: 600;
+}
+
+.rating-table .numeric {
+  text-align: right;
+}
+
+.rating-table td.numeric {
+  font-family: var(--font-mono);
+}
+
+.rating-table-note,
+.rating-table-message {
+  max-width: 72ch;
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
 .ui-popover {
   position: fixed;
   z-index: 80;

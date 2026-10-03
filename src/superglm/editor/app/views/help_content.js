@@ -199,6 +199,13 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    title: "Rating table",
+    items: Object.freeze([
+      "The Chart / Table switch above the chart shows the current term's block of the Excel rating table instead of its curve, with the workbook's number formats and note. It is built by the same code as the export, on the training data, and follows every edit.",
+      "Interactions are not shown. A model the export refuses shows the reason instead of a table.",
+    ]),
+  }),
+  Object.freeze({
     title: "Features",
     items: Object.freeze([
       "Type in the search box to filter the feature list; Enter opens the first match and Escape clears the search.",

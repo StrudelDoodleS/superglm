@@ -16,6 +16,7 @@ export function createInitialEditorState(snapshot = null) {
       activeTerm: snapshot?.selected_term || "",
       activeView: "editor",
       mode: "select",
+      termView: "chart",
       showCi: false,
       showContrib: false,
       summaryLevelDisplay: "expanded",

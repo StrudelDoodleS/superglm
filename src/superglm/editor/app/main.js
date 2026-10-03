@@ -78,6 +78,15 @@ import {
   waitingCounts
 } from "./views/summary_view.js";
 import { mountThemeControl, resolveTheme } from "./views/theme.js";
+import {
+  RATING_TABLE_FAILED,
+  RATING_TABLE_LOADING,
+  bindTermViewToggle,
+  ratingTableMessage,
+  ratingTableModel,
+  renderRatingTable,
+  renderTermViewToggle
+} from "./views/rating_table.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
 const appBar = document.getElementById("appBar");
@@ -107,6 +116,9 @@ const reportRetry = document.getElementById("reportRetry");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
+const plotColumn = document.querySelector(".plot-column");
+const termViewToggle = document.getElementById("termViewToggle");
+const ratingTableFrame = document.getElementById("ratingTableFrame");
 const featureListNodes = Object.freeze({
   root: document.getElementById("featureList"),
   search: document.getElementById("featureSearch"),
@@ -953,6 +965,7 @@ function renderChartWorkspace() {
     stopContributionBuild();
   }
   if (applyTermDefaults(term)) return;
+  const tableView = renderTermView(view.termView);
   const selection = view.preview && view.preview.term === selected
     ? new Set(view.preview.selection)
     : currentSelection();
@@ -967,7 +980,7 @@ function renderChartWorkspace() {
   updateCollapseAction(term, selection);
   updateShapeActions(term, selection);
   updateResetOrderAction(term);
-  drawChart(term, selection, chartContext);
+  if (!tableView) drawChart(term, selection, chartContext);
   const collapsedOriginalNote = selectionContextNote(term);
   renderContextBar(
     {
@@ -987,10 +1000,54 @@ function renderChartWorkspace() {
   );
 }
 
+// Table puts the term's rating-table block where the chart was; the chart
+// keeps its mode, zoom and selection for when Chart comes back.
+function renderTermView(termView) {
+  const tableView = termView === "table";
+  renderTermViewToggle(termViewToggle, termView);
+  plotColumn.classList.toggle("is-table-view", tableView);
+  // An SVG element has no `hidden` property; the attribute is what CSS hides.
+  svg.toggleAttribute("hidden", tableView);
+  ratingTableFrame.hidden = !tableView;
+  if (tableView) stopContributionBuild();
+  return tableView;
+}
+
+let ratingTableSequence = 0;
+
+function selectRatingTableRequest(state) {
+  return {
+    table: state.view.termView === "table",
+    term: selectActiveTermName(state),
+    revision: selectModelRevision(state)
+  };
+}
+
+function sameRatingTableRequest(next, previous) {
+  return next.table === previous.table &&
+    next.term === previous.term &&
+    next.revision === previous.revision;
+}
+
+// One request per term and model revision while Table is shown; a reply
+// that a newer request has overtaken is dropped.
+async function refreshRatingTable({ table, term, revision }) {
+  if (!table || !term || revision < 0) return;
+  const sequence = ++ratingTableSequence;
+  renderRatingTable(ratingTableFrame, ratingTableMessage(term, RATING_TABLE_LOADING));
+  let model;
+  try {
+    model = ratingTableModel(await editorClient.ratingTable(term));
+  } catch {
+    model = ratingTableMessage(term, RATING_TABLE_FAILED);
+  }
+  if (sequence === ratingTableSequence) renderRatingTable(ratingTableFrame, model);
+}
+
 function renderChartOnly() {
   const state = store.getState();
   const term = currentTerm();
-  if (!state.remote.snapshot || !term) return;
+  if (!state.remote.snapshot || !term || state.view.termView === "table") return;
   const selection = state.view.preview && state.view.preview.term === selectedTerm()
     ? new Set(state.view.preview.selection)
     : currentSelection();
@@ -1045,6 +1102,7 @@ function selectChartRenderState(state) {
     chartEpoch: state.remote.chartEpoch,
     activeTerm,
     mode: view.mode,
+    termView: view.termView,
     showCi: view.showCi,
     showContrib: view.showContrib,
     zoom: view.zoomByTerm[activeTerm] || null,
@@ -1059,6 +1117,7 @@ function sameChartRenderState(next, previous) {
     next.chartEpoch === previous.chartEpoch &&
     next.activeTerm === previous.activeTerm &&
     next.mode === previous.mode &&
+    next.termView === previous.termView &&
     next.showCi === previous.showCi &&
     next.showContrib === previous.showContrib &&
     next.zoom === previous.zoom &&
@@ -1703,6 +1762,10 @@ basisToggle.addEventListener("click", () => {
 
 contribPlay.addEventListener("click", startContributionBuild);
 
+bindTermViewToggle(termViewToggle, {
+  onChange: (termView) => actions.patchView({ termView })
+});
+
 handleCount.addEventListener("input", () => {
   handleCountValue.textContent = handleCount.value;
 });
@@ -1817,6 +1880,7 @@ for (const button of shapeButtons) {
 
 
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
+store.subscribe(selectRatingTableRequest, refreshRatingTable, sameRatingTableRequest);
 store.subscribe(
   selectFeatureListRenderState,
   renderFeatureListState,

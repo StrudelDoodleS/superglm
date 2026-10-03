@@ -237,6 +237,19 @@ body {
   stroke-linejoin: round;
 }
 
+/* The Chart / Table switch borrows the tool rail's segmented look. */
+.term-view-toggle {
+  margin-right: 0;
+  margin-left: 2px;
+}
+
+/* Table view: the rating table takes the chart's place, and the controls
+   that only act on the chart step aside. */
+.plot-column.is-table-view :is(#handleCountWrap, #basisToggle, #contribPlay, #ciToggle,
+  #resetZoom, #selectionMenu) {
+  display: none !important;
+}
+
 @media (max-width: 1085px) {
   .editor-workspace {
     grid-template-columns: auto minmax(0, 1fr);

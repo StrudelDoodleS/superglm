@@ -2,6 +2,7 @@
 
 /** @typedef {'editor'|'validation'|'final'} AppView */
 /** @typedef {'select'|'move'|'zoom'|'handles'} EditorMode */
+/** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
 /** @typedef {'metrics'|'summary'|'report'} EvidencePanel */
@@ -182,6 +183,20 @@
  * @property {SplineView|null} [spline_view]
  */
 /**
+ * The /rating_table response: the term's main-effect block of the Excel
+ * export, with the number format and the note the workbook gives it, and
+ * ``available`` false with a fixed ``reason`` when there is no table.
+ * @typedef {Object} RatingTableResponse
+ * @property {string} term
+ * @property {boolean} available
+ * @property {string|null} reason
+ * @property {string[]} columns
+ * @property {Array<Array<string|number|boolean|null>>} rows
+ * @property {Array<string|null>} formats
+ * @property {string|null} note
+ * @property {number} model_revision
+ */
+/**
  * What Undo and Redo would take next, edits and structural steps alike; null
  * when there is nothing.
  * @typedef {Object} UndoRedo
@@ -245,6 +260,7 @@
  * @property {string} activeTerm
  * @property {AppView} activeView
  * @property {EditorMode} mode
+ * @property {TermView} termView
  * @property {boolean} showCi
  * @property {boolean} showContrib
  * @property {SummaryLevelDisplay} summaryLevelDisplay

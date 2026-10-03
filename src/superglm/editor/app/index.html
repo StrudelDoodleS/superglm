@@ -203,6 +203,26 @@
           <span id="termEdf" class="context-chip"></span>
           <span id="termReference" class="context-chip" hidden></span>
         </div>
+        <div id="termViewToggle" class="tool-rail term-view-toggle" role="radiogroup"
+          aria-label="Term view">
+          <div class="tool-rail-modes">
+            <button type="button" role="radio" aria-checked="true" aria-label="Chart"
+              data-term-view="chart" data-popover-title="Chart"
+              data-popover-body="Show the term's curve.">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 19h16M5 15l4-5 4 3 6-7"></path>
+              </svg>
+            </button>
+            <button type="button" role="radio" aria-checked="false" aria-label="Table"
+              data-term-view="table" tabindex="-1" data-popover-title="Rating table"
+              data-popover-body="Show this term's block of the Excel rating table, built by the same code as the export.">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="4" y="5" width="16" height="14" rx="1.5"></rect>
+                <path d="M4 10h16M4 14.5h16M10 5v14"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
         <label id="groupDisplayWrap" class="toolbar-field group-display-toggle">
           <span>Groups</span>
           <select id="groupDisplayMode">
@@ -246,6 +266,8 @@
       </div>
       <div class="chart-shell">
         <svg id="chart" viewBox="0 0 940 520" role="img" aria-label="SuperGLM editable effect"></svg>
+        <section id="ratingTableFrame" class="rating-table-frame" aria-label="Rating table"
+          aria-live="polite" hidden></section>
         <div id="selectionMenu" class="selection-menu" aria-label="Selection actions" hidden>
         <span class="selection-group-label">Edit</span>
         <button class="selection-item" data-op="shift_up" data-help-operation="shift_up"
