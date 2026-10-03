@@ -273,7 +273,7 @@ def cat(
     base: str = "most_exposed",
     grouping: LevelGrouping | None = None,
     levels: Any = None,
-    unseen: Literal["error", "base"] = "error",
+    unseen: str = "error",
 ) -> BoundTerm:
     """Declare a categorical effect with a reference level.
 
@@ -293,9 +293,11 @@ def cat(
     levels : sequence, data column or categorical dtype, optional
         Declare the allowed input levels. With ``grouping``, these are the
         original levels before grouping.
-    unseen : {"error", "base"}, default="error"
+    unseen : str, default="error"
         Prediction policy for levels outside the fitted level universe.
-        ``"base"`` uses the reference level and emits a warning.
+        ``"base"`` uses the reference level and emits a warning. The label of
+        a group of ``grouping`` gives them that group's effect, also with a
+        warning.
 
     Returns
     -------

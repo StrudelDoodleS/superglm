@@ -141,8 +141,13 @@ class TestUnseenPolicy:
             spec.score(np.asarray(["a", None], dtype=object), np.array([0.5]))
 
     def test_invalid_unseen_rejected(self):
+        # Any text may name a group, which only the fit can check (spec
+        # 2026-10-03 S5); anything else is refused at once.
         with pytest.raises(ValueError, match="unseen"):
-            Categorical(unseen="ignore")
+            Categorical(unseen=None)
+        spec = Categorical(unseen="ignore")
+        with pytest.raises(ValueError, match="unseen='ignore'.*no grouping="):
+            _build(spec, ["a", "b"])
 
     def test_unseen_routing_uses_a_supported_pandas_lookup(self):
         # pandas deprecates -- and will eventually reject -- constructing a
@@ -165,6 +170,110 @@ class TestUnseenPolicy:
         with pytest.warns(UserWarning):
             eta = spec.score(np.asarray(["NOVEL"], dtype=object), np.array([3.14]))
         assert eta == pytest.approx([0.0])
+
+
+class TestUnseenGroup:
+    """``unseen=<group label>``: levels unseen at fit take that group's effect."""
+
+    @staticmethod
+    def _grouping():
+        return collapse_levels(["a", "b", "c", "d"], groups={"Other": ["c", "d"]})
+
+    def _fitted(self, **kwargs):
+        spec = Categorical(base="a", grouping=self._grouping(), unseen="Other", **kwargs)
+        _build(spec, ["a", "b", "c", "d", "a"])
+        return spec
+
+    def test_a_novel_raw_level_takes_the_group_effect_with_one_warning(self):
+        spec = self._fitted()
+        assert spec._non_base == ["Other", "b"]
+        beta = np.array([0.3, -0.2])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            eta = spec.score(np.asarray(["NEW", "b", "NEW", "c", "a"], dtype=object), beta)
+        routed = [w for w in caught if "unseen at fit" in str(w.message)]
+        assert len(routed) == 1
+        assert "the group 'Other'" in str(routed[0].message)
+        assert "['NEW'] over 2 row(s)" in str(routed[0].message)
+        other = spec.score(np.asarray(["c"], dtype=object), beta)[0]
+        assert eta.tolist() == [0.3, -0.2, 0.3, 0.3, 0.0]
+        assert other == 0.3
+
+    def test_transform_puts_a_novel_level_in_the_group_column(self):
+        spec = Categorical(base="a", grouping=self._grouping(), unseen="Other")
+        _build(spec, ["a", "b", "c", "d"])
+        assert spec._non_base == ["Other", "b"]
+        with pytest.warns(UserWarning, match=r"group 'Other'.*'NEW'"):
+            T = spec.transform(np.asarray(["NEW", "b", "d"], dtype=object))
+        assert T.tolist() == [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]
+
+    def test_a_level_whose_group_had_no_rows_is_routed_too(self):
+        grouping = collapse_levels(["a", "b", "c", "d", "e"], groups={"Other": ["c", "d"]})
+        spec = Categorical(base="a", grouping=grouping, unseen="Other")
+        _build(spec, ["a", "b", "c", "d"])
+        assert "e" not in spec._levels
+        with pytest.warns(UserWarning, match=r"group 'Other'.*'e'"):
+            T = spec.transform(np.asarray(["e"], dtype=object))
+        assert T.tolist() == [[1.0, 0.0]]
+
+    def test_missing_values_still_error(self):
+        spec = self._fitted()
+        with pytest.raises(ValueError, match="missing values"):
+            spec.score(np.asarray(["a", None], dtype=object), np.array([0.5, 0.1]))
+
+    def test_the_fit_refuses_a_group_label_without_a_grouping(self):
+        spec = Categorical(unseen="Other")
+        with pytest.raises(ValueError, match=r"unseen='Other' names a group.*no grouping="):
+            _build(spec, ["a", "b"])
+
+    def test_the_fit_refuses_a_label_that_is_not_a_group(self):
+        spec = Categorical(grouping=self._grouping(), unseen="Rest")
+        with pytest.raises(ValueError, match=r"unseen='Rest' is not a group.*'Other'"):
+            _build(spec, ["a", "b", "c"])
+
+    def test_the_fit_refuses_a_group_with_no_place_in_the_universe(self):
+        spec = Categorical(grouping=self._grouping(), unseen="Other")
+        with pytest.raises(ValueError, match=r"unseen='Other'.*no level in this fit"):
+            _build(spec, ["a", "b", "a"])
+
+    def test_error_stays_the_default(self):
+        spec = Categorical(grouping=self._grouping())
+        assert spec.unseen == "error"
+        _build(spec, ["a", "b", "c"])
+        with pytest.raises(ValueError, match="unseen categorical levels"):
+            spec.score(np.asarray(["NEW"], dtype=object), np.zeros(2))
+
+    def test_a_model_routes_next_years_new_level_through_its_interaction_too(self):
+        from superglm import SuperGLM
+        from superglm.features.spline import Spline
+
+        rng = np.random.default_rng(11)
+        n = 300
+        X = pd.DataFrame(
+            {
+                "x": rng.uniform(0.0, 10.0, n),
+                "g": np.asarray(rng.choice(["a", "b", "c", "d"], size=n), dtype=object),
+            }
+        )
+        y = rng.poisson(1.0, size=n).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "x": Spline(n_knots=5),
+                "g": Categorical(base="a", grouping=self._grouping(), unseen="Other"),
+            },
+            interactions=[("x", "g")],
+        )
+        model.fit(X, y)
+        Xp = pd.DataFrame({"x": [2.5, 2.5], "g": np.asarray(["NEW", "c"], dtype=object)})
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mu = model.predict(Xp)
+        assert any("group 'Other'" in str(w.message) for w in caught)
+        assert mu[0] == mu[1]
+        base = model.predict(pd.DataFrame({"x": [2.5], "g": np.asarray(["a"], dtype=object)}))
+        assert mu[0] != base[0]
 
 
 class TestGroupedDeclared:
