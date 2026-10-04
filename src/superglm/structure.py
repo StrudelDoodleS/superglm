@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, InstanceOf, TypeAdapter, ValidationError
 
 from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange, RangeError
 from superglm.features.categorical import Categorical
@@ -824,6 +824,10 @@ def _require_shape_fits(source, r: PolynomialRange) -> None:
 
 # Strict: a value keeps its JSON type, so 1, 1.0, "1" and true stay four values.
 _STRICT = ConfigDict(extra="forbid", strict=True)
+# A number the file holds is an int or a float: pydantic's float, strict or
+# not, takes any object with __float__, a Decimal among them, which json
+# cannot write.
+_Float = InstanceOf[float]
 # A level, or a reference, in its native type: text, a boolean, or a number
 # float64 holds as a finite value. JSON reads integers of any length, and
 # float() rounds one at 2**1024 - 2**970 or past it to infinity.
@@ -832,12 +836,12 @@ _Level = (
     str
     | bool
     | Annotated[int, Field(gt=-_INT_LIMIT, lt=_INT_LIMIT)]
-    | Annotated[float, Field(allow_inf_nan=False)]
+    | Annotated[_Float, Field(allow_inf_nan=False)]
 )
 _LEVEL = TypeAdapter(_Level, config=_STRICT)
 # A range edge: a number, or a band name on an ordered term. Which edges a
 # spline takes, finite ones only, is checked with the range's own sentence.
-_Edge = str | int | float
+_Edge = str | int | _Float
 
 
 class _Schema(BaseModel):
@@ -921,9 +925,19 @@ def _refuse_constant(constant: str):
 
 
 def _plain(value):
-    """``value`` as JSON holds it: numpy scalars as Python ones, ranges as mappings."""
-    if isinstance(value, np.generic):
-        return value.item()
+    """``value`` as JSON holds it: text, booleans and Python numbers, ranges as mappings.
+
+    A number of another type, a numpy scalar or a Fraction, becomes the int or
+    float it equals. Any other object is kept, for the schema to refuse.
+    """
+    if isinstance(value, bool | np.bool_):
+        return bool(value)
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real) and _is_finite(value):
+        return float(value)
     if isinstance(value, PolynomialRange):
         return _plain(dataclasses.asdict(value))
     if isinstance(value, list):

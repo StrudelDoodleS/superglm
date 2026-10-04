@@ -289,6 +289,53 @@ def test_levels_a_file_cannot_hold_are_refused_by_name_on_export():
     )
 
 
+def test_a_number_json_cannot_write_is_refused_and_a_fraction_is_written_as_its_float():
+    """A Decimal, as a database NUMERIC column arrives, is refused, never a TypeError from json.
+
+    Every way into a file is checked: from_model names the level, and an entry
+    built in Python or read from a mapping is malformed. A Fraction is a real
+    number, written as the float it equals.
+    """
+    from decimal import Decimal
+    from fractions import Fraction
+
+    rng = np.random.default_rng(0)
+    n = 300
+    decimals = np.array([Decimal("4"), Decimal("5.5"), Decimal("6")] * 100, dtype=object)
+    model = _declared({"power": Categorical(base="first")})
+    model.fit(pd.DataFrame({"power": decimals}), rng.normal(size=n))
+    with pytest.raises(StructureError) as refused:
+        Structure.from_model(model)
+    first = model._specs["power"]._levels[0]
+    assert str(refused.value) == (
+        f"{first!r} in 'power' cannot be written to a structure file, which holds text, "
+        "numbers and booleans; give the term plain labels."
+    )
+
+    malformed = "The structure entry for 'c' has a malformed {!r}; export the structure again."
+    for field, entry in (
+        ("levels", FeatureStructure("categorical", [Decimal("1.5"), 2], {}, 2)),
+        ("reference", FeatureStructure("categorical", [1.5, 2], {}, Decimal("1.5"))),
+        ("ranges", FeatureStructure("spline", ranges=[PolynomialRange(Decimal("1"), 2.0, 1)])),
+    ):
+        with pytest.raises(StructureError) as refused:
+            Structure(features={"c": entry})
+        assert str(refused.value) == malformed.format(field)
+    payload = json.loads(
+        Structure(features={"c": FeatureStructure("categorical", [1, 2], {}, 1)}).to_json()
+    )
+    payload["features"]["c"]["levels"] = [Decimal("1"), 2]
+    with pytest.raises(StructureError) as refused:
+        Structure.from_json(payload)
+    assert str(refused.value) == malformed.format("levels")
+
+    fractions = np.array([Fraction(1, 2), Fraction(3, 2)] * 150, dtype=object)
+    model = _declared({"f": Categorical(base="first")})
+    model.fit(pd.DataFrame({"f": fractions}), rng.normal(size=n))
+    written = json.loads(Structure.from_model(model).to_json())["features"]["f"]
+    assert (written["levels"], written["reference"]) == ([0.5, 1.5], 0.5)
+
+
 def test_a_structure_built_in_python_is_checked_like_a_file():
     with pytest.raises(StructureError, match="not one of its levels"):
         Structure(
