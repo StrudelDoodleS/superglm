@@ -31,6 +31,7 @@ from superglm.editor.evaluation import EvaluationDataset, training_export_datase
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.refit import fit_refit_model
 from superglm.editor.terms import resolve_refit_method
+from superglm.model.fit_state import configured_lambda2, configured_penalty
 from superglm.model_selection import (
     _BUILTIN_SCORERS,
     _POOLED_PARTS,
@@ -644,6 +645,7 @@ class CVRunPlan:
     """Everything Run CV reads, captured under the widget lock."""
 
     model: Any
+    template: Any
     model_revision: int
     rows: EvaluationDataset
     folds: tuple[tuple[NDArray[np.intp], NDArray[np.intp]], ...]
@@ -668,6 +670,7 @@ def capture_cv_run(session) -> CVRunPlan:
     supplied = tuple(name for name in _DEFAULT_SCORING if name in cv.fold_scores.columns)
     return CVRunPlan(
         model=session.model,
+        template=_declared_template(session),
         model_revision=session.model_revision,
         rows=session.cv_check.rows,
         folds=tuple(
@@ -683,12 +686,28 @@ def capture_cv_run(session) -> CVRunPlan:
     )
 
 
+def _declared_template(session):
+    """The in-force structure, unfitted, under the penalties the opened model declares.
+
+    A Refit's model declares the selection penalty and smoothing its own fit
+    chose on all the training rows. Each fold and the Final fit choose them
+    again on their own rows, as :meth:`superglm.structure.Structure.apply`
+    does: ``selection_penalty="auto"`` calibrates per fold, and validation
+    rows never set a fold's penalty.
+    """
+    opened = session.reference_model
+    template = session.model.clone_unfitted()
+    template.selection_penalty = configured_penalty(opened).lambda1
+    template.lambda2 = configured_lambda2(opened)
+    return template
+
+
 def run_cv(plan: CVRunPlan, context) -> CVRun:
     """Replay the stored folds on the in-force structure with the hand edits put back."""
     recorder = _FoldRecorder(plan, context)
     try:
         result = cross_validate(
-            plan.model,
+            plan.template,
             plan.rows.X,
             plan.rows.y,
             cv=StoredFolds(plan.folds, before_fold=recorder.before_fold),
@@ -802,6 +821,7 @@ class FinalFitPlan:
     """Everything Final fit reads, captured under the widget lock."""
 
     model: Any
+    template: Any
     model_revision: int
     datasets: tuple[EvaluationDataset, ...]
     edited: dict[str, EditableTerm]
@@ -820,6 +840,7 @@ def capture_final_fit(session) -> FinalFitPlan:
         raise EditorValueError(reason)
     return FinalFitPlan(
         model=session.model,
+        template=_declared_template(session),
         model_revision=session.model_revision,
         datasets=datasets,
         edited={name: session.terms[name].copy() for name in session.edited_terms()},
@@ -833,7 +854,7 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
     X, y, sample_weight, offset = _union_rows(plan.datasets)
     context.progress("fitting", n_rows=int(y.size))
     context.check()
-    model = plan.model.clone_unfitted()
+    model = plan.template.clone_unfitted()
     fit_refit_model(
         plan.model,
         model,

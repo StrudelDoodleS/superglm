@@ -513,8 +513,10 @@ Two buttons run jobs in the background, each with a **Cancel** button while it r
   as **Final fit model**.
 
 Run CV scores the folds with whichever of deviance, Gini and NLL the supplied result scored, or
-with all three when it scored none of them. A job whose model changed while it ran is not kept;
-run it again.
+with all three when it scored none of them. Both jobs choose the penalties as the opened model
+declares them: a `selection_penalty="auto"`, or smoothing that `fit_reml` estimates, is chosen
+again on each fold's rows and on the Final fit's rows, after a Refit too. A job whose model changed
+while it ran is not kept; run it again.
 
 Run CV is disabled, with the reason on hover, when it cannot use the rows:
 
