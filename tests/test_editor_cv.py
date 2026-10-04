@@ -1339,6 +1339,51 @@ def test_run_cv_and_final_fit_recalibrate_the_declared_penalties_after_a_refit(
     np.testing.assert_array_equal(after.predict(X.iloc[500:]), before.predict(X.iloc[500:]))
 
 
+def test_run_cv_and_final_fit_estimate_a_declared_auto_theta_again_after_a_refit(cv_frame):
+    """A Refit that changes nothing leaves an NB2 ``theta="auto"`` estimated per fold.
+
+    The Refit's model declares the theta its own fit estimated on all the
+    training rows. Each fold and the Final fit estimate it again on their own
+    rows, as the opened model declares.
+    """
+    from superglm.distributions import NegativeBinomial
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+
+    X, _, w = cv_frame
+    rng = np.random.default_rng(20261004)
+    mu = np.exp(0.2 + 0.4 * (X["region"] == "B").to_numpy() + 0.2 * X["power"].to_numpy())
+    y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu)).astype(np.float64)
+    rows = (X.iloc[:400], y[:400])
+
+    def declared():
+        model = _model()
+        model.family = NegativeBinomial(theta="auto")
+        return model
+
+    model = declared().fit(*rows, sample_weight=w[:400])
+    supplied = cross_validate(
+        declared(),
+        *rows,
+        cv=KFold(3, shuffle=True, random_state=0),
+        sample_weight=w[:400],
+        scoring=("deviance", "gini", "nll"),
+    )
+    session = EditorSession.from_model(model, cv=supplied, **_splits((X, y, w)))
+    before = run_final_fit(capture_final_fit(session), _Context()).model
+    session.stage_structural("set_reference", "region", {"level": "A"})
+    session.refit_pending()
+
+    run = run_cv(capture_cv_run(session), _Context())
+    after = run_final_fit(capture_final_fit(session), _Context()).model
+
+    for name in ("deviance", "gini", "nll"):
+        np.testing.assert_array_equal(run.result.fold_scores[name], supplied.fold_scores[name])
+    # The Final fit's rows are the training and validation rows, not the
+    # training rows the Refit estimated its theta on.
+    assert after.theta_ == before.theta_ != model.theta_
+    np.testing.assert_array_equal(after.predict(X.iloc[500:]), before.predict(X.iloc[500:]))
+
+
 def test_run_cv_takes_the_in_force_fit_method_and_the_supplied_scorers(cv_frame, cv_fit):
     from superglm.editor.cv import capture_cv_run
 

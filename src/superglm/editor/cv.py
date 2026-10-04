@@ -25,6 +25,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
+from superglm.distributions import NegativeBinomial
 from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
@@ -32,7 +33,7 @@ from superglm.editor.jobs import JobCancelledError
 from superglm.editor.refit import fit_refit_model
 from superglm.editor.terms import resolve_refit_method
 from superglm.features.grouping import native_by_text
-from superglm.model.fit_state import configured_lambda2, configured_penalty
+from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.model_selection import (
     _BUILTIN_SCORERS,
     _POOLED_PARTS,
@@ -663,18 +664,23 @@ def capture_cv_run(session) -> CVRunPlan:
 
 
 def _declared_template(session):
-    """The in-force structure, unfitted, under the penalties the opened model declares.
+    """The in-force structure, unfitted, to choose again what the opened model estimates.
 
-    A Refit's model declares the selection penalty and smoothing its own fit
-    chose on all the training rows. Each fold and the Final fit choose them
-    again on their own rows, as :meth:`superglm.structure.Structure.apply`
-    does: ``selection_penalty="auto"`` calibrates per fold, and validation
-    rows never set a fold's penalty.
+    A Refit's model declares the selection penalty, smoothing and NB2 theta
+    its own fit chose on all the training rows. Each fold and the Final fit
+    choose them again on their own rows, as the opened model declares: the
+    penalties as :meth:`superglm.structure.Structure.apply` does, and a
+    ``theta="auto"`` too. Validation rows never set a fold's penalty or
+    theta. A theta the opened model fixes stays as the in-force model holds
+    it, re-profiled or not.
     """
     opened = session.reference_model
     template = session.model.clone_unfitted()
     template.selection_penalty = configured_penalty(opened).lambda1
     template.lambda2 = configured_lambda2(opened)
+    family = configured_family(opened)
+    if isinstance(family, NegativeBinomial) and family.theta == "auto":
+        template.family = family
     return template
 
 
