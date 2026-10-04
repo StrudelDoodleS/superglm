@@ -553,6 +553,38 @@ def test_apply_never_fits_and_leaves_the_other_features_alone():
     assert applied._specs["brand"]._grouping.group_to_originals["Other"] == ["B13", "B14"]
 
 
+def test_apply_keeps_the_models_separation_group_pricing_and_bound_levels():
+    """The copy is the same model: its model-level rules come with it.
+
+    ``bind_levels`` bound area's universe from a frame holding D; next
+    year's rows lack D, so only the binding keeps D a known level that
+    predict rates (pinned to the base) instead of refusing.
+    """
+    X, y = _frame()
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        separation="error",
+        group_pricing="spanned",
+        features={"brand": Categorical(base="first"), "area": Categorical(base="first")},
+    ).bind_levels(X)
+
+    applied = _brand_structure().apply(model)
+
+    assert (applied._separation, applied._group_pricing) == ("error", "spanned")
+    assert applied._config.level_bindings == model._config.level_bindings
+    without_d = (X["area"] != "D").to_numpy()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*pinned.*", category=UserWarning)
+        applied.fit(X[without_d], y[without_d])
+    probe = X[~without_d].head(3)
+    assert np.isfinite(applied.predict(probe)).all()
+    # The copy's own clone keeps them too.
+    again = applied.clone_unfitted()
+    assert (again._separation, again._group_pricing) == ("error", "spanned")
+
+
 def test_ranges_on_a_ps_spline_rebuild_it_as_bs():
     structure = Structure(
         features={"age": FeatureStructure(kind="spline", ranges=[PolynomialRange(30.0, 45.0, 1)])}
