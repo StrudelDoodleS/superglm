@@ -73,6 +73,11 @@ NO_FINAL_ROWS = "Final fit needs train_data, or a model that kept its fit data."
 TRAIN_ONLY = "No validation data was supplied, so Final fit uses the train rows only."
 SUPERSEDED = "The model changed while the job ran, so its result was not kept. Run it again."
 MIXED_FRAMES = "Train and validation data must both be pandas or both be Polars data frames."
+FINAL_SPLIT_MISSING = (
+    "Final fit fits the train and validation rows together, so it needs {column} on both "
+    "or on neither: the {have} data has them and the {lack} data does not. Pass them with "
+    "the {lack} data to edit()."
+)
 FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
 
@@ -209,6 +214,40 @@ def final_fit_datasets(session) -> tuple[EvaluationDataset, ...]:
         return ()
     validation = session._evaluation_data.get("validation")
     return (train,) if validation is None else (train, validation)
+
+
+# Each column Final fit stacks: its attribute, its name in a refusal, and the
+# value a split without it stands for.
+_STACKED_COLUMNS = (("sample_weight", "sample weights", 1.0), ("offset", "offsets", 0.0))
+
+
+def final_fit_reason(session) -> str | None:
+    """Why Final fit cannot run now, as one fixed sentence; None when it can."""
+    datasets = final_fit_datasets(session)
+    if not datasets:
+        return NO_FINAL_ROWS
+    return _unstackable_reason(datasets)
+
+
+def _unstackable_reason(datasets: Sequence[EvaluationDataset]) -> str | None:
+    """Refuse a column one split lacks while another holds anything but its neutral value.
+
+    A split without weights or an offset is stacked as weight 1 and offset 0.
+    That is exact beside a split holding those values (a model that kept
+    unweighted fit data keeps weights of 1), but beside log exposure it would
+    fit the rows that lack it on exposure 1, silently.
+    """
+    for name, column, neutral in _STACKED_COLUMNS:
+        lack = [dataset.name for dataset in datasets if getattr(dataset, name) is None]
+        have = [
+            dataset.name
+            for dataset in datasets
+            if getattr(dataset, name) is not None
+            and np.any(np.asarray(getattr(dataset, name), dtype=np.float64) != neutral)
+        ]
+        if lack and have:
+            return FINAL_SPLIT_MISSING.format(column=column, have=have[0], lack=lack[0])
+    return None
 
 
 # ── Relativities by fold ─────────────────────────────────────────
@@ -420,7 +459,7 @@ def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -
         model_changed=session.model is not session.reference_model or bool(session.edited_terms()),
         pending=len(session.pending),
         run_reason=run_cv_reason(session),
-        final_reason=None if final_fit_datasets(session) else NO_FINAL_ROWS,
+        final_reason=final_fit_reason(session),
         has_validation="validation" in session._evaluation_data,
     )
 
@@ -726,10 +765,11 @@ class FinalFitPlan:
 
 
 def capture_final_fit(session) -> FinalFitPlan:
-    """Capture Final fit's inputs; refuse when there are no training rows."""
+    """Capture Final fit's inputs; refuse without training rows, or rows that cannot stack."""
     datasets = final_fit_datasets(session)
-    if not datasets:
-        raise EditorValueError(NO_FINAL_ROWS)
+    reason = _unstackable_reason(datasets) if datasets else NO_FINAL_ROWS
+    if reason is not None:
+        raise EditorValueError(reason)
     return FinalFitPlan(
         model=session.model,
         model_revision=session.model_revision,
@@ -793,7 +833,10 @@ def _union_rows(datasets: Sequence[EvaluationDataset]):
 
 
 def _stacked(datasets: Sequence[EvaluationDataset], name: str, fill: float):
-    """One column across the splits, ``fill`` where a split lacks it; None if all do."""
+    """One column across the splits, ``fill`` where a split lacks it; None if all do.
+
+    :func:`capture_final_fit` has refused a fill beside values that differ from it.
+    """
     columns = [getattr(dataset, name) for dataset in datasets]
     if all(column is None for column in columns):
         return None

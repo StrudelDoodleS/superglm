@@ -911,6 +911,69 @@ def test_final_fit_refits_train_and_validation_and_export_offers_it(cv_frame, cv
     assert stale.value.public_message == FINAL_STALE
 
 
+@pytest.mark.parametrize(
+    ("column", "lacking"),
+    [
+        ("offset", "validation"),
+        ("offset", "train"),
+        ("sample_weight", "validation"),
+        ("sample_weight", "train"),
+    ],
+)
+def test_final_fit_refuses_an_offset_or_weights_only_one_split_carries(cv_frame, column, lacking):
+    """Stacking the splits must not fill in an offset or weights one split lacks.
+
+    A Poisson book fitted on log exposure, with the validation rows passed
+    without it, would otherwise be fitted on exposure 1 there.
+    """
+    from superglm.editor.cv import FINAL_SPLIT_MISSING, capture_cv_view, capture_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    X, y, w = cv_frame
+    values = np.log(w) if column == "offset" else w
+    given = {
+        split: None if split == lacking else values[rows]
+        for split, rows in (("train", slice(0, 400)), ("validation", slice(400, 500)))
+    }
+    model = _model().fit(X.iloc[:400], y[:400], **{column: given["train"]})
+
+    def split(name, rows):
+        extra = {"sample_weight": None, "offset": None, column: given[name]}
+        return (X.iloc[rows], y[rows], extra["sample_weight"], extra["offset"])
+
+    session = EditorSession.from_model(
+        model,
+        train_data=split("train", slice(0, 400)),
+        validation_data=split("validation", slice(400, 500)),
+    )
+    have = "train" if lacking == "validation" else "validation"
+    expected = FINAL_SPLIT_MISSING.format(
+        column="offsets" if column == "offset" else "sample weights", have=have, lack=lacking
+    )
+
+    assert capture_cv_view(session, run=None, final_fit=None).final_reason == expected
+    with pytest.raises(EditorValueError) as refused:
+        capture_final_fit(session)
+    assert refused.value.public_message == expected
+
+
+def test_final_fit_stacks_a_split_without_weights_beside_unit_weights(cv_frame):
+    """A model that kept unweighted fit data holds weights of 1: the validation rows match them.
+
+    Guards the refusal above against refusing what the fill gets exactly right.
+    """
+    from superglm.editor.cv import _union_rows, capture_cv_view, capture_final_fit
+
+    X, y, _w = cv_frame
+    model = _model().fit(X.iloc[:400], y[:400])
+    session = EditorSession.from_model(model, validation_data=(X.iloc[400:500], y[400:500]))
+
+    assert capture_cv_view(session, run=None, final_fit=None).final_reason is None
+    _X, stacked_y, weights, offset = _union_rows(capture_final_fit(session).datasets)
+    assert stacked_y.size == 500 and offset is None
+    np.testing.assert_array_equal(weights, np.ones(500))
+
+
 def test_run_cv_and_final_fit_fit_off_the_widget_lock(cv_frame, cv_fit, monkeypatch):
     """While each fit of a real Run CV or Final fit runs, another thread can take the lock.
 
