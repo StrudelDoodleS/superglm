@@ -148,9 +148,11 @@ def model_with_unseen(model, term: str, policy: str):
     """A copy of fitted ``model`` whose ``term`` sends new levels to ``policy``.
 
     The copy's declaration says so too, so a refit of it (Run CV, Final fit)
-    keeps the choice. ``model`` is not changed.
+    keeps the choice. ``model`` is not changed. The fit is the same, so the
+    copy shares its row-length outputs rather than holding another copy for
+    each choice; the prediction plan, which holds the specs, is its own.
     """
-    copied = _copy_model_for_editor_edits(model)
+    copied = _copy_model_for_editor_edits(model, share_fit_outputs=True)
     spec = copied._specs[term]
     spec.unseen = policy
     declared = dict(getattr(getattr(copied, "_config", None), "feature_templates", ())).get(term)

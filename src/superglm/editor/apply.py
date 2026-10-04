@@ -55,13 +55,39 @@ _EDITOR_EDIT_ONLY_MEMO_STATE = (
 )
 
 
-def _copy_model_for_editor_edits(model, *, share_transient_state: bool = False):
-    """Copy a fitted model without duplicating its row-scale fit inputs."""
+# The fit's own outputs, frozen read-only when the fit is published. A copy
+# whose fit is unchanged shares them; the cached ones only once computed.
+_EDITOR_SHARED_FIT_OUTPUTS = (
+    "_fit_mu",
+    "_fit_null_mu",
+    "_fit_stats",
+    "_fit_inference_info",
+    "_coef_covariance",
+)
+
+
+def _copy_model_for_editor_edits(
+    model, *, share_transient_state: bool = False, share_fit_outputs: bool = False
+):
+    """Copy a fitted model without duplicating its row-scale fit inputs.
+
+    ``share_fit_outputs`` is for a copy that keeps the fit as it is (a New
+    levels choice): it shares the fit's outputs too, and starts without the
+    metrics cache, which is bound to its model and is rebuilt when asked.
+    """
     shared_names: tuple[str, ...] = _EDITOR_SHARED_ROW_INPUTS
     if share_transient_state:
         shared_names += _EDITOR_EDIT_ONLY_MEMO_STATE
     shared = {name: getattr(model, name) for name in shared_names if hasattr(model, name)}
+    if share_fit_outputs:
+        # Read from the instance: getattr would compute a cached one not yet computed.
+        computed = vars(model)
+        shared.update(
+            {name: computed[name] for name in _EDITOR_SHARED_FIT_OUTPUTS if name in computed}
+        )
     memo = {id(value): value for value in shared.values()}
+    if share_fit_outputs and getattr(model, "_fit_metrics_cache", None) is not None:
+        memo[id(model._fit_metrics_cache)] = None
     edited_model = copy.deepcopy(model, memo)
     for name, value in shared.items():
         setattr(edited_model, name, value)

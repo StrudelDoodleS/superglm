@@ -1862,6 +1862,46 @@ def test_new_levels_carries_through_a_refit_and_comes_back_with_its_undo():
     assert model.clone_unfitted()._specs["region"].unseen == "error"
 
 
+def test_new_levels_shares_the_fits_row_state_instead_of_copying_it_per_choice():
+    """The choice changes no fitted value, so the copy keeps the model's fit outputs as they are.
+
+    Each choice's model stays in the history, so a copy of the row-length
+    state (fitted means, inference, metrics) per choice would add up.
+    """
+    model, X, y = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"], train_data=(X, y))
+    model.metrics(X, y)
+    fit_outputs = (
+        "_fit_mu",
+        "_fit_null_mu",
+        "_fit_stats",
+        "_fit_inference_info",
+        "_coef_covariance",
+    )
+    assert all(name in vars(model) for name in fit_outputs)
+    assert model._fit_metrics_cache is not None
+
+    session.set_unseen("region", "Other")
+
+    chosen = session.model
+    assert [name for name in fit_outputs if vars(chosen)[name] is not vars(model)[name]] == []
+    # The metrics cache is bound to its model: the copy builds its own when asked.
+    assert chosen._fit_metrics_cache is None
+    rebuilt, source = chosen.metrics(X, y), model.metrics(X, y)
+    assert rebuilt._model is chosen
+    assert (rebuilt.deviance, rebuilt.aic) == (source.deviance, source.aic)
+    # The prediction plan holds the specs, so the copy's reads its own policy.
+    [region] = [term for term in chosen._prediction_plan["features"] if term["name"] == "region"]
+    assert region["spec"] is chosen._specs["region"] and region["spec"].unseen == "Other"
+    assert model._specs["region"].unseen == "error"
+    new = _with_new_level(X)
+    seen = (new["region"] != "Z").to_numpy()
+    assert np.array_equal(chosen.predict(new[seen]), model.predict(new[seen]))
+    with pytest.warns(UserWarning, match=r"group 'Other'"):
+        routed = chosen.predict(new)
+    assert np.array_equal(routed, model.predict(new.replace({"region": {"Z": "C"}})))
+
+
 def test_new_levels_is_offered_on_plain_categoricals_only(banded):
     model, _, _ = _grouped_region()
     session = EditorSession.from_model(model, terms=["region", "x"])
