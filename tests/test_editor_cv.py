@@ -873,6 +873,82 @@ def test_run_cv_cancelled_mid_run_publishes_nothing(cv_frame, cv_fit, fit_rows, 
     assert report["jobs"]["cv"]["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("how", ["carry", "fit"])
+def test_run_cv_stops_at_a_fold_that_fails_and_publishes_nothing(how, monkeypatch):
+    """A fold that cannot be fitted or scored stops Run CV with its reason.
+
+    ``carry``: the CV rows reach past the editor's train rows, and the edited
+    term refuses them (``extrapolation="error"``) when the hand edits are put
+    back on the first fold. ``fit``: the second fold's fit fails. Either way
+    the folds that did score are not averaged as if they were all.
+    """
+    from superglm import Piecewise
+
+    rng = np.random.default_rng(1)
+    n = 1200
+    age = rng.uniform(18.0, 80.0, n)
+    X = pd.DataFrame({"age": age, "power": rng.normal(0.0, 1.0, n)})
+    y = rng.poisson(np.exp(-0.5 + 0.01 * (age - 50.0))).astype(np.float64)
+    supplied = cross_validate(
+        _model_without_region(), X, y, cv=KFold(3, shuffle=True, random_state=0)
+    )
+    if how == "carry":
+        inner = (age > 25.0) & (age < 70.0)
+        piecewise = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "age": Piecewise(breaks=[30.0, 50.0], extrapolation="error"),
+                "power": Numeric(),
+            },
+        ).fit(X[inner], y[inner])
+        session = EditorSession.from_model(
+            piecewise, cv=supplied, cv_data=(X, y), train_data=(X[inner], y[inner])
+        )
+        session.select_indices("age", [1])
+        session.shift("age", 0.1)
+        fold, reason = 1, "Term 'age' received values outside the rated range"
+    else:
+        session = EditorSession.from_model(
+            _model_without_region().fit(X, y), cv=supplied, cv_data=(X, y)
+        )
+        fit = SuperGLM.fit
+        calls = []
+
+        def second_fit_fails(self, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return fit(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit", second_fit_fails)
+        fold, reason = 2, "That fold could not be fitted or scored."
+    widget = session.widget()
+    try:
+        started = _post_json(f"{widget.url}/job_start", {"kind": "cv"})
+        finished = _post_json(
+            f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True}
+        )
+        report = widget._report("cv")
+    finally:
+        widget.close()
+
+    assert finished["status"] == "failed"
+    assert finished["error"].startswith(
+        f"Run CV stopped at fold {fold} and kept no result. {reason}"
+    )
+    assert widget._cv_run is None
+    assert [result["origin"] for result in report["results"]] == ["supplied"]
+
+
+def _model_without_region() -> SuperGLM:
+    return SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=6), "power": Numeric()},
+    )
+
+
 def test_run_cv_result_is_dropped_when_the_model_changes_mid_run(cv_frame, cv_fit, monkeypatch):
     from superglm.editor.cv import SUPERSEDED
     from superglm.editor.jobs import JobContext

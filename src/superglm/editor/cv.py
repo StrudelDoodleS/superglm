@@ -15,6 +15,7 @@ Every refusal is a fixed sentence (``editor/errors.py``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -25,8 +26,9 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.editor.carry import model_with_edited_curves
-from superglm.editor.errors import EditorValueError
+from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
+from superglm.editor.jobs import JobCancelledError
 from superglm.editor.refit import fit_refit_model
 from superglm.editor.terms import resolve_refit_method
 from superglm.model_selection import (
@@ -41,6 +43,8 @@ from superglm.plotting.curve_similarity import _summarize_against_fold_mean
 
 if TYPE_CHECKING:
     from superglm.editor._types import EditableTerm
+
+_LOGGER = logging.getLogger(__name__)
 
 JOB_KINDS = ("cv", "final_fit")
 
@@ -73,6 +77,8 @@ NO_FINAL_ROWS = "Final fit needs train_data, or a model that kept its fit data."
 TRAIN_ONLY = "No validation data was supplied, so Final fit uses the train rows only."
 SUPERSEDED = "The model changed while the job ran, so its result was not kept. Run it again."
 MIXED_FRAMES = "Train and validation data must both be pandas or both be Polars data frames."
+FOLD_FAILED = "Run CV stopped at fold {fold} and kept no result. {reason}"
+FOLD_NOT_FITTED = "That fold could not be fitted or scored."
 FINAL_SPLIT_MISSING = (
     "Final fit fits the train and validation rows together, so it needs {column} on both "
     "or on neither: the {have} data has them and the {lack} data does not. Pass them with "
@@ -679,16 +685,31 @@ def capture_cv_run(session) -> CVRunPlan:
 def run_cv(plan: CVRunPlan, context) -> CVRun:
     """Replay the stored folds on the in-force structure with the hand edits put back."""
     recorder = _FoldRecorder(plan, context)
-    result = cross_validate(
-        plan.model,
-        plan.rows.X,
-        plan.rows.y,
-        cv=StoredFolds(plan.folds, before_fold=recorder.before_fold),
-        sample_weight=plan.rows.sample_weight,
-        offset=plan.rows.offset,
-        fit_mode=plan.fit_mode,
-        scoring=recorder.score,
-    )
+    try:
+        result = cross_validate(
+            plan.model,
+            plan.rows.X,
+            plan.rows.y,
+            cv=StoredFolds(plan.folds, before_fold=recorder.before_fold),
+            sample_weight=plan.rows.sample_weight,
+            offset=plan.rows.offset,
+            fit_mode=plan.fit_mode,
+            scoring=recorder.score,
+            error_score="raise",
+        )
+    except JobCancelledError:
+        raise
+    except Exception as exc:
+        # A fold that fails stops the run: the folds that did score are not
+        # averaged as if they were all of them.
+        if isinstance(exc, EditorClientError):
+            reason = exc.public_message
+        else:
+            _LOGGER.warning("Run CV fold %d failed.", recorder.fold_number, exc_info=True)
+            reason = FOLD_NOT_FITTED
+        raise EditorValueError(
+            FOLD_FAILED.format(fold=recorder.fold_number, reason=reason)
+        ) from exc
     context.check()
     context.progress("curves")
     return CVRun(
@@ -717,6 +738,11 @@ class _FoldRecorder:
         self._y = np.asarray(plan.rows.y, dtype=np.float64)
         self._totals = {name: [0.0, 0.0] for name in plan.scoring if name in _POOLED_PARTS}
         self.curves: dict[int, dict[str, NDArray[np.float64]]] = {}
+
+    @property
+    def fold_number(self) -> int:
+        """The fold being fitted or scored, counted from 1."""
+        return self._fold + 1
 
     def before_fold(self, index: int) -> None:
         self._context.progress("fold", fold=index + 1, n_folds=len(self._plan.folds))
