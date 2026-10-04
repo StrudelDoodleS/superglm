@@ -833,6 +833,52 @@ def test_run_cv_job_puts_the_hand_edits_back_on_every_fold(cv_frame, cv_fit, fit
     assert age["spread"] > 0.0
 
 
+def test_run_cv_puts_the_hand_edits_back_on_each_fold_with_that_folds_training_rows(
+    cv_frame, cv_fit
+):
+    """Each fold's edits are carried with the rows that fold was fitted on.
+
+    The oracle replays every fold by hand: the same clone and fit as
+    ``cross_validate``, the edited curves carried with that fold's training
+    rows, then the built-in scores on its test rows. The same operations in
+    the same thread give the same numbers.
+    """
+    from superglm.editor.carry import model_with_edited_curves
+    from superglm.editor.cv import capture_cv_run, run_cv
+    from superglm.model_selection import _BUILTIN_SCORERS, _clone_model
+
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.select_indices("age", list(range(120, 200)))
+    session.shift("age", 0.3)
+    session.select_levels("region", ["C"])
+    session.shift("region", 0.1)
+    plan = capture_cv_run(session)
+
+    run = run_cv(plan, _Context())
+
+    frame = plan.rows.X
+    y = np.asarray(plan.rows.y, dtype=np.float64)
+    w = np.asarray(plan.rows.sample_weight, dtype=np.float64)
+    for index, (train, test) in enumerate(plan.folds):
+        fold = _clone_model(plan.model)
+        getattr(fold, plan.fit_mode)(frame.iloc[train], y[train], sample_weight=w[train])
+        fold = model_with_edited_curves(
+            fold,
+            plan.edited,
+            frame.iloc[train],
+            y[train],
+            w[train],
+            None,
+            n_points=plan.n_points,
+        )
+        for name in ("deviance", "gini", "nll"):
+            expected = _BUILTIN_SCORERS[name](
+                fold, frame.iloc[test], y[test], sample_weight=w[test], offset=None
+            )
+            assert run.result.fold_scores[name][index] == expected, (index, name)
+
+
 def test_run_cv_is_refused_with_its_reason(cv_frame, cv_fit):
     from superglm.editor.cv import ROWS_MISMATCH
 
