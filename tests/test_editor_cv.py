@@ -646,6 +646,28 @@ def test_job_runner_cancel_between_steps_publishes_nothing():
     assert published == []
 
 
+def test_job_runner_cancel_after_the_work_returns_publishes_nothing():
+    """A cancel that lands after the work's last check of its own still stops the publish."""
+    from superglm.editor.jobs import JobRunner
+
+    runner = JobRunner(name="test")
+    started, job, published = threading.Event(), [], []
+
+    def work(context):
+        context.check()
+        assert started.wait(30)
+        runner.cancel(job[0])
+        return "value"
+
+    job.append(runner.start("cv", work, lambda value: published.append(value) or {}))
+    started.set()
+    finished = runner.status(job[0], wait=True)
+    runner.close()
+
+    assert finished["status"] == "cancelled"
+    assert published == []
+
+
 def test_job_runner_runs_one_job_per_kind_and_keeps_the_last_of_each():
     from superglm.editor.errors import EditorKeyError, EditorValueError
     from superglm.editor.jobs import JobRunner
