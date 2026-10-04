@@ -324,6 +324,51 @@ def test_load_names_the_structural_steps_the_edit_file_did_not_restore(book, tmp
     assert [record.operation for record in loaded.history] == ["shift"]
 
 
+def _legacy_declared_grouping_model():
+    """A model as superglm 0.36.1 left it: levels=A, B, C while its grouping also maps D.
+
+    Construction refuses that declaration now. A model pickled before then
+    keeps it, fits rows holding D as the group Other and scores D there, so
+    the term is built as that older constructor left it.
+    """
+    rng = np.random.default_rng(2)
+    n = 1500
+    X = pd.DataFrame({"t": rng.choice(list("ABC"), n), "age": rng.uniform(18.0, 80.0, n)})
+    y = rng.poisson(np.exp(-1.0 + 0.2 * (X["t"] == "B"))).astype(np.float64)
+    legacy = Categorical(base="A", levels=list("ABC"))
+    legacy._grouping = collapse_levels(list("ABCD"), groups={"Other": ["C", "D"]})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"t": legacy, "age": Spline(kind="bs", n_knots=5)},
+    ).fit(X, y)
+    return model, X, y
+
+
+@pytest.mark.parametrize(
+    ("operation", "params", "levels"),
+    [
+        ("set_reference", {"level": "B"}, ["A", "B", "Other"]),
+        ("collapse", {"levels": ["A", "B"]}, ["A+B", "Other"]),
+    ],
+)
+def test_a_term_declared_before_the_grouping_check_can_still_be_restructured(
+    operation, params, levels
+):
+    model, X, y = _legacy_declared_grouping_model()
+    session = EditorSession.from_model(model, terms=["t", "age"], train_data=(X, y))
+
+    session.stage_structural(operation, "t", params)
+    session.refit_pending(method="fit")
+
+    spec = session.model._specs["t"]
+    assert spec._levels == levels
+    # D is declared now, as the older term accepted it, and still scores as Other.
+    assert [str(level) for level in spec._declared_levels] == ["A", "B", "C", "D"]
+    d, c = session.model.predict(pd.DataFrame({"t": ["D", "C"], "age": [40.0, 40.0]}))
+    assert d == c
+
+
 def test_ungrouping_to_no_groups_gives_an_integer_reference_its_native_type():
     rng = np.random.default_rng(20261005)
     code = rng.choice([1, 2, 3, 10], 400)

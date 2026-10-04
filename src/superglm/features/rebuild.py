@@ -105,16 +105,36 @@ def rebuilt_categorical(
 
 
 def _declared_universe(spec: Categorical, grouping) -> list | None:
-    """The universe a rebuild of ``spec`` declares: its own, widened when a frame bound it.
+    """The universe a rebuild of ``spec`` declares: its own, widened where it accepted more.
 
     A universe bound from a frame or a dtype is not a declaration: the term
     accepted every label its grouping maps, those the frame lacks included.
-    The rebuilt term declares its universe, and a declaration names every
-    label its grouping maps, so those labels follow the bound ones, which
-    keep their order and so the design's.
+    So did a term declared before construction refused a grouping wider than
+    ``levels=`` (:func:`accepted_levels`). The rebuilt term declares its
+    universe, and a declaration names every label its grouping maps, so those
+    labels follow the declared ones, which keep their order and so the design's.
     """
     declared = spec._declared_levels
-    if declared is None or grouping is None or spec._level_source == "declared":
+    if declared is None or grouping is None:
+        return declared
+    if spec._level_source == "declared" and accepted_levels(spec) == declared:
+        return declared
+    named = {str(level) for level in declared}
+    return [*declared, *(raw for raw in grouping.all_original_levels if raw not in named)]
+
+
+def accepted_levels(spec: Categorical) -> list | None:
+    """The levels ``spec`` accepts by declaration: ``levels=``, and what its grouping adds.
+
+    Construction refuses a grouping that maps labels ``levels=`` leaves out,
+    but a term pickled before it did (superglm 0.36.1 and earlier), or one
+    whose universe a frame bound, keeps such a grouping: it fits and scores
+    those labels through their group. They follow the declared levels. None
+    when nothing is declared.
+    """
+    declared = spec._declared_levels
+    grouping = getattr(spec, "_grouping", None)
+    if declared is None or grouping is None:
         return declared
     named = {str(level) for level in declared}
     return [*declared, *(raw for raw in grouping.all_original_levels if raw not in named)]

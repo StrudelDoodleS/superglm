@@ -49,6 +49,7 @@ from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange, Range
 from superglm.features.categorical import Categorical
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import (
+    accepted_levels,
     band_edges,
     clone_with_replaced_features,
     current_ranges,
@@ -516,7 +517,7 @@ def _rebuilt(model, name: str, spec, entry: FeatureStructure, frame):
 def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
     levels = list(entry.levels)
     groups = {label: list(members) for label, members in entry.groups.items()}
-    declared = spec._declared_levels
+    declared = accepted_levels(spec)
     # A grouping covers its levels at fit, so under one the levels the model
     # declares must be the structure's exactly: a level the grouping missed
     # would be refused, and a member the declaration leaves out admitted.

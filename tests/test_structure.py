@@ -791,6 +791,34 @@ def test_apply_refuses_levels_in_x_that_the_declared_levels_leave_out():
     )
 
 
+def test_a_term_declared_before_the_grouping_check_round_trips():
+    """A model from superglm 0.36.1 declares levels=A, B, C while its grouping also maps D.
+
+    Construction refuses that declaration now; a model pickled before then
+    keeps it and scores D as its group Other. Its own structure applies back
+    to it and refits the same model.
+    """
+    rng = np.random.default_rng(2)
+    n = 600
+    X = pd.DataFrame({"t": rng.choice(list("ABC"), n), "age": rng.uniform(18.0, 80.0, n)})
+    y = 0.5 + 0.2 * (X["t"] == "B") + 0.1 * np.sin(X["age"] / 15.0) + rng.normal(0.0, 0.05, n)
+    legacy = Categorical(base="A", levels=list("ABC"))
+    legacy._grouping = collapse_levels(list("ABCD"), groups={"Other": ["C", "D"]})
+    model = _declared({"t": legacy, "age": Spline(kind="bs", n_knots=5)}).fit(X, y)
+
+    structure = Structure.from_model(model)
+    assert structure.features["t"].levels == ["A", "B", "C", "D"]
+    applied = structure.apply(model)
+    applied.fit(X, y)
+
+    assert applied._specs["t"]._levels == model._specs["t"]._levels == ["A", "B", "Other"]
+    probe = pd.DataFrame({"t": list("ABCD"), "age": [40.0] * 4})
+    gap = np.max(np.abs(applied.predict(probe) - model.predict(probe)))
+    assert gap <= _linear_predictor_bound(probe, applied, model)
+    d, c = applied.predict(probe)[[3, 2]]
+    assert d == c
+
+
 def test_an_unexpected_library_error_becomes_the_features_refusal(monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("deep inside")
