@@ -16,7 +16,7 @@ from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.piecewise import Piecewise
 from superglm.features.rebuild import (
     SYMBOLIC_BASE_POLICIES,
-    clone_with_replaced_features,
+    clone_with_replaced_features,  # noqa: F401  (imported from here by the editor's tests)
     interaction_users,
     rebuilt_categorical,
     rebuilt_ordered_spec,
@@ -263,13 +263,6 @@ def _fitted_level_label(spec, grouping, term: EditableTerm, level: str) -> str:
     if level not in term.levels:
         raise EditorValueError(f"{level!r} is not a level of term {term.name!r}.")
     return level if grouping is None else str(grouping.original_to_group.get(level, level))
-
-
-def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., lambda2=...):
-    """Clone a model and replace one feature spec before fitting."""
-    return clone_with_replaced_features(
-        model, {term: replacement}, lambda1=lambda1, lambda2=lambda2
-    )
 
 
 def _require_not_interaction_parent(model, term: str, *, operation: str) -> None:

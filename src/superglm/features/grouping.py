@@ -8,6 +8,8 @@ original levels at inference/plotting time.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import chain
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -35,6 +37,18 @@ class LevelGrouping:
     group_to_originals: dict[str, list[str]]
     all_original_levels: list[str]
     grouped_levels: list[str]
+
+
+def native_by_text(*sources) -> dict[str, Any]:
+    """Each value by its text, the first one seen winning.
+
+    A grouping matches levels as text; this gives a level known only by its
+    text its native type back, so an integer level stays 3, not "3".
+    """
+    native: dict[str, Any] = {}
+    for value in chain.from_iterable(sources):
+        native.setdefault(str(value), value)
+    return native
 
 
 def collapse_levels(

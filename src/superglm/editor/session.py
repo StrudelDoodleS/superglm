@@ -21,7 +21,6 @@ from superglm.editor._types import (
     new_step_id,
 )
 from superglm.editor.collapse import (
-    clone_with_replaced_feature,
     collapsed_feature_spec,
     ungroup_label,
     ungrouped_feature_spec,
@@ -1340,18 +1339,16 @@ class EditorSession:
         if y_ref is None:
             raise RuntimeError("Fit response data was not retained on the source model.")
         replacement, metadata = build(X_ref)
-        refit_model = clone_with_replaced_feature(
-            self.model, term, replacement, lambda1=lambda1, lambda2=lambda2
-        )
-        metadata["method"] = fit_refit_model(
-            self.model,
-            refit_model,
-            method=method,
+        refit_model, metadata["method"] = self._refit_with_drafts(
+            {term: replacement},
             X=X_ref,
             y=y_ref,
             sample_weight=sample_weight_ref,
             offset=base_offset,
-            fit_kwargs=fit_kwargs,
+            method=method,
+            lambda1=lambda1,
+            lambda2=lambda2,
+            **fit_kwargs,
         )
         refit_model._editor_step = metadata
         return refit_model
@@ -1871,11 +1868,15 @@ class EditorSession:
                 params=recorded,
             )
         )
-        self.redo_stack.clear()
-        self.structure_redo.clear()
-        self.pending_redo.clear()
+        self._end_redo()
         if changed:
             self._advance_model_revision()
+
+    def _end_redo(self) -> None:
+        """A new action ends the future of whatever was undone."""
+        self.redo_stack.clear()
+        self.pending_redo.clear()
+        self.structure_redo.clear()
 
     def _pop_record(self, records: list[EditRecord], term: str | None) -> EditRecord | None:
         if term is None:

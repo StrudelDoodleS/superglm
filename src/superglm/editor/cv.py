@@ -25,12 +25,13 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
-from superglm.editor.carry import model_with_edited_curves
+from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.refit import fit_refit_model
 from superglm.editor.terms import resolve_refit_method
+from superglm.features.grouping import native_by_text
 from superglm.model.fit_state import configured_lambda2, configured_penalty
 from superglm.model_selection import (
     _BUILTIN_SCORERS,
@@ -136,10 +137,6 @@ class StoredFolds:
             if self.before_fold is not None:
                 self.before_fold(index)
             yield train, test
-
-    def get_n_splits(self, X=None, y=None, groups=None) -> int:
-        del X, y, groups
-        return len(self.folds)
 
 
 @dataclass(frozen=True)
@@ -333,9 +330,7 @@ def _levels_as_taken(spec, grid: _TermGrid) -> NDArray:
     unseen (or, under ``unseen="base"``, reads it at the reference). A label
     the fold's levels lack, a grouped fold's member, is passed as it is.
     """
-    own: dict[str, Any] = {}
-    for level in getattr(spec, "_levels", ()):
-        own.setdefault(str(level), level)
+    own = native_by_text(getattr(spec, "_levels", ()))
     return np.asarray(
         [
             own.get(label, point)
@@ -403,10 +398,7 @@ def _term_item(
     def centred(log_values) -> NDArray[np.float64]:
         values = np.asarray(log_values, dtype=np.float64)
         points = shared if shared.any() else ~np.isnan(values)
-        point_weights = weights[points]
-        if not float(np.sum(point_weights)) > 0.0:
-            point_weights = np.ones(point_weights.size, dtype=np.float64)
-        return np.exp(values - np.average(values[points], weights=point_weights))
+        return np.exp(values - weighted_mean(values[points], weights[points]))
 
     folds = {f"Fold {index + 1}": centred(values) for index, values in curves.items()}
     vs_mean = None if held else _summarize_against_fold_mean(folds, weights)
@@ -616,12 +608,24 @@ def _relativities(view: CVTabView) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class CVRunPlan:
-    """Everything Run CV reads, captured under the widget lock."""
+class _Plan:
+    """A job's inputs, captured under the widget lock with the model they were taken from.
+
+    ``template`` is the in-force structure, unfitted, that the job fits.
+    """
 
     model: Any
     template: Any
     model_revision: int
+
+    def is_current(self, session) -> bool:
+        return session.model_revision == self.model_revision and session.model is self.model
+
+
+@dataclass(frozen=True)
+class CVRunPlan(_Plan):
+    """Everything Run CV reads."""
+
     rows: EvaluationDataset
     folds: tuple[tuple[NDArray[np.intp], NDArray[np.intp]], ...]
     terms: dict[str, EditableTerm]
@@ -630,9 +634,6 @@ class CVRunPlan:
     scoring: tuple[str, ...]
     splitter: str | None
     n_points: int
-
-    def is_current(self, session) -> bool:
-        return session.model_revision == self.model_revision and session.model is self.model
 
 
 def capture_cv_run(session) -> CVRunPlan:
@@ -792,19 +793,13 @@ def _take(values, rows: NDArray[np.intp]):
 
 
 @dataclass(frozen=True)
-class FinalFitPlan:
-    """Everything Final fit reads, captured under the widget lock."""
+class FinalFitPlan(_Plan):
+    """Everything Final fit reads."""
 
-    model: Any
-    template: Any
-    model_revision: int
     datasets: tuple[EvaluationDataset, ...]
     edited: dict[str, EditableTerm]
     pending: int
     n_points: int
-
-    def is_current(self, session) -> bool:
-        return session.model_revision == self.model_revision and session.model is self.model
 
 
 def capture_final_fit(session) -> FinalFitPlan:

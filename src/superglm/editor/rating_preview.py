@@ -11,8 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pandas as pd
+
+from superglm.editor.io import jsonable
 
 # The preview asks for no discretisation-impact sweep. The builder makes every
 # block before it sweeps, and the sweep fills only the workbook's impact sheet,
@@ -112,13 +113,8 @@ def _block_note(block) -> str | None:
 
 
 def _cell(value: Any) -> str | int | float | bool | None:
-    if isinstance(value, bool | np.bool_):
-        return bool(value)
-    if isinstance(value, int | np.integer):
-        return int(value)
-    if isinstance(value, float | np.floating):
-        number = float(value)
-        return number if np.isfinite(number) else None
-    if value is None or pd.isna(value):
-        return None
-    return str(value)
+    """A table cell as JSON: numpy scalars as Python ones, a missing or non-finite value as None."""
+    plain = jsonable(value)
+    if plain is None or isinstance(plain, bool | int | float):
+        return plain
+    return None if pd.isna(plain) else str(plain)

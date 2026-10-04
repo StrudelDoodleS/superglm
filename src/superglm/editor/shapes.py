@@ -19,6 +19,7 @@ from superglm.features.rebuild import (
     RangePlacementError,
     band_edges,
     current_ranges,
+    edge_text,
     merged_ranges,
     pristine_basis,
     rebuilt_ordered_spec,
@@ -159,7 +160,7 @@ def shaped_feature_spec(
     basis = shaped_spline(source, ranges, knots=knots, boundary=boundary)
     setattr(basis, EDITOR_CHOSEN_SHAPE_ATTRIBUTE, True)
     replacement = _hosted(spec, basis, name, X) if ordered else basis
-    span = f"{_edge_text(lo)}–{_edge_text(hi)}"
+    span = f"{edge_text(lo)}–{edge_text(hi)}"
     return replacement, {
         "format": "superglm.editor.shaped_range.v1",
         "term": name,
@@ -241,10 +242,6 @@ def _hosted(spec: OrderedCategorical, basis, name: str, X) -> OrderedCategorical
         data=frame.column_array(name),
         basis=basis,
     )
-
-
-def _edge_text(edge) -> str:
-    return edge if isinstance(edge, str) else f"{edge:g}"
 
 
 def _is_finite(value) -> bool:

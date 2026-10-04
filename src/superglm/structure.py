@@ -49,6 +49,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange, RangeError
 from superglm.features.categorical import Categorical
+from superglm.features.grouping import native_by_text
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import (
     accepted_levels,
@@ -267,7 +268,7 @@ class Structure:
             if not isinstance(name, str):
                 raise StructureError(_NOT_WRITABLE.format(value=name, feature=name))
             if kind == "spline":
-                features[name] = FeatureStructure(kind=kind, ranges=_spec_ranges(spec))
+                features[name] = FeatureStructure(kind=kind, ranges=list(current_ranges(spec)))
             else:
                 features[name] = _level_structure(name, spec, kind, frame)
         if getattr(model, "_result", None) is None:
@@ -458,11 +459,6 @@ def _kind(spec) -> str | None:
     return None
 
 
-def _spec_ranges(spec) -> list[PolynomialRange]:
-    """The polynomial ranges in force on ``spec``, in axis order."""
-    return list(current_ranges(spec))
-
-
 def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
     """The levels, groups, reference and unseen policy of a fitted categorical or ordered term."""
     if spec._base_level == "" or spec._base_level is None:
@@ -503,7 +499,7 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
     reference = spec._base_level
     if str(reference) not in groups:
         reference = native.get(str(reference), reference)
-    ranges = _spec_ranges(spec) if kind == "ordered" else []
+    ranges = list(current_ranges(spec)) if kind == "ordered" else []
     _require_writable_levels(name, universe)
     return FeatureStructure(
         kind=kind,
@@ -534,15 +530,12 @@ def _require_writable_levels(name: str, levels: list) -> None:
 
 def _native_levels(name: str, universe: list, spec, frame) -> dict[str, Any]:
     """Each level's native value by its text: the term's own levels, declared, then X's column."""
-    values = list(universe) + list(getattr(spec, "_declared_levels", None) or [])
+    column = []
     if frame is not None and name in frame.columns:
         import pandas as pd
 
-        values.extend(pd.unique(np.asarray(frame.column_array(name), dtype=object)).tolist())
-    native: dict[str, Any] = {}
-    for value in values:
-        native.setdefault(str(value), value)
-    return native
+        column = pd.unique(np.asarray(frame.column_array(name), dtype=object)).tolist()
+    return native_by_text(universe, getattr(spec, "_declared_levels", None) or [], column)
 
 
 # -- Applying to a model ---------------------------------------------------------
@@ -652,7 +645,7 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     grouping = _grouping(entry.levels, entry.groups, order=declared)
     base = entry.reference if grouping is None else str(entry.reference)
     data = np.asarray(entry.levels, dtype=object)
-    if _same_ranges(entry.ranges, _spec_ranges(spec)):
+    if _same_ranges(entry.ranges, current_ranges(spec)):
         return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data)
     _require_shapes(model, name, entry)
     source = pristine_basis(spec)
@@ -696,7 +689,7 @@ def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
     from superglm.features._spline_ranges import validate_ranges
 
-    if _same_ranges(entry.ranges, _spec_ranges(spec)):
+    if _same_ranges(entry.ranges, current_ranges(spec)):
         return spec
     _require_shapes(model, name, entry)
     ranges: list[PolynomialRange] = []

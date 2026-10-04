@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.features.categorical import Categorical
+from superglm.features.grouping import native_by_text
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.piecewise import Piecewise
@@ -153,9 +154,7 @@ def _native_level_values(X: EagerFrame, term: str, labels: list[str]) -> NDArray
     A fitted universe keeps native types, so an integer-coded categorical
     refuses the text "1" as an unseen level.
     """
-    native: dict[str, Any] = {}
-    for value in pd.Series(X.column_array(term), name=term).drop_duplicates().tolist():
-        native.setdefault(str(value), value)
+    native = native_by_text(pd.Series(X.column_array(term), name=term).drop_duplicates().tolist())
     return np.asarray([native.get(label, label) for label in labels], dtype=object)
 
 

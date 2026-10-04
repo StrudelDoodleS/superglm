@@ -175,10 +175,7 @@ def stage_structural(
         metadata=dict(metadata),
     )
     session.pending.append(step)
-    # A new action ends the future of whatever was undone.
-    session.redo_stack.clear()
-    session.pending_redo.clear()
-    session.structure_redo.clear()
+    session._end_redo()
     return step
 
 

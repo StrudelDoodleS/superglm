@@ -42,10 +42,6 @@ class JobContext:
     _cancel: threading.Event = field(repr=False)
     _report: Callable[[dict[str, Any]], None] = field(repr=False)
 
-    @property
-    def cancelled(self) -> bool:
-        return self._cancel.is_set()
-
     def check(self) -> None:
         """Raise :class:`JobCancelledError` if a cancel was requested."""
         if self._cancel.is_set():

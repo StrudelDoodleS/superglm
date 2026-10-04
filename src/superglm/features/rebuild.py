@@ -16,7 +16,6 @@ import dataclasses
 import re
 import warnings
 from collections.abc import Callable
-from itertools import chain
 from typing import Any
 
 import numpy as np
@@ -24,7 +23,7 @@ import pandas as pd
 
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
-from superglm.features.grouping import LevelGrouping
+from superglm.features.grouping import LevelGrouping, native_by_text
 from superglm.features.ordered_categorical import (
     _CLAMP_WARNING_PREFIX,
     OrderedCategorical,
@@ -132,12 +131,9 @@ def _declared_universe(spec: Categorical, grouping) -> list | None:
     labels follow the declared ones, which keep their order and so the design's.
     """
     declared = spec._declared_levels
-    if declared is None or grouping is None:
-        return declared
     if spec._level_source == "declared" and accepted_levels(spec) == declared:
         return declared
-    named = {str(level) for level in declared}
-    return [*declared, *(raw for raw in grouping.all_original_levels if raw not in named)]
+    return _with_grouped(declared, grouping)
 
 
 def accepted_levels(spec: Categorical) -> list | None:
@@ -149,8 +145,11 @@ def accepted_levels(spec: Categorical) -> list | None:
     those labels through their group. They follow the declared levels. None
     when nothing is declared.
     """
-    declared = spec._declared_levels
-    grouping = getattr(spec, "_grouping", None)
+    return _with_grouped(spec._declared_levels, getattr(spec, "_grouping", None))
+
+
+def _with_grouped(declared: list | None, grouping) -> list | None:
+    """``declared``, then the labels ``grouping`` maps that it leaves out."""
     if declared is None or grouping is None:
         return declared
     named = {str(level) for level in declared}
@@ -165,10 +164,7 @@ def _native_levels(spec: Categorical, fitted: Categorical, data) -> dict[str, An
     """
     fitted_levels = fitted._levels if getattr(fitted, "_grouping", None) is None else []
     observed = pd.unique(np.asarray(data).ravel()).tolist()
-    native: dict[str, Any] = {}
-    for level in chain(spec._declared_levels or [], fitted_levels, observed):
-        native.setdefault(str(level), level)
-    return native
+    return native_by_text(spec._declared_levels or [], fitted_levels, observed)
 
 
 # -- Ordered terms ---------------------------------------------------------------
@@ -266,9 +262,7 @@ def _ordered_original_values(
     if grouping is not None:
         return values, base
 
-    native_by_label: dict[str, Any] = {}
-    for raw in np.asarray(data, dtype=object).ravel():
-        native_by_label.setdefault(str(raw), raw)
+    native_by_label = native_by_text(np.asarray(data, dtype=object).ravel())
     native_values = {native_by_label.get(label, label): value for label, value in values.items()}
     native_base = base if base in SYMBOLIC_BASE_POLICIES else native_by_label.get(str(base), base)
     return native_values, native_base
@@ -360,7 +354,7 @@ def merged_ranges(
         if at[0] < span[1] and span[0] < at[1]:
             raise RangePlacementError(
                 f"This range overlaps the {current.label} range "
-                f"{_edge_text(current.lo)}–{_edge_text(current.hi)}. "
+                f"{edge_text(current.lo)}–{edge_text(current.hi)}. "
                 "Undo it or choose a range outside it."
             )
         kept.append(current)
@@ -392,5 +386,6 @@ def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBas
     )
 
 
-def _edge_text(edge) -> str:
+def edge_text(edge) -> str:
+    """A range edge as a sentence names it: a band as it is, a number as ``%g``."""
     return edge if isinstance(edge, str) else f"{edge:g}"

@@ -114,10 +114,7 @@ def set_unseen(session: EditorSession, term: str, policy: Any) -> UnseenChoice |
         model_after=model_with_unseen(before, term, policy),
     )
     session.history.append(record)
-    # A new action ends the future of whatever was undone.
-    session.redo_stack.clear()
-    session.pending_redo.clear()
-    session.structure_redo.clear()
+    session._end_redo()
     session.model = record.model_after
     session._advance_model_revision()
     return record

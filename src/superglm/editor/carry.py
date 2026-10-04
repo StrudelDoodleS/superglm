@@ -123,12 +123,12 @@ def _carried_values(source: EditableTerm, target: EditableTerm) -> NDArray[np.fl
         shared = np.array([label in position for label in target.levels], dtype=bool)
         index = [position[label] for label in target.levels if label in position]
         values = refit.copy()
-        anchor = _anchor(refit[shared], native_log_effect_values(original)[index], weights[shared])
-        values[shared] = edited[index] + anchor
+        moved = refit[shared] - native_log_effect_values(original)[index]
+        values[shared] = edited[index] + weighted_mean(moved, weights[shared])
         return values
     x = np.asarray(target.x, dtype=np.float64)
-    anchor = _anchor(refit, term_offset_values(original, x), weights)
-    return term_offset_values(source, x) + anchor
+    moved = refit - term_offset_values(original, x)
+    return term_offset_values(source, x) + weighted_mean(moved, weights)
 
 
 def _original_curve(term: EditableTerm) -> EditableTerm:
@@ -144,13 +144,13 @@ def _weights(term: EditableTerm) -> NDArray[np.float64]:
     return np.asarray(term.weights, dtype=np.float64)
 
 
-def _anchor(refit: NDArray, original: NDArray, weights: NDArray) -> float:
-    """Exposure-weighted mean of ``refit - original``; unweighted when no row backs it."""
-    if refit.size == 0:
+def weighted_mean(values: NDArray, weights: NDArray) -> float:
+    """Exposure-weighted mean of ``values``; unweighted when no row backs them, 0 when empty."""
+    if values.size == 0:
         return 0.0
     if not float(np.sum(weights)) > 0.0:
-        weights = np.ones_like(refit)
-    return float(np.average(refit - original, weights=weights))
+        weights = np.ones_like(values)
+    return float(np.average(values, weights=weights))
 
 
-__all__ = ["carried_curve", "model_with_edited_curves"]
+__all__ = ["carried_curve", "model_with_edited_curves", "weighted_mean"]
