@@ -199,6 +199,29 @@ function invalidatePriorEvidence(state, revision) {
 }
 
 /**
+ * Whether two snapshots wait for different changes. Undo and Redo of a
+ * waiting change keep the model revision, so this is how a report that shows
+ * the waiting list (the Cross-validation tab's chip and Run CV's reason)
+ * learns it is out of date.
+ *
+ * @param {EditorSnapshot|null} previous @param {EditorSnapshot} next
+ */
+export function waitingListChanged(previous, next) {
+  /** @param {EditorSnapshot|null} snapshot */
+  const ids = (snapshot) => (snapshot?.pending ?? []).map((step) => step.id).join(" ");
+  return previous !== null && ids(previous) !== ids(next);
+}
+
+/** @param {EditorState} state */
+function invalidateReportEvidence(state) {
+  const current = state.request.evidence.report;
+  if (current.status === "idle" && current.payload === null) return state.request;
+  const evidence = { ...state.request.evidence };
+  evidence.report = { ...current, status: "stale", error: null };
+  return { ...state.request, evidence };
+}
+
+/**
  * The anchor is a source index, and a level reorder (a drag, its Undo or Redo,
  * Reset order) renumbers its term's levels. The anchor follows its level, as
  * the selection does, and goes when that level is gone.
@@ -226,7 +249,9 @@ export function commitRemote(state, snapshot) {
   const previousRevision = state.remote.snapshot?.model_revision;
   const request = previousRevision !== undefined && previousRevision !== snapshot.model_revision
     ? invalidatePriorEvidence(state, snapshot.model_revision)
-    : state.request;
+    : waitingListChanged(state.remote.snapshot, snapshot)
+      ? invalidateReportEvidence(state)
+      : state.request;
   const selectionAnchor = anchorFollowingItsLevel(
     state.view.selectionAnchor, state.remote.snapshot, snapshot
   );

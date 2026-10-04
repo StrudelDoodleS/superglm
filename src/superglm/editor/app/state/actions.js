@@ -10,7 +10,8 @@ import {
   normalizeSelectionIndices,
   patchView as patchViewState,
   selectionIndicesEqual,
-  setSelectionPreview
+  setSelectionPreview,
+  waitingListChanged
 } from "./store.js";
 import { selectModelRevision } from "./selectors.js";
 
@@ -38,7 +39,7 @@ import { selectModelRevision } from "./selectors.js";
  * @typedef {Object} EditorActionOptions
  * @property {EditorStore} store
  * @property {ActionClient} client
- * @property {(revision:number, options?:{immediate?:boolean, summaryCommitted?:boolean})=>void|Promise<void>} [scheduleVisibleEvidence]
+ * @property {(revision:number, options?:{immediate?:boolean, summaryCommitted?:boolean, onlyStale?:boolean})=>void|Promise<void>} [scheduleVisibleEvidence]
  * @property {()=>void|Promise<void>} [waitForPaint]
  * @property {(callback:()=>void, delay:number)=>any} [setTimer]
  * @property {(timer:any)=>void} [clearTimer]
@@ -377,7 +378,8 @@ export function createEditorActions({
       return skippedMutation("An editor mutation is already running.");
     }
 
-    const previousRevision = store.getState().remote.snapshot?.model_revision ?? -1;
+    const previousSnapshot = store.getState().remote.snapshot;
+    const previousRevision = previousSnapshot?.model_revision ?? -1;
     const descriptor = { name, path, payload: snapshotPayload(payload) };
     store.update((state) => ({
       ...state,
@@ -409,12 +411,18 @@ export function createEditorActions({
         }
       };
     });
-    if (snapshot.model_revision !== previousRevision) {
-      try {
+    try {
+      if (snapshot.model_revision !== previousRevision) {
         void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision)).catch(() => {});
-      } catch {
-        // Evidence refresh is independent of the already-confirmed mutation.
+      } else if (waitingListChanged(previousSnapshot, snapshot)) {
+        // Undo or Redo of a waiting change: the model is as it was, but a
+        // report showing the waiting list went stale (commitRemote).
+        void Promise.resolve(
+          scheduleVisibleEvidence(snapshot.model_revision, { immediate: true, onlyStale: true })
+        ).catch(() => {});
       }
+    } catch {
+      // Evidence refresh is independent of the already-confirmed mutation.
     }
     return { ok: true, snapshot };
   }

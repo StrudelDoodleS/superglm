@@ -93,6 +93,34 @@ def test_run_cv_from_the_tab_adds_the_current_model(cv_widget, chromium_browser)
         page.close()
 
 
+_RUN_CV_DISABLED = """() => document.querySelector('#reportFrame [data-cv-start="cv"]').disabled"""
+
+
+def test_undo_and_redo_of_a_waiting_change_update_the_open_tab(cv_widget, chromium_browser):
+    """Undo and Redo of a waiting change keep the model revision; the tab follows them anyway.
+
+    Its waiting chip, Run CV's state and its reason come from the report,
+    which a change of revision alone used to refresh.
+    """
+    cv_widget.session.stage_structural("collapse", "region", {"levels": ["A", "B"]})
+    page = _open_cv_tab(chromium_browser, cv_widget)
+    chips = page.locator("#reportFrame .cv-chip")
+    try:
+        assert page.evaluate(_RUN_CV_DISABLED) is True
+        assert chips.all_text_contents() == ["1 change waiting for refit"]
+
+        page.locator("#undoAction").click()
+        page.wait_for_function(f"() => !({_RUN_CV_DISABLED})()")
+        assert chips.count() == 0 and cv_widget.session.pending == []
+
+        page.locator("#redoAction").click()
+        page.wait_for_function(_RUN_CV_DISABLED)
+        assert chips.all_text_contents() == ["1 change waiting for refit"]
+        assert len(cv_widget.session.pending) == 1
+    finally:
+        page.close()
+
+
 _FOLD_OPACITY = """(selector) => [0, 1, 2].map((fold) => [
   ...document.querySelectorAll(`#reportFrame [data-cv-chart] ${selector}[data-fold="${fold}"]`)
 ].map((node) => Number(getComputedStyle(node).opacity)))"""

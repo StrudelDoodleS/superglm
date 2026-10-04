@@ -255,6 +255,30 @@ test("same-revision mutation clears preview without scheduling evidence", async 
   assert.deepEqual(scheduled, []);
 });
 
+test("an undo that changes only the waiting list re-requests the stale report", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+  /** @type {[number, unknown][]} */
+  const scheduled = [];
+  const undone = snapshot(2);
+  undone.pending = [
+    { id: "abc1234", operation: "collapse", term: "age", label: "Collapse", params: {}, note: null, time: 0 }
+  ];
+  const actions = createEditorActions({
+    store,
+    client: { postJSON: async () => undone, getState: async () => undone },
+    scheduleVisibleEvidence: (revision, options) => { scheduled.push([revision, options]); }
+  });
+
+  const result = await actions.executeStateMutation({
+    name: "redo",
+    path: "/op",
+    payload: { operation: "redo" }
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(scheduled, [[2, { immediate: true, onlyStale: true }]]);
+});
+
 test("selection mutation normalizes semantic no-ops without posting", async () => {
   const confirmed = snapshot(2);
   confirmed.selection.age = [1, 2];

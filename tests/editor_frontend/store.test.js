@@ -415,6 +415,35 @@ test("a new model revision marks every prior evidence panel stale", () => {
   }
 });
 
+test("a change to the waiting list at one revision marks only the report stale", () => {
+  // Undo or Redo of a waiting change keeps the revision; the Cross-validation
+  // report shows the waiting list (its chip, Run CV's reason), so it goes stale.
+  let state = createInitialEditorState(snapshot(2));
+  const panels = /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"]);
+  for (const [sequence, panel] of panels.entries()) {
+    state = beginEvidence(state, panel, 2, sequence + 1, { path: `/${panel}`, payload: {} });
+    state = completeEvidence(state, panel, 2, sequence + 1, { panel });
+  }
+  const waiting = snapshot(2);
+  waiting.pending = [
+    { id: "abc1234", operation: "collapse", term: "age", label: "Collapse", params: {}, note: null, time: 0 }
+  ];
+
+  const committed = commitRemote(state, waiting);
+
+  assert.equal(committed.request.evidence.report.status, "stale");
+  assert.equal(selectEvidenceNeedsRefresh(committed, "report"), true);
+  for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary"])) {
+    assert.equal(committed.request.evidence[panel].status, "current");
+  }
+  // The same waiting list again leaves the report as it is.
+  const again = commitRemote(
+    { ...committed, request: { ...committed.request, evidence: state.request.evidence } },
+    { ...waiting }
+  );
+  assert.equal(again.request.evidence.report.status, "current");
+});
+
 test("visible evidence selectors catch editor panels up after returning from reports", () => {
   let state = createInitialEditorState(snapshot(4));
   state = beginEvidence(state, "metrics", 3, 1, { path: "/metrics", payload: {} });
@@ -723,7 +752,8 @@ test("state modules expose only their requested public symbols", () => {
     "patchView",
     "selectionIndicesEqual",
     "setPreviewTerm",
-    "setSelectionPreview"
+    "setSelectionPreview",
+    "waitingListChanged"
   ]);
   assert.deepEqual(Object.keys(selectors).sort(), [
     "selectActiveTermName",
