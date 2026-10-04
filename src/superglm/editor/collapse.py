@@ -566,7 +566,14 @@ def _kept_levels(spec, base) -> list[str]:
 
 
 def _mark_kept(replacement, base, kept: list[str], grouping: LevelGrouping | None) -> None:
-    """Mark ``replacement``'s reference as kept and record the levels it stands for."""
+    """Mark ``replacement``'s reference as kept and record the levels it stands for.
+
+    A symbolic policy handed on from a draft (``_reference_to_keep``) keeps
+    nothing: the refit chooses again and may move the reference, so it is
+    left unmarked and the chip names the policy.
+    """
+    if str(base) in SYMBOLIC_BASE_POLICIES:
+        return
     setattr(replacement, KEPT_REFERENCE_ATTRIBUTE, True)
     members = set(_base_original_members(str(base), grouping))
     setattr(replacement, _KEPT_LEVELS_ATTRIBUTE, tuple(level for level in kept if level in members))

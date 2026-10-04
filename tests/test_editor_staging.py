@@ -150,6 +150,53 @@ def test_keep_reference_after_a_waiting_change_that_let_the_policy_choose(book):
     assert after.base == "first"
 
 
+@pytest.mark.parametrize("operation", ["collapse", "ungroup"])
+def test_a_reference_the_policy_chooses_again_is_not_called_kept(operation):
+    """A keep-reference step on a draft whose policy chooses again keeps nothing.
+
+    The first change lets the policy choose and takes B1, the reference in
+    force, into a group; the second, with keep-reference on, hands that policy
+    on. At the Refit the policy picks another level, so the chip must name
+    the policy, not "kept".
+    """
+    from superglm.editor.collapse import KEPT_REFERENCE_ATTRIBUTE
+    from superglm.editor.payloads import _reference_payload
+
+    rng = np.random.default_rng(5)
+    n = 4000
+    brand = rng.choice(BRANDS, n, p=[0.30, 0.05, 0.25, 0.25, 0.15])
+    y = 0.5 + 0.1 * (brand == "B2") + rng.normal(0.0, 0.05, n)
+    X = pd.DataFrame({"brand": brand, "age": rng.uniform(18.0, 80.0, n)})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"brand": Categorical(base="most_exposed"), "age": Spline(n_knots=5)},
+    ).fit(X, y)
+    session = EditorSession.from_model(model, terms=["brand", "age"], train_data=(X, y))
+    assert _reference_payload(session, "brand") == {"level": "B1", "policy": "most_exposed"}
+
+    session.stage_structural("collapse", "brand", {"levels": ["B1", "B2"]}, keep_reference=False)
+    if operation == "collapse":
+        session.stage_structural(
+            "collapse", "brand", {"levels": ["B10", "B11"]}, keep_reference=True
+        )
+    else:
+        session.stage_structural(
+            "collapse", "brand", {"levels": ["B10", "B11", "B12"]}, keep_reference=False
+        )
+        session.stage_structural("ungroup", "brand", {"levels": ["B12"]}, keep_reference=True)
+    draft = session.draft_spec("brand")
+    assert draft.base == "most_exposed"
+    assert not getattr(draft, KEPT_REFERENCE_ATTRIBUTE, False)
+    session.refit_pending(method="fit")
+
+    assert _reference_payload(session, "brand") == {
+        "level": "B10+B11",
+        "policy": "most_exposed",
+    }
+
+
 def test_keep_reference_finds_its_level_again_when_a_waiting_group_breaks_up(book):
     model, X, y = book
     # B2 sorts after B10 and B11, so a tie settled by order alone would lose it.
