@@ -12,6 +12,7 @@ one implementation and the library never imports the editor.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import re
 import warnings
 from collections.abc import Callable
@@ -58,8 +59,24 @@ def clone_with_replaced_features(model, replacements: dict[str, Any], *, lambda1
     new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
     for term, replacement in replacements.items():
         new_model._specs[term] = copy.deepcopy(replacement)
+    # A bind_levels binding was resolved on the old spec. Its base names a
+    # level of the old grouping, which a replacement whose base is still
+    # "most_exposed" would pin though it may no longer be a level, so a
+    # replaced term's base resolves again where it is fitted. Its universe
+    # carries over only to a replacement that declares none.
+    kept = []
+    for name, binding in getattr(new_model, "_level_bindings", None) or ():
+        if name not in replacements:
+            kept.append((name, binding))
+        elif getattr(replacements[name], "_declared_levels", None) is None:
+            kept.append((name, dataclasses.replace(binding, base=None)))
+    bindings = tuple(kept) or None
+    new_model._level_bindings = bindings
     new_model._config = new_model._config.with_value(
-        feature_templates=tuple((name, new_model._specs[name]) for name in new_model._feature_order)
+        feature_templates=tuple(
+            (name, new_model._specs[name]) for name in new_model._feature_order
+        ),
+        level_bindings=bindings,
     )
     new_model._config_revision += 1
     return new_model

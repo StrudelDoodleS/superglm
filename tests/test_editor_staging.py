@@ -300,6 +300,33 @@ def test_a_collapse_on_a_frame_bound_universe_declares_the_labels_its_grouping_m
     assert d == c
 
 
+def test_a_collapse_of_the_bound_reference_without_keeping_it_refits():
+    # bind_levels pins the most-exposed level, A, as the reference. Collapsing
+    # A and B without keeping the reference leaves the rebuilt term's base
+    # "most_exposed", which resolves again on the groups: the old binding's A
+    # is no longer a level. The binding of the term no change touched stays.
+    weights = np.tile([4.0, 2.0, 1.0, 1.0], 30)
+    X = pd.DataFrame(
+        {"brand": np.tile(["A", "B", "C", "D"], 30), "area": np.repeat(["X", "Y"], 60)}
+    )
+    y = np.tile([1.0, 2.0, 4.0, 3.0], 30) + 0.5 * (X["area"] == "Y")
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"brand": Categorical(), "area": Categorical()},
+    ).bind_levels(X, sample_weight=weights)
+    model.fit(X, y, sample_weight=weights)
+    assert model._specs["brand"]._base_level == "A"
+    session = EditorSession.from_model(model, terms=["brand"])
+
+    session.stage_structural("collapse", "brand", {"levels": ["A", "B"]}, keep_reference=False)
+    session.refit_pending(method="fit")
+
+    fitted = session.model._specs["brand"]
+    assert (fitted._levels, fitted._base_level) == (["A+B", "C", "D"], "A+B")
+    assert [name for name, _binding in session.model._level_bindings] == ["area"]
+
+
 def test_load_names_the_structural_steps_the_edit_file_did_not_restore(book, tmp_path):
     model, _, _ = book
     session = _session(model)

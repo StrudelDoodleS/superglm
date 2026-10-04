@@ -683,7 +683,10 @@ def test_apply_keeps_the_models_separation_group_pricing_and_bound_levels():
     applied = _brand_structure().apply(model)
 
     assert (applied._separation, applied._group_pricing) == ("error", "spanned")
-    assert applied._config.level_bindings == model._config.level_bindings
+    # brand's rebuilt term declares the structure's universe and reference, so
+    # its old binding goes; area's, which the structure leaves alone, stays.
+    bound = dict(model._config.level_bindings)
+    assert applied._config.level_bindings == (("area", bound["area"]),)
     without_d = (X["area"] != "D").to_numpy()
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*pinned.*", category=UserWarning)
@@ -693,6 +696,30 @@ def test_apply_keeps_the_models_separation_group_pricing_and_bound_levels():
     # The copy's own clone keeps them too.
     again = applied.clone_unfitted()
     assert (again._separation, again._group_pricing) == ("error", "spanned")
+
+
+def test_apply_keeps_the_bound_universe_of_a_term_it_rebuilds_without_one():
+    """An ungrouped structure declares no universe, so the binding's universe stays.
+
+    The binding's base does not: the structure's reference replaces it.
+    """
+    X, y = _frame()
+    model = _declared({"brand": Categorical(base="most_exposed")}).bind_levels(X)
+    structure = Structure(
+        features={
+            "brand": FeatureStructure(kind="categorical", levels=sorted(BRANDS), reference="B10")
+        }
+    )
+
+    applied = structure.apply(model)
+    without_b14 = (X["brand"] != "B14").to_numpy()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*pinned.*", category=UserWarning)
+        applied.fit(X[without_b14], y[without_b14])
+
+    assert applied._specs["brand"]._base_level == "B10"
+    b14, b10 = applied.predict(pd.DataFrame({"brand": ["B14", "B10"]}))
+    assert b14 == b10
 
 
 @pytest.mark.parametrize("estimated", ["auto_selection", "reml_smoothing"])
