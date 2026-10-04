@@ -959,6 +959,42 @@ def test_the_ungroup_shortcut_keeps_a_new_levels_choice_made_after_the_collapse(
         assert np.isfinite(session.to_model().predict(new_area)).all()
 
 
+@pytest.mark.parametrize(("keep", "reused", "base"), [(True, False, "C"), (False, True, "B")])
+def test_the_ungroup_shortcut_reuses_the_earlier_fit_only_where_it_has_the_requested_reference(
+    monkeypatch, keep, reused, base
+):
+    # B is the most exposed level and the reference. Collapsing C and D without
+    # keeping the reference makes C+D, more exposed still, the reference.
+    # Ungrouping them while keeping that reference gives C, so the fit from
+    # before the collapse, on B, is not the result. Without keeping it the
+    # ungroup hands "most_exposed" on, which resolves to B again.
+    X = pd.DataFrame({"cat": np.tile(list("ABCDE"), 30)})
+    y = np.tile([1.0, 2.0, 4.0, 8.0, 3.0], 30)
+    w = np.tile([1.0, 4.0, 3.0, 2.0, 1.0], 30)
+
+    def declared(reference="most_exposed"):
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=10.0,
+            features={"cat": Categorical(base=reference)},
+        ).fit(X, y, sample_weight=w)
+
+    model = declared()
+    session = EditorSession.from_model(model, terms=["cat"])
+    session.select_levels("cat", ["C", "D"])
+    session.replace_with_collapsed_levels("cat", keep_reference=False, method="fit")
+    assert session.model._specs["cat"]._base_level == "C+D"
+    fits = _count_fits(monkeypatch)
+
+    session.select_levels("cat", ["C", "D"])
+    session.replace_with_ungrouped_levels("cat", keep_reference=keep, method="fit")
+
+    assert (session.model is model, len(fits)) == (reused, 0 if reused else 1)
+    assert session.model._specs["cat"]._base_level == base
+    probe = pd.DataFrame({"cat": list("ABCDE")})
+    np.testing.assert_array_equal(session.model.predict(probe), declared(base).predict(probe))
+
+
 def test_the_ungroup_shortcut_refuses_to_remove_the_group_new_levels_go_to(book):
     model, _, _ = book
     session = _session(model)

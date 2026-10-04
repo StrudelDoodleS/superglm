@@ -108,6 +108,27 @@ def _edit_span(term: EditableTerm, indices: NDArray[np.intp]) -> dict[str, Any]:
     return {"lo": float(x.min()), "hi": float(x.max())}
 
 
+def _fits_again(replacement, fitted) -> bool:
+    """Whether fitting the ungrouped ``replacement`` on ``fitted``'s rows gives ``fitted`` again.
+
+    Both ungrouped, they must agree on the kind of term, the declared universe,
+    where new levels go and the reference: the level ``fitted`` resolved, or
+    the policy it resolved it from, unless a level binding pinned it there.
+    """
+    base = str(replacement.base)
+    same_reference = base == str(fitted._base_level) or (
+        base == str(fitted.base) and getattr(fitted, "_pinned_base", None) is None
+    )
+    return (
+        type(replacement) is type(fitted)
+        and getattr(fitted, "_grouping", None) is None
+        and getattr(replacement, "_declared_levels", None)
+        == getattr(fitted, "_declared_levels", None)
+        and getattr(replacement, "unseen", None) == getattr(fitted, "unseen", None)
+        and same_reference
+    )
+
+
 class EditorSession:
     """Stateful editor for fitted 1D main effects.
 
@@ -1195,12 +1216,13 @@ class EditorSession:
         """Ungroup the selected levels and refit at once, as one structural step.
 
         With nothing waiting and no New levels choice since the latest step, an
-        ungroup that removes the model's last collapsed group, when the model
-        before that step had none, reuses that earlier fit instead of
-        refitting: it is exactly the result.
+        ungroup that removes the model's last collapsed group reuses the fit
+        from before that step instead of refitting, when that model had none
+        and its term is the one the ungroup would fit, reference included: it
+        is exactly the result.
         """
         if not self.pending:
-            model = self._pre_collapse_model(term, **refit_kwargs)
+            model = self._pre_collapse_model(term, keep_reference=keep_reference, **refit_kwargs)
             if model is not None:
                 # Read after the shortcut has validated the selection against a
                 # grouped term, in the sorted order the ungrouped spec uses.
@@ -1220,14 +1242,16 @@ class EditorSession:
             self, "ungroup", term, params, keep_reference=keep_reference, **refit_kwargs
         )
 
-    def _pre_collapse_model(self, term: str, **kwargs: Any):
+    def _pre_collapse_model(self, term: str, *, keep_reference: bool, **kwargs: Any):
         """The model before the latest step, when this ungroup reproduces it exactly.
 
         Only a step that did nothing but collapse ``term``'s levels qualifies:
         an ungroup does not take back what the same Refit did to another term,
         or to this term's reference. A New levels choice made since that step
         changed the in-force model, and the earlier fit lacks it, so it rules
-        the shortcut out too.
+        the shortcut out too. So does an ungroup whose term the earlier fit
+        would not fit again, such as one keeping a reference a collapse made
+        without keeping the old one.
         """
         step = self.structure_history[-1] if self.structure_history else None
         if step is None or not step.changes:
@@ -1236,13 +1260,16 @@ class EditorSession:
             return None
         if any((change.term, change.operation) != (term, "collapse") for change in step.changes):
             return None
-        if not self._ungroup_restores_reference_model(term, **kwargs):
+        replacement = self._ungrouped_replacement(term, keep_reference=keep_reference, **kwargs)
+        if self._has_collapsed_level_groups_after_replacement(term, replacement):
             return None
         previous = step.state.model
-        return None if self._model_has_collapsed_level_groups(previous) else previous
+        if self._model_has_collapsed_level_groups(previous):
+            return None
+        return previous if _fits_again(replacement, previous._specs[term]) else None
 
-    def _ungroup_restores_reference_model(self, term: str, **kwargs: Any) -> bool:
-        """Return whether ungrouping removes the last structural level collapse."""
+    def _ungrouped_replacement(self, term: str, *, keep_reference: bool, **kwargs: Any):
+        """The spec this ungroup refits ``term`` with."""
         X_ref, _, _, _ = self._resolve_refit_data(
             kwargs.get("X"),
             kwargs.get("y"),
@@ -1254,8 +1281,9 @@ class EditorSession:
             self._require_term(term),
             self._require_selection(term),
             X=X_ref,
+            keep_reference=keep_reference,
         )
-        return not self._has_collapsed_level_groups_after_replacement(term, replacement)
+        return replacement
 
     def replace_with_reference_level(self, term: str, level: str, **refit_kwargs: Any):
         """Pin ``level`` as ``term``'s reference and refit at once, as one structural step."""
