@@ -505,7 +505,9 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
             universe = [native.get(str(level), level) for level in raws]
         for label in grouping.grouped_levels:
             members = [str(member) for member in grouping.group_to_originals[label]]
-            if members == [str(label)]:
+            # A level grouped alone says nothing a level does not, except as
+            # the group new levels go to, which must name a group.
+            if members == [str(label)] and label != unseen:
                 continue
             if not isinstance(label, str):
                 raise StructureError(_NOT_WRITABLE.format(value=label, feature=name))

@@ -606,6 +606,26 @@ def test_apply_places_new_levels_in_x_where_the_structure_says_new_levels_go():
     )
 
 
+def test_a_one_level_group_new_levels_go_to_round_trips():
+    # "Other" groups only itself, so it says nothing a level does not, except
+    # as the group new levels go to; the file keeps it for that.
+    X = pd.DataFrame({"cat": np.tile(["A", "B", "Other"], 20)})
+    y = np.tile([1.0, 2.0, 4.0], 20)
+    grouping = collapse_levels(X["cat"], groups={"Other": ["Other"]})
+    model = _declared({"cat": Categorical(base="A", grouping=grouping, unseen="Other")}).fit(X, y)
+
+    structure = Structure.from_model(model)
+    applied = read_structure(json.loads(structure.to_json())).apply(model).fit(X, y)
+
+    assert structure.features["cat"].groups == {"Other": ["Other"]}
+    probe = pd.DataFrame({"cat": ["new", "Other", "A"]})
+    with pytest.warns(UserWarning, match="to the group 'Other'"):
+        expected = model.predict(probe)
+    with pytest.warns(UserWarning, match="to the group 'Other'"):
+        np.testing.assert_array_equal(applied.predict(probe), expected)
+    assert expected[0] == expected[1]
+
+
 def test_apply_fits_new_levels_in_x_as_their_own_without_an_unseen_group():
     next_year, next_y = _frame(seed=2027, brands=[*BRANDS, "B99"])
     count = int((next_year["brand"] == "B99").sum())
