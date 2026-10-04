@@ -520,8 +520,8 @@ Run CV is disabled, with the reason on hover, when it cannot use the rows:
 
 - `cv_data` has a different row count from the data the folds were drawn on.
 - `train_data` stands in for `cv_data` and has a different row count.
-- The response or weights differ from the data the folds were drawn on. Pass the same rows, in the
-  same order.
+- The features, response, weights or offsets differ from the data the folds were drawn on. Pass
+  the same rows, in the same order.
 
 A result from an older superglm version records no fingerprint of its data, so only its row count
 is checked, and the tab says so. The older `cv_report=` argument of `EditorSession.from_model`

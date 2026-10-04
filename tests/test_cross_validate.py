@@ -1976,11 +1976,15 @@ class TestDataFingerprint:
         import hashlib
 
         df, y, sw = poisson_data
-        result = cross_validate(base_model, df, y, cv=SimpleKFold(3), sample_weight=sw)
+        offset = np.linspace(-0.1, 0.1, len(y))
+        result = cross_validate(
+            base_model, df, y, cv=SimpleKFold(3), sample_weight=sw, offset=offset
+        )
 
         expected = hashlib.sha256(len(y).to_bytes(8, "little"))
-        expected.update(np.asarray(y, dtype="<f8").tobytes())
-        expected.update(np.asarray(sw, dtype="<f8").tobytes())
+        expected.update(as_eager_frame(df).digest(("x",), include_index=False))
+        for column in (y, sw, offset):
+            expected.update(np.asarray(column, dtype="<f8").tobytes())
         assert result.n_rows == len(y)
         assert result.splitter == "SimpleKFold"
         assert result.data_fingerprint == expected.hexdigest()
@@ -1993,9 +1997,27 @@ class TestDataFingerprint:
         df, y, sw = poisson_data
         unweighted = cross_validate(base_model, df, y, cv=SimpleKFold(2))
 
-        assert unweighted.data_fingerprint == _data_fingerprint(y, np.ones(len(y)))
-        assert _data_fingerprint(y, sw) != _data_fingerprint(y[::-1], sw[::-1])
-        assert _data_fingerprint(y, sw) != _data_fingerprint(y, 2.0 * sw)
+        n = len(y)
+        assert unweighted.data_fingerprint == _data_fingerprint(df, y, np.ones(n), np.zeros(n))
+        assert _data_fingerprint(df, y, sw) != _data_fingerprint(df[::-1], y[::-1], sw[::-1])
+        assert _data_fingerprint(df, y, sw) != _data_fingerprint(df, y, 2.0 * sw)
+
+    @pytest.mark.parametrize("backend", ["pandas", "polars"])
+    def test_fingerprint_sees_features_and_offsets_beside_equal_responses(self, backend):
+        from superglm.model_selection import _data_fingerprint
+
+        # Rows 0 and 2 share their response and unit weight; swapping their
+        # features leaves y and the weights byte for byte the same.
+        X = pd.DataFrame({"band": ["A", "B", "C", "A"], "x": [0.5, 1.0, 1.5, 2.0]})
+        y = np.array([0.0, 1.0, 0.0, 1.0])
+        swapped = X.iloc[[2, 1, 0, 3]].reset_index(drop=True)
+        if backend == "polars":
+            X, swapped = pl.from_pandas(X), pl.from_pandas(swapped)
+
+        original = _data_fingerprint(X, y)
+        assert _data_fingerprint(swapped, y) != original
+        assert _data_fingerprint(X, y, offset=np.full(4, 0.5)) != original
+        assert _data_fingerprint(X[["x", "band"]], y) == original
 
     def test_result_pickled_before_the_fields_existed_reads_none(self):
         # Such a pickle restores without the attributes; the dataclass

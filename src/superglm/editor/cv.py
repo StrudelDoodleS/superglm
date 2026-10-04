@@ -62,8 +62,8 @@ TRAIN_ROWS_MISMATCH = (
     "Pass cv_data=(X, y, sample_weight) to edit()."
 )
 FINGERPRINT_MISMATCH = (
-    "The CV data's response or weights differ from the data the folds were drawn on. "
-    "Pass the same rows, in the same order, as cv_data."
+    "The CV data's features, response, weights or offsets differ from the data the folds "
+    "were drawn on. Pass the same rows, in the same order, as cv_data."
 )
 NO_FINGERPRINT = (
     "This result was made before cross_validate recorded a data fingerprint, so only "
@@ -192,7 +192,8 @@ def check_cv_data(
         return CVDataCheck(None, sentence.format(rows=rows.n_obs, expected=expected))
     if cv.data_fingerprint is None:
         return CVDataCheck(rows, note=NO_FINGERPRINT)
-    if cv.data_fingerprint != _data_fingerprint(rows.y, rows.sample_weight):
+    held = _data_fingerprint(rows.X, rows.y, rows.sample_weight, rows.offset)
+    if cv.data_fingerprint != held:
         return CVDataCheck(None, FINGERPRINT_MISMATCH)
     return CVDataCheck(rows)
 

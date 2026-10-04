@@ -345,7 +345,8 @@ fitted spec and the display term. These break on an unfitted draft today:
 - `edit()` gains the same `cv=` and data arguments.
 - Without `cv_data`, the train data is used when its row count matches the folds.
 - `cross_validate` records `n_rows` and a data fingerprint (SHA-256 over the
-  y and weight bytes) on the result. The editor compares them. On a mismatch,
+  row count, a content digest of every column of X, and the y, weight and
+  offset bytes) on the result. The editor compares them. On a mismatch,
   Run CV is disabled with the reason. An older result without a fingerprint gets
   a row-count check and a one-line note.
 

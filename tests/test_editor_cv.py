@@ -309,6 +309,37 @@ def test_cv_data_is_checked_against_the_folds(cv_frame, cv_fit):
         EditorSession.from_model(model, cv=KFold(3))
 
 
+def test_cv_data_with_rows_swapped_between_equal_responses_is_refused():
+    # Rows 0 and 100 share their response and weight, so swapping them leaves
+    # y and the weights byte for byte the same. Replaying the GroupKFold folds
+    # on the swapped frame would put groups A and F on both sides of a fold.
+    from sklearn.model_selection import GroupKFold
+
+    from superglm.editor.cv import FINGERPRINT_MISMATCH
+
+    n = 120
+    X = pd.DataFrame({"group": np.repeat(list("ABCDEF"), 20), "x": np.linspace(-1.0, 1.0, n)})
+    y = np.tile([0.0, 1.0], n // 2)
+
+    def template():
+        return SuperGLM(family="binomial", selection_penalty=0.0, features={"x": Numeric()})
+
+    model = template().fit(X, y)
+    supplied = cross_validate(template(), X, y, cv=GroupKFold(3), groups=X["group"].to_numpy())
+    swapped = X.copy()
+    swapped.iloc[[0, 100]] = X.iloc[[100, 0]].to_numpy()
+    groups = swapped["group"].to_numpy()
+    leaked = [set(groups[train]) & set(groups[test]) for train, test in supplied.fold_indices]
+    assert {"A", "F"} <= set().union(*leaked)
+
+    same = EditorSession.from_model(model, cv=supplied, cv_data=(X.copy(), y, np.ones(n)))
+    assert (same.cv_check.reason, same.cv_check.note) == (None, None)
+    moved = EditorSession.from_model(model, cv=supplied, cv_data=(swapped, y))
+    assert moved.cv_check.reason == FINGERPRINT_MISMATCH
+    offset = EditorSession.from_model(model, cv=supplied, cv_data=(X, y, None, np.full(n, 0.5)))
+    assert offset.cv_check.reason == FINGERPRINT_MISMATCH
+
+
 def test_edit_takes_split_data_and_a_cv_result(cv_frame, cv_fit):
     from superglm.editor import edit
     from superglm.editor.evaluation import evaluation_datasets
@@ -451,14 +482,32 @@ def test_cv_report_says_how_to_get_what_is_missing(cv_frame, cv_fit):
 
 @pytest.fixture(scope="module")
 def rare_level(cv_frame, cv_fit):
-    """The train rows with region D on three rows of the first fold's test rows only."""
+    """The train rows with region D on three rows of the first fold's test rows only.
+
+    The result is cross_validate on these rows: the splitter draws the same
+    folds on the same row count, and the result's fingerprint holds the D rows.
+    """
     X, y, w = cv_frame
     _model_unused, supplied = cv_fit
     X_rows = X.iloc[:400].reset_index(drop=True).copy()
     y_rows, w_rows = y[:400], w[:400]
     first_test = supplied.fold_indices[0][1]
     X_rows.loc[first_test[y_rows[first_test] > 0][:3], "region"] = "D"
-    return X_rows, y_rows, w_rows, supplied
+    with pytest.warns(UserWarning, match="pinned to"):
+        on_rows = cross_validate(
+            _model(),
+            X_rows,
+            y_rows,
+            cv=KFold(3, shuffle=True, random_state=0),
+            sample_weight=w_rows,
+            scoring=("deviance", "gini", "nll"),
+        )
+    for (train, test), (again_train, again_test) in zip(
+        supplied.fold_indices, on_rows.fold_indices, strict=True
+    ):
+        np.testing.assert_array_equal(again_train, train)
+        np.testing.assert_array_equal(again_test, test)
+    return X_rows, y_rows, w_rows, on_rows
 
 
 def _rare_level_folds(rare_level, how: str) -> list[SuperGLM]:
@@ -1269,7 +1318,6 @@ def test_run_cv_scores_every_fold_when_one_fold_never_trained_on_a_level(rare_le
 
     X_rows, y_rows, w_rows, supplied = rare_level
     model = _model().fit(X_rows, y_rows, sample_weight=w_rows)
-    # The fingerprint hashes y and the weights, which D did not change.
     session = EditorSession.from_model(model, cv=supplied, train_data=(X_rows, y_rows, w_rows))
     session.select_levels("region", ["C", "D"])
     session.shift("region", 0.1)

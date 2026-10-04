@@ -58,10 +58,11 @@ class CrossValidationResult:
     n_rows : int or None
         Number of rows the folds index: the length of ``y``.
     data_fingerprint : str or None
-        SHA-256 of the response and sample weights the folds were scored on,
-        as little-endian float64 bytes after the row count, with unit weights
-        standing in for ``sample_weight=None``. Equal fingerprints mean the
-        same response and weights in the same row order, which is what lets
+        SHA-256 of the rows the folds index: the row count, a content digest
+        of every column of ``X``, then the response, sample weights and
+        offsets as little-endian float64, with unit weights standing in for
+        ``sample_weight=None`` and zeros for ``offset=None``. Equal
+        fingerprints mean the same rows in the same order, which is what lets
         a later consumer, such as the editor's Run CV, replay
         ``fold_indices`` on data it holds.
     splitter : str or None
@@ -127,24 +128,28 @@ class CrossValidationResult:
         )
 
 
-def _data_fingerprint(y, sample_weight=None) -> str:
-    """SHA-256 of the row count, then the response and weights as little-endian float64.
+def _data_fingerprint(X, y, sample_weight=None, offset=None) -> str:
+    """SHA-256 of the row count, the frame's content digest, then y, weights and offsets.
 
-    Unit weights stand in for ``sample_weight=None``, which is how every
-    scorer reads it, so an unweighted result matches the same rows supplied
-    with explicit ones. The row count goes first so the boundary between the
-    two arrays is fixed. Feature columns are not hashed: the response and
-    weights identify the rows and their order in one pass over two vectors.
+    The response and weights alone do not identify the rows: two rows with
+    the same response and weight can swap their features, and stored fold
+    indices would then fall on different rows. The frame enters through
+    :meth:`EagerFrame.digest`, every column's dtype and values in row order
+    and without the index, with the columns read in name order so that
+    reordering columns alone does not change it. Unit weights stand in for
+    ``sample_weight=None`` and zeros for ``offset=None``, which is how every
+    scorer reads them, so rows supplied with those explicit values match.
+    The row count goes first so the boundaries between the parts are fixed.
     """
+    frame = as_eager_frame(X)
     response = np.asarray(y, dtype=np.float64).ravel()
-    weights = (
-        np.ones(response.size, dtype=np.float64)
-        if sample_weight is None
-        else np.asarray(sample_weight, dtype=np.float64).ravel()
-    )
-    digest = hashlib.sha256(response.size.to_bytes(8, "little"))
-    digest.update(np.ascontiguousarray(response, dtype="<f8").tobytes())
-    digest.update(np.ascontiguousarray(weights, dtype="<f8").tobytes())
+    n = response.size
+    weights = np.ones(n) if sample_weight is None else sample_weight
+    offsets = np.zeros(n) if offset is None else offset
+    digest = hashlib.sha256(n.to_bytes(8, "little"))
+    digest.update(frame.digest(tuple(sorted(frame.columns, key=repr)), include_index=False))
+    for column in (response, weights, offsets):
+        digest.update(np.ascontiguousarray(column, dtype="<f8").ravel().tobytes())
     return digest.hexdigest()
 
 
@@ -597,6 +602,6 @@ def cross_validate(
         oof_predictions=oof,
         estimators=estimators_list,
         n_rows=n,
-        data_fingerprint=_data_fingerprint(y, sample_weight),
+        data_fingerprint=_data_fingerprint(frame, y, sample_weight, offset),
         splitter=type(cv).__name__,
     )
