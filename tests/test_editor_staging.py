@@ -819,6 +819,41 @@ def test_the_ungroup_shortcut_does_not_undo_the_rest_of_a_refit(
     assert read(session.model) == expected
 
 
+def test_the_ungroup_shortcut_keeps_a_new_levels_choice_made_after_the_collapse(book, monkeypatch):
+    model, _, _ = book
+    session = _session(model)
+    session.select_levels("brand", ["B10", "B11"])
+    session.replace_with_collapsed_levels("brand", method="fit")
+    session.set_unseen("area", "base")
+    fits = _count_fits(monkeypatch)
+
+    session.select_levels("brand", ["B10", "B11"])
+    session.replace_with_ungrouped_levels("brand", method="fit")
+
+    # The fit from before the collapse lacks the choice, so the ungroup refits
+    # and the choice History lists as done stays in force.
+    assert len(fits) == 1 and session.model is not model
+    assert session.model._specs["brand"]._grouping is None
+    assert session.model._specs["area"].unseen == "base"
+    new_area = pd.DataFrame({"brand": ["B1"], "area": ["Z"], "age": [40.0]})
+    with pytest.warns(UserWarning):
+        assert np.isfinite(session.to_model().predict(new_area)).all()
+
+
+def test_the_ungroup_shortcut_refuses_to_remove_the_group_new_levels_go_to(book):
+    model, _, _ = book
+    session = _session(model)
+    session.select_levels("brand", ["B10", "B11"])
+    session.replace_with_collapsed_levels("brand", method="fit")
+    session.set_unseen("brand", "B10+B11")
+    before = session.model
+
+    session.select_levels("brand", ["B10", "B11"])
+    with pytest.raises(EditorValueError, match="New levels of 'brand' go to the group 'B10\\+B11'"):
+        session.replace_with_ungrouped_levels("brand", method="fit")
+    assert session.model is before and session.model._specs["brand"].unseen == "B10+B11"
+
+
 def test_widget_http_stage_waits_without_fitting_and_says_what_waits(book, monkeypatch):
     model, _, _ = book
     session = _session(model)

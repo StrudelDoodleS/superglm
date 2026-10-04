@@ -1194,9 +1194,10 @@ class EditorSession:
     ):
         """Ungroup the selected levels and refit at once, as one structural step.
 
-        With nothing waiting, an ungroup that removes the model's last collapsed
-        group, when the model before the latest step had none, reuses that
-        earlier fit instead of refitting: it is exactly the result.
+        With nothing waiting and no New levels choice since the latest step, an
+        ungroup that removes the model's last collapsed group, when the model
+        before that step had none, reuses that earlier fit instead of
+        refitting: it is exactly the result.
         """
         if not self.pending:
             model = self._pre_collapse_model(term, **refit_kwargs)
@@ -1224,10 +1225,14 @@ class EditorSession:
 
         Only a step that did nothing but collapse ``term``'s levels qualifies:
         an ungroup does not take back what the same Refit did to another term,
-        or to this term's reference.
+        or to this term's reference. A New levels choice made since that step
+        changed the in-force model, and the earlier fit lacks it, so it rules
+        the shortcut out too.
         """
         step = self.structure_history[-1] if self.structure_history else None
         if step is None or not step.changes:
+            return None
+        if any(isinstance(record, UnseenChoice) for record in self.history):
             return None
         if any((change.term, change.operation) != (term, "collapse") for change in step.changes):
             return None
