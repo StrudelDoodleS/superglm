@@ -307,22 +307,22 @@
 .cv-tick,
 .cv-level { fill: var(--muted); }
 .cv-axis-title { fill: var(--text); font-weight: 600; }
-.cv-range { stroke: var(--grey); stroke-width: 2; stroke-opacity: 0.6; }
+.cv-range { stroke: var(--grey); stroke-width: 1.5; stroke-opacity: 0.6; }
 .cv-fold-dot,
-.cv-card-dot { fill-opacity: 0.95; stroke-width: 1.2; }
+.cv-card-dot { fill-opacity: 0.95; stroke-width: 0.9; }
 .cv-fit,
-.cv-fit-line { fill: none; stroke: var(--blue); stroke-width: 2.6; }
+.cv-fit-line { fill: none; stroke: var(--blue); stroke-width: 1.95; }
 .cv-edited,
-.cv-edited-line { fill: none; stroke: var(--orange); stroke-width: 2; stroke-dasharray: 5 4; }
+.cv-edited-line { fill: none; stroke: var(--orange); stroke-width: 1.5; stroke-dasharray: 5 4; }
 /* A fold curve is its pastel line over a casing of its edge colour. */
-.cv-fold-casing { fill: none; stroke-width: 3; stroke-opacity: 0.9; }
-.cv-fold-line { fill: none; stroke-width: 1.6; }
+.cv-fold-casing { fill: none; stroke-width: 2.25; stroke-opacity: 0.9; }
+.cv-fold-line { fill: none; stroke-width: 1.2; }
 .cv-envelope { fill: var(--blue-band); stroke: none; }
 /* A legend entry hovered or focused picks its fold out (highlightFold). */
 .cv-chart-svg .is-dimmed { opacity: 0.15; }
 .cv-fold-dot.is-lit { fill-opacity: 1; }
-.cv-fold-casing.is-lit { stroke-width: 4.4; stroke-opacity: 1; }
-.cv-fold-line.is-lit { stroke-width: 2.6; }
+.cv-fold-casing.is-lit { stroke-width: 3.3; stroke-opacity: 1; }
+.cv-fold-line.is-lit { stroke-width: 1.95; }
 
 /* The tab takes the report panel's whole width, and the panel scrolls as one
    page: the header goes up with the cards instead of staying over them. */
