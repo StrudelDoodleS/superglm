@@ -217,6 +217,47 @@ def test_an_unfitted_model_has_no_structure_to_export():
         Structure.from_model(model)
 
 
+def _lss_model():
+    from superglm import GaussianLS, SuperLSS, cat, s
+
+    family = GaussianLS()
+    return SuperLSS(
+        family, family.location(s("age", kind="cr", k=8), cat("region")), family.scale(s("age"))
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "kind"),
+    [
+        (lambda: None, "NoneType"),
+        (lambda: object(), "object"),
+        (_lss_model, "SuperLSS"),
+    ],
+    ids=["None", "object", "SuperLSS"],
+)
+def test_only_a_superglm_has_a_structure_to_export_or_take(model, kind):
+    for method, call in (
+        ("from_model", lambda: Structure.from_model(model())),
+        ("apply", lambda: Structure(features={}).apply(model())),
+        ("apply", lambda: _brand_structure().apply(model())),
+    ):
+        with pytest.raises(StructureError) as refused:
+            call()
+        assert str(refused.value) == (
+            f"Structure.{method} takes a SuperGLM model, not a {kind}; structure files do not "
+            "cover other models yet."
+        )
+
+
+@pytest.mark.parametrize(
+    "features", [{}, {"age": Spline(n_knots=6)}], ids=["no features", "spline only"]
+)
+def test_an_unfitted_model_without_levels_has_no_structure_to_export(features):
+    with pytest.raises(StructureError) as refused:
+        Structure.from_model(_declared(features))
+    assert str(refused.value) == "Structure.from_model needs a fitted model; fit the model first."
+
+
 def test_a_structure_built_in_python_is_checked_like_a_file():
     with pytest.raises(StructureError, match="not one of its levels"):
         Structure(

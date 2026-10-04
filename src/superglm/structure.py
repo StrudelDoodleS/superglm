@@ -61,6 +61,7 @@ from superglm.features.rebuild import (
     shaped_spline,
 )
 from superglm.features.spline import _SplineBase
+from superglm.model import SuperGLM
 from superglm.model.fit_state import configured_lambda2, configured_penalty
 
 FORMAT = "superglm.structure.v1"
@@ -109,6 +110,11 @@ _FITTED_OUT = (
 _UNFITTED = (
     "Structure.from_model needs a fitted model: {feature!r} has no fitted levels yet; "
     "fit the model first."
+)
+_MODEL_UNFITTED = "Structure.from_model needs a fitted model; fit the model first."
+_NOT_A_SUPERGLM = (
+    "Structure.{method} takes a SuperGLM model, not a {kind}; structure files do not cover "
+    "other models yet."
 )
 _ABSENT = (
     "The structure names {feature!r}, which is not a feature of this model; remove it from "
@@ -235,10 +241,12 @@ class Structure:
         Raises
         ------
         StructureError
-            If the model is not fitted, or a level cannot be written as JSON.
+            If the model is not a fitted SuperGLM, or a level cannot be written
+            as JSON.
         """
         import superglm
 
+        _require_superglm(model, "from_model")
         frame = None
         if X is not None:
             from superglm._frame import as_eager_frame
@@ -255,6 +263,9 @@ class Structure:
                 features[name] = FeatureStructure(kind=kind, ranges=_spec_ranges(spec))
             else:
                 features[name] = _level_structure(name, spec, kind, frame)
+        if getattr(model, "_result", None) is None:
+            # A model with no categorical or ordered term to name says so here.
+            raise StructureError(_MODEL_UNFITTED)
         return cls(features=features, superglm_version=str(superglm.__version__))
 
     def to_json(self, path=None) -> str:
@@ -372,11 +383,13 @@ class Structure:
         Raises
         ------
         StructureError
-            If a feature is not in the model or is another kind of term, its
-            levels are not those the model declares, or its spline refuses a
-            range. Any other error while a feature is rebuilt is reported as
-            that feature's refusal, with the error as its cause.
+            If ``model`` is not a SuperGLM, a feature is not in the model or is
+            another kind of term, its levels are not those the model declares,
+            or its spline refuses a range. Any other error while a feature is
+            rebuilt is reported as that feature's refusal, with the error as
+            its cause.
         """
+        _require_superglm(model, "apply")
         frame = None
         if X is not None:
             from superglm._frame import as_eager_frame
@@ -434,6 +447,12 @@ def read_structure(path_or_mapping) -> Structure:
 
 
 # -- Reading a model -----------------------------------------------------------
+
+
+def _require_superglm(model, method: str) -> None:
+    """Refuse anything but a SuperGLM: a SuperLSS, or no model, has no structure here."""
+    if not isinstance(model, SuperGLM):
+        raise StructureError(_NOT_A_SUPERGLM.format(method=method, kind=type(model).__name__))
 
 
 def _kind(spec) -> str | None:
