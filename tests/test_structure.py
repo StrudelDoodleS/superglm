@@ -585,6 +585,43 @@ def test_apply_keeps_the_models_separation_group_pricing_and_bound_levels():
     assert (again._separation, again._group_pricing) == ("error", "spanned")
 
 
+@pytest.mark.parametrize("estimated", ["auto_selection", "reml_smoothing"])
+def test_apply_to_a_fitted_model_takes_the_penalties_it_was_declared_with(estimated):
+    """Penalties a fit estimated belong to that fit, like its coefficients.
+
+    A calibrated ``selection_penalty="auto"`` and REML smoothing are not
+    carried into the copy, so applying a structure to the fitted model and
+    to its declaration give the same model and the same next fit.
+    """
+    X, y = _frame()
+
+    def declared():
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty="auto" if estimated == "auto_selection" else 0.0,
+            spline_penalty=0.1,
+            features={"brand": Categorical(base="first"), "age": Spline(kind="bs", n_knots=8)},
+        )
+
+    fitted = declared()
+    if estimated == "auto_selection":
+        fitted.fit(X, y)
+    else:
+        fitted.fit_reml(X, y)
+    structure = _brand_structure()
+
+    from_fit, from_declaration = structure.apply(fitted), structure.apply(declared())
+
+    assert from_fit._penalty_config.lambda1 == from_declaration._penalty_config.lambda1
+    assert from_fit.lambda2 == from_declaration.lambda2 == 0.1
+    next_year, y_next = _frame(seed=2027)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*pinned.*", category=UserWarning)
+        from_fit.fit(next_year, y_next)
+        from_declaration.fit(next_year, y_next)
+    np.testing.assert_array_equal(from_fit.predict(next_year), from_declaration.predict(next_year))
+
+
 def test_ranges_on_a_ps_spline_rebuild_it_as_bs():
     structure = Structure(
         features={"age": FeatureStructure(kind="spline", ranges=[PolynomialRange(30.0, 45.0, 1)])}

@@ -446,7 +446,10 @@ next_model.fit(X_next, y_next, sample_weight=w_next)
 ```
 
 `apply` returns an unfitted copy of `model` with those decisions in its features. The model you
-pass is left unchanged, and features the file does not name are copied as they are.
+pass is left unchanged, and features the file does not name are copied as they are. The copy's
+penalties are the ones `model` was declared with, even when `model` is fitted: a
+`selection_penalty="auto"` is calibrated again on the new data, and smoothing that `fit_reml`
+estimated is not carried over, so fit the copy with `fit_reml` to estimate it again.
 
 - Pass `X=`, the data you will fit on. A level of a grouped term that the file does not list then
   goes where the file sends new levels, with one warning per term.
