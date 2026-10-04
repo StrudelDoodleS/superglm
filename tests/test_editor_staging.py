@@ -330,8 +330,16 @@ def test_a_collapse_of_the_bound_reference_without_keeping_it_refits():
 def test_load_names_the_structural_steps_the_edit_file_did_not_restore(book, tmp_path):
     model, _, _ = book
     session = _session(model)
+    # An edit before the Refit is carried over it as a step of its own. The
+    # carried curve is a curve edit, which the file holds, so it is not named.
+    session.select_indices("area", [2])
+    session.shift("area", 0.05)
     session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
     session.refit_pending(method="fit")
+    assert [step.operation for step in session.structure_history] == [
+        "refit_pending",
+        "carry_edits",
+    ]
     session.select_indices("area", [1])
     session.shift("area", 0.1)
     session.stage_structural("shape", "age", {"lo": 30.0, "hi": 45.0, "degree": 1})
@@ -349,6 +357,11 @@ def test_load_names_the_structural_steps_the_edit_file_did_not_restore(book, tmp
     ]
     assert (loaded.pending, loaded.structure_history) == ([], [])
     assert [record.operation for record in loaded.history] == ["shift"]
+    # Both area edits are back: the carried one and the one made after the Refit.
+    restored = loaded.terms["area"]
+    assert np.array_equal(restored.edited_log_effect, session.terms["area"].edited_log_effect)
+    moved = restored.edited_log_effect != restored.original_log_effect
+    assert moved[[1, 2]].all()
 
 
 def _legacy_declared_grouping_model():

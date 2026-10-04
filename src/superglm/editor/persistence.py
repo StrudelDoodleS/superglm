@@ -269,8 +269,9 @@ def _left_out(session) -> list[str]:
 
     The structural steps the in-force model was refitted through, each with
     the New levels choices made before it; then those made since, and the
-    changes still waiting. A step's earlier choices sit in the state it
-    kept: a step starts the live history afresh.
+    changes still waiting. Hand edits carried over a Refit are not named:
+    they are curve edits, saved with the terms. A step's earlier choices sit
+    in the state it kept: a step starts the live history afresh.
     """
     from superglm.editor.unseen import UnseenChoice
 
@@ -284,6 +285,9 @@ def _left_out(session) -> list[str]:
     changes: list[str] = []
     for step in session.structure_history:
         changes += choices(step.state.history)
+        if step.operation == "carry_edits":
+            # The carried curves are curve edits, which the artifact holds.
+            continue
         changes += [change.label for change in step.changes] or [step.label]
     changes += choices(session.history)
     changes += [f"{step.label} (waiting)" for step in session.pending]
