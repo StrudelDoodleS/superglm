@@ -373,6 +373,53 @@ def test_cv_report_shows_a_supplied_result_least_stable_first(cv_frame, cv_fit):
     assert region["spread"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
 
 
+@pytest.mark.parametrize("unseen", ["error", "base"])
+def test_cv_report_reads_integer_coded_fold_models_after_a_collapse(unseen):
+    """A collapse gives the in-force term text labels; fold models fitted on integers still score.
+
+    Under ``unseen="error"`` the text labels were refused and the term left
+    the list; under ``"base"`` every fold read flat at 1.
+    """
+    from superglm.editor.cv import capture_cv_view, cv_tab_payload
+
+    rng = np.random.default_rng(7)
+    n = 1200
+    cls = rng.choice([10, 1, 2, 3], n, p=[0.4, 0.3, 0.2, 0.1])
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "cls": cls})
+    eta = -0.5 + np.select([cls == 2, cls == 3], [0.3, -0.2], 0.0)
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+
+    def make():
+        return SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"age": Spline(n_knots=6), "cls": Categorical(base=1, unseen=unseen)},
+        )
+
+    supplied = cross_validate(
+        make(), X, y, cv=KFold(4, shuffle=True, random_state=0), return_estimators=True
+    )
+    session = EditorSession.from_model(make().fit(X, y), cv=supplied, train_data=(X, y))
+
+    def cls_folds():
+        view = capture_cv_view(session, run=None, final_fit=None)
+        terms = cv_tab_payload(view, jobs={})["relativities"]["terms"]
+        item = next((item for item in terms if item["name"] == "cls"), None)
+        assert item is not None, [item["name"] for item in terms]
+        return item["levels"], np.array([fold["values"] for fold in item["folds"]])
+
+    levels, before = cls_folds()
+    session.select_levels("cls", ["2", "3"])
+    session.replace_with_collapsed_levels("cls", method="fit")
+    assert session.terms["cls"].metadata["native_levels"] == ["1", "2", "3", "10"]
+    after_levels, after = cls_folds()
+
+    # The supplied folds are the same models, read on the same levels.
+    assert after_levels == levels == ["1", "2", "3", "10"]
+    assert np.ptp(after[:, 2]) > 0.0
+    np.testing.assert_allclose(after, before, rtol=64 * _U)
+
+
 def test_cv_report_says_how_to_get_what_is_missing(cv_frame, cv_fit):
     from superglm.editor.cv import NO_CV, NO_ESTIMATORS
 

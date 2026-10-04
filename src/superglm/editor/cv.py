@@ -305,8 +305,9 @@ def fold_log_curves(model, terms: Mapping[str, EditableTerm]) -> dict[str, NDArr
         try:
             beta = _feature_beta(model, name)
             if grid.kind == "levels":
-                values = _score_levels(spec, grid.points, beta)
-                values[_pinned_points(spec, grid.points)] = np.nan
+                points = _levels_as_taken(spec, grid)
+                values = _score_levels(spec, points, beta)
+                values[_pinned_points(spec, points)] = np.nan
             else:
                 values = np.asarray(spec.score(grid.points, beta), dtype=np.float64)
         except (KeyError, ValueError):
@@ -315,6 +316,26 @@ def fold_log_curves(model, terms: Mapping[str, EditableTerm]) -> dict[str, NDArr
             continue
         curves[name] = values
     return curves
+
+
+def _levels_as_taken(spec, grid: _TermGrid) -> NDArray:
+    """The grid's levels as ``spec`` takes them: its own value for each label it holds.
+
+    A collapse leaves the in-force term with text labels, while a supplied
+    fold model fitted on integer codes takes the integers and refuses "1" as
+    unseen (or, under ``unseen="base"``, reads it at the reference). A label
+    the fold's levels lack, a grouped fold's member, is passed as it is.
+    """
+    own: dict[str, Any] = {}
+    for level in getattr(spec, "_levels", ()):
+        own.setdefault(str(level), level)
+    return np.asarray(
+        [
+            own.get(label, point)
+            for label, point in zip(grid.labels or (), grid.points, strict=True)
+        ],
+        dtype=object,
+    )
 
 
 def _pinned_points(spec, points: NDArray) -> NDArray[np.bool_]:
