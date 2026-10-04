@@ -336,6 +336,20 @@ test("the dark folds of a five-fold CV keep every pair apart, as the CV chart dr
   assert.deepEqual(failures, []);
 });
 
+test("the light folds of a five-fold CV keep every pair apart, and stay 3:1 on the chart grounds", () => {
+  const folds = slots(LIGHT, "trace").slice(0, 5);
+  /** @type {string[]} */
+  const failures = [];
+  for (const token of folds) {
+    for (const ground of ["--surface", "--surface-subtle"]) {
+      const ratio = contrast(LIGHT, token, ground);
+      if (!(ratio >= 3)) failures.push(`${token} on ${ground}: ${ratio.toFixed(2)}:1`);
+    }
+  }
+  folds.forEach((token, i) => folds.slice(i + 1).forEach((other) => failures.push(...separation(LIGHT, token, other))));
+  assert.deepEqual(failures, []);
+});
+
 /**
  * Why two slots are not apart enough: in colour, under CVD, and in lightness.
  * @param {Map<string, string>} theme @param {string} token @param {string} other @returns {string[]}
