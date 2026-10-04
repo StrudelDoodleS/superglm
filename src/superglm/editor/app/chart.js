@@ -1018,6 +1018,12 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
       left: centeredLeft,
       top: plotBottom.y - parentBox.top + pad
     });
+    // The top of the plot, above the curve, where the board draws it: clear
+    // of the next click when the curve runs through every other place.
+    candidates.push({
+      left: centeredLeft,
+      top: svgClientPoint(svg, scale.margin.left, scale.margin.top).y - parentBox.top + pad
+    });
   }
   // The palette keeps to the plot area when it fits there, so it never sits
   // on the axes or their labels; otherwise the chart's own box bounds it.
@@ -1034,10 +1040,13 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
     left: Math.max(limits.minLeft, Math.min(limits.maxLeft, candidate.left)),
     top: Math.max(limits.minTop, Math.min(limits.maxTop, candidate.top))
   }));
+  // Read every point's box once: the candidates are scored against the same points.
+  const pointBoxes = [...svg.querySelectorAll("circle.point[data-index]")]
+    .map((point) => point.getBoundingClientRect());
   let best = positioned[0];
-  let bestIntersections = selectionMenuPointIntersections(svg, parentBox, menuBox, best);
+  let bestIntersections = selectionMenuPointIntersections(pointBoxes, parentBox, menuBox, best);
   for (const candidate of positioned.slice(1)) {
-    const intersections = selectionMenuPointIntersections(svg, parentBox, menuBox, candidate);
+    const intersections = selectionMenuPointIntersections(pointBoxes, parentBox, menuBox, candidate);
     if (intersections >= bestIntersections) continue;
     best = candidate;
     bestIntersections = intersections;
@@ -1087,15 +1096,17 @@ function plotLimits(svg, scale, parentBox, menuBox, pad, fallback) {
   return fits ? limits : fallback;
 }
 
-function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
+// The points the palette must not cover: every point on the curve, shown or
+// not. A dense curve hides its points until reached for, but each is a click
+// target: the next click or Shift-click of a range goes to it.
+function selectionMenuPointIntersections(pointBoxes, parentBox, menuBox, candidate) {
   const clearance = 2;
   const menuLeft = parentBox.left + candidate.left - clearance;
   const menuTop = parentBox.top + candidate.top - clearance;
   const menuRight = menuLeft + menuBox.width + clearance * 2;
   const menuBottom = menuTop + menuBox.height + clearance * 2;
   let intersections = 0;
-  for (const point of svg.querySelectorAll(visiblePointSelector(svg))) {
-    const pointBox = point.getBoundingClientRect();
+  for (const pointBox of pointBoxes) {
     if (
       pointBox.right >= menuLeft &&
       pointBox.left <= menuRight &&
@@ -1106,15 +1117,6 @@ function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
     }
   }
   return intersections;
-}
-
-// The points the palette must not cover: on a dense curve only the selected
-// ones show, so only they count.
-function visiblePointSelector(svg) {
-  const layer = svg.querySelector(".point-layer");
-  return layer && layer.getAttribute("data-dense") === "true"
-    ? "circle.point.selected[data-index]"
-    : "circle.point[data-index]";
 }
 
 function svgClientPoint(svg, x, y) {

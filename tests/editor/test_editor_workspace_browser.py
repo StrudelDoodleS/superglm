@@ -579,6 +579,61 @@ def test_click_shift_click_selects_a_span_and_ctrl_click_toggles_on_a_spline(ope
         assert session.selection("curve").tolist() == [17, 18, 19, 20]
 
 
+_POINTS_UNDER_THE_MENU = """() => [...document.querySelectorAll('#chart circle.point[data-index]')]
+  .filter((point) => {
+    const box = point.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return hit?.closest('#selectionMenu') != null;
+  })
+  .map((point) => Number(point.dataset.index))"""
+
+
+@pytest.mark.parametrize("viewport", [(1180, 720), (1600, 1000)])
+def test_the_selection_menu_leaves_every_point_of_a_dense_curve_clickable(
+    open_editor_page, viewport
+):
+    """After a click, the next click or Shift-click can land on any point of the curve.
+
+    A dense curve hides its points, but each is a click target, so the
+    selection menu that opens beside the clicked point must not cover them.
+    """
+    width, height = viewport
+    with open_editor_page(viewport={"width": width, "height": height}) as (page, session):
+        select_chart_tool(page, "Select")
+
+        def click_point(index: int, modifiers: tuple[str, ...] = ()) -> int:
+            """Click where point ``index`` is drawn; return the point the click lands on.
+
+            A hidden point is a target at its place; on a dense curve a
+            neighbour drawn over it can take the click.
+            """
+            box = page.locator(f'#chart circle.point[data-index="{index}"]').bounding_box()
+            x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            landed = page.evaluate(
+                "([x, y]) => Number(document.elementFromPoint(x, y)"
+                "?.closest('circle.point[data-index]')?.dataset.index ?? -1)",
+                [x, y],
+            )
+            with page.expect_response(lambda response: is_select_request(response.request)):
+                for key in modifiers:
+                    page.keyboard.down(key)
+                page.mouse.click(x, y)
+                for key in modifiers:
+                    page.keyboard.up(key)
+            page.wait_for_function("() => window.__superglmTest?.mutationStatus?.() !== 'running'")
+            return landed
+
+        for first in (20, 60, 100, 140, 180):
+            anchor = click_point(first)
+            page.locator("#selectionMenu").wait_for(state="visible")
+            assert page.evaluate(_POINTS_UNDER_THE_MENU) == [], first
+
+        # The click at 180 set the anchor: a Shift-click near 95 spans to it.
+        landed = click_point(95, modifiers=("Shift",))
+        assert abs(landed - 95) <= 1 and abs(anchor - 180) <= 1
+        assert session.selection("curve").tolist() == list(range(landed, anchor + 1))
+
+
 def _tagged_x(text: str, gesture: str) -> float:
     """The x a tag such as ``"click · 2.77"`` names."""
     prefix = f"{gesture} · "
