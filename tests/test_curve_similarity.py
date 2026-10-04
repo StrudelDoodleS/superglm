@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import polars as pl
+import pytest
 
 from superglm import Categorical, Spline, SuperGLM
 
@@ -238,3 +239,42 @@ def test_a_fold_that_never_saw_a_level_has_a_gap_there_not_a_crash(monkeypatch):
     )
     plotted = result.plot_terms_by_fold(X, sample_weight=w, terms="band")
     assert np.isnan(plotted["terms"][0]["series"]["fold_0"]["link"][3])
+
+
+def test_a_fold_that_holds_a_level_pinned_has_a_gap_there_on_the_cross_validate_path(
+    monkeypatch,
+):
+    """cross_validate gives every fold the frame's levels, so a fold whose
+    training rows lack D holds D pinned to its base.
+
+    Its score at D is the base's, not an estimate, so its curve has a gap
+    there in the similarity diagnostics and in plot_terms_by_fold.
+    """
+    from sklearn.model_selection import KFold
+
+    from superglm import cross_validate
+    from superglm.plotting import comparison_plotly
+
+    X = pd.DataFrame({"band": ["D", *["A", "B"] * 30]})
+    y = np.array([3.0, *[1.0, 2.0] * 30])
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={"band": Categorical(base="A")}
+    )
+    with pytest.warns(UserWarning, match="pinned to base"):
+        result = cross_validate(model, X, y, cv=KFold(3), return_estimators=True)
+    assert [list(fold._specs["band"]._pinned_levels) for fold in result.estimators] == [
+        ["D"],
+        [],
+        [],
+    ]
+
+    similarity = result.curve_similarity["band"]
+    d = similarity["domain"]["levels"].index("D")
+    for scale in ("link", "response"):
+        curves = similarity["curves"][scale]
+        assert np.isnan(curves["fold_0"][d])
+        assert np.isfinite(np.delete(curves["fold_0"], d)).all()
+        assert np.isfinite(curves["fold_1"]).all() and np.isfinite(curves["fold_2"]).all()
+    monkeypatch.setattr(comparison_plotly, "plot_term_comparison_plotly", lambda data, **_: data)
+    plotted = result.plot_terms_by_fold(X, terms="band")
+    assert np.isnan(plotted["terms"][0]["series"]["fold_0"]["link"][d])

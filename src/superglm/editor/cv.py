@@ -315,7 +315,6 @@ def fold_log_curves(model, terms: Mapping[str, EditableTerm]) -> dict[str, NDArr
             if grid.kind == "levels":
                 points = _levels_as_taken(spec, grid)
                 values = _score_levels(spec, points, beta)
-                values[_pinned_points(spec, points)] = np.nan
             else:
                 values = np.asarray(spec.score(grid.points, beta), dtype=np.float64)
         except (KeyError, ValueError):
@@ -343,30 +342,6 @@ def _levels_as_taken(spec, grid: _TermGrid) -> NDArray:
             for label, point in zip(grid.labels or (), grid.points, strict=True)
         ],
         dtype=object,
-    )
-
-
-def _pinned_points(spec, points: NDArray) -> NDArray[np.bool_]:
-    """Which level points ``spec`` holds pinned: levels, or specials, with no training rows.
-
-    Labels compare as text, the editor's level namespace. A grouped
-    categorical pins a group, which every member of it reads.
-    """
-    pinned = {
-        str(level)
-        for level in (*getattr(spec, "_pinned_levels", ()), *getattr(spec, "_pinned_specials", ()))
-    }
-    if not pinned:
-        return np.zeros(len(points), dtype=bool)
-    grouping = getattr(spec, "_grouping", None)
-    group_of = (
-        {}
-        if grouping is None
-        else {str(level): str(group) for level, group in grouping.original_to_group.items()}
-    )
-    labels = [str(point) for point in points]
-    return np.array(
-        [label in pinned or group_of.get(label) in pinned for label in labels], dtype=bool
     )
 
 

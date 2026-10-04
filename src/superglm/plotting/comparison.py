@@ -160,24 +160,50 @@ def _native_level_values(X: EagerFrame, term: str, labels: list[str]) -> NDArray
 
 
 def _score_levels(spec, levels: NDArray, beta: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Score a level term on ``levels``, NaN at a level the model refuses.
+    """Score a level term on ``levels``, NaN at a level the model did not estimate.
 
     A fold model that never saw a level the comparison frame holds refuses
-    it as unseen. It has no value there, so that level is a gap in its
-    curve rather than a failure of the whole comparison. The levels are
-    scored one by one only when the model refuses the whole vector.
+    it as unseen. One that ``cross_validate``'s shared universe gave the level
+    with no training rows holds it pinned and scores it at the pin. Neither
+    has an estimate there, so that level is a gap in its curve rather than a
+    failure of the whole comparison or a value. The levels are scored one by
+    one only when the model refuses the whole vector.
     """
     try:
-        return np.asarray(spec.score(levels, beta), dtype=np.float64)
+        values = np.array(spec.score(levels, beta), dtype=np.float64)
     except ValueError:
-        pass
-    values = np.full(len(levels), np.nan, dtype=np.float64)
-    for index in range(len(levels)):
-        try:
-            values[index] = spec.score(levels[index : index + 1], beta)[0]
-        except ValueError:
-            continue
+        values = np.full(len(levels), np.nan, dtype=np.float64)
+        for index in range(len(levels)):
+            try:
+                values[index] = spec.score(levels[index : index + 1], beta)[0]
+            except ValueError:
+                continue
+    values[_pinned_points(spec, levels)] = np.nan
     return values
+
+
+def _pinned_points(spec, points: NDArray) -> NDArray[np.bool_]:
+    """Which level points ``spec`` holds pinned: levels, or specials, with no training rows.
+
+    Labels compare as text, as the comparison domain names them. A grouped
+    categorical pins a group, which every member of it reads.
+    """
+    pinned = {
+        str(level)
+        for level in (*getattr(spec, "_pinned_levels", ()), *getattr(spec, "_pinned_specials", ()))
+    }
+    if not pinned:
+        return np.zeros(len(points), dtype=bool)
+    grouping = getattr(spec, "_grouping", None)
+    group_of = (
+        {}
+        if grouping is None
+        else {str(level): str(group) for level, group in grouping.original_to_group.items()}
+    )
+    labels = [str(point) for point in points]
+    return np.array(
+        [label in pinned or group_of.get(label) in pinned for label in labels], dtype=bool
+    )
 
 
 def _support_payload(
