@@ -21,6 +21,10 @@
 // The 6 floor leans on a second channel, which each palette has: the group
 // label under the axis, the Build's one highlighted basis, the legends.
 //
+// The Cross-validation chart draws every fold at once, any two side by side,
+// so the folds of a five-fold CV (scikit-learn's default, and the board's)
+// keep every pair apart at those floors, not only neighbours.
+//
 // SVG text takes its colour from `fill`, not `color`, so the text check
 // finds the classes the app's scripts give <text> elements and holds every
 // stylesheet fill on one of them to 4.5:1 on the ground it is drawn on.
@@ -319,22 +323,37 @@ test("the dark categorical palettes keep neighbours apart in colour and in light
       const ratio = contrast(DARK, token, "--surface");
       if (!(ratio >= 3)) failures.push(`${token} on --surface: ${ratio.toFixed(2)}:1`);
     }
-    tokens.forEach((token, i) => {
-      const next = tokens[(i + 1) % tokens.length];
-      const p = linearRgb(DARK, token);
-      const q = linearRgb(DARK, next);
-      const normal = distance(oklab(p), oklab(q));
-      const deficient = Math.min(
-        ...Object.values(DEFICIENCIES).map((matrix) => distance(oklab(simulate(matrix, p)), oklab(simulate(matrix, q)))),
-      );
-      const lightness = Math.abs(oklab(p)[0] - oklab(q)[0]);
-      if (!(normal >= 15)) failures.push(`${token}/${next}: ${normal.toFixed(1)} apart`);
-      if (!(deficient >= 6)) failures.push(`${token}/${next}: ${deficient.toFixed(1)} apart under CVD`);
-      if (!(lightness >= 0.06)) failures.push(`${token}/${next}: ${lightness.toFixed(3)} apart in lightness`);
-    });
+    tokens.forEach((token, i) => failures.push(...separation(DARK, token, tokens[(i + 1) % tokens.length])));
   }
   assert.deepEqual(failures, []);
 });
+
+test("the dark folds of a five-fold CV keep every pair apart, as the CV chart draws them together", () => {
+  const folds = slots(DARK, "trace").slice(0, 5);
+  /** @type {string[]} */
+  const failures = [];
+  folds.forEach((token, i) => folds.slice(i + 1).forEach((other) => failures.push(...separation(DARK, token, other))));
+  assert.deepEqual(failures, []);
+});
+
+/**
+ * Why two slots are not apart enough: in colour, under CVD, and in lightness.
+ * @param {Map<string, string>} theme @param {string} token @param {string} other @returns {string[]}
+ */
+function separation(theme, token, other) {
+  const p = linearRgb(theme, token);
+  const q = linearRgb(theme, other);
+  const normal = distance(oklab(p), oklab(q));
+  const deficient = Math.min(
+    ...Object.values(DEFICIENCIES).map((matrix) => distance(oklab(simulate(matrix, p)), oklab(simulate(matrix, q)))),
+  );
+  const lightness = Math.abs(oklab(p)[0] - oklab(q)[0]);
+  const failures = [];
+  if (!(normal >= 15)) failures.push(`${token}/${other}: ${normal.toFixed(1)} apart`);
+  if (!(deficient >= 6)) failures.push(`${token}/${other}: ${deficient.toFixed(1)} apart under CVD`);
+  if (!(lightness >= 0.06)) failures.push(`${token}/${other}: ${lightness.toFixed(3)} apart in lightness`);
+  return failures;
+}
 
 test("the dark theme is gruvbox's warm dark, with the edit in its own blue", () => {
   // Spec D9: gruvbox grounds and text (morhetz/gruvbox, MIT/X11).

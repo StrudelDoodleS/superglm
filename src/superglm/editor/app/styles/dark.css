@@ -4,7 +4,8 @@
    it current. It lives apart from tokens.css because
    superglm/plotting/editor_style.py reads that file as the light palette.
    tests/editor_frontend/dark_palette.test.js holds every text pair to 4.5:1
-   and keeps neighbours in each categorical palette apart, in lightness too. */
+   and keeps neighbours in each categorical palette apart, in lightness too,
+   and every pair of the first five folds. */
 
 /* Palette: gruvbox by morhetz (github.com/morhetz/gruvbox), MIT/X11. */
 
@@ -80,11 +81,15 @@
   --basis-9: #b16286;
   --basis-10: #d79921;
   --basis-11: #689d6a;
+  /* The Cross-validation chart draws a five-fold CV's folds together, so
+     the first five differ pairwise, in lightness too: gruvbox's purple,
+     yellow and aqua re-stepped in OKLab lightness, with the yellow clear of
+     the edited curve's orange. */
   --trace-0: #83a598;
   --trace-1: #b8bb26;
-  --trace-2: #b16286;
-  --trace-3: #fe8019;
-  --trace-4: #689d6a;
+  --trace-2: #b5668a;
+  --trace-3: #fdd994;
+  --trace-4: #497d4c;
   --trace-5: #fabd2f;
   --trace-6: #fb4934;
   --trace-7: #458588;
