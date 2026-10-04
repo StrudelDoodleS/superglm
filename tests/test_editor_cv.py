@@ -206,6 +206,10 @@ def test_carried_level_edit_keeps_its_change_when_the_reference_moves():
     change = log_carried - np.log(refit.predict(probe))
     edit = term.edited_log_effect - term.original_log_effect
     exposure = np.array([np.sum(X_all["region"] == level) for level in term.levels], dtype=float)
+    # Per level: the carry's shift and difference from the base, predict's sum
+    # (u|log| each), exp (2u) and log (2u|log|); a relativity is two levels and
+    # two differences, about 16u max(1, |log|), and the weighted change adds three
+    # 3-level means (gamma_6 each) and refit's predict, about 33u.
     tol = 64 * _U * max(1.0, np.max(np.abs(log_carried)))
     # The edited relativities hold exactly...
     np.testing.assert_allclose(
@@ -400,7 +404,11 @@ def test_cv_report_shows_a_supplied_result_least_stable_first(cv_frame, cv_fit):
     curves = {fold["label"]: np.asarray(fold["values"]) for fold in region["folds"]}
     for values in curves.values():
         log_values = np.log(values)
-        assert abs(np.average(log_values, weights=weights)) <= 64 * _U * np.max(np.abs(log_values))
+        # The tab's centring (a 3-level weighted mean of logs no larger than 2|c|,
+        # gamma_6, and a subtraction), its exp (2u, absolute in log), this log
+        # (2u|c|) and this mean (gamma_6): about 21u|c| + 2u <= 23u max(1, |c|).
+        tol = 64 * _U * max(1.0, np.max(np.abs(log_values)))
+        assert abs(np.average(log_values, weights=weights)) <= tol
     assert region["spread"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
 
 
@@ -445,10 +453,12 @@ def test_cv_report_reads_integer_coded_fold_models_after_a_collapse(unseen):
     assert session.terms["cls"].metadata["native_levels"] == ["1", "2", "3", "10"]
     after_levels, after = cls_folds()
 
-    # The supplied folds are the same models, read on the same levels.
+    # The supplied folds are the same models, read on the same levels and
+    # centred with the same weights (row counts, exact in float64), so the
+    # curves are equal bit for bit.
     assert after_levels == levels == ["1", "2", "3", "10"]
     assert np.ptp(after[:, 2]) > 0.0
-    np.testing.assert_allclose(after, before, rtol=64 * _U)
+    assert np.array_equal(after, before)
 
 
 def test_cv_report_says_how_to_get_what_is_missing(cv_frame, cv_fit):
@@ -571,13 +581,14 @@ def test_cv_report_gives_a_fold_that_never_saw_a_level_a_gap_there(rare_level, h
     shared = slice(0, 3)
     curves = {}
     for label, values in folds.items():
-        log_values = np.log(np.asarray(values, dtype=np.float64))
+        curves[label] = np.asarray(values, dtype=np.float64)
+        log_values = np.log(curves[label])
         centre = np.average(log_values[shared], weights=weights[shared])
-        assert abs(centre) <= 64 * _U * np.max(np.abs(log_values[shared]))
-        curves[label] = np.exp(log_values)
-    expected = _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
+        # As in the supplied-result test: about 21u|c| + 2u <= 23u max(1, |c|).
+        assert abs(centre) <= 64 * _U * max(1.0, np.max(np.abs(log_values[shared])))
+    # The spread is the summary of the curves as reported, so it is equal bit for bit.
     assert np.isfinite(region["spread"])
-    assert abs(region["spread"] - expected) <= 64 * _U * expected
+    assert region["spread"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
 
 
 @pytest.mark.filterwarnings(_EXPECTED_PIN)
@@ -606,6 +617,8 @@ def test_carried_level_edit_leaves_a_pinned_level_at_its_pin(rare_level):
     probe = pd.DataFrame({"age": [40.0] * 4, "power": [0.0] * 4, "region": ["A", "B", "C", "D"]})
     log_carried = np.log(carried.predict(probe))
     edited = term.edited_log_effect[[term.levels.index(level) for level in "ABC"]]
+    # Two levels' carry, coefficient, predict's sum, exp and log, and two
+    # differences: about 16u max(1, |log|), as in the reference-move test.
     tol = 64 * _U * max(1.0, np.max(np.abs(log_carried)))
     np.testing.assert_allclose(
         log_carried[:3] - log_carried[0], edited - edited[0], rtol=0.0, atol=tol
@@ -872,7 +885,10 @@ def test_run_cv_job_puts_the_hand_edits_back_on_every_fold(cv_frame, cv_fit, fit
         assert edited_fold["scores"]["deviance"] != supplied_fold["scores"]["deviance"]
     assert report["relativities"]["origin"] == "run"
     region = next(item for item in report["relativities"]["terms"] if item["name"] == "region")
-    # Every fold carries the edited curve, so the folds agree on region exactly.
+    # Every fold carries the edited curve, so the folds agree on region up to
+    # the carry's shift and difference from the base (u|log| each) and each
+    # curve's 3-level centring (gamma_6 + u) and exp (2u): about 17u max(1, |log|)
+    # + 4u relative.
     for fold in region["folds"]:
         np.testing.assert_allclose(fold["values"], region["edited"], rtol=64 * _U)
     # Its spread measures nothing, so region reads as held, after the measured terms.
@@ -1141,7 +1157,8 @@ def test_final_fit_refits_train_and_validation_and_export_offers_it(cv_frame, cv
     assert not hasattr(kept, "_editor_history")
     probe = pd.DataFrame({"age": [40.0] * 3, "power": [0.0] * 3, "region": ["A", "B", "C"]})
     log_mu = np.log(final_model.predict(probe))
-    # The hand edit is put back as set: the final model's region relativities are the edited ones.
+    # The hand edit is put back as set: the final model's region relativities are the edited ones,
+    # up to the carry and predict on two levels: about 16u max(1, |log|), as in the carry tests.
     np.testing.assert_allclose(
         log_mu - log_mu[0],
         edited - edited[0],
@@ -1274,14 +1291,15 @@ def test_run_cv_and_final_fit_refit_the_structure_from_the_last_refit(cv_frame, 
     region = next(item for item in run.terms if item["name"] == "region")
     assert region["levels"] == ["A", "B", "C"]
     assert [fold["label"] for fold in region["folds"]] == ["Fold 1", "Fold 2", "Fold 3"]
+    # B and C read one group's coefficient, centred and exponentiated element
+    # by element, so they are equal bit for bit, in every fold and in predict
+    # (the probe's one age value is scored once; every other step is row-wise).
     for fold in region["folds"]:
         _a, b, c = fold["values"]
-        np.testing.assert_allclose(c, b, rtol=64 * _U)
+        assert b == c
     probe = pd.DataFrame({"age": [40.0] * 3, "power": [0.0] * 3, "region": ["A", "B", "C"]})
     log_mu = np.log(final.model.predict(probe))
-    np.testing.assert_allclose(
-        log_mu[2], log_mu[1], rtol=0.0, atol=64 * _U * max(1.0, np.max(np.abs(log_mu)))
-    )
+    assert log_mu[2] == log_mu[1]
 
 
 @pytest.mark.parametrize(("fit_mode", "selection"), [("fit", "auto"), ("fit_reml", 0.0)])
@@ -1370,7 +1388,8 @@ def test_run_cv_scores_every_fold_when_one_fold_never_trained_on_a_level(rare_le
     assert list(folds) == ["Fold 1", "Fold 2", "Fold 3"]
     assert np.isnan(folds["Fold 1"][3])
     assert not np.isnan(folds["Fold 2"]).any() and not np.isnan(folds["Fold 3"]).any()
-    # Each fold carries the edit wherever it has a value.
+    # Each fold carries the edit wherever it has a value, up to about
+    # 17u max(1, |log|) + 4u relative, as in the Run CV job test.
     for values in folds.values():
         valued = ~np.isnan(values)
         np.testing.assert_allclose(values[valued], region["edited"][valued], rtol=64 * _U)
