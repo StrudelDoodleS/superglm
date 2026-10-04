@@ -1,5 +1,5 @@
-/* cv.css: the Cross-validation tab (views/cv_tab.js). Folds take the trace
-   palette by fold number, the all-rows fit the current-edit blue, exposure
+/* cv.css: the Cross-validation tab (views/cv_tab.js). Folds take the fold
+   palette by fold number (the trace palette past five folds), a pastel fill with a darker edge, the all-rows fit the current-edit blue, exposure
    the chart's yellow; every colour is a token, so dark.css restyles it.
    Some fold colours sit close together, so each fold also has a fixed place
    within a level and its own legend entry, which picks it out. */
@@ -308,17 +308,21 @@
 .cv-level { fill: var(--muted); }
 .cv-axis-title { fill: var(--text); font-weight: 600; }
 .cv-range { stroke: var(--grey); stroke-width: 2; stroke-opacity: 0.6; }
-.cv-fold-dot { fill-opacity: 0.9; }
+.cv-fold-dot,
+.cv-card-dot { fill-opacity: 0.95; stroke-width: 1.2; }
 .cv-fit,
 .cv-fit-line { fill: none; stroke: var(--blue); stroke-width: 2.6; }
 .cv-edited,
 .cv-edited-line { fill: none; stroke: var(--orange); stroke-width: 2; stroke-dasharray: 5 4; }
-.cv-fold-line { fill: none; stroke-width: 1.3; stroke-opacity: 0.85; }
+/* A fold curve is its pastel line over a casing of its edge colour. */
+.cv-fold-casing { fill: none; stroke-width: 3; stroke-opacity: 0.9; }
+.cv-fold-line { fill: none; stroke-width: 1.6; }
 .cv-envelope { fill: var(--blue-band); stroke: none; }
 /* A legend entry hovered or focused picks its fold out (highlightFold). */
 .cv-chart-svg .is-dimmed { opacity: 0.15; }
 .cv-fold-dot.is-lit { fill-opacity: 1; }
-.cv-fold-line.is-lit { stroke-width: 2.4; stroke-opacity: 1; }
+.cv-fold-casing.is-lit { stroke-width: 4.4; stroke-opacity: 1; }
+.cv-fold-line.is-lit { stroke-width: 2.6; }
 
 /* The tab takes the report panel's whole width, and the panel scrolls as one
    page: the header goes up with the cards instead of staying over them. */

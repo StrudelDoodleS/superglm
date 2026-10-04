@@ -90,6 +90,17 @@
   --trace-2: #b5668a;
   --trace-3: #fdd994;
   --trace-4: #497d4c;
+  /* The folds keep the dark trace colours; the dark ground needs no edge. */
+  --fold-0: #83a598;
+  --fold-1: #b8bb26;
+  --fold-2: #b5668a;
+  --fold-3: #fdd994;
+  --fold-4: #497d4c;
+  --fold-edge-0: #83a598;
+  --fold-edge-1: #b8bb26;
+  --fold-edge-2: #b5668a;
+  --fold-edge-3: #fdd994;
+  --fold-edge-4: #497d4c;
   --trace-5: #fabd2f;
   --trace-6: #fb4934;
   --trace-7: #458588;

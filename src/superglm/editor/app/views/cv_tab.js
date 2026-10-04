@@ -64,9 +64,31 @@ function px(value) {
   return value.toFixed(1);
 }
 
+/** The folds with a palette of their own; later folds take the trace colours. */
+const FOLD_SLOTS = 5;
+
 /** @param {number} fold the fold's 0-based number */
 function foldColour(fold) {
-  return `var(--trace-${fold % 10})`;
+  return fold < FOLD_SLOTS ? `var(--fold-${fold})` : `var(--trace-${fold % 10})`;
+}
+
+/**
+ * The fold's edge, a darker shade of its colour that keeps a pastel mark
+ * readable on the chart's ground.
+ * @param {number} fold the fold's 0-based number
+ */
+function foldEdge(fold) {
+  return fold < FOLD_SLOTS ? `var(--fold-edge-${fold})` : foldColour(fold);
+}
+
+/** @param {number} fold the fold's 0-based number */
+function foldMarkStyle(fold) {
+  return `fill: ${foldColour(fold)}; stroke: ${foldEdge(fold)}`;
+}
+
+/** @param {number} fold the fold's 0-based number */
+function foldSwatchStyle(fold) {
+  return `background: ${foldColour(fold)}; box-shadow: inset 0 0 0 1px ${foldEdge(fold)}`;
 }
 
 /**
@@ -266,7 +288,7 @@ function metricCard(metric, results) {
       const value = fold.scores[metric.name];
       const number = foldNumber(fold, index);
       return isNumber(value)
-        ? `<circle cx="${px(x(value))}" cy="12" r="4.5" style="fill: ${foldColour(number)}">`
+        ? `<circle cx="${px(x(value))}" cy="12" r="4.5" class="cv-card-dot" style="${foldMarkStyle(number)}">`
           + `<title>Fold ${number + 1}: ${metricText(value)}</title></circle>`
         : "";
     }).join("");
@@ -310,7 +332,7 @@ export function foldTableMarkup(payload) {
   const label = (/** @type {string} */ name) =>
     SHORT_METRICS[/** @type {keyof typeof SHORT_METRICS} */ (name)] ?? name;
   const rows = result.folds.map((fold, index) => `<tr>
-      <td><span class="cv-fold-swatch" style="background: ${foldColour(foldNumber(fold, index))}"></span>Fold ${fold.fold + 1}</td>
+      <td><span class="cv-fold-swatch" style="${foldSwatchStyle(foldNumber(fold, index))}"></span>Fold ${fold.fold + 1}</td>
       <td>${countText(fold.n_train)}</td><td>${countText(fold.n_test)}</td>
       ${names.map((name) => `<td>${metricText(fold.scores[name])}</td>`).join("")}
       <td>${fixedText(fold.effective_df, 1)}</td>
@@ -378,7 +400,7 @@ function legendMarkup(term) {
   const folds = term.folds.map((fold, index) => {
     const number = foldNumber(fold, index);
     return `<button type="button" class="cv-fold-key" data-fold="${number}" data-cv-fold-key="${number}">`
-      + `<span class="cv-key-swatch" style="background: ${foldColour(number)}"></span>${escapeHTML(fold.label)}</button>`;
+      + `<span class="cv-key-swatch" style="${foldSwatchStyle(number)}"></span>${escapeHTML(fold.label)}</button>`;
   }).join("");
   const kinds = [
     ["cv-legend-fit", "all-rows fit"],
@@ -451,7 +473,7 @@ export function levelChartMarkup(term) {
     const offset = (number - (slots - 1) / 2) * step;
     return fold.values.map((value, index) => (isNumber(value)
       ? `<circle class="cv-fold-dot" data-fold="${number}" data-level="${index}"
-      cx="${px(x(index) + offset)}" cy="${px(y(value))}" r="3.6" style="fill: ${foldColour(number)}">
+      cx="${px(x(index) + offset)}" cy="${px(y(value))}" r="3.6" style="${foldMarkStyle(number)}">
       <title>${escapeHTML(`${fold.label} · ${levels[index]}: ${fmt(value)}`)}</title></circle>`
       : ""));
   }).join("");
@@ -553,8 +575,10 @@ export function curveChartMarkup(term) {
   ])}Z`).join("");
   const lines = term.folds.map((fold, index) => {
     const number = foldNumber(fold, index);
-    return `<path class="cv-fold-line" data-fold="${number}" style="stroke: ${foldColour(number)}"
-      d="${line(fold.values)}"><title>${escapeHTML(fold.label)}</title></path>`;
+    const d = line(fold.values);
+    return `<path class="cv-fold-casing" data-fold="${number}" style="stroke: ${foldEdge(number)}"
+      d="${d}"></path><path class="cv-fold-line" data-fold="${number}" style="stroke: ${foldColour(number)}"
+      d="${d}"><title>${escapeHTML(fold.label)}</title></path>`;
   }).join("");
   const xTicks = niceTicks(first, last, 6).map((tick) => `<text class="cv-tick" x="${px(x(tick))}"
       y="${base + 16}" text-anchor="middle">${escapeHTML(fmt(tick))}</text>`).join("");

@@ -411,8 +411,8 @@ test("each fold keeps its own place within every level, fold 1 leftmost", () => 
   const missing = levelChartMarkup({ ...threeFolds, folds: [threeFolds.folds[0], threeFolds.folds[2]] });
   const third = dotPlaces(missing).dots.filter(([fold]) => fold === 2);
   assert.ok(third.every(([, level, cx]) => Math.abs(cx - centres[level] - place[2]) <= 0.15));
-  assert.match(missing, /data-fold="2" data-level="0"[^>]*style="fill: var\(--trace-2\)"/);
-  assert.doesNotMatch(missing, /var\(--trace-1\)/);
+  assert.match(missing, /data-fold="2" data-level="0"[^>]*style="fill: var\(--fold-2\); stroke: var\(--fold-edge-2\)"/);
+  assert.doesNotMatch(missing, /var\(--fold-1\)/);
 });
 
 test("the legend names each fold, and its marks carry the fold they belong to", () => {
@@ -456,8 +456,8 @@ test("picking out a fold lights its marks and dims the other folds'", () => {
 test("a fold's colour follows its number in the cards and the fold table", () => {
   const markup = cvTabMarkup(cvPayload(), idle());
   const table = markup.slice(markup.indexOf('aria-label="Fold scores"'), markup.indexOf("</table>"));
-  assert.match(table, /background: var\(--trace-1\)"><\/span>Fold 2/);
-  assert.match(markup, /fill: var\(--trace-1\)"><title>Fold 2: 0\.3000<\/title>/);
+  assert.match(table, /background: var\(--fold-1\); box-shadow: inset 0 0 0 1px var\(--fold-edge-1\)"><\/span>Fold 2/);
+  assert.match(markup, /fill: var\(--fold-1\); stroke: var\(--fold-edge-1\)"><title>Fold 2: 0\.3000<\/title>/);
 });
 
 test("a term whose spread could not be measured reads as --", () => {

@@ -78,19 +78,30 @@
   --basis-9: #0f766e;
   --basis-10: #9333ea;
   --basis-11: #ca8a04;
-  /* The first five trace colours are the Cross-validation folds: the dark
-     theme's hue families (aqua, olive, plum, amber, green) stepped apart in
-     OKLab lightness, so every pair stays apart, colour blind included. */
-  --trace-0: #0b888d;
-  --trace-1: #91921f;
-  --trace-2: #7c2c66;
-  --trace-3: #8d5406;
-  --trace-4: #064a20;
+  --trace-0: #0969da;
+  --trace-1: #2da44e;
+  --trace-2: #bf3989;
+  --trace-3: #d97706;
+  --trace-4: #8250df;
   --trace-5: #1f6feb;
   --trace-6: #cf222e;
   --trace-7: #0a7f8f;
   --trace-8: #6f42c1;
   --trace-9: #57606a;
+  /* The Cross-validation folds: pastel fills (coral, sky, violet, lime,
+     aqua) stepped apart in OKLab lightness so every pair stays apart,
+     colour blind included, each drawn with a darker edge of its own hue
+     that holds the mark 3:1 on the chart's ground. */
+  --fold-0: #ff9689;
+  --fold-1: #05a0cf;
+  --fold-2: #be85f9;
+  --fold-3: #aadf5b;
+  --fold-4: #89f4ed;
+  --fold-edge-0: #dc5f52;
+  --fold-edge-1: #0593bf;
+  --fold-edge-2: #a36fd9;
+  --fold-edge-3: #67940c;
+  --fold-edge-4: #099791;
   /* The Build's green is the basis palette's first colour; the profile
      dialog's best marker is the trace palette's green. */
   --green: var(--basis-0);

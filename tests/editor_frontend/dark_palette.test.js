@@ -329,18 +329,23 @@ test("the dark categorical palettes keep neighbours apart in colour and in light
 });
 
 test("the dark folds of a five-fold CV keep every pair apart, as the CV chart draws them together", () => {
-  const folds = slots(DARK, "trace").slice(0, 5);
+  const folds = slots(DARK, "fold");
+  assert.equal(folds.length, 5, "--fold-* slots");
+  for (const token of folds) assert.ok(contrast(DARK, token, "--surface") >= 3, `${token} on --surface`);
   /** @type {string[]} */
   const failures = [];
   folds.forEach((token, i) => folds.slice(i + 1).forEach((other) => failures.push(...separation(DARK, token, other))));
   assert.deepEqual(failures, []);
 });
 
-test("the light folds of a five-fold CV keep every pair apart, and stay 3:1 on the chart grounds", () => {
-  const folds = slots(LIGHT, "trace").slice(0, 5);
+test("the light folds of a five-fold CV keep every pair apart, their edges 3:1 on the chart grounds", () => {
+  const folds = slots(LIGHT, "fold");
+  const edges = slots(LIGHT, "fold-edge");
+  assert.equal(folds.length, 5, "--fold-* slots");
+  assert.equal(edges.length, 5, "--fold-edge-* slots");
   /** @type {string[]} */
   const failures = [];
-  for (const token of folds) {
+  for (const token of edges) {
     for (const ground of ["--surface", "--surface-subtle"]) {
       const ratio = contrast(LIGHT, token, ground);
       if (!(ratio >= 3)) failures.push(`${token} on ${ground}: ${ratio.toFixed(2)}:1`);
