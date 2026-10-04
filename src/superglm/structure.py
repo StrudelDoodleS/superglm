@@ -136,6 +136,10 @@ _NOT_APPLIED = (
     "The structure could not be applied to {feature!r}: the model's declaration of it does "
     "not accept these decisions."
 )
+_SAME_TEXT = (
+    "Levels {first!r} and {second!r} of {feature!r} read as the same text, which is how a "
+    "structure file tells levels apart; give the term distinct labels."
+)
 _NOT_WRITABLE = (
     "{value!r} in {feature!r} cannot be written to a structure file, which holds text, "
     "numbers and booleans; give the term plain labels."
@@ -510,6 +514,7 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
     if str(reference) not in groups:
         reference = native.get(str(reference), reference)
     ranges = _spec_ranges(spec) if kind == "ordered" else []
+    _require_writable_levels(name, universe)
     return FeatureStructure(
         kind=kind,
         levels=universe,
@@ -518,6 +523,20 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
         unseen=unseen,
         ranges=ranges,
     )
+
+
+def _require_writable_levels(name: str, levels: list) -> None:
+    """Refuse, by name, levels a file cannot hold: not plain scalars, or two with one text.
+
+    Checked before the entry is built, whose own check could only call them
+    malformed and ask for the export that is failing.
+    """
+    seen: dict[str, Any] = {}
+    for level in levels:
+        _plain(level, name)
+        first = seen.setdefault(str(level), level)
+        if first is not level and first != level:
+            raise StructureError(_SAME_TEXT.format(first=first, second=level, feature=name))
 
 
 def _native_levels(name: str, universe: list, spec, frame) -> dict[str, Any]:

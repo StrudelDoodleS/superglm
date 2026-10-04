@@ -258,6 +258,37 @@ def test_an_unfitted_model_without_levels_has_no_structure_to_export(features):
     assert str(refused.value) == "Structure.from_model needs a fitted model; fit the model first."
 
 
+def test_levels_a_file_cannot_hold_are_refused_by_name_on_export():
+    """A fitted term whose levels are not plain JSON scalars, or share a text, says why.
+
+    The refusal names the level and what to do, not "export the structure
+    again", which is the export that failed.
+    """
+    rng = np.random.default_rng(0)
+    n = 300
+    stamps = pd.to_datetime(["2020-01-01", "2021-01-01", "2022-01-01"])
+    dated = _declared({"d": Categorical(base="first")}).fit(
+        pd.DataFrame({"d": rng.choice(stamps, n)}), rng.normal(size=n)
+    )
+    with pytest.raises(StructureError) as refused:
+        Structure.from_model(dated)
+    first = dated._specs["d"]._levels[0]
+    assert str(refused.value) == (
+        f"{first!r} in 'd' cannot be written to a structure file, which holds text, numbers "
+        "and booleans; give the term plain labels."
+    )
+
+    mixed = _declared({"c": Categorical(base="first")}).fit(
+        pd.DataFrame({"c": np.array([1, "1", 2] * 100, dtype=object)}), rng.normal(size=n)
+    )
+    with pytest.raises(StructureError) as refused:
+        Structure.from_model(mixed)
+    assert str(refused.value) == (
+        "Levels 1 and '1' of 'c' read as the same text, which is how a structure file tells "
+        "levels apart; give the term distinct labels."
+    )
+
+
 def test_a_structure_built_in_python_is_checked_like_a_file():
     with pytest.raises(StructureError, match="not one of its levels"):
         Structure(
