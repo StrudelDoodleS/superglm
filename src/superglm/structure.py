@@ -979,7 +979,12 @@ def _range_text(lo, hi, degree) -> str:
 
 
 def _edge_text(edge) -> str:
-    return f"{edge:g}" if _is_finite(edge) else str(edge)
+    if _is_finite(edge):
+        return f"{edge:g}"
+    if isinstance(edge, Integral) and not isinstance(edge, bool):
+        # An integer past float64's range: its digits could run to thousands.
+        return "inf" if edge > 0 else "-inf"
+    return str(edge)
 
 
 def _is_scalar(value) -> bool:
@@ -987,6 +992,14 @@ def _is_scalar(value) -> bool:
 
 
 def _is_finite(value) -> bool:
-    if isinstance(value, bool | np.bool_):
+    """Whether ``value`` is a number float64 holds as a finite value.
+
+    JSON reads an integer of any length, and one past float64's range is no
+    level or edge: ``float`` would raise ``OverflowError`` on it.
+    """
+    if isinstance(value, bool | np.bool_) or not isinstance(value, Real):
         return False
-    return isinstance(value, Real) and math.isfinite(float(value))
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False

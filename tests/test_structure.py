@@ -230,6 +230,8 @@ def test_a_structure_built_in_python_is_checked_like_a_file():
 
 # -- Read refusals (S4): one fixed sentence each -------------------------------
 
+_HUGE = 10**400
+
 READ_REFUSALS = {
     "unknown format": (
         {"format": "superglm.structure.v2", "superglm_version": "0", "features": {}},
@@ -315,6 +317,42 @@ READ_REFUSALS = {
     "features not a mapping": (
         {"format": FORMAT, "superglm_version": "0", "features": []},
         "The structure's 'features' field is malformed; export the structure again.",
+    ),
+    # JSON reads an integer of any length; one past float64's range is no level or edge.
+    "integer past float range as a level": (
+        _payload(area=_categorical(levels=["A", "B", "C", "D", _HUGE])),
+        "The structure entry for 'area' has a malformed 'levels'; export the structure again.",
+    ),
+    "integer past float range as the reference": (
+        _payload(area=_categorical(reference=_HUGE)),
+        "The structure entry for 'area' has a malformed 'reference'; export the structure again.",
+    ),
+    "integer past float range as a member": (
+        _payload(area=_categorical(groups={"CD": ["C", "D", _HUGE]})),
+        f"Group 'CD' of 'area' holds {_HUGE!r}, which is not one of its levels; add it to the "
+        "levels or take it out of the group.",
+    ),
+    "integer past float range as a spline edge": (
+        _payload(
+            age={
+                "kind": "spline",
+                "ranges": [{"lo": _HUGE, "hi": 2.0, "degree": 1, "join": "kink"}],
+            }
+        ),
+        "The spline of 'age' refuses the Line range inf–2; change or remove that range.",
+    ),
+    "integer past float range as an ordered edge": (
+        _payload(
+            band=_categorical(
+                kind="ordered",
+                levels=["0", "1"],
+                groups={},
+                reference="0",
+                unseen="error",
+                ranges=[{"lo": -_HUGE, "hi": "1", "degree": 0, "join": "kink"}],
+            )
+        ),
+        "The spline of 'band' refuses the Flat range -inf–1; change or remove that range.",
     ),
 }
 
