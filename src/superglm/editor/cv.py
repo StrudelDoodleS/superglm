@@ -25,6 +25,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
+from superglm.diagnostics.separation import SeparationError
 from superglm.distributions import NegativeBinomial
 from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.errors import EditorClientError, EditorValueError
@@ -53,6 +54,10 @@ from superglm.model_selection import (
 )
 from superglm.plotting.comparison import _feature_beta, _score_levels
 from superglm.plotting.curve_similarity import _summarize_against_fold_mean
+from superglm.reml.observed_geometry import (
+    ObservedGeometryInfeasibleError,
+    ObservedModeNotCertifiedError,
+)
 
 if TYPE_CHECKING:
     from superglm.editor._types import EditableTerm
@@ -102,6 +107,15 @@ SUPERSEDED = "The model changed while the job ran, so its result was not kept. R
 MIXED_FRAMES = "Train and validation data must both be pandas or both be Polars data frames."
 FOLD_FAILED = "Run CV stopped at fold {fold} and kept no result. {reason}"
 FOLD_NOT_FITTED = "That fold could not be fitted or scored."
+FOLD_SEPARATED = (
+    "That fold's training rows hold a level or crossed cell with exposure but only boundary "
+    "responses, such as no claims, so its effect is infinite and the model refuses it "
+    "(separation='error'); group that level with a neighbour."
+)
+FOLD_SOLVER_FAILED = (
+    "The solver failed numerically on that fold's training rows; the editor's log records "
+    "where it failed."
+)
 FINAL_SPLIT_MISSING = (
     "Final fit fits the train and validation rows together, so it needs {column} on both "
     "or on neither: the {have} data has them and the {lack} data does not. Pass them with "
@@ -133,6 +147,15 @@ FINAL_NOT_FITTED = (
     "Final fit could not fit the {rows} rows. Check them for values the model cannot fit, "
     "such as missing or non-finite values, a level a term does not declare, or a response "
     "its family does not allow."
+)
+FINAL_SEPARATED = (
+    "Final fit could not fit the {rows} rows: a level or crossed cell there has exposure but "
+    "only boundary responses, such as no claims, so its effect is infinite and the model "
+    "refuses it (separation='error'); group that level with a neighbour, or leave those rows out."
+)
+FINAL_SOLVER_FAILED = (
+    "The solver failed numerically while Final fit fitted the {rows} rows, so no model was "
+    "kept; the editor's log records where it failed."
 )
 FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
@@ -895,7 +918,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
             reason = exc.public_message
         else:
             _LOGGER.warning("Run CV fold %d failed.", recorder.fold_number, exc_info=True)
-            reason = FOLD_NOT_FITTED
+            reason = _fit_failure(exc, FOLD_SEPARATED, FOLD_SOLVER_FAILED, FOLD_NOT_FITTED)
         raise EditorValueError(
             FOLD_FAILED.format(fold=recorder.fold_number, reason=reason)
         ) from exc
@@ -1028,15 +1051,18 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
             sample_weight=sample_weight,
             offset=offset,
         )
-    except ValueError as exc:
-        # A row the fit refuses, which the checks above do not name: a
-        # validation row's missing or non-finite number, a level outside an
-        # interaction's universe, or a response the family does not allow.
+    except (ValueError, *_SOLVER_FAILURES) as exc:
+        # Separation and a solver failure say what they are. Any other
+        # ValueError is a row the fit refuses, which the checks above do not
+        # name: a validation row's missing or non-finite number, a level
+        # outside an interaction's universe, or a response the family does
+        # not allow.
         if isinstance(exc, EditorClientError):
             raise
         _LOGGER.warning("Final fit failed.", exc_info=True)
         rows = "train and validation" if len(plan.datasets) > 1 else "train"
-        raise EditorValueError(FINAL_NOT_FITTED.format(rows=rows)) from exc
+        sentence = _fit_failure(exc, FINAL_SEPARATED, FINAL_SOLVER_FAILED, FINAL_NOT_FITTED)
+        raise EditorValueError(sentence.format(rows=rows)) from exc
     context.check()
     if plan.edited:
         context.progress("carrying", terms=sorted(plan.edited))
@@ -1052,6 +1078,24 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         carried=tuple(sorted(plan.edited)),
         pending=plan.pending,
     )
+
+
+# A numerical failure of the solver, as opposed to rows the fit refuses.
+_SOLVER_FAILURES = (
+    np.linalg.LinAlgError,
+    FloatingPointError,
+    ObservedGeometryInfeasibleError,
+    ObservedModeNotCertifiedError,
+)
+
+
+def _fit_failure(exc: BaseException, separated: str, solver: str, other: str) -> str:
+    """The sentence for a refit that raised ``exc``: ``separated``, ``solver`` or ``other``."""
+    if isinstance(exc, SeparationError):
+        return separated
+    if isinstance(exc, _SOLVER_FAILURES):
+        return solver
+    return other
 
 
 def _union_rows(datasets: Sequence[EvaluationDataset]):

@@ -16,6 +16,10 @@ from sklearn.model_selection import KFold
 
 from superglm import Categorical, Numeric, Spline, SuperGLM, cross_validate
 from superglm.editor import EditorSession
+from superglm.reml.observed_geometry import (
+    ObservedGeometryInfeasibleError,
+    ObservedModeNotCertifiedError,
+)
 
 _U = np.finfo(np.float64).eps / 2
 # A fold that never saw a level holds it pinned, and the fit says so.
@@ -1778,6 +1782,84 @@ def test_final_fit_refuses_rows_its_fit_refuses_in_a_fixed_sentence(cv_frame, sp
 
     together = "train and validation" if split == "validation" else "train"
     assert refused.value.public_message == cv.FINAL_NOT_FITTED.format(rows=together)
+
+
+def test_run_cv_and_final_fit_name_a_separated_design_as_such():
+    """N, which only the validation rows hold, has no claims, and the model refuses separation.
+
+    The train and validation fit, like a fold that trains on N, raised
+    SeparationError, and Final fit told the user to look for missing values
+    or an undeclared level.
+    """
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    def declared(**options):
+        features = {"x": Categorical(base="first")}
+        return SuperGLM(family="poisson", features=features, **options)
+
+    rng = np.random.default_rng(20261006)
+    train = pd.DataFrame({"x": np.tile(["A", "B", "C"], 100)}), rng.poisson(1.0, 300) + 1.0
+    x = np.tile(["A", "B", "N"], 20)
+    validation = pd.DataFrame({"x": x}), np.where(x == "N", 0.0, rng.poisson(1.0, 60) + 1.0)
+    X = pd.concat([train[0], validation[0]], ignore_index=True)
+    y = np.concatenate([train[1], validation[1]])
+    supplied = cross_validate(
+        declared(selection_penalty=1.0, separation="ignore"),
+        X,
+        y,
+        cv=KFold(3),
+        scoring=("deviance",),
+    )
+    model = declared(selection_penalty=0.0, separation="error").fit(*train)
+    session = EditorSession.from_model(
+        model, cv=supplied, cv_data=(X, y), train_data=train, validation_data=validation
+    )
+
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    assert final.value.public_message == cv.FINAL_SEPARATED.format(rows="train and validation")
+    assert run.value.public_message == cv.FOLD_FAILED.format(fold=1, reason=cv.FOLD_SEPARATED)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        lambda: np.linalg.LinAlgError("Matrix is singular."),
+        lambda: FloatingPointError("overflow encountered"),
+        lambda: ObservedGeometryInfeasibleError("indefinite penalized Hessian"),
+        lambda: ObservedModeNotCertifiedError(1e-3, 1e-8),
+    ],
+    ids=["linalg", "floating point", "observed geometry", "mode not certified"],
+)
+def test_run_cv_and_final_fit_name_a_solver_failure_as_such(cv_frame, cv_fit, monkeypatch, error):
+    """The solver fails numerically on every fit.
+
+    Final fit blamed the rows for a ValueError among these and reported the
+    others as an internal editor error.
+    """
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+
+    def fails(self, *args, **kwargs):
+        raise error()
+
+    monkeypatch.setattr(SuperGLM, "fit", fails)
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    assert final.value.public_message == cv.FINAL_SOLVER_FAILED.format(rows="train and validation")
+    assert run.value.public_message == cv.FOLD_FAILED.format(fold=1, reason=cv.FOLD_SOLVER_FAILED)
 
 
 @pytest.mark.filterwarnings("ignore:Routing rows with categorical levels unseen:UserWarning")
