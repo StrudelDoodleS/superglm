@@ -1128,6 +1128,16 @@ APPLY_REFUSALS = {
         "The levels of 'brand' in the structure are not the levels the model declares for it; "
         "apply the structure to a model declared with the same levels.",
     ),
+    "ungrouped levels that are not the declared ones": (
+        lambda: Structure(
+            features={
+                "area": FeatureStructure(kind="categorical", levels=["A", "C"], reference="A")
+            }
+        ),
+        lambda: _plain(area=Categorical(base="first", levels=["A", "B"])),
+        "The levels of 'area' in the structure are not the levels the model declares for it; "
+        "apply the structure to a model declared with the same levels.",
+    ),
     "a group member the declared levels leave out": (
         _brand_structure,
         lambda: _plain(brand=Categorical(base="first", levels=BRANDS[:-1])),

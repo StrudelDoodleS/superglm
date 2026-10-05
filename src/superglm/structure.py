@@ -574,10 +574,11 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
     levels = list(entry.levels)
     groups = {label: list(members) for label, members in entry.groups.items()}
     declared = accepted_levels(spec)
-    # A grouping covers its levels at fit, so under one the levels the model
-    # declares must be the structure's exactly: a level the grouping missed
-    # would be refused, and a member the declaration leaves out admitted.
-    if groups and declared is not None and _texts(declared) != _texts(levels):
+    # The levels the model declares must be the structure's exactly. Grouped,
+    # a level the grouping missed would be refused at fit and a member the
+    # declaration leaves out admitted; ungrouped, the declaration would fit
+    # its own levels in place of the structure's.
+    if declared is not None and _texts(declared) != _texts(levels):
         raise StructureError(_UNIVERSE.format(feature=name))
     if groups and column is not None:
         levels, groups = _placed_new_levels(name, entry, levels, groups, column, declared)
