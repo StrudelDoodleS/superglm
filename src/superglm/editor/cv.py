@@ -32,8 +32,10 @@ from superglm.editor.evaluation import EvaluationDataset, training_export_datase
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
-from superglm.features.categorical import Categorical, _codes_against
+from superglm.features.categorical import Categorical, _codes_against, _grouping_labels
 from superglm.features.grouping import LevelGrouping, native_by_text
+from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.random_effect import RandomEffect
 from superglm.features.rebuild import (
     base_names_level,
     clone_with_replaced_features,
@@ -113,6 +115,15 @@ OUTSIDE_DECLARED_LEVELS = (
     "{job}'s rows hold levels of {term!r} outside its list of levels, {levels}; open a model "
     "whose list includes them (levels=, bind_levels or a categorical dtype sets it), or leave "
     "those rows out."
+)
+OUTSIDE_ORDERED_LEVELS = (
+    "{job}'s rows hold levels of {term!r} outside its ordered levels, {levels}; open a model "
+    "whose order=, values= or specials= includes them, or leave those rows out."
+)
+OUTSIDE_ORDERED_GROUPS = (
+    "{job}'s rows hold levels of {term!r} outside its ordered levels or its groups, {levels}; "
+    "open a model whose order=, values= or specials= includes them and whose groups cover "
+    "them, or leave those rows out."
 )
 FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
@@ -744,14 +755,27 @@ def _covering_template(template, X, job: str):
     places it. A term
     with no group for new levels (``"error"`` or ``"base"``), or one whose
     ``levels=`` leaves the level out, refuses ``job`` in one sentence. So
-    does an ungrouped term whose universe, declared or bound by
-    ``bind_levels``, leaves the level out: it has no group to take it.
+    does a term with no group to take a level its universe leaves out: an
+    ungrouped categorical or a random effect whose universe, declared or
+    bound by ``bind_levels``, leaves it out, and an ordered term, grouped or
+    not, whose ``order=``, ``values=`` and ``specials=`` leave it out or
+    whose groups do not cover it.
     """
     frame = as_eager_frame(X)
     bindings = dict(getattr(template, "_level_bindings", None) or ())
     replacements = {}
     for name, spec in template._specs.items():
-        if not isinstance(spec, Categorical) or name not in frame.columns:
+        if not isinstance(spec, Categorical | OrderedCategorical | RandomEffect):
+            continue
+        if name not in frame.columns:
+            continue
+        if isinstance(spec, OrderedCategorical):
+            outside = _outside_order(frame.column_array(name), spec)
+            if outside:
+                sentence = (
+                    OUTSIDE_ORDERED_LEVELS if spec._grouping is None else OUTSIDE_ORDERED_GROUPS
+                )
+                raise EditorValueError(sentence.format(job=job, term=name, levels=outside))
             continue
         grouping = getattr(spec, "_grouping", None)
         if grouping is None:
@@ -788,7 +812,7 @@ def _covering_template(template, X, job: str):
     return clone_with_replaced_features(template, replacements) if replacements else template
 
 
-def _outside_universe(frame, name: str, spec: Categorical, binding) -> list[str]:
+def _outside_universe(frame, name: str, spec: Categorical | RandomEffect, binding) -> list[str]:
     """The labels of column ``name`` outside ungrouped ``spec``'s universe, as text.
 
     The universe is the one the fit binds: ``levels=``, else a categorical
@@ -805,6 +829,22 @@ def _outside_universe(frame, name: str, spec: Categorical, binding) -> list[str]
     present = values[~np.asarray(pd.isna(values), dtype=bool)]
     outside = present[_codes_against(present, list(universe)) < 0]
     return sorted({str(label) for label in pd.unique(outside).tolist()}, key=str)
+
+
+def _outside_order(values, spec: OrderedCategorical) -> list[str]:
+    """The labels in ``values`` that ordered ``spec``'s fit does not take, as text.
+
+    Values match the declaration as the fit matches them (``_canonical``),
+    and a grouped term's through its grouping: a label the declaration
+    leaves out, or one its groups do not cover. Missing values are left to
+    the fit, which refuses them.
+    """
+    values = np.asarray(values).ravel()
+    labels = spec._canonical(values[~np.asarray(pd.isna(values), dtype=bool)])
+    if spec._grouping is not None:
+        labels = _grouping_labels(labels)
+    unknown = set(pd.unique(labels).tolist()) - spec._known_levels
+    return sorted({str(label) for label in unknown}, key=str)
 
 
 def _uncovered_labels(values, grouping) -> list[str]:

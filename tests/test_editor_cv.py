@@ -1548,6 +1548,99 @@ def test_run_cv_and_final_fit_refuse_levels_outside_an_ungrouped_term_s_universe
         )
 
 
+def _validation_rows_session(term, *, fit_mode="fit", bind=False, missing=False) -> EditorSession:
+    """Train rows hold x = A/B/C/D and validation rows A/B/N/E; x is ``term``.
+
+    The CV data is the two together; the supplied result is an inferred
+    categorical's. ``bind`` binds x's universe from the train rows with
+    ``bind_levels``; ``missing`` leaves x missing on three validation rows.
+    """
+    rng = np.random.default_rng(20261006)
+
+    def rows(levels, n):
+        x = rng.choice(levels, n).astype(object)
+        power = rng.normal(0.0, 1.0, n)
+        eta = -0.3 + 0.1 * power + 0.3 * (x == "B")
+        return pd.DataFrame({"power": power, "x": x}), rng.poisson(np.exp(eta)).astype(float)
+
+    def model(x_term):
+        features = {"power": Numeric(), "x": x_term}
+        return SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+
+    train, validation = rows(["A", "B", "C", "D"], 400), rows(["A", "B", "N", "E"], 100)
+    if missing:
+        validation[0].loc[:2, "x"] = None
+    X = pd.concat([train[0], validation[0]], ignore_index=True)
+    y = np.concatenate([train[1], validation[1]])
+    supplied = cross_validate(
+        model(Categorical(base="first")),
+        X,
+        y,
+        cv=KFold(3, shuffle=True, random_state=0),
+        scoring=("deviance",),
+        fit_mode=fit_mode,
+        error_score=np.nan,
+    )
+    opened = model(term)
+    if bind:
+        opened.bind_levels(train[0])
+    return EditorSession.from_model(
+        getattr(opened, fit_mode)(*train),
+        cv=supplied,
+        cv_data=(X, y),
+        train_data=train,
+        validation_data=validation,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "sentence"),
+    [
+        ("ordered", "OUTSIDE_ORDERED_LEVELS"),
+        ("collapsed ordered", "OUTSIDE_ORDERED_GROUPS"),
+        ("random effect, levels=", "OUTSIDE_DECLARED_LEVELS"),
+        ("random effect, bind_levels", "OUTSIDE_DECLARED_LEVELS"),
+    ],
+)
+def test_run_cv_and_final_fit_refuse_levels_outside_an_ordered_or_random_effect_term(
+    kind, sentence
+):
+    """x is an ordered term with order=A/B/C/D, or a random effect over A/B/C/D.
+
+    N and E, which only the validation rows hold, lie outside its levels, and
+    neither kind of term has a group to take them. The fit refused them with a
+    bare ValueError: Final fit failed as an internal editor error and Run CV's
+    fold as one that "could not be fitted or scored". Both refuse in one
+    sentence.
+    """
+    import superglm.editor.cv as cv
+    from superglm import OrderedCategorical, RandomEffect
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    if kind.endswith("ordered"):
+        basis = Spline(kind="bs", n_knots=2, degree=2)
+        term = OrderedCategorical(order=["A", "B", "C", "D"], basis=basis)
+        session = _validation_rows_session(term)
+    else:
+        bind = kind.endswith("bind_levels")
+        term = RandomEffect(levels=None if bind else ["A", "B", "C", "D"])
+        session = _validation_rows_session(term, fit_mode="fit_reml", bind=bind)
+    if kind == "collapsed ordered":
+        session.select_levels("x", ["C", "D"])
+        session.replace_with_collapsed_levels("x", group_label="CD")
+
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    for job, refused in (("Final fit", final), ("Run CV", run)):
+        assert refused.value.public_message == getattr(cv, sentence).format(
+            job=job, term="x", levels=["E", "N"]
+        )
+
+
 @pytest.mark.filterwarnings("ignore:Routing rows with categorical levels unseen:UserWarning")
 @pytest.mark.parametrize("grouped", [False, True], ids=["levels", "grouping"])
 @pytest.mark.parametrize(
