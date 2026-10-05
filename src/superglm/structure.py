@@ -63,7 +63,7 @@ from superglm.features.rebuild import (
 )
 from superglm.features.spline import _SplineBase
 from superglm.model import SuperGLM
-from superglm.model.fit_state import configured_lambda2, configured_penalty
+from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 
 FORMAT = "superglm.structure.v1"
 KINDS = ("categorical", "ordered", "spline")
@@ -357,10 +357,11 @@ class Structure:
         base, with the library's warning, rather than refused. Ranges on a ``ps``
         or ``ns`` spline rebuild it as a ``bs`` spline with the same knots,
         degree and penalty order, as the editor does. The copy's penalties
-        are those ``model`` was declared with: applied to a fitted model, a
-        ``selection_penalty="auto"`` is calibrated again at the next fit, and
-        smoothing that ``fit_reml`` estimated starts again from the declared
-        ``spline_penalty``, as they would on a fresh declaration.
+        and family are those ``model`` was declared with: applied to a fitted
+        model, a ``selection_penalty="auto"`` is calibrated again at the next
+        fit, smoothing that ``fit_reml`` estimated starts again from the
+        declared ``spline_penalty``, and a ``NegativeBinomial(theta="auto")``
+        estimates its theta again, as they would on a fresh declaration.
 
         Parameters
         ----------
@@ -417,15 +418,18 @@ class Structure:
                 raise
             except Exception as exc:
                 raise StructureError(_NOT_APPLIED.format(feature=name)) from exc
-        # The penalties as declared: a calibrated selection_penalty="auto" or
-        # smoothing a REML fit estimated belongs to that fit, like its
-        # coefficients, so a fitted model and its declaration give one copy.
-        return clone_with_replaced_features(
+        # The penalties and family as declared: a calibrated
+        # selection_penalty="auto", smoothing a REML fit estimated or an NB2
+        # theta="auto" belongs to that fit, like its coefficients, so a fitted
+        # model and its declaration give one copy.
+        applied = clone_with_replaced_features(
             model,
             replacements,
             lambda1=configured_penalty(model).lambda1,
             lambda2=configured_lambda2(model),
         )
+        applied.family = configured_family(model)
+        return applied
 
 
 def read_structure(path_or_mapping) -> Structure:

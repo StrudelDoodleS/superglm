@@ -807,36 +807,48 @@ def test_apply_keeps_the_bound_universe_of_a_term_it_rebuilds_without_one():
     assert b14 == b10
 
 
-@pytest.mark.parametrize("estimated", ["auto_selection", "reml_smoothing"])
-def test_apply_to_a_fitted_model_takes_the_penalties_it_was_declared_with(estimated):
-    """Penalties a fit estimated belong to that fit, like its coefficients.
+@pytest.mark.parametrize("estimated", ["auto_selection", "reml_smoothing", "nb2_theta"])
+def test_apply_to_a_fitted_model_takes_the_penalties_and_family_it_was_declared_with(estimated):
+    """Penalties and a theta a fit estimated belong to that fit, like its coefficients.
 
-    A calibrated ``selection_penalty="auto"`` and REML smoothing are not
-    carried into the copy, so applying a structure to the fitted model and
-    to its declaration give the same model and the same next fit.
+    A calibrated ``selection_penalty="auto"``, REML smoothing and an NB2
+    ``theta="auto"`` are not carried into the copy, so applying a structure
+    to the fitted model and to its declaration give the same model and the
+    same next fit.
     """
-    X, y = _frame()
+    from superglm.distributions import NegativeBinomial
+
+    def counted(frame, y, seed):
+        if estimated != "nb2_theta":
+            return frame, y
+        mu = np.exp(y)
+        return frame, np.random.default_rng(seed).negative_binomial(2.0, 2.0 / (2.0 + mu))
+
+    X, y = counted(*_frame(), seed=0)
 
     def declared():
         return SuperGLM(
-            family="gaussian",
+            family=NegativeBinomial(theta="auto") if estimated == "nb2_theta" else "gaussian",
             selection_penalty="auto" if estimated == "auto_selection" else 0.0,
             spline_penalty=0.1,
             features={"brand": Categorical(base="first"), "age": Spline(kind="bs", n_knots=8)},
         )
 
     fitted = declared()
-    if estimated == "auto_selection":
-        fitted.fit(X, y)
-    else:
+    if estimated == "reml_smoothing":
         fitted.fit_reml(X, y)
+    else:
+        fitted.fit(X, y)
     structure = _brand_structure()
 
     from_fit, from_declaration = structure.apply(fitted), structure.apply(declared())
 
     assert from_fit._penalty_config.lambda1 == from_declaration._penalty_config.lambda1
     assert from_fit.lambda2 == from_declaration.lambda2 == 0.1
-    next_year, y_next = _frame(seed=2027)
+    assert getattr(from_fit.family, "theta", None) == getattr(
+        from_declaration.family, "theta", None
+    )
+    next_year, y_next = counted(*_frame(seed=2027), seed=1)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*pinned.*", category=UserWarning)
         from_fit.fit(next_year, y_next)
