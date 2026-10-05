@@ -337,3 +337,34 @@ def test_a_level_a_fold_never_saw_is_a_gap_whatever_its_unseen_policy(unseen):
             assert np.isnan(curve[at])
             assert np.isfinite(np.delete(curve, at)).all()
     assert np.isfinite(similarity["vs_mean"]["link"].to_numpy()).all()
+
+
+@pytest.mark.parametrize("unseen", ["base", "Other"])
+def test_a_level_whose_group_a_fold_never_saw_is_a_gap_whatever_routes_it(unseen):
+    """A grouping over A-E holds D and E in Other; this fold was fitted on A, B and D only.
+
+    Unbound, the fold's universe is A, B and Other. C is its own group,
+    outside that universe, and the unseen policy reads it at the base or in
+    Other without refusing: C is a gap. E has no rows either, but its group
+    has D's: it reads Other's estimate, as D does.
+    """
+    from superglm import collapse_levels
+    from superglm.plotting.comparison import _build_term_comparison_data
+
+    rng = np.random.default_rng(20261005)
+    train = rng.choice(["A", "B", "D"], 300)
+    y = 1.0 + 0.2 * (train == "B") + 0.3 * (train == "D") + rng.normal(0.0, 0.1, 300)
+    grouping = collapse_levels(pd.Series(["A", "B", "C", "D", "E"]), groups={"Other": ["D", "E"]})
+    spec = Categorical(base="A", grouping=grouping, unseen=unseen)
+    fold = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": spec})
+    fold.fit(pd.DataFrame({"x": train}), y)
+    assert fold._specs["x"]._levels == ["A", "B", "Other"]
+
+    X = pd.DataFrame({"x": ["A", "B", "C", "D", "E"]})
+    [term] = _build_term_comparison_data(models={"fold_0": fold}, terms=["x"], X=X)["terms"]
+
+    link = term["series"]["fold_0"]["link"]
+    at = {level: index for index, level in enumerate(term["domain"]["levels"])}
+    assert np.isnan(link[at["C"]])
+    assert np.isfinite(np.delete(link, at["C"])).all()
+    assert link[at["E"]] == link[at["D"]]

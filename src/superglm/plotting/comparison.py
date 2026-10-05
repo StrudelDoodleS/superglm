@@ -191,8 +191,11 @@ def _unestimated_points(spec, points: NDArray) -> NDArray[np.bool_]:
     Levels, or specials, it holds pinned with no training rows, and on a
     Categorical any level outside its universe, which its unseen policy may
     score without refusing; an ordered term refuses one. Labels compare as
-    text, as the comparison domain names them. A grouped categorical knows
-    its groups' members and pins a group, which every member of it reads.
+    text, as the comparison domain names them. A grouped term reads each
+    member at its group: a member whose group it pins, or whose group is
+    outside its universe (no training rows, unbound), is a gap whatever its
+    unseen policy would route it to; one whose group it estimated reads that
+    estimate, rows of its own or not.
     """
     pinned = {
         str(level)
@@ -205,20 +208,14 @@ def _unestimated_points(spec, points: NDArray) -> NDArray[np.bool_]:
         else {str(level): str(group) for level, group in grouping.original_to_group.items()}
     )
     # None when the term refuses a level outside its universe itself.
-    known = (
-        {str(level) for level in spec._levels} | set(group_of)
-        if isinstance(spec, Categorical)
-        else None
-    )
-    return np.array(
-        [
-            label in pinned
-            or group_of.get(label) in pinned
-            or (known is not None and label not in known)
-            for label in map(str, points)
-        ],
-        dtype=bool,
-    )
+    fitted = {str(level) for level in spec._levels} if isinstance(spec, Categorical) else None
+
+    def unestimated(label: str) -> bool:
+        # The fitted level the point is read at; None for a label the grouping lacks.
+        level = label if grouping is None else group_of.get(label)
+        return label in pinned or level in pinned or (fitted is not None and level not in fitted)
+
+    return np.array([unestimated(label) for label in map(str, points)], dtype=bool)
 
 
 def _support_payload(
