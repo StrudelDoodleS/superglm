@@ -32,7 +32,7 @@ from superglm.editor.evaluation import EvaluationDataset, training_export_datase
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
-from superglm.features.categorical import Categorical
+from superglm.features.categorical import Categorical, _codes_against
 from superglm.features.grouping import LevelGrouping, native_by_text
 from superglm.features.rebuild import (
     base_names_level,
@@ -739,13 +739,23 @@ def _covering_template(template, X, job: str):
     levels: into the group its ``unseen`` names, as the in-force model
     predicts it and as ``Structure.apply(model, X=...)`` places it. A term
     with no group for new levels (``"error"`` or ``"base"``), or one whose
-    ``levels=`` leaves the level out, refuses ``job`` in one sentence.
+    ``levels=`` leaves the level out, refuses ``job`` in one sentence. So
+    does an ungrouped term whose universe, declared or bound by
+    ``bind_levels``, leaves the level out: it has no group to take it.
     """
     frame = as_eager_frame(X)
+    bindings = dict(getattr(template, "_level_bindings", None) or ())
     replacements = {}
     for name, spec in template._specs.items():
+        if not isinstance(spec, Categorical) or name not in frame.columns:
+            continue
         grouping = getattr(spec, "_grouping", None)
-        if not isinstance(spec, Categorical) or grouping is None or name not in frame.columns:
+        if grouping is None:
+            outside = _outside_universe(frame, name, spec, bindings.get(name))
+            if outside:
+                raise EditorValueError(
+                    OUTSIDE_DECLARED_LEVELS.format(job=job, term=name, levels=outside)
+                )
             continue
         new = _uncovered_labels(frame.column_array(name), grouping)
         if not new:
@@ -772,6 +782,25 @@ def _covering_template(template, X, job: str):
             level=base_names_level(spec),
         )
     return clone_with_replaced_features(template, replacements) if replacements else template
+
+
+def _outside_universe(frame, name: str, spec: Categorical, binding) -> list[str]:
+    """The labels of column ``name`` outside ungrouped ``spec``'s universe, as text.
+
+    The universe is the one the fit binds: ``levels=``, else a categorical
+    dtype on the column (which holds every value it has), else ``binding``.
+    Values match it as the fit codes them. Missing values are left to the
+    fit, which refuses them.
+    """
+    universe = spec._declared_levels
+    if universe is None and frame.column_declared_categories(name) is None:
+        universe = None if binding is None else binding.levels
+    if universe is None:
+        return []
+    values = np.asarray(frame.column_array(name)).ravel()
+    present = values[~np.asarray(pd.isna(values), dtype=bool)]
+    outside = present[_codes_against(present, list(universe)) < 0]
+    return sorted({str(label) for label in pd.unique(outside).tolist()}, key=str)
 
 
 def _uncovered_labels(values, grouping) -> list[str]:

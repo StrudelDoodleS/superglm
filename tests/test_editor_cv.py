@@ -1356,12 +1356,16 @@ def test_run_cv_and_final_fit_refit_the_structure_from_the_last_refit(cv_frame, 
     assert log_mu[2] == log_mu[1]
 
 
-def _new_levels_session(unseen: str, levels=None) -> EditorSession:
+def _new_levels_session(
+    unseen: str, levels=None, *, collapse: bool = True, bind: bool = False
+) -> EditorSession:
     """Train rows hold x = A/B/C/D and validation rows A/B/N/E; C and D are grouped as Other.
 
     The CV data is the two together, so N and E sit in Run CV's rows too,
     and the supplied result is the ungrouped model's. ``levels`` is the
-    opened model's ``levels=`` for x.
+    opened model's ``levels=`` for x; ``bind`` binds its universe from the
+    train rows with ``bind_levels`` instead, and ``collapse=False`` leaves
+    x ungrouped.
     """
     rng = np.random.default_rng(20261005)
 
@@ -1381,15 +1385,19 @@ def _new_levels_session(unseen: str, levels=None) -> EditorSession:
     supplied = cross_validate(
         declared(), X, y, cv=KFold(3, shuffle=True, random_state=0), scoring=("deviance",)
     )
+    model = declared(levels)
+    if bind:
+        model.bind_levels(train[0])
     session = EditorSession.from_model(
-        declared(levels).fit(*train),
+        model.fit(*train),
         cv=supplied,
         cv_data=(X, y),
         train_data=train,
         validation_data=validation,
     )
-    session.select_levels("x", ["C", "D"])
-    session.replace_with_collapsed_levels("x", group_label="Other")
+    if collapse:
+        session.select_levels("x", ["C", "D"])
+        session.replace_with_collapsed_levels("x", group_label="Other")
     if unseen != "error":
         session.set_unseen("x", unseen)
     return session
@@ -1450,6 +1458,33 @@ def test_run_cv_and_final_fit_refuse_levels_no_group_takes_in_one_sentence(
 
     for job, refused in (("Final fit", final), ("Run CV", run)):
         assert refused.value.public_message == getattr(cv, sentence).format(
+            job=job, term="x", levels=["E", "N"]
+        )
+
+
+@pytest.mark.parametrize("bind", [False, True], ids=["levels", "bind_levels"])
+def test_run_cv_and_final_fit_refuse_levels_outside_an_ungrouped_term_s_universe(bind):
+    """x is ungrouped, its universe A/B/C/D declared with levels= or bound by bind_levels.
+
+    N and E, which only the validation rows hold, lie outside it, and an
+    ungrouped term has no group to take them. The fit refused them with a bare
+    ValueError: Final fit failed as an internal editor error and Run CV's fold
+    as one that "could not be fitted or scored". Both refuse in one sentence.
+    """
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    levels = None if bind else ["A", "B", "C", "D"]
+    session = _new_levels_session("error", levels, collapse=False, bind=bind)
+
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    for job, refused in (("Final fit", final), ("Run CV", run)):
+        assert refused.value.public_message == cv.OUTSIDE_DECLARED_LEVELS.format(
             job=job, term="x", levels=["E", "N"]
         )
 
