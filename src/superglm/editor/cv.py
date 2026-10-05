@@ -80,6 +80,10 @@ NO_FINGERPRINT = (
     "This result was made before cross_validate recorded a data fingerprint, so only "
     "the row count was checked."
 )
+NO_FIT_MODE = (
+    "This result was made before cross_validate recorded its fit method, so Run CV fits "
+    "each fold with {method}, as the current model was fitted."
+)
 NO_ESTIMATORS = (
     "Fold curves need the fold models: pass return_estimators=True to cross_validate, "
     "or run CV on the current model."
@@ -458,6 +462,7 @@ class CVTabView:
     run_reason: str | None
     final_reason: str | None
     has_validation: bool
+    fit_mode_note: str | None = None
 
 
 def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -> CVTabView:
@@ -472,9 +477,17 @@ def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -
         model_changed=session.model is not session.reference_model or bool(session.edited_terms()),
         pending=len(session.pending),
         run_reason=run_cv_reason(session),
+        fit_mode_note=_fit_mode_note(session),
         final_reason=final_fit_reason(session),
         has_validation="validation" in session._evaluation_data,
     )
+
+
+def _fit_mode_note(session) -> str | None:
+    """The tab's note when a supplied result does not record its fit method."""
+    if session.cv is None or session.cv.fit_mode is not None:
+        return None
+    return NO_FIT_MODE.format(method=_replay_method(session))
 
 
 def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[str, Any]:
@@ -525,7 +538,8 @@ def cv_tab_payload(
         "run_cv": {
             "available": view.run_reason is None,
             "reason": view.run_reason,
-            "note": view.check.note,
+            "note": " ".join(note for note in (view.check.note, view.fit_mode_note) if note)
+            or None,
         },
         "final_fit": {
             "available": view.final_reason is None,
@@ -672,11 +686,18 @@ def capture_cv_run(session) -> CVRunPlan:
         ),
         terms=terms,
         edited={name: terms[name] for name in session.edited_terms()},
-        fit_mode=resolve_refit_method(session.model, "auto"),
+        fit_mode=_replay_method(session),
         scoring=supplied or _DEFAULT_SCORING,
         splitter=cv.splitter,
         n_points=session.n_points,
     )
+
+
+def _replay_method(session) -> str:
+    """The method Run CV fits each fold with: the supplied result's, so the two
+    columns differ only by structure and edits; the current model's when the
+    result predates the record (the tab's note says so)."""
+    return session.cv.fit_mode or resolve_refit_method(session.model, "auto")
 
 
 def _declared_template(session):

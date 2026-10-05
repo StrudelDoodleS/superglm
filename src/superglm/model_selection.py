@@ -73,10 +73,11 @@ class CrossValidationResult:
         features and interaction parents, or every column when the model
         takes its features from ``X``. Other columns may hold anything.
         ``data_fingerprint`` is ``None`` when these columns cannot be hashed.
+    fit_mode : {"fit", "fit_reml"} or None
+        The fit method each fold was fitted with.
 
-    ``n_rows``, ``data_fingerprint``, ``splitter`` and
-    ``fingerprint_columns`` are ``None`` on a result made before they were
-    recorded.
+    ``n_rows``, ``data_fingerprint``, ``splitter``, ``fingerprint_columns``
+    and ``fit_mode`` are ``None`` on a result made before they were recorded.
     """
 
     fold_scores: pd.DataFrame
@@ -91,6 +92,7 @@ class CrossValidationResult:
     data_fingerprint: str | None = None
     splitter: str | None = None
     fingerprint_columns: tuple[str, ...] | None = None
+    fit_mode: str | None = None
 
     def plot_terms_by_fold(
         self,
@@ -684,4 +686,5 @@ def cross_validate(
         data_fingerprint=fingerprint,
         splitter=type(cv).__name__,
         fingerprint_columns=columns,
+        fit_mode=fit_mode,
     )

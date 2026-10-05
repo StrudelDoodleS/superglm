@@ -1549,8 +1549,8 @@ def test_run_cv_and_final_fit_estimate_a_declared_auto_theta_again_after_a_refit
     np.testing.assert_array_equal(after.predict(X.iloc[500:]), before.predict(X.iloc[500:]))
 
 
-def test_run_cv_takes_the_in_force_fit_method_and_the_supplied_scorers(cv_frame, cv_fit):
-    from superglm.editor.cv import capture_cv_run
+def test_run_cv_takes_the_recorded_fit_method_and_the_supplied_scorers(cv_frame, cv_fit):
+    from superglm.editor.cv import NO_FIT_MODE, capture_cv_run, capture_cv_view, cv_tab_payload
 
     X, y, w = cv_frame
     model, supplied = cv_fit
@@ -1560,14 +1560,51 @@ def test_run_cv_takes_the_in_force_fit_method_and_the_supplied_scorers(cv_frame,
     no_builtins = dataclasses.replace(
         supplied, fold_scores=scores.drop(columns=["deviance", "gini", "nll"])
     )
+    # A result made before cross_validate recorded its fit method.
+    older = dataclasses.replace(supplied, fit_mode=None)
+
+    def session(fitted, result):
+        return EditorSession.from_model(fitted, cv=result, **_splits(cv_frame))
 
     def plan(fitted, result):
-        return capture_cv_run(EditorSession.from_model(fitted, cv=result, **_splits(cv_frame)))
+        return capture_cv_run(session(fitted, result))
 
+    def note(fitted, result):
+        view = capture_cv_view(session(fitted, result), run=None, final_fit=None)
+        return cv_tab_payload(view, jobs={})["run_cv"]["note"]
+
+    assert supplied.fit_mode == "fit"
     assert plan(model, supplied).fit_mode == "fit"
-    assert plan(reml, supplied).fit_mode == "fit_reml"
+    assert plan(reml, supplied).fit_mode == "fit"
+    assert (plan(reml, older).fit_mode, note(reml, older)) == (
+        "fit_reml",
+        NO_FIT_MODE.format(method="fit_reml"),
+    )
+    assert note(reml, supplied) is None
     assert plan(model, deviance_only).scoring == ("deviance",)
     assert plan(model, no_builtins).scoring == ("deviance", "gini", "nll")
+
+
+def test_run_cv_on_a_reml_model_replays_a_result_fitted_with_fit(cv_frame, cv_fit, fit_rows):
+    """The supplied folds were fitted with fit, the default; the opened model with fit_reml.
+
+    Run CV took the opened model's method, so with nothing edited its scores
+    differed from the supplied ones with no reason shown. It replays the
+    folds with the recorded method: the same folds, structure and scorers
+    give the same numbers.
+    """
+    from superglm.editor.cv import capture_cv_run, run_cv
+
+    X, y, w = cv_frame
+    _fitted, supplied = cv_fit
+    reml = _model().fit_reml(X.iloc[:400], y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(reml, cv=supplied, **_splits(cv_frame))
+
+    run = run_cv(capture_cv_run(session), _Context())
+
+    for name in ("deviance", "gini", "nll"):
+        np.testing.assert_array_equal(run.result.fold_scores[name], supplied.fold_scores[name])
+    assert run.result.fit_mode == "fit"
 
 
 @pytest.mark.filterwarnings(_EXPECTED_PIN)

@@ -2034,7 +2034,7 @@ class TestDataFingerprint:
         for column in (y, sw, offset):
             expected.update(np.asarray(column, dtype="<f8").tobytes())
         assert result.n_rows == len(y)
-        assert result.splitter == "SimpleKFold"
+        assert (result.splitter, result.fit_mode) == ("SimpleKFold", "fit")
         assert result.data_fingerprint == expected.hexdigest()
 
     def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
@@ -2108,4 +2108,9 @@ class TestDataFingerprint:
         )
         restored = pickle.loads(pickle.dumps(old))
 
-        assert (restored.n_rows, restored.data_fingerprint, restored.splitter) == (None, None, None)
+        assert (
+            restored.n_rows,
+            restored.data_fingerprint,
+            restored.splitter,
+            restored.fit_mode,
+        ) == (None, None, None, None)
