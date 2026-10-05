@@ -278,3 +278,62 @@ def test_a_fold_that_holds_a_level_pinned_has_a_gap_there_on_the_cross_validate_
     monkeypatch.setattr(comparison_plotly, "plot_term_comparison_plotly", lambda data, **_: data)
     plotted = result.plot_terms_by_fold(X, terms="band")
     assert np.isnan(plotted["terms"][0]["series"]["fold_0"]["link"][d])
+
+
+@pytest.mark.parametrize("unseen", ["base", "group"])
+def test_a_level_a_fold_never_saw_is_a_gap_whatever_its_unseen_policy(unseen):
+    """A fold reads a level outside its universe by its unseen policy, without refusing.
+
+    cross_validate's folds share the CV rows' levels, and the data the curves
+    are read on also holds D, which the CV rows do not. Under unseen="base" a
+    fold would read D at its base, relativity 1, and under a group policy at
+    that group's value, as if it had estimated D. D is a gap in every fold's
+    curve instead: in the comparison payload, the similarity diagnostics and
+    the editor's fold curves.
+    """
+    from sklearn.model_selection import KFold
+
+    from superglm import collapse_levels, cross_validate
+    from superglm.editor import EditorSession
+    from superglm.editor.cv import fold_log_curves
+    from superglm.plotting.comparison import _build_term_comparison_data
+    from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+    rng = np.random.default_rng(20261005)
+    band = rng.choice(["A", "B", "C", "D"], 400, p=[0.3, 0.3, 0.3, 0.1])
+    X_all = pd.DataFrame({"band": band})
+    y_all = 1.0 + 0.2 * (band == "B") + 0.4 * (band == "C") + rng.normal(0.0, 0.1, 400)
+    rows = band != "D"
+
+    def declared(levels):
+        if unseen == "base":
+            return Categorical(base="A", unseen="base")
+        grouping = collapse_levels(pd.Series(levels), groups={"BC": ["B", "C"]})
+        return Categorical(base="A", grouping=grouping, unseen="BC")
+
+    def model(levels):
+        return SuperGLM(
+            family="gaussian", selection_penalty=0.0, features={"band": declared(levels)}
+        )
+
+    result = cross_validate(
+        model(["A", "B", "C"]), X_all[rows], y_all[rows], cv=KFold(3), return_estimators=True
+    )
+    labeled = {f"fold_{i}": fold for i, fold in enumerate(result.estimators)}
+
+    [term] = _build_term_comparison_data(models=labeled, terms=["band"], X=X_all)["terms"]
+    d = term["domain"]["levels"].index("D")
+    similarity = build_cv_curve_similarity(models=result.estimators, X=X_all)["band"]
+    assert similarity["domain"]["levels"].index("D") == d
+    in_force = model(["A", "B", "C", "D"]).fit(X_all, y_all)
+    session = EditorSession.from_model(in_force, terms=["band"])
+    editor_d = session.terms["band"].levels.index("D")
+    for label, fold in labeled.items():
+        for curve, at in (
+            (term["series"][label]["link"], d),
+            (similarity["curves"]["link"][label], d),
+            (fold_log_curves(fold, session.terms)["band"], editor_d),
+        ):
+            assert np.isnan(curve[at])
+            assert np.isfinite(np.delete(curve, at)).all()
+    assert np.isfinite(similarity["vs_mean"]["link"].to_numpy()).all()

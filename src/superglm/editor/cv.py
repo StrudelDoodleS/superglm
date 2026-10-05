@@ -293,10 +293,11 @@ def fold_log_curves(model, terms: Mapping[str, EditableTerm]) -> dict[str, NDArr
 
     The editor's grid can reach past a fold's training range; a spline holds
     its end value there, as it does at predict time. A level the fold never
-    saw is NaN, a gap in that fold's curve: one outside its level universe,
-    or one ``cross_validate``'s shared universe gave it with no training rows,
-    which it holds pinned and would predict at its pin. A fold that can score
-    none of a term's points, a term of another kind, is left out of that term.
+    saw is NaN, a gap in that fold's curve, whatever its unseen policy: one
+    outside its level universe, or one ``cross_validate``'s shared universe
+    gave it with no training rows, which it holds pinned and would predict at
+    its pin. A fold that can score none of a term's points, a term of another
+    kind, is left out of that term.
     """
     curves: dict[str, NDArray[np.float64]] = {}
     for name, term in terms.items():
@@ -323,9 +324,9 @@ def _levels_as_taken(spec, grid: _TermGrid) -> NDArray:
     """The grid's levels as ``spec`` takes them: its own value for each label it holds.
 
     A collapse leaves the in-force term with text labels, while a supplied
-    fold model fitted on integer codes takes the integers and refuses "1" as
-    unseen (or, under ``unseen="base"``, reads it at the reference). A label
-    the fold's levels lack, a grouped fold's member, is passed as it is.
+    fold model fitted on integer codes takes the integers and would read "1"
+    as a level it never saw, a gap. A label the fold's levels lack, a grouped
+    fold's member, is passed as it is.
     """
     own = native_by_text(getattr(spec, "_levels", ()))
     return np.asarray(

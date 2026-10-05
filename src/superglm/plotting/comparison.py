@@ -161,47 +161,63 @@ def _native_level_values(X: EagerFrame, term: str, labels: list[str]) -> NDArray
 def _score_levels(spec, levels: NDArray, beta: NDArray[np.float64]) -> NDArray[np.float64]:
     """Score a level term on ``levels``, NaN at a level the model did not estimate.
 
-    A fold model that never saw a level the comparison frame holds refuses
-    it as unseen. One that ``cross_validate``'s shared universe gave the level
-    with no training rows holds it pinned and scores it at the pin. Neither
-    has an estimate there, so that level is a gap in its curve rather than a
-    failure of the whole comparison or a value. The levels are scored one by
-    one only when the model refuses the whole vector.
+    A fold model has no estimate at a level its training rows lack, whatever
+    its unseen policy. Outside its universe, ``unseen="error"`` refuses the
+    level, while ``unseen="base"`` or a group policy would score it at the
+    base or in that group without refusing. One that ``cross_validate``'s
+    shared universe gave it with no training rows it holds pinned and scores
+    at the pin. Each is a gap in its curve rather than a value, or a failure
+    of the whole comparison. Only the other levels are scored, one by one
+    only when the model refuses them together.
     """
+    values = np.full(len(levels), np.nan, dtype=np.float64)
+    scored = np.flatnonzero(~_unestimated_points(spec, levels))
+    if scored.size == 0:
+        return values
     try:
-        values = np.array(spec.score(levels, beta), dtype=np.float64)
+        values[scored] = spec.score(levels[scored], beta)
     except ValueError:
-        values = np.full(len(levels), np.nan, dtype=np.float64)
-        for index in range(len(levels)):
+        for index in scored:
             try:
                 values[index] = spec.score(levels[index : index + 1], beta)[0]
             except ValueError:
                 continue
-    values[_pinned_points(spec, levels)] = np.nan
     return values
 
 
-def _pinned_points(spec, points: NDArray) -> NDArray[np.bool_]:
-    """Which level points ``spec`` holds pinned: levels, or specials, with no training rows.
+def _unestimated_points(spec, points: NDArray) -> NDArray[np.bool_]:
+    """Which level points ``spec`` has no estimate at.
 
-    Labels compare as text, as the comparison domain names them. A grouped
-    categorical pins a group, which every member of it reads.
+    Levels, or specials, it holds pinned with no training rows, and on a
+    Categorical any level outside its universe, which its unseen policy may
+    score without refusing; an ordered term refuses one. Labels compare as
+    text, as the comparison domain names them. A grouped categorical knows
+    its groups' members and pins a group, which every member of it reads.
     """
     pinned = {
         str(level)
         for level in (*getattr(spec, "_pinned_levels", ()), *getattr(spec, "_pinned_specials", ()))
     }
-    if not pinned:
-        return np.zeros(len(points), dtype=bool)
     grouping = getattr(spec, "_grouping", None)
     group_of = (
         {}
         if grouping is None
         else {str(level): str(group) for level, group in grouping.original_to_group.items()}
     )
-    labels = [str(point) for point in points]
+    # None when the term refuses a level outside its universe itself.
+    known = (
+        {str(level) for level in spec._levels} | set(group_of)
+        if isinstance(spec, Categorical)
+        else None
+    )
     return np.array(
-        [label in pinned or group_of.get(label) in pinned for label in labels], dtype=bool
+        [
+            label in pinned
+            or group_of.get(label) in pinned
+            or (known is not None and label not in known)
+            for label in map(str, points)
+        ],
+        dtype=bool,
     )
 
 
