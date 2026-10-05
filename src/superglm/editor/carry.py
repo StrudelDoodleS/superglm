@@ -69,8 +69,9 @@ def model_with_edited_curves(
     ``model``. A numeric curve is carried by ``np.interp`` on ``x``, held at
     its end values past either end of the editor's grid (a piecewise term
     follows its own extrapolation, as its offset does). A level curve is
-    carried by label; a level the editor never showed keeps its refit value,
-    and a level ``model`` holds pinned (no training rows) keeps its pin.
+    carried by label; a level the editor never showed takes the carried value
+    of the group ``model`` places it in, else keeps its refit value, and a
+    level ``model`` holds pinned (no training rows) keeps its pin.
 
     The carried curve keeps the edited shape exactly and moves by one
     constant: the exposure-weighted mean of the refit curve minus the
@@ -97,7 +98,8 @@ def model_with_edited_curves(
     )
     for name, source in edited.items():
         target = session.terms[name]
-        target.edited_log_effect = _carried_values(source, target)
+        grouping = getattr(session.model._specs[name], "_grouping", None)
+        target.edited_log_effect = _carried_values(source, target, grouping)
     return apply.apply_edits_to_model_copy_with_data(
         session.model,
         session.terms,
@@ -109,8 +111,13 @@ def model_with_edited_curves(
     )
 
 
-def _carried_values(source: EditableTerm, target: EditableTerm) -> NDArray[np.float64]:
-    """``source``'s edited curve on ``target``'s grid, in ``target``'s centring."""
+def _carried_values(
+    source: EditableTerm, target: EditableTerm, grouping=None
+) -> NDArray[np.float64]:
+    """``source``'s edited curve on ``target``'s grid, in ``target``'s centring.
+
+    ``grouping`` is the target fit's grouping of ``target``'s levels, if any.
+    """
     refit = np.asarray(target.edited_log_effect, dtype=np.float64)
     edited = native_log_effect_values(source)
     if source.size == 1:
@@ -125,10 +132,27 @@ def _carried_values(source: EditableTerm, target: EditableTerm) -> NDArray[np.fl
         values = refit.copy()
         moved = refit[shared] - native_log_effect_values(original)[index]
         values[shared] = edited[index] + weighted_mean(moved, weights[shared])
+        if grouping is not None:
+            _join_their_groups(values, target.levels, shared, weights, grouping)
         return values
     x = np.asarray(target.x, dtype=np.float64)
     moved = refit - term_offset_values(original, x)
     return term_offset_values(source, x) + weighted_mean(moved, weights)
+
+
+def _join_their_groups(values, levels, shared, weights, grouping) -> None:
+    """Give each level ``source`` did not show its group's carried value, in place.
+
+    Run CV and Final fit place a level only their rows hold in a group, and
+    the group's coefficient is its members' exposure-weighted mean, so a
+    member left at its refit value would dilute the group's edit.
+    """
+    group_of = np.array([grouping.original_to_group.get(label) for label in levels], dtype=object)
+    for group in set(group_of[~shared].tolist()) - {None}:
+        members = group_of == group
+        known = members & shared
+        if known.any():
+            values[members & ~shared] = weighted_mean(values[known], weights[known])
 
 
 def _original_curve(term: EditableTerm) -> EditableTerm:

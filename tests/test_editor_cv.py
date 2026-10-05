@@ -1470,6 +1470,45 @@ def test_run_cv_and_final_fit_place_levels_only_their_rows_hold_in_the_new_level
     assert np.isfinite(run.result.fold_scores["deviance"]).all()
 
 
+@pytest.mark.filterwarnings(_EXPECTED_PIN)
+@pytest.mark.filterwarnings("ignore:Routing rows with categorical levels unseen:UserWarning")
+def test_run_cv_and_final_fit_put_an_edit_back_as_set_on_a_group_they_widen(monkeypatch):
+    """Other (C and D) is shifted by 0.1; Run CV and Final fit also place N and E in it.
+
+    N and E kept their refit value, and the group's coefficient, their
+    exposure-weighted mean with C and D, diluted the edit.
+    """
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+
+    session = _new_levels_session("Other")
+    session.select_levels("x", ["C", "D"])
+    session.shift("x", 0.1)
+    edited = dict(zip(session.terms["x"].levels, session.terms["x"].edited_log_effect))
+    carried = []
+    carry = cv.model_with_edited_curves
+
+    def recorded(*args, **kwargs):
+        carried.append(carry(*args, **kwargs))
+        return carried[-1]
+
+    monkeypatch.setattr(cv, "model_with_edited_curves", recorded)
+    run_final_fit(capture_final_fit(session), _Context())
+    run_cv(capture_cv_run(session), _Context())
+
+    probe = pd.DataFrame({"power": [0.0] * 6, "x": ["A", "B", "C", "D", "N", "E"]})
+    expected = np.array([edited[level] - edited["A"] for level in "ABCDCC"])
+    assert len(carried) == 4
+    for model in carried:
+        log_mu = np.log(model.predict(probe))
+        np.testing.assert_allclose(
+            log_mu - log_mu[0],
+            expected,
+            rtol=0.0,
+            atol=64 * _U * max(1.0, np.max(np.abs(log_mu))),
+        )
+
+
 @pytest.mark.parametrize(
     ("unseen", "levels", "sentence"),
     [
