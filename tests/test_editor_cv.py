@@ -1617,6 +1617,40 @@ def test_run_cv_and_final_fit_keep_a_selection_penalty_given_to_a_refit(cv_frame
     assert final.selection_penalty_ == 0.05
 
 
+@pytest.mark.parametrize("given", ["collapse", "ungroup"])
+def test_an_ungroup_that_restores_the_opened_structure_keeps_a_selection_penalty_given(
+    cv_frame, given
+):
+    """``lambda1=0.05`` is given to the collapse of B and C, or to the ungroup that undoes it.
+
+    The ungroup removes the last group, and the fit from before the collapse
+    has that structure, so it was reused. But that fit is the opened one,
+    calibrated by "auto": the 0.05 was dropped from the in-force model, and
+    Final fit calibrated again.
+    """
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE
+
+    X, y, w = cv_frame
+    model = _model("auto").fit(X.iloc[:400], y[:400], sample_weight=w[:400])
+    assert model.selection_penalty_ != 0.05
+    session = EditorSession.from_model(model, **_splits(cv_frame))
+    penalty = {"lambda1": 0.05}
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels(
+        "region", method="fit", **(penalty if given == "collapse" else {})
+    )
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_ungrouped_levels(
+        "region", method="fit", **(penalty if given == "ungroup" else {})
+    )
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+
+    assert session.model._specs["region"]._grouping is None
+    assert getattr(session.model, EXPLICIT_PENALTY_ATTRIBUTE, {}) == penalty
+    assert session.model.selection_penalty_ == final.selection_penalty_ == 0.05
+
+
 def test_run_cv_and_final_fit_estimate_a_declared_auto_theta_again_after_a_refit(cv_frame):
     """A Refit that changes nothing leaves an NB2 ``theta="auto"`` estimated per fold.
 

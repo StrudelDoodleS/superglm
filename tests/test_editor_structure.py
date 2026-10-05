@@ -467,6 +467,20 @@ def test_a_partial_ungroup_keeps_a_most_exposed_reference(options, reference):
     assert session_payload(session)["region"]["reference"] == reference
 
 
+def test_the_ungroup_shortcut_does_not_read_a_base_policy_as_a_level_of_that_name():
+    """A term declaring the policy "first" does not fit again a model whose reference is the level "first".
+
+    The policy picks A, the first level; the fitted reference is the most
+    exposed level, which is named "first".
+    """
+    fitted = Categorical(base="most_exposed")
+    fitted.build(np.array(["A", "first", "C"]), sample_weight=np.array([1.0, 4.0, 1.0]))
+    assert fitted._base_level == "first"
+
+    assert not session_module._fits_again(Categorical(base="first"), fitted)
+    assert session_module._fits_again(Categorical(base="most_exposed"), fitted)
+
+
 def test_keeping_the_reference_keeps_integer_levels_native():
     rng = np.random.default_rng(20261004)
     band = rng.permutation(np.repeat([1, 2, 10], [250, 400, 350]))

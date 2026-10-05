@@ -72,7 +72,7 @@ from superglm.editor.terms import (
     term_weights_from_fit,
 )
 from superglm.editor.unseen import UnseenChoice
-from superglm.features.rebuild import clone_with_replaced_features
+from superglm.features.rebuild import base_names_level, clone_with_replaced_features
 from superglm.model_selection import CrossValidationResult
 from superglm.solvers.dispersion import model_weight_semantics
 
@@ -112,10 +112,11 @@ def _fits_again(replacement, fitted) -> bool:
 
     Both ungrouped, they must agree on the kind of term, the declared universe,
     where new levels go and the reference: the level ``fitted`` resolved, or
-    the policy it resolved it from, unless a level binding pinned it there.
+    the policy it resolved it from, unless a level binding pinned it there. A
+    policy is never that level, even one named "first".
     """
     base = str(replacement.base)
-    same_reference = base == str(fitted._base_level) or (
+    same_reference = (base_names_level(replacement) and base == str(fitted._base_level)) or (
         base == str(fitted.base) and getattr(fitted, "_pinned_base", None) is None
     )
     return (
@@ -126,6 +127,21 @@ def _fits_again(replacement, fitted) -> bool:
         and getattr(replacement, "unseen", None) == getattr(fitted, "unseen", None)
         and same_reference
     )
+
+
+def _explicit_penalties(model, lambda1, lambda2) -> dict[str, Any]:
+    """The penalties a Refit of ``model`` records as given (``EXPLICIT_PENALTY_ATTRIBUTE``).
+
+    ``model``'s own record, with this Refit's ``lambda1`` and ``lambda2``
+    over it; ``...`` gives none.
+    """
+    explicit = dict(getattr(model, EXPLICIT_PENALTY_ATTRIBUTE, {}))
+    explicit.update(
+        (name, value)
+        for name, value in (("lambda1", lambda1), ("lambda2", lambda2))
+        if value is not ...
+    )
+    return explicit
 
 
 class EditorSession:
@@ -1217,8 +1233,9 @@ class EditorSession:
         With nothing waiting and no New levels choice since the latest step, an
         ungroup that removes the model's last collapsed group reuses the fit
         from before that step instead of refitting, when that model had none
-        and its term is the one the ungroup would fit, reference included: it
-        is exactly the result.
+        and its term is the one the ungroup would fit, reference included, at
+        the penalties the ungroup would record as given: it is exactly the
+        result.
         """
         if not self.pending:
             model = self._pre_collapse_model(term, keep_reference=keep_reference, **refit_kwargs)
@@ -1250,7 +1267,8 @@ class EditorSession:
         changed the in-force model, and the earlier fit lacks it, so it rules
         the shortcut out too. So does an ungroup whose term the earlier fit
         would not fit again, such as one keeping a reference a collapse made
-        without keeping the old one.
+        without keeping the old one, and one whose ``lambda1`` or ``lambda2``,
+        given now or to an earlier Refit, the earlier fit was not given.
         """
         step = self.structure_history[-1] if self.structure_history else None
         if step is None or not step.changes:
@@ -1264,6 +1282,11 @@ class EditorSession:
             return None
         previous = step.state.model
         if self._model_has_collapsed_level_groups(previous):
+            return None
+        given = _explicit_penalties(
+            self.model, kwargs.get("lambda1", ...), kwargs.get("lambda2", ...)
+        )
+        if given != getattr(previous, EXPLICIT_PENALTY_ATTRIBUTE, {}):
             return None
         return previous if _fits_again(replacement, previous._specs[term]) else None
 
@@ -1390,12 +1413,7 @@ class EditorSession:
             offset=base_offset,
             fit_kwargs=fit_kwargs,
         )
-        explicit = dict(getattr(self.model, EXPLICIT_PENALTY_ATTRIBUTE, {}))
-        explicit.update(
-            (name, value)
-            for name, value in (("lambda1", lambda1), ("lambda2", lambda2))
-            if value is not ...
-        )
+        explicit = _explicit_penalties(self.model, lambda1, lambda2)
         if explicit:
             setattr(refit_model, EXPLICIT_PENALTY_ATTRIBUTE, explicit)
         return refit_model, method_used
