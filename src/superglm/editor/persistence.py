@@ -271,7 +271,9 @@ def _left_out(session) -> list[str]:
     the New levels choices made before it; then those made since, and the
     changes still waiting. Hand edits carried over a Refit are not named:
     they are curve edits, saved with the terms. A step's earlier choices sit
-    in the state it kept: a step starts the live history afresh.
+    in the state it kept: a step starts the live history afresh. A revert
+    to the original model puts the opened model back in force, so it and
+    everything before it are not named: load against that model restores them.
     """
     from superglm.editor.unseen import UnseenChoice
 
@@ -282,8 +284,10 @@ def _left_out(session) -> list[str]:
             if isinstance(record, UnseenChoice)
         ]
 
+    steps = session.structure_history
+    reverts = [i for i, step in enumerate(steps) if step.operation == "revert_to_original"]
     changes: list[str] = []
-    for step in session.structure_history:
+    for step in steps[reverts[-1] + 1 :] if reverts else steps:
         changes += choices(step.state.history)
         if step.operation == "carry_edits":
             # The carried curves are curve edits, which the artifact holds.

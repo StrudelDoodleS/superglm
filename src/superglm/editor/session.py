@@ -1538,8 +1538,9 @@ class EditorSession:
         """Load an edit artifact against a fitted model.
 
         The artifact holds curve edits only. When the session it came from had
-        structural steps or New levels choices, one warning names them: they
-        were not restored.
+        structural steps or New levels choices in force, one warning names
+        them: they were not restored. Those a revert to the original model
+        undid are not named: loaded against that model, nothing is missing.
         """
         return persistence.load_session(cls, path, model=model)
 

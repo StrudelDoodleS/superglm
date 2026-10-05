@@ -364,6 +364,39 @@ def test_load_names_the_structural_steps_the_edit_file_did_not_restore(book, tmp
     assert moved[[1, 2]].all()
 
 
+def test_load_does_not_name_what_a_revert_to_the_original_model_undid(book, tmp_path):
+    """A revert puts the opened model back in force; load against it restores the session.
+
+    The collapse, the New levels choice made on it and the revert itself
+    change nothing the opened model lacks, so the warning names only the
+    waiting change made since.
+    """
+    model, _, _ = book
+    session = _session(model)
+    session.stage_structural("collapse", "brand", {"levels": ["B10", "B11"]})
+    session.refit_pending(method="fit")
+    group = next(label for label in session.model._specs["brand"]._levels if "+" in label)
+    session.set_unseen("brand", group)
+    session.revert_to_reference_model()
+    assert session.model is model
+    session.select_indices("area", [1])
+    session.shift("area", 0.1)
+    session.stage_structural("shape", "age", {"lo": 30.0, "hi": 45.0, "degree": 1})
+    path = tmp_path / "session.json"
+    session.save(path)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = EditorSession.load(path, model=model)
+
+    assert [str(w.message) for w in caught if "edit file" in str(w.message)] == [
+        "The edit file holds curve edits only, so these changes were not restored: "
+        "Line 30–45 in age (waiting). Pass the model they produced to load, or make them again."
+    ]
+    restored = loaded.terms["area"]
+    assert np.array_equal(restored.edited_log_effect, session.terms["area"].edited_log_effect)
+
+
 def _legacy_declared_grouping_model():
     """A model as superglm 0.36.1 left it: levels=A, B, C while its grouping also maps D.
 
