@@ -49,6 +49,7 @@ from superglm.model_selection import (
     FINGERPRINT_VERSION,
     CrossValidationResult,
     _data_fingerprint,
+    _fingerprint_columns,
     _fold_row_count,
     cross_validate,
 )
@@ -105,6 +106,10 @@ NO_FINAL_ROWS = "Final fit needs train_data, or a model that kept its fit data."
 TRAIN_ONLY = "No validation data was supplied, so Final fit uses the train rows only."
 SUPERSEDED = "The model changed while the job ran, so its result was not kept. Run it again."
 MIXED_FRAMES = "Train and validation data must both be pandas or both be Polars data frames."
+FINAL_COLUMN_TYPES = (
+    "Final fit stacks the train and validation rows, so a column the model reads must have one "
+    "dtype in both; {column!r} does not, so pass it with the same dtype in both splits."
+)
 FOLD_FAILED = "Run CV stopped at fold {fold} and kept no result. {reason}"
 FOLD_NOT_FITTED = "That fold could not be fitted or scored."
 FOLD_SEPARATED = (
@@ -1037,7 +1042,7 @@ def capture_final_fit(session) -> FinalFitPlan:
 
 def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
     """Refit the in-force structure on train and validation rows, then put the edits back."""
-    X, y, sample_weight, offset = _union_rows(plan.datasets)
+    X, y, sample_weight, offset = _union_rows(plan.datasets, plan.template)
     context.progress("fitting", n_rows=int(y.size))
     context.check()
     model = _covering_template(plan.template, X, "Final fit").clone_unfitted()
@@ -1098,8 +1103,11 @@ def _fit_failure(exc: BaseException, separated: str, solver: str, other: str) ->
     return other
 
 
-def _union_rows(datasets: Sequence[EvaluationDataset]):
-    """The splits' rows stacked in order: one frame, response, weight and offset."""
+def _union_rows(datasets: Sequence[EvaluationDataset], template):
+    """The splits' rows stacked in order: one frame, response, weight and offset.
+
+    The frame holds the columns ``template`` reads (:func:`_stacked_columns`).
+    """
     frames = [as_eager_frame(dataset.X) for dataset in datasets]
     backends = {frame.backend for frame in frames}
     if len(backends) > 1:
@@ -1107,15 +1115,71 @@ def _union_rows(datasets: Sequence[EvaluationDataset]):
     if len(frames) == 1:
         X = frames[0].native
     elif backends == {"pandas"}:
-        X = pd.concat([cast(pd.DataFrame, frame.native) for frame in frames], ignore_index=True)
+        names, numbers = _stacked_columns(frames, template)
+        X = pd.concat(
+            [
+                cast(pd.DataFrame, frame.native)[names].astype(dict.fromkeys(numbers, "float64"))
+                for frame in frames
+            ],
+            ignore_index=True,
+        )
     else:
         import polars as pl
 
+        names, numbers = _stacked_columns(frames, template)
         X = pl.concat(
-            [cast(pl.DataFrame, frame.native) for frame in frames], how="vertical_relaxed"
+            [
+                cast(pl.DataFrame, frame.native)
+                .select(names)
+                .cast(dict.fromkeys(numbers, pl.Float64))
+                for frame in frames
+            ],
+            how="vertical_relaxed",
         )
     y = np.concatenate([np.asarray(dataset.y, dtype=np.float64) for dataset in datasets])
     return X, y, _stacked(datasets, "sample_weight", 1.0), _stacked(datasets, "offset", 0.0)
+
+
+def _stacked_columns(frames, template) -> tuple[list[str], list[str]]:
+    """The columns ``template`` reads, and those to stack as float64; refused if a split differs.
+
+    The fit reads a column as its NumPy array and the categories its dtype
+    declares (a pandas categorical, a Polars Enum), so splits that agree on
+    those stack without changing a value, however their libraries name the
+    dtype or order the columns. So do numbers of other kinds or widths in a
+    column a term reads as a number, which the fit reads as float64; a level
+    term reads a number's text, and 1 and 1.0 are two levels.
+    """
+    names = list(_fingerprint_columns(template, frames[0]))
+    levels = {
+        name
+        for name, spec in template._specs.items()
+        if isinstance(spec, Categorical | OrderedCategorical | RandomEffect)
+    }
+    numbers = []
+    for name in names:
+        readings = {_reading(frame, name) for frame in frames}
+        if len(readings) == 1:
+            continue
+        numeric = all(isinstance(kind, np.dtype) and kind.kind in "iuf" for kind, _ in readings)
+        if name in levels or not numeric:
+            raise EditorValueError(FINAL_COLUMN_TYPES.format(column=name))
+        numbers.append(name)
+    return names, numbers
+
+
+def _reading(frame, name) -> tuple[Any, tuple | None]:
+    """How the fit reads ``frame``'s column ``name``: its NumPy dtype, then its declared categories.
+
+    Any value not a number or a bool reads as ``"values"`` (text, whatever
+    its dtype is called), and a column the frame lacks as ``"absent"``.
+    """
+    if name not in frame.columns:
+        return "absent", None
+    dtype = frame.column_array(name).dtype
+    categories = frame.column_declared_categories(name)
+    kind = dtype if dtype.kind in "iufb" and categories is None else "values"
+    return kind, None if categories is None else tuple(categories)
 
 
 def _stacked(datasets: Sequence[EvaluationDataset], name: str, fill: float):

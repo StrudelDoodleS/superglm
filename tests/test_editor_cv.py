@@ -1324,9 +1324,78 @@ def test_final_fit_stacks_a_split_without_weights_beside_unit_weights(cv_frame):
     session = EditorSession.from_model(model, validation_data=(X.iloc[400:500], y[400:500]))
 
     assert capture_cv_view(session, run=None, final_fit=None).final_reason is None
-    _X, stacked_y, weights, offset = _union_rows(capture_final_fit(session).datasets)
+    plan = capture_final_fit(session)
+    _X, stacked_y, weights, offset = _union_rows(plan.datasets, plan.template)
     assert stacked_y.size == 500 and offset is None
     np.testing.assert_array_equal(weights, np.ones(500))
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_final_fit_stacks_splits_that_order_or_type_their_columns_otherwise(cv_frame, backend):
+    """The validation rows order their columns otherwise, add one, and hold power as float32.
+
+    The model does not read the added column; it reads features by name and
+    power as float64. So each split is
+    valid on its own, but pl.concat(how="vertical_relaxed") needs one
+    schema, and the Polars Final fit failed as an internal editor error.
+    """
+    import polars as pl
+
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    X, y, w = cv_frame
+    # Quarter steps, so float32 holds every power exactly.
+    X = X.assign(power=np.round(4.0 * X["power"]) / 4.0)
+    train = X.iloc[:400]
+    validation = X.iloc[400:500][["region", "power", "age"]].assign(
+        power=lambda frame: frame["power"].astype(np.float32), meta="unused"
+    )
+    frame = pd.DataFrame if backend == "pandas" else pl.from_pandas
+    model = _model().fit(frame(train), y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(frame(train), y[:400], w[:400]),
+        validation_data=(frame(validation), y[400:500], w[400:500]),
+    )
+
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+
+    expected = _model().fit(frame(X.iloc[:500]), y[:500], sample_weight=w[:500])
+    np.testing.assert_array_equal(final.predict(frame(X)), expected.predict(frame(X)))
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_final_fit_refuses_a_column_its_splits_declare_otherwise(cv_frame, backend):
+    """Region is categorical in the train rows, which declares its levels, and text in validation.
+
+    Stacked, region became text: the declared universe was dropped without
+    a sign (Polars and pandas alike), and Final fit fitted another model.
+    """
+    import polars as pl
+
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    X, y, w = cv_frame
+    levels = ["A", "B", "C"]
+    if backend == "pandas":
+        train = X.iloc[:400].astype({"region": pd.CategoricalDtype(levels)})
+        validation = X.iloc[400:500]
+    else:
+        train = pl.from_pandas(X.iloc[:400]).cast({"region": pl.Enum(levels)})
+        validation = pl.from_pandas(X.iloc[400:500])
+    model = _model().fit(train, y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(train, y[:400], w[:400]),
+        validation_data=(validation, y[400:500], w[400:500]),
+    )
+
+    with pytest.raises(EditorValueError) as refused:
+        run_final_fit(capture_final_fit(session), _Context())
+
+    assert refused.value.public_message == cv.FINAL_COLUMN_TYPES.format(column="region")
 
 
 def test_run_cv_and_final_fit_fit_off_the_widget_lock(cv_frame, cv_fit, monkeypatch):
