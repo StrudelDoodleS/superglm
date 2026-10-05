@@ -2012,12 +2012,10 @@ def test_summary_scrolls_the_chart_term_into_view(open_editor_page, choose_featu
                 && document.querySelector('#summaryFrame tr.summary-section')"""
         )
 
-        def line_in_view(term: str) -> bool:
-            # The frame scrolls its padding box, clipped by the window. The
-            # scroll offset is a whole pixel and the layout is not, so an edge
-            # it aligns may sit up to a pixel past.
-            return page.evaluate(
-                """term => {
+        # The frame scrolls its padding box, clipped by the window. The
+        # scroll offset is a whole pixel and the layout is not, so an edge it
+        # aligns may sit up to a pixel past.
+        in_view = """term => {
                     const frame = document.querySelector('#summaryFrame');
                     const box = frame.getBoundingClientRect();
                     const top = Math.max(box.top + frame.clientTop, 0);
@@ -2028,9 +2026,10 @@ def test_summary_scrolls_the_chart_term_into_view(open_editor_page, choose_featu
                         .querySelector(`tr.summary-section[data-term="${term}"]`)
                         .getBoundingClientRect();
                     return line.top >= top - 1 && line.bottom <= bottom + 1;
-                }""",
-                term,
-            )
+                }"""
+
+        def line_in_view(term: str) -> bool:
+            return page.evaluate(in_view, term)
 
         page.locator("#summaryFrame").evaluate("node => { node.scrollTop = 0; }")
         assert not line_in_view("long_category")
@@ -2041,7 +2040,9 @@ def test_summary_scrolls_the_chart_term_into_view(open_editor_page, choose_featu
                 '#summaryFrame tr.summary-section[data-term="long_category"]'
             )?.dataset.current === 'true'"""
         )
-        assert line_in_view("long_category")
+        # The scroll lands after the line is marked current; on a loaded
+        # machine that can be a frame later, so wait for it.
+        page.wait_for_function(in_view, arg="long_category", timeout=5000)
 
 
 def test_context_bar_reports_term_kind_and_edf(open_editor_page):
