@@ -323,6 +323,26 @@ def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
             )
 
 
+def _require_no_group_named_as_special(grouping: Any, spellings: dict[str, Any]) -> None:
+    """Refuse a group of other levels whose label is a spelling of a special.
+
+    ``spellings`` maps each text a special's indicator matches, the one
+    ``specials=`` declares (``"9"``) and the one the term reports (``"9.0"``),
+    to the special as reported. A group named either way would have its rows
+    claimed by that indicator and fitted as the special.
+    """
+    if grouping is None:
+        return
+    for label, originals in grouping.group_to_originals.items():
+        text = str(label)
+        if text in spellings and [str(member) for member in originals] != [str(spellings[text])]:
+            raise ValueError(
+                f"OrderedCategorical grouping names a group of other levels {text!r}, a "
+                f"spelling of the free level {spellings[text]!r}, so that level's indicator would "
+                "claim the group's rows; give the group another name."
+            )
+
+
 class OrderedCategorical:
     """Ordered categorical feature smoothed by a spline over its level values.
 
@@ -633,6 +653,14 @@ class OrderedCategorical:
         # that reason is more useful than the generic 'no numeric position'
         # symptom it would otherwise produce first.
         _require_no_grouped_specials(grouping, grouped_specials)
+        _require_no_group_named_as_special(
+            grouping,
+            {
+                text: shown
+                for coerced, shown in zip(self._specials, self._special_display)
+                for text in (coerced, str(shown))
+            },
+        )
         self._original_level_to_value: dict[str, float] | None = None
         if grouping is not None:
             # Preserve original level→value mapping for plot expansion

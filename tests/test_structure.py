@@ -954,6 +954,43 @@ def test_a_grouped_ordered_term_fits_a_special_its_domain_spells_differently():
     np.testing.assert_array_equal(session.terms["band"].weights, np.full(7, 20.0))
 
 
+def test_a_group_of_ordered_levels_named_as_a_special_is_refused():
+    """5.0 and 6.0 grouped as "9" beside specials=[9], which the term reports as 9.0.
+
+    The special's indicator matches both spellings, so it claimed the group's
+    rows too, and 5, 6 and 9 predicted as one level: renaming the group "5-6"
+    to "9" moved the fit by up to 0.57.
+    """
+    order = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 9.0]
+    band = np.repeat(order, 20)
+    X = pd.DataFrame({"band": band})
+    y = 1.0 + 0.1 * band + 0.5 * (band == 9.0) + np.random.default_rng(3).normal(0.0, 0.05, 140)
+    refusal = (
+        "OrderedCategorical grouping names a group of other levels '9', a spelling of the free "
+        "level 9.0, so that level's indicator would claim the group's rows; give the group "
+        "another name."
+    )
+
+    def declared(grouping=None):
+        basis = Spline(kind="bs", n_knots=4)
+        term = OrderedCategorical(order=order, specials=[9], grouping=grouping, basis=basis)
+        return _declared({"band": term})
+
+    with pytest.raises(ValueError, match=re.escape(refusal)):
+        declared(collapse_levels(X["band"], groups={"9": ["5.0", "6.0"]}))
+    feature = FeatureStructure(
+        kind="ordered", levels=order, groups={"9": [5.0, 6.0]}, reference=1.0
+    )
+    with pytest.raises(StructureError) as applied:
+        Structure(features={"band": feature}).apply(declared(), X=X)
+    # Structure.apply refuses in its own sentence and reports the library's as the cause.
+    assert str(applied.value.__cause__) == refusal
+    session = EditorSession.from_model(declared().fit(X, y), train_data=(X, y))
+    with pytest.raises(ValueError, match=re.escape(refusal)):
+        session.stage_structural("collapse", "band", {"levels": ["5.0", "6.0"], "group_label": "9"})
+        session.refit_pending(method="fit")
+
+
 def test_a_reference_named_like_a_base_policy_is_that_level_after_apply():
     """The level named "first" weighs most, so the fit makes it the reference.
 
