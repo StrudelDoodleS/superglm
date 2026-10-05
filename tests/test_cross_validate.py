@@ -2060,6 +2060,26 @@ class TestDataFingerprint:
             "e0297a330fd78311947ae6bc1018fdca1ee13c5fcaaa75369e3a5cfae52e90f9"
         )
 
+    @pytest.mark.parametrize("backend", ["pandas", "polars"])
+    def test_nans_that_differ_only_in_their_payload_bits_give_one_fingerprint(self, backend):
+        """Every NaN is one value: a NaN's sign and payload bits are not part of the rows.
+
+        IEEE 754 leaves them unspecified for most operations producing a NaN,
+        so the same rows computed or read twice can carry different NaN bytes.
+        """
+        from superglm.model_selection import _data_fingerprint
+
+        quiet = np.array([0.5, np.nan, 2.0])
+        other = quiet.copy()
+        other.view(np.uint64)[1] = np.uint64(0xFFF8_0000_0000_0001)
+        assert np.isnan(other[1]) and other.tobytes() != quiet.tobytes()
+        frame = pd.DataFrame if backend == "pandas" else pl.DataFrame
+        y = np.array([0.0, 1.0, 2.0])
+
+        assert _data_fingerprint(frame({"x": other}), y) == _data_fingerprint(
+            frame({"x": quiet}), y
+        )
+
     def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
         self, poisson_data, base_model
     ):
