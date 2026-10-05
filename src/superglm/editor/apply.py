@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -74,9 +75,9 @@ def _copy_model_for_editor_edits(
     """Copy a fitted model without duplicating its row-scale fit inputs.
 
     ``share_fit_outputs`` is for a copy that keeps the fit as it is (a New
-    levels choice): it reads the fit's outputs too, through read-only views,
-    and starts without the metrics cache, which is bound to its model and is
-    rebuilt when asked.
+    levels choice): it reads the fit's outputs' memory too, through read-only
+    views, and starts without the metrics cache, which is bound to its model
+    and is rebuilt when asked.
     """
     shared_names: tuple[str, ...] = _EDITOR_SHARED_ROW_INPUTS
     if share_transient_state:
@@ -86,9 +87,9 @@ def _copy_model_for_editor_edits(
     if share_fit_outputs:
         # Read from the instance: getattr would compute a cached one not yet computed.
         computed = vars(model)
-        for name in _EDITOR_SHARED_FIT_OUTPUTS:
-            if name in computed:
-                shared[name] = memo[id(computed[name])] = _read_only(computed[name])
+        _share_arrays_read_only(
+            [computed[name] for name in _EDITOR_SHARED_FIT_OUTPUTS if name in computed], memo
+        )
         if getattr(model, "_fit_metrics_cache", None) is not None:
             memo[id(model._fit_metrics_cache)] = None
     edited_model = copy.deepcopy(model, memo)
@@ -97,21 +98,43 @@ def _copy_model_for_editor_edits(
     return edited_model
 
 
-def _read_only(value):
-    """``value`` with each writeable array in it a read-only view of the same memory.
+def _share_arrays_read_only(value, memo: dict) -> None:
+    """Enter each array reachable from ``value`` in a deepcopy ``memo`` as a read-only view.
 
-    A dict, list or tuple is rebuilt around the views, so a copy can change
-    neither the source's arrays nor its containers; anything else is shared.
+    ``copy.deepcopy(..., memo)`` then gives the copy its own dicts, lists and
+    objects (a structured fit's covariance accessors and their factor among
+    them) over the same array memory, which the copy cannot write. An array
+    already read-only is shared as it is, an object array is copied with its
+    items, and an object the memo already shares is left as it is.
     """
-    if isinstance(value, np.ndarray) and value.flags.writeable:
-        view = value.view()
-        view.flags.writeable = False
-        return view
-    if isinstance(value, dict):
-        return {key: _read_only(item) for key, item in value.items()}
-    if type(value) in (list, tuple):
-        return type(value)(_read_only(item) for item in value)
-    return value
+    stack, seen = [value], set()
+    while stack:
+        item = stack.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, np.ndarray):
+            if item.dtype != object and item.flags.writeable:
+                memo[id(item)] = view = item.view()
+                view.flags.writeable = False
+            elif item.dtype != object:
+                memo[id(item)] = item
+            continue
+        if id(item) in memo or isinstance(item, type | ModuleType):
+            continue
+        if isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, list | tuple | set | frozenset):
+            stack.extend(item)
+        else:
+            state = getattr(item, "__dict__", None)
+            if isinstance(state, dict):
+                stack.extend(state.values())
+            for klass in type(item).__mro__:
+                slots = klass.__dict__.get("__slots__", ())
+                for name in (slots,) if isinstance(slots, str) else slots:
+                    stack.append(getattr(item, name, None))
 
 
 def apply_edits_to_model_copy(model, terms: dict[str, EditableTerm]):

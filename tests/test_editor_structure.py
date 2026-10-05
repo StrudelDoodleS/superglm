@@ -25,6 +25,7 @@ from superglm import (
     OrderedCategorical,
     Piecewise,
     Polynomial,
+    RandomEffect,
     Spline,
     Structure,
     SuperGLM,
@@ -1862,16 +1863,33 @@ def test_new_levels_carries_through_a_refit_and_comes_back_with_its_undo():
     assert model.clone_unfitted()._specs["region"].unseen == "error"
 
 
-def _arrays(value, path):
-    """Each array in a fit output, by its path: in a dict, list or tuple, or the output itself."""
+_FIT_OUTPUTS = ("_fit_mu", "_fit_null_mu", "_fit_stats", "_fit_inference_info", "_coef_covariance")
+
+
+def _arrays(value, path, seen=None):
+    """Each array in a fit output, by its path: in a dict, list, tuple or object, or the output itself."""
+    seen = set() if seen is None else seen
     if isinstance(value, np.ndarray):
         yield path, value
-    elif isinstance(value, dict):
+        return
+    if id(value) in seen or isinstance(value, type):
+        return
+    seen.add(id(value))
+    if isinstance(value, dict):
         for key, item in value.items():
-            yield from _arrays(item, f"{path}[{key!r}]")
+            yield from _arrays(item, f"{path}[{key!r}]", seen)
     elif isinstance(value, list | tuple):
         for index, item in enumerate(value):
-            yield from _arrays(item, f"{path}[{index}]")
+            yield from _arrays(item, f"{path}[{index}]", seen)
+    else:
+        state = dict(getattr(value, "__dict__", None) or {})
+        for klass in type(value).__mro__:
+            slots = klass.__dict__.get("__slots__", ())
+            for name in (slots,) if isinstance(slots, str) else slots:
+                if name not in ("__dict__", "__weakref__") and hasattr(value, name):
+                    state[name] = getattr(value, name)
+        for name, item in state.items():
+            yield from _arrays(item, f"{path}.{name}", seen)
 
 
 def test_new_levels_shares_the_fits_row_state_instead_of_copying_it_per_choice():
@@ -1887,13 +1905,7 @@ def test_new_levels_shares_the_fits_row_state_instead_of_copying_it_per_choice()
     model, X, y = _grouped_region()
     session = EditorSession.from_model(model, terms=["region", "x"], train_data=(X, y))
     model.metrics(X, y)
-    fit_outputs = (
-        "_fit_mu",
-        "_fit_null_mu",
-        "_fit_stats",
-        "_fit_inference_info",
-        "_coef_covariance",
-    )
+    fit_outputs = _FIT_OUTPUTS
     assert all(name in vars(model) for name in fit_outputs)
     assert model._fit_metrics_cache is not None
 
@@ -1906,7 +1918,7 @@ def test_new_levels_shares_the_fits_row_state_instead_of_copying_it_per_choice()
     session.set_unseen("region", "Other")
 
     chosen = session.model
-    assert vars(chosen)["_fit_stats"] is vars(model)["_fit_stats"]
+    assert vars(chosen)["_fit_stats"] == vars(model)["_fit_stats"]
     shared = {
         path: array for name in fit_outputs for path, array in _arrays(vars(chosen)[name], name)
     }
@@ -1932,6 +1944,64 @@ def test_new_levels_shares_the_fits_row_state_instead_of_copying_it_per_choice()
     with pytest.warns(UserWarning, match=r"group 'Other'"):
         routed = chosen.predict(new)
     assert np.array_equal(routed, model.predict(new.replace({"region": {"Z": "C"}})))
+
+
+def test_new_levels_on_a_structured_fit_shares_no_state_the_choice_can_write():
+    """A structured fit's covariance is objects over a factor, and the choice still cannot write it.
+
+    With a random effect, ``fit_reml``'s structured solver keeps the
+    covariance as accessor objects over its factor, not as arrays in a dict.
+    The choice reads the factor's memory through read-only views and holds
+    its own objects, so neither an array write nor an attribute write
+    through the choice's model reaches the model it was made from.
+    """
+    rng = np.random.default_rng(862)
+    broker = rng.permutation(np.repeat(np.arange(18), 18))
+    x = rng.normal(size=broker.size)
+    region = rng.choice(["A", "B", "C"], broker.size)
+    offset = np.log(rng.uniform(0.5, 1.8, broker.size))
+    effect = rng.normal(scale=0.3, size=18)[broker]
+    y = rng.poisson(np.exp(offset - 0.3 + 0.2 * x + 0.1 * (region == "B") + effect)).astype(float)
+    X = pd.DataFrame({"x": x, "region": region, "broker": [f"b{i}" for i in broker]})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        direct_solve="structured",
+        features={"x": Numeric(), "region": Categorical(base="first"), "broker": RandomEffect()},
+    )
+    model.fit_reml(X, y, offset=offset, max_reml_iter=4)
+    inference = model._fit_inference_info
+    assert inference["structured_covariance"] and model._coef_covariance is not None
+    fit_outputs = _FIT_OUTPUTS
+    sources = [array for name in fit_outputs for _, array in _arrays(vars(model)[name], name)]
+    writeable = [array.flags.writeable for array in sources]
+    assert any(writeable)
+
+    session = EditorSession.from_model(model, terms=["region"], train_data=(X, y, None, offset))
+    session.set_unseen("region", "base")
+
+    chosen = session.model
+    shared = [
+        array
+        for name in fit_outputs
+        for _, array in _arrays(vars(chosen)[name], name)
+        if array.size and any(np.shares_memory(array, source) for source in sources)
+    ]
+    assert shared
+    for array in shared:
+        with pytest.raises(ValueError, match="read-only"):
+            array[...] = 0
+    assert [array.flags.writeable for array in sources] == writeable
+    covariance = chosen._fit_inference_info["XtWX_inv_aug"]
+    assert covariance is not inference["XtWX_inv_aug"]
+    covariance.scale = 99.0
+    assert inference["XtWX_inv_aug"].scale == 1.0
+    covariance.scale = 1.0
+    # The choice's own objects answer as the model's do.
+    relativities = chosen.relativities(with_se=True)
+    for term, table in model.relativities(with_se=True).items():
+        pd.testing.assert_frame_equal(relativities[term], table)
+    assert str(chosen.summary()) == str(model.summary())
 
 
 def test_new_levels_is_offered_on_plain_categoricals_only(banded):
