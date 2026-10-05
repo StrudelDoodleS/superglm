@@ -529,6 +529,8 @@ Run CV is disabled, with the reason on hover, when it cannot use the rows:
 - The rows are not the ones the folds were drawn on: their columns, dtypes, row order or values
   differ, and a pandas frame and a polars one of the same values differ too. Pass the `X`, `y`,
   `sample_weight` and `offset` you gave `cross_validate`.
+- The result's data fingerprint was made by an earlier development build of superglm, or by
+  another version, so its rows cannot be checked. Run `cross_validate` again.
 
 A result from an older superglm version records no fingerprint of its data, so only its row count
 is checked. It records no fit method either, so Run CV fits each fold the way the current model was

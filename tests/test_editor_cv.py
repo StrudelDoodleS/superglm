@@ -347,6 +347,25 @@ def test_a_fingerprint_mismatch_names_the_rows_and_what_can_differ(cv_frame, cv_
     assert session.cv_check.reason is None
 
 
+def test_a_fingerprint_another_recipe_made_is_refused_as_such(cv_frame, cv_fit):
+    """A result pickled before the fingerprint recipe was versioned cannot be compared.
+
+    That is not a change in the data, and the reason says what it is.
+    """
+    from superglm.editor.cv import FINGERPRINT_OTHER_VERSION
+
+    model, supplied = cv_fit
+    older = dataclasses.replace(supplied, fingerprint_version=None)
+
+    session = EditorSession.from_model(model, cv=older, **_splits(cv_frame))
+
+    assert (session.cv_check.rows, session.cv_check.reason) == (None, FINGERPRINT_OTHER_VERSION)
+    assert FINGERPRINT_OTHER_VERSION == (
+        "This result's data fingerprint predates this version of superglm or comes from another "
+        "one, so its rows cannot be checked; run cross_validate again with this version."
+    )
+
+
 def test_cv_data_with_rows_swapped_between_equal_responses_is_refused():
     # Rows 0 and 100 share their response and weight, so swapping them leaves
     # y and the weights byte for byte the same. Replaying the GroupKFold folds

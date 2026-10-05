@@ -2021,7 +2021,7 @@ class TestDataFingerprint:
     """A result records the rows its folds index, so a consumer can replay them."""
 
     def test_result_records_row_count_fingerprint_and_splitter(self, poisson_data, base_model):
-        import hashlib
+        from superglm.model_selection import FINGERPRINT_VERSION, _data_fingerprint
 
         df, y, sw = poisson_data
         offset = np.linspace(-0.1, 0.1, len(y))
@@ -2029,13 +2029,36 @@ class TestDataFingerprint:
             base_model, df, y, cv=SimpleKFold(3), sample_weight=sw, offset=offset
         )
 
-        expected = hashlib.sha256(len(y).to_bytes(8, "little"))
-        expected.update(as_eager_frame(df).digest(("x",), include_index=False))
-        for column in (y, sw, offset):
-            expected.update(np.asarray(column, dtype="<f8").tobytes())
         assert result.n_rows == len(y)
         assert (result.splitter, result.fit_mode) == ("SimpleKFold", "fit")
-        assert result.data_fingerprint == expected.hexdigest()
+        assert result.fingerprint_columns == ("x",)
+        assert result.data_fingerprint == _data_fingerprint(df, y, sw, offset, ("x",))
+        assert result.fingerprint_version == FINGERPRINT_VERSION
+
+    def test_the_fingerprint_of_fixed_rows_is_pinned_across_library_versions(self):
+        """X is read through NumPy and pandas.factorize, never a row hash or a dtype's text.
+
+        So these rows give these digests under any pandas or polars version,
+        and the same text gives one digest as pandas object or string dtype
+        (pandas 3 reads text as str). The frame library is part of it.
+        """
+        from superglm.model_selection import _data_fingerprint
+
+        columns = {
+            "band": ["B", "A", None, "B"],
+            "n": np.array([3, 1, 2, 3], dtype=np.int32),
+            "x": [0.5, -0.0, np.nan, 2.0],
+        }
+        X = pd.DataFrame(columns)
+        y = np.array([0.0, 1.0, 0.0, 2.0])
+
+        pinned = _data_fingerprint(X, y)
+        assert pinned == "53e673b34ac0e860131fad0fade27dd556a142ca87e85962d4627184fdda1db9"
+        for dtype in (object, "string"):
+            assert _data_fingerprint(X.astype({"band": dtype}), y) == pinned
+        assert _data_fingerprint(pl.DataFrame(columns), y) == (
+            "e0297a330fd78311947ae6bc1018fdca1ee13c5fcaaa75369e3a5cfae52e90f9"
+        )
 
     def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
         self, poisson_data, base_model
@@ -2092,6 +2115,29 @@ class TestDataFingerprint:
             plain.data_fingerprint
         )
 
+    def test_a_fingerprint_another_recipe_made_is_refused_as_such(self, monkeypatch):
+        # A result pickled before the recipe was versioned reads None; its
+        # fingerprint cannot be compared, which is not a change in the data.
+        x = np.linspace(0.0, 1.0, 60)
+        X, y = pd.DataFrame({"x": x}), 0.5 + np.sin(3.0 * x)
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0.0, features={"x": Spline(n_knots=5)}
+        )
+        result = cross_validate(model, X, y, cv=SimpleKFold(3), return_estimators=True)
+        older = CrossValidationResult(**{**vars(result), "fingerprint_version": None})
+        monkeypatch.setattr(
+            "superglm.plotting.comparison.plot_term_comparison", lambda **kwargs: "figure"
+        )
+
+        with pytest.raises(ValueError) as refused:
+            older.plot_terms_by_fold(X, y=y)
+        assert str(refused.value) == (
+            "This result's data fingerprint predates this version of superglm or comes from "
+            "another one, so these rows cannot be checked; run cross_validate again with this "
+            "version, or pass no y."
+        )
+        assert result.plot_terms_by_fold(X, y=y) == "figure"
+
     def test_result_pickled_before_the_fields_existed_reads_none(self):
         # Such a pickle restores without the attributes; the dataclass
         # defaults are class attributes, so the fields read as None.
@@ -2113,4 +2159,5 @@ class TestDataFingerprint:
             restored.data_fingerprint,
             restored.splitter,
             restored.fit_mode,
-        ) == (None, None, None, None)
+            restored.fingerprint_version,
+        ) == (None, None, None, None, None)

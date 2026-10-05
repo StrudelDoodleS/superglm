@@ -43,6 +43,7 @@ from superglm.model.fit_state import configured_family, configured_lambda2, conf
 from superglm.model_selection import (
     _BUILTIN_SCORERS,
     _POOLED_PARTS,
+    FINGERPRINT_VERSION,
     CrossValidationResult,
     _data_fingerprint,
     _fold_row_count,
@@ -75,6 +76,10 @@ FINGERPRINT_MISMATCH = (
     "The {data}'s {rows:,} rows are not the ones the folds were drawn on: their columns, "
     "dtypes, row order or values differ (a pandas frame and a polars one differ too). Pass "
     "the X, y, sample_weight and offset given to cross_validate as cv_data."
+)
+FINGERPRINT_OTHER_VERSION = (
+    "This result's data fingerprint predates this version of superglm or comes from another "
+    "one, so its rows cannot be checked; run cross_validate again with this version."
 )
 NO_FINGERPRINT = (
     "This result was made before cross_validate recorded a data fingerprint, so only "
@@ -211,6 +216,8 @@ def check_cv_data(
         return CVDataCheck(None, sentence.format(rows=rows.n_obs, expected=expected))
     if cv.data_fingerprint is None:
         return CVDataCheck(rows, note=NO_FINGERPRINT)
+    if cv.fingerprint_version != FINGERPRINT_VERSION:
+        return CVDataCheck(None, FINGERPRINT_OTHER_VERSION)
     try:
         held = _data_fingerprint(
             rows.X, rows.y, rows.sample_weight, rows.offset, cv.fingerprint_columns
