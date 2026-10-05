@@ -219,6 +219,9 @@ class _PowerProfile:
         clone._profile_design_cache = {}
         # estimate_p checked the rows' random-effect nesting once at its entry
         clone._random_effect_nesting_checked = True
+        # Each candidate's REML convergence is recorded in the search result
+        # (``reml_converged``), so a candidate does not warn on its own.
+        clone._suppress_convergence_warning = True
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         # fit_reml refuses a selection penalty.
         self.selecting = False
@@ -229,9 +232,10 @@ class _PowerProfile:
         clone.family = Tweedie(p)
         # The post-fit runtime parity check certifies published state; candidate
         # fits are never published, and it cost 42% of every candidate on master.
-        # No lambda warm start: the direct and discrete REML engines bootstrap
-        # their own starting lambdas, so a previous candidate's lambdas leave
-        # the fit bitwise unchanged.
+        # No lambda warm start. The REML engines now honour a mapping
+        # lambda2_init, so a previous candidate's lambdas would change where
+        # this fit starts; adopting it here needs its own measurement of the
+        # selected power against ``xatol`` first.
         clone.fit_reml(
             self.X,
             self.y,

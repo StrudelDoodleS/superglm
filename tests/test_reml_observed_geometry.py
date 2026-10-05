@@ -3775,11 +3775,19 @@ class TestModeCertifiesAtTheRoundOffFloor:
         converge.
         """
         frame, y, weight, offset = self._burn_cost_fixture(seed=0)
+        from superglm import ConvergenceWarning
+
         reached = self._stamped_terminal_refit(
             monkeypatch, converged=False, termination_reason="max_iter"
         )
         model = self._model()
-        model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+        # The warning names the refit that failed, never the search's converged
+        # stop as its cause (it read "because termination_reason=
+        # 'score_objective_tolerance'").
+        with pytest.warns(ConvergenceWarning, match="final coefficient fit") as caught:
+            model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+        assert not any("because" in str(w.message) for w in caught)
+        assert "final coefficient fit" in model.reml_diagnostics()["convergence_note"]
 
         assert reached, "the terminal publication refit never ran"
         assert model._reml_profile["reml_terminal_mode_certified"] is False

@@ -1135,10 +1135,20 @@ class TestSCOPPlateauExit:
         assert r.converged
         assert str(r.termination_reason) == "lambda_tolerance"
 
-    def test_an_unreachable_tolerance_classifies_as_plateau(self):
+    def test_an_unreachable_tolerance_classifies_as_plateau(self, monkeypatch):
         """Below the machinery noise floor (steps stall near 2e-5 on this
         fixture), the honest exit is the plateau classification with
-        converged=True -- the step-engine converged_at_precision."""
+        converged=True -- the step-engine converged_at_precision. The EFS
+        step's floor: the Newton step reaches this tolerance on this fixture."""
+        import functools
+
+        import superglm.reml.scop_efs as scop_efs
+
+        monkeypatch.setattr(
+            scop_efs,
+            "optimize_scop_efs_reml",
+            functools.partial(scop_efs.optimize_scop_efs_reml, _outer_step="efs"),
+        )
         frame, y, features = self._monotone_fixture(400)
         model = SuperGLM(family="poisson", features=features)
         model.fit_reml(frame, y, runtime_validation="skip", reml_tol=1e-11, max_reml_iter=60)

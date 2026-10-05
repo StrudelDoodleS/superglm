@@ -746,16 +746,19 @@ def packed_centered_gram_rhs(
     dm,
     W: NDArray,
     z_centered: NDArray,
+    state=None,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
-    """Build centered products from indexed supports when every group is eligible."""
+    """Build centered products from indexed supports when every group is eligible.
+
+    ``state`` (a fit-local ``TabmatCenteringState``), when given, carries a
+    rejection of the tensor raw rungs across the fit's iterations.
+    """
     from superglm.group_matrix import (
         CategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
     )
 
-    supports: list[_CenteredSupport] = []
-    widths: list[int] = []
     # isinstance, not `type(gm) in`: SupportCompressedSSPGroupMatrix is a
     # DiscretizedSSPGroupMatrix that adds no state (`__slots__ = ()`) and is
     # numerically identical over the same basis -- its bin_idx indexes exact
@@ -772,7 +775,10 @@ def packed_centered_gram_rhs(
         return None
     weighted_z = W * z_centered
     sum_w = float(np.sum(W, dtype=np.float64))
-    if any(type(gm) is DiscretizedTensorGroupMatrix for gm in dm.group_matrices):
+    tensor_rejected = False
+    if any(type(gm) is DiscretizedTensorGroupMatrix for gm in dm.group_matrices) and (
+        state is None or state.tensor_raw_eligible is not False
+    ):
         pattern_attempted, patterned = _try_pattern_tensor_centering(
             dm=dm,
             W=W,
@@ -791,7 +797,105 @@ def packed_centered_gram_rhs(
             )
             if factored is not None:
                 return factored
+        tensor_rejected = True
 
+    anchored = _anchor_support_gram_rhs(dm=dm, W=W, weighted_z=weighted_z, sum_w=sum_w)
+    if tensor_rejected and anchored is not None and state is not None:
+        # A rejection latches for the fit, as the other raw rungs' do: later
+        # weights could pass, but the anchor-centred route is at least as
+        # accurate, and repeating rejected raw moments doubled each
+        # iteration's centring cost.  It latches only when that route served
+        # the build.  The route declines on support sizes alone (a basis
+        # property), and the caller then falls to the chunked dense pass,
+        # which costs far more than retrying the tensor rungs, so a design it
+        # declines keeps retrying them: a later iterate's weights may pass
+        # (ten tensor pairs on the 678k-row book: 5 chunked builds latched
+        # against 2 retried).
+        state.tensor_raw_eligible = False
+    return anchored
+
+
+def _compact_support(gm) -> tuple[NDArray, NDArray, NDArray | None] | None:
+    """``(values, codes, transform)`` with rows ``values[codes] @ transform``, else ``None``.
+
+    Discretized SSP groups (tensor and support-compressed ones included) and
+    discretized SCOP groups index a dense support by bin; a categorical's
+    support is the identity with a zero row for its base level.  One level of
+    a discretized spline-by-category term is its spline support on that
+    level's rows and zero elsewhere: the support gains a zero row, which every
+    row outside the level is coded to.
+    """
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+    )
+
+    if isinstance(gm, DiscretizedSSPGroupMatrix):
+        return gm.B_unique, gm.bin_idx, gm.R_inv
+    if isinstance(gm, DiscretizedSCOPGroupMatrix):
+        return gm.B_scop_unique, gm.bin_idx, None
+    if isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
+        values = np.zeros((gm.n_bins + 1, gm.B_unique.shape[1]), dtype=np.float64)
+        values[: gm.n_bins] = gm.B_unique
+        codes = np.full(gm.n_rows, gm.n_bins, dtype=np.intp)
+        codes[gm.row_idx] = gm.bin_idx_level
+        return values, codes, gm.R_inv
+    if isinstance(gm, CategoricalGroupMatrix):
+        values = np.zeros((gm.n_levels + 1, gm.n_levels), dtype=np.float64)
+        values[np.arange(gm.n_levels), np.arange(gm.n_levels)] = 1.0
+        return values, gm.codes, None
+    return None
+
+
+def anchor_support_centered_gram_rhs(
+    *,
+    dm,
+    W: NDArray,
+    z_centered: NDArray,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Centre-first products from compact supports, discretized SCOP groups included.
+
+    The stable fallback for a design every raw-moment rung rejected: each
+    support row is centred once about its weighted mean, before any product,
+    so no raw moment is subtracted, and no row of the design is materialised.
+    ``None`` when a group has no compact support or one is oversized.
+    """
+    weighted_z = W * z_centered
+    sum_w = float(np.sum(W, dtype=np.float64))
+    return _anchor_support_gram_rhs(dm=dm, W=W, weighted_z=weighted_z, sum_w=sum_w)
+
+
+def _anchor_support_gram_rhs(
+    *,
+    dm,
+    W: NDArray,
+    weighted_z: NDArray,
+    sum_w: float,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Anchor-centred compact supports, their Grams and cross-Grams by joint histogram.
+
+    One row pass (``_disc_disc_2d_hist``) per pair of groups, except within a
+    tensor's derived family (``_derived_support_family``): a group whose codes
+    are a function of the tensor's cell codes, as its own margins' are, takes
+    every cross-Gram from the tensor's tables (``_add_family_cross``), which
+    saves its passes against every other group, the tensor and each other.
+
+    **Error.**  Every cross entry is ``sum_r W_r s(r)_j t(r)_k`` over rows,
+    ``W >= 0``, of two computed centred supports ``s``, ``t``.  The per-pair
+    route sums rows into a joint table and then over the two supports' rows;
+    the derived route sums rows into the tensor's table and then over its
+    cells and the other support's rows.  Each term meets two multiplications
+    and at most ``n + n_t + n_c`` additions on either route (``n`` rows,
+    ``n_t`` the other support's rows, ``n_c`` the larger of the child's rows
+    and the tensor's cells), and a sum of products in any order and
+    association lies within ``gamma_K sum_r W_r |s(r)_j| |t(r)_k|`` of its
+    exact value with ``K`` that count plus two (Higham 2002, secs. 3.1 and
+    4.2).  The routes therefore differ by at most twice that.  The supports,
+    means, diagonal blocks, right-hand side and every block outside the family
+    are bitwise those of the per-pair route.
+    """
     # Reject an oversized support BEFORE materialising it.  A categorical
     # block's anchor support is a dense ``(K+1, K)`` identity and its Gram
     # costs O(K^3); for a crossed interaction K is ``(L1-1)*(L2-1)``, so it
@@ -799,41 +903,26 @@ def packed_centered_gram_rhs(
     # check below runs too late to prevent the allocation, and cannot catch a
     # single wide block paired with a narrow one at all.  Falling back here
     # costs the chunked path, which is what this design got before.
-    for gm in dm.group_matrices:
-        if isinstance(gm, eligible_types):
-            support_rows = int(gm.B_unique.shape[0])
-        elif isinstance(gm, CategoricalGroupMatrix):
-            support_rows = int(gm.n_levels) + 1
-        else:
-            continue
-        if support_rows * support_rows > _MAX_PACKED_HIST_CELLS:
+    compact = [_compact_support(gm) for gm in dm.group_matrices]
+    if any(support is None for support in compact):
+        return None
+    for values, _codes, _transform in compact:
+        if values.shape[0] * values.shape[0] > _MAX_PACKED_HIST_CELLS:
             return None
 
-    for gm in dm.group_matrices:
-        if isinstance(gm, eligible_types):
-            supports.append(
-                _anchor_center_support(
-                    values=gm.B_unique,
-                    codes=gm.bin_idx,
-                    W=W,
-                    Wz=weighted_z,
-                    sum_w=sum_w,
-                    transform=gm.R_inv,
-                )
+    supports: list[_CenteredSupport] = []
+    for gm, (values, codes, transform) in zip(dm.group_matrices, compact, strict=True):
+        supports.append(
+            _anchor_center_support(
+                values=values,
+                codes=codes,
+                W=W,
+                Wz=weighted_z,
+                sum_w=sum_w,
+                transform=transform,
             )
-        elif isinstance(gm, CategoricalGroupMatrix):
-            values = np.zeros((gm.n_levels + 1, gm.n_levels), dtype=float)
-            values[np.arange(gm.n_levels), np.arange(gm.n_levels)] = 1.0
-            supports.append(
-                _anchor_center_support(
-                    values=values,
-                    codes=gm.codes,
-                    W=W,
-                    Wz=weighted_z,
-                    sum_w=sum_w,
-                )
-            )
-        widths.append(gm.shape[1])
+        )
+    widths = [gm.shape[1] for gm in dm.group_matrices]
 
     if any(
         len(left.values) * len(right.values) > _MAX_PACKED_HIST_CELLS
@@ -852,12 +941,16 @@ def packed_centered_gram_rhs(
     )
     starts = np.cumsum([0, *widths])
 
+    family = _derived_support_family(dm, compact)
+    derived = set() if family is None else {family[0], *family[1]}
     for i, support_i in enumerate(supports):
         sl_i = slice(starts[i], starts[i + 1])
         gram[sl_i, sl_i] = support_i.values.T @ (support_i.mass[:, None] * support_i.values)
         rhs[sl_i] = support_i.values.T @ support_i.weighted_z
 
         for j in range(i + 1, len(supports)):
+            if i in derived or j in derived:
+                continue
             support_j = supports[j]
             sl_j = slice(starts[j], starts[j + 1])
             n_j = len(support_j.values)
@@ -872,7 +965,100 @@ def packed_centered_gram_rhs(
             gram[sl_i, sl_j] = cross
             gram[sl_j, sl_i] = cross.T
 
+    if family is not None:
+        _add_family_cross(gram, supports, starts, W, *family)
     return mean_x, gram, rhs
+
+
+def _derived_support_family(dm, compact) -> tuple[int, dict[int, NDArray]] | None:
+    """``(tensor, {group: tensor cell -> group code})`` for the groups that are functions of a tensor's cells.
+
+    A tensor's own margins (its marginal splines on the same bins) are the
+    case that arises: every row of a tensor cell lies in one margin bin.  It
+    depends on the basis only, so it is decided once per design and kept on
+    it, keyed by the identity of the design's group matrices (owner: the
+    design; invalidated with its groups).  A cell no row reaches maps to code
+    0, harmlessly: its tensor table rows and mass are exactly zero.
+    """
+    from superglm.group_matrix import DiscretizedTensorGroupMatrix
+
+    groups = dm.group_matrices
+    cached = getattr(dm, "_centered_support_family", None)
+    if cached is not None and cached[0] is groups:
+        return cached[1]
+    family = None
+    for parent, matrix in enumerate(groups):
+        if type(matrix) is not DiscretizedTensorGroupMatrix:
+            continue
+        cell_values, cells, _transform = compact[parent]
+        children = {}
+        for child, (_values, codes, _child_transform) in enumerate(compact):
+            if child == parent or type(groups[child]) is DiscretizedTensorGroupMatrix:
+                continue
+            cell_map = np.zeros(cell_values.shape[0], dtype=np.intp)
+            cell_map[cells] = codes
+            if np.array_equal(cell_map[cells], codes):
+                children[child] = cell_map
+        if children:
+            family = (parent, children)
+            break
+    dm._centered_support_family = (groups, family)
+    return family
+
+
+def _add_family_cross(
+    gram: NDArray,
+    supports: list[_CenteredSupport],
+    starts: NDArray,
+    W: NDArray,
+    parent: int,
+    children: dict[int, NDArray],
+) -> None:
+    """Every cross-Gram touching a tensor's derived family, one row pass per other group.
+
+    A child's codes are ``m(c)`` for tensor cell ``c``, so its joint table
+    with any group ``x`` is the tensor's summed over cells, ``H_ax = M' H_tx``
+    (``M`` the cell-to-code selection), and ``S_a' H_ax S_x = E' H_tx S_x``
+    with ``E = S_a[m]`` the child's centred support at each cell.  Against
+    the tensor and another child the table is the tensor's cell mass on the
+    map's pattern: ``S_a' H_at S_t = (E * mass_t)' S_t`` and ``(E_a *
+    mass_t)' E_b``.  A tensor block against another group is evaluated in the
+    per-pair route's order, so it is bitwise that route's.
+    """
+
+    def put(left: int, right: int, block: NDArray) -> None:
+        rows = slice(starts[left], starts[left + 1])
+        columns = slice(starts[right], starts[right + 1])
+        gram[rows, columns] = block
+        gram[columns, rows] = block.T
+
+    tensor = supports[parent]
+    expanded = {child: supports[child].values[cell_map] for child, cell_map in children.items()}
+    for child, values in expanded.items():
+        weighted = values * tensor.mass[:, None]
+        put(child, parent, weighted.T @ tensor.values)
+        for other, other_values in expanded.items():
+            if other > child:
+                put(child, other, weighted.T @ other_values)
+    for index, support in enumerate(supports):
+        if index == parent or index in children:
+            continue
+        if index < parent:
+            joint = _disc_disc_2d_hist(
+                support.codes, tensor.codes, W, len(support.values), len(tensor.values)
+            )
+            projected = support.values.T @ joint
+            put(index, parent, projected @ tensor.values)
+            for child, values in expanded.items():
+                put(index, child, projected @ values)
+        else:
+            joint = _disc_disc_2d_hist(
+                tensor.codes, support.codes, W, len(tensor.values), len(support.values)
+            )
+            put(parent, index, tensor.values.T @ joint @ support.values)
+            projected = joint @ support.values
+            for child, values in expanded.items():
+                put(child, index, values.T @ projected)
 
 
 def _compensated_add(total: NDArray, compensation: NDArray, value: NDArray) -> None:
@@ -951,41 +1137,6 @@ def stable_centered_gram_rhs(
             block.T @ (W_block * z_centered[start:stop]),
         )
     return mean_x, 0.5 * (gram + gram.T), rhs
-
-
-def stable_centered_matvec(
-    *,
-    dm,
-    beta: NDArray,
-    W: NDArray,
-    sum_w: float,
-    chunk_size: int = 8192,
-) -> NDArray:
-    """Evaluate ``(X - weighted_mean(X)) @ beta`` in anchored coordinates."""
-    n, p = dm.shape
-    beta = np.asarray(beta, dtype=np.float64)
-    W = np.asarray(W, dtype=np.float64)
-    if beta.shape != (p,) or W.shape != (n,):
-        raise ValueError("centered matvec inputs must match the design")
-    if not np.isfinite(sum_w) or sum_w <= 0.0:
-        raise ValueError("sum_w must be positive and finite")
-    if p == 0:
-        return np.zeros(n, dtype=np.float64)
-
-    anchor_row = int(np.argmax(W))
-    anchor = np.asarray(
-        dm.row_subset(np.array([anchor_row], dtype=np.intp)).toarray()[0],
-        dtype=np.float64,
-    )
-    values = np.empty(n, dtype=np.float64)
-    for start in range(0, n, chunk_size):
-        stop = min(start + chunk_size, n)
-        rows = np.arange(start, stop, dtype=np.intp)
-        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
-        values[start:stop] = (block - anchor) @ beta
-    mean_value = float(np.dot(W, values) / sum_w)
-    values -= mean_value
-    return values
 
 
 def centered_gram_rhs(
@@ -1091,6 +1242,60 @@ def centered_signed_grams(
     return [0.5 * (gram + gram.T) for gram in grams]
 
 
+def _compact_centered_rmatvec(
+    *,
+    dm,
+    rows: NDArray,
+    mean_x: NDArray,
+    mean_lo: NDArray | None,
+    chunk_size: int = 8192,
+) -> NDArray | None:
+    """``(X - 1 c')' rows`` with each support row centred before its product; else ``None``.
+
+    For a compact group the rows are ``s_b`` (support row ``b``) on the rows
+    coded ``b``, so the product is ``sum_b (s_b - c) R_b`` with ``R_b`` the
+    sum of ``rows`` coded ``b``: every term is the centred row the chunked
+    pass forms, with the same rounding, and only the order of accumulation
+    differs (``np.bincount``, as ``rmatvec`` sums by bin).  A dense group is
+    centred row by row over its own columns.  ``None`` for any other group,
+    or a support of more than ``_MAX_PACKED_HIST_CELLS`` entries.
+    """
+    from superglm.group_matrix import DenseGroupMatrix
+
+    result = np.empty(dm.p, dtype=np.float64)
+    offset = 0
+    for gm in dm.group_matrices:
+        width = gm.shape[1]
+        centre = mean_x[offset : offset + width]
+        if mean_lo is not None:
+            centre_lo = mean_lo[offset : offset + width]
+        if type(gm) is DenseGroupMatrix:
+            accumulated = np.zeros(width, dtype=np.float64)
+            compensation = np.zeros(width, dtype=np.float64)
+            for start in range(0, dm.n, chunk_size):
+                stop = min(start + chunk_size, dm.n)
+                block = np.asarray(gm.M[start:stop], dtype=np.float64) - centre
+                if mean_lo is not None:
+                    block -= centre_lo
+                _compensated_add(accumulated, compensation, block.T @ rows[start:stop])
+            result[offset : offset + width] = accumulated
+            offset += width
+            continue
+        support = _compact_support(gm)
+        if support is None:
+            return None
+        values, codes, transform = support
+        if values.shape[0] * width > _MAX_PACKED_HIST_CELLS:
+            return None
+        centred = (values if transform is None else values @ transform) - centre
+        if mean_lo is not None:
+            centred -= centre_lo
+        aggregated = np.bincount(codes, weights=rows, minlength=values.shape[0])
+        result[offset : offset + width] = centred.T @ aggregated
+        offset += width
+    return result
+
+
 def centered_rhs(
     *,
     dm,
@@ -1106,6 +1311,10 @@ def centered_rhs(
     ``(mean_x, mean_lo)`` (``centered_system.weighted_mean_pair``): rows are
     centred as ``(x - mean_x) - mean_lo``, so a dense column at an offset is
     centred about its anchor exactly and then by the small remainder.
+
+    A design whose groups all have compact supports (or are dense) centres
+    each support row once and aggregates ``W z_centered`` by support row
+    (``_compact_centered_rmatvec``); any other design is centred in row chunks.
     """
     n, p = dm.shape
     W = np.asarray(W, dtype=float)
@@ -1119,6 +1328,9 @@ def centered_rhs(
         raise ValueError("chunk_size must be positive")
     if p == 0:
         return np.zeros(0, dtype=float)
+    compact = _compact_centered_rmatvec(dm=dm, rows=W * z_centered, mean_x=mean_x, mean_lo=mean_lo)
+    if compact is not None:
+        return compact
 
     rhs = np.zeros(p, dtype=float)
     compensation = np.zeros_like(rhs)

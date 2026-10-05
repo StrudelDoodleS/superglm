@@ -90,6 +90,7 @@ from numpy.typing import NDArray
 from scipy import stats
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.diagnostics.convergence import lss_nonconvergence_reason
 from superglm.distributional.posterior import (
     CovarianceKind,
     _posterior_draw_count,
@@ -839,6 +840,25 @@ def _absorption_note(
     return "" if interaction is None else f"absorbed by {interaction}"
 
 
+def _convergence_note(fitted: Any) -> str:
+    """Every row of a fit that did not converge says so: its numbers are an iterate's."""
+    smoothing = getattr(fitted, "smoothing", None)
+    why = lss_nonconvergence_reason(
+        getattr(fitted, "fitted_result", None),
+        None if smoothing is None else smoothing.convergence_reason,
+    )
+    return "" if why is None else f"fit not converged: {why}"
+
+
+def _negative_edf_note(edf: float) -> str:
+    """A negative EDF is no degree of freedom; the row must not read as one."""
+    return f"negative EDF ({float(edf):.3g}) is not interpretable" if float(edf) < 0.0 else ""
+
+
+def _join_notes(*notes: str) -> str:
+    return "; ".join(note for note in notes if note)
+
+
 def summary_table(
     fitted: Any,
     X_train: FrameLike | EagerFrame,
@@ -856,13 +876,17 @@ def summary_table(
     all in ``term_effect(...).lambdas``.
 
     A term's free level block reads as ``"<term> (special level)"`` rather than
-    under its raw ``:special`` suffix, and ``note`` carries the one reading a
-    row cannot state in numbers: ``"absorbed by <interaction>"`` where a level
-    term has no estimable direction left because an interaction on the same
-    feature spans it, and the empty string everywhere else.
+    under its raw ``:special`` suffix, and ``note`` carries what a row cannot
+    state in numbers: ``"absorbed by <interaction>"`` where a level term has no
+    estimable direction left because an interaction on the same feature spans
+    it; ``"fit not converged: ..."`` on every row of a fit that stopped before
+    its convergence test passed (``result_.converged`` is False); and
+    ``"negative EDF (...) is not interpretable"`` where a term's EDF is below
+    zero. Notes join with ``"; "``, and a row with none reads ``""``.
     """
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     frame = as_eager_frame(X_train)
+    convergence_note = _convergence_note(fitted)
     prepared_tests: dict[str, _PreparedTermTest] = {}
     has_intercept = False
     for state in fitted.layout.predictors:
@@ -887,14 +911,14 @@ def summary_table(
     rows: list[dict[str, Any]] = []
     for state in fitted.layout.predictors:
         if state.intercept_index is not None:
-            rows.append(
-                _intercept_row(
-                    state,
-                    beta,
-                    matrix,
-                    fitted.inference.intercept_edf,
-                )
+            row = _intercept_row(
+                state,
+                beta,
+                matrix,
+                fitted.inference.intercept_edf,
             )
+            row["note"] = _join_notes(row["note"], convergence_note)
+            rows.append(row)
         for qualified, term_slice in fitted.layout.term_slices.items():
             namespace, _, term = qualified.partition(":")
             if namespace != state.name:
@@ -923,8 +947,10 @@ def summary_table(
                         if single
                         else float("nan")
                     ),
-                    "note": _absorption_note(
-                        fitted, state.name, term, outcome.edf, beta[term_slice]
+                    "note": _join_notes(
+                        _absorption_note(fitted, state.name, term, outcome.edf, beta[term_slice]),
+                        convergence_note,
+                        _negative_edf_note(outcome.edf),
                     ),
                 }
             )

@@ -1030,6 +1030,8 @@ def finalize_reml_fit(
         if not terminal_certified:
             converged = False
             best.converged = False
+            # The disclosure names this stage, not the search's own stop.
+            best.terminal_refit_termination = str(solver_result.termination_reason)
     profile["total_s"] = _time.perf_counter() - total_start
     profile["n_reml_iter"] = n_reml_iter
     profile["converged"] = converged

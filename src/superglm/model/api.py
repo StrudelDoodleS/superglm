@@ -656,11 +656,11 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        max_reml_iter: int = 20,
+        max_reml_iter: int | None = None,
         reml_tol: float | None = None,
         pirls_tol: float | None = None,
         max_pirls_iter: int | None = None,
-        lambda2_init: float | None = None,
+        lambda2_init: float | Mapping[str, float] | None = None,
         interaction_mode: str = "full",
         runtime_validation: str | bool = "auto",
         verbose: bool = False,
@@ -698,8 +698,14 @@ class SuperGLM:
             the linear predictor or automatically scale the conditional mean.
         offset : array-like, optional
             Offset term.
-        max_reml_iter : int
-            Maximum REML outer iterations (default 20).
+        max_reml_iter : int, optional
+            Maximum REML outer iterations. Unset, it resolves per engine: 20
+            for the Newton engines, 100 for the SCOP engine, whose
+            Fellner-Schall steps converge linearly (measured 14 to 57 outer
+            iterations on freMTPL2 SCOP fits). A fit that reaches the cap is
+            returned with a ``ConvergenceWarning``,
+            ``reml_diagnostics()["converged"]`` reads ``False`` and the
+            summary says why.
         reml_tol : float, optional
             Stopping tolerance for the smoothing-parameter optimizer. Unset,
             it resolves per engine: 1e-9 for the Newton engines (exact and
@@ -786,8 +792,20 @@ class SuperGLM:
         max_pirls_iter : int, optional
             Maximum inner PIRLS iterations per REML step. Defaults to
             constructor ``max_iter`` (100).
-        lambda2_init : float, optional
-            Initial per-group lambda. Defaults to ``self.lambda2``.
+        lambda2_init : float or mapping, optional
+            Where the smoothing-parameter search starts. A mapping keyed by
+            smoothing component (or group) name, such as an earlier fit's
+            ``reml_diagnostics()["lambdas"]``, is a warm start: each named
+            component begins there instead of at the engine's own bootstrap,
+            so a refit on similar data (a cross-validation fold, a bootstrap
+            or a later year) takes fewer outer iterations. Components the
+            mapping does not name start as usual, fixed-policy components
+            keep their fixed value, and values must be finite and positive.
+            Coefficients are not carried over: their basis is rebuilt from
+            each fit's own data. The search converges to the same criterion
+            either way; where the criterion is flat, a different start can
+            stop at a different point of that flat region. A float, or leaving
+            it unset, keeps the engines' own bootstrap start, as before.
         interaction_mode : {"full", "fast_candidate"}
             ``"full"`` runs ordinary REML. ``"fast_candidate"`` caps REML
             outer updates for interaction models and then runs the normal final

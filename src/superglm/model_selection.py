@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +18,7 @@ from superglm.distributions import Tweedie, weighted_log_likelihood
 # The full-frame binding pass lives in a neutral module so the public
 # SuperGLM.bind_levels runs this exact resolution without importing this one.
 from superglm.model.binding_ops import resolve_level_bindings as _resolve_level_bindings
+from superglm.model.reml_setup import live_reml_lambdas
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.validation import _normalized_gini
 
@@ -33,7 +34,11 @@ class CrossValidationResult:
     fold_scores : DataFrame
         One row per fold with columns: ``fold``, ``n_train``, ``n_test``,
         ``fit_time_s``, ``score_time_s``, ``converged``, ``n_iter``,
-        ``effective_df``, plus one column per requested metric.
+        ``effective_df``, plus one column per requested metric. Under
+        ``fit_mode="fit_reml"`` a fold is ``converged`` only when both its
+        smoothing-parameter selection and its final coefficient fit
+        converged, and two more columns say how it got there:
+        ``n_reml_iter`` (outer REML iterations) and ``warm_started``.
     mean_scores : dict
         Equal-weight mean of each per-fold metric across folds. Built-in
         deviance and negative log-likelihood are normalized within each fold
@@ -220,6 +225,8 @@ _RESERVED_COLUMNS = frozenset(
         "converged",
         "n_iter",
         "effective_df",
+        "n_reml_iter",
+        "warm_started",
     }
 )
 
@@ -287,6 +294,8 @@ def cross_validate(
     return_estimators: bool = False,
     return_oof: bool = False,
     error_score: float | str = np.nan,
+    fit_kwargs: Mapping[str, Any] | None = None,
+    warm_start: bool = True,
 ) -> CrossValidationResult:
     """Cross-validate a SuperGLM model with a pluggable splitter.
 
@@ -330,6 +339,25 @@ def cross_validate(
         If True, collect out-of-fold predictions.
     error_score : float or "raise"
         Value to assign when a fold fails. ``"raise"`` propagates the error.
+    fit_kwargs : mapping, optional
+        Extra keyword arguments for every fold's fit call, for example
+        ``{"max_reml_iter": 100}``. ``sample_weight`` and ``offset`` come
+        from the split and cannot be set here.
+    warm_start : bool, default True
+        Under ``fit_mode="fit_reml"``, start every fold after the first
+        converged one from that fold's smoothing parameters
+        (``lambda2_init``), so later folds take fewer outer iterations.
+        Components a search could not leave from where that fold ended them
+        (frozen as flat by the Newton engines, or held at either flat end by
+        the SCOP engine's suppression holds: residual EDF under 0.05, or a
+        tensor margin whose penalty the other margin covers) start from the
+        engine's own bootstrap instead, together with every other component
+        of the same penalty block, so a tensor product never starts half
+        warm. Each fold still searches
+        to its own convergence test; a fold that does not converge warns and
+        reads ``converged=False``. Set ``False`` to start every fold from the
+        engine's own bootstrap. A ``lambda2_init`` in ``fit_kwargs`` takes
+        precedence for every fold.
 
     Returns
     -------
@@ -343,6 +371,15 @@ def cross_validate(
 
     if fit_mode not in ("fit", "fit_reml"):
         raise ValueError(f"fit_mode must be 'fit' or 'fit_reml', got {fit_mode!r}")
+    fit_kwargs = dict(fit_kwargs or {})
+    reserved_fit_kwargs = {"sample_weight", "offset"} & set(fit_kwargs)
+    if reserved_fit_kwargs:
+        raise ValueError(
+            f"fit_kwargs cannot set {sorted(reserved_fit_kwargs)}: cross_validate slices "
+            "sample_weight and offset per fold; pass them as its own arguments"
+        )
+    reml_warm_start = warm_start and fit_mode == "fit_reml" and "lambda2_init" not in fit_kwargs
+    warm_lambdas: dict[str, float] | None = None
 
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
@@ -432,11 +469,25 @@ def cross_validate(
                 est._config = est._config.with_value(level_bindings=tuple(level_bindings.items()))
             t0 = time.perf_counter()
             fit_fn = getattr(est, fit_mode)
-            fit_fn(X_train, y_train, sample_weight=sw_train, offset=off_train)
+            fold_kwargs = dict(fit_kwargs)
+            if reml_warm_start and warm_lambdas is not None:
+                fold_kwargs["lambda2_init"] = warm_lambdas
+            fit_fn(X_train, y_train, sample_weight=sw_train, offset=off_train, **fold_kwargs)
             record["fit_time_s"] = time.perf_counter() - t0
-            record["converged"] = est._result.converged
+            # Under fit_reml the fold's convergence is its smoothing selection's
+            # as well as its final coefficient fit's: PIRLS converging at
+            # lambdas REML never settled is not a converged fold.
+            reml = getattr(est, "_reml_result", None) if fit_mode == "fit_reml" else None
+            record["converged"] = bool(est._result.converged) and (
+                reml is None or bool(reml.converged)
+            )
             record["n_iter"] = est._result.n_iter
             record["effective_df"] = est._result.effective_df
+            if fit_mode == "fit_reml":
+                record["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
+                record["warm_started"] = "lambda2_init" in fold_kwargs and reml_warm_start
+                if reml_warm_start and warm_lambdas is None and record["converged"]:
+                    warm_lambdas = live_reml_lambdas(est)
 
             # Score
             t1 = time.perf_counter()
@@ -511,6 +562,9 @@ def cross_validate(
             record["converged"] = False
             record["n_iter"] = 0
             record["effective_df"] = np.nan
+            if fit_mode == "fit_reml":
+                record["n_reml_iter"] = 0
+                record["warm_started"] = False
             for sname in score_names:
                 record[sname] = error_score
             if estimators_list is not None:

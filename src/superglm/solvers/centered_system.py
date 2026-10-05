@@ -14,6 +14,7 @@ from superglm._group_matrix._group_matrix_centered import (
     _try_mixed_discrete_centering,
     _try_raw_spline_tabmat_centering,
     _try_tabmat_centering,
+    anchor_support_centered_gram_rhs,
     centered_gram_rhs,
     packed_centered_gram_rhs,
     stable_centered_gram_rhs,
@@ -77,6 +78,11 @@ class TabmatCenteringState:
     eligible: bool | None = None
     raw_spline_eligible: bool | None = None
     raw_moment_eligible: bool | None = None
+    # The tensor raw rungs of ``packed_centered_gram_rhs`` (pattern, factored):
+    # ``False`` once their certificate rejected and the anchor-centred supports
+    # served the build, so later iterations go straight to those supports
+    # instead of repeating the work.
+    tensor_raw_eligible: bool | None = None
     _raw_moment_owners: tuple = ()
 
     def seed_raw_rejection(self, owners: tuple) -> bool | None:
@@ -117,6 +123,7 @@ class _InitialDataReuse:
         state.eligible = self.after.eligible
         state.raw_spline_eligible = self.after.raw_spline_eligible
         state.raw_moment_eligible = self.after.raw_moment_eligible
+        state.tensor_raw_eligible = self.after.tensor_raw_eligible
         *data, mean_hi, mean_lo = self.data
         return _attach_centered_penalty(*data, penalty, mean_hi=mean_hi, mean_lo=mean_lo)
 
@@ -567,9 +574,11 @@ def _raw_rung_system(
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """``(mean_x, data_gram, rhs)`` from the first raw rung that accepts ``dm``, else ``None``.
 
-    Called only with a design free of ``DenseGroupMatrix`` columns.
+    After the raw rungs, the compact anchor-support fallback, which subtracts
+    no raw moment.  Called only with a design free of ``DenseGroupMatrix``
+    columns.
     """
-    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered, state=tabmat_state)
     if packed is None and (tabmat_state is None or tabmat_state.eligible is not False):
         mixed_attempted, mixed = _try_mixed_discrete_centering(
             dm=dm,
@@ -655,6 +664,17 @@ def _raw_rung_system(
             tabmat_state.raw_moment_eligible = packed is not None
         if packed is not None and profile is not None:
             profile["centered_raw_moment_hits"] = profile.get("centered_raw_moment_hits", 0) + 1
+    # Every raw rung declined: centre compact supports first rather than the
+    # chunked rows below.  Only a design ``packed_centered_gram_rhs`` turned
+    # away reaches it with something to do -- a discretized SCOP or
+    # spline-by-category group, which that rung's tensor stages do not handle
+    # -- and it subtracts no raw moment, so no certificate applies.
+    if packed is None and not force_chunked:
+        packed = anchor_support_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+        if packed is not None and profile is not None:
+            profile["centered_anchor_support_hits"] = (
+                profile.get("centered_anchor_support_hits", 0) + 1
+            )
     return packed
 
 

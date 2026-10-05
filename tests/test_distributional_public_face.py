@@ -45,6 +45,41 @@ def test_negative_binomial_lss_is_exported_from_both_public_family_namespaces() 
     assert distributional_families.NegativeBinomialLS is NegativeBinomialLS
 
 
+def test_a_non_converged_fit_warns_and_its_summary_says_so(monkeypatch) -> None:
+    """Returned, not refused, and never silent (the GPD repro of register A3).
+
+    A strict fit stopped at its iteration cap is a non-converged fit: it warns,
+    and every summary row says the numbers are an iterate's. A negative term
+    EDF -- what the non-converged GPD shape smooth reported, -2.196 with an
+    empty note -- is called out on its row. Mutation check: master warned
+    nothing and left every note empty.
+    """
+    from superglm import ConvergenceWarning, GaussianLS, SuperLSS, s
+    from superglm.distributional import terms as terms_module
+
+    rng = np.random.default_rng(2)
+    n = 600
+    frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, n)})
+    response = np.sin(2.0 * frame["x"].to_numpy()) + rng.normal(0.0, 0.3, n)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(s("x", kind="cr", k=6)), family.scale())
+    with pytest.warns(ConvergenceWarning, match="did not converge"):
+        model.fit_reml(frame, response, max_reml_iter=1, practical_reml=False)
+    assert model.result_.converged is False
+    notes = model.summary()["note"]
+    assert all("fit not converged" in note for note in notes)
+
+    real_outcome = terms_module._term_test_from_covariance
+
+    def negative_edf(prepared, matrix):
+        return replace(real_outcome(prepared, matrix), edf=-2.196)
+
+    monkeypatch.setattr(terms_module, "_term_test_from_covariance", negative_edf)
+    table = model.summary()
+    term_notes = table.loc[table["term"] != "(intercept)", "note"]
+    assert all("negative EDF (-2.2) is not interpretable" in note for note in term_notes)
+
+
 def test_public_gamma_reml_exposes_an_exact_face_at_the_default_lambda_cap(
     monkeypatch,
 ) -> None:

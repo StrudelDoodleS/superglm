@@ -31,6 +31,7 @@ from superglm.constraints import (
 from superglm.constraints import (
     MonotoneRepairResult as MonotoneRepairResult,
 )
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
@@ -297,6 +298,7 @@ __all__ = [
     "n_knots_from_k",
     "TermInference",
     "InteractionInference",
+    "ConvergenceWarning",
     "SeparationError",
     "SeparationWarning",
     "WeakIdentificationWarning",

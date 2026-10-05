@@ -69,6 +69,31 @@ class REMLResult:
     managed_cleanup_active_history: list[list[str]] | None = None
     # Accepted post-update frozen managed names per outer step.
     managed_cleanup_frozen_history: list[list[str]] | None = None
+    # SCOP components a suppression hold covered at the final iterate: those at
+    # a flat end of the criterion, where the residual EDF is under 0.05, or
+    # (a penalty other penalties cover) d log|S|+ / d rho_j is under 0.05
+    # with the slope asking for a decrease under 0.05 as well
+    # (``scop_efs._scop_suppression_holds``). There the criterion cannot say
+    # which way the new data's optimum lies, so these are left out of warm
+    # starts.
+    flat_components: list[str] | None = None
+    # The SCOP outer step taken at each iteration ("newton", "efs", or
+    # "efs_fisher": an EFS step at an iterate where a block's inner solve fell
+    # back to Fisher curvature, which leaves the Newton Jacobian without its
+    # reparameterisation terms), and why and at which iteration (0: before the
+    # first) the run handed itself to EFS, or None when Newton ran throughout.
+    # Reasons: "requested", "multi_scop_cleanup", "scale_profile",
+    # "newton_system", "line_search". On "line_search" the search restarted
+    # from the bootstrap with EFS steps at that iteration, and the histories
+    # hold the Newton iterations followed by the restarted search's.
+    scop_outer_steps: list[str] | None = None
+    scop_newton_fallback: str | None = None
+    scop_newton_fallback_iter: int | None = None
+    # The final coefficient refit's termination reason when that refit, at the
+    # selected smoothing parameters, did not meet its convergence certificate
+    # (``converged`` is then False whatever ``termination_reason`` says), or
+    # None.
+    terminal_refit_termination: str | None = None
     # Fit-invariant Tweedie saturated-density state built by the optimizer.
     # Carried so the terminal REML evaluations in finalize re-enter the SAME
     # per-fit phi cache the search filled, instead of rebuilding a cold one and

@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from superglm import __version__
+from superglm.diagnostics.convergence import reml_nonconvergence_message
 
 
 def training_telemetry(model) -> dict[str, Any]:
@@ -84,9 +85,15 @@ def reml_diagnostics(model) -> dict[str, Any]:
             "n_reml_iter": getattr(reml, "n_reml_iter", None),
             "converged": getattr(reml, "converged", None),
             "termination_reason": getattr(reml, "termination_reason", None),
+            "convergence_note": reml_nonconvergence_message(reml),
             "objective": getattr(reml, "objective", None),
             "objective_history": getattr(reml, "objective_history", None),
             "inner_iter_history": getattr(reml, "inner_iter_history", None),
+            # The monotone (SCOP) engine's step per iteration ("newton",
+            # "efs", or "efs_fisher" where a Fisher-fallback iterate took an
+            # EFS step), and why the run fell back to EFS steps, or None.
+            "scop_outer_steps": getattr(reml, "scop_outer_steps", None),
+            "scop_newton_fallback": getattr(reml, "scop_newton_fallback", None),
             "profile": profile,
         }
     )
