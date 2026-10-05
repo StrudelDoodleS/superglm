@@ -532,9 +532,10 @@ Run CV is disabled, with the reason on hover, when it cannot use the rows:
 - The result's data fingerprint was made by an earlier development build of superglm, or by
   another version, so its rows cannot be checked. Run `cross_validate` again.
 
-A result from an older superglm version records no fingerprint of its data, so only its row count
-is checked. It records no fit method either, so Run CV fits each fold the way the current model was
-fitted. The tab says so in both cases. The older `cv_report=` argument of `EditorSession.from_model`
+A result from an older superglm version records no fingerprint of its data, and nor does a result
+whose model reads a column that could not be fingerprinted; for either, only the row count is
+checked. An older result records no fit method either, so Run CV fits each fold the way the current
+model was fitted. The tab says so in both cases. The older `cv_report=` argument of `EditorSession.from_model`
 still works: its report is shown on the Validation tab.
 
 ## Keyboard Shortcuts

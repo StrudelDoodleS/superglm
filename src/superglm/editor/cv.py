@@ -82,8 +82,9 @@ FINGERPRINT_OTHER_VERSION = (
     "one, so its rows cannot be checked; run cross_validate again with this version."
 )
 NO_FINGERPRINT = (
-    "This result was made before cross_validate recorded a data fingerprint, so only "
-    "the row count was checked."
+    "This result has no data fingerprint, so only the row count was checked: it was made "
+    "before cross_validate recorded one, or the columns its model reads could not be "
+    "fingerprinted."
 )
 NO_FIT_MODE = (
     "This result was made before cross_validate recorded its fit method, so Run CV fits "
@@ -109,8 +110,9 @@ UNCOVERED_LEVELS = (
     "New levels of {term!r} to a group to fit them there, or leave those rows out."
 )
 OUTSIDE_DECLARED_LEVELS = (
-    "{job}'s rows hold levels of {term!r} that the model's levels= leaves out, {levels}; "
-    "declare them in its levels=, or leave those rows out."
+    "{job}'s rows hold levels of {term!r} outside its list of levels, {levels}; open a model "
+    "whose list includes them (levels=, bind_levels or a categorical dtype sets it), or leave "
+    "those rows out."
 )
 FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
