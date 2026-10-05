@@ -976,6 +976,27 @@ def test_a_reference_named_like_a_base_policy_is_that_level_after_apply():
     assert np.max(np.abs(applied.predict(X) - model.predict(X))) <= bound
 
 
+def test_an_ordered_reference_band_named_first_is_that_band_after_apply():
+    """The band named "first" weighs most, so the fit makes it the reference.
+
+    Apply passed it on as base="first", which read as the policy and chose
+    A, the first band: every reported relativity was rebased to A.
+    """
+    name = "first"
+    bands = ["A", name, "C", "D", "E"]
+    X = pd.DataFrame({"band": np.tile(bands, 30)})
+    y, w = np.tile([1.0, 2.0, 4.0, 8.0, 9.0], 30), np.tile([1.0, 4.0, 1.0, 1.0, 1.0], 30)
+
+    def declared():
+        basis = Spline(kind="bs", n_knots=3, degree=2)
+        return _declared({"band": OrderedCategorical(order=bands, basis=basis)})
+
+    model = declared().fit(X, y, sample_weight=w)
+    applied = Structure.from_model(model).apply(declared()).fit(X, y, sample_weight=w)
+
+    assert model._specs["band"]._base_level == applied._specs["band"]._base_level == name
+
+
 def _narrower_next_year():
     """Next year's rows, whose ages stop a year short of this year's oldest."""
     X, _ = _frame()

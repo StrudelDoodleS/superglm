@@ -328,6 +328,41 @@ def test_a_reference_level_named_like_a_base_policy_stays_that_level(name):
     assert applied._specs["x"]._base_level == name
 
 
+@pytest.mark.parametrize("name", ["first", "most_exposed"])
+def test_an_ordered_reference_band_named_like_a_base_policy_stays_that_band(name):
+    """A band is set as the reference, kept through a shape, a collapse and an ungroup, and applied.
+
+    A weighs most and is the first band, so either policy picks A: each step
+    that passed the band on as base= read its name as the policy and rebased
+    the reported relativities to A.
+    """
+    bands = ["A", name, "C", "D", "E", "F"]
+    X = pd.DataFrame({"band": np.tile(bands, 30)})
+    y = np.tile([1.0, 2.0, 4.0, 8.0, 9.0, 9.5], 30)
+    w = np.tile([4.0, 1.0, 1.0, 1.0, 1.0, 1.0], 30)
+
+    def declared():
+        band = OrderedCategorical(order=bands, basis=Spline(kind="ps", k=5), base="C")
+        return SuperGLM(family="gaussian", features={"band": band})
+
+    session = EditorSession.from_model(declared().fit(X, y, sample_weight=w), train_data=(X, y, w))
+    session.replace_with_reference_level("band", name, method="fit")
+    references = [session.model._specs["band"]._base_level]
+    session.replace_with_shaped_range("band", lo="C", hi="D", degree=1, method="fit")
+    references.append(session.model._specs["band"]._base_level)
+    session.select_levels("band", ["E", "F"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    references.append(session.model._specs["band"]._base_level)
+    session.stage_structural("ungroup", "band", {"levels": ["E", "F"]})
+    session.refit_pending(method="fit")
+    references.append(session.model._specs["band"]._base_level)
+    applied = Structure.from_model(session.model).apply(declared()).fit(X, y, sample_weight=w)
+    references.append(applied._specs["band"]._base_level)
+
+    assert references == [name] * 5
+    assert session_payload(session)["band"]["reference"] == {"level": name, "policy": "kept"}
+
+
 def _exposed_region_session(
     base: str, groups: dict[str, list[str]] | None = None, reference: str = "B"
 ) -> EditorSession:

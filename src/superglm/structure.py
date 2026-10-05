@@ -673,13 +673,14 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     if listed[: len(smooth)] != smooth:
         raise StructureError(_ORDER.format(feature=name))
     grouping = _grouping(entry.levels, entry.groups, order=declared)
+    # The reference is a band or group, whatever its name (level=True below).
     base = entry.reference if grouping is None else str(entry.reference)
     data = np.asarray(entry.levels, dtype=object)
     # A model that declares these ranges keeps its spline, unless X needs it
     # fitted out to hold them.
     same = _same_ranges(entry.ranges, current_ranges(spec))
     if same and (column is None or not entry.ranges):
-        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data)
+        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data, level=True)
     _require_shapes(model, name, entry)
     source = pristine_basis(spec)
     knots = source._named_knots or source._explicit_knots
@@ -687,7 +688,9 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
 
     def hosted(ranges, bound=boundary):
         basis = shaped_spline(source, ranges, knots=knots, boundary=bound)
-        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data, basis=basis)
+        return rebuilt_ordered_spec(
+            spec, grouping=grouping, base=base, data=data, basis=basis, level=True
+        )
 
     # The term without ranges places each band on the axis the ranges name.
     host = hosted([])
@@ -717,7 +720,7 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     in_order = sorted(ranges, key=lambda r: position(r.lo))
     placed = _placed_boundary(name, in_order, fits, boundary, extent, position)
     if same and placed == boundary:
-        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data)
+        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data, level=True)
     return hosted(ranges, placed)
 
 

@@ -431,6 +431,11 @@ class OrderedCategorical:
         Categorical(base="most_exposed")
     """
 
+    # Whether `base=` names a band although it reads "first" or "most_exposed".
+    # Only a rebuild sets it, for a reference a fit resolved or a user chose. A
+    # class attribute so a spec pickled before it existed reads False.
+    _base_is_level: bool = False
+
     def __init__(
         self,
         values: dict[str, float] | None = None,
@@ -724,6 +729,7 @@ class OrderedCategorical:
             )
 
         # Reporting state, populated by _choose_base at build time.
+        self._base_is_level: bool = False
         self._base_level: str = ""
         self._non_base: list[str] = []
 
@@ -1236,19 +1242,22 @@ class OrderedCategorical:
 
         Specials are excluded: the base anchors every reported relativity and
         must lie on the smooth. On a real book a MISSING band is often the most
-        exposed level, so ``most_exposed`` would otherwise select it.
+        exposed level, so ``most_exposed`` would otherwise select it. A
+        ``base=`` a rebuild marked as a band (``_base_is_level``) names that
+        band, even when it reads "first" or "most_exposed".
         """
         if self._base_level and self._base_level in self._smooth_levels:
             return
 
-        if self.base == "most_exposed" and sample_weight is not None:
+        policy = None if self._base_is_level else self.base
+        if policy == "most_exposed" and sample_weight is not None:
             exp_by_level = {
                 lev: float(sample_weight[x == lev].sum()) for lev in self._smooth_levels
             }
             self._base_level = max(exp_by_level, key=exp_by_level.get)
-        elif self.base == "most_exposed" and sample_weight is None:
+        elif policy == "most_exposed" and sample_weight is None:
             self._base_level = self._smooth_levels[0]
-        elif self.base == "first":
+        elif policy == "first":
             self._base_level = self._smooth_levels[0]
         else:
             # `base=` is the user's own spelling of a level and need not match the

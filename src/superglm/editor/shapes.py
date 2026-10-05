@@ -18,6 +18,7 @@ from superglm.features.rebuild import (
     TOO_FEW_POINTS,
     RangePlacementError,
     band_edges,
+    base_names_level,
     current_ranges,
     edge_text,
     merged_ranges,
@@ -241,6 +242,7 @@ def _hosted(spec: OrderedCategorical, basis, name: str, X) -> OrderedCategorical
         base=spec.base,
         data=frame.column_array(name),
         basis=basis,
+        level=base_names_level(spec),
     )
 
 

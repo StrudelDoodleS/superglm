@@ -119,7 +119,9 @@ def collapsed_feature_spec(
     base = _collapsed_base(declared, kept, selected_levels, label, existing, grouping, level=level)
 
     if isinstance(spec, OrderedCategorical):
-        replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=values)
+        replacement = rebuilt_ordered_spec(
+            spec, grouping=grouping, base=base, data=values, level=level
+        )
     else:
         replacement = rebuilt_categorical(
             spec, fitted, base=base, grouping=grouping, data=values, level=level
@@ -197,7 +199,7 @@ def ungrouped_feature_spec(
         base = _valid_base_after_ungroup(spec.base, selected_levels, grouping, level=level)
     if isinstance(spec, OrderedCategorical):
         replacement = rebuilt_ordered_spec(
-            spec, grouping=replacement_grouping, base=base, data=values
+            spec, grouping=replacement_grouping, base=base, data=values, level=level
         )
     else:
         # Without a grouping the fit reads native values (3, not "3").
@@ -242,7 +244,9 @@ def reference_feature_spec(
     frame.require_columns((term.name,))
     values = frame.column_array(term.name)
     if isinstance(spec, OrderedCategorical):
-        replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=label, data=values)
+        replacement = rebuilt_ordered_spec(
+            spec, grouping=grouping, base=label, data=values, level=True
+        )
     else:
         # Fitted levels keep their native type (an integer level stays 3, not "3").
         replacement = rebuilt_categorical(

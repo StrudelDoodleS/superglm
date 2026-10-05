@@ -192,14 +192,17 @@ def rebuilt_ordered_spec(
     base: Any,
     data,
     basis=None,
+    level: bool = False,
 ) -> OrderedCategorical:
     """A fresh, unfitted OrderedCategorical like ``spec`` with this grouping and base.
 
     ``basis`` replaces the inner basis (a shaped range). By default the pristine
     declared basis is cloned. A fitted spec is never mutated: its resolved base
-    is sticky and would silently survive a changed ``base``.
+    is sticky and would silently survive a changed ``base``. ``level=True``
+    says ``base`` names a band or group, as :func:`rebuilt_categorical`'s does.
     """
-    values, native_base = _ordered_original_values(spec, grouping, data, base)
+    named = level or str(base) not in SYMBOLIC_BASE_POLICIES
+    values, native_base = _ordered_original_values(spec, grouping, data, base, named=named)
     # A special the declaration also named in order= or values= is reported
     # under that domain spelling (9.0 beside 1.0 and 2.0) and matches rows
     # through its raw label (9). The smooth's values lack it, so it is named
@@ -225,13 +228,15 @@ def rebuilt_ordered_spec(
             message=re.escape(_CLAMP_WARNING_PREFIX),
             category=UserWarning,
         )
-        return OrderedCategorical(
+        rebuilt = OrderedCategorical(
             values=values,
             basis=source,
             base=native_base,
             grouping=grouping,
             specials=specials or None,
         )
+    rebuilt._base_is_level = named and str(base) in SYMBOLIC_BASE_POLICIES
+    return rebuilt
 
 
 def pristine_basis(spec: OrderedCategorical):
@@ -274,6 +279,8 @@ def _ordered_original_values(
     grouping: LevelGrouping | None,
     data,
     base,
+    *,
+    named: bool,
 ) -> tuple[dict[Any, float], Any]:
     original_values = getattr(spec, "_original_level_to_value", None)
     if original_values is not None:
@@ -285,7 +292,7 @@ def _ordered_original_values(
 
     native_by_label = native_by_text(np.asarray(data, dtype=object).ravel())
     native_values = {native_by_label.get(label, label): value for label, value in values.items()}
-    native_base = base if base in SYMBOLIC_BASE_POLICIES else native_by_label.get(str(base), base)
+    native_base = native_by_label.get(str(base), base) if named else base
     return native_values, native_base
 
 
