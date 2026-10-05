@@ -450,6 +450,8 @@ def optimize_efs_reml(
         n_reml_iter=n_reml_iter,
         converged=converged,
         lambda_history=lambda_history,
+        # The loop leaves only on the lambda tolerance or at its cap.
+        termination_reason="lambda_tolerance" if converged else "max_reml_iter",
         objective=reml_laml_objective(
             dm,
             distribution,

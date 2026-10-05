@@ -470,7 +470,11 @@ def cross_validate(
             t0 = time.perf_counter()
             fit_fn = getattr(est, fit_mode)
             fold_kwargs = dict(fit_kwargs)
-            if reml_warm_start and warm_lambdas is not None:
+            # An empty mapping starts nothing warm (every component of the
+            # first converged fold was left on a flat plateau): those folds
+            # keep the model's own configured start, and read cold.
+            warm_this_fold = bool(reml_warm_start and warm_lambdas)
+            if warm_this_fold:
                 fold_kwargs["lambda2_init"] = warm_lambdas
             fit_fn(X_train, y_train, sample_weight=sw_train, offset=off_train, **fold_kwargs)
             record["fit_time_s"] = time.perf_counter() - t0
@@ -485,7 +489,7 @@ def cross_validate(
             record["effective_df"] = est._result.effective_df
             if fit_mode == "fit_reml":
                 record["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
-                record["warm_started"] = "lambda2_init" in fold_kwargs and reml_warm_start
+                record["warm_started"] = warm_this_fold
                 # A model with no REML-eligible groups legitimately fits without
                 # smoothing selection (``_reml_result`` is None): nothing to warm-start.
                 if (

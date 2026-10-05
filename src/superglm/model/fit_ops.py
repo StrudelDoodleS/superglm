@@ -1357,7 +1357,7 @@ def _refine_nb_theta_to_reml_fixed_point(
             y_ref=y_ref,
             sample_weight_ref=sample_weight_ref,
             offset_ref=offset_ref,
-            lambda2_init=warm_lambdas,
+            lambda2_init=warm_lambdas or None,
             durable_retain_fit_state=durable_retain_fit_state,
             **refit_kwargs,
         )
@@ -2128,7 +2128,12 @@ def _fit_reml_in_workspace(
     lambdas, estimated_names = initialize_component_lambdas(reml_penalties, lam_init)
     # A mapping lambda2_init (a previous fit's ``reml_diagnostics()["lambdas"]``)
     # is a warm start the engines bootstrap from; a scalar keeps its cold meaning.
-    warm_lambdas = warm_start_lambdas(reml_penalties, lambda2_init, estimated_names)
+    warm_lambdas = warm_start_lambdas(
+        reml_penalties,
+        lambda2_init,
+        estimated_names,
+        other_names=[group.name for group in model._groups],
+    )
     _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
     # QP monotone with auto lambda → two-stage passthrough heuristic:

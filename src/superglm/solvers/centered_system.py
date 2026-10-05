@@ -17,7 +17,6 @@ from superglm._group_matrix._group_matrix_centered import (
     anchor_support_centered_gram_rhs,
     centered_gram_rhs,
     packed_centered_gram_rhs,
-    stable_centered_gram_rhs,
     try_raw_moment_centering,
 )
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
@@ -1011,51 +1010,4 @@ def _attach_centered_penalty(
         hessian=_freeze(hessian),
         mean_hi=None if mean_hi is None else _freeze(mean_hi),
         mean_lo=None if mean_lo is None else _freeze(mean_lo),
-    )
-
-
-def build_anchor_centered_system(
-    *,
-    dm: DesignMatrix,
-    W: NDArray,
-    z_off: NDArray,
-    penalty: NDArray,
-) -> CenteredSystem:
-    """Build an anchored system for predictors with locations beyond their scale."""
-    W = np.asarray(W, dtype=np.float64)
-    z_off = np.asarray(z_off, dtype=np.float64)
-    penalty = np.asarray(penalty, dtype=np.float64)
-    if W.shape != (dm.n,) or z_off.shape != (dm.n,):
-        raise ValueError("W and z_off must match the design row count")
-    if penalty.shape != (dm.p, dm.p):
-        raise ValueError("penalty must match the design column count")
-    if not np.all(np.isfinite(W)) or np.any(W < 0.0):
-        raise ValueError("working weights must be finite and non-negative")
-    sum_w = float(np.sum(W, dtype=np.float64))
-    if not np.isfinite(sum_w) or sum_w <= 0.0:
-        raise ValueError("working weights must have a positive finite sum")
-    mean_z = float(np.dot(W, z_off) / sum_w)
-    mean_x, data_gram, rhs = stable_centered_gram_rhs(
-        dm=dm,
-        W=W,
-        z_centered=z_off - mean_z,
-        sum_w=sum_w,
-    )
-    penalty_symmetric = 0.5 * (penalty + penalty.T)
-    hessian = 0.5 * (data_gram + data_gram.T) + penalty_symmetric
-    try:
-        np.linalg.cholesky(hessian)
-    except np.linalg.LinAlgError:
-        eigenvalues, eigenvectors = np.linalg.eigh(hessian)
-        if eigenvalues.size and eigenvalues[0] < 0.0:
-            hessian = (eigenvectors * np.maximum(eigenvalues, 0.0)[None, :]) @ eigenvectors.T
-            hessian = 0.5 * (hessian + hessian.T)
-    return CenteredSystem(
-        sum_w=sum_w,
-        mean_x=_freeze(mean_x),
-        mean_z=mean_z,
-        data_gram=_freeze(data_gram),
-        rhs=_freeze(rhs),
-        penalty=_freeze(penalty_symmetric),
-        hessian=_freeze(hessian),
     )

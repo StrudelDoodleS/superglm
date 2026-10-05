@@ -3203,15 +3203,21 @@ class TestSCOPWarmStart:
             assert abs(np.log(warm["lambdas"][name]) - np.log(value)) <= bound, name
 
 
-def _scop_newton_fixture(family: str = "poisson", seed: int = 7, n: int = 6000):
+def _scop_newton_fixture(
+    family: str = "poisson", seed: int = 7, n: int = 6000, diesel_share: float | None = None
+):
     """A small SCOP fit whose monotone term is curved, so no smoothing parameter
-    ends in a suppression hold and the fixed point is a point, not a region."""
+    ends in a suppression hold and the fixed point is a point, not a region.
+
+    ``diesel_share`` puts that share of rows on Diesel and makes Regular the
+    base level, so the Diesel indicator carries that share of the weight."""
     from superglm import Categorical, Spline
 
     rng = np.random.default_rng(seed)
     bm = rng.uniform(50.0, 150.0, n)
     age = rng.uniform(18.0, 90.0, n)
-    gas = np.where(rng.uniform(size=n) < 0.3, "Diesel", "Regular")
+    share = 0.3 if diesel_share is None else diesel_share
+    gas = np.where(rng.uniform(size=n) < share, "Diesel", "Regular")
     eta = (
         -1.4
         + 0.9 * (1.0 - np.exp(-(bm - 50.0) / 25.0))
@@ -3236,7 +3242,7 @@ def _scop_newton_fixture(family: str = "poisson", seed: int = 7, n: int = 6000):
         features={
             "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
             "DrivAge": Spline(kind="ps", k=8),
-            "VehGas": Categorical(base="most_exposed"),
+            "VehGas": Categorical(base="most_exposed" if diesel_share is None else "Regular"),
         },
     )
     return model, frame, y, offset
@@ -4081,6 +4087,239 @@ class TestSCOPNewtonOuterStep:
         result = model._reml_result
         assert not result.converged
         assert result.scop_outer_steps == ["newton", "newton"]
+
+    @pytest.mark.parametrize("family", ["gamma", "poisson"])
+    def test_a_fisher_fallback_geometry_takes_an_efs_step(self, monkeypatch, family):
+        """The joint geometry can fall back to Fisher curvature with no block
+        flagged: the observed builder's indefinite branch (Gamma) and the cached
+        builder's decomposition failure (Poisson). Its H is J F J + S, without
+        the map's -diag(e S beta) term that the reparameterisation correction
+        reads, so those iterates take an EFS step ("efs_fisher") and the
+        correction is never formed on them. Forced from the first Newton line
+        search on by failing each geometry build's first decomposition, which
+        sends the builder down its own Fisher branch. Mutation check: on
+        941f9ce8 every later iterate took a Newton step with the correction
+        formed on the Fisher geometry."""
+        import superglm.reml.scop_geometry as scop_geometry
+
+        armed = {"search": False, "build": False}
+        for builder_name, decomposer_name in (
+            ("build_observed_scop_joint_geometry", "decompose_gram"),
+            ("build_cached_scop_joint_geometry", "_decompose_with_factor_certification"),
+        ):
+            real_builder = getattr(scop_efs_module, builder_name)
+            real_decomposer = getattr(scop_geometry, decomposer_name)
+
+            def builder(*args, _real=real_builder, **kwargs):
+                armed["build"] = armed["search"]
+                try:
+                    return _real(*args, **kwargs)
+                finally:
+                    armed["build"] = False
+
+            def decomposer(*args, _real=real_decomposer, **kwargs):
+                if armed["build"]:
+                    armed["build"] = False
+                    raise np.linalg.LinAlgError("forced indefinite geometry")
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(scop_efs_module, builder_name, builder)
+            monkeypatch.setattr(scop_geometry, decomposer_name, decomposer)
+
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+
+        def arming_search(*args, **kwargs):
+            armed["search"] = True
+            return real_search(*args, **kwargs)
+
+        sources = []
+        real_correction = scop_efs_module._scop_reparam_jacobian_correction
+
+        def recording_correction(mode, system):
+            sources.append(mode.curvature_source)
+            return real_correction(mode, system)
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", arming_search)
+        monkeypatch.setattr(
+            scop_efs_module, "_scop_reparam_jacobian_correction", recording_correction
+        )
+        model, frame, y, offset = _scop_newton_fixture(family)
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.curvature_source == "fisher"
+        assert result.scop_outer_steps[0] == "newton"
+        assert set(result.scop_outer_steps[1:]) == {"efs_fisher"}
+        assert sources == ["observed"]
+        assert result.converged
+
+    def test_a_rejected_first_newton_step_hands_over_to_efs_in_place(self, monkeypatch):
+        """When the first Newton step's forward trials are all rejected, EFS
+        takes over from the same mode with the fresh state it starts from, so
+        the run is the EFS search's own, step for step. The reason names that
+        hand-over, not the restart from the bootstrap ("line_search"), which
+        did not happen. Mutation check: on 941f9ce8 the reason read
+        "line_search"."""
+        import functools
+
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+
+        def reject_first_newton(context, current, proposed, **kwargs):
+            if kwargs.get("reflect", True) is False and kwargs["reml_iteration"] == 1:
+                return current, False
+            return real_search(context, current, proposed, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", reject_first_newton)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        monkeypatch.undo()
+
+        real = scop_efs_module.optimize_scop_efs_reml
+        monkeypatch.setattr(
+            scop_efs_module, "optimize_scop_efs_reml", functools.partial(real, _outer_step="efs")
+        )
+        efs_model, _, _, _ = _scop_newton_fixture()
+        efs_model.fit_reml(frame, y, offset=offset)
+        efs = efs_model._reml_result
+        assert result.scop_newton_fallback == "line_search_first_iteration"
+        assert result.scop_newton_fallback_iter == 1
+        assert result.scop_outer_steps == efs.scop_outer_steps
+        assert result.lambdas == efs.lambdas
+        assert (result.n_reml_iter, result.termination_reason) == (
+            efs.n_reml_iter,
+            efs.termination_reason,
+        )
+
+    def test_a_rejected_newton_step_at_the_cap_stops_and_says_so(self, monkeypatch):
+        """A guard that fires on the last allowed iteration has no iteration to
+        restart in: the run stops at that mode on ``max_reml_iter``, records
+        "line_search_at_cap", and the warning says the last Newton step failed
+        and nothing was left to restart with. Forced as in
+        ``test_a_failed_newton_line_search_restarts_the_search_with_efs``, with
+        the cap at the third iteration. Mutation check: on 941f9ce8 the reason
+        read "line_search", the label of a restart that never ran, and the
+        warning did not mention the failed step."""
+        from superglm import ConvergenceWarning
+
+        real_step = scop_efs_module._scop_newton_step
+        calls = []
+
+        def reversed_third(system, jacobian=None):
+            step = real_step(system, jacobian)
+            calls.append(step)
+            if len(calls) == 3:
+                return -4.0 * np.sign(step) * (np.abs(step) > 0)
+            return step
+
+        monkeypatch.setattr(scop_efs_module, "_scop_newton_step", reversed_third)
+        model, frame, y, offset = _scop_newton_fixture()
+        with pytest.warns(ConvergenceWarning, match="no iteration was left to restart"):
+            model.fit_reml(frame, y, offset=offset, max_reml_iter=3)
+        result = model._reml_result
+        assert not result.converged
+        assert result.termination_reason == "max_reml_iter"
+        assert result.scop_newton_fallback == "line_search_at_cap"
+        assert result.scop_newton_fallback_iter == 3
+        assert result.scop_outer_steps == ["newton", "newton", "newton"]
+        assert result.lambdas == result.lambda_history[-1] == result.lambda_history[-2]
+
+    def test_aitken_never_extrapolates_from_newton_steps(self, monkeypatch):
+        """The Aitken limit reads a history of EFS steps contracting at one
+        ratio. At an isolated "efs_fisher" iterate between Newton steps the
+        history starts afresh, so no Newton step enters it. Forced by marking
+        the modes of the second and fourth line searches as Fisher fallbacks.
+        Mutation check: on 941f9ce8 the history held the preceding Newton step
+        at the first such iterate and two Newton steps at the second."""
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+        searches = []
+
+        def mark(context, current, proposed, **kwargs):
+            mode, accepted = real_search(context, current, proposed, **kwargs)
+            searches.append(mode)
+            if len(searches) in (2, 4) and accepted:
+                states = {
+                    index: {**state, "last_fisher_fallback": True}
+                    for index, state in mode.scop_states.items()
+                }
+                mode = replace(mode, scop_states=states)
+            return mode, accepted
+
+        lengths = []
+        real_aitken = scop_efs_module._aitken_step
+
+        def recording_aitken(state, name, prev_dlsp, dlsp, scaled_step):
+            out = real_aitken(state, name, prev_dlsp, dlsp, scaled_step)
+            lengths.append(len(state[name]))
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", mark)
+        monkeypatch.setattr(scop_efs_module, "_aitken_step", recording_aitken)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.scop_outer_steps[:5] == [
+            "newton",
+            "newton",
+            "efs_fisher",
+            "newton",
+            "efs_fisher",
+        ]
+        assert result.scop_outer_steps.count("efs") == 0
+        assert lengths and set(lengths) == {0}
+        assert result.converged
+
+
+class TestSCOPObservedGeometryCentring:
+    """The observed-curvature geometry takes ``build_centered_system`` as its authority."""
+
+    def test_a_frequent_indicator_forms_no_design_rows(self, monkeypatch):
+        """Gamma with a log link takes the observed geometry. Its Diesel
+        indicator carries about 60% of the weight, so its weighted mean exceeds
+        its centred RMS at every geometry build, and the system there comes
+        from the compact anchor-centred supports, which form no design row.
+        The answer agrees with one whose geometry centres row chunks
+        (``_force_chunked``) to the stopping bound of two converged Newton fits
+        of one criterion, 2 * reml_tol in log lambda (the centring routes
+        differ at the rounding level). Mutation check: on 941f9ce8 every build
+        was redone from 8,192-row chunks after the guard rejected it: 24 row
+        materialisations and 8 chunked builds on this fit."""
+        import functools
+
+        import superglm.reml.scop_geometry as scop_geometry
+        from superglm._group_matrix._group_matrix_centered import _raw_centering_well_scaled
+        from superglm.group_matrix import DesignMatrix
+
+        real_build = scop_geometry.build_centered_system
+        tripped = []
+
+        def recording_build(**kwargs):
+            system = real_build(**kwargs)
+            scale = np.sqrt(np.maximum(np.diag(system.data_gram), 0.0) / system.sum_w)
+            tripped.append(not _raw_centering_well_scaled(system.mean_x, scale))
+            return system
+
+        def no_rows(self, idx):
+            raise AssertionError("the observed geometry must not materialise design rows")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(scop_geometry, "build_centered_system", recording_build)
+            patch.setattr(DesignMatrix, "row_subset", no_rows)
+            model, frame, y, offset = _scop_newton_fixture("gamma", diesel_share=0.6)
+            model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert tripped and all(tripped)
+        assert result.converged and result.curvature_source == "observed"
+
+        monkeypatch.setattr(
+            scop_geometry,
+            "build_centered_system",
+            functools.partial(real_build, _force_chunked=True),
+        )
+        chunked, _, _, _ = _scop_newton_fixture("gamma", diesel_share=0.6)
+        chunked.fit_reml(frame, y, offset=offset)
+        reml_tol = model.reml_diagnostics()["profile"]["reml_tol_resolved"]
+        for name, value in chunked._reml_result.lambdas.items():
+            assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
 
 
 class TestCandidateStepBackoff:

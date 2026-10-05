@@ -91,7 +91,8 @@ def reml_diagnostics(model) -> dict[str, Any]:
             "inner_iter_history": getattr(reml, "inner_iter_history", None),
             # The monotone (SCOP) engine's step per iteration ("newton",
             # "efs", or "efs_fisher" where a Fisher-fallback iterate took an
-            # EFS step), and why the run fell back to EFS steps, or None.
+            # EFS step), and why the run fell back to EFS steps, or None
+            # (``REMLResult.scop_newton_fallback`` lists the reasons).
             "scop_outer_steps": getattr(reml, "scop_outer_steps", None),
             "scop_newton_fallback": getattr(reml, "scop_newton_fallback", None),
             "profile": profile,

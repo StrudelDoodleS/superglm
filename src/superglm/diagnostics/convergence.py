@@ -89,6 +89,11 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
             "freedom and standard errors are those of the last iterate, not of a REML "
             "optimum."
         )
+    if getattr(reml_result, "scop_newton_fallback", None) == "line_search_at_cap":
+        message += (
+            " Its last Newton step on the smoothing parameters improved nothing, and no "
+            "iteration was left to restart the search with smaller steps."
+        )
     if reason == "max_reml_iter":
         message += (
             " Refit with a larger max_reml_iter, passing "

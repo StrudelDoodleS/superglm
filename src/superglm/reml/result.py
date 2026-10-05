@@ -78,14 +78,19 @@ class REMLResult:
     # starts.
     flat_components: list[str] | None = None
     # The SCOP outer step taken at each iteration ("newton", "efs", or
-    # "efs_fisher": an EFS step at an iterate where a block's inner solve fell
-    # back to Fisher curvature, which leaves the Newton Jacobian without its
-    # reparameterisation terms), and why and at which iteration (0: before the
-    # first) the run handed itself to EFS, or None when Newton ran throughout.
-    # Reasons: "requested", "multi_scop_cleanup", "scale_profile",
-    # "newton_system", "line_search". On "line_search" the search restarted
-    # from the bootstrap with EFS steps at that iteration, and the histories
-    # hold the Newton iterations followed by the restarted search's.
+    # "efs_fisher": an EFS step at an iterate where a block's inner solve or
+    # the joint geometry fell back to Fisher curvature, which leaves the
+    # Newton Jacobian without its reparameterisation terms), and why and at
+    # which iteration (0: before the first) the run handed itself to EFS, or
+    # None when Newton ran throughout. Reasons: "requested",
+    # "multi_scop_cleanup", "scale_profile", "newton_system", and three for a
+    # Newton step none of whose forward trials the LAML accepted:
+    # "line_search_first_iteration" (EFS took over in place at the first
+    # iteration), "line_search" (the search restarted from the bootstrap with
+    # EFS steps at that iteration, and the histories hold the Newton
+    # iterations followed by the restarted search's), and "line_search_at_cap"
+    # (no iteration was left to restart in: the run stopped there on
+    # ``max_reml_iter``).
     scop_outer_steps: list[str] | None = None
     scop_newton_fallback: str | None = None
     scop_newton_fallback_iter: int | None = None

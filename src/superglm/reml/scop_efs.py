@@ -1913,7 +1913,12 @@ def fit_fixed_scop_reml(
 def _aitken_step(
     state: dict, name: str, prev_dlsp: dict[str, float], dlsp: float, scaled_step: float
 ) -> float:
-    """The EFS step, replaced by its Aitken limit when the linear phase is evidenced."""
+    """The EFS step, replaced by its Aitken limit when the linear phase is evidenced.
+
+    ``state[("jumped", name)]`` marks the accepted step before this call as
+    outside the linear phase (an Aitken jump, or a Newton step): it does not
+    enter the history, which starts afresh.
+    """
     history = state.setdefault(name, [])
     if state.get(("jumped", name)):
         history.clear()
@@ -2259,10 +2264,12 @@ def _scop_reparam_jacobian_correction(
     ``e (K v + c v0 - v S beta)`` and ``dc = E c``; the intercept-profiled H
     loses ``(dc c' + c dc') / sum(W)``. Returned unsymmetrised, as the j, k
     entries of ``lambda_j d t_j / d rho_k``. None when no block carries a
-    positivity coordinate, a block's Newton solve fell back to Fisher
-    curvature (its retained curvature then lacks the map's term), or the map
-    is not the exp map this assumes.
+    positivity coordinate, a block's Newton solve or the joint geometry fell
+    back to Fisher curvature (the curvature then lacks the map's term), or
+    the map is not the exp map this assumes.
     """
+    if mode.curvature_source != "observed":
+        return None
     geometry = mode.joint_geometry
     hessian_inverse = mode.hessian_inverse
     width = int(hessian_inverse.shape[0])
@@ -2421,13 +2428,16 @@ def optimize_scop_efs_reml(
     cleanup, or a non-finite system). When a Newton step fails its guard (no
     forward trial accepted), a step under the plateau's 0.01 cap whose
     predicted decrease the objective cannot resolve ends the run as an
-    objective plateau; at the first iteration EFS takes over in place; and
-    otherwise the search restarts from the bootstrap with EFS steps, within
-    the iterations left, and returns what that EFS search returns, with the
-    Newton iterations prepended to its histories. At an
-    iterate where a SCOP block's inner solve fell back to Fisher curvature the
-    Newton Jacobian lacks its reparameterisation terms, so that iteration
-    takes an EFS step instead (``"efs_fisher"`` in ``scop_outer_steps``).
+    objective plateau; at the first iteration EFS takes over in place
+    (``"line_search_first_iteration"``); at the iteration cap the run stops
+    there, unconverged (``"line_search_at_cap"``); and otherwise the search
+    restarts from the bootstrap with EFS steps (``"line_search"``), within
+    the iterations left, and returns what that EFS search returns within
+    them, with the Newton iterations prepended to its histories. At an
+    iterate where a SCOP block's inner solve, or the joint geometry, fell
+    back to Fisher curvature the Newton Jacobian lacks its
+    reparameterisation terms, so that iteration takes an EFS step instead
+    (``"efs_fisher"`` in ``scop_outer_steps``).
     ``_outer_step="efs"`` runs EFS throughout.
 
     Parameters
@@ -2732,12 +2742,16 @@ def optimize_scop_efs_reml(
         # coefficients, SCOP blocks, penalty, and LAML geometry share the same
         # lambda state; a failed search retains the exact current mode.
         # A block whose inner solve fell back to Fisher curvature retains a
-        # curvature without the map's term, so the reparameterisation
-        # correction cannot be formed there, and without it the Jacobian's
-        # SCOP diagonal measured 3.05 against a finite-difference 5.25: this
+        # curvature without the map's term, and so does a joint geometry that
+        # fell back to Fisher curvature itself (an indefinite observed Hessian,
+        # or retained blocks that would not decompose): its H is J F J + S. The
+        # reparameterisation correction reads H as K - diag(e S beta) + S, so
+        # it cannot be formed on either, and without it the Jacobian's SCOP
+        # diagonal measured 3.05 against a finite-difference 5.25: this
         # iteration takes the EFS step instead and Newton resumes at the next.
-        fisher_iterate = newton_live and any(
-            bool(state.get("last_fisher_fallback", False)) for state in scop_states.values()
+        fisher_iterate = newton_live and (
+            current_mode.curvature_source != "observed"
+            or any(bool(state.get("last_fisher_fallback", False)) for state in scop_states.values())
         )
         if newton_live and not fisher_iterate:
             inverse_phi_derivative: float | None = 0.0
@@ -2845,6 +2859,11 @@ def optimize_scop_efs_reml(
                         # with the fresh state it would have there, and a
                         # rescued mode keeps its endorsement check below.
                         #
+                        # No iteration is left (the cap): nothing can restart,
+                        # so the run stops at this mode, unconverged on
+                        # ``max_reml_iter``, and the fallback records that the
+                        # last Newton step failed its line search there.
+                        #
                         # Otherwise the search restarts from the bootstrap
                         # with EFS steps (below the loop). Continuing EFS
                         # from this mode was measured to fail: a Newton step
@@ -2873,11 +2892,14 @@ def optimize_scop_efs_reml(
                             break
                         elif n_reml_iter == 1:
                             newton_live = False
+                            newton_fallback = "line_search_first_iteration"
                             flat_names = set()
                         else:
                             outer_steps.append("newton")
                             lambda_history.append(lambdas.copy())
-                            restart_with_efs = True
+                            restart_with_efs = n_reml_iter < max_reml_iter
+                            if not restart_with_efs:
+                                newton_fallback = "line_search_at_cap"
                             break
 
         # Step 6b: Joint EFS lambda update (rEDF/pSp, scasm-style), with its
@@ -2924,6 +2946,13 @@ def optimize_scop_efs_reml(
                     max(lambdas[name], 1e-10)
                 )
                 efs_prev_dlsp[name] = accepted_step
+        # Aitken extrapolates a run of EFS steps contracting at one ratio, and
+        # a Newton step is no part of that run: the next EFS step (an
+        # ``"efs_fisher"`` iterate, or the hand-off to EFS) starts the history
+        # afresh, as after an Aitken jump (``_aitken_step``).
+        if step_kind == "newton" and aitken_state is not None:
+            for name in estimated_names:
+                aitken_state[("jumped", name)] = True
 
         # Step 7b: Multi-SCOP discrete cleanup — freeze floor-pinned components
         # after they have been stable for several accepted lambda updates.
@@ -3077,12 +3106,14 @@ def optimize_scop_efs_reml(
         # but kept current so a future loop shape cannot inherit a stale origin.
         step_origin = retained_mode
 
-    if restart_with_efs and max_reml_iter > n_reml_iter:
+    if restart_with_efs:
         # The guard fired: rerun the search from the bootstrap with EFS steps,
         # in the iterations left. A fresh call reproduces the EFS search
         # exactly (its own fit context and centring state), so the answer is
-        # the one ``_outer_step="efs"`` returns; the Newton iterations cost at
-        # most one candidate and three trial fits each on top of it.
+        # the one ``_outer_step="efs"`` returns when the iterations left cover
+        # that search; with fewer it stops at its own cap, as ``max_reml_iter``,
+        # where the EFS search would have gone on. The Newton iterations cost
+        # at most one candidate and three trial fits each on top of it.
         if verbose:
             print(
                 f"  SCOP REML: Newton step rejected at iteration {n_reml_iter}; "

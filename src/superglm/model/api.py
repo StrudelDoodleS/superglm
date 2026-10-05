@@ -801,6 +801,11 @@ class SuperGLM:
             or a later year) takes fewer outer iterations. Components the
             mapping does not name start as usual, fixed-policy components
             keep their fixed value, and values must be finite and positive.
+            A term's components start warm only together: a mapping that
+            names some of a tensor interaction's components but not all
+            starts that whole term as usual, with a ``UserWarning``, and a
+            key that names nothing in the model is ignored, with a
+            ``UserWarning``.
             Coefficients are not carried over: their basis is rebuilt from
             each fit's own data. The search converges to the same criterion
             either way; where the criterion is flat, a different start can

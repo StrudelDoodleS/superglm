@@ -106,10 +106,16 @@ A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
   cases measured they differed by at most 0.05 standard errors.
 - **A rejected Newton step restarts the search.** If no Newton step improves
   the REML objective, the search starts again from the beginning with the
-  smaller steps used before this release, and returns exactly what that search
+  smaller steps used before this release, and returns what that search
   returns. The Newton iterations already taken are the extra cost.
-  `model.reml_diagnostics()["scop_newton_fallback"]` names the reason; it is
-  `None` when the search did not restart.
+- **The restart shares the iteration limit.** It runs within the iterations
+  `max_reml_iter` has left, so it returns exactly the smaller steps' answer
+  when those are enough. If none are left, the fit stops there and warns that
+  it did not converge.
+- **A rejected first step needs no restart.** The smaller steps take over from
+  where the search stands. `model.reml_diagnostics()["scop_newton_fallback"]`
+  names which of these happened; it is `None` when the search kept its Newton
+  steps throughout.
 - **A rejected step next to the answer ends the search there.** If the
   rejected step would move every smoothing parameter by less than 1%, and the
   gain it predicts is too small for the REML objective to resolve, the fit
@@ -143,6 +149,10 @@ refit = model.clone_unfitted().fit_reml(df, y, sample_weight=exposure, lambda2_i
   limit, for example a spline reduced to a straight line, sits where the
   search cannot tell which way to move. Started there, it stays there even if
   the new data supports a curve. Drop such terms from `start`.
+- **A tensor interaction starts from `start` only as a whole.** If `start`
+  names some parts of a tensor interaction but not all, the whole interaction
+  starts afresh, and the fit warns. A name that matches nothing in the model
+  is ignored, also with a warning.
 - **`cross_validate(..., fit_mode="fit_reml")` does this for you.** Every
   fold after the first starts from the first converged fold, minus the terms
   it switched off. A tensor interaction with any part switched off starts

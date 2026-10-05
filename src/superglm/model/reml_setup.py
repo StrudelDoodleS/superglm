@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+import warnings
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from superglm.group_matrix import (
@@ -88,6 +89,7 @@ def warm_start_lambdas(
     reml_penalties: list[Any],
     lambda2_init: Any,
     estimated_names: set[str],
+    other_names: Iterable[str] = (),
 ) -> dict[str, float]:
     """Estimated components a mapping ``lambda2_init`` starts the REML search from.
 
@@ -97,9 +99,29 @@ def warm_start_lambdas(
     it keeps its historical meaning, an anchor the cold bootstrap may move away
     from -- so cold fits are unchanged. Names the mapping does not cover stay
     cold; fixed-policy components are never started from it.
+
+    A penalty block (a group's components, such as a tensor product's margins)
+    starts warm only whole: when the mapping names some of a block's estimated
+    components but not all, the whole block starts cold, with a
+    ``UserWarning``, as ``live_reml_lambdas`` keeps it for cross-validation (a
+    half-warm block's penalty spread can defeat the bootstrap's
+    log-determinant). A key that names no component or group of the model
+    (``other_names`` adds the model's other terms, such as its monotone ones)
+    is ignored with a ``UserWarning``.
     """
     if not isinstance(lambda2_init, Mapping):
         return {}
+    known = {name for pc in reml_penalties for name in (pc.name, pc.group_name)}
+    known.update(other_names)
+    unknown = sorted(str(key) for key in lambda2_init if key not in known)
+    if unknown:
+        warnings.warn(
+            f"lambda2_init names no smoothing parameter of this model: {', '.join(unknown)}. "
+            "Those entries are ignored. Use the names in "
+            "model.reml_diagnostics()['lambdas'], or a group name.",
+            UserWarning,
+            stacklevel=5,
+        )
     warm: dict[str, float] = {}
     for penalty_component in reml_penalties:
         name = penalty_component.name
@@ -110,6 +132,27 @@ def warm_start_lambdas(
         elif penalty_component.group_name in lambda2_init:
             group_name = penalty_component.group_name
             warm[name] = _warm_value(group_name, lambda2_init[group_name])
+    blocks: dict[str, list[str]] = {}
+    for penalty_component in reml_penalties:
+        if penalty_component.name in estimated_names:
+            blocks.setdefault(penalty_component.group_name, []).append(penalty_component.name)
+    half_warm = sorted(
+        block
+        for block, names in blocks.items()
+        if any(name in warm for name in names) and not all(name in warm for name in names)
+    )
+    for block in half_warm:
+        for name in blocks[block]:
+            warm.pop(name, None)
+    if half_warm:
+        warnings.warn(
+            f"lambda2_init names only some smoothing parameters of {', '.join(half_warm)}, "
+            "so that term starts its smoothing search from the default start instead. To "
+            "start it from lambda2_init, name every one of its components, or the term "
+            "itself.",
+            UserWarning,
+            stacklevel=5,
+        )
     return warm
 
 

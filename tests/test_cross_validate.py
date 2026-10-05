@@ -643,6 +643,36 @@ class TestFitModes:
         assert list(result.fold_scores["warm_started"]) == [False, True, True]
         assert all(result.fold_scores["converged"])
 
+    def test_fit_reml_an_empty_warm_start_is_not_passed(self, poisson_data, monkeypatch):
+        """When the first converged fold leaves every component on a flat
+        plateau, the warm start is empty: later folds keep the model's own start
+        and read ``warm_started=False``. Mutation check: 941f9ce8 passed
+        ``lambda2_init={}``, a mapping, which seeds every component at 0.1
+        instead of the configured smoothing, and marked those folds warm."""
+        import superglm.model_selection as model_selection
+
+        df, y, sw = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=5)},
+        )
+        monkeypatch.setattr(model_selection, "live_reml_lambdas", lambda fitted: {})
+        passed = []
+        real_fit_reml = SuperGLM.fit_reml
+
+        def spy(self, *args, **kwargs):
+            passed.append("lambda2_init" in kwargs)
+            return real_fit_reml(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", spy)
+        result = cross_validate(
+            model, df, y, cv=SimpleKFold(3), sample_weight=sw, fit_mode="fit_reml"
+        )
+        assert passed == [False, False, False]
+        assert not any(result.fold_scores["warm_started"])
+        assert all(result.fold_scores["converged"])
+
     def test_fit_kwargs_cannot_set_the_split_arrays(self, poisson_data, base_model):
         df, y, sw = poisson_data
         with pytest.raises(ValueError, match="fit_kwargs cannot set"):

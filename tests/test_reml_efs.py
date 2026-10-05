@@ -228,6 +228,12 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact(monkeypatch) ->
     )
     assert result.n_reml_iter == 5
     assert result.converged is False
+    # The capped engine names its stop, so the disclosure can. Mutation check:
+    # 941f9ce8 left it None ("because termination_reason=None").
+    from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+    assert result.termination_reason == "max_reml_iter"
+    assert "it reached the max_reml_iter limit" in reml_nonconvergence_message(result)
     assert len(fitted_states) == 7  # Bootstrap, five outer fits, and the final refit.
     assert history == [values for values, _, _ in fitted_states[1:]]
     assert result.pirls_result is fitted_states[-1][2]

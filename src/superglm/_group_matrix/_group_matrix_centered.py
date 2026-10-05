@@ -923,10 +923,11 @@ def _anchor_support_gram_rhs(
     # Reject an oversized support BEFORE materialising it.  A categorical
     # block's anchor support is a dense ``(K+1, K)`` identity and its Gram
     # costs O(K^3); for a crossed interaction K is ``(L1-1)*(L2-1)``, so it
-    # grows multiplicatively in the parents' cardinalities.  The pairwise cell
-    # check below runs too late to prevent the allocation, and cannot catch a
-    # single wide block paired with a narrow one at all.  Falling back here
-    # costs the chunked path, which is what this design got before.
+    # grows multiplicatively in the parents' cardinalities.  Falling back here
+    # costs the chunked path, which is what this design got before.  The same
+    # bound covers every pair's joint table, ``n_i n_j <= max(n_i, n_j)^2``
+    # (a centred support keeps its compact support's rows), so no decline
+    # waits for a row pass.
     rows = [_compact_support_rows(gm) for gm in dm.group_matrices]
     if any(n is None or n * n > _MAX_PACKED_HIST_CELLS for n in rows):
         return None
@@ -945,13 +946,6 @@ def _anchor_support_gram_rhs(
             )
         )
     widths = [gm.shape[1] for gm in dm.group_matrices]
-
-    if any(
-        len(left.values) * len(right.values) > _MAX_PACKED_HIST_CELLS
-        for i, left in enumerate(supports)
-        for right in supports[i + 1 :]
-    ):
-        return None
 
     p = dm.p
     gram = np.zeros((p, p), dtype=float)
@@ -1088,77 +1082,6 @@ def _compensated_add(total: NDArray, compensation: NDArray, value: NDArray) -> N
     updated = total + corrected
     compensation[...] = (updated - total) - corrected
     total[...] = updated
-
-
-def stable_centered_gram_rhs(
-    *,
-    dm,
-    W: NDArray,
-    z_centered: NDArray,
-    sum_w: float,
-    chunk_size: int = 8192,
-) -> tuple[NDArray, NDArray, NDArray]:
-    """Return mean and centered products without forming a large raw mean.
-
-    The weighted location is accumulated relative to one observed row, and
-    the same anchor/difference representation is used for the Gram and RHS.
-    A translated column therefore loses only the unavoidable input ULP; it
-    never subtracts two O(location) moments or centers rows with a rounded
-    O(location) mean.
-    """
-    n, p = dm.shape
-    W = np.asarray(W, dtype=np.float64)
-    z_centered = np.asarray(z_centered, dtype=np.float64)
-    if W.shape != (n,) or z_centered.shape != (n,):
-        raise ValueError("W and z_centered must match the design row count")
-    if not np.isfinite(sum_w) or sum_w <= 0.0:
-        raise ValueError("sum_w must be positive and finite")
-    if chunk_size < 1:
-        raise ValueError("chunk_size must be positive")
-    if p == 0:
-        return (
-            np.zeros(0, dtype=np.float64),
-            np.zeros((0, 0), dtype=np.float64),
-            np.zeros(0, dtype=np.float64),
-        )
-
-    anchor_row = int(np.argmax(W))
-    anchor = np.asarray(
-        dm.row_subset(np.array([anchor_row], dtype=np.intp)).toarray()[0],
-        dtype=np.float64,
-    )
-    weighted_difference = np.zeros(p, dtype=np.float64)
-    mean_compensation = np.zeros(p, dtype=np.float64)
-    for start in range(0, n, chunk_size):
-        stop = min(start + chunk_size, n)
-        rows = np.arange(start, stop, dtype=np.intp)
-        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
-        contribution = (block - anchor).T @ W[start:stop]
-        _compensated_add(weighted_difference, mean_compensation, contribution)
-    mean_difference = weighted_difference / sum_w
-    mean_x = anchor + mean_difference
-
-    gram = np.zeros((p, p), dtype=np.float64)
-    gram_compensation = np.zeros_like(gram)
-    rhs = np.zeros(p, dtype=np.float64)
-    rhs_compensation = np.zeros_like(rhs)
-    for start in range(0, n, chunk_size):
-        stop = min(start + chunk_size, n)
-        rows = np.arange(start, stop, dtype=np.intp)
-        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
-        block = (block - anchor) - mean_difference
-        W_block = W[start:stop]
-        _compensated_add(
-            gram,
-            gram_compensation,
-            block.T @ (W_block[:, None] * block),
-        )
-        _compensated_add(
-            rhs,
-            rhs_compensation,
-            block.T @ (W_block * z_centered[start:stop]),
-        )
-    return mean_x, 0.5 * (gram + gram.T), rhs
 
 
 def centered_gram_rhs(

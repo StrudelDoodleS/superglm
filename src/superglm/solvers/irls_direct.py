@@ -210,14 +210,22 @@ class SCOPRunCentring:
     **Invalidation:** a fit whose design, group matrices, groups, family or
     link differ by identity from the bound ones clears everything.  Weights
     change every fit and are not keyed: a carried refusal skips a rung, so a
-    later fit whose weights would have passed it stays on the anchor-centred
-    route, at least as accurate, that every rejection already selects.  This
-    is the contract the Newton engine's ``raw_moment_policy`` keeps
-    (``reml/direct.py``).  Where every carried refusal would recur the run is
-    bitwise identical to one without the carry: measured on the freMTPL2 fits
-    once certification retries start warm.  A cold retry restarts where the
-    certificate can pass again, and then moves to the anchor route, at the
-    rounding level.
+    later fit whose weights would have passed it stays on the centre-first
+    route every rejection already selects, at least as accurate: the
+    anchor-centred compact supports, or, for a design they decline (a group
+    with no compact support, such as a non-discretized spline, or an
+    oversized one), the centred row chunks.  The raw-moment refusal is
+    carried either way, as the Newton engine's ``raw_moment_policy`` carries
+    it (``reml/direct.py``); only the tensor refusal waits for the anchor
+    route to serve (``packed_centered_gram_rhs``), because retrying the
+    tensor rungs is cheaper than the chunked pass a decline costs.  Where
+    every carried refusal would recur the run is bitwise identical to one
+    without the carry: measured on the freMTPL2 fits once certification
+    retries start warm, and on non-discretized Poisson, Gamma and Tweedie
+    SCOP fits, whose raw-moment rung passed at none of 20 to 42 per-fit
+    attempts, so the carry saved those passes and changed no bit.  A cold
+    retry restarts where the certificate can pass again, and then moves to
+    the centre-first route, at the rounding level.
     Penalty target and precision never enter: a centring route reads the
     float64 data Gram only.
     """

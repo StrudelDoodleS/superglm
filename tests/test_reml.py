@@ -2272,6 +2272,91 @@ class TestREMLWarmStart:
         with pytest.raises(ValueError, match="finite and positive"):
             _two_smooth_model(True).fit_reml(X, y, lambda2_init={"x1": -1.0})
 
+    def test_a_tensor_starts_warm_only_as_a_whole(self):
+        """A mapping that names one margin of a tensor starts the whole tensor
+        from the default start, with one UserWarning, and the fit converges; the
+        other names, the monotone term's among them, start warm. Half warm (one
+        margin at its fitted value, the other at the cold seed) the bootstrap's
+        log-determinant cannot certify the block's penalty spread. Mutation
+        check: on 941f9ce8 the partial start raised PenaltyNumericalError."""
+        rng = np.random.default_rng(3)
+        n = 3000
+        bm = rng.uniform(50.0, 150.0, n)
+        age = rng.uniform(18.0, 90.0, n)
+        vage = rng.uniform(0.0, 20.0, n)
+        gas = np.where(rng.uniform(size=n) < 0.3, "Diesel", "Regular")
+        eta = (
+            -1.4
+            + 0.9 * (1 - np.exp(-(bm - 50) / 25))
+            + 0.4 * np.exp(-(age - 18) / 8)
+            + 0.2 * np.sin(vage / 4)
+        )
+        exposure = rng.uniform(0.3, 1.0, n)
+        y = rng.poisson(exposure * np.exp(eta)).astype(float)
+        df = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehAge": vage, "VehGas": gas})
+
+        def make():
+            return SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=True,
+                features={
+                    "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                    "DrivAge": Spline(kind="ps", k=8),
+                    "VehAge": Spline(kind="ps", k=8),
+                    "VehGas": Categorical(base="most_exposed"),
+                },
+                interactions=[("DrivAge", "VehAge")],
+            )
+
+        offset = np.log(exposure)
+        start = make().fit_reml(df, y, offset=offset).reml_diagnostics()["lambdas"]
+        half = slice(0, n // 2)
+        partial = {k: v for k, v in start.items() if k != "DrivAge:VehAge:margin_VehAge"}
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            refit = make().fit_reml(df[half], y[half], offset=offset[half], lambda2_init=partial)
+        about_start = [str(w.message) for w in caught if "lambda2_init" in str(w.message)]
+        assert len(about_start) == 1
+        assert "only some smoothing parameters of DrivAge:VehAge" in about_start[0]
+        info = refit.reml_diagnostics()
+        assert info["converged"]
+        assert info["profile"]["reml_warm_start_components"] == ["BonusMalus", "DrivAge", "VehAge"]
+
+    def test_a_name_the_model_lacks_warns_and_is_ignored(self):
+        """Mutation check: 941f9ce8 ignored the misspelt name silently."""
+        X, y = _two_smooth_poisson(n=500)
+        with pytest.warns(UserWarning, match="names no smoothing parameter of this model: x9"):
+            model = _two_smooth_model(True).fit_reml(X, y, lambda2_init={"x1": 1.0, "x9": 2.0})
+        assert model.reml_diagnostics()["profile"]["reml_warm_start_components"] == ["x1"]
+
+
+def _increasing_gaussian(n=800, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 1, n)
+    x2 = rng.uniform(0, 1, n)
+    y = 1.0 + 2.0 * x + 0.5 * np.sin(4 * x2) + rng.normal(0, 0.3, n)
+    return pd.DataFrame({"x": x, "x2": x2}), y
+
+
+def _qp_monotone_model(fixed: bool) -> SuperGLM:
+    """A QP-constrained increasing smooth beside a free one; ``fixed`` fixes every
+    smoothing parameter (the fixed-lambda route), else REML estimates them
+    through the QP passthrough."""
+    from superglm import BSplineSmooth, LambdaPolicy
+
+    policy = LambdaPolicy.fixed(1.0) if fixed else None
+    return SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "x": BSplineSmooth(
+                n_knots=8, constraint=Constraint.fit.increasing, lambda_policy=policy
+            ),
+            "x2": Spline(kind="ps", k=8, lambda_policy=policy),
+        },
+    )
+
 
 class TestREMLNonConvergenceDisclosure:
     """A fit that stops before its convergence test passes says so, and is returned."""
@@ -2416,6 +2501,57 @@ class TestREMLNonConvergenceDisclosure:
         info = model.reml_diagnostics()
         assert info["converged"] is True
         assert info["convergence_note"] is None
+
+    @pytest.mark.parametrize("route", ["qp_passthrough", "fixed_qp"])
+    def test_an_unconverged_constrained_fit_warns(self, route, monkeypatch):
+        """A constrained coefficient fit, which the mode certificate does not
+        judge, still discloses stopping before its own convergence test. Forced
+        by reporting the final fit as stopped on its iteration budget. The QP
+        passthrough's terminal refit names that stage and its reason; mutation
+        check: on 941f9ce8 it published converged=True with no warning. The
+        fixed-lambda route warned there already, through the plain coefficient
+        statement (it runs no smoothing selection), and is pinned beside it."""
+        from dataclasses import replace
+
+        import superglm.model.reml_execute as reml_execute
+        import superglm.model.reml_finalize as reml_finalize
+        from superglm import ConvergenceWarning
+
+        module, name = (
+            (reml_finalize, "maybe_qp_passthrough_refit")
+            if route == "qp_passthrough"
+            else (reml_execute, "fit_irls_direct")
+        )
+        real = getattr(module, name)
+
+        def budget_spent(*args, **kwargs):
+            out = real(*args, **kwargs)
+            first = out[0] if isinstance(out, tuple) else out
+            spent = replace(first, converged=False, termination_reason="max_iter")
+            return (spent, *out[1:]) if isinstance(out, tuple) else spent
+
+        monkeypatch.setattr(module, name, budget_spent)
+        X, y = _increasing_gaussian()
+        model = _qp_monotone_model(fixed=route == "fixed_qp")
+        with pytest.warns(ConvergenceWarning, match="'max_iter'"):
+            model.fit_reml(X, y)
+        assert model.diagnostics()["_model"]["converged"] is False
+        if route == "qp_passthrough":
+            info = model.reml_diagnostics()
+            assert info["converged"] is False
+            assert "final coefficient fit" in info["convergence_note"]
+            assert model._reml_result.terminal_refit_termination == "max_iter"
+
+    @pytest.mark.parametrize("route", ["qp_passthrough", "fixed_qp"])
+    def test_converged_constrained_fits_raise_no_convergence_warning(self, route):
+        from superglm import ConvergenceWarning
+
+        X, y = _increasing_gaussian()
+        model = _qp_monotone_model(fixed=route == "fixed_qp")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            model.fit_reml(X, y)
+        assert model.diagnostics()["_model"]["converged"] is True
 
     def test_the_default_cap_is_engine_specific(self):
         """20 for the Newton engines, 100 for the SCOP engine's linear EFS steps.
