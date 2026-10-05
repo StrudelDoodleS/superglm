@@ -2170,6 +2170,55 @@ def test_run_cv_takes_the_recorded_fit_method_and_the_supplied_scorers(cv_frame,
     assert plan(model, no_builtins).scoring == ("deviance", "gini", "nll")
 
 
+def test_run_cv_refuses_scores_a_callable_made_under_a_built_in_name(cv_frame, cv_fit):
+    """The supplied deviance is a callable named deviance, and gini a key a callable returned.
+
+    Run CV computed the built-in scorers under those names, so the tab
+    compared unlike numbers as if structure and edits made the difference.
+    A result made before cross_validate recorded its built-in scorers is
+    replayed by name, and the tab says so.
+    """
+    from superglm.editor.cv import (
+        NO_SCORERS,
+        OTHER_SCORERS,
+        capture_cv_view,
+        cv_tab_payload,
+        run_cv_reason,
+    )
+
+    X, y, w = cv_frame
+    model, supplied = cv_fit
+
+    def deviance(model, X, y, *, sample_weight=None, offset=None):
+        return float(np.mean(np.abs(y - model.predict(X, offset=offset))))
+
+    def ranking(model, X, y, *, sample_weight=None, offset=None):
+        return {"gini": 0.5}
+
+    custom = cross_validate(
+        _model(),
+        X.iloc[:400],
+        y[:400],
+        cv=KFold(3, shuffle=True, random_state=0),
+        sample_weight=w[:400],
+        scoring=(deviance, "nll", ranking),
+    )
+    older = dataclasses.replace(supplied, builtin_scores=None)
+
+    assert (supplied.builtin_scores, custom.builtin_scores) == (
+        ("deviance", "gini", "nll"),
+        ("nll",),
+    )
+    session = EditorSession.from_model(model, cv=custom, **_splits(cv_frame))
+    assert run_cv_reason(session) == OTHER_SCORERS.format(names=["deviance", "gini"])
+    view = capture_cv_view(
+        EditorSession.from_model(model, cv=older, **_splits(cv_frame)), run=None, final_fit=None
+    )
+    assert cv_tab_payload(view, jobs={})["run_cv"]["note"] == NO_SCORERS.format(
+        names=["deviance", "gini", "nll"]
+    )
+
+
 def test_run_cv_on_a_reml_model_replays_a_result_fitted_with_fit(cv_frame, cv_fit, fit_rows):
     """The supplied folds were fitted with fit, the default; the opened model with fit_reml.
 

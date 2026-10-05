@@ -98,6 +98,15 @@ NO_FIT_MODE = (
     "This result was made before cross_validate recorded its fit method, so Run CV fits "
     "each fold with {method}, as the current model was fitted."
 )
+OTHER_SCORERS = (
+    "This result's {names} scores come from scorers of its own, not the built-in ones of those "
+    "names, so Run CV's scores would not compare with them; run cross_validate with the "
+    'built-in scorers named as text, such as scoring=("deviance", "gini").'
+)
+NO_SCORERS = (
+    "This result was made before cross_validate recorded which scorers were built in, so Run "
+    "CV takes its {names} columns for the built-in scorers of those names."
+)
 NO_ESTIMATORS = (
     "Fold curves need the fold models: pass return_estimators=True to cross_validate, "
     "or run CV on the current model."
@@ -285,6 +294,11 @@ def run_cv_reason(session) -> str | None:
     """Why Run CV is disabled now, or None (D7: it waits for Refit)."""
     if session.cv_check.reason is not None:
         return session.cv_check.reason
+    builtin = session.cv.builtin_scores
+    if builtin is not None:
+        others = [name for name in _replayed_scores(session.cv) if name not in builtin]
+        if others:
+            return OTHER_SCORERS.format(names=others)
     if session.pending:
         return f"Refit first: {waiting_sentence(len(session.pending))}."
     return None
@@ -520,7 +534,7 @@ class CVTabView:
     run_reason: str | None
     final_reason: str | None
     has_validation: bool
-    fit_mode_note: str | None = None
+    replay_note: str | None = None
 
 
 def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -> CVTabView:
@@ -535,17 +549,28 @@ def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -
         model_changed=session.model is not session.reference_model or bool(session.edited_terms()),
         pending=len(session.pending),
         run_reason=run_cv_reason(session),
-        fit_mode_note=_fit_mode_note(session),
+        replay_note=_replay_note(session),
         final_reason=final_fit_reason(session),
         has_validation="validation" in session._evaluation_data,
     )
 
 
-def _fit_mode_note(session) -> str | None:
-    """The tab's note when a supplied result does not record its fit method."""
-    if session.cv is None or session.cv.fit_mode is not None:
+def _replay_note(session) -> str | None:
+    """The tab's notes when a supplied result does not record its fit method or its scorers."""
+    if session.cv is None:
         return None
-    return NO_FIT_MODE.format(method=_replay_method(session))
+    notes = []
+    if session.cv.fit_mode is None:
+        notes.append(NO_FIT_MODE.format(method=_replay_method(session)))
+    replayed = _replayed_scores(session.cv)
+    if session.cv.builtin_scores is None and replayed:
+        notes.append(NO_SCORERS.format(names=list(replayed)))
+    return " ".join(notes) or None
+
+
+def _replayed_scores(cv: CrossValidationResult) -> tuple[str, ...]:
+    """The score columns of ``cv`` that Run CV computes again: those named like a built-in."""
+    return tuple(name for name in _DEFAULT_SCORING if name in cv.fold_scores.columns)
 
 
 def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[str, Any]:
@@ -596,8 +621,7 @@ def cv_tab_payload(
         "run_cv": {
             "available": view.run_reason is None,
             "reason": view.run_reason,
-            "note": " ".join(note for note in (view.check.note, view.fit_mode_note) if note)
-            or None,
+            "note": " ".join(note for note in (view.check.note, view.replay_note) if note) or None,
         },
         "final_fit": {
             "available": view.final_reason is None,
@@ -732,7 +756,7 @@ def capture_cv_run(session) -> CVRunPlan:
         raise EditorValueError(reason)
     cv = session.cv
     terms = {name: term.copy() for name, term in session.terms.items()}
-    supplied = tuple(name for name in _DEFAULT_SCORING if name in cv.fold_scores.columns)
+    supplied = _replayed_scores(cv)
     return CVRunPlan(
         model=session.model,
         template=_declared_template(session),
@@ -930,7 +954,12 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
     context.check()
     context.progress("curves")
     return CVRun(
-        result=replace(result, pooled_scores=recorder.pooled_scores(), splitter=plan.splitter),
+        result=replace(
+            result,
+            pooled_scores=recorder.pooled_scores(),
+            splitter=plan.splitter,
+            builtin_scores=plan.scoring,
+        ),
         terms=fold_term_items(plan.terms, recorder.curves, held=plan.edited),
         model_revision=plan.model_revision,
         carried=tuple(sorted(plan.edited)),

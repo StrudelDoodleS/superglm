@@ -80,10 +80,14 @@ class CrossValidationResult:
     fingerprint_version : int or None
         The version of the recipe ``data_fingerprint`` was made with. A
         fingerprint of another version cannot be compared with these rows.
+    builtin_scores : tuple of str or None
+        The score columns the built-in scorers computed, in ``scoring``
+        order. A column a callable wrote is not one of them, even one named
+        ``"deviance"``, ``"nll"`` or ``"gini"``.
 
     ``n_rows``, ``data_fingerprint``, ``splitter``, ``fingerprint_columns``,
-    ``fit_mode`` and ``fingerprint_version`` are ``None`` on a result made
-    before they were recorded.
+    ``fit_mode``, ``fingerprint_version`` and ``builtin_scores`` are ``None``
+    on a result made before they were recorded.
     """
 
     fold_scores: pd.DataFrame
@@ -100,6 +104,7 @@ class CrossValidationResult:
     fingerprint_columns: tuple[str, ...] | None = None
     fit_mode: str | None = None
     fingerprint_version: int | None = None
+    builtin_scores: tuple[str, ...] | None = None
 
     def plot_terms_by_fold(
         self,
@@ -591,6 +596,11 @@ def cross_validate(
     pooled_denominators: dict[str, float] = {
         name: 0.0 for name in score_names if name in _POOLED_PARTS
     }
+    # The columns a callable writes, its dict's keys included: such a column
+    # is not the built-in scorer's, whatever it is named.
+    custom_columns = {
+        name for name, scorer in scorers.items() if scorer is not _BUILTIN_SCORERS.get(name)
+    }
 
     for fold_i, (train_idx, test_idx) in enumerate(cv.split(X, y, groups)):
         train_idx = np.asarray(train_idx)
@@ -668,6 +678,7 @@ def cross_validate(
                                 f"Reserved: {_RESERVED_COLUMNS}"
                             )
                         record[k] = v
+                    custom_columns.update(result)
                 else:
                     record[sname] = float(result)
                     pooled_fn = _POOLED_PARTS.get(sname)
@@ -759,4 +770,5 @@ def cross_validate(
         fingerprint_columns=columns,
         fit_mode=fit_mode,
         fingerprint_version=None if fingerprint is None else FINGERPRINT_VERSION,
+        builtin_scores=tuple(name for name in score_names if name not in custom_columns),
     )
