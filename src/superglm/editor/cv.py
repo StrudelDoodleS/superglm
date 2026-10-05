@@ -30,7 +30,7 @@ from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
-from superglm.editor.refit import fit_refit_model
+from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
 from superglm.features.grouping import native_by_text
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
@@ -193,7 +193,12 @@ def check_cv_data(
         return CVDataCheck(None, sentence.format(rows=rows.n_obs, expected=expected))
     if cv.data_fingerprint is None:
         return CVDataCheck(rows, note=NO_FINGERPRINT)
-    held = _data_fingerprint(rows.X, rows.y, rows.sample_weight, rows.offset)
+    try:
+        held = _data_fingerprint(
+            rows.X, rows.y, rows.sample_weight, rows.offset, cv.fingerprint_columns
+        )
+    except (KeyError, TypeError, ValueError):
+        held = None
     if cv.data_fingerprint != held:
         data = "train data" if cv_rows is None else "CV data"
         return CVDataCheck(None, FINGERPRINT_MISMATCH.format(data=data, rows=rows.n_obs))
@@ -669,12 +674,14 @@ def _declared_template(session):
     penalties as :meth:`superglm.structure.Structure.apply` does, and a
     ``theta="auto"`` too. Validation rows never set a fold's penalty or
     theta. A theta the opened model fixes stays as the in-force model holds
-    it, re-profiled or not.
+    it, re-profiled or not. A ``lambda1`` or ``lambda2`` passed to a Refit
+    is the analyst's choice and stays.
     """
     opened = session.reference_model
     template = session.model.clone_unfitted()
-    template.selection_penalty = configured_penalty(opened).lambda1
-    template.lambda2 = configured_lambda2(opened)
+    explicit = getattr(session.model, EXPLICIT_PENALTY_ATTRIBUTE, {})
+    template.selection_penalty = explicit.get("lambda1", configured_penalty(opened).lambda1)
+    template.lambda2 = explicit.get("lambda2", configured_lambda2(opened))
     family = configured_family(opened)
     if isinstance(family, NegativeBinomial) and family.theta == "auto":
         template.family = family

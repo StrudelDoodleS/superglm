@@ -2067,6 +2067,31 @@ class TestDataFingerprint:
         assert _data_fingerprint(X, y, offset=np.full(4, 0.5)) != original
         assert _data_fingerprint(X[["x", "band"]], y) == original
 
+    def test_a_column_the_model_does_not_read_is_left_out_of_the_fingerprint(self):
+        # Columns the model never reads may hold anything, as on master: a
+        # list in every row neither breaks cross_validate after its folds are
+        # fitted nor moves the fingerprint, while a read column still does.
+        rng = np.random.default_rng(7)
+        n = 90
+        X = pd.DataFrame({"band": rng.choice(["A", "B", "C"], n), "x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(1.0, n).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"band": Categorical(), "x": Spline(n_knots=4)},
+        )
+        plain = cross_validate(model, X, y, cv=SimpleKFold(3))
+        with_meta = cross_validate(
+            model, X.assign(meta=[[i] for i in range(n)]), y, cv=SimpleKFold(3)
+        )
+
+        assert with_meta.fingerprint_columns == ("band", "x")
+        assert with_meta.data_fingerprint == plain.data_fingerprint
+        moved = X.assign(x=X["x"].to_numpy()[::-1])
+        assert cross_validate(model, moved, y, cv=SimpleKFold(3)).data_fingerprint != (
+            plain.data_fingerprint
+        )
+
     def test_result_pickled_before_the_fields_existed_reads_none(self):
         # Such a pickle restores without the attributes; the dataclass
         # defaults are class attributes, so the fields read as None.

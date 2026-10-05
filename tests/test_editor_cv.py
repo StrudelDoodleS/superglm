@@ -314,11 +314,12 @@ def test_cv_data_is_checked_against_the_folds(cv_frame, cv_fit):
 
 
 def test_a_fingerprint_mismatch_names_the_rows_and_what_can_differ(cv_frame, cv_fit):
-    """The same values in another backend, dtype or with an extra column are other data.
+    """The same values in another backend or dtype are other data; an extra column is not.
 
-    The folds replay only on the data they were drawn on, so these are
-    refused, in a sentence that says what can differ and what to pass
-    rather than that the features differ.
+    The folds replay only on the rows they were drawn on, so a column the
+    model reads in another backend or dtype is refused, in a sentence that
+    says what can differ and what to pass. A column the model never reads is
+    outside the fingerprint, so the same rows with one added are accepted.
     """
     import polars as pl
 
@@ -330,7 +331,7 @@ def test_a_fingerprint_mismatch_names_the_rows_and_what_can_differ(cv_frame, cv_
         "order or values differ (a pandas frame and a polars one differ too). Pass the X, y, "
         "sample_weight and offset given to cross_validate as cv_data."
     )
-    for frame in (pl.from_pandas(train), train.astype({"power": "float32"}), train.assign(z=1)):
+    for frame in (pl.from_pandas(train), train.astype({"power": "float32"})):
         supplied_rows = (frame, y[:400], w[:400])
         session = EditorSession.from_model(
             model, terms=["region"], cv=supplied, cv_data=supplied_rows
@@ -340,6 +341,9 @@ def test_a_fingerprint_mismatch_names_the_rows_and_what_can_differ(cv_frame, cv_
             model, terms=["region"], cv=supplied, train_data=supplied_rows
         )
         assert session.cv_check.reason == sentence.format("train data's")
+    extra = (train.assign(z=[[i] for i in range(400)]), y[:400], w[:400])
+    session = EditorSession.from_model(model, terms=["region"], cv=supplied, cv_data=extra)
+    assert session.cv_check.reason is None
 
 
 def test_cv_data_with_rows_swapped_between_equal_responses_is_refused():
@@ -1367,6 +1371,38 @@ def test_run_cv_and_final_fit_recalibrate_the_declared_penalties_after_a_refit(
         np.testing.assert_array_equal(run.result.fold_scores[name], supplied.fold_scores[name])
     assert after.selection_penalty_ == before.selection_penalty_
     np.testing.assert_array_equal(after.predict(X.iloc[500:]), before.predict(X.iloc[500:]))
+
+
+def test_run_cv_and_final_fit_keep_a_selection_penalty_given_to_a_refit(cv_frame):
+    """A ``lambda1`` passed to a Refit is what Run CV and Final fit use.
+
+    The opened model declares ``selection_penalty="auto"``. A Refit given
+    ``lambda1=0.05`` replaces that choice, and a later Refit without one keeps
+    it, so every fold and the Final fit fit at 0.05 instead of calibrating.
+    """
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+
+    X, y, w = cv_frame
+    rows = (X.iloc[:400], y[:400])
+    folds = KFold(3, shuffle=True, random_state=0)
+    scoring = ("deviance", "gini", "nll")
+    model = _model("auto").fit(*rows, sample_weight=w[:400])
+    supplied = cross_validate(
+        _model("auto"), *rows, cv=folds, sample_weight=w[:400], scoring=scoring
+    )
+    fixed = cross_validate(_model(0.05), *rows, cv=folds, sample_weight=w[:400], scoring=scoring)
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.stage_structural("set_reference", "region", {"level": "A"})
+    session.refit_pending(lambda1=0.05)
+    session.stage_structural("set_reference", "region", {"level": "A"})
+    session.refit_pending()
+
+    run = run_cv(capture_cv_run(session), _Context())
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+
+    for name in scoring:
+        np.testing.assert_array_equal(run.result.fold_scores[name], fixed.fold_scores[name])
+    assert final.selection_penalty_ == 0.05
 
 
 def test_run_cv_and_final_fit_estimate_a_declared_auto_theta_again_after_a_refit(cv_frame):

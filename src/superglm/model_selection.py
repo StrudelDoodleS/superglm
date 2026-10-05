@@ -59,17 +59,24 @@ class CrossValidationResult:
         Number of rows the folds index: the length of ``y``.
     data_fingerprint : str or None
         SHA-256 of the rows the folds index: the row count, a content digest
-        of every column of ``X``, then the response, sample weights and
-        offsets as little-endian float64, with unit weights standing in for
+        of the columns of ``X`` the model reads (``fingerprint_columns``),
+        then the response, sample weights and offsets as little-endian
+        float64, with unit weights standing in for
         ``sample_weight=None`` and zeros for ``offset=None``. Equal
         fingerprints mean the same rows in the same order, which is what lets
         a later consumer, such as the editor's Run CV, replay
         ``fold_indices`` on data it holds.
     splitter : str or None
         Class name of the splitter that drew the folds.
+    fingerprint_columns : tuple of str or None
+        The columns of ``X`` the fingerprint covers: the model's declared
+        features and interaction parents, or every column when the model
+        takes its features from ``X``. Other columns may hold anything.
+        ``data_fingerprint`` is ``None`` when these columns cannot be hashed.
 
-    ``n_rows``, ``data_fingerprint`` and ``splitter`` are ``None`` on a
-    result made before they were recorded.
+    ``n_rows``, ``data_fingerprint``, ``splitter`` and
+    ``fingerprint_columns`` are ``None`` on a result made before they were
+    recorded.
     """
 
     fold_scores: pd.DataFrame
@@ -83,6 +90,7 @@ class CrossValidationResult:
     n_rows: int | None = None
     data_fingerprint: str | None = None
     splitter: str | None = None
+    fingerprint_columns: tuple[str, ...] | None = None
 
     def plot_terms_by_fold(
         self,
@@ -128,7 +136,11 @@ class CrossValidationResult:
             if expected is not None and rows is not None and len(rows) != expected:
                 raise ValueError(_FOLD_ROWS.format(name=name, rows=len(rows), expected=expected))
         if y is not None and self.data_fingerprint is not None:
-            if _data_fingerprint(frame, y, weight_arr, offset) != self.data_fingerprint:
+            try:
+                held = _data_fingerprint(frame, y, weight_arr, offset, self.fingerprint_columns)
+            except (KeyError, TypeError, ValueError):
+                held = None
+            if held != self.data_fingerprint:
                 raise ValueError(_FOLD_DATA.format(rows=expected))
         support_by_label: dict[str, dict[str, Any]] = {}
         for fold, indices in enumerate(self.fold_indices or []):
@@ -170,15 +182,31 @@ def _fold_row_count(n_rows: int | None, folds: Sequence[tuple[NDArray, NDArray]]
     return 1 + max(int(np.max(np.concatenate(fold))) for fold in folds)
 
 
-def _data_fingerprint(X, y, sample_weight=None, offset=None) -> str:
+def _fingerprint_columns(model, frame) -> tuple[str, ...]:
+    """The columns a model reads: its declared features and interaction parents.
+
+    A model that takes its features from ``X`` reads every column. Fold
+    replay needs only the rows the model reads to be the same, so a column it
+    never reads stays out of the fingerprint and may hold anything.
+    """
+    if not getattr(model, "_features_explicit", False):
+        return tuple(sorted(frame.columns, key=repr))
+    names = [*model._specs]
+    for spec in getattr(model, "_interaction_specs", {}).values():
+        names.extend(spec.parent_names)
+    return tuple(sorted(dict.fromkeys(names), key=repr))
+
+
+def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> str:
     """SHA-256 of the row count, the frame's content digest, then y, weights and offsets.
 
     The response and weights alone do not identify the rows: two rows with
     the same response and weight can swap their features, and stored fold
     indices would then fall on different rows. The frame enters through
-    :meth:`EagerFrame.digest`, every column's dtype and values in row order
-    and without the index, with the columns read in name order so that
-    reordering columns alone does not change it. Unit weights stand in for
+    :meth:`EagerFrame.digest`, the dtype and values of ``columns`` (every
+    column when ``None``) in row order and without the index, with the
+    columns read in name order so that reordering columns alone does not
+    change it. Unit weights stand in for
     ``sample_weight=None`` and zeros for ``offset=None``, which is how every
     scorer reads them, so rows supplied with those explicit values match.
     The row count goes first so the boundaries between the parts are fixed.
@@ -189,7 +217,8 @@ def _data_fingerprint(X, y, sample_weight=None, offset=None) -> str:
     weights = np.ones(n) if sample_weight is None else sample_weight
     offsets = np.zeros(n) if offset is None else offset
     digest = hashlib.sha256(n.to_bytes(8, "little"))
-    digest.update(frame.digest(tuple(sorted(frame.columns, key=repr)), include_index=False))
+    names = frame.columns if columns is None else columns
+    digest.update(frame.digest(tuple(sorted(names, key=repr)), include_index=False))
     for column in (response, weights, offsets):
         digest.update(np.ascontiguousarray(column, dtype="<f8").ravel().tobytes())
     return digest.hexdigest()
@@ -634,6 +663,14 @@ def cross_validate(
             n_points=200,
         )
 
+    columns = _fingerprint_columns(model, frame)
+    try:
+        fingerprint = _data_fingerprint(frame, y, sample_weight, offset, columns)
+    except (TypeError, ValueError):
+        # A column the model reads that cannot be hashed: the result keeps
+        # its folds and scores, and a consumer checks the row count only.
+        fingerprint = None
+
     return CrossValidationResult(
         fold_scores=fold_scores,
         mean_scores=mean_scores,
@@ -644,6 +681,7 @@ def cross_validate(
         oof_predictions=oof,
         estimators=estimators_list,
         n_rows=n,
-        data_fingerprint=_data_fingerprint(frame, y, sample_weight, offset),
+        data_fingerprint=fingerprint,
         splitter=type(cv).__name__,
+        fingerprint_columns=columns,
     )

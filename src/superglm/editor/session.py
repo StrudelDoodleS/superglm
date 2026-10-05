@@ -61,7 +61,7 @@ from superglm.editor.operations import (
     isotonic_values,
     monotone_clamp_values,
 )
-from superglm.editor.refit import fit_refit_model
+from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.shapes import shape_support
 from superglm.editor.staging import _COLLAPSE_SENTENCES, _range_refusal
 from superglm.editor.terms import (
@@ -1390,6 +1390,14 @@ class EditorSession:
             offset=base_offset,
             fit_kwargs=fit_kwargs,
         )
+        explicit = dict(getattr(self.model, EXPLICIT_PENALTY_ATTRIBUTE, {}))
+        explicit.update(
+            (name, value)
+            for name, value in (("lambda1", lambda1), ("lambda2", lambda2))
+            if value is not ...
+        )
+        if explicit:
+            setattr(refit_model, EXPLICIT_PENALTY_ATTRIBUTE, explicit)
         return refit_model, method_used
 
     def _push_structure(
