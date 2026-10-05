@@ -2055,6 +2055,27 @@ def test_run_cv_and_final_fit_keep_a_selection_penalty_given_to_a_refit(cv_frame
     assert final.selection_penalty_ == 0.05
 
 
+def test_run_cv_and_final_fit_fit_after_a_refit_given_lambda2_none(cv_frame, cv_fit):
+    """A Refit given lambda2=None fits with no smoothing penalty, 0.0, as its clone reads None.
+
+    The Refit recorded None itself, so every fold and the Final fit were
+    given lambda2=None and the spline's design build raised TypeError: Run
+    CV stopped at fold 1, and Final fit failed as an internal editor error.
+    """
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.stage_structural("set_reference", "region", {"level": "B"})
+    session.refit_pending(lambda2=None)
+
+    run = run_cv(capture_cv_run(session), _Context())
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+
+    assert (session.model.lambda2, final.lambda2) == (0.0, 0.0)
+    assert np.isfinite(run.result.fold_scores["deviance"]).all()
+
+
 @pytest.mark.parametrize("given", ["collapse", "ungroup"])
 def test_an_ungroup_that_restores_the_opened_structure_keeps_a_selection_penalty_given(
     cv_frame, given

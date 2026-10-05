@@ -136,8 +136,11 @@ def _explicit_penalties(model, lambda1, lambda2) -> dict[str, Any]:
     """The penalties a Refit of ``model`` records as given (``EXPLICIT_PENALTY_ATTRIBUTE``).
 
     ``model``'s own record, with this Refit's ``lambda1`` and ``lambda2``
-    over it; ``...`` gives none.
+    over it as its clone applies them: ``lambda2=None`` is no smoothing
+    penalty, 0.0 (``clone_without_features``). ``...`` gives none.
     """
+    if lambda2 is None:
+        lambda2 = 0.0
     explicit = dict(getattr(model, EXPLICIT_PENALTY_ATTRIBUTE, {}))
     explicit.update(
         (name, value)
