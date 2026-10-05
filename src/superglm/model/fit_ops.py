@@ -1927,9 +1927,18 @@ def fit_reml(
     # Internal candidate fits (the Tweedie power search) disclose convergence
     # in their own result instead of warning per candidate.
     if not getattr(model, "_suppress_convergence_warning", False):
-        from superglm.diagnostics.convergence import warn_reml_nonconvergence
+        from superglm.diagnostics.convergence import (
+            warn_coefficient_nonconvergence,
+            warn_reml_nonconvergence,
+        )
 
-        warn_reml_nonconvergence(getattr(model, "_reml_result", None), stacklevel=3)
+        reml_result = getattr(model, "_reml_result", None)
+        if reml_result is not None:
+            warn_reml_nonconvergence(reml_result, stacklevel=3)
+        else:
+            # No REML-eligible groups: fit_reml fell back to the plain coefficient
+            # fit, whose own convergence must not go unreported.
+            warn_coefficient_nonconvergence(getattr(model, "_result", None), stacklevel=3)
     return model
 
 

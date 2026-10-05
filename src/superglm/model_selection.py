@@ -486,7 +486,14 @@ def cross_validate(
             if fit_mode == "fit_reml":
                 record["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
                 record["warm_started"] = "lambda2_init" in fold_kwargs and reml_warm_start
-                if reml_warm_start and warm_lambdas is None and record["converged"]:
+                # A model with no REML-eligible groups legitimately fits without
+                # smoothing selection (``_reml_result`` is None): nothing to warm-start.
+                if (
+                    reml_warm_start
+                    and warm_lambdas is None
+                    and record["converged"]
+                    and reml is not None
+                ):
                     warm_lambdas = live_reml_lambdas(est)
 
             # Score

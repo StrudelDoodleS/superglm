@@ -209,6 +209,44 @@ def test_a_wide_categorical_support_is_rejected_before_it_is_materialised(monkey
     assert centered.packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered) is not None
 
 
+def test_an_oversized_compact_support_is_refused_before_it_is_allocated(monkeypatch):
+    """The anchor route must size every support from metadata before building any.
+
+    A categorical's compact support is a dense ``(K + 1, K)`` identity: for a
+    3,000-level block that is 72 MB allocated only to be rejected by the cell
+    cap. Mutation check: building the supports first and checking their shapes
+    afterwards calls ``_compact_support`` on the oversized block, which this
+    test forbids.
+    """
+    from superglm._group_matrix import _group_matrix_centered as centered
+
+    rng = np.random.default_rng(3)
+    n, levels = 400, 24
+    group = CategoricalGroupMatrix(rng.integers(-1, levels, size=n).astype(np.intp), levels)
+    dm = DesignMatrix([group], n, group.shape[1])
+    support_rows = levels + 1
+    W = rng.uniform(0.5, 2.0, n)
+    z = rng.normal(size=n)
+    z_centered = z - float(np.dot(W, z) / W.sum())
+
+    built = []
+    real_compact_support = centered._compact_support
+
+    def counting_compact_support(gm):
+        built.append(gm)
+        return real_compact_support(gm)
+
+    monkeypatch.setattr(centered, "_compact_support", counting_compact_support)
+
+    monkeypatch.setattr(centered, "_MAX_PACKED_HIST_CELLS", support_rows * support_rows - 1)
+    assert centered.anchor_support_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered) is None
+    assert built == [], "an oversized support must be refused before it is materialised"
+
+    monkeypatch.setattr(centered, "_MAX_PACKED_HIST_CELLS", support_rows * support_rows)
+    assert centered.anchor_support_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered) is not None
+    assert built == [group]
+
+
 def test_a_rejected_tensor_raw_rung_is_paid_once_per_fit(monkeypatch):
     """The tensor rung's raw moments are not recomputed after their certificate rejects.
 

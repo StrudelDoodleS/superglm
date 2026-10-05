@@ -500,6 +500,27 @@ class TestFitModes:
         assert not any(folds["converged"])
         assert list(folds["n_reml_iter"]) == [1, 1, 1]
 
+    def test_fit_reml_warm_start_skips_a_model_without_smoothing_selection(self):
+        """A model with no REML-eligible groups fits without a REML result.
+
+        ``fit_reml`` legitimately falls back to the plain coefficient fit and
+        leaves ``_reml_result`` as None; the default warm start must not try to
+        read lambdas from it. Mutation check: extracting the warm start without
+        the None guard turns every fold's score into NaN (AttributeError inside
+        the fold), which this test rejects.
+        """
+        x = np.linspace(-1.0, 1.0, 60)
+        df = pd.DataFrame({"x": x})
+        y = 2.0 + x + 0.1 * np.cos(np.arange(60))
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()})
+        result = cross_validate(
+            model, df, y, cv=SimpleKFold(3), fit_mode="fit_reml", error_score="raise"
+        )
+        folds = result.fold_scores
+        assert np.all(np.isfinite(folds["deviance"]))
+        assert all(folds["converged"])
+        assert not any(folds["warm_started"])
+
     def test_fit_reml_folds_warm_start_from_the_first_converged_fold(self):
         """Later folds start from fold 0's live lambdas and converge in fewer steps.
 
@@ -2128,3 +2149,28 @@ class TestFullFrameLevelBinding:
         bindings = _resolve_level_bindings(model, as_eager_frame(X), None)
 
         assert set(bindings) == {"g"}
+
+
+def test_fit_reml_without_smoothing_selection_warns_when_the_coefficient_fit_stops_early():
+    """The no-REML fallback of ``fit_reml`` must disclose an unconverged coefficient fit.
+
+    Mutation check: warning only from ``_reml_result`` (None on this path)
+    leaves a ``max_iter`` stop silent.
+    """
+    from superglm import ConvergenceWarning
+
+    x = np.linspace(-1.0, 1.0, 60)
+    df = pd.DataFrame({"x": x})
+    y = np.tile([0.0, 1.0, 2.0, 3.0, 8.0, 15.0], 10)
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()})
+    with pytest.warns(ConvergenceWarning, match="coefficient fit did not converge"):
+        model.fit_reml(df, y, max_pirls_iter=1)
+    assert model._reml_result is None
+    assert not model._result.converged
+
+    # A converged no-REML fit stays silent.
+    quiet = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        quiet.fit_reml(df, y)
+    assert quiet._result.converged

@@ -125,6 +125,30 @@ def lss_nonconvergence_message(fitted_result: Any, smoothing_reason: str | None)
     )
 
 
+def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
+    """The statement for an unconverged coefficient fit with no smoothing selection."""
+    if fit_result is None or bool(getattr(fit_result, "converged", True)):
+        return None
+    reason = getattr(fit_result, "termination_reason", None)
+    n_iter = getattr(fit_result, "n_iter", None)
+    return (
+        "SuperGLM coefficient fit did not converge"
+        + (f" after {n_iter} iterations" if n_iter is not None else "")
+        + (f" (termination_reason={reason!r})" if reason else "")
+        + ". This model has no smoothing selection to run, so fit_reml fitted the "
+        "coefficients directly. The model is returned, but its coefficients and "
+        "standard errors may be inaccurate. Refit with a larger max_pirls_iter."
+    )
+
+
+def warn_coefficient_nonconvergence(fit_result: Any, *, stacklevel: int = 2) -> str | None:
+    """Emit the coefficient non-convergence statement as a ConvergenceWarning; return it."""
+    message = coefficient_nonconvergence_message(fit_result)
+    if message is not None:
+        warnings.warn(message, ConvergenceWarning, stacklevel=stacklevel + 1)
+    return message
+
+
 def warn_reml_nonconvergence(reml_result: Any, *, stacklevel: int = 2) -> str | None:
     """Emit the REML non-convergence statement as a ConvergenceWarning; return it."""
     message = reml_nonconvergence_message(reml_result)

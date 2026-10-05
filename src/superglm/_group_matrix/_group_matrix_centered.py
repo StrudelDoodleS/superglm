@@ -815,6 +815,30 @@ def packed_centered_gram_rhs(
     return anchored
 
 
+def _compact_support_rows(gm) -> int | None:
+    """Row count of ``_compact_support(gm)``'s support from metadata alone, else ``None``.
+
+    The size preflight: a categorical's support is a dense ``(K+1, K)``
+    identity, so its size must be refused before anything is allocated.
+    """
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+    )
+
+    if isinstance(gm, DiscretizedSSPGroupMatrix):
+        return int(gm.B_unique.shape[0])
+    if isinstance(gm, DiscretizedSCOPGroupMatrix):
+        return int(gm.B_scop_unique.shape[0])
+    if isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
+        return int(gm.n_bins) + 1
+    if isinstance(gm, CategoricalGroupMatrix):
+        return int(gm.n_levels) + 1
+    return None
+
+
 def _compact_support(gm) -> tuple[NDArray, NDArray, NDArray | None] | None:
     """``(values, codes, transform)`` with rows ``values[codes] @ transform``, else ``None``.
 
@@ -903,12 +927,10 @@ def _anchor_support_gram_rhs(
     # check below runs too late to prevent the allocation, and cannot catch a
     # single wide block paired with a narrow one at all.  Falling back here
     # costs the chunked path, which is what this design got before.
-    compact = [_compact_support(gm) for gm in dm.group_matrices]
-    if any(support is None for support in compact):
+    rows = [_compact_support_rows(gm) for gm in dm.group_matrices]
+    if any(n is None or n * n > _MAX_PACKED_HIST_CELLS for n in rows):
         return None
-    for values, _codes, _transform in compact:
-        if values.shape[0] * values.shape[0] > _MAX_PACKED_HIST_CELLS:
-            return None
+    compact = [_compact_support(gm) for gm in dm.group_matrices]
 
     supports: list[_CenteredSupport] = []
     for gm, (values, codes, transform) in zip(dm.group_matrices, compact, strict=True):
