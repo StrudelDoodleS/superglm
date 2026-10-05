@@ -1641,6 +1641,66 @@ def test_run_cv_and_final_fit_refuse_levels_outside_an_ordered_or_random_effect_
         )
 
 
+@pytest.mark.parametrize("kind", ["categorical", "ordered", "random effect"])
+def test_run_cv_and_final_fit_refuse_missing_values_of_a_level_term_in_one_sentence(kind):
+    """Three validation rows, and so three CV rows, leave x missing.
+
+    The session opens and offers Final fit. The fit refused the missing values
+    with a bare ValueError: Final fit failed as an internal editor error and
+    Run CV's fold as one that "could not be fitted or scored".
+    """
+    import superglm.editor.cv as cv
+    from superglm import OrderedCategorical, RandomEffect
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    if kind == "categorical":
+        session = _validation_rows_session(Categorical(base="first"), missing=True)
+    elif kind == "ordered":
+        basis = Spline(kind="bs", n_knots=2, degree=2)
+        term = OrderedCategorical(order=["A", "B", "C", "D", "N", "E"], basis=basis)
+        session = _validation_rows_session(term, missing=True)
+    else:
+        session = _validation_rows_session(RandomEffect(), fit_mode="fit_reml", missing=True)
+
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    for job, refused in (("Final fit", final), ("Run CV", run)):
+        assert refused.value.public_message == cv.MISSING_LEVELS.format(job=job, term="x")
+
+
+@pytest.mark.parametrize("split", ["train", "validation"])
+def test_final_fit_refuses_rows_its_fit_refuses_in_a_fixed_sentence(cv_frame, split):
+    """A validation row holds a missing power, or the session has train rows only and one of those does.
+
+    The session opens and offers Final fit. The fit refused the row with a
+    bare ValueError, and Final fit failed as an internal editor error.
+    """
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    X, y, w = cv_frame
+    splits = _splits(cv_frame)
+    model = _model().fit(*splits["train_data"][:2], sample_weight=w[:400])
+    rows, response, weights = splits[f"{split}_data"]
+    rows = rows.copy()
+    rows.iloc[0, rows.columns.get_loc("power")] = np.nan
+    splits[f"{split}_data"] = (rows, response, weights)
+    if split == "train":
+        del splits["validation_data"]
+    session = EditorSession.from_model(model, **splits)
+
+    with pytest.raises(EditorValueError) as refused:
+        run_final_fit(capture_final_fit(session), _Context())
+
+    together = "train and validation" if split == "validation" else "train"
+    assert refused.value.public_message == cv.FINAL_NOT_FITTED.format(rows=together)
+
+
 @pytest.mark.filterwarnings("ignore:Routing rows with categorical levels unseen:UserWarning")
 @pytest.mark.parametrize("grouped", [False, True], ids=["levels", "grouping"])
 @pytest.mark.parametrize(

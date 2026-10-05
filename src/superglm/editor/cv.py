@@ -125,6 +125,14 @@ OUTSIDE_ORDERED_GROUPS = (
     "open a model whose order=, values= or specials= includes them and whose groups cover "
     "them, or leave those rows out."
 )
+MISSING_LEVELS = (
+    "{job}'s rows hold missing values of {term!r}; code them as a level of their own, or "
+    "leave those rows out."
+)
+FINAL_NOT_FITTED = (
+    "Final fit could not fit the {rows} rows. Check them for values the model cannot fit, "
+    "such as missing or non-finite values or a response its family does not allow."
+)
 FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
 
@@ -759,7 +767,7 @@ def _covering_template(template, X, job: str):
     ungrouped categorical or a random effect whose universe, declared or
     bound by ``bind_levels``, leaves it out, and an ordered term, grouped or
     not, whose ``order=``, ``values=`` and ``specials=`` leave it out or
-    whose groups do not cover it.
+    whose groups do not cover it. Any of these terms refuses a missing value.
     """
     frame = as_eager_frame(X)
     bindings = dict(getattr(template, "_level_bindings", None) or ())
@@ -769,8 +777,11 @@ def _covering_template(template, X, job: str):
             continue
         if name not in frame.columns:
             continue
+        values = np.asarray(frame.column_array(name)).ravel()
+        if np.asarray(pd.isna(values), dtype=bool).any():
+            raise EditorValueError(MISSING_LEVELS.format(job=job, term=name))
         if isinstance(spec, OrderedCategorical):
-            outside = _outside_order(frame.column_array(name), spec)
+            outside = _outside_order(values, spec)
             if outside:
                 sentence = (
                     OUTSIDE_ORDERED_LEVELS if spec._grouping is None else OUTSIDE_ORDERED_GROUPS
@@ -779,13 +790,13 @@ def _covering_template(template, X, job: str):
             continue
         grouping = getattr(spec, "_grouping", None)
         if grouping is None:
-            outside = _outside_universe(frame, name, spec, bindings.get(name))
+            outside = _outside_universe(values, frame, name, spec, bindings.get(name))
             if outside:
                 raise EditorValueError(
                     OUTSIDE_DECLARED_LEVELS.format(job=job, term=name, levels=outside)
                 )
             continue
-        new = _uncovered_labels(frame.column_array(name), grouping)
+        new = _uncovered_labels(values, grouping)
         if not new:
             continue
         if spec._declared_levels is not None:
@@ -812,22 +823,21 @@ def _covering_template(template, X, job: str):
     return clone_with_replaced_features(template, replacements) if replacements else template
 
 
-def _outside_universe(frame, name: str, spec: Categorical | RandomEffect, binding) -> list[str]:
-    """The labels of column ``name`` outside ungrouped ``spec``'s universe, as text.
+def _outside_universe(
+    values, frame, name: str, spec: Categorical | RandomEffect, binding
+) -> list[str]:
+    """The labels in ``values``, column ``name``, outside ungrouped ``spec``'s universe, as text.
 
     The universe is the one the fit binds: ``levels=``, else a categorical
     dtype on the column (which holds every value it has), else ``binding``.
-    Values match it as the fit codes them. Missing values are left to the
-    fit, which refuses them.
+    Values match it as the fit codes them. ``values`` hold no missing value.
     """
     universe = spec._declared_levels
     if universe is None and frame.column_declared_categories(name) is None:
         universe = None if binding is None else binding.levels
     if universe is None:
         return []
-    values = np.asarray(frame.column_array(name)).ravel()
-    present = values[~np.asarray(pd.isna(values), dtype=bool)]
-    outside = present[_codes_against(present, list(universe)) < 0]
+    outside = values[_codes_against(values, list(universe)) < 0]
     return sorted({str(label) for label in pd.unique(outside).tolist()}, key=str)
 
 
@@ -836,11 +846,10 @@ def _outside_order(values, spec: OrderedCategorical) -> list[str]:
 
     Values match the declaration as the fit matches them (``_canonical``),
     and a grouped term's through its grouping: a label the declaration
-    leaves out, or one its groups do not cover. Missing values are left to
-    the fit, which refuses them.
+    leaves out, or one its groups do not cover. ``values`` hold no missing
+    value.
     """
-    values = np.asarray(values).ravel()
-    labels = spec._canonical(values[~np.asarray(pd.isna(values), dtype=bool)])
+    labels = spec._canonical(values)
     if spec._grouping is not None:
         labels = _grouping_labels(labels)
     unknown = set(pd.unique(labels).tolist()) - spec._known_levels
@@ -850,11 +859,9 @@ def _outside_order(values, spec: OrderedCategorical) -> list[str]:
 def _uncovered_labels(values, grouping) -> list[str]:
     """The labels in ``values`` that ``grouping`` does not map, as the text it matches by.
 
-    Missing values are left to the fit, which refuses them.
+    ``values`` hold no missing value.
     """
-    values = np.asarray(values).ravel()
-    present = values[~np.asarray(pd.isna(values), dtype=bool)]
-    labels = pd.Series(present).astype(str).unique()
+    labels = pd.Series(values).astype(str).unique()
     return sorted(set(labels.tolist()) - set(grouping.original_to_group), key=str)
 
 
@@ -1010,15 +1017,25 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
     context.progress("fitting", n_rows=int(y.size))
     context.check()
     model = _covering_template(plan.template, X, "Final fit").clone_unfitted()
-    fit_refit_model(
-        plan.model,
-        model,
-        method="auto",
-        X=X,
-        y=y,
-        sample_weight=sample_weight,
-        offset=offset,
-    )
+    try:
+        fit_refit_model(
+            plan.model,
+            model,
+            method="auto",
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+    except ValueError as exc:
+        # A row the fit refuses, which the checks above do not name: a
+        # validation row's missing or non-finite number, or a response the
+        # family does not allow.
+        if isinstance(exc, EditorClientError):
+            raise
+        _LOGGER.warning("Final fit failed.", exc_info=True)
+        rows = "train and validation" if len(plan.datasets) > 1 else "train"
+        raise EditorValueError(FINAL_NOT_FITTED.format(rows=rows)) from exc
     context.check()
     if plan.edited:
         context.progress("carrying", terms=sorted(plan.edited))
