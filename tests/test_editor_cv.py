@@ -223,6 +223,46 @@ def test_carried_level_edit_keeps_its_change_when_the_reference_moves():
     assert abs(np.average(change, weights=exposure) - np.average(edit, weights=exposure)) <= tol
 
 
+@pytest.mark.parametrize("kind", ["ordered", "categorical"])
+def test_final_fit_carries_an_edit_on_an_integer_column_as_on_the_same_column_as_floats(kind):
+    """band declares the levels 1.0 to 6.0 and is fitted on an int64 column, or on it as float64.
+
+    The fit codes the row 1 as the level 1.0, but the editor weighed a level by
+    the rows whose text matched its own, and "1" is not "1.0": every level
+    weighed 0 on the int64 column. The carried edit was then centred by an
+    unweighted mean, and Final fit's predictions moved by up to 3e-4.
+    """
+    from superglm import OrderedCategorical
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    levels = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    counts = [80, 10, 10, 10, 10, 40]
+    band = np.repeat(np.arange(1, 7, dtype=np.int64), counts)
+    rng = np.random.default_rng(1)
+    power = rng.normal(0.0, 1.0, band.size)
+    y = 1.0 + 0.1 * band + 0.2 * power + rng.normal(0.0, 0.05, band.size)
+    weights, predictions = [], []
+    for dtype in (np.int64, np.float64):
+        X = pd.DataFrame({"band": band.astype(dtype), "power": power})
+        if kind == "ordered":
+            term = OrderedCategorical(order=levels, basis=Spline(kind="bs", n_knots=4))
+        else:
+            term = Categorical(base="first", levels=levels)
+        features = {"band": term, "power": Numeric()}
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features).fit(X, y)
+        session = EditorSession.from_model(model, train_data=(X, y), validation_data=(X, y))
+        session.select_levels("band", ["2.0", "3.0"])
+        session.shift("band", 0.3)
+        weights.append(session.terms["band"].weights)
+        predictions.append(run_final_fit(capture_final_fit(session), _Context()).model.predict(X))
+
+    np.testing.assert_array_equal(weights[0], counts)
+    np.testing.assert_array_equal(weights[0], weights[1])
+    # The two columns hold the same numbers, so the fits and the carry do the
+    # same arithmetic in this thread: the same predictions.
+    np.testing.assert_array_equal(predictions[0], predictions[1])
+
+
 # ── Stored folds and the supplied result's rows ──────────────────
 
 
