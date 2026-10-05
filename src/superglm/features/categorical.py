@@ -292,6 +292,9 @@ class Categorical:
     _pinned_levels: tuple | list = ()
     _base_fallback: tuple | None = None
     _pinned_base: Any | None = None
+    # Whether `base=` names a level although it reads "first" or "most_exposed".
+    # Only a rebuild sets it, for a reference a fit resolved or a user chose.
+    _base_is_level: bool = False
 
     def __init__(
         self,
@@ -347,6 +350,7 @@ class Categorical:
         self._pinned_levels: list = []
         self._base_fallback: tuple | None = None
         self._pinned_base: Any | None = None
+        self._base_is_level: bool = False
 
     def __repr__(self) -> str:
         n = len(self._levels)
@@ -369,7 +373,7 @@ class Categorical:
         if self._declared_levels is None and binding.levels is not None:
             self._declared_levels = list(binding.levels)
             self._level_source = "full-frame"
-        if binding.base is not None and self.base == "most_exposed":
+        if binding.base is not None and self.base == "most_exposed" and not self._base_is_level:
             self._pinned_base = binding.base
 
     def resolve_binding(self, values: NDArray, sample_weight=None):
@@ -547,8 +551,14 @@ class Categorical:
         observed: NDArray[np.bool_],
         sample_weight: NDArray[np.floating] | None,
     ) -> Any:
-        """Pick the reference level, falling back when the request is empty."""
+        """Pick the reference level, falling back when the request is empty.
+
+        A binding's pin and the level a prior build resolved name a level, even
+        one named "first" or "most_exposed"; only ``base=`` names a policy, and
+        not when a rebuild marked it as a level (``_base_is_level``).
+        """
         self._base_fallback = None
+        policy = None
         if self._pinned_base is not None:
             requested = self._pinned_base
         elif self._base_level and self._base_level in self._levels:
@@ -557,10 +567,12 @@ class Categorical:
             requested = self._base_level
         else:
             requested = self.base
+            if not self._base_is_level and requested in ("most_exposed", "first"):
+                policy = requested
 
-        if requested == "most_exposed":
+        if policy == "most_exposed":
             base_level = self._most_exposed(effective, observed, sample_weight)
-        elif requested == "first":
+        elif policy == "first":
             # Universe order, so a declared universe means first-DECLARED; the
             # inferred universe is sorted, so it still means alphabetical there.
             base_level = self._levels[0]

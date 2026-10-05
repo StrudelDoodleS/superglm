@@ -22,6 +22,7 @@ from superglm.editor.terms import term_from_inference
 from superglm.editor.unseen import unseen_payload
 from superglm.features.categorical import Categorical
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.rebuild import base_names_level
 
 _MAX_INTERACTIVE_HANDLES = 420
 
@@ -198,7 +199,7 @@ def _waiting_reference(draft, fitted) -> str | None:
     if not isinstance(draft, Categorical | OrderedCategorical):
         return None
     base = str(draft.base)
-    if base in {"first", "most_exposed"} or base == str(getattr(fitted, "_base_level", "")):
+    if not base_names_level(draft) or base == str(getattr(fitted, "_base_level", "")):
         return None
     return base
 
@@ -332,7 +333,7 @@ def _reference_payload(session, name: str) -> dict[str, str] | None:
     if getattr(spec, KEPT_REFERENCE_ATTRIBUTE, False):
         policy = "kept"
     else:
-        policy = spec.base if spec.base in {"most_exposed", "first"} else "pinned"
+        policy = "pinned" if base_names_level(spec) else spec.base
     return {"level": str(level), "policy": policy}
 
 

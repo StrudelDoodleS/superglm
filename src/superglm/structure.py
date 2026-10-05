@@ -177,7 +177,8 @@ class FeatureStructure:
         Each group label and the levels it holds. Levels in no group stand
         alone.
     reference : object
-        The reference: an ungrouped level or a group label.
+        The reference: an ungrouped level or a group label, never a base
+        policy, even when it is named "first" or "most_exposed".
     unseen : str
         Where levels unseen at fit go: ``"error"``, ``"base"`` or a group label.
         An ordered term refuses new levels, so its policy is ``"error"``.
@@ -591,6 +592,8 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
     # Grouped, the design speaks the grouping's text; ungrouped, the builder
     # gives the reference its native type from the levels.
     base = entry.reference if grouping is None else str(entry.reference)
+    # The reference is a level or group, whatever its name: one named "first"
+    # is that level, not the policy.
     return rebuilt_categorical(
         spec,
         spec,
@@ -599,6 +602,7 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
         data=np.asarray(levels, dtype=object),
         unseen=entry.unseen,
         levels=universe,
+        level=True,
     )
 
 

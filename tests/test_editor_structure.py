@@ -299,6 +299,35 @@ def test_a_pinned_reference_survives_a_later_collapse(region_model):
     assert session.model._specs["region"]._base_level == "C"
 
 
+@pytest.mark.parametrize("name", ["first", "most_exposed"])
+def test_a_reference_level_named_like_a_base_policy_stays_that_level(name):
+    """A level is set as the reference, kept through a collapse, exported and applied.
+
+    A weighs most and sorts first, so either policy picks A: each step that
+    passed the level on as base= read its name as the policy and moved the
+    reference to A.
+    """
+    X = pd.DataFrame({"x": np.tile(["A", name, "C", "D"], 30)})
+    y, w = np.tile([1.0, 2.0, 4.0, 8.0], 30), np.tile([4.0, 1.0, 1.0, 1.0], 30)
+
+    def declared():
+        return SuperGLM(
+            family="gaussian", selection_penalty=10.0, features={"x": Categorical(base="C")}
+        )
+
+    session = EditorSession.from_model(declared().fit(X, y, sample_weight=w), train_data=(X, y, w))
+    session.replace_with_reference_level("x", name, method="fit")
+    pinned = (session.model._specs["x"]._base_level, session_payload(session)["x"]["reference"])
+    session.select_levels("x", ["C", "D"])
+    session.replace_with_collapsed_levels("x", method="fit")
+    kept = (session.model._specs["x"]._base_level, session_payload(session)["x"]["reference"])
+    applied = Structure.from_model(session.model).apply(declared()).fit(X, y, sample_weight=w)
+
+    assert pinned == (name, {"level": name, "policy": "pinned"})
+    assert kept == (name, {"level": name, "policy": "kept"})
+    assert applied._specs["x"]._base_level == name
+
+
 def _exposed_region_session(
     base: str, groups: dict[str, list[str]] | None = None, reference: str = "B"
 ) -> EditorSession:

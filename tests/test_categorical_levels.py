@@ -111,6 +111,28 @@ class TestZeroWeightAndBaseFallback:
         assert spec._base_level == "b"
 
 
+class TestReferenceNamedLikeAPolicy:
+    """A level named "first" or "most_exposed" that a fit or a binding resolved stays that level."""
+
+    def test_a_build_again_keeps_the_level_it_resolved(self):
+        # "first" weighs most, so most_exposed resolves it; it sorts after A.
+        spec = Categorical()
+        x, w = ["A", "first", "C"], np.array([1.0, 4.0, 1.0])
+        _build(spec, x, w=w)
+        _build(spec, x, w=w)
+        assert spec._base_level == "first"
+
+    @pytest.mark.parametrize("name", ["first", "most_exposed"])
+    def test_a_binding_pins_the_level_it_resolved(self, name):
+        from superglm.types import LevelBinding
+
+        # A weighs most here and sorts first, so either policy would pick A.
+        spec = Categorical()
+        spec.apply_level_binding(LevelBinding(levels=None, base=name))
+        _build(spec, ["A", name, "C"], w=np.array([4.0, 1.0, 1.0]))
+        assert spec._base_level == name
+
+
 class TestUnseenPolicy:
     def _fitted(self):
         spec = Categorical(base="first", unseen="base")

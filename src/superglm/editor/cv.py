@@ -34,7 +34,11 @@ from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, native_by_text
-from superglm.features.rebuild import clone_with_replaced_features, rebuilt_categorical
+from superglm.features.rebuild import (
+    base_names_level,
+    clone_with_replaced_features,
+    rebuilt_categorical,
+)
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.model_selection import (
     _BUILTIN_SCORERS,
@@ -732,7 +736,12 @@ def _covering_template(template, X, job: str):
             grouped_levels=list(grouping.grouped_levels),
         )
         replacements[name] = rebuilt_categorical(
-            spec, spec, base=spec.base, grouping=widened, data=np.asarray(new, dtype=object)
+            spec,
+            spec,
+            base=spec.base,
+            grouping=widened,
+            data=np.asarray(new, dtype=object),
+            level=base_names_level(spec),
         )
     return clone_with_replaced_features(template, replacements) if replacements else template
 

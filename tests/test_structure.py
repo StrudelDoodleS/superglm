@@ -918,6 +918,28 @@ def test_an_ordered_special_keeps_its_domain_spelling_through_export_and_apply()
     np.testing.assert_array_equal(weights, np.full(7, 20.0))
 
 
+def test_a_reference_named_like_a_base_policy_is_that_level_after_apply():
+    """The level named "first" weighs most, so the fit makes it the reference.
+
+    The file holds the level, but apply passed it on as base="first", which
+    reads as the policy and chose A: under selection_penalty=10 that moved
+    the predictions by up to 0.65.
+    """
+    X = pd.DataFrame({"x": np.tile(["A", "first", "C", "D"], 30)})
+    y, w = np.tile([1.0, 2.0, 4.0, 8.0], 30), np.tile([1.0, 4.0, 1.0, 1.0], 30)
+
+    def declared():
+        features = {"x": Categorical(base="most_exposed")}
+        return SuperGLM(family="gaussian", selection_penalty=10.0, features=features)
+
+    model = declared().fit(X, y, sample_weight=w)
+    applied = Structure.from_model(model).apply(declared()).fit(X, y, sample_weight=w)
+
+    assert model._specs["x"]._base_level == applied._specs["x"]._base_level == "first"
+    bound = _linear_predictor_bound(X, model, applied)
+    assert np.max(np.abs(applied.predict(X) - model.predict(X))) <= bound
+
+
 def _narrower_next_year():
     """Next year's rows, whose ages stop a year short of this year's oldest."""
     X, _ = _frame()

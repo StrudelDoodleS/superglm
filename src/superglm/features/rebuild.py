@@ -102,6 +102,7 @@ def rebuilt_categorical(
     data,
     unseen: str | None = None,
     levels: list | None = None,
+    level: bool = False,
 ) -> Categorical:
     """A fresh Categorical like ``spec`` with this grouping and base.
 
@@ -109,15 +110,29 @@ def rebuilt_categorical(
     drop; ``unseen`` replaces the policy and ``levels`` the declared universe.
     Grouped, the design speaks the grouping's text labels; ungrouped, the base
     goes back to its native value, so an integer level stays 3, not "3".
+    ``level=True`` says ``base`` names a level or group, as a reference a fit
+    resolved does, even when it reads "first" or "most_exposed".
     """
-    if grouping is None and str(base) not in SYMBOLIC_BASE_POLICIES:
+    named = level or str(base) not in SYMBOLIC_BASE_POLICIES
+    if grouping is None and named:
         base = _native_levels(spec, fitted, data).get(str(base), base)
-    return Categorical(
+    rebuilt = Categorical(
         base=base,
         grouping=grouping,
         levels=_declared_universe(spec, grouping) if levels is None else levels,
         unseen=spec.unseen if unseen is None else unseen,
     )
+    rebuilt._base_is_level = named and str(base) in SYMBOLIC_BASE_POLICIES
+    return rebuilt
+
+
+def base_names_level(spec) -> bool:
+    """Whether ``spec``'s ``base=`` names a level or group rather than a base policy.
+
+    It names a policy when it reads "first" or "most_exposed", unless a rebuild
+    marked it as a level (:func:`rebuilt_categorical`).
+    """
+    return getattr(spec, "_base_is_level", False) or str(spec.base) not in SYMBOLIC_BASE_POLICIES
 
 
 def _declared_universe(spec: Categorical, grouping) -> list | None:

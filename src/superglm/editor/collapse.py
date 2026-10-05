@@ -15,7 +15,7 @@ from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.piecewise import Piecewise
 from superglm.features.rebuild import (
-    SYMBOLIC_BASE_POLICIES,
+    base_names_level,
     clone_with_replaced_features,  # noqa: F401  (imported from here by the editor's tests)
     interaction_users,
     rebuilt_categorical,
@@ -112,15 +112,20 @@ def collapsed_feature_spec(
         selected_levels=selected_levels,
         group_label=label,
     )
-    declared, kept = _reference_to_keep(fitted, spec, term) if keep_reference else (spec.base, [])
-    base = _collapsed_base(declared, kept, selected_levels, label, existing, grouping)
+    if keep_reference:
+        declared, kept, level = _reference_to_keep(fitted, spec, term)
+    else:
+        declared, kept, level = spec.base, [], base_names_level(spec)
+    base = _collapsed_base(declared, kept, selected_levels, label, existing, grouping, level=level)
 
     if isinstance(spec, OrderedCategorical):
         replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=values)
     else:
-        replacement = rebuilt_categorical(spec, fitted, base=base, grouping=grouping, data=values)
+        replacement = rebuilt_categorical(
+            spec, fitted, base=base, grouping=grouping, data=values, level=level
+        )
     if keep_reference:
-        _mark_kept(replacement, base, kept, grouping)
+        _mark_kept(replacement, base, kept, grouping, level=level)
 
     metadata = {
         "format": "superglm.editor.level_collapse.v1",
@@ -183,10 +188,13 @@ def ungrouped_feature_spec(
     replacement_grouping = None if _is_identity_grouping(grouping) else grouping
 
     if keep_reference:
-        declared, kept = _reference_to_keep(fitted, spec, term)
-        base = _kept_base_after_ungroup(declared, kept, selected_levels, existing, grouping)
+        declared, kept, level = _reference_to_keep(fitted, spec, term)
+        base = _kept_base_after_ungroup(
+            declared, kept, selected_levels, existing, grouping, level=level
+        )
     else:
-        base = _valid_base_after_ungroup(spec.base, selected_levels, grouping)
+        level = base_names_level(spec)
+        base = _valid_base_after_ungroup(spec.base, selected_levels, grouping, level=level)
     if isinstance(spec, OrderedCategorical):
         replacement = rebuilt_ordered_spec(
             spec, grouping=replacement_grouping, base=base, data=values
@@ -194,10 +202,10 @@ def ungrouped_feature_spec(
     else:
         # Without a grouping the fit reads native values (3, not "3").
         replacement = rebuilt_categorical(
-            spec, fitted, base=base, grouping=replacement_grouping, data=values
+            spec, fitted, base=base, grouping=replacement_grouping, data=values, level=level
         )
     if keep_reference:
-        _mark_kept(replacement, base, kept, replacement_grouping)
+        _mark_kept(replacement, base, kept, replacement_grouping, level=level)
 
     metadata = {
         "format": "superglm.editor.level_ungroup.v1",
@@ -237,7 +245,9 @@ def reference_feature_spec(
         replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=label, data=values)
     else:
         # Fitted levels keep their native type (an integer level stays 3, not "3").
-        replacement = rebuilt_categorical(spec, fitted, base=label, grouping=grouping, data=values)
+        replacement = rebuilt_categorical(
+            spec, fitted, base=label, grouping=grouping, data=values, level=True
+        )
     metadata = {
         "format": "superglm.editor.reference_level.v1",
         "term": term.name,
@@ -441,15 +451,18 @@ def _collapsed_base(
     group_label: str,
     existing_grouping: LevelGrouping | None,
     grouping: LevelGrouping,
+    *,
+    level: bool,
 ) -> str:
     """The level holding ``base`` once the collapse into ``grouping`` is made.
 
     A reference group the collapse splits follows the new level holding most
     of its members; a tie goes to the level holding a ``kept`` one, the
     original levels a kept reference stands for (``_reference_to_keep``).
+    A base policy (``level`` False) is handed on as it is.
     """
     base = str(base)
-    if base in SYMBOLIC_BASE_POLICIES:
+    if not level:
         return base
 
     valid = {str(level) for level in grouping.grouped_levels}
@@ -483,10 +496,10 @@ def _base_original_members(base: str, grouping: LevelGrouping | None) -> list[st
 
 
 def _valid_base_after_ungroup(
-    base: str, selected_levels: list[str], grouping: LevelGrouping
+    base: str, selected_levels: list[str], grouping: LevelGrouping, *, level: bool
 ) -> str:
     base = str(base)
-    if base in SYMBOLIC_BASE_POLICIES:
+    if not level:
         return base
     valid = set(grouping.grouped_levels) | set(grouping.all_original_levels)
     if base in valid:
@@ -500,6 +513,8 @@ def _kept_base_after_ungroup(
     selected_levels: list[str],
     existing: LevelGrouping,
     grouping: LevelGrouping,
+    *,
+    level: bool,
 ) -> str:
     """The level holding the in-force reference once ``selected_levels`` leave their groups.
 
@@ -510,11 +525,11 @@ def _kept_base_after_ungroup(
     grouping does not know keeps the declared-base rule.
     """
     base = str(base)
-    if base in SYMBOLIC_BASE_POLICIES or base in grouping.grouped_levels:
+    if not level or base in grouping.grouped_levels:
         return base
     members = _base_original_members(base, existing)
     if not members:
-        return _valid_base_after_ungroup(base, selected_levels, grouping)
+        return _valid_base_after_ungroup(base, selected_levels, grouping, level=level)
     mapped = [str(grouping.original_to_group.get(member, member)) for member in members]
     pulled = set(selected_levels)
     holding = _holding(kept, grouping)
@@ -522,7 +537,7 @@ def _kept_base_after_ungroup(
     return max(counts, key=lambda label: (counts[label], label not in pulled, label in holding))
 
 
-def _reference_to_keep(fitted, spec, term: EditableTerm) -> tuple[Any, list[str]]:
+def _reference_to_keep(fitted, spec, term: EditableTerm) -> tuple[Any, list[str], bool]:
     """The reference a keep-reference step keeps, named in ``spec``'s own levels.
 
     ``spec`` is the term's draft, or ``fitted`` when nothing waits. A draft that
@@ -532,19 +547,21 @@ def _reference_to_keep(fitted, spec, term: EditableTerm) -> tuple[Any, list[str]
     keep-reference off keeps its own policy.
 
     Also returns the original levels the reference stands for: those an
-    earlier keep-reference step recorded, else all of its members.
+    earlier keep-reference step recorded, else all of its members; and
+    whether it is a level or group, which a level named "first" is, rather
+    than a base policy.
     """
     in_force = _in_force_reference(fitted)
     if spec is fitted:
-        return in_force, _kept_levels(fitted, in_force)
-    if str(spec.base) not in SYMBOLIC_BASE_POLICIES:
-        return spec.base, _kept_levels(spec, spec.base)
+        return in_force, _kept_levels(fitted, in_force), True
+    if base_names_level(spec):
+        return spec.base, _kept_levels(spec, spec.base), True
     grouping = getattr(spec, "_grouping", None)
     names = term.levels if grouping is None else grouping.grouped_levels
     held = {str(name) for name in names or []}
     if str(in_force) in held:
-        return in_force, _kept_levels(fitted, in_force)
-    return spec.base, []
+        return in_force, _kept_levels(fitted, in_force), True
+    return spec.base, [], False
 
 
 def _kept_levels(spec, base) -> list[str]:
@@ -558,14 +575,16 @@ def _kept_levels(spec, base) -> list[str]:
     return recorded or members
 
 
-def _mark_kept(replacement, base, kept: list[str], grouping: LevelGrouping | None) -> None:
+def _mark_kept(
+    replacement, base, kept: list[str], grouping: LevelGrouping | None, *, level: bool
+) -> None:
     """Mark ``replacement``'s reference as kept and record the levels it stands for.
 
-    A symbolic policy handed on from a draft (``_reference_to_keep``) keeps
-    nothing: the refit chooses again and may move the reference, so it is
-    left unmarked and the chip names the policy.
+    A symbolic policy handed on from a draft (``_reference_to_keep``, ``level``
+    False) keeps nothing: the refit chooses again and may move the reference,
+    so it is left unmarked and the chip names the policy.
     """
-    if str(base) in SYMBOLIC_BASE_POLICIES:
+    if not level:
         return
     setattr(replacement, KEPT_REFERENCE_ATTRIBUTE, True)
     members = set(_base_original_members(str(base), grouping))
