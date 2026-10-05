@@ -55,8 +55,10 @@ _EDITOR_EDIT_ONLY_MEMO_STATE = (
 )
 
 
-# The fit's own outputs, frozen read-only when the fit is published. A copy
-# whose fit is unchanged shares them; the cached ones only once computed.
+# The fit's own outputs. A copy whose fit is unchanged reads their memory
+# through read-only views, the cached ones only once computed: publication
+# freezes only what the fit computed, and the inference state and coefficient
+# covariance computed later are writeable on the model itself.
 _EDITOR_SHARED_FIT_OUTPUTS = (
     "_fit_mu",
     "_fit_null_mu",
@@ -72,26 +74,44 @@ def _copy_model_for_editor_edits(
     """Copy a fitted model without duplicating its row-scale fit inputs.
 
     ``share_fit_outputs`` is for a copy that keeps the fit as it is (a New
-    levels choice): it shares the fit's outputs too, and starts without the
-    metrics cache, which is bound to its model and is rebuilt when asked.
+    levels choice): it reads the fit's outputs too, through read-only views,
+    and starts without the metrics cache, which is bound to its model and is
+    rebuilt when asked.
     """
     shared_names: tuple[str, ...] = _EDITOR_SHARED_ROW_INPUTS
     if share_transient_state:
         shared_names += _EDITOR_EDIT_ONLY_MEMO_STATE
     shared = {name: getattr(model, name) for name in shared_names if hasattr(model, name)}
+    memo = {id(value): value for value in shared.values()}
     if share_fit_outputs:
         # Read from the instance: getattr would compute a cached one not yet computed.
         computed = vars(model)
-        shared.update(
-            {name: computed[name] for name in _EDITOR_SHARED_FIT_OUTPUTS if name in computed}
-        )
-    memo = {id(value): value for value in shared.values()}
-    if share_fit_outputs and getattr(model, "_fit_metrics_cache", None) is not None:
-        memo[id(model._fit_metrics_cache)] = None
+        for name in _EDITOR_SHARED_FIT_OUTPUTS:
+            if name in computed:
+                shared[name] = memo[id(computed[name])] = _read_only(computed[name])
+        if getattr(model, "_fit_metrics_cache", None) is not None:
+            memo[id(model._fit_metrics_cache)] = None
     edited_model = copy.deepcopy(model, memo)
     for name, value in shared.items():
         setattr(edited_model, name, value)
     return edited_model
+
+
+def _read_only(value):
+    """``value`` with each writeable array in it a read-only view of the same memory.
+
+    A dict, list or tuple is rebuilt around the views, so a copy can change
+    neither the source's arrays nor its containers; anything else is shared.
+    """
+    if isinstance(value, np.ndarray) and value.flags.writeable:
+        view = value.view()
+        view.flags.writeable = False
+        return view
+    if isinstance(value, dict):
+        return {key: _read_only(item) for key, item in value.items()}
+    if type(value) in (list, tuple):
+        return type(value)(_read_only(item) for item in value)
+    return value
 
 
 def apply_edits_to_model_copy(model, terms: dict[str, EditableTerm]):

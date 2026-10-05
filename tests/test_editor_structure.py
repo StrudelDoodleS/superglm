@@ -1862,11 +1862,27 @@ def test_new_levels_carries_through_a_refit_and_comes_back_with_its_undo():
     assert model.clone_unfitted()._specs["region"].unseen == "error"
 
 
+def _arrays(value, path):
+    """Each array in a fit output, by its path: in a dict, list or tuple, or the output itself."""
+    if isinstance(value, np.ndarray):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _arrays(item, f"{path}[{key!r}]")
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            yield from _arrays(item, f"{path}[{index}]")
+
+
 def test_new_levels_shares_the_fits_row_state_instead_of_copying_it_per_choice():
     """The choice changes no fitted value, so the copy keeps the model's fit outputs as they are.
 
     Each choice's model stays in the history, so a copy of the row-length
-    state (fitted means, inference, metrics) per choice would add up.
+    state (fitted means, inference, metrics) per choice would add up. The
+    copy reads the same memory through read-only views: the inference state
+    and coefficient covariance computed after the fit was published are
+    writeable on the model itself, and a write through the choice's model
+    must not reach it.
     """
     model, X, y = _grouped_region()
     session = EditorSession.from_model(model, terms=["region", "x"], train_data=(X, y))
@@ -1881,10 +1897,26 @@ def test_new_levels_shares_the_fits_row_state_instead_of_copying_it_per_choice()
     assert all(name in vars(model) for name in fit_outputs)
     assert model._fit_metrics_cache is not None
 
+    sources = {
+        path: array for name in fit_outputs for path, array in _arrays(vars(model)[name], name)
+    }
+    writeable = {path: array.flags.writeable for path, array in sources.items()}
+    assert writeable["_coef_covariance[0]"] and writeable["_fit_inference_info['XtWX_inv']"]
+
     session.set_unseen("region", "Other")
 
     chosen = session.model
-    assert [name for name in fit_outputs if vars(chosen)[name] is not vars(model)[name]] == []
+    assert vars(chosen)["_fit_stats"] is vars(model)["_fit_stats"]
+    shared = {
+        path: array for name in fit_outputs for path, array in _arrays(vars(chosen)[name], name)
+    }
+    assert shared.keys() == sources.keys()
+    for path, array in shared.items():
+        assert array.size == 0 or np.shares_memory(array, sources[path]), path
+        with pytest.raises(ValueError, match="read-only"):
+            array[...] = 0
+    # The model's own arrays keep their flags, so its own writes still work.
+    assert {path: array.flags.writeable for path, array in sources.items()} == writeable
     # The metrics cache is bound to its model: the copy builds its own when asked.
     assert chosen._fit_metrics_cache is None
     rebuilt, source = chosen.metrics(X, y), model.metrics(X, y)
