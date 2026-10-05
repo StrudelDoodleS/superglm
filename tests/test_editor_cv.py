@@ -1462,6 +1462,65 @@ def test_run_cv_and_final_fit_refuse_levels_no_group_takes_in_one_sentence(
         )
 
 
+@pytest.mark.filterwarnings("ignore:Routing rows with categorical levels unseen:UserWarning")
+def test_run_cv_and_final_fit_keep_a_reference_level_named_first_when_placing_new_levels(
+    monkeypatch,
+):
+    """The reference is the level "first", the most exposed; C and D are collapsed as CD.
+
+    Placing N, which only the validation and CV rows hold, rebuilds x. Read
+    as the policy, the reference "first" would become the first level, A,
+    and under selection_penalty=10 that moves the fit.
+    """
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+
+    def declared():
+        features = {"x": Categorical(base="most_exposed")}
+        return SuperGLM(family="gaussian", selection_penalty=10.0, features=features)
+
+    train = (
+        pd.DataFrame({"x": np.tile(["A", "first", "C", "D"], 30)}),
+        np.tile([1.0, 2.0, 4.0, 8.0], 30),
+        np.tile([1.0, 4.0, 1.0, 1.0], 30),
+    )
+    validation = (
+        pd.DataFrame({"x": np.tile(["A", "first", "N"], 10)}),
+        np.tile([1.0, 2.0, 5.0], 10),
+        np.ones(30),
+    )
+    rows = tuple(
+        pd.concat([a, b], ignore_index=True) if isinstance(a, pd.DataFrame) else np.r_[a, b]
+        for a, b in zip(train, validation, strict=True)
+    )
+    model = declared().fit(*train)
+    assert model._specs["x"]._base_level == "first"
+    supplied = cross_validate(
+        declared(), *rows[:2], sample_weight=rows[2], cv=KFold(3, shuffle=True, random_state=0)
+    )
+    session = EditorSession.from_model(
+        model, cv=supplied, cv_data=rows, train_data=train, validation_data=validation
+    )
+    session.select_levels("x", ["C", "D"])
+    session.replace_with_collapsed_levels("x", group_label="CD")
+    session.set_unseen("x", "CD")
+    assert session.model._specs["x"]._base_level == "first"
+
+    fold_references = []
+    score = cv._FoldRecorder.score
+
+    def recorded(self, model, X, y, **kwargs):
+        fold_references.append(model._specs["x"]._base_level)
+        return score(self, model, X, y, **kwargs)
+
+    monkeypatch.setattr(cv._FoldRecorder, "score", recorded)
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+    run_cv(capture_cv_run(session), _Context())
+
+    assert final._specs["x"]._base_level == "first"
+    assert fold_references == ["first"] * 3
+
+
 @pytest.mark.parametrize("bind", [False, True], ids=["levels", "bind_levels"])
 def test_run_cv_and_final_fit_refuse_levels_outside_an_ungrouped_term_s_universe(bind):
     """x is ungrouped, its universe A/B/C/D declared with levels= or bound by bind_levels.
