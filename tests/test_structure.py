@@ -289,51 +289,69 @@ def test_levels_a_file_cannot_hold_are_refused_by_name_on_export():
     )
 
 
-def test_a_number_json_cannot_write_is_refused_and_a_fraction_is_written_as_its_float():
-    """A Decimal, as a database NUMERIC column arrives, is refused, never a TypeError from json.
+def test_a_number_a_file_cannot_hold_as_itself_is_refused():
+    """A Decimal, a Fraction or an extended float is refused, never a TypeError from json.
 
-    Every way into a file is checked: from_model names the level, and an entry
-    built in Python or read from a mapping is malformed. A Fraction is a real
-    number, written as the float it equals.
+    json cannot write a Decimal, as a database NUMERIC column arrives. A
+    Fraction or an extended float would be written as a float64 that need not
+    equal it and reads as other text, so the file could not find the level
+    again. Every way into a file is checked: from_model names the level, and an
+    entry built in Python or read from a mapping is refused in its fixed sentence.
     """
     from decimal import Decimal
     from fractions import Fraction
 
     rng = np.random.default_rng(0)
     n = 300
-    decimals = np.array([Decimal("4"), Decimal("5.5"), Decimal("6")] * 100, dtype=object)
-    model = _declared({"power": Categorical(base="first")})
-    model.fit(pd.DataFrame({"power": decimals}), rng.normal(size=n))
-    with pytest.raises(StructureError) as refused:
-        Structure.from_model(model)
-    first = model._specs["power"]._levels[0]
-    assert str(refused.value) == (
-        f"{first!r} in 'power' cannot be written to a structure file, which holds text, "
-        "numbers and booleans; give the term plain labels."
-    )
+    for name, column in (
+        ("power", [Decimal("4"), Decimal("5.5"), Decimal("6")] * 100),
+        ("share", [Fraction(1, 3), Fraction(3, 2)] * 150),
+    ):
+        model = _declared({name: Categorical(base="first")})
+        model.fit(pd.DataFrame({name: np.array(column, dtype=object)}), rng.normal(size=n))
+        with pytest.raises(StructureError) as refused:
+            Structure.from_model(model)
+        first = model._specs[name]._levels[0]
+        assert str(refused.value) == (
+            f"{first!r} in {name!r} cannot be written to a structure file, which holds text, "
+            "numbers and booleans; give the term plain labels."
+        )
 
     malformed = "The structure entry for 'c' has a malformed {!r}; export the structure again."
-    for field, entry in (
-        ("levels", FeatureStructure("categorical", [Decimal("1.5"), 2], {}, 2)),
-        ("reference", FeatureStructure("categorical", [1.5, 2], {}, Decimal("1.5"))),
-        ("ranges", FeatureStructure("spline", ranges=[PolynomialRange(Decimal("1"), 2.0, 1)])),
-    ):
-        with pytest.raises(StructureError) as refused:
-            Structure(features={"c": entry})
-        assert str(refused.value) == malformed.format(field)
     payload = json.loads(
         Structure(features={"c": FeatureStructure("categorical", [1, 2], {}, 1)}).to_json()
     )
-    payload["features"]["c"]["levels"] = [Decimal("1"), 2]
-    with pytest.raises(StructureError) as refused:
-        Structure.from_json(payload)
-    assert str(refused.value) == malformed.format("levels")
+    for number in (Decimal("1.5"), Fraction(3, 2), np.longdouble(1.5)):
+        for field, entry in (
+            ("levels", FeatureStructure("categorical", [number, 2], {}, 2)),
+            ("reference", FeatureStructure("categorical", [1.5, 2], {}, number)),
+        ):
+            with pytest.raises(StructureError) as refused:
+                Structure(features={"c": entry})
+            assert str(refused.value) == malformed.format(field)
+        payload["features"]["c"]["levels"] = [number, 2]
+        with pytest.raises(StructureError) as refused:
+            Structure.from_json(payload)
+        assert str(refused.value) == malformed.format("levels")
+        spline = FeatureStructure("spline", ranges=[PolynomialRange(number, 2.0, 1)])
+        with pytest.raises(StructureError) as refused:
+            Structure(features={"c": spline})
+        assert str(refused.value) == (
+            f"The spline of 'c' refuses the Line range {number}–2; change or remove that range."
+        )
 
-    fractions = np.array([Fraction(1, 2), Fraction(3, 2)] * 150, dtype=object)
-    model = _declared({"f": Categorical(base="first")})
-    model.fit(pd.DataFrame({"f": fractions}), rng.normal(size=n))
-    written = json.loads(Structure.from_model(model).to_json())["features"]["f"]
-    assert (written["levels"], written["reference"]) == ([0.5, 1.5], 0.5)
+
+def test_importing_superglm_loads_no_pydantic():
+    """The structure file is checked by plain Python, so importing superglm stays light."""
+    script = (
+        "import sys, superglm, superglm.structure\n"
+        "loaded = sorted(m for m in sys.modules if m.split('.')[0] in ('pydantic', 'pydantic_core'))\n"
+        "assert not loaded, loaded\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script], check=False, capture_output=True, text=True, timeout=120
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_a_structure_built_in_python_is_checked_like_a_file():

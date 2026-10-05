@@ -34,18 +34,16 @@ fixed sentence naming the feature and, where there is one, the level or range.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import math
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from numbers import Integral, Real
+from numbers import Integral
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Any
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, InstanceOf, TypeAdapter, ValidationError
 
 from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange, RangeError
 from superglm.features.categorical import Categorical
@@ -68,7 +66,16 @@ from superglm.model import SuperGLM
 from superglm.model.fit_state import configured_lambda2, configured_penalty
 
 FORMAT = "superglm.structure.v1"
+KINDS = ("categorical", "ordered", "spline")
 _POLICIES = ("error", "base")
+# The fields each kind of entry holds, besides "kind".
+_FIELDS = {
+    "categorical": ("groups", "levels", "reference", "unseen"),
+    "ordered": ("groups", "levels", "ranges", "reference", "unseen"),
+    "spline": ("ranges",),
+}
+_RANGE_FIELDS = ("degree", "hi", "join", "lo")
+_FILE_FIELDS = ("features", "format", "superglm_version")
 
 # One fixed sentence per refusal.
 _NOT_JSON = "The structure is not valid JSON; to read a file, pass its path to read_structure."
@@ -210,20 +217,10 @@ class Structure:
     superglm_version: str = ""
 
     def __post_init__(self) -> None:
-        self._file()
-
-    def _file(self) -> dict[str, Any]:
-        """The structure as its file holds it, refused as the file would be on reading."""
-        if not all(isinstance(entry, FeatureStructure) for entry in self.features.values()):
-            raise StructureError(_MALFORMED_FILE.format(field="features"))
-        features = {name: _entry_json(entry) for name, entry in self.features.items()}
-        payload = {
-            "features": features,
-            "format": FORMAT,
-            "superglm_version": self.superglm_version,
-        }
-        _checked(payload)
-        return payload
+        for name, entry in self.features.items():
+            if not isinstance(name, str) or not isinstance(entry, FeatureStructure):
+                raise StructureError(_MALFORMED_FILE.format(field="features"))
+            _check_feature(name, entry)
 
     @classmethod
     def from_model(cls, model, X=None) -> Structure:
@@ -293,7 +290,11 @@ class Structure:
         str
             The JSON text.
         """
-        payload = self._file()
+        payload = {
+            "features": {name: _entry_json(name, entry) for name, entry in self.features.items()},
+            "format": FORMAT,
+            "superglm_version": self.superglm_version,
+        }
         text = json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False)
         text += "\n"
         if path is not None:
@@ -328,9 +329,20 @@ class Structure:
                 payload = json.loads(source, parse_constant=_refuse_constant)
             except (TypeError, ValueError) as exc:
                 raise StructureError(_NOT_JSON) from exc
-        file = _checked(_plain(payload))
-        features = {name: _feature(name, entry) for name, entry in file.features.items()}
-        return cls(features=features, superglm_version=file.superglm_version)
+        fmt = payload.get("format") if isinstance(payload, Mapping) else None
+        if fmt != FORMAT:
+            raise StructureError(_UNKNOWN_FORMAT.format(fmt=fmt, expected=FORMAT))
+        for key in payload:
+            if key not in _FILE_FIELDS:
+                raise StructureError(_MALFORMED_FILE.format(field=key))
+        features = payload.get("features")
+        if not isinstance(features, Mapping):
+            raise StructureError(_MALFORMED_FILE.format(field="features"))
+        version = payload.get("superglm_version", "")
+        if not isinstance(version, str):
+            raise StructureError(_MALFORMED_FILE.format(field="superglm_version"))
+        entries = {name: _entry_from_json(name, entry) for name, entry in features.items()}
+        return cls(features=entries, superglm_version=version)
 
     def apply(self, model, X=None):
         """An unfitted copy of ``model`` with these decisions built into its features.
@@ -390,10 +402,10 @@ class Structure:
             frame = as_eager_frame(X)
         specs = getattr(model, "_specs", None) or {}
         declared = dict(getattr(getattr(model, "_config", None), "feature_templates", ()))
-        self._file()  # an entry may have changed since the structure was built
         replacements = {}
         for name in sorted(self.features):
             entry = self.features[name]
+            _check_feature(name, entry)
             if name not in specs:
                 raise StructureError(_ABSENT.format(feature=name))
             spec = declared.get(name, specs[name])
@@ -519,10 +531,7 @@ def _require_writable_levels(name: str, levels: list) -> None:
     """
     seen: dict[str, Any] = {}
     for level in levels:
-        try:
-            _LEVEL.validate_python(_plain(level))
-        except ValidationError:
-            raise StructureError(_NOT_WRITABLE.format(value=level, feature=name)) from None
+        _plain(level, name)
         first = seen.setdefault(str(level), level)
         if first is not level and first != level:
             raise StructureError(_SAME_TEXT.format(first=first, second=level, feature=name))
@@ -820,103 +829,7 @@ def _require_shape_fits(source, r: PolynomialRange) -> None:
         raise ValueError(f"the spline of degree {source.degree} cannot take {r}")
 
 
-# -- The file's schema -------------------------------------------------------------
-
-# Strict: a value keeps its JSON type, so 1, 1.0, "1" and true stay four values.
-_STRICT = ConfigDict(extra="forbid", strict=True)
-# A number the file holds is an int or a float: pydantic's float, strict or
-# not, takes any object with __float__, a Decimal among them, which json
-# cannot write.
-_Float = InstanceOf[float]
-# A level, or a reference, in its native type: text, a boolean, or a number
-# float64 holds as a finite value. JSON reads integers of any length, and
-# float() rounds one at 2**1024 - 2**970 or past it to infinity.
-_INT_LIMIT = 2**1024 - 2**970
-_Level = (
-    str
-    | bool
-    | Annotated[int, Field(gt=-_INT_LIMIT, lt=_INT_LIMIT)]
-    | Annotated[_Float, Field(allow_inf_nan=False)]
-)
-_LEVEL = TypeAdapter(_Level, config=_STRICT)
-# A range edge: a number, or a band name on an ordered term. Which edges a
-# spline takes, finite ones only, is checked with the range's own sentence.
-_Edge = str | int | _Float
-
-
-class _Schema(BaseModel):
-    model_config = _STRICT
-
-
-class _Range(_Schema):
-    lo: _Edge
-    hi: _Edge
-    degree: int
-    join: Literal["kink", "tangent", "smooth"]
-
-
-class _Spline(_Schema):
-    kind: Literal["spline"]
-    ranges: list[_Range] = []
-
-
-class _Categorical(_Schema):
-    kind: Literal["categorical"]
-    levels: Annotated[list[_Level], Field(min_length=1)]
-    groups: dict[str, Annotated[list[_Level], Field(min_length=1)]] = {}
-    reference: _Level
-    unseen: str = "error"
-
-
-class _Ordered(_Categorical):
-    """A categorical's fields, and the ranges of the spline over its bands."""
-
-    kind: Literal["ordered"]
-    ranges: list[_Range] = []
-
-
-class _File(_Schema):
-    format: Literal[FORMAT]
-    features: dict[str, Annotated[_Categorical | _Ordered | _Spline, Field(discriminator="kind")]]
-    superglm_version: str = ""
-
-
-# The fields an entry of each kind holds.
-_HELD = {
-    "categorical": _Categorical.model_fields,
-    "ordered": _Ordered.model_fields,
-    "spline": _Spline.model_fields,
-}
-
-
-def _checked(payload) -> _File:
-    """The parsed file, refused in its fixed sentence unless well formed and self-consistent."""
-    try:
-        file = _File.model_validate(payload)
-    except ValidationError as exc:
-        raise _schema_refusal(exc.errors()[0], payload) from exc
-    for name, entry in file.features.items():
-        _check_consistent(name, entry)
-    return file
-
-
-def _schema_refusal(error, payload) -> StructureError:
-    """The fixed sentence for the schema's first complaint about a file."""
-    loc = error["loc"]
-    if loc[:1] in ((), ("format",)):
-        fmt = payload.get("format") if isinstance(payload, Mapping) else None
-        return StructureError(_UNKNOWN_FORMAT.format(fmt=fmt, expected=FORMAT))
-    if loc[0] != "features" or len(loc) < 2 or loc[2:3] == ("[key]",):
-        return StructureError(_MALFORMED_FILE.format(field=loc[0]))
-    name = loc[1]
-    if len(loc) < 4:
-        # No mapping to read, or no kind it knows.
-        field = "kind" if isinstance(error["input"], Mapping) else "entry"
-        return StructureError(_MALFORMED.format(feature=name, field=field))
-    if loc[3] == "groups" and len(loc) > 5 and isinstance(loc[5], int):
-        member = error["input"]
-        return StructureError(_MEMBER.format(group=loc[4], feature=name, member=member))
-    return StructureError(_MALFORMED.format(feature=name, field=loc[3]))
+# -- JSON ------------------------------------------------------------------------
 
 
 def _refuse_constant(constant: str):
@@ -924,72 +837,116 @@ def _refuse_constant(constant: str):
     raise ValueError(f"non-finite constant {constant}")
 
 
-def _plain(value):
-    """``value`` as JSON holds it: text, booleans and Python numbers, ranges as mappings.
-
-    A number of another type, a numpy scalar or a Fraction, becomes the int or
-    float it equals. Any other object is kept, for the schema to refuse.
-    """
+def _plain(value, feature: str):
+    """``value`` as a JSON scalar of the same kind: a numpy scalar becomes its Python one."""
     if isinstance(value, bool | np.bool_):
         return bool(value)
     if isinstance(value, str):
         return str(value)
     if isinstance(value, Integral):
         return int(value)
-    if isinstance(value, Real) and _is_finite(value):
+    if _is_finite(value):
         return float(value)
-    if isinstance(value, PolynomialRange):
-        return _plain(dataclasses.asdict(value))
-    if isinstance(value, list):
-        return [_plain(item) for item in value]
-    if isinstance(value, Mapping):
-        return {key: _plain(item) for key, item in value.items()}
-    return value
+    raise StructureError(_NOT_WRITABLE.format(value=value, feature=feature))
 
 
-def _entry_json(entry: FeatureStructure) -> dict[str, Any]:
-    """The entry as its file holds it.
-
-    A field its kind does not hold is written only when it is set, so that an
-    entry built in Python with one is refused as the file would be.
-    """
-    blank = vars(FeatureStructure(kind=entry.kind))
-    held = _HELD.get(str(entry.kind), blank)
-    return {
-        key: _plain(value)
-        for key, value in vars(entry).items()
-        if key in held or not (type(value) is type(blank[key]) and value == blank[key])
+def _entry_json(name: str, entry: FeatureStructure) -> dict[str, Any]:
+    ranges = [
+        {
+            "degree": int(r.degree),
+            "hi": _plain(r.hi, name),
+            "join": r.join,
+            "lo": _plain(r.lo, name),
+        }
+        for r in entry.ranges
+    ]
+    if entry.kind == "spline":
+        return {"kind": "spline", "ranges": ranges}
+    payload = {
+        "groups": {
+            label: [_plain(member, name) for member in members]
+            for label, members in entry.groups.items()
+        },
+        "kind": entry.kind,
+        "levels": [_plain(level, name) for level in entry.levels],
+        "reference": _plain(entry.reference, name),
+        "unseen": entry.unseen,
     }
+    if entry.kind == "ordered":
+        payload["ranges"] = ranges
+    return payload
 
 
-def _feature(name: str, entry) -> FeatureStructure:
-    """A checked file entry as the FeatureStructure it records."""
-    ranges = [_range_from_json(name, r) for r in getattr(entry, "ranges", [])]
-    return FeatureStructure(**entry.model_dump(exclude={"ranges"}), ranges=ranges)
+def _entry_from_json(name: str, entry) -> FeatureStructure:
+    """One feature's parsed JSON as a FeatureStructure; its consistency is checked after."""
+    if not isinstance(entry, Mapping):
+        raise StructureError(_MALFORMED.format(feature=name, field="entry"))
+    kind = entry.get("kind")
+    if kind not in KINDS:
+        raise StructureError(_MALFORMED.format(feature=name, field="kind"))
+    for key in entry:
+        if key != "kind" and key not in _FIELDS[kind]:
+            raise StructureError(_MALFORMED.format(feature=name, field=key))
+    ranges = entry.get("ranges", [])
+    if not isinstance(ranges, list) or not all(_is_range_json(r) for r in ranges):
+        raise StructureError(_MALFORMED.format(feature=name, field="ranges"))
+    parsed = [_range_from_json(name, r) for r in ranges]
+    if kind == "spline":
+        return FeatureStructure(kind=kind, ranges=parsed)
+    groups = entry.get("groups", {})
+    if not isinstance(groups, Mapping) or not all(isinstance(m, list) for m in groups.values()):
+        raise StructureError(_MALFORMED.format(feature=name, field="groups"))
+    levels = entry.get("levels")
+    return FeatureStructure(
+        kind=kind,
+        levels=list(levels) if isinstance(levels, list) else levels,
+        groups={label: list(members) for label, members in groups.items()},
+        reference=entry.get("reference"),
+        unseen=entry.get("unseen", "error"),
+        ranges=parsed,
+    )
 
 
-def _range_from_json(name: str, r: _Range) -> PolynomialRange:
+def _is_range_json(value) -> bool:
+    return isinstance(value, Mapping) and sorted(value) == list(_RANGE_FIELDS)
+
+
+def _range_from_json(name: str, value: Mapping) -> PolynomialRange:
     try:
-        return PolynomialRange(r.lo, r.hi, r.degree, r.join)
+        return PolynomialRange(value["lo"], value["hi"], value["degree"], value["join"])
     except ValueError as exc:
-        raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree)) from exc
+        raise StructureError(
+            _range_refusal(name, value["lo"], value["hi"], value["degree"])
+        ) from exc
 
 
 # -- Consistency -------------------------------------------------------------------
 
 
-def _check_consistent(name: str, entry) -> None:
-    """Refuse a well-formed file entry whose fields disagree, in its fixed sentence."""
+def _check_feature(name: str, entry: FeatureStructure) -> None:
+    """Refuse an entry that is not self-consistent, in its fixed sentence."""
+    if entry.kind not in KINDS:
+        raise StructureError(_MALFORMED.format(feature=name, field="kind"))
+    if not isinstance(entry.ranges, list) or not all(
+        isinstance(r, PolynomialRange) for r in entry.ranges
+    ):
+        raise StructureError(_MALFORMED.format(feature=name, field="ranges"))
     if entry.kind == "spline":
+        if entry.levels or entry.groups or entry.reference is not None or entry.unseen != "error":
+            raise StructureError(_MALFORMED.format(feature=name, field="levels"))
         for r in entry.ranges:
             _check_numeric_range(name, r)
         return
-    texts = [str(level) for level in entry.levels]
-    if len(set(texts)) != len(texts):
-        raise StructureError(_MALFORMED.format(feature=name, field="levels"))
+    if entry.kind == "categorical" and entry.ranges:
+        raise StructureError(_MALFORMED.format(feature=name, field="ranges"))
+    texts = _check_levels(name, entry.levels)
     names = _check_groups(name, entry.groups, texts)
+    if not _is_scalar(entry.reference):
+        raise StructureError(_MALFORMED.format(feature=name, field="reference"))
     if str(entry.reference) not in names:
         raise StructureError(_REFERENCE.format(reference=entry.reference, feature=name))
+    if not isinstance(entry.unseen, str):
+        raise StructureError(_MALFORMED.format(feature=name, field="unseen"))
     if entry.kind == "ordered":
         if entry.unseen != "error":
             raise StructureError(_ORDERED_UNSEEN.format(feature=name))
@@ -1000,13 +957,27 @@ def _check_consistent(name: str, entry) -> None:
         raise StructureError(_UNSEEN.format(unseen=entry.unseen, feature=name))
 
 
-def _check_groups(name: str, groups: dict, texts: list[str]) -> set[str]:
+def _check_levels(name: str, levels) -> list[str]:
+    """The levels' texts; refused unless they are distinct plain scalars."""
+    if not isinstance(levels, list) or not levels or not all(_is_scalar(v) for v in levels):
+        raise StructureError(_MALFORMED.format(feature=name, field="levels"))
+    texts = [str(level) for level in levels]
+    if len(set(texts)) != len(texts):
+        raise StructureError(_MALFORMED.format(feature=name, field="levels"))
+    return texts
+
+
+def _check_groups(name: str, groups, texts: list[str]) -> set[str]:
     """The names a reference or unseen policy may use: group labels and ungrouped levels."""
+    if not isinstance(groups, Mapping):
+        raise StructureError(_MALFORMED.format(feature=name, field="groups"))
     known = set(texts)
     owner: dict[str, str] = {}
     for label, members in groups.items():
+        if not isinstance(label, str) or not isinstance(members, list) or not members:
+            raise StructureError(_MALFORMED.format(feature=name, field="groups"))
         for member in members:
-            if str(member) not in known:
+            if not _is_scalar(member) or str(member) not in known:
                 raise StructureError(_MEMBER.format(group=label, feature=name, member=member))
             if str(member) in owner:
                 raise StructureError(_TWO_GROUPS.format(member=member, feature=name))
@@ -1014,7 +985,7 @@ def _check_groups(name: str, groups: dict, texts: list[str]) -> set[str]:
     for label, members in groups.items():
         if label in known and label not in {str(member) for member in members}:
             raise StructureError(_GROUP_NAME.format(group=label, feature=name))
-    return set(groups) | (known - set(owner))
+    return set(groups) | {text for text in texts if text not in owner}
 
 
 def _texts(levels) -> set[str]:
@@ -1022,7 +993,7 @@ def _texts(levels) -> set[str]:
     return {str(level) for level in levels}
 
 
-def _check_numeric_range(name: str, r) -> None:
+def _check_numeric_range(name: str, r: PolynomialRange) -> None:
     if not (_is_finite(r.lo) and _is_finite(r.hi) and float(r.lo) < float(r.hi)):
         raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree))
 
@@ -1049,13 +1020,23 @@ def _edge_text(edge) -> str:
     return str(edge)
 
 
-def _is_finite(value) -> bool:
-    """Whether ``value`` is a number float64 holds as a finite value.
+def _is_scalar(value) -> bool:
+    return isinstance(value, str | bool | np.bool_) or _is_finite(value)
 
-    JSON reads an integer of any length, and one past float64's range is no
-    level or edge: ``float`` would raise ``OverflowError`` on it.
+
+def _is_finite(value) -> bool:
+    """Whether ``value`` is a number a file holds as itself, finite in float64.
+
+    That is an integer, which JSON writes exactly, or a binary float float64
+    holds every value of. A Decimal, a Fraction or an extended float would be
+    written as a float64 that need not equal it, so the file could not find
+    that level again. JSON reads an integer of any length, and one past
+    float64's range is no level or edge: ``float`` would raise
+    ``OverflowError`` on it.
     """
-    if isinstance(value, bool | np.bool_) or not isinstance(value, Real):
+    if isinstance(value, bool | np.bool_) or not isinstance(
+        value, Integral | float | np.float32 | np.float16
+    ):
         return False
     try:
         return math.isfinite(float(value))
