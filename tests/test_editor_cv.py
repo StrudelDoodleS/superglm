@@ -7,6 +7,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -1334,6 +1335,104 @@ def test_run_cv_and_final_fit_refit_the_structure_from_the_last_refit(cv_frame, 
     probe = pd.DataFrame({"age": [40.0] * 3, "power": [0.0] * 3, "region": ["A", "B", "C"]})
     log_mu = np.log(final.model.predict(probe))
     assert log_mu[2] == log_mu[1]
+
+
+def _new_levels_session(unseen: str, levels=None) -> EditorSession:
+    """Train rows hold x = A/B/C/D and validation rows A/B/N/E; C and D are grouped as Other.
+
+    The CV data is the two together, so N and E sit in Run CV's rows too,
+    and the supplied result is the ungrouped model's. ``levels`` is the
+    opened model's ``levels=`` for x.
+    """
+    rng = np.random.default_rng(20261005)
+
+    def rows(levels, n):
+        x = rng.choice(levels, n)
+        power = rng.normal(0.0, 1.0, n)
+        eta = -0.3 + 0.1 * power + 0.3 * (x == "B") - 0.2 * np.isin(x, ["C", "D"])
+        return pd.DataFrame({"power": power, "x": x}), rng.poisson(np.exp(eta)).astype(float)
+
+    def declared(levels=None):
+        features = {"power": Numeric(), "x": Categorical(base="first", levels=levels)}
+        return SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+
+    train, validation = rows(["A", "B", "C", "D"], 400), rows(["A", "B", "N", "E"], 100)
+    X = pd.concat([train[0], validation[0]], ignore_index=True)
+    y = np.concatenate([train[1], validation[1]])
+    supplied = cross_validate(
+        declared(), X, y, cv=KFold(3, shuffle=True, random_state=0), scoring=("deviance",)
+    )
+    session = EditorSession.from_model(
+        declared(levels).fit(*train),
+        cv=supplied,
+        cv_data=(X, y),
+        train_data=train,
+        validation_data=validation,
+    )
+    session.select_levels("x", ["C", "D"])
+    session.replace_with_collapsed_levels("x", group_label="Other")
+    if unseen != "error":
+        session.set_unseen("x", unseen)
+    return session
+
+
+@pytest.mark.filterwarnings(_EXPECTED_PIN)
+@pytest.mark.filterwarnings("ignore:Routing rows with categorical levels unseen:UserWarning")
+def test_run_cv_and_final_fit_place_levels_only_their_rows_hold_in_the_new_levels_group():
+    """The grouping, built on the train rows, does not cover N and E; New levels sends them to Other.
+
+    The fit refused a level its grouping does not cover, so both jobs failed
+    as an internal editor error. They fit N and E in Other, as the in-force
+    model predicts them.
+    """
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+
+    session = _new_levels_session("Other")
+
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+    run = run_cv(capture_cv_run(session), _Context())
+
+    probe = pd.DataFrame({"power": [0.0] * 4, "x": ["C", "D", "N", "E"]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        log_mu = np.log(final.predict(probe))
+    # One group's coefficient, read row by row: equal bit for bit, and no
+    # level is unseen to the Final fit model.
+    assert (log_mu == log_mu[0]).all()
+    assert final._specs["x"]._levels == ["A", "B", "Other"]
+    assert np.isfinite(run.result.fold_scores["deviance"]).all()
+
+
+@pytest.mark.parametrize(
+    ("unseen", "levels", "sentence"),
+    [
+        ("error", None, "UNCOVERED_LEVELS"),
+        ("base", None, "UNCOVERED_LEVELS"),
+        ("Other", ["A", "B", "C", "D"], "OUTSIDE_DECLARED_LEVELS"),
+    ],
+)
+def test_run_cv_and_final_fit_refuse_levels_no_group_takes_in_one_sentence(
+    unseen, levels, sentence
+):
+    """Without a group for new levels, or under a levels= that leaves them out, they are refused.
+
+    Placing them in Other would widen the model's declaration.
+    """
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    session = _new_levels_session(unseen, levels)
+
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    for job, refused in (("Final fit", final), ("Run CV", run)):
+        assert refused.value.public_message == getattr(cv, sentence).format(
+            job=job, term="x", levels=["E", "N"]
+        )
 
 
 @pytest.mark.parametrize(("fit_mode", "selection"), [("fit", "auto"), ("fit_reml", 0.0)])

@@ -32,7 +32,9 @@ from superglm.editor.evaluation import EvaluationDataset, training_export_datase
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
-from superglm.features.grouping import native_by_text
+from superglm.features.categorical import Categorical
+from superglm.features.grouping import LevelGrouping, native_by_text
+from superglm.features.rebuild import clone_with_replaced_features, rebuilt_categorical
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.model_selection import (
     _BUILTIN_SCORERS,
@@ -88,6 +90,14 @@ FINAL_SPLIT_MISSING = (
     "Final fit fits the train and validation rows together, so it needs {column} on both "
     "or on neither: the {have} data has them and the {lack} data does not. Pass them with "
     "the {lack} data to edit()."
+)
+UNCOVERED_LEVELS = (
+    "{job}'s rows hold levels of {term!r} that its groups do not cover, {levels}; send "
+    "New levels of {term!r} to a group to fit them there, or leave those rows out."
+)
+OUTSIDE_DECLARED_LEVELS = (
+    "{job}'s rows hold levels of {term!r} that the model's levels= leaves out, {levels}; "
+    "declare them in its levels=, or leave those rows out."
 )
 FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
@@ -688,12 +698,63 @@ def _declared_template(session):
     return template
 
 
+def _covering_template(template, X, job: str):
+    """``template`` with each grouped categorical covering the levels ``X`` holds.
+
+    A grouping built on the train rows does not cover a level only the CV
+    data or the validation rows hold, and the fit refuses a level its
+    grouping does not cover. Such a level goes where the term sends new
+    levels: into the group its ``unseen`` names, as the in-force model
+    predicts it and as ``Structure.apply(model, X=...)`` places it. A term
+    with no group for new levels (``"error"`` or ``"base"``), or one whose
+    ``levels=`` leaves the level out, refuses ``job`` in one sentence.
+    """
+    frame = as_eager_frame(X)
+    replacements = {}
+    for name, spec in template._specs.items():
+        grouping = getattr(spec, "_grouping", None)
+        if not isinstance(spec, Categorical) or grouping is None or name not in frame.columns:
+            continue
+        new = _uncovered_labels(frame.column_array(name), grouping)
+        if not new:
+            continue
+        if spec._declared_levels is not None:
+            raise EditorValueError(OUTSIDE_DECLARED_LEVELS.format(job=job, term=name, levels=new))
+        if spec.unseen in ("error", "base"):
+            raise EditorValueError(UNCOVERED_LEVELS.format(job=job, term=name, levels=new))
+        widened = LevelGrouping(
+            original_to_group={**grouping.original_to_group, **dict.fromkeys(new, spec.unseen)},
+            group_to_originals={
+                label: [*members, *(new if label == spec.unseen else ())]
+                for label, members in grouping.group_to_originals.items()
+            },
+            all_original_levels=[*grouping.all_original_levels, *new],
+            grouped_levels=list(grouping.grouped_levels),
+        )
+        replacements[name] = rebuilt_categorical(
+            spec, spec, base=spec.base, grouping=widened, data=np.asarray(new, dtype=object)
+        )
+    return clone_with_replaced_features(template, replacements) if replacements else template
+
+
+def _uncovered_labels(values, grouping) -> list[str]:
+    """The labels in ``values`` that ``grouping`` does not map, as the text it matches by.
+
+    Missing values are left to the fit, which refuses them.
+    """
+    values = np.asarray(values).ravel()
+    present = values[~np.asarray(pd.isna(values), dtype=bool)]
+    labels = pd.Series(present).astype(str).unique()
+    return sorted(set(labels.tolist()) - set(grouping.original_to_group), key=str)
+
+
 def run_cv(plan: CVRunPlan, context) -> CVRun:
     """Replay the stored folds on the in-force structure with the hand edits put back."""
+    template = _covering_template(plan.template, plan.rows.X, "Run CV")
     recorder = _FoldRecorder(plan, context)
     try:
         result = cross_validate(
-            plan.template,
+            template,
             plan.rows.X,
             plan.rows.y,
             cv=StoredFolds(plan.folds, before_fold=recorder.before_fold),
@@ -834,7 +895,7 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
     X, y, sample_weight, offset = _union_rows(plan.datasets)
     context.progress("fitting", n_rows=int(y.size))
     context.check()
-    model = plan.template.clone_unfitted()
+    model = _covering_template(plan.template, X, "Final fit").clone_unfitted()
     fit_refit_model(
         plan.model,
         model,
