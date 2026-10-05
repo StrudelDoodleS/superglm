@@ -131,7 +131,8 @@ MISSING_LEVELS = (
 )
 FINAL_NOT_FITTED = (
     "Final fit could not fit the {rows} rows. Check them for values the model cannot fit, "
-    "such as missing or non-finite values or a response its family does not allow."
+    "such as missing or non-finite values, a level a term does not declare, or a response "
+    "its family does not allow."
 )
 FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
@@ -1029,8 +1030,8 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         )
     except ValueError as exc:
         # A row the fit refuses, which the checks above do not name: a
-        # validation row's missing or non-finite number, or a response the
-        # family does not allow.
+        # validation row's missing or non-finite number, a level outside an
+        # interaction's universe, or a response the family does not allow.
         if isinstance(exc, EditorClientError):
             raise
         _LOGGER.warning("Final fit failed.", exc_info=True)
