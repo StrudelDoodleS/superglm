@@ -65,6 +65,7 @@ from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.shapes import shape_support
 from superglm.editor.staging import _COLLAPSE_SENTENCES, _range_refusal
 from superglm.editor.terms import (
+    resolve_refit_method,
     term_from_inference,
     term_offset_values,
     term_type_from_spec,
@@ -1233,9 +1234,9 @@ class EditorSession:
         With nothing waiting and no New levels choice since the latest step, an
         ungroup that removes the model's last collapsed group reuses the fit
         from before that step instead of refitting, when that model had none
-        and its term is the one the ungroup would fit, reference included, at
-        the penalties the ungroup would record as given: it is exactly the
-        result.
+        and its term is the one the ungroup would fit, reference included, on
+        the same rows, with the same method and at the penalties the ungroup
+        would record as given: it is exactly the result.
         """
         if not self.pending:
             model = self._pre_collapse_model(term, keep_reference=keep_reference, **refit_kwargs)
@@ -1268,7 +1269,9 @@ class EditorSession:
         the shortcut out too. So does an ungroup whose term the earlier fit
         would not fit again, such as one keeping a reference a collapse made
         without keeping the old one, and one whose ``lambda1`` or ``lambda2``,
-        given now or to an earlier Refit, the earlier fit was not given.
+        given now or to an earlier Refit, the earlier fit was not given. So
+        does an ungroup given its own rows or fit options, or a method the
+        earlier fit was not fitted with.
         """
         step = self.structure_history[-1] if self.structure_history else None
         if step is None or not step.changes:
@@ -1287,6 +1290,12 @@ class EditorSession:
             self.model, kwargs.get("lambda1", ...), kwargs.get("lambda2", ...)
         )
         if given != getattr(previous, EXPLICIT_PENALTY_ATTRIBUTE, {}):
+            return None
+        options = {"method", "lambda1", "lambda2"}
+        if any(value is not None for name, value in kwargs.items() if name not in options):
+            return None
+        method = resolve_refit_method(self.model, kwargs.get("method", "auto"))
+        if method != resolve_refit_method(previous, "auto"):
             return None
         return previous if _fits_again(replacement, previous._specs[term]) else None
 

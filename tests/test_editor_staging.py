@@ -1041,6 +1041,36 @@ def test_the_ungroup_shortcut_reuses_the_earlier_fit_only_where_it_has_the_reque
     np.testing.assert_array_equal(session.model.predict(probe), declared(base).predict(probe))
 
 
+@pytest.mark.parametrize("given", ["rows", "method"])
+def test_the_ungroup_shortcut_refits_on_the_rows_and_with_the_method_the_call_gives(
+    book, monkeypatch, given
+):
+    """The ungroup is given the first 600 rows, or fit_reml where the earlier fit used fit.
+
+    The fit from before the collapse, on all 900 rows with fit, has the
+    ungroup's structure, so it was reused all the same: the rows or the
+    method the call gave were dropped without a sign.
+    """
+    model, X, y = book
+    session = _session(model)
+    session.select_levels("brand", ["B10", "B11"])
+    session.replace_with_collapsed_levels("brand", method="fit")
+    fits = _count_fits(monkeypatch)
+    refit = {"method": "fit", "X": X.iloc[:600], "y": y[:600]}
+    if given == "method":
+        refit = {"method": "fit_reml"}
+
+    session.select_levels("brand", ["B10", "B11"])
+    session.replace_with_ungrouped_levels("brand", **refit)
+
+    assert len(fits) == 1 and session.model is not model
+    assert session.model._specs["brand"]._grouping is None
+    if given == "rows":
+        np.testing.assert_array_equal(session.model._fit_y_ref, y[:600])
+    else:
+        assert session.model._last_fit_meta["method"] == "fit_reml"
+
+
 def test_the_ungroup_shortcut_refuses_to_remove_the_group_new_levels_go_to(book):
     model, _, _ = book
     session = _session(model)
