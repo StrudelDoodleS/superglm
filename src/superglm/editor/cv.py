@@ -201,7 +201,8 @@ def check_cv_data(
 
     ``cv_rows`` is ``cv_data=`` when it was supplied; otherwise ``fallback``,
     the train data, is used when its row count matches the folds. A result
-    that records a data fingerprint must match it. An older one gets the
+    that records a data fingerprint must match it. One without (an older
+    result, or one whose read columns could not be fingerprinted) gets the
     row-count check and a note saying so.
     """
     if cv is None:

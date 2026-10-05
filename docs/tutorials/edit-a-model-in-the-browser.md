@@ -526,9 +526,10 @@ Run CV is disabled, with the reason on hover, when it cannot use the rows:
 
 - `cv_data` has a different row count from the data the folds were drawn on.
 - `train_data` stands in for `cv_data` and has a different row count.
-- The rows are not the ones the folds were drawn on: their columns, dtypes, row order or values
-  differ, and a pandas frame and a polars one of the same values differ too. Pass the `X`, `y`,
-  `sample_weight` and `offset` you gave `cross_validate`.
+- The rows are not the ones the folds were drawn on: the columns the model reads, or `y`, the
+  weights or the offsets, differ in type, row order or values, and a pandas frame and a polars one
+  of the same values differ too. Columns the model does not read are not checked. Pass the `X`,
+  `y`, `sample_weight` and `offset` you gave `cross_validate`.
 - The result's data fingerprint was made by an earlier development build of superglm, or by
   another version, so its rows cannot be checked. Run `cross_validate` again.
 

@@ -345,10 +345,12 @@ fitted spec and the display term. These break on an unfitted draft today:
 - `edit()` gains the same `cv=` and data arguments.
 - Without `cv_data`, the train data is used when its row count matches the folds.
 - `cross_validate` records `n_rows` and a data fingerprint (SHA-256 over the
-  row count, a content digest of every column of X, and the y, weight and
+  row count, a content digest of the columns of X the model reads, which are
+  every column only when it takes its features from X, and the y, weight and
   offset bytes) on the result. The editor compares them. On a mismatch,
-  Run CV is disabled with the reason. An older result without a fingerprint gets
-  a row-count check and a one-line note.
+  Run CV is disabled with the reason. A result without a fingerprint (an older
+  one, or one whose read columns could not be fingerprinted) gets a row-count
+  check and a one-line note.
 
 **Tab.**
 - A fourth app view, `cv`, reusing `#reportPanel`.
@@ -384,7 +386,9 @@ fitted spec and the display term. These break on an unfitted draft today:
     `CrossValidationResult.fold_indices`;
   - the model is the in-force structure (last refit);
   - hand edits are re-applied per fold (D5);
-  - `fit_mode` is the in-force method;
+  - `fit_mode` is the one the supplied result records, so its scores and
+    Run CV's differ only by structure and edits; a result made before
+    `cross_validate` recorded it falls back to the in-force method, with a note;
   - the scorers are the supplied result's built-in names, else deviance, Gini
     and NLL.
 - Final fit: train ∪ validation; hand edits re-applied (D5, D6); shown on Final
