@@ -1041,6 +1041,42 @@ def test_the_ungroup_shortcut_reuses_the_earlier_fit_only_where_it_has_the_reque
     np.testing.assert_array_equal(session.model.predict(probe), declared(base).predict(probe))
 
 
+@pytest.mark.parametrize(
+    ("levels", "collapsed", "label"),
+    [(["A", "first", "z", "zz"], ["A", "zz"], "new"), (["A", "B", "first"], ["A", "B"], "zz")],
+    ids=["Sol", "Claude"],
+)
+def test_the_ungroup_shortcut_keeps_a_reference_level_named_like_a_policy(
+    monkeypatch, levels, collapsed, label
+):
+    """base="first" resolves to A; the collapse, not keeping it, makes the level "first" the reference.
+
+    Ungrouping while keeping that reference keeps the level "first". The
+    shortcut read it as the policy the fit before the collapse was given
+    and put that fit, on A, back in force: under selection_penalty=10 that
+    moved the first case's predictions by up to 0.61.
+    """
+    X = pd.DataFrame({"x": np.tile(levels, 30)})
+    y = np.tile(2.0 ** np.arange(len(levels)), 30)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=10.0, features={"x": Categorical(base="first")}
+    ).fit(X, y)
+    assert model._specs["x"]._base_level == "A"
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_levels("x", collapsed)
+    session.replace_with_collapsed_levels(
+        "x", group_label=label, keep_reference=False, method="fit"
+    )
+    assert session.model._specs["x"]._base_level == "first"
+    fits = _count_fits(monkeypatch)
+
+    session.select_levels("x", collapsed)
+    session.replace_with_ungrouped_levels("x", keep_reference=True, method="fit")
+
+    assert (session.model is model, len(fits)) == (False, 1)
+    assert session.model._specs["x"]._base_level == "first"
+
+
 @pytest.mark.parametrize("given", ["rows", "method"])
 def test_the_ungroup_shortcut_refits_on_the_rows_and_with_the_method_the_call_gives(
     book, monkeypatch, given

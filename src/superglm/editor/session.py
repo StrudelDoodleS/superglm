@@ -112,13 +112,15 @@ def _fits_again(replacement, fitted) -> bool:
     """Whether fitting the ungrouped ``replacement`` on ``fitted``'s rows gives ``fitted`` again.
 
     Both ungrouped, they must agree on the kind of term, the declared universe,
-    where new levels go and the reference: the level ``fitted`` resolved, or
-    the policy it resolved it from, unless a level binding pinned it there. A
-    policy is never that level, even one named "first".
+    where new levels go and the reference: the level ``fitted`` resolved, or,
+    when both name a policy, the policy it resolved it from, unless a level
+    binding pinned it there. A policy is never that level, even one named
+    "first".
     """
     base = str(replacement.base)
+    policies = not base_names_level(replacement) and not base_names_level(fitted)
     same_reference = (base_names_level(replacement) and base == str(fitted._base_level)) or (
-        base == str(fitted.base) and getattr(fitted, "_pinned_base", None) is None
+        policies and base == str(fitted.base) and getattr(fitted, "_pinned_base", None) is None
     )
     return (
         type(replacement) is type(fitted)
