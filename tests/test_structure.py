@@ -891,6 +891,33 @@ def test_an_ordered_term_takes_its_groups_reference_and_band_ranges():
     assert Structure.from_model(applied).features["band"] == structure.features["band"]
 
 
+def test_an_ordered_special_keeps_its_domain_spelling_through_export_and_apply():
+    """order=[1.0, ..., 6.0, 9.0] with specials=[9] reports the special as 9.0, beside 1.0.
+
+    The rebuild named it by its raw label 9 only: the editor found no rows
+    for it, and the next export, listing 9, no longer applied to the
+    declaration. JSON writes 9 and 9.0 apart, so the files show the spelling.
+    """
+    order = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 9.0]
+    band = np.repeat(order, 20)
+    X = pd.DataFrame({"band": band})
+    y = 1.0 + 0.1 * band + 0.5 * (band == 9.0) + np.random.default_rng(3).normal(0.0, 0.05, 140)
+
+    def declared():
+        basis = Spline(kind="bs", n_knots=4)
+        return _declared({"band": OrderedCategorical(order=order, specials=[9], basis=basis)})
+
+    first = Structure.from_model(declared().fit(X, y))
+    rebuilt = first.apply(declared()).fit(X, y)
+    second = Structure.from_model(rebuilt)
+    again = Structure.from_model(second.apply(declared()).fit(X, y))
+
+    assert first.to_json() == second.to_json() == again.to_json()
+    assert json.loads(first.to_json())["features"]["band"]["levels"][-1] == 9.0
+    weights = EditorSession.from_model(rebuilt, train_data=(X, y)).terms["band"].weights
+    np.testing.assert_array_equal(weights, np.full(7, 20.0))
+
+
 def _narrower_next_year():
     """Next year's rows, whose ages stop a year short of this year's oldest."""
     X, _ = _frame()

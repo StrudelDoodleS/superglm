@@ -185,6 +185,12 @@ def rebuilt_ordered_spec(
     is sticky and would silently survive a changed ``base``.
     """
     values, native_base = _ordered_original_values(spec, grouping, data, base)
+    # A special the declaration also named in order= or values= is reported
+    # under that domain spelling (9.0 beside 1.0 and 2.0) and matches rows
+    # through its raw label (9). The smooth's values lack it, so it is named
+    # in values= again, which takes it out of the smooth as the declaration
+    # did and keeps the spelling; the value given is never read.
+    values.update(dict.fromkeys(spec._special_display, 0.0))
     # Clone the RAW declarations, not the string-coerced ``_specials``. A special
     # declared as ``9`` on a float column matches through its raw label -- the
     # string view renders 9.0 as "9.0", which never equals "9" -- so rebuilding
