@@ -608,7 +608,11 @@ class OrderedCategorical:
         # namespace and no downstream site has to reconcile them again -- the
         # editor previously carried its own copy of this, and the direct
         # `grouping=` path carried none.
-        grouping = _regroup_to_declared(grouping, self._ordered_levels + list(self._specials))
+        # A special is spelled as the term reports it (9.0 beside 1.0 for
+        # specials=[9]): rows canonicalise to that spelling and every report
+        # joins on it, so a grouping spelling it "9" would cover none of them.
+        grouping = _regroup_to_declared(grouping, self._ordered_levels + self._special_display)
+        grouped_specials = {str(level) for level in self._special_display}
         # RESERVED SEAM -- penalized collapse (L1 fusion), not built. Gertheiss
         # & Tutz (2010), "Sparse modeling of categorial explanatory variables",
         # Ann. Appl. Stat. 4(4):2150-2180: an L1 penalty on adjacent
@@ -623,7 +627,7 @@ class OrderedCategorical:
         # renames a special is wrong for a specific, explainable reason, and
         # that reason is more useful than the generic 'no numeric position'
         # symptom it would otherwise produce first.
-        _require_no_grouped_specials(grouping, special_set)
+        _require_no_grouped_specials(grouping, grouped_specials)
         self._original_level_to_value: dict[str, float] | None = None
         if grouping is not None:
             # Preserve original level→value mapping for plot expansion
@@ -669,7 +673,7 @@ class OrderedCategorical:
                 # `_expand_grouped_term`. Named here instead, beside the group
                 # that caused it.
                 undeclared = [str(o) for o in originals if str(o) not in by_text]
-                if vals and undeclared and str(glev) not in special_set:
+                if vals and undeclared and str(glev) not in grouped_specials:
                     raise ValueError(
                         f"OrderedCategorical grouping puts undeclared level(s) "
                         f"{undeclared!r} in group {glev!r}, whose other members are "
@@ -685,7 +689,7 @@ class OrderedCategorical:
             missing = [
                 g
                 for g in grouping.grouped_levels
-                if g not in grouped_ltv and str(g) not in special_set
+                if g not in grouped_ltv and str(g) not in grouped_specials
             ]
             if missing:
                 raise ValueError(
@@ -694,7 +698,9 @@ class OrderedCategorical:
                     "and the declaration disagree about how levels are named."
                 )
             self._level_to_value = grouped_ltv
-            self._smooth_levels = [lev for lev in grouping.grouped_levels if lev not in special_set]
+            self._smooth_levels = [
+                lev for lev in grouping.grouped_levels if lev not in grouped_specials
+            ]
             # _known_levels includes all *original* levels (for predict-time validation)
             self._known_levels = set(grouping.all_original_levels) | known_special_labels
         else:
@@ -1484,12 +1490,14 @@ class OrderedCategorical:
         declared as a non-str is matched against its raw label as well. That
         comparison runs through pandas, which yields element-wise ``False``
         when the column's dtype cannot hold the label rather than raising.
+        A grouped term's labels are strings spelled as the special is reported
+        (``"9.0"``), so that spelling matches as well.
         """
         raw = pd.Series(np.asarray(x).ravel())
         labels = raw.astype(str).to_numpy()
         columns = []
-        for lev, raw_lev in zip(self._specials, self._special_raw):
-            hit = labels == lev
+        for lev, raw_lev, shown in zip(self._specials, self._special_raw, self._special_display):
+            hit = (labels == lev) | (labels == str(shown))
             if not isinstance(raw_lev, str):
                 hit = hit | np.asarray(raw == raw_lev, dtype=bool)
             columns.append(hit)
