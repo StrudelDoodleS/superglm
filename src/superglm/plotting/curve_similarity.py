@@ -51,13 +51,17 @@ def _weighted_max_abs_diff(
 
 
 def _curve_correlation(left: NDArray[np.float64], right: NDArray[np.float64]) -> float:
-    left, right, _shared = _both_valued(left, right)
-    if left.size == 0:
+    """The curves' Pearson correlation on the finite points they share; NaN where it has none.
+
+    It needs two such points, and both curves must vary across them: one
+    shared point, or a flat curve, has no correlation, neither 1 nor 0.
+    """
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    shared = np.isfinite(left) & np.isfinite(right)
+    left, right = left[shared], right[shared]
+    if left.size < 2 or np.ptp(left) == 0.0 or np.ptp(right) == 0.0:
         return float("nan")
-    if np.allclose(left, left[0]) and np.allclose(right, right[0]):
-        return 1.0
-    if np.std(left) < 1e-12 or np.std(right) < 1e-12:
-        return 0.0
     return float(np.corrcoef(left, right)[0, 1])
 
 

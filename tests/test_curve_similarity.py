@@ -30,6 +30,31 @@ def test_pairwise_similarity_matrices_have_expected_diagonals():
     np.testing.assert_allclose(np.diag(result["correlation"]), 1.0)
 
 
+def test_a_correlation_needs_two_shared_points_and_a_spread_in_both_curves():
+    """Gaps leave folds 0 and 1 one shared level, and fold 2 is flat.
+
+    A correlation from one point was reported as 1.0, the folds claiming a
+    perfect agreement they had no shape to show, and a flat curve's as 0.0
+    (1.0 against itself). Neither has a correlation.
+    """
+    from superglm.plotting.curve_similarity import _pairwise_curve_similarity
+
+    curves = {
+        "fold_0": np.array([0.1, 0.5, np.nan]),
+        "fold_1": np.array([np.nan, 0.2, 0.9]),
+        "fold_2": np.array([0.3, 0.3, 0.3]),
+    }
+
+    correlation = _pairwise_curve_similarity(curves, np.ones(3), labels=list(curves))["correlation"]
+
+    assert np.isnan(correlation.loc["fold_0", "fold_1"])
+    assert np.isnan(correlation.loc["fold_0", "fold_2"])
+    assert np.isnan(correlation.loc["fold_2", "fold_2"])
+    # A curve with itself: covariance over the product of two equal standard
+    # deviations, each a few roundings from exact.
+    assert abs(correlation.loc["fold_0", "fold_0"] - 1.0) <= 8 * _U
+
+
 def test_weighting_changes_rmse_in_expected_direction():
     from superglm.plotting.curve_similarity import _pairwise_curve_similarity
 
