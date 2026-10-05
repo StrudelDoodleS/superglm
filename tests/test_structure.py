@@ -949,12 +949,16 @@ def _narrower_next_year():
     return top, next_year[keep].reset_index(drop=True), next_y[keep]
 
 
-def test_a_range_to_this_years_end_fits_next_years_narrower_data_as_written():
-    # The editor writes a range dragged to the end as the data's maximum.
+@pytest.mark.parametrize("declared", [False, True], ids=["new", "declares the range"])
+def test_a_range_to_this_years_end_fits_next_years_narrower_data_as_written(declared):
+    # The editor writes a range dragged to the end as the data's maximum. A
+    # model that already declares the range is placed on the data as well.
     top, next_year, next_y = _narrower_next_year()
     structure = _age(PolynomialRange(70.0, top, 0, "kink"))
+    ranged = Spline(kind="bs", n_knots=6, polynomial_ranges=[PolynomialRange(70.0, top, 0, "kink")])
+    target = _plain(age=ranged) if declared else _plain()
     with pytest.warns(UserWarning) as placed:
-        model = structure.apply(_plain(), X=next_year)
+        model = structure.apply(target, X=next_year)
     assert [str(w.message) for w in placed] == [
         f"The spline of 'age' is fitted out past this data to hold the Flat range 70–{top:g} "
         "as written."
@@ -965,10 +969,13 @@ def test_a_range_to_this_years_end_fits_next_years_narrower_data_as_written():
     assert spline.fitted_boundary == (float(next_year["age"].min()), top)
 
 
-def test_an_ordered_band_range_to_a_band_next_year_lacks_fits_as_written():
+@pytest.mark.parametrize("declared", [False, True], ids=["new", "declares the range"])
+def test_an_ordered_band_range_to_a_band_next_year_lacks_fits_as_written(declared):
     X, y = _frame()
     keep = (X["band"] != "7").to_numpy()
     next_year, next_y = X[keep].reset_index(drop=True), y[keep]
+    ranged = Spline(kind="bs", n_knots=4, polynomial_ranges=[PolynomialRange("5", "7", 0, "kink")])
+    target = _plain(band=OrderedCategorical(order=BANDS, basis=ranged)) if declared else _plain()
     structure = Structure(
         features={
             "band": FeatureStructure(
@@ -980,7 +987,7 @@ def test_an_ordered_band_range_to_a_band_next_year_lacks_fits_as_written():
         }
     )
     with pytest.warns(UserWarning) as placed:
-        model = structure.apply(_plain(), X=next_year)
+        model = structure.apply(target, X=next_year)
     assert [str(w.message) for w in placed] == [
         "The spline of 'band' is fitted out past this data to hold the Flat range 5–7 as written."
     ]

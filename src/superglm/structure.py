@@ -674,7 +674,10 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     grouping = _grouping(entry.levels, entry.groups, order=declared)
     base = entry.reference if grouping is None else str(entry.reference)
     data = np.asarray(entry.levels, dtype=object)
-    if _same_ranges(entry.ranges, current_ranges(spec)):
+    # A model that declares these ranges keeps its spline, unless X needs it
+    # fitted out to hold them.
+    same = _same_ranges(entry.ranges, current_ranges(spec))
+    if same and (column is None or not entry.ranges):
         return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data)
     _require_shapes(model, name, entry)
     source = pristine_basis(spec)
@@ -711,14 +714,20 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
 
     position = host._range_edge_value
     in_order = sorted(ranges, key=lambda r: position(r.lo))
-    return hosted(ranges, _placed_boundary(name, in_order, fits, boundary, extent, position))
+    placed = _placed_boundary(name, in_order, fits, boundary, extent, position)
+    if same and placed == boundary:
+        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data)
+    return hosted(ranges, placed)
 
 
 def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
     from superglm.features._spline_ranges import validate_ranges
 
-    if _same_ranges(entry.ranges, current_ranges(spec)):
+    # A model that declares these ranges keeps its spline, unless X needs it
+    # fitted out to hold them.
+    same = _same_ranges(entry.ranges, current_ranges(spec))
+    if same and (column is None or not entry.ranges):
         return spec
     _require_shapes(model, name, entry)
     ranges: list[PolynomialRange] = []
@@ -738,15 +747,19 @@ def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
         return shaped_spline(spec, subset, knots=spec._explicit_knots, boundary=bound)
 
     boundary = spec._explicit_boundary
+
+    def placed_at(bound):
+        return spec if same and bound == boundary else shaped(ranges, bound)
+
     if column is None or not ranges:
-        return shaped(ranges, boundary)
+        return placed_at(boundary)
     try:
         x = np.asarray(column, dtype=np.float64).ravel()
     except (TypeError, ValueError):
-        return shaped(ranges, boundary)  # not a numeric column: the fit says so
+        return placed_at(boundary)  # not a numeric column: the fit says so
     x = x[np.isfinite(x)]
     if not x.size:
-        return shaped(ranges, boundary)
+        return placed_at(boundary)
 
     def fits(subset, bound):
         # The fit's own range checks: knot placement on the values it sees.
@@ -759,7 +772,7 @@ def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
     def extent():
         return float(x.min()), float(x.max())
 
-    return shaped(ranges, _placed_boundary(name, ranges, fits, boundary, extent, float))
+    return placed_at(_placed_boundary(name, ranges, fits, boundary, extent, float))
 
 
 def _placed_boundary(name: str, ranges: list, fits, boundary, extent, position):
