@@ -154,8 +154,11 @@ def _level_texts(values, levels: list[str]) -> NDArray:
         except ValueError:  # a number two levels spell, neither exactly
             return str(value)
 
-    codes, uniques = pd.factorize(raw[unmatched])
-    texts[unmatched] = np.asarray([*map(named, uniques), ""], dtype=object)[codes]
+    rows = np.flatnonzero(unmatched)
+    # A missing value is coded -1 and keeps its text.
+    codes, uniques = pd.factorize(raw[rows])
+    found = codes >= 0
+    texts[rows[found]] = np.asarray([named(value) for value in uniques], dtype=object)[codes[found]]
     return texts
 
 
