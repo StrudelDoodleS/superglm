@@ -1548,6 +1548,61 @@ def test_run_cv_and_final_fit_refuse_levels_outside_an_ungrouped_term_s_universe
         )
 
 
+@pytest.mark.filterwarnings("ignore:Routing rows with categorical levels unseen:UserWarning")
+@pytest.mark.parametrize("grouped", [False, True], ids=["levels", "grouping"])
+@pytest.mark.parametrize(
+    ("splitter", "unseen"), [("time series", "base"), ("rows in no fold", "error")]
+)
+def test_run_cv_checks_only_the_rows_its_folds_fit(grouped, splitter, unseen):
+    """N sits only in the last 40 rows, outside x's levels A/B/C/D or its groups.
+
+    No fold fits those rows: TimeSeriesSplit only tests on its last block, and
+    the other folds leave the last 100 rows out altogether. Run CV refused N
+    all the same, because it checked every CV row, though each fold fits and
+    scores as the supplied result did.
+    """
+    from sklearn.model_selection import TimeSeriesSplit
+
+    from superglm.editor.cv import StoredFolds, capture_cv_run, run_cv
+    from superglm.features.grouping import collapse_levels
+
+    rng = np.random.default_rng(3)
+    n = 600
+    x = rng.choice(["A", "B", "C", "D"], n).astype(object)
+    x[-40:] = "N"
+    power = rng.normal(size=n)
+    X = pd.DataFrame({"power": power, "x": x})
+    y = rng.poisson(np.exp(-0.3 + 0.1 * power)).astype(np.float64)
+    train = (X.iloc[:400], y[:400])
+
+    def declared():
+        if grouped:
+            grouping = collapse_levels(train[0]["x"], groups={"Other": ["C", "D"]})
+            term = Categorical(base="first", grouping=grouping, unseen=unseen)
+        else:
+            term = Categorical(base="first", levels=["A", "B", "C", "D"], unseen=unseen)
+        return SuperGLM(
+            family="poisson", selection_penalty=0.0, features={"power": Numeric(), "x": term}
+        )
+
+    rows = np.arange(n)
+    folds = (
+        TimeSeriesSplit(3)
+        if splitter == "time series"
+        else StoredFolds(((rows[:250], rows[250:500]), (rows[250:500], rows[:250])))
+    )
+    supplied = cross_validate(declared(), X, y, cv=folds, scoring=("deviance",))
+    session = EditorSession.from_model(
+        declared().fit(*train), cv=supplied, cv_data=(X, y), train_data=train
+    )
+
+    run = run_cv(capture_cv_run(session), _Context())
+
+    np.testing.assert_array_equal(
+        run.result.fold_scores["deviance"], supplied.fold_scores["deviance"]
+    )
+
+
 @pytest.mark.parametrize(("fit_mode", "selection"), [("fit", "auto"), ("fit_reml", 0.0)])
 def test_run_cv_and_final_fit_recalibrate_the_declared_penalties_after_a_refit(
     cv_frame, fit_mode, selection

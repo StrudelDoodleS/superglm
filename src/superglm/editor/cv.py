@@ -736,11 +736,12 @@ def _declared_template(session):
 def _covering_template(template, X, job: str):
     """``template`` with each grouped categorical covering the levels ``X`` holds.
 
-    A grouping built on the train rows does not cover a level only the CV
-    data or the validation rows hold, and the fit refuses a level its
-    grouping does not cover. Such a level goes where the term sends new
-    levels: into the group its ``unseen`` names, as the in-force model
-    predicts it and as ``Structure.apply(model, X=...)`` places it. A term
+    ``X`` holds the rows ``job`` fits. A grouping built on the train rows
+    does not cover a level only the CV data or the validation rows hold, and
+    the fit refuses a level its grouping does not cover. Such a level goes
+    where the term sends new levels: into the group its ``unseen`` names, as
+    the in-force model predicts it and as ``Structure.apply(model, X=...)``
+    places it. A term
     with no group for new levels (``"error"`` or ``"base"``), or one whose
     ``levels=`` leaves the level out, refuses ``job`` in one sentence. So
     does an ungrouped term whose universe, declared or bound by
@@ -819,7 +820,11 @@ def _uncovered_labels(values, grouping) -> list[str]:
 
 def run_cv(plan: CVRunPlan, context) -> CVRun:
     """Replay the stored folds on the in-force structure with the hand edits put back."""
-    template = _covering_template(plan.template, plan.rows.X, "Run CV")
+    # Only the rows some fold trains on are fitted: a test-only row is scored
+    # as the term predicts new levels, and a row in no fold is never read.
+    fitted = np.unique(np.concatenate([train for train, _test in plan.folds]))
+    X_fitted = as_eager_frame(plan.rows.X).take_rows(fitted)
+    template = _covering_template(plan.template, X_fitted, "Run CV")
     recorder = _FoldRecorder(plan, context)
     try:
         result = cross_validate(
