@@ -285,7 +285,7 @@ def test_cv_data_is_checked_against_the_folds(cv_frame, cv_fit):
 
     reordered = (X.iloc[:400][::-1], y[:400][::-1], w[:400][::-1])
     moved = EditorSession.from_model(model, terms=["region"], cv=supplied, cv_data=reordered)
-    assert moved.cv_check.reason == FINGERPRINT_MISMATCH
+    assert moved.cv_check.reason == FINGERPRINT_MISMATCH.format(data="CV data", rows=400)
 
     older = dataclasses.replace(supplied, n_rows=None, data_fingerprint=None)
     noted = EditorSession.from_model(model, terms=["region"], cv=older, cv_data=reordered)
@@ -311,6 +311,35 @@ def test_cv_data_is_checked_against_the_folds(cv_frame, cv_fit):
     assert EditorSession.from_model(model, terms=["region"]).cv_check.reason == NO_CV
     with pytest.raises(TypeError, match="not a splitter"):
         EditorSession.from_model(model, cv=KFold(3))
+
+
+def test_a_fingerprint_mismatch_names_the_rows_and_what_can_differ(cv_frame, cv_fit):
+    """The same values in another backend, dtype or with an extra column are other data.
+
+    The folds replay only on the data they were drawn on, so these are
+    refused, in a sentence that says what can differ and what to pass
+    rather than that the features differ.
+    """
+    import polars as pl
+
+    X, y, w = cv_frame
+    model, supplied = cv_fit
+    train = X.iloc[:400]
+    sentence = (
+        "The {} 400 rows are not the ones the folds were drawn on: their columns, dtypes, row "
+        "order or values differ (a pandas frame and a polars one differ too). Pass the X, y, "
+        "sample_weight and offset given to cross_validate as cv_data."
+    )
+    for frame in (pl.from_pandas(train), train.astype({"power": "float32"}), train.assign(z=1)):
+        supplied_rows = (frame, y[:400], w[:400])
+        session = EditorSession.from_model(
+            model, terms=["region"], cv=supplied, cv_data=supplied_rows
+        )
+        assert session.cv_check.reason == sentence.format("CV data's")
+        session = EditorSession.from_model(
+            model, terms=["region"], cv=supplied, train_data=supplied_rows
+        )
+        assert session.cv_check.reason == sentence.format("train data's")
 
 
 def test_cv_data_with_rows_swapped_between_equal_responses_is_refused():
@@ -339,9 +368,10 @@ def test_cv_data_with_rows_swapped_between_equal_responses_is_refused():
     same = EditorSession.from_model(model, cv=supplied, cv_data=(X.copy(), y, np.ones(n)))
     assert (same.cv_check.reason, same.cv_check.note) == (None, None)
     moved = EditorSession.from_model(model, cv=supplied, cv_data=(swapped, y))
-    assert moved.cv_check.reason == FINGERPRINT_MISMATCH
+    mismatch = FINGERPRINT_MISMATCH.format(data="CV data", rows=n)
+    assert moved.cv_check.reason == mismatch
     offset = EditorSession.from_model(model, cv=supplied, cv_data=(X, y, None, np.full(n, 0.5)))
-    assert offset.cv_check.reason == FINGERPRINT_MISMATCH
+    assert offset.cv_check.reason == mismatch
 
 
 def test_edit_takes_split_data_and_a_cv_result(cv_frame, cv_fit):
