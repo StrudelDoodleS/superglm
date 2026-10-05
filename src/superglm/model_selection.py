@@ -88,12 +88,29 @@ class CrossValidationResult:
         self,
         X: FrameLike,
         *,
+        y: NDArray | None = None,
         sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
         terms: str | list[str] | None = None,
         engine: str = "plotly",
         **kwargs,
     ):
-        """Plot fold-specific main effects using the shared comparison engine."""
+        """Plot fold-specific main effects using the shared comparison engine.
+
+        The stored folds are replayed on ``X`` and ``sample_weight``, so they
+        must be the data given to :func:`cross_validate`, in the same order.
+        Their row count is always checked. Pass ``y`` (and ``offset``, if the
+        cross-validation had one) to check the rows themselves against
+        :attr:`data_fingerprint`; without ``y`` a reordered ``X`` of the same
+        length cannot be told apart.
+
+        Raises
+        ------
+        ValueError
+            If ``X`` or ``sample_weight`` has another row count than the folds
+            index, or, when ``y`` is passed, the data differ from the data the
+            folds were drawn on.
+        """
         if self.estimators is None:
             raise RuntimeError("return_estimators=True is required for plot_terms_by_fold().")
 
@@ -105,8 +122,15 @@ class CrossValidationResult:
         if not models:
             raise RuntimeError("No fitted fold estimators are available to plot.")
         frame = as_eager_frame(X)
-        support_by_label: dict[str, dict[str, Any]] = {}
         weight_arr = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+        expected = _fold_row_count(self.n_rows, self.fold_indices or [])
+        for name, rows in (("X", frame), ("sample_weight", weight_arr)):
+            if expected is not None and rows is not None and len(rows) != expected:
+                raise ValueError(_FOLD_ROWS.format(name=name, rows=len(rows), expected=expected))
+        if y is not None and self.data_fingerprint is not None:
+            if _data_fingerprint(frame, y, weight_arr, offset) != self.data_fingerprint:
+                raise ValueError(_FOLD_DATA.format(rows=expected))
+        support_by_label: dict[str, dict[str, Any]] = {}
         for fold, indices in enumerate(self.fold_indices or []):
             label = f"fold_{fold}"
             if label not in models:
@@ -126,6 +150,24 @@ class CrossValidationResult:
             engine=engine,
             **kwargs,
         )
+
+
+_FOLD_ROWS = (
+    "{name} has {rows:,} rows, but the folds were drawn on {expected:,}; pass the data given "
+    "to cross_validate."
+)
+_FOLD_DATA = (
+    "These {rows:,} rows are not the ones the folds were drawn on: the columns, dtypes, row "
+    "order or values of X, y, sample_weight or offset differ (a pandas frame and a polars one "
+    "differ too); pass the data given to cross_validate."
+)
+
+
+def _fold_row_count(n_rows: int | None, folds: Sequence[tuple[NDArray, NDArray]]) -> int | None:
+    """The recorded row count, or one past the largest index an older result holds."""
+    if n_rows is not None or not folds:
+        return n_rows
+    return 1 + max(int(np.max(np.concatenate(fold))) for fold in folds)
 
 
 def _data_fingerprint(X, y, sample_weight=None, offset=None) -> str:

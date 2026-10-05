@@ -782,6 +782,54 @@ class TestReturnOptions:
             40,
         ]
 
+    def test_plot_terms_by_fold_refuses_rows_the_folds_were_not_drawn_on(self, monkeypatch):
+        """Stored folds replayed on other rows crash on a short X or plot the wrong rows.
+
+        The row count is checked always, from the indices on a result made
+        before it was recorded; the fingerprint when y is passed.
+        """
+        x = np.linspace(0.0, 1.0, 60)
+        X = pd.DataFrame({"x": x})
+        y = 0.5 + np.sin(3.0 * x)
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0.0, features={"x": Spline(n_knots=5)}
+        )
+        result = cross_validate(model, X, y, cv=SimpleKFold(3), return_estimators=True)
+        monkeypatch.setattr(
+            "superglm.plotting.comparison.plot_term_comparison", lambda **kwargs: "figure"
+        )
+
+        short = (
+            "{} has 40 rows, but the folds were drawn on 60; pass the data given to cross_validate."
+        )
+        older = CrossValidationResult(
+            **{**vars(result), "n_rows": None, "data_fingerprint": None, "splitter": None}
+        )
+        for cv in (result, older):
+            with pytest.raises(ValueError) as refused:
+                cv.plot_terms_by_fold(X.iloc[:40])
+            assert str(refused.value) == short.format("X")
+            with pytest.raises(ValueError) as refused:
+                cv.plot_terms_by_fold(X, sample_weight=np.ones(40))
+            assert str(refused.value) == short.format("sample_weight")
+
+        reversed_rows = X.iloc[::-1].reset_index(drop=True)
+        for args in (
+            (reversed_rows, y),
+            (X, y[::-1]),
+            (X.astype("float32"), y),
+            (pl.from_pandas(X), y),
+        ):
+            with pytest.raises(ValueError) as refused:
+                result.plot_terms_by_fold(args[0], y=args[1])
+            assert str(refused.value) == (
+                "These 60 rows are not the ones the folds were drawn on: the columns, dtypes, "
+                "row order or values of X, y, sample_weight or offset differ (a pandas frame and "
+                "a polars one differ too); pass the data given to cross_validate."
+            )
+        assert result.plot_terms_by_fold(X, y=y, sample_weight=np.ones(60)) == "figure"
+        assert result.plot_terms_by_fold(reversed_rows) == "figure"  # unchecked without y
+
     def test_return_oof(self, poisson_data, base_model):
         """return_oof=True fills correct indices."""
         df, y, sw = poisson_data

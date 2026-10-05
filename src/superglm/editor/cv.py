@@ -39,6 +39,7 @@ from superglm.model_selection import (
     _POOLED_PARTS,
     CrossValidationResult,
     _data_fingerprint,
+    _fold_row_count,
     cross_validate,
 )
 from superglm.plotting.comparison import _feature_beta, _score_levels
@@ -185,7 +186,7 @@ def check_cv_data(
     rows = fallback if cv_rows is None else cv_rows
     if rows is None:
         return CVDataCheck(None, NO_ROWS)
-    expected = _expected_rows(cv.n_rows, folds)
+    expected = _fold_row_count(cv.n_rows, folds)
     if rows.n_obs != expected:
         sentence = TRAIN_ROWS_MISMATCH if cv_rows is None else ROWS_MISMATCH
         return CVDataCheck(None, sentence.format(rows=rows.n_obs, expected=expected))
@@ -195,13 +196,6 @@ def check_cv_data(
     if cv.data_fingerprint != held:
         return CVDataCheck(None, FINGERPRINT_MISMATCH)
     return CVDataCheck(rows)
-
-
-def _expected_rows(n_rows: int | None, folds: Sequence[tuple[NDArray, NDArray]]) -> int:
-    """The recorded row count, or one past the largest index an older result holds."""
-    if n_rows is not None:
-        return int(n_rows)
-    return 1 + max(int(np.max(np.concatenate(fold))) for fold in folds)
 
 
 def run_cv_reason(session) -> str | None:
