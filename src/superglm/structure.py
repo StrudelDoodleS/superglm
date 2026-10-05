@@ -129,6 +129,10 @@ _UNIVERSE = (
     "The levels of {feature!r} in the structure are not the levels the model declares for "
     "it; apply the structure to a model declared with the same levels."
 )
+_ORDER = (
+    "The levels of {feature!r} in the structure are in another order than the model declares "
+    "them; apply the structure to a model that declares them in the same order."
+)
 _OUTSIDE_DECLARED = (
     "The data holds levels of {feature!r} that the model's levels= leaves out: {levels}; "
     "add them to its levels= or leave those rows out."
@@ -390,8 +394,9 @@ class Structure:
         ------
         StructureError
             If ``model`` is not a SuperGLM, a feature is not in the model or is
-            another kind of term, its levels are not those the model declares,
-            or its spline refuses a range. Any other error while a feature is
+            another kind of term, its levels are not those the model declares
+            (an ordered term's bands in the order it declares them), or its
+            spline refuses a range. Any other error while a feature is
             rebuilt is reported as that feature's refusal, with the error as
             its cause.
         """
@@ -652,9 +657,16 @@ def _grouping(levels: list, groups: dict, *, order: list[str]):
 
 
 def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
-    declared = [str(level) for level in (*spec._declared_smooth_levels, *spec._special_display)]
-    if sorted(declared) != sorted(str(level) for level in entry.levels):
+    smooth = [str(level) for level in spec._declared_smooth_levels]
+    declared = [*smooth, *(str(level) for level in spec._special_display)]
+    listed = [str(level) for level in entry.levels]
+    if sorted(declared) != sorted(listed):
         raise StructureError(_UNIVERSE.format(feature=name))
+    # The groups join neighbouring bands and the ranges run between bands, so
+    # the bands must lie in the order the structure was made on. The specials,
+    # free levels off the axis, follow them in any order.
+    if listed[: len(smooth)] != smooth:
+        raise StructureError(_ORDER.format(feature=name))
     grouping = _grouping(entry.levels, entry.groups, order=declared)
     base = entry.reference if grouping is None else str(entry.reference)
     data = np.asarray(entry.levels, dtype=object)

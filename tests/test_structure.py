@@ -1058,6 +1058,14 @@ APPLY_REFUSALS = {
         "The levels of 'band' in the structure are not the levels the model declares for it; "
         "apply the structure to a model declared with the same levels.",
     ),
+    "ordered levels in another order": (
+        lambda: Structure(
+            features={"band": FeatureStructure(kind="ordered", levels=BANDS[::-1], reference="3")}
+        ),
+        _plain,
+        "The levels of 'band' in the structure are in another order than the model declares "
+        "them; apply the structure to a model that declares them in the same order.",
+    ),
     "declared levels the grouping misses": (
         _brand_structure,
         lambda: _plain(brand=Categorical(base="first", levels=[*BRANDS, "B15"])),
