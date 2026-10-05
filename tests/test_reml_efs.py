@@ -245,3 +245,52 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact(monkeypatch) ->
         terminal = fitted.iteration_log[-1]
         assert terminal.convergence_tolerance == 1e-8
         assert terminal.convergence_value < terminal.convergence_tolerance
+
+
+def test_an_unconverged_efs_route_final_fit_is_published_unconverged(monkeypatch) -> None:
+    """The EFS route (a selection penalty with targets) publishes its engine's
+    own final fit, which the mode certificate does not judge; one that stopped
+    before its own convergence test is published converged=False, names that
+    stage, and warns. ``fit_reml`` resolves every selection penalty to 0, so no
+    public call reaches this route: it is entered by bypassing that resolution,
+    and the final fit is forced to stop on its iteration budget, as for the QP
+    passthrough in test_reml.py. Mutation check: publishing the final fit as
+    converged whatever it reports (``unconverged_terminal = None`` in
+    ``finalize_reml_fit``) fails here, as 941f9ce8 did."""
+    from dataclasses import replace
+
+    import superglm.model.reml_finalize as reml_finalize
+    import superglm.reml.efs as efs
+    from superglm import ConvergenceWarning
+
+    engine_runs = []
+    real_engine = efs.optimize_efs_reml
+
+    def counting_engine(*args, **kwargs):
+        engine_runs.append(1)
+        return real_engine(*args, **kwargs)
+
+    real_final = reml_finalize.maybe_qp_passthrough_refit
+
+    def budget_spent(*args, **kwargs):
+        return replace(real_final(*args, **kwargs), converged=False, termination_reason="max_iter")
+
+    monkeypatch.setattr(base, "resolve_selection_penalty_for_reml", lambda penalty: None)
+    monkeypatch.setattr(efs, "optimize_efs_reml", counting_engine)
+    monkeypatch.setattr(reml_finalize, "maybe_qp_passthrough_refit", budget_spent)
+    rng = np.random.default_rng(731)
+    x = np.linspace(-1.0, 1.0, 80)
+    response = rng.poisson(np.exp(0.25 + 0.4 * np.sin(np.pi * x))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.01,
+        features={"x": Spline(kind="cr", n_knots=5, penalty="ssp")},
+        spline_penalty=0.3,
+    )
+    with pytest.warns(ConvergenceWarning, match="final coefficient fit"):
+        model.fit_reml(pd.DataFrame({"x": x}), response)
+    assert engine_runs == [1]
+    info = model.reml_diagnostics()
+    assert info["converged"] is False
+    assert info["terminal_refit_termination"] == "max_iter"
+    assert model._reml_result.terminal_refit_termination == "max_iter"

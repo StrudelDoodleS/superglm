@@ -1951,7 +1951,6 @@ def _joint_efs_lambda_step(
     scop_states: dict[int, dict],
     alpha: dict[str, float],
     prev_dlsp: dict[str, float],
-    flat_out: set[str] | None = None,
     aitken_state: dict | None = None,
 ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     """Joint EFS lambda step using rEDF/pSp (Wood & Fasiolo 2017, scasm-style).
@@ -1977,10 +1976,6 @@ def _joint_efs_lambda_step(
     scop_states : SCOP converged state dict.
     alpha : per-component adaptive step size (mutated in place).
     prev_dlsp : previous step directions for sign-flip detection.
-    flat_out : set, optional
-        Receives the components either suppression hold covers at this
-        iterate (``_scop_suppression_holds``): those at a flat end of the
-        criterion.
     aitken_state : dict, optional
         Per-component accepted-step history for the safeguarded Aitken jump
         (``_SCOP_EFS_AITKEN_*``); ``None`` disables it.
@@ -2042,8 +2037,6 @@ def _joint_efs_lambda_step(
             dlsp = 0.0
         if decrease_held and dlsp < 0:
             dlsp = 0.0
-        if flat_out is not None and (increase_held or decrease_held):
-            flat_out.add(pc.name)
 
         # Adaptive alpha damping
         if pc.name in prev_dlsp and prev_dlsp[pc.name] != 0.0:
@@ -2245,10 +2238,14 @@ def _scop_newton_system(
     )
 
 
+class _SCOPCorrectionUnavailableError(Exception):
+    """The Newton Jacobian's SCOP reparameterisation terms cannot be formed at this mode."""
+
+
 def _scop_reparam_jacobian_correction(
     mode: _SCOPREMLMode, system: _SCOPNewtonSystem
 ) -> NDArray | None:
-    """The working Jacobian's SCOP reparameterisation terms, or None.
+    """The working Jacobian's SCOP reparameterisation terms, or None when there are none.
 
     The part of ``d t_j / d rho_k = -tr(H^-1 (dH/d rho_k) H^-1 S_j)`` that
     comes from H moving with a SCOP block's own coefficients through the map
@@ -2264,12 +2261,15 @@ def _scop_reparam_jacobian_correction(
     ``e (K v + c v0 - v S beta)`` and ``dc = E c``; the intercept-profiled H
     loses ``(dc c' + c dc') / sum(W)``. Returned unsymmetrised, as the j, k
     entries of ``lambda_j d t_j / d rho_k``. None when no block carries a
-    positivity coordinate, a block's Newton solve or the joint geometry fell
-    back to Fisher curvature (the curvature then lacks the map's term), or
-    the map is not the exp map this assumes.
+    positivity coordinate: the Jacobian then has no such terms. Raises
+    ``_SCOPCorrectionUnavailableError`` when the terms exist but cannot be formed:
+    a block's Newton solve or the joint geometry fell back to Fisher curvature
+    (the curvature then lacks the map's term), the map is not the exp map this
+    assumes, or the terms are not finite. The fixed-curvature Jacobian alone
+    is then not the step's Jacobian, so the caller takes an EFS step there.
     """
     if mode.curvature_source != "observed":
-        return None
+        raise _SCOPCorrectionUnavailableError("the joint geometry fell back to Fisher curvature")
     geometry = mode.joint_geometry
     hessian_inverse = mode.hessian_inverse
     width = int(hessian_inverse.shape[0])
@@ -2277,7 +2277,9 @@ def _scop_reparam_jacobian_correction(
     latent_beta = np.asarray(mode.result.beta, dtype=np.float64).copy()
     for state in mode.scop_states.values():
         if bool(state.get("last_fisher_fallback", False)):
-            return None
+            raise _SCOPCorrectionUnavailableError(
+                "a block's Newton solve fell back to Fisher curvature"
+            )
         group_slice = state["group_sl"]
         beta_eff = np.asarray(state["beta_eff"], dtype=np.float64)
         latent_beta[group_slice] = beta_eff
@@ -2285,7 +2287,7 @@ def _scop_reparam_jacobian_correction(
         second = np.asarray(state["reparam"].second_derivative_diagonal(beta_eff), dtype=np.float64)
         ratio = np.divide(second, jacobian, out=np.zeros_like(second), where=jacobian != 0.0)
         if not np.all((ratio == 0.0) | (ratio == 1.0)):
-            return None
+            raise _SCOPCorrectionUnavailableError("the SCOP map is not the exp map")
         positivity[group_slice] = ratio
     if not np.any(positivity):
         return None
@@ -2335,7 +2337,7 @@ def _scop_reparam_jacobian_correction(
             - 2.0 * ((sandwich @ cross) @ cross_changes) / sum_w
         )
     if not np.all(np.isfinite(correction)):
-        return None
+        raise _SCOPCorrectionUnavailableError("the reparameterisation terms are not finite")
     return correction
 
 
@@ -2364,6 +2366,12 @@ def _scop_newton_step(system: _SCOPNewtonSystem, jacobian: NDArray | None = None
         if index.size == 0:
             break
         values, vectors = np.linalg.eigh(matrix[np.ix_(index, index)])
+        # Wood, Pya & Saefken (2016), outer step 4d, asks only that the
+        # Jacobian be perturbed to positive definite so the step descends. The
+        # perturbation chosen here keeps each eigenvalue's magnitude and raises
+        # it to at least eps**0.7 (about 1e-11) times the largest, a relative
+        # floor written in eps = 2**-52 (np.finfo spacing at 1.0), not in the
+        # unit roundoff u = eps / 2.
         floor = np.finfo(np.float64).eps ** 0.7 * max(float(np.max(np.abs(values))), 1e-300)
         values = np.maximum(np.abs(values), floor)
         step[index] = -(vectors @ ((vectors.T @ g[index]) / values))
@@ -2380,6 +2388,35 @@ def _scop_newton_step(system: _SCOPNewtonSystem, jacobian: NDArray | None = None
     if largest > _SCOP_NEWTON_MAX_LOG_STEP:
         step *= _SCOP_NEWTON_MAX_LOG_STEP / largest
     return step
+
+
+def _scop_flat_components(mode: _SCOPREMLMode, names: set[str], phi: float) -> list[str]:
+    """The components of ``names`` a suppression hold covers at ``mode``, sorted.
+
+    The holds the EFS step and the Newton system read (``_scop_suppression_holds``),
+    from the same reductions, at one coherent mode. A component whose block is
+    numerically zero is left out, as both steps leave it in place.
+    """
+    prior_edf, _ = compute_logdet_s_derivatives(mode.lambdas, mode.penalty_components)
+    flat: list[str] = []
+    for pc in mode.penalty_components:
+        if pc.name not in names:
+            continue
+        scop_state = _is_scop_component(pc, mode.scop_states)
+        beta_group = (
+            scop_state["beta_eff"] if scop_state is not None else mode.result.beta[pc.group_sl]
+        )
+        if np.linalg.norm(beta_group) < 1e-12:
+            continue
+        lam = float(mode.lambdas[pc.name])
+        quadratic = penalty_component_quadratic(pc, beta_group)
+        trace = penalty_component_trace(pc, mode.hessian_inverse[pc.group_sl, pc.group_sl])
+        increase_held, decrease_held = _scop_suppression_holds(
+            float(prior_edf[pc.name]), lam * trace, quadratic * lam / max(phi, 1e-300)
+        )
+        if increase_held or decrease_held:
+            flat.append(pc.name)
+    return sorted(flat)
 
 
 def optimize_scop_efs_reml(
@@ -2437,7 +2474,8 @@ def optimize_scop_efs_reml(
     iterate where a SCOP block's inner solve, or the joint geometry, fell
     back to Fisher curvature the Newton Jacobian lacks its
     reparameterisation terms, so that iteration takes an EFS step instead
-    (``"efs_fisher"`` in ``scop_outer_steps``).
+    (``"efs_fisher"`` in ``scop_outer_steps``), and so does an observed
+    iterate where those terms cannot be formed (``"efs_uncorrected"``).
     ``_outer_step="efs"`` runs EFS throughout.
 
     Parameters
@@ -2610,7 +2648,6 @@ def optimize_scop_efs_reml(
     current_mode: _SCOPREMLMode | None = None
 
     # Convergence diagnostics
-    flat_names: set[str] = set()
     inner_iter_history: list[int] = []
     objective_history: list[float] = []
     scop_step_norms_history: list[dict[str, float]] = []
@@ -2732,7 +2769,6 @@ def optimize_scop_efs_reml(
 
         obj_curr = current_mode.objective
         objective_history.append(float(obj_curr))
-        flat_names = set()
         retained_mode = None
         candidate_accepted = False
         step_kind = "efs"
@@ -2753,6 +2789,12 @@ def optimize_scop_efs_reml(
             current_mode.curvature_source != "observed"
             or any(bool(state.get("last_fisher_fallback", False)) for state in scop_states.values())
         )
+        # The reparameterisation terms can also fail to form on an observed
+        # iterate (not finite, or a map that is not the exp map). The
+        # fixed-curvature Jacobian alone is then not the step's Jacobian, so
+        # that iteration takes the EFS step too, recorded as
+        # "efs_uncorrected", and Newton resumes at the next.
+        uncorrected_iterate = False
         if newton_live and not fisher_iterate:
             inverse_phi_derivative: float | None = 0.0
             if not scale_known:
@@ -2782,12 +2824,15 @@ def optimize_scop_efs_reml(
             # The reparameterisation terms enter symmetrised: the exact LAML
             # Hessian is symmetric, and what the fixed weights leave of the
             # asymmetry measured 2e-2 against diagonals of 1 to 7.
-            correction = (
-                None if system is None else _scop_reparam_jacobian_correction(current_mode, system)
-            )
+            correction = None
+            if system is not None:
+                try:
+                    correction = _scop_reparam_jacobian_correction(current_mode, system)
+                except _SCOPCorrectionUnavailableError:
+                    uncorrected_iterate = True
             newton_step = (
                 None
-                if system is None
+                if system is None or uncorrected_iterate
                 else _scop_newton_step(
                     system,
                     None
@@ -2795,7 +2840,7 @@ def optimize_scop_efs_reml(
                     else system.hessian + 0.5 * (correction + correction.T),
                 )
             )
-            if system is None or newton_step is None:
+            if system is None or (newton_step is None and not uncorrected_iterate):
                 newton_live = False
                 newton_fallback = (
                     "scale_profile"
@@ -2803,15 +2848,8 @@ def optimize_scop_efs_reml(
                     else "newton_system"
                 )
                 newton_fallback_iter = n_reml_iter
-            else:
+            elif not uncorrected_iterate:
                 step_kind = "newton"
-                flat_names = {
-                    name
-                    for name, held_up, held_down in zip(
-                        system.names, system.increase_held, system.decrease_held, strict=True
-                    )
-                    if held_up or held_down
-                }
                 if rescue_alpha is None and float(np.max(np.abs(newton_step))) < reml_tol:
                     # The full Newton step is the distance to the fixed point
                     # of the local model, so a step under the tolerance
@@ -2893,7 +2931,6 @@ def optimize_scop_efs_reml(
                         elif n_reml_iter == 1:
                             newton_live = False
                             newton_fallback = "line_search_first_iteration"
-                            flat_names = set()
                         else:
                             outer_steps.append("newton")
                             lambda_history.append(lambdas.copy())
@@ -2906,7 +2943,13 @@ def optimize_scop_efs_reml(
         # own bounded line search (Step 7). Only update components in
         # active_names (frozen ones are skipped).
         if retained_mode is None:
-            step_kind = "efs_fisher" if fisher_iterate else "efs"
+            step_kind = (
+                "efs_fisher"
+                if fisher_iterate
+                else "efs_uncorrected"
+                if uncorrected_iterate
+                else "efs"
+            )
             lambdas_new, efs_alpha, raw_dlsp = _joint_efs_lambda_step(
                 all_pcs,
                 beta,
@@ -2917,7 +2960,6 @@ def optimize_scop_efs_reml(
                 scop_states,
                 efs_alpha,
                 efs_prev_dlsp,
-                flat_names,
                 aitken_state,
             )
             retained_mode, candidate_accepted = _backtrack_scop_efs_candidate(
@@ -2939,13 +2981,21 @@ def optimize_scop_efs_reml(
         if rescue_alpha is not None:
             rescue_endorsed = retained_mode is not current_mode
 
-        # Update prev_dlsp from ACCEPTED (post-damping) step
-        for name in estimated_names:
-            if name in lambdas_new and name in lambdas:
-                accepted_step = np.log(max(lambdas_new[name], 1e-10)) - np.log(
-                    max(lambdas[name], 1e-10)
-                )
-                efs_prev_dlsp[name] = accepted_step
+        # Update prev_dlsp from the ACCEPTED (post-damping) EFS step. The
+        # adaptive EFS step size halves on a sign flip against it and grows on
+        # agreement, and a Newton step is no EFS step: it leaves no direction
+        # behind, so the next EFS step (an ``"efs_fisher"`` or
+        # ``"efs_uncorrected"`` iterate) keeps the step size the last EFS step
+        # left, as the Aitken history below starts afresh.
+        if step_kind == "newton":
+            efs_prev_dlsp.clear()
+        else:
+            for name in estimated_names:
+                if name in lambdas_new and name in lambdas:
+                    accepted_step = np.log(max(lambdas_new[name], 1e-10)) - np.log(
+                        max(lambdas[name], 1e-10)
+                    )
+                    efs_prev_dlsp[name] = accepted_step
         # Aitken extrapolates a run of EFS steps contracting at one ratio, and
         # a Newton step is no part of that run: the next EFS step (an
         # ``"efs_fisher"`` iterate, or the hand-off to EFS) starts the history
@@ -3185,6 +3235,18 @@ def optimize_scop_efs_reml(
     final_scop_states = final_mode.scop_states
     final_all_pcs = final_mode.penalty_components
     final_evaluation = final_mode.evaluation
+    # The holds are read at the published mode: an accepted final step can
+    # cross a 0.05 bar, and the iterate it left would then describe the other
+    # side of it to every warm start taken from this result.
+    flat_components = _scop_flat_components(
+        final_mode,
+        active_names,
+        _reml_evaluation_phi(
+            final_evaluation,
+            scale_known=scale_known,
+            fallback_likelihood_size=fit_context.likelihood_size,
+        ),
+    )
 
     return REMLResult(
         lambdas=lambdas,
@@ -3211,7 +3273,7 @@ def optimize_scop_efs_reml(
             managed_cleanup_frozen_history if managed_cleanup_frozen_history else None
         ),
         tweedie_scale_data=tweedie_scale_data,
-        flat_components=sorted(flat_names),
+        flat_components=flat_components,
         scop_outer_steps=outer_steps,
         scop_newton_fallback=newton_fallback,
         scop_newton_fallback_iter=newton_fallback_iter,

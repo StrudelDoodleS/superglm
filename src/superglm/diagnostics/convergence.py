@@ -15,13 +15,16 @@ class ConvergenceWarning(UserWarning):
     """A fit stopped before its convergence test passed.
 
     The fitted model is still returned. ``SuperGLM.fit_reml`` warns when
-    smoothing-parameter selection stops unconverged; the summary's
-    ``Converged`` row and ``reml_diagnostics()["converged"]`` then read
-    ``False``. ``SuperLSS.fit_reml`` warns when its coefficient or smoothing
-    loop stops unconverged; ``result_.converged`` then reads ``False`` and
-    the summary's ``note`` column says so. The message names the reason and
-    what to change. Silence it with ``warnings.filterwarnings`` once the
-    reason is understood.
+    smoothing-parameter selection stops unconverged, or its final coefficient
+    fit does, and so do ``estimate_p`` and ``estimate_theta`` with
+    ``fit_mode="reml"`` for the fit they publish; the summary's ``Converged``
+    row and ``reml_diagnostics()["converged"]`` then read ``False``.
+    ``SuperLSS.fit_reml`` warns when its coefficient or smoothing loop stops
+    unconverged; ``result_.converged`` then reads ``False`` and the summary's
+    ``note`` column says so (``SuperLSS.fit``, with fixed smoothing, reports
+    it there without a warning). The message names the reason and what to
+    change. Silence it with ``warnings.filterwarnings`` once the reason is
+    understood.
     """
 
 
@@ -96,8 +99,10 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
         )
     if reason == "max_reml_iter":
         message += (
-            " Refit with a larger max_reml_iter, passing "
-            "lambda2_init=model.reml_diagnostics()['lambdas'] to continue from this fit."
+            " Refit with a larger max_reml_iter"
+            + (" and a larger max_pirls_iter" if refit_reason == "max_iter" else "")
+            + ", passing lambda2_init=model.reml_diagnostics()['lambdas'] to continue "
+            "from this fit."
         )
     elif refit_reason == "max_iter":
         message += " Refit with a larger max_pirls_iter to let the final fit finish."

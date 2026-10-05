@@ -69,7 +69,7 @@ class REMLResult:
     managed_cleanup_active_history: list[list[str]] | None = None
     # Accepted post-update frozen managed names per outer step.
     managed_cleanup_frozen_history: list[list[str]] | None = None
-    # SCOP components a suppression hold covered at the final iterate: those at
+    # SCOP components a suppression hold covered at the published mode: those at
     # a flat end of the criterion, where the residual EDF is under 0.05, or
     # (a penalty other penalties cover) d log|S|+ / d rho_j is under 0.05
     # with the slope asking for a decrease under 0.05 as well
@@ -77,10 +77,12 @@ class REMLResult:
     # which way the new data's optimum lies, so these are left out of warm
     # starts.
     flat_components: list[str] | None = None
-    # The SCOP outer step taken at each iteration ("newton", "efs", or
+    # The SCOP outer step taken at each iteration ("newton", "efs",
     # "efs_fisher": an EFS step at an iterate where a block's inner solve or
     # the joint geometry fell back to Fisher curvature, which leaves the
-    # Newton Jacobian without its reparameterisation terms), and why and at
+    # Newton Jacobian without its reparameterisation terms, or
+    # "efs_uncorrected": an EFS step at an observed iterate where those terms
+    # could not be formed, not finite or under a map other than exp), and why and at
     # which iteration (0: before the first) the run handed itself to EFS, or
     # None when Newton ran throughout. Reasons: "requested",
     # "multi_scop_cleanup", "scale_profile", "newton_system", and three for a

@@ -324,6 +324,11 @@ def _publish_profiled_family(
         from superglm.model import fit_ops
 
         fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
+        # The publication refit is a fit_reml fit the caller receives: it
+        # warns once, as fit_reml does, while the search's discarded
+        # candidates stay silent. stacklevel 4 reaches the caller of
+        # SuperGLM.estimate_p / estimate_theta.
+        fit_ops.warn_published_reml_nonconvergence(model, stacklevel=4)
     return published
 
 

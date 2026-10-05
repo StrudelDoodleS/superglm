@@ -1169,15 +1169,40 @@ class TestPublicationREMLBudget:
     mode refuses it rather than letting it sit inert.
     """
 
-    def test_the_budget_reaches_the_publication_refit(self):
+    @pytest.mark.parametrize("search_fit_mode", ["fit", "reml"])
+    def test_the_budget_reaches_the_publication_refit(self, search_fit_mode, monkeypatch):
+        """The unconverged publication refit is a fit_reml fit the caller
+        receives, so it warns once, at the caller, as fit_reml does; the
+        search's REML candidates (``search_fit_mode="reml"``, capped here at one
+        iteration too) are discarded and stay silent. Mutation check: on
+        af53c8d4 the publication installed silently."""
+        from superglm import ConvergenceWarning
+
+        candidates = []
+        real_fit_reml = SuperGLM.fit_reml
+
+        def capped_candidates(self, *args, **kwargs):
+            if getattr(self, "_suppress_convergence_warning", False):
+                candidates.append(1)
+                kwargs["max_reml_iter"] = 1
+            return real_fit_reml(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", capped_candidates)
         frame, y, features = _small_search_fixture()
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit", max_reml_iter=1)
+        with pytest.warns(ConvergenceWarning, match="max_reml_iter") as record:
+            result = model.estimate_p(
+                frame, y, fit_mode="reml", search_fit_mode=search_fit_mode, max_reml_iter=1
+            )
 
         # One outer iteration can never satisfy the two-evaluation
         # convergence contract: the budget provably bound the refit.
         assert int(model._reml_result.n_reml_iter) == 1
         assert result.converged is False
+        disclosed = [w for w in record if issubclass(w.category, ConvergenceWarning)]
+        assert len(disclosed) == 1
+        assert disclosed[0].filename == __file__
+        assert bool(candidates) == (search_fit_mode == "reml")
 
     def test_a_pure_ml_publication_refuses_the_reml_budget(self):
         frame, y, features = _small_search_fixture()

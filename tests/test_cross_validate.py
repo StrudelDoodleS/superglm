@@ -2197,6 +2197,15 @@ def test_fit_reml_without_smoothing_selection_warns_when_the_coefficient_fit_sto
         model.fit_reml(df, y, max_pirls_iter=1)
     assert model._reml_result is None
     assert not model._result.converged
+    # The warning points at reml_diagnostics(); with no smoothing search the
+    # coefficient fit is the only stage, and its stop is published there.
+    # Mutation check: on af53c8d4 these keys were absent on this path.
+    info = model.reml_diagnostics()
+    assert info["enabled"] is False
+    assert info["converged"] is False
+    assert info["termination_reason"] == "max_iter"
+    assert info["terminal_refit_termination"] == "max_iter"
+    assert "coefficient fit did not converge" in info["convergence_note"]
 
     # A converged no-REML fit stays silent.
     quiet = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()})
@@ -2204,3 +2213,7 @@ def test_fit_reml_without_smoothing_selection_warns_when_the_coefficient_fit_sto
         warnings.simplefilter("error", ConvergenceWarning)
         quiet.fit_reml(df, y)
     assert quiet._result.converged
+    info = quiet.reml_diagnostics()
+    assert info["converged"] is True
+    assert info["convergence_note"] is None
+    assert info["terminal_refit_termination"] is None

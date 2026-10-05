@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -1922,24 +1923,35 @@ def fit_reml(
     )
     _install_fit_state(model, candidate)
     _record_reml_terminal_best_effort(model, debug_recorder)
-    # Returned, not refused, and never silent: a fit whose smoothing selection
-    # stopped unconverged says so once, after the state it describes is public.
-    # Internal candidate fits (the Tweedie power search) disclose convergence
-    # in their own result instead of warning per candidate.
-    if not getattr(model, "_suppress_convergence_warning", False):
-        from superglm.diagnostics.convergence import (
-            warn_coefficient_nonconvergence,
-            warn_reml_nonconvergence,
-        )
-
-        reml_result = getattr(model, "_reml_result", None)
-        if reml_result is not None:
-            warn_reml_nonconvergence(reml_result, stacklevel=3)
-        else:
-            # No REML-eligible groups: fit_reml fell back to the plain coefficient
-            # fit, whose own convergence must not go unreported.
-            warn_coefficient_nonconvergence(getattr(model, "_result", None), stacklevel=3)
+    warn_published_reml_nonconvergence(model, stacklevel=3)
     return model
+
+
+def warn_published_reml_nonconvergence(model, *, stacklevel: int) -> None:
+    """Warn once that a published fit_reml fit stopped unconverged.
+
+    Returned, not refused, and never silent: called after the state it
+    describes is public, by ``fit_reml`` and by the REML publication refit of
+    ``estimate_p`` and ``estimate_theta``. Internal candidate fits (the Tweedie
+    power search) set ``_suppress_convergence_warning``: they disclose
+    convergence in their own result instead of warning per candidate.
+    ``stacklevel`` counts from the caller of this function, as
+    ``warnings.warn`` does.
+    """
+    if getattr(model, "_suppress_convergence_warning", False):
+        return
+    from superglm.diagnostics.convergence import (
+        warn_coefficient_nonconvergence,
+        warn_reml_nonconvergence,
+    )
+
+    reml_result = getattr(model, "_reml_result", None)
+    if reml_result is not None:
+        warn_reml_nonconvergence(reml_result, stacklevel=stacklevel + 1)
+    else:
+        # No REML-eligible groups: fit_reml fell back to the plain coefficient
+        # fit, whose own convergence must not go unreported.
+        warn_coefficient_nonconvergence(getattr(model, "_result", None), stacklevel=stacklevel + 1)
 
 
 def _record_reml_terminal_best_effort(model, debug_recorder) -> None:
@@ -2125,15 +2137,23 @@ def _fit_reml_in_workspace(
     # Initialize per-component lambdas (penalty-indexed, not term-indexed)
     # Partition into fixed (policy.mode == "fixed") and estimated components.
     lam_init = lambda2_init if lambda2_init is not None else configured_smoothing
-    lambdas, estimated_names = initialize_component_lambdas(reml_penalties, lam_init)
     # A mapping lambda2_init (a previous fit's ``reml_diagnostics()["lambdas"]``)
     # is a warm start the engines bootstrap from; a scalar keeps its cold meaning.
+    # Under a mapping, every component it does not warm-start -- unnamed, or in
+    # a block it names only in part -- starts exactly as a fit without it: the
+    # engines read these values too (the tensor bootstrap caps its first step
+    # around them), so a refused warm value left here still steered the fit.
+    lambdas, estimated_names = initialize_component_lambdas(
+        reml_penalties,
+        configured_smoothing if isinstance(lambda2_init, Mapping) else lam_init,
+    )
     warm_lambdas = warm_start_lambdas(
         reml_penalties,
         lambda2_init,
         estimated_names,
         other_names=[group.name for group in model._groups],
     )
+    lambdas.update(warm_lambdas)
     _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
     # QP monotone with auto lambda → two-stage passthrough heuristic:

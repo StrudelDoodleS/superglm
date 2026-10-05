@@ -157,6 +157,9 @@ def test_empty_cleanup_path_uses_legacy_plateau_convergence(monkeypatch):
         "_joint_efs_lambda_step",
         lambda *args, **kwargs: (next(lambda_updates), {}, {}),
     )
+    # The stub modes carry no penalty algebra for the holds read at the
+    # published mode; this test is about the stop, not the flat set.
+    monkeypatch.setattr(scop_efs, "_scop_flat_components", lambda *args, **kwargs: [])
     monkeypatch.setattr(scop_efs, "_multi_scop_discrete_cleanup_names", lambda **kwargs: set())
 
     def fail_if_helper_used(**kwargs):

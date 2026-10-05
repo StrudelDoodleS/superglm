@@ -171,6 +171,9 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
         return next(lambda_updates), args[7], {}
 
     monkeypatch.setattr(scop_efs, "_joint_efs_lambda_step", fake_joint_efs_lambda_step)
+    # The stub modes carry no penalty algebra for the holds read at the
+    # published mode; this test is about the cleanup freeze, not the flat set.
+    monkeypatch.setattr(scop_efs, "_scop_flat_components", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         scop_efs,
         "_multi_scop_discrete_cleanup_names",

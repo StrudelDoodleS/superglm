@@ -152,6 +152,16 @@ def test_reml_diagnostics_returns_reml_only_payload():
     assert diagnostics["lambdas"]["DrivAge"] == pytest.approx(2.0)
     assert diagnostics["objective_history"] == [45.0, 42.0]
     assert diagnostics["inner_iter_history"] == [3, 2]
+    # The final refit's own stop is a key, None when that refit converged, so a
+    # reader can tell which stage failed without parsing convergence_note.
+    # Mutation check: on af53c8d4 it reached the payload only inside that text.
+    assert diagnostics["terminal_refit_termination"] is None
+    model = _dummy_model()
+    model._reml_result.converged = False
+    model._reml_result.terminal_refit_termination = "max_iter"
+    diagnostics = telemetry_ops.reml_diagnostics(model)
+    assert diagnostics["terminal_refit_termination"] == "max_iter"
+    assert "'max_iter'" in diagnostics["convergence_note"]
 
 
 def test_reml_diagnostics_non_reml_has_empty_reml_lambdas():

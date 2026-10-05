@@ -713,14 +713,17 @@ class SuperLSS:
         ).input_positions
         # Positional selection owns the retained rows and preserves pandas indices.
         self._training_frame = frame.take_rows(positions)
-        # Returned, not refused, and never silent.
-        smoothing = getattr(candidate, "smoothing", None)
-        message = lss_nonconvergence_message(
-            getattr(candidate, "fitted_result", None),
-            None if smoothing is None else smoothing.convergence_reason,
-        )
-        if message is not None:
-            warnings.warn(message, ConvergenceWarning, stacklevel=3)
+        # Returned, not refused, and never silent: fit_reml warns, as its
+        # contract says. A fixed-lambda ``fit`` discloses through
+        # ``result_.converged`` and the summary's note column, as before.
+        if efs_config is not None:
+            smoothing = getattr(candidate, "smoothing", None)
+            message = lss_nonconvergence_message(
+                getattr(candidate, "fitted_result", None),
+                None if smoothing is None else smoothing.convergence_reason,
+            )
+            if message is not None:
+                warnings.warn(message, ConvergenceWarning, stacklevel=3)
         return self
 
     def fit(

@@ -839,6 +839,22 @@ def _compact_support_rows(gm) -> int | None:
     return None
 
 
+def _compact_supports_fit(group_matrices, cells) -> bool:
+    """Whether every group has a compact support of at most ``_MAX_PACKED_HIST_CELLS`` cells.
+
+    The size preflight, read from metadata alone (``_compact_support_rows``)
+    before any support is materialised: a categorical's support is a dense
+    ``(K+1, K)`` identity, so a large K must be refused before it is
+    allocated. ``cells(rows, width)`` is what a caller then allocates from a
+    support of ``rows`` rows for a group of ``width`` columns.
+    """
+    for gm in group_matrices:
+        rows = _compact_support_rows(gm)
+        if rows is None or cells(rows, gm.shape[1]) > _MAX_PACKED_HIST_CELLS:
+            return False
+    return True
+
+
 def _compact_support(gm) -> tuple[NDArray, NDArray, NDArray | None] | None:
     """``(values, codes, transform)`` with rows ``values[codes] @ transform``, else ``None``.
 
@@ -928,8 +944,7 @@ def _anchor_support_gram_rhs(
     # bound covers every pair's joint table, ``n_i n_j <= max(n_i, n_j)^2``
     # (a centred support keeps its compact support's rows), so no decline
     # waits for a row pass.
-    rows = [_compact_support_rows(gm) for gm in dm.group_matrices]
-    if any(n is None or n * n > _MAX_PACKED_HIST_CELLS for n in rows):
+    if not _compact_supports_fit(dm.group_matrices, lambda rows, width: rows * rows):
         return None
     compact = [_compact_support(gm) for gm in dm.group_matrices]
 
@@ -1203,10 +1218,14 @@ def _compact_centered_rmatvec(
     pass forms, with the same rounding, and only the order of accumulation
     differs (``np.bincount``, as ``rmatvec`` sums by bin).  A dense group is
     centred row by row over its own columns.  ``None`` for any other group,
-    or a support of more than ``_MAX_PACKED_HIST_CELLS`` entries.
+    or a support of more than ``_MAX_PACKED_HIST_CELLS`` entries, refused from
+    metadata before any support is materialised (``_compact_supports_fit``).
     """
     from superglm.group_matrix import DenseGroupMatrix
 
+    compact_groups = [gm for gm in dm.group_matrices if type(gm) is not DenseGroupMatrix]
+    if not _compact_supports_fit(compact_groups, lambda rows, width: rows * width):
+        return None
     result = np.empty(dm.p, dtype=np.float64)
     offset = 0
     for gm in dm.group_matrices:
@@ -1226,12 +1245,7 @@ def _compact_centered_rmatvec(
             result[offset : offset + width] = accumulated
             offset += width
             continue
-        support = _compact_support(gm)
-        if support is None:
-            return None
-        values, codes, transform = support
-        if values.shape[0] * width > _MAX_PACKED_HIST_CELLS:
-            return None
+        values, codes, transform = _compact_support(gm)
         centred = (values if transform is None else values @ transform) - centre
         if mean_lo is not None:
             centred -= centre_lo

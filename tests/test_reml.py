@@ -2323,6 +2323,39 @@ class TestREMLWarmStart:
         assert info["converged"]
         assert info["profile"]["reml_warm_start_components"] == ["BonusMalus", "DrivAge", "VehAge"]
 
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_a_block_started_cold_is_the_cold_fit(self, discrete):
+        """A tensor named only in part starts cold, and cold means the fit
+        without lambda2_init: the refused value must not linger where the
+        engines read starting values (the tensor bootstrap caps its first step
+        around them). Both Newton engines, no monotone term. Mutation check: on
+        af53c8d4 the refused 1e8 stayed in the starting values and the direct
+        engine raised PenaltyNumericalError where the cold fit converges."""
+        rng = np.random.default_rng(11)
+        n = 1500
+        x1 = rng.uniform(0.0, 1.0, n)
+        x2 = rng.uniform(0.0, 1.0, n)
+        eta = 0.3 + 0.8 * np.sin(2.0 * np.pi * x1) + 0.6 * np.cos(3.0 * x2)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        def make():
+            return SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=discrete,
+                features={"x1": Spline(kind="ps", k=10), "x2": Spline(kind="ps", k=10)},
+                interactions=[("x1", "x2")],
+            )
+
+        cold = make().fit_reml(X, y)._reml_result
+        with pytest.warns(UserWarning, match="only some smoothing parameters of x1:x2"):
+            warned = make().fit_reml(X, y, lambda2_init={"x1:x2:margin_x1": 1e8})._reml_result
+        assert cold.converged
+        assert dict(warned.lambdas) == dict(cold.lambdas)
+        assert warned.objective == cold.objective
+        assert warned.n_reml_iter == cold.n_reml_iter
+
     def test_a_name_the_model_lacks_warns_and_is_ignored(self):
         """Mutation check: 941f9ce8 ignored the misspelt name silently."""
         X, y = _two_smooth_poisson(n=500)
@@ -2451,6 +2484,25 @@ class TestREMLNonConvergenceDisclosure:
         assert "because it reached the max_reml_iter limit, and the final coefficient" in message
         assert "'score_stagnated'" in message
         assert "lambda2_init" in message
+        assert "max_pirls_iter" not in message
+
+    def test_both_budgets_are_named_when_both_ran_out(self):
+        """A capped search whose final refit also stopped on its iteration cap
+        needs both budgets raised, so the advice names both. Mutation check: on
+        af53c8d4 it named max_reml_iter alone."""
+        from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+        result = REMLResult(
+            lambdas={},
+            pirls_result=None,
+            n_reml_iter=20,
+            converged=False,
+            termination_reason="max_reml_iter",
+        )
+        result.terminal_refit_termination = "max_iter"
+        message = reml_nonconvergence_message(result)
+        assert "Refit with a larger max_reml_iter and a larger max_pirls_iter" in message
+        assert "lambda2_init" in message
 
     def test_an_edited_fit_publishes_no_convergence_statement(self):
         """Coefficients revised after fitting are disclosed by the editor's own note;
@@ -2541,6 +2593,7 @@ class TestREMLNonConvergenceDisclosure:
             assert info["converged"] is False
             assert "final coefficient fit" in info["convergence_note"]
             assert model._reml_result.terminal_refit_termination == "max_iter"
+            assert info["terminal_refit_termination"] == "max_iter"
 
     @pytest.mark.parametrize("route", ["qp_passthrough", "fixed_qp"])
     def test_converged_constrained_fits_raise_no_convergence_warning(self, route):

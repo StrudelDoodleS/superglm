@@ -209,14 +209,18 @@ def test_a_wide_categorical_support_is_rejected_before_it_is_materialised(monkey
     assert centered.packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered) is not None
 
 
-def test_an_oversized_compact_support_is_refused_before_it_is_allocated(monkeypatch):
-    """The anchor route must size every support from metadata before building any.
+@pytest.mark.parametrize("route", ["anchor_gram", "centred_rhs"])
+def test_an_oversized_compact_support_is_refused_before_it_is_allocated(monkeypatch, route):
+    """Every caller that materialises supports sizes them from metadata first.
 
     A categorical's compact support is a dense ``(K + 1, K)`` identity: for a
     3,000-level block that is 72 MB allocated only to be rejected by the cell
-    cap. Mutation check: building the supports first and checking their shapes
+    cap. The anchor route's Gram needs ``(K + 1)^2`` cells, the centred
+    right-hand side (``_compact_centered_rmatvec``, which the SCOP mode score
+    reaches when a frequent indicator trips the centring guard) ``(K + 1) K``.
+    Mutation check: building the supports first and checking their shapes
     afterwards calls ``_compact_support`` on the oversized block, which this
-    test forbids.
+    test forbids; on af53c8d4 the right-hand side did exactly that.
     """
     from superglm._group_matrix import _group_matrix_centered as centered
 
@@ -228,6 +232,20 @@ def test_an_oversized_compact_support_is_refused_before_it_is_allocated(monkeypa
     W = rng.uniform(0.5, 2.0, n)
     z = rng.normal(size=n)
     z_centered = z - float(np.dot(W, z) / W.sum())
+    if route == "anchor_gram":
+        cells = support_rows * support_rows
+
+        def build():
+            return centered.anchor_support_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+
+    else:
+        cells = support_rows * levels
+        mean_x = dm.toarray().T @ W / W.sum()
+
+        def build():
+            return centered._compact_centered_rmatvec(
+                dm=dm, rows=W * z_centered, mean_x=mean_x, mean_lo=None
+            )
 
     built = []
     real_compact_support = centered._compact_support
@@ -238,12 +256,12 @@ def test_an_oversized_compact_support_is_refused_before_it_is_allocated(monkeypa
 
     monkeypatch.setattr(centered, "_compact_support", counting_compact_support)
 
-    monkeypatch.setattr(centered, "_MAX_PACKED_HIST_CELLS", support_rows * support_rows - 1)
-    assert centered.anchor_support_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered) is None
+    monkeypatch.setattr(centered, "_MAX_PACKED_HIST_CELLS", cells - 1)
+    assert build() is None
     assert built == [], "an oversized support must be refused before it is materialised"
 
-    monkeypatch.setattr(centered, "_MAX_PACKED_HIST_CELLS", support_rows * support_rows)
-    assert centered.anchor_support_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered) is not None
+    monkeypatch.setattr(centered, "_MAX_PACKED_HIST_CELLS", cells)
+    assert build() is not None
     assert built == [group]
 
 

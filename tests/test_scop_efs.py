@@ -3349,6 +3349,20 @@ def _strict_efs_lambdas(monkeypatch, family: str) -> dict[str, float]:
     return dict(model._reml_result.lambdas)
 
 
+def _assert_stopped_on_a_full_newton_step(result) -> None:
+    """The premise of the 2 * reml_tol endpoint bound between two runs.
+
+    A run that stops because its full Newton step is under reml_tol is within
+    reml_tol of the local model's fixed point; that iteration adopts no move,
+    so its lambda history ends on a repeat. A strict stop on an accepted step
+    that the line search shortened, or on an EFS step, bounds nothing of the
+    kind and needs its own bound.
+    """
+    assert result.termination_reason == "lambda_tolerance"
+    assert result.scop_outer_steps[-1] == "newton"
+    assert result.lambda_history[-1] == result.lambda_history[-2]
+
+
 class TestSCOPSuppressionHold:
     """The EFS step's decrease hold is read in effective degrees of freedom."""
 
@@ -3483,6 +3497,51 @@ class TestSCOPSuppressionHold:
         assert system.increase_held[index] and not system.decrease_held[index]
         start = live_reml_lambdas(model)
         assert set(start) == {"DrivAge", "VehAge", "BonusMalus"}
+
+    def test_flat_components_describe_the_published_mode(self, monkeypatch):
+        """The holds are read at the mode the run publishes, not at the iterate
+        its last step left. Capped at eight iterations, the last accepted Newton
+        step takes the VehAge margin from lambda 1.2e3 (residual EDF 0.053, not
+        held) to 3.1e3 (0.024, held against increase), so the published mode is
+        flat there and a warm start taken from it leaves the tensor cold.
+        Mutation check: on af53c8d4 the holds came from the iterate before that
+        step, ``flat_components`` was empty and the warm start kept the margin."""
+        from superglm import ConvergenceWarning
+        from superglm.model.reml_setup import live_reml_lambdas
+        from superglm.reml.scop_efs import _scop_newton_system
+
+        captured = {}
+        real_final = scop_efs_module._finalize_scop_reml_mode
+
+        def capture(context, mode):
+            captured["mode"] = mode
+            return real_final(context, mode)
+
+        monkeypatch.setattr(scop_efs_module, "_finalize_scop_reml_mode", capture)
+        make, frame, y, offset = _half_flat_tensor_fixture()
+        model = make()
+        with pytest.warns(ConvergenceWarning, match="max_reml_iter"):
+            model.fit_reml(frame, y, offset=offset, max_reml_iter=8)
+        mode = captured["mode"]
+        system = _scop_newton_system(
+            mode.penalty_components,
+            mode.result.beta,
+            mode.hessian_inverse,
+            1.0,
+            mode.lambdas,
+            {pc.name for pc in mode.penalty_components},
+            mode.scop_states,
+        )
+        held = sorted(
+            name
+            for name, up, down in zip(
+                system.names, system.increase_held, system.decrease_held, strict=True
+            )
+            if up or down
+        )
+        assert held == ["DrivAge:VehAge:margin_VehAge"]
+        assert model._reml_result.flat_components == held
+        assert set(live_reml_lambdas(model)) == {"DrivAge", "VehAge", "BonusMalus"}
 
     def test_a_strongly_identified_term_started_above_its_optimum_comes_back(self):
         """A smooth so well identified that its penalty suppresses about 0.01 EDF at
@@ -4050,8 +4109,149 @@ class TestSCOPNewtonOuterStep:
         assert result.scop_newton_fallback is None
         assert result.scop_fisher_fallbacks >= 1
         assert result.converged
+        _assert_stopped_on_a_full_newton_step(reference._reml_result)
+        _assert_stopped_on_a_full_newton_step(result)
         for name, value in reference._reml_result.lambdas.items():
             assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
+
+    def test_an_uncorrectable_iterate_takes_an_efs_step(self, monkeypatch):
+        """On an observed iterate the reparameterisation terms can still fail to
+        form (here a map that is not the exp map; the same holds when they are
+        not finite). That iteration takes an EFS step, recorded as
+        "efs_uncorrected", and Newton resumes at the next: the fixed-curvature
+        Jacobian alone is not the step's Jacobian. Forced at the third iterate's
+        correction. The run converges to the unforced fit's fixed point within
+        the Newton stop's bound, 2 * reml_tol. Mutation check: on af53c8d4 the
+        failed correction returned None and that iteration took a Newton step on
+        the uncorrected Jacobian, recorded as "newton"."""
+        reference, frame, y, offset = _scop_newton_fixture()
+        reference.fit_reml(frame, y, offset=offset)
+        reml_tol = reference.reml_diagnostics()["profile"]["reml_tol_resolved"]
+
+        class NotExp:
+            """The block's map with its second derivative doubled: not the exp map.
+            Seen only by the correction; the inner solves keep the real map."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def jacobian_diagonal(self, beta_eff):
+                return self._inner.jacobian_diagonal(beta_eff)
+
+            def second_derivative_diagonal(self, beta_eff):
+                return 2.0 * self._inner.second_derivative_diagonal(beta_eff)
+
+        real_correction = scop_efs_module._scop_reparam_jacobian_correction
+        calls = []
+
+        def not_exp_on_the_third(mode, system):
+            calls.append(1)
+            if len(calls) == 3:
+                states = {
+                    index: {**state, "reparam": NotExp(state["reparam"])}
+                    for index, state in mode.scop_states.items()
+                }
+                mode = replace(mode, scop_states=states)
+            return real_correction(mode, system)
+
+        monkeypatch.setattr(
+            scop_efs_module, "_scop_reparam_jacobian_correction", not_exp_on_the_third
+        )
+        model, _, _, _ = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.scop_outer_steps[:3] == ["newton", "newton", "efs_uncorrected"]
+        assert "newton" in result.scop_outer_steps[3:]
+        assert result.scop_newton_fallback is None
+        assert result.converged
+        _assert_stopped_on_a_full_newton_step(reference._reml_result)
+        _assert_stopped_on_a_full_newton_step(result)
+        for name, value in reference._reml_result.lambdas.items():
+            assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
+
+    def test_the_correction_distinguishes_none_from_failure(self, monkeypatch):
+        """None means the Jacobian has no reparameterisation terms (no block
+        carries a positivity coordinate); terms that exist but cannot be formed
+        raise, so the loop can take the EFS step rather than a Newton step on
+        the fixed-curvature Jacobian alone. Mutation check: on af53c8d4 a
+        non-finite correction returned None, the same value as no terms."""
+        from superglm.reml.scop_efs import (
+            _scop_newton_system,
+            _scop_reparam_jacobian_correction,
+            _SCOPCorrectionUnavailableError,
+        )
+
+        captured = {}
+        real_final = scop_efs_module._finalize_scop_reml_mode
+
+        def capture(context, mode):
+            captured["mode"] = mode
+            return real_final(context, mode)
+
+        monkeypatch.setattr(scop_efs_module, "_finalize_scop_reml_mode", capture)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        mode = captured["mode"]
+        system = _scop_newton_system(
+            mode.penalty_components,
+            mode.result.beta,
+            mode.hessian_inverse,
+            1.0,
+            mode.lambdas,
+            {pc.name for pc in mode.penalty_components},
+            mode.scop_states,
+        )
+        correction = _scop_reparam_jacobian_correction(mode, system)
+        assert correction is not None and np.all(np.isfinite(correction))
+        assert _scop_reparam_jacobian_correction(replace(mode, scop_states={}), system) is None
+        with np.errstate(invalid="ignore", over="ignore"):
+            overflowed = replace(mode, penalty=mode.penalty * np.inf)
+            with pytest.raises(_SCOPCorrectionUnavailableError, match="not finite"):
+                _scop_reparam_jacobian_correction(overflowed, system)
+
+    def test_a_newton_step_leaves_no_efs_step_size_history(self, monkeypatch):
+        """The adaptive EFS step size halves when a step reverses the previous
+        EFS step's direction and grows when it agrees. A Newton step is no EFS
+        step: at the "efs_fisher" iterate after two Newton steps the EFS step
+        reads no previous direction and leaves every step size at its start, 1.
+        Forced as in ``test_a_fisher_fallback_iterate_takes_an_efs_step``.
+        Mutation check: on af53c8d4 that step read the second Newton step's
+        direction and moved the step sizes off 1."""
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+        searches = []
+
+        def mark_second(context, current, proposed, **kwargs):
+            mode, accepted = real_search(context, current, proposed, **kwargs)
+            searches.append(mode)
+            if len(searches) == 2 and accepted:
+                states = {
+                    index: {**state, "last_fisher_fallback": True}
+                    for index, state in mode.scop_states.items()
+                }
+                mode = replace(mode, scop_states=states)
+            return mode, accepted
+
+        steps = []
+        real_step = scop_efs_module._joint_efs_lambda_step
+
+        def recording_step(*args, **kwargs):
+            previous = dict(args[8])
+            out = real_step(*args, **kwargs)
+            steps.append((previous, dict(args[7])))
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", mark_second)
+        monkeypatch.setattr(scop_efs_module, "_joint_efs_lambda_step", recording_step)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.scop_outer_steps[:3] == ["newton", "newton", "efs_fisher"]
+        # The bootstrap's step, then one per EFS iterate; the third is the first.
+        assert len(steps) == 1 + result.scop_outer_steps.count("efs_fisher")
+        previous, step_sizes = steps[1]
+        assert previous == {}
+        assert set(step_sizes.values()) == {1.0}
+        assert result.converged
 
     def test_the_reparameterisation_terms_cut_the_inner_fits(self, monkeypatch):
         """Counts, not time: on a Gaussian fit Newton takes no more inner IRLS fits
@@ -4318,6 +4518,8 @@ class TestSCOPObservedGeometryCentring:
         chunked, _, _, _ = _scop_newton_fixture("gamma", diesel_share=0.6)
         chunked.fit_reml(frame, y, offset=offset)
         reml_tol = model.reml_diagnostics()["profile"]["reml_tol_resolved"]
+        _assert_stopped_on_a_full_newton_step(result)
+        _assert_stopped_on_a_full_newton_step(chunked._reml_result)
         for name, value in chunked._reml_result.lambdas.items():
             assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
 
