@@ -215,7 +215,8 @@ def _fingerprint_columns(model, frame) -> tuple[str, ...]:
 
 # The recipe of _data_fingerprint. A result records it beside its fingerprint,
 # and one made by another recipe is refused as such, never as other data.
-FINGERPRINT_VERSION = 2
+# Version 3 keeps -0.0 apart from 0.0; version 2 wrote both as 0.0.
+FINGERPRINT_VERSION = 3
 
 
 def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> str:
@@ -260,8 +261,9 @@ def _column_bytes(frame, name) -> bytes:
     pandas categorical or polars Enum adds its declared categories, which
     the fit takes as the level universe. Numbers are written at a fixed
     width, little-endian: integers as 64-bit, floats as float64 (exact) with
-    one NaN and one zero; anything else as ``pandas.factorize`` codes in
-    order of first appearance (missing values -1) and its uniques' text.
+    one NaN; anything else as ``pandas.factorize`` codes in order of first
+    appearance (missing values -1) and its uniques' text. ``-0.0`` stays
+    apart from ``0.0``: a grouped categorical reads them as two levels.
     """
     values = frame.column_array(name)
     kind = values.dtype.kind
@@ -270,7 +272,7 @@ def _column_bytes(frame, name) -> bytes:
         data = np.ascontiguousarray(values, dtype="<i8" if kind == "i" else "<u8").tobytes()
     elif kind == "f":
         tag = f"float{8 * values.dtype.itemsize}"
-        floats = np.asarray(values, dtype="<f8") + 0.0  # -0.0 + 0.0 is +0.0
+        floats = np.array(values, dtype="<f8")
         floats[np.isnan(floats)] = np.nan
         data = floats.tobytes()
     elif kind == "b":

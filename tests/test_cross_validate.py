@@ -2053,11 +2053,11 @@ class TestDataFingerprint:
         y = np.array([0.0, 1.0, 0.0, 2.0])
 
         pinned = _data_fingerprint(X, y)
-        assert pinned == "53e673b34ac0e860131fad0fade27dd556a142ca87e85962d4627184fdda1db9"
+        assert pinned == "ca0af589de56222a9c242ea27624cb0e44408e437e9b7f9bc7e2636fe63a4a43"
         for dtype in (object, "string"):
             assert _data_fingerprint(X.astype({"band": dtype}), y) == pinned
         assert _data_fingerprint(pl.DataFrame(columns), y) == (
-            "e0297a330fd78311947ae6bc1018fdca1ee13c5fcaaa75369e3a5cfae52e90f9"
+            "73477e609750ba9f4f771a70e6b35306e01ed13565802ea99565530572006260"
         )
 
     @pytest.mark.parametrize("backend", ["pandas", "polars"])
@@ -2078,6 +2078,34 @@ class TestDataFingerprint:
 
         assert _data_fingerprint(frame({"x": other}), y) == _data_fingerprint(
             frame({"x": quiet}), y
+        )
+
+    def test_fingerprint_sees_a_swap_of_signed_zeros_a_grouped_categorical_reads(self):
+        """-0.0 and 0.0 are one number, but a grouped categorical reads them as two levels.
+
+        Rows 0 (-0.0) and 41 (0.0) share their response, so swapping their x
+        leaves y as it was, and the fingerprint, which wrote every zero as
+        +0.0, did not change; the first fold's deviance does.
+        """
+        from superglm import collapse_levels
+        from superglm.model_selection import _data_fingerprint
+
+        x = np.tile([-0.0, 0.0, 1.0, 2.0], 30)
+        y = np.tile([1.0, 3.0, 4.0, 6.0], 30)
+        y[[0, 41]] = 2.0
+        swapped = x.copy()
+        swapped[[0, 41]] = x[[41, 0]]
+        grouping = collapse_levels(x, groups={})
+
+        def first_fold_deviance(values):
+            features = {"x": Categorical(grouping=grouping)}
+            model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features)
+            result = cross_validate(model, pd.DataFrame({"x": values}), y, cv=SimpleKFold(3))
+            return result.fold_scores["deviance"].iloc[0]
+
+        assert first_fold_deviance(swapped) != first_fold_deviance(x)
+        assert _data_fingerprint(pd.DataFrame({"x": swapped}), y) != _data_fingerprint(
+            pd.DataFrame({"x": x}), y
         )
 
     def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
