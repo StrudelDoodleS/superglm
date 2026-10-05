@@ -101,7 +101,7 @@ class CrossValidationResult:
         must be the data given to :func:`cross_validate`, in the same order.
         Their row count is always checked. Pass ``y`` (and ``offset``, if the
         cross-validation had one) to check the rows themselves against
-        :attr:`data_fingerprint`; without ``y`` a reordered ``X`` of the same
+        ``data_fingerprint``; without ``y`` a reordered ``X`` of the same
         length cannot be told apart.
 
         Raises
