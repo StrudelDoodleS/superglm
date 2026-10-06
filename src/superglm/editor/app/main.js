@@ -261,12 +261,13 @@ const evidenceTiming = createEvidenceTimingTracker({
 // The Cross-validation tab draws into the report frame, which the other
 // reports share, so it draws a job's progress only while it is the open view.
 // A finished Run CV or Final fit changes the tab, and a Final fit also what
-// Export offers.
+// Export offers; a mutation running when it publishes may hold a snapshot from
+// before it, so the refresh waits for that mutation to settle.
 const cvTab = createCVTab({
   frame: reportFrame,
   client: editorClient,
   onJobSettled: async (kind) => {
-    if (kind === "final_fit") await actions.refreshFromPython();
+    if (kind === "final_fit") await actions.refreshFromPythonWhenIdle();
     await refreshActiveReport();
   },
   isShown: () => store.getState().view.activeView === "cv"

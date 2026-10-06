@@ -29,6 +29,7 @@ import { selectModelRevision } from "./selectors.js";
  * @typedef {Object} EditorStore
  * @property {()=>EditorState} getState
  * @property {(updater:(state:EditorState)=>EditorState)=>void} update
+ * @property {<T>(selector:(state:EditorState)=>T, listener:(next:T, previous:T)=>void)=>()=>void} subscribe
  */
 /**
  * @typedef {Object} ActionClient
@@ -351,6 +352,30 @@ export function createEditorActions({
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
       .catch(() => {});
     return { ok: true, snapshot };
+  }
+
+  /**
+   * Re-read the Python session once no mutation is running. A job that
+   * publishes while a mutation runs is missing from that mutation's snapshot,
+   * and refreshFromPython is skipped while it runs, so this waits for the
+   * mutation to settle first.
+   *
+   * @returns {Promise<ActionResult>}
+   */
+  async function refreshFromPythonWhenIdle() {
+    if (store.getState().request.mutation.status === "running") {
+      await new Promise((resolve) => {
+        const unsubscribe = store.subscribe(
+          (state) => state.request.mutation.status,
+          (status) => {
+            if (status === "running") return;
+            unsubscribe();
+            resolve(undefined);
+          }
+        );
+      });
+    }
+    return refreshFromPython();
   }
 
   /** @returns {Promise<EditorSnapshot>} */
@@ -727,6 +752,7 @@ export function createEditorActions({
   return {
     initialize,
     refreshFromPython,
+    refreshFromPythonWhenIdle,
     executeSelectionMutation,
     executeStateMutation,
     executeStructuralMutation,

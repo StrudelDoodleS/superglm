@@ -668,6 +668,7 @@ test("structural commit failure before envelope installation stays ambiguous", a
   let updateCalls = 0;
   const store = {
     getState: baseStore.getState,
+    subscribe: baseStore.subscribe,
     /** @param {(state:EditorState)=>EditorState} updater */
     update(updater) {
       updateCalls += 1;
@@ -1645,6 +1646,7 @@ test("action module exposes only the controller factory, paint helper, and exact
     "patchView",
     "refreshEvidence",
     "refreshFromPython",
+    "refreshFromPythonWhenIdle",
     "retryEvidence",
     "retryMutation",
     "schedulePanelEvidence"
@@ -1700,6 +1702,41 @@ test("refreshFromPython is skipped while a mutation is running", async () => {
   if (result.ok) assert.fail("refresh ran during a mutation");
   assert.equal(result.skipped, true);
   assert.equal(stateCalls, 0);
+});
+
+test("refreshFromPythonWhenIdle waits for a running mutation, then refreshes", async () => {
+  // A Final fit that publishes while a staging request runs is missing from
+  // that request's snapshot, and a plain refresh is skipped while it runs.
+  const store = createEditorStore(createInitialEditorState(snapshot(3)));
+  store.update((state) => ({
+    ...state,
+    request: {
+      ...state.request,
+      mutation: { status: "running", operation: "stage", error: null, blocking: false }
+    }
+  }));
+  const published = snapshot(3);
+  let stateCalls = 0;
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => ({}),
+      getState: async () => { stateCalls += 1; return published; }
+    }
+  });
+
+  const pending = actions.refreshFromPythonWhenIdle();
+  await Promise.resolve();
+  assert.equal(stateCalls, 0);
+  store.update((state) => ({
+    ...state,
+    request: { ...state.request, mutation: { status: "idle", operation: null, error: null } }
+  }));
+  const result = await pending;
+
+  assert.equal(result.ok, true);
+  assert.equal(stateCalls, 1);
+  assert.strictEqual(store.getState().remote.snapshot, published);
 });
 
 test("refreshFromPython leaves state unchanged on a malformed snapshot", async () => {
