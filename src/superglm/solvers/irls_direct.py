@@ -69,6 +69,8 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
     grouped_augmented_factor_rhs,
     grouped_weighted_factor,
+    note_factor_route,
+    prefetch_weighted_factor,
     refresh_centered_rhs,
 )
 from superglm.solvers.constrained_qp import (
@@ -3152,13 +3154,24 @@ def _fit_irls_direct_once(
                 _last_working_centered = centered
                 _t_gram += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
+                step_response = None if newton_score is not None else z_off - centered.mean_z
+                step_centre, step_centre_lo = centered.centre_pair()
+                prefetch_weighted_factor(
+                    "pirls",
+                    dm,
+                    W,
+                    response=step_response,
+                    center=step_centre,
+                    center_lo=step_centre_lo,
+                )
                 iteration_rank = decompose_gram_if_authoritative(centered.hessian)
+                note_factor_route("pirls", iteration_rank is None)
                 iteration_factor_rhs = None
                 if iteration_rank is None:
                     certification = certify_centered_factor(
                         centered,
                         W,
-                        response=None if newton_score is not None else z_off - centered.mean_z,
+                        response=step_response,
                     )
                     certified = certification.decomposition
                     if certification.transformed_rhs is None and newton_score is None:
@@ -4546,7 +4559,12 @@ def _fit_irls_direct_once(
         XtWX_beta = XtWX
         reml_slope_rank: RankDecomposition | None
         if _compute_reml_geometry:
+            final_centre, final_centre_lo = centered_final.centre_pair()
+            prefetch_weighted_factor(
+                "terminal", dm, W, center=final_centre, center_lo=final_centre_lo
+            )
             reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
+            note_factor_route("terminal", reml_slope_rank is None)
             if reml_slope_rank is None:
                 certification = certify_centered_factor(
                     centered_final,

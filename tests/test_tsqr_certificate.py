@@ -478,21 +478,14 @@ def test_tsqr_holds_at_most_one_leaf_beyond_its_workers(monkeypatch):
     assert bound < 64 * copy
 
 
-def test_reml_fit_factors_each_set_of_rows_once(monkeypatch):
-    """One ``fit_reml`` runs the TSQR at most once per set of weights, centre and response.
+def _aliased_tweedie_fit(monkeypatch):
+    """A Tweedie REML fit whose every factor certificate is recorded.
 
-    Two aliased factors keep every PIRLS step and every observed geometry of
-    this Tweedie fit on the factor certificate.  The REML loop asks again for
-    factors it has formed -- the observed geometry of an accepted trial, a
-    PIRLS start shared by successive smoothing states -- and the factor is a
-    function of the design and the bits of those inputs alone, so the fit
-    reuses it (``centered_system.reuse_data_factors``).  Without the reuse
-    (the mutation below) the same fit repeats inputs, and its coefficients
-    are the same to the bit.
+    Two aliased factors keep every PIRLS step, terminal state and observed
+    geometry of the fit on the factor certificate.  Returns ``fit()``, which
+    fits and returns the coefficients, and the list of ``(inputs, thread)``
+    of every TSQR pass of the last fit.
     """
-    import contextlib
-
-    import superglm.solvers.centered_system as centered_system
     from superglm import Tweedie
 
     rng = np.random.default_rng(3)
@@ -508,21 +501,22 @@ def test_reml_fit_factors_each_set_of_rows_once(monkeypatch):
     )
     mu = np.exp(0.3 * np.sin(2.0 * x) + 0.2 * level)
     y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.3)
-    passes: list[bytes] = []
+    passes: list[tuple[bytes, str]] = []
 
-    def inputs(*arrays) -> bytes:
-        return b"|".join(
+    def record(*arrays) -> None:
+        inputs = b"|".join(
             b"-" if a is None else np.asarray(a, dtype=np.float64).tobytes() for a in arrays
         )
+        passes.append((inputs, threading.current_thread().name))
 
     plain, joint = rank.streamed_weighted_factor, rank.streamed_weighted_factor_rhs
 
     def recorded(chunks, weights, *, center=None, center_lo=None):
-        passes.append(inputs(weights, center, center_lo))
+        record(weights, center, center_lo)
         return plain(chunks, weights, center=center, center_lo=center_lo)
 
     def recorded_rhs(chunks, weights, response, *, center=None, center_lo=None):
-        passes.append(inputs(weights, center, center_lo, response))
+        record(weights, center, center_lo, response)
         return joint(chunks, weights, response, center=center, center_lo=center_lo)
 
     monkeypatch.setattr(rank, "streamed_weighted_factor", recorded)
@@ -541,12 +535,31 @@ def test_reml_fit_factors_each_set_of_rows_once(monkeypatch):
             model.fit_reml(frame, y)
         return np.asarray(model.result.beta)
 
+    return fit, passes
+
+
+def test_reml_fit_factors_each_set_of_rows_once(monkeypatch):
+    """One ``fit_reml`` runs the TSQR at most once per set of weights, centre and response.
+
+    The REML loop asks again for factors it has formed -- the observed
+    geometry of an accepted trial, a PIRLS start shared by successive
+    smoothing states -- and the factor is a function of the design and the
+    bits of those inputs alone, so the fit reuses it
+    (``centered_system.reuse_data_factors``).  Without the reuse (the
+    mutation below) the same fit repeats inputs, and its coefficients are the
+    same to the bit.
+    """
+    import contextlib
+
+    import superglm.solvers.centered_system as centered_system
+
+    fit, passes = _aliased_tweedie_fit(monkeypatch)
     reused = fit()
-    reused_passes = list(passes)
-    assert len(set(reused_passes)) == len(reused_passes)
+    inputs = [entry[0] for entry in passes]
+    assert len(set(inputs)) == len(inputs)
     monkeypatch.setattr(centered_system, "reuse_data_factors", contextlib.nullcontext)
     repeated = fit()
-    assert len(passes) > len(set(passes)) == len(reused_passes)
+    assert len(passes) > len({entry[0] for entry in passes}) == len(inputs)
     assert np.array_equal(reused.view(np.uint64), repeated.view(np.uint64))
 
 
@@ -569,6 +582,32 @@ def test_data_factor_reuse_keeps_the_four_most_recently_used(monkeypatch):
     assert len(leaves) == 5
     for again in (factors[3], factors[6]):
         assert np.array_equal(again.view(np.uint64), factors[0].view(np.uint64))
+
+
+def test_reml_fit_forms_each_certificate_beside_its_gram_decision(monkeypatch):
+    """A site whose last Gram could not certify itself starts the next factor before deciding.
+
+    The PIRLS step, the terminal state and the observed geometry each ask a
+    Gram whether it certifies itself, and on refusal form the observation
+    factor.  Once a site has needed the factor in a fit, the next one starts
+    on a background thread before the Gram decides
+    (``centered_system.prefetch_weighted_factor``), with the inputs the
+    certificate then takes: here every factor after each of the three
+    sites' first runs on that thread, none is formed twice or wasted, and
+    the coefficients are those of the fit that forms each factor after its
+    decision, to the bit.
+    """
+    import superglm._blas_threads as blas_threads
+
+    fit, passes = _aliased_tweedie_fit(monkeypatch)
+    beside = fit()
+    prefetched = [thread.startswith("superglm-prefetch") for _, thread in passes]
+    inputs = [entry[0] for entry in passes]
+    monkeypatch.setattr(blas_threads, "fit_blas_single_threaded", lambda: False)
+    after = fit()
+    assert sum(prefetched) == len(passes) - 3 > 0
+    assert inputs == [entry[0] for entry in passes]
+    assert np.array_equal(beside.view(np.uint64), after.view(np.uint64))
 
 
 def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):

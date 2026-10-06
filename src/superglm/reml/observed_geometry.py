@@ -51,6 +51,8 @@ from superglm.solvers.centered_system import (
     TabmatCenteringState,
     build_centered_system,
     grouped_augmented_factor,
+    note_factor_route,
+    prefetch_weighted_factor,
 )
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
@@ -1550,6 +1552,8 @@ def build_observed_reml_geometry(
         )
         hessian = 0.5 * (data_gram + data_gram.T) + penalty
 
+    if nonnegative:
+        prefetch_weighted_factor("observed", dm, observed_w, center=centre, center_lo=centre_lo)
     try:
         decomposition = decompose_gram(hessian)
     except ValueError as error:
@@ -1557,7 +1561,10 @@ def build_observed_reml_geometry(
             "observed REML coefficient Hessian is indefinite; "
             "the fitted coefficients do not define a valid Laplace mode"
         ) from error
-    if nonnegative and needs_factor_certification(decomposition):
+    certify = nonnegative and needs_factor_certification(decomposition)
+    if nonnegative:
+        note_factor_route("observed", certify)
+    if certify:
         # The same licence as the centered-system wrap above: this factor is
         # assembled from rows and a penalty the preamble has already validated,
         # so a non-finite factor or a retained basis that will not resolve

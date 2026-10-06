@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextvars
 import weakref
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -316,24 +318,56 @@ class _DataFactorReuse:
     successive smoothing states).  The ``_ENTRIES`` most recently used are
     kept (a few factors of ``(p + 1)^2`` doubles and their ``n``-vectors); a
     hit returns copies, so no caller can change an entry.
+
+    An entry may also be a factor still being formed (:func:`prefetch_weighted_factor`):
+    a hit waits for it.  ``expected`` records, per call site, whether its
+    last decision needed the factor.
     """
 
     _ENTRIES = 4
     entries: list = field(default_factory=list)
+    expected: dict = field(default_factory=dict)
+    executor: ThreadPoolExecutor | None = None
 
-    def find(self, key: tuple):
-        for index, (entry_key, value) in enumerate(self.entries):
+    def _index(self, key: tuple) -> int | None:
+        for index, (entry_key, _) in enumerate(self.entries):
             if len(entry_key) == len(key) and all(
                 _same_input(saved, given) for saved, given in zip(entry_key, key)
             ):
-                self.entries.append(self.entries.pop(index))
-                return tuple(np.array(part) for part in value)
+                return index
         return None
 
-    def keep(self, key: tuple, value: tuple) -> None:
+    def find(self, key: tuple):
+        index = self._index(key)
+        if index is None:
+            return None
+        entry_key, value = self.entries.pop(index)
+        if isinstance(value, Future):
+            value = tuple(_freeze(part) for part in value.result())
+        self.entries.append((entry_key, value))
+        return tuple(np.array(part) for part in value)
+
+    def keep(self, key: tuple, value) -> None:
         frozen = tuple(part if not isinstance(part, np.ndarray) else _freeze(part) for part in key)
-        self.entries.append((frozen, tuple(_freeze(part) for part in value)))
+        if not isinstance(value, Future):
+            value = tuple(_freeze(part) for part in value)
+        self.entries.append((frozen, value))
         del self.entries[: -self._ENTRIES]
+
+    def prefetch(self, key: tuple) -> None:
+        if self._index(key) is not None:
+            return
+        if self.executor is None:
+            self.executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="superglm-prefetch"
+            )
+        frozen = tuple(part if not isinstance(part, np.ndarray) else _freeze(part) for part in key)
+        run = contextvars.copy_context().run
+        self.keep(frozen, self.executor.submit(run, _data_factor, *frozen))
+
+    def close(self) -> None:
+        if self.executor is not None:
+            self.executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _same_input(saved, given) -> bool:
@@ -354,11 +388,13 @@ _DATA_FACTOR_REUSE: ContextVar[_DataFactorReuse | None] = ContextVar(
 @contextmanager
 def reuse_data_factors() -> Iterator[None]:
     """Reuse the weighted data factors formed inside this context (:class:`_DataFactorReuse`)."""
-    token = _DATA_FACTOR_REUSE.set(_DataFactorReuse())
+    reuse = _DataFactorReuse()
+    token = _DATA_FACTOR_REUSE.set(reuse)
     try:
         yield
     finally:
         _DATA_FACTOR_REUSE.reset(token)
+        reuse.close()
 
 
 def _factor_key(dm, W, center, center_lo, response) -> tuple:
@@ -370,6 +406,64 @@ def _factor_key(dm, W, center, center_lo, response) -> tuple:
     return (dm, tsqr_leaf_rows(dm.p), bits(W), bits(center), bits(center_lo), bits(response))
 
 
+def _data_factor(dm, _leaf_rows, W, center, center_lo, response) -> tuple:
+    """The TSQR of :func:`grouped_weighted_factor` (``response`` ``None``) or ``_rhs``, as a tuple."""
+    from superglm.solvers.rank import streamed_weighted_factor, streamed_weighted_factor_rhs
+
+    leaves = iter_grouped_design_leaves(dm)
+    if response is None:
+        return (streamed_weighted_factor(leaves, W, center=center, center_lo=center_lo),)
+    return streamed_weighted_factor_rhs(leaves, W, response, center=center, center_lo=center_lo)
+
+
+def _reused_data_factor(dm, W, center, center_lo, response) -> tuple:
+    reuse = _DATA_FACTOR_REUSE.get()
+    if reuse is None:
+        return _data_factor(dm, None, W, center, center_lo, response)
+    key = _factor_key(dm, W, center, center_lo, response)
+    found = reuse.find(key)
+    if found is None:
+        found = _data_factor(*key)
+        reuse.keep(key, found)
+    return found
+
+
+def prefetch_weighted_factor(
+    site: str,
+    dm: DesignMatrix,
+    W: NDArray,
+    *,
+    response: NDArray | None = None,
+    center: NDArray | None = None,
+    center_lo: NDArray | None = None,
+) -> None:
+    """Start a data factor the fit is about to decide whether it needs, beside that decision.
+
+    Called just before a Gram decides whether it can certify itself
+    (``rank.decompose_gram_if_authoritative``), with the inputs the factor
+    certificate would take if it cannot.  Only when the same ``site``'s last
+    decision in this fit needed the factor (:func:`note_factor_route`), and
+    only while the fit holds BLAS at one thread (``_blas_threads``): the
+    factor then runs on a background thread while this thread decomposes
+    the Gram, and its bits are those of the factor formed afterwards, so the
+    decision and every result are unchanged; a factor the Gram makes
+    unnecessary is discarded.
+    """
+    from superglm._blas_threads import fit_blas_single_threaded
+
+    reuse = _DATA_FACTOR_REUSE.get()
+    if reuse is None or not reuse.expected.get(site, False) or not fit_blas_single_threaded():
+        return
+    reuse.prefetch(_factor_key(dm, W, center, center_lo, response))
+
+
+def note_factor_route(site: str, needed: bool) -> None:
+    """Record whether ``site``'s decision just needed the factor (:func:`prefetch_weighted_factor`)."""
+    reuse = _DATA_FACTOR_REUSE.get()
+    if reuse is not None:
+        reuse.expected[site] = bool(needed)
+
+
 def grouped_weighted_factor(
     dm: DesignMatrix,
     W: NDArray,
@@ -378,19 +472,7 @@ def grouped_weighted_factor(
     center_lo: NDArray | None = None,
 ) -> NDArray:
     """Return the weighted QR factor, a TSQR over the design's leaves, without retaining all rows."""
-    from superglm.solvers.rank import streamed_weighted_factor
-
-    reuse = _DATA_FACTOR_REUSE.get()
-    key = None if reuse is None else _factor_key(dm, W, center, center_lo, None)
-    found = None if reuse is None else reuse.find(key)
-    if found is not None:
-        return found[0]
-    factor = streamed_weighted_factor(
-        iter_grouped_design_leaves(dm), W, center=center, center_lo=center_lo
-    )
-    if reuse is not None:
-        reuse.keep(key, (factor,))
-    return factor
+    return _reused_data_factor(dm, W, center, center_lo, None)[0]
 
 
 def grouped_weighted_factor_rhs(
@@ -402,22 +484,7 @@ def grouped_weighted_factor_rhs(
     center_lo: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Return a bounded weighted QR factor and its transformed response."""
-    from superglm.solvers.rank import streamed_weighted_factor_rhs
-
-    reuse = _DATA_FACTOR_REUSE.get()
-    key = None if reuse is None else _factor_key(dm, W, center, center_lo, response)
-    found = None if reuse is None else reuse.find(key)
-    if found is not None:
-        return found[0], found[1]
-    factor, transformed = streamed_weighted_factor_rhs(
-        iter_grouped_design_leaves(dm),
-        W,
-        response,
-        center=center,
-        center_lo=center_lo,
-    )
-    if reuse is not None:
-        reuse.keep(key, (factor, transformed))
+    factor, transformed = _reused_data_factor(dm, W, center, center_lo, response)
     return factor, transformed
 
 
