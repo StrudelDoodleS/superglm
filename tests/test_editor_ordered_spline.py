@@ -22,6 +22,7 @@ from superglm.editor.controls import (
     ORDERED_SPLINE_GRID_STEPS,
     ORDERED_SPLINE_GROUPED,
     ORDERED_SPLINE_SHAPED,
+    ORDERED_SPLINE_UNAVAILABLE,
 )
 from superglm.editor.payloads import session_payload
 
@@ -302,6 +303,33 @@ def test_handles_are_off_with_a_reason_once_a_band_is_shaped(wide):
     assert payload["spline_view"]["reason"] == ORDERED_SPLINE_SHAPED
     with pytest.raises(TypeError, match="shaped"):
         session.move_control_point("band", 0, 0.0)
+
+
+def test_handles_are_off_when_the_certification_bound_overflows(wide, monkeypatch):
+    """The bound |b| |M| |beta| overflows to inf, as on an ill-scaled fit where M beta cancels.
+
+    Every discrepancy between the spline view and the fitted effects passed
+    ``<= inf``, so handles were offered for a curve nothing certified. Here
+    the view is also moved off the effects; a bound that is not finite
+    certifies nothing.
+    """
+    import superglm.editor.controls as controls
+
+    model, _ = wide
+    session = EditorSession.from_model(model, terms=["band"])
+    raw_map = controls._raw_coefficient_map
+    monkeypatch.setattr(
+        controls, "_raw_coefficient_map", lambda inner, width: 2.0 * raw_map(inner, width)
+    )
+    monkeypatch.setattr(
+        controls,
+        "_certification_bound",
+        lambda level_basis, *args: np.full(level_basis.shape[0], np.inf),
+    )
+
+    assert controls.ordered_spline_geometry(model, session.terms["band"]) == (
+        ORDERED_SPLINE_UNAVAILABLE
+    )
 
 
 def test_an_ordered_term_without_a_spline_basis_gets_no_spline_view():

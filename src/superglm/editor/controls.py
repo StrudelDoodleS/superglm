@@ -348,6 +348,9 @@ def ordered_spline_geometry(model, term: EditableTerm) -> OrderedSplineGeometry 
     fitted = raw - float(base_row @ raw)
     effects = np.asarray(term.original_log_effect, dtype=np.float64)[: positions.size]
     bound = _certification_bound(level_basis, base_row, coefficient_map, spline_beta, inner)
+    # A bound that overflowed (|M| |beta| on an ill-scaled fit) certifies nothing.
+    if not (np.all(np.isfinite(bound)) and np.all(np.isfinite(fitted))):
+        return ORDERED_SPLINE_UNAVAILABLE
     if not np.all(np.abs(level_basis @ fitted - effects) <= bound):
         return ORDERED_SPLINE_UNAVAILABLE
     centres = _handle_centres(grid_basis, grid_x)
