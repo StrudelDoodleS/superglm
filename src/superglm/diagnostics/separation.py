@@ -479,30 +479,22 @@ def separated_factor_smooth_levels(
     return tuple(int(level) for level in np.flatnonzero(separated))
 
 
-def format_factor_smooth_separation(
-    name: str, labels: list[Any], n_levels: int, *, penalized: bool = True
-) -> str:
-    """The warning for ``sz`` levels whose unpenalized line separates (``separated_factor_smooth_levels``).
+#: What a term whose ``sz`` lines are unpenalized can do about it (#444): the
+#: lines' null-space penalty is the term's own option, never the data's.
+SZ_SELECT_REMEDY = (
+    "To give every level a finite, unique curve, pass select=True to this FactorSmooth, "
+    "which penalizes every level's line with a smoothing parameter of its own (the "
+    "null-space penalty of mgcv's select=TRUE), or use basis='fs'."
+)
 
-    ``penalized``: the fit gave the term's level lines their null-space
-    penalty (#444), which bounds them; without it (a ``LambdaPolicy.off()``
-    term) they stay out of the population curve.
-    """
-    head = (
+
+def format_factor_smooth_separation(name: str, labels: list[Any], n_levels: int) -> str:
+    """The warning for ``sz`` levels whose unpenalized line separates (``separated_factor_smooth_levels``)."""
+    return (
         f"FactorSmooth {name!r} (basis='sz'): {len(labels)} of {n_levels} levels have an "
         f"unpenalized line that separates the response: {_format_labels(labels)}. The "
-        "likelihood keeps increasing along each such line, so it has no finite estimate. "
-    )
-    if penalized:
-        return head + (
-            "The fit therefore penalizes every level's line, with a 'null' smoothing "
-            "parameter of its own (as basis='fs' does), which shrinks the lines toward the "
-            "population curve and gives every level a finite curve. separation='ignore' "
-            "silences this warning."
-        )
-    return head + (
-        "The term's smoothing parameters are fixed at zero, so these lines walk to the "
-        "response boundary for as long as the fit runs; they are left out of the "
-        "population curve, the mean of the levels the data identify. separation='ignore' "
-        "silences this warning."
+        "likelihood keeps increasing along each such line, so their fitted values walk to "
+        "the response boundary for as long as the fit runs. They are left out of the "
+        f"population curve, the mean of the levels the data identify. {SZ_SELECT_REMEDY} "
+        "separation='ignore' silences this warning."
     )

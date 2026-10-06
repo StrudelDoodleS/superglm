@@ -143,9 +143,9 @@ def test_an_sz_model_saved_by_v0_36_0_predicts_as_saved(name) -> None:
 
     v0.36.0 recorded at fit the thin levels and the levels whose line
     separates, and predicted them by convention
-    (``scripts/make_saved_sz_v0_36_0_fixtures.py``).  A fit now penalizes the
-    lines of a term whose line separates or whose every level is thin; a saved
-    model carries no such penalty and keeps its convention.  Its conditional
+    (``scripts/make_saved_sz_v0_36_0_fixtures.py``).  A term penalizes its
+    lines only when it selects them (``select=True``), which a model saved by
+    v0.36.0 cannot: it keeps its convention.  Its conditional
     predictor on the training rows and on a grid over every level, and its
     population predictor on the grid, are v0.36.0's within two evaluations'
     rounding: ``gamma`` over the predictor's products and the convention's
@@ -162,7 +162,8 @@ def test_an_sz_model_saved_by_v0_36_0_predicts_as_saved(name) -> None:
     model = record["model"]
     spec = model._interaction_specs["x:g:sz"]
     assert spec._has_population_offset
-    assert not getattr(spec, "_lines_penalized", False)
+    assert not spec._selects_lines
+    assert [name for name, _ in spec._base_penalty_components] == ["wiggle"]
     count = len(model.result.beta) + len(spec._levels) * spec.k + 4 * spec.k + 2
     cases = (
         (record["frame"], "conditional", record["eta"]),

@@ -9,9 +9,9 @@ v0.36.0 recorded, at fit, which ``basis="sz"`` levels its data identify only in
 part (#432) and predicted them by convention: a thin level keeps what its rows
 identify, a level whose unpenalized line separates the response stays out of
 the population curve, and with every level thin the population is the
-canonical point.  Later releases penalize the lines of a term whose line
-separates or whose every level is thin (#444), at fit; a model saved by
-v0.36.0 must still predict as it did.  Each record holds the model (fit state
+canonical point.  Later releases let a term penalize its lines
+(``select=True``, #444); a model saved by v0.36.0 has no such option and must
+still predict as it did.  Each record holds the model (fit state
 released), its training rows, a grid over every level and the linear
 predictors v0.36.0 gave on them, conditional and population.
 """

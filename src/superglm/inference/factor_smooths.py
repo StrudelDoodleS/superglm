@@ -543,14 +543,7 @@ def factor_smooth_result(
             "level_edf_numerical_reconciliation": float(edf_reconciliation),
             **common_diagnostics,
         }
-        if getattr(spec, "_lines_penalized", False):
-            # The levels that made the fit penalize the lines (#444); no level
-            # stays out of the population, which is the main effect.
-            thin, separated = spec._line_penalty_record
-            diagnostics["population_convention"] = spec._population_convention
-            diagnostics["thin_levels"] = [spec._levels[code] for code in thin]
-            diagnostics["separated_levels"] = [spec._levels[code] for code in separated]
-        elif spec._has_population_offset:
+        if spec._has_population_offset:
             diagnostics["population_convention"] = spec._population_convention
             diagnostics["thin_levels"] = list(spec._unidentified_level_names)
             diagnostics["separated_levels"] = [

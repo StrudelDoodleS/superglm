@@ -788,52 +788,44 @@ def _all_thin_frame():
     return frame, y
 
 
-def _all_thin_model(solve: str = "auto", lines: LambdaPolicy | None = None) -> SuperGLM:
+def _all_thin_model(
+    solve: str = "auto", lines: LambdaPolicy | None = None, *, select: bool = False
+) -> SuperGLM:
     """``lines``: one policy for every component of the term; by default only ``wiggle`` is fixed."""
     policy = lines if lines is not None else {"wiggle": LambdaPolicy.fixed(1.0)}
     return SuperGLM(
         family="gaussian",
         features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
-        interactions=[FactorSmooth("x", group="g", basis="sz", lambda_policy=policy)],
+        interactions=[
+            FactorSmooth("x", group="g", basis="sz", lambda_policy=policy, select=select)
+        ],
         selection_penalty=0,
         direct_solve=solve,
     )
 
 
-def _without_line_penalty(monkeypatch) -> None:
-    """Fit as 0.36.0 did: the record without the lines' penalty (#444), as a model saved then holds."""
-    original = FactorSmooth._record_unidentified_levels
-
-    def unpenalized(self, *args, **kwargs):
-        kwargs["penalize"] = False
-        return original(self, *args, **kwargs)
-
-    monkeypatch.setattr(FactorSmooth, "_record_unidentified_levels", unpenalized)
-
-
-def test_an_sz_term_whose_every_level_is_thin_reproduces_its_fit(monkeypatch) -> None:
+def test_an_sz_term_whose_every_level_is_thin_reproduces_its_fit() -> None:
     """Every level at one ``x``: the canonical population, a warning, and the fit kept (#432 b).
 
     No level identifies the population curve, so ``_population_offset`` was
     zero and every level's deviation went to it: the conditional training
     predictions spanned -260702 to 260703 on b5080877 against master's -0.726
-    to 0.954 (Codex and Sol reviews, P1).  The population is the family's
+    to 0.954 (Codex and Sol reviews, P1).  The population is now the family's
     canonical point, where each level's free part is zero, named in a warning
     at fit; the predictions on the training rows are the fit's own to their
-    rounding, and the rule follows the family there as well.  A fit now
-    penalizes such a term's lines instead (#444,
-    ``test_penalized_sz_lines_predict_alike_on_both_solvers``); the
-    convention serves the models 0.36.0 saved, fitted here without the
-    penalty.
+    rounding, and the rule follows the family there as well.  Without
+    ``select=True`` the term's lines stay unpenalized whatever its data, and
+    the warning names that option (#444).  Mutation: the warning without it.
     """
     from superglm.model import base
 
-    _without_line_penalty(monkeypatch)
     frame, y = _all_thin_frame()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model = _all_thin_model().fit_reml(frame, y)
-    assert [w for w in caught if "fixed by convention" in str(w.message)]
+    convention = [w for w in caught if "fixed by convention" in str(w.message)]
+    assert len(convention) == 1 and "select=True" in str(convention[0].message)
+    assert "x:g:sz:null" not in model._reml_lambdas
     spec = model._interaction_specs["x:g:sz"]
     assert spec._population_convention == "canonical"
     eta = base.predict_eta_exact(model, frame, warn=False)
@@ -863,12 +855,10 @@ def test_the_all_thin_border_decision_does_not_follow_the_penalty_products_round
     inputs with the penalty under the congruence ``D S D``, ``D = diag(1 +
     4 u xi)`` (exactly the same null structure, every product rounded anew),
     give one decision and no refusal over 32 draws; on 52c6b730, 13 of 64
-    draws refused and the rest kept a rank the Haswell kernel did not.  The
-    fit is held without the lines' penalty (#444), which removes the alias.
+    draws refused and the rest kept a rank the Haswell kernel did not.
     """
     import superglm.solvers._structured.balance_tree as tree_module
 
-    _without_line_penalty(monkeypatch)
     calls = []
     original = tree_module.factor_border
 
@@ -1159,18 +1149,80 @@ def _separated_model(
     family: str = "poisson",
     discrete: bool = False,
     m: int = 2,
+    select: bool = False,
 ) -> SuperGLM:
     """``lines``: one policy for every component of the term; by default only ``wiggle`` is fixed."""
     policy = lines if lines is not None else {"wiggle": LambdaPolicy.fixed(1.0)}
     return SuperGLM(
         family=family,
         features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
-        interactions=[FactorSmooth("x", group="g", basis="sz", m=m, lambda_policy=policy)],
+        interactions=[
+            FactorSmooth("x", group="g", basis="sz", m=m, lambda_policy=policy, select=select)
+        ],
         selection_penalty=0,
         separation=separation,
         direct_solve=direct_solve,
         discrete=discrete,
     )
+
+
+def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> None:
+    """A level whose unpenalized line separates the response is named, and stays out (Opus P2).
+
+    On pg17's make model 26 of 71 identified makes had no claim; their lines
+    walked toward ``-inf`` for as long as each fit ran, so the population
+    curve, the mean of the levels with them, sat at ``[-37, -9.6]`` (auto)
+    against ``[-80, 80]`` (gram).  The scan (``separated_factor_smooth_levels``)
+    names a zero-claim level and a one-sided one, not a level with claims
+    inside its rows, in a ``SeparationWarning`` (``separation="ignore"``
+    silences it and still leaves them out).  Along a separated line, ``d``
+    into the level and ``-d / K`` from every level, the population and every
+    other level do not move (``_assert_rule_follows``).  The binomial scan,
+    on the same design, finds the level whose ones all lie above its zeros
+    (the linear program's side).  Without ``select=True`` the term's lines
+    stay unpenalized whatever its data, and the warning names that option and
+    ``basis="fs"`` (#444).  Mutations: no scan; the separated levels kept in
+    the mean; the lines penalized from the data (the first rule of #457) or
+    on every fit; the warning without the option.
+    """
+    from superglm.diagnostics.separation import (
+        SeparationWarning,
+        separated_factor_smooth_levels,
+    )
+
+    frame, y = _separated_poisson()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _separated_model().fit_reml(frame, y)
+    spec = model._interaction_specs["x:g:sz"]
+    assert [spec._levels[code] for code in spec._separated_levels] == ["g000", "g001"]
+    named = [w for w in caught if "unpenalized line" in str(w.message)]
+    assert len(named) == 1
+    assert issubclass(named[0].category, SeparationWarning)
+    assert "'g000'" in str(named[0].message) and "'g001'" in str(named[0].message)
+    assert "'g002'" not in str(named[0].message)
+    assert "select=True" in str(named[0].message) and "basis='fs'" in str(named[0].message)
+    assert "x:g:sz:null" not in model._reml_lambdas
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    shifted, step = _family_shift(spec, blocks, (0, 1), float(np.max(np.abs(blocks))))
+    _assert_rule_follows(spec, blocks, shifted, step, keep=(0, 1))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        quiet = _separated_model("ignore").fit_reml(frame, y)
+    assert not [w for w in caught if "unpenalized line" in str(w.message)]
+    assert quiet._interaction_specs["x:g:sz"]._separated_levels == spec._separated_levels
+
+    dm = model._dm.group_matrices[model._groups.index(group)]
+    codes = np.asarray(dm.codes)
+    binary = (y > 0).astype(float)
+    level = np.flatnonzero(codes == 3)
+    binary[level] = (frame["x"].to_numpy()[level] > 0.6).astype(float)
+    found = separated_factor_smooth_levels(
+        dm, spec._population_null_space, None, binary, ("zero", "one")
+    )
+    assert 3 in found and 2 not in found
 
 
 def _working_rows(model: SuperGLM):
@@ -1249,7 +1301,7 @@ def _prediction_rows(model: SuperGLM, frame: pd.DataFrame, *, population: bool) 
     """``Z`` with ``Z theta`` the predictor ``predict`` evaluates (``_working_rows``' coordinates).
 
     The intercept and each term's centred columns; the population skips the
-    ``sz`` term, which no level stays out of once its lines are penalized.
+    ``sz`` term, which no level stays out of once it selects its lines.
     """
     from superglm.model.base import _prediction_plan, prediction_centred_state
 
@@ -1283,15 +1335,16 @@ def _line_bound(model: SuperGLM, frame: pd.DataFrame, y: np.ndarray) -> np.ndarr
     coefficients with the term removed, which keeps every other penalty:
     ``sum_l beta_l' P beta_l <= D(theta_0) - D(theta) + eps``.  The data and
     the other terms fix that, wherever the solver went.  Without the lines'
-    penalty ``P`` is singular on them and nothing bounds a separated line.
+    penalty (``select=False``) ``P`` is singular on them and nothing bounds a
+    separated line.
     """
     spec = model._interaction_specs["x:g:sz"]
     group = next(g for g in model._groups if g.name == "x:g:sz")
     lam = model._reml_lambdas
-    _, omega = spec._level_line_penalty()
+    components = dict(spec._base_penalty_components)
     P = np.diag(
-        lam["x:g:sz:wiggle"] * np.diag(spec._base_penalty_components[0][1])
-        + lam["x:g:sz:null"] * np.diag(omega)
+        lam["x:g:sz:wiggle"] * np.diag(components["wiggle"])
+        + lam["x:g:sz:null"] * np.diag(components["null"])
     )
     A, _, theta, _, _, _ = _working_rows(model)
     term = slice(1 + group.sl.start, 1 + group.sl.stop)
@@ -1306,29 +1359,31 @@ def _line_bound(model: SuperGLM, frame: pd.DataFrame, y: np.ndarray) -> np.ndarr
     return np.sqrt(np.einsum("ij,ij->i", basis, basis / np.diag(P)[None, :]) * max(room, 0.0))
 
 
-def test_a_separated_sz_line_is_penalized_and_stays_bounded() -> None:
-    """Separated ``sz`` lines take the null-space penalty and stay bounded on both solvers (#444).
+def _sz_warnings(caught) -> list:
+    """The warnings an ``sz`` term raises at fit: every one names ``(basis='sz')``."""
+    return [w for w in caught if "(basis='sz')" in str(w.message)]
+
+
+def test_a_selected_sz_term_bounds_its_separated_lines() -> None:
+    """``select=True`` bounds separated ``sz`` lines, on both solvers, and only when the term asks (#444).
 
     g000 has no claim and g001's claims sit at one ``x`` below its other rows:
-    neither line has a finite estimate, and on master each walked for as long
-    as the fit ran (to the log link's clip, ``eta = -80``, on its rows, as
-    the real-data model #444 reports does), the solver deciding where it
-    stopped.  The fit now names them in a ``SeparationWarning`` and gives
-    every level's line Marra & Wood's null-space penalty, with a smoothing
-    parameter REML estimates (``x:g:sz:null``).  Each level's deviation from
-    the population curve is then within ``_line_bound``, which the data fix,
-    and the structured and dense solvers reach one fit
-    (``_assert_fits_as_gram``).  The scan still names only the separated
-    levels, ``separation="ignore"`` silences the warning and keeps the
-    penalty, a response that no line separates keeps the lines unpenalized,
-    and the binomial scan, on the same design, finds the level whose ones all
-    lie above its zeros (the linear program's side).  Mutations: no penalty
-    (master); the penalty on every ``sz`` fit.
+    neither unpenalized line has a finite estimate, and on master each walked
+    for as long as the fit ran (to the log link's clip, ``eta = -80``, on its
+    rows, as the real-data model #444 reports does), the solver deciding
+    where it stopped.  With ``select=True`` every level's line carries Marra
+    & Wood's null-space penalty, with a smoothing parameter REML estimates
+    (``x:g:sz:null``), so no line is unpenalized and the fit warns of none.
+    Each level's deviation from the population curve is within
+    ``_line_bound``, which the data fix, and the structured and dense
+    solvers reach one fit (``_assert_fits_as_gram``).  No level stays out of
+    the population, so the report carries no population diagnostics, as for
+    any such fit.  The term's option decides, never the data: a response
+    that no line separates keeps the penalty.  Mutations: no penalty
+    (master); the penalty from the data alone (the first rule of #457, which
+    drops it for the joined response); every penalized fit's report given
+    the population diagnostics (ec74c786).
     """
-    from superglm.diagnostics.separation import (
-        SeparationWarning,
-        separated_factor_smooth_levels,
-    )
     from superglm.model import base
 
     frame, y = _separated_poisson()
@@ -1342,13 +1397,8 @@ def test_a_separated_sz_line_is_penalized_and_stays_bounded() -> None:
     for solve in ("structured", "gram"):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            model = _separated_model(direct_solve=solve).fit_reml(frame, y)
-        named = [w for w in caught if "unpenalized line" in str(w.message)]
-        assert len(named) == 1
-        assert issubclass(named[0].category, SeparationWarning)
-        message = str(named[0].message)
-        assert "'g000'" in message and "'g001'" in message and "'g002'" not in message
-        assert "penalizes every level's line" in message
+            model = _separated_model(direct_solve=solve, select=True).fit_reml(frame, y)
+        assert not _sz_warnings(caught)
         lam = model._reml_lambdas.get("x:g:sz:null")
         assert lam is not None and 0.0 < lam < np.inf
         assert bool(model._reml_result.converged)
@@ -1359,12 +1409,10 @@ def test_a_separated_sz_line_is_penalized_and_stays_bounded() -> None:
         assert np.all(np.abs(eta - population) <= _line_bound(model, grid, y) + slack)
         models[solve] = model
     _assert_fits_as_gram(models["structured"], models["gram"])
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        quiet = _separated_model("ignore").fit_reml(frame, y)
-    assert not [w for w in caught if "unpenalized line" in str(w.message)]
-    assert "x:g:sz:null" in quiet._reml_lambdas
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        diagnostics = models["gram"].factor_smooth("x:g:sz").diagnostics
+    assert not {"population_convention", "thin_levels", "separated_levels"} & set(diagnostics)
 
     joined = y.copy()
     g, x = frame["g"].to_numpy(), frame["x"].to_numpy()
@@ -1373,79 +1421,64 @@ def test_a_separated_sz_line_is_penalized_and_stays_bounded() -> None:
     joined[one[np.argmax(x[one])]] = 1.0
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        plain = _separated_model().fit_reml(frame, joined)
-    assert not [w for w in caught if "unpenalized line" in str(w.message)]
-    assert "x:g:sz:null" not in plain._reml_lambdas
-
-    model = models["gram"]
-    spec = model._interaction_specs["x:g:sz"]
-    dm = model._dm.group_matrices[[g.name for g in model._groups].index("x:g:sz")]
-    null_space = np.eye(spec.k)[:, np.diag(spec._base_penalty_components[0][1]) == 0.0]
-    codes = np.asarray(dm.codes)
-    binary = (y > 0).astype(float)
-    level = np.flatnonzero(codes == 3)
-    binary[level] = (x[level] > 0.6).astype(float)
-    found = separated_factor_smooth_levels(dm, null_space, None, binary, ("zero", "one"))
-    assert 3 in found and 2 not in found
-
-    # A second fit on the same design (``estimate_p``'s candidates share one)
-    # decides afresh from the wiggle penalty's null space: without the reset
-    # the design's ``null`` component hides every line and the record lapses.
-    components = dm.repeated_penalty_components
-    spec._record_unidentified_levels(dm, np.ones(len(y)), y, ("zero",), penalize=True)
-    assert spec._lines_penalized
-    assert [name for name, _ in dm.repeated_penalty_components] == ["wiggle", "null"]
-    assert np.array_equal(dm.repeated_penalty_components[1][1], components[1][1])
+        plain = _separated_model(select=True).fit_reml(frame, joined)
+    assert not _sz_warnings(caught)
+    assert 0.0 < plain._reml_lambdas["x:g:sz:null"] < np.inf
 
 
-@pytest.mark.parametrize("form", ["term", "wiggle"])
-def test_an_off_sz_term_keeps_its_lines_unpenalized(form) -> None:
-    """``LambdaPolicy.off()`` on the term's wiggle keeps the lines unpenalized and #440's record (#444).
+def test_an_sz_term_selects_its_lines_when_declared() -> None:
+    """``select=True`` puts the lines' ``null`` component in the term's design at build (#444).
 
-    Off as the term's one policy or as its ``"wiggle"`` entry: each level's
-    wiggle coordinates then carry no penalty, so a ``null`` component would
-    neither bound a separated level nor identify a thin one.  The fit keeps
-    the term's lines as 0.36.0 did, records the separated levels, leaves
-    them out of the population curve and says so.  Mutations: the off policy
-    copied onto the lines' component, which marked the lines penalized and
-    dropped the record (Codex and Claude reviews of 55eda85f); the guard
-    reading only a term-wide policy (Codex review of 4dd54555).
+    The component is Marra & Wood's null-space penalty: the indicator of the
+    wiggle penalty's zero diagonal (the natural parameterization), exactly,
+    one coordinate per order of ``m``.  One policy for the term covers both
+    components, and a dict may name ``null``.  A policy that fixes either
+    component at zero would leave part of every level unpenalized, so it is
+    refused when the term is declared, as are ``select`` on ``basis="fs"``
+    and a ``null`` entry without ``select``.  Mutations: no ``null``
+    component at build; no check of a zero policy.
     """
-    frame, y = _separated_poisson()
+    rng = np.random.default_rng(5)
+    x = rng.uniform(size=400)
+    g = np.array([f"g{v}" for v in rng.integers(0, 4, 400)], dtype=object)
+    fixed = LambdaPolicy.fixed
+    for m in (2, 3):
+        plain = FactorSmooth("x", group="g", basis="sz", m=m).build(x, g, {})
+        assert [name for name, _ in plain.repeated_penalty_components] == ["wiggle"]
+        policy = {"null": fixed(2.0)}
+        info = FactorSmooth(
+            "x", group="g", basis="sz", m=m, select=True, lambda_policy=policy
+        ).build(x, g, {})
+        assert [name for name, _ in info.repeated_penalty_components] == ["wiggle", "null"]
+        wiggle, null = (component for _, component in info.repeated_penalty_components)
+        assert np.array_equal(wiggle, plain.repeated_penalty_components[0][1])
+        assert np.array_equal(null, np.diag((np.diag(wiggle) == 0.0).astype(np.float64)))
+        assert np.count_nonzero(null) == m
+        assert info.lambda_policies == {"wiggle": LambdaPolicy.estimate(), "null": fixed(2.0)}
+    single = FactorSmooth("x", group="g", basis="sz", select=True, lambda_policy=fixed(3.0))
+    assert single.build(x, g, {}).lambda_policies == {"wiggle": fixed(3.0), "null": fixed(3.0)}
+
     off = LambdaPolicy.off()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        model = SuperGLM(
-            family="poisson",
-            features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
-            interactions=[
-                FactorSmooth(
-                    "x",
-                    group="g",
-                    basis="sz",
-                    lambda_policy=off if form == "term" else {"wiggle": off},
-                )
-            ],
-            selection_penalty=0,
-            direct_solve="gram",
-        ).fit_reml(frame, y)
-    spec = model._interaction_specs["x:g:sz"]
-    assert "x:g:sz:null" not in model._reml_lambdas
-    assert not spec._lines_penalized
-    assert [spec._levels[code] for code in spec._separated_levels] == ["g000", "g001"]
-    assert spec._has_population_offset
-    named = [w for w in caught if "unpenalized line" in str(w.message)]
-    assert len(named) == 1
-    assert "left out of the population curve" in str(named[0].message)
+    for policy in (off, {"wiggle": off}, {"null": off}, {"null": fixed(0.0)}):
+        with pytest.raises(ValueError, match="at zero"):
+            FactorSmooth("x", group="g", basis="sz", select=True, lambda_policy=policy)
+    with pytest.raises(ValueError, match="applies to basis='sz'"):
+        FactorSmooth("x", group="g", basis="fs", select=True)
+    with pytest.raises(ValueError, match="unknown component names"):
+        FactorSmooth("x", group="g", basis="sz", lambda_policy={"null": fixed(1.0)})
+    with pytest.raises(TypeError, match="select must be a bool"):
+        FactorSmooth("x", group="g", basis="sz", select=1)
 
 
-def test_an_all_thin_sz_term_with_a_separated_line_still_names_the_penalty() -> None:
-    """``separation="ignore"`` silences the separation warning, never the all-thin one (#444).
+def test_an_all_thin_sz_term_names_select_whatever_its_separation_mode() -> None:
+    """Without ``select``, an all-thin term with a separated line names the option in every mode (#444).
 
-    Every level at one ``x`` and one level without claims: the lines are
-    penalized for both reasons.  Under ``"ignore"`` the all-thin warning is
-    the only sign that every line carries the penalty (Claude review of
-    55eda85f); under ``"warn"`` both warnings fire.
+    Every level at one ``x`` and one level without claims.  Under
+    ``"ignore"`` the canonical population's warning is the only sign, and it
+    names ``select=True``; under ``"warn"`` the ``SeparationWarning`` does
+    too.  With ``select=True`` neither warning fires: no line is unpenalized.
+    Mutations: the remedy left out of either warning; the penalty from the
+    data alone.
     """
     rng = np.random.default_rng(11)
     g = np.repeat(np.arange(8), 200)
@@ -1457,39 +1490,21 @@ def test_an_all_thin_sz_term_with_a_separated_line_still_names_the_penalty() -> 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             model = _separated_model(separation, direct_solve="gram").fit_reml(frame, y)
-        assert "x:g:sz:null" in model._reml_lambdas
-        thin = [w for w in caught if "every level holds fewer distinct x" in str(w.message)]
-        assert len(thin) == 1 and "m=2" in str(thin[0].message)
-        assert len([w for w in caught if "unpenalized line" in str(w.message)]) == separated
-
-
-def test_an_all_thin_sz_warning_names_the_terms_m() -> None:
-    """The all-thin warning states the term's own ``m`` (Codex review of 55eda85f, P3).
-
-    ``m = 3``: every level at two distinct ``x`` values is thin.  On 55eda85f
-    the warning said "its line, with m=2" whatever the term's ``m``.
-    """
-    rng = np.random.default_rng(13)
-    g = np.repeat(np.arange(8), 100)
-    x = np.where(np.arange(800) % 2 == 0, 0.1, 0.6) + 0.04 * g
-    y = np.sin(3 * x) + 0.2 * rng.normal(size=800)
-    frame = pd.DataFrame({"x": x, "g": np.array([f"g{v:03d}" for v in g], dtype=object)})
+        assert "x:g:sz:null" not in model._reml_lambdas
+        convention = [w for w in caught if "fixed by convention" in str(w.message)]
+        assert len(convention) == 1 and "select=True" in str(convention[0].message)
+        lines = [w for w in caught if "unpenalized line" in str(w.message)]
+        assert len(lines) == separated
+        assert all("select=True" in str(w.message) for w in lines)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model = SuperGLM(
-            family="gaussian",
-            features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
-            interactions=[FactorSmooth("x", group="g", basis="sz", m=3)],
-            selection_penalty=0,
-            direct_solve="gram",
-        ).fit_reml(frame, y)
-    assert "x:g:sz:null" in model._reml_lambdas
-    thin = [w for w in caught if "every level holds fewer distinct x" in str(w.message)]
-    assert len(thin) == 1 and "(m=3)" in str(thin[0].message)
+        model = _separated_model(direct_solve="gram", select=True).fit_reml(frame, y)
+    assert 0.0 < model._reml_lambdas["x:g:sz:null"] < np.inf
+    assert not _sz_warnings(caught)
 
 
-def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() -> None:
-    """A level without weight is predicted at the population curve when the lines are penalized (#444).
+def test_a_weightless_sz_level_beside_selected_lines_predicts_the_population() -> None:
+    """A level without weight is predicted at the population curve when the term selects its lines (#444).
 
     The level has no data term, so the sum-to-zero constraint alone fixes its
     block: minus the other levels' deviations, shrunk but not zero.  As in
@@ -1497,11 +1512,12 @@ def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() 
     population curve, which stays the main effect (``c = 0`` to the rule's
     rounding), and ``predict`` names it.  ``factor_smooth()`` reports a curve
     of zero with no band, as for an unpenalized fit
-    (``test_sz_reports_agree_with_the_population_prediction``), and names the
-    levels that made the fit penalize the lines.  Mutations: the penalized
-    record without the weightless levels (Claude review of 4dd54555); the
-    report's band kept for it (Claude review of 8fbdadda); the report's level
-    lists read from the unpenalized record (Claude review of ddaf4416).
+    (``test_sz_reports_agree_with_the_population_prediction``), and lists it
+    as the one level the data leave out; no line separates.  Mutations: the
+    selected record without the weightless levels (Claude review of
+    4dd54555); the report's band kept for it (Claude review of 8fbdadda);
+    ``_unidentified_level_names`` without the weightless levels, which
+    leaves ``thin_levels`` empty (Claude review of ec74c786).
     """
     from superglm.model import base
 
@@ -1509,10 +1525,13 @@ def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() 
     weight = np.where(frame["g"].to_numpy() == "g005", 0.0, 1.0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model = _separated_model(direct_solve="gram").fit_reml(frame, y, sample_weight=weight)
+        model = _separated_model(direct_solve="gram", select=True).fit_reml(
+            frame, y, sample_weight=weight
+        )
     spec = model._interaction_specs["x:g:sz"]
-    assert spec._lines_penalized
+    assert "x:g:sz:null" in model._reml_lambdas
     assert spec._weightless_levels == (5,)
+    assert spec._unidentified_levels == () and spec._separated_levels == ()
     grid = pd.DataFrame({"x": np.linspace(0.0, 1.0, 21), "g": "g005"})
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -1527,8 +1546,8 @@ def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() 
     assert np.all(report.curves["effect"].to_numpy() == 0.0)
     assert np.all(report.curves["posterior_se"].to_numpy() == 0.0)
     assert report.diagnostics["population_convention"] == "main"
-    assert report.diagnostics["separated_levels"] == ["g000", "g001"]
     assert report.diagnostics["thin_levels"] == ["g005"]
+    assert report.diagnostics["separated_levels"] == []
     group = next(g for g in model._groups if g.name == "x:g:sz")
     blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
     offset = spec._population_offset(blocks)
@@ -1541,15 +1560,15 @@ def test_a_weightless_sz_level_beside_penalized_lines_predicts_the_population() 
     [("poisson", True, 2), ("binomial", False, 2), ("poisson", False, 3)],
     ids=["discrete", "binomial", "m3"],
 )
-def test_separated_sz_lines_stay_bounded_across_designs(family, discrete, m) -> None:
-    """The lines' penalty bounds separated lines on a discrete design, under binomial, and at ``m = 3``.
+def test_selected_sz_lines_stay_bounded_across_designs(family, discrete, m) -> None:
+    """``select=True`` bounds separated lines on a discrete design, under binomial, and at ``m = 3``.
 
-    ``test_a_separated_sz_line_is_penalized_and_stays_bounded``'s fixture,
-    its responses made binary for the binomial case: the scan reads a
-    discrete design's bins, the binomial boundary and a quadratic null
-    space, and each fit takes the ``null`` component, names the separated
-    levels and keeps every level within ``_line_bound`` of the population
-    (Claude review of 55eda85f).  Mutation: no penalty (master).
+    ``test_a_selected_sz_term_bounds_its_separated_lines``' fixture, its
+    responses made binary for the binomial case: each fit carries the
+    ``null`` component on a discrete design's bins, the binomial boundary and
+    a quadratic null space, warns of no unpenalized line and keeps every
+    level within ``_line_bound`` of the population (Claude review of
+    55eda85f).  Mutation: no penalty (master).
     """
     from superglm.model import base
 
@@ -1558,10 +1577,10 @@ def test_separated_sz_lines_stay_bounded_across_designs(family, discrete, m) -> 
         y = (y > 0).astype(float)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model = _separated_model(family=family, discrete=discrete, m=m).fit_reml(frame, y)
-    named = [w for w in caught if "unpenalized line" in str(w.message)]
-    assert len(named) == 1
-    assert "'g000'" in str(named[0].message) and "'g001'" in str(named[0].message)
+        model = _separated_model(family=family, discrete=discrete, m=m, select=True).fit_reml(
+            frame, y
+        )
+    assert not _sz_warnings(caught)
     assert 0.0 < model._reml_lambdas["x:g:sz:null"] < np.inf
     grid = pd.DataFrame(
         {
@@ -1576,15 +1595,16 @@ def test_separated_sz_lines_stay_bounded_across_designs(family, discrete, m) -> 
 
 
 @pytest.mark.parametrize("case", ["all_thin", "separated"])
-def test_penalized_sz_lines_predict_alike_on_both_solvers(case) -> None:
-    """With every level thin, or a line separated, both solvers predict the same curves (#444).
+def test_selected_sz_lines_predict_alike_on_both_solvers(case) -> None:
+    """With every level thin, or a line separated, ``select=True`` fits predict alike on both solvers (#444).
 
     Every level at one ``x`` (the Sol review's fixture): the levels' lines
     and the main effect's unpenalized curve were an exact alias, and the
     population off the levels' ``x`` values followed each solver's point
     along it (``+-585`` on ``auto`` against ``-0.03 .. 1.07`` on ``gram`` at
-    #440's head, and still ``7.9e-4`` apart on master).  With the lines'
-    penalty every smoothing parameter fixed (one policy for the term), the
+    #440's head, and still ``7.9e-4`` apart on master, as without
+    ``select``).  With the lines' penalty (``select=True``) and every
+    smoothing parameter fixed (one policy for the term), the
     penalized system has one solution in working precision (``kappa_s eta <
     1/2``, ``_scaled_kappa_eta``; master's alias puts it near ``1 / u``), and
     each fit is within ``_mode_gap`` of it, so on a grid every level's curve
@@ -1592,18 +1612,21 @@ def test_penalized_sz_lines_predict_alike_on_both_solvers(case) -> None:
     evaluation's ``(m + 1) eps |Z| |theta|`` (``Z`` the predictor's rows,
     ``_prediction_rows``, checked against ``predict`` first).  The separated
     fixture holds the same on its walked levels.  Mutation: no penalty
-    (master), where the singular system fails the first check.
+    (master, or ``select=False``), where the singular system fails the first
+    check.
     """
     from superglm.model import base
 
     if case == "all_thin":
         frame, y = _all_thin_frame()
-        build = lambda solve: _all_thin_model(solve, LambdaPolicy.fixed(1.0))  # noqa: E731
+        build = lambda solve: _all_thin_model(  # noqa: E731
+            solve, LambdaPolicy.fixed(1.0), select=True
+        )
         levels = ("g0", "g3", "g9")
     else:
         frame, y = _separated_poisson()
         build = lambda solve: _separated_model(  # noqa: E731
-            direct_solve=solve, lines=LambdaPolicy.fixed(1.0)
+            direct_solve=solve, lines=LambdaPolicy.fixed(1.0), select=True
         )
         levels = ("g000", "g001", "g002")
     x = np.linspace(float(frame["x"].min()), float(frame["x"].max()), 41)
@@ -1636,23 +1659,22 @@ def test_penalized_sz_lines_predict_alike_on_both_solvers(case) -> None:
         assert np.all(np.abs(etas[0] - etas[1]) <= reach)
 
 
-def test_an_all_thin_sz_term_penalizes_its_lines_under_reml() -> None:
-    """The Sol review's all-thin fit, its lines' smoothing parameter estimated: one fit on both solvers.
+def test_an_all_thin_sz_term_selects_its_lines_under_reml() -> None:
+    """The Sol review's all-thin fit with ``select=True``, its lines' smoothing parameter estimated.
 
-    The fit names the penalty in a warning and estimates ``x:g:sz:null`` by
-    REML; the structured and dense solvers reach the same penalized objective
-    and rank (``_assert_fits_as_gram``), where on master the objective was
-    flat along the alias and each solver kept its own point.  Mutation: no
-    penalty (master).
+    The fit estimates ``x:g:sz:null`` by REML and warns of nothing: no level
+    is left to a convention.  The structured and dense solvers reach the same
+    penalized objective and rank (``_assert_fits_as_gram``), where without
+    the penalty the objective was flat along the alias and each solver kept
+    its own point.  Mutation: no penalty (master, or ``select=False``).
     """
     frame, y = _all_thin_frame()
     models = {}
     for solve in ("structured", "gram"):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            models[solve] = _all_thin_model(solve).fit_reml(frame, y)
-        assert [w for w in caught if "penalizes every level's polynomial part" in str(w.message)]
-        assert not [w for w in caught if "fixed by convention" in str(w.message)]
+            models[solve] = _all_thin_model(solve, select=True).fit_reml(frame, y)
+        assert not _sz_warnings(caught)
         assert 0.0 < models[solve]._reml_lambdas["x:g:sz:null"] < np.inf
     _assert_fits_as_gram(models["structured"], models["gram"])
 
