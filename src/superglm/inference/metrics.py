@@ -1391,7 +1391,7 @@ class ModelMetrics:
                 n_points=n_points,
             )
             if isinstance(spec, Hierarchy):
-                return {"levels": list(spec._paths[len(spec.levels) - 1]), "se_log_relativity": se}
+                return {"levels": list(spec._paths[len(spec.names) - 1]), "se_log_relativity": se}
             return {
                 "levels": spec._ordered_levels,
                 "base_level": spec._base_level,

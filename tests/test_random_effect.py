@@ -38,7 +38,7 @@ def test_random_effect_is_exported_from_top_level():
     assert hasattr(superglm, "RandomEffect")
 
 
-@pytest.mark.parametrize("unseen", ["population", "error"])
+@pytest.mark.parametrize("unseen", ["population", "weighted", "error"])
 def test_random_effect_accepts_supported_unseen_policies(unseen):
     policy = LambdaPolicy.fixed(2.5)
 
@@ -103,6 +103,77 @@ def test_random_effect_scores_known_levels_and_population_unknown_as_zero():
         scored = spec.score(np.array(["c", "new", "a", "b"], dtype=object), beta)
 
     np.testing.assert_allclose(scored, [0.3, 0.0, 0.1, -0.2])
+
+
+def test_random_effect_weighted_unseen_scores_the_training_weighted_mean():
+    """``unseen="weighted"``: a new level is the average exposure, not the average level.
+
+    Mutation: equal shares (the average level, ``mean(beta)``) give 0.0667
+    where the exposure-weighted mean is 0.155.
+    """
+    spec = RandomEffect(unseen="weighted")
+    spec.build(np.array(["b", "a", "c", "b"], dtype=object), sample_weight=[1.0, 2.0, 1.0, 4.0])
+    beta = np.array([0.1, -0.2, 0.3])  # levels a, b, c carry weights 2, 5, 1
+
+    scored = spec.score(np.array(["c", "new", "a"], dtype=object), beta)
+    weighted = (2.0 * 0.1 + 5.0 * -0.2 + 1.0 * 0.3) / 8.0
+    # Shares exact in binary; three products summed: gamma_4 times sum |w b| / 8.
+    unit = np.finfo(np.float64).eps / 2
+    np.testing.assert_allclose(scored, [0.3, weighted, 0.1], rtol=0, atol=8 * unit * 0.2)
+    np.testing.assert_array_equal(spec.unseen_contrast(), [2 / 8, 5 / 8, 1 / 8])
+    rows = spec.transform(np.array(["new", "a"], dtype=object))
+    np.testing.assert_array_equal(rows, [[2 / 8, 5 / 8, 1 / 8], [1.0, 0.0, 0.0]])
+    unweighted = RandomEffect(unseen="weighted")
+    unweighted.build(np.array(["b", "a", "c", "b"], dtype=object))
+    np.testing.assert_array_equal(unweighted.unseen_contrast(), [1 / 4, 2 / 4, 1 / 4])
+
+
+def test_random_effect_weighted_unseen_reports_its_value_and_standard_error():
+    """``random_effects()`` reports what a new level is priced at and ``sqrt(a' V a)``.
+
+    Mutation: reporting the posterior SE of one level, or of the equally
+    weighted mean, misses ``sqrt(a' V a)`` for the exposure shares ``a``.
+    """
+    X = pd.DataFrame(
+        {
+            "x": np.linspace(-1.0, 1.0, 12),
+            "broker": np.array(["a", "a", "a", "a", "a", "b", "b", "c", "c", "c", "c", "c"]),
+        }
+    )
+    y = np.array([0.2, 0.5, 0.1, 0.4, 0.3, 1.9, 2.4, -0.3, -0.1, 0.0, -0.2, 0.1])
+    weight = np.array([1.0, 2.0, 1.0, 3.0, 1.0, 0.5, 0.5, 1.0, 1.0, 2.0, 1.0, 1.0])
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Numeric(), "broker": RandomEffect(unseen="weighted")},
+        selection_penalty=0,
+        direct_solve="gram",
+    ).fit_reml(X, y, sample_weight=weight)
+    report = model.random_effects("broker")
+    shares = np.array([8.0, 1.0, 6.0]) / 15.0
+    effects = report.table["effect"].to_numpy()
+    unit = np.finfo(np.float64).eps / 2
+    # The same three-term dot product, its shares a rounding apart: gamma_8 * sum |a b|.
+    scale = float(np.abs(shares) @ np.abs(effects))
+    assert report.unseen_effect == pytest.approx(shares @ effects, abs=16 * unit * scale)
+    new = pd.DataFrame({"x": [0.0], "broker": ["new"]})
+    conditional = model.predict(new)
+    shift = conditional - model.predict(new, random_effects="population")
+    # Identity link: the two predictions differ by that sum, added to an O(1) intercept.
+    bound = 16 * unit * (scale + float(np.abs(conditional[0])) + abs(model.result.intercept))
+    assert shift[0] == pytest.approx(report.unseen_effect, abs=bound)
+    covariance, active = model._coef_covariance
+    group = next(g for g in active if g.name == "broker")
+    contrast = np.zeros(covariance.shape[0])
+    contrast[group.start : group.end] = shares
+    dense = np.asarray(covariance, dtype=np.float64)
+    expected = float(np.sqrt(contrast @ dense @ contrast))
+    # Two routes to one small quadratic form: a backward-stable solve's error,
+    # p u times the condition number, on each side.
+    assert report.unseen_se == pytest.approx(
+        expected, rel=32 * unit * dense.shape[0] * np.linalg.cond(dense)
+    )
+    single = report.table["posterior_se"].to_numpy()
+    assert not np.any(np.isclose(single, expected, rtol=1e-6))
 
 
 def test_random_effect_error_policy_rejects_unknown_level():

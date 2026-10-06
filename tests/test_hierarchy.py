@@ -50,7 +50,7 @@ def _fit(spec, frame, y, **features) -> SuperGLM:
 
 
 def _joined() -> Hierarchy:
-    return Hierarchy(levels=("make", "model", "year"), sep="-")
+    return Hierarchy(names=("make", "model", "year"), sep="-")
 
 
 def test_one_joined_column_and_separate_columns_fit_identically() -> None:
@@ -132,12 +132,13 @@ def test_normalize_merges_spellings_reports_them_and_applies_at_predict() -> Non
     spelled[ford[1::3]] = "  FORD "
     frame["make"] = spelled
     with pytest.warns(
-        UserWarning, match=r"merged 1 group.*make 'ford' <- '  FORD ', 'Ford', 'ford'"
+        UserWarning, match=r"merged 1 group.*make 'Ford' <- '  FORD ', 'Ford', 'ford'"
     ):
         model = _fit(Hierarchy(columns=("make", "model", "year"), normalize=True), frame, y)
     merged = model.reconstruct_feature("vehicle")["merged_labels"]
-    assert merged == {"make": {"ford": ("  FORD ", "Ford", "ford")}}
-    assert ("ford",) in set(model.random_effects("vehicle:make").table["level"])
+    # "Ford" holds the most rows (or ties and is seen first), so it labels the make.
+    assert merged == {"make": {"Ford": ("  FORD ", "Ford", "ford")}}
+    assert ("Ford",) in set(model.random_effects("vehicle:make").table["level"])
     row = frame.iloc[[ford[2]]].assign(x=0.0)
     folded = row.assign(make="\uff26\uff2f\uff32\uff24\u00a0")  # full-width FORD, no-break space
     np.testing.assert_array_equal(model.predict(folded), model.predict(row))
@@ -147,6 +148,38 @@ def test_normalize_merges_spellings_reports_them_and_applies_at_predict() -> Non
     assert {("ford",), ("Ford",), ("  FORD ",)} <= set(
         raw.random_effects("vehicle:make").table["level"]
     )
+
+
+def test_normalize_reports_the_spelling_most_rows_use() -> None:
+    """Labels keep the data's spelling; only the comparison is folded.
+
+    Mutation: keying the levels by the folded form reports ``("ford",)`` for a
+    column that only ever says ``"Ford"``, and ``("ford",)`` again once a few
+    rows say ``"FORD "``.
+    """
+    frame, y = _book()
+    frame = frame.drop(columns="vehicle").assign(
+        make=lambda f: f["make"].str.title(), model=lambda f: f["model"].str.upper()
+    )
+    spec = Hierarchy(columns=("make", "model", "year"), normalize=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)  # nothing merges, so nothing warns
+        clean = _fit(spec, frame, y)
+    labels = set(clean.random_effects("vehicle:model").table["level"])
+    assert ("Ford", "ALPHA") in labels and ("ford", "alpha") not in labels
+    assert clean.reconstruct_feature("vehicle")["merged_labels"] == {}
+
+    spelled = frame["make"].to_numpy(dtype=object)
+    spelled[np.flatnonzero(spelled == "Ford")[::5]] = "FORD "  # a fifth, so "Ford" leads
+    with pytest.warns(UserWarning, match=r"make 'Ford' <- 'FORD ', 'Ford'"):
+        merged = _fit(
+            Hierarchy(columns=("make", "model", "year"), normalize=True),
+            frame.assign(make=spelled),
+            y,
+        )
+    assert ("Ford",) in set(merged.random_effects("vehicle:make").table["level"])
+    row = frame.head(1).assign(x=0.0, make="Ford")
+    np.testing.assert_array_equal(merged.predict(row.assign(make="ｆｏｒｄ")), merged.predict(row))
 
 
 def test_an_unseen_path_takes_the_deepest_level_it_shares() -> None:
@@ -167,9 +200,128 @@ def test_an_unseen_path_takes_the_deepest_level_it_shares() -> None:
         conditional - population, [make_effect, 0.0], rtol=0, atol=_gamma(16) * scale
     )
     assert abs(make_effect) > 1e-3
-    strict = _fit(Hierarchy(levels=("make", "model", "year"), sep="-", unseen="error"), frame, y)
+    strict = _fit(Hierarchy(names=("make", "model", "year"), sep="-", unseen="error"), frame, y)
     with pytest.raises(ValueError, match="unseen Hierarchy paths"):
         strict.predict(new)
+
+
+def test_weighted_unseen_paths_take_the_weighted_mean_under_their_deepest_known_part() -> None:
+    """``unseen="weighted"``: a new level is priced as its group's average exposure.
+
+    A new model of a known make takes, at the model and year levels, the
+    weighted mean of that make's effects there; a new year of a known model
+    the mean of that model's years; a new make the book's means, which add
+    up to the weighted mean of every training path's total.  Mutations:
+    equal shares (the average level) or the book-wide mean for a known make
+    both miss the expected values.
+    """
+    frame, y = _book()
+    weight = np.random.default_rng(3).uniform(0.2, 2.0, len(frame))
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "x": Numeric(),
+            "vehicle": Hierarchy(names=("make", "model", "year"), sep="-", unseen="weighted"),
+        },
+        selection_penalty=0,
+    ).fit_reml(frame, y, sample_weight=weight)
+    levels = model.reconstruct_feature("vehicle")["level_effects"]
+    paths = list(zip(frame["make"], frame["model"], frame["year"], strict=True))
+    by_row = {
+        "model": np.array([levels["model"][path[:2]] for path in paths]),
+        "year": np.array([levels["year"][path] for path in paths]),
+    }
+
+    def mean(level: str, rows: np.ndarray) -> float:
+        return float(np.sum(weight[rows] * by_row[level][rows]) / np.sum(weight[rows]))
+
+    kia = frame["make"].to_numpy() == "kia"
+    kia_beta = kia & (frame["model"].to_numpy() == "beta")
+    everyone = np.ones(len(frame), dtype=bool)
+    new = pd.DataFrame(
+        {"x": 0.0, "vehicle": ["kia-omega-2019", "kia-beta-2031", "tesla-alpha-2019"]}
+    )
+    parts = model.term_contributions(new)
+    make_mean = float(
+        np.sum(weight * np.array([levels["make"][path[:1]] for path in paths])) / np.sum(weight)
+    )
+    expected = np.array(
+        [
+            [levels["make"][("kia",)], mean("model", kia), mean("year", kia)],
+            [levels["make"][("kia",)], levels["model"][("kia", "beta")], mean("year", kia_beta)],
+            [make_mean, mean("model", everyone), mean("year", everyone)],
+        ]
+    )
+    got = parts[["vehicle:make", "vehicle:model", "vehicle:year"]].to_numpy()
+    # A weighted mean of O(1) effects over n rows, against the same in n roundings.
+    np.testing.assert_allclose(got, expected, rtol=0, atol=_gamma(2 * len(frame)))
+    totals = model.reconstruct_feature("vehicle")["effects"]
+    book = float(np.sum(weight * np.array([totals[path] for path in paths])) / np.sum(weight))
+    assert abs(got[2].sum() - book) <= _gamma(4 * len(frame))
+    assert abs(mean("model", kia) - mean("model", everyone)) > 1e-3  # the prefix matters here
+    report = model.random_effects("vehicle:model")
+    assert report.unseen_effect == pytest.approx(mean("model", everyone), abs=_gamma(len(frame)))
+    population = _fit(_joined(), frame, y)
+    assert population.random_effects("vehicle:model").unseen_effect == 0.0
+    assert population.random_effects("vehicle:model").unseen_se == 0.0
+
+
+def test_term_contributions_split_the_predictor_by_term_and_by_hierarchy_level() -> None:
+    """One column per term and per hierarchy level, summing with the intercept to the predictor.
+
+    Each column is its term's own log relativity: the hierarchy levels' fitted
+    effects and the ``relativities()`` tables of the categorical and of the
+    ordered band, whose base level reads zero there and its effect sits in
+    the intercept.  Mutations: one combined ``"vehicle"`` column, the term's
+    ``score``, still sums to the predictor but fails the per-level columns;
+    the band's raw score without its base shift fails its table.
+    """
+    from superglm import Categorical, OrderedCategorical, Spline
+
+    frame, y = _book()
+    bands = [f"p{i}" for i in range(6)]
+    frame["power"] = np.array(bands)[np.random.default_rng(8).integers(0, 6, len(frame))]
+    band = OrderedCategorical(
+        values={b: float(i) for i, b in enumerate(bands)}, basis=Spline(kind="cr", k=4)
+    )
+    model = _fit(_joined(), frame, y, engine=Categorical(), power=band)
+    rows = frame.iloc[::50].copy()
+    rows.index = rows.index + 1000  # a pandas index is carried through
+    parts = model.term_contributions(rows)
+    assert list(parts.columns) == [
+        "Intercept",
+        "x",
+        "vehicle:make",
+        "vehicle:model",
+        "vehicle:year",
+        "engine",
+        "power",
+    ]
+    assert parts.index.equals(rows.index)
+    eta = np.log(model.predict(rows))
+    # Six O(1) terms summed twice in different orders, an exp and a log.
+    scale = np.abs(parts.to_numpy()).sum(axis=1) + np.abs(eta)
+    np.testing.assert_allclose(parts.sum(axis=1), eta, rtol=0, atol=float(_gamma(16) * scale.max()))
+    levels = model.reconstruct_feature("vehicle")["level_effects"]
+    for (_, row), make, model_name, year in zip(
+        parts.iterrows(), rows["make"], rows["model"], rows["year"], strict=True
+    ):
+        assert row["vehicle:make"] == levels["make"][(make,)]
+        assert row["vehicle:model"] == levels["model"][(make, model_name)]
+        assert row["vehicle:year"] == levels["year"][(make, model_name, year)]
+    tables = model.relativities()
+    engine = tables["engine"].set_index("level")["log_relativity"]
+    np.testing.assert_array_equal(parts["engine"], engine[rows["engine"]].to_numpy())
+    power = tables["power"].set_index("level")["log_relativity"]
+    expected = power[rows["power"]].to_numpy()
+    # The same curve value less the same base value, in one and two roundings.
+    atol = _gamma(4) * (np.abs(expected).max() + np.abs(power).max())
+    np.testing.assert_allclose(parts["power"], expected, rtol=0, atol=atol)
+    assert np.abs(power).max() > 1e-3 and np.min(np.abs(parts["power"])) < atol  # base reads 0
+    population = model.term_contributions(rows, random_effects="population")
+    vehicle = ["vehicle:make", "vehicle:model", "vehicle:year"]
+    assert not population[vehicle].to_numpy().any()
+    pd.testing.assert_frame_equal(population.drop(columns=vehicle), parts.drop(columns=vehicle))
 
 
 def test_a_crossed_effect_shares_its_parent_level_instead_of_refitting_it() -> None:
@@ -321,14 +473,18 @@ def test_a_fitted_hierarchy_survives_pickle_and_its_configuration_refits() -> No
 
 def test_declarations_that_cannot_be_read_unambiguously_are_refused() -> None:
     """Exactly one of ``sep``/``columns``; names that would alias; levels to fit."""
+    with pytest.raises(TypeError, match="levels"):
+        Hierarchy(levels=("make", "model"), sep="-")  # type: ignore[call-arg]  # names= now
+    with pytest.raises(ValueError, match="unseen must be"):
+        Hierarchy(columns=("make", "model"), unseen="mean")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="exactly one of sep="):
-        Hierarchy(levels=("make", "model"), sep="-", columns=("make", "model"))
-    with pytest.raises(ValueError, match="needs levels="):
+        Hierarchy(names=("make", "model"), sep="-", columns=("make", "model"))
+    with pytest.raises(ValueError, match="needs names="):
         Hierarchy(sep="-")
     with pytest.raises(ValueError, match="RandomEffect"):
         Hierarchy(columns=("make",))
     with pytest.raises(ValueError, match="may not contain ':'"):
-        Hierarchy(levels=("make", "a:b"), sep="-")
+        Hierarchy(names=("make", "a:b"), sep="-")
     frame, y = _book()
     one_model = frame.assign(model=frame["make"] + "-only")
     with pytest.warns(UserWarning, match="'vehicle:make' and 'vehicle:model' group the training"):

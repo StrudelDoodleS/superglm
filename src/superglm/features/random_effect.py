@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections.abc import Hashable
 from typing import Any, Literal
@@ -32,6 +33,14 @@ class RandomEffect:
     with no ``FactorSmooth`` in the model), the declared parent is always in
     its elimination chain; otherwise the declaration is only validated.
 
+    ``unseen=`` sets what a level the fit never saw is predicted with:
+    ``"population"`` (the default) gives it zero, the population value;
+    ``"weighted"`` gives it the mean of the fitted level effects, each
+    weighted by its training weight (``sample_weight``, or rows), so a new
+    level is priced as the average exposure is rather than the average
+    level; ``"error"`` refuses it.  ``random_effects()`` reports that value
+    and its standard error (``RandomEffectResult``).
+
     Notes
     -----
     When a REML-estimated ``RandomEffect`` is fitted beside an unpenalised
@@ -51,7 +60,7 @@ class RandomEffect:
         self,
         *,
         levels=None,
-        unseen: Literal["population", "error"] = "population",
+        unseen: Literal["population", "weighted", "error"] = "population",
         missing: Literal["error"] = "error",
         lambda_policy: LambdaPolicy | None = None,
         nested_in: Hashable | None = None,
@@ -60,8 +69,8 @@ class RandomEffect:
 
         if nested_in is not None and not isinstance(nested_in, Hashable):
             raise TypeError("nested_in must be the name of another RandomEffect feature or None")
-        if unseen not in ("population", "error"):
-            raise ValueError(f"unseen must be 'population' or 'error', got {unseen!r}")
+        if unseen not in ("population", "weighted", "error"):
+            raise ValueError(f"unseen must be 'population', 'weighted' or 'error', got {unseen!r}")
         if missing != "error":
             raise ValueError(f"missing must be 'error', got {missing!r}")
         if lambda_policy is not None and not isinstance(lambda_policy, LambdaPolicy):
@@ -77,6 +86,8 @@ class RandomEffect:
         self._level_source: str = "declared" if levels is not None else "inferred"
         self._levels: list[Any] = []
         self._level_to_code: dict[Any, int] = {}
+        # Each level's training weight, read by ``unseen="weighted"``.
+        self._level_weight: NDArray[np.floating] = np.zeros(0, dtype=np.float64)
 
     def adopt_dtype_categories(self, categories: list) -> None:
         """Adopt a dtype-declared universe unless one is already declared."""
@@ -129,8 +140,11 @@ class RandomEffect:
         x: NDArray,
         sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
-        """Factorize all fitted levels without dropping a reference category."""
-        del sample_weight
+        """Factorize all fitted levels without dropping a reference category.
+
+        Each level's training weight (*sample_weight*, or one per row) is kept
+        for ``unseen="weighted"``.
+        """
         values = np.asarray(x).ravel()
         if self._declared_levels is not None:
             self._levels = list(self._declared_levels)
@@ -141,6 +155,11 @@ class RandomEffect:
                 raise ValueError("RandomEffect column contains missing values (NaN or None).")
             self._levels = uniques.tolist()
         self._level_to_code = {level: code for code, level in enumerate(self._levels)}
+        self._level_weight = np.bincount(
+            codes,
+            weights=None if sample_weight is None else np.asarray(sample_weight).ravel(),
+            minlength=len(self._levels),
+        ).astype(np.float64)
         return GroupInfo(
             columns=None,
             n_cols=len(self._levels),
@@ -169,6 +188,20 @@ class RandomEffect:
             raise ValueError(f"Encountered unseen RandomEffect levels: {unseen}.")
         return codes
 
+    def unseen_contrast(self) -> NDArray[np.floating]:
+        """The weights over the fitted levels that an unseen level's effect takes.
+
+        Zero under ``unseen="population"`` (and ``"error"``, which refuses an
+        unseen level); each level's share of the training weight under
+        ``unseen="weighted"``, zero if the levels carry no weight.
+        """
+        contrast = np.zeros(len(self._levels), dtype=np.float64)
+        weight = getattr(self, "_level_weight", contrast)
+        total = math.fsum(weight.tolist())
+        if self.unseen == "weighted" and total > 0.0:
+            contrast = weight / total
+        return contrast
+
     def score(
         self,
         x: NDArray,
@@ -176,17 +209,22 @@ class RandomEffect:
     ) -> NDArray[np.floating]:
         """Select fitted level effects without materializing one-hot columns."""
         codes = self._prediction_codes(x)
+        beta = np.asarray(beta, dtype=np.float64)
         effects = np.zeros(len(codes), dtype=np.float64)
         known = codes >= 0
-        effects[known] = np.asarray(beta, dtype=np.float64)[codes[known]]
+        effects[known] = beta[codes[known]]
+        if self.unseen == "weighted" and not np.all(known):
+            effects[~known] = self.unseen_contrast() @ beta
         return effects
 
     def transform(self, x: NDArray) -> NDArray[np.floating]:
-        """Materialize a small all-level one-hot reference matrix."""
+        """Materialize a small all-level one-hot reference matrix (shares on an unseen row)."""
         codes = self._prediction_codes(x)
         transformed = np.zeros((len(codes), len(self._levels)), dtype=np.float64)
         known = codes >= 0
         transformed[np.flatnonzero(known), codes[known]] = 1.0
+        if self.unseen == "weighted" and not np.all(known):
+            transformed[~known] = self.unseen_contrast()
         return transformed
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
@@ -297,7 +335,7 @@ def _check_same_grouping(name: Hashable, spec, levels: _TrainingLevels) -> None:
     reference = levels.codes(parent)
     if reference is None:
         return
-    covered = ", ".join(spec.levels[: spec._shared_depth])
+    covered = ", ".join(spec.names[: spec._shared_depth])
     for finer, coarser, finer_name, coarser_name in (
         (prefix, reference, f"{name!r} parts ({covered})", repr(parent)),
         (reference, prefix, repr(parent), f"{name!r} parts ({covered})"),

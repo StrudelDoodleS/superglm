@@ -2049,6 +2049,45 @@ class SuperGLM:
         """
         return self._predict_exact(X, offset, random_effects=random_effects)
 
+    def term_contributions(
+        self,
+        X: FrameLike,
+        *,
+        random_effects: str = "conditional",
+    ) -> pd.DataFrame:
+        """Each term's part of the linear predictor, one column per term.
+
+        Splits every row's prediction into the parts its terms add: under a
+        log link, ``np.exp(contributions)`` gives each term's relativity for
+        that row, and their product times ``exp(Intercept)`` and the exposure
+        is the prediction.
+
+        Parameters
+        ----------
+        X : pandas or eager Polars DataFrame
+            Eager input features with the same columns used during fitting.
+        random_effects : {"conditional", "population"}
+            As in :meth:`predict`: ``"population"`` gives random-effect,
+            ``Hierarchy`` and factor-smooth columns their population value.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per row of ``X`` (and its index, for a pandas ``X``).
+            ``"Intercept"`` holds the intercept the summary reports; then one
+            column per feature and per interaction, named as in
+            ``features=`` and ``interactions=``.  A ``Hierarchy`` gives one
+            column per fitted level, ``"vehicle:make"``, ``"vehicle:model"``,
+            ..., so a vehicle's relativity splits into its make, model and
+            year parts.  Each column is the row's log relativity on that
+            term's ``relativities()`` table (an ``OrderedCategorical``
+            measured from its base level, as its table is), with an unseen
+            level taking the value its ``unseen=`` rule gives.  Across a row
+            the columns plus any offset sum, up to rounding, to the linear
+            predictor whose inverse link :meth:`predict` returns.
+        """
+        return base.term_contributions(self, X, random_effects=random_effects)
+
     # ── Monotone repair ─────────────────────────────────────────
 
     def monotonize(

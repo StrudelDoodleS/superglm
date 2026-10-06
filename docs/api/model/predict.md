@@ -40,6 +40,8 @@ rating engine wants from a log-link model (under other links they are
 exponentiated link-scale contributions, not factors of the mean);
 {py:meth}`~superglm.SuperGLM.reconstruct_feature` returns one feature's fitted
 curve or effect on its original scale.
+{py:meth}`~superglm.SuperGLM.term_contributions` splits each row's prediction
+into the parts its terms add.
 
 ```{eval-rst}
 .. autosummary::
@@ -49,6 +51,7 @@ curve or effect on its original scale.
    ~superglm.SuperGLM.predict
    ~superglm.SuperGLM.relativities
    ~superglm.SuperGLM.reconstruct_feature
+   ~superglm.SuperGLM.term_contributions
 ```
 
 ## Example
@@ -121,6 +124,16 @@ then North, South and West — is the ordering the data was simulated with.
 
 ```{code-cell} ipython3
 model.relativities()["region"].round(3)
+```
+
+`term_contributions` gives the same view row by row: one column per term,
+holding that term's log relativity for the policy, beside the intercept. Under
+the log link the columns add up to the log of the rate `predict` returns, so a
+price can be explained term by term.
+
+```{code-cell} ipython3
+parts = model.term_contributions(new_policies)
+parts.assign(rate=np.exp(parts.sum(axis=1))).round(4)
 ```
 
 `reconstruct_feature` returns one feature's fitted curve on its original scale,

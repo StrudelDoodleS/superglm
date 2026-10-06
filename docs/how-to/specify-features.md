@@ -509,9 +509,16 @@ toward the portfolio prediction than thick levels.
 
 ```python
 RandomEffect()                              # unseen levels use the population prediction
+RandomEffect(unseen="weighted")             # unseen levels use the exposure-weighted average
 RandomEffect(unseen="error")                # fail on an unseen level
 RandomEffect(levels=df["Region"].unique())  # bind the level universe
 ```
+
+An unseen level gets zero by default, the prediction for the average level.
+`unseen="weighted"` gives it the average of the fitted levels weighted by
+their training exposure instead, which is the average policy rather than the
+average level. `model.random_effects(name)` reports that value as
+`unseen_effect` and its standard error as `unseen_se`.
 
 It is the SuperGLM analogue of mgcv's `s(group, bs="re")`. Unlike
 `Categorical`, it retains every level rather than choosing a reference level,
@@ -542,7 +549,7 @@ credibility (Jewell 1975; Ohlsson 2008).
 from superglm import Hierarchy
 
 # One column that joins the parts, such as "Ford-Focus-2019":
-Hierarchy(levels=("make", "model", "year"), sep="-")
+Hierarchy(names=("make", "model", "year"), sep="-")
 
 # One column per level, with no joining:
 Hierarchy(columns=("make", "model", "year"))
@@ -571,7 +578,10 @@ with `fit_reml()`. What you get:
   them with a character that no name contains.
 - **New vehicles at prediction.** A model the fit never saw, under a make it
   did see, gets that make's effect. A make it never saw gets the book average.
-  `unseen="error"` refuses any new combination instead.
+  `unseen="weighted"` prices each new level at the exposure-weighted average
+  of the levels it would sit beside: a new model gets the average model of its
+  make, weighted by each model's exposure, and a new make gets the average of
+  the whole book. `unseen="error"` refuses any new combination instead.
 - **Missing parts are an error,** at fit and at prediction.
 
 ### Cleaning labels with `normalize=True`
@@ -584,8 +594,24 @@ Text is compared after ignoring case, full-width characters and extra spaces,
 so `"FORD "`, `"Ford"` and `"ford"` are one make. Prediction cleans its labels
 the same way. The fit warns with every set of spellings it merged, and
 `model.reconstruct_feature("vehicle")["merged_labels"]` lists them. Reports
-show the cleaned label, such as `"ford"`. Values that are not text, such as a
+show the spelling most rows use, such as `"Ford"`, so a column that is
+already clean reads exactly as it did. Values that are not text, such as a
 numeric year, are used as they are.
+
+### Splitting a vehicle's price by level
+
+`model.term_contributions(X)` returns one column per term and one per
+hierarchy level, so each row's price splits into its parts:
+
+```python
+parts = model.term_contributions(X)
+parts[["vehicle:make", "vehicle:model", "vehicle:year"]]  # log relativities
+np.exp(parts.sum(axis=1))  # the prediction at one unit of exposure (log link)
+```
+
+Each column is that level's log relativity for the row. A level the row's
+vehicle does not share with the training data shows the value its `unseen=`
+rule gives it.
 
 ### Crossed effects that share a level
 
@@ -625,6 +651,18 @@ tell apart, so a fit stops when a hierarchy level groups the rows exactly as
 another term's level does, and names the `nested_in=` that shares it. A
 `RandomEffect` can name a hierarchy level the same way:
 `RandomEffect(nested_in="vehicle:make")`.
+
+Declare an engine-within-model effect as `model_engine` above, not as a
+`RandomEffect(nested_in="vehicle:model")` on a key column you join yourself
+from make, model and engine. The `Hierarchy` form keeps what a hand-built key
+loses:
+
+- the same `normalize=` cleaning as the levels it continues, so `"FORD"` in
+  the key cannot miss the make `"Ford"`;
+- keys that cannot collide when a name contains your separator;
+- labels reported as `(make, model, engine)`;
+- under `unseen="weighted"`, a new engine of a known model priced at that
+  model's average engine rather than the book's.
 
 Current limits:
 
