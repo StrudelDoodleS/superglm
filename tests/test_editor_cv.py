@@ -1640,6 +1640,52 @@ def test_run_cv_and_final_fit_name_a_missing_value_in_a_factor_smooth_group(cv_f
         assert refused.value.public_message == cv.MISSING_LEVELS.format(job=job, term="urban")
 
 
+def test_run_cv_names_a_missing_factor_smooth_group_value_only_a_test_fold_reads():
+    """TimeSeriesSplit(3): the last block, which only the last fold tests on, holds a missing group.
+
+    Run CV checked the rows its folds train on, which is right for a level
+    term (a test-only row is scored as the term predicts new levels), but a
+    factor smooth refuses a missing group when it predicts as well as when it
+    fits: the last fold failed while scoring, and Run CV said only that the
+    fold could not be fitted or scored.
+    """
+    from sklearn.model_selection import TimeSeriesSplit
+
+    import superglm.editor.cv as cv
+    from superglm import FactorSmooth
+    from superglm.editor.cv import capture_cv_run, run_cv
+    from superglm.editor.errors import EditorValueError
+
+    rng = np.random.default_rng(11)
+    n = 600
+    age = rng.uniform(18.0, 80.0, n)
+    urban = rng.choice(["yes", "no"], n).astype(object)
+    urban[-1] = None
+    X = pd.DataFrame({"age": age, "urban": urban})
+    y = rng.poisson(np.exp(-0.5 + 0.2 * np.sin(age / 12.0))).astype(np.float64)
+
+    def declared():
+        return SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"age": Spline(n_knots=6)},
+            interactions=[FactorSmooth("age", group="urban", basis="fs", k=5)],
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        supplied = cross_validate(
+            declared(), X, y, cv=TimeSeriesSplit(3), fit_mode="fit_reml", scoring=("deviance",)
+        )
+    model = declared().fit_reml(X.iloc[:400], y[:400])
+    session = EditorSession.from_model(model, cv=supplied, cv_data=(X, y))
+
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    assert run.value.public_message == cv.MISSING_LEVELS.format(job="Run CV", term="urban")
+
+
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_final_fit_refuses_a_factor_smooth_group_held_as_bool_beside_integers(cv_frame, backend):
     """The factor smooth's group column is True/False in the train rows and int8 0/1 in validation.

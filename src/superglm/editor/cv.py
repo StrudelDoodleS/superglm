@@ -848,11 +848,7 @@ def _covering_template(template, X, job: str):
     and so does a factor smooth's group.
     """
     frame = as_eager_frame(X)
-    for spec in getattr(template, "_interaction_specs", {}).values():
-        group = getattr(spec, "group", None)
-        if isinstance(spec, FactorSmooth) and group in frame.columns:
-            if _holds_missing(frame, group):
-                raise EditorValueError(MISSING_LEVELS.format(job=job, term=group))
+    _require_valued_groups(template, frame, job)
     bindings = dict(getattr(template, "_level_bindings", None) or ())
     replacements = {}
     for name, spec in template._specs.items():
@@ -912,6 +908,16 @@ def _covering_template(template, X, job: str):
     return clone_with_replaced_features(template, replacements) if replacements else template
 
 
+def _require_valued_groups(template, X, job: str) -> None:
+    """Refuse a missing value in a factor smooth's group, which it refuses to fit and to predict."""
+    frame = as_eager_frame(X)
+    for spec in getattr(template, "_interaction_specs", {}).values():
+        group = getattr(spec, "group", None)
+        if isinstance(spec, FactorSmooth) and group in frame.columns:
+            if _holds_missing(frame, group):
+                raise EditorValueError(MISSING_LEVELS.format(job=job, term=group))
+
+
 def _outside_universe(
     values, frame, name: str, spec: Categorical | RandomEffect, binding
 ) -> list[str]:
@@ -957,9 +963,14 @@ def _uncovered_labels(values, grouping) -> list[str]:
 def run_cv(plan: CVRunPlan, context) -> CVRun:
     """Replay the stored folds on the in-force structure with the hand edits put back."""
     # Only the rows some fold trains on are fitted: a test-only row is scored
-    # as the term predicts new levels, and a row in no fold is never read.
+    # as the term predicts new levels, and a row in no fold is never read. A
+    # factor smooth refuses a missing group when it predicts too, so its
+    # groups are checked on every row a fold reads.
+    frame = as_eager_frame(plan.rows.X)
+    read = np.unique(np.concatenate([np.concatenate(fold) for fold in plan.folds]))
+    _require_valued_groups(plan.template, frame.take_rows(read), "Run CV")
     fitted = np.unique(np.concatenate([train for train, _test in plan.folds]))
-    X_fitted = as_eager_frame(plan.rows.X).take_rows(fitted)
+    X_fitted = frame.take_rows(fitted)
     template = _covering_template(plan.template, X_fitted, "Run CV")
     recorder = _FoldRecorder(plan, context)
     try:
