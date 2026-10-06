@@ -34,6 +34,9 @@ ORDERED_SPLINE_UNAVAILABLE = "Handles are not available for this spline."
 _UNIT_ROUNDOFF = 2.0**-53
 
 
+_SUBNORMAL_SPACING = 2.0**-1074
+
+
 def _gamma(count: int) -> float:
     """Higham's ``gamma_k = k u / (1 - k u)`` for ``k`` roundings, ``u = 2^-53``."""
     product = count * _UNIT_ROUNDOFF
@@ -498,6 +501,16 @@ def _certification_bound(level_basis, base_row, coefficient_map, beta, inner) ->
     SCOP column-mean constant's magnitude when the fit carries one.  Twice
     that, and a ``gamma`` whose count also covers forming ``a_i`` from
     non-negative terms, keeps the computed bound an upper bound.
+
+    That bound is relative, and rounds to zero when the effects are
+    subnormal. Under gradual underflow each product also carries an absolute
+    error of at most ``eta = 2^-1075``, half the subnormal spacing, while a
+    sum that underflows is exact (Demmel, *Underflow and the Reliability of
+    Numerical Software*, SIAM J. Sci. Stat. Comput. 5(4), 1984). The four
+    evaluations form at most ``K + p + 1`` products a level, whose errors the
+    later sums and products carry at most ``(1 + |beta|_1)(1 + |b|_1)`` times,
+    so ``count (1 + |beta|_1)(1 + |b|_1)`` subnormal spacings ``2 eta``, each
+    product and sum of it rounded outward, bound the absolute part.
     """
     columns = level_basis.shape[1]
     weights = np.abs(coefficient_map) @ np.abs(beta)
@@ -509,7 +522,25 @@ def _certification_bound(level_basis, base_row, coefficient_map, beta, inner) ->
     base_magnitude = float(np.abs(base_row) @ weights) + constant
     row_norm = np.maximum(1.0, np.sum(np.abs(level_basis), axis=1))
     count = 2 * (columns + beta.size) + 6
-    return 4.0 * _gamma(count) * row_norm * (level_magnitude + base_magnitude)
+    relative = 4.0 * _gamma(count) * row_norm * (level_magnitude + base_magnitude)
+    up = np.inf
+    beta_mass = np.nextafter(1.0 + _sum_up(np.abs(beta)), up)
+    basis_mass = np.nextafter(
+        1.0 + max(_sum_up(np.abs(level_basis), axis=1).max(), _sum_up(np.abs(base_row))), up
+    )
+    spacings = np.nextafter(np.nextafter(count * beta_mass, up) * basis_mass, up)
+    absolute = np.nextafter(spacings * _SUBNORMAL_SPACING, up)
+    return np.nextafter(relative + absolute, up)
+
+
+def _sum_up(values: NDArray, axis: int | None = None):
+    """An upper bound on the sum of non-negative ``values``: the float64 sum times ``1 + gamma``.
+
+    ``gamma``'s count covers the ``n - 1`` roundings of the sum, forming and
+    applying the factor (two), and the two of ``gamma`` itself.
+    """
+    n = values.shape[-1] if axis is not None else values.size
+    return np.sum(values, axis=axis) * (1.0 + _gamma(n + 3))
 
 
 def _handle_centres(grid_basis: NDArray, grid_x: NDArray) -> NDArray:

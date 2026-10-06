@@ -332,6 +332,28 @@ def test_handles_are_off_when_the_certification_bound_overflows(wide, monkeypatc
     )
 
 
+def test_handles_survive_effects_of_subnormal_size():
+    """Responses near 1e-310: the effects are subnormal, and so are their rounding errors.
+
+    Under gradual underflow a product also carries an absolute error, up to
+    half the subnormal spacing (Demmel 1984). The certificate was purely
+    relative, so it rounded to zero at every level, the view and the effects
+    differed by a subnormal spacing or two, and handles were refused for a
+    fit that ordinary-scale responses give handles.
+    """
+    levels = ["0", "1", "2", "3", "4", "5"]
+    X = pd.DataFrame({"band": np.tile(levels, 30)})
+    y = 1e-310 * np.tile([-0.3, -0.18, -0.05, 0.06, 0.15, 0.2], 30)
+    band = OrderedCategorical(order=levels, basis=Spline(kind="ps", k=8))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": band})
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["band"])
+
+    assert session.ordered_spline("band") is not None
+    assert not isinstance(session.ordered_spline("band"), str)
+    assert len(session.control_points("band")["x"]) >= 3
+
+
 def test_an_ordered_term_without_a_spline_basis_gets_no_spline_view():
     model, _ = _fit(Piecewise(breaks=["3"]), specials=())
     session = EditorSession.from_model(model, terms=["band"])
