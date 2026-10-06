@@ -368,6 +368,10 @@ _TEXT_IS_VALUE = (
     datetime.timedelta,
     pd.Timestamp,
     pd.Timedelta,
+    # pd.cut's levels and periods: the text carries what equality compares
+    # (closed side and endpoints, the period), and neither reads as a number.
+    pd.Interval,
+    pd.Period,
 )
 
 

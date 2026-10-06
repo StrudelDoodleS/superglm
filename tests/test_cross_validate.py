@@ -2077,6 +2077,12 @@ class TestFullFrameLevelBinding:
 # ── Data fingerprint (the editor's Run CV) ───────────────────────
 
 
+def _data_fingerprint_of(frame):
+    from superglm.model_selection import _data_fingerprint
+
+    return _data_fingerprint(frame, np.ones(len(frame)))
+
+
 class TestDataFingerprint:
     """A result records the rows its folds index, so a consumer can replay them."""
 
@@ -2272,6 +2278,34 @@ class TestDataFingerprint:
 
         assert result.fold_scores["deviance"].isna().all()
         assert result.data_fingerprint is None
+
+    def test_a_pd_cut_column_keeps_its_fingerprint(self):
+        """pd.cut without labels= gives a categorical of Interval values, which a level term reads as text.
+
+        701eba5e fingerprinted only listed value types and left Interval out,
+        so the result had no fingerprint: plot_terms_by_fold refused the very
+        rows its folds were drawn on, and the editor disabled Run CV. An
+        Interval's text carries the closed side and endpoints its equality
+        compares, as a Period's carries the period.
+        """
+        x = np.linspace(0.0, 1.0, 120)
+        X = pd.DataFrame({"band": pd.cut(x, [0.0, 0.25, 0.5, 0.75, 1.0], include_lowest=True)})
+        y = np.tile([1.0, 2.0, 3.0], 40)
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": Categorical()})
+
+        result = cross_validate(model, X, y, cv=SimpleKFold(3), return_estimators=True)
+
+        from superglm.model_selection import _data_fingerprint
+
+        # The check plot_terms_by_fold(X, y=y) and the editor make on these rows.
+        assert result.data_fingerprint is not None
+        assert result.data_fingerprint == _data_fingerprint(
+            X, y, None, None, result.fingerprint_columns
+        )
+        periods = pd.DataFrame(
+            {"p": pd.period_range("2020-01", periods=4, freq="M").astype(object)}
+        )
+        assert _data_fingerprint_of(periods) is not None
 
     def test_a_column_of_objects_whose_text_may_not_be_their_value_is_not_fingerprinted(self):
         """Every Tag(1) in one frame is a Tag(2) in the other: both print "same", beside "other".
