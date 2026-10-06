@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 pytest.importorskip("playwright.sync_api")
@@ -536,6 +538,184 @@ def test_selection_menu_does_not_block_adjacent_modifier_selection(open_editor_p
         assert session.selection("territory").tolist() == [first_index, adjacent_index]
         assert page.locator("#chart circle.point.selected[data-index]").count() == 2
         assert page.locator("#selectionMenu").is_visible()
+
+
+def _click_selects(page, point, modifiers=(), timeout=30000) -> None:
+    """Click, wait for its /select, and let the page settle before the next click.
+
+    A selection posts without the busy overlay, and a click that lands while
+    one is still running is skipped, so the next click waits for it.
+    """
+    with page.expect_response(
+        lambda response: is_select_request(response.request), timeout=timeout
+    ):
+        point.click(modifiers=list(modifiers))
+    page.wait_for_function("() => window.__superglmTest?.mutationStatus?.() !== 'running'")
+
+
+def test_click_shift_click_selects_a_span_and_ctrl_click_toggles_on_a_spline(open_editor_page):
+    # Thirty points draw every marker, so the selection palette steps around them.
+    with open_editor_page(n_points=30) as (page, session):
+        select_chart_tool(page, "Select")
+
+        def point(index: int):
+            return page.locator(f'#chart circle.point[data-index="{index}"]')
+
+        _click_selects(page, point(8))
+        _click_selects(page, point(14), modifiers=["Shift"], timeout=5000)
+        assert session.selection("curve").tolist() == list(range(8, 15))
+        # The Shift press did not pan: the chart still shows its whole x range.
+        assert page.evaluate(
+            "() => { const s = document.querySelector('#chart')._scale;"
+            " return s.xMin === s.baseXMin && s.xMax === s.baseXMax; }"
+        )
+
+        _click_selects(page, point(11), modifiers=["Control"])
+        assert session.selection("curve").tolist() == [8, 9, 10, 12, 13, 14]
+        _click_selects(page, point(20), modifiers=["Control"])
+        assert session.selection("curve").tolist() == [8, 9, 10, 12, 13, 14, 20]
+        # The last Ctrl-click is the anchor: Shift-click 17 spans 17 to 20.
+        _click_selects(page, point(17), modifiers=["Shift"])
+        assert session.selection("curve").tolist() == [17, 18, 19, 20]
+
+
+_POINTS_UNDER_THE_MENU = """() => [...document.querySelectorAll('#chart circle.point[data-index]')]
+  .filter((point) => {
+    const box = point.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return hit?.closest('#selectionMenu') != null;
+  })
+  .map((point) => Number(point.dataset.index))"""
+
+
+@pytest.mark.parametrize("viewport", [(1180, 720), (1600, 1000)])
+def test_the_selection_menu_leaves_every_point_of_a_dense_curve_clickable(
+    open_editor_page, viewport
+):
+    """After a click, the next click or Shift-click can land on any point of the curve.
+
+    A dense curve hides its points, but each is a click target, so the
+    selection menu that opens beside the clicked point must not cover them.
+    """
+    width, height = viewport
+    with open_editor_page(viewport={"width": width, "height": height}) as (page, session):
+        select_chart_tool(page, "Select")
+
+        def click_point(index: int, modifiers: tuple[str, ...] = ()) -> int:
+            """Click where point ``index`` is drawn; return the point the click lands on.
+
+            A hidden point is a target at its place; on a dense curve a
+            neighbour drawn over it can take the click.
+            """
+            box = page.locator(f'#chart circle.point[data-index="{index}"]').bounding_box()
+            x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            landed = page.evaluate(
+                "([x, y]) => Number(document.elementFromPoint(x, y)"
+                "?.closest('circle.point[data-index]')?.dataset.index ?? -1)",
+                [x, y],
+            )
+            with page.expect_response(lambda response: is_select_request(response.request)):
+                for key in modifiers:
+                    page.keyboard.down(key)
+                page.mouse.click(x, y)
+                for key in modifiers:
+                    page.keyboard.up(key)
+            page.wait_for_function("() => window.__superglmTest?.mutationStatus?.() !== 'running'")
+            return landed
+
+        for first in (20, 60, 100, 140, 180):
+            anchor = click_point(first)
+            page.locator("#selectionMenu").wait_for(state="visible")
+            assert page.evaluate(_POINTS_UNDER_THE_MENU) == [], first
+
+        # The click at 180 set the anchor: a Shift-click near 95 spans to it.
+        landed = click_point(95, modifiers=("Shift",))
+        assert abs(landed - 95) <= 1 and abs(anchor - 180) <= 1
+        assert session.selection("curve").tolist() == list(range(landed, anchor + 1))
+
+
+def _tagged_x(text: str, gesture: str) -> float:
+    """The x a tag such as ``"click · 2.77"`` names."""
+    prefix = f"{gesture} · "
+    assert text.startswith(prefix), text
+    return float(text[len(prefix) :])
+
+
+def test_the_anchor_and_a_shift_click_end_are_ringed_and_tagged(open_editor_page):
+    with open_editor_page(n_points=30) as (page, session):
+        select_chart_tool(page, "Select")
+        x = session.terms["curve"].x
+        # Every x here lies in [1, 10), which the axis prints to two decimals.
+        printed = 0.005
+
+        def point(index: int):
+            return page.locator(f'#chart circle.point[data-index="{index}"]')
+
+        tags = page.locator("#chart .anchor-tag:visible")
+        rings = page.locator("#chart circle.anchor-ring:visible")
+        status = page.locator("#status")
+        assert tags.count() == 0 and rings.count() == 0
+
+        _click_selects(page, point(8))
+        [anchor_tag] = tags.all_text_contents()
+        assert abs(_tagged_x(anchor_tag, "click") - x[8]) <= printed
+        assert rings.count() == 1
+        assert rings.first.get_attribute("cx") == point(8).get_attribute("cx")
+        assert status.text_content().startswith("1 of 30 selected · ")
+
+        _click_selects(page, point(14), modifiers=["Shift"], timeout=5000)
+        anchor_tag, end_tag = tags.all_text_contents()
+        assert abs(_tagged_x(anchor_tag, "click") - x[8]) <= printed
+        assert abs(_tagged_x(end_tag, "Shift-click") - x[14]) <= printed
+        assert sorted(ring.get_attribute("cx") for ring in rings.all()) == sorted(
+            point(i).get_attribute("cx") for i in (8, 14)
+        )
+        range_line = re.fullmatch(
+            r"Range (\S+) – (\S+) · 7 of 30 points · selected exposure [\d.]+%",
+            status.text_content(),
+        )
+        assert range_line, status.text_content()
+        assert abs(float(range_line[1]) - x[8]) <= printed
+        assert abs(float(range_line[2]) - x[14]) <= printed
+
+        # A span the other way still reads low to high.
+        _click_selects(page, point(3), modifiers=["Shift"], timeout=5000)
+        range_line = re.fullmatch(
+            r"Range (\S+) – (\S+) · 6 of 30 points · .*", status.text_content()
+        )
+        assert range_line, status.text_content()
+        assert abs(float(range_line[1]) - x[3]) <= printed
+        assert abs(float(range_line[2]) - x[8]) <= printed
+
+        # While the pointer drags, the tags step aside; the rings stay.
+        corner = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const { margin } = svg._scale;
+                const at = (dx, dy) => {
+                    const p = svg.createSVGPoint();
+                    p.x = margin.left + dx;
+                    p.y = margin.top + dy;
+                    const client = p.matrixTransform(svg.getScreenCTM());
+                    return { x: client.x, y: client.y };
+                };
+                return { start: at(4, 4), end: at(24, 24) };
+            }"""
+        )
+        page.mouse.move(corner["start"]["x"], corner["start"]["y"])
+        page.mouse.down()
+        page.mouse.move(corner["end"]["x"], corner["end"]["y"], steps=3)
+        assert tags.count() == 0
+        assert rings.count() == 2
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            page.mouse.up()
+        page.wait_for_function("() => window.__superglmTest?.mutationStatus?.() !== 'running'")
+
+        # The box changed the selection, so it is no span any more: the anchor
+        # keeps its tag, and the status line its selection sentence.
+        [anchor_tag] = tags.all_text_contents()
+        assert abs(_tagged_x(anchor_tag, "click") - x[8]) <= printed
+        assert status.text_content().startswith("0 of 30 selected · ")
 
 
 def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_editor_page):
@@ -1190,6 +1370,7 @@ def test_application_bar_exposes_views_undo_redo_and_export(open_editor_page):
         assert tabs.get_by_role("tab").all_inner_texts() == [
             "Editor",
             "Validation",
+            "Cross-validation",
             "Final Fit",
         ]
         assert page.get_by_role("button", name="Undo edit").is_disabled()
@@ -1477,7 +1658,7 @@ def test_summary_level_display_toggle_is_view_only_and_synchronizes_full_summary
             is initial_chart_is_collapsed
         )
 
-        forbidden = {"collapse_levels", "ungroup_levels", "refit_offset"}
+        forbidden = {"collapse_levels", "ungroup_levels", "stage", "refit_pending", "refit_offset"}
         assert not any(path in forbidden for path, _payload in requests)
         summary_payloads = [payload for path, payload in requests if path == "summary"]
         assert [payload["level_display"] for payload in summary_payloads] == [
@@ -1709,6 +1890,180 @@ def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):
         assert page.evaluate("document.documentElement.dataset.summarySandboxEscape") is None
 
 
+def test_summary_search_filters_rows_survives_a_new_payload_and_escape_clears_it(
+    open_editor_page,
+):
+    with open_editor_page(selected_term="territory") as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelectorAll('#summaryFrame .summary-row').length > 0"""
+        )
+        search = page.get_by_role("searchbox", name="Search terms and levels")
+
+        def shown_rows() -> list[str]:
+            return page.locator("#summaryFrame tr.summary-row:not([hidden])").evaluate_all(
+                "rows => rows.map(row => row.querySelector('.summary-term span').textContent)"
+            )
+
+        # T01..T10 are text: "t1" is in T10 only, and in no term's name.
+        search.fill("t1")
+        assert shown_rows() == ["territory[T10]"]
+        marks = page.locator("#summaryFrame tr.summary-row:not([hidden]) mark")
+        assert marks.all_inner_texts() == ["T1"]
+        assert page.locator("#summarySearchCount").inner_text() == "1 term · 1 row"
+
+        # A new payload rebuilds the frame, and the search is applied to it.
+        grouped = page.get_by_role("group", name="Categorical levels").get_by_role(
+            "radio", name="Grouped"
+        )
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/summary")
+            )
+        ):
+            grouped.check()
+        page.wait_for_function(
+            "() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'"
+        )
+        assert shown_rows() == ["territory[T10]"]
+
+        search.press("Escape")
+        assert search.input_value() == ""
+        assert page.locator("#summarySearchCount").inner_text() == ""
+        assert len([row for row in shown_rows() if row.startswith("territory[")]) == 10
+        assert page.locator("#inspector").get_attribute("data-open") == "true"
+
+
+def test_summary_follows_the_chart_and_filters_edited_and_waiting_terms(
+    open_editor_page, choose_feature
+):
+    with open_editor_page(selected_term="territory") as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame tr.summary-section')"""
+        )
+
+        def lines() -> list[str]:
+            return page.locator("#summaryFrame tr.summary-section:not([hidden])").evaluate_all(
+                "rows => rows.map(row => row.dataset.term)"
+            )
+
+        def open_lines() -> list[str]:
+            return page.locator(
+                '#summaryFrame tr.summary-section:not([hidden]) [aria-expanded="true"]'
+            ).evaluate_all("buttons => buttons.map(button => button.dataset.summarySection)")
+
+        # The chart's term is open; every other term is one line.
+        assert lines() == ["curve", "territory", "age_band", "long_category"]
+        assert open_lines() == ["territory"]
+        current = page.locator('#summaryFrame tr.summary-section[data-current="true"]')
+        assert current.get_attribute("data-term") == "territory"
+        # A spline, ordered or not, carries its whole-term test's p on its line; a
+        # categorical has no whole-term test, so its line carries no p chip.
+        chips = page.locator("#summaryFrame tr.summary-section").evaluate_all(
+            "rows => rows.map(row => [row.dataset.term, row.querySelectorAll('.summary-p-chip').length])"
+        )
+        assert chips == [["curve", 1], ["territory", 0], ["age_band", 1], ["long_category", 0]]
+
+        # Another term opens from its line and stays open while the chart stays put.
+        page.locator('#summaryFrame [data-summary-section="age_band"]').click()
+        assert open_lines() == ["territory", "age_band"]
+
+        # The chart moves on: the summary follows it, folds the rest again, and
+        # rewrites only its table body.
+        summary_child = page.locator("#summaryFrame > *").first.element_handle()
+        choose_feature(page, "curve")
+        page.wait_for_function("() => document.querySelector('#status')?.dataset.term === 'curve'")
+        assert open_lines() == ["curve"]
+        assert summary_child.evaluate(
+            "node => node === document.querySelector('#summaryFrame > *')"
+        )
+
+        # A hand edit on curve: Edited keeps it alone, and nothing is waiting.
+        select_chart_tool(page, "Select")
+        _click_selects(page, page.locator('#chart circle.point[data-index="5"]'))
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+            )
+        ):
+            page.locator('button[data-op="shift_up"]').click()
+        edited = page.get_by_role("button", name="Edited", exact=True)
+        edited.click()
+        page.wait_for_function(
+            """() => [...document.querySelectorAll('#summaryFrame tr.summary-section:not([hidden])')]
+                .map(row => row.dataset.term).join() === 'curve'"""
+        )
+        assert edited.get_attribute("aria-pressed") == "true"
+        page.get_by_role("button", name="Waiting", exact=True).click()
+        assert lines() == []
+        assert page.locator("#summaryFrame .summary-empty-row").inner_text() == "No terms match."
+        page.get_by_role("button", name="All", exact=True).click()
+        assert lines() == ["curve", "territory", "age_band", "long_category"]
+
+
+def test_summary_scrolls_the_chart_term_into_view(open_editor_page, choose_feature):
+    # A short window leaves the summary frame room for a few lines only, and
+    # the frame runs a little past the window's bottom. The webfonts are held
+    # back until the line is current, as on a slow network: the rows are laid
+    # out in a fallback font first and move when the fonts arrive.
+    webfonts = re.compile(r"^https://fonts\.gstatic\.com/")
+    held = []
+
+    def hold_webfonts(page) -> None:
+        page.route(webfonts, lambda route: held.append(route))
+
+    with open_editor_page(viewport={"width": 1180, "height": 560}, prepare=hold_webfonts) as (
+        page,
+        _session,
+    ):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame tr.summary-section')"""
+        )
+
+        # The frame scrolls its padding box, clipped by the window. The
+        # scroll offset is a whole pixel and the layout is not, so an edge it
+        # aligns may sit up to a pixel past.
+        in_view = """term => {
+                    const frame = document.querySelector('#summaryFrame');
+                    const box = frame.getBoundingClientRect();
+                    const top = Math.max(box.top + frame.clientTop, 0);
+                    const bottom = Math.min(
+                        box.top + frame.clientTop + frame.clientHeight, window.innerHeight
+                    );
+                    const line = frame
+                        .querySelector(`tr.summary-section[data-term="${term}"]`)
+                        .getBoundingClientRect();
+                    return line.top >= top - 1 && line.bottom <= bottom + 1;
+                }"""
+
+        def line_in_view(term: str) -> bool:
+            return page.evaluate(in_view, term)
+
+        page.locator("#summaryFrame").evaluate("node => { node.scrollTop = 0; }")
+        assert not line_in_view("long_category")
+
+        choose_feature(page, "long_category")
+        page.wait_for_function(
+            """() => document.querySelector(
+                '#summaryFrame tr.summary-section[data-term="long_category"]'
+            )?.dataset.current === 'true'"""
+        )
+        # The scroll lands after the line is marked current; on a loaded
+        # machine that can be a frame later, so wait for it.
+        page.wait_for_function(in_view, arg="long_category", timeout=5000)
+
+        # The fonts arrive and the rows move; the line stays in view.
+        for route in held:
+            route.continue_()
+        page.unroute(webfonts)
+        page.wait_for_function("() => document.fonts.status === 'loaded'")
+        page.wait_for_function(in_view, arg="long_category", timeout=5000)
+
+
 def test_context_bar_reports_term_kind_and_edf(open_editor_page):
     with open_editor_page(selected_term="curve") as (page, _session):
         context = page.get_by_role("region", name="Term context")
@@ -1857,7 +2212,7 @@ def test_existing_svg_selection_operation_posts_linearise_unchanged(open_editor_
         assert session.history[-1].operation == "linear_interpolate"
 
 
-def test_inspector_uses_one_slot_for_summary_history_advanced_and_help(open_editor_page):
+def test_inspector_uses_one_slot_for_summary_history_settings_and_help(open_editor_page):
     with open_editor_page() as (page, _session):
         inspector = page.get_by_role("complementary", name="Model inspector")
 
@@ -1865,14 +2220,14 @@ def test_inspector_uses_one_slot_for_summary_history_advanced_and_help(open_edit
         assert inspector.get_by_role("tab").all_inner_texts() == [
             "Summary",
             "History",
-            "Advanced",
+            "Settings",
             "Help",
         ]
 
-        inspector.get_by_role("tab", name="Advanced").click()
-        advanced = inspector.get_by_role("tabpanel", name="Advanced")
-        assert advanced.is_visible()
-        assert advanced.get_by_label("Build animation duration").is_visible()
+        inspector.get_by_role("tab", name="Settings").click()
+        settings = inspector.get_by_role("tabpanel", name="Settings")
+        assert settings.is_visible()
+        assert settings.get_by_label("Build animation duration").is_visible()
         assert page.locator("#buildDurationWrap").count() == 1
 
         page.get_by_role("button", name="Help", exact=True).click()

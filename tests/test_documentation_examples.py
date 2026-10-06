@@ -16,6 +16,7 @@ from sklearn.model_selection import KFold
 
 import superglm
 import superglm.model_selection
+import superglm.structure
 import superglm.validation
 from superglm.editor import EditorSession
 from superglm.export.rating_tables import RatingTableBlock
@@ -409,6 +410,14 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
     )
     monkeypatch.setattr(superglm.validation, "lorenz_curve", lorenz_curve)
     monkeypatch.setattr(superglm.validation, "double_lift_chart", double_lift_chart)
+
+    # A structure file the snippet reads: apply returns the model it is given,
+    # so the snippet's fit runs through the fit double above.
+    structure = create_autospec(superglm.Structure, instance=True, spec_set=True)
+    structure.apply.side_effect = lambda model, X=None: model
+    read_structure = create_autospec(superglm.read_structure, return_value=structure)
+    monkeypatch.setattr(superglm, "read_structure", read_structure)
+    monkeypatch.setattr(superglm.structure, "read_structure", read_structure)
     return results
 
 
@@ -472,6 +481,7 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
             "mu_baseline": np.ones(n_rows),
             "mu_holdout": np.ones(n_rows),
             "mu_new": np.ones(n_rows),
+            "model_template": model,
             "np": np,
             "offset": np.log(exposure),
             "pd": pd,
@@ -482,11 +492,18 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
             "train": frame,
             "train_df": frame,
             "validation_weight": exposure,
+            "w_next": exposure,
+            "w_train": exposure,
+            "w_val": exposure,
+            "X_next": frame,
+            "X_val": frame,
             "y": y,
             "y_holdout": y,
             "y_obs": y,
             "y_pred": np.ones(n_rows),
+            "y_next": y,
             "y_train": y,
+            "y_val": y,
             "y_validation": y,
         }
     )

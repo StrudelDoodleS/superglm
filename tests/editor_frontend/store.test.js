@@ -33,9 +33,11 @@ const {
   selectVisibleEvidencePanels,
   selectModelRevision,
   selectMutation,
+  selectPendingSteps,
   selectRenderableTerm,
   selectSummaryLevelDisplay,
-  selectSnapshot
+  selectSnapshot,
+  selectWaitingTerms
 } = selectors;
 
 /** @returns {import('../../src/superglm/editor/app/api/contracts.js').EditorSnapshot} */
@@ -351,6 +353,48 @@ test("remote commit clears preview and preserves valid view state", () => {
   assert.deepEqual(selectCurrentSelection(state), [0]);
 });
 
+/**
+ * A snapshot whose chart shows a categorical "brand" with its levels in order.
+ * @param {string[]} levels @param {number} [revision]
+ */
+function brandSnapshot(levels, revision = 0) {
+  const base = snapshot(revision);
+  const ones = levels.map(() => 1);
+  base.terms.brand = {
+    ...base.terms.age, kind: "categorical", term_type: "categorical",
+    x: levels.map((_, index) => index), y: ones, original_y: ones,
+    levels: levels.slice(), n_points: levels.length
+  };
+  base.selected_term = "brand";
+  base.selection.brand = [];
+  return base;
+}
+
+test("a level reorder moves the selection anchor with its level", () => {
+  let state = createInitialEditorState(brandSnapshot(["a", "b", "c", "d"]));
+  state = patchView(state, { selectionAnchor: { term: "brand", index: 1 } });
+
+  // A drag, its Undo or Redo, or Reset order renumbers the levels: b goes to 3.
+  state = commitRemote(state, brandSnapshot(["a", "c", "d", "b"], 1));
+  assert.deepEqual(state.view.selectionAnchor, { term: "brand", index: 3 });
+
+  // The same order keeps the anchor object.
+  const anchor = state.view.selectionAnchor;
+  state = commitRemote(state, brandSnapshot(["a", "c", "d", "b"], 2));
+  assert.strictEqual(state.view.selectionAnchor, anchor);
+
+  // An anchor on a term without levels is left alone.
+  const spline = commitRemote(
+    patchView(state, { selectionAnchor: { term: "age", index: 0 } }),
+    brandSnapshot(["d", "c", "b", "a"], 3)
+  );
+  assert.deepEqual(spline.view.selectionAnchor, { term: "age", index: 0 });
+
+  // A level that is gone takes the anchor with it.
+  state = commitRemote(state, brandSnapshot(["a", "c", "d"], 4));
+  assert.equal(state.view.selectionAnchor, null);
+});
+
 test("a new model revision marks every prior evidence panel stale", () => {
   let state = createInitialEditorState(snapshot(2));
   const panels = /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"]);
@@ -369,6 +413,35 @@ test("a new model revision marks every prior evidence panel stale", () => {
     assert.equal(committed.request.evidence[panel].revision, 2);
     assert.deepEqual(committed.request.evidence[panel].payload, { panel });
   }
+});
+
+test("a change to the waiting list at one revision marks only the report stale", () => {
+  // Undo or Redo of a waiting change keeps the revision; the Cross-validation
+  // report shows the waiting list (its chip, Run CV's reason), so it goes stale.
+  let state = createInitialEditorState(snapshot(2));
+  const panels = /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"]);
+  for (const [sequence, panel] of panels.entries()) {
+    state = beginEvidence(state, panel, 2, sequence + 1, { path: `/${panel}`, payload: {} });
+    state = completeEvidence(state, panel, 2, sequence + 1, { panel });
+  }
+  const waiting = snapshot(2);
+  waiting.pending = [
+    { id: "abc1234", operation: "collapse", term: "age", label: "Collapse", params: {}, note: null, time: 0 }
+  ];
+
+  const committed = commitRemote(state, waiting);
+
+  assert.equal(committed.request.evidence.report.status, "stale");
+  assert.equal(selectEvidenceNeedsRefresh(committed, "report"), true);
+  for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary"])) {
+    assert.equal(committed.request.evidence[panel].status, "current");
+  }
+  // The same waiting list again leaves the report as it is.
+  const again = commitRemote(
+    { ...committed, request: { ...committed.request, evidence: state.request.evidence } },
+    { ...waiting }
+  );
+  assert.equal(again.request.evidence.report.status, "current");
 });
 
 test("visible evidence selectors catch editor panels up after returning from reports", () => {
@@ -679,7 +752,8 @@ test("state modules expose only their requested public symbols", () => {
     "patchView",
     "selectionIndicesEqual",
     "setPreviewTerm",
-    "setSelectionPreview"
+    "setSelectionPreview",
+    "waitingListChanged"
   ]);
   assert.deepEqual(Object.keys(selectors).sort(), [
     "selectActiveTermName",
@@ -690,9 +764,33 @@ test("state modules expose only their requested public symbols", () => {
     "selectGroupDisplayMode",
     "selectModelRevision",
     "selectMutation",
+    "selectPendingSteps",
     "selectRenderableTerm",
     "selectSnapshot",
     "selectSummaryLevelDisplay",
-    "selectVisibleEvidencePanels"
+    "selectVisibleEvidencePanels",
+    "selectWaitingTerms"
   ]);
+});
+
+test("the pending selector reads the waiting structural changes, and none without them", () => {
+  const confirmed = snapshot(7);
+  confirmed.pending = [
+    { id: "a1b2c3d", operation: "collapse", term: "age", label: "Collapse 1 + 2", params: {}, note: null, time: 1 },
+    { id: "b2c3d4e", operation: "shape", term: "age", label: "Line 1 – 2", params: {}, note: null, time: 2 }
+  ];
+  assert.strictEqual(selectPendingSteps(createInitialEditorState(confirmed)), confirmed.pending);
+  assert.deepEqual(selectPendingSteps(createInitialEditorState(snapshot(7))), []);
+  assert.deepEqual(selectPendingSteps(createInitialEditorState()), []);
+});
+
+test("each term with a change waiting for refit is named once", () => {
+  const confirmed = snapshot(7);
+  confirmed.pending = [
+    { id: "a1b2c3d", operation: "collapse", term: "region", label: "Collapse B + C", params: {}, note: null, time: 1 },
+    { id: "b2c3d4e", operation: "shape", term: "age", label: "Line 1 – 2", params: {}, note: null, time: 2 },
+    { id: "c3d4e5f", operation: "set_reference", term: "region", label: "Reference B", params: {}, note: null, time: 3 }
+  ];
+  assert.deepEqual(selectWaitingTerms(createInitialEditorState(confirmed)), ["region", "age"]);
+  assert.deepEqual(selectWaitingTerms(createInitialEditorState(snapshot(7))), []);
 });

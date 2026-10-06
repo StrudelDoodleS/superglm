@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import copy
-import re
-import warnings
 from itertools import chain
 from typing import Any
 
@@ -15,13 +12,24 @@ from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorIndexError, EditorTypeError, EditorValueError
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, collapse_levels
-from superglm.features.ordered_categorical import (
-    _CLAMP_WARNING_PREFIX,
-    OrderedCategorical,
-)
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.piecewise import Piecewise
+from superglm.features.rebuild import (
+    base_names_level,
+    clone_with_replaced_features,  # noqa: F401  (imported from here by the editor's tests)
+    interaction_users,
+    rebuilt_categorical,
+    rebuilt_ordered_spec,
+    special_labels,
+)
 
-_SYMBOLIC_BASE_POLICIES = {"first", "most_exposed"}
+# Marks a spec whose reference a collapse or ungroup held in place. The state
+# payload reads it to label the reference "kept".
+KEPT_REFERENCE_ATTRIBUTE = "_editor_kept_reference"
+# The original levels a kept reference stands for. A group that took the
+# reference in becomes the reference, yet the level it took in is what was
+# kept: when the group later breaks up into a tie, that level settles it.
+_KEPT_LEVELS_ATTRIBUTE = "_editor_kept_reference_levels"
 
 
 def collapsed_feature_spec(
@@ -31,14 +39,26 @@ def collapsed_feature_spec(
     *,
     X,
     group_label: str | None = None,
+    draft_spec=None,
+    keep_reference: bool = True,
 ) -> tuple[Any, dict[str, Any]]:
-    """Return a replacement feature spec that collapses selected levels."""
+    """Return a replacement feature spec that collapses selected levels.
+
+    ``keep_reference`` holds the reference the in-force fit resolved, or the
+    new group when it takes that level in. ``False`` hands the declared base
+    to the refit, where a symbolic policy (``most_exposed``, ``first``)
+    resolves again and can move the reference.
+
+    ``draft_spec`` is the term's spec as waiting changes leave it (None: the
+    fitted spec); the collapse is built on it, so changes to one term compose.
+    """
     if term.levels is None:
         raise EditorTypeError(f"Term {term.name!r} does not expose categorical levels.")
     if selected_indices.size < 2:
         raise EditorValueError(f"Select at least two levels to collapse term {term.name!r}.")
 
-    spec = model._specs[term.name]
+    fitted = model._specs[term.name]
+    spec = fitted if draft_spec is None else draft_spec
     if not isinstance(spec, Categorical | OrderedCategorical):
         raise EditorTypeError(
             f"Collapse levels is only available for categorical terms, got {term.name!r}."
@@ -92,15 +112,22 @@ def collapsed_feature_spec(
         selected_levels=selected_levels,
         group_label=label,
     )
-    base = _collapsed_base(spec.base, selected_levels, label, existing, grouping)
+    if keep_reference:
+        declared, kept, level = _reference_to_keep(fitted, spec, term)
+    else:
+        declared, kept, level = spec.base, [], base_names_level(spec)
+    base = _collapsed_base(declared, kept, selected_levels, label, existing, grouping, level=level)
 
     if isinstance(spec, OrderedCategorical):
-        replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=values)
-    else:
-        replacement = Categorical(
-            base=base,
-            grouping=grouping,
+        replacement = rebuilt_ordered_spec(
+            spec, grouping=grouping, base=base, data=values, level=level
         )
+    else:
+        replacement = rebuilt_categorical(
+            spec, fitted, base=base, grouping=grouping, data=values, level=level
+        )
+    if keep_reference:
+        _mark_kept(replacement, base, kept, grouping, level=level)
 
     metadata = {
         "format": "superglm.editor.level_collapse.v1",
@@ -119,12 +146,23 @@ def ungrouped_feature_spec(
     selected_indices: np.ndarray,
     *,
     X,
+    draft_spec=None,
+    keep_reference: bool = True,
 ) -> tuple[Any, dict[str, Any]]:
-    """Return a replacement feature spec that removes selected levels from groups."""
+    """Return a replacement feature spec that removes selected levels from groups.
+
+    ``keep_reference`` holds the in-force reference: a reference group that
+    loses members follows the members that stay. ``False`` hands the declared
+    base on, as ``collapsed_feature_spec`` does.
+
+    ``draft_spec`` is the term's spec as waiting changes leave it (None: the
+    fitted spec); the ungroup is built on it, so changes to one term compose.
+    """
     if term.levels is None:
         raise EditorTypeError(f"Term {term.name!r} does not expose categorical levels.")
 
-    spec = model._specs[term.name]
+    fitted = model._specs[term.name]
+    spec = fitted if draft_spec is None else draft_spec
     if not isinstance(spec, Categorical | OrderedCategorical):
         raise EditorTypeError(
             f"Ungroup levels is only available for categorical terms, got {term.name!r}."
@@ -151,13 +189,25 @@ def ungrouped_feature_spec(
     )
     replacement_grouping = None if _is_identity_grouping(grouping) else grouping
 
-    base = _valid_base_after_ungroup(spec.base, selected_levels, grouping)
-    if isinstance(spec, OrderedCategorical):
-        replacement = rebuilt_ordered_spec(
-            spec, grouping=replacement_grouping, base=base, data=values
+    if keep_reference:
+        declared, kept, level = _reference_to_keep(fitted, spec, term)
+        base = _kept_base_after_ungroup(
+            declared, kept, selected_levels, existing, grouping, level=level
         )
     else:
-        replacement = Categorical(base=base, grouping=replacement_grouping)
+        level = base_names_level(spec)
+        base = _valid_base_after_ungroup(spec.base, selected_levels, grouping, level=level)
+    if isinstance(spec, OrderedCategorical):
+        replacement = rebuilt_ordered_spec(
+            spec, grouping=replacement_grouping, base=base, data=values, level=level
+        )
+    else:
+        # Without a grouping the fit reads native values (3, not "3").
+        replacement = rebuilt_categorical(
+            spec, fitted, base=base, grouping=replacement_grouping, data=values, level=level
+        )
+    if keep_reference:
+        _mark_kept(replacement, base, kept, replacement_grouping, level=level)
 
     metadata = {
         "format": "superglm.editor.level_ungroup.v1",
@@ -174,36 +224,41 @@ def ungroup_label(term_name: str, levels: list[str]) -> str:
 
 
 def reference_feature_spec(
-    model, term: EditableTerm, level: str, *, X
+    model, term: EditableTerm, level: str, *, X, draft_spec=None
 ) -> tuple[Any, dict[str, Any]]:
-    """Return a fresh replacement spec whose reference is the displayed ``level``."""
-    spec = model._specs[term.name]
+    """Return a fresh replacement spec whose reference is the displayed ``level``.
+
+    ``draft_spec`` is the term's spec as waiting changes leave it (None: the
+    fitted spec), so a reference can name a group a waiting collapse made.
+    """
+    fitted = model._specs[term.name]
+    spec = fitted if draft_spec is None else draft_spec
     if not isinstance(spec, Categorical | OrderedCategorical):
         raise EditorTypeError(
             f"Set reference is only available for categorical terms, got {term.name!r}."
         )
     _require_not_interaction_parent(model, term.name, operation="set the reference level")
     grouping = getattr(spec, "_grouping", None)
-    fitted = _fitted_level_label(spec, grouping, term, level)
+    label = _fitted_level_label(spec, grouping, term, level)
+    frame = as_eager_frame(X)
+    frame.require_columns((term.name,))
+    values = frame.column_array(term.name)
     if isinstance(spec, OrderedCategorical):
-        frame = as_eager_frame(X)
-        frame.require_columns((term.name,))
         replacement = rebuilt_ordered_spec(
-            spec, grouping=grouping, base=fitted, data=frame.column_array(term.name)
+            spec, grouping=grouping, base=label, data=values, level=True
         )
     else:
         # Fitted levels keep their native type (an integer level stays 3, not "3").
-        native = {str(value): value for value in spec._levels}[fitted]
-        replacement = Categorical(
-            base=native, grouping=grouping, levels=spec._declared_levels, unseen=spec.unseen
+        replacement = rebuilt_categorical(
+            spec, fitted, base=label, grouping=grouping, data=values, level=True
         )
     metadata = {
         "format": "superglm.editor.reference_level.v1",
         "term": term.name,
-        "level": fitted,
-        "label": f"set reference of {term.name} to {fitted}",
+        "level": label,
+        "label": f"set reference of {term.name} to {label}",
         "message": (
-            f"The reference level of {term.name} was set to {fitted} and the full model was refit."
+            f"The reference level of {term.name} was set to {label} and the full model was refit."
         ),
     }
     return replacement, metadata
@@ -222,26 +277,6 @@ def _fitted_level_label(spec, grouping, term: EditableTerm, level: str) -> str:
     if level not in term.levels:
         raise EditorValueError(f"{level!r} is not a level of term {term.name!r}.")
     return level if grouping is None else str(grouping.original_to_group.get(level, level))
-
-
-def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., lambda2=...):
-    """Clone a model and replace one feature spec before fitting."""
-    new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
-    new_model._specs[term] = replacement
-    new_model._config = new_model._config.with_value(
-        feature_templates=tuple((name, new_model._specs[name]) for name in new_model._feature_order)
-    )
-    new_model._config_revision += 1
-    return new_model
-
-
-def interaction_users(model, term: str) -> list[str]:
-    """The interactions that use ``term`` as a parent."""
-    return [
-        str(name)
-        for name, spec in getattr(model, "_interaction_specs", {}).items()
-        if term in getattr(spec, "parent_names", ())
-    ]
 
 
 def _require_not_interaction_parent(model, term: str, *, operation: str) -> None:
@@ -404,114 +439,34 @@ def _original_level_order(spec, term: EditableTerm, grouping) -> list[str]:
     return [str(level) for level in term.levels or []]
 
 
-def rebuilt_ordered_spec(
-    spec: OrderedCategorical,
-    *,
-    grouping: LevelGrouping | None,
-    base: Any,
-    data,
-    basis=None,
-) -> OrderedCategorical:
-    """A fresh, unfitted OrderedCategorical like ``spec`` with this grouping and base.
+def _in_force_reference(spec) -> Any:
+    """The reference ``spec``'s fit resolved, in its native type (3, not "3").
 
-    ``basis`` replaces the inner basis (a shaped range). By default the pristine
-    declared basis is cloned. A fitted spec is never mutated: its resolved base
-    is sticky and would silently survive a changed ``base``.
+    Before a fit there is none, and the declared base stands in.
     """
-    values, native_base = _ordered_original_values(spec, grouping, data, base)
-    # Clone the RAW declarations, not the string-coerced ``_specials``. A special
-    # declared as ``9`` on a float column matches through its raw label -- the
-    # string view renders 9.0 as "9.0", which never equals "9" -- so rebuilding
-    # from the coerced form silently drops that fallback and the special's
-    # indicator comes back all-zero on a refit.
-    specials = list(spec._special_raw) or list(spec._specials)
-    source = _pristine_basis(spec) if basis is None else basis
-    # Collapsing levels shrinks the level count, so the pristine spline's
-    # ``n_knots`` routinely exceeds the new ``n_levels - 1`` and construction
-    # clamps it. That clamp is the caller's own basis being re-fitted to the
-    # levels the caller just asked to merge, not a configuration mistake, and
-    # the user-facing construction already warned if the original declaration
-    # over-specified. Do not repeat it from an internal editor clone.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=re.escape(_CLAMP_WARNING_PREFIX),
-            category=UserWarning,
-        )
-        return OrderedCategorical(
-            values=values,
-            basis=source,
-            base=native_base,
-            grouping=grouping,
-            specials=specials or None,
-        )
-
-
-def _pristine_basis(spec: OrderedCategorical):
-    # Clone from the pristine caller-supplied spline, not the clamped inner
-    # copy: the new spec re-clamps against ITS OWN level count, which can
-    # exceed the current one when a grouping is being undone. `_spline_obj` is
-    # always set on a spec this version constructed; the fallback covers a
-    # pre-0.24 pickle, whose `_basis_spline` read refuses a step-mode spec
-    # loudly instead of silently cloning it onto the default P-spline.
-    #
-    # Read it with `getattr`, not `spec._spline_obj`: an attribute-less read
-    # only reaches the fallback when the key EXISTS and is None, so a pickle
-    # old enough to predate the attribute raised a bare AttributeError naming
-    # `_spline_obj` -- still loud, but without the migration sentence, and
-    # never reaching `_basis_spline` where that sentence lives.
-    spline_obj = getattr(spec, "_spline_obj", None)
-    if spline_obj is not None:
-        source = copy.deepcopy(spline_obj)
-    else:
-        # A shortcut-era pickle has no pristine declaration, only the inner
-        # spline -- and its `n_knots` was already clamped to the level count it
-        # was BUILT against. Cloning that alone keeps the reduced basis, which
-        # is wrong in exactly the direction ungrouping goes: back to MORE
-        # levels. The removed shortcut path rebuilt from the then-plain
-        # `n_knots` attribute, i.e. the count the caller REQUESTED, and that
-        # entry survives in the pickled __dict__ because the class property
-        # only shadows it. Recover it and let __init__ re-clamp against the new
-        # level count, so the clamp is still enforced -- just against the right
-        # number of levels.
-        source = copy.deepcopy(spec._basis_spline)
-        requested = spec.__dict__.get("n_knots")
-        if isinstance(requested, int | np.integer) and int(requested) > source.n_knots:
-            source.n_knots = int(requested)
-    return source
-
-
-def _ordered_original_values(
-    spec: OrderedCategorical,
-    grouping: LevelGrouping | None,
-    data,
-    base,
-) -> tuple[dict[Any, float], Any]:
-    original_values = getattr(spec, "_original_level_to_value", None)
-    if original_values is not None:
-        values = {str(k): float(v) for k, v in original_values.items()}
-    else:
-        values = {str(k): float(v) for k, v in spec._level_to_value.items()}
-    if grouping is not None:
-        return values, base
-
-    native_by_label: dict[str, Any] = {}
-    for raw in np.asarray(data, dtype=object).ravel():
-        native_by_label.setdefault(str(raw), raw)
-    native_values = {native_by_label.get(label, label): value for label, value in values.items()}
-    native_base = base if base in _SYMBOLIC_BASE_POLICIES else native_by_label.get(str(base), base)
-    return native_values, native_base
+    level = getattr(spec, "_base_level", "")
+    return spec.base if level == "" else level
 
 
 def _collapsed_base(
-    base: str,
+    base: Any,
+    kept: list[str],
     selected_levels: list[str],
     group_label: str,
     existing_grouping: LevelGrouping | None,
     grouping: LevelGrouping,
+    *,
+    level: bool,
 ) -> str:
+    """The level holding ``base`` once the collapse into ``grouping`` is made.
+
+    A reference group the collapse splits follows the new level holding most
+    of its members; a tie goes to the level holding a ``kept`` one, the
+    original levels a kept reference stands for (``_reference_to_keep``).
+    A base policy (``level`` False) is handed on as it is.
+    """
     base = str(base)
-    if base in _SYMBOLIC_BASE_POLICIES:
+    if not level:
         return base
 
     valid = {str(level) for level in grouping.grouped_levels}
@@ -529,8 +484,9 @@ def _collapsed_base(
     if not candidates:
         return group_label if group_label in valid else base
 
+    holding = _holding(kept, grouping)
     counts = {candidate: candidates.count(candidate) for candidate in dict.fromkeys(candidates)}
-    return max(counts, key=counts.__getitem__)
+    return max(counts, key=lambda candidate: (counts[candidate], candidate in holding))
 
 
 def _base_original_members(base: str, grouping: LevelGrouping | None) -> list[str]:
@@ -544,15 +500,104 @@ def _base_original_members(base: str, grouping: LevelGrouping | None) -> list[st
 
 
 def _valid_base_after_ungroup(
-    base: str, selected_levels: list[str], grouping: LevelGrouping
+    base: str, selected_levels: list[str], grouping: LevelGrouping, *, level: bool
 ) -> str:
     base = str(base)
-    if base in _SYMBOLIC_BASE_POLICIES:
+    if not level:
         return base
     valid = set(grouping.grouped_levels) | set(grouping.all_original_levels)
     if base in valid:
         return base
     return selected_levels[0] if selected_levels else "most_exposed"
+
+
+def _kept_base_after_ungroup(
+    base: Any,
+    kept: list[str],
+    selected_levels: list[str],
+    existing: LevelGrouping,
+    grouping: LevelGrouping,
+    *,
+    level: bool,
+) -> str:
+    """The level holding the in-force reference once ``selected_levels`` leave their groups.
+
+    A reference group that loses members follows the new level holding most of
+    them (the collapse rule in ``_collapsed_base``); a tie goes to a level that
+    was not pulled out, then to the level holding a ``kept`` one, so a group
+    ungrouped whole gives back the level it took in. A reference the old
+    grouping does not know keeps the declared-base rule.
+    """
+    base = str(base)
+    if not level or base in grouping.grouped_levels:
+        return base
+    members = _base_original_members(base, existing)
+    if not members:
+        return _valid_base_after_ungroup(base, selected_levels, grouping, level=level)
+    mapped = [str(grouping.original_to_group.get(member, member)) for member in members]
+    pulled = set(selected_levels)
+    holding = _holding(kept, grouping)
+    counts = {label: mapped.count(label) for label in dict.fromkeys(mapped)}
+    return max(counts, key=lambda label: (counts[label], label not in pulled, label in holding))
+
+
+def _reference_to_keep(fitted, spec, term: EditableTerm) -> tuple[Any, list[str], bool]:
+    """The reference a keep-reference step keeps, named in ``spec``'s own levels.
+
+    ``spec`` is the term's draft, or ``fitted`` when nothing waits. A draft that
+    already names a level or group (a reference an earlier waiting step kept
+    or set) keeps it. Otherwise the fitted reference is kept while the draft
+    still has that level or group; a draft regrouped by a step staged with
+    keep-reference off keeps its own policy.
+
+    Also returns the original levels the reference stands for: those an
+    earlier keep-reference step recorded, else all of its members; and
+    whether it is a level or group, which a level named "first" is, rather
+    than a base policy.
+    """
+    in_force = _in_force_reference(fitted)
+    if spec is fitted:
+        return in_force, _kept_levels(fitted, in_force), True
+    if base_names_level(spec):
+        return spec.base, _kept_levels(spec, spec.base), True
+    grouping = getattr(spec, "_grouping", None)
+    names = term.levels if grouping is None else grouping.grouped_levels
+    held = {str(name) for name in names or []}
+    if str(in_force) in held:
+        return in_force, _kept_levels(fitted, in_force), True
+    return spec.base, [], False
+
+
+def _kept_levels(spec, base) -> list[str]:
+    """The original levels ``spec``'s reference ``base`` stands for.
+
+    A keep-reference step records them (``_mark_kept``); a record that no
+    longer lies inside ``base`` is stale, and every member stands for it.
+    """
+    members = _base_original_members(str(base), getattr(spec, "_grouping", None))
+    recorded = [level for level in getattr(spec, _KEPT_LEVELS_ATTRIBUTE, ()) if level in members]
+    return recorded or members
+
+
+def _mark_kept(
+    replacement, base, kept: list[str], grouping: LevelGrouping | None, *, level: bool
+) -> None:
+    """Mark ``replacement``'s reference as kept and record the levels it stands for.
+
+    A symbolic policy handed on from a draft (``_reference_to_keep``, ``level``
+    False) keeps nothing: the refit chooses again and may move the reference,
+    so it is left unmarked and the chip names the policy.
+    """
+    if not level:
+        return
+    setattr(replacement, KEPT_REFERENCE_ATTRIBUTE, True)
+    members = set(_base_original_members(str(base), grouping))
+    setattr(replacement, _KEPT_LEVELS_ATTRIBUTE, tuple(level for level in kept if level in members))
+
+
+def _holding(kept: list[str], grouping: LevelGrouping) -> set[str]:
+    """The levels of ``grouping`` that hold a ``kept`` original level."""
+    return {str(grouping.original_to_group.get(level, level)) for level in kept}
 
 
 def _is_identity_grouping(grouping: LevelGrouping) -> bool:
@@ -621,17 +666,6 @@ def _stated_break_bands(spec: OrderedCategorical) -> list[str]:
         stated = [entry for entry in chain(named, edges) if isinstance(entry, str)]
     declared = [str(level) for level in spec._declared_smooth_levels]
     return [entry if isinstance(entry, str) else declared[int(entry)] for entry in stated]
-
-
-def special_labels(spec: OrderedCategorical) -> set[str]:
-    """The free (special) levels of ``spec``, in every spelling the editor displays."""
-    # Both namespaces: displayed levels arrive in the DISPLAY spelling, so
-    # matching only the str-coerced `_specials` leaves a guard INERT on a float
-    # domain ("9" vs "9.0") -- and a guard that fails open here silently smooths
-    # a level that `specials=` still reports as free.
-    return {str(level) for level in spec._specials} | {
-        str(level) for level in spec._special_display
-    }
 
 
 def _default_group_label(selected_levels: list[str]) -> str:

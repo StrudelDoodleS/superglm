@@ -33,7 +33,9 @@ asset.
 - the in-force fitted model and immutable original reference model;
 - editable term arrays and categorical metadata;
 - selections and undo/redo history;
-- evaluation splits;
+- the structural changes waiting for Refit (`pending`) and the notes on timeline entries
+  (`step_notes`);
+- evaluation splits, and the cross-validation result with the rows its folds index;
 - semantic `model_revision` and manual-edit `edit_epoch`.
 
 `EditorWidget` in `src/superglm/editor/widget.py` owns the per-widget mutation lock, transition
@@ -41,9 +43,30 @@ assembly, materialized edited-model publication, scalar evaluation cache, eviden
 local server lifetime. `payloads.py` converts confirmed session state into detached JSON-safe
 dictionaries.
 
+`session.py` keeps its public methods short and delegates to focused modules of module-level
+functions that take the session as their first argument:
+
+- `staging.py`: waiting changes, the one Refit that applies them, the order Undo and Redo take,
+  notes, and the history records an exported model carries;
+- `carry.py`: re-applies edited curves onto another fitted model, for Refit's carry-over and for
+  Run CV and Final fit;
+- `unseen.py`: the **New levels →** choice (`set_unseen`), an edit that refits nothing;
+- `cv.py` and `jobs.py`: the Cross-validation tab's payload, and Run CV and Final fit as
+  cancellable background jobs;
+- `rating_preview.py`: one term's block of the rating table, from the Excel export's own payload
+  builder;
+- `persistence.py`: saved models with their `_editor_history`, structure files from
+  `export_structure`, and saved sessions.
+
+Structure files (`superglm.structure`) are library code. They rebuild terms through
+`superglm.features.rebuild`, the same rebuild helpers `collapse.py` and `shapes.py` use, and import
+nothing from the editor.
+
 Selection, active term, display order, zoom, mode, and inspector state do not change predictions.
 Coefficient operations, control-handle edits, undo/redo/reset, structural refits, and distribution
-profiling do. Keep those revision rules centralized in Python and covered in `tests/test_editor.py`.
+profiling do. A **New levels →** choice does too, because it changes predictions on data holding
+new levels. Staging a change, and undoing or redoing a waiting change, do not: the model has not
+changed. Keep those revision rules centralized in Python and covered in `tests/test_editor.py`.
 
 ## Browser Store, Actions, and Selectors
 
@@ -96,16 +119,134 @@ The store commits `state` and `summary` in one update. The browser crosses a two
 paint boundary, releases the blocking overlay, and then starts visible evidence without awaiting it.
 There is no successful post-refit `/state` fetch.
 
+A staged change (`/stage`) returns the same envelope without fitting. Its revision is unchanged, so
+it runs without the blocking overlay and re-requests no evidence. A refused request (HTTP 400) shows
+Python's fixed sentence in the alert.
+
 Every JSON response also exposes `Server-Timing: json;dur=...`, which measures JSON-safe conversion
 and serialization separately from the route's model work.
 
-The Advanced pane keeps browser request wait, synchronous store/DOM commit, and the two-frame paint
-boundary as separate timings. Metrics, summary, and report completion are recorded independently as
-panel evidence timings; they are not folded back into the blocking refit duration.
+Settings › Request timings shows browser request wait, synchronous store/DOM commit, and the
+two-frame paint boundary as separate timings. Metrics, summary, and report completion are recorded
+independently as panel evidence timings; they are not folded back into the blocking refit duration.
 
 Metrics, summaries, and reports echo the requested revision and sequence. A response is accepted
 only when both still match the panel's current request. Superseded work and late responses never
 redraw the chart.
+
+## Waiting Changes, Refit and Notes
+
+Collapse, Ungroup, Set reference and the shapes are staged, not fitted. Each one is a
+`PendingStep` in `session.pending` holding its labels-only `params` and the draft spec it leaves;
+a term's draft is the last waiting step's spec for it, else the in-force fitted spec, so staged
+changes on one term compose. One Refit fits every draft in a single clone, records one
+`StructuralStep` whose saved state holds the waiting list (Undo brings the changes back as
+waiting), and re-applies hand edits on the terms it did not restructure as one more step.
+
+| Route | Body | Returns |
+|---|---|---|
+| `POST /stage` | `{operation, term, params, keep_reference, level_display}` | the structural envelope, without a fit |
+| `POST /refit_pending` | `{level_display}` | the structural envelope of the one fit |
+| `POST /note` | `{id, note}` | `{ok: true, state}` |
+| `POST /set_unseen` | `{term, unseen}` | the state snapshot |
+
+`params` by operation:
+
+- `collapse`: `{levels: [label, ...], group_label: str | null}`;
+- `ungroup`: `{levels: [label, ...]}`;
+- `set_reference`: `{level: label}`;
+- `shape`: `{lo, hi, degree, join}`, with `join` either `"tangent"` or `"kink"`.
+
+`keep_reference` is a JSON boolean, true when absent; any other value is refused with the fixed
+sentence "keep_reference must be true or false.". With Settings' "Refit after every structural
+change" on, the browser posts to the operation's own route (`/collapse_levels`,
+`/ungroup_levels`, `/set_reference`, `/shape_range`) instead, which stages the change and refits
+it as one step that one Undo takes back.
+
+The state snapshot carries the waiting changes in three places:
+
+- top-level `pending`: `[{id, operation, term, label, params, note, time}]`, oldest first;
+- per term, `pending`: `{groups, ranges, reference}`. `groups` is the draft's whole grouping once a
+  waiting collapse or ungroup touches the term, else null; `ranges` lists the shaped ranges the
+  draft adds or changes; `reference` is the level or group the draft pins, else null;
+- each top-level `timeline` entry: `id` (seven hex digits), `time` (seconds since the epoch), `note`
+  and `status`, one of `"applied"`, `"waiting"` or `"edit"`. A waiting or applied change is a
+  `"pending"` entry.
+
+Notes live in `session.step_notes`, keyed by step id, so they survive Undo and Redo. An exported
+Python model carries the timeline up to now as `_editor_history`, one dict per entry with its id,
+ISO 8601 time, operation, term, message, note, status and `predictor` (None until the SuperLSS
+editor names one). The Excel workbook does not carry it.
+
+## Settings and the Theme Switch
+
+`app/views/settings.js` keeps the Settings pane's choices in one `localStorage` key,
+`superglm.editor.settings`, as one JSON object. It exports `DEFAULT_SETTINGS`:
+
+```js
+{refitEveryChange: false, keepReference: true, followBrowserTheme: true,
+ groupsDefault: "expanded", buildDurationMs: 10000, showTimings: false}
+```
+
+and `loadSettings()`, `saveSettings(patch)` and `onSettingsChange(listener)`, which returns an
+unsubscribe function. Every read and write is wrapped in `try`/`catch`. A stored value is
+normalised field by field, so a partial or hand-edited entry still loads. Where storage is
+blocked, the choices live in memory until the page closes. A setting that affects the backend
+travels with each request, as `keep_reference` does; Python stores no browser setting.
+
+`app/views/theme.js` drives the DAY / NIGHT switch, `#themeSwitch` (`role="switch"`). The theme key
+`superglm.editor.theme` decides: a stored `"light"` or `"dark"` is an explicit choice, and no
+stored value means follow the browser. The pre-paint script in `index.html` reads that key alone
+and writes `<html data-theme>` before first paint. `followBrowserTheme` mirrors the key, and the
+module keeps the two equal. The flip's keyframes play only on a click; `tokens.css` turns every
+animation and transition off under `prefers-reduced-motion: reduce`.
+
+The older keys `superglm.editor.featureList` and `superglm.editor.shapeJoin` are separate and
+unchanged.
+
+## Background Jobs and the Cross-validation Tab
+
+Run CV and Final fit take one fit per fold, or one fit on every row, so they run as background
+jobs (`jobs.py`), polled by id:
+
+| Route | Body | Returns |
+|---|---|---|
+| `POST /job_start` | `{kind}`, with `kind` either `"cv"` or `"final_fit"` | the job's status |
+| `POST /job_status` | `{job_id, wait}` | `{job_id, kind, status, progress, result, error, cancel_requested, started_at, finished_at}` |
+| `POST /job_cancel` | `{job_id}` | `{job_id, status, cancel_requested}` |
+
+`status` is `"running"`, `"done"`, `"failed"` or `"cancelled"`. A job never holds the widget lock
+while it works: its work runs on state captured when it starts, and its publish step takes the
+lock and keeps the result only if the model revision is still the one it started from. A cancel
+is a flag the work checks between folds, so a cancelled job publishes nothing. A finished job
+evicts the finished jobs of its kind before it, so the runner keeps the last of each kind.
+
+The tab is the fourth app view, `cv`. It reuses `#reportPanel`: `report_payload` has a `"cv"` kind
+beside `"validation"` and `"final"`, and `app/views/cv_tab.js` renders it and starts, polls and
+cancels the two jobs. `cv.py` checks the supplied result against the rows (`cv_data`, else train
+data of the same row count, and the result's data fingerprint when it records one) and builds the
+payload; `carry.py` puts the hand edits back on every fold and on the Final fit.
+
+## Rating-Table Preview
+
+`POST /rating_table` with `{term}` returns `{term, available, reason, columns, rows, note}`: the
+term's block of the payload `export.rating_tables.build_rating_table_payload` builds for the Excel
+workbook, on the same training split and materialised model. The payload is built once per model
+revision, outside the lock like the export, and reused while the revision stands. A refusal is
+one of the fixed sentences in `rating_preview.py`, never builder text.
+`app/views/rating_table.js` draws it in `#ratingTableFrame`, behind the Chart / Table switch
+`#termViewToggle`.
+
+## Chart and Inspector Modules
+
+- `chart/pending_overlay.js` draws waiting groups, ungroups and ranges over the last refit's
+  curve.
+- `chart/ordered_spline.js` reads an ordered spline's `spline_view`: its spline on a fine grid of
+  the level axis, the level dots on it and the special levels as dots of their own.
+- `chart/anchor_marks.js` marks the selection anchor that a Shift-click spans from.
+- `views/summary_view.js` decides which summary rows a search and the All / Edited / Waiting filter
+  keep and which term sections are open as Summary follows the chart; `summary.js` turns the
+  result into markup and reapplies it after every render.
 
 ## DOM Events and Focus
 
@@ -131,6 +272,8 @@ The styles are plain CSS loaded directly by `index.html`:
 - `styles/chart.css` owns SVG/chart styling;
 - `styles/panels.css` owns inspector, evidence, Help, and report regions;
 - `styles/dialogs.css` owns native dialogs and profiling UI;
+- `styles/dark.css` holds the warm dark palette, keyed on `<html data-theme="dark">`;
+- `styles/cv.css` owns the Cross-validation tab;
 - `styles.css` contains the remaining shared and legacy component rules.
 
 The normal workspace is a tool rail, flexible chart, and inspector. Below 1048 px the inspector is a
@@ -185,6 +328,14 @@ rtk npm run typecheck:frontend
 rtk pytest tests/editor/test_editor_refit_browser.py -m browser --run-browser -q
 ```
 
+Run the two browser suites as separate commands, never together in one `-n` run: run in one
+process, `tests/editor` first leaves state behind that fails tests in the other file.
+
+```bash
+rtk pytest tests/test_editor_browser.py -m browser --run-browser -q
+rtk pytest tests/editor -m browser --run-browser -q
+```
+
 `rtk npm run check:frontend` runs the first two together. Node tests cover pure store, action,
 geometry, popover, and accessibility behavior. Python Playwright tests cover the packaged app, real
 FastAPI routes, responsive viewports, focus, SVG layout, and request ordering.
@@ -226,8 +377,12 @@ its wiring:
 3. Add an `EditorWidget._...` method that calls `_structural_step` with the operation name and the
    session call. It takes the lock and returns the envelope.
 4. Add a token-guarded route in `server.py` that parses the payload explicitly.
-5. Add a descriptor next to `setReferenceTransition` in `summary.js` and run it through
-   `runStructuralRefit` from `main.js`.
+5. Add a `stage…` descriptor next to `stageReference` in `summary.js` and run it through
+   `runStructuralChange` from `main.js`. The change is staged on `/stage` and waits, drawn on the
+   chart, until Refit (`/refit_pending`, through `runStructuralRefit`) applies every waiting change
+   in one fit. Give it a case in `refitAtOnceTransition` too: with Settings' "Refit after every
+   structural change" on, the change goes to the operation's own route, which stages it and refits
+   at once as one step that one Undo takes back.
 6. Test the refit, the one pushed step and the refusals in `tests/test_editor_structure.py`, and add
    one browser case to `tests/editor/test_editor_structure_browser.py`.
 

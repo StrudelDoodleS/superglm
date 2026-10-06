@@ -196,8 +196,8 @@ test("rows carry name, kind and EDF under group headings; the active row is curr
     rows().map((row) => row.children.map((part) => part.textContent)),
     [
       ["age", "spline", "EDF 4.21"],
-      ["mileage", "spline", "EDF 2.5"],
-      ["region", "categorical", "EDF 3"],
+      ["mileage", "spline", "EDF 2.50"],
+      ["region", "categorical", "EDF 3.00"],
       ["territory", "categorical", "EDF —"],
     ],
   );
@@ -208,6 +208,20 @@ test("rows carry name, kind and EDF under group headings; the active row is curr
   assert.equal(nodes.strip.textContent, "mileage");
   assert.equal(nodes.root.dataset.open, "true");
   assert.equal(nodes.toggle.getAttribute("aria-expanded"), "true");
+});
+
+test("a row gives its EDF to three significant figures, as the context bar and the inspector do", () => {
+  const { render, rows } = fixture();
+  const edfs = { age: 10, mileage: 5, region: 11.3, territory: 11.2649 };
+  render({
+    terms: Object.fromEntries(
+      Object.entries(TERMS).map(([name, term]) => [name, { ...term, effective_df: edfs[name] }]),
+    ),
+  });
+  assert.deepEqual(
+    rows().map((row) => row.children.at(-1).textContent),
+    ["EDF 10.0", "EDF 5.00", "EDF 11.3", "EDF 11.3"],
+  );
 });
 
 test("a query narrows the rows, moves the tab stop to the first match when the active feature is hidden, and says when nothing matches", () => {
@@ -343,4 +357,30 @@ test("destroy detaches every listener", () => {
   nodes.search.emit("input");
   nodes.toggle.emit("click");
   assert.deepEqual(calls, { selected: [], queries: [], toggles: 0 });
+});
+
+test("a term with a change waiting for refit carries a dot on its row; the others carry none", () => {
+  const { render, rows } = fixture();
+  render({ waiting: new Set(["region"]) });
+  const dots = rows().map(
+    (row) => row.children.filter((part) => part.className === "feature-row-waiting"),
+  );
+  assert.deepEqual(dots.map((found) => found.length), [0, 0, 1, 0]);
+  assert.equal(dots[2][0].getAttribute("role"), "img");
+  assert.equal(dots[2][0].getAttribute("aria-label"), "Waiting for refit");
+
+  render();
+  assert.ok(rows().every((row) => row.children.length === 3));
+});
+
+test("the waiting dot sits right after the term's name, ahead of its kind and EDF", () => {
+  const { render, rows } = fixture();
+  render({ waiting: new Set(["region"]) });
+  const row = rows()[2];
+  assert.deepEqual(
+    row.children.map((part) => part.className),
+    ["feature-row-name", "feature-row-waiting", "feature-row-kind", "feature-row-edf"],
+  );
+  const name = row.children.find((part) => part.className === "feature-row-name");
+  assert.equal(row.children[row.children.indexOf(name) + 1].className, "feature-row-waiting");
 });

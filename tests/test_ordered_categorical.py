@@ -1,10 +1,20 @@
 """Tests for OrderedCategorical feature type."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Constraint, OrderedCategorical, PSpline, Spline, SuperGLM
+from superglm import (
+    Categorical,
+    Constraint,
+    OrderedCategorical,
+    PSpline,
+    Spline,
+    SuperGLM,
+    collapse_levels,
+)
 from superglm.constraints import shape_constraint_certificate
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -229,6 +239,69 @@ class TestEdgeCases:
         spec.build(X["risk"].values, sample_weight=sample_weight)
         with pytest.raises(ValueError, match="unseen"):
             spec.transform(np.array(["UNKNOWN"]))
+
+
+_UNDECLARED_AT_FIT = (
+    "Training data contains levels this OrderedCategorical does not declare: ['E']. "
+    "Declared: {declared}. Add them to order= or values=, or to specials= for a level off "
+    "the ordered axis, or leave those rows out."
+)
+
+
+class TestFitRefusals:
+    """A fit refuses a level in its own words, never the predict-time sentence."""
+
+    @pytest.mark.parametrize(
+        ("spec", "declared"),
+        [
+            pytest.param(
+                lambda: OrderedCategorical(order=["A", "B", "C", "D"]),
+                "['A', 'B', 'C', 'D']",
+                id="order",
+            ),
+            pytest.param(
+                lambda: OrderedCategorical(values={"A": 1.0, "B": 2.0, "C": 4.0, "D": 8.0}),
+                "['A', 'B', 'C', 'D']",
+                id="values",
+            ),
+            pytest.param(
+                lambda: OrderedCategorical(order=["A", "B", "C", "D"], specials=["MISSING"]),
+                "['A', 'B', 'C', 'D', 'MISSING']",
+                id="specials",
+            ),
+            pytest.param(
+                lambda: OrderedCategorical(
+                    order=["A", "B", "C", "D"],
+                    grouping=collapse_levels(["A", "B", "C", "D"], groups={"CD": ["C", "D"]}),
+                ),
+                "['A', 'B', 'C', 'D']",
+                id="grouped",
+            ),
+        ],
+    )
+    def test_an_undeclared_level_is_refused_as_training_data(self, spec, declared):
+        x = np.array(["A", "B", "C", "D", "E", "E"], dtype=object)
+        with pytest.raises(ValueError) as refused, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            spec().build(x)
+        assert str(refused.value) == _UNDECLARED_AT_FIT.format(declared=declared)
+
+    def test_a_declared_level_the_grouping_does_not_cover_is_named_as_such(self):
+        # The grouping was built from a column that lacked D, which is declared.
+        grouping = collapse_levels(["A", "B", "C"], groups={"BC": ["B", "C"]})
+        spec = OrderedCategorical(order=["A", "B", "C", "D"], grouping=grouping)
+        with pytest.raises(ValueError) as refused, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            spec.build(np.array(["A", "B", "C", "D"], dtype=object))
+        assert str(refused.value) == (
+            "Training data contains levels the grouping does not cover: ['D']. Covered: "
+            "['A', 'B', 'C']. Build the grouping from the full column, or leave those rows out."
+        )
+
+    def test_a_missing_value_is_still_a_broken_column(self):
+        spec = OrderedCategorical(order=["A", "B", "C"])
+        with pytest.raises(ValueError, match=r"^Categorical column contains missing values"):
+            spec.build(np.array(["A", "B", None], dtype=object))
 
 
 # ── Integration Tests ─────────────────────────────────────────────

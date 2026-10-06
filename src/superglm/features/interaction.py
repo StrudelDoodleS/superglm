@@ -23,8 +23,10 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm.features.categorical import (
+    _UNSEEN_POLICIES,
     _codes_against,
     _resolve_categorical_labels,
+    _route_unseen_to_group,
     _validate_missing_only,
     _warn_unseen_routed,
 )
@@ -73,7 +75,12 @@ def _categorical_predict_labels(
     levels, so a label matching none of them -- pinned or novel -- codes as
     ``-1`` and already contributes zero, which is exactly base routing.  All
     ``unseen="base"`` has to do is stop erroring and name what it let through.
+    A group policy routes those rows to the group's label, as the parent does.
     """
+    if unseen not in _UNSEEN_POLICIES:
+        return _route_unseen_to_group(x, grouping, universe, unseen)
+    if unseen == "base" and grouping is not None:
+        return _route_unseen_to_group(x, grouping, universe, None)
     x = _resolve_categorical_labels(
         x,
         grouping,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
 from numbers import Integral, Real
 from typing import Any
 
@@ -11,28 +10,35 @@ import numpy as np
 
 from superglm._frame import as_eager_frame
 from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
-from superglm.editor.collapse import (
-    _pristine_basis,
-    interaction_users,
-    rebuilt_ordered_spec,
-    special_labels,
-)
 from superglm.editor.errors import EditorValueError
 from superglm.features._spline_ranges import NARROWEST_GAP, SHAPE_NAMES, PolynomialRange
 from superglm.features._spline_runtime import fit_support
-from superglm.features.ordered_categorical import OrderedCategorical, _spline_kind_name
-from superglm.features.spline import CardinalCRSpline, Spline, _SplineBase
+from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.rebuild import (
+    TOO_FEW_POINTS,
+    RangePlacementError,
+    band_edges,
+    base_names_level,
+    current_ranges,
+    edge_text,
+    merged_ranges,
+    pristine_basis,
+    rebuilt_ordered_spec,
+    shape_unavailable_reason,
+    shaped_spline,
+    source_spline,
+)
+from superglm.features.spline import _SplineBase
 
 # Read by model/report_ops.py BY NAME, so the model layer never imports the
 # editor: a basis carrying it had its shape chosen in the editor from this
 # data, so its tests are conditional on it.
 EDITOR_CHOSEN_SHAPE_ATTRIBUTE = "_editor_chosen_shape"
-_TOO_FEW_POINTS = "Select at least two points to shape a range."
 
 
 def shape_availability(model, name: str) -> tuple[bool, str | None]:
     """Whether ``name`` can take a shaped range, and the hover reason when it can't."""
-    reason = _unavailable_reason(model, name)
+    reason = shape_unavailable_reason(model, name)
     return reason is None, reason
 
 
@@ -50,10 +56,10 @@ def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dic
     available, reason = shape_availability(model, name)
     ranges = [
         {"lo": r.lo, "hi": r.hi, "degree": r.degree, "label": r.label, "join": r.join}
-        for r in _current_ranges(spec)
+        for r in current_ranges(spec)
     ]
     specials = spec._special_display if isinstance(spec, OrderedCategorical) else ()
-    linear = available and _source_spline(spec).degree < 2
+    linear = available and source_spline(spec).degree < 2
     return {
         "available": available,
         "reason": reason,
@@ -63,6 +69,22 @@ def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dic
         "joins": ["kink"] if linear else list(EDITOR_JOINS),
         "join_reason": _LINEAR_TANGENT if linear else None,
     }
+
+
+def waiting_ranges(draft, fitted) -> list[dict[str, Any]]:
+    """The ranges ``draft`` adds or changes against the fitted spec, in axis order.
+
+    Each is listed as the palette lists a range in force.
+    """
+    in_force = {(r.lo, r.hi, r.degree, r.join) for r in current_ranges(fitted)}
+    ranges = current_ranges(draft)
+    if not isinstance(draft, OrderedCategorical):
+        ranges = sorted(ranges, key=lambda r: r.lo)
+    return [
+        {"lo": r.lo, "hi": r.hi, "degree": r.degree, "label": r.label, "join": r.join}
+        for r in ranges
+        if (r.lo, r.hi, r.degree, r.join) not in in_force
+    ]
 
 
 def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[int]] | None:
@@ -77,7 +99,7 @@ def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[in
     was retained.
     """
     spec = model._specs[name]
-    if X is None or not isinstance(spec, _SplineBase) or _unavailable_reason(model, name):
+    if X is None or not isinstance(spec, _SplineBase) or shape_unavailable_reason(model, name):
         return None
     x = np.asarray(as_eager_frame(X).column_array(name), dtype=np.float64)
     if sample_weight is not None:
@@ -95,7 +117,7 @@ def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[in
 
 
 def shaped_feature_spec(
-    model, name: str, *, lo, hi, degree: int, join: str = "tangent", X
+    model, name: str, *, lo, hi, degree: int, join: str = "tangent", X, draft_spec=None
 ) -> tuple[Any, dict[str, Any]]:
     """A fresh spec for ``name`` with ``[lo, hi]`` pinned to a ``degree`` polynomial.
 
@@ -106,32 +128,40 @@ def shaped_feature_spec(
     numeric term keeps its fitted base knots and boundary, so the free
     part's knots never move; an ordered term rebuilds from its declaration,
     whose placement is deterministic on the same level axis.
+
+    ``draft_spec`` is the term's spec as waiting changes leave it (None: the
+    fitted spec); a numeric draft is the unfitted spline an earlier waiting
+    shape built, and keeps the fitted knots and boundary it states.
     """
-    reason = _unavailable_reason(model, name)
+    reason = shape_unavailable_reason(model, name)
     if reason is not None:
         raise EditorValueError(reason)
     if not _is_shape_degree(degree):
         raise EditorValueError("Choose a shape: Flat, Line, Quadratic or Cubic.")
     if join not in EDITOR_JOINS:
         raise EditorValueError("Choose a join: Tangent or Corner.")
-    if join == "tangent" and _source_spline(model._specs[name]).degree < 2:
+    spec = model._specs[name] if draft_spec is None else draft_spec
+    if join == "tangent" and source_spline(spec).degree < 2:
         raise EditorValueError(_LINEAR_TANGENT)
-    spec = model._specs[name]
     ordered = isinstance(spec, OrderedCategorical)
     position = spec._range_edge_value if ordered else float
-    lo, hi = _band_edges(spec, name, lo, hi) if ordered else _numeric_edges(spec, lo, hi)
-    new = PolynomialRange(lo, hi, degree, join)
-    ranges = _merged_ranges(_current_ranges(spec), new, position)
+    try:
+        lo, hi = band_edges(spec, name, lo, hi) if ordered else _numeric_edges(spec, lo, hi)
+        new = PolynomialRange(lo, hi, degree, join)
+        ranges = merged_ranges(current_ranges(spec), new, position)
+    except RangePlacementError as exc:
+        raise EditorValueError(str(exc)) from exc
     if ordered:
-        source = _pristine_basis(spec)
+        source = pristine_basis(spec)
         knots = source._named_knots or source._explicit_knots
         boundary = source._explicit_boundary
     else:
-        source, knots, boundary = spec, spec.fitted_base_knots, spec.fitted_boundary
-    basis = _shaped_spline(source, ranges, knots=knots, boundary=boundary)
+        source = spec
+        knots, boundary = _free_geometry(spec)
+    basis = shaped_spline(source, ranges, knots=knots, boundary=boundary)
     setattr(basis, EDITOR_CHOSEN_SHAPE_ATTRIBUTE, True)
     replacement = _hosted(spec, basis, name, X) if ordered else basis
-    span = f"{_edge_text(lo)}–{_edge_text(hi)}"
+    span = f"{edge_text(lo)}–{edge_text(hi)}"
     return replacement, {
         "format": "superglm.editor.shaped_range.v1",
         "term": name,
@@ -162,41 +192,6 @@ def snap_edge(value: float, span: float, direction: int) -> float:
     return snapped
 
 
-def _unavailable_reason(model, name: str) -> str | None:
-    source = _source_spline(model._specs[name])
-    if source is None:
-        return "Shapes need a spline term."
-    if isinstance(source, CardinalCRSpline):
-        return "Shapes are not available for cardinal cubic regression splines."
-    if source.constraint_kind is not None:
-        return "Remove the term's shape constraint to add shaped ranges."
-    if source.select:
-        return "Remove select=True from the term to add shaped ranges."
-    if max(source._m_orders) > source.degree:
-        # A shaped term is rebuilt with a derivative penalty, whose order the
-        # degree bounds; a difference penalty (ps) is not bounded so.
-        return "Shapes need a penalty order no higher than the spline's degree."
-    if interaction_users(model, name):
-        return "A term used by an interaction cannot be reshaped."
-    return None
-
-
-def _source_spline(spec) -> _SplineBase | None:
-    """The spline a term is declared with: its own spec, or an ordered term's basis."""
-    basis = getattr(spec, "_spline_obj", None) if isinstance(spec, OrderedCategorical) else spec
-    return basis if isinstance(basis, _SplineBase) else None
-
-
-def _current_ranges(spec) -> tuple[PolynomialRange, ...]:
-    """The ranges in force, in axis order: band names on an ordered term, values otherwise."""
-    source = _source_spline(spec)
-    if source is None:
-        return ()
-    if not isinstance(spec, OrderedCategorical):
-        return source.polynomial_ranges
-    return tuple(sorted(source.polynomial_ranges, key=lambda r: spec._range_edge_value(r.lo)))
-
-
 def _numeric_edges(spec, lo, hi) -> tuple[float, float]:
     """Snap selected values outward onto the fitted span's grid, clipped to the boundary.
 
@@ -206,9 +201,20 @@ def _numeric_edges(spec, lo, hi) -> tuple[float, float]:
     if not (_is_finite(lo) and _is_finite(hi)):
         raise EditorValueError("Range edges on a numeric term must be finite numbers.")
     if not lo < hi:
-        raise EditorValueError(_TOO_FEW_POINTS)
-    boundary = spec.fitted_boundary
+        raise EditorValueError(TOO_FEW_POINTS)
+    boundary = _free_geometry(spec)[1]
     return _snapped_edge(boundary, float(lo), -1), _snapped_edge(boundary, float(hi), 1)
+
+
+def _free_geometry(spec) -> tuple[Any, tuple[float, float]]:
+    """The base knots and boundary a numeric term keeps when it is shaped.
+
+    A fitted spline reports them. A draft, the unfitted spline an earlier
+    waiting shape built (``shaped_spline``), states the fitted ones it kept.
+    """
+    if spec.fitted_boundary is not None:
+        return spec.fitted_base_knots, spec.fitted_boundary
+    return spec._explicit_knots, spec._explicit_boundary
 
 
 def _snapped_edge(boundary: tuple[float, float], value: float, direction: int) -> float:
@@ -226,74 +232,6 @@ def _snapped_edge(boundary: tuple[float, float], value: float, direction: int) -
     return end if abs(edge - end) < NARROWEST_GAP * (b_hi - b_lo) else edge
 
 
-def _band_edges(spec: OrderedCategorical, name: str, lo, hi) -> tuple[str, str]:
-    """Two single bands in axis order; a group, a special or an unknown label refuses."""
-    lo, hi = str(lo), str(hi)
-    if {lo, hi} & special_labels(spec):
-        raise EditorValueError(
-            f"A shaped range covers only the bands of {name}; "
-            "leave its special levels out of the selection."
-        )
-    try:
-        at = {lo: spec._range_edge_value(lo), hi: spec._range_edge_value(hi)}
-    except ValueError as exc:
-        raise EditorValueError(
-            f"A shaped range must start and end on single bands of {name}; "
-            "ungroup the bands at its ends first."
-        ) from exc
-    if at[lo] == at[hi]:
-        raise EditorValueError(_TOO_FEW_POINTS)
-    lo, hi = sorted((lo, hi), key=at.__getitem__)
-    return lo, hi
-
-
-def _merged_ranges(
-    existing: tuple[PolynomialRange, ...],
-    new: PolynomialRange,
-    position: Callable[[Any], float],
-) -> list[PolynomialRange]:
-    """``existing`` plus ``new``: the same range is replaced, any other overlap refused."""
-    span = (position(new.lo), position(new.hi))
-    kept = []
-    for current in existing:
-        at = (position(current.lo), position(current.hi))
-        if at == span:
-            continue
-        if at[0] < span[1] and span[0] < at[1]:
-            raise EditorValueError(
-                f"This range overlaps the {current.label} range "
-                f"{_edge_text(current.lo)}–{_edge_text(current.hi)}. "
-                "Undo it or choose a range outside it."
-            )
-        kept.append(current)
-    return [*kept, new]
-
-
-def _shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBase:
-    """``source``'s settings with ``ranges``; a ``ps``/``ns`` source becomes ``bs``.
-
-    Range edges repeat knots, which the equal-spacing difference penalties
-    cannot take; a ``bs`` with the same knots, degree and penalty order is
-    the derivative-penalty spline whose penalty can skip the pinned ranges.
-    """
-    return Spline(
-        kind="cr" if _spline_kind_name(source) == "cr" else "bs",
-        n_knots=source.n_knots,
-        knots=knots,
-        boundary=boundary,
-        degree=source.degree,
-        knot_strategy=source.knot_strategy,
-        knot_alpha=source.knot_alpha,
-        penalty=source.penalty,
-        extrapolation=source.extrapolation,
-        discrete=source.discrete,
-        n_bins=source.n_bins,
-        m=source._m_orders,
-        lambda_policy=source._lambda_policy,
-        polynomial_ranges=ranges,
-    )
-
-
 def _hosted(spec: OrderedCategorical, basis, name: str, X) -> OrderedCategorical:
     """A fresh ordered term around ``basis``, keeping order, specials, grouping, base."""
     frame = as_eager_frame(X)
@@ -304,11 +242,8 @@ def _hosted(spec: OrderedCategorical, basis, name: str, X) -> OrderedCategorical
         base=spec.base,
         data=frame.column_array(name),
         basis=basis,
+        level=base_names_level(spec),
     )
-
-
-def _edge_text(edge) -> str:
-    return edge if isinstance(edge, str) else f"{edge:g}"
 
 
 def _is_finite(value) -> bool:

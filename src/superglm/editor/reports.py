@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload
 from superglm.editor.evaluation import evaluation_datasets
 from superglm.editor.metrics import METRIC_LABELS, compute_dataset_metrics
 from superglm.editor.summaries import summary_payload
@@ -51,8 +52,9 @@ def final_fit_report_payload(
     model_revision: int | None = None,
     request_sequence: int | None = None,
     model_override=None,
+    final_fit=None,
 ) -> dict[str, Any]:
-    """Return the current in-force model summary and split metrics."""
+    """Return the current in-force model summary, split metrics and any Final fit."""
     if splits is None:
         splits = _split_metrics(widget.session)
     revision = widget.session.model_revision if model_revision is None else int(model_revision)
@@ -70,6 +72,25 @@ def final_fit_report_payload(
         "splits": splits,
         "summary": summary_payload(widget, "in_force", model_override=model_override),
         "can_run_cv": False,
+        "final_fit": _final_fit_section(widget, final_fit, model_revision=revision),
+    }
+
+
+def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, Any]:
+    """The Final fit on train and validation rows, once one has run (D6)."""
+    if final_fit is None:
+        return {"available": False, "note": FINAL_NOT_RUN}
+    summary = summary_payload(widget, "in_force", model_override=final_fit.model)
+    return {
+        "available": True,
+        "stale": final_fit.model_revision != model_revision,
+        "n_rows": final_fit.n_rows,
+        "splits": list(final_fit.splits),
+        "carried": list(final_fit.carried),
+        # Waiting changes are never in a Final fit, and staging or undoing one
+        # leaves the model revision alone, so the count is the one waiting now.
+        "pending": len(widget.session.pending),
+        "summary": summary.get("compact"),
     }
 
 
@@ -81,8 +102,11 @@ def report_payload(
     model_revision: int | None = None,
     request_sequence: int | None = None,
     model_override=None,
+    final_fit=None,
 ) -> dict[str, Any]:
     """Dispatch a named report for the local editor app."""
+    if report == "cv":
+        return cv_report_payload(widget, request_sequence=request_sequence)
     if report == "final":
         return final_fit_report_payload(
             widget,
@@ -90,6 +114,7 @@ def report_payload(
             model_revision=model_revision,
             request_sequence=request_sequence,
             model_override=model_override,
+            final_fit=final_fit,
         )
     return validation_report_payload(
         widget.session,

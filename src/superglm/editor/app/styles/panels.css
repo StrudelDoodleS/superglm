@@ -1,5 +1,5 @@
-/* panels.css: feature list, inspector, help, advanced controls, and the
-   evidence status rows. The side panels share one paper tint and no border. */
+/* panels.css: feature list, inspector, help, settings, and the evidence
+   status rows. The side panels share one paper tint and no border. */
 
 .feature-list {
   width: var(--feature-list-width);
@@ -69,11 +69,13 @@
   text-transform: uppercase;
 }
 
+/* Name on the first line, kind and EDF on the second. The middle column holds
+   a waiting dot right after the name, and is the slack otherwise. */
 .feature-row {
   display: grid;
   width: 100%;
   height: auto;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, max-content) 1fr auto;
   column-gap: 8px;
   padding: 5px 8px;
   border: 0;
@@ -94,6 +96,7 @@
 }
 
 .feature-row-name {
+  grid-row: 1;
   grid-column: 1 / -1;
   overflow: hidden;
   font-weight: 600;
@@ -110,8 +113,31 @@
   white-space: nowrap;
 }
 
+.feature-row-kind {
+  grid-row: 2;
+  grid-column: 1 / 3;
+}
+
 .feature-row-edf {
+  grid-row: 2;
+  grid-column: 3;
   font-variant-numeric: tabular-nums;
+}
+
+/* A term with a change waiting for Refit carries an amber dot right after its name. */
+.feature-row:has(.feature-row-waiting) .feature-row-name {
+  grid-column: 1;
+}
+
+.feature-row-waiting {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: center;
+  justify-self: start;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--group-0);
 }
 
 .feature-empty {
@@ -188,7 +214,7 @@
 }
 
 .help-pane,
-.advanced-timing,
+.settings-timing,
 .summary-frame,
 .history-frame,
 .report-frame {
@@ -221,14 +247,110 @@
   color: var(--muted);
 }
 
-#advancedPane h2 {
-  margin: 2px 0 12px;
-  font-size: 14px;
+.sidepanel-tab:has(.sidepanel-tab-icon) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sidepanel-tab-icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Settings: one card per preference, under small headings. */
+.settings-pane {
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.settings-heading {
+  margin: 6px 2px 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.setting-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.setting-text {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
+.setting-title {
+  font-size: 13px;
   font-weight: 600;
 }
 
-.advanced-timing {
-  margin-top: 12px;
+.setting-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.setting-switch,
+.setting-switch:hover,
+.setting-switch:active {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: var(--border-strong);
+}
+
+.setting-switch[aria-checked="true"],
+.setting-switch[aria-checked="true"]:hover,
+.setting-switch[aria-checked="true"]:active {
+  background: var(--blue);
+}
+
+.setting-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 25%, transparent);
+  transition: left 120ms ease;
+}
+
+.setting-switch[aria-checked="true"]::after {
+  left: 16px;
+}
+
+.settings-pane .setting-segments {
+  flex: 0 0 auto;
+  width: 172px;
+}
+
+.settings-pane .build-duration {
+  flex: 0 0 auto;
+}
+
+.settings-timing {
+  margin-top: 2px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;

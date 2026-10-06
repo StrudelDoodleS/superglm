@@ -1285,7 +1285,14 @@ class SuperGLM:
         *,
         keep_smoothing: bool = True,
     ) -> SuperGLM:
-        """Refit with only active features and no selection penalty."""
+        """Refit with only active features and no selection penalty.
+
+        The refit keeps the model's declared ``separation`` mode. A level whose
+        separation the selection penalty exempted is not exempt without it, so
+        under ``separation="error"`` the refit raises :class:`SeparationError`
+        for that level, and under ``"warn"`` it fits with a
+        :class:`SeparationWarning`.
+        """
         return explain_ops.refit_unpenalised(
             self,
             X,

@@ -1,19 +1,49 @@
 // @ts-check
-// The theme control in the app bar: one icon that cycles Auto, Light and Dark.
-// Auto follows the browser's colour-scheme setting, which inside a notebook is
-// not always the notebook's own theme, so an explicit choice wins over it and
-// outlives the page through localStorage when it can. The resolved theme is
-// written to <html data-theme>, which styles/dark.css keys the dark palette
-// on; index.html writes the same attribute before first paint.
+// The theme switch in the app bar: a comic pill reading DAY or NIGHT. Until
+// it is flipped the editor follows the browser's colour-scheme setting, which
+// inside a notebook is not always the notebook's own theme; a flip is an
+// explicit choice that outlives the page through localStorage when it can,
+// and Settings can hand the theme back to the browser. The resolved theme is
+// written to <html data-theme>, which styles/dark.css keys the dark palette on
+// and the switch's rest position follows; index.html writes the same attribute
+// before first paint.
+//
+// Which store decides: the theme key. A stored "light" or "dark" is an
+// explicit choice and no stored value means follow the browser, so the
+// first-paint script reads that key alone. The followBrowserTheme setting
+// mirrors it, and this module keeps the two equal: it reconciles them on
+// mount, a flip clears the setting, and turning the setting on or off in
+// Settings removes the key or stores the theme on screen.
+//
+// A flip plays the switch's keyframes and cross-fades the page's grounds
+// (styles/shell.css). A change from the browser or from Settings lands
+// without motion.
+//
+// While the page fades, <html> keeps the colour scheme it had, pinned inline,
+// and takes the new one when the knob lands. Chromium restarts a colour
+// transition on every frame while an ancestor's colour transitions and the
+// root's color-scheme has changed, so text that set its own colour lagged the
+// fade by its length again, and text inheriting it dimmed back after landing.
 
 /** @typedef {"auto"|"light"|"dark"} ThemeChoice */
 /** @typedef {"light"|"dark"} Theme */
 /** @typedef {Pick<Storage, 'getItem'|'setItem'|'removeItem'>} ThemeStorage */
 /** @typedef {Pick<MediaQueryList, 'matches'|'addEventListener'|'removeEventListener'>} DarkMedia */
+/** @typedef {{followBrowserTheme: boolean}} FollowSetting */
+/**
+ * The part of views/settings.js the switch uses, passed in by main.js.
+ * @typedef {{
+ *   load: () => FollowSetting,
+ *   save: (patch: FollowSetting) => unknown,
+ *   subscribe: (listener: (settings: FollowSetting) => void) => () => void,
+ * }} ThemeSettings
+ */
 
 export const THEME_STORAGE_KEY = "superglm.editor.theme";
-
-const NAMES = Object.freeze({ auto: "Auto", light: "Light", dark: "Dark" });
+/** On the switch while a flip's keyframes may play. */
+export const FLIP_CLASS = "is-flipping";
+/** On <html> while the page's grounds cross-fade after a flip. */
+export const FADE_CLASS = "theme-fading";
 
 /** @param {unknown} value @returns {value is ThemeChoice} */
 export function isThemeChoice(value) {
@@ -56,73 +86,118 @@ export function resolveTheme(choice, prefersDark) {
 }
 
 /**
- * The choice after a click: first the theme Auto is not showing, then the one
- * it is, then Auto again, so the first click always changes what is on screen.
- * @param {ThemeChoice} choice @param {boolean} prefersDark @returns {ThemeChoice}
- */
-export function nextThemeChoice(choice, prefersDark) {
-  const browser = prefersDark ? "dark" : "light";
-  const other = prefersDark ? "light" : "dark";
-  if (choice === "auto") return other;
-  return choice === other ? browser : "auto";
-}
-
-/**
- * What the control says of itself: its state, and what a click does.
+ * What the switch says of itself: on for Night, its popover, what a click does.
  * @param {ThemeChoice} choice @param {boolean} prefersDark
- * @returns {{label:string, body:string}}
+ * @returns {{checked: boolean, title: string, body: string}}
  */
-export function describeThemeControl(choice, prefersDark) {
-  const next = nextThemeChoice(choice, prefersDark);
-  const now = choice === "auto"
-    ? `Follows the browser's setting, ${resolveTheme(choice, prefersDark)} now. `
-    : "";
-  const target = next === "auto" ? "Auto, which follows the browser's setting" : NAMES[next];
-  return { label: `Theme: ${NAMES[choice]}`, body: `${now}Click for ${target}.` };
+export function describeThemeSwitch(choice, prefersDark) {
+  const dark = resolveTheme(choice, prefersDark) === "dark";
+  const next = dark ? "Day" : "Night";
+  return {
+    checked: dark,
+    title: `Theme: ${dark ? "Night" : "Day"}`,
+    body: choice === "auto"
+      ? `Follows the browser's setting. Click for ${next}; the theme then stays as you set it.`
+      : `Click for ${next}. Settings can follow the browser's setting again.`,
+  };
 }
 
 /**
- * Show the choice on the control: its icon, its name, and its popover.
+ * Show the choice on the switch: its state and its popover.
  * @param {HTMLElement} button @param {ThemeChoice} choice @param {boolean} prefersDark
  */
-export function renderThemeControl(button, choice, prefersDark) {
-  const { label, body } = describeThemeControl(choice, prefersDark);
+export function renderThemeSwitch(button, choice, prefersDark) {
+  const { checked, title, body } = describeThemeSwitch(choice, prefersDark);
   button.dataset.choice = choice;
-  button.setAttribute("aria-label", label);
-  button.dataset.popoverTitle = label;
+  button.setAttribute("aria-checked", String(checked));
+  button.dataset.popoverTitle = title;
   button.dataset.popoverBody = body;
-  for (const icon of button.querySelectorAll("[data-theme-icon]")) {
-    icon.toggleAttribute("hidden", icon.getAttribute("data-theme-icon") !== choice);
-  }
 }
 
 /**
- * Mount the control: apply the remembered choice, cycle it on a click, and
- * follow the browser's setting while the choice is Auto.
- * @param {{button:HTMLElement, root:HTMLElement, media:DarkMedia, storage?:ThemeStorage}} options
+ * Mount the switch: apply the remembered choice, flip it on a click, follow
+ * the browser while no choice is stored, and keep the follow setting equal to
+ * that.
+ * @param {{button:HTMLElement, root:HTMLElement, media:DarkMedia, settings:ThemeSettings, storage?:ThemeStorage}} options
  * @returns {{destroy:()=>void}}
  */
-export function mountThemeControl({ button, root, media, storage }) {
+export function mountThemeSwitch({ button, root, media, settings, storage }) {
   let choice = readThemeChoice(storage);
+  // Set while this module saves the setting, so its own echo is not taken
+  // for a change made in Settings.
+  let saving = false;
+
+  function mirror() {
+    saving = true;
+    try {
+      settings.save({ followBrowserTheme: choice === "auto" });
+    } finally {
+      saving = false;
+    }
+  }
 
   function render() {
     root.dataset.theme = resolveTheme(choice, media.matches);
-    renderThemeControl(button, choice, media.matches);
+    renderThemeSwitch(button, choice, media.matches);
+  }
+
+  /** @param {Theme} shown the theme on screen as the flip starts */
+  function startFade(shown) {
+    // A click mid-flip keeps the scheme the page still has.
+    if (!root.classList.contains(FADE_CLASS)) root.style.colorScheme = shown;
+    root.classList.add(FADE_CLASS);
+  }
+
+  function endFade() {
+    root.classList.remove(FADE_CLASS);
+    root.style.colorScheme = "";
   }
 
   function onClick() {
-    choice = nextThemeChoice(choice, media.matches);
+    const shown = resolveTheme(choice, media.matches);
+    choice = shown === "dark" ? "light" : "dark";
     storeThemeChoice(choice, storage);
+    mirror();
+    button.classList.add(FLIP_CLASS);
+    startFade(shown);
     render();
   }
 
+  // While the browser leads the switch carries no flip: a flip ends the
+  // following, and Settings clears the flip when it hands the theme back.
+  function onBrowserChange() {
+    if (choice === "auto") render();
+  }
+
+  /** @param {FollowSetting} next */
+  function onSettingsChange(next) {
+    if (saving || next.followBrowserTheme === (choice === "auto")) return;
+    choice = next.followBrowserTheme ? "auto" : resolveTheme(choice, media.matches);
+    storeThemeChoice(choice, storage);
+    // Kept, the last flip's keyframes would replay under the new theme's names.
+    button.classList.remove(FLIP_CLASS);
+    endFade();
+    render();
+  }
+
+  /** The knob has landed, and the fade with it. @param {Event} event */
+  function onAnimationEnd(event) {
+    if (/** @type {AnimationEvent} */ (event).animationName.startsWith("theme-knob-")) endFade();
+  }
+
+  if (settings.load().followBrowserTheme !== (choice === "auto")) mirror();
   button.addEventListener("click", onClick);
-  media.addEventListener("change", render);
+  button.addEventListener("animationend", onAnimationEnd);
+  media.addEventListener("change", onBrowserChange);
+  const unsubscribe = settings.subscribe(onSettingsChange);
   render();
   return Object.freeze({
     destroy() {
       button.removeEventListener("click", onClick);
-      media.removeEventListener("change", render);
+      button.removeEventListener("animationend", onAnimationEnd);
+      media.removeEventListener("change", onBrowserChange);
+      unsubscribe();
+      endFade();
     },
   });
 }

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
+from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, collapse_levels
 
 
 def _to_polars(frame):
@@ -101,6 +101,41 @@ def test_build_term_comparison_data_uses_shared_domains(fitted_comparison_models
     assert set(veh_age["series"]) == {"ordered", "categorical"}
     assert bonus["family"] == "level"
     assert list(bonus["domain"]["levels"]) == ["50-60", "60-70", "70-80", "80-100", "100+"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "grouped", "expected"),
+    [
+        (["C", "A", "B"], False, ["A", "B", "C"]),
+        (["C", "A", "B"], True, ["A", "B", "C"]),
+        # Model order, which is neither row order (10, 1, 2) nor text order (1, 10, 2).
+        ([10, 1, 2], False, ["1", "2", "10"]),
+    ],
+    ids=["text", "grouped", "integer"],
+)
+def test_unordered_level_domain_follows_the_model_not_the_rows(rows, grouped, expected):
+    from superglm.plotting.comparison import _build_term_comparison_data
+
+    rng = np.random.default_rng(20261003)
+    region = np.tile(np.asarray(rows), 100)
+    y = 0.5 + 0.1 * (region == rows[1]) + rng.normal(0.0, 0.05, region.size)
+    X = pd.DataFrame({"region": region})
+    grouping = collapse_levels(X["region"], groups={"B+C": ["B", "C"]}) if grouped else None
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first", grouping=grouping)},
+    )
+    model.fit(X, y)
+
+    term = _build_term_comparison_data(models={"fit": model}, terms=["region"], X=X)["terms"][0]
+
+    assert term["domain"]["levels"] == expected
+    assert term["support"]["levels"] == expected
+    # Each label carries its own fitted effect, scored from the column's native values.
+    inference = model.term_inference("region", with_se=False)
+    assert [str(level) for level in inference.levels] == expected
+    np.testing.assert_array_equal(term["series"]["fit"]["link"], inference.log_relativity)
 
 
 def test_build_term_comparison_data_can_store_per_label_support(fitted_comparison_models):

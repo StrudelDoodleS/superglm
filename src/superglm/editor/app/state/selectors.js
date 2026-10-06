@@ -46,6 +46,27 @@ export function selectRenderableTerm(state) {
     : selectCurrentTerm(state);
 }
 
+/** @type {readonly import('../api/contracts.js').PendingStep[]} */
+const NO_PENDING = Object.freeze([]);
+
+/**
+ * The structural changes waiting for Refit, oldest first.
+ * @param {EditorState} state
+ * @returns {readonly import('../api/contracts.js').PendingStep[]}
+ */
+export function selectPendingSteps(state) {
+  return selectSnapshot(state)?.pending ?? NO_PENDING;
+}
+
+/**
+ * Each term with a change waiting for Refit, once, in the order first staged.
+ * @param {EditorState} state
+ * @returns {string[]}
+ */
+export function selectWaitingTerms(state) {
+  return [...new Set(selectPendingSteps(state).map((step) => step.term))];
+}
+
 /** @param {EditorState} state */
 export function selectGroupDisplayMode(state) {
   const active = selectActiveTermName(state);

@@ -1,104 +1,120 @@
-/* dark.css: the dark palette. Every colour token in tokens.css is restated
-   for a dark ground, keyed on <html data-theme="dark">: index.html sets that
-   attribute before first paint from the remembered choice or the browser's
-   setting, and views/theme.js keeps it current. The ground, the paper text
-   and the unchanged yellow are the docs site's dark (docs/_static/custom.css);
-   the blue is the same hue stepped up for the dark ground; the chart's
-   categorical palettes are the light hues re-stepped into the dark lightness
-   band and validated against this surface. It lives apart from tokens.css
-   because superglm/plotting/editor_style.py reads that file as the light
-   palette. */
+/* dark.css: the dark palette, a warm dark. Every colour token in tokens.css
+   is restated for a dark ground, keyed on <html data-theme="dark">:
+   index.html sets that attribute before first paint and views/theme.js keeps
+   it current. It lives apart from tokens.css because
+   superglm/plotting/editor_style.py reads that file as the light palette.
+   tests/editor_frontend/dark_palette.test.js holds every text pair to 4.5:1
+   and keeps neighbours in each categorical palette apart, in lightness too,
+   and every pair of the first five folds. */
+
+/* Palette: gruvbox by morhetz (github.com/morhetz/gruvbox), MIT/X11. */
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --text: #f2efe6;
-  --muted: #a6a8ae;
-  --surface: #15171c;
-  --surface-subtle: #1c1f26;
-  --surface-hover: #272b34;
-  --border: #2c3038;
-  --border-strong: #6f737c;
-  --hairline: rgba(242, 239, 230, 0.12);
-  --grid: rgba(166, 168, 174, 0.14);
-  --blue: #7aa2f7;
-  --blue-soft: #24314f;
-  --blue-band: rgba(122, 162, 247, 0.12);
-  --orange: #fb923c;
-  --red: #f26b52;
-  --yellow: #f4b942;
-  --yellow-border: #f4b942;
-  --danger: #f26b52;
-  --danger-surface: #3a201c;
+  /* Grounds and text are gruvbox's. The hover ground is its dark0_soft
+     rather than dark1, which keeps muted text on it at 4.5:1. */
+  --text: #ebdbb2;
+  --muted: #a89984;
+  --surface: #1d2021;
+  --surface-subtle: #282828;
+  --surface-hover: #32302f;
+  --border: #3c3836;
+  --border-strong: #7c6f64;
+  --hairline: rgba(235, 219, 178, 0.1);
+  --grid: rgba(168, 153, 132, 0.14);
+  /* The current edit is this file's own blue, clearer than gruvbox's. */
+  --blue: #83a8e8;
+  --blue-soft: #283244;
+  --blue-band: rgba(131, 168, 232, 0.12);
+  --orange: #fe8019;
+  /* gruvbox's orange already reads as text on the ground, at 6.5:1. */
+  --orange-text: #fe8019;
+  --red: #fb4934;
+  --yellow: #d79921;
+  --yellow-border: #d79921;
+  /* Red set as text is a step lighter than gruvbox's red, which falls below
+     4.5:1 on the inspector's ground. */
+  --danger: #fb7a6b;
+  --danger-surface: #3c1f1e;
   --danger-text: #ffb3a7;
-  --better: #2dd4bf;
-  --worse: #f26b52;
-  --focus: #7aa2f7;
-  --shadow: rgba(0, 0, 0, 0.5);
+  --better: #8ec07c;
+  --worse: #fb7a6b;
+  --focus: #83a8e8;
+  --shadow: rgba(0, 0, 0, 0.55);
   --ink: #000000;
-  --primary-hover: #dcd9cf;
-  --popover-muted: #4f535b;
-  --grey: #6f7883;
-  --zero: rgba(242, 239, 230, 0.3);
-  --ci: rgba(122, 162, 247, 0.16);
-  --ci-whisker: rgba(122, 162, 247, 0.6);
-  --basis-contribution: rgba(166, 168, 174, 0.35);
-  --build-end: #7aa2f7;
-  --trace-ink: #a6a8ae;
-  --sig-strong-bg: #14382b;
-  --sig-strong-fg: #86efc0;
-  --sig-medium-bg: #163a2a;
-  --sig-medium-fg: #a3e4b4;
-  --sig-standard-bg: #2f3a15;
-  --sig-standard-fg: #d5e79b;
-  --sig-weak-bg: #3f2b12;
-  --sig-weak-fg: #f5c98c;
-  --sig-none-bg: #421d1d;
-  --sig-none-fg: #ffb3b3;
-  --group-0: #cf7e1a;
-  --group-1: #903be3;
-  --group-2: #2da97b;
-  --group-3: #f2403a;
-  --group-4: #2ca2c4;
-  --group-5: #3877ff;
-  --basis-0: #2caf56;
-  --basis-1: #d97705;
-  --basis-2: #8c54fe;
-  --basis-3: #2ca2c4;
-  --basis-4: #f2403a;
-  --basis-5: #3877ff;
-  --basis-6: #d75527;
-  --basis-7: #6aa819;
-  --basis-8: #d3336e;
-  --basis-9: #2b8880;
-  --basis-10: #a54cfe;
-  --basis-11: #c48607;
-  --trace-0: #267cef;
-  --trace-1: #3aae57;
-  --trace-2: #d44d9b;
-  --trace-3: #d97705;
-  --trace-4: #9364f4;
-  --trace-5: #3583ff;
-  --trace-6: #e53c40;
-  --trace-7: #2b91a1;
-  --trace-8: #8055d5;
-  --trace-9: #68717b;
+  --primary-hover: #d5c4a1;
+  --popover-muted: #504945;
+  --grey: #928374;
+  --zero: rgba(235, 219, 178, 0.3);
+  --ci: rgba(131, 168, 232, 0.18);
+  --ci-whisker: rgba(131, 168, 232, 0.6);
+  --basis-contribution: rgba(168, 153, 132, 0.4);
+  --build-end: #83a8e8;
+  --trace-ink: #a89984;
+  --sig-strong-bg: #2b3a1f;
+  --sig-strong-fg: #b8bb26;
+  --sig-medium-bg: #2a3622;
+  --sig-medium-fg: #a9c47f;
+  --sig-standard-bg: #33361c;
+  --sig-standard-fg: #d5c46a;
+  --sig-weak-bg: #3d3115;
+  --sig-weak-fg: #fabd2f;
+  --sig-none-bg: #3c1f1e;
+  --sig-none-fg: #fb7a6b;
+  /* The categorical palettes draw on gruvbox's bright and neutral hues,
+     ordered so neighbours differ in lightness as well as hue. */
+  --group-0: #fabd2f;
+  --group-1: #d3869b;
+  --group-2: #689d6a;
+  --group-3: #b8bb26;
+  --group-4: #fb4934;
+  --group-5: #458588;
+  --basis-0: #b8bb26;
+  --basis-1: #fb4934;
+  --basis-2: #8ec07c;
+  --basis-3: #d65d0e;
+  --basis-4: #83a598;
+  --basis-5: #fabd2f;
+  --basis-6: #98971a;
+  --basis-7: #458588;
+  --basis-8: #fe8019;
+  --basis-9: #b16286;
+  --basis-10: #d79921;
+  --basis-11: #689d6a;
+  /* The Cross-validation chart draws a five-fold CV's folds together, so
+     the first five differ pairwise, in lightness too: gruvbox's purple,
+     yellow and aqua re-stepped in OKLab lightness, with the yellow clear of
+     the edited curve's orange. */
+  --trace-0: #83a598;
+  --trace-1: #b8bb26;
+  --trace-2: #b5668a;
+  --trace-3: #fdd994;
+  --trace-4: #497d4c;
+  /* The folds keep the dark trace colours; the dark ground needs no edge. */
+  --fold-0: #83a598;
+  --fold-1: #b8bb26;
+  --fold-2: #b5668a;
+  --fold-3: #fdd994;
+  --fold-4: #497d4c;
+  --fold-edge-0: #83a598;
+  --fold-edge-1: #b8bb26;
+  --fold-edge-2: #b5668a;
+  --fold-edge-3: #fdd994;
+  --fold-edge-4: #497d4c;
+  --trace-5: #fabd2f;
+  --trace-6: #fb4934;
+  --trace-7: #458588;
+  --trace-8: #8ec07c;
+  --trace-9: #d65d0e;
+  --switch-track: #32302f;
+  --switch-dots: rgba(235, 219, 178, 0.22);
 }
 
-/* A translucent yellow over near-black composes to a dim gold whatever its
-   tint, and at the light strip's opacity the curves crossing it would sink
-   into it. So the strip stays lighter on the dark ground, the curve stays the
-   figure, and a bright edge along the strip carries the yellow. */
+/* A translucent yellow over near-black composes to a dim gold, so the
+   exposure strip, and its legend swatch, are more opaque here than on the
+   light ground (0.6 in styles.css). */
 :root[data-theme="dark"] .exposure,
-:root[data-theme="dark"] .exposure-density {
-  fill-opacity: 0.4;
-}
-:root[data-theme="dark"] .exposure,
-:root[data-theme="dark"] .exposure-edge,
+:root[data-theme="dark"] .exposure-density,
 :root[data-theme="dark"] .legend-swatch {
-  stroke: var(--yellow);
-  stroke-width: 1;
-  stroke-opacity: 0.8;
-}
-:root[data-theme="dark"] .exposure-edge {
-  stroke-width: 1.5;
+  fill-opacity: 0.8;
 }

@@ -329,6 +329,41 @@ levels and how many rows they cover. It is deliberately never silent — a route
 row is indistinguishable from a genuine base row in the output, so the warning
 is the only record that it happened.
 
+**New levels can go to a group.** `unseen=` can also name a group of the term's
+`grouping=`. A level the fit never saw, or a label the grouping does not list,
+then takes that group's relativity, with one warning per `predict` call that
+names the levels and how many rows they cover.
+
+```python
+from superglm import Categorical, collapse_levels
+
+grouping = collapse_levels(df["Area"], groups={"Other": ["E", "F"]})
+area = Categorical(grouping=grouping, unseen="Other")
+```
+
+A good group to name is one that pools the term's thin levels: a new level has
+no rows of its own, and the pooled group's relativity is estimated from all the
+thin levels' rows together. scikit-learn's `OneHotEncoder` applies the same
+rule with `handle_unknown="infrequent_if_exist"`, where an unknown category maps
+to the infrequent category, the pool of categories rarer than `min_frequency`,
+if it exists
+([scikit-learn documentation](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.OneHotEncoder.html)).
+
+The fit checks the group, and refuses with a message that says what to do:
+
+- an `unseen` group on a `Categorical` without `grouping=`;
+- a name that is not one of the grouping's groups;
+- a group with no level in the fit's level universe, which would leave new
+  levels no relativity to take.
+
+`OrderedCategorical` has no `unseen=` argument: a level outside its order is
+refused at predict time. A `RandomEffect` gives a level it never saw the
+population average by default; see [RandomEffect](#randomeffect).
+
+The editor's **New levels →** control makes the same choice on a fitted model
+without refitting; see
+[Where New Levels Go](../tutorials/edit-a-model-in-the-browser.md#where-new-levels-go).
+
 ### CV and level universes
 
 `cross_validate` resolves the universe for every categorical-family term that

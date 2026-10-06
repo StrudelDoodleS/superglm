@@ -298,3 +298,107 @@ test("cancelled browser save is a normal status and destroy removes every listen
   await fixture.download.emit("click");
   assert.equal(fixture.blobPaths.length, priorRequests);
 });
+
+test("the dialog says how many waiting changes the export leaves out", async () => {
+  const fixture = exportFixture();
+  const pendingNote = new FakeElement();
+  let waiting = 2;
+  const binding = bindExportDialog({
+    ...fixture.context,
+    nodes: { ...fixture.nodes, pendingNote },
+    pendingCount: () => waiting,
+  });
+
+  await fixture.action.emit("click");
+  assert.equal(pendingNote.hidden, false);
+  assert.equal(
+    pendingNote.textContent,
+    "2 waiting changes are not included. The export is the last refit.",
+  );
+
+  fixture.dialog.close();
+  waiting = 1;
+  await fixture.action.emit("click");
+  assert.equal(
+    pendingNote.textContent,
+    "1 waiting change is not included. The export is the last refit.",
+  );
+
+  fixture.dialog.close();
+  waiting = 0;
+  await fixture.action.emit("click");
+  assert.equal(pendingNote.hidden, true);
+  assert.equal(pendingNote.textContent, "");
+  binding.destroy();
+});
+
+test("the Final fit model option follows availability and downloads the final export", async () => {
+  const fixture = exportFixture();
+  const final = new FakeElement("final");
+  fixture.nodes.formatInputs.push(final);
+  let available = false;
+  const binding = bindExportDialog({ ...fixture.context, finalFitAvailable: () => available });
+
+  await fixture.action.emit("click");
+  assert.equal(final.disabled, true);
+
+  available = true;
+  fixture.dialog.open = false;
+  await fixture.action.emit("click");
+  assert.equal(final.disabled, false);
+  fixture.joblib.checked = false;
+  final.checked = true;
+  await final.emit("change");
+  assert.equal(fixture.filename.value, "superglm_final_model.joblib");
+  await fixture.download.emit("click");
+  assert.deepEqual(fixture.blobPaths, [
+    "/download_export?format=final&filename=superglm_final_model.joblib",
+  ]);
+
+  // Once the model changes, the stale final fit is no longer offered.
+  available = false;
+  fixture.dialog.open = false;
+  await fixture.action.emit("click");
+  assert.deepEqual([final.disabled, final.checked, fixture.joblib.checked], [true, false, true]);
+  assert.equal(fixture.filename.value, "superglm_edited_model.joblib");
+  binding.destroy();
+});
+
+test("Structure (JSON) downloads and saves the structure file with its own default name", async () => {
+  const fixture = exportFixture();
+  const structure = new FakeElement("structure");
+  fixture.nodes.formatInputs.push(structure);
+  const pendingNote = new FakeElement();
+  const binding = bindExportDialog({
+    ...fixture.context,
+    nodes: { ...fixture.nodes, pendingNote },
+    pendingCount: () => 1,
+  });
+
+  await fixture.action.emit("click");
+  // The structure is the last refit too, so the waiting-changes note stands.
+  assert.equal(
+    pendingNote.textContent,
+    "1 waiting change is not included. The export is the last refit.",
+  );
+  fixture.joblib.checked = false;
+  structure.checked = true;
+  await structure.emit("change");
+  assert.equal(fixture.filename.value, "superglm_structure.json");
+
+  await fixture.download.emit("click");
+  assert.deepEqual(fixture.blobPaths, [
+    "/download_export?format=structure&filename=superglm_structure.json",
+  ]);
+  assert.equal(fixture.saved[0].metadata.description, "Structure (JSON)");
+  assert.deepEqual(fixture.saved[0].metadata.accept, { "application/json": [".json"] });
+  assert.equal(fixture.status.textContent, "Downloaded superglm_structure.json");
+
+  await fixture.saveToKernel.emit("click");
+  assert.deepEqual(fixture.posts.at(-1), {
+    path: "/export_file",
+    payload: { format: "structure", directory: ".", filename: "superglm_structure.json" },
+  });
+  assert.equal(fixture.status.textContent, "Saved ./superglm_structure.json");
+  binding.destroy();
+});

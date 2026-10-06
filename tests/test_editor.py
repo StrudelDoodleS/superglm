@@ -7,6 +7,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1465,7 +1466,13 @@ def test_widget_evidence_and_export_reuse_materialized_model(
     assert Path(saved["path"]).exists()
     assert filename == "edited-model.joblib"
     assert downloaded
-    assert dumped == [materialized, materialized]
+    # Both exports dump a copy of the one materialized model that carries the
+    # history (spec D11); the cached model itself is left as it was.
+    assert len(dumped) == 2
+    assert all(
+        model is not materialized and model._result is materialized._result for model in dumped
+    )
+    assert not hasattr(materialized, "_editor_history")
 
 
 def test_to_model_refreshes_fit_statistics_after_manual_edit(editor_model):
@@ -2423,10 +2430,11 @@ def test_auto_level_refits_use_reml_when_source_model_was_reml_fit():
     assert "age" in collapsed._reml_lambdas
 
 
-def test_collapse_levels_replaces_in_force_model_and_clears_manual_edits(editor_model):
+def test_collapse_levels_replaces_in_force_model_and_carries_edits_on_other_terms(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
     session.select_indices("x_spline", [10, 11, 12])
     session.shift("x_spline", 0.4)
+    edited = session.terms["x_spline"].edited_log_effect.copy()
     assert session.edited_terms() == ["x_spline"]
 
     session.select_levels("region", ["B", "C"])
@@ -2434,13 +2442,13 @@ def test_collapse_levels_replaces_in_force_model_and_clears_manual_edits(editor_
 
     assert session.reference_model is editor_model
     assert session.model is refit
-    assert session.edited_terms() == []
+    # The collapse left x_spline's rows and grid alone, so its hand edit is
+    # carried over the refit (spec D2), inside the collapse's own step.
+    assert session.edited_terms() == ["x_spline"]
     assert session.history == []
+    assert [step.label for step in session.structure_history] == ["collapse B + C in region"]
     assert session.selection("x_spline").size == 0
-    np.testing.assert_allclose(
-        session.terms["x_spline"].edited_log_effect,
-        session.terms["x_spline"].original_log_effect,
-    )
+    np.testing.assert_array_equal(session.terms["x_spline"].edited_log_effect, edited)
     grouping = session.model.features["region"]._grouping
     assert grouping.original_to_group["B"] == "B+C"
     assert grouping.original_to_group["C"] == "B+C"
@@ -4486,13 +4494,17 @@ def test_save_load_roundtrip(editor_model, tmp_path):
     path = tmp_path / "edits.json"
 
     session.save(path)
-    loaded = EditorSession.load(path, model=editor_model)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = EditorSession.load(path, model=editor_model)
 
     np.testing.assert_allclose(
         loaded.terms["x_spline"].edited_log_effect,
         session.terms["x_spline"].edited_log_effect,
     )
     assert loaded.history[-1].operation == "shift"
+    # Curve edits only: the file left nothing out, so load has nothing to disclose.
+    assert not [w for w in caught if "edit file" in str(w.message)]
 
 
 def test_load_rejects_same_shape_artifact_from_different_baseline(
@@ -4870,9 +4882,10 @@ def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
     try:
         session.select_indices("region", [1, 2])
 
-        def replace_with_smaller_term(term, *, method="auto"):
+        def replace_with_smaller_term(term, *, method="auto", keep_reference=True):
             assert term == "region"
             assert method == "fit"
+            assert keep_reference is True
             session.terms["region"] = EditableTerm(
                 name="region",
                 kind="categorical",
@@ -4912,7 +4925,7 @@ def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
         monkeypatch.setattr(
             session,
             "replace_with_collapsed_levels",
-            lambda term, *, method="auto": editor_model,
+            lambda term, *, method="auto", keep_reference=True: editor_model,
         )
         monkeypatch.setattr(
             widget_module,
@@ -6394,6 +6407,9 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "/control" in js
         assert "/metrics" in js
         assert "/summary" in js
+        assert "/stage" in js
+        assert "/refit_pending" in js
+        assert "/note" in js
     finally:
         widget.close()
 
@@ -6555,8 +6571,8 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     bindings_start = main_js.index("if (collapseLevels) {", refit_end)
     bindings_end = main_js.index("\nloadState().then", bindings_start)
     bindings_source = main_js[bindings_start:bindings_end]
-    collapse_start = summary_js.index("export function collapseTransition")
-    collapse_end = summary_js.index("export function ungroupTransition", collapse_start)
+    collapse_start = summary_js.index("export function stageCollapse")
+    collapse_end = summary_js.index("export function stageUngroup", collapse_start)
     collapse_source = summary_js[collapse_start:collapse_end]
     transition_start = actions_js.index("  async function executeStructuralMutation")
     transition_end = actions_js.index("\n  /**\n   * Refresh one evidence panel", transition_start)
@@ -6613,14 +6629,14 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "formatEvidenceTimingDetails" in main_js
     assert "formatTimingDetails" in main_js
     assert "Refit completed in" in main_js
-    assert 'id="advancedTiming"' in html
-    assert "advancedTiming.textContent" in main_js
+    assert 'id="settingsTiming"' in html
+    assert "settingsTiming.textContent" in main_js
     assert 'summaryNote.textContent = payload.note || ""' in main_js
-    assert "collapseTransition" in main_js[:refit_start]
-    assert "ungroupTransition" in main_js[:refit_start]
+    assert "stageCollapse" in main_js[:refit_start]
+    assert "stageUngroup" in main_js[:refit_start]
     assert "restoreTransition" not in main_js
-    assert "runStructuralRefit(collapseTransition(selectedTerm()))" in bindings_source
-    assert "runStructuralRefit(ungroupTransition(selectedTerm()))" in bindings_source
+    assert "runStructuralChange(stageCollapse(selectedTerm()," in bindings_source
+    assert "runStructuralChange(stageUngroup(selectedTerm()," in bindings_source
     assert "store.subscribe(selectChartRenderState" in bindings_source
     assert "sameChartRenderState" in bindings_source
     assert "(state) => state.remote.summary" in bindings_source
@@ -6629,8 +6645,8 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "renderStaleSummary" not in main_js
     assert "renderSummaryEvidence" in bindings_source
     assert "state.request.mutation" in bindings_source
-    assert 'path: "/collapse_levels"' in collapse_source
-    assert 'payload: { term, method: "auto" }' in collapse_source
+    assert 'stageTransition("collapse", term, { levels: [...levels] }' in collapse_source
+    assert 'path: "/stage"' in summary_js
     assert "requestJSON" not in collapse_source
     assert "app-busy-overlay" in css
     assert "app-shell.is-busy" in css
@@ -6678,7 +6694,7 @@ def test_editor_structural_steps_run_their_side_effects_without_asking_first():
     assert ".export-dialog" in dialog_css
 
 
-def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
+def test_editor_inspector_has_summary_history_settings_and_help_tabs():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     html = (root / "index.html").read_text()
     main_js = (root / "main.js").read_text()
@@ -6688,11 +6704,14 @@ def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
     assert 'aria-label="Model inspector"' in html
     assert ">Summary</button>" in html
     assert ">History</button>" in html
-    assert ">Advanced</button>" in html
+    assert "</svg>Settings</button>" in html
+    assert "Advanced" not in html
     assert ">Help</button>" in html
     assert "historyFrame" in html
-    assert "advancedTiming" in html
+    assert 'id="settingsPane"' in html
+    assert "settingsTiming" in html
     assert html.count('id="buildDurationWrap"') == 1
+    assert 'from "./views/settings.js"' in main_js
     assert 'from "./history.js"' in main_js
     assert ".inspector" in css
     assert ".help-pane" in css
@@ -6707,9 +6726,10 @@ def test_editor_history_module_renders_the_timeline():
     source = history_js_path.read_text()
 
     assert "renderHistory" in source
-    assert "history-now" in source
-    assert "history-chip" in source
-    assert "history-hash" in source
+    assert "bindHistory" in source
+    assert "history-section" in source
+    assert "history-undo-chip" in source
+    assert "history-id" in source
 
 
 def test_widget_serves_editor_app_assets(editor_model):
@@ -6724,6 +6744,7 @@ def test_widget_serves_editor_app_assets(editor_model):
         assert '<link rel="stylesheet" href="/assets/styles/chart.css">' in shell
         assert '<link rel="stylesheet" href="/assets/styles/panels.css">' in shell
         assert '<link rel="stylesheet" href="/assets/styles/dialogs.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/cv.css">' in shell
         assert '<script type="module" src="/assets/main.js"></script>' in shell
         assert "<style>" not in shell
         assert "<script>\nconst svg" not in shell
@@ -6761,6 +6782,9 @@ def test_widget_serves_editor_app_assets(editor_model):
             "interactions.js",
             "views/inspector.js",
             "views/help_drawer.js",
+            "views/settings.js",
+            "chart/pending_overlay.js",
+            "views/cv_tab.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -6773,6 +6797,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "styles/chart.css",
             "styles/panels.css",
             "styles/dialogs.css",
+            "styles/cv.css",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -6873,9 +6898,15 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/profile_distribution", frozenset({"POST"})) in routes
     assert ("/profile_distribution/start", frozenset({"POST"})) in routes
     assert ("/profile_distribution/status/{job_id}", frozenset({"GET"})) in routes
+    assert ("/job_start", frozenset({"POST"})) in routes
+    assert ("/job_status", frozenset({"POST"})) in routes
+    assert ("/job_cancel", frozenset({"POST"})) in routes
     assert ("/collapse_levels", frozenset({"POST"})) in routes
     assert ("/ungroup_levels", frozenset({"POST"})) in routes
     assert ("/reorder_levels", frozenset({"POST"})) in routes
+    assert ("/stage", frozenset({"POST"})) in routes
+    assert ("/refit_pending", frozenset({"POST"})) in routes
+    assert ("/note", frozenset({"POST"})) in routes
     assert ("/restore_structure", frozenset({"POST"})) not in routes
     assert ("/model_source", frozenset({"POST"})) not in routes
 

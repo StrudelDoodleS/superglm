@@ -12,6 +12,7 @@ silence. Each docstring says when it fires and what to do about it.
    superglm.NearPoissonDispersionError
    superglm.RatingTableBaseNotRepresentableError
    superglm.ConvergenceWarning
+   superglm.StructureError
    superglm.SeparationError
    superglm.SeparationWarning
    superglm.WeakIdentificationWarning

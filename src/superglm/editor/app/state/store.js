@@ -16,6 +16,7 @@ export function createInitialEditorState(snapshot = null) {
       activeTerm: snapshot?.selected_term || "",
       activeView: "editor",
       mode: "select",
+      termView: "chart",
       showCi: false,
       showContrib: false,
       summaryLevelDisplay: "expanded",
@@ -24,7 +25,9 @@ export function createInitialEditorState(snapshot = null) {
       inspectorPane: "summary",
       inspectorOpen: true,
       preview: null,
-      selectionPreview: null
+      selectionPreview: null,
+      selectionAnchor: null,
+      selectionSpan: null
     },
     request: {
       mutation: { status: "idle", operation: null, error: null },
@@ -195,6 +198,49 @@ function invalidatePriorEvidence(state, revision) {
   return { ...state.request, evidence };
 }
 
+/**
+ * Whether two snapshots wait for different changes. Undo and Redo of a
+ * waiting change keep the model revision, so this is how a report that shows
+ * the waiting list (the Cross-validation tab's chip and Run CV's reason)
+ * learns it is out of date.
+ *
+ * @param {EditorSnapshot|null} previous @param {EditorSnapshot} next
+ */
+export function waitingListChanged(previous, next) {
+  /** @param {EditorSnapshot|null} snapshot */
+  const ids = (snapshot) => (snapshot?.pending ?? []).map((step) => step.id).join(" ");
+  return previous !== null && ids(previous) !== ids(next);
+}
+
+/** @param {EditorState} state */
+function invalidateReportEvidence(state) {
+  const current = state.request.evidence.report;
+  if (current.status === "idle" && current.payload === null) return state.request;
+  const evidence = { ...state.request.evidence };
+  evidence.report = { ...current, status: "stale", error: null };
+  return { ...state.request, evidence };
+}
+
+/**
+ * The anchor is a source index, and a level reorder (a drag, its Undo or Redo,
+ * Reset order) renumbers its term's levels. The anchor follows its level, as
+ * the selection does, and goes when that level is gone.
+ *
+ * @param {EditorState['view']['selectionAnchor']} anchor
+ * @param {EditorSnapshot|null} previous
+ * @param {EditorSnapshot} next
+ */
+function anchorFollowingItsLevel(anchor, previous, next) {
+  if (!anchor) return anchor;
+  const before = previous?.terms?.[anchor.term]?.levels;
+  const after = next.terms?.[anchor.term]?.levels;
+  if (!Array.isArray(before) || !Array.isArray(after)) return anchor;
+  const level = before[anchor.index];
+  if (after[anchor.index] === level) return anchor;
+  const index = after.indexOf(level);
+  return index >= 0 ? { term: anchor.term, index } : null;
+}
+
 /** @param {EditorState} state @param {EditorSnapshot} snapshot */
 export function commitRemote(state, snapshot) {
   if (isOlderGeneratedSnapshot(state.remote.snapshot, snapshot)) {
@@ -203,7 +249,12 @@ export function commitRemote(state, snapshot) {
   const previousRevision = state.remote.snapshot?.model_revision;
   const request = previousRevision !== undefined && previousRevision !== snapshot.model_revision
     ? invalidatePriorEvidence(state, snapshot.model_revision)
-    : state.request;
+    : waitingListChanged(state.remote.snapshot, snapshot)
+      ? invalidateReportEvidence(state)
+      : state.request;
+  const selectionAnchor = anchorFollowingItsLevel(
+    state.view.selectionAnchor, state.remote.snapshot, snapshot
+  );
   /** @type {EditorState} */
   const candidate = {
     ...state,
@@ -212,7 +263,7 @@ export function commitRemote(state, snapshot) {
       summary: state.remote.summary,
       chartEpoch: state.remote.chartEpoch + 1
     },
-    view: { ...state.view, preview: null, selectionPreview: null },
+    view: { ...state.view, preview: null, selectionPreview: null, selectionAnchor },
     request
   };
   return {
