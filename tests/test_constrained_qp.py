@@ -2450,3 +2450,64 @@ class TestLargeFiniteHessian:
         )
         assert scaled.active_set == reference.active_set
         assert scaled.converged == reference.converged
+
+
+class TestFaceMinimumAboveTheStepGate:
+    """A face minimizer whose next step is rounding, not zero, is still certified.
+
+    After a full step the iterate minimizes the QP on its active face, so in
+    exact arithmetic the next step is zero.  In floating point it is the saddle
+    solve's rounding, about ``u`` times the KKT system's condition number,
+    which a Hessian with widely spread curvature (thin random-effect levels at
+    a small penalty) lifts above the ``tol`` step gate.  The loop used to step
+    along that rounding until ``max_iter`` and report no certificate, and each
+    IRLS iteration of a monotone fit with random effects then lacked one.
+    """
+
+    @staticmethod
+    def _ill_scaled_problem(seed: int, spread: float, p: int = 60, k: int = 8):
+        """``H = R C R`` with ``C`` well conditioned and ``R`` spread over ``spread``.
+
+        The unconstrained optimum decreases across the first ``k + 1``
+        coordinates, so the ``k`` increasing rows bind.
+        """
+        rng = np.random.default_rng(seed)
+        q, _ = np.linalg.qr(rng.normal(size=(p, p)))
+        eig = np.exp(rng.uniform(0.0, np.log(10.0), p))
+        C = (q * eig) @ q.T
+        d = np.sqrt(C.diagonal())
+        C = C / np.outer(d, d)
+        root = np.sqrt(np.exp(rng.uniform(-np.log(spread) / 2, np.log(spread) / 2, p)))
+        target = rng.normal(size=p)
+        target[: k + 1] = np.linspace(1.0, -1.0, k + 1)
+        A = np.zeros((k, p))
+        A[np.arange(k), np.arange(k)] = -1.0
+        A[np.arange(k), np.arange(k) + 1] = 1.0
+        return C, root, target, A
+
+    def test_a_widely_scaled_face_minimum_is_certified_before_the_budget_ends(self):
+        """Certified in a few iterations, and equal to the well-scaled reformulation.
+
+        ``beta = gamma / root`` turns the problem into one with Hessian ``C``
+        (condition number below 10) and the same feasible set, whose solve is
+        the oracle.  Mutation: without the face-minimum certificate the loop
+        exhausts its 200 iterations and returns ``converged=False``.
+        """
+        C, root, target, A = self._ill_scaled_problem(seed=33, spread=1e6)
+        H = C * np.outer(root, root)
+        g = H @ target
+        b = np.zeros(A.shape[0])
+
+        result = solve_constrained_qp(H, g, A, b)
+        assert result.converged
+        assert result.n_iter < 50
+
+        oracle = solve_constrained_qp(C, g / root, A / root[None, :], b)
+        assert oracle.converged
+        assert sorted(result.active_set) == sorted(oracle.active_set)
+        reference = oracle.beta / root
+        # A backward-stable solve's forward error: p u times the condition number.
+        unit = np.finfo(np.float64).eps / 2
+        bound = H.shape[0] * unit * np.linalg.cond(H) * np.max(np.abs(reference))
+        assert np.max(np.abs(result.beta - reference)) <= bound
+        assert bound < 1e-6  # informative on this fixture

@@ -75,6 +75,13 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
         "convergence test"
         + (f" (it stopped with termination_reason={refit_reason!r})" if refit_reason else "")
     )
+    if refit_reason == "constraint_kkt_incomplete":
+        refit = (
+            "the final coefficient fit at the selected smoothing parameters keeps every "
+            "shape constraint but could not certify that its coefficients are the "
+            "constrained optimum: the inner quadratic program did not complete its KKT "
+            f"certificate (termination_reason={refit_reason!r})"
+        )
     if reason in _REML_CONVERGED_REASONS:
         message = (
             f"fit_reml did not converge: smoothing-parameter selection stopped after "

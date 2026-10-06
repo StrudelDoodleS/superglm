@@ -668,14 +668,16 @@ def finalize_reml_fit(
     )
     # Typed for the same routing contract as the candidate-side gate in
     # run_fixed_monotone_reml: a power search treats a terminal QP refit
-    # with no feasible mode as this point's infeasibility, not a crash.
+    # with no feasible mode as this point's infeasibility, not a crash.  A
+    # mode outside the constraints is not the declared shape at all, so it is
+    # refused.  A feasible mode whose inner QP did not complete its KKT
+    # certificate keeps every constraint and is only short of certified
+    # optimality: it is published as not converged (owner decision 3, below),
+    # its stop named in ``terminal_refit_termination``, and a power search
+    # routes around it by that name (``profiling.tweedie``).
     if final_pirls.termination_reason == "constraint_infeasible":
         raise ObservedModeNotConvergedError(
             "terminal constrained REML refit ended at an infeasible coefficient mode"
-        )
-    if final_pirls.termination_reason == "constraint_kkt_incomplete":
-        raise ObservedModeNotConvergedError(
-            "terminal constrained REML refit ended without a complete inner-QP KKT certificate"
         )
     structured_terminal = not qp_passthrough and isinstance(
         final_factor,
