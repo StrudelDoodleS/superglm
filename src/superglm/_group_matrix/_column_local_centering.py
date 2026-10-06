@@ -22,10 +22,14 @@ _SUPPORT_CHUNK_BYTES = 8 << 20
 # failing column (128 columns of a 256 x 256 tensor grid), and on the weighted
 # rows of the failing columns it forms at once (at least one).  A categorical
 # or SCOP support's value copy and the own block's mass-weighted temporary
-# take the transient to about four times it, beside one projected support the
-# rejected build did not form (``_admitted_products``), no larger than that
-# group's ``B_unique``.
+# take the transient to about four times it, beside the kept projections
+# (``_MAX_KEPT_PROJECTION_BYTES``) and one more projected support the rejected
+# build did not form (``_admitted_products``), no larger than that group's
+# ``B_unique``.
 _MAX_CENTRED_COLUMN_BYTES = 64 << 20
+# Ceiling on the projections the repair forms itself and keeps for later
+# chunks of failing columns; past it a projection is formed again per chunk.
+_MAX_KEPT_PROJECTION_BYTES = _MAX_CENTRED_COLUMN_BYTES
 
 
 class RecentredColumns(NamedTuple):
@@ -117,7 +121,7 @@ def _admitted_products(group_matrices, readers, weighted: NDArray, formed: dict)
 
     Groups outside, failing columns inside.  A projection this repair forms
     is kept in ``formed`` for the later chunks of failing columns while the
-    kept ones total at most ``_MAX_CENTRED_COLUMN_BYTES``; past that it is
+    kept ones total at most ``_MAX_KEPT_PROJECTION_BYTES``; past that it is
     released at the next group's and formed again by the next chunk.
     """
     parts = []
@@ -130,7 +134,10 @@ def _admitted_products(group_matrices, readers, weighted: NDArray, formed: dict)
             support = formed.get(gm)
         if support is None:
             support = _project(gm)
-            if sum(v.nbytes for v in formed.values()) + support.nbytes <= _MAX_CENTRED_COLUMN_BYTES:
+            if (
+                sum(v.nbytes for v in formed.values()) + support.nbytes
+                <= _MAX_KEPT_PROJECTION_BYTES
+            ):
                 formed[gm] = support
         summed = np.stack(
             [
@@ -222,7 +229,9 @@ def column_local_centering(
     the certificate would have returned for them on its own.  The cost is
     one gather and one transpose product of the design per failing column,
     ``O(n G)`` for ``G`` groups, and one projection of each SSP support the
-    rejected build did not project, against the chunked pass's ``O(n p^2)``.
+    rejected build did not project, against the chunked pass's ``O(n p^2)``;
+    a projection past ``_MAX_KEPT_PROJECTION_BYTES`` is formed once per chunk
+    of failing columns instead.
     ``recentred`` holds each group's recentred columns and centred support
     (``RecentredColumns``), so a caller that meets them with other rows does
     so through ``recentred_products``, never through their raw values.
@@ -337,6 +346,7 @@ def column_local_centering(
                 block = summed @ partner_values
                 gram[column, partner] = block
                 gram[partner, column] = block
+    del formed, weighted, products  # the own blocks below run without them
     for columns, values, _, mean, mass, response in centred.values():
         own = values.T @ (mass[:, None] * values)
         gram[np.ix_(columns, columns)] = 0.5 * (own + own.T)
