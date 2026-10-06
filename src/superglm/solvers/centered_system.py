@@ -200,13 +200,31 @@ def _writable_codes(codes: NDArray) -> NDArray:
     return codes if codes.flags.writeable else codes.copy()
 
 
-def _design_leaf_parts(dm: DesignMatrix) -> list[tuple]:
+@dataclass(frozen=True)
+class _LeafParts:
+    """How a design's column blocks write a leaf's rows (``_design_leaf_parts``).
+
+    ``held`` is the bytes of the support tables the parts hold for as long as
+    they live; ``per_leaf`` the largest table a ``rows`` block forms in each
+    leaf.  ``rank._tsqr_weighted_factor`` charges both to ``max_memory``.
+    """
+
+    parts: tuple
+    held: int
+    per_leaf: int
+
+
+def _design_leaf_parts(dm: DesignMatrix) -> _LeafParts:
     """How each column block of ``dm`` writes a leaf's rows: ``(column, kind, a, b)``.
 
     ``one_hot`` (codes, levels) and ``gather`` (table, index) write
     ``toarray()``'s entries from the compact form without the GIL; ``rows``
     (a matrix) materialises its rows by ``row_subset(...).toarray()``, the
-    whole design's when ``dm`` is not a plain ``DesignMatrix``.
+    whole design's when ``dm`` is not a plain ``DesignMatrix``.  A gather
+    holds its support's table ``B_unique @ R_inv``; while those tables would
+    take more than half of ``max_memory`` together, the supports materialise
+    their leaves' rows instead, one table at a time, as ``toarray`` does.
+    Inside a fit the parts are formed once (``_DataFactorReuse``).
     """
     from superglm._blas_threads import pooled_blas_threads
     from superglm._group_matrix._group_matrix_core import (
@@ -217,11 +235,31 @@ def _design_leaf_parts(dm: DesignMatrix) -> list[tuple]:
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
     )
+    from superglm._parallel import resolve_max_memory
 
     if type(dm).toarray is not DesignMatrix.toarray or (
         type(dm).row_subset is not DesignMatrix.row_subset
     ):
-        return [(0, "rows", dm, None)]
+        return _LeafParts(((0, "rows", dm, None),), 0, 0)
+    reuse = _DATA_FACTOR_REUSE.get()
+    if reuse is not None:
+        cached = reuse.leaf_parts.get(id(dm))
+        if cached is not None and cached[0] is dm and cached[1] is dm.group_matrices:
+            return cached[2]
+
+    def supports(gm) -> bool:
+        kind = type(gm)
+        return kind.toarray is DiscretizedSSPGroupMatrix.toarray and kind.row_subset in (
+            DiscretizedSSPGroupMatrix.row_subset,
+            DiscretizedTensorGroupMatrix.row_subset,
+        )
+
+    table_bytes = [
+        8 * len(cast(DiscretizedSSPGroupMatrix, gm).B_unique) * int(gm.shape[1])
+        for gm in dm.group_matrices
+        if supports(gm)
+    ]
+    gather = 2 * sum(table_bytes) <= resolve_max_memory()
     parts: list[tuple] = []
     column = 0
     # The table is the product ``toarray`` forms, under the pin its leaves had.
@@ -236,10 +274,7 @@ def _design_leaf_parts(dm: DesignMatrix) -> list[tuple]:
                 parts.append(
                     (column, "one_hot", _writable_codes(one_hot.codes), int(one_hot.n_levels))
                 )
-            elif kind.toarray is DiscretizedSSPGroupMatrix.toarray and kind.row_subset in (
-                DiscretizedSSPGroupMatrix.row_subset,
-                DiscretizedTensorGroupMatrix.row_subset,
-            ):
+            elif gather and supports(gm):
                 support = cast(DiscretizedSSPGroupMatrix, gm)
                 table = np.ascontiguousarray(support.B_unique @ support.R_inv, dtype=np.float64)
                 parts.append(
@@ -248,7 +283,12 @@ def _design_leaf_parts(dm: DesignMatrix) -> list[tuple]:
             else:
                 parts.append((column, "rows", gm, None))
             column += int(gm.shape[1])
-    return parts
+    held = sum(table_bytes) if gather else 0
+    per_leaf = 0 if gather else max(table_bytes, default=0)
+    result = _LeafParts(tuple(parts), held, per_leaf)
+    if reuse is not None:
+        reuse.leaf_parts[id(dm)] = (dm, dm.group_matrices, result)
+    return result
 
 
 class _DesignLeaf:
@@ -259,10 +299,12 @@ class _DesignLeaf:
     in the same order of operations, so the factor is bitwise the same.
     """
 
-    __slots__ = ("_parts", "shape", "start", "stop")
+    __slots__ = ("_parts", "held_bytes", "leaf_bytes", "shape", "start", "stop")
 
-    def __init__(self, parts: list[tuple], start: int, stop: int, width: int) -> None:
-        self._parts = parts
+    def __init__(self, parts: _LeafParts, start: int, stop: int, width: int) -> None:
+        self._parts = parts.parts
+        self.held_bytes = parts.held
+        self.leaf_bytes = parts.per_leaf
         self.start = start
         self.stop = stop
         self.shape = (stop - start, width)
@@ -305,7 +347,9 @@ def iter_grouped_design_leaves(dm: DesignMatrix) -> Iterator[tuple[int, int, _De
     from superglm.solvers.rank import tsqr_leaf_rows
 
     leaf_rows = tsqr_leaf_rows(dm.p)
-    parts = _design_leaf_parts(dm) if dm.n else []
+    if not dm.n:
+        return
+    parts = _design_leaf_parts(dm)
     for start in range(0, dm.n, leaf_rows):
         stop = min(start + leaf_rows, dm.n)
         yield start, stop, _DesignLeaf(parts, start, stop, dm.p)
@@ -325,7 +369,10 @@ class _DataFactorReuse:
     trial and of the candidate it accepts; one PIRLS start shared by
     successive smoothing states).  The ``_ENTRIES`` most recently used are
     kept (a few factors of ``(p + 1)^2`` doubles and their ``n``-vectors); a
-    hit returns copies, so no caller can change an entry.
+    hit returns copies, so no caller can change an entry.  ``leaf_parts``
+    keeps each design's leaf parts (``_design_leaf_parts``, its support
+    tables included) for the fit: a function of the design alone, keyed by
+    the design and its group matrices.
 
     An entry may also be a factor still being formed (:func:`prefetch_weighted_factor`):
     a hit waits for it.  ``expected`` records, per call site, whether its
@@ -339,6 +386,7 @@ class _DataFactorReuse:
     entries: list = field(default_factory=list)
     expected: dict = field(default_factory=dict)
     pending: dict = field(default_factory=dict)
+    leaf_parts: dict = field(default_factory=dict)
     executor: ThreadPoolExecutor | None = None
 
     def _index(self, key: tuple) -> int | None:

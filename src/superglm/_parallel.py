@@ -293,10 +293,12 @@ def estimator_scope(n_jobs: int | str = "auto", max_memory: int | str = "auto") 
         yield
 
 
-def pool_workers(n_tasks: int, task_bytes: int) -> int:
+def pool_workers(n_tasks: int, task_bytes: int, held: int = 0) -> int:
     """Workers for ``n_tasks`` tasks of ``task_bytes`` each: ``n_jobs`` capped by tasks and memory.
 
-    At least one, so a task larger than the whole budget still runs (alone).
+    ``held`` is memory the kernel keeps beside its tasks for as long as they
+    run, charged to the budget first.  At least one, so a task larger than
+    the whole budget still runs (alone).
     """
-    by_memory = resolve_max_memory() // max(int(task_bytes), 1)
+    by_memory = max(resolve_max_memory() - int(held), 0) // max(int(task_bytes), 1)
     return max(1, min(resolve_n_jobs(), int(n_tasks), int(by_memory)))

@@ -642,7 +642,13 @@ def _tsqr_weighted_factor(
     rows = max(int(first[1]) - int(first[0]), 1)
     width = int(np.shape(first[2])[1]) + (response is not None)
     n_leaves = max(1, -(-int(weights.shape[0]) // rows))
-    workers = pool_workers(n_leaves, _TSQR_LEAF_COPIES * 8 * rows * width)
+    # A deferred leaf's design may hold support tables for the whole factor
+    # and form one more in each leaf (``centered_system._LeafParts``).
+    workers = pool_workers(
+        n_leaves,
+        _TSQR_LEAF_COPIES * 8 * rows * width + int(getattr(first[2], "leaf_bytes", 0)),
+        held=int(getattr(first[2], "held_bytes", 0)),
+    )
     tree = _TSQRTree()
     leaves = itertools.chain((first,), iterator)
     del first

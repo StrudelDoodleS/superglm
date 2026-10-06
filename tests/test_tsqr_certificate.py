@@ -90,8 +90,8 @@ def test_tsqr_factor_is_bitwise_identical_across_worker_counts(monkeypatch):
     used: list[int] = []
     original_workers = parallel.pool_workers
 
-    def recorded_workers(*args):
-        used.append(original_workers(*args))
+    def recorded_workers(*args, **kwargs):
+        used.append(original_workers(*args, **kwargs))
         return used[-1]
 
     monkeypatch.setattr(parallel, "pool_workers", recorded_workers)
@@ -582,6 +582,67 @@ def test_data_factor_reuse_keeps_the_four_most_recently_used(monkeypatch):
     assert len(leaves) == 5
     for again in (factors[3], factors[6]):
         assert np.array_equal(again.view(np.uint64), factors[0].view(np.uint64))
+
+
+def test_support_tables_are_formed_once_per_fit_and_charged_to_max_memory(monkeypatch):
+    """A design's support tables: formed once in a fit, charged to the budget, or not held at all.
+
+    A gather leaf part holds its support's table ``B_unique @ R_inv`` for as
+    long as the parts live (``_design_leaf_parts``).  Inside one fit's reuse
+    two factors share one set of parts, outside it each forms its own; the
+    TSQR charges the tables' bytes to ``max_memory`` before it counts
+    workers (six leaf working sets plus the tables, less a byte, leave room
+    for five); and while the tables would take more than half the budget the
+    supports materialise their leaves' rows instead, holding nothing, with
+    the factor's bits unchanged.  Mutation checks: not keeping the parts on
+    the reuse, not charging the tables, or ignoring the half-budget rule each
+    fail one of the three.
+    """
+    import superglm.solvers.centered_system as centered_system
+
+    n, leaf = 400, 40
+    dm = _mixed_design(n, seed=31)
+    _leaf_rows_for(monkeypatch, dm.p, leaf)
+    rng = np.random.default_rng(32)
+    first, second = rng.uniform(0.2, 3.0, n), rng.uniform(0.2, 3.0, n)
+    formed = []
+    build = centered_system._design_leaf_parts
+
+    def recorded(design):
+        formed.append(build(design))
+        return formed[-1]
+
+    monkeypatch.setattr(centered_system, "_design_leaf_parts", recorded)
+    with parallel_config(n_jobs=1), centered_system.reuse_data_factors():
+        grouped_weighted_factor(dm, first)
+        grouped_weighted_factor(dm, second)
+    assert formed[0] is formed[1]
+    formed.clear()
+    with parallel_config(n_jobs=1):
+        grouped_weighted_factor(dm, first)
+        grouped_weighted_factor(dm, second)
+    assert formed[0] is not formed[1]
+
+    held = formed[0].held
+    assert held == 8 * (7 * 3) and formed[0].per_leaf == 0
+    task = rank._TSQR_LEAF_COPIES * 8 * leaf * dm.p
+    used: list[int] = []
+    original_workers = parallel.pool_workers
+
+    def recorded_workers(*args, **kwargs):
+        used.append(original_workers(*args, **kwargs))
+        return used[-1]
+
+    monkeypatch.setattr(parallel, "pool_workers", recorded_workers)
+    with parallel_config(n_jobs=8, max_memory=6 * task + held - 1):
+        gathered = grouped_weighted_factor(dm, first)
+    assert used == [5]
+    with parallel_config(n_jobs=1, max_memory=2 * held - 1):
+        materialised = grouped_weighted_factor(dm, first)
+    kinds = [part[1] for part in formed[-1].parts]
+    assert kinds == ["one_hot", "one_hot", "rows", "rows", "rows"]
+    assert formed[-1].held == 0 and formed[-1].per_leaf == held
+    assert np.array_equal(gathered.view(np.uint64), materialised.view(np.uint64))
 
 
 def test_reml_fit_abandons_the_factor_of_a_decision_that_flips(monkeypatch):
