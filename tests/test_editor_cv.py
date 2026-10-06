@@ -1599,6 +1599,47 @@ def test_final_fit_stacks_a_numeric_term_read_from_categoricals_of_two_number_ki
     np.testing.assert_array_equal(final.predict(union), expected.predict(union))
 
 
+@pytest.mark.parametrize("group", ["text", "float"])
+def test_run_cv_and_final_fit_name_a_missing_value_in_a_factor_smooth_group(cv_frame, group):
+    """The factor smooth's group holds one missing value in validation, of one dtype in both splits.
+
+    The splits read alike, so the stacking check let the column through, and
+    the jobs' missing-level check covered the main effects only: the fit
+    refused the group's missing value and Final fit said only that it could
+    not fit the rows. Both jobs share that check, and it names the group.
+    """
+    import superglm.editor.cv as cv
+    from superglm import FactorSmooth
+    from superglm.editor.cv import _covering_template, capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    X, y, w = cv_frame
+    urban = X["power"] > 0.0
+    X = X.assign(urban=urban.map({True: "yes", False: "no"}) if group == "text" else urban * 1.0)
+    train, validation = X.iloc[:400], X.iloc[400:500].copy()
+    validation.iloc[3, validation.columns.get_loc("urban")] = None if group == "text" else np.nan
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=6)},
+        interactions=[FactorSmooth("age", group="urban", basis="fs", k=5)],
+    )
+    model.fit_reml(train, y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(train, y[:400], w[:400]),
+        validation_data=(validation, y[400:500], w[400:500]),
+    )
+
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+    with pytest.raises(EditorValueError) as run:
+        _covering_template(model, validation, "Run CV")
+
+    for job, refused in (("Final fit", final), ("Run CV", run)):
+        assert refused.value.public_message == cv.MISSING_LEVELS.format(job=job, term="urban")
+
+
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_final_fit_refuses_a_factor_smooth_group_held_as_bool_beside_integers(cv_frame, backend):
     """The factor smooth's group column is True/False in the train rows and int8 0/1 in validation.

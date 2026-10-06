@@ -844,9 +844,15 @@ def _covering_template(template, X, job: str):
     ungrouped categorical or a random effect whose universe, declared or
     bound by ``bind_levels``, leaves it out, and an ordered term, grouped or
     not, whose ``order=``, ``values=`` and ``specials=`` leave it out or
-    whose groups do not cover it. Any of these terms refuses a missing value.
+    whose groups do not cover it. Any of these terms refuses a missing value,
+    and so does a factor smooth's group.
     """
     frame = as_eager_frame(X)
+    for spec in getattr(template, "_interaction_specs", {}).values():
+        group = getattr(spec, "group", None)
+        if isinstance(spec, FactorSmooth) and group in frame.columns:
+            if _holds_missing(frame, group):
+                raise EditorValueError(MISSING_LEVELS.format(job=job, term=group))
     bindings = dict(getattr(template, "_level_bindings", None) or ())
     replacements = {}
     for name, spec in template._specs.items():
@@ -1220,9 +1226,12 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
     dtype or order the columns. So do numbers of other kinds or widths, and
     bools, in a column a term reads as a number, which the fit reads as
     float64 (True as 1), whatever categories their dtype declares. A column
-    read as labels, a level term's or a factor smooth's group, reads a
-    number's text: integers of any width spell a level alike, so they stack
-    as int64, but 1 and 1.0, or True and 1, are two levels, and uint64 is
+    read as labels follows stricter rules. A level term reads a number's
+    text: integers of any width spell a level alike, so they stack as int64,
+    but 1 and 1.0, or True and 1, are two levels. A factor smooth reads its
+    group by value, but the kept model reports and matches the levels it
+    fitted, so a cast would relabel them (1 as 1.0), and a bool group cast to
+    numbers stops matching bool rows; it follows the level rule. uint64 is
     left alone, since beside a signed integer pandas would stack it as
     float64.
     """
