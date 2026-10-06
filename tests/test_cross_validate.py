@@ -2095,7 +2095,9 @@ class TestDataFingerprint:
         y[[0, 41]] = 2.0
         swapped = x.copy()
         swapped[[0, 41]] = x[[41, 0]]
-        grouping = collapse_levels(x, groups={})
+        # From a Series: on a bare float array collapse_levels finds one zero
+        # level, so "0.0" would be uncovered and every fold would fail.
+        grouping = collapse_levels(pd.Series(x), groups={})
 
         def first_fold_deviance(values):
             features = {"x": Categorical(grouping=grouping)}
@@ -2103,7 +2105,9 @@ class TestDataFingerprint:
             result = cross_validate(model, pd.DataFrame({"x": values}), y, cv=SimpleKFold(3))
             return result.fold_scores["deviance"].iloc[0]
 
-        assert first_fold_deviance(swapped) != first_fold_deviance(x)
+        original, moved = first_fold_deviance(x), first_fold_deviance(swapped)
+        assert np.isfinite(original) and np.isfinite(moved)
+        assert moved != original
         assert _data_fingerprint(pd.DataFrame({"x": swapped}), y) != _data_fingerprint(
             pd.DataFrame({"x": x}), y
         )
@@ -2135,7 +2139,9 @@ class TestDataFingerprint:
             return result.fold_scores["deviance"].iloc[0]
 
         assert len(grouping.all_original_levels) == 4
-        assert first_fold_deviance(swapped) != first_fold_deviance(x)
+        original, moved = first_fold_deviance(x), first_fold_deviance(swapped)
+        assert np.isfinite(original) and np.isfinite(moved)
+        assert moved != original
         assert _data_fingerprint(pd.DataFrame({"x": swapped}), y) != _data_fingerprint(
             pd.DataFrame({"x": x}), y
         )
