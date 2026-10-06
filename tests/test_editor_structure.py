@@ -2097,6 +2097,29 @@ def test_new_levels_is_offered_on_plain_categoricals_only(banded):
     assert ordered.history == [] and session.history == []
 
 
+def test_new_levels_can_go_back_to_the_one_level_group_the_model_opened_with():
+    """The model sends new levels to B, a group of one level of its own name.
+
+    Only groups that merge or rename levels are offered, so once the choice
+    moved away from B (to Reference) the control no longer listed it and
+    set_unseen refused it: only Undo could bring it back.
+    """
+    from superglm.editor.unseen import unseen_payload
+
+    model, _, _ = _grouped_region(unseen="B")
+    session = EditorSession.from_model(model, terms=["region", "x"])
+
+    session.set_unseen("region", "base")
+    offered = [choice["value"] for choice in unseen_payload(session, "region")["choices"]]
+    session.set_unseen("region", "B")
+
+    assert offered == ["error", "base", "Other", "B"]
+    assert session.model._specs["region"].unseen == "B"
+    # A level the model never sent new levels to is still not a group.
+    with pytest.raises(EditorValueError):
+        session.set_unseen("region", "A")
+
+
 def test_new_levels_refuses_a_label_that_is_not_one_of_its_groups():
     model, _, _ = _grouped_region()
     session = EditorSession.from_model(model, terms=["region", "x"])

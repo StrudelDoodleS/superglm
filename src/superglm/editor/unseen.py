@@ -74,7 +74,7 @@ def unseen_payload(session: EditorSession, term: str) -> dict[str, Any] | None:
     spec = session.model._specs.get(term)
     if not isinstance(spec, Categorical):
         return None
-    values = [*_CHOICE_NAMES, *_groups(spec)]
+    values = _choices(session, term, spec)
     if spec.unseen not in values:
         values.append(spec.unseen)
     return {
@@ -98,7 +98,7 @@ def set_unseen(session: EditorSession, term: str, policy: Any) -> UnseenChoice |
     reason = _unavailable_reason(session, term)
     if reason is not None:
         raise EditorValueError(reason)
-    if not isinstance(policy, str) or policy not in (*_CHOICE_NAMES, *_groups(spec)):
+    if not isinstance(policy, str) or policy not in _choices(session, term, spec):
         raise EditorValueError(_NOT_A_GROUP.format(choice=policy, term=term))
     if policy == spec.unseen:
         return None
@@ -175,6 +175,27 @@ def require_group_kept(term: str, draft) -> None:
     grouping = draft._grouping
     if grouping is None or draft.unseen not in grouping.grouped_levels:
         raise EditorValueError(_GROUP_REMOVED.format(term=term, group=draft.unseen))
+
+
+def _choices(session: EditorSession, term: str, spec: Categorical) -> list[str]:
+    """Refuse, Reference and ``spec``'s groups, then a one-level group the term sends new levels to.
+
+    A one-level group of its own name reads as a plain level, so it is not
+    offered as a group; but where the opened model or the in-force one sends
+    new levels to it, choosing it again must stay possible.
+    """
+    values = [*_CHOICE_NAMES, *_groups(spec)]
+    opened = session.reference_model._specs.get(term)
+    for policy in (getattr(opened, "unseen", None), spec.unseen):
+        if isinstance(policy, str) and policy not in values and _receives(spec, policy):
+            values.append(policy)
+    return values
+
+
+def _receives(spec: Categorical, label: str) -> bool:
+    """Whether ``label`` is one of ``spec``'s fitted groups, so new levels can go to it."""
+    grouping = spec._grouping
+    return grouping is not None and label in grouping.grouped_levels and label in spec._levels
 
 
 def _groups(spec: Categorical) -> list[str]:
