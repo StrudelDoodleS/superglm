@@ -183,6 +183,21 @@ def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDA
         yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
 
 
+def iter_grouped_design_leaves(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
+    """Yield the TSQR leaves of a grouped design: ``rank.tsqr_leaf_rows(p)`` dense rows each.
+
+    The partition depends only on ``(n, p)``, which fixes the factor's
+    reduction tree (``rank._tsqr_weighted_factor``).
+    """
+    from superglm.solvers.rank import tsqr_leaf_rows
+
+    leaf_rows = tsqr_leaf_rows(dm.p)
+    for start in range(0, dm.n, leaf_rows):
+        stop = min(start + leaf_rows, dm.n)
+        rows = np.arange(start, stop, dtype=np.intp)
+        yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+
+
 def grouped_weighted_factor(
     dm: DesignMatrix,
     W: NDArray,
@@ -190,11 +205,11 @@ def grouped_weighted_factor(
     center: NDArray | None = None,
     center_lo: NDArray | None = None,
 ) -> NDArray:
-    """Return a streaming weighted QR factor without retaining all design rows."""
+    """Return the weighted QR factor, a TSQR over the design's leaves, without retaining all rows."""
     from superglm.solvers.rank import streamed_weighted_factor
 
     return streamed_weighted_factor(
-        iter_grouped_design_chunks(dm), W, center=center, center_lo=center_lo
+        iter_grouped_design_leaves(dm), W, center=center, center_lo=center_lo
     )
 
 
@@ -210,7 +225,7 @@ def grouped_weighted_factor_rhs(
     from superglm.solvers.rank import streamed_weighted_factor_rhs
 
     return streamed_weighted_factor_rhs(
-        iter_grouped_design_chunks(dm),
+        iter_grouped_design_leaves(dm),
         W,
         response,
         center=center,

@@ -471,3 +471,39 @@ def test_a_structured_route_keeps_the_cap_in_a_wide_fit(monkeypatch):
         allow_wide_design(5_000)
         keep_narrow_cap(9)
         assert _blas_thread_counts() == before
+
+
+def test_a_pooled_section_runs_blas_on_one_thread_under_every_policy(monkeypatch):
+    """A worker pool is the one parallelism level, whatever the BLAS policy says.
+
+    Outside a fit, inside a wide fit that released the automatic cap, and under
+    'native' or an explicit integer cap, a pooled section holds every BLAS pool
+    at one thread and hands back the state it found.  The explicit cap is the
+    case that needs the registration re-made at a different limit.
+    """
+    from superglm._blas_threads import allow_wide_design, pooled_blas_threads
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _native_blas_counts()
+    with pooled_blas_threads():
+        assert all(count == 1 for count in _blas_thread_counts())
+    assert _blas_thread_counts() == before
+    with solver_blas_threads():
+        allow_wide_design(5_000)
+        assert _blas_thread_counts() == before
+        with pooled_blas_threads():
+            assert all(count == 1 for count in _blas_thread_counts())
+        assert _blas_thread_counts() == before
+    assert _blas_thread_counts() == before
+    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "native")
+    with solver_blas_threads(), pooled_blas_threads():
+        assert all(count == 1 for count in _blas_thread_counts())
+    assert _blas_thread_counts() == before
+    explicit = 2
+    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", str(explicit))
+    with solver_blas_threads():
+        assert all(count == explicit for count in _blas_thread_counts())
+        with pooled_blas_threads():
+            assert all(count == 1 for count in _blas_thread_counts())
+        assert all(count == explicit for count in _blas_thread_counts())
+    assert _blas_thread_counts() == before

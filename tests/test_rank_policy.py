@@ -669,14 +669,14 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
     certified_prediction = preliminary.mean_z + dm.matvec(certified_beta)
     np.testing.assert_allclose(certified_prediction, y, rtol=2e-12, atol=2e-11)
     factor_passes = 0
-    original_chunks = centered_system_module.iter_grouped_design_chunks
+    original_chunks = centered_system_module.iter_grouped_design_leaves
 
     def counted_chunks(design):
         nonlocal factor_passes
         factor_passes += 1
         yield from original_chunks(design)
 
-    monkeypatch.setattr(centered_system_module, "iter_grouped_design_chunks", counted_chunks)
+    monkeypatch.setattr(centered_system_module, "iter_grouped_design_leaves", counted_chunks)
 
     hybrid, _ = fit_irls_direct(
         dm,
@@ -916,14 +916,14 @@ def test_exact_gaussian_alias_reuses_factor_certificate_across_iterations(
     ]
     y = 1.0 + 3.0 * x + 0.03 * np.sin(5.0 * x)
     factor_passes = 0
-    original_chunks = centered_system_module.iter_grouped_design_chunks
+    original_chunks = centered_system_module.iter_grouped_design_leaves
 
     def counted_chunks(design):
         nonlocal factor_passes
         factor_passes += 1
         yield from original_chunks(design)
 
-    monkeypatch.setattr(centered_system_module, "iter_grouped_design_chunks", counted_chunks)
+    monkeypatch.setattr(centered_system_module, "iter_grouped_design_leaves", counted_chunks)
     result, _ = fit_irls_direct(
         dm,
         y,

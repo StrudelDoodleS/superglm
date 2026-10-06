@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import itertools
 import math
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Literal
@@ -299,6 +302,221 @@ def diagonal_of_square(matrix: NDArray) -> NDArray:
     return np.einsum("ij,ji->i", matrix, matrix, optimize=True)
 
 
+# The observation-row factor is a tall-skinny QR, TSQR (Demmel, Grigori,
+# Hoemmen & Langou, SIAM J. Sci. Comput. 34(1):A206, 2012): every leaf of rows
+# is factored on its own by Householder QR (LAPACK ``dgeqrf``), and the leaf
+# triangles are reduced pairwise in a fixed binary tree by the structured
+# Householder QR of two stacked triangles (LAPACK ``dtpqrt`` with ``l = n``,
+# the triangle-on-triangle kernel of TSQR's reduction).
+#
+# A leaf holds ``_TSQR_LEAF_COPIES`` copies of its rows while it is factored
+# (the weighted rows, ``numpy.linalg.qr``'s working copy and its Fortran
+# buffer), so its row count is ``_TSQR_LEAF_BYTES / (3 * 8 * width)``: 4,294
+# rows at width 814.  The leaves, and so the tree, depend only on the row count
+# and the width -- never on the worker count -- so the factor is bitwise the
+# same however many workers factor the leaves.
+_TSQR_LEAF_BYTES = 80 << 20
+_TSQR_LEAF_COPIES = 3
+# Block size of the structured merge (``dtpqrt``'s ``nb``); fixed, so the merge
+# arithmetic does not vary with anything but its inputs.
+_TSQR_MERGE_BLOCK = 32
+
+
+def tsqr_leaf_rows(width: int) -> int:
+    """Rows per TSQR leaf of a ``width``-column factor, from the fixed per-leaf budget.
+
+    At least ``2 * width``, so a leaf is tall and its triangle is ``width`` square.
+    """
+    width = max(int(width), 1)
+    return max(2 * width, _TSQR_LEAF_BYTES // (_TSQR_LEAF_COPIES * 8 * width))
+
+
+def _tsqr_leaf(
+    slot: list,
+    sqrt_weights: NDArray,
+    center: NDArray | None,
+    center_lo: NDArray | None,
+    response: NDArray | None,
+) -> NDArray:
+    """``R`` of one leaf's weighted, centred rows (with the weighted response appended).
+
+    The rows are taken out of ``slot`` and released once copied, so the leaf
+    holds its weighted copy and LAPACK's two working copies, never the input
+    as well.  Each entry is ``sqrt(w_i) * ((x_ij - c_j) - c_lo_j)``, formed
+    exactly as the chunked factor formed it.
+    """
+    values = np.asarray(slot.pop(), dtype=np.float64)
+    rows, width = values.shape
+    block = np.empty((rows, width + (response is not None)), dtype=np.float64)
+    design = block[:, :width]
+    if center is None:
+        design[...] = values
+    else:
+        np.subtract(values, center, out=design)
+    del values
+    if center_lo is not None:
+        design -= center_lo
+    design *= sqrt_weights[:, None]
+    if response is not None:
+        np.multiply(sqrt_weights, response, out=block[:, width])
+    return np.linalg.qr(block, mode="r")
+
+
+def _tsqr_merge(upper: NDArray, lower: NDArray) -> NDArray:
+    """``R`` of ``[upper; lower]``, two leaf or subtree factors of one width.
+
+    Two full triangles take the structured kernel (``dtpqrt``): the same
+    Householder reflectors as ``dgeqrf`` on the stacked rows, skipping the
+    known zeros, in ``(2/3) n^3`` flops instead of ``(10/3) n^3``.  A
+    trapezoid (fewer rows than columns: a short leaf, or a design with fewer
+    rows than columns) is stacked and factored by ``dgeqrf``, which keeps the
+    factor at ``min(rows, width)`` rows as the chunked factor did.
+    """
+    width = upper.shape[1]
+    if width and upper.shape[0] == width and lower.shape[0] == width:
+        from scipy.linalg.lapack import dtpqrt
+
+        merged, _, _, info = dtpqrt(
+            width,
+            min(width, _TSQR_MERGE_BLOCK),
+            np.asfortranarray(upper),
+            np.asfortranarray(lower),
+            overwrite_a=1,
+            overwrite_b=1,
+        )
+        if info != 0:  # pragma: no cover - LAPACK argument contract
+            raise RuntimeError(f"dtpqrt failed with info={info}")
+        return np.triu(merged)
+    return np.linalg.qr(np.vstack((upper, lower)), mode="r")
+
+
+class _TSQRTree:
+    """The fixed pairwise reduction tree over leaves pushed in leaf order.
+
+    A binary counter: level ``k`` holds at most one subtree of ``2**k`` leaves
+    waiting for its right sibling, so at most ``log2(leaves) + 1`` triangles
+    are held.  Node ``(k + 1, j)`` is ``merge(node(k, 2j), node(k, 2j + 1))``;
+    the leftover subtrees at the end are folded from the lowest level up, the
+    earlier rows on top.  The tree is a function of the leaf count alone.
+    """
+
+    def __init__(self) -> None:
+        self._levels: list[NDArray | None] = []
+        self.leaves = 0
+        self.merges = 0
+
+    def push(self, factor: NDArray) -> None:
+        self.leaves += 1
+        for level in range(len(self._levels) + 1):
+            if level == len(self._levels):
+                self._levels.append(None)
+            waiting = self._levels[level]
+            if waiting is None:
+                self._levels[level] = factor
+                return
+            self._levels[level] = None
+            factor = _tsqr_merge(waiting, factor)
+            self.merges += 1
+
+    def finish(self) -> NDArray | None:
+        result = None
+        for waiting in self._levels:
+            if waiting is None:
+                continue
+            if result is None:
+                result = waiting
+            else:
+                result = _tsqr_merge(waiting, result)
+                self.merges += 1
+        self._levels = []
+        return result
+
+
+def _tsqr_weighted_factor(
+    chunks: Iterable[tuple[int, int, NDArray]],
+    weights: NDArray,
+    *,
+    center: NDArray | None,
+    center_lo: NDArray | None,
+    response: NDArray | None,
+) -> NDArray | None:
+    """``R`` of the weighted, centred rows (and response): a TSQR over ``chunks`` as leaves.
+
+    Each chunk is one leaf; ``centered_system.iter_grouped_design_leaves``
+    sizes them by :func:`tsqr_leaf_rows`.  The leaves are factored on a
+    thread pool of ``_parallel.pool_workers`` workers (``n_jobs`` capped by
+    the leaf count and by ``max_memory`` over the leaf working set), at most
+    one leaf ahead of the workers in flight, and reduced in leaf order by
+    :class:`_TSQRTree` on the calling thread.  BLAS runs on one thread
+    throughout (``pooled_blas_threads``), with or without the pool, so every
+    leaf and merge is the same arithmetic at any worker count and the factor
+    is bitwise identical across worker counts.
+
+    **Accuracy.**  Householder QR of an ``m x n`` matrix is columnwise
+    backward stable, ``R = Q'(A + dA)`` with ``||da_j|| <= gamma~_{mn}
+    ||a_j||`` (Higham 2002, Thm 19.4; ``gamma~_k = c k u / (1 - c k u)``).
+    A row of the TSQR passes through one leaf of ``L`` rows and at most
+    ``ceil(log2 m)`` merges of ``2n`` rows, so the bound grows with ``L + 2n
+    ceil(log2 m)`` rows where the chunked chain's grows with all ``N`` rows
+    (Mori, Yamamoto & Zhang, *Japan J. Indust. Appl. Math.* 29:111, 2012,
+    who show the TSQR bound is the smaller).  The certificate reads ``R``
+    only through ``decompose_factor``, which cuts at ``sqrt(eps)`` relative
+    singular value, far above either bound.
+    """
+    from superglm._blas_threads import pooled_blas_threads
+    from superglm._parallel import pool_workers
+
+    weights = np.asarray(weights, dtype=np.float64)
+    iterator = iter(chunks)
+    first = next(iterator, None)
+    if first is None:
+        return None
+    rows = max(int(first[1]) - int(first[0]), 1)
+    width = int(np.shape(first[2])[1]) + (response is not None)
+    n_leaves = max(1, -(-int(weights.shape[0]) // rows))
+    workers = pool_workers(n_leaves, _TSQR_LEAF_COPIES * 8 * rows * width)
+    tree = _TSQRTree()
+    leaves = itertools.chain((first,), iterator)
+    del first
+
+    def leaf_args(item):
+        start, stop, values = item
+        return (
+            [values],
+            np.sqrt(weights[start:stop]),
+            center,
+            center_lo,
+            None if response is None else response[start:stop],
+        )
+
+    with pooled_blas_threads():
+        if workers == 1:
+            for item in leaves:
+                args = leaf_args(item)
+                del item
+                tree.push(_tsqr_leaf(*args))
+                del args
+        else:
+            in_flight: deque = deque()
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="superglm-tsqr"
+            ) as pool:
+                try:
+                    for item in leaves:
+                        in_flight.append(pool.submit(_tsqr_leaf, *leaf_args(item)))
+                        del item
+                        # One leaf beyond the workers waits, so a worker that
+                        # finishes starts the next leaf at once.
+                        while len(in_flight) > workers:
+                            tree.push(in_flight.popleft().result())
+                    while in_flight:
+                        tree.push(in_flight.popleft().result())
+                finally:
+                    for future in in_flight:
+                        future.cancel()
+        return tree.finish()
+
+
 def streamed_weighted_factor(
     chunks: Iterable[tuple[int, int, NDArray]],
     weights: NDArray,
@@ -306,25 +524,19 @@ def streamed_weighted_factor(
     center: NDArray | None = None,
     center_lo: NDArray | None = None,
 ) -> NDArray:
-    """Build a compact QR factor from bounded weighted row chunks.
+    """Build a compact QR factor of the weighted rows, a TSQR over the chunks as leaves.
 
     Rows are centred as ``(x - center) - center_lo`` when the centre is an
-    exact pair (``centered_system.weighted_mean_pair``).
+    exact pair (``centered_system.weighted_mean_pair``).  The factor has
+    ``min(rows, width)`` rows; see :func:`_tsqr_weighted_factor` for the
+    reduction, its worker pool and its accuracy.
     """
-    weights = np.asarray(weights, dtype=float)
-    factor: NDArray | None = None
-    width = 0 if center is None else len(center)
-    for start, stop, values in chunks:
-        block = np.asarray(values, dtype=float)
-        width = block.shape[1]
-        if center is not None:
-            block = block - center
-        if center_lo is not None:
-            block = block - center_lo
-        block = np.sqrt(weights[start:stop])[:, None] * block
-        stacked = block if factor is None else np.vstack((factor, block))
-        factor = np.linalg.qr(stacked, mode="r")
-    return np.empty((0, width)) if factor is None else np.asarray(factor)
+    factor = _tsqr_weighted_factor(
+        chunks, weights, center=center, center_lo=center_lo, response=None
+    )
+    if factor is None:
+        return np.empty((0, 0 if center is None else len(center)))
+    return np.asarray(factor)
 
 
 def streamed_weighted_factor_rhs(
@@ -337,31 +549,20 @@ def streamed_weighted_factor_rhs(
 ) -> tuple[NDArray, NDArray]:
     """Build a compact weighted QR factor and its consistently transformed RHS.
 
-    Appending the response to every bounded design chunk preserves ``Q.T @ b``
-    without retaining either the observation matrix or the observation-length
+    Appending the response to every leaf preserves ``Q.T @ b`` without
+    retaining either the observation matrix or the observation-length
     orthogonal factor.  The returned factor has at most ``p + 1`` rows.
     """
     weights = np.asarray(weights, dtype=float)
     response = np.asarray(response, dtype=float)
     if weights.ndim != 1 or response.shape != weights.shape:
         raise ValueError("weights and response must be matching vectors")
-    joint_factor: NDArray | None = None
-    width = 0 if center is None else len(center)
-    for start, stop, values in chunks:
-        block = np.asarray(values, dtype=float)
-        width = block.shape[1]
-        if center is not None:
-            block = block - center
-        if center_lo is not None:
-            block = block - center_lo
-        sqrt_weights = np.sqrt(weights[start:stop])
-        joint_block = np.column_stack(
-            (sqrt_weights[:, None] * block, sqrt_weights * response[start:stop])
-        )
-        stacked = joint_block if joint_factor is None else np.vstack((joint_factor, joint_block))
-        joint_factor = np.linalg.qr(stacked, mode="r")
+    joint_factor = _tsqr_weighted_factor(
+        chunks, weights, center=center, center_lo=center_lo, response=response
+    )
     if joint_factor is None:
-        return np.empty((0, width)), np.empty(0)
+        return np.empty((0, 0 if center is None else len(center))), np.empty(0)
+    width = joint_factor.shape[1] - 1
     return np.asarray(joint_factor[:, :width]), np.asarray(joint_factor[:, width])
 
 
