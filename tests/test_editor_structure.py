@@ -8,7 +8,10 @@ import json
 import pickle
 import re
 import urllib.error
+import urllib.request
+import warnings
 import weakref
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -22,20 +25,24 @@ from superglm import (
     OrderedCategorical,
     Piecewise,
     Polynomial,
+    RandomEffect,
     Spline,
+    Structure,
     SuperGLM,
+    collapse_levels,
+    read_structure,
 )
 from superglm.editor import EditorSession
 from superglm.editor import session as session_module
-from superglm.editor.errors import EditorValueError
+from superglm.editor.errors import EditorTypeError, EditorValueError
 from superglm.editor.payloads import session_payload, timeline_payload, undo_redo_payload
-from superglm.editor.session import _SHAPE_REFUSED, _STRETCH_REFUSED
 from superglm.editor.shapes import EDITOR_CHOSEN_SHAPE_ATTRIBUTE, _numeric_edges, snap_edge
+from superglm.editor.staging import _SHAPE_REFUSED, _STRETCH_REFUSED
 from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
 from superglm.export.summary import build_summary_export_payload
 from superglm.features.spline import _SplineBase
-from tests.test_editor import _post_json
+from tests.test_editor import _editor_token_header, _post_json
 
 
 @pytest.fixture
@@ -292,6 +299,216 @@ def test_a_pinned_reference_survives_a_later_collapse(region_model):
     assert session.model._specs["region"]._base_level == "C"
 
 
+@pytest.mark.parametrize("name", ["first", "most_exposed"])
+def test_a_reference_level_named_like_a_base_policy_stays_that_level(name):
+    """A level is set as the reference, kept through a collapse, exported and applied.
+
+    A weighs most and sorts first, so either policy picks A: each step that
+    passed the level on as base= read its name as the policy and moved the
+    reference to A.
+    """
+    X = pd.DataFrame({"x": np.tile(["A", name, "C", "D"], 30)})
+    y, w = np.tile([1.0, 2.0, 4.0, 8.0], 30), np.tile([4.0, 1.0, 1.0, 1.0], 30)
+
+    def declared():
+        return SuperGLM(
+            family="gaussian", selection_penalty=10.0, features={"x": Categorical(base="C")}
+        )
+
+    session = EditorSession.from_model(declared().fit(X, y, sample_weight=w), train_data=(X, y, w))
+    session.replace_with_reference_level("x", name, method="fit")
+    pinned = (session.model._specs["x"]._base_level, session_payload(session)["x"]["reference"])
+    session.select_levels("x", ["C", "D"])
+    session.replace_with_collapsed_levels("x", method="fit")
+    kept = (session.model._specs["x"]._base_level, session_payload(session)["x"]["reference"])
+    applied = Structure.from_model(session.model).apply(declared()).fit(X, y, sample_weight=w)
+
+    assert pinned == (name, {"level": name, "policy": "pinned"})
+    assert kept == (name, {"level": name, "policy": "kept"})
+    assert applied._specs["x"]._base_level == name
+
+
+@pytest.mark.parametrize("name", ["first", "most_exposed"])
+def test_an_ordered_reference_band_named_like_a_base_policy_stays_that_band(name):
+    """A band is set as the reference, kept through a shape, a collapse and an ungroup, and applied.
+
+    A weighs most and is the first band, so either policy picks A: each step
+    that passed the band on as base= read its name as the policy and rebased
+    the reported relativities to A.
+    """
+    bands = ["A", name, "C", "D", "E", "F"]
+    X = pd.DataFrame({"band": np.tile(bands, 30)})
+    y = np.tile([1.0, 2.0, 4.0, 8.0, 9.0, 9.5], 30)
+    w = np.tile([4.0, 1.0, 1.0, 1.0, 1.0, 1.0], 30)
+
+    def declared():
+        band = OrderedCategorical(order=bands, basis=Spline(kind="ps", k=5), base="C")
+        return SuperGLM(family="gaussian", features={"band": band})
+
+    session = EditorSession.from_model(declared().fit(X, y, sample_weight=w), train_data=(X, y, w))
+    session.replace_with_reference_level("band", name, method="fit")
+    references = [session.model._specs["band"]._base_level]
+    session.replace_with_shaped_range("band", lo="C", hi="D", degree=1, method="fit")
+    references.append(session.model._specs["band"]._base_level)
+    session.select_levels("band", ["E", "F"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    references.append(session.model._specs["band"]._base_level)
+    session.stage_structural("ungroup", "band", {"levels": ["E", "F"]})
+    session.refit_pending(method="fit")
+    references.append(session.model._specs["band"]._base_level)
+    applied = Structure.from_model(session.model).apply(declared()).fit(X, y, sample_weight=w)
+    references.append(applied._specs["band"]._base_level)
+
+    assert references == [name] * 5
+    assert session_payload(session)["band"]["reference"] == {"level": name, "policy": "kept"}
+
+
+def _exposed_region_session(
+    base: str, groups: dict[str, list[str]] | None = None, reference: str = "B"
+) -> EditorSession:
+    """B is the most exposed level; C + D outweigh it, and A + B weigh less than C + D.
+
+    ``groups`` declares a grouping on the opened model, whose fit resolves ``reference``.
+    """
+    rng = np.random.default_rng(20261003)
+    region = rng.permutation(np.repeat(["A", "B", "C", "D", "E"], [180, 360, 330, 330, 100]))
+    effects = {"A": -0.1, "B": 0.0, "C": 0.15, "D": 0.2, "E": 0.05}
+    y = 0.5 + np.array([effects[r] for r in region]) + rng.normal(0.0, 0.05, region.size)
+    weight = np.ones(region.size)
+    X = pd.DataFrame({"region": region})
+    grouping = None if groups is None else collapse_levels(X["region"], groups=groups)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"region": Categorical(base=base, grouping=grouping)},
+    )
+    model.fit(X, y, sample_weight=weight)
+    assert model._specs["region"]._base_level == reference, (
+        f"precondition: {reference} is the reference"
+    )
+    return EditorSession.from_model(model, terms=["region"], train_data=(X, y, weight))
+
+
+def _declared_grouping_session() -> EditorSession:
+    """C + D (660) and A + E (280) declared under most_exposed: C + D is the reference."""
+    return _exposed_region_session(
+        "most_exposed", groups={"C+D": ["C", "D"], "A+E": ["A", "E"]}, reference="C+D"
+    )
+
+
+@pytest.mark.parametrize(
+    ("options", "reference"),
+    [
+        ({}, {"level": "B", "policy": "kept"}),
+        ({"keep_reference": False}, {"level": "C+D", "policy": "most_exposed"}),
+    ],
+    ids=["kept", "off"],
+)
+def test_a_collapse_keeps_a_most_exposed_reference(options, reference):
+    # C + D outweigh B, so most_exposed, chosen again at the refit, moves the reference.
+    session = _exposed_region_session("most_exposed")
+    session.select_levels("region", ["C", "D"])
+    session.replace_with_collapsed_levels("region", method="fit", **options)
+    assert session_payload(session)["region"]["reference"] == reference
+
+
+def test_collapsing_the_reference_makes_its_group_the_reference():
+    session = _exposed_region_session("most_exposed")
+    session.select_levels("region", ["C", "D"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    # A + B weigh less than C + D, which most_exposed alone would pick.
+    session.select_levels("region", ["A", "B"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    assert session.model._specs["region"]._base_level == "A+B"
+
+
+@pytest.mark.parametrize(
+    ("pulled", "options", "reference"),
+    [
+        (["D"], {}, "B+C"),
+        (["B"], {}, "C+D"),
+        (["B", "C"], {}, "D"),
+        # Off, the declared-base rule is unchanged: the first level pulled out.
+        (["D"], {"keep_reference": False}, "D"),
+    ],
+    ids=["majority", "reference-pulled", "tie", "off"],
+)
+def test_a_partial_ungroup_leaves_the_reference_with_the_levels_that_stay(
+    pulled, options, reference
+):
+    session = _exposed_region_session("B")
+    # A + E stays grouped, so no ungroup here can reuse the pre-collapse fit.
+    session.select_levels("region", ["A", "E"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    session.select_levels("region", ["B", "C", "D"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    assert session.model._specs["region"]._base_level == "B+C+D"
+
+    session.select_levels("region", pulled)
+    session.replace_with_ungrouped_levels("region", method="fit", **options)
+    assert session.model._specs["region"]._base_level == reference
+
+
+@pytest.mark.parametrize(
+    ("options", "reference"),
+    [
+        # C + D loses D; C and D tie on members, and C was not pulled out.
+        ({}, {"level": "C", "policy": "kept"}),
+        # Off, most_exposed resolves again over B (360), C, D (330 each) and A + E (280).
+        ({"keep_reference": False}, {"level": "B", "policy": "most_exposed"}),
+    ],
+    ids=["kept", "off"],
+)
+def test_a_partial_ungroup_keeps_a_most_exposed_reference(options, reference):
+    # The declared base is symbolic, so the reference to keep is the one the fit resolved.
+    session = _declared_grouping_session()
+    session.select_levels("region", ["D"])
+    session.replace_with_ungrouped_levels("region", method="fit", **options)
+    assert session_payload(session)["region"]["reference"] == reference
+
+
+def test_the_ungroup_shortcut_does_not_read_a_base_policy_as_a_level_of_that_name():
+    """A term declaring the policy "first" does not fit again a model whose reference is the level "first".
+
+    The policy picks A, the first level; the fitted reference is the most
+    exposed level, which is named "first".
+    """
+    fitted = Categorical(base="most_exposed")
+    fitted.build(np.array(["A", "first", "C"]), sample_weight=np.array([1.0, 4.0, 1.0]))
+    assert fitted._base_level == "first"
+
+    assert not session_module._fits_again(Categorical(base="first"), fitted)
+    assert session_module._fits_again(Categorical(base="most_exposed"), fitted)
+
+
+def test_keeping_the_reference_keeps_integer_levels_native():
+    rng = np.random.default_rng(20261004)
+    band = rng.permutation(np.repeat([1, 2, 10], [250, 400, 350]))
+    y = 0.5 + 0.1 * (band == 10) + rng.normal(0.0, 0.05, band.size)
+    weight = np.ones(band.size)
+    X = pd.DataFrame({"band": band})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"band": Categorical(base="most_exposed")},
+    )
+    model.fit(X, y, sample_weight=weight)
+    assert model._specs["band"]._base_level == 2, "precondition: native integer levels"
+
+    setup = EditorSession.from_model(model, terms=["band"], train_data=(X, y, weight))
+    setup.select_levels("band", ["1", "10"])
+    collapsed = setup.replace_with_collapsed_levels("band", method="fit")
+    # 1 + 10 outweigh 2, which stays the reference; a grouped fit spells levels as text.
+    assert collapsed._specs["band"]._base_level == "2"
+
+    # A fresh session has no pre-collapse fit to reuse, so the ungroup refits.
+    session = EditorSession.from_model(collapsed, terms=["band"], train_data=(X, y, weight))
+    session.select_levels("band", ["1", "10"])
+    session.replace_with_ungrouped_levels("band", method="fit")
+    assert session.model._specs["band"]._base_level == 2
+    assert session_payload(session)["band"]["reference"] == {"level": "2", "policy": "kept"}
+
+
 def test_set_reference_refuses_a_special_level():
     rng = np.random.default_rng(20260927)
     levels = ["0", "1", "2", "3", "4", "5"]
@@ -353,6 +570,21 @@ def test_a_mean_centred_original_line_stays_put_for_an_untouched_term(region_mod
     )
 
 
+def test_payload_marks_the_terms_that_carry_hand_edits(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    assert {name: term["edited"] for name, term in session_payload(session).items()} == {
+        "region": False,
+        "x": False,
+    }
+    session.select_indices("x", [3, 4])
+    session.shift("x", 0.1)
+    payload = session_payload(session)
+    assert (payload["x"]["edited"], payload["region"]["edited"]) == (True, False)
+    session.undo()
+    assert session_payload(session)["x"]["edited"] is False
+
+
 def test_widget_http_set_reference_returns_transition_envelope(region_model):
     model, _ = region_model
     session = EditorSession.from_model(model, terms=["region"])
@@ -366,6 +598,66 @@ def test_widget_http_set_reference_returns_transition_envelope(region_model):
             "policy": "pinned",
         }
         assert payload["state"]["undo_redo"]["undo"] == "set reference of region to C"
+    finally:
+        widget.close()
+
+
+@pytest.mark.parametrize(
+    ("body", "reference"),
+    [
+        ({}, {"level": "B", "policy": "kept"}),
+        ({"keep_reference": False}, {"level": "C+D", "policy": "most_exposed"}),
+    ],
+    ids=["default", "off"],
+)
+def test_widget_http_collapse_reads_keep_reference_from_the_body(body, reference):
+    session = _exposed_region_session("most_exposed")
+    widget = session.widget()
+    try:
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [2, 3]})
+        payload = _post_json(
+            f"{widget.url}/collapse_levels", {"term": "region", "method": "fit", **body}
+        )
+        assert payload["state"]["terms"]["region"]["reference"] == reference
+    finally:
+        widget.close()
+
+
+@pytest.mark.parametrize(
+    ("body", "reference"),
+    [
+        ({}, {"level": "C", "policy": "kept"}),
+        ({"keep_reference": False}, {"level": "B", "policy": "most_exposed"}),
+    ],
+    ids=["default", "off"],
+)
+def test_widget_http_ungroup_reads_keep_reference_from_the_body(body, reference):
+    session = _declared_grouping_session()
+    widget = session.widget()
+    try:
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [3]})
+        payload = _post_json(
+            f"{widget.url}/ungroup_levels", {"term": "region", "method": "fit", **body}
+        )
+        assert payload["state"]["terms"]["region"]["reference"] == reference
+    finally:
+        widget.close()
+
+
+@pytest.mark.parametrize("route", ["collapse_levels", "ungroup_levels"])
+def test_widget_http_refuses_a_keep_reference_that_is_not_a_boolean(region_model, route):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region"])
+    widget = session.widget()
+    try:
+        session.select_levels("region", ["B", "C"])
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _post_json(f"{widget.url}/{route}", {"term": "region", "keep_reference": "no"})
+        assert error.value.code == 400
+        assert json.loads(error.value.read().decode("utf-8")) == {
+            "error": "keep_reference must be true or false."
+        }
+        assert session.model is model and session.structure_history == []
     finally:
         widget.close()
 
@@ -870,13 +1162,13 @@ def test_an_edge_snapped_a_hair_inside_an_off_grid_end_goes_onto_it(
 
 
 def test_a_narrow_gap_refusal_has_its_own_sentence():
-    from superglm.editor import session as session_module
+    from superglm.editor import staging
     from superglm.features._spline_ranges import NarrowGapError
 
     chained = ValueError("Feature 'x': ...")
     chained.__cause__ = NarrowGapError("...")
-    sentence = session_module._range_refusal(chained, session_module._SHAPE_SENTENCES)
-    assert sentence == session_module._NARROW_REFUSED
+    sentence = staging._range_refusal(chained, staging._SHAPE_SENTENCES)
+    assert sentence == staging._NARROW_REFUSED
 
 
 def test_select_all_then_flat_is_refused_in_words(aged):
@@ -1149,7 +1441,10 @@ def test_undoing_a_collapse_brings_back_the_edits_made_before_it(region_model):
     assert before["level_orders"] == {"region": ["D", "A", "B", "C"]}
 
     session.replace_with_collapsed_levels("region", method="fit")
-    assert session.history == [] and session.edited_terms() == []
+    # x kept its grid, so its smoothing is carried over; region was restructured,
+    # so its shift is not. One Undo takes the collapse back, carry-over and all.
+    assert session.history == [] and session.edited_terms() == ["x"]
+    assert [step.operation for step in session.structure_history] == ["collapse_levels"]
     session.undo()
     _assert_state_is(session, before)
 
@@ -1249,6 +1544,8 @@ def test_the_timeline_lists_every_action_around_the_current_position(region_mode
     session.select_levels("region", ["D"])
     session.shift("region", 0.1)
     session.replace_with_shaped_range("x", lo=2.0, hi=4.0, degree=1, method="fit")
+    # The shape left region alone, so its edit is carried over, inside the step.
+    assert session.edited_terms() == ["region"]
     shape = session.structure_history[-1].label
     session.select_indices("x", [0, 1])
     session.shift("x", -0.05)
@@ -1295,7 +1592,8 @@ def test_a_collapse_keeps_the_edits_made_before_it_on_the_timeline(region_model)
     session.select_levels("region", ["B", "C"])
     session.replace_with_collapsed_levels("region", method="fit")
 
-    assert session.history == []
+    # x's edit is carried over inside the collapse's step, not as an entry of its own.
+    assert session.history == [] and session.edited_terms() == ["x"]
     assert _outline(session) == [
         ("edit", "shift x", False),
         ("structural", "collapse B + C in region", False),
@@ -1458,3 +1756,520 @@ def test_no_shape_note_without_an_editor_chosen_shape(banded, step):
     session = EditorSession.from_model(model, terms=["band"])
     step(session)
     assert "editor_shape_terms" not in session.model.summary()._info
+
+
+# -- The structure file (spec addendum S2) ------------------------------------------
+
+
+def test_export_structure_is_the_in_force_model_without_its_waiting_changes(region_model, tmp_path):
+    model, X = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.stage_structural("collapse", "region", {"levels": ["C", "D"]})
+    path = tmp_path / "structure.json"
+    text = session.export_structure(path)
+    assert path.read_bytes() == text.encode("utf-8")
+    assert text == Structure.from_model(model, X=X).to_json()
+    assert read_structure(path).features["region"].groups == {}
+    # Once the change is refit it is in force, and in the file.
+    session.refit_pending(method="fit")
+    assert read_structure(json.loads(session.export_structure())).features["region"].groups == {
+        "C+D": ["C", "D"]
+    }
+
+
+def test_export_structure_keeps_a_grouped_terms_integer_levels_native():
+    rng = np.random.default_rng(20261003)
+    band = rng.permutation(np.repeat([1, 2, 10], [250, 400, 350]))
+    y = 0.5 + 0.1 * (band == 10) + rng.normal(0.0, 0.05, band.size)
+    X = pd.DataFrame({"band": band})
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={"band": Categorical(base="first")}
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["band"], train_data=(X, y))
+    session.select_levels("band", ["1", "10"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    entry = read_structure(json.loads(session.export_structure())).features["band"]
+    # In model order: the fitted levels are "1+10" then "2".
+    assert entry.levels == [1, 10, 2]
+    assert entry.groups == {"1+10": [1, 10]}
+    # The fitted grouping alone knows its levels as text; the refit rows give them their types.
+    assert Structure.from_model(session.model).features["band"].groups == {"1+10": ["1", "10"]}
+
+
+def test_widget_exports_the_structure_for_download_and_to_a_kernel_path(region_model, tmp_path):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?format=structure&filename=book",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data, headers = response.read(), response.headers
+        saved = _post_json(
+            f"{widget.url}/export_file",
+            {"format": "structure", "directory": str(tmp_path), "filename": "book"},
+        )
+        with pytest.raises(EditorValueError, match=r"extension must be \.json"):
+            widget._export_bytes("structure", "book.joblib")
+    finally:
+        widget.close()
+    assert data == session.export_structure().encode("utf-8")
+    assert headers["content-type"] == "application/json"
+    assert 'filename="book.json"' in headers["content-disposition"]
+    assert headers["x-superglm-model-revision"] == str(session.model_revision)
+    assert "x-superglm-validation" not in headers
+    assert Path(saved["path"]).name == "book.json"
+    assert Path(saved["path"]).read_bytes() == data
+
+
+# -- Where new levels go (spec addendum S6) -------------------------------------------
+
+_NOT_CATEGORICAL = "Only a categorical term has a New levels choice; {term!r} is not one."
+
+
+def _grouped_region(unseen: str = "error"):
+    """``region`` with C and D grouped as Other, beside a spline; fitted, unseen policy declared."""
+    rng = np.random.default_rng(20261003)
+    region = rng.choice(["A", "B", "C", "D"], 600, p=[0.3, 0.3, 0.2, 0.2])
+    x = rng.uniform(0.0, 10.0, 600)
+    effects = {"A": 0.0, "B": 0.15, "C": 0.2, "D": 0.25}
+    y = 0.4 + np.array([effects[r] for r in region]) + 0.05 * x + rng.normal(0.0, 0.05, 600)
+    X = pd.DataFrame({"region": region, "x": x})
+    grouping = collapse_levels(X["region"], groups={"Other": ["C", "D"]})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={
+            "region": Categorical(base="first", grouping=grouping, unseen=unseen),
+            "x": Spline(n_knots=6),
+        },
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def _with_new_level(X, rows: int = 5):
+    new = X.iloc[:40].copy()
+    new.loc[new.index[:rows], "region"] = "Z"
+    return new
+
+
+def test_new_levels_routes_to_a_group_without_a_refit_and_undo_redo_step_across_it(
+    monkeypatch,
+):
+    model, X, _ = _grouped_region()
+    fits = []
+    monkeypatch.setattr(SuperGLM, "fit", lambda self, *args, **kwargs: fits.append(self) or self)
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.set_unseen("region", "Other")
+    assert fits == []
+    in_force = session.model
+    # The opened model is never changed: the in-force model is a copy.
+    assert in_force is not model and model._specs["region"].unseen == "error"
+    assert in_force._specs["region"].unseen == "Other"
+    new = _with_new_level(X)
+    with pytest.warns(UserWarning, match=r"group 'Other'.*\['Z'\] over 5 row\(s\)"):
+        routed = in_force.predict(new)
+    assert np.array_equal(routed, in_force.predict(new.replace({"region": {"Z": "C"}})))
+    assert timeline_payload(session)[-2]["label"] == "New levels → Other"
+    assert timeline_payload(session)[-2]["status"] == "edit"
+    assert undo_redo_payload(session)["undo"] == "New levels → Other"
+    assert session_payload(session)["region"]["unseen"] == {
+        "policy": "Other",
+        "choices": [
+            {"value": "error", "label": "Refuse"},
+            {"value": "base", "label": "Reference"},
+            {"value": "Other", "label": "Other"},
+        ],
+        "reason": None,
+    }
+
+    session.undo()
+    assert session.model is model
+    assert undo_redo_payload(session) == {"undo": None, "redo": "New levels → Other"}
+    session.redo()
+    assert session.model is in_force
+    assert fits == []
+
+
+def test_new_levels_takes_its_place_in_time_among_edits_and_waiting_changes():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_indices("x", [3, 4, 5])
+    session.shift("x", 0.1)
+    session.stage_structural("collapse", "region", {"levels": ["A", "B"]})
+    session.undo()  # the collapse waits no longer; its future is the redo
+    session.set_unseen("region", "base")
+    assert session.pending_redo == []
+    session.stage_structural("shape", "x", {"lo": 2.0, "hi": 6.0, "degree": 1})
+    # Undo takes back the latest first: the waiting shape, the choice, then the edit.
+    session.undo()
+    assert len(session.pending) == 0 and session.model._specs["region"].unseen == "base"
+    session.undo()
+    assert session.model is model and session.edited_terms() == ["x"]
+    session.undo()
+    assert session.edited_terms() == []
+
+
+def test_new_levels_carries_through_a_refit_and_comes_back_with_its_undo():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.set_unseen("region", "Other")
+    chosen = session.model
+    session.stage_structural("shape", "x", {"lo": 2.0, "hi": 6.0, "degree": 1})
+    session.refit_pending(method="fit")
+    assert session.model._specs["region"].unseen == "Other"
+    # A change to the term itself is built on the in-force spec, so it keeps the choice too.
+    regrouped = EditorSession.from_model(session.model, terms=["region"])
+    regrouped.stage_structural("collapse", "region", {"levels": ["A", "B"]})
+    regrouped.refit_pending(method="fit")
+    assert regrouped.model._specs["region"].unseen == "Other"
+    # Run CV and Final fit refit the in-force model's declaration.
+    assert session.model.clone_unfitted()._specs["region"].unseen == "Other"
+    assert chosen.clone_unfitted()._specs["region"].unseen == "Other"
+    session.undo()  # the Refit: the shape waits again
+    assert session.model is chosen and len(session.pending) == 1
+    session.undo()  # the waiting shape
+    assert session.model is chosen and session.pending == []
+    session.undo()  # the choice
+    assert session.model is model
+    # The opened model's declaration was never touched either.
+    assert model.clone_unfitted()._specs["region"].unseen == "error"
+
+
+_FIT_OUTPUTS = ("_fit_mu", "_fit_null_mu", "_fit_stats", "_fit_inference_info", "_coef_covariance")
+
+
+def _arrays(value, path, seen=None):
+    """Each array in a fit output, by its path: in a dict, list, tuple or object, or the output itself."""
+    seen = set() if seen is None else seen
+    if isinstance(value, np.ndarray):
+        yield path, value
+        return
+    if id(value) in seen or isinstance(value, type):
+        return
+    seen.add(id(value))
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _arrays(item, f"{path}[{key!r}]", seen)
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            yield from _arrays(item, f"{path}[{index}]", seen)
+    else:
+        state = dict(getattr(value, "__dict__", None) or {})
+        for klass in type(value).__mro__:
+            slots = klass.__dict__.get("__slots__", ())
+            for name in (slots,) if isinstance(slots, str) else slots:
+                if name not in ("__dict__", "__weakref__") and hasattr(value, name):
+                    state[name] = getattr(value, name)
+        for name, item in state.items():
+            yield from _arrays(item, f"{path}.{name}", seen)
+
+
+def test_new_levels_shares_the_fits_row_state_instead_of_copying_it_per_choice():
+    """The choice changes no fitted value, so the copy keeps the model's fit outputs as they are.
+
+    Each choice's model stays in the history, so a copy of the row-length
+    state (fitted means, inference, metrics) per choice would add up. The
+    copy reads the same memory through read-only views: the inference state
+    and coefficient covariance computed after the fit was published are
+    writeable on the model itself, and a write through the choice's model
+    must not reach it.
+    """
+    model, X, y = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"], train_data=(X, y))
+    model.metrics(X, y)
+    fit_outputs = _FIT_OUTPUTS
+    assert all(name in vars(model) for name in fit_outputs)
+    assert model._fit_metrics_cache is not None
+
+    sources = {
+        path: array for name in fit_outputs for path, array in _arrays(vars(model)[name], name)
+    }
+    writeable = {path: array.flags.writeable for path, array in sources.items()}
+    assert writeable["_coef_covariance[0]"] and writeable["_fit_inference_info['XtWX_inv']"]
+
+    session.set_unseen("region", "Other")
+
+    chosen = session.model
+    assert vars(chosen)["_fit_stats"] == vars(model)["_fit_stats"]
+    shared = {
+        path: array for name in fit_outputs for path, array in _arrays(vars(chosen)[name], name)
+    }
+    assert shared.keys() == sources.keys()
+    for path, array in shared.items():
+        assert array.size == 0 or np.shares_memory(array, sources[path]), path
+        with pytest.raises(ValueError, match="read-only"):
+            array[...] = 0
+    # The model's own arrays keep their flags, so its own writes still work.
+    assert {path: array.flags.writeable for path, array in sources.items()} == writeable
+    # The metrics cache is bound to its model: the copy builds its own when asked.
+    assert chosen._fit_metrics_cache is None
+    rebuilt, source = chosen.metrics(X, y), model.metrics(X, y)
+    assert rebuilt._model is chosen
+    assert (rebuilt.deviance, rebuilt.aic) == (source.deviance, source.aic)
+    # The prediction plan holds the specs, so the copy's reads its own policy.
+    [region] = [term for term in chosen._prediction_plan["features"] if term["name"] == "region"]
+    assert region["spec"] is chosen._specs["region"] and region["spec"].unseen == "Other"
+    assert model._specs["region"].unseen == "error"
+    new = _with_new_level(X)
+    seen = (new["region"] != "Z").to_numpy()
+    assert np.array_equal(chosen.predict(new[seen]), model.predict(new[seen]))
+    with pytest.warns(UserWarning, match=r"group 'Other'"):
+        routed = chosen.predict(new)
+    assert np.array_equal(routed, model.predict(new.replace({"region": {"Z": "C"}})))
+
+
+def test_new_levels_on_a_structured_fit_shares_no_state_the_choice_can_write():
+    """A structured fit's covariance is objects over a factor, and the choice still cannot write it.
+
+    With a random effect, ``fit_reml``'s structured solver keeps the
+    covariance as accessor objects over its factor, not as arrays in a dict.
+    The choice reads the factor's memory through read-only views and holds
+    its own objects, so neither an array write nor an attribute write
+    through the choice's model reaches the model it was made from.
+    """
+    rng = np.random.default_rng(862)
+    broker = rng.permutation(np.repeat(np.arange(18), 18))
+    x = rng.normal(size=broker.size)
+    region = rng.choice(["A", "B", "C"], broker.size)
+    offset = np.log(rng.uniform(0.5, 1.8, broker.size))
+    effect = rng.normal(scale=0.3, size=18)[broker]
+    y = rng.poisson(np.exp(offset - 0.3 + 0.2 * x + 0.1 * (region == "B") + effect)).astype(float)
+    X = pd.DataFrame({"x": x, "region": region, "broker": [f"b{i}" for i in broker]})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        direct_solve="structured",
+        features={"x": Numeric(), "region": Categorical(base="first"), "broker": RandomEffect()},
+    )
+    model.fit_reml(X, y, offset=offset, max_reml_iter=4)
+    inference = model._fit_inference_info
+    assert inference["structured_covariance"] and model._coef_covariance is not None
+    fit_outputs = _FIT_OUTPUTS
+    sources = [array for name in fit_outputs for _, array in _arrays(vars(model)[name], name)]
+    writeable = [array.flags.writeable for array in sources]
+    assert any(writeable)
+
+    session = EditorSession.from_model(model, terms=["region"], train_data=(X, y, None, offset))
+    session.set_unseen("region", "base")
+
+    chosen = session.model
+    shared = [
+        array
+        for name in fit_outputs
+        for _, array in _arrays(vars(chosen)[name], name)
+        if array.size and any(np.shares_memory(array, source) for source in sources)
+    ]
+    assert shared
+    for array in shared:
+        with pytest.raises(ValueError, match="read-only"):
+            array[...] = 0
+    assert [array.flags.writeable for array in sources] == writeable
+    covariance = chosen._fit_inference_info["XtWX_inv_aug"]
+    assert covariance is not inference["XtWX_inv_aug"]
+    covariance.scale = 99.0
+    assert inference["XtWX_inv_aug"].scale == 1.0
+    covariance.scale = 1.0
+    # The choice's own objects answer as the model's do.
+    relativities = chosen.relativities(with_se=True)
+    for term, table in model.relativities(with_se=True).items():
+        pd.testing.assert_frame_equal(relativities[term], table)
+    assert str(chosen.summary()) == str(model.summary())
+
+
+def test_new_levels_is_offered_on_plain_categoricals_only(banded):
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    assert session_payload(session)["x"]["unseen"] is None
+    with pytest.raises(EditorTypeError) as refused:
+        session.set_unseen("x", "base")
+    assert str(refused.value) == _NOT_CATEGORICAL.format(term="x")
+    ordered = EditorSession.from_model(banded[0], terms=["band"])
+    assert session_payload(ordered)["band"]["unseen"] is None
+    with pytest.raises(EditorTypeError) as refused:
+        ordered.set_unseen("band", "base")
+    assert str(refused.value) == _NOT_CATEGORICAL.format(term="band")
+    assert ordered.history == [] and session.history == []
+
+
+def test_new_levels_can_go_back_to_the_one_level_group_the_model_opened_with():
+    """The model sends new levels to B, a group of one level of its own name.
+
+    Only groups that merge or rename levels are offered, so once the choice
+    moved away from B (to Reference) the control no longer listed it and
+    set_unseen refused it: only Undo could bring it back.
+    """
+    from superglm.editor.unseen import unseen_payload
+
+    model, _, _ = _grouped_region(unseen="B")
+    session = EditorSession.from_model(model, terms=["region", "x"])
+
+    session.set_unseen("region", "base")
+    offered = [choice["value"] for choice in unseen_payload(session, "region")["choices"]]
+    session.set_unseen("region", "B")
+
+    assert offered == ["error", "base", "Other", "B"]
+    assert session.model._specs["region"].unseen == "B"
+    # A level the model never sent new levels to is still not a group.
+    with pytest.raises(EditorValueError):
+        session.set_unseen("region", "A")
+
+
+def test_new_levels_refuses_a_label_that_is_not_one_of_its_groups():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    for choice in ("Rest", "A", 3):
+        with pytest.raises(EditorValueError) as refused:
+            session.set_unseen("region", choice)
+        assert str(refused.value) == (
+            f"{choice!r} is not a group of 'region'. Choose Refuse, Reference or one of its groups."
+        )
+    # Choosing the policy in force changes nothing and adds no entry.
+    session.set_unseen("region", "error")
+    assert session.history == [] and session.model is model
+
+
+def test_new_levels_waits_for_a_refit_of_its_terms_waiting_changes():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.stage_structural("set_reference", "region", {"level": "B"})
+    sentence = (
+        "Refit or undo the waiting changes to 'region' before choosing where its new levels go."
+    )
+    assert session_payload(session)["region"]["unseen"]["reason"] == sentence
+    with pytest.raises(EditorValueError) as refused:
+        session.set_unseen("region", "Other")
+    assert str(refused.value) == sentence
+    session.refit_pending(method="fit")
+    session.set_unseen("region", "Other")
+    assert session.model._specs["region"].unseen == "Other"
+
+
+def test_new_levels_refuses_a_term_an_interaction_uses():
+    rng = np.random.default_rng(20261005)
+    region = rng.choice(["A", "B", "C"], 400)
+    x = rng.uniform(0.0, 10.0, 400)
+    y = 0.4 + 0.1 * (region == "B") + 0.05 * x + rng.normal(0.0, 0.05, 400)
+    X = pd.DataFrame({"region": region, "x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"region": Categorical(base="first"), "x": Spline(n_knots=5)},
+        interactions=[("x", "region")],
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    sentence = (
+        "Cannot choose where new levels go for term 'region' because it is used by "
+        "interaction(s): x:region. Refit a model without those interactions first."
+    )
+    assert session_payload(session)["region"]["unseen"]["reason"] == sentence
+    with pytest.raises(EditorValueError) as refused:
+        session.set_unseen("region", "base")
+    assert str(refused.value) == sentence
+
+
+@pytest.mark.parametrize(
+    ("operation", "levels"),
+    [("collapse", ["B", "C"]), ("ungroup", ["C", "D"])],
+    ids=["collapse", "ungroup"],
+)
+def test_a_waiting_change_that_removes_the_new_levels_group_is_refused(operation, levels):
+    model, _, _ = _grouped_region(unseen="Other")
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural(operation, "region", {"levels": levels})
+    assert str(refused.value) == (
+        "New levels of 'region' go to the group 'Other', which that change would remove. "
+        "Choose where new levels go first, then make the change."
+    )
+    assert session.pending == []
+
+
+def test_reset_keeps_the_new_levels_choice():
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_levels("region", ["A"])
+    session.shift("region", 0.1)
+    session.set_unseen("region", "Other")
+    session.clear_selection("region")
+    session.reset("region")
+    assert session.edited_terms() == []
+    assert session.model._specs["region"].unseen == "Other"
+    assert [record.label for record in session.history] == ["New levels → Other"]
+    session.undo()
+    assert session.model is model
+
+
+def test_a_saved_session_leaves_the_new_levels_choice_to_the_model_and_load_says_so(tmp_path):
+    # The artifact holds curve edits; the model passed to load holds the policy.
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_indices("x", [3, 4])
+    session.shift("x", 0.1)
+    session.set_unseen("region", "Other")
+    session.save(tmp_path / "session.json")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = EditorSession.load(tmp_path / "session.json", model=model)
+    assert [str(w.message) for w in caught if "edit file" in str(w.message)] == [
+        "The edit file holds curve edits only, so these changes were not restored: "
+        "New levels → Other in region. Pass the model they produced to load, or make them again."
+    ]
+    assert [record.operation for record in loaded.history] == ["shift"]
+
+
+def test_new_levels_moves_the_model_revision_so_new_level_metrics_refresh():
+    # Validation rows hold a level the fit never saw: base rates it at the
+    # reference, Other at Other's effect, so the validation deviance moves.
+    from superglm.editor.metrics import compute_dataset_metrics
+
+    model, X, y = _grouped_region(unseen="base")
+    validation = _with_new_level(X, rows=20)
+    session = EditorSession.from_model(
+        model, terms=["region", "x"], validation_data=(validation, y[:40])
+    )
+    widget = EditorWidget(session)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            before = widget._metrics("deviance", dataset="validation")
+            revision = session.model_revision
+            state = widget._set_unseen("region", "Other")
+            after = widget._metrics("deviance", dataset="validation")
+            expected = compute_dataset_metrics(
+                session.model, session._evaluation_data["validation"]
+            )["deviance"]
+    finally:
+        widget.close()
+    assert state["model_revision"] > revision
+    assert state["terms"]["region"]["unseen"]["policy"] == "Other"
+    assert after["edited"] == pytest.approx(expected, rel=0.0, abs=0.0)
+    assert after["edited"] != before["edited"]
+
+
+def test_widget_http_set_unseen_returns_the_state_and_refuses_with_its_sentence(tmp_path):
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    widget = session.widget()
+    try:
+        state = _post_json(f"{widget.url}/set_unseen", {"term": "region", "unseen": "Other"})
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            _post_json(f"{widget.url}/set_unseen", {"term": "x", "unseen": "base"})
+        body = json.loads(refused.value.read().decode("utf-8"))
+        saved = _post_json(
+            f"{widget.url}/export_file",
+            {"format": "structure", "directory": str(tmp_path), "filename": "book"},
+        )
+    finally:
+        widget.close()
+    assert state["terms"]["region"]["unseen"]["policy"] == "Other"
+    assert state["timeline"][-2]["label"] == "New levels → Other"
+    assert body == {"error": _NOT_CATEGORICAL.format(term="x")}
+    assert read_structure(saved["path"]).features["region"].unseen == "Other"

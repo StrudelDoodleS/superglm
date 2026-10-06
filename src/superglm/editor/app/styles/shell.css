@@ -80,6 +80,252 @@ body {
   gap: 2px;
 }
 
+/* The theme switch: a comic pill, DAY or NIGHT, in the docs site's display
+   face. At rest it follows <html data-theme>, which index.html sets before
+   first paint, so the pill is right before views/theme.js runs. The id
+   outranks the toolbar's ghost-button rules. */
+#themeSwitch {
+  position: relative;
+  flex: none;
+  box-sizing: content-box;
+  width: 76px;
+  height: 32px;
+  margin: 0 6px 0 2px;
+  padding: 0;
+  border: 2.5px solid var(--text);
+  border-radius: 999px;
+  background-color: var(--switch-track);
+  background-image: radial-gradient(circle, var(--switch-dots) 1.1px, transparent 1.4px);
+  background-size: 5px 5px;
+  box-shadow: 3px 3px 0 var(--ink);
+  color: var(--text);
+}
+
+/* Each label keeps to the side of the track the knob leaves free, 38px from
+   its left edge, so a wider fallback face, when Bangers cannot load, is cut
+   off there instead of running under the knob. */
+.theme-switch-label {
+  position: absolute;
+  top: 9.5px;
+  max-width: 38px;
+  overflow: hidden;
+  font: 15px/1 Bangers, Impact, "Arial Black", sans-serif;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.theme-switch-label[data-label="day"] {
+  left: 38px;
+}
+
+.theme-switch-label[data-label="night"] {
+  left: 8px;
+  opacity: 0;
+}
+
+.theme-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 28px;
+  height: 28px;
+  border: 2.5px solid var(--text);
+  border-radius: 50%;
+  background-color: var(--surface);
+}
+
+.theme-switch-icon {
+  position: absolute;
+  inset: 0;
+  width: 17px;
+  height: 17px;
+  margin: auto;
+  fill: none;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.theme-switch-icon[data-icon="sun"] {
+  stroke: var(--red);
+}
+
+.theme-switch-icon[data-icon="moon"] {
+  stroke: var(--surface);
+  opacity: 0;
+}
+
+:root[data-theme="dark"] .theme-switch-knob {
+  translate: 44px 0;
+  background-color: var(--blue);
+}
+
+:root[data-theme="dark"] .theme-switch-label[data-label="day"],
+:root[data-theme="dark"] .theme-switch-icon[data-icon="sun"] {
+  opacity: 0;
+}
+
+:root[data-theme="dark"] .theme-switch-label[data-label="night"],
+:root[data-theme="dark"] .theme-switch-icon[data-icon="moon"] {
+  opacity: 1;
+}
+
+/* The flip, on a click only: theme.js adds .is-flipping. The knob squashes,
+   overshoots and settles, the outgoing icon spins out and the incoming one
+   in, the label pops, and the halftone drifts four dots, a whole number of
+   its period. Each keyframe is named for the theme it reaches, so the next
+   click changes the name and the browser restarts it. */
+#themeSwitch.is-flipping {
+  animation: theme-track-to-day 560ms ease backwards;
+}
+
+#themeSwitch.is-flipping .theme-switch-knob {
+  animation: theme-knob-to-day 680ms cubic-bezier(0.3, 0.7, 0.2, 1) backwards;
+}
+
+:root[data-theme="dark"] #themeSwitch.is-flipping {
+  animation-name: theme-track-to-night;
+}
+
+:root[data-theme="dark"] #themeSwitch.is-flipping .theme-switch-knob {
+  animation-name: theme-knob-to-night;
+}
+
+#themeSwitch.is-flipping [data-icon="sun"],
+:root[data-theme="dark"] #themeSwitch.is-flipping [data-icon="moon"] {
+  animation: theme-icon-in 620ms cubic-bezier(0.3, 0.7, 0.2, 1) 160ms backwards;
+}
+
+#themeSwitch.is-flipping [data-icon="moon"],
+:root[data-theme="dark"] #themeSwitch.is-flipping [data-icon="sun"] {
+  animation: theme-icon-out 420ms cubic-bezier(0.3, 0.7, 0.2, 1) backwards;
+}
+
+#themeSwitch.is-flipping [data-label="day"],
+:root[data-theme="dark"] #themeSwitch.is-flipping [data-label="night"] {
+  animation: theme-label-in 560ms cubic-bezier(0.3, 0.7, 0.2, 1) 260ms backwards;
+}
+
+#themeSwitch.is-flipping [data-label="night"],
+:root[data-theme="dark"] #themeSwitch.is-flipping [data-label="day"] {
+  animation: theme-label-out 240ms cubic-bezier(0.3, 0.7, 0.2, 1) backwards;
+}
+
+@keyframes theme-knob-to-night {
+  0% { translate: 0 0; scale: 1 1; }
+  30% { scale: 1.32 0.78; }
+  68% { translate: 51px 0; scale: 0.88 1.12; }
+  84% { translate: 41.55px 0; scale: 1.05 0.96; }
+  100% { translate: 44px 0; scale: 1 1; }
+}
+
+@keyframes theme-knob-to-day {
+  0% { translate: 44px 0; scale: 1 1; }
+  30% { scale: 1.32 0.78; }
+  68% { translate: -7px 0; scale: 0.88 1.12; }
+  84% { translate: 2.45px 0; scale: 1.05 0.96; }
+  100% { translate: 0 0; scale: 1 1; }
+}
+
+@keyframes theme-track-to-night {
+  from { background-position: 0 0; }
+  to { background-position: 20px 0; }
+}
+
+@keyframes theme-track-to-day {
+  from { background-position: 0 0; }
+  to { background-position: -20px 0; }
+}
+
+@keyframes theme-icon-in {
+  0% { opacity: 0; transform: rotate(-220deg) scale(0.2); }
+  60% { opacity: 1; transform: rotate(18deg) scale(1.15); }
+  100% { opacity: 1; transform: rotate(0deg) scale(1); }
+}
+
+@keyframes theme-icon-out {
+  0% { opacity: 1; transform: rotate(0deg) scale(1); }
+  100% { opacity: 0; transform: rotate(220deg) scale(0.2); }
+}
+
+@keyframes theme-label-in {
+  0% { opacity: 0; transform: scale(0.2) rotate(-14deg); }
+  55% { opacity: 1; transform: scale(1.35) rotate(5deg); }
+  78% { transform: scale(0.92) rotate(-2deg); }
+  100% { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+
+@keyframes theme-label-out {
+  0% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.3) translateY(20%); }
+}
+
+/* tokens.css zeroes every duration under reduced motion; the delays go too,
+   so a flip lands at once. */
+@media (prefers-reduced-motion: reduce) {
+  #themeSwitch,
+  #themeSwitch * {
+    animation-delay: 0s !important;
+  }
+}
+
+/* The grounds, the app bar and the switch cross-fade with a flip, and only
+   then: theme.js puts .theme-fading on <html> for the flip and takes it off
+   when the knob lands, and <html> keeps its old color-scheme until then so
+   that each colour fades once (theme.js says why). The rest changes at
+   once, because a transition on every element halves the frame rate while
+   it runs. Reduced motion zeroes the fade through tokens.css. */
+:root.theme-fading,
+:root.theme-fading body,
+:root.theme-fading .app-bar,
+:root.theme-fading .app-bar *,
+:root.theme-fading .feature-list,
+:root.theme-fading .editor-workspace,
+:root.theme-fading #chart,
+:root.theme-fading .inspector {
+  transition: background-color 600ms ease, border-color 600ms ease, color 600ms ease,
+    box-shadow 600ms ease;
+}
+
+/* Refit: quiet while nothing waits, the one filled action while changes do. */
+.app-actions .refit-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.app-actions .refit-action.has-pending,
+.app-actions .refit-action.has-pending:hover {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: var(--surface);
+}
+
+.refit-action-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 22%, transparent);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 18px;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .refit-action-label {
+    display: none;
+  }
+}
+
 #editorView {
   min-height: 0;
   display: grid;
@@ -133,6 +379,30 @@ body {
   padding: 0 0 2px;
 }
 
+/* Contrib and Build wrap as one. When the Chart / Table switch's row cannot
+   hold them as well, views/context_bar.js sends the switch to the end of the
+   row, ahead of the view actions, rather than part them. */
+.contrib-tools {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+
+.context-bar[data-view-toggle="last"] #termViewToggle {
+  order: 1;
+}
+
+.context-bar[data-view-toggle="last"] .toolbar-actions {
+  order: 2;
+}
+
+/* A reference a waiting change will pin, until Refit. */
+.context-chip[data-waiting="true"] {
+  background: var(--sig-weak-bg);
+  color: var(--sig-weak-fg);
+}
+
 /* Tool modes as a segmented control. */
 .tool-rail {
   display: flex;
@@ -171,6 +441,17 @@ body {
   box-shadow: 0 1px 2px var(--shadow);
 }
 
+/* Off with a reason: still hoverable, so its popover can say why. */
+.tool-rail button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.tool-rail button[aria-disabled="true"]:hover {
+  background: transparent;
+  color: var(--muted);
+}
+
 .tool-rail svg {
   width: 17px;
   height: 17px;
@@ -179,6 +460,19 @@ body {
   stroke-width: 1.7;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* The Chart / Table switch borrows the tool rail's segmented look. */
+.term-view-toggle {
+  margin-right: 0;
+  margin-left: 2px;
+}
+
+/* Table view: the rating table takes the chart's place, and the controls
+   that only act on the chart step aside. */
+.plot-column.is-table-view :is(#groupDisplayWrap, #handleCountWrap, #contribTools, #ciToggle,
+  [data-op="select_all"], #resetZoom, #selectionMenu) {
+  display: none !important;
 }
 
 @media (max-width: 1085px) {

@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.features.categorical import Categorical
+from superglm.features.grouping import native_by_text
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.piecewise import Piecewise
@@ -105,18 +106,33 @@ def _shared_continuous_domain(
     return {"x": np.linspace(float(values.min()), float(values.max()), n_points)}
 
 
+def _model_level_order(spec) -> list[str]:
+    """The level order a fitted level term reports in, as text.
+
+    An ordered term's declared order; a grouped categorical's original levels,
+    which is how its term inference expands the groups; otherwise the fitted
+    universe, which keeps native order (1, 2, 10, not "1", "10", "2").
+    """
+    if isinstance(spec, OrderedCategorical):
+        return [str(level) for level in spec._ordered_levels]
+    grouping = getattr(spec, "_grouping", None)
+    if grouping is not None:
+        return [str(level) for level in grouping.all_original_levels]
+    return [str(level) for level in spec._levels]
+
+
 def _shared_level_domain(
     models: Mapping[str, Any],
     X: EagerFrame,
     term: str,
 ) -> dict[str, list[str]]:
-    """Build a shared categorical/ordered level domain."""
-    ordered_levels: list[str] | None = None
-    for model in models.values():
-        spec = model._specs[term]
-        if isinstance(spec, OrderedCategorical):
-            ordered_levels = [str(level) for level in spec._ordered_levels]
-            break
+    """Build a shared categorical/ordered level domain in model order.
+
+    An ordered term's order wins; otherwise the first model's fitted order.
+    Observed labels the model order lacks follow in row order.
+    """
+    specs = [model._specs[term] for model in models.values()]
+    spec = next((s for s in specs if isinstance(s, OrderedCategorical)), specs[0])
 
     observed_levels = [
         str(level)
@@ -125,14 +141,81 @@ def _shared_level_domain(
         .drop_duplicates()
         .tolist()
     ]
-    if ordered_levels is None:
-        return {"levels": observed_levels}
-
-    merged = [level for level in ordered_levels if level in observed_levels]
-    for level in observed_levels:
-        if level not in merged:
-            merged.append(level)
+    observed = set(observed_levels)
+    merged = [level for level in _model_level_order(spec) if level in observed]
+    placed = set(merged)
+    merged.extend(level for level in observed_levels if level not in placed)
     return {"levels": merged}
+
+
+def _native_level_values(X: EagerFrame, term: str, labels: list[str]) -> NDArray:
+    """The column's own values for the domain's text labels, as predict receives them.
+
+    A fitted universe keeps native types, so an integer-coded categorical
+    refuses the text "1" as an unseen level.
+    """
+    native = native_by_text(pd.Series(X.column_array(term), name=term).drop_duplicates().tolist())
+    return np.asarray([native.get(label, label) for label in labels], dtype=object)
+
+
+def _score_levels(spec, levels: NDArray, beta: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Score a level term on ``levels``, NaN at a level the model did not estimate.
+
+    A fold model has no estimate at a level its training rows lack, whatever
+    its unseen policy. Outside its universe, ``unseen="error"`` refuses the
+    level, while ``unseen="base"`` or a group policy would score it at the
+    base or in that group without refusing. One that ``cross_validate``'s
+    shared universe gave it with no training rows it holds pinned and scores
+    at the pin. Each is a gap in its curve rather than a value, or a failure
+    of the whole comparison. Only the other levels are scored, one by one
+    only when the model refuses them together.
+    """
+    values = np.full(len(levels), np.nan, dtype=np.float64)
+    scored = np.flatnonzero(~_unestimated_points(spec, levels))
+    if scored.size == 0:
+        return values
+    try:
+        values[scored] = spec.score(levels[scored], beta)
+    except ValueError:
+        for index in scored:
+            try:
+                values[index] = spec.score(levels[index : index + 1], beta)[0]
+            except ValueError:
+                continue
+    return values
+
+
+def _unestimated_points(spec, points: NDArray) -> NDArray[np.bool_]:
+    """Which level points ``spec`` has no estimate at.
+
+    Levels, or specials, it holds pinned with no training rows, and on a
+    Categorical any level outside its universe, which its unseen policy may
+    score without refusing; an ordered term refuses one. Labels compare as
+    text, as the comparison domain names them. A grouped term reads each
+    member at its group: a member whose group it pins, or whose group is
+    outside its universe (no training rows, unbound), is a gap whatever its
+    unseen policy would route it to; one whose group it estimated reads that
+    estimate, rows of its own or not.
+    """
+    pinned = {
+        str(level)
+        for level in (*getattr(spec, "_pinned_levels", ()), *getattr(spec, "_pinned_specials", ()))
+    }
+    grouping = getattr(spec, "_grouping", None)
+    group_of = (
+        {}
+        if grouping is None
+        else {str(level): str(group) for level, group in grouping.original_to_group.items()}
+    )
+    # None when the term refuses a level outside its universe itself.
+    fitted = {str(level) for level in spec._levels} if isinstance(spec, Categorical) else None
+
+    def unestimated(label: str) -> bool:
+        # The fitted level the point is read at; None for a label the grouping lacks.
+        level = label if grouping is None else group_of.get(label)
+        return label in pinned or level in pinned or (fitted is not None and level not in fitted)
+
+    return np.array([unestimated(label) for label in map(str, points)], dtype=bool)
 
 
 def _support_payload(
@@ -208,13 +291,10 @@ def _build_term_comparison_data(
             }
         else:
             domain = _shared_level_domain(normalized_models, frame, term)
-            levels = np.asarray(domain["levels"], dtype=object)
+            levels = _native_level_values(frame, term, domain["levels"])
             series = {
                 label: {
-                    "link": np.asarray(
-                        model._specs[term].score(levels, _feature_beta(model, term)),
-                        dtype=np.float64,
-                    ),
+                    "link": _score_levels(model._specs[term], levels, _feature_beta(model, term)),
                 }
                 for label, model in normalized_models.items()
             }

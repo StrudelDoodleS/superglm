@@ -19,6 +19,9 @@
   --blue-soft: #e3ebfa;
   --blue-band: rgba(36, 87, 197, 0.08);
   --orange: #ea580c;
+  /* The selection orange set as text, the anchor's tags: its own hue
+     darkened to 4.9:1 on --surface, where --orange is 3.6:1. */
+  --orange-text: #c2490a;
   --red: #d6402b;
   --yellow: #f4b942;
   --yellow-border: #d9a12c;
@@ -85,10 +88,27 @@
   --trace-7: #0a7f8f;
   --trace-8: #6f42c1;
   --trace-9: #57606a;
+  /* The Cross-validation folds: pastel fills (coral, sky, violet, lime,
+     aqua) stepped apart in OKLab lightness so every pair stays apart,
+     colour blind included, each drawn with a darker edge of its own hue
+     that holds the mark 3:1 on the chart's ground. */
+  --fold-0: #ff9689;
+  --fold-1: #05a0cf;
+  --fold-2: #be85f9;
+  --fold-3: #aadf5b;
+  --fold-4: #89f4ed;
+  --fold-edge-0: #dc5f52;
+  --fold-edge-1: #0593bf;
+  --fold-edge-2: #a36fd9;
+  --fold-edge-3: #67940c;
+  --fold-edge-4: #099791;
   /* The Build's green is the basis palette's first colour; the profile
      dialog's best marker is the trace palette's green. */
   --green: var(--basis-0);
   --trace-best: var(--trace-1);
+  /* The theme switch's track and its halftone dots. */
+  --switch-track: #fabd2f;
+  --switch-dots: rgba(21, 23, 28, 0.2);
   --font-sans: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --radius-sm: 4px;

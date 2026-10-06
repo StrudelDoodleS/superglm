@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 
 import numpy as np
@@ -114,6 +114,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
         selected_term: str = "curve",
         n_points: int = 200,
         collapsed_levels: tuple[str, tuple[str, ...]] | None = None,
+        prepare: Callable[[object], None] | None = None,
     ) -> Iterator[tuple[object, EditorSession]]:
         resources = ExitStack()
         opened.append(resources)
@@ -131,6 +132,8 @@ def open_editor_page(chromium_browser, editor_browser_model):
             resources.callback(widget.close)
             page = chromium_browser.new_page(viewport=viewport or {"width": 1180, "height": 720})
             resources.callback(page.close)
+            if prepare is not None:
+                prepare(page)
             page.goto(f"{widget.app_url}&test=1", wait_until="domcontentloaded")
             page.locator("#chart path.edited").first.wait_for()
             page.wait_for_function(

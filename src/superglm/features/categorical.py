@@ -14,6 +14,9 @@ from numpy.typing import NDArray
 
 from superglm.types import GroupInfo
 
+# The named unseen policies; any other `unseen=` text names a group.
+_UNSEEN_POLICIES = ("error", "base")
+
 
 def _validate_observed_categorical_levels(
     observed: set,
@@ -109,12 +112,26 @@ def _grouping_labels(x: NDArray) -> NDArray:
     return pd.Series(x).astype(str).to_numpy()
 
 
+def _refuse_uncovered_training_levels(observed: set, grouping) -> None:
+    """Raise, as a fit, for training labels that ``grouping`` does not cover."""
+    uncovered = observed - set(grouping.all_original_levels)
+    if uncovered:
+        raise ValueError(
+            f"Training data contains levels the grouping does not cover: "
+            f"{sorted(uncovered, key=str)}. Covered: "
+            f"{sorted(grouping.all_original_levels, key=str)}. Build the grouping from the "
+            f"full column, or pass the data to Structure.apply(model, X=data), which places "
+            f"them where the structure sends new levels."
+        )
+
+
 def _resolve_categorical_labels(
     x: NDArray,
     grouping,
     *,
     known_levels: set | None = None,
     context: str = "",
+    at_fit: bool = False,
 ) -> NDArray:
     """Resolve one categorical parent's raw labels into its fitted level domain.
 
@@ -123,6 +140,8 @@ def _resolve_categorical_labels(
     they may themselves be original labels with a different mapping.  Validate
     the raw domain first, apply the mapping exactly once, then (when fitted
     levels are supplied) certify that the collapsed level was present at fit.
+    ``at_fit`` reports a label the grouping does not cover as training data
+    rather than as a level unseen at fit.
     """
     x = np.asarray(x).ravel()
     if grouping is None:
@@ -133,8 +152,11 @@ def _resolve_categorical_labels(
     import pandas as pd
 
     labels = _grouping_labels(x)
+    observed = set(pd.unique(labels).tolist())
+    if at_fit:
+        _refuse_uncovered_training_levels(observed, grouping)
     _validate_observed_categorical_levels(
-        set(pd.unique(labels).tolist()),
+        observed,
         set(grouping.all_original_levels),
         context=context,
     )
@@ -163,19 +185,57 @@ def _codes_against(values: NDArray, levels: list) -> NDArray:
     return np.asarray(pd.Index(levels).get_indexer(np.asarray(values)), dtype=np.intp)
 
 
-def _warn_unseen_routed(x: NDArray, codes: NDArray) -> None:
-    """Warn once per call for rows routed to base by `unseen="base"`."""
+def _warn_unseen_routed(x: NDArray, codes: NDArray, *, group: Any = None) -> None:
+    """Warn once per call for rows with a negative code: routed to base, or to ``group``."""
     novel_rows = codes < 0
     if not novel_rows.any():
         return
     novel = sorted(set(np.asarray(x)[novel_rows].tolist()), key=str)
+    if group is None:
+        destination = "the base level (unseen='base')"
+        effect = "They contribute nothing to the linear predictor."
+    else:
+        destination = f"the group {group!r} (unseen={group!r})"
+        effect = "They take that group's effect."
     warnings.warn(
-        f"Routing rows with categorical levels unseen at fit to the base level "
-        f"(unseen='base'): {novel} over {int(novel_rows.sum())} row(s). They "
-        f"contribute nothing to the linear predictor.",
+        f"Routing rows with categorical levels unseen at fit to {destination}: "
+        f"{novel} over {int(novel_rows.sum())} row(s). {effect}",
         UserWarning,
         stacklevel=3,
     )
+
+
+def _route_unseen_to_group(x: NDArray, grouping, universe: list, group: Any) -> NDArray:
+    """Resolve raw labels through ``grouping``, sending each level unseen at fit to ``group``.
+
+    A raw label the grouping does not know, or one whose group has no place in
+    the fitted ``universe``, is unseen. Its rows take ``group``'s label, and so
+    that group's effect, and one warning names those levels and their row
+    count. This is the rule of scikit-learn's ``OneHotEncoder`` with
+    ``handle_unknown="warn"`` (``"infrequent_if_exist"`` plus the warning),
+    whose documentation says an unknown category "will map to the infrequent
+    category if it exists"; here the user names the group, and the fit has
+    checked that it exists.
+
+    ``group=None`` is ``unseen="base"`` under a grouping: the unseen rows keep
+    a label no fitted level matches, so they code as ``-1`` and take the base,
+    as ``handle_unknown="ignore"`` encodes an unknown category as all zeros.
+    """
+    import pandas as pd
+
+    raw = np.asarray(x).ravel()
+    resolved = (
+        pd.Series(_grouping_labels(raw), copy=False)
+        .map(grouping.original_to_group)
+        .to_numpy(dtype=object)
+    )
+    # A label the grouping lacks maps to NaN, which no fitted level matches.
+    codes = _codes_against(resolved, universe)
+    if (codes < 0).any():
+        _warn_unseen_routed(raw, codes, group=group)
+        if group is not None:
+            resolved[codes < 0] = group
+    return resolved
 
 
 class Categorical:
@@ -197,13 +257,19 @@ class Categorical:
         Collapse original levels into groups before fitting.
     levels : list | tuple | Series | ndarray | CategoricalDtype, optional
         The level universe to bind to (spec 2026-08-11, §3.1).  With a
-        ``grouping`` this declares the RAW, pre-collapse universe.  Levels with
+        ``grouping`` this declares the RAW, pre-collapse universe, and the
+        grouping must cover exactly these levels.  Levels with
         no training rows are pinned to base rather than dropped; training rows
         outside the universe are an error.
-    unseen : {'error', 'base'}
+    unseen : str
         Predict-time policy for levels outside the universe.  'error' (default)
-        is the historical behavior; 'base' routes those rows to the base level
-        with one warning per call.
+        is the historical behavior; 'base' routes those rows, raw labels a
+        ``grouping`` does not know included, to the base level with one warning
+        per call.  Any other value names a group of
+        ``grouping``: levels unseen at fit, including raw labels the grouping
+        does not know, then take that group's effect, again with one warning
+        per call.  The fit checks that the group exists and has a place in the
+        fitted universe.
     """
 
     # Class-level defaults for the level-universe state. Unpickling restores an
@@ -226,6 +292,9 @@ class Categorical:
     _pinned_levels: tuple | list = ()
     _base_fallback: tuple | None = None
     _pinned_base: Any | None = None
+    # Whether `base=` names a level although it reads "first" or "most_exposed".
+    # Only a rebuild sets it, for a reference a fit resolved or a user chose.
+    _base_is_level: bool = False
 
     def __init__(
         self,
@@ -237,8 +306,14 @@ class Categorical:
     ):
         from superglm.features._level_source import resolve_level_source
 
-        if unseen not in ("error", "base"):
-            raise ValueError(f"unseen must be 'error' or 'base', got {unseen!r}")
+        # A group label can only be checked against the grouping at fit
+        # (`_require_unseen_group`): an editor rebuild may hand over a grouping
+        # that no longer holds the group, and that is a refit's refusal.
+        if not isinstance(unseen, str):
+            raise ValueError(
+                f"unseen must be 'error', 'base' or the label of a group of grouping=, "
+                f"got {unseen!r}"
+            )
         self.base = base
         self.unseen = unseen
         self._grouping = grouping
@@ -258,12 +333,24 @@ class Categorical:
                     f"{sorted(uncovered, key=str)}. Build the grouping from the "
                     f"full column so every declared level maps somewhere."
                 )
+            # And the other way: a label the grouping maps but levels= leaves
+            # out would be fitted and scored through its group, though the
+            # declaration says it is not a level.
+            declared = {str(lev) for lev in self._declared_levels}
+            undeclared = [raw for raw in grouping.original_to_group if raw not in declared]
+            if undeclared:
+                raise ValueError(
+                    f"grouping= covers labels that levels= leaves out: "
+                    f"{sorted(undeclared, key=str)}. Add them to levels=, or build the "
+                    f"grouping from the declared levels only."
+                )
         self._levels: list = []
         self._base_level: str = ""
         self._non_base: list = []
         self._pinned_levels: list = []
         self._base_fallback: tuple | None = None
         self._pinned_base: Any | None = None
+        self._base_is_level: bool = False
 
     def __repr__(self) -> str:
         n = len(self._levels)
@@ -286,7 +373,7 @@ class Categorical:
         if self._declared_levels is None and binding.levels is not None:
             self._declared_levels = list(binding.levels)
             self._level_source = "full-frame"
-        if binding.base is not None and self.base == "most_exposed":
+        if binding.base is not None and self.base == "most_exposed" and not self._base_is_level:
             self._pinned_base = binding.base
 
     def resolve_binding(self, values: NDArray, sample_weight=None):
@@ -355,7 +442,7 @@ class Categorical:
         """Build sparse one-hot design columns, choosing the base level from *x*."""
         import pandas as pd
 
-        x = _resolve_categorical_labels(x, self._grouping)
+        x = _resolve_categorical_labels(x, self._grouping, at_fit=True)
 
         universe = self._working_universe()
         if universe is None:
@@ -385,6 +472,7 @@ class Categorical:
 
         if len(self._levels) < 2:
             raise ValueError(f"Categorical needs >= 2 levels, got {len(self._levels)}")
+        self._require_unseen_group()
 
         # Effective observation: rows when unweighted, total weight otherwise.
         # A level carrying only zero-weight rows contributes nothing to the fit
@@ -434,14 +522,43 @@ class Categorical:
 
         return GroupInfo(columns=None, n_cols=n_levels, cat_codes=cat_codes)
 
+    def _require_unseen_group(self) -> None:
+        """Refuse an ``unseen`` group this fit cannot route new levels to."""
+        if self.unseen in _UNSEEN_POLICIES:
+            return
+        if self._grouping is None:
+            raise ValueError(
+                f"unseen={self.unseen!r} names a group, but this Categorical has no "
+                f"grouping=. Group its levels with grouping=, or use unseen='error' or "
+                f"unseen='base'."
+            )
+        if self.unseen not in self._grouping.grouped_levels:
+            raise ValueError(
+                f"unseen={self.unseen!r} is not a group of this Categorical's grouping, "
+                f"whose groups are {list(self._grouping.grouped_levels)}. Name one of them, "
+                f"or use unseen='error' or unseen='base'."
+            )
+        if self.unseen not in self._levels:
+            raise ValueError(
+                f"unseen={self.unseen!r} names a group with no level in this fit's universe "
+                f"{self._levels}, so new levels would have no effect to take. Declare its "
+                f"levels with levels=, or route new levels to another group."
+            )
+
     def _resolve_base(
         self,
         effective: NDArray[np.floating],
         observed: NDArray[np.bool_],
         sample_weight: NDArray[np.floating] | None,
     ) -> Any:
-        """Pick the reference level, falling back when the request is empty."""
+        """Pick the reference level, falling back when the request is empty.
+
+        A binding's pin and the level a prior build resolved name a level, even
+        one named "first" or "most_exposed"; only ``base=`` names a policy, and
+        not when a rebuild marked it as a level (``_base_is_level``).
+        """
         self._base_fallback = None
+        policy = None
         if self._pinned_base is not None:
             requested = self._pinned_base
         elif self._base_level and self._base_level in self._levels:
@@ -450,10 +567,12 @@ class Categorical:
             requested = self._base_level
         else:
             requested = self.base
+            if not self._base_is_level and requested in ("most_exposed", "first"):
+                policy = requested
 
-        if requested == "most_exposed":
+        if policy == "most_exposed":
             base_level = self._most_exposed(effective, observed, sample_weight)
-        elif requested == "first":
+        elif policy == "first":
             # Universe order, so a declared universe means first-DECLARED; the
             # inferred universe is sorted, so it still means alphabetical there.
             base_level = self._levels[0]
@@ -492,6 +611,11 @@ class Categorical:
 
     def _resolve_predict_labels(self, x: NDArray) -> NDArray:
         """Resolve predict-time labels under the term's unseen policy."""
+        if self.unseen not in _UNSEEN_POLICIES:
+            return _route_unseen_to_group(x, self._grouping, self._levels, self.unseen)
+        if self.unseen == "base" and self._grouping is not None:
+            # A raw label the grouping does not know is unseen too.
+            return _route_unseen_to_group(x, self._grouping, self._levels, None)
         x = _resolve_categorical_labels(
             x,
             self._grouping,
@@ -506,14 +630,16 @@ class Categorical:
     def _predict_codes(self, x: NDArray) -> NDArray:
         """Codes against the fitted universe; -1 for levels the policy admits."""
         codes = _codes_against(x, self._levels)
-        if self.unseen != "error":
+        if self.unseen == "base" and self._grouping is None:
+            # A group policy, or base under a grouping, has already routed and
+            # reported its rows by their raw labels.
             _warn_unseen_routed(x, codes)
         return codes
 
     def transform(self, x: NDArray) -> NDArray:
         """One-hot encode using levels learned during build()."""
         x = self._resolve_predict_labels(x)
-        if self.unseen != "error":
+        if self.unseen == "base" and self._grouping is None:
             # Equality masks already give a novel level an all-zero row, which
             # IS base routing; the codes are computed only to report it.
             self._predict_codes(x)

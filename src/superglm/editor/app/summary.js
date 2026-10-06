@@ -1,13 +1,23 @@
 import { requestJSON } from "./api.js";
-import { escapeHTML, fmt } from "./format.js";
+import { escapeHTML, fmt, fmtEdf } from "./format.js";
 import { SHAPE_NAMES } from "./shapes.js";
+import {
+  DEFAULT_SUMMARY_VIEW,
+  highlightMatches,
+  highlightRowName,
+  summaryCountText,
+  summaryViewModel
+} from "./views/summary_view.js";
 
 /** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
 /** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
 /** @typedef {import('./api/contracts.js').ShapeRangeRequest} ShapeRangeRequest */
+/** @typedef {import('./api/contracts.js').StageRequest} StageRequest */
 
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
 const summaryMarkupByFrame = new WeakMap();
+// The payload each frame shows, so a change of view can redraw it unfetched.
+const summaryPayloadByFrame = new WeakMap();
 
 export async function refreshSummary(nodes, { request = requestJSON } = {}) {
   const { summarySource, summaryStatus, summaryFrame } = nodes;
@@ -167,47 +177,83 @@ function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-export function collapseTransition(term) {
-  return {
-    name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term, method: "auto" }
-  };
-}
-
-export function ungroupTransition(term) {
-  return {
-    name: "ungroup levels",
-    path: "/ungroup_levels",
-    payload: { term, method: "auto" }
-  };
-}
-
 /**
- * @param {string} term @param {string} level
- * @returns {{name:string, path:string, payload:SetReferenceRequest}}
+ * One structural change, staged: Python builds it and keeps it waiting,
+ * drawn on the chart, until Refit applies every waiting change in one fit.
+ * ``name`` is what the busy overlay and an alert call it.
+ * @param {StageRequest['operation']} operation @param {string} term
+ * @param {Record<string, unknown>} params @param {string} name
+ * @returns {{name:string, path:string, payload:StageRequest}}
  */
-export function setReferenceTransition(term, level) {
-  return {
-    name: "set reference and refit",
-    path: "/set_reference",
-    payload: { term, level, method: "auto" }
-  };
+function stageTransition(operation, term, params, name) {
+  return { name, path: "/stage", payload: { operation, term, params } };
+}
+
+/** @param {string} term @param {readonly string[]} levels the selected levels, by label */
+export function stageCollapse(term, levels) {
+  return stageTransition("collapse", term, { levels: [...levels] }, "collapse levels");
+}
+
+/** @param {string} term @param {readonly string[]} levels the selected levels, by label */
+export function stageUngroup(term, levels) {
+  return stageTransition("ungroup", term, { levels: [...levels] }, "ungroup levels");
+}
+
+/** @param {string} term @param {string} level a displayed level, which may be a group label */
+export function stageReference(term, level) {
+  return stageTransition("set_reference", term, { level }, "set reference");
 }
 
 /**
- * Named for its shape, which the busy overlay shows. ``join`` is how the
- * range meets the free curve: "tangent" (the default) or "kink" (Corner).
+ * Named for its shape. ``join`` is how the range meets the free curve:
+ * "tangent" (the default) or "kink" (Corner).
  * @param {string} term @param {number|string} lo @param {number|string} hi @param {number} degree
  * @param {"tangent"|"kink"} [join]
- * @returns {{name:string, path:string, payload:ShapeRangeRequest}}
  */
-export function shapeRangeTransition(term, lo, hi, degree, join = "tangent") {
+export function stageShapeRange(term, lo, hi, degree, join = "tangent") {
+  return stageTransition(
+    "shape", term, { lo, hi, degree, join }, `make a ${SHAPE_NAMES[degree]} range`
+  );
+}
+
+/**
+ * Refit: every waiting change in one fit, and one step on the timeline.
+ * @param {number} count how many changes wait, for the busy overlay
+ * @returns {{name:string, path:string, payload:EmptyStructuralRequest}}
+ */
+export function refitPendingTransition(count) {
   return {
-    name: `make a ${SHAPE_NAMES[degree]} range`,
-    path: "/shape_range",
-    payload: { term, lo, hi, degree, join, method: "auto" }
+    name: `refit ${count} waiting ${count === 1 ? "change" : "changes"}`,
+    path: "/refit_pending",
+    payload: {}
   };
+}
+
+/**
+ * The same change refitted at once, through its operation's own route, as
+ * Settings' "Refit after every structural change" asks. Python stages it and
+ * refits every waiting change in one fit: one step, which one Undo takes
+ * back, refused with the operation's own sentences. Collapse and ungroup act
+ * on the selection Python holds, the one their levels were read from.
+ * @param {{name:string, payload:StageRequest}} staged a descriptor from stageCollapse,
+ *   stageUngroup, stageReference or stageShapeRange
+ * @returns {{name:string, path:string,
+ *   payload:{term:string, method:string}|SetReferenceRequest|ShapeRangeRequest}}
+ */
+export function refitAtOnceTransition({ name, payload: { operation, term, params } }) {
+  const method = "auto";
+  switch (operation) {
+    case "collapse":
+      return { name, path: "/collapse_levels", payload: { term, method } };
+    case "ungroup":
+      return { name, path: "/ungroup_levels", payload: { term, method } };
+    case "set_reference":
+      return { name, path: "/set_reference", payload: { term, level: params.level, method } };
+    default: {
+      const { lo, hi, degree, join } = params;
+      return { name, path: "/shape_range", payload: { term, lo, hi, degree, join, method } };
+    }
+  }
 }
 
 /** @returns {{name:string, path:string, payload:EmptyStructuralRequest}} */
@@ -221,6 +267,7 @@ export function revertTransition() {
 
 export function renderSummary(payload, nodes) {
   const { summaryStatus, summaryNote, summaryFrame } = nodes;
+  summaryPayloadByFrame.set(summaryFrame, payload);
   updateDistributionProfileActions(payload, nodes);
   if (!payload.available) {
     summaryStatus.textContent = payload.label || "Summary";
@@ -229,29 +276,150 @@ export function renderSummary(payload, nodes) {
       summaryFrame,
       `<div class="summary-empty">${escapeHTML(payload.error || "Summary unavailable.")}</div>`
     );
+    renderSearchCount(nodes, "");
+    renderSummaryHeader(payload, nodes, "");
     return;
   }
   summaryStatus.textContent = payload.label || "Summary";
   summaryNote.textContent = payload.note || "";
   // Prefer the typed compact payload for the immediate panel. The raw HTML is
-  // still included inside the disclosure for full notebook-style detail.
-  updateSummaryMarkup(
+  // still included inside the disclosure for full notebook-style detail. The
+  // inspector's search is part of the markup, so every render reapplies it.
+  const view = summaryViewOf(nodes);
+  const viewModel = payload.compact ? compactViewModel(payload.compact, view) : null;
+  const written = updateSummaryMarkup(
     summaryFrame,
-    payload.compact ? renderCompactSummary(payload) : payload.html || ""
+    viewModel ? renderCompactSummary(payload, viewModel, view.query) : payload.html || ""
   );
+  renderSearchCount(nodes, viewModel ? summaryCountText(viewModel, view.query) : "");
+  renderSummaryHeader(payload, nodes, view.query);
+  if (written && !view.query.trim()) scrollToCurrentSection(summaryFrame);
 }
 
+/**
+ * Redraw the summary on show for the inspector's current view: search,
+ * filter and open sections. With the compact table in the DOM only its body is
+ * rewritten, so an open "Full summary" keeps its frame; otherwise the last
+ * payload is rendered again. `follow` scrolls the chart's term into view.
+ */
+export function applySummaryView(nodes, { follow = false } = {}) {
+  const { summaryFrame } = nodes;
+  const payload = summaryPayloadByFrame.get(summaryFrame);
+  const shown = summaryMarkupByFrame.get(summaryFrame);
+  // Only a frame still holding its last render is redrawn: one emptied while
+  // the other level display loads waits for that payload.
+  if (!payload || !shown || shown.firstElementChild !== summaryFrame.firstElementChild) return;
+  const body = payload.available && payload.compact && typeof summaryFrame.querySelector === "function"
+    ? summaryFrame.querySelector(".summary-table tbody")
+    : null;
+  if (!body) {
+    renderSummary(payload, nodes);
+    return;
+  }
+  const view = summaryViewOf(nodes);
+  const viewModel = compactViewModel(payload.compact, view);
+  body.innerHTML = renderSummaryBody(
+    compactRows(payload.compact),
+    viewModel,
+    payload.compact.has_level_groups === true,
+    view.query
+  );
+  renderSearchCount(nodes, summaryCountText(viewModel, view.query));
+  renderSummaryHeader(payload, nodes, view.query);
+  // The frame now holds what a full render for this view writes, so a later
+  // render of the same payload and view leaves the DOM alone.
+  summaryMarkupByFrame.set(summaryFrame, {
+    markup: renderCompactSummary(payload, viewModel, view.query),
+    firstElementChild: summaryFrame.firstElementChild
+  });
+  if (follow) scrollToCurrentSection(summaryFrame);
+}
+
+// Follow the chart: bring its term's line into view in the summary frame.
+// In a short window the frame runs past the window's bottom, where
+// scrollIntoView would align the line to the frame's own edge and leave it
+// out of sight unless the page scrolled too. So the frame scrolls the line to
+// the nearest edge of the part of it the window shows, and the page stays put.
+// A webfont that arrives later moves the rows, so the line is aligned again
+// once the fonts have loaded.
+function scrollToCurrentSection(summaryFrame) {
+  if (typeof summaryFrame.querySelector !== "function") return;
+  const line = summaryFrame.querySelector('tr.summary-section[data-current="true"]:not([hidden])');
+  if (!line) return;
+  const frame = summaryFrame.getBoundingClientRect();
+  const top = Math.max(frame.top + summaryFrame.clientTop, 0);
+  const bottom = Math.min(
+    frame.top + summaryFrame.clientTop + summaryFrame.clientHeight,
+    window.innerHeight
+  );
+  const box = line.getBoundingClientRect();
+  // Scroll offsets are whole pixels: round so that the line ends inside.
+  if (box.top < top || box.height > bottom - top) {
+    summaryFrame.scrollTop += Math.floor(box.top - top);
+  } else if (box.bottom > bottom) {
+    summaryFrame.scrollTop += Math.ceil(box.bottom - bottom);
+  }
+  if (document.fonts?.status === "loading") {
+    document.fonts.ready.then(() => scrollToCurrentSection(summaryFrame));
+  }
+}
+
+// Family, link and method as chips and four figures as tiles, beside Refit
+// offsets. The header steps aside while a search narrows the table.
+function renderSummaryHeader(payload, nodes, query) {
+  const { summaryHeader, summaryModelChips, summaryTiles } = nodes;
+  const model = payload.available && payload.compact ? payload.compact.model || {} : null;
+  if (summaryModelChips) updateSummaryMarkup(summaryModelChips, model ? renderModelChips(model) : "");
+  if (summaryTiles) updateSummaryMarkup(summaryTiles, model ? renderModelTiles(model) : "");
+  if (summaryHeader) summaryHeader.hidden = query.trim() !== "";
+}
+
+function renderModelChips(model) {
+  const link = model.link ? `${model.link} link` : "";
+  return [model.family, link, model.method]
+    .filter((value) => value !== null && value !== undefined && value !== "")
+    .map((value) => `<span class="summary-chip">${escapeHTML(value)}</span>`)
+    .join("");
+}
+
+function renderModelTiles(model) {
+  return [
+    ["Deviance", model.deviance],
+    ["AIC", model.aic],
+    ["BIC", model.bic],
+    ["Total EDF", model.effective_df]
+  ].map(([label, value]) => `<div class="summary-tile"><span>${escapeHTML(label)}</span><strong title="${escapeHTML(formatFullNumber(value))}">${escapeHTML(formatSummaryValue(value))}</strong></div>`).join("");
+}
+
+function summaryViewOf(nodes) {
+  return typeof nodes.summaryView === "function" ? nodes.summaryView() : DEFAULT_SUMMARY_VIEW;
+}
+
+function compactRows(compact) {
+  return Array.isArray(compact.rows) ? compact.rows : [];
+}
+
+function compactViewModel(compact, view) {
+  return summaryViewModel(compactRows(compact), view);
+}
+
+function renderSearchCount(nodes, text) {
+  if (nodes.summarySearchCount) nodes.summarySearchCount.textContent = text;
+}
+
+// Whether the markup was written; unchanged markup leaves the DOM alone.
 function updateSummaryMarkup(summaryFrame, markup) {
   const cached = summaryMarkupByFrame.get(summaryFrame);
   if (
     cached?.markup === markup &&
     cached.firstElementChild === summaryFrame.firstElementChild
-  ) return;
+  ) return false;
   summaryFrame.innerHTML = markup;
   summaryMarkupByFrame.set(summaryFrame, {
     markup,
     firstElementChild: summaryFrame.firstElementChild
   });
+  return true;
 }
 
 export function updateDistributionProfileActions(payload, nodes) {
@@ -492,22 +660,14 @@ function formatProfileNumber(value) {
   return number.toPrecision(4);
 }
 
-function renderCompactSummary(payload) {
+function renderCompactSummary(payload, viewModel, query) {
   const compact = payload.compact || {};
   const model = compact.model || {};
-  const rows = Array.isArray(compact.rows) ? compact.rows : [];
+  const rows = compactRows(compact);
   const hasLevelGroups = compact.has_level_groups === true;
-  const columnCount = hasLevelGroups ? 8 : 7;
-  const facts = [
-    ["Family", model.family],
-    ["Link", model.link],
-    ["Method", model.method],
-    ["Total EDF", model.effective_df],
-    ["Deviance", model.deviance],
-    ["AIC", model.aic],
-    ["BIC", model.bic],
-    ["Log lik", model.log_likelihood]
-  ];
+  // Family, link, method and the four headline figures are the header's
+  // (renderSummaryHeader); a profiled distribution parameter stays here.
+  const facts = [];
   if (model.tweedie_p !== null && model.tweedie_p !== undefined) {
     facts.push(["Tweedie p", model.tweedie_p]);
     const ci = Array.isArray(model.tweedie_p_ci) ? model.tweedie_p_ci : null;
@@ -519,9 +679,9 @@ function renderCompactSummary(payload) {
   if (model.nb_theta !== null && model.nb_theta !== undefined) facts.push(["NB2 theta", model.nb_theta]);
   return `
     <div class="compact-summary">
-      <div class="summary-facts">
+      ${facts.length ? `<div class="summary-facts">
         ${facts.map(([label, value]) => renderSummaryFact(label, value)).join("")}
-      </div>
+      </div>` : ""}
       <table class="summary-table${hasLevelGroups ? " has-level-groups" : ""}" aria-label="Compact coefficient summary">
         <thead>
           <tr>
@@ -536,7 +696,7 @@ function renderCompactSummary(payload) {
           </tr>
         </thead>
         <tbody>
-          ${renderSummaryRows(rows, hasLevelGroups, columnCount)}
+          ${renderSummaryBody(rows, viewModel, hasLevelGroups, query)}
         </tbody>
       </table>
       ${renderLevelGroupLegends(compact)}
@@ -563,25 +723,48 @@ function renderRawSummaryFrame(html) {
   `;
 }
 
-function renderSummaryRows(rows, hasLevelGroups, columnCount) {
-  let previousGroup = "";
-  return rows.map((row) => {
-    const group = summaryRowGroup(row);
-    const showGroup = group && group !== previousGroup && group !== "Intercept";
-    previousGroup = group || previousGroup;
-    const groupRow = showGroup
-      ? `<tr class="summary-group-row"><td colspan="${columnCount}">${escapeHTML(group)}</td></tr>`
-      : "";
-    return `${groupRow}${renderSummaryRow(row, hasLevelGroups)}`;
+// One header row per term, then its rows. Rows and headers outside the
+// search stay in the markup, hidden, each tagged with its term.
+function renderSummaryBody(rows, viewModel, hasLevelGroups, query) {
+  const columnCount = hasLevelGroups ? 8 : 7;
+  const empty = viewModel.empty
+    ? `<tr class="summary-empty-row"><td colspan="${columnCount}">No terms match.</td></tr>`
+    : "";
+  return empty + viewModel.sections.map((section) => {
+    const groupRow = section.header ? renderSectionHeader(section, columnCount, query) : "";
+    const sectionRows = section.rows.map((entry) => renderSummaryRow(
+      rows[entry.index],
+      hasLevelGroups,
+      section.term,
+      query,
+      entry.hidden
+    ));
+    return groupRow + sectionRows.join("");
   }).join("");
 }
 
-function summaryRowGroup(row) {
-  const group = row && row.group ? String(row.group) : "";
-  if (group) return group;
-  const name = row && row.name ? String(row.name) : "";
-  const bracket = name.indexOf("[");
-  return bracket > 0 ? name.slice(0, bracket) : name;
+// A term's line: what it is and how it fits, folded or open. Its button opens
+// or closes the rows under it.
+function renderSectionHeader(section, columnCount, query) {
+  const term = escapeHTML(section.term);
+  const kind = section.kind
+    ? `<span class="summary-section-kind">${escapeHTML(section.kind)}</span>`
+    : "";
+  const waiting = section.waiting > 0
+    ? `<span class="summary-waiting">${section.waiting} waiting</span>`
+    : "";
+  const edf = section.edf === null
+    ? ""
+    : `<span class="summary-section-edf">${escapeHTML(fmtEdf(section.edf))}</span>`;
+  return `<tr class="summary-group-row summary-section" data-term="${term}" data-current="${section.current}"${section.hidden ? " hidden" : ""}><td colspan="${columnCount}"><button type="button" class="summary-section-toggle" data-summary-section="${term}" aria-expanded="${section.open}"><svg class="summary-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"></path></svg><span class="summary-section-name">${highlightMatches(section.label, query)}</span>${kind}${waiting}<span class="summary-section-fill"></span>${edf}${renderPChip(section.chip)}</button></td></tr>`;
+}
+
+// The p-value of a term's whole-term test on its line. A categorical has
+// none, so its line carries no chip.
+function renderPChip(chip) {
+  if (!chip) return "";
+  const text = `${formatP(chip.p)}${chip.sigCode ? ` ${chip.sigCode}` : ""}`;
+  return `<span class="summary-p-chip ${safeSigClass(chip.sigClass)}" title="p-value of the whole-term test">${escapeHTML(text)}</span>`;
 }
 
 function renderSummaryFact(label, value) {
@@ -598,17 +781,17 @@ function renderSummaryFact(label, value) {
 // added here, instead of silently rendering as a spline or as nothing at all.
 const GROUP_ROW_KINDS = new Set(["spline", "piecewise"]);
 
-function renderSummaryRow(row, hasLevelGroups) {
+function renderSummaryRow(row, hasLevelGroups, term, query, hidden) {
   // SE cell color is data-driven from Python's significance class. The browser
   // never infers significance from display text.
   const sigClass = safeSigClass(row.sig_class);
   const levelGroupCell = hasLevelGroups
-    ? `<td class="summary-level-group">${escapeHTML(row.level_group || "")}</td>`
+    ? `<td class="summary-level-group">${highlightMatches(String(row.level_group || ""), query)}</td>`
     : "";
   return `
-    <tr class="summary-row ${sigClass}">
+    <tr class="summary-row ${sigClass}" data-term="${escapeHTML(term)}"${hidden ? " hidden" : ""}>
       <td class="summary-term">
-        <span>${escapeHTML(row.name || "")}</span>
+        <span>${highlightRowName(String(row.name || ""), term, query)}</span>
         ${GROUP_ROW_KINDS.has(row.kind) ? `<em>${escapeHTML(row.kind)}</em>` : ""}
       </td>
       ${levelGroupCell}

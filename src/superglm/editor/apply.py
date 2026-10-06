@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -55,17 +56,85 @@ _EDITOR_EDIT_ONLY_MEMO_STATE = (
 )
 
 
-def _copy_model_for_editor_edits(model, *, share_transient_state: bool = False):
-    """Copy a fitted model without duplicating its row-scale fit inputs."""
+# The fit's own outputs. A copy whose fit is unchanged reads their memory
+# through read-only views, the cached ones only once computed: publication
+# freezes only what the fit computed, and the inference state and coefficient
+# covariance computed later are writeable on the model itself.
+_EDITOR_SHARED_FIT_OUTPUTS = (
+    "_fit_mu",
+    "_fit_null_mu",
+    "_fit_stats",
+    "_fit_inference_info",
+    "_coef_covariance",
+)
+
+
+def _copy_model_for_editor_edits(
+    model, *, share_transient_state: bool = False, share_fit_outputs: bool = False
+):
+    """Copy a fitted model without duplicating its row-scale fit inputs.
+
+    ``share_fit_outputs`` is for a copy that keeps the fit as it is (a New
+    levels choice): it reads the fit's outputs' memory too, through read-only
+    views, and starts without the metrics cache, which is bound to its model
+    and is rebuilt when asked.
+    """
     shared_names: tuple[str, ...] = _EDITOR_SHARED_ROW_INPUTS
     if share_transient_state:
         shared_names += _EDITOR_EDIT_ONLY_MEMO_STATE
     shared = {name: getattr(model, name) for name in shared_names if hasattr(model, name)}
     memo = {id(value): value for value in shared.values()}
+    if share_fit_outputs:
+        # Read from the instance: getattr would compute a cached one not yet computed.
+        computed = vars(model)
+        _share_arrays_read_only(
+            [computed[name] for name in _EDITOR_SHARED_FIT_OUTPUTS if name in computed], memo
+        )
+        if getattr(model, "_fit_metrics_cache", None) is not None:
+            memo[id(model._fit_metrics_cache)] = None
     edited_model = copy.deepcopy(model, memo)
     for name, value in shared.items():
         setattr(edited_model, name, value)
     return edited_model
+
+
+def _share_arrays_read_only(value, memo: dict) -> None:
+    """Enter each array reachable from ``value`` in a deepcopy ``memo`` as a read-only view.
+
+    ``copy.deepcopy(..., memo)`` then gives the copy its own dicts, lists and
+    objects (a structured fit's covariance accessors and their factor among
+    them) over the same array memory, which the copy cannot write. An array
+    already read-only is shared as it is, an object array is copied with its
+    items, and an object the memo already shares is left as it is.
+    """
+    stack, seen = [value], set()
+    while stack:
+        item = stack.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, np.ndarray):
+            if item.dtype != object and item.flags.writeable:
+                memo[id(item)] = view = item.view()
+                view.flags.writeable = False
+            elif item.dtype != object:
+                memo[id(item)] = item
+            continue
+        if id(item) in memo or isinstance(item, type | ModuleType):
+            continue
+        if isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, list | tuple | set | frozenset):
+            stack.extend(item)
+        else:
+            state = getattr(item, "__dict__", None)
+            if isinstance(state, dict):
+                stack.extend(state.values())
+            for klass in type(item).__mro__:
+                slots = klass.__dict__.get("__slots__", ())
+                for name in (slots,) if isinstance(slots, str) else slots:
+                    stack.append(getattr(item, name, None))
 
 
 def apply_edits_to_model_copy(model, terms: dict[str, EditableTerm]):
@@ -81,8 +150,16 @@ def apply_edits_to_model_copy_with_data(
     y=None,
     sample_weight=None,
     offset=None,
+    keep_pinned: bool = False,
 ):
-    """Return a deep-copied model and refresh scalar fit stats if data is available."""
+    """Return a deep-copied model and refresh scalar fit stats if data is available.
+
+    A level with no effective training rows is pinned and has no coefficient
+    to write, so editing its term is refused. ``keep_pinned=True`` is for
+    carrying edits onto another fit (``carry.model_with_edited_curves``),
+    where such a level is one that fit never saw: it keeps its pin and the
+    rest of the term is edited.
+    """
     changed_terms = [
         term
         for term in terms.values()
@@ -120,7 +197,7 @@ def apply_edits_to_model_copy_with_data(
     edited_model = revision.model
     beta_before = np.array(edited_model._result.beta, dtype=np.float64)
     for term in changed_terms:
-        _apply_term_edit(edited_model, term)
+        _apply_term_edit(edited_model, term, keep_pinned=keep_pinned)
     if changed_terms:
         publish_revised_coefficients(edited_model, beta_before)
     edited_terms = [term.name for term in changed_terms]
@@ -159,7 +236,7 @@ def materialize_edit_request(request):
     )
 
 
-def _apply_term_edit(model, term: EditableTerm) -> None:
+def _apply_term_edit(model, term: EditableTerm, *, keep_pinned: bool = False) -> None:
     spec = model._specs[term.name]
     groups = _feature_groups(model, term.name)
 
@@ -175,11 +252,11 @@ def _apply_term_edit(model, term: EditableTerm) -> None:
                 f"Editable term {term.name!r} is a step-mode OrderedCategorical. "
                 f"{_STEP_MODE_REMOVED_MESSAGE}"
             )
-        _apply_ordered_spline_term(model, spec, groups, term)
+        _apply_ordered_spline_term(model, spec, groups, term, keep_pinned=keep_pinned)
         return
 
     if isinstance(spec, Categorical):
-        _apply_categorical_term(model, spec, groups, term)
+        _apply_categorical_term(model, spec, groups, term, keep_pinned=keep_pinned)
         return
 
     if isinstance(spec, Piecewise):
@@ -265,6 +342,8 @@ def _apply_ordered_spline_term(
     spec: OrderedCategorical,
     groups: list[GroupSlice],
     term: EditableTerm,
+    *,
+    keep_pinned: bool = False,
 ) -> None:
     """Project ordered levels onto the spline and assign special levels exactly.
 
@@ -314,19 +393,25 @@ def _apply_ordered_spline_term(
     # namespace as `specials`, for the float-domain reason above.
     pinned_display = {str(level) for level in getattr(spec, "_pinned_specials", ())}
     pinned = [level for level in specials if level in pinned_display]
-    if pinned:
+    if pinned and not keep_pinned:
         raise EditorValueError(
             f"Editable term {term.name!r} cannot be edited: special level(s) {pinned} "
             "had no effective training rows in this fit and are pinned to zero "
             "contribution, so they have no fitted coefficient to edit. Refit on data "
             "carrying those level(s) with weight, or drop them from specials=."
         )
+    # Kept pinned (a carry onto a fit that never saw them): a pinned special
+    # is a row of neither block, since it has no column and no smooth position.
+    specials = [level for level in specials if level not in pinned]
     missing = [level for level in specials if level not in labels]
     if missing:
         raise ValueError(f"Editable term {term.name!r} has no row for special level(s) {missing}.")
     row_of = {label: index for index, label in enumerate(labels)}
     special_rows = np.array([row_of[level] for level in specials], dtype=np.intp)
-    smooth_rows = np.setdiff1d(np.arange(len(labels), dtype=np.intp), special_rows)
+    pinned_rows = np.array([row_of[level] for level in pinned if level in row_of], dtype=np.intp)
+    smooth_rows = np.setdiff1d(
+        np.arange(len(labels), dtype=np.intp), np.concatenate([special_rows, pinned_rows])
+    )
     n_spline = spec._split_beta(np.zeros(B.shape[1], dtype=np.float64))[0].size
 
     intercept_delta, spline_beta = _solve_with_intercept(
@@ -344,6 +429,8 @@ def _apply_categorical_term(
     spec: Categorical,
     groups: list[GroupSlice],
     term: EditableTerm,
+    *,
+    keep_pinned: bool = False,
 ) -> None:
     if term.levels is None:
         raise NotImplementedError(f"Term {term.name!r} has no editable levels.")
@@ -357,8 +444,10 @@ def _apply_categorical_term(
     # SPECIALS guard does: the term is patched as one block, and half-applying
     # an edit is worse than declining it. Read through `getattr` so a spec
     # pickled before pinning existed pins nothing.
+    # A carry onto another fit keeps the pin (``keep_pinned``): that fit never
+    # saw the level, which predicts as the base level there.
     pinned = list(getattr(spec, "_pinned_levels", ()))
-    if pinned:
+    if pinned and not keep_pinned:
         raise EditorValueError(
             f"Editable term {term.name!r} cannot be edited: level(s) "
             f"{sorted(pinned, key=str)} had no effective training rows in this fit and "

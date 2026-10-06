@@ -55,6 +55,7 @@ const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === "function"
  * @property {number} titleY
  * @property {number} titleHeight
  * @property {number} maxLabelHeight
+ * @property {number} labelsBottom where the tick labels end, above the title row
  * @property {number} labelBudget
  */
 
@@ -243,6 +244,7 @@ export function planCategoricalAxis({
     titleY,
     titleHeight,
     maxLabelHeight,
+    labelsBottom: axisY + TICK_OFFSET + maxLabelHeight,
     labelBudget,
   };
 }

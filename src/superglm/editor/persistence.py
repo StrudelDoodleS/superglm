@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -12,6 +14,7 @@ import numpy as np
 
 from superglm._frame import as_eager_frame
 from superglm.editor.apply import materialize_edit_request
+from superglm.editor.errors import EditorValueError
 from superglm.editor.io import (
     jsonable,
     record_from_payload,
@@ -172,7 +175,10 @@ def save_model(session, path: str | Path, *, model_override=None) -> Path:
     target = Path(path)
     if not target.suffix:
         target = target.with_suffix(".joblib")
-    model = edited_model_for_export(session, model_override=model_override)
+    model = with_editor_history(
+        edited_model_for_export(session, model_override=model_override),
+        session.editor_history_records(),
+    )
     data, _ = serialize_validated_model(
         model,
         dataset=default_metrics_dataset(session),
@@ -192,8 +198,53 @@ def edited_model_for_export(session, *, model_override=None):
     return materialize_edit_request(request)
 
 
+def with_editor_history(model, records: list[dict[str, Any]]):
+    """A shallow copy of ``model`` carrying the editor's timeline as ``_editor_history`` (D11).
+
+    The copy shares every fitted attribute and owns only the new one, so the
+    in-force or cached model the editor holds is never changed.
+    """
+    exported = copy.copy(model)
+    exported._editor_history = [dict(record) for record in records]
+    return exported
+
+
+def export_structure(session, path: str | Path | None = None) -> str:
+    """The in-force model's structure file as JSON text, written to ``path`` too when given.
+
+    The in-force model is the last Refit, so changes still waiting are not in
+    it (spec addendum S2), and the file holds no coefficients and no hand
+    edits. The training rows, when the session has them, give a grouped
+    term's levels their native types (``Structure.from_model``).
+    """
+    from superglm.editor.evaluation import training_export_dataset
+    from superglm.structure import Structure, StructureError
+
+    dataset = training_export_dataset(session)
+    try:
+        structure = Structure.from_model(session.model, X=None if dataset is None else dataset.X)
+    except StructureError as exc:
+        # Each refusal is one fixed sentence naming the feature, written to be shown.
+        raise EditorValueError(str(exc)) from exc
+    return structure.to_json(path)
+
+
+_LEFT_OUT = (
+    "The edit file holds curve edits only, so these changes were not restored: {changes}. "
+    "Pass the model they produced to load, or make them again."
+)
+
+
 def save_session(session, path: str | Path) -> None:
-    """Write an auditable JSON edit artifact."""
+    """Write an auditable JSON edit artifact.
+
+    It holds the curve edits. A New levels choice and a structural step
+    change the model, which the artifact does not hold (the model passed to
+    load does), so they are left out; the artifact names them under
+    ``left_out``, and load warns that they were not restored.
+    """
+    from superglm.editor.unseen import UnseenChoice
+
     payload = {
         "format": "superglm.editor.v1",
         "n_points": session.n_points,
@@ -203,9 +254,48 @@ def save_session(session, path: str | Path) -> None:
         "selection": {
             name: session._selection[name].astype(int).tolist() for name in session.terms
         },
-        "history": [record_to_payload(record) for record in session.history],
+        "history": [
+            record_to_payload(record)
+            for record in session.history
+            if not isinstance(record, UnseenChoice)
+        ],
+        "left_out": _left_out(session),
     }
     Path(path).write_text(json.dumps(jsonable(payload), indent=2, sort_keys=True))
+
+
+def _left_out(session) -> list[str]:
+    """The model changes an edit artifact does not hold, by label, oldest first.
+
+    The structural steps the in-force model was refitted through, each with
+    the New levels choices made before it; then those made since, and the
+    changes still waiting. Hand edits carried over a Refit are not named:
+    they are curve edits, saved with the terms. A step's earlier choices sit
+    in the state it kept: a step starts the live history afresh. A revert
+    to the original model puts the opened model back in force, so it and
+    everything before it are not named: load against that model restores them.
+    """
+    from superglm.editor.unseen import UnseenChoice
+
+    def choices(history) -> list[str]:
+        return [
+            f"{record.label} in {record.term}"
+            for record in history
+            if isinstance(record, UnseenChoice)
+        ]
+
+    steps = session.structure_history
+    reverts = [i for i, step in enumerate(steps) if step.operation == "revert_to_original"]
+    changes: list[str] = []
+    for step in steps[reverts[-1] + 1 :] if reverts else steps:
+        changes += choices(step.state.history)
+        if step.operation == "carry_edits":
+            # The carried curves are curve edits, which the artifact holds.
+            continue
+        changes += [change.label for change in step.changes] or [step.label]
+    changes += choices(session.history)
+    changes += [f"{step.label} (waiting)" for step in session.pending]
+    return changes
 
 
 def load_session(session_cls, path: str | Path, *, model):
@@ -250,4 +340,7 @@ def load_session(session_cls, path: str | Path, *, model):
 
     session.history = [record_from_payload(record) for record in payload.get("history", [])]
     session.redo_stack = []
+    left_out = [str(change) for change in payload.get("left_out", [])]
+    if left_out:
+        warnings.warn(_LEFT_OUT.format(changes="; ".join(left_out)), UserWarning, stacklevel=3)
     return session

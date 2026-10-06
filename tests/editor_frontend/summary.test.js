@@ -9,15 +9,18 @@ import {
 
 const summaryModulePath = "../../src/superglm/editor/app/summary.js";
 const {
-  collapseTransition,
+  applySummaryView,
+  refitAtOnceTransition,
+  refitPendingTransition,
   refreshSummary,
   renderSummary,
   runDistributionProfile,
   revertTransition,
-  setReferenceTransition,
-  shapeRangeTransition,
   runOffsetRefit,
-  ungroupTransition
+  stageCollapse,
+  stageReference,
+  stageShapeRange,
+  stageUngroup
 } = await import(summaryModulePath);
 
 /**
@@ -181,46 +184,78 @@ async function completedProfileLegend(ciStatus, parameter = "tweedie_p", ci = [n
   return nodes;
 }
 
-test("structural transition descriptors are pure route descriptions", () => {
-  assert.deepEqual(collapseTransition("region"), {
+test("structural changes are staged through one route, levels by label", () => {
+  assert.deepEqual(stageCollapse("region", ["B", "C"]), {
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "region", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "region", params: { levels: ["B", "C"] } }
   });
-  assert.deepEqual(ungroupTransition("region"), {
+  assert.deepEqual(stageUngroup("region", ["B"]), {
     name: "ungroup levels",
-    path: "/ungroup_levels",
-    payload: { term: "region", method: "auto" }
+    path: "/stage",
+    payload: { operation: "ungroup", term: "region", params: { levels: ["B"] } }
   });
-  assert.deepEqual(setReferenceTransition("region", "B"), {
-    name: "set reference and refit",
-    path: "/set_reference",
-    payload: { term: "region", level: "B", method: "auto" }
+  assert.deepEqual(stageReference("region", "B+C"), {
+    name: "set reference",
+    path: "/stage",
+    payload: { operation: "set_reference", term: "region", params: { level: "B+C" } }
   });
+  // The join is the toggle's choice; Tangent when no choice is given.
+  assert.deepEqual(stageShapeRange("age", 30, 45, 1), {
+    name: "make a Line range",
+    path: "/stage",
+    payload: {
+      operation: "shape", term: "age", params: { lo: 30, hi: 45, degree: 1, join: "tangent" }
+    }
+  });
+  assert.deepEqual(stageShapeRange("band", "B2", "B4", 0, "kink").payload.params, {
+    lo: "B2", hi: "B4", degree: 0, join: "kink"
+  });
+  assert.deepEqual(refitPendingTransition(1), {
+    name: "refit 1 waiting change",
+    path: "/refit_pending",
+    payload: {}
+  });
+  assert.equal(refitPendingTransition(3).name, "refit 3 waiting changes");
   assert.deepEqual(revertTransition(), {
     name: "revert to original model",
     path: "/revert_to_original",
     payload: {}
   });
-  // The join is the toggle's choice; Tangent when no choice is given.
-  assert.deepEqual(shapeRangeTransition("age", 30, 45, 1), {
-    name: "make a Line range",
-    path: "/shape_range",
-    payload: { term: "age", lo: 30, hi: 45, degree: 1, join: "tangent", method: "auto" }
+});
+
+test("with Refit after every change on, a change goes to its operation's own route", () => {
+  // Collapse and ungroup act on the selection Python holds; the others name their change.
+  assert.deepEqual(refitAtOnceTransition(stageCollapse("region", ["B", "C"])), {
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "region", method: "auto" }
   });
-  assert.deepEqual(shapeRangeTransition("band", "B2", "B4", 0, "kink").payload, {
-    term: "band", lo: "B2", hi: "B4", degree: 0, join: "kink", method: "auto"
+  assert.deepEqual(refitAtOnceTransition(stageUngroup("region", ["B"])), {
+    name: "ungroup levels",
+    path: "/ungroup_levels",
+    payload: { term: "region", method: "auto" }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageReference("region", "B+C")), {
+    name: "set reference",
+    path: "/set_reference",
+    payload: { term: "region", level: "B+C", method: "auto" }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageShapeRange("band", "B2", "B4", 0, "kink")), {
+    name: "make a Flat range",
+    path: "/shape_range",
+    payload: { term: "band", lo: "B2", hi: "B4", degree: 0, join: "kink", method: "auto" }
   });
 });
 
 test("transition descriptor payloads are independent caller-owned values", () => {
-  const first = collapseTransition("region");
-  first.payload.term = "mutated";
+  const levels = ["B", "C"];
+  const first = stageCollapse("region", levels);
+  first.payload.params.levels.push("D");
+  levels.push("E");
 
-  assert.deepEqual(collapseTransition("region").payload, {
-    term: "region",
-    method: "auto"
-  });
+  assert.deepEqual(first.payload.params.levels, ["B", "C", "D"]);
+  assert.deepEqual(stageCollapse("region", ["B", "C"]).payload.params, { levels: ["B", "C"] });
 });
 
 test("rendering unchanged summary markup preserves the existing table DOM", () => {
@@ -257,6 +292,226 @@ test("rendering unchanged summary markup preserves the existing table DOM", () =
 
   assert.equal(writes, 2);
   assert.match(markup, /Unavailable/);
+});
+
+/** A compact summary with integer-typed levels, as Python prints them. */
+function bonusSummary() {
+  /**
+   * @param {string} name @param {string} group @param {string} sigClass
+   * @param {Record<string, unknown>} [extra]
+   */
+  const row = (name, group, sigClass, extra = {}) => ({
+    name, group, kind: "coef", sig_class: sigClass, ...extra
+  });
+  return {
+    available: true,
+    label: "Summary",
+    html: "",
+    compact: {
+      model: {},
+      level_display: "expanded",
+      has_level_groups: false,
+      level_groups: [],
+      rows: [
+        row("region[A]", "region", "sig-reference", { kind: "reference" }),
+        row("bonus[1]", "bonus", "sig-reference", { kind: "reference" }),
+        row("bonus[2]", "bonus", "sig-none", { coef: 0.1, p_value: 0.2 }),
+        row("bonus[10]", "bonus", "sig-medium", { coef: 0.3, p_value: 0.004, sig_code: "**" })
+      ]
+    }
+  };
+}
+
+test("the inspector search is reapplied on every render and marks its matches", () => {
+  const view = { query: "1", termNames: ["region", "bonus"] };
+  const nodes = {
+    ...compactSummaryNodes(),
+    summarySearchCount: { textContent: "" },
+    summaryView: () => view
+  };
+  const payload = bonusSummary();
+
+  renderSummary(payload, nodes);
+  const first = nodes.summaryFrame.innerHTML;
+  assert.match(first, /<tr class="summary-row sig-reference" data-term="bonus">/);
+  assert.match(first, /bonus\[<mark>1<\/mark>\]/);
+  assert.match(first, /bonus\[<mark>1<\/mark>0\]/);
+  assert.match(first, /<tr class="summary-row sig-none" data-term="bonus" hidden>/);
+  assert.match(first, /<tr class="summary-group-row[^"]*" data-term="region"[^>]* hidden>/);
+  assert.equal(nodes.summarySearchCount.textContent, "1 term · 2 rows");
+
+  // A refit sends a new payload; the frame is rebuilt and the search holds.
+  const refit = bonusSummary();
+  refit.html = "<p>Refitted</p>";
+  renderSummary(refit, nodes);
+  assert.notEqual(nodes.summaryFrame.innerHTML, first);
+  assert.match(nodes.summaryFrame.innerHTML, /<tr class="summary-row sig-none" data-term="bonus" hidden>/);
+
+  // A new query redraws the last payload without fetching it again.
+  view.query = "10";
+  applySummaryView(nodes);
+  assert.match(nodes.summaryFrame.innerHTML, /bonus\[<mark>10<\/mark>\]/);
+  assert.match(nodes.summaryFrame.innerHTML, /<tr class="summary-row sig-reference" data-term="bonus" hidden>/);
+  assert.equal(nodes.summarySearchCount.textContent, "1 term · 1 row");
+
+  view.query = "";
+  applySummaryView(nodes);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, / hidden>|<mark>/);
+  assert.equal(nodes.summarySearchCount.textContent, "");
+});
+
+test("the inspector filter is reapplied on every render", () => {
+  /** @type {import("../../src/superglm/editor/app/views/summary_view.js").SummaryView} */
+  const view = {
+    query: "",
+    termNames: ["region", "bonus"],
+    filter: "waiting",
+    waiting: { bonus: 1 },
+    edited: ["region"]
+  };
+  const nodes = { ...compactSummaryNodes(), summaryView: () => view };
+  const regionHidden = /<tr class="summary-group-row[^"]*" data-term="region"[^>]* hidden>/;
+  const bonusHidden = /<tr class="summary-group-row[^"]*" data-term="bonus"[^>]* hidden>/;
+
+  renderSummary(bonusSummary(), nodes);
+  assert.match(nodes.summaryFrame.innerHTML, regionHidden);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, bonusHidden);
+
+  // A refit sends a new payload; the frame is rebuilt and Waiting holds.
+  const refit = bonusSummary();
+  refit.html = "<p>Refitted</p>";
+  renderSummary(refit, nodes);
+  assert.match(nodes.summaryFrame.innerHTML, regionHidden);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, bonusHidden);
+
+  // Edited, chosen on the drawn summary, holds through the next payload too.
+  view.filter = "edited";
+  applySummaryView(nodes);
+  const edit = bonusSummary();
+  edit.html = "<p>Edited</p>";
+  renderSummary(edit, nodes);
+  assert.match(nodes.summaryFrame.innerHTML, bonusHidden);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, regionHidden);
+});
+
+test("the chart's term is open and every other term folds to one line", () => {
+  /** @type {import("../../src/superglm/editor/app/views/summary_view.js").SummaryView} */
+  const view = {
+    query: "",
+    termNames: ["age", "region", "bonus"],
+    currentTerm: "bonus",
+    kinds: { age: "spline", region: "categorical", bonus: "categorical" },
+    waiting: { region: 1 }
+  };
+  const nodes = { ...compactSummaryNodes(), summaryView: () => view };
+  // A spline ahead of the categoricals: its whole-term test gives its line a p chip.
+  const payload = bonusSummary();
+  /** @type {Array<Record<string, unknown>>} */ (payload.compact.rows).unshift({
+    name: "age", group: "age", kind: "spline", edf: 3.2, p_value: 2e-5,
+    sig_class: "sig-strong", sig_code: "***"
+  });
+
+  renderSummary(payload, nodes);
+  const markup = nodes.summaryFrame.innerHTML;
+
+  assert.match(
+    markup,
+    /<tr class="summary-group-row summary-section" data-term="region" data-current="false">/
+  );
+  assert.match(markup, /data-summary-section="region" aria-expanded="false"/);
+  assert.match(markup, /<span class="summary-section-kind">categorical<\/span><span class="summary-waiting">1 waiting<\/span>/);
+  assert.match(markup, /<tr class="summary-row sig-reference" data-term="region" hidden>/);
+  assert.match(markup, /data-summary-section="bonus" aria-expanded="true"/);
+  assert.match(
+    markup,
+    /<span class="summary-p-chip sig-strong" title="p-value of the whole-term test">&lt;0\.001 \*\*\*<\/span>/
+  );
+  assert.doesNotMatch(markup, /data-term="bonus" hidden/);
+
+  // Opened by hand, a folded term shows its rows; the chart's term may be closed.
+  view.toggled = new Map([["region", true], ["bonus", false]]);
+  applySummaryView(nodes);
+  assert.match(nodes.summaryFrame.innerHTML, /<tr class="summary-row sig-reference" data-term="region">/);
+  assert.match(nodes.summaryFrame.innerHTML, /<tr class="summary-row sig-none" data-term="bonus" hidden>/);
+  // A categorical has no whole-term test, so its folded line carries no p chip.
+  const bonusLine = nodes.summaryFrame.innerHTML.match(/<tr class="summary-group-row summary-section" data-term="bonus".*?<\/tr>/s);
+  assert.ok(bonusLine);
+  assert.match(bonusLine[0], /aria-expanded="false"/);
+  assert.doesNotMatch(bonusLine[0], /summary-p-chip/);
+});
+
+test("every folded line gives its EDF to the same three significant figures", () => {
+  const terms = { age: 11.2, brand: 11, area: 9, power: 3.2, region: 123.4, district: 1234.4 };
+  const view = {
+    query: "",
+    termNames: Object.keys(terms),
+    currentTerm: "age",
+    kinds: Object.fromEntries(Object.keys(terms).map((name) => [name, "categorical"])),
+  };
+  const nodes = { ...compactSummaryNodes(), summaryView: () => view };
+  renderSummary({
+    available: true,
+    label: "Summary",
+    html: "",
+    compact: {
+      model: {},
+      level_display: "expanded",
+      has_level_groups: false,
+      level_groups: [],
+      rows: Object.entries(terms).map(([name, edf]) => ({
+        name: `${name}[B]`, group: name, kind: "coef", edf, coef: 0.1, p_value: 0.2,
+        sig_class: "sig-none"
+      }))
+    }
+  }, nodes);
+
+  const lines = [...nodes.summaryFrame.innerHTML.matchAll(
+    /<span class="summary-section-edf">([^<]*)<\/span>/g
+  )].map((match) => match[1]);
+  // A whole EDF keeps its places, so an 11 reads beside an 11.2 as 11.0; one
+  // too large for three figures keeps its whole part.
+  assert.deepEqual(lines, ["EDF 11.2", "EDF 11.0", "EDF 9.00", "EDF 3.20", "EDF 123", "EDF 1234"]);
+});
+
+test("the header shows the model as chips and four tiles and steps aside for a search", () => {
+  const view = { query: "", termNames: ["region", "bonus"] };
+  const nodes = {
+    ...compactSummaryNodes(),
+    summaryHeader: { hidden: false },
+    summaryModelChips: { innerHTML: "" },
+    summaryTiles: { innerHTML: "" },
+    summaryView: () => view
+  };
+  const payload = bonusSummary();
+  payload.compact.model = {
+    family: "Poisson",
+    link: "Log",
+    method: "MLE",
+    deviance: 445.3,
+    aic: 1125.7,
+    bic: 1177.3,
+    effective_df: 12.93,
+    log_likelihood: -549.9
+  };
+
+  renderSummary(payload, nodes);
+
+  assert.equal(
+    nodes.summaryModelChips.innerHTML,
+    '<span class="summary-chip">Poisson</span><span class="summary-chip">Log link</span>'
+      + '<span class="summary-chip">MLE</span>'
+  );
+  const tiles = [...nodes.summaryTiles.innerHTML.matchAll(/<span>([^<]+)<\/span><strong[^>]*>([^<]+)</g)]
+    .map((match) => [match[1], match[2]]);
+  assert.deepEqual(tiles, [
+    ["Deviance", "445.3"], ["AIC", "1125.7"], ["BIC", "1177.3"], ["Total EDF", "12.9"]
+  ]);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /summary-facts|Deviance|Log lik/);
+  assert.equal(nodes.summaryHeader.hidden, false);
+
+  view.query = "bonus";
+  applySummaryView(nodes);
+  assert.equal(nodes.summaryHeader.hidden, true);
 });
 
 test("expanded compact summary shows group indicators without a membership legend", () => {

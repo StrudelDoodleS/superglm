@@ -5,8 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import polars as pl
+import pytest
 
 from superglm import Categorical, Spline, SuperGLM
+
+_U = np.finfo(np.float64).eps / 2
 
 
 def test_pairwise_similarity_matrices_have_expected_diagonals():
@@ -25,6 +28,80 @@ def test_pairwise_similarity_matrices_have_expected_diagonals():
     np.testing.assert_allclose(np.diag(result["rmse"]), 0.0)
     np.testing.assert_allclose(np.diag(result["max_abs_diff"]), 0.0)
     np.testing.assert_allclose(np.diag(result["correlation"]), 1.0)
+
+
+def test_a_correlation_needs_two_shared_points_and_a_spread_in_both_curves():
+    """Gaps leave folds 0 and 1 one shared level, and fold 2 is flat.
+
+    A correlation from one point was reported as 1.0, the folds claiming a
+    perfect agreement they had no shape to show, and a flat curve's as 0.0
+    (1.0 against itself). Neither has a correlation.
+    """
+    from superglm.plotting.curve_similarity import _pairwise_curve_similarity
+
+    curves = {
+        "fold_0": np.array([0.1, 0.5, np.nan]),
+        "fold_1": np.array([np.nan, 0.2, 0.9]),
+        "fold_2": np.array([0.3, 0.3, 0.3]),
+    }
+
+    correlation = _pairwise_curve_similarity(curves, np.ones(3), labels=list(curves))["correlation"]
+
+    assert np.isnan(correlation.loc["fold_0", "fold_1"])
+    assert np.isnan(correlation.loc["fold_0", "fold_2"])
+    assert np.isnan(correlation.loc["fold_2", "fold_2"])
+    # A curve with itself: covariance over the product of two equal standard
+    # deviations, each a few roundings from exact.
+    assert abs(correlation.loc["fold_0", "fold_0"] - 1.0) <= 8 * _U
+
+
+def test_a_level_only_one_fold_estimated_is_no_evidence_of_stability():
+    """Each fold estimates levels the others do not; folds 0 and 1 share only the first.
+
+    The fold mean at a level one fold estimated is that fold's own value, so
+    it counted a zero distance: disjoint folds scored RMSE and max difference
+    0.0, and the CV tab reported a spread of 0 with nothing compared.
+    """
+    from superglm.plotting.curve_similarity import _summarize_against_fold_mean
+
+    disjoint = {
+        "fold_0": np.array([0.1, np.nan, np.nan]),
+        "fold_1": np.array([np.nan, 0.5, np.nan]),
+        "fold_2": np.array([np.nan, np.nan, 0.9]),
+    }
+    partial = {"fold_0": np.array([0.1, 0.5, np.nan]), "fold_1": np.array([0.3, np.nan, 0.9])}
+
+    apart = _summarize_against_fold_mean(disjoint, np.ones(3))
+    shared = _summarize_against_fold_mean(partial, np.ones(3))
+
+    assert apart[["rmse_to_mean", "max_abs_diff_to_mean"]].isna().all().all()
+    # Only the first level is compared: 0.1 and 0.3 about their mean, 0.2. A
+    # few roundings of values below 1: the mean, the difference, the square
+    # and the root.
+    for fold in ("fold_0", "fold_1"):
+        assert abs(shared.loc[fold, "rmse_to_mean"] - 0.1) <= 8 * _U
+        assert abs(shared.loc[fold, "max_abs_diff_to_mean"] - 0.1) <= 8 * _U
+
+
+def test_a_nearly_constant_curve_keeps_its_correlation():
+    """Curves whose range is a few units in the last place of their values.
+
+    [1, 1 + 2u] and [1, 1 + 4u] are exactly correlated, but their means
+    round: 1 + u is not a float64, so centring at it cancelled and the
+    correlation came out 1/sqrt(2). Each curve is shifted by one of its own
+    points and scaled by its range first, which leaves these two exact.
+    """
+    from superglm.plotting.curve_similarity import _curve_correlation
+
+    rising = np.array([1.0, 1.0 + 2 * _U])
+    steeper = np.array([1.0, 1.0 + 4 * _U])
+    three = np.array([1.0, 1.0 + 2 * _U, 1.0 + 4 * _U])
+
+    # Shifted and scaled, each pair is [0, 1] against [0, 1] or [1, 0]: the
+    # correlation is a few roundings from exact.
+    assert abs(_curve_correlation(rising, steeper) - 1.0) <= 8 * _U
+    assert abs(_curve_correlation(rising, steeper[::-1]) + 1.0) <= 8 * _U
+    assert abs(_curve_correlation(three, 2.0 * three) - 1.0) <= 8 * _U
 
 
 def test_weighting_changes_rmse_in_expected_direction():
@@ -124,5 +201,244 @@ def test_build_cv_curve_similarity_accepts_polars_without_converting_fold_models
 
     assert set(similarity) == {"x", "band"}
     assert len(similarity["x"]["domain"]["x"]) == 41
-    assert similarity["band"]["domain"]["levels"] == list(dict.fromkeys(band))
+    # Model order, not the order the rows first show each level.
+    assert similarity["band"]["domain"]["levels"] == ["A", "B", "C"]
     assert all(isinstance(model._fit_X_ref, pl.DataFrame) for model in models)
+
+
+def test_build_cv_curve_similarity_scores_integer_coded_levels_in_model_order():
+    from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+    rng = np.random.default_rng(9)
+    n = 150
+    code = np.tile([10, 1, 2], n // 3)
+    w = rng.uniform(0.5, 1.2, n)
+    y = rng.poisson(np.exp(-1.0 + 0.2 * (code == 2)) * w).astype(float)
+    X = pd.DataFrame({"code": code})
+
+    models = []
+    for seed in [1, 2, 3]:
+        idx = np.random.default_rng(seed).choice(n, size=int(0.8 * n), replace=False)
+        model = SuperGLM(features={"code": Categorical(base="first")})
+        model.fit(X.iloc[idx], y[idx], sample_weight=w[idx])
+        models.append(model)
+
+    similarity = build_cv_curve_similarity(models=models, X=X, sample_weight=w, n_points=41)
+
+    assert similarity["code"]["domain"]["levels"] == ["1", "2", "10"]
+    for label, model in zip(["fold_0", "fold_1", "fold_2"], models, strict=True):
+        inference = model.term_inference("code", with_se=False)
+        np.testing.assert_array_equal(
+            similarity["code"]["curves"]["link"][label], inference.log_relativity
+        )
+
+
+def test_a_fold_that_never_saw_a_level_has_a_gap_there_not_a_crash(monkeypatch):
+    """A level only one fold's test rows hold is unknown to that fold's model.
+
+    That model has no value at the level: its curve has a gap there, the
+    similarity summary reads it on the levels it has, and nothing raises.
+    """
+    from superglm.model_selection import CrossValidationResult
+    from superglm.plotting import comparison_plotly
+    from superglm.plotting.comparison import _build_term_comparison_data, _feature_beta
+    from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+    rng = np.random.default_rng(11)
+    n = 300
+    band = rng.choice(["A", "B", "C"], n)
+    band[[7, 19, 42]] = "D"  # only in the first fold's test rows, 0-99
+    x = rng.uniform(0, 10, n)
+    w = rng.uniform(0.5, 1.2, n)
+    y = rng.poisson(np.exp(-1.0 + 0.1 * np.sin(x) + 0.2 * (band == "C")) * w).astype(float)
+    X = pd.DataFrame({"x": x, "band": band})
+    folds = [(np.setdiff1d(np.arange(n), test), test) for test in np.array_split(np.arange(n), 3)]
+    models = [
+        SuperGLM(
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=5), "band": Categorical(base="first")},
+        ).fit(X.iloc[train], y[train], sample_weight=w[train])
+        for train, _test in folds
+    ]
+    assert [list(model._specs["band"]._levels) for model in models] == [
+        ["A", "B", "C"],
+        ["A", "B", "C", "D"],
+        ["A", "B", "C", "D"],
+    ]
+    labeled = {f"fold_{i}": model for i, model in enumerate(models)}
+
+    payload = _build_term_comparison_data(models=labeled, terms=["band"], X=X, sample_weight=w)
+
+    [term] = payload["terms"]
+    assert term["domain"]["levels"] == ["A", "B", "C", "D"]
+    levels = np.asarray(["A", "B", "C", "D"], dtype=object)
+    gap = np.array([False, False, False, True])
+    for label, model in labeled.items():
+        link = term["series"][label]["link"]
+        known = ~gap if label == "fold_0" else np.ones(4, dtype=bool)
+        expected = model._specs["band"].score(levels[known], _feature_beta(model, "band"))
+        np.testing.assert_array_equal(link[known], expected)
+        assert np.isnan(link[~known]).all()
+        assert np.isnan(term["series"][label]["response"][~known]).all()
+
+    similarity = build_cv_curve_similarity(models=models, X=X, sample_weight=w)
+
+    link = similarity["band"]["curves"]["link"]
+    weights = np.asarray(similarity["band"]["support"]["density"])
+    stacked = np.vstack(list(link.values()))
+    mean_curve = np.array(
+        [np.mean(stacked[~np.isnan(stacked[:, j]), j]) for j in range(stacked.shape[1])]
+    )
+    vs_mean = similarity["band"]["vs_mean"]["link"]
+    assert np.isfinite(vs_mean.to_numpy()).all()
+    # The first fold is read against the fold mean on the three levels it has;
+    # the others on all four. Each is one weighted mean of at most four
+    # squares, accurate to a few units of rounding (Higham, sec. 3.1).
+    for label, curve in link.items():
+        has = ~np.isnan(curve)
+        expected = np.sqrt(np.average((curve[has] - mean_curve[has]) ** 2, weights=weights[has]))
+        assert abs(vs_mean.loc[label, "rmse_to_mean"] - expected) <= 16 * _U * expected
+    assert np.isfinite(similarity["band"]["pairwise"]["link"]["rmse"].to_numpy()).all()
+
+    # plot_terms_by_fold reads the same payload; the renderer is stubbed so
+    # the check runs without plotly installed.
+    monkeypatch.setattr(comparison_plotly, "plot_term_comparison_plotly", lambda data, **_: data)
+    result = CrossValidationResult(
+        fold_scores=pd.DataFrame(),
+        mean_scores={},
+        pooled_scores={},
+        std_scores={},
+        fold_indices=folds,
+        estimators=models,
+    )
+    plotted = result.plot_terms_by_fold(X, sample_weight=w, terms="band")
+    assert np.isnan(plotted["terms"][0]["series"]["fold_0"]["link"][3])
+
+
+def test_a_fold_that_holds_a_level_pinned_has_a_gap_there_on_the_cross_validate_path(
+    monkeypatch,
+):
+    """cross_validate gives every fold the frame's levels, so a fold whose
+    training rows lack D holds D pinned to its base.
+
+    Its score at D is the base's, not an estimate, so its curve has a gap
+    there in the similarity diagnostics and in plot_terms_by_fold.
+    """
+    from sklearn.model_selection import KFold
+
+    from superglm import cross_validate
+    from superglm.plotting import comparison_plotly
+
+    X = pd.DataFrame({"band": ["D", *["A", "B"] * 30]})
+    y = np.array([3.0, *[1.0, 2.0] * 30])
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={"band": Categorical(base="A")}
+    )
+    with pytest.warns(UserWarning, match="pinned to base"):
+        result = cross_validate(model, X, y, cv=KFold(3), return_estimators=True)
+    assert [list(fold._specs["band"]._pinned_levels) for fold in result.estimators] == [
+        ["D"],
+        [],
+        [],
+    ]
+
+    similarity = result.curve_similarity["band"]
+    d = similarity["domain"]["levels"].index("D")
+    for scale in ("link", "response"):
+        curves = similarity["curves"][scale]
+        assert np.isnan(curves["fold_0"][d])
+        assert np.isfinite(np.delete(curves["fold_0"], d)).all()
+        assert np.isfinite(curves["fold_1"]).all() and np.isfinite(curves["fold_2"]).all()
+    monkeypatch.setattr(comparison_plotly, "plot_term_comparison_plotly", lambda data, **_: data)
+    plotted = result.plot_terms_by_fold(X, terms="band")
+    assert np.isnan(plotted["terms"][0]["series"]["fold_0"]["link"][d])
+
+
+@pytest.mark.parametrize("unseen", ["base", "group"])
+def test_a_level_a_fold_never_saw_is_a_gap_whatever_its_unseen_policy(unseen):
+    """A fold reads a level outside its universe by its unseen policy, without refusing.
+
+    cross_validate's folds share the CV rows' levels, and the data the curves
+    are read on also holds D, which the CV rows do not. Under unseen="base" a
+    fold would read D at its base, relativity 1, and under a group policy at
+    that group's value, as if it had estimated D. D is a gap in every fold's
+    curve instead: in the comparison payload, the similarity diagnostics and
+    the editor's fold curves.
+    """
+    from sklearn.model_selection import KFold
+
+    from superglm import collapse_levels, cross_validate
+    from superglm.editor import EditorSession
+    from superglm.editor.cv import fold_log_curves
+    from superglm.plotting.comparison import _build_term_comparison_data
+    from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+    rng = np.random.default_rng(20261005)
+    band = rng.choice(["A", "B", "C", "D"], 400, p=[0.3, 0.3, 0.3, 0.1])
+    X_all = pd.DataFrame({"band": band})
+    y_all = 1.0 + 0.2 * (band == "B") + 0.4 * (band == "C") + rng.normal(0.0, 0.1, 400)
+    rows = band != "D"
+
+    def declared(levels):
+        if unseen == "base":
+            return Categorical(base="A", unseen="base")
+        grouping = collapse_levels(pd.Series(levels), groups={"BC": ["B", "C"]})
+        return Categorical(base="A", grouping=grouping, unseen="BC")
+
+    def model(levels):
+        return SuperGLM(
+            family="gaussian", selection_penalty=0.0, features={"band": declared(levels)}
+        )
+
+    result = cross_validate(
+        model(["A", "B", "C"]), X_all[rows], y_all[rows], cv=KFold(3), return_estimators=True
+    )
+    labeled = {f"fold_{i}": fold for i, fold in enumerate(result.estimators)}
+
+    [term] = _build_term_comparison_data(models=labeled, terms=["band"], X=X_all)["terms"]
+    d = term["domain"]["levels"].index("D")
+    similarity = build_cv_curve_similarity(models=result.estimators, X=X_all)["band"]
+    assert similarity["domain"]["levels"].index("D") == d
+    in_force = model(["A", "B", "C", "D"]).fit(X_all, y_all)
+    session = EditorSession.from_model(in_force, terms=["band"])
+    editor_d = session.terms["band"].levels.index("D")
+    for label, fold in labeled.items():
+        for curve, at in (
+            (term["series"][label]["link"], d),
+            (similarity["curves"]["link"][label], d),
+            (fold_log_curves(fold, session.terms)["band"], editor_d),
+        ):
+            assert np.isnan(curve[at])
+            assert np.isfinite(np.delete(curve, at)).all()
+    assert np.isfinite(similarity["vs_mean"]["link"].to_numpy()).all()
+
+
+@pytest.mark.parametrize("unseen", ["base", "Other"])
+def test_a_level_whose_group_a_fold_never_saw_is_a_gap_whatever_routes_it(unseen):
+    """A grouping over A-E holds D and E in Other; this fold was fitted on A, B and D only.
+
+    Unbound, the fold's universe is A, B and Other. C is its own group,
+    outside that universe, and the unseen policy reads it at the base or in
+    Other without refusing: C is a gap. E has no rows either, but its group
+    has D's: it reads Other's estimate, as D does.
+    """
+    from superglm import collapse_levels
+    from superglm.plotting.comparison import _build_term_comparison_data
+
+    rng = np.random.default_rng(20261005)
+    train = rng.choice(["A", "B", "D"], 300)
+    y = 1.0 + 0.2 * (train == "B") + 0.3 * (train == "D") + rng.normal(0.0, 0.1, 300)
+    grouping = collapse_levels(pd.Series(["A", "B", "C", "D", "E"]), groups={"Other": ["D", "E"]})
+    spec = Categorical(base="A", grouping=grouping, unseen=unseen)
+    fold = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": spec})
+    fold.fit(pd.DataFrame({"x": train}), y)
+    assert fold._specs["x"]._levels == ["A", "B", "Other"]
+
+    X = pd.DataFrame({"x": ["A", "B", "C", "D", "E"]})
+    [term] = _build_term_comparison_data(models={"fold_0": fold}, terms=["x"], X=X)["terms"]
+
+    link = term["series"]["fold_0"]["link"]
+    at = {level: index for index, level in enumerate(term["domain"]["levels"])}
+    assert np.isnan(link[at["C"]])
+    assert np.isfinite(np.delete(link, at["C"])).all()
+    assert link[at["E"]] == link[at["D"]]

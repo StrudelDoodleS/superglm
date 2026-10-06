@@ -18,6 +18,33 @@ export function fmt(value) {
   });
 }
 
+/**
+ * `value` to `figures` significant figures, trailing zeros kept, so figures
+ * listed together read alike: 11.0 beside 11.2, 9.00 beside 3.20. A whole part
+ * longer than `figures` is kept whole.
+ * @param {number} value @param {number} [figures]
+ */
+export function fmtSignificant(value, figures = 3) {
+  if (!Number.isFinite(value)) return "";
+  /** @param {number} magnitude */
+  const places = (magnitude) => Math.min(100, Math.max(0, figures - 1 - magnitude));
+  const magnitude = value === 0 ? 0 : Math.floor(Math.log10(Math.abs(value)));
+  const text = value.toFixed(places(magnitude));
+  // Rounding can carry into the next power of ten, as 9.996 does to 10.00.
+  return Math.abs(Number(text)) >= 10 ** (magnitude + 1)
+    ? value.toFixed(places(magnitude + 1))
+    : text;
+}
+
+/**
+ * An EDF as the feature list, the context bar and the inspector's folded
+ * lines all print it: three significant figures, so 10.0, 5.00 and 11.3.
+ * @param {number} value
+ */
+export function fmtEdf(value) {
+  return `EDF ${fmtSignificant(value)}`;
+}
+
 /** @param {number} value */
 export function fmtSigned(value) {
   const formatted = fmt(value);

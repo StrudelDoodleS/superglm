@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections import Counter
 from urllib.parse import urlsplit
 
 import numpy as np
 import pytest
 from tests.test_editor_structure import EPS, _line_residual, _pinning_tolerance
 
-from superglm.editor.payloads import session_payload
+from superglm import read_structure
+from superglm.editor.payloads import session_payload, timeline_payload
 from superglm.editor.shapes import _numeric_edges
 
 pytest.importorskip("playwright.sync_api")
@@ -52,6 +54,18 @@ def _settled_after_refit(page) -> None:
     )
 
 
+def _stage_and_refit(page, icon) -> None:
+    """Click a structural icon, which stages the change, then Refit it."""
+    with page.expect_response(_posted("/stage")) as staged:
+        icon.click()
+    assert staged.value.status == 200
+    page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
+    with page.expect_response(_posted("/refit_pending")) as refitted:
+        page.locator("#refitPendingAction").click()
+    assert refitted.value.status == 200
+    _settled_after_refit(page)
+
+
 def _box_select_x(page, lo: float, hi: float) -> None:
     """Drag a Select box over the whole plot height between two x values."""
     corners = page.evaluate(
@@ -83,14 +97,33 @@ def _drawn_y(page) -> list[float]:
     return page.evaluate("() => document.querySelector('#chart')._scale.y")
 
 
-def _history_rows(page) -> list[list[str]]:
-    """Each row of the History tab as [class, text], top to bottom."""
+def _history_sections(page) -> dict[str, list[str]]:
+    """The History pane's steps by section, top to bottom, by step id.
+
+    The applied list ends at the opened model, its root, which has no id.
+    """
     return page.evaluate(
-        """() => Array.from(
-            document.querySelectorAll('#historyFrame .history-list > li'),
-            row => [row.className, (row.querySelector('.history-label') ?? row).textContent],
-        )"""
+        """() => Object.fromEntries(['waiting', 'applied', 'undone'].map(kind => [
+            kind,
+            Array.from(
+                document.querySelectorAll(`#historyFrame .history-section.${kind} .history-item`),
+                node => node.dataset.stepId ?? node.querySelector('.history-label').textContent,
+            ),
+        ]))"""
     )
+
+
+def _timeline_sections(session) -> dict[str, list[str]]:
+    """The sections the session's timeline asks for: newest first, undone in Redo's order."""
+    timeline = timeline_payload(session)
+    marker = next(i for i, entry in enumerate(timeline) if entry["kind"] == "marker")
+    done = timeline[:marker][::-1]
+    return {
+        "waiting": [entry["id"] for entry in done if entry.get("status") == "waiting"],
+        "applied": [entry["id"] for entry in done if entry.get("status") != "waiting"]
+        + ["Opened model"],
+        "undone": [entry["id"] for entry in timeline[marker + 1 :]],
+    }
 
 
 def test_line_icon_pins_a_run_of_points_and_undo_and_redo_step_across_it(open_editor_page):
@@ -106,10 +139,7 @@ def test_line_icon_pins_a_run_of_points_and_undo_and_redo_step_across_it(open_ed
         line = page.locator("#shapeLine")
         line.wait_for(state="visible")
         assert line.get_attribute("aria-disabled") == "false"
-        with page.expect_response(_posted("/shape_range")) as response_info:
-            line.click()
-        assert response_info.value.status == 200
-        _settled_after_refit(page)
+        _stage_and_refit(page, line)
 
         spec = session.model._specs["curve"]
         [pinned] = spec.polynomial_ranges
@@ -189,10 +219,7 @@ def test_quadratic_on_bands_spans_whole_bands_and_cubic_says_why_not(open_editor
         cubic = page.locator("#shapeCubic")
         assert cubic.get_attribute("aria-disabled") == "true"
         assert cubic.get_attribute("data-popover-body") == "Select at least 4 bands for a Cubic."
-        with page.expect_response(_posted("/shape_range")) as response_info:
-            page.locator("#shapeQuadratic").click()
-        assert response_info.value.status == 200
-        _settled_after_refit(page)
+        _stage_and_refit(page, page.locator("#shapeQuadratic"))
 
         declared = session.model._specs["age_band"]._spline_obj.polynomial_ranges
         assert [(r.lo, r.hi, r.degree) for r in declared] == [("25-34", "45-54", 2)]
@@ -222,10 +249,7 @@ def test_back_to_back_runs_give_ranges_that_meet(open_editor_page):
             session.select_indices("curve", list(range(run[0], run[1] + 1)))
             _reload_editor(page, "curve")
             page.locator("#selectionMenu").wait_for(state="visible")
-            with page.expect_response(_posted("/shape_range")) as response_info:
-                page.locator(icon).click()
-            assert response_info.value.status == 200
-            _settled_after_refit(page)
+            _stage_and_refit(page, page.locator(icon))
 
         spec = session.model._specs["curve"]
         first, second = spec.polynomial_ranges
@@ -276,9 +300,7 @@ def test_set_reference_icon_needs_exactly_one_level(open_editor_page):
         session.select_levels("territory", ["T03"])
         _reload_editor(page, "territory")
         set_reference.wait_for(state="visible")
-        with page.expect_response(_posted("/set_reference")) as response_info:
-            set_reference.click()
-        assert response_info.value.status == 200
+        _stage_and_refit(page, set_reference)
         page.wait_for_function(
             "() => document.querySelector('#termReference')?.textContent"
             " === 'reference T03 · pinned'"
@@ -303,8 +325,8 @@ def test_refresh_pulls_a_notebook_side_structural_change(open_editor_page):
         assert undo.get_attribute("data-popover-body") == "Undo: collapse T01 + T02 in territory"
         page.locator("#chart .level-group-marker").first.wait_for()
         assert page.locator("#chart .level-group-marker").count() == 2
-        # The first level now sits inside the new group, so the group is the reference.
-        assert reference.text_content() == "reference T01+T02 · first"
+        # The reference T01 now sits inside the new group, which keeps it.
+        assert reference.text_content() == "reference T01+T02 · kept"
 
 
 def test_revert_is_one_step_that_undo_takes_back(open_editor_page):
@@ -334,40 +356,378 @@ def test_revert_is_one_step_that_undo_takes_back(open_editor_page):
         assert session.model is collapsed
 
 
-def test_history_lists_the_session_in_order_and_follows_undo_and_redo(open_editor_page):
+def test_history_lists_waiting_changes_above_applied_ones_with_ids_and_notes(open_editor_page):
     with open_editor_page() as (page, session):
         _box_select_x(page, 3.0, 5.0)
         with page.expect_response(_posted("/op")):
             page.get_by_role("button", name="Increase selection").click()
-        line = page.locator("#shapeLine")
-        line.wait_for(state="visible")
-        with page.expect_response(_posted("/shape_range")):
-            line.click()
-        _settled_after_refit(page)
-        shape = session.structure_history[-1].label
+        session.stage_structural(
+            "shape", "curve", {"lo": 6.0, "hi": 8.0, "degree": 1, "join": "tangent"}
+        )
+        [step] = session.pending
+        _reload_editor(page, "curve")
 
         page.locator("#historyTab").click()
-        rows = "document.querySelectorAll('#historyFrame .history-list > li')"
-        page.wait_for_function(f"() => {rows}.length === 3")
-        listed = [
-            ["history-item edit", "shift curve"],
-            ["history-item structural", shape],
-            ["history-now", "now"],
-        ]
-        assert _history_rows(page) == listed
+        page.locator("#historyFrame .history-section.waiting").wait_for()
+        assert _history_sections(page) == _timeline_sections(session)
+        assert _history_sections(page)["waiting"] == [step.step_id]
+        waiting = page.locator(f'#historyFrame [data-step-id="{step.step_id}"]')
+        # The message says what the step does; the meta line names the term.
+        assert step.label == "Line 6–8 in curve"
+        assert waiting.locator(".history-label").text_content() == "Line 6 – 8"
+        assert waiting.locator(".history-meta").text_content() == "curve · shape"
+        assert waiting.locator(".history-id").text_content() == step.step_id
+        # Undo takes the newest step, which is the waiting one.
+        assert page.locator("#historyFrame .history-undo-chip").count() == 1
+        assert waiting.locator(".history-undo-chip").count() == 1
 
+        # A note is written in place and saved on Enter.
+        note = "Young-driver tail is noise"
+        waiting.get_by_role("button", name="Add a note").click()
+        field = page.get_by_role("textbox", name="Note for this step")
+        field.fill(note)
+        with page.expect_request(
+            lambda request: request.method == "POST" and urlsplit(request.url).path == "/note"
+        ) as note_info:
+            field.press("Enter")
+        assert note_info.value.post_data_json == {"id": step.step_id, "note": note}
+        page.wait_for_function(
+            'id => document.querySelector(`[data-step-id="${id}"] .history-note`)',
+            arg=step.step_id,
+        )
+        assert waiting.locator(".history-note").text_content() == note
+        assert session.step_notes[step.step_id] == note
+
+        # Escape keeps the note as it was and sends nothing.
+        notes: list[object] = []
+        page.on(
+            "request",
+            lambda request: urlsplit(request.url).path == "/note" and notes.append(request),
+        )
+        waiting.get_by_role("button", name="Edit note").click()
+        field.fill("changed my mind")
+        field.press("Escape")
+        assert notes == []
+        assert waiting.locator(".history-note").text_content() == note
+
+        # Undo moves the waiting step under Undone, note and all; Redo puts it back.
         with page.expect_response(_posted("/op")):
             page.keyboard.press("Control+z")
-        page.wait_for_function(f"() => {rows}[2].classList.contains('redo')")
-        assert session.structure_redo[-1].label == shape
-        assert _history_rows(page) == [
-            ["history-item edit", "shift curve"],
-            ["history-now", "now"],
-            ["history-item structural redo", shape],
-        ]
-
+        page.locator("#historyFrame .history-section.undone").wait_for()
+        assert _history_sections(page) == _timeline_sections(session)
+        undone = page.locator("#historyFrame .history-section.undone .history-note")
+        assert undone.text_content() == note
         with page.expect_response(_posted("/op")):
             page.keyboard.press("Control+Shift+z")
-        page.wait_for_function(f"() => {rows}[1].classList.contains('history-item')")
-        assert session.structure_history[-1].label == shape
-        assert _history_rows(page) == listed
+        page.locator("#historyFrame .history-section.waiting").wait_for()
+        assert _history_sections(page) == _timeline_sections(session)
+
+        # After Refit the step is applied, and its note stays with it.
+        with page.expect_response(_posted("/refit_pending")):
+            page.keyboard.press("r")
+        _settled_after_refit(page)
+        page.wait_for_function(
+            "() => !document.querySelector('#historyFrame .history-section.waiting')"
+        )
+        assert _history_sections(page) == _timeline_sections(session)
+        assert note in page.locator("#historyFrame .history-section.applied").text_content()
+
+
+# Holds each /note request in the page until the test releases it, so a click
+# provably lands while a History note is still saving.
+HOLD_NOTES = """(() => {
+    const realFetch = window.fetch.bind(window);
+    let gate = null;
+    window.__noteSaves = 0;
+    window.__holdNotes = () => {
+        let release;
+        gate = new Promise(resolve => { release = resolve; });
+        window.__releaseNotes = () => { gate = null; release(); };
+    };
+    window.fetch = async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+        if (url.pathname === '/note') {
+            window.__noteSaves += 1;
+            if (gate) await gate;
+        }
+        return realFetch(input, init);
+    };
+})()"""
+
+
+def _note_then_click(page, step_id: str, note: str, control, path: str) -> None:
+    """Write a note, click a control while the note saves, then let the save finish."""
+    item = page.locator(f'#historyFrame [data-step-id="{step_id}"]')
+    item.get_by_role("button", name="Add a note").click()
+    page.get_by_role("textbox", name="Note for this step").fill(note)
+    saves = page.evaluate("() => window.__noteSaves")
+    page.evaluate("() => window.__holdNotes()")
+    # The click's mousedown takes the focus from the note, which saves it.
+    control.click()
+    page.wait_for_function("n => window.__noteSaves === n", arg=saves + 1)
+    with page.expect_response(_posted(path), timeout=10_000) as answered:
+        page.evaluate("() => window.__releaseNotes()")
+    assert answered.value.status == 200
+
+
+def test_a_click_that_ends_a_history_note_still_acts(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        page.add_init_script(HOLD_NOTES)
+        session.stage_structural(
+            "collapse", "territory", {"levels": ["T02", "T03"], "group_label": None}
+        )
+        [step] = session.pending
+        _reload_editor(page, "territory")
+        page.locator("#historyTab").click()
+
+        _note_then_click(
+            page,
+            step.step_id,
+            "Thin exposure",
+            page.locator("#refitPendingAction"),
+            "/refit_pending",
+        )
+        _settled_after_refit(page)
+        assert session.pending == []
+        assert session.step_notes[step.step_id] == "Thin exposure"
+
+        refit = next(
+            entry
+            for entry in reversed(timeline_payload(session))
+            if entry.get("status") == "applied"
+        )
+        _note_then_click(
+            page, refit["id"], "Merged for stability", page.locator("#undoAction"), "/op"
+        )
+        _settled_after_refit(page)
+        # Undo of the Refit brings the collapse back as waiting; both notes stand.
+        assert [pending.step_id for pending in session.pending] == [step.step_id]
+        assert session.step_notes[refit["id"]] == "Merged for stability"
+
+
+def test_waiting_changes_show_in_the_feature_list_status_line_and_export(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        session.stage_structural(
+            "collapse", "territory", {"levels": ["T02", "T03"], "group_label": None}
+        )
+        _reload_editor(page, "territory")
+        status = page.locator("#status")
+        assert status.text_content() == (
+            "1 change waiting for refit · the curve and metrics are from the last refit"
+        )
+        assert page.locator("#status .status-waiting").text_content() == (
+            "1 change waiting for refit"
+        )
+        assert page.locator("#featureList .feature-row-waiting").count() == 1
+        assert (
+            page.locator('#featureList [data-term="territory"] .feature-row-waiting').count() == 1
+        )
+        # The dot sits right after the term's name, on its line.
+        collapsed = page.locator("#featureList").get_attribute("data-open") == "false"
+        if collapsed:
+            page.locator("#featureListToggle").click()
+        name = page.locator('#featureList [data-term="territory"] .feature-row-name').bounding_box()
+        dot = page.locator(
+            '#featureList [data-term="territory"] .feature-row-waiting'
+        ).bounding_box()
+        assert 0 <= dot["x"] - (name["x"] + name["width"]) <= 10
+        assert name["y"] <= dot["y"] + dot["height"] / 2 <= name["y"] + name["height"]
+        if collapsed:
+            page.locator("#featureListToggle").click()
+
+        page.locator("#exportAction").click()
+        note = page.locator("#exportPendingNote")
+        note.wait_for(state="visible")
+        assert note.text_content() == (
+            "1 waiting change is not included. The export is the last refit."
+        )
+        page.locator("#exportDialogClose").click()
+
+        # With a selection, the waiting count still leads the line.
+        session.select_levels("territory", ["T05"])
+        _reload_editor(page, "territory")
+        assert status.text_content().startswith("1 change waiting for refit · 1 of ")
+
+
+def test_a_change_staged_by_its_icon_shows_at_once_in_the_status_line_and_feature_list(
+    open_editor_page,
+):
+    # A stage keeps the model revision, so nothing redraws the page for it
+    # unless the waiting change itself is part of what the views key on.
+    with open_editor_page(selected_term="territory") as (page, session):
+        session.select_levels("territory", ["T02", "T03"])
+        _reload_editor(page, "territory")
+        status = page.locator("#status")
+        dot = page.locator('#featureList [data-term="territory"] .feature-row-waiting')
+        assert status.text_content().startswith("2 of 10 selected · ")
+        assert dot.count() == 0
+        revision = session.model_revision
+
+        with page.expect_response(_posted("/stage")) as staged:
+            page.get_by_role("button", name="Collapse", exact=True).click()
+        assert staged.value.status == 200
+        page.wait_for_function(
+            "() => document.querySelector('#refitPendingCount')?.textContent === '1'"
+        )
+        assert session.model_revision == revision
+        assert status.text_content().startswith("1 change waiting for refit · 2 of 10 selected · ")
+        assert dot.count() == 1
+
+
+def test_a_waiting_collapse_is_drawn_dashed_with_a_bracket_under_the_axis(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        session.stage_structural(
+            "collapse", "territory", {"levels": ["T02", "T03"], "group_label": None}
+        )
+        _reload_editor(page, "territory")
+        bracket = page.locator("#chart .pending-group-bracket")
+        assert bracket.count() == 1
+        assert bracket.locator(".pending-group-label").text_content() == "T02 + T03 · waiting"
+        assert page.locator("#chart rect.exposure.waiting").count() == 2
+        assert page.locator("#chart .pending-group-ring").count() == 2
+        # The curve is still the last refit's: nothing is grouped in force yet.
+        assert page.locator("#chart .level-group-marker").count() == 0
+        # The bracket has its own row between the level labels and the axis title.
+        rows = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const label = svg.querySelector('.pending-group-label').getBBox();
+                const title = svg.querySelector('.x-axis-title').getBBox();
+                const ticks = Array.from(svg.querySelectorAll('.x-tick-label'), n => n.getBBox());
+                return {
+                    ticksBottom: Math.max(...ticks.map(box => box.y + box.height)),
+                    labelTop: label.y,
+                    labelBottom: label.y + label.height,
+                    titleTop: title.y,
+                };
+            }"""
+        )
+        assert rows["ticksBottom"] <= rows["labelTop"]
+        assert rows["labelBottom"] <= rows["titleTop"]
+
+
+def test_a_waiting_ungroup_marks_the_levels_that_leave_their_group(open_editor_page):
+    with open_editor_page(
+        selected_term="territory", collapsed_levels=("territory", ("T02", "T03"))
+    ) as (page, session):
+        session.select_levels("territory", ["T02", "T03"])
+        _reload_editor(page, "territory")
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(_posted("/stage")) as staged:
+            page.get_by_role("button", name="Ungroup", exact=True).click()
+        assert staged.value.status == 200
+        page.wait_for_function(
+            "() => document.querySelector('#refitPendingCount')?.textContent === '1'"
+        )
+        # The whole group breaks up, so the draft has no group left to draw.
+        assert session_payload(session)["territory"]["pending"]["groups"] == {}
+        bracket = page.locator("#chart .pending-group-bracket.ungroup")
+        assert bracket.count() == 1
+        assert (
+            bracket.locator(".pending-group-label").text_content() == "T02, T03 ungrouped · waiting"
+        )
+        assert bracket.get_attribute("data-popover-body") == (
+            "T02, T03 leave the group T02+T03 at the next Refit."
+        )
+        assert page.locator("#chart rect.exposure.waiting").count() == 2
+        # Until Refit the fit still groups them: its markers stay, and no ring
+        # announces a new group.
+        assert page.locator("#chart .level-group-marker").count() == 2
+        assert page.locator("#chart .pending-group-ring").count() == 0
+
+        with page.expect_response(_posted("/refit_pending")):
+            page.locator("#refitPendingAction").click()
+        _settled_after_refit(page)
+        assert page.locator("#chart .pending-group-bracket").count() == 0
+        assert page.locator("#chart .level-group-marker").count() == 0
+
+
+def test_a_waiting_range_is_a_dashed_box_until_refit_pins_it(open_editor_page):
+    with open_editor_page() as (page, session):
+        session.stage_structural(
+            "shape", "curve", {"lo": 3.0, "hi": 5.0, "degree": 1, "join": "tangent"}
+        )
+        _reload_editor(page, "curve")
+        waiting = page.locator("#chart .pending-range")
+        assert waiting.count() == 1
+        assert (
+            waiting.locator(".pending-range-label").text_content().endswith(" · waiting for refit")
+        )
+        assert page.locator("#chart .shape-range").count() == 0
+        [staged] = session_payload(session)["curve"]["pending"]["ranges"]
+        extent = page.evaluate(
+            """([lo, hi]) => {
+                const svg = document.querySelector('#chart');
+                const rect = svg.querySelector('.pending-range-box');
+                const left = Number(rect.getAttribute('x'));
+                return {
+                    left,
+                    right: left + Number(rect.getAttribute('width')),
+                    expected: [svg._scale.sx(lo), svg._scale.sx(hi)],
+                };
+            }""",
+            [staged["lo"], staged["hi"]],
+        )
+        assert [extent["left"], extent["right"]] == pytest.approx(extent["expected"], abs=1e-9)
+
+        with page.expect_response(_posted("/refit_pending")):
+            page.keyboard.press("r")
+        _settled_after_refit(page)
+        assert waiting.count() == 0
+        assert page.locator("#chart .shape-range").count() == 1
+
+
+def test_new_levels_goes_into_the_structure_file_and_undo_takes_it_back(
+    open_editor_page, choose_feature, tmp_path
+):
+    with open_editor_page(
+        selected_term="territory", collapsed_levels=("territory", ("T02", "T03"))
+    ) as (page, session):
+        collapsed = session.model
+        control = page.locator("#newLevelsWrap")
+        select = page.locator("#newLevelsMode")
+        undo = page.locator("#undoAction")
+        control.wait_for(state="visible")
+        assert control.get_attribute("data-popover-title") == "New levels →"
+        assert select.locator("option").all_text_contents() == ["Refuse", "Reference", "T02+T03"]
+        assert select.input_value() == "error"
+
+        with page.expect_response(_posted("/set_unseen")) as chosen:
+            select.select_option("T02+T03")
+        assert chosen.value.status == 200
+        page.wait_for_function(
+            "() => document.querySelector('#undoAction').dataset.popoverBody"
+            " === 'Undo: New levels → T02+T03'"
+        )
+        assert session.model._specs["territory"].unseen == "T02+T03"
+        assert select.input_value() == "T02+T03"
+
+        # Export the structure to a kernel path, from the dialog's fourth card.
+        page.locator("#exportAction").click()
+        cards = page.locator(".export-format-card")
+        cards.last.wait_for(state="visible")
+        rows = Counter(round(card.bounding_box()["y"]) for card in cards.all())
+        assert sorted(rows.values()) == [2, 2], "four cards on two rows, none alone"
+        page.get_by_role("radio", name="Structure (JSON)").check()
+        assert page.locator("#exportFilename").input_value() == "superglm_structure.json"
+        page.locator("#exportDirectory").fill(str(tmp_path))
+        with page.expect_response(_posted("/export_file")) as saved:
+            page.locator("#exportSave").click()
+        assert saved.value.status == 200
+        page.locator("#exportDialogClose").click()
+        entry = read_structure(tmp_path / "superglm_structure.json").features["territory"]
+        assert entry.unseen == "T02+T03"
+        assert entry.groups == {"T02+T03": ["T02", "T03"]}
+
+        with page.expect_response(_posted("/op")):
+            undo.click()
+        page.wait_for_function("() => document.querySelector('#newLevelsMode').value === 'error'")
+        assert session.model is collapsed
+
+        # Only a plain categorical has the choice.
+        for term in ("curve", "age_band"):
+            choose_feature(page, term)
+            page.wait_for_function(
+                "term => document.querySelector('#status')?.dataset.term === term", arg=term
+            )
+            assert control.is_hidden(), term

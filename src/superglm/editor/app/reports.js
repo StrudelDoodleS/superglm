@@ -1,5 +1,6 @@
 import { escapeHTML, fmt, fmtSigned } from "./format.js";
 import { metricDirection } from "./metrics.js";
+import { cvSourceLine } from "./views/cv_tab.js";
 
 const reportMetricKeys = [
   "deviance",
@@ -10,8 +11,13 @@ const reportMetricKeys = [
   "effective_df"
 ];
 
-export function renderReport(payload, { reportTitle, reportStatus, reportFrame }) {
+export function renderReport(payload, { reportTitle, reportStatus, reportFrame }, cvTab = null) {
   reportTitle.textContent = payload.title || "Report";
+  if (payload.report === "cv" && cvTab) {
+    reportStatus.textContent = cvSourceLine(payload);
+    cvTab.render(payload);
+    return;
+  }
   reportStatus.textContent = payload.note || "";
   if (!payload.available) {
     reportFrame.innerHTML = `<div class="summary-empty">${escapeHTML(payload.note || "Report unavailable.")}</div>`;
@@ -20,7 +26,8 @@ export function renderReport(payload, { reportTitle, reportStatus, reportFrame }
   const splitSection = renderSplitSection(payload);
   const cvSection = payload.report === "validation" ? renderCVSection(payload.cv_report) : "";
   const summarySection = payload.report === "final" ? renderFinalSummary(payload.summary) : "";
-  reportFrame.innerHTML = `${splitSection}${cvSection}${summarySection}`;
+  const finalFitSection = payload.report === "final" ? renderFinalFit(payload.final_fit) : "";
+  reportFrame.innerHTML = `${splitSection}${cvSection}${summarySection}${finalFitSection}`;
 }
 
 function renderSplitSection(payload) {
@@ -147,6 +154,45 @@ function renderFinalSummary(summary) {
         <tbody>
           <tr><th>Family</th><td>${escapeHTML(formatValue(model.family))}</td></tr>
           <tr><th>Link</th><td>${escapeHTML(formatValue(model.link))}</td></tr>
+          <tr><th>Method</th><td>${escapeHTML(formatValue(model.method))}</td></tr>
+          <tr><th>Total EDF</th><td>${escapeHTML(formatValue(model.effective_df))}</td></tr>
+          <tr><th>Deviance</th><td>${escapeHTML(formatValue(model.deviance))}</td></tr>
+          <tr><th>AIC</th><td>${escapeHTML(formatValue(model.aic))}</td></tr>
+          <tr><th>BIC</th><td>${escapeHTML(formatValue(model.bic))}</td></tr>
+        </tbody>
+      </table>
+    </section>
+  `;
+}
+
+function waitingNotIncluded(count) {
+  return `${count} waiting ${count === 1 ? "change is" : "changes are"} not included.`;
+}
+
+function renderFinalFit(finalFit) {
+  if (!finalFit) return "";
+  if (!finalFit.available) {
+    return `
+      <section class="report-section final-fit">
+        <h3>Final Fit on All Rows</h3>
+        <div class="report-note">${escapeHTML(finalFit.note || "")}</div>
+      </section>
+    `;
+  }
+  const model = finalFit.summary?.model || {};
+  const notes = [
+    `Refitted on ${Number(finalFit.n_rows).toLocaleString("en-US")} ${finalFit.splits.join(" and ")} rows; the test split stays held out.`,
+    finalFit.carried.length ? `Hand edits put back: ${finalFit.carried.join(", ")}.` : "",
+    finalFit.pending ? waitingNotIncluded(finalFit.pending) : "",
+    finalFit.stale ? "The model has changed since; run Final fit again before exporting." : ""
+  ].filter(Boolean);
+  return `
+    <section class="report-section final-fit">
+      <h3>Final Fit on All Rows</h3>
+      ${notes.map((note) => `<div class="report-note">${escapeHTML(note)}</div>`).join("")}
+      <table class="report-table" aria-label="Final fit on all rows">
+        <tbody>
+          <tr><th>Rows</th><td>${escapeHTML(formatValue(finalFit.n_rows))}</td></tr>
           <tr><th>Method</th><td>${escapeHTML(formatValue(model.method))}</td></tr>
           <tr><th>Total EDF</th><td>${escapeHTML(formatValue(model.effective_df))}</td></tr>
           <tr><th>Deviance</th><td>${escapeHTML(formatValue(model.deviance))}</td></tr>

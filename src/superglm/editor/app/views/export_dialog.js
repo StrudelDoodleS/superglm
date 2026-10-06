@@ -17,6 +17,19 @@ const EXPORTS = Object.freeze({
       ]),
     }),
   }),
+  final: Object.freeze({
+    filename: "superglm_final_model.joblib",
+    description: "Final fit model",
+    validationDescription: "Validated final fit model",
+    accept: Object.freeze({ "application/octet-stream": Object.freeze([".joblib"]) }),
+  }),
+  // The structural decisions alone, for superglm.read_structure (spec S1, S2).
+  structure: Object.freeze({
+    filename: "superglm_structure.json",
+    description: "Structure (JSON)",
+    validationDescription: "Structure (JSON)",
+    accept: Object.freeze({ "application/json": Object.freeze([".json"]) }),
+  }),
 });
 
 /** @typedef {keyof typeof EXPORTS} ExportFormat */
@@ -33,6 +46,7 @@ const EXPORTS = Object.freeze({
  * @property {HTMLButtonElement} saveToKernel
  * @property {HTMLButtonElement|null} [openDirectory]
  * @property {HTMLElement} status
+ * @property {HTMLElement|null} [pendingNote] says how many waiting changes the export leaves out
  */
 
 /**
@@ -40,6 +54,8 @@ const EXPORTS = Object.freeze({
  * @property {{requestBlob:(path:string)=>Promise<Response>, postJSON:(path:string,payload:Record<string,unknown>)=>Promise<unknown>}} client
  * @property {ExportDialogNodes} nodes
  * @property {(blob:Blob, filename:string, metadata:{description:string,accept:Readonly<Record<string,readonly string[]>>})=>Promise<string|null>} saveBlobToFile
+ * @property {()=>number} [pendingCount] how many structural changes wait for Refit
+ * @property {()=>boolean} [finalFitAvailable] whether a current Final fit model exists
  */
 
 /** @param {unknown} error */
@@ -76,7 +92,7 @@ function hasValidationScope(value) {
 
 /** @param {string} message @param {ExportFormat} format @param {string|null} validation */
 function successMessage(message, format, validation) {
-  if (format !== "joblib") return message;
+  if (format === "xlsx" || format === "structure") return message;
   if (validation === "artifact+predictions") {
     return `${message} Round-trip validated; predictions validated.`;
   }
@@ -85,17 +101,41 @@ function successMessage(message, format, validation) {
 }
 
 /**
- * Bind the self-contained model/workbook export dialog.
+ * What the dialog says while changes wait: the export is the last refit.
+ * @param {number} count
+ */
+export function pendingExportNote(count) {
+  if (count <= 0) return "";
+  return `${count} waiting ${count === 1 ? "change is" : "changes are"} not included. The export is the last refit.`;
+}
+
+/**
+ * Bind the self-contained export dialog: the Python model, the Excel rating
+ * workbook, the Final fit model and the structure file.
  *
  * @param {ExportDialogContext} context
  */
-export function bindExportDialog({ client, nodes, saveBlobToFile }) {
+export function bindExportDialog({
+  client, nodes, saveBlobToFile, pendingCount = () => 0, finalFitAvailable = () => false,
+}) {
   let pending = false;
 
   /** @returns {ExportFormat} */
   function selectedFormat() {
     const value = nodes.formatInputs.find((input) => input.checked)?.value;
-    return value === "xlsx" ? "xlsx" : "joblib";
+    return value === "xlsx" || value === "final" || value === "structure" ? value : "joblib";
+  }
+
+  // Export offers the Final fit model only while one is current (D6).
+  function syncFinalFit() {
+    const finalInput = nodes.formatInputs.find((input) => input.value === "final");
+    if (!finalInput) return;
+    finalInput.disabled = !finalFitAvailable();
+    if (!finalInput.disabled || !finalInput.checked) return;
+    finalInput.checked = false;
+    const joblib = nodes.formatInputs.find((input) => input.value === "joblib");
+    if (joblib) joblib.checked = true;
+    normaliseFilename();
   }
 
   function normaliseFilename() {
@@ -135,7 +175,13 @@ export function bindExportDialog({ client, nodes, saveBlobToFile }) {
   }
 
   async function openDialog() {
+    syncFinalFit();
     nodes.status.textContent = "";
+    if (nodes.pendingNote) {
+      const note = pendingExportNote(pendingCount());
+      nodes.pendingNote.textContent = note;
+      nodes.pendingNote.hidden = note === "";
+    }
     if (nodes.dialog.open) return;
     if (typeof nodes.dialog.showModal === "function") nodes.dialog.showModal();
     else nodes.dialog.setAttribute("open", "");
