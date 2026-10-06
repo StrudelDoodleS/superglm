@@ -2095,9 +2095,12 @@ def truncated_direction_ratio(
       (score and Fisher weights of those rows only, brought to unit scale by
       a power of two), moves each row by ``M delta`` in ``eta``.  Within
       ``bar`` or its rounding (``gamma`` of the sums, the basis's error in the
-      rows' movement and in the pull ``D' S beta``, the penalty's size, through
-      ``|C^+|``) on every row, the rows sit at their own maximum: weakly
-      identified.  Otherwise, if every row the step moves beyond its rounding
+      rows' movement and in the pull ``D' S beta``, the pull's rounding,
+      through ``|C^+|``) on every row, the rows sit at their own maximum:
+      weakly identified.  The pull reads the penalty product ``fl(S beta)``
+      (``penalty_gradient``, within ``gamma_k`` of its formed size
+      ``penalty_size``), and its ``p``-term sums are formed as the bend's
+      below: ``gamma_{k + 2p + 2}`` of ``|D|' penalty_size``.  Otherwise, if every row the step moves beyond its rounding
       improves along it (a response of 0 moving down, of 1 up):
       - along directions the penalty does not bend (``D' S D`` within its
         error), the step is a recession direction of the rows' likelihood:
@@ -2287,7 +2290,7 @@ def truncated_direction_ratio(
     rounding = (
         _gamma(len(s_local) + 2) * (np.abs(local).T @ np.abs(s_local))
         + movement_error
-        + _gamma(p + 2) * pull_size
+        + _gamma(penalty_chain + 2 * p + 2) * pull_size
         + pull_error
         + np.ldexp(underflow, exponent)
     ).ravel()

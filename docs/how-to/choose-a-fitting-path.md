@@ -137,8 +137,8 @@ A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
   about half its flexibility, and the search starts from there. On the
   678,000-row freMTPL2 pure-premium model (Tweedie, monotone BonusMalus curve)
   this is what lets the fit finish.
-- **Only the starting fit that is kept warns.** Warnings from a discarded
-  first attempt, such as a separation warning, are not shown.
+- **Only the starting fit that is kept warns.** superglm's own warnings from
+  a discarded first attempt, such as a `SeparationWarning`, are not shown.
 - **A fit with no checkable start is returned, not refused.** If the second
   start cannot be checked either, the search does not run. The model is
   returned at that start's smoothing values with a `ConvergenceWarning` that

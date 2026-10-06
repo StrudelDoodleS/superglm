@@ -420,3 +420,52 @@ def test_the_solver_passes_the_penalty_product_rounding_to_its_mode_residual(mon
     assert set(received) <= {k for _, k in counts}
     # the spline's range chain and the random effect's identity, not the dense p + 2
     assert all(k == 2 * 9 + 1 + 1 != width + 2 for width, k in counts)
+
+
+def test_the_truncated_direction_pull_is_charged_the_penalty_product_rounding():
+    """The pull ``D' S beta`` reads the penalty product, so it carries ``gamma_{k + 2p + 2}``.
+
+    The direction lies in the penalty's null space, so its bend is exactly 0
+    at any count and ``penalty_rounding`` reaches the floor only through the
+    pull's charge.  With a pull size of 1e-2 per coefficient, ``k = 2**40``
+    puts that charge above the step (the rows sit at their own maximum,
+    ratio 0), where the dense default leaves the step refused.  Mutation
+    check: 71c697b0 charged the pull ``gamma_{p + 2}`` whatever the count,
+    and read 1.4e9 at both.
+    """
+    import math
+
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR, truncated_direction_ratio
+
+    codes = np.array([-1, -1, -1, -1, 0, 0, 1, 1, 2, 2])
+    response = np.array([0.0, 1.0, 0.0, 1.0] + [1.0] * 6)
+    weight = np.where(codes < 0, 1e8, 1e-8)
+    odds = math.exp(-20.0) / -math.expm1(-20.0)
+    second = np.array([[1.0, -2.0, 1.0]])
+    penalty = 1e6 * (second.T @ second)
+    direction = np.array([[1.0], [2.0], [3.0]]) / 4.0
+    assert np.all(penalty @ direction == 0.0)
+
+    def ratio(rounding):
+        value, _ = truncated_direction_ratio(
+            dm=DesignMatrix([CategoricalGroupMatrix(codes, 3)], n=10, p=3),
+            null_basis=direction,
+            angle=1e-12,
+            mean_x=np.zeros(3),
+            row_score=np.where(codes < 0, weight * (2.0 * response - 1.0), weight),
+            fisher_weights=np.where(codes < 0, weight, weight * odds),
+            response=response,
+            positive_prior=np.ones(10, dtype=bool),
+            penalty_gradient=np.zeros(3),
+            penalty_size=np.full(3, 1e-2),
+            penalty_apply=lambda v: penalty @ np.asarray(v),
+            penalty_size_apply=lambda v: np.abs(penalty) @ np.abs(np.asarray(v)),
+            bar=MODE_CERTIFICATION_BAR,
+            underflow=0.0,
+            penalty_rounding=rounding,
+        )
+        return value
+
+    assert ratio(None) > 1.0
+    assert ratio(2**40) == 0.0

@@ -2632,10 +2632,12 @@ def _bootstrap_attempt(
     if one did.  The bootstrap can be fitted at a second start
     (``optimize_scop_efs_reml``), and a start that is discarded must not
     speak for the fit that is published, so the caller replays only the
-    warnings of the start it keeps, publishes or raises.  The hold is
-    context-local: a caller's "error" filter cannot abort a start that may be
-    discarded, and a fit on another thread is untouched.  Any other error is
-    the caller's: the start's warnings are replayed and it is raised.
+    warnings of the start it keeps, publishes or raises.  Only superglm's own
+    warnings are held (``_held_warnings``), in this context alone: a caller's
+    "error" filter cannot abort a start that may be discarded on one of
+    them, and a fit on another thread is untouched.  Other warnings, NumPy's
+    floating-point ones among them, pass through as raised.  Any other error
+    is the caller's: the start's warnings are replayed and it is raised.
     """
     held: list[held_warnings.HeldWarning] = []
     try:
@@ -2755,8 +2757,9 @@ def optimize_scop_efs_reml(
     unconverged with termination reason ``"bootstrap_uncertified"``, and the
     search never starts; when the retry's mode cannot be scored, that error
     is raised (to a power search, an infeasible point), as it is when no
-    retry differs from the first start. Warnings of a start the fit does not
-    continue from, publish or raise are dropped (``_bootstrap_attempt``).
+    retry differs from the first start. superglm's own warnings from a start
+    the fit does not continue from, publish or raise are dropped
+    (``_bootstrap_attempt``).
 
     Parameters
     ----------

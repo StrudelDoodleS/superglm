@@ -3530,16 +3530,20 @@ class TestColdBootstrapStart:
         assert np.all(np.isfinite(model.predict(frame)))
 
 
-def _overflow_probe_a():
-    return np.exp(np.array([1000.0]))
-
-
-def _overflow_probe_b():
-    return np.exp(np.array([1000.0]))
-
-
 class _ProbeWarning(UserWarning):
     """A warning only these tests raise."""
+
+
+def _held_probe_a():
+    from superglm import _held_warnings
+
+    _held_warnings.warn("thread A", _ProbeWarning)
+
+
+def _held_probe_b():
+    from superglm import _held_warnings
+
+    _held_warnings.warn("thread B", _ProbeWarning)
 
 
 def _small_scop_model():
@@ -3568,8 +3572,8 @@ class TestBootstrapWarningHold:
     def test_overlapping_bootstraps_leave_the_warnings_module_alone(self, monkeypatch):
         """Two fits on two threads, their bootstraps interleaved A in, B in, A out, B out.
 
-        Each thread's kept start replays its own NumPy overflow probe, and
-        nothing else's; the filters and ``showwarning`` are as they were, and a
+        Each thread's kept start replays its own held probe, and nothing
+        else's; the filters and ``showwarning`` are as they were, and a
         later warning on the main thread still reaches ``showwarning``.
         Mutation check: a19d2fe4's ``catch_warnings`` left B's exit restoring
         the state A installed (an "always" filter and a recording
@@ -3578,7 +3582,7 @@ class TestBootstrapWarningHold:
         import threading
         import warnings
 
-        probes = {"A": _overflow_probe_a, "B": _overflow_probe_b}
+        probes = {"A": _held_probe_a, "B": _held_probe_b}
         a_in, a_out = threading.Event(), threading.Event()
         both_in = threading.Barrier(2, timeout=120)
         started: set[str] = set()
@@ -3640,9 +3644,9 @@ class TestBootstrapWarningHold:
             own = [
                 (filename, lineno)
                 for thread, category, filename, lineno in seen
-                if thread == name and category is RuntimeWarning and filename == __file__
+                if thread == name and category is _ProbeWarning and filename == __file__
             ]
-            assert own == [(__file__, probe.__code__.co_firstlineno + 1)], (name, own)
+            assert own == [(__file__, probe.__code__.co_firstlineno + 3)], (name, own)
 
     def test_the_kept_start_warnings_reach_the_caller(self, monkeypatch):
         """A warning the bootstrap raises through superglm reaches the caller from its own line.
@@ -3699,6 +3703,45 @@ class TestBootstrapWarningHold:
         assert 1e-4 in emitted
         assert retried == [(f"probe {x!r}", __file__, line) for x in emitted if x != 1e-4]
         assert retried
+
+    def test_numpy_floating_point_warnings_pass_through_as_numpy_raises_them(self, monkeypatch):
+        """NumPy's own warnings are not held: its text, and a caller's ``np.seterr`` "log".
+
+        Routed through ``np.errstate(call=...)``, the overflow came back as
+        "overflow encountered", without the ufunc a caller's message filter
+        matches, and under ``np.seterr(all="log")`` NumPy called ``write`` on
+        that handler, raising ``AttributeError`` out of the fit.  Mutation
+        check: 71c697b0 failed both.
+        """
+        import warnings
+
+        real_fit = scop_efs_module._fit_scop_reml_mode
+
+        def fit(context, lambdas, **kwargs):
+            if kwargs.get("phase") == "bootstrap":
+                np.exp(np.array([1000.0]))
+            return real_fit(context, lambdas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fit)
+        model, frame, y = _small_scop_model()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.fit_reml(frame, y, max_reml_iter=5)
+        messages = {str(w.message) for w in caught if w.category is RuntimeWarning}
+        assert messages == {"overflow encountered in exp"}
+
+        class Log:
+            def __init__(self):
+                self.lines: list[str] = []
+
+            def write(self, message):
+                self.lines.append(message)
+
+        log = Log()
+        model, frame, y = _small_scop_model()
+        with np.errstate(all="log", call=log):
+            model.fit_reml(frame, y, max_reml_iter=5)
+        assert "Warning: overflow encountered in exp\n" in log.lines
 
     @pytest.mark.parametrize("held", [False, True], ids=["warnings_warn", "held_warn"])
     def test_a_warning_from_code_with_no_module_is_not_dropped(self, monkeypatch, held):
