@@ -1206,6 +1206,10 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
             continue
         if ("absent", None) in readings:
             raise EditorValueError(FINAL_COLUMN_MISSING.format(column=name))
+        # A missing value turns an integer level column into floats or objects,
+        # so name it, as Run CV does, rather than the dtype it changed.
+        if name in levels and any(_holds_missing(frame, name) for frame in frames):
+            raise EditorValueError(MISSING_LEVELS.format(job="Final fit", term=name))
         kinds = [kind for kind, _ in readings]
         if not all(isinstance(kind, np.dtype) for kind in kinds):
             raise EditorValueError(FINAL_COLUMN_TYPES.format(column=name))
@@ -1216,6 +1220,10 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
         else:
             raise EditorValueError(FINAL_COLUMN_TYPES.format(column=name))
     return names, casts
+
+
+def _holds_missing(frame, name) -> bool:
+    return bool(np.asarray(pd.isna(frame.column_array(name)), dtype=bool).any())
 
 
 def _reading(frame, name) -> tuple[Any, tuple | None]:

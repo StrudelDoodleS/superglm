@@ -1477,6 +1477,42 @@ def test_final_fit_stacks_a_level_column_whose_splits_hold_integers_of_two_width
 
 
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_final_fit_names_a_missing_value_in_an_integer_level_column(cv_frame, backend):
+    """Region is coded 1, 2, 3, and one validation row is missing.
+
+    A missing value makes the column float64 (pandas) or a null Polars Int64,
+    which reads as float64, so Final fit said the column's dtype differs and
+    asked for one dtype, where Run CV names the missing value.
+    """
+    import polars as pl
+
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    X, y, w = cv_frame
+    X = X.assign(region=X["region"].map({"A": 1, "B": 2, "C": 3}).astype(np.int64))
+    train, validation = X.iloc[:400], X.iloc[400:500].copy()
+    validation["region"] = validation["region"].astype("Int64")
+    validation.iloc[3, validation.columns.get_loc("region")] = pd.NA
+    if backend == "pandas":
+        validation = validation.astype({"region": "float64"})
+    else:
+        train, validation = pl.from_pandas(train), pl.from_pandas(validation)
+    model = _model().fit(train, y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(train, y[:400], w[:400]),
+        validation_data=(validation, y[400:500], w[400:500]),
+    )
+
+    with pytest.raises(EditorValueError) as refused:
+        run_final_fit(capture_final_fit(session), _Context())
+
+    assert refused.value.public_message == cv.MISSING_LEVELS.format(job="Final fit", term="region")
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
 @pytest.mark.parametrize("other", [np.float64, np.uint64])
 def test_final_fit_refuses_a_level_column_an_integer_cast_would_respell(cv_frame, backend, other):
     """An int64 region beside float64 (1 beside 1.0) or uint64 (which pandas stacks as float)."""
