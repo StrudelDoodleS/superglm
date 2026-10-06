@@ -1497,6 +1497,60 @@ def test_final_fit_stacks_a_level_column_whose_splits_hold_integers_of_two_width
     np.testing.assert_array_equal(final.predict(frame(X)), expected.predict(frame(X)))
 
 
+def test_final_fit_keeps_a_categorical_universe_whose_splits_differ_in_order_flag(cv_frame):
+    """Region's categories are A, B, C and an unobserved D in both splits; only validation is ordered.
+
+    pandas stacks two categoricals whose ordered flags differ as object, so
+    D, which only the dtype declares, left the universe and Final fit fitted
+    another model.
+    """
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    X, y, w = cv_frame
+    levels = ["A", "B", "C", "D"]
+    X = X.astype({"region": pd.CategoricalDtype(levels)})
+    train = X.iloc[:400]
+    validation = X.iloc[400:500].astype({"region": pd.CategoricalDtype(levels, ordered=True)})
+    model = _model().fit(train, y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(train, y[:400], w[:400]),
+        validation_data=(validation, y[400:500], w[400:500]),
+    )
+
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+
+    expected = _model().fit(X.iloc[:500], y[:500], sample_weight=w[:500])
+    assert list(final._specs["region"]._levels) == list(expected._specs["region"]._levels)
+    np.testing.assert_array_equal(final.predict(X), expected.predict(X))
+
+
+@pytest.mark.parametrize("nullable", ["Float64", "Int64"])
+def test_final_fit_stacks_a_nullable_numeric_column_beside_a_numpy_one(cv_frame, nullable):
+    """Power is a NumPy float in the train rows and a pandas nullable dtype in validation.
+
+    The nullable column reads as an object array, so it read as text and
+    Final fit refused the pair, though a numeric term reads both as numbers.
+    """
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    X, y, w = cv_frame
+    X = X.assign(power=np.round(4.0 * X["power"]))
+    train = X.iloc[:400]
+    validation = X.iloc[400:500].astype({"power": nullable})
+    model = _model().fit(train, y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(train, y[:400], w[:400]),
+        validation_data=(validation, y[400:500], w[400:500]),
+    )
+
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+
+    expected = _model().fit(X.iloc[:500], y[:500], sample_weight=w[:500])
+    np.testing.assert_array_equal(final.predict(X), expected.predict(X))
+
+
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_final_fit_names_a_missing_value_in_an_integer_level_column(cv_frame, backend):
     """Region is coded 1, 2, 3, and one validation row is missing.

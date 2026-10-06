@@ -1166,8 +1166,20 @@ def _union_rows(datasets: Sequence[EvaluationDataset], template):
         X = frames[0].native
     elif backends == {"pandas"}:
         names, casts = _stacked_columns(frames, template)
+        # Splits that declare one set of categories stack as one categorical:
+        # pandas stacks two whose ordered flags differ as object, which drops
+        # a category no row holds from the universe.
+        first = cast(pd.DataFrame, frames[0].native)
+        categorical = {
+            name: first[name].dtype
+            for name in names
+            if isinstance(first[name].dtype, pd.CategoricalDtype)
+        }
         X = pd.concat(
-            [cast(pd.DataFrame, frame.native)[names].astype(casts) for frame in frames],
+            [
+                cast(pd.DataFrame, frame.native)[names].astype({**casts, **categorical})
+                for frame in frames
+            ],
             ignore_index=True,
         )
     else:
