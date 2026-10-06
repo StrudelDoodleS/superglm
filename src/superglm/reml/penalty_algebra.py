@@ -1316,6 +1316,23 @@ def penalty_component_matvec(
         repeat_count, block_width = _repeated_penalty_geometry(component)
         blocks = beta.reshape(repeat_count, block_width)
         return np.asarray(blocks @ omega.T, dtype=np.float64).ravel()
+    rank = int(round(float(component.rank)))
+    if omega is not None and 0 < rank < omega.shape[0]:
+        # Over the penalty's range, the gradient of ``penalty_component_quadratic``
+        # (``_penalty_range_basis``): ``V (Lambda (V' beta))`` lies in the range
+        # to the computed eigenvectors' orthogonality, whatever its rounding.
+        # The dense product rounds within ``gamma_m |Omega| |beta|``, and beside
+        # a large null-space coefficient (the main spline's reached 100 to 370
+        # beside weightless ``sz`` levels) that rounding has a component along
+        # the null space, where the penalty has no curvature to absorb it: each
+        # PIRLS step turned ``lambda`` times it into a move along a direction
+        # the data identify, so every coefficient's score moved by it.  At
+        # lambda 7e8 that held the score at 3 to 60 times the mode certificate's
+        # bar, growing with lambda (300 at 5e9), every candidate and trial
+        # stopped ``score_stagnated``, and REML's line search failed with no
+        # evaluated trial; over the range the same fits contract to 0.05 of it.
+        values, vectors = _penalty_range_basis(component, omega, rank)
+        return vectors @ (values * (vectors.T @ beta))
     return omega @ beta
 
 
@@ -1330,13 +1347,19 @@ def penalty_component_magnitude_matvec(
     identity, ``[I; -1]`` for sum-to-zero, or the repeat).  Each entry that
     routine forms rounds to within ``gamma_m`` times this for ``m`` additions
     along its chain (Higham 2002, section 3.1), at most the group width plus two.
+    A rank-deficient dense penalty's product over its range sums ``|V| |Lambda|
+    |V'| |beta|`` instead, along a chain of at most twice the group width.
     """
     magnitude = np.asarray(beta_magnitude, dtype=np.float64)
     if component.penalty_kind == "identity":
         return magnitude.copy()
-    omega = np.abs(
-        np.asarray(_penalty_component_omega_ssp(component, group_matrix), dtype=np.float64)
-    )
+    signed = np.asarray(_penalty_component_omega_ssp(component, group_matrix), dtype=np.float64)
+    rank = int(round(float(component.rank)))
+    if component.penalty_kind == "dense" and 0 < rank < signed.shape[0]:
+        values, vectors = _penalty_range_basis(component, signed, rank)
+        absolute = np.abs(vectors)
+        return absolute @ (np.abs(values) * (absolute.T @ magnitude))
+    omega = np.abs(signed)
     if component.penalty_kind == "sum_to_zero":
         n_levels, block_width = _sum_to_zero_penalty_geometry(component)
         free = magnitude.reshape(n_levels - 1, block_width)

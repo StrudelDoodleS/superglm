@@ -1467,7 +1467,8 @@ class SuperGLM:
             candidate search fits keep their own budget. Requires
             ``fit_mode="reml"`` -- a pure-ML publication has no REML
             iteration to budget and refuses the parameter. The default
-            ``None`` uses the ``fit_reml`` default of 20.
+            ``None`` resolves per engine, as ``fit_reml``'s does: 20 for the
+            Newton engines, 100 for the SCOP engine.
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each feasible search

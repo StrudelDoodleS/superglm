@@ -48,7 +48,10 @@ from superglm.profiling._scalar import (
     profile_plot,
     warn_caller,
 )
-from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+from superglm.reml.observed_geometry import (
+    ObservedModeNotCertifiedError,
+    ObservedModeNotConvergedError,
+)
 from superglm.solvers.mode_score import linear_predictor
 
 # Candidate REML fits only rank powers; the published refit at p_hat runs at the
@@ -244,6 +247,15 @@ class _PowerProfile:
             runtime_validation="skip",
             reml_tol=_SEARCH_REML_TOL,
         )
+        if getattr(clone._reml_result, "termination_reason", None) == "bootstrap_uncertified":
+            # A shape-constrained fit published unconverged because no start of
+            # its bootstrap certified a coefficient mode has no REML objective to
+            # rank this power by: it is infeasible, as it was when the bootstrap
+            # raised, and the search routes around it.
+            raise ObservedModeNotConvergedError(
+                "SCOP REML bootstrap did not converge to a coefficient mode at any start",
+                infeasible_detail="no certified SCOP bootstrap mode",
+            )
         # The clone follows the model's retain_fit_state; a released fit keeps
         # its coefficients but not its fitted mean.
         if clone._retain_fit_state:

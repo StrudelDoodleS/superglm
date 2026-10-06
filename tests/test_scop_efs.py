@@ -2909,10 +2909,12 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         does not converge, or a converged mode that fails latent
         certification. A non-converged result returns at ``require_converged
         and not result.converged`` before any certification is computed, so
-        both bootstrap attempts leave ``_scop_mode_newton_relative`` uncalled
-        and only the published last resort computes one. One call therefore
-        distinguishes the two, and keeps a future change that makes this fit
-        converge from leaving the test silently green on the other failure.
+        both bootstrap attempts leave ``_scop_mode_newton_relative`` uncalled,
+        and the publication evaluates the retry's last fit without certifying
+        it. Zero calls therefore distinguishes the two, and keeps a future
+        change that makes this fit converge from leaving the test silently
+        green on the other failure. (2a4e28c7 fitted the retry's start a
+        third time to publish it, and certified that refit once.)
         """
         from superglm import ConvergenceWarning
 
@@ -2943,7 +2945,7 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         assert not diagnostics["converged"]
         assert diagnostics["termination_reason"] == "bootstrap_uncertified"
         assert model._reml_result.terminal_refit_termination == "max_iter"
-        assert len(certifications) == 1
+        assert certifications == []
 
     def test_a_failed_certification_gets_a_cold_final_attempt(self, monkeypatch):
         """The final retry rung drops the warm start, not just the tolerance.
@@ -3123,7 +3125,9 @@ class TestCertificationRetryStart:
         overflow guard. On the freMTPL2 Tweedie book the cold bootstrap's
         certificate asked for a latent step of 8.0e4; started there, the retry
         could not take a single inner step and reported separation. Mutation
-        check: 37f73863 returned that start.
+        check: 37f73863 returned that start. The clip binds at -500 as well,
+        where the clipped point is not the Newton point either; 2a4e28c7
+        guarded only the upper end and returned the start at -501.
         """
         from superglm.solvers.scop import build_scop_solver_reparam
 
@@ -3143,6 +3147,10 @@ class TestCertificationRetryStart:
         assert start is not None and start[2][0]["beta_eff"][0] == 499.0
         assert scop_efs_module._newton_polished_warm_start(mode, correction(512.0)) is None
         assert scop_efs_module._newton_polished_warm_start(mode, correction(8.0e4)) is None
+        start = scop_efs_module._newton_polished_warm_start(mode, correction(-488.0))
+        assert start is not None and start[2][0]["beta_eff"][0] == -499.0
+        assert scop_efs_module._newton_polished_warm_start(mode, correction(-490.0)) is None
+        assert scop_efs_module._newton_polished_warm_start(mode, correction(-8.0e4)) is None
 
 
 def _tweedie_pure_premium_fixture(n: int, seed: int):
@@ -3197,6 +3205,112 @@ def _tweedie_pure_premium_fixture(n: int, seed: int):
     return model, frame, np.minimum(amount, 50000.0) / exposure, exposure
 
 
+def _three_kind_fixture(family="tweedie", n: int = 240, seed: int = 11):
+    """An ordinary spline, a SCOP block and a two-margin tensor, with prior weights."""
+    from superglm import Spline, Tweedie
+
+    rng = np.random.default_rng(seed)
+    frame = pd.DataFrame({name: rng.uniform(0.0, 1.0, n) for name in ("s", "m", "a", "b")})
+    mean = np.exp(0.5 + np.sin(3.0 * frame["s"]) + frame["m"] + 0.5 * frame["a"] * frame["b"])
+    y = rng.poisson(mean).astype(float)
+    if family == "tweedie":
+        family = Tweedie(p=1.5)
+        y = y * rng.gamma(2.0, 0.5, n)
+    model = SuperGLM(
+        family=family,
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "s": Spline(kind="ps", k=8),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "a": Spline(kind="ps", k=6),
+            "b": Spline(kind="ps", k=6),
+        },
+        interactions=[("a", "b")],
+    )
+    return model, frame, y, rng.uniform(0.2, 2.0, n)
+
+
+class _BootstrapCapturedError(Exception):
+    """Stops a fit at its first bootstrap start, carrying the fit context."""
+
+    def __init__(self, context, lambdas):
+        super().__init__("bootstrap captured")
+        self.context = context
+        self.lambdas = lambdas
+
+
+def _bootstrap_context(monkeypatch, model, frame, y, **fit_kwargs):
+    """The SCOP REML fit context and first bootstrap start, before any inner fit."""
+
+    def capture(context, lambdas, **kwargs):
+        raise _BootstrapCapturedError(context, dict(lambdas))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scop_efs_module, "_fit_scop_reml_mode", capture)
+        with pytest.raises(_BootstrapCapturedError) as info:
+            model.fit_reml(frame, y, **fit_kwargs)
+    return info.value.context, info.value.lambdas
+
+
+def _scaled_start_oracle(context, lambdas):
+    """``{name: (sum A_ii / sum S_j,ii, kappa, m)}`` in exact arithmetic, and the row count.
+
+    ``A`` is the two-pass centred Fisher Gram at the initial mean (no
+    offset), from the dense design; ``S_j`` the dense penalty with only
+    ``name`` at one; ``kappa = sum g_ii / sum A_ii``, ``g = diag(X' W X)``;
+    ``m`` the support's size.
+    """
+    from fractions import Fraction
+
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.solvers.working_rows import coefficient_initial_intercept, fisher_working_weights
+
+    assert not np.any(context.offset_arr)
+    weights = np.asarray(context.sample_weight, dtype=np.float64)
+    intercept = coefficient_initial_intercept(
+        distribution=context.distribution, link=context.link, y=context.y, sample_weight=weights
+    )
+    eta = stabilize_eta(intercept + context.offset_arr, context.link)
+    mu = clip_mu(context.link.inverse(eta), context.distribution)
+    fisher = fisher_working_weights(
+        distribution=context.distribution, link=context.link, mu=mu, eta=eta, sample_weight=weights
+    )
+    design = context.dm.toarray()
+    w = [Fraction(float(value)) for value in fisher]
+    sum_w = sum(w)
+    moments: dict[int, tuple[Fraction, Fraction]] = {}
+
+    def column(j: int) -> tuple[Fraction, Fraction]:
+        if j not in moments:
+            x = [Fraction(float(value)) for value in design[:, j]]
+            mean = sum(wi * xi for wi, xi in zip(w, x, strict=True)) / sum_w
+            centred = sum(wi * (xi - mean) ** 2 for wi, xi in zip(w, x, strict=True))
+            raw = sum(wi * xi * xi for wi, xi in zip(w, x, strict=True))
+            moments[j] = (centred, raw)
+        return moments[j]
+
+    unit = dict.fromkeys(lambdas, 0.0)
+    oracle = {}
+    for name in lambdas:
+        diag = np.diagonal(
+            build_penalty_matrix(
+                list(context.dm.group_matrices),
+                context.groups,
+                {**unit, name: 1.0},
+                context.dm.p,
+                reml_penalties=context.reml_penalties,
+            )
+        )
+        support = np.flatnonzero(diag > 0.0)
+        centred = sum(column(int(j))[0] for j in support)
+        raw = sum(column(int(j))[1] for j in support)
+        penalty = sum(Fraction(float(diag[j])) for j in support)
+        oracle[name] = (float(centred / penalty), float(raw / centred), len(support))
+    return oracle, design.shape[0]
+
+
 class TestColdBootstrapStart:
     """A bootstrap with no certified mode at the cold seeds restarts where it can.
 
@@ -3214,7 +3328,18 @@ class TestColdBootstrapStart:
 
         Mutation check: 37f73863 raised ``ObservedModeNotConvergedError`` ("SCOP
         REML bootstrap did not converge to a coefficient mode") on this fit.
+
+        The discarded cold start's warnings do not reach the caller: its
+        SeparationWarning called the returned coefficients unusable, while
+        the published fit converged with its linear predictor far from any
+        overflow guard. Under an "error" filter for SeparationWarning the
+        cold start no longer aborts the fit before its retry. Mutation check:
+        2a4e28c7 raised the cold start's SeparationWarning here.
         """
+        import warnings
+
+        from superglm import SeparationWarning
+
         model, frame, y, exposure = _tweedie_pure_premium_fixture(n=10_000, seed=3)
         boots: list[tuple[dict[str, float], bool]] = []
         real = scop_efs_module._fit_scop_reml_mode
@@ -3226,8 +3351,12 @@ class TestColdBootstrapStart:
             return mode
 
         monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", recording)
-        model.fit_reml(frame, y, sample_weight=exposure, max_reml_iter=200)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            warnings.simplefilter("error", SeparationWarning)
+            model.fit_reml(frame, y, sample_weight=exposure, max_reml_iter=200)
 
+        assert not [w for w in caught if issubclass(w.category, SeparationWarning)]
         assert [certified for _, certified in boots] == [False, True]
         cold, scaled = boots[0][0], boots[1][0]
         assert set(cold.values()) == {1e-4}
@@ -3235,6 +3364,155 @@ class TestColdBootstrapStart:
         diagnostics = model.reml_diagnostics()
         assert diagnostics["converged"]
         assert diagnostics["termination_reason"] == "lambda_tolerance"
+
+    def test_the_scaled_start_is_sum_a_over_sum_s(self, monkeypatch):
+        """Each start is ``sum A_ii / sum S_j,ii`` over ``S_j``'s support, clipped to [1e-6, 1e10].
+
+        ``A`` is the intercept-centred Fisher Gram at the initial mean (a SCOP
+        block's at Jacobian one: its design columns, at unit increments), on
+        an ordinary spline, a SCOP block and a two-margin tensor. The oracle
+        forms ``A_ii = sum W (x - xbar)**2`` and the ratio in exact rational
+        arithmetic from the same float64 design, weights and penalty
+        diagonal, so its one rounding is the final one.
+
+        The production value forms ``A_ii`` from raw moments, ``g - sum_w
+        m**2`` with ``g = sum W x**2``, by an unknown summation order (BLAS or
+        binned kernels), and its error is relative to ``g``, not to ``A_ii``
+        (Higham 2002, section 3.1): ``g``, ``sum W x`` and ``sum_w`` round
+        within ``gamma_(2n+4)``, ``gamma_(2n+2)`` (of ``sum W |x|``) and
+        ``gamma_n``; with ``(sum W |x|)**2 <= sum_w g`` the four further
+        roundings of the mean, its square, the product and the difference
+        leave ``|A_ii^ - A_ii| <= gamma_(10n+18) g_ii``.  The sums over the
+        ``m`` supported coefficients and the divide add ``gamma_(3m+4)``, so
+        the relative error is at most ``kappa gamma_(10n+18) + gamma_(3m+4)``,
+        ``kappa = sum g_ii / sum A_ii``, doubled for the second-order cross
+        terms.  Weights scaled by ``2**-60`` and ``2**60`` scale every ratio
+        exactly, past each clip. Mutation check: a ratio of ``g`` instead of
+        ``A`` (no centring: ``s`` off by 7e-4 relative against a bound of
+        5e-13), or over every penalized coefficient instead of ``S_j``'s
+        support (``s`` 2.7 times the oracle), fails the bound.
+        """
+        model, frame, y, weights = _three_kind_fixture()
+        context, lambdas = _bootstrap_context(monkeypatch, model, frame, y, sample_weight=weights)
+        names = set(lambdas)
+        assert len(names) >= 5
+        scaled = scop_efs_module._hessian_scaled_bootstrap_lambdas(context, lambdas, names)
+        oracle, n = _scaled_start_oracle(context, lambdas)
+        assert set(oracle) == names
+
+        u = 2.0**-53
+
+        def gamma(k: int) -> float:
+            return k * u / (1.0 - k * u)
+
+        for name, (ratio, kappa, m) in oracle.items():
+            tol = 2.0 * (kappa * gamma(10 * n + 18) + gamma(3 * m + 4))
+            assert abs(scaled[name] - ratio) <= tol * ratio, (name, scaled[name], ratio, tol)
+            assert ratio * 2.0**-60 < 1e-6 and ratio * 2.0**60 > 1e10
+        for factor, bound in ((2.0**-60, 1e-6), (2.0**60, 1e10)):
+            rescaled = replace(context, sample_weight=context.sample_weight * factor)
+            assert scop_efs_module._hessian_scaled_bootstrap_lambdas(
+                rescaled, lambdas, names
+            ) == dict.fromkeys(names, bound)
+
+    def test_an_offset_shift_leaves_the_scaled_start_unchanged(self, monkeypatch):
+        """A constant added to every offset is absorbed by the intercept, so the start ignores it.
+
+        The Fisher weights are read at the intercept-only fit given the
+        offset, relative to its largest value; with offsets on a 2**-20 grid
+        a shift of 3 is exact, and the start is the same float64 value.
+        Mutation check: 2a4e28c7 read them at the offset-free intercept plus
+        the offset, so the shift scaled every Poisson start by e**3 and every
+        Tweedie (p=1.5) start by e**1.5.
+        """
+        from superglm import Tweedie
+
+        for family in ("poisson", Tweedie(p=1.5)):
+            model, frame, y, weights = _three_kind_fixture(family=family)
+            exposure = np.random.default_rng(5).uniform(0.05, 1.0, len(y))
+            offset = np.round(np.log(exposure) * 2.0**20) / 2.0**20
+            context, lambdas = _bootstrap_context(
+                monkeypatch, model, frame, y, sample_weight=weights, offset=offset
+            )
+            assert np.array_equal(context.offset_arr, offset)
+            names = set(lambdas)
+            base = scop_efs_module._hessian_scaled_bootstrap_lambdas(context, lambdas, names)
+            shifted = replace(context, offset_arr=context.offset_arr + 3.0)
+            assert np.array_equal(shifted.offset_arr - 3.0, offset)
+            moved = scop_efs_module._hessian_scaled_bootstrap_lambdas(shifted, lambdas, names)
+            assert moved == base, family
+
+    def test_the_scaled_start_keeps_no_dense_penalty_alive(self, monkeypatch):
+        """Each component's p x p penalty is released once its diagonal is read.
+
+        ``np.diag`` returns a view, which kept every component's dense
+        penalty alive until the start was formed: ``8 m p**2`` bytes for
+        ``m`` components. Mutation check: 2a4e28c7 held all earlier ones.
+        """
+        import weakref
+
+        model, frame, y, weights = _three_kind_fixture()
+        context, lambdas = _bootstrap_context(monkeypatch, model, frame, y, sample_weight=weights)
+        made: list[weakref.ref] = []
+        alive: list[int] = []
+        real = scop_efs_module.build_penalty_matrix
+
+        def tracking(*args, **kwargs):
+            alive.append(sum(ref() is not None for ref in made))
+            matrix = real(*args, **kwargs)
+            made.append(weakref.ref(matrix))
+            return matrix
+
+        monkeypatch.setattr(scop_efs_module, "build_penalty_matrix", tracking)
+        scop_efs_module._hessian_scaled_bootstrap_lambdas(context, lambdas, set(lambdas))
+        assert len(made) == len(lambdas) >= 2
+        assert alive == [0] * len(made)
+
+    def test_a_bootstrap_with_no_observed_geometry_is_still_published(self, monkeypatch):
+        """A last iterate with signed observed rows is published, not refused.
+
+        Gamma with an identity link has observed-information rows
+        ``w (2 y - mu) / mu**3``, negative wherever ``y < mu / 2``, and the
+        SCOP moment kernels refuse signed rows. With ``max_pirls_iter=1``
+        both bootstrap starts stop on their budget, and the retry's last
+        iterate (finite coefficients) has such rows. It is published not
+        converged, evaluated on the geometry the inner fit retained (the route
+        a Fisher-curvature family always takes). Mutation check: 2a4e28c7
+        raised ValueError ("signed observed-information rows are not
+        supported") with no ConvergenceWarning and no fit.
+        """
+        from superglm import ConvergenceWarning
+        from superglm.distributions import Gamma
+        from superglm.links import IdentityLink
+
+        x = np.linspace(0.0, 1.0, 100)
+        frame = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=Gamma(),
+            link=IdentityLink(),
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        )
+        retained: list[object] = []
+        real = scop_efs_module.build_cached_scop_joint_geometry
+
+        def recording(**kwargs):
+            retained.append(real(**kwargs))
+            return retained[-1]
+
+        monkeypatch.setattr(scop_efs_module, "build_cached_scop_joint_geometry", recording)
+        with pytest.warns(ConvergenceWarning, match="max_pirls_iter"):
+            model.fit_reml(frame, np.exp(8.0 * x), max_pirls_iter=1)
+        reml = model._reml_result
+        assert not reml.converged
+        assert reml.termination_reason == "bootstrap_uncertified"
+        assert reml.terminal_refit_termination == "max_iter"
+        assert len(retained) == 1
+        assert reml.curvature_source == retained[0].curvature_source
+        assert len(reml.lambda_history) == 2
+        assert np.isfinite(model.result.effective_df)
+        assert np.all(np.isfinite(model.predict(frame)))
 
 
 class TestSCOPAitkenTail:
@@ -4950,10 +5228,34 @@ class TestCandidateStepBackoff:
         what to change (owner decision 3, 2026-09-30). Mutation check:
         37f73863 raised "SCOP REML bootstrap did not converge to a coefficient
         mode".
+
+        What is published is the last inner fit the retry's certification
+        ladder made (rung 3: cold, at the ladder's tightest tolerance), at the
+        retry's own start, and nothing is fitted twice: four inner fits per
+        start, one per rung. Mutation check: 2a4e28c7 fitted the retry's start
+        again from scratch at the loose tolerance, a ninth inner fit that
+        repeated the retry's rung 0 bit for bit, and published that.
         """
         from superglm import ConvergenceWarning
 
         monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", lambda mode: 1.0)
+        fits: list[tuple[str, float, object]] = []
+        real_fit = scop_efs_module.fit_irls_direct
+
+        def counting_fit(**kwargs):
+            out = real_fit(**kwargs)
+            fits.append((kwargs["debug_context"]["phase"], kwargs["tol"], out[0]))
+            return out
+
+        scaled_starts: list[dict[str, float]] = []
+        real_scaled = scop_efs_module._hessian_scaled_bootstrap_lambdas
+
+        def recording_scaled(*args, **kwargs):
+            scaled_starts.append(real_scaled(*args, **kwargs))
+            return scaled_starts[-1]
+
+        monkeypatch.setattr(scop_efs_module, "fit_irls_direct", counting_fit)
+        monkeypatch.setattr(scop_efs_module, "_hessian_scaled_bootstrap_lambdas", recording_scaled)
         model, frame, y = self._model()
         with pytest.warns(ConvergenceWarning, match="starting smoothing parameters"):
             model.fit_reml(frame, y, max_reml_iter=5)
@@ -4962,6 +5264,78 @@ class TestCandidateStepBackoff:
         assert diagnostics["termination_reason"] == "bootstrap_uncertified"
         assert diagnostics["n_reml_iter"] == 0
         assert np.all(np.isfinite(model.predict(frame)))
+        # Poisson/log certifies at Fisher curvature, so rung 0 runs at the
+        # default pirls_tol and the ladder tightens to 1e-10, then 1e-11 twice.
+        assert [(phase, tol) for phase, tol, _ in fits] == [
+            ("bootstrap", tol) for tol in (1e-6, 1e-10, 1e-11, 1e-11)
+        ] * 2
+        assert model._reml_result.pirls_result is fits[-1][2]
+        assert len(scaled_starts) == 1
+        assert diagnostics["lambdas"] == scaled_starts[0]
+        assert diagnostics["lambdas"] != {"x": 1e-4}
+
+    def test_a_failed_warm_bootstrap_restarts_every_component_scaled(self, monkeypatch):
+        """A warm bootstrap with no certified mode is retried at the scaled start too.
+
+        A complete ``lambda2_init`` warms every estimated component, so
+        2a4e28c7 had no cold component to rescale: a failed warm bootstrap
+        went straight to the disclosure, which still claimed a scaled retry,
+        and the published fit sat at the warm value that had failed. Cross-
+        validation folds after the first, NB2 theta refits and user mappings
+        start that way. Every estimated component now restarts at its
+        Hessian-scaled value, and the message names only the starts that ran.
+        """
+        from superglm import ConvergenceWarning
+
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", lambda mode: 1.0)
+        starts: list[dict[str, float]] = []
+        real = scop_efs_module._fit_scop_reml_mode
+
+        def recording(context, lambdas, **kwargs):
+            if kwargs.get("phase") == "bootstrap" and kwargs.get("_certification_retry", 0) == 0:
+                starts.append(dict(lambdas))
+            return real(context, lambdas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", recording)
+        model, frame, y = self._model()
+        with pytest.warns(ConvergenceWarning) as caught:
+            model.fit_reml(frame, y, lambda2_init={"x": 3.0}, max_reml_iter=5)
+        assert len(starts) == 2
+        assert starts[0] == {"x": 3.0}
+        assert starts[1]["x"] != 3.0
+        diagnostics = model.reml_diagnostics()
+        assert diagnostics["termination_reason"] == "bootstrap_uncertified"
+        assert diagnostics["lambdas"] == starts[1]
+        message = " ".join(
+            str(w.message) for w in caught if issubclass(w.category, ConvergenceWarning)
+        )
+        assert "scaled to the data's curvature that it retried at" in message
+        assert "data-scaled starting ones" in message
+
+    def test_the_bootstrap_message_names_only_the_starts_that_ran(self):
+        """With no retry (no scaled start differed), the message claims none.
+
+        Mutation check: 2a4e28c7 claimed a retry at the scaled start whatever
+        ran.
+        """
+        from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+        def reml(*starts):
+            return SimpleNamespace(
+                converged=False,
+                termination_reason="bootstrap_uncertified",
+                n_reml_iter=0,
+                terminal_refit_termination=None,
+                lambda_history=[{"x": value} for value in starts],
+                scop_states=None,
+            )
+
+        alone = reml_nonconvergence_message(reml(1e-4))
+        assert "retried at" not in alone and "data-scaled" not in alone
+        assert "no retry ran" in alone
+        retried = reml_nonconvergence_message(reml(1e-4, 2.5))
+        assert "scaled to the data's curvature that it retried at" in retried
+        assert "no retry ran" not in retried
 
     def test_a_failed_fixed_lambda_fit_has_nothing_to_back_off_to(self, monkeypatch):
         """Fixed-lambda fits have no certified predecessor either.

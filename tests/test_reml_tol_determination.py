@@ -1204,6 +1204,47 @@ class TestPublicationREMLBudget:
         assert disclosed[0].filename == __file__
         assert bool(candidates) == (search_fit_mode == "reml")
 
+    @pytest.mark.parametrize("estimate", ["p", "theta"])
+    def test_an_unset_budget_resolves_per_engine(self, estimate):
+        """An unset budget is ``fit_reml``'s: 100 outer iterations for a SCOP model.
+
+        It read as 20, so the publication refit of a model with a monotone
+        (SCOP) term stopped at 20 outer iterations where ``fit_reml`` and the
+        search's own REML candidates run to 100, and warned of a cap the
+        caller never set; ``estimate_theta`` takes no budget at all and had
+        the same 20. Mutation check: 7ed61b05 published 20 for both.
+        """
+        from superglm import Constraint
+
+        rng = np.random.default_rng(3)
+        n = 500
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n), "z": rng.uniform(0.0, 1.0, n)})
+        mean = np.exp(0.2 + 0.8 * frame["x"] + 0.3 * np.sin(6.0 * frame["z"])).to_numpy()
+        features = {
+            "x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "z": Spline(kind="ps", k=8),
+        }
+        if estimate == "p":
+            counts = rng.poisson(mean)
+            y = np.array([rng.gamma(2.0, 0.5, count).sum() for count in counts])
+            model = SuperGLM(
+                family=families.tweedie(p=1.5),
+                selection_penalty=0.0,
+                discrete=True,
+                features=features,
+            )
+            model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit")
+        else:
+            y = rng.poisson(mean * rng.gamma(2.0, 0.5, n)).astype(float)
+            model = SuperGLM(
+                family=families.nb2(theta=1.0),
+                selection_penalty=0.0,
+                discrete=True,
+                features=features,
+            )
+            model.estimate_theta(frame, y, fit_mode="reml")
+        assert model.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 100
+
     def test_a_pure_ml_publication_refuses_the_reml_budget(self):
         frame, y, features = _small_search_fixture()
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)

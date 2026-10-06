@@ -130,6 +130,21 @@ A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
 - **A term smoothed to its limit stops near the limit.** Once such a term has
   under 0.05 effective degrees of freedom left, the search stops it, and
   exactly where depends on the steps taken.
+- **A starting fit that cannot be checked is tried once more.** The search
+  begins with one coefficient fit at very light smoothing, or at the
+  `lambda2_init` values you pass. If the solver cannot check that fit, it fits
+  again with every smoothing value set from the data so that each term keeps
+  about half its flexibility, and the search starts from there. On the
+  678,000-row freMTPL2 pure-premium model (Tweedie, monotone BonusMalus curve)
+  this is what lets the fit finish.
+- **Only the starting fit that is kept warns.** Warnings from a discarded
+  first attempt, such as a separation warning, are not shown.
+- **A fit with no checkable start is returned, not refused.** If the second
+  start cannot be checked either, the search does not run. The model is
+  returned at that start's smoothing values with a `ConvergenceWarning` that
+  says what to change, and `model.reml_diagnostics()["termination_reason"]`
+  reads `"bootstrap_uncertified"`. `estimate_p` skips a Tweedie power where
+  this happens.
 
 ### Refitting on similar data
 

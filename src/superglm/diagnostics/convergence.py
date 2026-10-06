@@ -34,11 +34,6 @@ _REML_REASON_TEXT = {
     "max_reml_iter": "it reached the max_reml_iter limit",
     "line_search_failed": "no smoothing step improved the REML objective",
     "line_search_stalled": "no smoothing step improved the REML objective",
-    "bootstrap_uncertified": (
-        "no coefficient fit at its starting smoothing parameters, nor at the start scaled to "
-        "the data that a cold start is retried at, reached a mode that passes the convergence "
-        "certificate"
-    ),
 }
 
 # Termination reasons of a smoothing search that met its convergence test. A
@@ -89,6 +84,8 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
         )
     else:
         why = _REML_REASON_TEXT.get(str(reason), f"termination_reason={reason!r}")
+        if reason == "bootstrap_uncertified":
+            why = _bootstrap_reason(reml_result)
         message = (
             f"fit_reml did not converge: smoothing-parameter selection stopped after "
             f"{n_iter} iterations because {why}"
@@ -115,7 +112,9 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
         terms = f" ({', '.join(repr(name) for name in names)})" if names else ""
         message += (
             f" The inner fit of the shape-constrained terms{terms} did not settle, so the "
-            "smoothing parameters are the starting ones in model.reml_diagnostics()['lambdas']. "
+            "smoothing parameters are the "
+            + ("data-scaled " if _bootstrap_retried(reml_result) else "")
+            + "starting ones in model.reml_diagnostics()['lambdas']. "
             "Refit with lambda2_init naming larger starting values for the smooth terms"
             + (", or with a larger max_pirls_iter" if refit_reason == "max_iter" else "")
             + ", or with a smaller basis (k) for the shape-constrained terms and the terms "
@@ -126,6 +125,26 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
     else:
         message += " model.reml_diagnostics() holds the iteration history."
     return message
+
+
+def _bootstrap_retried(reml_result: Any) -> bool:
+    """Whether a SCOP bootstrap retried at data-scaled starts: its ``lambda_history`` holds both."""
+    return len(getattr(reml_result, "lambda_history", None) or ()) > 1
+
+
+def _bootstrap_reason(reml_result: Any) -> str:
+    """Why a SCOP bootstrap published no certified mode, naming only the starts that ran."""
+    if _bootstrap_retried(reml_result):
+        return (
+            "no coefficient fit at its starting smoothing parameters, nor at the starting "
+            "values scaled to the data's curvature that it retried at, reached a mode that "
+            "passes the convergence certificate"
+        )
+    return (
+        "no coefficient fit at its starting smoothing parameters reached a mode that passes "
+        "the convergence certificate (no retry ran: the starting values scaled to the data's "
+        "curvature were the same)"
+    )
 
 
 def lss_nonconvergence_reason(fitted_result: Any, smoothing_reason: str | None) -> str | None:

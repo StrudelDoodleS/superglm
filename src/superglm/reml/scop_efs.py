@@ -13,6 +13,8 @@ Biometrics 73(4), 1071-1081.
 from __future__ import annotations
 
 import logging
+import sys
+import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any
@@ -20,9 +22,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import clip_mu
+from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import stabilize_eta
+from superglm.links import LogLink, stabilize_eta
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.observed_geometry import (
     ObservedGeometryInfeasibleError,
@@ -300,6 +302,25 @@ class _SCOPREMLMode:
     @property
     def objective(self) -> float:
         return float(self.evaluation.value)
+
+
+@dataclass
+class _SCOPInnerFit:
+    """One inner coefficient fit, with what evaluating its mode needs.
+
+    ``mode`` is its evaluated mode, once one was formed.  A bootstrap start
+    keeps its last such fit (``_fit_scop_reml_mode``'s ``_last_fit``), so a
+    start that certifies no mode can still be published as not converged
+    without fitting anything again.
+    """
+
+    context: _SCOPREMLFitContext
+    lambdas: dict[str, float]
+    result: Any
+    xtwx: NDArray
+    scop_states: dict[int, dict]
+    cache: dict[str, Any]
+    mode: _SCOPREMLMode | None = None
 
 
 def _multi_scop_discrete_cleanup_enabled(*, discrete: bool, scop_term_count: int) -> bool:
@@ -854,8 +875,17 @@ def _evaluate_scop_reml_mode(
     penalty: NDArray | None = None,
     mode_score: SCOPModeScore | None = None,
     eta_unclipped: NDArray | None = None,
+    curvature: str | None = None,
 ) -> _SCOPREMLMode:
-    """Assemble and evaluate LAML from one lambda-coherent fitted mode."""
+    """Assemble and evaluate LAML from one lambda-coherent fitted mode.
+
+    ``curvature="fisher"`` takes the route a Fisher-curvature family takes,
+    whatever ``classify_scop_reml_curvature`` says: the geometry the inner fit
+    retained (``build_cached_scop_joint_geometry``: its own SCOP Newton
+    blocks, expected curvature elsewhere), which needs no observed rows. Only
+    the publication of an uncertified bootstrap fit asks for it
+    (``_uncertified_bootstrap_mode``).
+    """
     if penalty_components is None:
         penalty_components = _merge_scop_penalty_components(
             context.reml_penalties,
@@ -920,11 +950,12 @@ def _evaluate_scop_reml_mode(
             sample_weight=context.sample_weight,
         )
 
-    curvature = (
-        classify_scop_reml_curvature(context.distribution, context.link)
-        if scop_states
-        else "fisher"
-    )
+    if curvature is None:
+        curvature = (
+            classify_scop_reml_curvature(context.distribution, context.link)
+            if scop_states
+            else "fisher"
+        )
     if curvature == "observed":
         joint_geometry = build_observed_scop_joint_geometry(
             dm=context.dm,
@@ -1119,14 +1150,17 @@ def _newton_polished_warm_start(
     Returns None when the step is not finite, so the caller keeps the plain
     warm start.
 
-    A step that carries a latent coordinate past the point where the forward
-    map saturates its exponent (``solvers/scop.py`` clips it at 500) counts
-    as not finite too: ``exp`` overflows there, the clipped point is not the
-    Newton point at all, and its linear predictor sits at the link's overflow
+    A step that carries a latent coordinate past either end where the forward
+    map clips its exponent (``solvers/scop.py`` clips it to [-500, 500])
+    counts as not finite too: the clipped point is not the Newton point at
+    all, and above the clip its linear predictor sits at the link's overflow
     guard.  Such a step comes from a mode whose latent curvature is nearly
     singular, so the Newton step is not to be trusted (measured on the
     freMTPL2 Tweedie book at the cold 1e-4 bootstrap: a latent step of 8.0e4,
-    whose start the inner fit could not leave).
+    whose start the inner fit could not leave).  The test is exact: inside
+    the clip ``forward`` returns ``exp`` of the very coordinate, and outside
+    it the clip moves the coordinate by at least ``ulp(500) = 2**-44``, which
+    changes ``exp`` by far more than its rounding (or to 0 or inf).
     """
     polished = correction.latent_beta + correction.slope
     intercept = float(mode.result.intercept) + correction.intercept
@@ -1140,8 +1174,8 @@ def _newton_polished_warm_start(
         mapped = state["reparam"].forward(beta_eff)
         free_dim = getattr(state["reparam"], "free_dim", None)
         if free_dim is not None:
-            with np.errstate(over="ignore"):
-                if np.any(np.exp(beta_eff[free_dim:]) > mapped[free_dim:]):
+            with np.errstate(over="ignore", under="ignore"):
+                if np.any(np.exp(beta_eff[free_dim:]) != mapped[free_dim:]):
                     return None
         beta[group_slice] = mapped
         states[group_index] = {**state, "beta_eff": beta_eff}
@@ -1200,121 +1234,10 @@ def _scop_certification_failure(
     )
 
 
-def _fit_scop_reml_mode(
-    context: _SCOPREMLFitContext,
-    lambdas: dict[str, float],
-    *,
-    beta_init: NDArray | None,
-    intercept_init: float | None,
-    scop_state_init: dict[int, dict] | None,
-    phase: str,
-    reml_iteration: int,
-    line_search_iteration: int | None = None,
-    trial_alpha: float | None = None,
-    require_converged: bool,
-    _certification_retry: int = 0,
-    _publish_uncertified: bool = False,
-) -> _SCOPREMLMode | None:
-    """Fit and evaluate one mode, optionally rejecting a failed inner solve.
-
-    ``_publish_uncertified`` (with ``require_converged=False``) returns a mode
-    that fails the certificate instead of raising: the bootstrap's last resort
-    publishes it as not converged (``optimize_scop_efs_reml``).
-    """
-    debug_context: dict[str, Any] = {
-        "phase": phase,
-        "reml_iteration": reml_iteration,
-    }
-    if line_search_iteration is not None:
-        debug_context["line_search_iteration"] = line_search_iteration
-    if trial_alpha is not None:
-        debug_context["trial_alpha"] = float(trial_alpha)
-
-    trace_run = getattr(context.debug_recorder, "trace_run", None)
-    trace_purpose = {
-        "bootstrap": "reml_bootstrap",
-        "candidate": "reml_candidate",
-        "reml": "reml_candidate",
-        "line_search": "reml_line_search",
-        "final": "reml_final",
-        "fixed": "reml_fixed",
-    }.get(phase, f"reml_{phase}")
-    working_cache: dict[str, Any] = {}
-    inner_tol = (
-        min(context.pirls_tol, 1.0e-10)
-        if any(group.monotone_engine == "scop" for group in context.groups)
-        and classify_scop_reml_curvature(context.distribution, context.link) == "observed"
-        else context.pirls_tol
-    )
-    irls_out: Any = fit_irls_direct(
-        X=context.dm,
-        y=context.y,
-        weights=context.sample_weight,
-        family=context.distribution,
-        link=context.link,
-        groups=context.groups,
-        lambda2=lambdas,
-        offset=context.offset_arr,
-        beta_init=beta_init,
-        intercept_init=intercept_init,
-        tol=inner_tol,
-        max_iter=context.max_pirls_iter,
-        return_xtwx=True,
-        return_scop_state=True,
-        reml_penalties=context.reml_penalties,
-        # A LAML evaluation requires a coefficient mode. Deviance plateaus can
-        # precede latent SCOP stationarity, especially near an interpolating
-        # fit where the penalty deliberately trades a tiny deviance increase
-        # for a much smaller quadratic.
-        convergence="coefficients",
-        _scop_joint=context.scop_joint,
-        scop_state_init=scop_state_init,
-        debug_recorder=context.debug_recorder,
-        debug_context=debug_context,
-        trace_run=trace_run,
-        trace_purpose=trace_purpose,
-        _compute_scop_postfit_inference=False,
-        compute_rank_info=False,
-        _compute_fit_statistics=False,
-        _compute_reml_geometry=False,
-        cache_out=working_cache,
-        weight_semantics=context.weight_semantics,
-        _scop_run_centring=context.scop_run_centring,
-    )
-    scop_states: dict[int, dict]
-    if len(irls_out) == 4:
-        result, _, xtwx, scop_states = irls_out
-    else:
-        result, _, xtwx = irls_out
-        scop_states = {}
-
-    if require_converged and not result.converged:
-        # getattr, unlike the load-bearing predicate in observed_geometry: this is
-        # a best-effort note on a path that is already failing, and it must not
-        # be the thing that raises.
-        if getattr(result, "termination_reason", None) == "max_iter":
-            # Budget exhaustion is refused here by design: item 2c retired the
-            # rule that specially accepted a non-converged inner fit, because
-            # PR #176 removed its cause rather than working around it. But under
-            # observed curvature ``inner_tol`` is a FIXED ceiling, not scaled to
-            # the problem, and a step-length test cannot fire when the
-            # iteration's round-off floor sits above it -- the ordinary REML
-            # path was measured failing exactly that way, 9x to 646x above the
-            # same ceiling. No shape-constrained fit reaching it has been
-            # produced (measured: 922 inner fits at this tolerance, none
-            # exhausted), so the gate stands. Say so on the way out rather than
-            # let a floor-limited fit read as a fit that would not settle.
-            logger.warning(
-                "SCOP inner fit exhausted %d PIRLS iterations at tol=%.1e without "
-                "meeting its step-length test, and is refused. If that tolerance "
-                "sits below this problem's round-off floor then the mode may in "
-                "fact have been reached and the test simply cannot fire; compare "
-                "the achieved coefficient step against the tolerance before "
-                "reading this as a fit that would not settle.",
-                int(getattr(result, "n_iter", -1)),
-                inner_tol,
-            )
-        return None
+def _scop_mode_from_fit(fit: _SCOPInnerFit, *, curvature: str | None = None) -> _SCOPREMLMode:
+    """Evaluate one inner fit's mode: centred Fisher moments, penalty, score and LAML."""
+    context, lambdas, result, xtwx = fit.context, fit.lambdas, fit.result, fit.xtwx
+    scop_states, working_cache = fit.scop_states, fit.cache
     rank_info = result.rank_info
     cached_mean_x = working_cache.get("mean_x")
     cached_sum_w = working_cache.get("sum_W")
@@ -1385,7 +1308,7 @@ def _fit_scop_reml_mode(
             max_abs=0.0,
             relative_max=0.0,
         )
-    mode = _evaluate_scop_reml_mode(
+    return _evaluate_scop_reml_mode(
         context,
         lambdas,
         result=result,
@@ -1398,7 +1321,131 @@ def _fit_scop_reml_mode(
         penalty=penalty,
         mode_score=mode_score,
         eta_unclipped=working_cache.get("eta_unclipped"),
+        curvature=curvature,
     )
+
+
+def _fit_scop_reml_mode(
+    context: _SCOPREMLFitContext,
+    lambdas: dict[str, float],
+    *,
+    beta_init: NDArray | None,
+    intercept_init: float | None,
+    scop_state_init: dict[int, dict] | None,
+    phase: str,
+    reml_iteration: int,
+    line_search_iteration: int | None = None,
+    trial_alpha: float | None = None,
+    require_converged: bool,
+    _certification_retry: int = 0,
+    _last_fit: list[_SCOPInnerFit] | None = None,
+) -> _SCOPREMLMode | None:
+    """Fit and evaluate one mode, optionally rejecting a failed inner solve.
+
+    ``_last_fit``, when given, receives each inner fit this call and its
+    certification retries make, so it ends holding the last one: the
+    bootstrap publishes that fit as not converged when no rung certified a
+    mode (``optimize_scop_efs_reml``), instead of fitting it again.
+    """
+    debug_context: dict[str, Any] = {
+        "phase": phase,
+        "reml_iteration": reml_iteration,
+    }
+    if line_search_iteration is not None:
+        debug_context["line_search_iteration"] = line_search_iteration
+    if trial_alpha is not None:
+        debug_context["trial_alpha"] = float(trial_alpha)
+
+    trace_run = getattr(context.debug_recorder, "trace_run", None)
+    trace_purpose = {
+        "bootstrap": "reml_bootstrap",
+        "candidate": "reml_candidate",
+        "reml": "reml_candidate",
+        "line_search": "reml_line_search",
+        "final": "reml_final",
+        "fixed": "reml_fixed",
+    }.get(phase, f"reml_{phase}")
+    working_cache: dict[str, Any] = {}
+    inner_tol = (
+        min(context.pirls_tol, 1.0e-10)
+        if any(group.monotone_engine == "scop" for group in context.groups)
+        and classify_scop_reml_curvature(context.distribution, context.link) == "observed"
+        else context.pirls_tol
+    )
+    irls_out: Any = fit_irls_direct(
+        X=context.dm,
+        y=context.y,
+        weights=context.sample_weight,
+        family=context.distribution,
+        link=context.link,
+        groups=context.groups,
+        lambda2=lambdas,
+        offset=context.offset_arr,
+        beta_init=beta_init,
+        intercept_init=intercept_init,
+        tol=inner_tol,
+        max_iter=context.max_pirls_iter,
+        return_xtwx=True,
+        return_scop_state=True,
+        reml_penalties=context.reml_penalties,
+        # A LAML evaluation requires a coefficient mode. Deviance plateaus can
+        # precede latent SCOP stationarity, especially near an interpolating
+        # fit where the penalty deliberately trades a tiny deviance increase
+        # for a much smaller quadratic.
+        convergence="coefficients",
+        _scop_joint=context.scop_joint,
+        scop_state_init=scop_state_init,
+        debug_recorder=context.debug_recorder,
+        debug_context=debug_context,
+        trace_run=trace_run,
+        trace_purpose=trace_purpose,
+        _compute_scop_postfit_inference=False,
+        compute_rank_info=False,
+        _compute_fit_statistics=False,
+        _compute_reml_geometry=False,
+        cache_out=working_cache,
+        weight_semantics=context.weight_semantics,
+        _scop_run_centring=context.scop_run_centring,
+    )
+    scop_states: dict[int, dict]
+    if len(irls_out) == 4:
+        result, _, xtwx, scop_states = irls_out
+    else:
+        result, _, xtwx = irls_out
+        scop_states = {}
+    inner_fit = _SCOPInnerFit(context, dict(lambdas), result, xtwx, scop_states, working_cache)
+    if _last_fit is not None:
+        _last_fit[:] = [inner_fit]
+
+    if require_converged and not result.converged:
+        # getattr, unlike the load-bearing predicate in observed_geometry: this is
+        # a best-effort note on a path that is already failing, and it must not
+        # be the thing that raises.
+        if getattr(result, "termination_reason", None) == "max_iter":
+            # Budget exhaustion is refused here by design: item 2c retired the
+            # rule that specially accepted a non-converged inner fit, because
+            # PR #176 removed its cause rather than working around it. But under
+            # observed curvature ``inner_tol`` is a FIXED ceiling, not scaled to
+            # the problem, and a step-length test cannot fire when the
+            # iteration's round-off floor sits above it -- the ordinary REML
+            # path was measured failing exactly that way, 9x to 646x above the
+            # same ceiling. No shape-constrained fit reaching it has been
+            # produced (measured: 922 inner fits at this tolerance, none
+            # exhausted), so the gate stands. Say so on the way out rather than
+            # let a floor-limited fit read as a fit that would not settle.
+            logger.warning(
+                "SCOP inner fit exhausted %d PIRLS iterations at tol=%.1e without "
+                "meeting its step-length test, and is refused. If that tolerance "
+                "sits below this problem's round-off floor then the mode may in "
+                "fact have been reached and the test simply cannot fire; compare "
+                "the achieved coefficient step against the tolerance before "
+                "reading this as a fit that would not settle.",
+                int(getattr(result, "n_iter", -1)),
+                inner_tol,
+            )
+        return None
+    mode = _scop_mode_from_fit(inner_fit)
+    inner_fit.mode = mode
     mode_newton_relative = _scop_mode_newton_relative(mode)
     mode_tolerance = _scop_mode_tolerance(mode)
     if mode_newton_relative > mode_tolerance:
@@ -1454,13 +1501,12 @@ def _fit_scop_reml_mode(
                 trial_alpha=trial_alpha,
                 require_converged=require_converged,
                 _certification_retry=_certification_retry + 1,
+                _last_fit=_last_fit,
             )
         if require_converged:
             return None
-        if _publish_uncertified:
-            return mode
         raise _scop_certification_failure(
-            mode_newton_relative, mode_tolerance, mode_score.relative_max
+            mode_newton_relative, mode_tolerance, mode.mode_score.relative_max
         )
     if trace_run is not None and trace_run.enabled:
         if result.state_id is None:  # pragma: no cover - trace contract
@@ -2442,10 +2488,55 @@ def _scop_flat_components(mode: _SCOPREMLMode, names: set[str], phi: float) -> l
     return sorted(flat)
 
 
+def _log_link_variance_power(distribution: Any, link: Any) -> float | None:
+    """``p`` of a built-in log-link family whose variance is ``mu**p``, else None."""
+    if type(link) is not LogLink:
+        return None
+    if type(distribution) is Tweedie:
+        return float(distribution.p)
+    return {Gaussian: 0.0, Poisson: 1.0, Gamma: 2.0}.get(type(distribution))
+
+
+def _null_fit_eta(context: _SCOPREMLFitContext) -> NDArray:
+    """The linear predictor of the intercept-only fit, given the offset.
+
+    The offset is read relative to its largest value on a weighted row,
+    ``o~ = o - max o``, so a constant added to every offset, which the
+    intercept absorbs, changes nothing here: where ``o + c`` is exact, ``o~``
+    is the same float64 vector.  For a log link and variance ``mu**p``
+    (Gaussian 0, Poisson 1, Tweedie p, Gamma 2) the intercept is the
+    maximum-likelihood one given ``o~``.  Its score equation,
+    ``sum w (y - t e^o~) (t e^o~)**(1-p) = 0`` with ``t = e^intercept``,
+    solves to ``t = sum w y e^((1-p) o~) / sum w e^((2-p) o~)``: the weighted
+    mean of the response ``y e^-o~`` under the weights ``w e^((2-p) o~)``,
+    which is what the family's initial intercept of those rows computes (up
+    to its positive floor).  With no offset those are the original rows, bit
+    for bit.  Any other family or link keeps its offset-free initial
+    intercept, still placed against ``o~``, and so does a row set whose
+    rescaled response or weight is not finite.
+    """
+    weights = np.asarray(context.sample_weight, dtype=np.float64)
+    offset = np.asarray(context.offset_arr, dtype=np.float64)
+    carried = weights > 0.0
+    shifted = offset - (float(np.max(offset[carried])) if np.any(carried) else 0.0)
+    y = np.asarray(context.y, dtype=np.float64)
+    power = _log_link_variance_power(context.distribution, context.link)
+    if power is not None:
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            rescaled_y = y * np.exp(-shifted)
+            rescaled_weights = weights * np.exp((2.0 - power) * shifted)
+        if np.all(np.isfinite(rescaled_y)) and np.all(np.isfinite(rescaled_weights)):
+            y, weights = rescaled_y, rescaled_weights
+    intercept = coefficient_initial_intercept(
+        distribution=context.distribution, link=context.link, y=y, sample_weight=weights
+    )
+    return stabilize_eta(intercept + shifted, context.link)
+
+
 def _hessian_scaled_bootstrap_lambdas(
     context: _SCOPREMLFitContext,
     boot_lambdas: Mapping[str, float],
-    cold_names: set[str],
+    names: set[str],
 ) -> dict[str, float]:
     """Starting smoothing parameters scaled to the data Hessian, for the bootstrap's retry.
 
@@ -2464,37 +2555,39 @@ def _hessian_scaled_bootstrap_lambdas(
 
     The crude approximation here is the diagonal one, ``edf_i = A_ii / (A_ii
     + lambda_j S_j,ii)``, with ``A`` the intercept-centred Fisher Gram at the
-    cold start (every coefficient zero, the intercept at the family's
-    initial mean).  ``lambda_j = sum A_ii / sum S_j,ii`` over the
-    coefficients ``S_j`` penalizes puts the typical one at 1/2.  A SCOP
-    block's ``A`` is its latent Hessian at unit increments (latent zero,
-    Jacobian one).  Only ``cold_names`` move; a component whose ratio is not
-    a positive finite number keeps its seed.
+    cold start: every coefficient zero, the linear predictor that of the
+    intercept-only fit given the offset (``_null_fit_eta``), so a constant
+    added to the offset moves no value.  ``lambda_j = sum A_ii / sum S_j,ii``
+    over the coefficients ``S_j`` penalizes puts the typical one at 1/2.  A
+    SCOP block's ``A`` is its latent Hessian at unit increments (latent zero,
+    Jacobian one).  Only ``names`` move, clipped to [1e-6, 1e10]; a
+    component whose ratio is not a positive finite number keeps its value.
+
+    ``A_ii`` is formed from raw moments, ``diag(X' W X) - sum_w * mean**2``,
+    which loses relative accuracy where a column's mean dominates its spread
+    (the error is ``u`` times ``diag(X' W X)``, not times ``A_ii``).  That is
+    acceptable here only because the value is a starting point whose fit is
+    certified on its own; nothing reads it as a curvature.
     """
     groups = context.groups
     dm = context.dm
-    weights = np.asarray(context.sample_weight, dtype=np.float64)
-    intercept = coefficient_initial_intercept(
-        distribution=context.distribution,
-        link=context.link,
-        y=context.y,
-        sample_weight=weights,
-    )
-    eta = stabilize_eta(intercept + context.offset_arr, context.link)
+    eta = _null_fit_eta(context)
     mu = clip_mu(context.link.inverse(eta), context.distribution)
     fisher = fisher_working_weights(
         distribution=context.distribution,
         link=context.link,
         mu=mu,
         eta=eta,
-        sample_weight=weights,
+        sample_weight=np.asarray(context.sample_weight, dtype=np.float64),
     )
     sum_w = float(np.sum(fisher))
     gram_diag = np.zeros(dm.p, dtype=np.float64)
     unit = {name: 0.0 for name in boot_lambdas}
     penalty_diags: dict[str, NDArray] = {}
-    for name in cold_names:
-        penalty_diags[name] = np.diag(
+    for name in names:
+        # A copy, not np.diag's view: a view keeps its p x p penalty alive,
+        # one per component, for as long as the diagonal lives.
+        penalty_diags[name] = np.diagonal(
             build_penalty_matrix(
                 list(dm.group_matrices),
                 groups,
@@ -2502,7 +2595,7 @@ def _hessian_scaled_bootstrap_lambdas(
                 dm.p,
                 reml_penalties=context.reml_penalties,
             )
-        )
+        ).copy()
     touched = np.zeros(dm.p, dtype=bool)
     for diag in penalty_diags.values():
         touched |= diag > 0.0
@@ -2521,6 +2614,95 @@ def _hessian_scaled_bootstrap_lambdas(
         if np.isfinite(ratio) and ratio > 0.0:
             scaled[name] = float(np.clip(ratio, 1e-6, 1e10))
     return scaled
+
+
+def _replay_warnings(caught: list[warnings.WarningMessage]) -> None:
+    """Re-emit recorded warnings through the caller's filters, from where they were raised.
+
+    Each goes back through ``warnings.warn_explicit`` with its own module
+    name and that module's registry, as ``warnings.warn`` would have sent
+    it, so the caller's filters and once-per-location rules apply as if it
+    had never been held back.
+    """
+    if not caught:
+        return
+    modules = {getattr(module, "__file__", None): module for module in list(sys.modules.values())}
+    for record in caught:
+        module = modules.get(record.filename)
+        warnings.warn_explicit(
+            record.message,
+            record.category,
+            record.filename,
+            record.lineno,
+            module=None if module is None else module.__name__,
+            registry=None if module is None else vars(module).setdefault("__warningregistry__", {}),
+            source=record.source,
+        )
+
+
+def _bootstrap_attempt(
+    context: _SCOPREMLFitContext,
+    lambdas: dict[str, float],
+    last_fit: list[_SCOPInnerFit],
+) -> tuple[_SCOPREMLMode | None, list[warnings.WarningMessage]]:
+    """Fit the bootstrap at one start, holding its warnings back.
+
+    The bootstrap can be fitted at a second start (``optimize_scop_efs_reml``),
+    and a start that is discarded must not speak for the fit that is
+    published: on a Tweedie book whose cold start failed, its
+    SeparationWarning called coefficients unusable whose linear predictor
+    the retry left far from any overflow guard.  Warnings are recorded under
+    an "always" filter, so a caller's "error" filter cannot abort a start
+    that may be discarded; the caller replays (``_replay_warnings``) those of
+    the start it keeps or publishes.  A start that raises replays its own
+    first, since the error is then the caller's.
+    """
+    caught: list[warnings.WarningMessage] = []
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mode = _fit_scop_reml_mode(
+                context,
+                lambdas,
+                beta_init=None,
+                intercept_init=None,
+                scop_state_init=None,
+                phase="bootstrap",
+                reml_iteration=0,
+                require_converged=True,
+                _last_fit=last_fit,
+            )
+    except Exception:
+        _replay_warnings(caught)
+        raise
+    return mode, caught
+
+
+def _uncertified_bootstrap_mode(fit: _SCOPInnerFit) -> _SCOPREMLMode:
+    """The bootstrap's last coefficient fit, evaluated for publication as not converged.
+
+    A fit whose mode was evaluated, and failed only the certificate, is
+    published as it stands.  One that stopped on its iteration budget was
+    never evaluated, and its last iterate need not admit the family's
+    observed geometry: a Gamma identity-link iterate can have signed observed
+    rows, which the SCOP moment kernels refuse.  It is then evaluated on the
+    geometry the inner fit retained, the route every Fisher-curvature family
+    takes (``_evaluate_scop_reml_mode``), which reads no observed rows, and
+    ``curvature_source`` names what that geometry holds.  The fit is
+    published as not converged either way, its objective, effective degrees
+    of freedom and standard errors those of that iterate.
+    """
+    if fit.mode is not None:
+        return fit.mode
+    try:
+        return _scop_mode_from_fit(fit)
+    except (ValueError, ObservedModeNotCertifiedError) as exc:
+        logger.info(
+            "SCOP REML bootstrap: the last fit has no observed geometry (%s); "
+            "publishing it on the geometry the inner fit retained",
+            exc,
+        )
+        return _scop_mode_from_fit(fit, curvature="fisher")
 
 
 def optimize_scop_efs_reml(
@@ -2582,11 +2764,14 @@ def optimize_scop_efs_reml(
     iterate where those terms cannot be formed (``"efs_uncorrected"``).
     ``_outer_step="efs"`` runs EFS throughout.
 
-    The bootstrap is fitted at 1e-4 for every cold component. When that fit
-    has no certified mode, it is fitted again at Hessian-scaled starting
-    values (``_hessian_scaled_bootstrap_lambdas``); when that fails too, the
-    fit at those values is returned unconverged with termination reason
-    ``"bootstrap_uncertified"``, and the search never starts.
+    The bootstrap is fitted at 1e-4 for every cold component and at its warm
+    value for every warm one. When that fit has no certified mode, it is
+    fitted again with every estimated component at its Hessian-scaled
+    starting value (``_hessian_scaled_bootstrap_lambdas``); when that fails
+    too, the last inner fit of that start is returned unconverged with
+    termination reason ``"bootstrap_uncertified"``, and the search never
+    starts. Warnings of a start the fit does not continue from or publish
+    are dropped (``_bootstrap_attempt``).
 
     Parameters
     ----------
@@ -2627,6 +2812,8 @@ def optimize_scop_efs_reml(
         A warm start (a previous fit's estimates, keyed by component name).
         The bootstrap fit is taken at these values and the first EFS update
         starts from them; components it does not name bootstrap cold at 1e-4.
+        A warm bootstrap with no certified mode is retried at the
+        Hessian-scaled values, like a cold one.
 
     Returns
     -------
@@ -2694,61 +2881,49 @@ def optimize_scop_efs_reml(
         )
         for name, val in lambdas.items()
     }
-    boot_mode = _fit_scop_reml_mode(
-        fit_context,
-        boot_lambdas,
-        beta_init=None,
-        intercept_init=None,
-        scop_state_init=None,
-        phase="bootstrap",
-        reml_iteration=0,
-        require_converged=True,
-    )
-    cold_names = set(estimated_names) - warm_names
-    if boot_mode is None and cold_names:
-        # No certified mode at the cold seeds: start where every smooth's
-        # e.d.f. lies away from its extremes instead (Wood, Pya and Saefken
-        # 2016, section 3.1), as ``_hessian_scaled_bootstrap_lambdas`` says.
-        # A fit whose seeded bootstrap certifies never reaches this.
-        boot_lambdas = _hessian_scaled_bootstrap_lambdas(fit_context, boot_lambdas, cold_names)
-        logger.info(
-            "SCOP REML bootstrap: no certified mode at the cold seeds; retrying at "
-            "Hessian-scaled starting lambdas %s",
-            {name: f"{boot_lambdas[name]:.4g}" for name in sorted(cold_names)},
-        )
-        boot_mode = _fit_scop_reml_mode(
-            fit_context,
-            boot_lambdas,
-            beta_init=None,
-            intercept_init=None,
-            scop_state_init=None,
-            phase="bootstrap",
-            reml_iteration=0,
-            require_converged=True,
-        )
+    last_fit: list[_SCOPInnerFit] = []
+    boot_mode, boot_warnings = _bootstrap_attempt(fit_context, boot_lambdas, last_fit)
+    bootstrap_starts = [dict(boot_lambdas)]
     if boot_mode is None:
-        # Neither start reached a certified mode, so the search has nowhere to
-        # begin. The inner fit at the last start is published as not
-        # converged rather than refused (owner decision 3, 2026-09-30); the
-        # ``"bootstrap_uncertified"`` reason names this stage to the user.
-        uncertified = _fit_scop_reml_mode(
-            fit_context,
-            boot_lambdas,
-            beta_init=None,
-            intercept_init=None,
-            scop_state_init=None,
-            phase="bootstrap",
-            reml_iteration=0,
-            require_converged=False,
-            _certification_retry=3,
-            _publish_uncertified=True,
-        )
+        # No certified mode at the first start, cold, warm or partly warm:
+        # every estimated component starts again where its e.d.f. lies away
+        # from its extremes (Wood, Pya and Saefken 2016, section 3.1), as
+        # ``_hessian_scaled_bootstrap_lambdas`` says. A warm value that gave
+        # no certified mode has no claim to be kept, and a warm block left
+        # where it failed while the rest moved would start the retry half
+        # warm; the scaled start is the documented one, so the cold seed is
+        # not tried first. The warm start is then spent: every component
+        # takes the bootstrap's EFS step, as a cold start does. A fit whose
+        # first bootstrap certifies never reaches this.
+        scaled = _hessian_scaled_bootstrap_lambdas(fit_context, boot_lambdas, set(estimated_names))
+        if scaled != boot_lambdas:
+            boot_lambdas = scaled
+            warm_names = set()
+            last_fit.clear()
+            bootstrap_starts.append(dict(boot_lambdas))
+            logger.info(
+                "SCOP REML bootstrap: no certified mode at the first start; retrying at "
+                "Hessian-scaled starting lambdas %s",
+                {name: f"{boot_lambdas[name]:.4g}" for name in sorted(estimated_names)},
+            )
+            boot_mode, boot_warnings = _bootstrap_attempt(fit_context, boot_lambdas, last_fit)
+    # Only the start the fit continues from, or publishes, speaks for it.
+    _replay_warnings(boot_warnings)
+    if boot_mode is None:
+        # No start reached a certified mode, so the search has nowhere to
+        # begin. The last inner fit the last start's certification ladder
+        # made is published as not converged rather than refused (owner
+        # decision 3, 2026-09-30), without fitting it again; the
+        # ``"bootstrap_uncertified"`` reason names this stage to the user, and
+        # ``lambda_history`` holds the starts that were tried.
+        uncertified = _uncertified_bootstrap_mode(last_fit[0])
+        last_fit.clear()
         return REMLResult(
-            lambdas=dict(boot_lambdas),
+            lambdas=dict(uncertified.lambdas),
             pirls_result=_finalize_scop_reml_mode(fit_context, uncertified),
             n_reml_iter=0,
             converged=False,
-            lambda_history=[dict(boot_lambdas)],
+            lambda_history=bootstrap_starts,
             reml_penalties=uncertified.penalty_components,
             scop_states=uncertified.scop_states if uncertified.scop_states else None,
             objective=float(uncertified.evaluation.value),
@@ -2762,6 +2937,7 @@ def optimize_scop_efs_reml(
             ),
             tweedie_scale_data=tweedie_scale_data,
         )
+    last_fit.clear()
     boot_result = boot_mode.result
     boot_scop_states = boot_mode.scop_states
     all_pcs = boot_mode.penalty_components

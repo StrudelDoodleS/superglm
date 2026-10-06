@@ -100,10 +100,17 @@ class CrossValidationResult:
         The score columns the built-in scorers computed, in ``scoring``
         order. A column a callable wrote is not one of them, even one named
         ``"deviance"``, ``"nll"`` or ``"gini"``.
+    warm_start : bool or None
+        The ``warm_start`` the folds were fitted with.
+    fit_kwargs : dict or None
+        The ``fit_kwargs`` every fold's fit received, copied.
 
     ``n_rows``, ``data_fingerprint``, ``splitter``, ``fingerprint_columns``,
-    ``fit_mode``, ``fingerprint_version`` and ``builtin_scores`` are ``None``
-    on a result made before they were recorded.
+    ``fit_mode``, ``fingerprint_version``, ``builtin_scores``, ``warm_start``
+    and ``fit_kwargs`` are ``None`` on a result made before they were
+    recorded. ``warm_start`` and ``fit_kwargs`` were recorded from the release
+    that added them to :func:`cross_validate`, so a result without them was
+    fitted cold, with no extra fit arguments.
     """
 
     fold_scores: pd.DataFrame
@@ -121,6 +128,8 @@ class CrossValidationResult:
     fit_mode: str | None = None
     fingerprint_version: int | None = None
     builtin_scores: tuple[str, ...] | None = None
+    warm_start: bool | None = None
+    fit_kwargs: dict[str, Any] | None = None
 
     def plot_terms_by_fold(
         self,
@@ -936,4 +945,11 @@ def cross_validate(
         fit_mode=fit_mode,
         fingerprint_version=FINGERPRINT_VERSION,
         builtin_scores=tuple(name for name in score_names if name not in not_built_in),
+        warm_start=bool(warm_start),
+        # A mapping argument (a lambda2_init) is copied too: the record must
+        # not change when the caller later edits what it passed.
+        fit_kwargs={
+            key: dict(value) if isinstance(value, Mapping) else value
+            for key, value in fit_kwargs.items()
+        },
     )

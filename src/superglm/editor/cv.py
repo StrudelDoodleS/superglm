@@ -768,6 +768,8 @@ class CVRunPlan(_Plan):
     terms: dict[str, EditableTerm]
     edited: dict[str, EditableTerm]
     fit_mode: str
+    warm_start: bool
+    fit_kwargs: dict[str, Any]
     scoring: tuple[str, ...]
     splitter: str | None
     n_points: int
@@ -793,6 +795,10 @@ def capture_cv_run(session) -> CVRunPlan:
         terms=terms,
         edited={name: terms[name] for name in session.edited_terms()},
         fit_mode=_replay_method(session),
+        # As the supplied folds were fitted; a result that records neither
+        # predates both, so its folds were fitted cold with no extra arguments.
+        warm_start=bool(cv.warm_start),
+        fit_kwargs=dict(cv.fit_kwargs or {}),
         scoring=supplied or _DEFAULT_SCORING,
         splitter=cv.splitter,
         n_points=session.n_points,
@@ -802,7 +808,8 @@ def capture_cv_run(session) -> CVRunPlan:
 def _replay_method(session) -> str:
     """The method Run CV fits each fold with: the supplied result's, so the two
     columns differ only by structure and edits; the current model's when the
-    result predates the record (the tab's note says so)."""
+    result predates the record (the tab's note says so). Its ``warm_start``
+    and ``fit_kwargs`` are replayed with it (``capture_cv_run``)."""
     return session.cv.fit_mode or resolve_refit_method(session.model, "auto")
 
 
@@ -984,6 +991,8 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
             fit_mode=plan.fit_mode,
             scoring=recorder.score,
             error_score="raise",
+            fit_kwargs=plan.fit_kwargs,
+            warm_start=plan.warm_start,
         )
     except JobCancelledError:
         raise
