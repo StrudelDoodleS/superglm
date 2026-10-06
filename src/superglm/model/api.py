@@ -89,6 +89,9 @@ class SuperGLM:
         separation: str = "warn",
         group_pricing: Literal["rank", "spanned"] = "rank",
         weight_semantics: Literal["prior", "frequency"] = "prior",
+        # Threads
+        n_jobs: int | Literal["auto"] = "auto",
+        max_memory: int | str = "auto",
     ):
         """
         Parameters
@@ -240,6 +243,21 @@ class SuperGLM:
             frequency mass shapes the same support as replicated rows, while
             prior weights leave learned geometry a function of physical rows.
             Unweighted fits and fits with ``w == 1`` are identical under both.
+        n_jobs : int or "auto"
+            The most threads a fit uses for its heaviest steps: forming the
+            weighted Gram block by block and checking the rank of the design.
+            ``"auto"`` (default) uses the ``SUPERGLM_N_JOBS`` environment
+            variable when it is set and the number of physical cores
+            otherwise; ``1`` runs those steps on the calling thread.  The
+            fitted model does not depend on it: every thread count gives the
+            same coefficients, bit for bit.
+        max_memory : int, str or "auto"
+            The working memory those threads may hold at once, in bytes or as
+            a size such as ``"4G"``.  A fit starts fewer threads when each
+            needs more than this budget allows, so it is the limit to set on
+            a shared machine.  ``"auto"`` (default) uses
+            ``SUPERGLM_MAX_MEMORY`` when it is set and a quarter of the
+            machine's memory otherwise.
         """
         if splines is not None:
             import warnings
@@ -275,6 +293,16 @@ class SuperGLM:
             separation=separation,
             group_pricing=group_pricing,
             weight_semantics=weight_semantics,
+            n_jobs=n_jobs,
+            max_memory=max_memory,
+        )
+
+    def _parallel_scope(self):
+        """The fit's thread and memory limits (``_parallel.estimator_scope``)."""
+        from superglm._parallel import estimator_scope
+
+        return estimator_scope(
+            getattr(self, "_n_jobs", "auto"), getattr(self, "_max_memory", "auto")
         )
 
     def __setstate__(self, state: dict) -> None:
@@ -605,7 +633,7 @@ class SuperGLM:
                 stacklevel=2,
             )
 
-        with solver_blas_threads():
+        with solver_blas_threads(), self._parallel_scope():
             return fit_ops.fit(
                 self,
                 X,
@@ -637,7 +665,7 @@ class SuperGLM:
         from zero, rebuilding predictions from them cancels the column's
         offset (``PathResult``); predict with a fitted model instead.
         """
-        with solver_blas_threads():
+        with solver_blas_threads(), self._parallel_scope():
             return fit_ops.fit_path(
                 self,
                 X,
@@ -840,7 +868,7 @@ class SuperGLM:
         resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
         resolved_max_pirls_iter = max_pirls_iter if max_pirls_iter is not None else self._max_iter
 
-        with solver_blas_threads():
+        with solver_blas_threads(), self._parallel_scope():
             return fit_ops.fit_reml(
                 self,
                 X,

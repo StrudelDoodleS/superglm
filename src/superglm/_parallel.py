@@ -16,11 +16,15 @@ This module only decides how many workers a kernel may use:
     worker count is ``min(n_jobs, tasks, max_memory // task_bytes)``, at
     least one: CPU time floats, peak memory is the constraint.
 
-Neither is a public estimator parameter yet.  The process default comes
-from ``SUPERGLM_N_JOBS`` and ``SUPERGLM_MAX_MEMORY`` (an integer, ``auto``,
-or for memory a number with a ``K``/``M``/``G`` binary suffix), and
-:func:`parallel_config` overrides both for one context, which is how tests
-pin the worker count.
+Both are ``SuperGLM`` parameters: a fit runs inside :func:`estimator_scope`,
+which applies the estimator's values, and ``"auto"`` there defers to the
+process default.  The process default comes from ``SUPERGLM_N_JOBS`` and
+``SUPERGLM_MAX_MEMORY`` (an integer, ``auto``, or for memory a number with a
+``K``/``M``/``G`` binary suffix), and :func:`parallel_config` overrides both
+for one context, which is how tests pin the worker count.
+
+The pooled kernels are the data-rank factor's TSQR leaves
+(``solvers.rank``) and the Gram's blocks (``_group_matrix._block_queue``).
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
+
+import numpy as np
 
 _N_JOBS_ENV = "SUPERGLM_N_JOBS"
 _MAX_MEMORY_ENV = "SUPERGLM_MAX_MEMORY"
@@ -186,6 +192,45 @@ def resolve_max_memory() -> int:
         return override.max_memory
     from_env = _from_env(_MAX_MEMORY_ENV, _parse_memory)
     return default_max_memory() if from_env is None else from_env
+
+
+def validate_n_jobs(value: int | str) -> int | str:
+    """An estimator's ``n_jobs`` as given, once checked: ``"auto"`` or a positive integer."""
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return "auto"
+    if isinstance(value, bool) or not isinstance(value, int | np.integer) or int(value) < 1:
+        raise ValueError(f"n_jobs must be a positive integer or 'auto', got {value!r}")
+    return int(value)
+
+
+def validate_max_memory(value: int | str) -> int | str:
+    """An estimator's ``max_memory`` as given, once checked.
+
+    ``"auto"``, a positive byte count, or a string such as ``"4G"`` or
+    ``"512M"`` (binary suffixes ``K``, ``M``, ``G``, ``T``).
+    """
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return "auto"
+    if isinstance(value, bool) or not isinstance(value, int | np.integer | str):
+        raise ValueError(f"max_memory must be a positive byte count or 'auto', got {value!r}")
+    try:
+        _parse_memory(value if isinstance(value, str) else int(value))
+    except ValueError as exc:
+        raise ValueError(
+            f"max_memory must be a positive byte count, a size such as '4G', or 'auto', "
+            f"got {value!r}"
+        ) from exc
+    return value if isinstance(value, str) else int(value)
+
+
+@contextmanager
+def estimator_scope(n_jobs: int | str = "auto", max_memory: int | str = "auto") -> Iterator[None]:
+    """Apply an estimator's ``n_jobs`` and ``max_memory`` for one fit; ``"auto"`` keeps the default."""
+    with parallel_config(
+        n_jobs=None if n_jobs == "auto" else n_jobs,
+        max_memory=None if max_memory == "auto" else max_memory,
+    ):
+        yield
 
 
 def pool_workers(n_tasks: int, task_bytes: int) -> int:

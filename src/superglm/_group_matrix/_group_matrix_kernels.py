@@ -1,4 +1,15 @@
-"""Private numba kernels shared by group-matrix helpers."""
+"""Private numba kernels shared by group-matrix helpers.
+
+The kernels a Gram block can reach (``_POOLED_BLOCK_KERNELS``) are compiled
+``nogil=True``: the block queue (``_block_queue``) runs blocks on worker
+threads, and a kernel that held the GIL would run them one at a time.  Every
+one is nopython, so it touches no Python object while the GIL is released;
+none uses ``prange``, so it starts no numba threads of its own; and each
+writes only the arrays it allocates or the scratch its caller owns, which is
+never shared between workers.  Kernels no pooled block reaches (the batched
+channel passes, the structured and centred-assembly kernels) keep numba's
+default and hold the GIL.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +20,7 @@ import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _tensor_operand_in_reassociation_range(values):
     """Check the exponent interval without allocating absolute-value/mask arrays."""
     for row in range(values.shape[0]):
@@ -20,7 +31,7 @@ def _tensor_operand_in_reassociation_range(values):
     return True
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _float64_operand_exponent_bounds(values):
     """Scan IEEE binary64 magnitudes with integer extrema and no array scratch."""
     bits = values.view(np.uint64)
@@ -46,7 +57,7 @@ def _float64_operand_exponent_bounds(values):
     )
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _operand_exponent_bounds(values):
     """Enclose nonzero magnitudes by powers of two, without array scratch."""
     if values.dtype == np.dtype(np.float64):
@@ -223,7 +234,7 @@ def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indi
     return rounded_gram, rounded_xtw, rounded_rhs
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _indexed_row_dot(left, right, left_idx, right_idx):
     """Row dot products gathered from two support tables, without row panels."""
     result = np.empty(len(left_idx), dtype=np.float64)
@@ -235,7 +246,7 @@ def _indexed_row_dot(left, right, left_idx, right_idx):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _csr_weighted_gram(data, indices, indptr, W, p, absolute_weights=False):
     """B.T @ diag(W) @ B exploiting CSR sparsity (symmetric accumulation)."""
     result = np.zeros((p, p))
@@ -291,7 +302,7 @@ def _csr_weighted_gram_channels(data, indices, indptr, W, start, width, p, absol
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _csr_weighted_cross(data, indices, indptr, other_data, other_indices, other_indptr, W, p, q):
     """B.T @ diag(W) @ C for two CSR blocks over shared rows, weighting B.
 
@@ -347,7 +358,7 @@ def _csr_row_chunk(csr, start: int, stop: int, *, data=None):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _weighted_bincount_2d(bin_idx, W, M, n_bins):
     """Fused W-weighted multi-column bincount for dense M."""
     n = len(bin_idx)
@@ -361,7 +372,7 @@ def _weighted_bincount_2d(bin_idx, W, M, n_bins):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _support_weighted_bincount_2d(out, bin_idx, W, B_unique, support_idx, col_start):
     """Add ``W[i] * B_unique[support_idx[i], col_start + c]`` into ``out[bin_idx[i], c]``.
 
@@ -378,7 +389,7 @@ def _support_weighted_bincount_2d(out, bin_idx, W, B_unique, support_idx, col_st
             out[b, c] += w * B_unique[row, col_start + c]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _csr_weighted_bincount(data, indices, indptr, n_cols, bin_idx, W, n_bins):
     """Fused CSR-aware W-weighted bincount."""
     n = len(bin_idx)
@@ -409,7 +420,7 @@ def _csr_weighted_bincount_channels(
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
     """Fused 2D histogram for disc-disc cross-gram."""
     n = len(W)
@@ -445,7 +456,7 @@ def _weighted_hist_channels(idx_a, idx_b, W, start, width, n_a, n_b):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _disc_disc_2d_hist_channels(bin_idx_i, bin_idx_j, chan_idx, W, chan_vals, n_bins_i, n_bins_j):
     """Fused multi-channel 2D histogram: tensor-main cross-grams and the dense
     stage of the tensor-tensor channel route."""
@@ -473,7 +484,7 @@ def _add_raw_row(acc, w, bin1, bin2, offsets1, values1, offsets2, values2, k2_ra
             acc[base + b] += weighted * values2[bin2, b]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _gather_cell_order(order, bin1, bin2):
     """Permute a partner's channel bins into a grid's cell order.
 
@@ -493,7 +504,7 @@ def _gather_cell_order(order, bin1, bin2):
     return bin1_sorted, bin2_sorted
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _cell_hist_raw_kron(ptr, bin1, bin2, w, offsets1, values1, offsets2, values2, k2_raw, out):
     """Raw-band channel histogram over a cell-CSR: ``out[c] = sum over the rows
     ``t`` of cell ``c`` of ``w[t] * kron(raw1[bin1[t]], raw2[bin2[t]])``.
@@ -516,7 +527,7 @@ def _cell_hist_raw_kron(ptr, bin1, bin2, w, offsets1, values1, offsets2, values2
             out[cell, column] = acc[column]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _cell_csr_matches(ptr, order, idx1, idx2, n_bins1, n_bins2):
     """Validate live cell membership without retaining another index copy."""
     n = len(idx1)
@@ -536,7 +547,7 @@ def _cell_csr_matches(ptr, order, idx1, idx2, n_bins1, n_bins2):
     return True
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _cell_csr(idx1, idx2, n_bins1, n_bins2):
     """Stable counting sort of the rows by grid cell ``idx1 * n_bins2 + idx2``.
 
@@ -560,7 +571,7 @@ def _cell_csr(idx1, idx2, n_bins1, n_bins2):
     return ptr, order
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _fused_bincount_2(bin_idx, W, Wz, n_bins):
     """Fused dual bincount: aggregate W and Wz by bin in one O(n) pass."""
     n = len(bin_idx)
@@ -573,7 +584,7 @@ def _fused_bincount_2(bin_idx, W, Wz, n_bins):
     return W_agg, Wz_agg
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _factor_smooth_csr_matvec(data, indices, indptr, codes, raw_coefficients):
     """Apply a level-specific raw spline coefficient block to CSR rows."""
     result = np.zeros(len(codes))
@@ -586,7 +597,7 @@ def _factor_smooth_csr_matvec(data, indices, indptr, codes, raw_coefficients):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _factor_smooth_support_matvec(basis, bin_idx, codes, raw_coefficients):
     """Apply level-specific coefficients through a shared discrete support basis."""
     result = np.zeros(len(codes))
@@ -601,7 +612,7 @@ def _factor_smooth_support_matvec(basis, bin_idx, codes, raw_coefficients):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _factor_smooth_csr_rmatvec(data, indices, indptr, codes, values, n_levels, width):
     """Aggregate an observation vector into level-by-raw-basis coordinates."""
     result = np.zeros((n_levels, width))
@@ -613,7 +624,7 @@ def _factor_smooth_csr_rmatvec(data, indices, indptr, codes, values, n_levels, w
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _factor_smooth_support_rmatvec(basis, bin_idx, codes, values, n_levels):
     """Aggregate an observation vector through a shared discrete support basis."""
     width = basis.shape[1]
@@ -627,7 +638,7 @@ def _factor_smooth_support_rmatvec(basis, bin_idx, codes, values, n_levels):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _factor_smooth_csr_sufficient_stats(
     data,
     indices,
@@ -663,7 +674,7 @@ def _factor_smooth_csr_sufficient_stats(
     return gram, xtw, xt_rhs
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _factor_smooth_support_cell_aggregates(
     bin_idx,
     codes,
@@ -683,7 +694,7 @@ def _factor_smooth_support_cell_aggregates(
     return cell_weights, cell_rhs
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _factor_smooth_csr_dense_cross(
     data,
     indices,
@@ -710,7 +721,7 @@ def _factor_smooth_csr_dense_cross(
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _factor_smooth_support_dense_cross(
     basis,
     bin_idx,
@@ -780,7 +791,7 @@ def _dense_small_weighted_moments(X, W, Wz):
     return gram, xtw, xtwz
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _fused_2d_bincount_2(idx1, idx2, W, Wz, n_bins1, n_bins2):
     """Fused dual 2D bincount for tensor gram_rmatvec."""
     n = len(idx1)
@@ -836,7 +847,7 @@ def _pattern_support_summaries(
     return marginal_w, marginal_wz, joint_w
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _cat_weighted_bincount(codes, bin_idx, W, n_bins, n_levels):
     """Scatter W into (n_bins, n_levels) by (bin_idx, codes) simultaneously."""
     result = np.zeros((n_bins, n_levels))
@@ -847,7 +858,7 @@ def _cat_weighted_bincount(codes, bin_idx, W, n_bins, n_levels):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _cat_cat_weighted_crosstab(codes_i, codes_j, W, n_levels_i, n_levels_j):
     """Weighted crosstab: X_i.T @ diag(W) @ X_j for two categoricals."""
     result = np.zeros((n_levels_i, n_levels_j))
@@ -857,6 +868,38 @@ def _cat_cat_weighted_crosstab(codes_i, codes_j, W, n_levels_i, n_levels_j):
         if ci < n_levels_i and cj < n_levels_j:
             result[ci, cj] += W[k]
     return result
+
+
+_POOLED_BLOCK_KERNELS = (
+    _tensor_operand_in_reassociation_range,
+    _float64_operand_exponent_bounds,
+    _operand_exponent_bounds,
+    _indexed_row_dot,
+    _csr_weighted_gram,
+    _csr_weighted_cross,
+    _weighted_bincount_2d,
+    _support_weighted_bincount_2d,
+    _csr_weighted_bincount,
+    _disc_disc_2d_hist,
+    _disc_disc_2d_hist_channels,
+    _gather_cell_order,
+    _cell_hist_raw_kron,
+    _cell_csr_matches,
+    _cell_csr,
+    _fused_bincount_2,
+    _factor_smooth_csr_matvec,
+    _factor_smooth_support_matvec,
+    _factor_smooth_csr_rmatvec,
+    _factor_smooth_support_rmatvec,
+    _factor_smooth_csr_sufficient_stats,
+    _factor_smooth_support_cell_aggregates,
+    _factor_smooth_csr_dense_cross,
+    _factor_smooth_support_dense_cross,
+    _fused_2d_bincount_2,
+    _cat_weighted_bincount,
+    _cat_cat_weighted_crosstab,
+)
+"""The kernels a diagonal or cross Gram block can reach: exactly the ``nogil`` ones."""
 
 
 def _warmup_group_matrix_kernels() -> None:

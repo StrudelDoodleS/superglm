@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, cast
 
@@ -197,8 +199,95 @@ class _ChannelBatch:
             cache.release_channel_buffers()
 
 
+class _SharedEntries:
+    """Form each shared entry of one pooled assembly once, whichever worker asks first.
+
+    The block queue (``_block_queue``) runs a Gram's blocks on worker threads
+    whose caches share one set of entries (``_BlockWeightCache.worker_view``).
+    Every entry is a function of the assembly's weights and fixed factors
+    alone, so the worker that forms it forms the value a serial assembly
+    would.  This registry also forms each entry exactly once, as the serial
+    assembly does: the first worker to ask registers the key and forms the
+    value outside the lock, and later askers wait for it.  No computation
+    asks the cache for another entry, so no worker waits on itself, and a
+    failed computation wakes its waiters, the next of which forms it again.
+    Owner: one pooled assembly; lifetime: that assembly.
+    """
+
+    __slots__ = ("_lock", "_pending")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: dict[tuple[int, Any], threading.Event] = {}
+
+    def lookup(self, store: dict, key, alternate=None) -> tuple[Any, Any]:
+        """``(key, value)`` of a formed entry under ``key`` or ``alternate``, after any in flight.
+
+        ``(None, None)`` when neither is formed nor being formed.
+        """
+        keys = (key,) if alternate is None else (key, alternate)
+        while True:
+            with self._lock:
+                for candidate in keys:
+                    value = store.get(candidate)
+                    if value is not None:
+                        return candidate, value
+                pending = next(
+                    (
+                        self._pending[(id(store), candidate)]
+                        for candidate in keys
+                        if (id(store), candidate) in self._pending
+                    ),
+                    None,
+                )
+                if pending is None:
+                    return None, None
+            pending.wait()
+
+    def claim(self, store: dict, keys) -> threading.Event | None:
+        """Register the caller as the one forming every key, or None if any is formed or forming."""
+        with self._lock:
+            if any(store.get(key) is not None or (id(store), key) in self._pending for key in keys):
+                return None
+            event = threading.Event()
+            for key in keys:
+                self._pending[(id(store), key)] = event
+            return event
+
+    def publish(self, store: dict, event: threading.Event, keys, values) -> None:
+        """Store the formed ``values`` (none if forming failed) and wake the waiters."""
+        with self._lock:
+            if values is not None:
+                for key, value in zip(keys, values, strict=True):
+                    store[key] = value
+            for key in keys:
+                self._pending.pop((id(store), key), None)
+        event.set()
+
+    def once(self, store: dict, key, compute: Callable[[], Any], alternate=None):
+        """``(key, value, formed)``: the entry under ``key`` (or ``alternate``), formed once."""
+        while True:
+            found_key, value = self.lookup(store, key, alternate)
+            if found_key is not None:
+                return found_key, value, False
+            event = self.claim(store, (key,))
+            if event is not None:
+                break
+        value = None
+        try:
+            value = compute()
+        finally:
+            self.publish(store, event, (key,), None if value is None else (value,))
+        return key, value, True
+
+
 class _BlockWeightCache:
-    """Per-block-assembly cache for weighted discrete summaries."""
+    """Per-block-assembly cache for weighted discrete summaries.
+
+    A pooled assembly gives each worker a view (:meth:`worker_view`) that
+    shares the entries, formed once through :class:`_SharedEntries`, and owns
+    its scratch, so no array is written by two workers.
+    """
 
     __slots__ = (
         "_batch",
@@ -213,6 +302,9 @@ class _BlockWeightCache:
         "_weight_ranges",
         "_support_ranges",
         "_cell_orders",
+        "_shared",
+        "_parts",
+        "_queue",
     )
 
     def __init__(self, profile: dict[str, Any] | None = None) -> None:
@@ -228,6 +320,55 @@ class _BlockWeightCache:
         self._weight_ranges: dict[int, tuple[NDArray, bool, tuple[int, int]]] = {}
         self._support_ranges: dict[int, tuple[NDArray, tuple[int, int]]] = {}
         self._cell_orders: dict[DiscretizedTensorGroupMatrix, tuple[NDArray, NDArray]] = {}
+        self._shared: _SharedEntries | None = None
+        self._parts = 1
+        self._queue = None
+
+    def worker_view(
+        self, shared: _SharedEntries, profile: dict[str, Any] | None, queue
+    ) -> _BlockWeightCache:
+        """One pool worker's cache: this assembly's entries, its own scratch and profile.
+
+        ``queue`` runs a split block's parts (:meth:`run_parts`).  The view
+        never holds a batch: batched assemblies are not pooled.
+        """
+        view = _BlockWeightCache(profile)
+        for name in (
+            "_hist2d",
+            "_hist_orientation",
+            "_cell_weights",
+            "_supports",
+            "_sparse_grams",
+            "_weight_ranges",
+            "_support_ranges",
+            "_cell_orders",
+        ):
+            setattr(view, name, getattr(self, name))
+        view._shared = shared
+        view._queue = queue
+        return view
+
+    def _once(self, store: dict, key, compute: Callable[[], Any]) -> tuple[Any, bool]:
+        """``(store[key], formed)``, forming the entry with ``compute()`` if it is missing."""
+        value = store.get(key)
+        if value is not None:
+            return value, False
+        if self._shared is not None:
+            _key, value, formed = self._shared.once(store, key, compute)
+            return value, formed
+        value = compute()
+        store[key] = value
+        return value, True
+
+    def stage_parts(self) -> int:
+        """How many parts the current block's row stage may be split into (1: whole)."""
+        return self._parts
+
+    def run_parts(self, count: int, part: Callable[[int], Any]) -> list:
+        """``[part(0), ..., part(count - 1)]``, on idle pool workers too when pooled."""
+        if self._queue is None or count < 2:
+            return [part(index) for index in range(count)]
+        return self._queue.run_parts(count, part)
 
     def for_new_weights(
         self, batch: _ChannelBatch | None = None, channel: int = 0
@@ -271,15 +412,15 @@ class _BlockWeightCache:
         Retain the array, so an identity key cannot outlive its owner. The
         legacy boolean is separate: exponent bounds round powers of two up.
         """
-        entry = self._weight_ranges.get(id(W))
-        if entry is None:
-            values = W[:, None]
-            entry = (
+        entry, _formed = self._once(
+            self._weight_ranges,
+            id(W),
+            lambda: (
                 W,
-                _tensor_operand_in_reassociation_range(values),
-                _cross_operand_bounds(values),
-            )
-            self._weight_ranges[id(W)] = entry
+                _tensor_operand_in_reassociation_range(W[:, None]),
+                _cross_operand_bounds(W[:, None]),
+            ),
+        )
         return entry[1], entry[2]
 
     def support_range(self, factor: NDArray) -> tuple[int, int]:
@@ -288,10 +429,9 @@ class _BlockWeightCache:
         Weighted partners may be reused scratch and must not enter this cache.
         A fresh assembly observes mutations to the live support factors.
         """
-        entry = self._support_ranges.get(id(factor))
-        if entry is None:
-            entry = (factor, _cross_operand_bounds(factor))
-            self._support_ranges[id(factor)] = entry
+        entry, _formed = self._once(
+            self._support_ranges, id(factor), lambda: (factor, _cross_operand_bounds(factor))
+        )
         return entry[1]
 
     def cell_csr(self, gm: DiscretizedTensorGroupMatrix) -> tuple[NDArray, NDArray]:
@@ -300,16 +440,18 @@ class _BlockWeightCache:
         Keys own the grids. A fresh assembly and every uncached call validate
         live indices again; no cross-fit validation result is retained.
         """
-        result = self._cell_orders.get(gm)
-        if result is None:
-            result = gm.cell_csr()
-            self._cell_orders[gm] = result
-        return result
+        return self._once(self._cell_orders, gm, gm.cell_csr)[0]
 
     def release_channel_buffers(self) -> None:
-        """Drop derived channel workspace before another route spends its budget."""
+        """Drop derived channel workspace before another route spends its budget.
+
+        A pool worker drops only its own scratch: the permuted weights are
+        the assembly's, shared with the other workers, which may be reading
+        them (``_tensor_channel_workspace_bytes`` does not charge them).
+        """
         self._channel_scratch = np.empty(0)
-        self._cell_weights.clear()
+        if self._shared is None:
+            self._cell_weights.clear()
 
     def sparse_gram(self, gm: SparseSSPGroupMatrix, weights: NDArray) -> tuple[NDArray, bool]:
         """Share a sparse diagonal's cancellation decision with its crosses.
@@ -317,15 +459,15 @@ class _BlockWeightCache:
         This cache belongs to one weighted assembly. A cross may request the
         right diagonal early; the diagonal loop then reuses that same result.
         """
-        result = self._sparse_grams.get(gm)
-        if result is None:
-            result = (
+        return self._once(
+            self._sparse_grams,
+            gm,
+            lambda: (
                 gm._gram_with_projection(weights)
                 if self._batch is None
                 else gm._gram_with_projection(weights, _csr_gram=self._csr_gram)
-            )
-            self._sparse_grams[gm] = result
-        return result
+            ),
+        )[0]
 
     def _csr_gram(self, data, indices, indptr, W, p, absolute_weights=False) -> NDArray:
         """``_csr_weighted_gram``, one pass shared by batched channels."""
@@ -364,10 +506,8 @@ class _BlockWeightCache:
         so changed factors, weights, subsets and reparameterizations cannot
         reuse a previous assembly's projection.
         """
-        support = self._supports.get(gm)
-        if support is None:
-            support = gm.B_unique @ gm.R_inv
-            self._supports[gm] = support
+        support, formed = self._once(self._supports, gm, lambda: gm.B_unique @ gm.R_inv)
+        if formed:
             _profile_count(self._profile, "block_solver_support_builds")
         else:
             _profile_count(self._profile, "block_solver_support_reuses")
@@ -380,13 +520,9 @@ class _BlockWeightCache:
         is the grid's cached cell-CSR and ``W`` the build's weights -- so the
         entry is keyed on their identity, as ``disc_disc_hist``'s is.
         """
-        key = (id(order), id(W))
-        permuted = self._cell_weights.get(key)
-        if permuted is not None:
+        permuted, formed = self._once(self._cell_weights, (id(order), id(W)), lambda: W[order])
+        if not formed:
             _profile_count(self._profile, "block_cell_weight_reuses")
-            return permuted
-        permuted = W[order]
-        self._cell_weights[key] = permuted
         return permuted
 
     def channel_accumulator(self, n_cells: int, width: int) -> NDArray:
@@ -418,27 +554,44 @@ class _BlockWeightCache:
         n_a: int,
         n_b: int,
     ) -> NDArray:
+        """``_disc_disc_2d_hist`` of one index pair, formed once per assembly.
+
+        A grid formed for the reversed pair serves as its transpose, copied to
+        C order: every cell sums the same weights in the same row order either
+        way, so the copy is the value AND the layout a fresh grid has, and
+        what reaches the contractions does not depend on which block formed
+        the grid first, in a serial assembly or a pooled one.
+        """
         key = self._key(idx_a, idx_b, W, n_a, n_b)
+        rev_key = self._key(idx_b, idx_a, W, n_b, n_a)
+
+        def form() -> NDArray:
+            t0 = perf_counter() if self._profile is not None else 0.0
+            hist = _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
+            _profile_elapsed(self._profile, "block_hist2d_s", t0)
+            _profile_count(self._profile, "block_hist2d_builds")
+            return hist
+
+        if self._shared is not None:
+            found, hist, formed = self._shared.once(self._hist2d, key, form, alternate=rev_key)
+            if not formed:
+                _profile_count(self._profile, "block_hist2d_reuses")
+            return hist if found == key else np.ascontiguousarray(hist.T)
+
         cached = self._hist2d.get(key)
         if cached is not None:
             _profile_count(self._profile, "block_hist2d_reuses")
             return cached
 
-        rev_key = self._key(idx_b, idx_a, W, n_b, n_a)
         rev_cached = self._hist2d.get(rev_key)
         if rev_cached is not None:
-            hist = rev_cached.T
-            self._hist2d[key] = hist
             _profile_count(self._profile, "block_hist2d_reuses")
-            return hist
+            return np.ascontiguousarray(rev_cached.T)
 
         if self._batch is not None:
             return self._batched_hist(key, rev_key, idx_a, idx_b, W, n_a, n_b)
 
-        t0 = perf_counter() if self._profile is not None else 0.0
-        hist = _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
-        _profile_elapsed(self._profile, "block_hist2d_s", t0)
-        _profile_count(self._profile, "block_hist2d_builds")
+        hist = form()
         self._hist2d[key] = hist
         return hist
 
@@ -458,7 +611,7 @@ class _BlockWeightCache:
         hist = _weighted_hist(
             self, idx_a, idx_b, W, n_a, n_b, lambda: _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
         )
-        return hist.T if transposed else hist
+        return np.ascontiguousarray(hist.T) if transposed else hist
 
     def tensor_w_grid(self, gm: DiscretizedTensorGroupMatrix, W: NDArray) -> NDArray:
         return self.disc_disc_hist(gm.idx1, gm.idx2, W, gm.n_bins1, gm.n_bins2)
@@ -466,19 +619,39 @@ class _BlockWeightCache:
     def tensor_w_wz_grid(
         self, gm: DiscretizedTensorGroupMatrix, W: NDArray, Wz: NDArray
     ) -> tuple[NDArray, NDArray]:
+        """Both weight grids of a tensor, in one fused pass when neither is formed yet.
+
+        The fused kernel adds each grid's rows in the order
+        ``_disc_disc_2d_hist`` does, so either route forms the same grids.
+        In a pooled assembly the fused pass runs only if this worker claims
+        both keys before any other worker forms or claims one of them.
+        """
         w_key = self._key(gm.idx1, gm.idx2, W, gm.n_bins1, gm.n_bins2)
         wz_key = self._key(gm.idx1, gm.idx2, Wz, gm.n_bins1, gm.n_bins2)
+        keys = (w_key,) if wz_key == w_key else (w_key, wz_key)
+        claim = None if self._shared is None else self._shared.claim(self._hist2d, keys)
         w_grid = self._hist2d.get(w_key)
         wz_grid = self._hist2d.get(wz_key)
-        if w_grid is None and wz_grid is None:
-            t0 = perf_counter() if self._profile is not None else 0.0
-            w_grid, wz_grid = _fused_2d_bincount_2(gm.idx1, gm.idx2, W, Wz, gm.n_bins1, gm.n_bins2)
-            _profile_elapsed(self._profile, "block_hist2d_s", t0)
-            _profile_count(self._profile, "block_hist2d_builds")
-            self._hist2d[w_key] = w_grid
-            self._hist2d[wz_key] = wz_grid
-            if self._batch is not None:
-                self._hist_orientation[w_key] = self._hist_orientation[wz_key] = False
+        if claim is not None or (self._shared is None and w_grid is None and wz_grid is None):
+            grids = None
+            try:
+                t0 = perf_counter() if self._profile is not None else 0.0
+                grids = _fused_2d_bincount_2(gm.idx1, gm.idx2, W, Wz, gm.n_bins1, gm.n_bins2)
+                _profile_elapsed(self._profile, "block_hist2d_s", t0)
+                _profile_count(self._profile, "block_hist2d_builds")
+            finally:
+                if claim is not None:
+                    # One key stores the second grid, as the serial path's
+                    # second assignment leaves it.
+                    self._shared.publish(
+                        self._hist2d, claim, keys, None if grids is None else grids[-len(keys) :]
+                    )
+            w_grid, wz_grid = grids
+            if claim is None:
+                self._hist2d[w_key] = w_grid
+                self._hist2d[wz_key] = wz_grid
+                if self._batch is not None:
+                    self._hist_orientation[w_key] = self._hist_orientation[wz_key] = False
             return w_grid, wz_grid
 
         if w_grid is None:
@@ -979,24 +1152,81 @@ def _tensor_channel_histogram(
             if cache is None
             else cache.channel_accumulator(n1 * n2, width)
         )
-        bin1, bin2 = _gather_cell_order(order, chan.idx1, chan.idx2)
-        w = W[order] if cache is None else cache.cell_weights(order, W)
+        parts = 1 if cache is None else cache.stage_parts()
+        if parts > 1:
+            w = cache.cell_weights(order, W)
+            _cell_hist_raw_kron_parts(cache, parts, ptr, order, chan, w, band, H)
+            _profile_count(profile, "block_cross_tensor_tensor_channel_split")
+        else:
+            bin1, bin2 = _gather_cell_order(order, chan.idx1, chan.idx2)
+            w = W[order] if cache is None else cache.cell_weights(order, W)
+            _cell_hist_raw_kron(
+                ptr,
+                bin1,
+                bin2,
+                w,
+                band.offsets1,
+                band.values1,
+                band.offsets2,
+                band.values2,
+                band.k2_raw,
+                H,
+            )
+            del bin1, bin2
+        del w
+        _profile_count(profile, "block_cross_tensor_tensor_channel_raw")
+        return H, band.projection @ chan.R_inv
+    return None
+
+
+def _cell_ranges(ptr: NDArray, parts: int) -> list[tuple[int, int]]:
+    """Split a grid's cells into at most ``parts`` contiguous runs of about equal rows.
+
+    A function of the cell pointer and ``parts`` alone.  Every run is
+    non-empty; a cell is never split, since its rows sum into one row of H.
+    """
+    n_cells, n_rows = ptr.shape[0] - 1, int(ptr[-1])
+    targets = (np.arange(1, parts, dtype=np.int64) * n_rows) // parts
+    bounds = np.unique(np.concatenate(([0], np.searchsorted(ptr, targets, side="left"), [n_cells])))
+    return [(int(lo), int(hi)) for lo, hi in zip(bounds[:-1], bounds[1:], strict=True) if hi > lo]
+
+
+def _cell_hist_raw_kron_parts(cache, parts, ptr, order, chan, w, band, H) -> None:
+    """``_cell_hist_raw_kron`` over runs of cells, each run one part of the block.
+
+    The rows of cell ``c`` are ``order[ptr[c]:ptr[c + 1]]`` and the kernel
+    sums them into ``H[c]`` alone, from zero and in that order, so a run of
+    cells ``[lo, hi)`` reads only rows ``ptr[lo]:ptr[hi]`` and writes only
+    ``H[lo:hi]``.  Each part gathers its own rows and fills its own buffer,
+    which the calling worker copies into ``H``: the same additions in the
+    same order as one whole pass, so ``H`` is bitwise the unsplit one.  The
+    parts' buffers together hold one more ``H``, which the block queue
+    charges to the block's working set (``_block_queue.block_bytes``).
+    """
+    ranges = _cell_ranges(ptr, parts)
+    width = H.shape[1]
+
+    def part(index: int) -> NDArray:
+        lo, hi = ranges[index]
+        first, last = int(ptr[lo]), int(ptr[hi])
+        bin1, bin2 = _gather_cell_order(order[first:last], chan.idx1, chan.idx2)
+        out = np.empty((hi - lo, width))
         _cell_hist_raw_kron(
-            ptr,
+            ptr[lo : hi + 1] - first,
             bin1,
             bin2,
-            w,
+            w[first:last],
             band.offsets1,
             band.values1,
             band.offsets2,
             band.values2,
             band.k2_raw,
-            H,
+            out,
         )
-        del bin1, bin2, w
-        _profile_count(profile, "block_cross_tensor_tensor_channel_raw")
-        return H, band.projection @ chan.R_inv
-    return None
+        return out
+
+    for (lo, hi), block in zip(ranges, cache.run_parts(len(ranges), part), strict=True):
+        H[lo:hi] = block
 
 
 def _cross_gram_tensor_tensor_channels(

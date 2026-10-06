@@ -123,6 +123,10 @@ class ModelConfig:
     # reproducing a recorded fit means reproducing the likelihood it was fitted
     # under, not adopting the new default.
     weight_semantics: str = "prior"
+    # Thread and memory limits; they never change a fitted value.  Pickles
+    # from before the fields existed restore to the automatic defaults.
+    n_jobs: int | str = "auto"
+    max_memory: int | str = "auto"
 
     def __getattr__(self, name: str) -> object:
         """Supply fields absent from models pickled before config migrations."""
@@ -203,6 +207,8 @@ class ModelConfig:
             level_bindings=copy.deepcopy(getattr(model, "_level_bindings", None)),
             group_pricing=str(getattr(model, "_group_pricing", "spanned")),
             weight_semantics=model_weight_semantics(model),
+            n_jobs=getattr(model, "_n_jobs", "auto"),
+            max_memory=getattr(model, "_max_memory", "auto"),
         )
 
     def with_value(self, **changes: object) -> ModelConfig:
@@ -247,6 +253,8 @@ class ModelConfig:
             "separation": self.separation,
             "group_pricing": self.group_pricing,
             "weight_semantics": self.weight_semantics,
+            "n_jobs": self.n_jobs,
+            "max_memory": self.max_memory,
         }
 
     def materialize(self, model_type):
@@ -268,6 +276,8 @@ class ModelConfig:
             "_n_bins": copy.deepcopy(self.n_bins),
             "_group_pricing": self.group_pricing,
             "_weight_semantics": self.weight_semantics,
+            "_n_jobs": self.n_jobs,
+            "_max_memory": self.max_memory,
             "_tol": self.tol,
             "_max_iter": self.max_iter,
             "_retain_fit_state": self.retain_fit_state,

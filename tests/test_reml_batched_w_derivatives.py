@@ -667,7 +667,9 @@ def test_batched_grids_reform_the_layout_that_reuse_returns():
                 w.flags.c_contiguous,
                 w.flags.f_contiguous,
             )
-    assert not want[1].flags.c_contiguous  # Reuse returned the retained grid's transpose.
+    # Reuse returned the retained grid's transpose, copied to the C order a fresh grid has.
+    assert want[1].flags.c_contiguous
+    np.testing.assert_array_equal(want[1], want[0].T)
     assert not cache._hist2d
     # Weights outside the batch, such as a derived vector, keep their own pass.
     third = _order_sensitive(rng, 64, 1)[:, 0]
