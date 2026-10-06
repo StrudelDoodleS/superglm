@@ -682,6 +682,8 @@ export function createCVTab({
   const state = { term: "", query: "", jobs: { cv: null, final_fit: null }, errors: { cv: "", final_fit: "" } };
   /** @type {Set<string>} */
   const polling = new Set();
+  /** @type {Set<JobKind>} The kinds whose start is sent but not yet answered. */
+  const starting = new Set();
 
   function renderAll() {
     if (!payload || !isShown()) return;
@@ -740,14 +742,28 @@ export function createCVTab({
     }
   }
 
-  /** @param {JobKind} kind */
+  /**
+   * Start a job of ``kind`` unless one is running or being started: the job
+   * is marked running only once the server answers, so a second click in
+   * between would otherwise send a second start the server refuses.
+   * @param {JobKind} kind
+   */
   async function start(kind) {
-    if (state.jobs[kind]?.status === "running") return;
+    if (state.jobs[kind]?.status === "running" || starting.has(kind)) return;
+    starting.add(kind);
     state.errors[kind] = "";
+    let job;
     try {
-      const job = /** @type {JobStatus} */ (await client.jobStart(kind));
-      state.jobs[kind] = job;
-      renderToolbar();
+      job = /** @type {JobStatus} */ (await client.jobStart(kind));
+    } catch (error) {
+      refuse(kind, error);
+      return;
+    } finally {
+      starting.delete(kind);
+    }
+    state.jobs[kind] = job;
+    renderToolbar();
+    try {
       await poll(kind, job.job_id);
     } catch (error) {
       refuse(kind, error);

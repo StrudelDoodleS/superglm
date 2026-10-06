@@ -259,6 +259,41 @@ test("a started job is polled until it settles, then reported once", async () =>
   assert.match(frame.innerHTML, /Run CV finished\./);
 });
 
+test("a second start while the first is still being sent starts nothing", async () => {
+  // A double-click: the job is marked running only once jobStart answers,
+  // so the second click passed the guard, the server refused it as already
+  // running, and that refusal stayed on the tab for the job that ran.
+  const starts = [];
+  let answer;
+  const frame = fakeFrame();
+  const tab = createCVTab({
+    frame,
+    client: {
+      jobStart(kind) {
+        starts.push(kind);
+        return new Promise((resolve) => { answer = resolve; });
+      },
+      async jobStatus(jobId) {
+        return { job_id: jobId, kind: "cv", status: "done", progress: [], result: { n_folds: 2 } };
+      },
+      async jobCancel() {
+        throw new Error("not called");
+      }
+    },
+    onJobSettled: () => {},
+    pause: async () => {}
+  });
+  tab.render(cvPayload());
+
+  const first = tab.start("cv");
+  const second = tab.start("cv");
+  answer({ job_id: "cv-1", kind: "cv", status: "running", progress: [], result: null });
+  await Promise.all([first, second]);
+
+  assert.deepEqual(starts, ["cv"]);
+  assert.match(frame.innerHTML, /Run CV finished\./);
+});
+
 test("cancel posts the running job's id and shows it is stopping", async () => {
   const cancelled = [];
   let release;
