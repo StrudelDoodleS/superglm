@@ -478,6 +478,99 @@ def test_tsqr_holds_at_most_one_leaf_beyond_its_workers(monkeypatch):
     assert bound < 64 * copy
 
 
+def test_reml_fit_factors_each_set_of_rows_once(monkeypatch):
+    """One ``fit_reml`` runs the TSQR at most once per set of weights, centre and response.
+
+    Two aliased factors keep every PIRLS step and every observed geometry of
+    this Tweedie fit on the factor certificate.  The REML loop asks again for
+    factors it has formed -- the observed geometry of an accepted trial, a
+    PIRLS start shared by successive smoothing states -- and the factor is a
+    function of the design and the bits of those inputs alone, so the fit
+    reuses it (``centered_system.reuse_data_factors``).  Without the reuse
+    (the mutation below) the same fit repeats inputs, and its coefficients
+    are the same to the bit.
+    """
+    import contextlib
+
+    import superglm.solvers.centered_system as centered_system
+    from superglm import Tweedie
+
+    rng = np.random.default_rng(3)
+    n = 3_000
+    x = rng.uniform(-1.0, 1.0, n)
+    level = rng.integers(0, 3, n)
+    frame = pd.DataFrame(
+        {
+            "x": x,
+            "a": pd.Categorical([f"a{v}" for v in level]),
+            "b": pd.Categorical([f"b{v}" for v in level]),
+        }
+    )
+    mu = np.exp(0.3 * np.sin(2.0 * x) + 0.2 * level)
+    y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.3)
+    passes: list[bytes] = []
+
+    def inputs(*arrays) -> bytes:
+        return b"|".join(
+            b"-" if a is None else np.asarray(a, dtype=np.float64).tobytes() for a in arrays
+        )
+
+    plain, joint = rank.streamed_weighted_factor, rank.streamed_weighted_factor_rhs
+
+    def recorded(chunks, weights, *, center=None, center_lo=None):
+        passes.append(inputs(weights, center, center_lo))
+        return plain(chunks, weights, center=center, center_lo=center_lo)
+
+    def recorded_rhs(chunks, weights, response, *, center=None, center_lo=None):
+        passes.append(inputs(weights, center, center_lo, response))
+        return joint(chunks, weights, response, center=center, center_lo=center_lo)
+
+    monkeypatch.setattr(rank, "streamed_weighted_factor", recorded)
+    monkeypatch.setattr(rank, "streamed_weighted_factor_rhs", recorded_rhs)
+
+    def fit() -> np.ndarray:
+        passes.clear()
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            link="log",
+            selection_penalty=0.0,
+            features={"x": Spline(kind="ps", k=8), "a": Categorical(), "b": Categorical()},
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(frame, y)
+        return np.asarray(model.result.beta)
+
+    reused = fit()
+    reused_passes = list(passes)
+    assert len(set(reused_passes)) == len(reused_passes)
+    monkeypatch.setattr(centered_system, "reuse_data_factors", contextlib.nullcontext)
+    repeated = fit()
+    assert len(passes) > len(set(passes)) == len(reused_passes)
+    assert np.array_equal(reused.view(np.uint64), repeated.view(np.uint64))
+
+
+def test_data_factor_reuse_keeps_the_four_most_recently_used(monkeypatch):
+    """Weights A B C A D E A form five factors: a hit counts as a use.
+
+    A PIRLS start shared by successive smoothing states comes back every
+    third factor, with two other factors between its uses.  Mutation checks:
+    keeping only the latest entry, or the latest formed rather than used,
+    forms the last A again.
+    """
+    from superglm.solvers.centered_system import reuse_data_factors
+
+    dm = _mixed_design(200, seed=13)
+    rng = np.random.default_rng(4)
+    weights = [rng.uniform(0.2, 3.0, dm.n) for _ in range(5)]
+    leaves = _record_calls(monkeypatch, "_tsqr_leaf")
+    with parallel_config(n_jobs=1), reuse_data_factors():
+        factors = [grouped_weighted_factor(dm, weights[k]) for k in (0, 1, 2, 0, 3, 4, 0)]
+    assert len(leaves) == 5
+    for again in (factors[3], factors[6]):
+        assert np.array_equal(again.view(np.uint64), factors[0].view(np.uint64))
+
+
 def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     """Only the published state certifies its data rank with observation rows.
 

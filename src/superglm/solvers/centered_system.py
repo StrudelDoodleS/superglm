@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -299,6 +301,75 @@ def iter_grouped_design_leaves(dm: DesignMatrix) -> Iterator[tuple[int, int, _De
         yield start, stop, _DesignLeaf(parts, start, stop, dm.p)
 
 
+@dataclass
+class _DataFactorReuse:
+    """The weighted data factors one fit has formed, keyed by the bits of their inputs.
+
+    Owner: one ``fit_reml`` call (:func:`reuse_data_factors`); lifetime: that
+    call.  A factor is a function of the design, the leaf partition
+    (``rank.tsqr_leaf_rows``), and the float64 bits of the weights, the
+    centre pair and the response: the penalty never enters it, the leaves
+    run with BLAS on one thread at any worker count, so the same inputs give
+    the same bits and an entry needs no other invalidation.  A REML fit asks
+    again for factors it has formed (the observed geometry of a line-search
+    trial and of the candidate it accepts; one PIRLS start shared by
+    successive smoothing states).  The ``_ENTRIES`` most recently used are
+    kept (a few factors of ``(p + 1)^2`` doubles and their ``n``-vectors); a
+    hit returns copies, so no caller can change an entry.
+    """
+
+    _ENTRIES = 4
+    entries: list = field(default_factory=list)
+
+    def find(self, key: tuple):
+        for index, (entry_key, value) in enumerate(self.entries):
+            if len(entry_key) == len(key) and all(
+                _same_input(saved, given) for saved, given in zip(entry_key, key)
+            ):
+                self.entries.append(self.entries.pop(index))
+                return tuple(np.array(part) for part in value)
+        return None
+
+    def keep(self, key: tuple, value: tuple) -> None:
+        frozen = tuple(part if not isinstance(part, np.ndarray) else _freeze(part) for part in key)
+        self.entries.append((frozen, tuple(_freeze(part) for part in value)))
+        del self.entries[: -self._ENTRIES]
+
+
+def _same_input(saved, given) -> bool:
+    if not isinstance(saved, np.ndarray) or not isinstance(given, np.ndarray):
+        return saved is given if not isinstance(saved, int) else saved == given
+    return (
+        saved.shape == given.shape
+        and given.dtype == np.float64
+        and np.array_equal(saved.view(np.uint64), given.view(np.uint64))
+    )
+
+
+_DATA_FACTOR_REUSE: ContextVar[_DataFactorReuse | None] = ContextVar(
+    "superglm_data_factor_reuse", default=None
+)
+
+
+@contextmanager
+def reuse_data_factors() -> Iterator[None]:
+    """Reuse the weighted data factors formed inside this context (:class:`_DataFactorReuse`)."""
+    token = _DATA_FACTOR_REUSE.set(_DataFactorReuse())
+    try:
+        yield
+    finally:
+        _DATA_FACTOR_REUSE.reset(token)
+
+
+def _factor_key(dm, W, center, center_lo, response) -> tuple:
+    from superglm.solvers.rank import tsqr_leaf_rows
+
+    def bits(values):
+        return None if values is None else np.asarray(values, dtype=np.float64)
+
+    return (dm, tsqr_leaf_rows(dm.p), bits(W), bits(center), bits(center_lo), bits(response))
+
+
 def grouped_weighted_factor(
     dm: DesignMatrix,
     W: NDArray,
@@ -309,9 +380,17 @@ def grouped_weighted_factor(
     """Return the weighted QR factor, a TSQR over the design's leaves, without retaining all rows."""
     from superglm.solvers.rank import streamed_weighted_factor
 
-    return streamed_weighted_factor(
+    reuse = _DATA_FACTOR_REUSE.get()
+    key = None if reuse is None else _factor_key(dm, W, center, center_lo, None)
+    found = None if reuse is None else reuse.find(key)
+    if found is not None:
+        return found[0]
+    factor = streamed_weighted_factor(
         iter_grouped_design_leaves(dm), W, center=center, center_lo=center_lo
     )
+    if reuse is not None:
+        reuse.keep(key, (factor,))
+    return factor
 
 
 def grouped_weighted_factor_rhs(
@@ -325,13 +404,21 @@ def grouped_weighted_factor_rhs(
     """Return a bounded weighted QR factor and its transformed response."""
     from superglm.solvers.rank import streamed_weighted_factor_rhs
 
-    return streamed_weighted_factor_rhs(
+    reuse = _DATA_FACTOR_REUSE.get()
+    key = None if reuse is None else _factor_key(dm, W, center, center_lo, response)
+    found = None if reuse is None else reuse.find(key)
+    if found is not None:
+        return found[0], found[1]
+    factor, transformed = streamed_weighted_factor_rhs(
         iter_grouped_design_leaves(dm),
         W,
         response,
         center=center,
         center_lo=center_lo,
     )
+    if reuse is not None:
+        reuse.keep(key, (factor, transformed))
+    return factor, transformed
 
 
 def penalty_factor(penalty: NDArray) -> NDArray:

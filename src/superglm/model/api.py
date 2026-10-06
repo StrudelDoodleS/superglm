@@ -879,7 +879,9 @@ class SuperGLM:
         resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
         resolved_max_pirls_iter = max_pirls_iter if max_pirls_iter is not None else self._max_iter
 
-        with solver_blas_threads(), self._parallel_scope():
+        from superglm.solvers.centered_system import reuse_data_factors
+
+        with solver_blas_threads(), self._parallel_scope(), reuse_data_factors():
             return fit_ops.fit_reml(
                 self,
                 X,
