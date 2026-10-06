@@ -100,10 +100,13 @@ _OFFSET_SOURCE_RESERVED_COLUMNS = frozenset({"Relativity", "Weight"})
 
 def _unsupported_structured_export_terms(model: SuperGLM) -> list[str]:
     from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.hierarchy import Hierarchy
     from superglm.features.random_effect import RandomEffect
 
     unsupported = [
-        name for name in model._feature_order if isinstance(model._specs[name], RandomEffect)
+        name
+        for name in model._feature_order
+        if isinstance(model._specs[name], RandomEffect | Hierarchy)
     ]
     unsupported.extend(
         name
@@ -118,7 +121,7 @@ def _preflight_rating_table_terms(model: SuperGLM) -> None:
     if unsupported:
         raise NotImplementedError(
             "Rating-table export does not yet support conditional or population-only "
-            f"RandomEffect/FactorSmooth terms {unsupported!r}; no payload was produced."
+            f"RandomEffect/Hierarchy/FactorSmooth terms {unsupported!r}; no payload was produced."
         )
 
 

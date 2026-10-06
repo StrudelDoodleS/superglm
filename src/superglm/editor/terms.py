@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorKeyError, EditorValueError
+from superglm.features.hierarchy import Hierarchy, feature_column
 from superglm.features.ordered_categorical import _declared_matcher
 
 
@@ -82,15 +83,46 @@ def term_weights_from_fit(model, name: str, term: EditableTerm) -> NDArray:
     # retained, fall back to equal weights so the editor remains usable.
     X_ref = getattr(model, "_fit_X_ref", None)
     fit_weights = getattr(model, "_fit_weights", None)
-    return term_weights_from_data(X_ref, fit_weights, name, term)
+    return term_weights_from_data(X_ref, fit_weights, name, term, spec=model._specs.get(name))
 
 
-def term_weights_from_data(X_ref, sample_weight, name: str, term: EditableTerm) -> NDArray:
-    """Compute editable-term exposure weights from row-level feature data."""
+def _hierarchy_path_weights(frame, sample_weight, name: str, spec, fallback: NDArray) -> NDArray:
+    """Exposure on each full path of a ``Hierarchy`` term, in its reported order."""
+    if not set(spec.source_columns(name)).issubset(frame.columns):
+        return fallback
+    try:
+        leaf = spec._prediction_codes(feature_column(frame.column_array, name, spec))[
+            len(spec.levels) - 1
+        ]
+    except ValueError:  # an unsplittable value or, under unseen="error", a new path
+        return fallback
+    weights = (
+        np.ones(len(leaf), dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64).ravel()
+    )
+    if weights.size != leaf.size:
+        return fallback
+    known = leaf >= 0
+    return np.bincount(leaf[known], weights=weights[known], minlength=fallback.size).astype(
+        np.float64
+    )
+
+
+def term_weights_from_data(
+    X_ref, sample_weight, name: str, term: EditableTerm, *, spec=None
+) -> NDArray:
+    """Compute editable-term exposure weights from row-level feature data.
+
+    A ``Hierarchy`` term reports full paths, which no single column spells, so
+    its weights are read through the term's own path codes when *spec* is one.
+    """
     fallback = np.ones(term.size, dtype=np.float64)
     if X_ref is None:
         return fallback
     frame = as_eager_frame(X_ref)
+    if isinstance(spec, Hierarchy):
+        return _hierarchy_path_weights(frame, sample_weight, name, spec, fallback)
     if name not in frame.columns:
         return fallback
     values = frame.column_array(name)

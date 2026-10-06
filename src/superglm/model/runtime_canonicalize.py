@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributions import clip_mu
+from superglm.features.hierarchy import feature_column
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.links import stabilize_eta
 from superglm.solvers.mode_score import linear_predictor, two_sum
@@ -373,7 +374,7 @@ def _live_public_runtime_state(
     for term in plan["features"]:
         if term["name"] in model._interaction_specs:
             continue
-        values = frame.column_array(term["name"])
+        values = feature_column(frame.column_array, term["name"], term["spec"])
         beta = beta_all[term["beta_idx"]]
         contribution = np.asarray(
             base._score_feature(term["spec"], values, beta),

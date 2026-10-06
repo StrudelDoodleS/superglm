@@ -47,6 +47,7 @@ PUBLIC_API = [
     "GeneralizedParetoLSS",
     "GroupElasticNet",
     "GroupLasso",
+    "Hierarchy",
     "IdentityLink",
     "InteractionInference",
     "InverseLink",

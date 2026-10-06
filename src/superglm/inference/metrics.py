@@ -1356,6 +1356,7 @@ class ModelMetrics:
             subgroups, all subgroups are gathered automatically.
         """
         from superglm.features.categorical import Categorical
+        from superglm.features.hierarchy import Hierarchy
         from superglm.features.numeric import Numeric
         from superglm.features.ordered_categorical import OrderedCategorical
         from superglm.features.piecewise import Piecewise
@@ -1372,7 +1373,11 @@ class ModelMetrics:
             self._groups,
             penalty=fitted_penalty(self._model),
         )
-        if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
+        # A Hierarchy reports one error per full path, whose variance needs the
+        # covariances between the path's levels, which feature_se_from_cov forms.
+        if isinstance(spec, Hierarchy) or (
+            isinstance(spec, OrderedCategorical) and spec.basis == "spline"
+        ):
             _, _, _, XtWX_inv_aug, active_groups = self._active_info
             phi = self._coefficient_dispersion if phi_scale else 1.0
             se = feature_se_from_cov(
@@ -1385,6 +1390,8 @@ class ModelMetrics:
                 self._model._interaction_specs,
                 n_points=n_points,
             )
+            if isinstance(spec, Hierarchy):
+                return {"levels": list(spec._paths[len(spec.levels) - 1]), "se_log_relativity": se}
             return {
                 "levels": spec._ordered_levels,
                 "base_level": spec._base_level,

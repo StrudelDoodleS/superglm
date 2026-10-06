@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm._reporting_state import ReportingSupportState
 from superglm.distributions import _VARIANCE_FLOOR, Poisson, clip_mu
+from superglm.features.hierarchy import Hierarchy, feature_column
 from superglm.features.random_effect import RandomEffect
 from superglm.group_matrix import RandomEffectGroupMatrix
 from superglm.inference.covariance import covariance_selected_diagonal
@@ -162,18 +163,29 @@ def vectorized_conditional_unpooled_effect(
     return effects
 
 
-def _resolve_random_effect(model, name: Hashable) -> tuple[GroupSlice, RandomEffect]:
-    matches: list[tuple[GroupSlice, RandomEffect]] = []
+def _resolve_random_effect(model, name: Hashable) -> tuple[GroupSlice, Any]:
+    """The fitted group named *name* and the spec that reads its levels.
+
+    A ``Hierarchy`` level is read through its ``HierarchyLevel`` view, which
+    answers ``_levels`` and ``_prediction_codes`` as a ``RandomEffect`` does.
+    """
+    matches: list[tuple[GroupSlice, Any]] = []
     for group in model._groups:
         if group.name != name and group.feature_name != name:
             continue
         spec = model._specs.get(group.feature_name)
         if isinstance(spec, RandomEffect):
             matches.append((group, spec))
+        elif isinstance(spec, Hierarchy):
+            matches.append((group, spec.level_view(group.subgroup_type)))
     if not matches:
         raise KeyError(f"No fitted RandomEffect term named {name!r}.")
     if len(matches) > 1:
-        raise ValueError(f"RandomEffect name {name!r} is ambiguous.")
+        names = ", ".join(repr(group.name) for group, _ in matches)
+        raise ValueError(
+            f"RandomEffect name {name!r} is ambiguous: it names the levels {names}; "
+            "ask for one of them."
+        )
     return matches[0]
 
 
@@ -236,7 +248,7 @@ def _stored_support(model, group: GroupSlice) -> StructuredLevelSupport | None:
 def _reporting_rows(
     model,
     group: GroupSlice,
-    spec: RandomEffect,
+    spec: Any,
     *,
     X,
     y,
@@ -258,7 +270,9 @@ def _reporting_rows(
 
     frame = as_eager_frame(X)
     feature_name = group.feature_name
-    codes = spec._prediction_codes(frame.column_array(feature_name))
+    codes = spec._prediction_codes(
+        feature_column(frame.column_array, feature_name, model._specs[feature_name])
+    )
     if np.any(codes < 0):
         raise ValueError("random-effect reporting rows contain unseen fitted levels")
     y_values = np.asarray(y, dtype=np.float64)

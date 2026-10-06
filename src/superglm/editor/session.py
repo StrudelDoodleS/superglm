@@ -317,7 +317,9 @@ class EditorSession:
                 # holds flat or continues its end slopes past the knot vector.
                 term.metadata["extrapolation"] = model._specs[name].extrapolation
             term.weights = (
-                term_weights_from_data(train_data.X, train_data.sample_weight, name, term)
+                term_weights_from_data(
+                    train_data.X, train_data.sample_weight, name, term, spec=model._specs[name]
+                )
                 if train_data is not None
                 else term_weights_from_fit(model, name, term)
             )
