@@ -439,41 +439,58 @@ def test_default_memory_budget_honours_the_cgroup_limit(monkeypatch, tmp_path):
 
 
 def test_tsqr_holds_at_most_one_leaf_beyond_its_workers(monkeypatch):
-    """Peak allocation is set by the workers, not by the leaf count.
+    """A materialising producer runs at most one leaf ahead of the workers.
 
-    Each leaf in flight holds at most its materialised rows, the weighted
-    copy and ``numpy.linalg.qr``'s working copy (three copies of ``L x p``
-    doubles); the producer runs at most one leaf ahead of the workers and
-    materialises one more (two copies while ``hstack`` joins the groups).
-    64 leaves on 4 workers must therefore peak below ``(4 + 2) * 3`` leaf
-    copies plus the tree's ``log2(64) + 1`` triangles and the per-leaf
-    weights, under a third of what holding every leaf would take.  The
-    workers are slowed (a sleep in each leaf, not a timing assertion) so a
-    producer without backpressure would queue every leaf.  ``tracemalloc``
-    sees NumPy's allocations but not LAPACK's ``malloc``-ed working buffer,
-    so this checks the backpressure, not the whole three-copy working set.
+    ``streamed_weighted_factor`` over chunks the producer materialises (as
+    ``metrics``' ``iter_dense_chunks`` does) holds every submitted leaf's rows
+    until a worker takes them, so the backpressure is what bounds memory: at
+    most ``workers + 1`` leaves are submitted and unfinished at once, and the
+    producer has drawn at most one chunk beyond them.  Each leaf in flight
+    holds its rows, the weighted copy and ``numpy.linalg.qr``'s working copy
+    (three copies of ``L x p`` doubles), so 64 leaves on 4 workers peak below
+    ``(4 + 2) * 3`` leaf copies plus the tree's ``log2(64) + 1`` triangles,
+    under a third of holding every leaf.  The workers are slowed (a sleep in
+    each leaf, not a timing assertion) so a producer without backpressure
+    would queue every leaf.  ``tracemalloc`` sees NumPy's allocations but not
+    LAPACK's ``malloc``-ed working buffer.  Mutation check: submitting every
+    leaf at once (no backpressure) breaks both bounds.
     """
     n, p, leaf, workers = 64 * 512, 16, 512, 4
     X, weights = _near_rank_rows(n, p, seed=3)
-    dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=p)
-    _leaf_rows_for(monkeypatch, p, leaf)
     original = rank._tsqr_leaf
+    drawn = [0]
+    finished = [0]
+    ahead = [0]
+    lock = threading.Lock()
 
     def slow_leaf(*args):
         time.sleep(0.01)
-        return original(*args)
+        try:
+            return original(*args)
+        finally:
+            with lock:
+                finished[0] += 1
+
+    def chunks():
+        for start in range(0, n, leaf):
+            with lock:
+                drawn[0] += 1
+                ahead[0] = max(ahead[0], drawn[0] - finished[0])
+            yield start, start + leaf, np.array(X[start : start + leaf])
 
     monkeypatch.setattr(rank, "_tsqr_leaf", slow_leaf)
     copy = leaf * p * 8
     bound = (workers + 2) * 3 * copy + (int(math.log2(64)) + 2) * 3 * p * p * 8 + 64 * leaf * 8
     with parallel_config(n_jobs=workers):
-        grouped_weighted_factor(dm, weights)  # warm the pool's imports
+        rank.streamed_weighted_factor(chunks(), weights)  # warm the pool's imports
+        drawn[0] = finished[0] = ahead[0] = 0
         tracemalloc.start()
         try:
-            grouped_weighted_factor(dm, weights)
+            rank.streamed_weighted_factor(chunks(), weights)
             _, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
+    assert ahead[0] <= workers + 2
     assert peak <= bound
     assert bound < 64 * copy
 
