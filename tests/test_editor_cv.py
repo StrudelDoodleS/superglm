@@ -1681,6 +1681,12 @@ def test_run_cv_and_final_fit_put_an_edit_back_as_set_on_a_group_they_widen(monk
     assert len(carried) == 4
     for model in carried:
         log_mu = np.log(model.predict(probe))
+        # C, D, N and E read Other's one coefficient, so they predict alike.
+        assert (log_mu[2:] == log_mu[2]).all()
+        # The carry and predict on two levels, about 16u max(1, |log|) as in
+        # the carry tests, plus N and E's two-member weighted mean of the
+        # carried C and D (gamma_2) and the group's four-member exposure-
+        # weighted mean in _level_target_map (gamma_4): about 22u.
         np.testing.assert_allclose(
             log_mu - log_mu[0],
             expected,
