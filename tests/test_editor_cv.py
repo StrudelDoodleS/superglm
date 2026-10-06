@@ -1606,6 +1606,35 @@ def test_final_fit_refuses_categories_that_are_equal_numbers_but_other_levels():
     assert refused.value.public_message == cv.FINAL_COLUMN_TYPES.format(column="x")
 
 
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_final_fit_stacks_a_boolean_numeric_column_beside_integers(cv_frame, backend):
+    """Power is 0/1 integers in the train rows and True/False in validation.
+
+    Numeric reads both as the numbers 0 and 1, but bool was not on the
+    numeric stacking path, so Final fit refused the pair.
+    """
+    import polars as pl
+
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    X, y, w = cv_frame
+    X = X.assign(power=(X["power"] > 0.0).astype(np.int64))
+    train = X.iloc[:400]
+    validation = X.iloc[400:500].astype({"power": bool})
+    frame = pd.DataFrame if backend == "pandas" else pl.from_pandas
+    model = _model().fit(frame(train), y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(frame(train), y[:400], w[:400]),
+        validation_data=(frame(validation), y[400:500], w[400:500]),
+    )
+
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+
+    expected = _model().fit(frame(X.iloc[:500]), y[:500], sample_weight=w[:500])
+    np.testing.assert_array_equal(final.predict(frame(X)), expected.predict(frame(X)))
+
+
 def test_final_fit_stacks_a_nullable_numeric_column_beside_a_numpy_one(cv_frame):
     """Power is a NumPy float in the train rows and a pandas Int64 in validation.
 

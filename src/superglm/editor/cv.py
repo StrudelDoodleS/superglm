@@ -1213,8 +1213,9 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
     The fit reads a column as its NumPy array and the categories its dtype
     declares (a pandas categorical, a Polars Enum), so splits that agree on
     those stack without changing a value, however their libraries name the
-    dtype or order the columns. So do numbers of other kinds or widths in a
-    column a term reads as a number, which the fit reads as float64. A level
+    dtype or order the columns. So do numbers of other kinds or widths, and
+    bools, in a column a term reads as a number, which the fit reads as
+    float64 (True as 1). A level
     term reads a number's text: integers of any width spell a level alike, so
     they stack as int64, but 1 and 1.0 are two levels, and uint64 is left
     alone, since beside a signed integer pandas would stack it as float64.
@@ -1239,7 +1240,7 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
         kinds = [kind for kind, _ in readings]
         if not all(isinstance(kind, np.dtype) for kind in kinds):
             raise EditorValueError(FINAL_COLUMN_TYPES.format(column=name))
-        if name not in levels and all(kind.kind in "iuf" for kind in kinds):
+        if name not in levels and all(kind.kind in "iufb" for kind in kinds):
             casts[name] = "float64"
         elif name in levels and all(kind.kind in "iu" and kind != np.uint64 for kind in kinds):
             casts[name] = "int64"
