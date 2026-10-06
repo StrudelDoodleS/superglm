@@ -444,8 +444,10 @@ def fold_term_items(
     Every curve is re-centred on its exposure-weighted mean log and shown as
     a relativity. A term's ``spread`` is the mean over folds of
     ``rmse_to_mean`` on that scale, and ``min_correlation`` the lowest
-    ``correlation_to_mean`` (``plotting.curve_similarity``). A level a fold
-    never saw is a gap (NaN) in that fold's curve, and its distances skip it.
+    ``correlation_to_mean`` (``plotting.curve_similarity``), or NaN when a
+    fold has none: a fold that dropped the term has a flat curve, and the
+    other folds' agreement must not stand in for it. A level a fold never
+    saw is a gap (NaN) in that fold's curve, and its distances skip it.
     Each fold's curve keeps its fold number, so a fold missing from a term
     keeps its colour and its place in the tab's charts.
 
@@ -512,7 +514,9 @@ def _term_item(
         "edited": centred(edited) if changed else None,
         "held": held,
         "spread": None if vs_mean is None else float(vs_mean["rmse_to_mean"].mean()),
-        "min_correlation": None if vs_mean is None else float(vs_mean["correlation_to_mean"].min()),
+        "min_correlation": (
+            None if vs_mean is None else float(vs_mean["correlation_to_mean"].min(skipna=False))
+        ),
     }
 
 

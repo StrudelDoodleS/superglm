@@ -996,6 +996,25 @@ def test_run_cv_job_puts_the_hand_edits_back_on_every_fold(cv_frame, cv_fit, fit
     assert age["spread"] > 0.0
 
 
+def test_min_r_is_unavailable_when_a_fold_curve_is_flat(cv_fit):
+    """A fold the selection penalty dropped a term on reads it flat, with no correlation.
+
+    The term's min r skipped that fold, so it showed the shaped folds'
+    agreement with the mean (1.00) while one fold had dropped the term.
+    """
+    from superglm.editor.cv import fold_term_items
+
+    model, _supplied = cv_fit
+    term = EditorSession.from_model(model).terms["age"]
+    shape = term.original_log_effect
+    fold_curves = {0: {"age": np.zeros_like(shape)}, 1: {"age": shape}, 2: {"age": 1.1 * shape}}
+
+    [age] = fold_term_items({"age": term}, fold_curves)
+
+    assert age["spread"] > 0.0
+    assert np.isnan(age["min_correlation"])
+
+
 def test_run_cv_puts_the_hand_edits_back_on_each_fold_with_that_folds_training_rows(
     cv_frame, cv_fit
 ):

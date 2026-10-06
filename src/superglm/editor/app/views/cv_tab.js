@@ -641,7 +641,7 @@ export function relativitiesMarkup(payload, state) {
           aria-label="Search terms" value="${escapeHTML(state.query)}">
         <div class="cv-term-head" aria-hidden="true"><span>Least stable first</span><span>spread</span><span>min r</span></div>
         <div class="cv-term-list" data-cv-term-list>${termListMarkup(shown, current?.name ?? "", state.query)}</div>
-        <p class="cv-hint">spread: mean distance of a fold's curve from the fold average. min r: lowest fold correlation with it.</p>
+        <p class="cv-hint">spread: mean distance of a fold's curve from the fold average. min r: lowest fold correlation with it, -- when a fold's curve is flat.</p>
       </div>
       <div class="cv-chart" data-cv-chart>${current ? chartMarkup(current) : ""}</div>
     </div></section>`;
