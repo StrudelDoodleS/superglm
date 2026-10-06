@@ -23,6 +23,7 @@ from superglm.diagnostics.separation import (
     format_separation_message,
     scan_categorical_term,
     scan_interaction_term,
+    scan_special_levels,
 )
 from superglm.distributional.family import DistributionalFamily, ResponseBoundaryFamily
 from superglm.distributional.predictor import CompiledPredictor
@@ -81,6 +82,18 @@ def scan_predictor_separation(
                 _, term, spec, column = record
                 findings.extend(
                     scan_categorical_term(
+                        f"{predictor.name}:{term}",
+                        spec,
+                        column,
+                        response,
+                        weight_values,
+                        predictor_boundaries,
+                    )
+                )
+            elif record[0] == "special":
+                _, term, spec, column = record
+                findings.extend(
+                    scan_special_levels(
                         f"{predictor.name}:{term}",
                         spec,
                         column,

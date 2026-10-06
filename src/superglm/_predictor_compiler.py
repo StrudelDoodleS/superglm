@@ -262,6 +262,9 @@ def compile_predictor_design(
             # Scanned after the loops, once the spec has learned its levels
             # and the GroupSlices exist for the penalty exemption.
             separation_records.append(("cat", name, spec, x_col))
+        elif separation_boundaries and isinstance(spec, OrderedCategorical) and spec.has_specials:
+            # A special is a free indicator, scanned as a Categorical level is.
+            separation_records.append(("special", name, spec, x_col))
         # Supply level universes the feature cannot discover from its observed
         # rows. A column's declared categorical dtype takes precedence over a
         # caller's full-frame binding. Both hooks decline when the feature

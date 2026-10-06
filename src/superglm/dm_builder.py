@@ -1104,6 +1104,7 @@ def build_design_matrix(
             emit_separation_findings,
             scan_categorical_term,
             scan_interaction_term,
+            scan_special_levels,
         )
         from superglm.penalties.base import penalty_targets_group
 
@@ -1116,6 +1117,16 @@ def build_design_matrix(
                 # directions are held), so a selection penalty exempts
                 # nothing here: it is reported whatever bounds the term.
                 curves.extend(record[2])
+                continue
+            if record[0] == "special":
+                # The specials block is unpenalised whatever penalty the
+                # smooth beside it carries, so nothing exempts it.
+                _, name_s, spec_s, x_s = record
+                findings.extend(
+                    scan_special_levels(
+                        name_s, spec_s, x_s, y, sample_weight, separation_boundaries
+                    )
+                )
                 continue
             if selection_penalty is not None and any(
                 penalty_targets_group(selection_penalty, g)
