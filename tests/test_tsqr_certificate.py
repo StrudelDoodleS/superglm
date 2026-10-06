@@ -645,6 +645,52 @@ def test_support_tables_are_formed_once_per_fit_and_charged_to_max_memory(monkey
     assert np.array_equal(gathered.view(np.uint64), materialised.view(np.uint64))
 
 
+def test_data_factor_reuse_keys_every_input(monkeypatch):
+    """At fixed weights, each centre, split centre, response and design is its own entry.
+
+    Inside one fit's reuse, the same weights with no centre, a centre, that
+    centre with a ``center_lo``, a response, and a second design built from
+    the same groups each run their own TSQR (five leaves) and return the
+    bits formed outside the reuse; asking any of them again runs none.
+    Mutation checks: a key without the centre, the split centre, the
+    response or the design returns another entry's factor.
+    """
+    from superglm.solvers.centered_system import reuse_data_factors
+
+    n, leaf = 200, 40
+    dm = _mixed_design(n, seed=21)
+    twin = DesignMatrix(list(dm.group_matrices), n=dm.n, p=dm.p)
+    _leaf_rows_for(monkeypatch, dm.p, leaf)
+    rng = np.random.default_rng(22)
+    weights = rng.uniform(0.2, 3.0, n)
+    response = rng.standard_normal(n)
+    centre = weights @ dm.toarray() / np.sum(weights)
+    centre_lo = 1e-13 * np.abs(centre) * rng.uniform(-1.0, 1.0, dm.p)
+    requests = {
+        "plain": lambda d: grouped_weighted_factor(d, weights),
+        "centre": lambda d: grouped_weighted_factor(d, weights, center=centre),
+        "split": lambda d: grouped_weighted_factor(d, weights, center=centre, center_lo=centre_lo),
+        "response": lambda d: np.column_stack(
+            grouped_weighted_factor_rhs(d, weights, response, center=centre, center_lo=centre_lo)
+        ),
+    }
+    with parallel_config(n_jobs=1):
+        expected = {name: request(dm) for name, request in requests.items()}
+    leaves = _record_calls(monkeypatch, "_tsqr_leaf")
+
+    def asked(name, design):
+        leaves.clear()
+        factor = requests[name](design)
+        assert np.array_equal(factor.view(np.uint64), expected[name].view(np.uint64)), name
+        return len(leaves)
+
+    with parallel_config(n_jobs=1), reuse_data_factors():
+        assert [asked(name, dm) for name in requests] == [5, 5, 5, 5]
+        assert [asked(name, dm) for name in requests] == [0, 0, 0, 0]
+        assert asked("split", twin) == 5
+        assert asked("split", twin) == 0
+
+
 def test_reml_fit_abandons_the_factor_of_a_decision_that_flips(monkeypatch):
     """A PIRLS site whose Gram certifies every other step abandons the factor started beside it.
 
