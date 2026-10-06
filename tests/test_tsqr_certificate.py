@@ -27,6 +27,8 @@ _U = 2.0**-53
 
 
 def _gamma(k: int) -> float:
+    """``gamma~_k`` of Higham Thm 19.4 with its unspecified constant taken as ``c = 1``,
+    the strictest reading: any ``c >= 1`` bound contains this one."""
     return k * _U / (1.0 - k * _U)
 
 
@@ -219,6 +221,28 @@ def test_tsqr_rank_decision_matches_one_householder_qr(monkeypatch):
         null = dropped(certified)
         sin_theta = np.linalg.norm(null - reference_null @ (reference_null.T @ null), 2)
         assert sin_theta <= error / gap
+
+
+def test_tsqr_leaves_keep_the_callers_errstate(monkeypatch):
+    """A leaf that overflows under the caller's ``errstate(over="ignore")`` stays quiet when pooled."""
+    n, p = 400, 6
+    X, weights = _near_rank_rows(n, p, seed=7)
+    dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=p)
+    _leaf_rows_for(monkeypatch, p, 24)
+    original = rank._tsqr_leaf
+
+    def leaf(*args, **kwargs):
+        np.multiply(np.array([1e308]), 10.0)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(rank, "_tsqr_leaf", leaf)
+    factors = {}
+    with warnings.catch_warnings(), np.errstate(over="ignore"):
+        warnings.simplefilter("error")
+        for jobs in (1, 4):
+            with parallel_config(n_jobs=jobs):
+                factors[jobs] = grouped_weighted_factor(dm, weights)
+    assert np.array_equal(factors[1], factors[4])
 
 
 def test_worker_count_is_capped_by_memory_not_cores():

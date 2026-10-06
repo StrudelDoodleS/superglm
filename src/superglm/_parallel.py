@@ -100,9 +100,12 @@ def _parse_n_jobs(value: int | str) -> int:
 
 def _parse_memory(value: int | str) -> int:
     if isinstance(value, str):
-        text = value.strip().upper().removesuffix("B").removesuffix("I")
-        if text in ("", "AUTO"):
+        text = value.strip().upper()
+        if text == "AUTO":
             return default_max_memory()
+        text = text.removesuffix("B").removesuffix("I")
+        if not text:
+            raise ValueError(f"max_memory must be a positive byte count or 'auto', got {value!r}")
         scale = _SUFFIXES.get(text[-1:], 1)
         number = float(text[:-1] if text[-1:] in _SUFFIXES else text) * scale
         if not math.isfinite(number):

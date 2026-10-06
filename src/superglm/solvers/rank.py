@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import itertools
 import math
 from collections import deque
@@ -508,7 +509,12 @@ def _tsqr_weighted_factor(
             ) as pool:
                 try:
                     for item in leaves:
-                        in_flight.append(pool.submit(_tsqr_leaf, *leaf_args(item)))
+                        # A copy of the caller's context per leaf carries np.errstate.
+                        in_flight.append(
+                            pool.submit(
+                                contextvars.copy_context().run, _tsqr_leaf, *leaf_args(item)
+                            )
+                        )
                         del item
                         # One leaf beyond the workers waits, so a worker that
                         # finishes starts the next leaf at once.

@@ -244,10 +244,14 @@ class _SharedEntries:
                     return None, None
             pending.wait()
 
-    def claim(self, store: dict, keys) -> threading.Event | None:
-        """Register the caller as the one forming every key, or None if any is formed or forming."""
+    def claim(self, store: dict, keys, alternates=()) -> threading.Event | None:
+        """Register the caller as the one forming every key, or None if any key or
+        alternate is formed or forming (checked under the same lock as the claim)."""
         with self._lock:
-            if any(store.get(key) is not None or (id(store), key) in self._pending for key in keys):
+            if any(
+                store.get(key) is not None or (id(store), key) in self._pending
+                for key in (*keys, *alternates)
+            ):
                 return None
             event = threading.Event()
             for key in keys:
@@ -270,7 +274,7 @@ class _SharedEntries:
             found_key, value = self.lookup(store, key, alternate)
             if found_key is not None:
                 return found_key, value, False
-            event = self.claim(store, (key,))
+            event = self.claim(store, (key,), () if alternate is None else (alternate,))
             if event is not None:
                 break
         value = None
@@ -1061,14 +1065,14 @@ def _tensor_channel_workspace_bytes(
     the cell pointers a grid tensor, as the groups' own row indexes do; the
     weights permuted into that order are the build's (its cache keeps one
     ``n``-vector a grid tensor until the build ends).  Neither is charged,
-    nor bounded by this cap: charging them made the admission depend on the
-    row count, so
-    above about 444k rows every 256 x 256 block silently fell from the raw
+    nor bounded by this cap: charging them as well put the crossover at
+    about 444k rows, above which every 256 x 256 block fell from the raw
     band to the dense stage.  The O(n) stage-one gathers
-    (``_gather_cell_order``), and the permuted weights of a call without a
-    cache, are this operation's buffers and stay charged, with the
-    histogram, any scratch this assembly retains and the stage-two
-    contraction.
+    (``_gather_cell_order``, ``16 n`` bytes), and the permuted weights of a
+    call without a cache, are this operation's buffers and stay charged,
+    with the histogram, any scratch this assembly retains and the stage-two
+    contraction.  Admission therefore still depends on ``n``: the same
+    blocks now fall to the dense stage near 890k rows.
     """
     n, cells = len(grid.idx1), grid.n_bins1 * grid.n_bins2
     index_bytes = np.dtype(np.intp).itemsize

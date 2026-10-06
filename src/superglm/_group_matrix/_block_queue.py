@@ -38,6 +38,7 @@ hidden override the tests use to force a pool, a worker count or a split.
 
 from __future__ import annotations
 
+import contextvars
 import math
 import threading
 from collections import deque
@@ -362,8 +363,14 @@ def run_block_tasks(
         queue = _WorkQueue(units)
         profiles = [None if profile is None else {} for _ in range(workers)]
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-gram") as pool:
+            # Each worker runs in its own copy of the caller's context, which
+            # carries np.errstate and the held-warning scope as serial has them.
             futures = [
-                pool.submit(queue.work, cache.worker_view(shared, profiles[k], queue))
+                pool.submit(
+                    contextvars.copy_context().run,
+                    queue.work,
+                    cache.worker_view(shared, profiles[k], queue),
+                )
                 for k in range(workers)
             ]
             try:

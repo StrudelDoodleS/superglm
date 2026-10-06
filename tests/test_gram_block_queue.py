@@ -12,6 +12,7 @@ import pytest
 import scipy.sparse as sp
 
 import superglm._group_matrix._block_queue as queue
+import superglm._group_matrix._group_matrix_algebra as algebra
 import superglm._group_matrix._group_matrix_execution as execution
 import superglm._group_matrix._group_matrix_kernels as kernels
 import superglm._parallel as parallel
@@ -361,6 +362,59 @@ def test_a_failing_block_stops_the_pool_and_raises(monkeypatch, tensor_plan):
     _assert_bitwise(again.gram, expected.gram)
 
 
+def test_pooled_blocks_keep_the_callers_errstate(monkeypatch, tensor_plan):
+    """A block that overflows under the caller's ``errstate(over="ignore")`` stays quiet when pooled.
+
+    Worker threads start with an empty context, so without the caller's
+    context they ran NumPy's default ``over="warn"``, which ``simplefilter("error")``
+    raised as a task failure that serial assembly never saw.
+    """
+    plan, W, z, _signed = tensor_plan
+    original = execution._cross_gram
+
+    def cross_gram(*args, **kwargs):
+        np.multiply(np.array([1e308]), 10.0)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "_cross_gram", cross_gram)
+    with warnings.catch_warnings(), np.errstate(over="ignore"):
+        warnings.simplefilter("error")
+        expected, _ = _moments(plan, W, z, workers=1)
+        actual, profile = _moments(plan, W, z, workers=4, min_cost=0)
+    assert profile["block_pool_workers"] == 4
+    _assert_bitwise(actual.gram, expected.gram)
+
+
+def test_a_shared_grid_is_formed_once_across_orientations(monkeypatch):
+    """A worker whose lookup missed a rival's claim on the transpose waits for it, not re-forms it."""
+    shared = algebra._SharedEntries()
+    store: dict = {}
+    rival = shared.claim(store, ("R",))
+    real_lookup = algebra._SharedEntries.lookup
+    first = [True]
+
+    def stale_lookup(self, *args):
+        # The interleaving: this lookup ran before the rival's claim.
+        if first[0]:
+            first[0] = False
+            return None, None
+        return real_lookup(self, *args)
+
+    monkeypatch.setattr(algebra._SharedEntries, "lookup", stale_lookup)
+    formed: list[str] = []
+    found: list = []
+    worker = threading.Thread(
+        target=lambda: found.append(
+            shared.once(store, "K", lambda: formed.append("K") or np.ones(1), alternate="R")
+        )
+    )
+    worker.start()
+    shared.publish(store, rival, ("R",), (np.zeros(1),))
+    worker.join(timeout=30)
+    assert formed == []
+    assert found[0][0] == "R" and found[0][2] is False
+
+
 def test_a_pooled_worker_holds_no_finished_block():
     """Each block is placed as it is formed, so finished blocks never outnumber the workers."""
     lock = threading.Lock()
@@ -499,7 +553,7 @@ def test_estimator_threads_never_change_the_fit(monkeypatch):
     for bad in (0, -1, True, 1.5, "many"):
         with pytest.raises(ValueError, match="n_jobs"):
             SuperGLM(n_jobs=bad)
-    for bad in (0, "lots", True, 2.5, "inf", "1e400", "nan"):
+    for bad in (0, "lots", True, 2.5, "inf", "1e400", "nan", "", " ", "B", "iB"):
         with pytest.raises(ValueError, match="max_memory"):
             SuperGLM(max_memory=bad)
     # A malformed environment default warns and falls back; it never fails a fit.
