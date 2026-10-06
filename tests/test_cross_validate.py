@@ -520,6 +520,26 @@ class TestScoring:
         assert "mae" in result.mean_scores
         assert result.mean_scores["mae"] > 0
 
+    def test_a_built_in_column_a_callable_overwrites_is_not_recorded_as_built_in(
+        self, poisson_data, base_model
+    ):
+        """scoring=("gini", ranking), where ranking returns {"gini": ...}.
+
+        The gini column holds the callable's value, so the result must not
+        say a built-in scorer made it: the editor's Run CV would replay the
+        built-in gini beside it under one label.
+        """
+        df, y, sw = poisson_data
+
+        def ranking(model, X, y, *, sample_weight=None, offset=None):
+            return {"gini": 0.5}
+
+        result = cross_validate(
+            base_model, df, y, cv=SimpleKFold(3), sample_weight=sw, scoring=("gini", ranking)
+        )
+        assert (result.fold_scores["gini"] == 0.5).all()
+        assert result.builtin_scores == ()
+
     def test_callable_scorer_dict(self, poisson_data, base_model):
         """Callable scorer returning a dict produces multiple columns."""
         df, y, sw = poisson_data
