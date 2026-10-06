@@ -2,7 +2,8 @@
 
 The kernels a Gram block can reach (``_POOLED_BLOCK_KERNELS``) are compiled
 ``nogil=True``: the block queue (``_block_queue``) runs blocks on worker
-threads, and a kernel that held the GIL would run them one at a time.  Every
+threads, and a kernel that held the GIL would run them one at a time.  So are
+the ones that write a TSQR leaf's rows on its worker (``_POOLED_LEAF_KERNELS``).  Every
 one is nopython, so it touches no Python object while the GIL is released;
 none uses ``prange``, so it starts no numba threads of its own; and each
 writes only the arrays it allocates or the scratch its caller owns, which is
@@ -870,6 +871,48 @@ def _cat_cat_weighted_crosstab(codes_i, codes_j, W, n_levels_i, n_levels_j):
     return result
 
 
+@njit(cache=True, nogil=True)
+def _weighted_centred_rows(out, column, table, index, first, center, center_lo, sqrt_weights):
+    """``out[i, column + j] = ((table[index[first + i], j] - c) - c_lo) * sqrt_weights[i]``.
+
+    ``c`` and ``c_lo`` are ``center[column + j]`` and ``center_lo[column +
+    j]``; an empty one is left out.  The operations and their order are a
+    TSQR leaf's (``rank._tsqr_leaf``), so its entries are bitwise the same.
+    """
+    centred = center.shape[0] > 0
+    split = center_lo.shape[0] > 0
+    for i in range(out.shape[0]):
+        row = index[first + i]
+        scale = sqrt_weights[i]
+        for j in range(table.shape[1]):
+            value = table[row, j]
+            if centred:
+                value = value - center[column + j]
+            if split:
+                value = value - center_lo[column + j]
+            out[i, column + j] = value * scale
+
+
+@njit(cache=True, nogil=True)
+def _weighted_centred_one_hot(out, column, codes, n_levels, first, center, center_lo, sqrt_weights):
+    """:func:`_weighted_centred_rows` of the one-hot rows of ``codes`` (code ``n_levels``: none)."""
+    centred = center.shape[0] > 0
+    split = center_lo.shape[0] > 0
+    for i in range(out.shape[0]):
+        code = codes[first + i]
+        scale = sqrt_weights[i]
+        for j in range(n_levels):
+            value = 1.0 if code == j else 0.0
+            if centred:
+                value = value - center[column + j]
+            if split:
+                value = value - center_lo[column + j]
+            out[i, column + j] = value * scale
+
+
+_POOLED_LEAF_KERNELS = (_weighted_centred_rows, _weighted_centred_one_hot)
+"""The kernels a TSQR leaf (``rank._tsqr_leaf``) runs on its pool worker: ``nogil`` too."""
+
 _POOLED_BLOCK_KERNELS = (
     _tensor_operand_in_reassociation_range,
     _float64_operand_exponent_bounds,
@@ -928,6 +971,11 @@ def _warmup_group_matrix_kernels() -> None:
     for support in (matrix, frozen_matrix):
         for indices in (codes, frozen_codes):
             _indexed_row_dot(matrix, support, indices, indices)
+    # A TSQR leaf writes its block whole (no response) or less its last column.
+    for block in (np.empty((2, 2)), np.empty((2, 3))[:, :2]):
+        for centre in (values, values[:0]):
+            _weighted_centred_rows(block, 0, matrix, codes, 0, centre, values[:0], values)
+            _weighted_centred_one_hot(block, 0, codes, 2, 0, centre, values[:0], values)
     row_patterns = np.array([0, 1], dtype=np.int32)
     unique_codes = np.array([[0, 0], [1, 1]], dtype=np.int32)
     marginal_offsets = np.array([0, 2, 4], dtype=np.intp)

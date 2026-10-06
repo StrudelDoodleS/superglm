@@ -11,10 +11,17 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.sparse as sp
 
 import superglm._parallel as parallel
 import superglm.solvers.rank as rank
 from superglm import Categorical, Spline, SuperGLM
+from superglm._group_matrix._group_matrix_core import (
+    CategoricalGroupMatrix,
+    RandomEffectGroupMatrix,
+    SparseGroupMatrix,
+)
+from superglm._group_matrix._group_matrix_discretized import SupportCompressedSSPGroupMatrix
 from superglm._parallel import parallel_config, pool_workers
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.solvers.centered_system import (
@@ -246,6 +253,134 @@ def test_tsqr_leaves_keep_the_callers_errstate(monkeypatch):
                 factors[jobs] = grouped_weighted_factor(dm, weights)
     assert any(name.startswith("superglm-tsqr") for name in threads)
     assert np.array_equal(factors[1], factors[4])
+
+
+def _mixed_design(n: int, seed: int) -> DesignMatrix:
+    """One block of each kind a deferred leaf writes.
+
+    One-hot codes with base-level rows (the sink code), all-level codes, a
+    support table gathered by row index, and two blocks that materialise
+    their own rows: dense columns at an offset and sparse columns.
+    """
+    rng = np.random.default_rng(seed)
+    dense = rng.standard_normal((n, 2))
+    dense[:, 1] += 1e3
+    groups = [
+        CategoricalGroupMatrix(rng.integers(-1, 4, n), 4),
+        RandomEffectGroupMatrix(rng.integers(0, 3, n), 3),
+        SupportCompressedSSPGroupMatrix(
+            rng.uniform(0.0, 1.0, (7, 4)), rng.standard_normal((4, 3)), rng.integers(0, 7, n)
+        ),
+        DenseGroupMatrix(dense),
+        SparseGroupMatrix(sp.random(n, 2, density=0.3, random_state=seed, format="csr")),
+    ]
+    return DesignMatrix(groups, n=n, p=14)
+
+
+@pytest.mark.parametrize("centring", ["none", "centre", "split"])
+def test_deferred_leaves_factor_the_materialised_rows_bitwise(monkeypatch, centring):
+    """Leaves written on the workers from the compact forms give the materialised rows' bits.
+
+    ``iter_grouped_design_leaves`` defers each leaf to the worker that
+    factors it, which writes ``sqrt(w) * ((x - c) - c_lo)`` from the codes,
+    the support table or the block's own rows; the same leaves materialised
+    by ``row_subset(...).toarray()`` take the rows branch of
+    ``rank._tsqr_leaf``.  Every kind of block, with and without the split
+    centre and the appended response, at 1, 2 and 8 workers: equal to the
+    bit.  Mutation checks: subtracting ``c + c_lo`` at once, reading the
+    sink code as a level, or weighting a materialising block's rows out of
+    order each break the equality.
+    """
+    n, leaf = 300, 40
+    dm = _mixed_design(n, seed=20261006)
+    _leaf_rows_for(monkeypatch, dm.p, leaf)
+    rng = np.random.default_rng(5)
+    weights = rng.uniform(0.2, 3.0, n)
+    response = rng.standard_normal(n)
+    dense = dm.toarray()
+    centre = None if centring == "none" else weights @ dense / np.sum(weights)
+    centre_lo = None
+    if centring == "split":
+        centre_lo = 1e-13 * np.abs(centre) * rng.uniform(-1.0, 1.0, dm.p)
+    kwargs = {"center": centre, "center_lo": centre_lo}
+
+    def materialised():
+        for start in range(0, n, leaf):
+            rows = np.arange(start, min(start + leaf, n))
+            yield start, rows[-1] + 1, np.asarray(dm.row_subset(rows).toarray(), dtype=float)
+
+    with parallel_config(n_jobs=1):
+        expected = rank.streamed_weighted_factor(materialised(), weights, **kwargs)
+        expected_rhs = np.column_stack(
+            rank.streamed_weighted_factor_rhs(materialised(), weights, response, **kwargs)
+        )
+    for jobs in (1, 2, 8):
+        with parallel_config(n_jobs=jobs, max_memory="1G"):
+            factor = grouped_weighted_factor(dm, weights, **kwargs)
+            joint = np.column_stack(grouped_weighted_factor_rhs(dm, weights, response, **kwargs))
+        assert np.array_equal(factor.view(np.uint64), expected.view(np.uint64)), jobs
+        assert np.array_equal(joint.view(np.uint64), expected_rhs.view(np.uint64)), jobs
+
+
+def test_tsqr_leaves_and_merges_run_on_the_pool(monkeypatch):
+    """At four workers the calling thread only schedules the TSQR.
+
+    Eight leaves make a complete tree (seven merges, no leftover to fold),
+    so every leaf's rows are written, every leaf is factored and every merge
+    runs on a pool worker, and no design rows are materialised on the
+    calling thread.  The former producer materialised each leaf there
+    (``DesignMatrix.row_subset(...).toarray()``) and merged there: against
+    it the materialising and merging threads below are the main thread.
+    """
+    n, leaf = 320, 40
+    dm = _mixed_design(n, seed=11)
+    _leaf_rows_for(monkeypatch, dm.p, leaf)
+    weights = np.random.default_rng(2).uniform(0.2, 3.0, n)
+    leaves = _record_calls(monkeypatch, "_tsqr_leaf")
+    merges = _record_calls(monkeypatch, "_tsqr_merge")
+    materialising: list[str] = []
+    for owner, name in (
+        (DesignMatrix, "row_subset"),
+        (DesignMatrix, "toarray"),
+        (DenseGroupMatrix, "toarray"),
+        (SparseGroupMatrix, "toarray"),
+    ):
+        original = getattr(owner, name)
+
+        def recorded(self, *args, _original=original):
+            materialising.append(threading.current_thread().name)
+            return _original(self, *args)
+
+        monkeypatch.setattr(owner, name, recorded)
+    with parallel_config(n_jobs=4, max_memory="1G"):
+        grouped_weighted_factor(dm, weights)
+    assert len(leaves) == 8 and len(merges) == 7
+    on_pool = [name.startswith("superglm-tsqr") for name in leaves + merges + materialising]
+    assert materialising and all(on_pool)
+
+
+@pytest.mark.parametrize("width", [1, 5, 31, 32, 33, 70])
+def test_structured_merge_is_scipys_dtpqrt_bitwise(width):
+    """The merge reaches SciPy's ``dtpqrt`` through its Cython LAPACK pointer, without the GIL.
+
+    The f2py wrapper calls the same routine with the same block size ``nb =
+    min(width, 32)``, so the merged triangle is the same to the bit on both
+    sides of the block size, and the merge leaves its operands as they were.
+    """
+    from scipy.linalg.lapack import dtpqrt
+
+    rng = np.random.default_rng(width)
+    upper = np.linalg.qr(rng.standard_normal((2 * width, width)), mode="r")
+    lower = np.linalg.qr(rng.standard_normal((3 * width, width)), mode="r")
+    kept = upper.copy(), lower.copy()
+    assert rank._dtpqrt_nogil() is not None
+    merged = rank._tsqr_merge(upper, lower)
+    reference, _, _, info = dtpqrt(
+        width, min(width, 32), np.asfortranarray(kept[0]), np.asfortranarray(kept[1])
+    )
+    assert info == 0
+    assert np.array_equal(merged.view(np.uint64), np.triu(reference).view(np.uint64))
+    assert np.array_equal(upper, kept[0]) and np.array_equal(lower, kept[1])
 
 
 def test_worker_count_is_capped_by_memory_not_cores():

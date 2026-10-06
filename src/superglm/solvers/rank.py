@@ -5,9 +5,8 @@ from __future__ import annotations
 import contextvars
 import itertools
 import math
-from collections import deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Literal
@@ -346,23 +345,111 @@ def _tsqr_leaf(
     The rows are taken out of ``slot`` and released once copied, so the leaf
     holds its weighted copy and LAPACK's two working copies, never the input
     as well.  Each entry is ``sqrt(w_i) * ((x_ij - c_j) - c_lo_j)``, formed
-    exactly as the chunked factor formed it.
+    exactly as the chunked factor formed it.  A slot may hold a deferred leaf
+    (``centered_system.iter_grouped_design_leaves``) instead of rows: it
+    writes the same entries straight into the block, on the worker that
+    factors the leaf.
     """
-    values = np.asarray(slot.pop(), dtype=np.float64)
-    rows, width = values.shape
-    block = np.empty((rows, width + (response is not None)), dtype=np.float64)
-    design = block[:, :width]
-    if center is None:
-        design[...] = values
+    source = slot.pop()
+    fill = getattr(source, "fill_weighted_rows", None)
+    if fill is not None:
+        rows, width = source.shape
+        block = np.empty((rows, width + (response is not None)), dtype=np.float64)
+        fill(block[:, :width], sqrt_weights, center, center_lo)
     else:
-        np.subtract(values, center, out=design)
-    del values
-    if center_lo is not None:
-        design -= center_lo
-    design *= sqrt_weights[:, None]
+        values = np.asarray(source, dtype=np.float64)
+        rows, width = values.shape
+        block = np.empty((rows, width + (response is not None)), dtype=np.float64)
+        design = block[:, :width]
+        if center is None:
+            design[...] = values
+        else:
+            np.subtract(values, center, out=design)
+        del values
+        if center_lo is not None:
+            design -= center_lo
+        design *= sqrt_weights[:, None]
+    del source
     if response is not None:
         np.multiply(sqrt_weights, response, out=block[:, width])
     return np.linalg.qr(block, mode="r")
+
+
+_DTPQRT: list = []
+
+
+def _dtpqrt_nogil():
+    """SciPy's ``dtpqrt`` through its Cython LAPACK pointer, called without the GIL.
+
+    The f2py wrapper (``scipy.linalg.lapack.dtpqrt``) holds the GIL, so merges
+    on worker threads would run one at a time; a ``ctypes.CFUNCTYPE`` call
+    releases it.  Both reach the same routine in SciPy's LAPACK, so the
+    result is bitwise the same.  ``None`` where the pointer is unavailable.
+    """
+    if not _DTPQRT:
+        function = None
+        try:
+            import ctypes
+
+            from scipy.linalg import cython_lapack
+
+            api = ctypes.pythonapi
+            api.PyCapsule_GetName.restype = ctypes.c_char_p
+            api.PyCapsule_GetName.argtypes = [ctypes.py_object]
+            api.PyCapsule_GetPointer.restype = ctypes.c_void_p
+            api.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+            capsule = cython_lapack.__pyx_capi__["dtpqrt"]
+            pointer = api.PyCapsule_GetPointer(capsule, api.PyCapsule_GetName(capsule))
+            if pointer:
+                function = ctypes.CFUNCTYPE(None, *([ctypes.c_void_p] * 12))(pointer)
+        except Exception:  # pragma: no cover - SciPy without its Cython LAPACK
+            function = None
+        _DTPQRT.append(function)
+    return _DTPQRT[0]
+
+
+def _structured_merge(upper: NDArray, lower: NDArray, width: int) -> NDArray:
+    """``dtpqrt`` of two ``width``-square triangles: ``R`` in the upper triangle of ``a``."""
+    block = min(width, _TSQR_MERGE_BLOCK)
+    function = _dtpqrt_nogil()
+    if function is None:  # pragma: no cover - SciPy without its Cython LAPACK
+        from scipy.linalg.lapack import dtpqrt
+
+        merged, _, _, info = dtpqrt(
+            width,
+            block,
+            np.asfortranarray(upper),
+            np.asfortranarray(lower),
+            overwrite_a=1,
+            overwrite_b=1,
+        )
+    else:
+        merged = np.array(upper, dtype=np.float64, order="F")
+        stacked = np.array(lower, dtype=np.float64, order="F")
+        reflectors = np.empty((block, width), dtype=np.float64, order="F")
+        work = np.empty(block * width, dtype=np.float64)
+        # m, n, l, nb, lda, ldb, ldt, info: Fortran arguments by reference
+        ints = np.array([width, width, width, block, width, width, block, 0], dtype=np.intc)
+        address = ints.ctypes.data
+        size = ints.itemsize
+        function(
+            address,
+            address + size,
+            address + 2 * size,
+            address + 3 * size,
+            merged.ctypes.data,
+            address + 4 * size,
+            stacked.ctypes.data,
+            address + 5 * size,
+            reflectors.ctypes.data,
+            address + 6 * size,
+            work.ctypes.data,
+            address + 7 * size,
+        )
+        info = int(ints[7])
+    if info != 0:  # pragma: no cover - LAPACK argument contract
+        raise RuntimeError(f"dtpqrt failed with info={info}")
+    return np.triu(merged)
 
 
 def _tsqr_merge(upper: NDArray, lower: NDArray) -> NDArray:
@@ -377,19 +464,7 @@ def _tsqr_merge(upper: NDArray, lower: NDArray) -> NDArray:
     """
     width = upper.shape[1]
     if width and upper.shape[0] == width and lower.shape[0] == width:
-        from scipy.linalg.lapack import dtpqrt
-
-        merged, _, _, info = dtpqrt(
-            width,
-            min(width, _TSQR_MERGE_BLOCK),
-            np.asfortranarray(upper),
-            np.asfortranarray(lower),
-            overwrite_a=1,
-            overwrite_b=1,
-        )
-        if info != 0:  # pragma: no cover - LAPACK argument contract
-            raise RuntimeError(f"dtpqrt failed with info={info}")
-        return np.triu(merged)
+        return _structured_merge(upper, lower, width)
     return np.linalg.qr(np.vstack((upper, lower)), mode="r")
 
 
@@ -435,6 +510,56 @@ class _TSQRTree:
         return result
 
 
+def _pooled_tsqr(leaves: Iterator, leaf_args: Callable, workers: int) -> NDArray:
+    """The leaves and :class:`_TSQRTree`'s merges as tasks on one pool of ``workers``.
+
+    Node ``(k, j)`` is leaf ``j`` at ``k = 0`` and ``merge(node(k - 1, 2j),
+    node(k - 1, 2j + 1))`` above; a merge is submitted the moment both
+    children are ready, and the nodes left without a sibling are folded from
+    the lowest level up, the earlier rows on top: the tree the binary counter
+    builds, so the factor is bitwise its factor.  At most one leaf beyond the
+    workers waits, as each holds its rows; the calling thread only schedules.
+    """
+    nodes: dict[tuple[int, int], NDArray] = {}
+    running: dict[Future, tuple[int, int]] = {}
+    leaves_running = 0
+    count = 0
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-tsqr") as pool:
+
+        def submit(node: tuple[int, int], task: Callable, *args) -> None:
+            # A copy of the caller's context per task carries np.errstate.
+            running[pool.submit(contextvars.copy_context().run, task, *args)] = node
+
+        try:
+            item = next(leaves, None)
+            while item is not None or running:
+                while item is not None and leaves_running <= workers:
+                    submit((0, count), _tsqr_leaf, *leaf_args(item))
+                    count += 1
+                    leaves_running += 1
+                    item = next(leaves, None)
+                done, _ = wait(running, return_when=FIRST_COMPLETED)
+                for future in done:
+                    level, index = running.pop(future)
+                    leaves_running -= level == 0
+                    factor = future.result()
+                    sibling = nodes.pop((level, index ^ 1), None)
+                    if sibling is None:
+                        nodes[level, index] = factor
+                        continue
+                    upper, lower = (sibling, factor) if index & 1 else (factor, sibling)
+                    submit((level + 1, index >> 1), _tsqr_merge, upper, lower)
+                    del upper, lower, sibling
+                del done, factor
+        finally:
+            for future in running:
+                future.cancel()
+    result = None
+    for node in sorted(nodes):
+        result = nodes[node] if result is None else _tsqr_merge(nodes[node], result)
+    return result
+
+
 def _tsqr_weighted_factor(
     chunks: Iterable[tuple[int, int, NDArray]],
     weights: NDArray,
@@ -449,8 +574,11 @@ def _tsqr_weighted_factor(
     sizes them by :func:`tsqr_leaf_rows`.  The leaves are factored on a
     thread pool of ``_parallel.pool_workers`` workers (``n_jobs`` capped by
     the leaf count and by ``max_memory`` over the leaf working set), at most
-    one leaf ahead of the workers in flight, and reduced in leaf order by
-    :class:`_TSQRTree` on the calling thread.  BLAS runs on one thread
+    one leaf ahead of the workers in flight, and reduced by
+    :class:`_TSQRTree`'s tree, whose merges run on the same pool
+    (:func:`_pooled_tsqr`) or, at one worker, on the calling thread in leaf
+    order (Hadri, Ltaief, Agullo & Dongarra, IPDPS 2010: the leaves and the
+    tree's merges as one asynchronous task graph).  BLAS runs on one thread
     throughout (``pooled_blas_threads``), with or without the pool, so every
     leaf and merge is the same arithmetic at any worker count and the factor
     is bitwise identical across worker counts.
@@ -496,35 +624,13 @@ def _tsqr_weighted_factor(
         )
 
     with pooled_blas_threads():
-        if workers == 1:
-            for item in leaves:
-                args = leaf_args(item)
-                del item
-                tree.push(_tsqr_leaf(*args))
-                del args
-        else:
-            in_flight: deque = deque()
-            with ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="superglm-tsqr"
-            ) as pool:
-                try:
-                    for item in leaves:
-                        # A copy of the caller's context per leaf carries np.errstate.
-                        in_flight.append(
-                            pool.submit(
-                                contextvars.copy_context().run, _tsqr_leaf, *leaf_args(item)
-                            )
-                        )
-                        del item
-                        # One leaf beyond the workers waits, so a worker that
-                        # finishes starts the next leaf at once.
-                        while len(in_flight) > workers:
-                            tree.push(in_flight.popleft().result())
-                    while in_flight:
-                        tree.push(in_flight.popleft().result())
-                finally:
-                    for future in in_flight:
-                        future.cancel()
+        if workers > 1:
+            return _pooled_tsqr(leaves, leaf_args, workers)
+        for item in leaves:
+            args = leaf_args(item)
+            del item
+            tree.push(_tsqr_leaf(*args))
+            del args
         return tree.finish()
 
 

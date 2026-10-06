@@ -186,19 +186,117 @@ def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDA
         yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
 
 
-def iter_grouped_design_leaves(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
-    """Yield the TSQR leaves of a grouped design: ``rank.tsqr_leaf_rows(p)`` dense rows each.
+_NO_CENTRE = np.empty(0, dtype=np.float64)
+
+
+def _writable_codes(codes: NDArray) -> NDArray:
+    codes = np.ascontiguousarray(codes, dtype=np.intp)
+    return codes if codes.flags.writeable else codes.copy()
+
+
+def _design_leaf_parts(dm: DesignMatrix) -> list[tuple]:
+    """How each column block of ``dm`` writes a leaf's rows: ``(column, kind, a, b)``.
+
+    ``one_hot`` (codes, levels) and ``gather`` (table, index) write
+    ``toarray()``'s entries from the compact form without the GIL; ``rows``
+    (a matrix) materialises its rows by ``row_subset(...).toarray()``, the
+    whole design's when ``dm`` is not a plain ``DesignMatrix``.
+    """
+    from superglm._blas_threads import pooled_blas_threads
+    from superglm._group_matrix._group_matrix_core import (
+        CategoricalGroupMatrix,
+        RandomEffectGroupMatrix,
+    )
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+    )
+
+    if type(dm).toarray is not DesignMatrix.toarray or (
+        type(dm).row_subset is not DesignMatrix.row_subset
+    ):
+        return [(0, "rows", dm, None)]
+    parts: list[tuple] = []
+    column = 0
+    # The table is the product ``toarray`` forms, under the pin its leaves had.
+    with pooled_blas_threads():
+        for gm in dm.group_matrices:
+            kind = type(gm)
+            if kind.toarray is CategoricalGroupMatrix.toarray and kind.row_subset in (
+                CategoricalGroupMatrix.row_subset,
+                RandomEffectGroupMatrix.row_subset,
+            ):
+                parts.append((column, "one_hot", _writable_codes(gm.codes), int(gm.n_levels)))
+            elif kind.toarray is DiscretizedSSPGroupMatrix.toarray and kind.row_subset in (
+                DiscretizedSSPGroupMatrix.row_subset,
+                DiscretizedTensorGroupMatrix.row_subset,
+            ):
+                table = np.ascontiguousarray(gm.B_unique @ gm.R_inv, dtype=np.float64)
+                parts.append((column, "gather", table, _writable_codes(gm.bin_idx)))
+            else:
+                parts.append((column, "rows", gm, None))
+            column += int(gm.shape[1])
+    return parts
+
+
+class _DesignLeaf:
+    """Rows ``[start, stop)`` of a grouped design, written by the worker that factors them.
+
+    ``fill_weighted_rows`` writes ``sqrt(w_i) * ((x_ij - c_j) - c_lo_j)``,
+    the entries ``rank._tsqr_leaf`` forms from ``row_subset(...).toarray()``,
+    in the same order of operations, so the factor is bitwise the same.
+    """
+
+    __slots__ = ("_parts", "shape", "start", "stop")
+
+    def __init__(self, parts: list[tuple], start: int, stop: int, width: int) -> None:
+        self._parts = parts
+        self.start = start
+        self.stop = stop
+        self.shape = (stop - start, width)
+
+    def fill_weighted_rows(self, out, sqrt_weights, center, center_lo) -> None:
+        from superglm._group_matrix._group_matrix_kernels import (
+            _weighted_centred_one_hot,
+            _weighted_centred_rows,
+        )
+
+        centre = _NO_CENTRE if center is None else np.array(center, dtype=np.float64)
+        centre_lo = _NO_CENTRE if center_lo is None else np.array(center_lo, dtype=np.float64)
+        scale = np.ascontiguousarray(sqrt_weights, dtype=np.float64)
+        for column, kind, first, second in self._parts:
+            if kind == "one_hot":
+                _weighted_centred_one_hot(
+                    out, column, first, second, self.start, centre, centre_lo, scale
+                )
+            elif kind == "gather":
+                _weighted_centred_rows(
+                    out, column, first, second, self.start, centre, centre_lo, scale
+                )
+            else:
+                rows = np.arange(self.start, self.stop, dtype=np.intp)
+                values = np.array(first.row_subset(rows).toarray(), dtype=np.float64, order="C")
+                _weighted_centred_rows(
+                    out, column, values, rows - self.start, 0, centre, centre_lo, scale
+                )
+
+
+def iter_grouped_design_leaves(dm: DesignMatrix) -> Iterator[tuple[int, int, _DesignLeaf]]:
+    """Yield the TSQR leaves of a grouped design: ``rank.tsqr_leaf_rows(p)`` rows each.
 
     The partition depends only on ``(n, p)``, which fixes the factor's
-    reduction tree (``rank._tsqr_weighted_factor``).
+    reduction tree (``rank._tsqr_weighted_factor``).  Each leaf is deferred
+    (:class:`_DesignLeaf`): the pool worker that factors it writes its
+    weighted, centred rows from the design's compact form, so no thread
+    materialises the rows of every leaf.
     """
     from superglm.solvers.rank import tsqr_leaf_rows
 
     leaf_rows = tsqr_leaf_rows(dm.p)
+    parts = _design_leaf_parts(dm) if dm.n else []
     for start in range(0, dm.n, leaf_rows):
         stop = min(start + leaf_rows, dm.n)
-        rows = np.arange(start, stop, dtype=np.intp)
-        yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+        yield start, stop, _DesignLeaf(parts, start, stop, dm.p)
 
 
 def grouped_weighted_factor(

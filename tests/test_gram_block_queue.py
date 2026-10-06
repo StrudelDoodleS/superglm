@@ -302,8 +302,9 @@ def test_pooled_kernels_run_without_the_gil_from_many_threads_bitwise():
 
 
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
-    pooled = {id(kernel) for kernel in kernels._POOLED_BLOCK_KERNELS}
-    for kernel in kernels._POOLED_BLOCK_KERNELS:
+    pooled_kernels = kernels._POOLED_BLOCK_KERNELS + kernels._POOLED_LEAF_KERNELS
+    pooled = {id(kernel) for kernel in pooled_kernels}
+    for kernel in pooled_kernels:
         assert kernel.targetoptions.get("nogil") is True
         assert not kernel.targetoptions.get("parallel")
     released = {
