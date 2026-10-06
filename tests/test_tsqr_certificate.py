@@ -230,8 +230,10 @@ def test_tsqr_leaves_keep_the_callers_errstate(monkeypatch):
     dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=p)
     _leaf_rows_for(monkeypatch, p, 24)
     original = rank._tsqr_leaf
+    threads: list[str] = []
 
     def leaf(*args, **kwargs):
+        threads.append(threading.current_thread().name)
         np.multiply(np.array([1e308]), 10.0)
         return original(*args, **kwargs)
 
@@ -240,8 +242,9 @@ def test_tsqr_leaves_keep_the_callers_errstate(monkeypatch):
     with warnings.catch_warnings(), np.errstate(over="ignore"):
         warnings.simplefilter("error")
         for jobs in (1, 4):
-            with parallel_config(n_jobs=jobs):
+            with parallel_config(n_jobs=jobs, max_memory="1G"):
                 factors[jobs] = grouped_weighted_factor(dm, weights)
+    assert any(name.startswith("superglm-tsqr") for name in threads)
     assert np.array_equal(factors[1], factors[4])
 
 
