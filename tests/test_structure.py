@@ -430,6 +430,16 @@ READ_REFUSALS = {
         ),
         "The spline of 'age' refuses the Line range 3–2; change or remove that range.",
     ),
+    # from_json takes any Mapping, and a key that is not text cannot be sorted beside text.
+    "range with a key that is not text": (
+        _payload(
+            age={
+                "kind": "spline",
+                "ranges": [{"lo": 1.0, "hi": 2.0, "degree": 1, "join": "kink", 0: "extra"}],
+            }
+        ),
+        "The structure entry for 'age' has a malformed 'ranges'; export the structure again.",
+    ),
     "malformed kind": (
         _payload(age={"kind": "piecewise", "ranges": []}),
         "The structure entry for 'age' has a malformed 'kind'; export the structure again.",

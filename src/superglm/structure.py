@@ -945,7 +945,9 @@ def _entry_from_json(name: str, entry) -> FeatureStructure:
 
 
 def _is_range_json(value) -> bool:
-    return isinstance(value, Mapping) and sorted(value) == list(_RANGE_FIELDS)
+    # A set, not sorted(): a Mapping may hold a key that is not text, which
+    # cannot be ordered beside text.
+    return isinstance(value, Mapping) and set(value) == set(_RANGE_FIELDS)
 
 
 def _range_from_json(name: str, value: Mapping) -> PolynomialRange:
