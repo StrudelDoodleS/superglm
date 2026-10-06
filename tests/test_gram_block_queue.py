@@ -596,5 +596,8 @@ def test_pooled_gram_under_default_thread_pools_holds_blas_at_one_thread(monkeyp
     monkeypatch.setattr(execution, "_cross_gram", cross_gram)
     actual, profile = _moments(plan, W, z, workers=4, min_cost=0)
     assert profile["block_pool_workers"] == 4
-    assert blas_threads == {1}
     _assert_bitwise(actual.gram, expected.gram)
+    if not any(pool["user_api"] == "blas" for pool in threadpool_info()):
+        # Accelerate (the macOS ARM64 wheels' BLAS) has no threadpoolctl pool.
+        pytest.skip("threadpoolctl exposes no BLAS pools; thread counts cannot be verified")
+    assert blas_threads == {1}
