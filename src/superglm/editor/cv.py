@@ -119,6 +119,10 @@ FINAL_COLUMN_TYPES = (
     "Final fit stacks the train and validation rows, so a column the model reads must have one "
     "dtype in both; {column!r} does not, so pass it with the same dtype in both splits."
 )
+FINAL_COLUMN_MISSING = (
+    "Final fit stacks the train and validation rows, so a column the model reads must be in "
+    "both; {column!r} is missing from one, so pass it in both splits."
+)
 FOLD_FAILED = "Run CV stopped at fold {fold} and kept no result. {reason}"
 FOLD_NOT_FITTED = "That fold could not be fitted or scored."
 FOLD_SEPARATED = (
@@ -1194,6 +1198,8 @@ def _stacked_columns(frames, template) -> tuple[list[str], list[str]]:
         readings = {_reading(frame, name) for frame in frames}
         if len(readings) == 1:
             continue
+        if ("absent", None) in readings:
+            raise EditorValueError(FINAL_COLUMN_MISSING.format(column=name))
         numeric = all(isinstance(kind, np.dtype) and kind.kind in "iuf" for kind, _ in readings)
         if name in levels or not numeric:
             raise EditorValueError(FINAL_COLUMN_TYPES.format(column=name))

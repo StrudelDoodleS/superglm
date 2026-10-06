@@ -1417,6 +1417,36 @@ def test_final_fit_refuses_a_column_its_splits_declare_otherwise(cv_frame, backe
     assert refused.value.public_message == cv.FINAL_COLUMN_TYPES.format(column="region")
 
 
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_final_fit_names_a_column_a_split_lacks(cv_frame, backend):
+    """The validation rows lack power, which the model reads.
+
+    The refusal said power's dtype differs between the splits and asked for
+    one dtype, when the column is missing from one of them.
+    """
+    import polars as pl
+
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    X, y, w = cv_frame
+    train, validation = X.iloc[:400], X.iloc[400:500][["age", "region"]]
+    if backend == "polars":
+        train, validation = pl.from_pandas(train), pl.from_pandas(validation)
+    model = _model().fit(train, y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(train, y[:400], w[:400]),
+        validation_data=(validation, y[400:500], w[400:500]),
+    )
+
+    with pytest.raises(EditorValueError) as refused:
+        run_final_fit(capture_final_fit(session), _Context())
+
+    assert refused.value.public_message == cv.FINAL_COLUMN_MISSING.format(column="power")
+
+
 def test_run_cv_and_final_fit_fit_off_the_widget_lock(cv_frame, cv_fit, monkeypatch):
     """While each fit of a real Run CV or Final fit runs, another thread can take the lock.
 
