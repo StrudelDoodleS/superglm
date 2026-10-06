@@ -2,6 +2,7 @@
 
 import inspect
 import pickle
+import re
 import warnings
 from types import SimpleNamespace
 
@@ -2230,13 +2231,22 @@ class TestDataFingerprint:
             def __lt__(self, other):
                 return self.k < other.k
 
+        from superglm.model_selection import _FOLD_UNFINGERPRINTED, FINGERPRINT_VERSION
+
         x = np.array([Tag(1), Tag(2), Tag(1), Tag(2)] * 30, dtype=object)
         y = np.tile([1.0, 3.0, 1.0, 3.0], 30)
         model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Categorical()})
+        X = pd.DataFrame({"x": x})
 
-        result = cross_validate(model, pd.DataFrame({"x": x}), y, cv=SimpleKFold(3))
+        result = cross_validate(model, X, y, cv=SimpleKFold(3), return_estimators=True)
 
-        assert result.data_fingerprint is None and result.fingerprint_version is None
+        # The version says the result was made under the recipe; no fingerprint
+        # beside it says these columns could not be fingerprinted, which is not
+        # an older result, so a check of the rows refuses rather than passing.
+        assert result.data_fingerprint is None
+        assert result.fingerprint_version == FINGERPRINT_VERSION
+        with pytest.raises(ValueError, match=re.escape(_FOLD_UNFINGERPRINTED)):
+            result.plot_terms_by_fold(X, y=y)
 
     def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
         self, poisson_data, base_model

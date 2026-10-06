@@ -90,9 +90,13 @@ FINGERPRINT_OTHER_VERSION = (
     "one, so its rows cannot be checked; run cross_validate again with this version."
 )
 NO_FINGERPRINT = (
-    "This result has no data fingerprint, so only the row count was checked: it was made "
-    "before cross_validate recorded one, or the columns its model reads could not be "
-    "fingerprinted."
+    "This result was made before cross_validate recorded a data fingerprint, so only the row "
+    "count was checked."
+)
+UNFINGERPRINTED = (
+    "Run CV cannot check that these rows are the ones this result's folds were drawn on: the "
+    "columns its model reads could not be fingerprinted (values that differ but print alike, "
+    "or that cannot be hashed). Give those values distinct text and run cross_validate again."
 )
 NO_FIT_MODE = (
     "This result was made before cross_validate recorded its fit method, so Run CV fits "
@@ -262,9 +266,10 @@ def check_cv_data(
 
     ``cv_rows`` is ``cv_data=`` when it was supplied; otherwise ``fallback``,
     the train data, is used when its row count matches the folds. A result
-    that records a data fingerprint must match it. One without (an older
-    result, or one whose read columns could not be fingerprinted) gets the
-    row-count check and a note saying so.
+    that records a data fingerprint must match it. An older result, made
+    before there were fingerprints, gets the row-count check and a note
+    saying so; one made under the recipe whose read columns could not be
+    fingerprinted is refused, since nothing can check its rows.
     """
     if cv is None:
         return CVDataCheck(None, NO_CV)
@@ -279,6 +284,8 @@ def check_cv_data(
         sentence = TRAIN_ROWS_MISMATCH if cv_rows is None else ROWS_MISMATCH
         return CVDataCheck(None, sentence.format(rows=rows.n_obs, expected=expected))
     if cv.data_fingerprint is None:
+        if cv.fingerprint_version is not None:
+            return CVDataCheck(None, UNFINGERPRINTED)
         return CVDataCheck(rows, note=NO_FINGERPRINT)
     if cv.fingerprint_version != FINGERPRINT_VERSION:
         return CVDataCheck(None, FINGERPRINT_OTHER_VERSION)

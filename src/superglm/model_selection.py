@@ -85,6 +85,9 @@ class CrossValidationResult:
     fingerprint_version : int or None
         The version of the recipe ``data_fingerprint`` was made with. A
         fingerprint of another version cannot be compared with these rows.
+        A version beside no ``data_fingerprint`` means the columns the model
+        reads could not be fingerprinted, so no rows can be checked against
+        the folds.
     builtin_scores : tuple of str or None
         The score columns the built-in scorers computed, in ``scoring``
         order. A column a callable wrote is not one of them, even one named
@@ -154,6 +157,8 @@ class CrossValidationResult:
         for name, rows in (("X", frame), ("sample_weight", weight_arr)):
             if expected is not None and rows is not None and len(rows) != expected:
                 raise ValueError(_FOLD_ROWS.format(name=name, rows=len(rows), expected=expected))
+        if y is not None and self.data_fingerprint is None and self.fingerprint_version:
+            raise ValueError(_FOLD_UNFINGERPRINTED)
         if y is not None and self.data_fingerprint is not None:
             if self.fingerprint_version != FINGERPRINT_VERSION:
                 raise ValueError(_FOLD_VERSION)
@@ -193,6 +198,11 @@ _FOLD_VERSION = (
     "This result's data fingerprint predates this version of superglm or comes from another "
     "one, so these rows cannot be checked; run cross_validate again with this version, or pass "
     "no y."
+)
+_FOLD_UNFINGERPRINTED = (
+    "The columns this result's model reads could not be fingerprinted (values that differ "
+    "but print alike, or that cannot be hashed), so these rows cannot be checked against its "
+    "folds; give those values distinct text and run cross_validate again, or pass no y."
 )
 _FOLD_DATA = (
     "These {rows:,} rows are not the ones the folds were drawn on: the columns, dtypes, row "
@@ -820,6 +830,6 @@ def cross_validate(
         splitter=type(cv).__name__,
         fingerprint_columns=columns,
         fit_mode=fit_mode,
-        fingerprint_version=None if fingerprint is None else FINGERPRINT_VERSION,
+        fingerprint_version=FINGERPRINT_VERSION,
         builtin_scores=tuple(name for name in score_names if name not in not_built_in),
     )

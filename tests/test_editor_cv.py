@@ -300,6 +300,46 @@ def test_stored_folds_replays_indices_with_a_hook_between_folds(cv_frame, cv_fit
         np.testing.assert_array_equal(again_test, test)
 
 
+def test_run_cv_refuses_a_result_whose_columns_could_not_be_fingerprinted():
+    """Two unequal objects print "same"; the model fits them as two levels.
+
+    A result made under the recipe but without a fingerprint could not
+    fingerprint its columns, so its rows cannot be checked. It was replayed
+    with the older results' row-count note, and a swap of two such rows
+    moved Run CV's deviance with Run CV still enabled.
+    """
+    from superglm.editor.cv import UNFINGERPRINTED, run_cv_reason
+
+    class Tag:
+        def __init__(self, k):
+            self.k = k
+
+        def __str__(self):
+            return "same"
+
+        def __eq__(self, other):
+            return isinstance(other, Tag) and other.k == self.k
+
+        def __hash__(self):
+            return hash(self.k)
+
+        def __lt__(self, other):
+            return self.k < other.k
+
+    x = np.array([Tag(1), Tag(1), Tag(1), Tag(2)] * 30, dtype=object)
+    y = np.tile([1.0, 1.0, 1.0, 3.0], 30)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Categorical()})
+    supplied = cross_validate(model, X, y, cv=KFold(2))
+    swapped = X.copy()
+    swapped.iloc[[0, 81], 0] = X["x"].iloc[[81, 0]].to_numpy()
+
+    session = EditorSession.from_model(model.fit(X, y), cv=supplied, cv_data=(swapped, y))
+
+    assert session.cv_check.rows is None
+    assert run_cv_reason(session) == UNFINGERPRINTED
+
+
 def test_cv_data_is_checked_against_the_folds(cv_frame, cv_fit):
     from superglm.editor.cv import (
         FINGERPRINT_MISMATCH,
@@ -332,7 +372,9 @@ def test_cv_data_is_checked_against_the_folds(cv_frame, cv_fit):
     moved = EditorSession.from_model(model, terms=["region"], cv=supplied, cv_data=reordered)
     assert moved.cv_check.reason == FINGERPRINT_MISMATCH.format(data="CV data", rows=400)
 
-    older = dataclasses.replace(supplied, n_rows=None, data_fingerprint=None)
+    older = dataclasses.replace(
+        supplied, n_rows=None, data_fingerprint=None, fingerprint_version=None
+    )
     noted = EditorSession.from_model(model, terms=["region"], cv=older, cv_data=reordered)
     assert noted.cv_check.reason is None
     assert noted.cv_check.note == NO_FINGERPRINT
