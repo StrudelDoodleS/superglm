@@ -812,8 +812,10 @@ def cross_validate(
     try:
         fingerprint = _data_fingerprint(frame, y, sample_weight, offset, columns)
     except (TypeError, ValueError):
-        # A column the model reads that cannot be hashed: the result keeps
-        # its folds and scores, and a consumer checks the row count only.
+        # A column the model reads that cannot be fingerprinted: the result
+        # keeps its folds and scores, and records the recipe version beside no
+        # fingerprint, so a consumer refuses to check rows against it rather
+        # than taking it for an older result.
         fingerprint = None
 
     return CrossValidationResult(
