@@ -153,16 +153,23 @@ def _admitted_products(group_matrices, readers, weighted: NDArray, formed: dict)
 
 def _anchor_centred_columns(
     gm, local: NDArray, W: NDArray, weighted_z: NDArray, sum_w: float
-) -> tuple[NDArray, NDArray, NDArray, NDArray, NDArray]:
+) -> tuple[NDArray, NDArray, NDArray, NDArray, NDArray] | None:
     """``(centred, codes, mean, mass, response)`` for ``gm``'s columns ``local``.
 
-    ``_anchor_center_support``'s arithmetic on those columns alone: the
+    ``_anchor_center_support``'s anchoring on those columns alone: the
     support rows less the heaviest one, less their weighted mean, then
     projected, accumulated over chunks of support rows so a tensor grid's
     raw rows are never copied at once.  A categorical's identity support is
     formed on the failing levels only, so the heavy level is the anchor and
     its column becomes the centred complement indicator, never a ``(K+1, K)``
     array.  ``centred`` is ``(support rows, len(local))``.
+
+    The support and transform are read as float64, chunk by chunk, before any
+    arithmetic: every other reader of the column converts them so (exact for
+    float32 and for integers up to ``2**53``, which round alike in all of
+    them), and an integer difference would wrap.  ``None`` for a support or
+    transform that is not real binary64 or narrower.  ``mean`` projects the
+    anchor and the shift apart (``column_local_centering``, **Centre**).
     """
     from superglm.group_matrix import CategoricalGroupMatrix
 
@@ -173,24 +180,26 @@ def _anchor_centred_columns(
         codes, transform = gm.codes, None
     else:
         values, codes, transform = _compact_support(gm)
+        operands = (values,) if transform is None else (values, transform)
+        if any(array.dtype.kind not in "biuf" or array.dtype.itemsize > 8 for array in operands):
+            return None
         if transform is None:
             values = values[:, local]
         else:
-            transform = transform[:, local]
+            transform = np.asarray(transform[:, local], dtype=np.float64)
     mass, response = _fused_bincount_2(codes, W, weighted_z, rows)
-    anchor = values[int(np.argmax(mass))]
+    anchor = np.asarray(values[int(np.argmax(mass))], dtype=np.float64)
     step = max(1, _SUPPORT_CHUNK_BYTES // (8 * max(values.shape[1], 1)))
     shift = np.zeros(values.shape[1], dtype=np.float64)
     for start in range(0, rows, step):
-        shift += mass[start : start + step] @ (values[start : start + step] - anchor)
+        block = np.asarray(values[start : start + step], dtype=np.float64)
+        shift += mass[start : start + step] @ (block - anchor)
     shift /= sum_w
     centred = np.empty((rows, len(local)), dtype=np.float64)
     for start in range(0, rows, step):
-        block = (values[start : start + step] - anchor) - shift
+        block = (np.asarray(values[start : start + step], dtype=np.float64) - anchor) - shift
         centred[start : start + step] = block if transform is None else block @ transform
-    mean = anchor + shift
-    if transform is not None:
-        mean = mean @ transform
+    mean = anchor + shift if transform is None else anchor @ transform + shift @ transform
     return centred, codes, mean, mass, response
 
 
@@ -235,8 +244,9 @@ def column_local_centering(
     ``recentred`` holds each group's recentred columns and centred support
     (``RecentredColumns``), so a caller that meets them with other rows does
     so through ``recentred_products``, never through their raw values.
-    ``None`` when a failing column's group has no compact support, when the
-    failing columns' centred supports exceed ``_MAX_CENTRED_COLUMN_BYTES``,
+    ``None`` when a failing column's group has no compact support or one
+    that is not real binary64 or narrower (``_anchor_centred_columns``), when
+    the failing columns' centred supports exceed ``_MAX_CENTRED_COLUMN_BYTES``,
     when a group's admitted columns cannot be read as their own values
     (``_admitted_readers``), or when an entry between admitted columns is
     not finite (a rejection that is not column-local).
@@ -273,10 +283,21 @@ def column_local_centering(
     two admitted columns lies within ``gamma_K S s_k s_l (kappa_k kappa_l +
     kappa_k + kappa_l + 1) <= (3 + 2 sqrt(2)) gamma_K S s_k s_l``.  Every
     recentred entry is inside the envelope a certified column already has,
-    beside that projection term.  The computed centre ``mu~_j = (v_h +
-    shift) T_j`` differs from the exact weighted mean by a constant ``d_j``,
-    which enters an entry only as ``S d_j d_k`` or ``S d_j (m_k - m^_k)``:
-    second order in ``u``.
+    beside that projection term.
+
+    **Centre.**  The returned centre ``mu~_j = fl(v_h T_j) + fl(shift
+    T_j)`` (``fl(v_h + shift)`` with no transform, ``q = 0``) is the
+    counterpart of ``c_j``: the projected support ``fl(v_b T_j)``, the
+    column every other reader centres about ``mu~_j`` (the factor
+    certificate among them), lies within ``gamma_q |v_b| |T_j| +
+    gamma_(q+1) (|v_h| + |shift|) |T_j| + gamma_(q+2) (|v_b - v_h| +
+    |shift|) |T_j|`` of ``mu~_j + c_j(b)``.  Its first two terms are the
+    projection's own rounding of rows ``b`` and ``h``, zero where they
+    project exactly; projecting ``fl(v_h + shift)`` instead rounds ``shift``
+    against ``v_h`` before a projection that may cancel, which erases it
+    where ``|shift| < u |v_h|``.  ``mu~_j`` differs from the exact weighted
+    mean by a constant ``d_j``, which enters an entry only as ``S d_j d_k``
+    or ``S d_j (m_k - m^_k)``: second order in ``u``.
     """
     weighted_z = rejected.weighted_z
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
@@ -315,15 +336,14 @@ def column_local_centering(
     if readers is None:
         return None
 
-    centred = {
-        g: (
-            columns,
-            *_anchor_centred_columns(
-                dm.group_matrices[g], columns - starts[g], W, weighted_z, sum_w
-            ),
+    centred = {}
+    for g, columns in by_group.items():
+        anchored = _anchor_centred_columns(
+            dm.group_matrices[g], columns - starts[g], W, weighted_z, sum_w
         )
-        for g, columns in by_group.items()
-    }
+        if anchored is None:
+            return None
+        centred[g] = (columns, *anchored)
     first = {g: mass @ values for g, (_, values, _, _, mass, _) in centred.items()}
     pending = [(g, i) for g, (columns, *_) in centred.items() for i in range(len(columns))]
     step = max(1, _MAX_CENTRED_COLUMN_BYTES // (8 * len(W)))

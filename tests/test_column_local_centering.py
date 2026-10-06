@@ -550,3 +550,137 @@ def test_the_repair_projects_only_the_supports_the_rejected_build_did_not(monkey
         )
     assert profile["centered_column_local_hits"] == builds
     assert len(projections) == builds * (1 if carried else 3)
+
+
+def _gaussian_fit(groups, y):
+    """An unpenalised Gaussian identity fit of ``y`` on ``groups``, unit weights, Gram solve."""
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.types import GroupSlice
+
+    n = len(y)
+    dm = DesignMatrix(groups, n, sum(group.shape[1] for group in groups))
+    starts = np.cumsum([0] + [group.shape[1] for group in groups])
+    fit, _ = fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=np.ones(n),
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=[
+            GroupSlice(name=f"g{g}", start=int(starts[g]), end=int(starts[g + 1]))
+            for g in range(len(groups))
+        ],
+        lambda2=0.0,
+        tol=1e-10,
+        direct_solve="gram",
+        weight_semantics="frequency",
+    )
+    return dm, fit
+
+
+def _repaired_system(dm, y, columns):
+    """The unit-weight centred system of ``y`` on ``dm``, asserting the repair served it."""
+    profile = {}
+    system = build_centered_system(
+        dm=dm,
+        W=np.ones(dm.n),
+        z_off=y,
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_state=TabmatCenteringState(),
+        profile=profile,
+    )
+    assert profile["centered_column_local_hits"] == 1
+    assert profile["centered_column_local_columns"] == columns
+    return system
+
+
+def test_a_recentred_column_keeps_its_centre_through_the_projection():
+    """A recentred SSP column's centre is its centred support's, so the certificate sees master's rank.
+
+    ``B_unique`` rows ``(1e16 +- 2, 1e16)`` and ``R_inv = (1, -1)'`` give ``x =
+    4 1[bin 0] - 2`` exactly, bin 0 holding 18,432 of 20,480 unit-weight rows,
+    beside the bin-0 indicator and two tensors.  Both fail the certificate
+    (90% of the weight in one row) and are recentred, the SSP column about
+    ``(v_h + shift) T`` with ``shift = (-0.4, 0)``.  Every product and
+    difference of its support is exact here (Sterbenz), so the centre
+    ``fl(v_h T) + fl(shift T)`` lies within ``gamma_2 (|v_h T| + |shift T|)``
+    of 8/5: only the shift's division and the final sum round.
+    ``fl(v_h + shift)`` rounds the 0.4 away against 1e16 first and returns 2,
+    so the factor certificate, which centres the rows about that mean, saw
+    the aliased SSP and indicator apart: data rank 14, both coefficients
+    estimable, where the chunked pass reports 13 and neither.  Mutation
+    check: that ordering fails both assertions.
+    """
+    rng = np.random.default_rng(3)
+    n = 20_480
+    first, second = (_tensor(rng, n, (50, 50), (3, 3), 6, tensor_id) for tensor_id in (1, 2))
+    bins = np.zeros(n, dtype=np.intp)
+    bins[18_432:] = 1
+    ssp = DiscretizedSSPGroupMatrix(
+        np.array([[1e16 + 2, 1e16], [1e16 - 2, 1e16]]), np.array([[1.0], [-1.0]]), bins
+    )
+    groups = [first, CategoricalGroupMatrix(np.where(bins == 0, 0, -1), 1), second, ssp]
+    y = rng.normal(size=n)
+    dm, fit = _gaussian_fit(groups, y)
+    indicator, k = first.shape[1], dm.p - 1
+
+    mean = _repaired_system(dm, y, columns=2).mean_x[k]
+    assert abs(Fraction(float(mean)) - Fraction(8, 5)) <= Fraction(_gamma(2) * (2 + 0.4))
+    assert fit.rank_info.data.rank == dm.p - 1
+    assert not fit.rank_info.coefficient_estimable()[[indicator, k]].any()
+
+
+def test_an_integer_support_is_recentred_in_float64():
+    """A SCOP support of int64 ``(-2**63, 1)`` is recentred as the float64 column every reader sees.
+
+    Anchored at ``-2**63`` (18,000 of 20,000 rows), ``1 - (-2**63)`` wrapped
+    in int64 and reversed the repaired right-hand side: the fit of ``y = x /
+    2**63``, which the design reproduces exactly, rejected every step and
+    stopped at the null deviance, 1800.  Read as float64 the fit converges.
+    With ``b* = e_j / 2**63`` the exact solution, ``G (b - b*) = rho`` with
+    ``|rho_k| <= gamma_K sum_r (|wz_r| + b*_j A_j(r)) (M_k(r) + |m^_k|)``
+    (the right-hand side and the cross; ``A_j = |v - v_h| + |shift|`` the
+    recentred column's majorant, ``M`` the factored ``|B_unique| |R_inv|``
+    of a tensor), plus a Cholesky solve's ``p gamma_(p+1) D_j b*_j`` (Higham
+    2002, Thm 10.3).  With ``D = diag(G)^(1/2)`` and ``lambda`` the least
+    eigenvalue of ``D^-1 G D^-1``, the deviance is at most ``|D^-1 rho|^2 /
+    lambda`` and ``|b_j - b*_j|`` at most ``|D^-1 rho| / (lambda D_j)``, to
+    first order; the factor 2 covers second order, and the fitted values'
+    own rounding is added.  Mutation check: int64 subtraction fails all three.
+    """
+    rng = np.random.default_rng(3)
+    n = 20_000
+    first, second = (_tensor(rng, n, (50, 50), (3, 3), 6, tensor_id) for tensor_id in (1, 2))
+    bins = np.zeros(n, dtype=np.intp)
+    bins[18_000:] = 1
+    support = np.array([[-(2**63)], [1]], dtype=np.int64)
+    groups = [first, second, DiscretizedSCOPGroupMatrix(support, bins)]
+    y = np.where(bins == 0, -1.0, 2.0**-63)
+    dm, fit = _gaussian_fit(groups, y)
+    j, p = dm.p - 1, dm.p
+    system = _repaired_system(dm, y, columns=1)
+
+    values = support[:, 0].astype(np.float64)
+    shift = 2_000 * (values[1] - values[0]) / n
+    recentred = (np.abs(values - values[0]) + shift)[bins]
+
+    def factored(tensor):
+        return (np.abs(tensor.B_unique) @ np.abs(tensor.R_inv))[tensor.bin_idx]
+
+    majorant = np.column_stack([factored(first), factored(second), recentred])
+    n_h, q_h = first.B_unique.shape
+    K = n + 2 + n_h + 1 + q_h + 5
+    weighted = np.abs(y - y.mean()) + 2.0**-63 * recentred
+    rho = _gamma(K) * (weighted @ (majorant + np.abs(system.mean_x)))
+    G = system.data_gram
+    D = np.sqrt(np.diag(G))
+    eigenvalues = np.linalg.eigvalsh(G / np.outer(D, D))
+    lam = eigenvalues[0] - p * _gamma(2 * p) * eigenvalues[-1]
+    assert lam > 0.0
+    scaled = float(np.linalg.norm(rho / D)) + p * _gamma(p + 1) * D[j] * 2.0**-63
+    fitted = _gamma(p + 2) * (abs(fit.intercept) + np.abs(dm.toarray()) @ np.abs(fit.beta))
+    assert fit.converged
+    assert np.sqrt(fit.deviance) <= np.sqrt(2 * scaled**2 / lam) + np.linalg.norm(fitted)
+    assert abs(fit.beta[j] - 2.0**-63) <= 2 * scaled / (lam * D[j])
