@@ -505,6 +505,30 @@ READ_REFUSALS = {
 }
 
 
+def test_to_json_refuses_a_structure_changed_after_it_was_built():
+    """Structure's features and entries are mutable; the checks ran only when it was built.
+
+    to_json then wrote a reference no level or group holds (a file
+    read_structure refuses), or failed on an entry that is not one with a
+    raw error. It now checks the structure as it is, in the same sentences.
+    """
+    structure = read_structure(_payload(area=_categorical()))
+    structure.features["area"].reference = "Z"
+    with pytest.raises(StructureError) as moved:
+        structure.to_json()
+    with pytest.raises(StructureError) as read:
+        Structure.from_json(json.dumps(_payload(area=_categorical(reference="Z"))))
+    assert str(moved.value) == str(read.value)
+
+    structure.features["area"] = "not an entry"
+    with pytest.raises(StructureError) as replaced:
+        structure.to_json()
+    assert (
+        str(replaced.value)
+        == "The structure's 'features' field is malformed; export the structure again."
+    )
+
+
 @pytest.mark.parametrize(
     ("payload", "sentence"), list(READ_REFUSALS.values()), ids=list(READ_REFUSALS)
 )

@@ -222,6 +222,14 @@ class Structure:
     superglm_version: str = ""
 
     def __post_init__(self) -> None:
+        self._check()
+
+    def _check(self) -> None:
+        """Refuse a structure that is not self-consistent, in its fixed sentences.
+
+        Its features and their entries can be changed after it is built, so
+        :meth:`to_json` checks them again before it writes.
+        """
         for name, entry in self.features.items():
             if not isinstance(name, str) or not isinstance(entry, FeatureStructure):
                 raise StructureError(_MALFORMED_FILE.format(field="features"))
@@ -295,6 +303,7 @@ class Structure:
         str
             The JSON text.
         """
+        self._check()
         payload = {
             "features": {name: _entry_json(name, entry) for name, entry in self.features.items()},
             "format": FORMAT,
