@@ -220,7 +220,8 @@ def _fingerprint_columns(model, frame) -> tuple[str, ...]:
 
 # The recipe of _data_fingerprint. A result records it beside its fingerprint,
 # and one made by another recipe is refused as such, never as other data.
-# Version 3 keeps -0.0 apart from 0.0; version 2 wrote both as 0.0.
+# Version 3 keeps apart equal values a grouped categorical reads as two
+# levels, -0.0 and 0.0, or 1 and 1.0 in an object column; version 2 did not.
 FINGERPRINT_VERSION = 3
 
 
@@ -266,9 +267,11 @@ def _column_bytes(frame, name) -> bytes:
     pandas categorical or polars Enum adds its declared categories, which
     the fit takes as the level universe. Numbers are written at a fixed
     width, little-endian: integers as 64-bit, floats as float64 (exact) with
-    one NaN; anything else as ``pandas.factorize`` codes in order of first
-    appearance (missing values -1) and its uniques' text. ``-0.0`` stays
-    apart from ``0.0``: a grouped categorical reads them as two levels.
+    one NaN; anything else as codes in order of first appearance (missing
+    values -1) and the text of each code's first value (:func:`_value_codes`).
+    A grouped categorical reads a level by its text, so equal values that
+    print differently stay apart: ``-0.0`` and ``0.0`` in a float column, and
+    in an object column also ``1`` and ``1.0``.
     """
     values = frame.column_array(name)
     kind = values.dtype.kind
@@ -283,7 +286,7 @@ def _column_bytes(frame, name) -> bytes:
     elif kind == "b":
         tag, data = "bool", np.ascontiguousarray(values, dtype="<u1").tobytes()
     else:
-        codes, uniques = pd.factorize(values, sort=False, use_na_sentinel=True)
+        codes, uniques = _value_codes(values)
         tag = "values"
         data = np.ascontiguousarray(codes, dtype="<i8").tobytes() + _texts(uniques)
     categories = frame.column_declared_categories(name)
@@ -291,9 +294,34 @@ def _column_bytes(frame, name) -> bytes:
     return _framed(tag.encode("utf-8")) + _framed(declared) + _framed(data)
 
 
+def _value_codes(values) -> tuple[NDArray[np.intp], NDArray]:
+    """``pandas.factorize`` codes, split where equal values differ in type or text.
+
+    Equal text is the same text, so a column of ``str`` is coded as
+    ``pandas.factorize`` codes it. Other equal values can print differently
+    (``-0.0`` and ``0.0``, ``1``, ``1.0`` and ``True``), and each type and
+    text then takes its own code. Codes follow first appearance, missing
+    values are -1, and the second result holds each code's first value.
+    """
+    codes, uniques = pd.factorize(values, sort=False, use_na_sentinel=True)
+    if all(type(value) is str for value in uniques):
+        return codes, uniques
+    present = codes >= 0
+    kept = values[present]
+    keys = [f"{code}:{_value_text(value)}" for code, value in zip(codes[present], kept)]
+    split, _ = pd.factorize(np.asarray(keys, dtype=object), sort=False)
+    codes[present] = split
+    return codes, kept[np.unique(split, return_index=True)[1]]
+
+
+def _value_text(value) -> str:
+    """A value's type name and text."""
+    return f"{type(value).__name__}:{value}"
+
+
 def _texts(values) -> bytes:
     """The count, then each value's type name and text, UTF-8 and length-prefixed."""
-    items = [f"{type(value).__name__}:{value}".encode("utf-8", "surrogatepass") for value in values]
+    items = [_value_text(value).encode("utf-8", "surrogatepass") for value in values]
     return len(items).to_bytes(8, "little") + b"".join(_framed(item) for item in items)
 
 

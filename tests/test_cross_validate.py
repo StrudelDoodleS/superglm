@@ -2108,6 +2108,38 @@ class TestDataFingerprint:
             pd.DataFrame({"x": x}), y
         )
 
+    @pytest.mark.parametrize("levels", [[-0.0, 0.0, 1.0, 2.0], [1, 1.0, 2, 3]])
+    def test_fingerprint_sees_a_swap_of_equal_objects_a_grouped_categorical_reads_apart(
+        self, levels
+    ):
+        """In an object column -0.0 equals 0.0 and 1 equals 1.0, but they print as two levels.
+
+        ``pandas.factorize`` gave equal values one code, so swapping rows 4
+        and 41 (equal responses) left the fingerprint as it was, while the
+        first fold's deviance moved.
+        """
+        from superglm import collapse_levels
+        from superglm.model_selection import _data_fingerprint
+
+        x = np.array(levels * 30, dtype=object)
+        y = np.tile([1.0, 3.0, 4.0, 6.0], 30)
+        y[[4, 41]] = 2.0
+        swapped = x.copy()
+        swapped[[4, 41]] = x[[41, 4]]
+        grouping = collapse_levels(pd.Series(x), groups={})
+
+        def first_fold_deviance(values):
+            features = {"x": Categorical(grouping=grouping)}
+            model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features)
+            result = cross_validate(model, pd.DataFrame({"x": values}), y, cv=SimpleKFold(3))
+            return result.fold_scores["deviance"].iloc[0]
+
+        assert len(grouping.all_original_levels) == 4
+        assert first_fold_deviance(swapped) != first_fold_deviance(x)
+        assert _data_fingerprint(pd.DataFrame({"x": swapped}), y) != _data_fingerprint(
+            pd.DataFrame({"x": x}), y
+        )
+
     def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
         self, poisson_data, base_model
     ):
