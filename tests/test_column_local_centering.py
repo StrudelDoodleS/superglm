@@ -186,8 +186,13 @@ def test_recentred_columns_match_the_two_pass_gram_within_their_bound(
 
     rng = np.random.default_rng(20261008)
     n = 240
+    projections = []
     if one_column_a_chunk:
         monkeypatch.setattr(local, "_MAX_CENTRED_COLUMN_BYTES", 8 * n)
+        # Room for the first tensor's projection (960 B) but not beside it the
+        # others' (640 B, 168 B): the cap bounds the kept projections' total.
+        monkeypatch.setattr(local, "_MAX_KEPT_PROJECTION_BYTES", 1_000)
+        monkeypatch.setattr(local, "_project", _counted(projections, local._project))
     levels = rng.choice([0, 1, -1], size=n, p=[0.8, 0.1, 0.1])
     bins = rng.integers(0, 7, size=n)
     groups = [
@@ -213,6 +218,9 @@ def test_recentred_columns_match_the_two_pass_gram_within_their_bound(
     mean, gram, rhs, repaired = local.column_local_centering(
         dm=dm, W=W, rejected=rejection, sum_w=S
     )
+    if one_column_a_chunk:
+        failing = sum(len(group.columns) for group in repaired)
+        assert failing >= 2 and len(projections) == 1 + 2 * failing
     raw_mean = moments.xtw / S
     raw = moments.gram - np.outer(moments.xtw, raw_mean)
     raw = 0.5 * (raw + raw.T)
