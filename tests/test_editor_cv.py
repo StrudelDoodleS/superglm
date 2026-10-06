@@ -996,6 +996,27 @@ def test_run_cv_job_puts_the_hand_edits_back_on_every_fold(cv_frame, cv_fit, fit
     assert age["spread"] > 0.0
 
 
+def test_least_stable_first_puts_a_term_without_a_spread_after_the_measured_ones():
+    """Wavy varies across folds, stable does not, and block's folds share no level.
+
+    Block's spread is NaN since 484c18df, and as a sort key NaN compares
+    false both ways, so it split the measured terms: stable, block, wavy,
+    the least stable last.
+    """
+    from superglm.editor.cv import _least_stable_first
+
+    items = [
+        {"name": "stable", "held": False, "spread": 0.0},
+        {"name": "block", "held": False, "spread": float("nan")},
+        {"name": "wavy", "held": False, "spread": 0.31604010556933493},
+        {"name": "dropped", "held": True, "spread": float("nan")},
+    ]
+
+    ordered = [item["name"] for item in sorted(items, key=_least_stable_first)]
+
+    assert ordered == ["wavy", "stable", "block", "dropped"]
+
+
 def test_min_r_is_unavailable_when_a_fold_curve_is_flat(cv_fit):
     """A fold the selection penalty dropped a term on reads it flat, with no correlation.
 

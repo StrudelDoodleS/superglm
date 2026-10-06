@@ -473,11 +473,18 @@ def fold_term_items(
     return items
 
 
-def _least_stable_first(item: dict[str, Any]) -> tuple[bool, float, str]:
-    """Measured terms by falling spread, then the held terms; by name within each."""
+def _least_stable_first(item: dict[str, Any]) -> tuple[int, float, str]:
+    """Measured terms by falling spread, then those without one, then the held terms.
+
+    By name within each. A spread is unavailable (NaN) where no fold shares
+    a point with another, and NaN does not order against a number.
+    """
     if item["held"]:
-        return (True, 0.0, item["name"])
-    return (False, -item["spread"], item["name"])
+        return (2, 0.0, item["name"])
+    spread = item["spread"]
+    if spread is None or not np.isfinite(spread):
+        return (1, 0.0, item["name"])
+    return (0, -spread, item["name"])
 
 
 def _term_item(
