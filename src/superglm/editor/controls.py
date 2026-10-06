@@ -529,8 +529,11 @@ def _certification_bound(level_basis, base_row, coefficient_map, beta, inner) ->
         1.0 + max(_sum_up(np.abs(level_basis), axis=1).max(), _sum_up(np.abs(base_row))), up
     )
     spacings = np.nextafter(np.nextafter(count * beta_mass, up) * basis_mass, up)
-    absolute = np.nextafter(spacings * _SUBNORMAL_SPACING, up)
-    return np.nextafter(relative + absolute, up)
+    # The allowance is subnormal by design; a caller's errstate must not turn
+    # that intended underflow into an error.
+    with np.errstate(under="ignore"):
+        absolute = np.nextafter(spacings * _SUBNORMAL_SPACING, up)
+        return np.nextafter(relative + absolute, up)
 
 
 def _sum_up(values: NDArray, axis: int | None = None):

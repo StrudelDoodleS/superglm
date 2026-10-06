@@ -354,6 +354,22 @@ def test_handles_survive_effects_of_subnormal_size():
     assert len(session.control_points("band")["x"]) >= 3
 
 
+def test_handles_need_no_underflow_allowance_from_numpy(wide):
+    """The certificate's subnormal allowance underflows on purpose.
+
+    Under np.errstate(under="raise") that multiplication raised
+    FloatingPointError, so an ordinary-scale fit lost its handles to a NumPy
+    setting the old bound never tripped.
+    """
+    model, _ = wide
+    session = EditorSession.from_model(model, terms=["band"])
+
+    with np.errstate(under="raise"):
+        points = session.control_points("band")
+
+    assert len(points["x"]) >= 3
+
+
 def test_an_ordered_term_without_a_spline_basis_gets_no_spline_view():
     model, _ = _fit(Piecewise(breaks=["3"]), specials=())
     session = EditorSession.from_model(model, terms=["band"])
