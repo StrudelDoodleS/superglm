@@ -1226,6 +1226,34 @@ def test_run_cv_result_is_dropped_when_the_model_changes_mid_run(cv_frame, cv_fi
     assert [result["origin"] for result in report["results"]] == ["supplied"]
 
 
+def test_the_final_fit_report_counts_the_changes_waiting_now(cv_frame, cv_fit):
+    """One change waits when Final fit runs; it is undone, then another is staged.
+
+    Staging and undoing a waiting change leave the model revision as it is,
+    so the report is not stale, and its waiting count was the one captured
+    when the job started: it warned about the undone change and missed the
+    new one.
+    """
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.stage_structural("collapse", "region", {"levels": ["B", "C"], "group_label": None})
+    widget = session.widget()
+    try:
+        started = _post_json(f"{widget.url}/job_start", {"kind": "final_fit"})
+        _post_json(f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True})
+        at_fit = widget._report("final")["final_fit"]
+        session.undo()
+        after_undo = widget._report("final")["final_fit"]
+        session.stage_structural("collapse", "region", {"levels": ["A", "B"], "group_label": None})
+        session.stage_structural("set_reference", "region", {"level": "C"})
+        after_staging = widget._report("final")["final_fit"]
+    finally:
+        widget.close()
+
+    assert [at_fit["pending"], after_undo["pending"], after_staging["pending"]] == [1, 0, 2]
+    assert not (at_fit["stale"] or after_undo["stale"] or after_staging["stale"])
+
+
 def test_final_fit_refits_train_and_validation_and_export_offers_it(cv_frame, cv_fit, fit_rows):
     from superglm.editor.cv import FINAL_NOT_RUN, FINAL_STALE
     from superglm.editor.errors import EditorValueError

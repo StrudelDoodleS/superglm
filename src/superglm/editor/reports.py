@@ -87,7 +87,9 @@ def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, A
         "n_rows": final_fit.n_rows,
         "splits": list(final_fit.splits),
         "carried": list(final_fit.carried),
-        "pending": final_fit.pending,
+        # Waiting changes are never in a Final fit, and staging or undoing one
+        # leaves the model revision alone, so the count is the one waiting now.
+        "pending": len(widget.session.pending),
         "summary": summary.get("compact"),
     }
 
