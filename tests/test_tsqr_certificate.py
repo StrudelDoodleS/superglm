@@ -10,13 +10,17 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import superglm._parallel as parallel
 import superglm.solvers.rank as rank
 from superglm import Categorical, Spline, SuperGLM
 from superglm._parallel import parallel_config, pool_workers
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
-from superglm.solvers.centered_system import grouped_weighted_factor
+from superglm.solvers.centered_system import (
+    grouped_weighted_factor,
+    grouped_weighted_factor_rhs,
+)
 from tests._exact_reference import exact_matmul
 
 _U = 2.0**-53
@@ -104,6 +108,72 @@ def test_tsqr_factor_is_bitwise_identical_across_worker_counts(monkeypatch):
     computed = exact_matmul((factor.T, factor))
     norms = np.sqrt(np.diag(reference))
     gamma = _gamma((leaf + 2 * p * math.ceil(math.log2(n / leaf))) * p)
+    bound = (2.0 * gamma + gamma * gamma) * np.outer(norms, norms)
+    assert np.all(np.abs(computed - reference) <= bound)
+
+
+@pytest.mark.parametrize("short", ["last_leaf", "every_leaf"])
+def test_tsqr_short_leaves_and_the_response_keep_the_joint_gram(monkeypatch, short):
+    """Leaves shorter than the width, and the appended response, at 1, 2 and 8 workers.
+
+    ``last_leaf``: ``grouped_weighted_factor_rhs`` (the QR-route solves) over
+    223 rows in leaves of 24 at width 12, ten leaves of which the last holds
+    7 rows, fewer than the width, so its merge stacks a trapezoid.
+    ``every_leaf``: ``streamed_weighted_factor`` over chunks of 5 rows, as
+    ``metrics``' ``iter_dense_chunks`` yields them for a wide design, so
+    every leaf and merge is a trapezoid.  A joint factor ``F`` of the
+    weighted rows ``[A, b]`` (``b`` left out without a response) has ``F'F
+    = [A, b]'[A, b]`` within ``(2 gamma_k + gamma_k^2) ||a_i|| ||a_j||``,
+    ``k = (L + 2 q ceil(log2 m)) q`` for width ``q`` (Higham 2002, Thm 19.4,
+    as in the bitwise test above), bitwise the same at every worker count.
+    Mutation checks: slicing a leaf's response from the wrong rows, or
+    dropping a lower factor shorter than the width in the merge, puts the
+    Gram orders of magnitude outside the bound (both passed every focused
+    test before this one).
+    """
+    n, p = 223, 12
+    rng = np.random.default_rng(20261010)
+    X = rng.standard_normal((n, p))
+    weights = rng.uniform(0.2, 3.0, n)
+    response = rng.standard_normal(n)
+    leaves = _record_calls(monkeypatch, "_tsqr_leaf")
+    if short == "last_leaf":
+        leaf = 2 * p
+        _leaf_rows_for(monkeypatch, p, leaf)
+        dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=p)
+
+        def joint():
+            factor, transformed = grouped_weighted_factor_rhs(dm, weights, response)
+            return np.column_stack((factor, transformed))
+
+        rows = np.column_stack((np.sqrt(weights)[:, None] * X, np.sqrt(weights) * response))
+    else:
+        leaf = 5
+
+        def joint():
+            chunks = (
+                (start, min(start + leaf, n), X[start : start + leaf])
+                for start in range(0, n, leaf)
+            )
+            return rank.streamed_weighted_factor(chunks, weights)
+
+        rows = np.sqrt(weights)[:, None] * X
+    factors = {}
+    for jobs in (1, 2, 8):
+        leaves.clear()
+        with parallel_config(n_jobs=jobs):
+            factors[jobs] = joint()
+        assert len(leaves) == math.ceil(n / leaf)
+        if jobs > 1:
+            assert all(name.startswith("superglm-tsqr") for name in leaves)
+    assert np.array_equal(factors[1], factors[2])
+    assert np.array_equal(factors[1], factors[8])
+    width = rows.shape[1]
+    assert factors[1].shape == (width, width)
+    reference = exact_matmul((rows.T, rows))
+    computed = exact_matmul((factors[1].T, factors[1]))
+    norms = np.sqrt(np.diag(reference))
+    gamma = _gamma((leaf + 2 * width * math.ceil(math.log2(n / leaf))) * width)
     bound = (2.0 * gamma + gamma * gamma) * np.outer(norms, norms)
     assert np.all(np.abs(computed - reference) <= bound)
 
