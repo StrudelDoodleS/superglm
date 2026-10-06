@@ -155,8 +155,14 @@ def _gamma(k: int) -> float:
     return k * u / (1 - k * u)
 
 
-def test_recentred_columns_match_the_two_pass_gram_within_their_bound(monkeypatch):
+@pytest.mark.parametrize("one_column_a_chunk", [False, True])
+def test_recentred_columns_match_the_two_pass_gram_within_their_bound(
+    monkeypatch, one_column_a_chunk
+):
     """Recentred rows against the exact two-pass Gram; admitted entries bitwise the raw rung's.
+
+    Run whole, and again with the cap at one weighted row so every failing
+    column is its own chunk: the chunked slicing must give the same rows.
 
     Two groups hold failing columns: a 2-level categorical whose first level
     holds all but 1e-9 of the weight (``kappa^2 = 1e9``; its light level is
@@ -180,6 +186,8 @@ def test_recentred_columns_match_the_two_pass_gram_within_their_bound(monkeypatc
 
     rng = np.random.default_rng(20261008)
     n = 240
+    if one_column_a_chunk:
+        monkeypatch.setattr(local, "_MAX_CENTRED_COLUMN_BYTES", 8 * n)
     levels = rng.choice([0, 1, -1], size=n, p=[0.8, 0.1, 0.1])
     bins = rng.integers(0, 7, size=n)
     groups = [
