@@ -1640,50 +1640,82 @@ def test_run_cv_and_final_fit_name_a_missing_value_in_a_factor_smooth_group(cv_f
         assert refused.value.public_message == cv.MISSING_LEVELS.format(job=job, term="urban")
 
 
-def test_run_cv_names_a_missing_factor_smooth_group_value_only_a_test_fold_reads():
-    """TimeSeriesSplit(3): the last block, which only the last fold tests on, holds a missing group.
-
-    Run CV checked the rows its folds train on, which is right for a level
-    term (a test-only row is scored as the term predicts new levels), but a
-    factor smooth refuses a missing group when it predicts as well as when it
-    fits: the last fold failed while scoring, and Run CV said only that the
-    fold could not be fitted or scored.
-    """
-    from sklearn.model_selection import TimeSeriesSplit
-
-    import superglm.editor.cv as cv
+def _missing_label_session(where: str, missing_rows, folds):
+    """600 rows of age and a label column (a factor smooth's group, or a level term), with
+    ``missing_rows`` of the label missing; the CV result is drawn with ``folds``."""
     from superglm import FactorSmooth
-    from superglm.editor.cv import capture_cv_run, run_cv
-    from superglm.editor.errors import EditorValueError
 
     rng = np.random.default_rng(11)
     n = 600
     age = rng.uniform(18.0, 80.0, n)
-    urban = rng.choice(["yes", "no"], n).astype(object)
-    urban[-1] = None
-    X = pd.DataFrame({"age": age, "urban": urban})
+    label = rng.choice(["yes", "no"], n).astype(object)
+    label[missing_rows] = None
+    X = pd.DataFrame({"age": age, "urban": label})
     y = rng.poisson(np.exp(-0.5 + 0.2 * np.sin(age / 12.0))).astype(np.float64)
 
     def declared():
-        return SuperGLM(
-            family="poisson",
-            selection_penalty=0.0,
-            features={"age": Spline(n_knots=6)},
-            interactions=[FactorSmooth("age", group="urban", basis="fs", k=5)],
-        )
+        if where == "group":
+            return SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                features={"age": Spline(n_knots=6)},
+                interactions=[FactorSmooth("age", group="urban", basis="fs", k=5)],
+            )
+        features = {"age": Spline(n_knots=6), "urban": Categorical(base="first")}
+        return SuperGLM(family="poisson", selection_penalty=0.0, features=features)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         supplied = cross_validate(
-            declared(), X, y, cv=TimeSeriesSplit(3), fit_mode="fit_reml", scoring=("deviance",)
+            declared(), X, y, cv=folds, fit_mode="fit_reml", scoring=("deviance",)
         )
     model = declared().fit_reml(X.iloc[:400], y[:400])
-    session = EditorSession.from_model(model, cv=supplied, cv_data=(X, y))
+    return EditorSession.from_model(model, cv=supplied, cv_data=(X, y)), supplied
+
+
+@pytest.mark.parametrize("where", ["group", "level"])
+def test_run_cv_names_a_missing_label_only_a_test_fold_reads(where):
+    """TimeSeriesSplit(3): the last block, which only the last fold tests on, holds a missing value.
+
+    Run CV checked missing values on the rows its folds train on, which is
+    right for a level outside the universe (a test-only row is scored as the
+    term predicts new levels), but a factor smooth's group and every level
+    term refuse a missing value when they predict too: the last fold failed
+    while scoring, and Run CV said only that it could not be fitted or scored.
+    """
+    from sklearn.model_selection import TimeSeriesSplit
+
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_cv_run, run_cv
+    from superglm.editor.errors import EditorValueError
+
+    session, _ = _missing_label_session(where, [599], TimeSeriesSplit(3))
 
     with pytest.raises(EditorValueError) as run:
         run_cv(capture_cv_run(session), _Context())
 
     assert run.value.public_message == cv.MISSING_LEVELS.format(job="Run CV", term="urban")
+
+
+@pytest.mark.parametrize("where", ["group", "level"])
+def test_run_cv_leaves_a_missing_label_on_rows_no_fold_reads_alone(where):
+    """The folds read rows 0-499 only, and the label is missing in rows 550-599.
+
+    No fold fits or scores those rows, and the supplied result scored every
+    fold, so Run CV must replay it as supplied: checking every CV row, not the
+    rows its folds read, would refuse a result that is whole.
+    """
+    from superglm.editor.cv import StoredFolds, capture_cv_run, run_cv
+
+    rows = np.arange(600)
+    folds = StoredFolds(((rows[:250], rows[250:500]), (rows[250:500], rows[:250])))
+    session, supplied = _missing_label_session(where, np.arange(550, 600), folds)
+
+    run = run_cv(capture_cv_run(session), _Context())
+
+    np.testing.assert_array_equal(
+        run.result.fold_scores["deviance"], supplied.fold_scores["deviance"]
+    )
 
 
 @pytest.mark.parametrize("backend", ["pandas", "polars"])

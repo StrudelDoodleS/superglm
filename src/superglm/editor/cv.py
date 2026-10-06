@@ -848,7 +848,7 @@ def _covering_template(template, X, job: str):
     and so does a factor smooth's group.
     """
     frame = as_eager_frame(X)
-    _require_valued_groups(template, frame, job)
+    _require_valued_labels(template, frame, job)
     bindings = dict(getattr(template, "_level_bindings", None) or ())
     replacements = {}
     for name, spec in template._specs.items():
@@ -857,8 +857,6 @@ def _covering_template(template, X, job: str):
         if name not in frame.columns:
             continue
         values = np.asarray(frame.column_array(name)).ravel()
-        if np.asarray(pd.isna(values), dtype=bool).any():
-            raise EditorValueError(MISSING_LEVELS.format(job=job, term=name))
         if isinstance(spec, OrderedCategorical):
             outside = _outside_order(values, spec)
             if outside:
@@ -908,14 +906,16 @@ def _covering_template(template, X, job: str):
     return clone_with_replaced_features(template, replacements) if replacements else template
 
 
-def _require_valued_groups(template, X, job: str) -> None:
-    """Refuse a missing value in a factor smooth's group, which it refuses to fit and to predict."""
+def _require_valued_labels(template, X, job: str) -> None:
+    """Refuse a missing value in a column read as labels, which its term refuses to fit and to predict.
+
+    That is a level term's column or a factor smooth's group: each refuses a
+    missing value when it scores a row as well as when it fits one.
+    """
     frame = as_eager_frame(X)
-    for spec in getattr(template, "_interaction_specs", {}).values():
-        group = getattr(spec, "group", None)
-        if isinstance(spec, FactorSmooth) and group in frame.columns:
-            if _holds_missing(frame, group):
-                raise EditorValueError(MISSING_LEVELS.format(job=job, term=group))
+    for name in sorted(_label_columns(template), key=str):
+        if name in frame.columns and _holds_missing(frame, name):
+            raise EditorValueError(MISSING_LEVELS.format(job=job, term=name))
 
 
 def _outside_universe(
@@ -962,13 +962,13 @@ def _uncovered_labels(values, grouping) -> list[str]:
 
 def run_cv(plan: CVRunPlan, context) -> CVRun:
     """Replay the stored folds on the in-force structure with the hand edits put back."""
-    # Only the rows some fold trains on are fitted: a test-only row is scored
-    # as the term predicts new levels, and a row in no fold is never read. A
-    # factor smooth refuses a missing group when it predicts too, so its
-    # groups are checked on every row a fold reads.
+    # A level outside a term's universe is checked on the rows some fold
+    # trains on: a test-only row is scored as the term predicts new levels,
+    # and a row in no fold is never read. A missing label is refused when a
+    # term scores a row too, so those are checked on every row a fold reads.
     frame = as_eager_frame(plan.rows.X)
     read = np.unique(np.concatenate([np.concatenate(fold) for fold in plan.folds]))
-    _require_valued_groups(plan.template, frame.take_rows(read), "Run CV")
+    _require_valued_labels(plan.template, frame.take_rows(read), "Run CV")
     fitted = np.unique(np.concatenate([train for train, _test in plan.folds]))
     X_fitted = frame.take_rows(fitted)
     template = _covering_template(plan.template, X_fitted, "Run CV")
