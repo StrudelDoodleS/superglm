@@ -1,13 +1,14 @@
 """Tests for REML smoothing parameter estimation."""
 
 import logging
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import Constraint, SuperGLM
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
@@ -2200,3 +2201,429 @@ class TestComponentNamedLambda2LegacyAssembly:
         scale = np.linalg.norm(inv_ref)
         np.testing.assert_allclose(S_legacy, S_ref, rtol=1e-5, atol=1e-7 * np.linalg.norm(S_ref))
         np.testing.assert_allclose(inv_legacy, inv_ref, rtol=1e-5, atol=1e-7 * scale)
+
+
+def _two_smooth_poisson(n=3000, seed=11):
+    """Two strongly identified smooths: every smoothing direction stays active."""
+    rng = np.random.default_rng(seed)
+    x1 = rng.uniform(0, 1, n)
+    x2 = rng.uniform(0, 1, n)
+    eta = 0.3 + 0.8 * np.sin(2 * np.pi * x1) + 0.6 * np.cos(3 * x2)
+    y = rng.poisson(np.exp(eta)).astype(float)
+    return pd.DataFrame({"x1": x1, "x2": x2}), y
+
+
+def _two_smooth_model(discrete: bool, interaction: bool = False) -> SuperGLM:
+    return SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=discrete,
+        features={"x1": Spline(kind="ps", k=10), "x2": Spline(kind="ps", k=10)},
+        interactions=[("x1", "x2")] if interaction else None,
+    )
+
+
+class TestREMLWarmStart:
+    """A mapping ``lambda2_init`` starts the Newton engines' search there.
+
+    Both engines used to bootstrap from fixed seeds whatever was passed, so a
+    refit seeded with converged lambdas repeated every outer iteration.
+    """
+
+    @pytest.mark.parametrize(
+        ("discrete", "interaction"), [(False, False), (True, False), (True, True)]
+    )
+    def test_a_converged_start_refits_in_two_iterations(self, discrete, interaction):
+        """Seeded with its own estimates, the refit stops at the converged point.
+
+        The engines stop when the objective change and the projected gradient
+        are both under ``reml_tol * (1 + |objective|)``; past that point a
+        superlinear iteration has less than one such step of objective left,
+        so two converged fits of one criterion agree to twice the bar.
+        Mutation check: on master (155832e8) the start was discarded and the
+        refits took the cold fits' 5, 6 and 13 iterations.
+        """
+        X, y = _two_smooth_poisson()
+        cold = _two_smooth_model(discrete, interaction).fit_reml(X, y)
+        cold_info = cold.reml_diagnostics()
+        assert cold_info["converged"] and cold_info["n_reml_iter"] > 3
+
+        warm = _two_smooth_model(discrete, interaction).fit_reml(
+            X, y, lambda2_init=cold_info["lambdas"]
+        )
+        warm_info = warm.reml_diagnostics()
+        assert warm_info["converged"]
+        assert warm_info["n_reml_iter"] <= 2
+        assert warm_info["profile"]["reml_warm_start_components"] == sorted(cold_info["lambdas"])
+        bar = 2.0 * cold_info["profile"]["reml_tol_resolved"] * (1.0 + abs(cold_info["objective"]))
+        assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
+
+    def test_a_scalar_keeps_the_cold_start(self):
+        """A float is not a warm start: the fit is the default fit, bit for bit."""
+        X, y = _two_smooth_poisson(n=1500)
+        default = _two_smooth_model(True).fit_reml(X, y)
+        scalar = _two_smooth_model(True).fit_reml(X, y, lambda2_init=0.5)
+        assert scalar.reml_diagnostics()["lambdas"] == default.reml_diagnostics()["lambdas"]
+        assert scalar.reml_diagnostics()["profile"]["reml_warm_start_components"] == []
+
+    def test_a_warm_start_must_be_finite_and_positive(self):
+        """Mutation check: master accepted and ignored a negative warm start."""
+        X, y = _two_smooth_poisson(n=500)
+        with pytest.raises(ValueError, match="finite and positive"):
+            _two_smooth_model(True).fit_reml(X, y, lambda2_init={"x1": -1.0})
+
+    def test_a_tensor_starts_warm_only_as_a_whole(self):
+        """A mapping that names one margin of a tensor starts the whole tensor
+        from the default start, with one UserWarning, and the fit converges; the
+        other names, the monotone term's among them, start warm. Half warm (one
+        margin at its fitted value, the other at the cold seed) the bootstrap's
+        log-determinant cannot certify the block's penalty spread. Mutation
+        check: on 941f9ce8 the partial start raised PenaltyNumericalError."""
+        rng = np.random.default_rng(3)
+        n = 3000
+        bm = rng.uniform(50.0, 150.0, n)
+        age = rng.uniform(18.0, 90.0, n)
+        vage = rng.uniform(0.0, 20.0, n)
+        gas = np.where(rng.uniform(size=n) < 0.3, "Diesel", "Regular")
+        eta = (
+            -1.4
+            + 0.9 * (1 - np.exp(-(bm - 50) / 25))
+            + 0.4 * np.exp(-(age - 18) / 8)
+            + 0.2 * np.sin(vage / 4)
+        )
+        exposure = rng.uniform(0.3, 1.0, n)
+        y = rng.poisson(exposure * np.exp(eta)).astype(float)
+        df = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehAge": vage, "VehGas": gas})
+
+        def make():
+            return SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=True,
+                features={
+                    "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                    "DrivAge": Spline(kind="ps", k=8),
+                    "VehAge": Spline(kind="ps", k=8),
+                    "VehGas": Categorical(base="most_exposed"),
+                },
+                interactions=[("DrivAge", "VehAge")],
+            )
+
+        offset = np.log(exposure)
+        start = make().fit_reml(df, y, offset=offset).reml_diagnostics()["lambdas"]
+        half = slice(0, n // 2)
+        partial = {k: v for k, v in start.items() if k != "DrivAge:VehAge:margin_VehAge"}
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            refit = make().fit_reml(df[half], y[half], offset=offset[half], lambda2_init=partial)
+        about_start = [str(w.message) for w in caught if "lambda2_init" in str(w.message)]
+        assert len(about_start) == 1
+        assert "only some smoothing parameters of DrivAge:VehAge" in about_start[0]
+        info = refit.reml_diagnostics()
+        assert info["converged"]
+        assert info["profile"]["reml_warm_start_components"] == ["BonusMalus", "DrivAge", "VehAge"]
+
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_a_block_started_cold_is_the_cold_fit(self, discrete):
+        """A tensor named only in part starts cold, and cold means the fit
+        without lambda2_init: the refused value must not linger where the
+        engines read starting values (the tensor bootstrap caps its first step
+        around them). Both Newton engines, no monotone term. Mutation check: on
+        af53c8d4 the refused 1e8 stayed in the starting values and the direct
+        engine raised PenaltyNumericalError where the cold fit converges."""
+        rng = np.random.default_rng(11)
+        n = 1500
+        x1 = rng.uniform(0.0, 1.0, n)
+        x2 = rng.uniform(0.0, 1.0, n)
+        eta = 0.3 + 0.8 * np.sin(2.0 * np.pi * x1) + 0.6 * np.cos(3.0 * x2)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        def make():
+            return SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=discrete,
+                features={"x1": Spline(kind="ps", k=10), "x2": Spline(kind="ps", k=10)},
+                interactions=[("x1", "x2")],
+            )
+
+        cold = make().fit_reml(X, y)._reml_result
+        with pytest.warns(UserWarning, match="only some smoothing parameters of x1:x2"):
+            warned = make().fit_reml(X, y, lambda2_init={"x1:x2:margin_x1": 1e8})._reml_result
+        assert cold.converged
+        assert dict(warned.lambdas) == dict(cold.lambdas)
+        assert warned.objective == cold.objective
+        assert warned.n_reml_iter == cold.n_reml_iter
+
+    def test_a_name_the_model_lacks_warns_and_is_ignored(self):
+        """Mutation check: 941f9ce8 ignored the misspelt name silently."""
+        X, y = _two_smooth_poisson(n=500)
+        with pytest.warns(UserWarning, match="names no smoothing parameter of this model: x9"):
+            model = _two_smooth_model(True).fit_reml(X, y, lambda2_init={"x1": 1.0, "x9": 2.0})
+        assert model.reml_diagnostics()["profile"]["reml_warm_start_components"] == ["x1"]
+
+
+def _increasing_gaussian(n=800, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 1, n)
+    x2 = rng.uniform(0, 1, n)
+    y = 1.0 + 2.0 * x + 0.5 * np.sin(4 * x2) + rng.normal(0, 0.3, n)
+    return pd.DataFrame({"x": x, "x2": x2}), y
+
+
+def _qp_monotone_model(fixed: bool) -> SuperGLM:
+    """A QP-constrained increasing smooth beside a free one; ``fixed`` fixes every
+    smoothing parameter (the fixed-lambda route), else REML estimates them
+    through the QP passthrough."""
+    from superglm import BSplineSmooth, LambdaPolicy
+
+    policy = LambdaPolicy.fixed(1.0) if fixed else None
+    return SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "x": BSplineSmooth(
+                n_knots=8, constraint=Constraint.fit.increasing, lambda_policy=policy
+            ),
+            "x2": Spline(kind="ps", k=8, lambda_policy=policy),
+        },
+    )
+
+
+class TestREMLNonConvergenceDisclosure:
+    """A fit that stops before its convergence test passes says so, and is returned."""
+
+    def test_the_iteration_cap_warns_and_the_summary_and_diagnostics_say_why(self):
+        """Mutation check: master returned the capped fit with no warning."""
+        from superglm import ConvergenceWarning
+
+        X, y = _two_smooth_poisson(n=1500)
+        model = _two_smooth_model(True)
+        with pytest.warns(ConvergenceWarning, match="max_reml_iter"):
+            model.fit_reml(X, y, max_reml_iter=1)
+        info = model.reml_diagnostics()
+        assert info["converged"] is False
+        assert info["termination_reason"] == "max_reml_iter"
+        assert "did not converge" in info["convergence_note"]
+        assert "lambda2_init" in info["convergence_note"]
+        assert model.diagnostics()["_model"]["termination_reason"] == "max_reml_iter"
+        assert "did not converge" in " ".join(str(model.summary()).split())
+
+    def test_a_converged_fit_does_not_warn(self):
+        from superglm import ConvergenceWarning
+
+        X, y = _two_smooth_poisson(n=1500)
+        model = _two_smooth_model(True)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.fit_reml(X, y)
+        assert not [w for w in caught if issubclass(w.category, ConvergenceWarning)]
+        assert model.reml_diagnostics()["convergence_note"] is None
+        assert "did not converge" not in str(model.summary())
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "lambda_tolerance",
+            "objective_plateau",
+            "score_objective_tolerance",
+            "active_set_stationary",
+            "converged_at_precision",
+            "fixed_lambdas",
+        ],
+    )
+    def test_a_converged_search_reason_is_never_named_as_the_failure(self, reason):
+        """Every termination reason of a search that met its test reads converged.
+
+        Converged, nothing is published. Unconverged only through the final
+        coefficient refit's certificate, the statement names that refit and its
+        own reason, never the search's reason as the cause. Mutation check: the
+        statement read "stopped after 7 iterations because
+        termination_reason='score_objective_tolerance'".
+        """
+        from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+        def result(converged, refit=None):
+            out = REMLResult(
+                lambdas={},
+                pirls_result=None,
+                n_reml_iter=7,
+                converged=converged,
+                termination_reason=reason,
+            )
+            out.terminal_refit_termination = refit
+            return out
+
+        assert reml_nonconvergence_message(result(True)) is None
+        message = reml_nonconvergence_message(result(False, "max_iter"))
+        assert "because" not in message
+        assert "final coefficient fit" in message
+        assert "'max_iter'" in message
+        assert "max_pirls_iter" in message
+        unexplained = reml_nonconvergence_message(result(False))
+        assert "because" not in unexplained
+        assert "final coefficient fit" in unexplained
+
+    def test_a_capped_search_and_an_uncertified_refit_are_both_named(self):
+        """When both stages fail, the statement names both: the cap, and the
+        final refit with its own reason. Mutation check: the refit-first
+        statement read "(termination_reason='max_reml_iter'), but the final
+        coefficient fit ...", as though the search had finished."""
+        from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+        result = REMLResult(
+            lambdas={},
+            pirls_result=None,
+            n_reml_iter=3,
+            converged=False,
+            termination_reason="max_reml_iter",
+        )
+        result.terminal_refit_termination = "score_stagnated"
+        message = reml_nonconvergence_message(result)
+        assert "because it reached the max_reml_iter limit, and the final coefficient" in message
+        assert "'score_stagnated'" in message
+        assert "lambda2_init" in message
+        assert "max_pirls_iter" not in message
+
+    def test_both_budgets_are_named_when_both_ran_out(self):
+        """A capped search whose final refit also stopped on its iteration cap
+        needs both budgets raised, so the advice names both. Mutation check: on
+        af53c8d4 it named max_reml_iter alone."""
+        from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+        result = REMLResult(
+            lambdas={},
+            pirls_result=None,
+            n_reml_iter=20,
+            converged=False,
+            termination_reason="max_reml_iter",
+        )
+        result.terminal_refit_termination = "max_iter"
+        message = reml_nonconvergence_message(result)
+        assert "Refit with a larger max_reml_iter and a larger max_pirls_iter" in message
+        assert "lambda2_init" in message
+
+    def test_an_edited_fit_publishes_no_convergence_statement(self):
+        """Coefficients revised after fitting are disclosed by the editor's own note;
+        the REML statement must not call that a convergence failure."""
+        from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+        revised = REMLResult(
+            lambdas={},
+            pirls_result=None,
+            n_reml_iter=7,
+            converged=False,
+            termination_reason="coefficients_revised",
+        )
+        assert reml_nonconvergence_message(revised) is None
+
+    @pytest.mark.parametrize("engine", ["discrete", "direct", "scop_newton", "scop_efs"])
+    def test_converged_fits_raise_no_convergence_warning(self, engine, monkeypatch):
+        """The fits that stop on a converged reason run with ConvergenceWarning
+        raised as an error, on each engine and each SCOP outer step."""
+        import functools
+
+        import superglm.reml.scop_efs as scop_efs_module
+        from superglm import ConvergenceWarning
+
+        X, y = _two_smooth_poisson(n=1500)
+        if engine.startswith("scop"):
+            if engine == "scop_efs":
+                real = scop_efs_module.optimize_scop_efs_reml
+                monkeypatch.setattr(
+                    scop_efs_module,
+                    "optimize_scop_efs_reml",
+                    functools.partial(real, _outer_step="efs"),
+                )
+            model = SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=True,
+                features={
+                    "x1": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+                    "x2": Spline(kind="ps", k=8),
+                },
+            )
+        else:
+            model = _two_smooth_model(engine == "discrete")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            model.fit_reml(X, y)
+        info = model.reml_diagnostics()
+        assert info["converged"] is True
+        assert info["convergence_note"] is None
+
+    @pytest.mark.parametrize("route", ["qp_passthrough", "fixed_qp"])
+    def test_an_unconverged_constrained_fit_warns(self, route, monkeypatch):
+        """A constrained coefficient fit, which the mode certificate does not
+        judge, still discloses stopping before its own convergence test. Forced
+        by reporting the final fit as stopped on its iteration budget. The QP
+        passthrough's terminal refit names that stage and its reason; mutation
+        check: on 941f9ce8 it published converged=True with no warning. The
+        fixed-lambda route warned there already, through the plain coefficient
+        statement (it runs no smoothing selection), and is pinned beside it."""
+        from dataclasses import replace
+
+        import superglm.model.reml_execute as reml_execute
+        import superglm.model.reml_finalize as reml_finalize
+        from superglm import ConvergenceWarning
+
+        module, name = (
+            (reml_finalize, "maybe_qp_passthrough_refit")
+            if route == "qp_passthrough"
+            else (reml_execute, "fit_irls_direct")
+        )
+        real = getattr(module, name)
+
+        def budget_spent(*args, **kwargs):
+            out = real(*args, **kwargs)
+            first = out[0] if isinstance(out, tuple) else out
+            spent = replace(first, converged=False, termination_reason="max_iter")
+            return (spent, *out[1:]) if isinstance(out, tuple) else spent
+
+        monkeypatch.setattr(module, name, budget_spent)
+        X, y = _increasing_gaussian()
+        model = _qp_monotone_model(fixed=route == "fixed_qp")
+        with pytest.warns(ConvergenceWarning, match="'max_iter'"):
+            model.fit_reml(X, y)
+        assert model.diagnostics()["_model"]["converged"] is False
+        if route == "qp_passthrough":
+            info = model.reml_diagnostics()
+            assert info["converged"] is False
+            assert "final coefficient fit" in info["convergence_note"]
+            assert model._reml_result.terminal_refit_termination == "max_iter"
+            assert info["terminal_refit_termination"] == "max_iter"
+
+    @pytest.mark.parametrize("route", ["qp_passthrough", "fixed_qp"])
+    def test_converged_constrained_fits_raise_no_convergence_warning(self, route):
+        from superglm import ConvergenceWarning
+
+        X, y = _increasing_gaussian()
+        model = _qp_monotone_model(fixed=route == "fixed_qp")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            model.fit_reml(X, y)
+        assert model.diagnostics()["_model"]["converged"] is True
+
+    def test_the_default_cap_is_engine_specific(self):
+        """20 for the Newton engines, 100 for the SCOP engine's linear EFS steps.
+
+        Mutation check: master capped the SCOP engine at 20, which measured
+        14-57 outer iterations on freMTPL2 SCOP fits.
+        """
+        X, y = _two_smooth_poisson(n=1500)
+        newton = _two_smooth_model(True).fit_reml(X, y)
+        assert newton.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 20
+        scop = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "x1": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+                "x2": Spline(kind="ps", k=8),
+            },
+        ).fit_reml(X, y)
+        assert scop.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 100
+        explicit = _two_smooth_model(True).fit_reml(X, y, max_reml_iter=50)
+        assert explicit.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 50

@@ -515,8 +515,9 @@ Two buttons run jobs in the background, each with a **Cancel** button while it r
 
 Run CV scores the folds with whichever of deviance, Gini and NLL the supplied result scored, or
 with all three when it scored none of them. It fits each fold with the method the result records:
-`fit`, unless you passed `fit_mode="fit_reml"` to `cross_validate`. Its scores then differ from
-the supplied ones only by your changes. Final fit uses the method the current model was fitted
+`fit`, unless you passed `fit_mode="fit_reml"` to `cross_validate`. It also passes the
+`warm_start` and `fit_kwargs` you gave `cross_validate`. Its scores then differ from the supplied
+ones only by your changes. Final fit uses the method the current model was fitted
 with. Both jobs estimate what the opened model declares they estimate: a
 `selection_penalty="auto"`, smoothing that a `fit_reml` fit estimates, or a negative binomial
 `theta="auto"` is chosen again on each fold's rows and on the Final fit's rows, after a Refit too.
@@ -538,7 +539,8 @@ Run CV is disabled, with the reason on hover, when it cannot use the rows:
 
 A result from an older superglm version records no fingerprint of its data, so only the row count
 is checked. An older result records no fit method either, so Run CV fits each fold the way the current
-model was fitted. The tab says so in both cases. The older `cv_report=` argument of `EditorSession.from_model`
+model was fitted. The tab says so in both cases. A result from before `cross_validate` took
+`warm_start` and `fit_kwargs` was fitted without them, and Run CV replays it the same way. The older `cv_report=` argument of `EditorSession.from_model`
 still works: its report is shown on the Validation tab.
 
 ## Keyboard Shortcuts

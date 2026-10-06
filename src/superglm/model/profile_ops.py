@@ -230,10 +230,14 @@ def _resolve_power_request(
     )
 
 
-def _publication_reml_budget(max_reml_iter, publish_mode: str, fit_mode) -> int:
-    """Outer-iteration budget of the REML publication refit; candidate fits keep their own."""
+def _publication_reml_budget(max_reml_iter, publish_mode: str, fit_mode) -> int | None:
+    """Outer-iteration budget of the REML publication refit; candidate fits keep their own.
+
+    ``None`` stays ``None``: the refit resolves it per engine, as ``fit_reml``
+    does (20 for the Newton engines, 100 for the SCOP engine).
+    """
     if max_reml_iter is None:
-        return 20
+        return None
     # Refused under an ML publication: a mode-scoped parameter that silently
     # no-ops is how inert knobs are born.
     if publish_mode != "fit_reml":
@@ -288,7 +292,7 @@ def _publish_profiled_family(
     value,
     synchronize,
     decoupled=False,
-    max_reml_iter=20,
+    max_reml_iter=None,
 ):
     """Refit at the selected parameter on a private candidate, then install it atomically.
 
@@ -324,6 +328,11 @@ def _publish_profiled_family(
         from superglm.model import fit_ops
 
         fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
+        # The publication refit is a fit_reml fit the caller receives: it
+        # warns once, as fit_reml does, while the search's discarded
+        # candidates stay silent. stacklevel 4 reaches the caller of
+        # SuperGLM.estimate_p / estimate_theta.
+        fit_ops.warn_published_reml_nonconvergence(model, stacklevel=4)
     return published
 
 

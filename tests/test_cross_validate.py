@@ -470,6 +470,221 @@ class TestFitModes:
         assert len(result.fold_scores) == 3
         assert all(result.fold_scores["converged"])
 
+    def test_fit_reml_fold_convergence_is_reml_convergence(self, poisson_data):
+        """A fold whose smoothing selection hit its cap is not a converged fold.
+
+        Mutation check: master recorded ``est._result.converged`` -- the final
+        PIRLS fit, which converges at whatever lambdas REML stopped on -- and
+        had no way to pass the cap, so these folds read ``converged=True``.
+        """
+        from superglm import ConvergenceWarning
+
+        df, y, sw = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=8)},
+        )
+        with pytest.warns(ConvergenceWarning):
+            result = cross_validate(
+                model,
+                df,
+                y,
+                cv=SimpleKFold(3),
+                sample_weight=sw,
+                fit_mode="fit_reml",
+                fit_kwargs={"max_reml_iter": 1},
+                return_estimators=True,
+            )
+        folds = result.fold_scores
+        assert all(est._result.converged for est in result.estimators)
+        assert not any(folds["converged"])
+        assert list(folds["n_reml_iter"]) == [1, 1, 1]
+
+    def test_fit_reml_warm_start_skips_a_model_without_smoothing_selection(self):
+        """A model with no REML-eligible groups fits without a REML result.
+
+        ``fit_reml`` legitimately falls back to the plain coefficient fit and
+        leaves ``_reml_result`` as None; the default warm start must not try to
+        read lambdas from it. Mutation check: extracting the warm start without
+        the None guard turns every fold's score into NaN (AttributeError inside
+        the fold), which this test rejects.
+        """
+        x = np.linspace(-1.0, 1.0, 60)
+        df = pd.DataFrame({"x": x})
+        y = 2.0 + x + 0.1 * np.cos(np.arange(60))
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()})
+        result = cross_validate(
+            model, df, y, cv=SimpleKFold(3), fit_mode="fit_reml", error_score="raise"
+        )
+        folds = result.fold_scores
+        assert np.all(np.isfinite(folds["deviance"]))
+        assert all(folds["converged"])
+        assert not any(folds["warm_started"])
+
+    def test_fit_reml_folds_warm_start_from_the_first_converged_fold(self):
+        """Later folds start from fold 0's live lambdas and converge in fewer steps.
+
+        Two converged fits of one criterion agree in objective to twice the
+        Newton engines' stopping bar ``reml_tol * (1 + |objective|)``.
+        Mutation check: master had no warm start; every fold started cold.
+        """
+        rng = np.random.default_rng(5)
+        n = 2400
+        df = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = 0.3 + 0.8 * np.sin(2 * np.pi * df["x1"]) + 0.6 * np.cos(3 * df["x2"])
+        y = rng.poisson(np.exp(eta)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x1": Spline(kind="ps", k=10), "x2": Spline(kind="ps", k=10)},
+        )
+        runs = {
+            warm: cross_validate(
+                model,
+                df,
+                y,
+                cv=SimpleKFold(4),
+                fit_mode="fit_reml",
+                warm_start=warm,
+                return_estimators=True,
+            )
+            for warm in (False, True)
+        }
+        cold, warm = runs[False].fold_scores, runs[True].fold_scores
+        assert list(warm["warm_started"]) == [False, True, True, True]
+        assert not any(cold["warm_started"])
+        assert all(warm["converged"]) and all(cold["converged"])
+        assert warm["n_reml_iter"].iloc[1:].sum() < cold["n_reml_iter"].iloc[1:].sum()
+        for cold_est, warm_est in zip(runs[False].estimators, runs[True].estimators, strict=True):
+            cold_info, warm_info = cold_est.reml_diagnostics(), warm_est.reml_diagnostics()
+            bar = (
+                2.0
+                * cold_info["profile"]["reml_tol_resolved"]
+                * (1.0 + abs(cold_info["objective"]))
+            )
+            assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
+
+    def test_fit_reml_warm_start_never_leaves_a_tensor_half_warm(self, monkeypatch):
+        """A first fold that runs one tensor margin to a flat end starts the whole
+        tensor cold in later folds, and every fold converges.
+
+        The data do not support the DrivAge x VehAge interaction: the first fold
+        (all rows) runs the VehAge margin to working infinity, which the warm
+        start leaves out. Started beside the DrivAge margin at its fitted value,
+        the cold margin's seed spreads the block's penalty past what the
+        bootstrap's log-determinant can certify. Mutation check: leaving only the
+        flat margin cold started the DrivAge margin warm, and both later folds
+        failed with PenaltyNumericalError and nan scores.
+        """
+        from superglm import Constraint
+
+        rng = np.random.default_rng(3)
+        n = 3000
+        bm = rng.uniform(50.0, 150.0, n)
+        age = rng.uniform(18.0, 90.0, n)
+        vage = rng.uniform(0.0, 20.0, n)
+        gas = np.where(rng.uniform(size=n) < 0.3, "Diesel", "Regular")
+        eta = (
+            -1.4
+            + 0.9 * (1 - np.exp(-(bm - 50) / 25))
+            + 0.4 * np.exp(-(age - 18) / 8)
+            + 0.2 * np.sin(vage / 4)
+        )
+        exposure = rng.uniform(0.3, 1.0, n)
+        y = rng.poisson(exposure * np.exp(eta)).astype(float)
+        df = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehAge": vage, "VehGas": gas})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "DrivAge": Spline(kind="ps", k=8),
+                "VehAge": Spline(kind="ps", k=8),
+                "VehGas": Categorical(base="most_exposed"),
+            },
+            interactions=[("DrivAge", "VehAge")],
+        )
+        rows = np.arange(n)
+
+        class WholeThenHalves:
+            def split(self, X, y=None, groups=None):
+                yield rows, rows[:50]
+                yield rows[: n // 2], rows[n // 2 :]
+                yield rows[n // 2 :], rows[: n // 2]
+
+            def get_n_splits(self, *args, **kwargs):
+                return 3
+
+        starts = []
+        real_fit_reml = SuperGLM.fit_reml
+
+        def spy(self, *args, **kwargs):
+            starts.append(kwargs.get("lambda2_init"))
+            return real_fit_reml(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", spy)
+        result = cross_validate(
+            model,
+            df,
+            y,
+            cv=WholeThenHalves(),
+            offset=np.log(exposure),
+            fit_mode="fit_reml",
+            return_estimators=True,
+            error_score="raise",
+        )
+        first = result.estimators[0]._reml_result
+        assert first.flat_components == ["DrivAge:VehAge:margin_VehAge"]
+        assert starts[0] is None
+        for start in starts[1:]:
+            assert set(start) == {"BonusMalus", "DrivAge", "VehAge"}
+        assert list(result.fold_scores["warm_started"]) == [False, True, True]
+        assert all(result.fold_scores["converged"])
+
+    def test_fit_reml_an_empty_warm_start_is_not_passed(self, poisson_data, monkeypatch):
+        """When the first converged fold leaves every component on a flat
+        plateau, the warm start is empty: later folds keep the model's own start
+        and read ``warm_started=False``. Mutation check: 941f9ce8 passed
+        ``lambda2_init={}``, a mapping, which seeds every component at 0.1
+        instead of the configured smoothing, and marked those folds warm."""
+        import superglm.model_selection as model_selection
+
+        df, y, sw = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=5)},
+        )
+        monkeypatch.setattr(model_selection, "live_reml_lambdas", lambda fitted: {})
+        passed = []
+        real_fit_reml = SuperGLM.fit_reml
+
+        def spy(self, *args, **kwargs):
+            passed.append("lambda2_init" in kwargs)
+            return real_fit_reml(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", spy)
+        result = cross_validate(
+            model, df, y, cv=SimpleKFold(3), sample_weight=sw, fit_mode="fit_reml"
+        )
+        assert passed == [False, False, False]
+        assert not any(result.fold_scores["warm_started"])
+        assert all(result.fold_scores["converged"])
+
+    def test_fit_kwargs_cannot_set_the_split_arrays(self, poisson_data, base_model):
+        df, y, sw = poisson_data
+        with pytest.raises(ValueError, match="fit_kwargs cannot set"):
+            cross_validate(
+                base_model,
+                df,
+                y,
+                cv=SimpleKFold(3),
+                fit_kwargs={"offset": np.zeros(len(y))},
+            )
+
     def test_invalid_fit_mode(self, poisson_data, base_model):
         """Invalid fit_mode raises ValueError."""
         df, y, sw = poisson_data
@@ -2072,6 +2287,44 @@ class TestFullFrameLevelBinding:
         bindings = _resolve_level_bindings(model, as_eager_frame(X), None)
 
         assert set(bindings) == {"g"}
+
+
+def test_fit_reml_without_smoothing_selection_warns_when_the_coefficient_fit_stops_early():
+    """The no-REML fallback of ``fit_reml`` must disclose an unconverged coefficient fit.
+
+    Mutation check: warning only from ``_reml_result`` (None on this path)
+    leaves a ``max_iter`` stop silent.
+    """
+    from superglm import ConvergenceWarning
+
+    x = np.linspace(-1.0, 1.0, 60)
+    df = pd.DataFrame({"x": x})
+    y = np.tile([0.0, 1.0, 2.0, 3.0, 8.0, 15.0], 10)
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()})
+    with pytest.warns(ConvergenceWarning, match="coefficient fit did not converge"):
+        model.fit_reml(df, y, max_pirls_iter=1)
+    assert model._reml_result is None
+    assert not model._result.converged
+    # The warning points at reml_diagnostics(); with no smoothing search the
+    # coefficient fit is the only stage, and its stop is published there.
+    # Mutation check: on af53c8d4 these keys were absent on this path.
+    info = model.reml_diagnostics()
+    assert info["enabled"] is False
+    assert info["converged"] is False
+    assert info["termination_reason"] == "max_iter"
+    assert info["terminal_refit_termination"] == "max_iter"
+    assert "coefficient fit did not converge" in info["convergence_note"]
+
+    # A converged no-REML fit stays silent.
+    quiet = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        quiet.fit_reml(df, y)
+    assert quiet._result.converged
+    info = quiet.reml_diagnostics()
+    assert info["converged"] is True
+    assert info["convergence_note"] is None
+    assert info["terminal_refit_termination"] is None
 
 
 # ── Data fingerprint (the editor's Run CV) ───────────────────────

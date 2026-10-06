@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+import warnings
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from superglm.group_matrix import (
@@ -72,6 +74,129 @@ def initialize_component_lambdas(
     return lambdas, estimated_names
 
 
+def _warm_value(name: str, value: Any) -> float:
+    """One warm-start smoothing parameter, refused unless finite and positive."""
+    try:
+        lam = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"lambda2_init[{name!r}] must be a real number, got {value!r}") from exc
+    if not math.isfinite(lam) or lam <= 0.0:
+        raise ValueError(f"lambda2_init[{name!r}] must be finite and positive, got {lam!r}")
+    return lam
+
+
+def warm_start_lambdas(
+    reml_penalties: list[Any],
+    lambda2_init: Any,
+    estimated_names: set[str],
+    other_names: Iterable[str] = (),
+) -> dict[str, float]:
+    """Estimated components a mapping ``lambda2_init`` starts the REML search from.
+
+    A mapping keyed by component name (or by group name, which then starts every
+    component of that group) is a warm start: the engines bootstrap there instead
+    of at their own cold seeds. A scalar ``lambda2_init`` is not a warm start --
+    it keeps its historical meaning, an anchor the cold bootstrap may move away
+    from -- so cold fits are unchanged. Names the mapping does not cover stay
+    cold; fixed-policy components are never started from it.
+
+    A penalty block (a group's components, such as a tensor product's margins)
+    starts warm only whole: when the mapping names some of a block's estimated
+    components but not all, the whole block starts cold, with a
+    ``UserWarning``, as ``live_reml_lambdas`` keeps it for cross-validation (a
+    half-warm block's penalty spread can defeat the bootstrap's
+    log-determinant). A key that names no component or group of the model
+    (``other_names`` adds the model's other terms, such as its monotone ones)
+    is ignored with a ``UserWarning``.
+    """
+    if not isinstance(lambda2_init, Mapping):
+        return {}
+    known = {name for pc in reml_penalties for name in (pc.name, pc.group_name)}
+    known.update(other_names)
+    unknown = sorted(str(key) for key in lambda2_init if key not in known)
+    if unknown:
+        warnings.warn(
+            f"lambda2_init names no smoothing parameter of this model: {', '.join(unknown)}. "
+            "Those entries are ignored. Use the names in "
+            "model.reml_diagnostics()['lambdas'], or a group name.",
+            UserWarning,
+            stacklevel=5,
+        )
+    warm: dict[str, float] = {}
+    for penalty_component in reml_penalties:
+        name = penalty_component.name
+        if name not in estimated_names:
+            continue
+        if name in lambda2_init:
+            warm[name] = _warm_value(name, lambda2_init[name])
+        elif penalty_component.group_name in lambda2_init:
+            group_name = penalty_component.group_name
+            warm[name] = _warm_value(group_name, lambda2_init[group_name])
+    blocks: dict[str, list[str]] = {}
+    for penalty_component in reml_penalties:
+        if penalty_component.name in estimated_names:
+            blocks.setdefault(penalty_component.group_name, []).append(penalty_component.name)
+    half_warm = sorted(
+        block
+        for block, names in blocks.items()
+        if any(name in warm for name in names) and not all(name in warm for name in names)
+    )
+    for block in half_warm:
+        for name in blocks[block]:
+            warm.pop(name, None)
+    if half_warm:
+        warnings.warn(
+            f"lambda2_init names only some smoothing parameters of {', '.join(half_warm)}, "
+            "so that term starts its smoothing search from the default start instead. To "
+            "start it from lambda2_init, name every one of its components, or the term "
+            "itself.",
+            UserWarning,
+            stacklevel=5,
+        )
+    return warm
+
+
+def live_reml_lambdas(model: Any) -> dict[str, float]:
+    """A fitted model's smoothing parameters, less those it left on a flat plateau.
+
+    The warm start for a refit on similar data. Two kinds of component start
+    cold instead, because a search started where they ended cannot reach the
+    new data's optimum:
+
+    - one the Newton engines froze as inferentially flat, where the
+      criterion's gradient and curvature vanish. Measured: a fold
+      warm-started on a tensor margin's plateau converged to an objective
+      1.05 worse, interaction EDF 1.00 against 2.10;
+    - one a SCOP suppression hold covered at the final iterate
+      (``REMLResult.flat_components``): a flat end of the criterion. Measured,
+      under the earlier decrease hold on ``tr(H^-1 S_j)``: folds warm-started
+      at the first fold's LogDensity lambda kept it exactly, term EDF 0.7 and
+      1.2 below the cold folds, whose own optima were 4 and 8 times lower.
+
+    A component that shares its penalty block with others (a tensor product's
+    margins) starts cold with all of them when any one is left out: a half-warm
+    block, one margin at the cold seed beside another at its fitted value, has
+    a penalty whose spread the bootstrap's log-determinant cannot certify.
+    Measured on the cleaned freMTPL2 book: every fold after a first fold that
+    left the VehAge margin out failed with ``PenaltyNumericalError``.
+    """
+    reml = model._reml_result
+    flat = set(getattr(reml, "flat_components", None) or ())
+    decision = (getattr(model, "_reml_profile", None) or {}).get("reml_freeze_decision")
+    if isinstance(decision, Mapping):
+        names = decision.get("names", ())
+        frozen = decision.get("frozen", ())
+        flat.update(name for name, is_frozen in zip(names, frozen, strict=False) if is_frozen)
+    penalties = getattr(model, "_reml_penalties", None) or getattr(reml, "reml_penalties", None)
+    block_of = {pc.name: pc.group_name for pc in penalties or ()}
+    cold_blocks = {block_of[name] for name in flat if name in block_of}
+    return {
+        str(k): float(v)
+        for k, v in reml.lambdas.items()
+        if k not in flat and block_of.get(k) not in cold_blocks
+    }
+
+
 def scop_fixed_lambda_value(spec: Any) -> float | None:
     """Return a fixed SCOP lambda value, or None if it should be estimated."""
     lambda_policy = getattr(spec, "_lambda_policy", None)
@@ -122,9 +247,16 @@ def promote_estimated_scop_lambdas(
     specs: dict[str, Any],
     lambdas: dict[str, float],
     estimated_names: set[str],
-    default_lambda: float,
-) -> None:
-    """Add unfixed SCOP-constrained groups to the estimated-lambda set."""
+    default_lambda: float | Mapping[str, float],
+) -> dict[str, float]:
+    """Add unfixed SCOP-constrained groups to the estimated-lambda set.
+
+    Returns the SCOP groups a mapping ``default_lambda`` warm-starts (see
+    :func:`warm_start_lambdas`). A mapping without the group's name leaves it
+    at the scalar default the SCOP engine seeds cold anyway; the value stored
+    is always a float, never the mapping itself.
+    """
+    warm: dict[str, float] = {}
     for group in groups:
         if group.monotone_engine != "scop" or not group.penalized:
             continue
@@ -133,7 +265,15 @@ def promote_estimated_scop_lambdas(
         if fixed_value is not None:
             continue
         estimated_names.add(group.name)
-        lambdas[group.name] = default_lambda
+        if isinstance(default_lambda, Mapping):
+            if group.name in default_lambda:
+                warm[group.name] = _warm_value(group.name, default_lambda[group.name])
+                lambdas[group.name] = warm[group.name]
+            else:
+                lambdas[group.name] = 0.1
+        else:
+            lambdas[group.name] = default_lambda
+    return warm
 
 
 def constraint_engine_flags(groups: list[GroupSlice]) -> tuple[bool, bool, bool]:

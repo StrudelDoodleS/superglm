@@ -353,6 +353,37 @@ class TestMaximumLikelihoodPhi:
         assert profile(1.0 + 1e-8) == math.inf
         assert "too close to 1" in profile.infeasible[1.0 + 1e-8]
 
+    def test_a_reml_candidate_with_no_certified_bootstrap_is_infeasible(self, monkeypatch):
+        """A shape-constrained candidate whose bootstrap certified no mode is routed around.
+
+        With every SCOP certification refused, no bootstrap start certifies a
+        coefficient mode, and fit_reml publishes the fit unconverged
+        (``"bootstrap_uncertified"``). That fit has no REML objective to rank
+        the power by, so the search scores the power infeasible, as it did
+        while the bootstrap raised (37f73863). Mutation check: 2a4e28c7
+        scored it with a finite NLL and a certified-objective error bound.
+        """
+        import pandas as pd
+
+        import superglm.reml.scop_efs as scop_efs_module
+        from superglm import Constraint
+        from superglm.profiling.tweedie import _PowerProfile
+
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", lambda mode: 1.0)
+        rng = np.random.default_rng(1)
+        x = rng.uniform(0.0, 1.0, 400)
+        y = rng.poisson(np.exp(0.3 + 0.8 * x)).astype(float)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing)},
+        )
+        profile = _PowerProfile(model, pd.DataFrame({"x": x}), y, np.ones(y.size), None, "fit_reml")
+        assert profile(1.5) == math.inf
+        assert 1.5 not in profile.candidates
+        assert "bootstrap" in profile.infeasible[1.5]
+
     def test_a_search_with_every_power_refused_names_the_refusal_not_reml(self):
         """Both bounds and every Brent point sit too close to 1 under plain ML fits."""
         import pandas as pd

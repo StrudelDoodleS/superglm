@@ -28,6 +28,7 @@ PUBLIC_API = [
     "CauchitLink",
     "CloglogLink",
     "Constraint",
+    "ConvergenceWarning",
     "CrossValidationResult",
     "CubicRegressionSpline",
     "DiscretizationResult",

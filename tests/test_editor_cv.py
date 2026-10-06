@@ -2874,6 +2874,49 @@ def test_run_cv_on_a_reml_model_replays_a_result_fitted_with_fit(cv_frame, cv_fi
     assert run.result.fit_mode == "fit"
 
 
+def test_run_cv_replays_the_recorded_warm_start_and_fit_kwargs(cv_frame):
+    """A result made with ``warm_start=False`` and ``fit_kwargs`` is replayed with both.
+
+    Run CV replayed the method, splitter and scorers but neither of these,
+    so it fitted the folds at the defaults (``warm_start=True``, no
+    ``fit_kwargs``) and the difference read as the edits'. 7ed61b05 recorded
+    neither; with the record kept and the replay dropped, the run's result
+    reads ``(True, {})``. With nothing edited the run now gives the supplied
+    numbers. A result that records neither predates both and was fitted
+    cold, with no extra arguments, so it is replayed that way.
+    """
+    from superglm.editor.cv import capture_cv_run, run_cv
+
+    X, y, w = cv_frame
+    train = slice(0, 400)
+    reml = _model().fit_reml(X.iloc[train], y[train], sample_weight=w[train])
+    supplied = cross_validate(
+        _model(),
+        X.iloc[train],
+        y[train],
+        cv=KFold(3, shuffle=True, random_state=0),
+        sample_weight=w[train],
+        fit_mode="fit_reml",
+        scoring=("deviance", "gini", "nll"),
+        warm_start=False,
+        fit_kwargs={"max_reml_iter": 7},
+    )
+    assert (supplied.warm_start, supplied.fit_kwargs) == (False, {"max_reml_iter": 7})
+    session = EditorSession.from_model(reml, cv=supplied, **_splits(cv_frame))
+
+    plan = capture_cv_run(session)
+    run = run_cv(plan, _Context())
+
+    assert (plan.warm_start, plan.fit_kwargs) == (False, {"max_reml_iter": 7})
+    assert (run.result.warm_start, run.result.fit_kwargs) == (False, {"max_reml_iter": 7})
+    assert run.result.fold_scores["warm_started"].tolist() == [False, False, False]
+    for name in ("deviance", "gini", "nll"):
+        np.testing.assert_array_equal(run.result.fold_scores[name], supplied.fold_scores[name])
+    older = dataclasses.replace(supplied, warm_start=None, fit_kwargs=None)
+    plan = capture_cv_run(EditorSession.from_model(reml, cv=older, **_splits(cv_frame)))
+    assert (plan.warm_start, plan.fit_kwargs) == (False, {})
+
+
 @pytest.mark.filterwarnings(_EXPECTED_PIN)
 def test_run_cv_scores_every_fold_when_one_fold_never_trained_on_a_level(rare_level):
     """Run CV on rows where region D sits in the first fold's test rows only.

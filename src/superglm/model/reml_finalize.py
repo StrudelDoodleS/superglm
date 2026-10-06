@@ -1022,14 +1022,23 @@ def finalize_reml_fit(
 
     update_reml_r_inv(model, reml_groups, lambdas)
 
+    # Owner decision 3 (2026-09-30): a terminal mode that stays short of the
+    # certificate is published as not converged, never refused. A route the
+    # certificate does not judge (a linearly constrained mode, the QP
+    # passthrough's constrained refit, the EFS engine's own final fit) is
+    # published the same way when its fit stopped before its own convergence
+    # test: silence would read as converged.
     if terminal_certified is not None:
-        # Owner decision 3 (2026-09-30): a terminal mode that stays short of
-        # the certificate is published as not converged, never refused.
         profile["reml_terminal_mode_certified"] = terminal_certified
         profile["reml_terminal_mode_termination"] = solver_result.termination_reason
-        if not terminal_certified:
-            converged = False
-            best.converged = False
+        unconverged_terminal = None if terminal_certified else solver_result
+    else:
+        unconverged_terminal = None if final_pirls.converged else final_pirls
+    if unconverged_terminal is not None:
+        converged = False
+        best.converged = False
+        # The disclosure names this stage, not the search's own stop.
+        best.terminal_refit_termination = str(unconverged_terminal.termination_reason)
     profile["total_s"] = _time.perf_counter() - total_start
     profile["n_reml_iter"] = n_reml_iter
     profile["converged"] = converged

@@ -39,6 +39,7 @@ from superglm import (
 from superglm.reml.penalty_algebra import (
     _penalty_component_omega_ssp,
     build_penalty_matrix,
+    penalty_component_matvec,
     penalty_component_quadratic,
 )
 
@@ -500,8 +501,53 @@ def test_sz_aliased_levels_converge_under_reml(variant) -> None:
         family = "gaussian_log"
     model = _fit(_model(family, "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
     assert model._reml_profile["direct_backend"] == "structured"
-    assert bool(model._reml_result.converged)
-    assert model._reml_result.termination_reason != "line_search_failed"
+    stops = _reml_stops(model)
+    assert bool(model._reml_result.converged), stops
+    assert model._reml_result.termination_reason != "line_search_failed", stops
+
+
+def _reml_stops(model: SuperGLM) -> str:
+    """The search's stop, the terminal refit's disclosure and its own stop, and the lambdas."""
+    result = model._reml_result
+    return (
+        f"search stop {result.termination_reason!r}, terminal refit "
+        f"{result.terminal_refit_termination!r} (its own stop "
+        f"{model._reml_profile.get('reml_terminal_mode_termination')!r}), "
+        f"lambdas {model._reml_lambdas}"
+    )
+
+
+def test_sz_reml_beside_weightless_levels_converges_from_a_large_main_lambda() -> None:
+    """REML warm-started where Windows CI's search for the weightless variant above ended.
+
+    The march of both smoothing parameters to their bound stops where the
+    active-set freeze bar catches each gradient, a last-bit decision: ``lambda_x``
+    ended between 5e6 and 6e7 on Linux and at 7.2e8 on Windows, there
+    unconverged.  At that ``lambda_x`` the main spline's dense penalty product
+    left its rounding along the penalty's null space (beside a null-space
+    coefficient near 100), each PIRLS step moved the fit along that
+    data-identified direction by ``lambda_x`` times it, and the score stayed at
+    3 to 60 times the mode certificate's bar: every line-search trial stopped
+    ``score_stagnated``, and from this start the search ended
+    ``line_search_failed`` after three iterations.  The product over the
+    penalty's range (``penalty_component_matvec``) keeps its rounding in the
+    range, and every PIRLS solve certifies in one to three iterations.
+    Mutation: the dense product.
+    """
+    frame, y, weight = _signed_aliased_frame("weightless")
+    model = _model("gaussian_log", "auto", lam=None, numerics=("x1", "x10"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(
+            frame,
+            y,
+            sample_weight=weight,
+            lambda2_init={"x": 723356142.9953878, "x:g:sz:wiggle": 68578.98838005865},
+        )
+    assert model._reml_profile["direct_backend"] == "structured"
+    stops = _reml_stops(model)
+    assert bool(model._reml_result.converged), stops
+    assert model._reml_result.termination_reason != "line_search_failed", stops
 
 
 _UNIDENTIFIED = {"weightless": ("g003", "g007"), "one_row": ("g000", "g001"), "same_x": ("g005",)}
@@ -1793,6 +1839,25 @@ def test_a_dense_penalty_charges_nothing_along_its_null_space() -> None:
     bound = 2.0 * norm * float(np.linalg.norm(beta)) * drift + norm * drift * drift
     assert base >= 0.0
     assert abs(moved - base) <= bound
+    # Its gradient over the same range (``penalty_component_matvec``):
+    # ``fl(V fl(Lambda fl(V' b)))`` at ``b = beta + t v`` leaves along ``v`` the
+    # eigenvectors' departure ``||V'v|| <= sqrt(r) p u`` times ``||w|| <= (1 + u)
+    # ||Lambda|| (||V||_F ||beta|| + t ||V'v|| + gamma_p ||V||_F (||beta|| + t))``,
+    # the last product's rounding ``gamma_r ||V||_F ||w||`` and the projection's
+    # own (Higham 2002, section 3.5): the shift enters at ``u^2 t``.  The dense
+    # product left the null eigenvalue's rounding times ``t`` along ``v`` (the
+    # PIRLS stall of ``test_sz_reml_beside_weightless_levels_converges_from_a_large_main_lambda``).
+    # Mutation: the dense product.
+    rank = int(round(component.rank))
+    product = penalty_component_matvec(component, beta + shift * null, matrix)
+    columns = math.sqrt(rank) * (1.0 + width * _U)
+    departure = math.sqrt(rank) * width * _U
+    size = float(np.linalg.norm(beta))
+    w_norm = (1.0 + _U) * norm * (columns * size + shift * departure)
+    w_norm += (1.0 + _U) * norm * _gamma(width) * columns * (size + shift)
+    leak = (departure + _gamma(rank) * columns) * w_norm
+    leak += _gamma(width) * (1.0 + _gamma(width)) * float(np.linalg.norm(product))
+    assert abs(float(null @ product)) <= leak
 
 
 def test_sz_deflated_alias_beside_exact_nulls_keeps_the_exact_pseudo_determinant() -> None:

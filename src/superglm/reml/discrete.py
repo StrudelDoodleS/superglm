@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import time as _time
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -311,6 +312,33 @@ def _damped_tensor_newton_step(
     return delta, mu_hi, binding(delta)
 
 
+def bootstrap_seed_lambdas(
+    penalties: list[PenaltyComponent],
+    warm_lambdas: Mapping[str, float] | None,
+    lambdas: Mapping[str, float],
+    estimated_mask: NDArray,
+) -> dict[str, float]:
+    """The smoothing parameters the Newton engines' bootstrap fit is taken at.
+
+    Cold, these are fixed seeds: a strong 1.0 for interaction components, whose
+    rich tensor bases can explode under an almost-unpenalized fit, and 1e-4 for
+    everything else, followed by one Fellner-Schall step from that fit.  A warm
+    start (``warm_lambdas``, a previous fit's estimates) replaces the seed of
+    each component it names, and, when present, fixed-policy components are
+    bootstrapped at their fixed value, so the bootstrap fit is the warm start's
+    own coefficient mode and the first Newton step is taken from there.
+    """
+    seeds = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
+    if not warm_lambdas:
+        return seeds
+    for index, pc in enumerate(penalties):
+        if pc.name in warm_lambdas and estimated_mask[index]:
+            seeds[pc.name] = float(np.clip(warm_lambdas[pc.name], 1e-6, 1e10))
+        elif not estimated_mask[index]:
+            seeds[pc.name] = float(lambdas[pc.name])
+    return seeds
+
+
 def optimize_discrete_reml_cached_w(
     dm: DesignMatrix,
     distribution: Any,
@@ -339,6 +367,7 @@ def optimize_discrete_reml_cached_w(
     estimated_names: set[str] | None = None,
     debug_recorder=None,
     trace_run: TraceRun | None = None,
+    warm_lambdas: Mapping[str, float] | None = None,
 ) -> REMLResult:
     """POI fREML optimizer for the discrete path.
 
@@ -482,8 +511,9 @@ def optimize_discrete_reml_cached_w(
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
     # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
-    # interaction penalty components from a materially stronger seed.
-    boot_lambdas = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
+    # interaction penalty components from a materially stronger seed. A warm
+    # start bootstraps at its own lambdas instead (``bootstrap_seed_lambdas``).
+    boot_lambdas = bootstrap_seed_lambdas(penalties, warm_lambdas, lambdas, estimated_mask)
     _t0 = _time.perf_counter()
     dm_boot = rebuild_design_matrix_with_lambdas(
         dm,
@@ -635,6 +665,10 @@ def optimize_discrete_reml_cached_w(
         if not estimated_mask[i]:
             fixed_val = fixed_lambdas[pc.name]
             rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
+            continue
+        if warm_lambdas and pc.name in warm_lambdas:
+            # The warm start is the iterate; no Fellner-Schall step from it.
+            rho[i] = np.clip(np.log(boot_lambdas[pc.name]), log_lo, log_hi)
             continue
         beta_g = boot_result.beta[pc.group_sl]
         gm = dm.group_matrices[pc.group_index]

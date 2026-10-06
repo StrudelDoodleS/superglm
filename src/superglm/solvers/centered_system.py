@@ -14,9 +14,9 @@ from superglm._group_matrix._group_matrix_centered import (
     _try_mixed_discrete_centering,
     _try_raw_spline_tabmat_centering,
     _try_tabmat_centering,
+    anchor_support_centered_gram_rhs,
     centered_gram_rhs,
     packed_centered_gram_rhs,
-    stable_centered_gram_rhs,
     try_raw_moment_centering,
 )
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
@@ -77,6 +77,11 @@ class TabmatCenteringState:
     eligible: bool | None = None
     raw_spline_eligible: bool | None = None
     raw_moment_eligible: bool | None = None
+    # The tensor raw rungs of ``packed_centered_gram_rhs`` (pattern, factored):
+    # ``False`` once their certificate rejected and the anchor-centred supports
+    # served the build, so later iterations go straight to those supports
+    # instead of repeating the work.
+    tensor_raw_eligible: bool | None = None
     _raw_moment_owners: tuple = ()
 
     def seed_raw_rejection(self, owners: tuple) -> bool | None:
@@ -117,6 +122,7 @@ class _InitialDataReuse:
         state.eligible = self.after.eligible
         state.raw_spline_eligible = self.after.raw_spline_eligible
         state.raw_moment_eligible = self.after.raw_moment_eligible
+        state.tensor_raw_eligible = self.after.tensor_raw_eligible
         *data, mean_hi, mean_lo = self.data
         return _attach_centered_penalty(*data, penalty, mean_hi=mean_hi, mean_lo=mean_lo)
 
@@ -567,9 +573,11 @@ def _raw_rung_system(
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """``(mean_x, data_gram, rhs)`` from the first raw rung that accepts ``dm``, else ``None``.
 
-    Called only with a design free of ``DenseGroupMatrix`` columns.
+    After the raw rungs, the compact anchor-support fallback, which subtracts
+    no raw moment.  Called only with a design free of ``DenseGroupMatrix``
+    columns.
     """
-    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered, state=tabmat_state)
     if packed is None and (tabmat_state is None or tabmat_state.eligible is not False):
         mixed_attempted, mixed = _try_mixed_discrete_centering(
             dm=dm,
@@ -655,6 +663,17 @@ def _raw_rung_system(
             tabmat_state.raw_moment_eligible = packed is not None
         if packed is not None and profile is not None:
             profile["centered_raw_moment_hits"] = profile.get("centered_raw_moment_hits", 0) + 1
+    # Every raw rung declined: centre compact supports first rather than the
+    # chunked rows below.  Only a design ``packed_centered_gram_rhs`` turned
+    # away reaches it with something to do -- a discretized SCOP or
+    # spline-by-category group, which that rung's tensor stages do not handle
+    # -- and it subtracts no raw moment, so no certificate applies.
+    if packed is None and not force_chunked:
+        packed = anchor_support_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+        if packed is not None and profile is not None:
+            profile["centered_anchor_support_hits"] = (
+                profile.get("centered_anchor_support_hits", 0) + 1
+            )
     return packed
 
 
@@ -991,51 +1010,4 @@ def _attach_centered_penalty(
         hessian=_freeze(hessian),
         mean_hi=None if mean_hi is None else _freeze(mean_hi),
         mean_lo=None if mean_lo is None else _freeze(mean_lo),
-    )
-
-
-def build_anchor_centered_system(
-    *,
-    dm: DesignMatrix,
-    W: NDArray,
-    z_off: NDArray,
-    penalty: NDArray,
-) -> CenteredSystem:
-    """Build an anchored system for predictors with locations beyond their scale."""
-    W = np.asarray(W, dtype=np.float64)
-    z_off = np.asarray(z_off, dtype=np.float64)
-    penalty = np.asarray(penalty, dtype=np.float64)
-    if W.shape != (dm.n,) or z_off.shape != (dm.n,):
-        raise ValueError("W and z_off must match the design row count")
-    if penalty.shape != (dm.p, dm.p):
-        raise ValueError("penalty must match the design column count")
-    if not np.all(np.isfinite(W)) or np.any(W < 0.0):
-        raise ValueError("working weights must be finite and non-negative")
-    sum_w = float(np.sum(W, dtype=np.float64))
-    if not np.isfinite(sum_w) or sum_w <= 0.0:
-        raise ValueError("working weights must have a positive finite sum")
-    mean_z = float(np.dot(W, z_off) / sum_w)
-    mean_x, data_gram, rhs = stable_centered_gram_rhs(
-        dm=dm,
-        W=W,
-        z_centered=z_off - mean_z,
-        sum_w=sum_w,
-    )
-    penalty_symmetric = 0.5 * (penalty + penalty.T)
-    hessian = 0.5 * (data_gram + data_gram.T) + penalty_symmetric
-    try:
-        np.linalg.cholesky(hessian)
-    except np.linalg.LinAlgError:
-        eigenvalues, eigenvectors = np.linalg.eigh(hessian)
-        if eigenvalues.size and eigenvalues[0] < 0.0:
-            hessian = (eigenvectors * np.maximum(eigenvalues, 0.0)[None, :]) @ eigenvectors.T
-            hessian = 0.5 * (hessian + hessian.T)
-    return CenteredSystem(
-        sum_w=sum_w,
-        mean_x=_freeze(mean_x),
-        mean_z=mean_z,
-        data_gram=_freeze(data_gram),
-        rhs=_freeze(rhs),
-        penalty=_freeze(penalty_symmetric),
-        hessian=_freeze(hessian),
     )

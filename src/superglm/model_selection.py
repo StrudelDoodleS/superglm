@@ -6,7 +6,7 @@ import datetime
 import hashlib
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
@@ -22,6 +22,7 @@ from superglm.distributions import Tweedie, weighted_log_likelihood
 # The full-frame binding pass lives in a neutral module so the public
 # SuperGLM.bind_levels runs this exact resolution without importing this one.
 from superglm.model.binding_ops import resolve_level_bindings as _resolve_level_bindings
+from superglm.model.reml_setup import live_reml_lambdas
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.validation import _normalized_gini
 
@@ -37,7 +38,11 @@ class CrossValidationResult:
     fold_scores : DataFrame
         One row per fold with columns: ``fold``, ``n_train``, ``n_test``,
         ``fit_time_s``, ``score_time_s``, ``converged``, ``n_iter``,
-        ``effective_df``, plus one column per requested metric.
+        ``effective_df``, plus one column per requested metric. Under
+        ``fit_mode="fit_reml"`` a fold is ``converged`` only when both its
+        smoothing-parameter selection and its final coefficient fit
+        converged, and two more columns say how it got there:
+        ``n_reml_iter`` (outer REML iterations) and ``warm_started``.
     mean_scores : dict
         Equal-weight mean of each per-fold metric across folds. Built-in
         deviance and negative log-likelihood are normalized within each fold
@@ -95,10 +100,17 @@ class CrossValidationResult:
         The score columns the built-in scorers computed, in ``scoring``
         order. A column a callable wrote is not one of them, even one named
         ``"deviance"``, ``"nll"`` or ``"gini"``.
+    warm_start : bool or None
+        The ``warm_start`` the folds were fitted with.
+    fit_kwargs : dict or None
+        The ``fit_kwargs`` every fold's fit received, copied.
 
     ``n_rows``, ``data_fingerprint``, ``splitter``, ``fingerprint_columns``,
-    ``fit_mode``, ``fingerprint_version`` and ``builtin_scores`` are ``None``
-    on a result made before they were recorded.
+    ``fit_mode``, ``fingerprint_version``, ``builtin_scores``, ``warm_start``
+    and ``fit_kwargs`` are ``None`` on a result made before they were
+    recorded. ``warm_start`` and ``fit_kwargs`` were recorded from the release
+    that added them to :func:`cross_validate`, so a result without them was
+    fitted cold, with no extra fit arguments.
     """
 
     fold_scores: pd.DataFrame
@@ -116,6 +128,8 @@ class CrossValidationResult:
     fit_mode: str | None = None
     fingerprint_version: int | None = None
     builtin_scores: tuple[str, ...] | None = None
+    warm_start: bool | None = None
+    fit_kwargs: dict[str, Any] | None = None
 
     def plot_terms_by_fold(
         self,
@@ -502,6 +516,8 @@ _RESERVED_COLUMNS = frozenset(
         "converged",
         "n_iter",
         "effective_df",
+        "n_reml_iter",
+        "warm_started",
     }
 )
 
@@ -569,6 +585,8 @@ def cross_validate(
     return_estimators: bool = False,
     return_oof: bool = False,
     error_score: float | str = np.nan,
+    fit_kwargs: Mapping[str, Any] | None = None,
+    warm_start: bool = True,
 ) -> CrossValidationResult:
     """Cross-validate a SuperGLM model with a pluggable splitter.
 
@@ -612,6 +630,27 @@ def cross_validate(
         If True, collect out-of-fold predictions.
     error_score : float or "raise"
         Value to assign when a fold fails. ``"raise"`` propagates the error.
+    fit_kwargs : mapping, optional
+        Extra keyword arguments for every fold's fit call, for example
+        ``{"max_reml_iter": 100}``. ``sample_weight`` and ``offset`` come
+        from the split and cannot be set here.
+    warm_start : bool, default True
+        Under ``fit_mode="fit_reml"``, start every fold after the first
+        converged one from that fold's smoothing parameters
+        (``lambda2_init``), so later folds take fewer outer iterations.
+        Components a search could not leave from where that fold ended them
+        (frozen as flat by the Newton engines, or held at either flat end by
+        the SCOP engine's suppression holds: residual EDF under 0.05, or a
+        tensor margin whose penalty the other margin covers) start from the
+        engine's own bootstrap instead, together with every other component
+        of the same penalty block, so a tensor product never starts half
+        warm. Each fold still searches
+        to its own convergence test; a fold that does not converge warns and
+        reads ``converged=False``. A fold whose SCOP search found no
+        certified mode at its warm start, and started again from its own
+        bootstrap, reads ``warm_started=False``. Set ``False`` to start every fold from the
+        engine's own bootstrap. A ``lambda2_init`` in ``fit_kwargs`` takes
+        precedence for every fold.
 
     Returns
     -------
@@ -625,6 +664,15 @@ def cross_validate(
 
     if fit_mode not in ("fit", "fit_reml"):
         raise ValueError(f"fit_mode must be 'fit' or 'fit_reml', got {fit_mode!r}")
+    fit_kwargs = dict(fit_kwargs or {})
+    reserved_fit_kwargs = {"sample_weight", "offset"} & set(fit_kwargs)
+    if reserved_fit_kwargs:
+        raise ValueError(
+            f"fit_kwargs cannot set {sorted(reserved_fit_kwargs)}: cross_validate slices "
+            "sample_weight and offset per fold; pass them as its own arguments"
+        )
+    reml_warm_start = warm_start and fit_mode == "fit_reml" and "lambda2_init" not in fit_kwargs
+    warm_lambdas: dict[str, float] | None = None
 
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
@@ -722,11 +770,39 @@ def cross_validate(
                 est._config = est._config.with_value(level_bindings=tuple(level_bindings.items()))
             t0 = time.perf_counter()
             fit_fn = getattr(est, fit_mode)
-            fit_fn(X_train, y_train, sample_weight=sw_train, offset=off_train)
+            fold_kwargs = dict(fit_kwargs)
+            # An empty mapping starts nothing warm (every component of the
+            # first converged fold was left on a flat plateau): those folds
+            # keep the model's own configured start, and read cold.
+            warm_this_fold = bool(reml_warm_start and warm_lambdas)
+            if warm_this_fold:
+                fold_kwargs["lambda2_init"] = warm_lambdas
+            fit_fn(X_train, y_train, sample_weight=sw_train, offset=off_train, **fold_kwargs)
             record["fit_time_s"] = time.perf_counter() - t0
-            record["converged"] = est._result.converged
+            # Under fit_reml the fold's convergence is its smoothing selection's
+            # as well as its final coefficient fit's: PIRLS converging at
+            # lambdas REML never settled is not a converged fold.
+            reml = getattr(est, "_reml_result", None) if fit_mode == "fit_reml" else None
+            record["converged"] = bool(est._result.converged) and (
+                reml is None or bool(reml.converged)
+            )
             record["n_iter"] = est._result.n_iter
             record["effective_df"] = est._result.effective_df
+            if fit_mode == "fit_reml":
+                record["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
+                # a fold whose search retried away from its warm start (a SCOP
+                # bootstrap with no certified mode there) did not start warm
+                kept = None if reml is None else getattr(reml, "warm_start_components", None)
+                record["warm_started"] = warm_this_fold and (kept is None or bool(kept))
+                # A model with no REML-eligible groups legitimately fits without
+                # smoothing selection (``_reml_result`` is None): nothing to warm-start.
+                if (
+                    reml_warm_start
+                    and warm_lambdas is None
+                    and record["converged"]
+                    and reml is not None
+                ):
+                    warm_lambdas = live_reml_lambdas(est)
 
             # Score
             t1 = time.perf_counter()
@@ -808,6 +884,9 @@ def cross_validate(
             record["converged"] = False
             record["n_iter"] = 0
             record["effective_df"] = np.nan
+            if fit_mode == "fit_reml":
+                record["n_reml_iter"] = 0
+                record["warm_started"] = False
             for sname in score_names:
                 record[sname] = error_score
             if estimators_list is not None:
@@ -871,4 +950,11 @@ def cross_validate(
         fit_mode=fit_mode,
         fingerprint_version=FINGERPRINT_VERSION,
         builtin_scores=tuple(name for name in score_names if name not in not_built_in),
+        warm_start=bool(warm_start),
+        # A mapping argument (a lambda2_init) is copied too: the record must
+        # not change when the caller later edits what it passed.
+        fit_kwargs={
+            key: dict(value) if isinstance(value, Mapping) else value
+            for key, value in fit_kwargs.items()
+        },
     )

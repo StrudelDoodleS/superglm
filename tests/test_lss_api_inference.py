@@ -494,7 +494,12 @@ def test_summary_lists_every_intercept_and_term(case):
         "note",
     ]
     assert set(table["parameter"]) == {"location", "scale"}
-    assert set(table["note"]) == {""}
+    # No row is absorbed; a fit that stopped unconverged (this seeded fit ends
+    # ``objective_rejected``) says so on every row instead of reading silent.
+    if model.result_.converged:
+        assert set(table["note"]) == {""}
+    else:
+        assert all(note.startswith("fit not converged: ") for note in table["note"])
     assert {"x", "g"} <= set(table["term"])
 
 

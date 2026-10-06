@@ -48,7 +48,10 @@ from superglm.profiling._scalar import (
     profile_plot,
     warn_caller,
 )
-from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+from superglm.reml.observed_geometry import (
+    ObservedModeNotCertifiedError,
+    ObservedModeNotConvergedError,
+)
 from superglm.solvers.mode_score import linear_predictor
 
 # Candidate REML fits only rank powers; the published refit at p_hat runs at the
@@ -219,6 +222,9 @@ class _PowerProfile:
         clone._profile_design_cache = {}
         # estimate_p checked the rows' random-effect nesting once at its entry
         clone._random_effect_nesting_checked = True
+        # Each candidate's REML convergence is recorded in the search result
+        # (``reml_converged``), so a candidate does not warn on its own.
+        clone._suppress_convergence_warning = True
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         # fit_reml refuses a selection penalty.
         self.selecting = False
@@ -229,9 +235,10 @@ class _PowerProfile:
         clone.family = Tweedie(p)
         # The post-fit runtime parity check certifies published state; candidate
         # fits are never published, and it cost 42% of every candidate on master.
-        # No lambda warm start: the direct and discrete REML engines bootstrap
-        # their own starting lambdas, so a previous candidate's lambdas leave
-        # the fit bitwise unchanged.
+        # No lambda warm start. The REML engines now honour a mapping
+        # lambda2_init, so a previous candidate's lambdas would change where
+        # this fit starts; adopting it here needs its own measurement of the
+        # selected power against ``xatol`` first.
         clone.fit_reml(
             self.X,
             self.y,
@@ -240,6 +247,15 @@ class _PowerProfile:
             runtime_validation="skip",
             reml_tol=_SEARCH_REML_TOL,
         )
+        if getattr(clone._reml_result, "termination_reason", None) == "bootstrap_uncertified":
+            # A shape-constrained fit published unconverged because no start of
+            # its bootstrap certified a coefficient mode has no REML objective to
+            # rank this power by: the power is infeasible, and the search routes
+            # around it.
+            raise ObservedModeNotConvergedError(
+                "SCOP REML bootstrap did not converge to a coefficient mode at any start",
+                infeasible_detail="no certified SCOP bootstrap mode",
+            )
         # The clone follows the model's retain_fit_state; a released fit keeps
         # its coefficients but not its fitted mean.
         if clone._retain_fit_state:

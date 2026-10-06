@@ -1,3 +1,4 @@
+import functools
 from types import SimpleNamespace
 
 import numpy as np
@@ -156,6 +157,9 @@ def test_empty_cleanup_path_uses_legacy_plateau_convergence(monkeypatch):
         "_joint_efs_lambda_step",
         lambda *args, **kwargs: (next(lambda_updates), {}, {}),
     )
+    # The stub modes carry no penalty algebra for the holds read at the
+    # published mode; this test is about the stop, not the flat set.
+    monkeypatch.setattr(scop_efs, "_scop_flat_components", lambda *args, **kwargs: [])
     monkeypatch.setattr(scop_efs, "_multi_scop_discrete_cleanup_names", lambda **kwargs: set())
 
     def fail_if_helper_used(**kwargs):
@@ -180,6 +184,8 @@ def test_empty_cleanup_path_uses_legacy_plateau_convergence(monkeypatch):
         max_reml_iter=5,
         reml_penalties=penalties,
         weight_semantics="frequency",
+        # The plateau exit under test is the EFS step's (the Newton step's fallback).
+        _outer_step="efs",
     )
 
     assert result.converged
@@ -250,11 +256,20 @@ def test_multi_scop_discrete_cleanup_preserves_predictions(monkeypatch):
     optimized.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
     assert optimized._reml_result.converged
     assert (True, 2) in consulted_calls
+    # The cleanup keeps the EFS step it was built on.
+    assert optimized._reml_result.scop_newton_fallback == "multi_scop_cleanup"
 
     monkeypatch.setattr(
         scop_efs,
         "_multi_scop_discrete_cleanup_enabled",
         lambda *, discrete, scop_term_count: False,
+    )
+    # Without the cleanup the fit would take Newton steps; compare like with
+    # like, EFS with and without the cleanup.
+    monkeypatch.setattr(
+        scop_efs,
+        "optimize_scop_efs_reml",
+        functools.partial(scop_efs.optimize_scop_efs_reml, _outer_step="efs"),
     )
     baseline = _make_model()
     baseline.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
