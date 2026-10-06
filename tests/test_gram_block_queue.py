@@ -451,6 +451,78 @@ def test_estimator_threads_never_change_the_fit(monkeypatch):
     assert (model()._n_jobs, model()._max_memory) == ("auto", "auto")
 
 
+def test_estimator_limits_reach_refits_and_post_fit_inference(monkeypatch):
+    """Every Gram build and data-rank factor a fitted estimator starts runs under its own limits.
+
+    ``n_jobs`` and ``max_memory`` used to apply inside ``fit``, ``fit_path``
+    and ``fit_reml`` only: the refits of ``drop1``, ``refit_unpenalised`` and
+    ``estimate_p``, and the post-fit inference of ``summary``, ``metrics``,
+    ``term_inference`` and ``relativities``, ran under the process default
+    (on a 16-core machine, 16 workers and a quarter of RAM against an
+    estimator's 1 worker and 64 MiB).  The estimator's ``(3, 64 MiB)``
+    differs from the process default in both fields.
+    """
+    from superglm import families
+    from superglm.solvers import rank
+
+    X, y, rng = _frame(3_000, seed=12)
+    seen: dict[str, set[tuple[int, int]]] = {}
+    label = ["fit_reml"]
+    original_tasks = execution.run_block_tasks
+    original_factor = rank._tsqr_weighted_factor
+
+    def record():
+        limits = (parallel.resolve_n_jobs(), parallel.resolve_max_memory())
+        seen.setdefault(label[0], set()).add(limits)
+
+    def recording_tasks(tasks, cache, profile):
+        record()
+        return original_tasks(tasks, cache, profile)
+
+    def recording_factor(*args, **kwargs):
+        record()
+        return original_factor(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "run_block_tasks", recording_tasks)
+    monkeypatch.setattr(rank, "_tsqr_weighted_factor", recording_factor)
+
+    def model(family="poisson"):
+        return SuperGLM(
+            family=family,
+            discrete=True,
+            n_bins=32,
+            features={**{c: Spline(kind="ps", k=6) for c in "abc"}, "g": Categorical()},
+            interactions=[("a", "b"), ("b", "c")],
+            n_jobs=3,
+            max_memory="64M",
+        )
+
+    fitted = model()
+    severity = np.where(rng.random(len(y)) < 0.6, 0.0, rng.gamma(2.0, 0.5, len(y)))
+    calls = {
+        "fit_reml": lambda: fitted.fit_reml(X, y, max_reml_iter=3),
+        "summary": fitted.summary,
+        "metrics": lambda: fitted.metrics(X, y),
+        "term_inference": lambda: fitted.term_inference("a"),
+        "relativities": lambda: fitted.relativities(with_se=True),
+        "drop1": lambda: fitted.drop1(X, y),
+        "refit_unpenalised": lambda: fitted.refit_unpenalised(X, y),
+        "estimate_p": lambda: model(families.Tweedie(p=1.5)).estimate_p(
+            X, severity, p_bounds=(1.3, 1.7), xatol=5e-2
+        ),
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for name, call in calls.items():
+            label[0] = name
+            call()
+    expected = (3, 64 << 20)
+    assert (parallel.resolve_n_jobs(), parallel.resolve_max_memory()) != expected
+    assert seen == {name: {expected} for name in seen}
+    assert {"fit_reml", "drop1", "refit_unpenalised", "estimate_p"} <= seen.keys()
+    assert seen.keys() & {"summary", "metrics", "term_inference", "relativities"}
+
+
 @pytest.mark.threads
 def test_pooled_gram_under_default_thread_pools_holds_blas_at_one_thread(monkeypatch, tensor_plan):
     """With every pool at its default, the workers' BLAS runs on one thread and the bits hold."""

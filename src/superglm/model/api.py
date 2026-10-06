@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import Callable, Hashable, Mapping, Sequence
-from functools import cached_property
+from functools import cached_property, wraps
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pandas as pd
@@ -49,6 +49,24 @@ if TYPE_CHECKING:
     from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
     from superglm.types import GroupSlice
+
+
+def _within_limits(method):
+    """Run an estimator method under the estimator's ``n_jobs`` and ``max_memory``.
+
+    Every public method that can refit, build a Gram or factor the design
+    carries it, as ``fit``, ``fit_path`` and ``fit_reml`` enter
+    ``_parallel_scope`` themselves, so a refit (``drop1``, ``estimate_p``)
+    and post-fit inference (``summary``, ``metrics``) keep the limits the
+    fit kept.
+    """
+
+    @wraps(method)
+    def within_limits(self, *args, **kwargs):
+        with self._parallel_scope():
+            return method(self, *args, **kwargs)
+
+    return within_limits
 
 
 class SuperGLM:
@@ -246,6 +264,8 @@ class SuperGLM:
         n_jobs : int or "auto"
             The most threads a fit uses for its heaviest steps: forming the
             weighted Gram block by block and checking the rank of the design.
+            Refits and inference on the fitted model (``summary``,
+            ``metrics``, ``drop1``, ``estimate_p`` and the like) keep it.
             ``"auto"`` (default) uses the ``SUPERGLM_N_JOBS`` environment
             variable when it is set and the number of physical cores
             otherwise; ``1`` runs those steps on the calling thread.  The
@@ -256,8 +276,9 @@ class SuperGLM:
             a size such as ``"4G"``.  A fit starts fewer threads when each
             needs more than this budget allows, so it is the limit to set on
             a shared machine.  ``"auto"`` (default) uses
-            ``SUPERGLM_MAX_MEMORY`` when it is set and a quarter of the
-            machine's memory otherwise.
+            ``SUPERGLM_MAX_MEMORY`` when it is set and otherwise a quarter
+            of the machine's memory, or of the container's memory limit
+            where that is lower.
         """
         if splines is not None:
             import warnings
@@ -886,6 +907,7 @@ class SuperGLM:
                 w_correction_order=w_correction_order,
             )
 
+    @_within_limits
     def screen_interactions(
         self,
         X: FrameLike,
@@ -1068,22 +1090,27 @@ class SuperGLM:
 
     @cached_property
     def _coef_covariance(self):
-        return state_ops.coef_covariance(self)
+        with self._parallel_scope():
+            return state_ops.coef_covariance(self)
 
     @cached_property
     def _fit_active_info(self):
-        return state_ops.fit_active_info(self)
+        with self._parallel_scope():
+            return state_ops.fit_active_info(self)
 
     @cached_property
     def _fit_inference_info(self):
-        return state_ops.fit_inference_info(self)
+        with self._parallel_scope():
+            return state_ops.fit_inference_info(self)
 
     @cached_property
     def _group_edf(self):
-        return state_ops.group_edf(self)
+        with self._parallel_scope():
+            return state_ops.group_edf(self)
 
     # ── Diagnostics & summary ─────────────────────────────────────
 
+    @_within_limits
     def random_effects(
         self,
         name: Hashable,
@@ -1107,6 +1134,7 @@ class SuperGLM:
             offset=offset,
         )
 
+    @_within_limits
     def factor_smooth(
         self,
         name: str,
@@ -1196,6 +1224,7 @@ class SuperGLM:
 
         return telemetry_ops.reml_diagnostics(self)
 
+    @_within_limits
     def diagnostics(self) -> dict[str, Any]:
         """Per-group diagnostic dict for programmatic / audit access."""
         return report_ops.diagnostics(self)
@@ -1218,6 +1247,7 @@ class SuperGLM:
 
         return build_design_summary(self)
 
+    @_within_limits
     def summary(
         self,
         alpha: float = 0.05,
@@ -1254,6 +1284,7 @@ class SuperGLM:
         """Get all groups belonging to a feature."""
         return report_ops.feature_groups(self, cast(Any, name))
 
+    @_within_limits
     def reconstruct_feature(self, name: Hashable) -> dict[str, Any]:
         """Reconstruct a fitted feature's curve or effect on its original scale."""
         return report_ops.reconstruct_feature(self, cast(Any, name))
@@ -1264,6 +1295,7 @@ class SuperGLM:
 
     # ── Inference ─────────────────────────────────────────────────
 
+    @_within_limits
     def metrics(
         self,
         X: FrameLike,
@@ -1288,6 +1320,7 @@ class SuperGLM:
         """
         return explain_ops.metrics(self, X, y, sample_weight, offset)
 
+    @_within_limits
     def drop1(
         self,
         X: FrameLike,
@@ -1304,6 +1337,7 @@ class SuperGLM:
         """
         return explain_ops.drop1(self, X, y, sample_weight, offset, test=test)
 
+    @_within_limits
     def refit_unpenalised(
         self,
         X: FrameLike,
@@ -1330,6 +1364,7 @@ class SuperGLM:
             keep_smoothing=keep_smoothing,
         )
 
+    @_within_limits
     def relativities(
         self, with_se: bool = False, centering: str = "native"
     ) -> dict[str, pd.DataFrame]:
@@ -1353,6 +1388,7 @@ class SuperGLM:
             self, name, Cov_active, active_groups, n_points
         )
 
+    @_within_limits
     def simultaneous_bands(
         self,
         feature: Hashable,
@@ -1367,6 +1403,7 @@ class SuperGLM:
             self, feature, alpha=alpha, n_sim=n_sim, n_points=n_points, seed=seed
         )
 
+    @_within_limits
     def term_inference(
         self,
         name: Hashable,
@@ -1406,6 +1443,7 @@ class SuperGLM:
 
     # ── Profile estimation ────────────────────────────────────────
 
+    @_within_limits
     def estimate_p(
         self,
         X: FrameLike,
@@ -1518,6 +1556,7 @@ class SuperGLM:
             progress_callback=progress_callback,
         )
 
+    @_within_limits
     def estimate_theta(
         self,
         X: FrameLike,
@@ -1583,6 +1622,7 @@ class SuperGLM:
 
     # ── Plotting ──────────────────────────────────────────────────
 
+    @_within_limits
     def plot(
         self,
         terms: Hashable | Sequence[Hashable] | None = cast(Any, plot_ops.TERMS_UNSET),
@@ -1742,6 +1782,7 @@ class SuperGLM:
             **kwargs,
         )
 
+    @_within_limits
     def plot_diagnostics(
         self,
         X: FrameLike,
@@ -1812,6 +1853,7 @@ class SuperGLM:
             residual_type=residual_type,
         )
 
+    @_within_limits
     def plot_data(
         self,
         terms: Hashable | Sequence[Hashable] | None = cast(Any, plot_ops.TERMS_UNSET),
@@ -1988,6 +2030,7 @@ class SuperGLM:
 
     # ── Monotone repair ─────────────────────────────────────────
 
+    @_within_limits
     def monotonize(
         self,
         X: FrameLike,
@@ -2025,6 +2068,7 @@ class SuperGLM:
         """
         return monotone_ops.monotonize(self, X, sample_weight, offset, n_grid=n_grid)
 
+    @_within_limits
     def apply_shape_postfit(
         self,
         X: FrameLike,
@@ -2038,6 +2082,7 @@ class SuperGLM:
 
         return shape_ops.apply_shape_postfit(self, X, sample_weight, offset, n_grid=n_grid)
 
+    @_within_limits
     def apply_monotone_postfit(
         self,
         X: FrameLike,
@@ -2051,6 +2096,7 @@ class SuperGLM:
 
     # ── Diagnostics ───────────────────────────────────────────────
 
+    @_within_limits
     def term_importance(
         self,
         X: FrameLike,
@@ -2064,6 +2110,7 @@ class SuperGLM:
         """
         return explain_ops.term_importance(self, X, sample_weight)
 
+    @_within_limits
     def term_drop_diagnostics(
         self,
         X: FrameLike,
@@ -2111,6 +2158,7 @@ class SuperGLM:
             offset_val=offset_val,
         )
 
+    @_within_limits
     def spline_redundancy(
         self,
         X: FrameLike,
@@ -2121,6 +2169,7 @@ class SuperGLM:
 
     # ── Discretization ────────────────────────────────────────────
 
+    @_within_limits
     def discretization_impact(
         self,
         X: FrameLike,
@@ -2135,6 +2184,7 @@ class SuperGLM:
         block is sampled on."""
         return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
 
+    @_within_limits
     def export_rating_tables(
         self,
         file_path,
@@ -2148,6 +2198,7 @@ class SuperGLM:
 
         return export_rating_tables(self, file_path, X, y, sample_weight=sample_weight, **kwargs)
 
+    @_within_limits
     def rating_table_payload(
         self,
         X: FrameLike,
