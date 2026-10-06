@@ -50,6 +50,32 @@ class _PatternPlan:
     own_margins: tuple[tuple[int, int], ...]
 
 
+@dataclass
+class RawMomentRejection:
+    """The raw moments a rung's certificate rejected during one centred build.
+
+    Owner: one ``_raw_rung_system`` call, that is one Gram build at one weight
+    vector; nothing outlives it, so no weight, basis or penalty can change
+    under it.  ``source`` names the rung that formed the moments: ``"pattern"``
+    and ``"factored"`` (``packed_centered_gram_rhs``) or ``"raw_moment"``
+    (``try_raw_moment_centering``).  The factored rung and the raw-moment
+    rung form the same moments by the same execution-plan call, so a
+    factored rejection decides the raw-moment rung of the same build.
+    """
+
+    source: str | None = None
+    raw_gram: NDArray | None = None
+    xtw: NDArray | None = None
+    raw_rhs: NDArray | None = None
+    weighted_z: NDArray | None = None
+    sum_weighted_z: float | None = None
+
+    def record(self, source, *, raw_gram, xtw, raw_rhs, weighted_z, sum_weighted_z=None) -> None:
+        self.source = source
+        self.raw_gram, self.xtw, self.raw_rhs = raw_gram, xtw, raw_rhs
+        self.weighted_z, self.sum_weighted_z = weighted_z, sum_weighted_z
+
+
 class _TensorGridCache:
     __slots__ = ("w_grid",)
 
@@ -105,20 +131,41 @@ def _certify_raw_centering(
     return mean_x, centered_gram, centered_rhs
 
 
+def _certify_or_record(
+    rejected: RawMomentRejection | None, source: str, **moments
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """``_certify_raw_centering(**moments)``; a rejection hands the moments to ``rejected``."""
+    certified = _certify_raw_centering(**moments)
+    if certified is None and rejected is not None:
+        moments.pop("sum_w")
+        rejected.record(source, **moments)
+    return certified
+
+
 def _raw_centering_well_scaled(mean_x: NDArray, centered_scale: NDArray) -> bool:
     """Return whether raw-moment subtraction stays in its rounding envelope."""
+    return bool(np.all(_raw_centering_admitted(mean_x, centered_scale)))
+
+
+def _raw_centering_admitted(mean_x: NDArray, centered_scale: NDArray) -> NDArray:
+    """Per column, whether raw-moment subtraction stays in its rounding envelope.
+
+    A column is admitted when its mean and centred RMS are finite and
+    ``|mean| <= RMS``, which is ``kappa^2 = 1 + mean^2 / RMS^2 <= 2`` (Chan,
+    Golub & LeVeque 1983, eq. 3.3).
+    """
     mean_x = np.asarray(mean_x, dtype=np.float64)
     centered_scale = np.asarray(centered_scale, dtype=np.float64)
-    if not np.all(np.isfinite(mean_x)) or not np.all(np.isfinite(centered_scale)):
-        return False
+    finite = np.isfinite(mean_x) & np.isfinite(centered_scale)
     # Keep intercept profiling within the ordinary rounding envelope of a
     # Gram calculation.  Allowing a larger mean than centered RMS amplifies
     # raw-moment subtraction error beyond that envelope and can erase a
     # near-collinear direction that the shared normal-equation rank policy
     # would otherwise retain.
-    return bool(
-        np.all((np.abs(mean_x) <= centered_scale) | ((mean_x == 0.0) & (centered_scale == 0.0)))
-    )
+    with np.errstate(invalid="ignore"):
+        return finite & (
+            (np.abs(mean_x) <= centered_scale) | ((mean_x == 0.0) & (centered_scale == 0.0))
+        )
 
 
 def _try_tabmat_centering(
@@ -233,6 +280,7 @@ def try_raw_moment_centering(
     W: NDArray,
     weighted_z: NDArray,
     sum_w: float,
+    rejected: RawMomentRejection | None = None,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """Centre from raw per-block moments, for any design the plan can dispatch.
 
@@ -245,7 +293,7 @@ def try_raw_moment_centering(
     Generalises :func:`_try_factored_tensor_centering`, which performs the same
     subtraction but only for designs containing a factored tensor product.
     Returns ``None`` whenever the certificate rejects, leaving the caller on its
-    stable chunked path.
+    stable chunked path; ``rejected``, when given, then receives the moments.
     """
     # Same measured crossover the mixed rung uses: below this many design cells
     # the raw-moment accumulation costs more than the stable chunked pass.
@@ -271,7 +319,9 @@ def try_raw_moment_centering(
         return None
     if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
         return None
-    return _certify_raw_centering(
+    return _certify_or_record(
+        rejected,
+        "raw_moment",
         raw_gram=moments.gram,
         xtw=moments.xtw,
         raw_rhs=moments.xt_rhs[0],
@@ -287,6 +337,7 @@ def _try_factored_tensor_centering(
     W: NDArray,
     weighted_z: NDArray,
     sum_w: float,
+    rejected: RawMomentRejection | None = None,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """Retain factored tensor products when raw-moment centering is certified.
 
@@ -309,7 +360,9 @@ def _try_factored_tensor_centering(
     )
     if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
         raise RuntimeError("execution plan did not return X'W")
-    return _certify_raw_centering(
+    return _certify_or_record(
+        rejected,
+        "factored",
         raw_gram=moments.gram,
         xtw=moments.xtw,
         raw_rhs=moments.xt_rhs[0],
@@ -616,6 +669,7 @@ def _try_pattern_tensor_centering(
     z_centered: NDArray,
     weighted_z: NDArray,
     sum_w: float,
+    rejected: RawMomentRejection | None = None,
 ) -> tuple[bool, tuple[NDArray, NDArray, NDArray] | None]:
     """Assemble all discrete summaries through compressed joint code patterns."""
     from ._group_matrix_algebra import _cross_gram_tensor_own_margin
@@ -703,7 +757,9 @@ def _try_pattern_tensor_centering(
 
     return (
         True,
-        _certify_raw_centering(
+        _certify_or_record(
+            rejected,
+            "pattern",
             raw_gram=raw_gram,
             xtw=xtw,
             raw_rhs=raw_rhs,
@@ -747,11 +803,14 @@ def packed_centered_gram_rhs(
     W: NDArray,
     z_centered: NDArray,
     state=None,
+    rejected: RawMomentRejection | None = None,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """Build centered products from indexed supports when every group is eligible.
 
     ``state`` (a fit-local ``TabmatCenteringState``), when given, carries a
     rejection of the tensor raw rungs across the fit's iterations.
+    ``rejected``, when given, receives the raw moments a tensor rung's
+    certificate rejected (``column_local_centering`` repairs them).
     """
     from superglm.group_matrix import (
         CategoricalGroupMatrix,
@@ -785,6 +844,7 @@ def packed_centered_gram_rhs(
             z_centered=z_centered,
             weighted_z=weighted_z,
             sum_w=sum_w,
+            rejected=rejected,
         )
         if patterned is not None:
             return patterned
@@ -794,6 +854,7 @@ def packed_centered_gram_rhs(
                 W=W,
                 weighted_z=weighted_z,
                 sum_w=sum_w,
+                rejected=rejected,
             )
             if factored is not None:
                 return factored

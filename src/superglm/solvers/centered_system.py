@@ -9,7 +9,9 @@ from dataclasses import dataclass, replace
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._column_local_centering import column_local_centering
 from superglm._group_matrix._group_matrix_centered import (
+    RawMomentRejection,
     _compensated_add,
     _try_mixed_discrete_centering,
     _try_raw_spline_tabmat_centering,
@@ -574,10 +576,18 @@ def _raw_rung_system(
     """``(mean_x, data_gram, rhs)`` from the first raw rung that accepts ``dm``, else ``None``.
 
     After the raw rungs, the compact anchor-support fallback, which subtracts
-    no raw moment.  Called only with a design free of ``DenseGroupMatrix``
-    columns.
+    no raw moment, and then column-local centring of the last raw moments a
+    certificate rejected in this build (``column_local_centering``), which
+    recentres only the failing columns, each inside its own group.  A build
+    reaches that repair only where it used to take the chunked ``O(n p^2)``
+    pass, so every other route is unchanged, and a refusal latches as before
+    unless the repair served the build.  Called only with a design free of
+    ``DenseGroupMatrix`` columns.
     """
-    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered, state=tabmat_state)
+    rejected = RawMomentRejection()
+    packed = packed_centered_gram_rhs(
+        dm=dm, W=W, z_centered=z_centered, state=tabmat_state, rejected=rejected
+    )
     if packed is None and (tabmat_state is None or tabmat_state.eligible is not False):
         mixed_attempted, mixed = _try_mixed_discrete_centering(
             dm=dm,
@@ -653,11 +663,22 @@ def _raw_rung_system(
             )
         )
     ):
-        packed = try_raw_moment_centering(
-            dm=dm,
-            W=W,
-            weighted_z=W * z_centered,
-            sum_w=sum_w,
+        # The factored tensor rung forms these very moments, by the same
+        # execution-plan call on the same vectors, and certifies them the same
+        # way: its rejection in this build is this rung's, and recomputing them
+        # cost every rejected build a second raw-moment pass.  (The pattern
+        # rung forms them by another summation, so its rejection does not
+        # decide this rung's certificate.)
+        packed = (
+            None
+            if rejected.source == "factored"
+            else try_raw_moment_centering(
+                dm=dm,
+                W=W,
+                weighted_z=W * z_centered,
+                sum_w=sum_w,
+                rejected=rejected,
+            )
         )
         if tabmat_state is not None:
             tabmat_state.raw_moment_eligible = packed is not None
@@ -674,6 +695,25 @@ def _raw_rung_system(
             profile["centered_anchor_support_hits"] = (
                 profile.get("centered_anchor_support_hits", 0) + 1
             )
+    if packed is None and not force_chunked and rejected.source is not None:
+        repaired = column_local_centering(dm=dm, W=W, rejected=rejected, sum_w=sum_w)
+        if profile is not None:
+            key = "declines" if repaired is None else "hits"
+            profile[f"centered_column_local_{key}"] = (
+                profile.get(f"centered_column_local_{key}", 0) + 1
+            )
+        if repaired is not None:
+            *system, columns = repaired
+            packed = tuple(system)
+            if profile is not None:
+                profile["centered_column_local_columns"] = (
+                    profile.get("centered_column_local_columns", 0) + columns
+                )
+            if tabmat_state is not None and rejected.source == "raw_moment":
+                # The rung's moments served this build through the repair, so
+                # its refusal does not latch: the next build needs them again,
+                # and a latched rung sent every later build to the chunked pass.
+                tabmat_state.raw_moment_eligible = None
     return packed
 
 

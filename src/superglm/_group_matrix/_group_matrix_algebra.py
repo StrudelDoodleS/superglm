@@ -880,37 +880,27 @@ def _tensor_channel_workspace_bytes(
     raw: bool,
     retain_buffers: bool = True,
 ) -> int:
-    """Bound active channel workspace, including retained reusable arrays.
+    """Bound one block's per-operation workspace: its histogram and stage buffers.
 
-    This is not a whole-model/RSS limit: other groups' cell indexes and input
-    factors remain model storage. Include the active grid's index even when
-    retained, and every permuted weight vector retained by this assembly.
+    This is not a whole-model/RSS limit.  The grid's cell order
+    (``grid.cell_csr()``, cached on the group matrix for the fit, with the
+    counting-sort fill that builds it) and the weights permuted into that
+    order (kept by the build's cache, one vector per grid tensor) are
+    fit-owned O(n) state, as the groups' own row indexes are, and are not
+    charged: charging them made the admission depend on the row count, so
+    above about 444k rows every 256 x 256 block silently fell from the raw
+    band to the dense stage.  The O(n) stage-one gathers
+    (``_gather_cell_order``), and the permuted weights of a call without a
+    cache, are this operation's buffers and stay charged, with the
+    histogram, any scratch this assembly retains and the stage-two
+    contraction.
     """
     n, cells = len(grid.idx1), grid.n_bins1 * grid.n_bins2
     index_bytes = np.dtype(np.intp).itemsize
-    retained_index = 0 if grid._cell_csr is None else sum(a.nbytes for a in grid._cell_csr)
-    if raw:
-        # Invalidated indexes are released before rebuilding. Reserve the
-        # counting-sort fill even on warm calls to cover live-index mutation.
-        retained_index = max(retained_index, 8 * (cells + 1) + index_bytes * n)
     scratch = 0 if cache is None or not retain_buffers else cache._channel_scratch.nbytes
-    weights = (
-        0
-        if cache is None or not retain_buffers
-        else sum(a.nbytes for a in cache._cell_weights.values())
-    )
     histogram = 8 * cells * width
-    base = retained_index + weights + (max(scratch, histogram) if raw else scratch + histogram)
-    # Reserve a new W permutation even if an old cell order has cached one:
-    # live-index invalidation can require a fresh permutation in this call.
-    if raw and cache is not None:
-        base += 8 * n  # A new permutation stays cached through stage two.
-    # The 8 * cells term reserves the counting-sort fill array during a rebuild.
-    stage1 = (
-        max(8 * cells, (2 * index_bytes + (8 if cache is None else 0)) * n + 8 * width)
-        if raw
-        else 0
-    )
+    base = max(scratch, histogram) if raw else scratch + histogram
+    stage1 = (2 * index_bytes + (8 if cache is None else 0)) * n + 8 * width if raw else 0
     k1, k2 = grid.B1_unique_t.shape[1], grid.B2_unique_t.shape[1]
     p_grid, p_chan = grid.shape[1], chan.shape[1]
     stage2 = 8 * (
@@ -922,12 +912,8 @@ def _tensor_channel_workspace_bytes(
         + (width * p_chan if raw else 0)  # projected channel map
     )
     # Marginal snapshots are model storage. Their array_equal comparison uses
-    # one byte per entry before allocating H, alongside any retained buffers.
-    validation = (
-        retained_index + weights + scratch + max(chan.B1_unique_t.size, chan.B2_unique_t.size)
-        if raw
-        else 0
-    )
+    # one byte per entry before allocating H, alongside any retained scratch.
+    validation = scratch + max(chan.B1_unique_t.size, chan.B2_unique_t.size) if raw else 0
     return max(validation, base + max(stage1, stage2))
 
 
@@ -943,9 +929,11 @@ def _tensor_channel_histogram(
 
     Raw bands accumulate in cell order and project after contraction. The
     dense stage gathers stored joint rows. Both must fit the per-operation
-    byte budget, including active retained storage and subsequent contraction
-    workspace. Clear derived build-cache buffers under memory pressure;
-    decline to the existing row route only if neither stage fits on its own.
+    byte budget, including retained scratch and subsequent contraction
+    workspace, but not the fit-owned cell order and cached permuted weights
+    (``_tensor_channel_workspace_bytes``). Clear derived build-cache buffers
+    under memory pressure; decline to the existing row route only if neither
+    stage fits on its own.
     """
     n1, n2 = grid.n_bins1, grid.n_bins2
     band = chan.raw_channels
@@ -1036,10 +1024,10 @@ def _cross_gram_tensor_tensor_channels(
     Both stages require float64 operands and a histogram below the aggregate
     cell cap. The stored-margin range guard bounds five factors and three
     reductions; the raw stage also checks its actual band and map factors.
-    Its byte admission includes active retained buffers and the contraction
-    peak, not just H. If neither stage fits, return None for the bounded row
-    fallback. Other tensors' model-owned cell indexes are not charged to this
-    per-operation workspace limit.
+    Its byte admission includes retained scratch, the stage buffers and the
+    contraction peak, not just H. If neither stage fits, return None for the
+    bounded row fallback. Cell indexes and a build cache's permuted weights
+    are fit-owned and not charged to this per-operation workspace limit.
 
     Stored joint rows, products of centered margins, and projected raw bands
     are related by rounded matrix products. Reassociation changes both that
