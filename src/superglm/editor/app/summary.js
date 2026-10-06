@@ -336,10 +336,32 @@ export function applySummaryView(nodes, { follow = false } = {}) {
 }
 
 // Follow the chart: bring its term's line into view in the summary frame.
+// In a short window the frame runs past the window's bottom, where
+// scrollIntoView would align the line to the frame's own edge and leave it
+// out of sight unless the page scrolled too. So the frame scrolls the line to
+// the nearest edge of the part of it the window shows, and the page stays put.
+// A webfont that arrives later moves the rows, so the line is aligned again
+// once the fonts have loaded.
 function scrollToCurrentSection(summaryFrame) {
   if (typeof summaryFrame.querySelector !== "function") return;
   const line = summaryFrame.querySelector('tr.summary-section[data-current="true"]:not([hidden])');
-  if (line) line.scrollIntoView({ block: "nearest" });
+  if (!line) return;
+  const frame = summaryFrame.getBoundingClientRect();
+  const top = Math.max(frame.top + summaryFrame.clientTop, 0);
+  const bottom = Math.min(
+    frame.top + summaryFrame.clientTop + summaryFrame.clientHeight,
+    window.innerHeight
+  );
+  const box = line.getBoundingClientRect();
+  // Scroll offsets are whole pixels: round so that the line ends inside.
+  if (box.top < top || box.height > bottom - top) {
+    summaryFrame.scrollTop += Math.floor(box.top - top);
+  } else if (box.bottom > bottom) {
+    summaryFrame.scrollTop += Math.ceil(box.bottom - bottom);
+  }
+  if (document.fonts?.status === "loading") {
+    document.fonts.ready.then(() => scrollToCurrentSection(summaryFrame));
+  }
 }
 
 // Family, link and method as chips and four figures as tiles, beside Refit

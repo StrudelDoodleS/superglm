@@ -2005,8 +2005,20 @@ def test_summary_follows_the_chart_and_filters_edited_and_waiting_terms(
 
 
 def test_summary_scrolls_the_chart_term_into_view(open_editor_page, choose_feature):
-    # A short window leaves the summary frame room for a few lines only.
-    with open_editor_page(viewport={"width": 1180, "height": 560}) as (page, _session):
+    # A short window leaves the summary frame room for a few lines only, and
+    # the frame runs a little past the window's bottom. The webfonts are held
+    # back until the line is current, as on a slow network: the rows are laid
+    # out in a fallback font first and move when the fonts arrive.
+    webfonts = re.compile(r"^https://fonts\.gstatic\.com/")
+    held = []
+
+    def hold_webfonts(page) -> None:
+        page.route(webfonts, lambda route: held.append(route))
+
+    with open_editor_page(viewport={"width": 1180, "height": 560}, prepare=hold_webfonts) as (
+        page,
+        _session,
+    ):
         page.wait_for_function(
             """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
                 && document.querySelector('#summaryFrame tr.summary-section')"""
@@ -2042,6 +2054,13 @@ def test_summary_scrolls_the_chart_term_into_view(open_editor_page, choose_featu
         )
         # The scroll lands after the line is marked current; on a loaded
         # machine that can be a frame later, so wait for it.
+        page.wait_for_function(in_view, arg="long_category", timeout=5000)
+
+        # The fonts arrive and the rows move; the line stays in view.
+        for route in held:
+            route.continue_()
+        page.unroute(webfonts)
+        page.wait_for_function("() => document.fonts.status === 'loaded'")
         page.wait_for_function(in_view, arg="long_category", timeout=5000)
 
 
