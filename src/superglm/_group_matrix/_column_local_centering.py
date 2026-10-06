@@ -112,11 +112,13 @@ def _admitted_readers(group_matrices, supports) -> list | None:
     return readers
 
 
-def _admitted_products(group_matrices, readers, weighted: NDArray) -> NDArray:
+def _admitted_products(group_matrices, readers, weighted: NDArray, formed: dict) -> NDArray:
     """``weighted @ X``, a row a failing column, each group read as ``_admitted_readers`` says.
 
-    Groups outside, failing columns inside: a projection formed here is the
-    only one live, released at the next group's.
+    Groups outside, failing columns inside.  A projection this repair forms
+    is kept in ``formed`` for the later chunks of failing columns while the
+    kept ones total at most ``_MAX_CENTRED_COLUMN_BYTES``; past that it is
+    released at the next group's and formed again by the next chunk.
     """
     parts = []
     for gm, reader in zip(group_matrices, readers, strict=True):
@@ -125,7 +127,11 @@ def _admitted_products(group_matrices, readers, weighted: NDArray) -> NDArray:
             continue
         support, codes, rows = reader
         if support is None:
+            support = formed.get(gm)
+        if support is None:
             support = _project(gm)
+            if sum(v.nbytes for v in formed.values()) + support.nbytes <= _MAX_CENTRED_COLUMN_BYTES:
+                formed[gm] = support
         summed = np.stack(
             [
                 np.bincount(
@@ -312,10 +318,11 @@ def column_local_centering(
     first = {g: mass @ values for g, (_, values, _, _, mass, _) in centred.items()}
     pending = [(g, i) for g, (columns, *_) in centred.items() for i in range(len(columns))]
     step = max(1, _MAX_CENTRED_COLUMN_BYTES // (8 * len(W)))
+    formed: dict = {}
     for start in range(0, len(pending), step):
         chunk = pending[start : start + step]
         weighted = np.stack([W * centred[g][1][:, i][centred[g][2]] for g, i in chunk])
-        products = _admitted_products(dm.group_matrices, readers, weighted)
+        products = _admitted_products(dm.group_matrices, readers, weighted, formed)
         for row, (g, i) in enumerate(chunk):
             column = centred[g][0][i]
             cross = products[row, kept] - mean_x[kept] * first[g][i]

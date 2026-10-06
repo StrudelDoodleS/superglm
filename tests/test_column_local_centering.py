@@ -446,6 +446,43 @@ def test_an_admitted_column_whose_projection_cancels_meets_a_recentred_one_as_it
     assert abs(fit.beta[k]) <= 2 * scaled / (lam * D[k])
 
 
+def test_a_projection_the_repair_forms_serves_every_chunk_of_failing_columns(monkeypatch):
+    """Two failing columns in two chunks still project the spline-by-category level once a build."""
+    from superglm._group_matrix import _column_local_centering as local
+
+    rng = np.random.default_rng(20261011)
+    n = 20_000
+    first, second = (_tensor(rng, n, (50, 50), (3, 3), 6, tensor_id) for tensor_id in (1, 2))
+    level = DiscretizedSplineCategoricalGroupMatrix(
+        rng.uniform(size=(15, 5)),
+        rng.normal(size=(5, 4)),
+        rng.integers(0, 15, size=n),
+        np.flatnonzero(rng.uniform(size=n) < 0.3),
+    )
+    heavy = [
+        CategoricalGroupMatrix(np.where(rng.uniform(size=n) < 0.55, 0, -1), 1) for _ in range(2)
+    ]
+    groups = [first, heavy[0], second, heavy[1], level]
+    dm = DesignMatrix(groups, n, sum(group.shape[1] for group in groups))
+    # One failing column per chunk: the cap holds fewer than two weighted rows.
+    monkeypatch.setattr(local, "_MAX_CENTRED_COLUMN_BYTES", 12 * n)
+    projections = []
+    monkeypatch.setattr(local, "_project", _counted(projections, local._project))
+    state, profile, builds = TabmatCenteringState(), {}, 2
+    for _ in range(builds):
+        build_centered_system(
+            dm=dm,
+            W=rng.uniform(0.5, 2.0, n),
+            z_off=rng.normal(size=n),
+            penalty=np.zeros((dm.p, dm.p)),
+            tabmat_state=state,
+            profile=profile,
+        )
+    assert profile["centered_column_local_hits"] == builds
+    assert profile["centered_column_local_columns"] == 2 * builds
+    assert len(projections) == builds
+
+
 @pytest.mark.parametrize("carried", [True, False])
 def test_the_repair_projects_only_the_supports_the_rejected_build_did_not(monkeypatch, carried):
     """No projection the rejected raw build formed is formed again; any other, one at a time.
