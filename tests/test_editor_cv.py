@@ -1567,6 +1567,45 @@ def test_final_fit_keeps_a_categorical_universe_whose_splits_differ_in_order_fla
     np.testing.assert_array_equal(final.predict(X), expected.predict(X))
 
 
+def test_final_fit_refuses_categories_that_are_equal_numbers_but_other_levels():
+    """Train categories -0.0, 1.0, 2.0 and validation's 0.0, 1.0, 2.0 (validation ordered).
+
+    The model reads a level's text, so "-0.0" and "0.0" are two levels, but
+    the categories compared equal as numbers, so 0a87d5a6 cast validation to
+    the train dtype and relabelled its 0.0 rows as the reference -0.0. The
+    two splits declare different universes, and Final fit refuses them in
+    its dtype sentence.
+    """
+    import superglm.editor.cv as cv
+    from superglm import collapse_levels
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    values = np.tile([-0.0, 1.0, 2.0], 30)
+    train = pd.DataFrame({"x": pd.Categorical(values, categories=[-0.0, 1.0, 2.0])})
+    validation = pd.DataFrame(
+        {
+            "x": pd.Categorical(
+                np.tile([0.0, 1.0, 2.0], 30), categories=[0.0, 1.0, 2.0], ordered=True
+            )
+        }
+    )
+    grouping = collapse_levels(pd.Series(values), groups={"Other": ["1.0", "2.0"]})
+    features = {"x": Categorical(base="-0.0", grouping=grouping, unseen="Other")}
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features)
+    model.fit(train, np.tile([1.0, 4.0, 4.0], 30))
+    session = EditorSession.from_model(
+        model,
+        train_data=(train, np.tile([1.0, 4.0, 4.0], 30)),
+        validation_data=(validation, np.full(90, 4.0)),
+    )
+
+    with pytest.raises(EditorValueError) as refused:
+        run_final_fit(capture_final_fit(session), _Context())
+
+    assert refused.value.public_message == cv.FINAL_COLUMN_TYPES.format(column="x")
+
+
 @pytest.mark.parametrize("nullable", ["Float64", "Int64"])
 def test_final_fit_stacks_a_nullable_numeric_column_beside_a_numpy_one(cv_frame, nullable):
     """Power is a NumPy float in the train rows and a pandas nullable dtype in validation.

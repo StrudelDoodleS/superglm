@@ -1257,13 +1257,18 @@ def _reading(frame, name) -> tuple[Any, tuple | None]:
 
     Any value not a number or a bool reads as ``"values"`` (text, whatever
     its dtype is called), and a column the frame lacks as ``"absent"``.
+    Categories compare by type and text, not as values: the fit reads a
+    category's text, so -0.0 and 0.0 are equal numbers but two levels, and
+    stacking 1 under the categories of "1" would lose the row.
     """
     if name not in frame.columns:
         return "absent", None
     dtype = frame.column_array(name).dtype
     categories = frame.column_declared_categories(name)
     kind = dtype if dtype.kind in "iufb" and categories is None else "values"
-    return kind, None if categories is None else tuple(categories)
+    if categories is None:
+        return kind, None
+    return kind, tuple(f"{type(category).__name__}:{category}" for category in categories)
 
 
 def _stacked(datasets: Sequence[EvaluationDataset], name: str, fill: float):
