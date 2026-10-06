@@ -176,6 +176,10 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
+    @app.post("/rating_table")
+    def rating_table(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._rating_table(str(_required(payload, "term"))))
+
     @app.get("/download_export")
     def download_export(format: str = "joblib", filename: str | None = None) -> Response:
         return _guarded_export_download(
@@ -245,6 +249,22 @@ def create_editor_app(widget: Any) -> FastAPI:
     def profile_distribution_status(job_id: str, wait: bool = False) -> Response:
         return _guarded_json(lambda: widget._profile_distribution_status(job_id, wait=wait))
 
+    @app.post("/job_start")
+    def job_start(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._job_start(str(_required(payload, "kind"))))
+
+    @app.post("/job_status")
+    def job_status(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._job_status(
+                str(_required(payload, "job_id")), wait=payload.get("wait") is True
+            )
+        )
+
+    @app.post("/job_cancel")
+    def job_cancel(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._job_cancel(str(_required(payload, "job_id"))))
+
     @app.post("/collapse_levels")
     def collapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
@@ -252,6 +272,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 None if "term" not in payload else str(payload["term"]),
                 str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
+                keep_reference=_keep_reference(payload),
             )
         )
 
@@ -262,6 +283,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 None if "term" not in payload else str(payload["term"]),
                 str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
+                keep_reference=_keep_reference(payload),
             )
         )
 
@@ -303,6 +325,36 @@ def create_editor_app(widget: Any) -> FastAPI:
                 method=str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
             )
+        )
+
+    @app.post("/stage")
+    def stage(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._stage(
+                str(_required(payload, "operation")),
+                str(_required(payload, "term")),
+                _stage_params(payload),
+                keep_reference=_keep_reference(payload),
+                level_display=_level_display(payload),
+            )
+        )
+
+    @app.post("/refit_pending")
+    def refit_pending(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._refit_pending(level_display=_level_display(payload)))
+
+    @app.post("/set_unseen")
+    def set_unseen(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._set_unseen(
+                str(_required(payload, "term")), _required(payload, "unseen")
+            )
+        )
+
+    @app.post("/note")
+    def note(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._set_note(str(_required(payload, "id")), _note_text(payload))
         )
 
     return app
@@ -516,6 +568,50 @@ def _level_display(payload: dict[str, Any]) -> str:
     if value not in {"expanded", "grouped"}:
         raise EditorValueError("level_display must be 'expanded' or 'grouped'.")
     return value
+
+
+def _keep_reference(payload: dict[str, Any]) -> bool:
+    value = payload.get("keep_reference", True)
+    if not isinstance(value, bool):
+        raise EditorValueError("keep_reference must be true or false.")
+    return value
+
+
+def _stage_params(payload: dict[str, Any]) -> dict[str, Any]:
+    """A /stage body's ``params``, each field checked for its JSON type.
+
+    The session checks the rest. ``degree`` and ``join`` pass through
+    unparsed, as on /shape_range: the builder refuses them with its fixed
+    sentences.
+    """
+    params = payload.get("params", {})
+    if not isinstance(params, dict):
+        raise EditorValueError("params must be an object.")
+    parsed: dict[str, Any] = {}
+    if "levels" in params:
+        levels = params["levels"]
+        if not isinstance(levels, list) or not all(isinstance(level, str) for level in levels):
+            raise EditorValueError("levels must be a list of level labels.")
+        parsed["levels"] = list(levels)
+    for name in ("group_label", "level"):
+        if params.get(name) is not None:
+            parsed[name] = str(params[name])
+    for name in ("lo", "hi"):
+        if name in params:
+            parsed[name] = _range_edge(params[name])
+    for name in ("degree", "join"):
+        if name in params:
+            parsed[name] = params[name]
+    return parsed
+
+
+def _note_text(payload: dict[str, Any]) -> str:
+    note = payload.get("note")
+    if note is None:
+        return ""
+    if not isinstance(note, str):
+        raise EditorValueError("note must be text.")
+    return note
 
 
 def _evidence_metadata(payload: dict[str, Any]) -> dict[str, Any]:

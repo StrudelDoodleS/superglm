@@ -13,9 +13,27 @@ from superglm._frame import FrameLike
 from superglm.plotting.comparison import _build_term_comparison_data
 
 
+def _both_valued(
+    left: NDArray[np.float64], right: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]]:
+    """The points where both curves have a value.
+
+    A fold model that never saw a level has NaN there (a gap), so two curves
+    are compared on the points they share.
+    """
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    shared = ~(np.isnan(left) | np.isnan(right))
+    return left[shared], right[shared], shared
+
+
 def _weighted_rmse(
     left: NDArray[np.float64], right: NDArray[np.float64], weights: NDArray[np.float64]
 ) -> float:
+    left, right, shared = _both_valued(left, right)
+    weights = np.asarray(weights, dtype=np.float64)[shared]
+    if not float(np.sum(weights)) > 0.0:
+        return float("nan")
     diff2 = (left - right) ** 2
     return float(np.sqrt(np.average(diff2, weights=weights)))
 
@@ -26,14 +44,35 @@ def _weighted_max_abs_diff(
     weights: NDArray[np.float64],
 ) -> float:
     del weights
+    left, right, _shared = _both_valued(left, right)
+    if left.size == 0:
+        return float("nan")
     return float(np.max(np.abs(left - right)))
 
 
 def _curve_correlation(left: NDArray[np.float64], right: NDArray[np.float64]) -> float:
-    if np.allclose(left, left[0]) and np.allclose(right, right[0]):
-        return 1.0
-    if np.std(left) < 1e-12 or np.std(right) < 1e-12:
-        return 0.0
+    """The curves' Pearson correlation on the finite points they share; NaN where it has none.
+
+    It needs two such points, and both curves must vary across them: one
+    shared point, or a flat curve, has no correlation, neither 1 nor 0.
+
+    Each curve is shifted by one of its own points and scaled by its range
+    before it is centred. Centring at the mean alone cancels in a curve whose
+    range is a few units in the last place of its values, the case shifted
+    data guards against (Chan, Golub and LeVeque, *Algorithms for computing
+    the sample variance: analysis and recommendations*, The American
+    Statistician 37(3), 1983): a point within a factor of two of the shift
+    point subtracts exactly (Sterbenz's lemma), and the scaled curve has
+    range 1.
+    """
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    shared = np.isfinite(left) & np.isfinite(right)
+    left, right = left[shared], right[shared]
+    if left.size < 2 or np.ptp(left) == 0.0 or np.ptp(right) == 0.0:
+        return float("nan")
+    left = (left - left[0]) / np.ptp(left)
+    right = (right - right[0]) / np.ptp(right)
     return float(np.corrcoef(left, right)[0, 1])
 
 
@@ -68,10 +107,25 @@ def _summarize_against_fold_mean(
     curves: Mapping[str, NDArray[np.float64]],
     weights: NDArray[np.float64],
 ) -> pd.DataFrame:
-    """Summarize each fold curve against the fold-mean curve."""
+    """Summarize each fold curve against the fold-mean curve.
+
+    The mean at each point is over the folds that have a value there, and
+    each fold is read on its own points: a fold that never saw a level
+    leaves that level out of its distance rather than making it NaN. A point
+    only one fold has is no mean at all (that fold's own value, at distance
+    zero), so it is left out too; a fold sharing no point with another has
+    no distance, NaN.
+    """
     labels = list(curves)
     stacked = np.vstack([np.asarray(curves[label], dtype=np.float64) for label in labels])
-    mean_curve = np.mean(stacked, axis=0)
+    valued = ~np.isnan(stacked)
+    counts = valued.sum(axis=0)
+    mean_curve = np.divide(
+        np.where(valued, stacked, 0.0).sum(axis=0),
+        counts,
+        out=np.full(stacked.shape[1], np.nan),
+        where=counts > 1,
+    )
     rows = []
     for label in labels:
         curve = np.asarray(curves[label], dtype=np.float64)
@@ -97,7 +151,12 @@ def build_cv_curve_similarity(
     sample_weight: NDArray | None = None,
     n_points: int = 200,
 ) -> dict[str, Any]:
-    """Build fold-curve similarity diagnostics for all comparable main effects."""
+    """Build fold-curve similarity diagnostics for all comparable main effects.
+
+    A correlation is NaN where two curves share fewer than two finite points
+    or either is flat there, and a fold's distance to the fold mean is NaN
+    where it shares no point with another fold.
+    """
     labeled_models = {f"fold_{i}": model for i, model in enumerate(models) if model is not None}
     if not labeled_models:
         return {}

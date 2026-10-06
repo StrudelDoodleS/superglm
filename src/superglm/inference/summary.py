@@ -873,6 +873,8 @@ class ModelSummary:
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
+        if info.get("convergence_note"):
+            lines.extend(textwrap.wrap(info["convergence_note"], width=max(60, min(W + 2, 100))))
         for note in _editor_notes(info):
             lines.append(note)
         has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
@@ -1305,6 +1307,12 @@ class ModelSummary:
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'color:#c60;border:none;">{advisory_note_html}</td></tr>'
+            )
+        if info.get("convergence_note"):
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'color:#c60;white-space:normal;border:none;">'
+                f"{html_escape(info['convergence_note'])}</td></tr>"
             )
         for note in _editor_notes(info):
             parts.append(

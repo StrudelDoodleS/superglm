@@ -11,6 +11,7 @@ References
 from __future__ import annotations
 
 import time as _time
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -29,7 +30,7 @@ from superglm.reml.convergence import (
     project_reml_gradient,
     trial_counts_as_precision_evidence,
 )
-from superglm.reml.discrete import optimize_discrete_reml_cached_w
+from superglm.reml.discrete import bootstrap_seed_lambdas, optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.identified import IdentifiedLaplace, dense_hessian
 from superglm.reml.objective import (
@@ -143,8 +144,13 @@ def optimize_direct_reml(
     max_pirls_iter: int = 100,
     debug_recorder=None,
     trace_run: TraceRun | None = None,
+    warm_lambdas: Mapping[str, float] | None = None,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
+
+    ``warm_lambdas`` (a previous fit's estimates, keyed by component name)
+    seeds the bootstrap and the first Newton iterate of every component it
+    names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
     Two algorithm variants depending on ``discrete``:
 
@@ -211,6 +217,7 @@ def optimize_direct_reml(
             max_pirls_iter=max_pirls_iter,
             debug_recorder=debug_recorder,
             trace_run=trace_run,
+            warm_lambdas=warm_lambdas,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
@@ -336,8 +343,9 @@ def optimize_direct_reml(
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
     # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
-    # interaction penalty components from a materially stronger seed.
-    boot_lambdas = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
+    # interaction penalty components from a materially stronger seed. A warm
+    # start bootstraps at its own lambdas instead (``bootstrap_seed_lambdas``).
+    boot_lambdas = bootstrap_seed_lambdas(penalties, warm_lambdas, lambdas, estimated_mask)
     S_boot = (
         None
         if use_structured
@@ -449,6 +457,10 @@ def optimize_direct_reml(
         if not estimated_mask[i]:
             fixed_val = fixed_lambdas[pc.name]
             rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
+            continue
+        if warm_lambdas and pc.name in warm_lambdas:
+            # The warm start is the iterate; no Fellner-Schall step from it.
+            rho[i] = np.clip(np.log(boot_lambdas[pc.name]), log_lo, log_hi)
             continue
         gm = dm.group_matrices[pc.group_index]
         beta_g = boot_result.beta[pc.group_sl]

@@ -398,9 +398,9 @@ def reml_laml_objective(
             # so out loud instead of silently substituting (the silent form
             # of this branch is exactly how the Tweedie criterion defect
             # shipped).
-            import warnings
+            from superglm import _held_warnings
 
-            warnings.warn(
+            _held_warnings.warn(
                 "REML is using a Gaussian-shaped scale profile for "
                 f"estimated-scale family {type(distribution).__name__!r}, "
                 "which has no exact saturated-likelihood profiler. This is "

@@ -21,21 +21,18 @@ from __future__ import annotations
 import logging
 import math
 import time
-import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from numpy.typing import NDArray
 
 import superglm.solvers.scop_exact_support as scop_exact_support
+from superglm import _held_warnings as held_warnings
 from superglm._blas_threads import keep_narrow_cap
 from superglm._fit_trace import TraceRun
-from superglm._group_matrix._group_matrix_centered import (
-    _raw_centering_well_scaled,
-    stable_centered_matvec,
-)
+from superglm._group_matrix._group_matrix_centered import _raw_centering_well_scaled
 from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
     _is_raw_spline_tabmat_centering_candidate,
@@ -68,7 +65,6 @@ from superglm.solvers.centered_system import (
     TabmatCenteringState,
     _FisherDataReuse,
     _InitialDataReuse,
-    build_anchor_centered_system,
     build_centered_system,
     grouped_augmented_factor,
     grouped_augmented_factor_rhs,
@@ -115,6 +111,7 @@ from superglm.solvers.mode_score import (
     centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
+    dense_columns,
     null_basis_angle,
     penalized_mode_residual,
     prior_weighted_centre,
@@ -191,6 +188,87 @@ from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 logger = logging.getLogger(__name__)
 
 _QP_FEASIBILITY_TOL = 1e-12
+
+# The rung refusals a SCOP REML run carries from one coefficient fit to the next.
+_CARRIED_REFUSALS = ("raw_moment_eligible", "tensor_raw_eligible")
+
+
+@dataclass
+class SCOPRunCentring:
+    """Centring state one SCOP REML run carries across its coefficient fits.
+
+    **Owner:** the run's fit context (``reml/scop_efs.py``,
+    ``_SCOPREMLFitContext``), shared by the certification-retry contexts
+    derived from it.  **Lifetime:** the run; it dies with the context.  It holds
+
+    - the block-coordinate step's reduced design (the non-SCOP groups), which
+      owns its compact-support caches (pattern plan, solver supports,
+      execution plan).  These depend on the basis only;
+    - the refusals (``_CARRIED_REFUSALS``) of the raw-moment and tensor raw
+      rungs, on the full design and on the reduced one.
+
+    **Invalidation:** a fit whose design, group matrices, groups, family or
+    link differ by identity from the bound ones clears everything.  Weights
+    change every fit and are not keyed: a carried refusal skips a rung, so a
+    later fit whose weights would have passed it stays on the centre-first
+    route every rejection already selects, at least as accurate: the
+    anchor-centred compact supports, or, for a design they decline (a group
+    with no compact support, such as a non-discretized spline, or an
+    oversized one), the centred row chunks.  The raw-moment refusal is
+    carried either way, as the Newton engine's ``raw_moment_policy`` carries
+    it (``reml/direct.py``); only the tensor refusal waits for the anchor
+    route to serve (``packed_centered_gram_rhs``), because retrying the
+    tensor rungs is cheaper than the chunked pass a decline costs.  Where
+    every carried refusal would recur the run is bitwise identical to one
+    without the carry: measured on the freMTPL2 fits once certification
+    retries start warm, and on non-discretized Poisson, Gamma and Tweedie
+    SCOP fits, whose raw-moment rung passed at none of 20 to 42 per-fit
+    attempts, so the carry saved those passes and changed no bit.  A cold
+    retry restarts where the certificate can pass again, and then moves to
+    the centre-first route, at the rounding level.
+    Penalty target and precision never enter: a centring route reads the
+    float64 data Gram only.
+    """
+
+    owners: tuple = ()
+    reduced_key: tuple = ()
+    reduced_dm: DesignMatrix | None = None
+    full_refusals: TabmatCenteringState = field(default_factory=TabmatCenteringState)
+    reduced_refusals: TabmatCenteringState = field(default_factory=TabmatCenteringState)
+
+    def bind(self, owners: tuple) -> None:
+        """Keep the run's state for ``owners`` (compared by identity); any change clears it."""
+        if len(owners) == len(self.owners) and all(
+            current is bound for current, bound in zip(owners, self.owners, strict=True)
+        ):
+            return
+        self.owners = owners
+        self.reduced_key = ()
+        self.reduced_dm = None
+        self.full_refusals = TabmatCenteringState()
+        self.reduced_refusals = TabmatCenteringState()
+
+    def reduced_design(self, key: tuple[int, ...], matrices: list, n: int, p: int) -> DesignMatrix:
+        """The reduced design over the groups ``key``, built once per bound run."""
+        if self.reduced_dm is None or self.reduced_key != key:
+            self.reduced_dm = DesignMatrix(matrices, n=n, p=p)
+            self.reduced_key = key
+            self.reduced_refusals = TabmatCenteringState()
+        return self.reduced_dm
+
+
+def _seed_refusals(state: TabmatCenteringState, carried: TabmatCenteringState) -> None:
+    """Start a fit's centring state from the run's refusals."""
+    for name in _CARRIED_REFUSALS:
+        if getattr(carried, name) is False:
+            setattr(state, name, False)
+
+
+def _carry_refusals(carried: TabmatCenteringState, state: TabmatCenteringState) -> None:
+    """Record a fit's refusals in the run's state."""
+    for name in _CARRIED_REFUSALS:
+        if getattr(state, name) is False:
+            setattr(carried, name, False)
 
 
 def _solve_constrained_qp_with_cold_retry(
@@ -427,6 +505,46 @@ def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
     centre, centre_lo = system.centre_pair()
     rows = X - centre
     return rows if centre_lo is None else rows - centre_lo
+
+
+def _centred_system_matvec(dm: DesignMatrix, beta: NDArray, system: CenteredSystem) -> NDArray:
+    """``(X - 1 m') beta`` about the system's centre pair, through each block's own product.
+
+    ``centred_matvec`` about ``hi``, less ``lo' beta`` (``lo`` is nonzero on
+    dense columns only): a ``DenseGroupMatrix`` row is ``(x - hi) - lo`` before
+    its product, so it rounds at ``|x - hi| |beta|`` rather than at its
+    offset; every other block takes the product the native ``intercept + X
+    beta`` takes, less ``m' beta``, so it rounds no worse than that route.  No
+    row of the design is materialised.
+    """
+    centre, centre_lo = system.centre_pair()
+    values = centred_matvec(dm, beta, centre)
+    if centre_lo is not None:
+        correction = math.fsum(np.asarray(centre_lo, dtype=np.float64) * beta)
+        if correction != 0.0:
+            values -= correction
+    return values
+
+
+def _system_offset_mean(
+    dm: DesignMatrix, W: NDArray, system: CenteredSystem, state_center: NDArray
+) -> NDArray:
+    """``mean_x - c``, the working mean's offset from the state's centre, read from the system's pair.
+
+    A dense column's working mean is the system's exact pair ``(hi, lo)``
+    (``centered_system.dense_mean_pair``, ``_attach_dense_split``), so its
+    offset from ``c`` is ``(hi - c) + lo``: ``hi - c`` is exact where the two
+    lie within a factor two (Sterbenz), as they do at a column's offset, and
+    otherwise rounds at ``u |hi - c|``, inside ``centre_offset_mean``'s
+    ``gamma_n sum W |x - c| / sum W``.  No pass.  A system without a pair has
+    no dense column and reads ``mean_x - c``.
+    """
+    if system.mean_hi is None or system.mean_lo is None:
+        return centre_offset_mean(dm, W, float(system.sum_w), state_center, system.mean_x)
+    offset_mean = np.asarray(system.mean_x, dtype=np.float64) - state_center
+    dense = dense_columns(dm)
+    offset_mean[dense] = (system.mean_hi[dense] - state_center[dense]) + system.mean_lo[dense]
+    return offset_mean
 
 
 def _structured_score_centre(
@@ -841,6 +959,7 @@ def fit_irls_direct(
     _initial_data_reuse: _InitialDataReuse | None = None,
     _raw_moment_policy: TabmatCenteringState | None = None,
     _fisher_data_reuse: _FisherDataReuse | None = None,
+    _scop_run_centring: SCOPRunCentring | None = None,
     _laplace_excluded: tuple[int, ...] = (),
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
@@ -898,6 +1017,7 @@ def fit_irls_direct(
             _initial_data_reuse=_initial_data_reuse,
             _raw_moment_policy=_raw_moment_policy,
             _fisher_data_reuse=_fisher_data_reuse,
+            _scop_run_centring=_scop_run_centring,
             _laplace_excluded=_laplace_excluded,
             _mode_bar=_mode_bar,
             _compensate_centred_intercept=_compensate_centred_intercept,
@@ -951,6 +1071,7 @@ def _fit_irls_direct_once(
     _initial_data_reuse: _InitialDataReuse | None = None,
     _raw_moment_policy: TabmatCenteringState | None = None,
     _fisher_data_reuse: _FisherDataReuse | None = None,
+    _scop_run_centring: SCOPRunCentring | None = None,
     _laplace_excluded: tuple[int, ...] = (),
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
@@ -1217,6 +1338,12 @@ def _fit_irls_direct_once(
             )
         return product
 
+    def penalty_rounding() -> int:
+        """``k`` with ``fl(S v)`` within ``gamma_k fl(|S| |v|)`` (``penalty_product_rounding``)."""
+        from superglm.reml.penalty_algebra import penalty_product_rounding
+
+        return penalty_product_rounding(p, None if S is not None else reml_penalties)
+
     def penalty_curvature() -> NDArray:
         """``diag(S)``: the dense penalty's diagonal, or the components' without forming ``S``."""
         if S is not None:
@@ -1256,7 +1383,7 @@ def _fit_irls_direct_once(
         resolved once every relative score is within ``MODE_RESOLVE_CAP``
         (``solvers.mode_score``).  The floors read the iterate's intercept
         about ``mean_x``; a centred state reads it from its own ``alpha`` and
-        the offset of ``mean_x`` from the centre (``centre_offset_mean``), not
+        the offset of ``mean_x`` from the centre (``_system_offset_mean``), not
         from the raw intercept, which cancels ``c' beta`` at a column's offset.
         """
         assert _score_centre is not None
@@ -1303,6 +1430,7 @@ def _fit_irls_direct_once(
             bar=mode_bar,
             excluded=excluded,
             resolve_cap=MODE_RESOLVE_CAP,
+            penalty_rounding=penalty_rounding(),
         )
 
     def true_mode_residual(
@@ -1482,6 +1610,7 @@ def _fit_irls_direct_once(
             column_shift=shift,
             decrement_noise=likelihood_noise,
             penalty_block=weak_penalty_block,
+            penalty_rounding=penalty_rounding(),
         )
         _last_true_residual[0] = residual
         rows_n = int(np.count_nonzero(positive))
@@ -1496,7 +1625,9 @@ def _fit_irls_direct_once(
         # design's, formed once per design (``mode_score.row_sets``)
         sets = row_sets(dm)
         if not _row_set_curvature:
-            _row_set_curvature.append(row_set_quadratics(sets, p, penalty_matvec))
+            _row_set_curvature.append(
+                row_set_quadratics(sets, p, penalty_matvec, penalty_rounding())
+            )
         with np.errstate(over="ignore", invalid="ignore"):
             column_penalty = np.ldexp(penalty_score, shift)
             column_penalty_size = np.ldexp(penalty_magnitude, shift)
@@ -1517,6 +1648,7 @@ def _fit_irls_direct_once(
                 set_curvature=set_curvature,
                 bar=mode_bar,
                 underflow=underflow,
+                penalty_rounding=penalty_rounding(),
             ),
         )
         # the directions the factorization this iteration holds truncates,
@@ -1552,6 +1684,7 @@ def _fit_irls_direct_once(
                     penalty_size_apply=lambda v: np.ldexp(
                         penalty_matvec(v, magnitude=True), -weight_exponent
                     ),
+                    penalty_rounding=penalty_rounding(),
                 )
             ratio = max(ratio, truncated_ratio)
             _judged_truncated[0] = (eta_values, truncated)
@@ -1848,6 +1981,7 @@ def _fit_irls_direct_once(
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    _scop_run: SCOPRunCentring | None = None
     # the columns the binomial/log certificate tests in SCOP's latent
     # coordinates instead (``true_mode_residual``)
     _scop_columns: NDArray | None = None
@@ -2002,8 +2136,20 @@ def _fit_irls_direct_once(
         _reduced_gms = []
         for gi in _non_scop_groups_idx:
             _reduced_gms.append(gms[gi])
-        _reduced_dm = DesignMatrix(_reduced_gms, n=n, p=_p_reduced)
+        # A REML run's fits share one reduced design and their rung refusals
+        # (``SCOPRunCentring``); a traced or debugged fit stays fresh, as the
+        # Newton engine's carried policy does.
+        if _scop_run_centring is not None and debug_recorder is None and trace_run is None:
+            _scop_run = _scop_run_centring
+            _scop_run.bind((dm, family, link, *gms, *groups))
+            _reduced_dm = _scop_run.reduced_design(
+                tuple(_non_scop_groups_idx), _reduced_gms, n, _p_reduced
+            )
+        else:
+            _reduced_dm = DesignMatrix(_reduced_gms, n=n, p=_p_reduced)
         _reduced_tabmat_state = TabmatCenteringState()
+        if _scop_run is not None:
+            _seed_refusals(_reduced_tabmat_state, _scop_run.reduced_refusals)
 
         _scop_specs = {
             gi: _SCOPGroupSpec(
@@ -2131,6 +2277,8 @@ def _fit_irls_direct_once(
     _tabmat_centering_state = TabmatCenteringState(
         raw_spline_eligible=False if _defer_raw_spline else None
     )
+    if _scop_run is not None:
+        _seed_refusals(_tabmat_centering_state, _scop_run.full_refusals)
     fixed_owners = ()
     if _raw_moment_policy is not None or _fisher_data_reuse is not None:
         # A negative route choice is safe for changed W; no accepted preflight,
@@ -2259,6 +2407,8 @@ def _fit_irls_direct_once(
         )
         if fisher is not None and fisher.data is None:
             fisher.remember(W_current, system)
+        if _scop_run is not None:
+            _carry_refusals(_scop_run.full_refusals, _tabmat_centering_state)
         if _raw_moment_policy is not None and _tabmat_centering_state.raw_moment_eligible is False:
             _raw_moment_policy.raw_moment_eligible = False
         if reuse is not None:
@@ -2353,7 +2503,7 @@ def _fit_irls_direct_once(
     _t_eta = 0.0
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
-    # its mean_x less the state's centre (``centre_offset_mean``), None without one
+    # its mean_x less the state's centre (``_system_offset_mean``), None without one
     _last_working_offset_mean: NDArray | None = None
     _last_working_structured: (
         FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
@@ -2666,9 +2816,7 @@ def _fit_irls_direct_once(
             intercept = centered.mean_z - float(centered.mean_x @ beta)
             _last_working_offset_mean = None
             if _state_center is not None:
-                _last_working_offset_mean = centre_offset_mean(
-                    dm, W, centered.sum_w, _state_center, centered.mean_x
-                )
+                _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
                 proposal_centred_intercept = centered.mean_z - math.fsum(
                     _last_working_offset_mean * beta
                 )
@@ -2707,7 +2855,13 @@ def _fit_irls_direct_once(
 
                 # Step 3: Profile the intercept in stable centered
                 # coordinates.  The raw augmented Gram loses the ordinary
-                # slope entirely after a large column translation.
+                # slope entirely after a large column translation, so the
+                # system comes from ``build_centered_system``, the authority
+                # every other route of this solver uses as it stands: it
+                # subtracts raw moments only under ``_raw_centering_well_scaled``
+                # and otherwise centres before it multiplies (anchor-centred
+                # compact supports, centred row chunks, a dense column's
+                # corrected two-pass pair).
                 reduced_centered = build_centered_system(
                     dm=_reduced_dm,
                     W=W,
@@ -2717,20 +2871,24 @@ def _fit_irls_direct_once(
                     tabmat_state=_reduced_tabmat_state,
                     profile=profile,
                 )
+                if _scop_run is not None:
+                    _carry_refusals(_scop_run.reduced_refusals, _reduced_tabmat_state)
+                # The certificate, read on the system's own location and
+                # spread, chooses only how Step 5 forms eta.  It no longer
+                # rebuilds the system: a rejection here can only fall on a
+                # column the builder centred first (a raw rung's columns
+                # passed this same test on these same numbers), so the rebuild
+                # recomputed a centred Gram by materialising the whole design
+                # twice per iteration.  A bounded column trips it whenever its
+                # weighted mean exceeds its centred RMS, e.g. a 0/1 indicator
+                # of weighted frequency above 1/2.
                 reduced_scale = np.sqrt(
                     np.maximum(np.diag(reduced_centered.data_gram), 0.0) / reduced_centered.sum_w
                 )
-                use_anchor_centering = not _raw_centering_well_scaled(
+                centred_prediction = not _raw_centering_well_scaled(
                     reduced_centered.mean_x,
                     reduced_scale,
                 )
-                if use_anchor_centering:
-                    reduced_centered = build_anchor_centered_system(
-                        dm=_reduced_dm,
-                        W=W,
-                        z_off=z_adj,
-                        penalty=_S_reduced,
-                    )
                 _t_gram += time.perf_counter() - _t0
 
                 # Step 4: Solve for unconstrained coefficients
@@ -2768,12 +2926,9 @@ def _fit_irls_direct_once(
                 _t_solve += time.perf_counter() - _t0
 
                 # Step 5: Compute residual for SCOP Newton step
-                if use_anchor_centering:
-                    eta_unconstrained = reduced_centered.mean_z + stable_centered_matvec(
-                        dm=_reduced_dm,
-                        beta=beta_reduced,
-                        W=W,
-                        sum_w=reduced_centered.sum_w,
+                if centred_prediction:
+                    eta_unconstrained = reduced_centered.mean_z + _centred_system_matvec(
+                        _reduced_dm, beta_reduced, reduced_centered
                     )
                 else:
                     eta_unconstrained = intercept + _reduced_dm.matvec(beta_reduced)
@@ -3032,11 +3187,10 @@ def _fit_irls_direct_once(
                 _last_working_offset_mean = None
                 if _state_center is not None:
                     # the intercept about the state's centre, from the offset
-                    # of the working mean to it, formed on centred rows
-                    # (``centre_offset_mean``): no raw-scale cancellation
-                    _last_working_offset_mean = centre_offset_mean(
-                        dm, W, centered.sum_w, _state_center, centered.mean_x
-                    )
+                    # of the working mean to it, formed on centred rows (the
+                    # system's pair, else ``centre_offset_mean``): no
+                    # raw-scale cancellation
+                    _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
                     proposal_centred_intercept = centered.mean_z - math.fsum(
                         _last_working_offset_mean * beta
                     )
@@ -3984,7 +4138,7 @@ def _fit_irls_direct_once(
                 message = format_runtime_message(separation_ratio, it + 1, drifting, pinned)
                 if separation == "error":
                     raise SeparationError(message)
-                warnings.warn(message, SeparationWarning, stacklevel=2)
+                held_warnings.warn(message, SeparationWarning, stacklevel=2)
 
     if has_constraints:
         if A_all is None or b_all is None:  # pragma: no cover - construction invariant
@@ -4257,9 +4411,7 @@ def _fit_irls_direct_once(
             offset_mean_final = (
                 None
                 if _state_center is None or cache_out is None
-                else centre_offset_mean(
-                    dm, W, centered_final.sum_w, _state_center, centered_final.mean_x
-                )
+                else _system_offset_mean(dm, W, centered_final, _state_center)
             )
         XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
         sum_W = centered_final.sum_w
@@ -4411,6 +4563,8 @@ def _fit_irls_direct_once(
                 mean_x=np.asarray(centered_final.mean_x, dtype=np.float64),
                 sum_w=float(centered_final.sum_w),
                 column_scale=np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
+                mean_hi=centered_final.mean_hi,
+                mean_lo=centered_final.mean_lo,
             )
         else:
             reml_slope_rank = None

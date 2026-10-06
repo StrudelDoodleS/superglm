@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import numpy as np
 
+from superglm.diagnostics.convergence import reml_nonconvergence_message
 from superglm.inference._term_helpers import (
     ordered_level_fit,
     spline_group_enrichment,
@@ -70,6 +71,10 @@ def diagnostics(model) -> dict[str, Any]:
             if getattr(model, "_reml_result", None) is not None
             else res.converged
         ),
+        "termination_reason": getattr(
+            getattr(model, "_reml_result", None), "termination_reason", None
+        ),
+        "convergence_note": reml_nonconvergence_message(getattr(model, "_reml_result", None)),
         "lambda1": penalty.lambda1,
         "weakly_identified": list(reml_profile.get("reml_weakly_identified_labels", ()) or ()),
         "excluded_from_smoothing_selection": list(
@@ -277,6 +282,10 @@ def summary(
             else res.n_iter
         ),
     }
+    convergence_note = reml_nonconvergence_message(getattr(model, "_reml_result", None))
+    if convergence_note is not None:
+        model_info["termination_reason"] = model._reml_result.termination_reason
+        model_info["convergence_note"] = convergence_note
     editor_meta = getattr(model, "_editor_edits", None)
     if getattr(model, "_editor_inference_stale", False):
         model_info["editor_inference_stale"] = True

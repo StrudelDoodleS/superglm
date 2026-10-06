@@ -276,3 +276,24 @@ test("chart size is the laid-out viewport in whole pixels, or the fallback witho
   }
   assert.ok(Object.isFrozen(FALLBACK_CHART_SIZE));
 });
+
+test("a taller title row grows the bottom gutter and leaves the labels where they were", () => {
+  const labels = ["T01", "T02", "T03"];
+  /** @param {number} titleHeight */
+  const plan = (titleHeight) => planCategoricalAxis({
+    values: [0, 1, 2],
+    labels,
+    measurements: labels.map((label) => measurement(label)),
+    availableWidth: 788,
+    svgHeight: 520,
+    baseLeft: 76,
+    baseBottom: 0,
+    titleHeight,
+  });
+  const plain = plan(14);
+  const roomy = plan(34);
+  assert.ok(plain.axisY < plain.labelsBottom && plain.labelsBottom < plain.titleY);
+  assert.equal(roomy.bottom - plain.bottom, 20);
+  assert.equal(roomy.labelsBottom - roomy.axisY, plain.labelsBottom - plain.axisY);
+  assert.equal(roomy.titleY - roomy.labelsBottom, plain.titleY - plain.labelsBottom);
+});

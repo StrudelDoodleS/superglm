@@ -34,7 +34,11 @@ import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from superglm.features.categorical import _grouping_labels, _validate_categorical_levels
+from superglm.features.categorical import (
+    _grouping_labels,
+    _validate_categorical_levels,
+    _validate_missing_only,
+)
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.types import GroupInfo, LinearConstraintSet
@@ -319,6 +323,30 @@ def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
             )
 
 
+class GroupNamedAsSpecialError(ValueError):
+    """A group of other levels is named as a free level is spelled."""
+
+
+def _require_no_group_named_as_special(grouping: Any, spellings: dict[str, Any]) -> None:
+    """Refuse a group of other levels whose label is a spelling of a special.
+
+    ``spellings`` maps each text a special's indicator matches, the one
+    ``specials=`` declares (``"9"``) and the one the term reports (``"9.0"``),
+    to the special as reported. A group named either way would have its rows
+    claimed by that indicator and fitted as the special.
+    """
+    if grouping is None:
+        return
+    for label, originals in grouping.group_to_originals.items():
+        text = str(label)
+        if text in spellings and [str(member) for member in originals] != [str(spellings[text])]:
+            raise GroupNamedAsSpecialError(
+                f"OrderedCategorical grouping names a group of other levels {text!r}, a "
+                f"spelling of the free level {spellings[text]!r}, so that level's indicator would "
+                "claim the group's rows; give the group another name."
+            )
+
+
 class OrderedCategorical:
     """Ordered categorical feature smoothed by a spline over its level values.
 
@@ -426,6 +454,11 @@ class OrderedCategorical:
 
         Categorical(base="most_exposed")
     """
+
+    # Whether `base=` names a band although it reads "first" or "most_exposed".
+    # Only a rebuild sets it, for a reference a fit resolved or a user chose. A
+    # class attribute so a spec pickled before it existed reads False.
+    _base_is_level: bool = False
 
     def __init__(
         self,
@@ -604,7 +637,11 @@ class OrderedCategorical:
         # namespace and no downstream site has to reconcile them again -- the
         # editor previously carried its own copy of this, and the direct
         # `grouping=` path carried none.
-        grouping = _regroup_to_declared(grouping, self._ordered_levels + list(self._specials))
+        # A special is spelled as the term reports it (9.0 beside 1.0 for
+        # specials=[9]): rows canonicalise to that spelling and every report
+        # joins on it, so a grouping spelling it "9" would cover none of them.
+        grouping = _regroup_to_declared(grouping, self._ordered_levels + self._special_display)
+        grouped_specials = {str(level) for level in self._special_display}
         # RESERVED SEAM -- penalized collapse (L1 fusion), not built. Gertheiss
         # & Tutz (2010), "Sparse modeling of categorial explanatory variables",
         # Ann. Appl. Stat. 4(4):2150-2180: an L1 penalty on adjacent
@@ -619,7 +656,15 @@ class OrderedCategorical:
         # renames a special is wrong for a specific, explainable reason, and
         # that reason is more useful than the generic 'no numeric position'
         # symptom it would otherwise produce first.
-        _require_no_grouped_specials(grouping, special_set)
+        _require_no_grouped_specials(grouping, grouped_specials)
+        _require_no_group_named_as_special(
+            grouping,
+            {
+                text: shown
+                for coerced, shown in zip(self._specials, self._special_display)
+                for text in (coerced, str(shown))
+            },
+        )
         self._original_level_to_value: dict[str, float] | None = None
         if grouping is not None:
             # Preserve original level→value mapping for plot expansion
@@ -665,7 +710,7 @@ class OrderedCategorical:
                 # `_expand_grouped_term`. Named here instead, beside the group
                 # that caused it.
                 undeclared = [str(o) for o in originals if str(o) not in by_text]
-                if vals and undeclared and str(glev) not in special_set:
+                if vals and undeclared and str(glev) not in grouped_specials:
                     raise ValueError(
                         f"OrderedCategorical grouping puts undeclared level(s) "
                         f"{undeclared!r} in group {glev!r}, whose other members are "
@@ -681,7 +726,7 @@ class OrderedCategorical:
             missing = [
                 g
                 for g in grouping.grouped_levels
-                if g not in grouped_ltv and str(g) not in special_set
+                if g not in grouped_ltv and str(g) not in grouped_specials
             ]
             if missing:
                 raise ValueError(
@@ -690,7 +735,9 @@ class OrderedCategorical:
                     "and the declaration disagree about how levels are named."
                 )
             self._level_to_value = grouped_ltv
-            self._smooth_levels = [lev for lev in grouping.grouped_levels if lev not in special_set]
+            self._smooth_levels = [
+                lev for lev in grouping.grouped_levels if lev not in grouped_specials
+            ]
             # _known_levels includes all *original* levels (for predict-time validation)
             self._known_levels = set(grouping.all_original_levels) | known_special_labels
         else:
@@ -714,6 +761,7 @@ class OrderedCategorical:
             )
 
         # Reporting state, populated by _choose_base at build time.
+        self._base_is_level: bool = False
         self._base_level: str = ""
         self._non_base: list[str] = []
 
@@ -1226,19 +1274,22 @@ class OrderedCategorical:
 
         Specials are excluded: the base anchors every reported relativity and
         must lie on the smooth. On a real book a MISSING band is often the most
-        exposed level, so ``most_exposed`` would otherwise select it.
+        exposed level, so ``most_exposed`` would otherwise select it. A
+        ``base=`` a rebuild marked as a band (``_base_is_level``) names that
+        band, even when it reads "first" or "most_exposed".
         """
         if self._base_level and self._base_level in self._smooth_levels:
             return
 
-        if self.base == "most_exposed" and sample_weight is not None:
+        policy = None if self._base_is_level else self.base
+        if policy == "most_exposed" and sample_weight is not None:
             exp_by_level = {
                 lev: float(sample_weight[x == lev].sum()) for lev in self._smooth_levels
             }
             self._base_level = max(exp_by_level, key=exp_by_level.get)
-        elif self.base == "most_exposed" and sample_weight is None:
+        elif policy == "most_exposed" and sample_weight is None:
             self._base_level = self._smooth_levels[0]
-        elif self.base == "first":
+        elif policy == "first":
             self._base_level = self._smooth_levels[0]
         else:
             # `base=` is the user's own spelling of a level and need not match the
@@ -1302,12 +1353,42 @@ class OrderedCategorical:
 
         if self._grouping is not None:
             x = _grouping_labels(x)
-            _validate_categorical_levels(x, self._known_levels)
+            self._refuse_unknown_training_levels(x)
             x = pd.Series(x).map(self._grouping.original_to_group).values
         else:
-            _validate_categorical_levels(x, self._known_levels)
+            self._refuse_unknown_training_levels(x)
 
         return self._build_spline(x, reporting_weight, geometry_weight)
+
+    def _refuse_unknown_training_levels(self, x: NDArray) -> None:
+        """Refuse, as a fit, training levels outside the declaration or its grouping.
+
+        A level the fit does not admit is either not declared at all, or
+        declared but missing from a grouping built from other data; the
+        sentence says which. Predict-time levels keep their own sentence.
+        """
+        _validate_missing_only(x)
+        unknown = set(pd.unique(np.asarray(x).ravel()).tolist()) - self._known_levels
+        if not unknown:
+            return
+        declared = [*self._declared_smooth_levels, *self._special_display]
+        texts = {str(level) for level in declared}
+        undeclared = [
+            level for level in unknown if self._grouping is None or str(level) not in texts
+        ]
+        if undeclared:
+            raise ValueError(
+                f"Training data contains levels this OrderedCategorical does not declare: "
+                f"{sorted(undeclared, key=str)}. Declared: {declared}. Add them to order= or "
+                f"values=, or to specials= for a level off the ordered axis, or leave those "
+                f"rows out."
+            )
+        raise ValueError(
+            f"Training data contains levels the grouping does not cover: "
+            f"{sorted(unknown, key=str)}. Covered: "
+            f"{sorted(self._grouping.all_original_levels, key=str)}. Build the grouping from "
+            f"the full column, or leave those rows out."
+        )
 
     def _build_inner_info(
         self,
@@ -1450,12 +1531,14 @@ class OrderedCategorical:
         declared as a non-str is matched against its raw label as well. That
         comparison runs through pandas, which yields element-wise ``False``
         when the column's dtype cannot hold the label rather than raising.
+        A grouped term's labels are strings spelled as the special is reported
+        (``"9.0"``), so that spelling matches as well.
         """
         raw = pd.Series(np.asarray(x).ravel())
         labels = raw.astype(str).to_numpy()
         columns = []
-        for lev, raw_lev in zip(self._specials, self._special_raw):
-            hit = labels == lev
+        for lev, raw_lev, shown in zip(self._specials, self._special_raw, self._special_display):
+            hit = (labels == lev) | (labels == str(shown))
             if not isinstance(raw_lev, str):
                 hit = hit | np.asarray(raw == raw_lev, dtype=bool)
             columns.append(hit)

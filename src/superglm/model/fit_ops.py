@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from superglm.model.input_validation import validate_fit_input
 from superglm.model.reml_execute import (
     optimize_reml_best,
     record_reml_terminal,
+    resolve_max_reml_iter,
     run_fixed_monotone_reml,
     run_scop_efs_reml,
 )
@@ -60,8 +62,10 @@ from superglm.model.reml_setup import (
     constraint_engine_flags,
     initialize_component_lambdas,
     inject_fixed_scop_lambdas,
+    live_reml_lambdas,
     restore_qp_constraints,
     strip_qp_constraints,
+    warm_start_lambdas,
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -1369,7 +1373,7 @@ def _refine_nb_theta_to_reml_fixed_point(
         theta = float(f"{solve.theta:.6g}")
         refits += 1
         model.family = NegativeBinomial(theta=theta)
-        warm_lambdas = dict(model._reml_result.lambdas)
+        warm_lambdas = live_reml_lambdas(model)
         debug_recorder = _fit_reml_in_workspace(
             model,
             X,
@@ -1380,7 +1384,7 @@ def _refine_nb_theta_to_reml_fixed_point(
             y_ref=y_ref,
             sample_weight_ref=sample_weight_ref,
             offset_ref=offset_ref,
-            lambda2_init=warm_lambdas,
+            lambda2_init=warm_lambdas or None,
             durable_retain_fit_state=durable_retain_fit_state,
             **refit_kwargs,
         )
@@ -1849,7 +1853,7 @@ def fit_reml(
     sample_weight=None,
     offset=None,
     *,
-    max_reml_iter=20,
+    max_reml_iter=None,
     reml_tol=None,
     pirls_tol=1e-6,
     max_pirls_iter=100,
@@ -1945,7 +1949,35 @@ def fit_reml(
     )
     _install_fit_state(model, candidate)
     _record_reml_terminal_best_effort(model, debug_recorder)
+    warn_published_reml_nonconvergence(model, stacklevel=3)
     return model
+
+
+def warn_published_reml_nonconvergence(model, *, stacklevel: int) -> None:
+    """Warn once that a published fit_reml fit stopped unconverged.
+
+    Returned, not refused, and never silent: called after the state it
+    describes is public, by ``fit_reml`` and by the REML publication refit of
+    ``estimate_p`` and ``estimate_theta``. Internal candidate fits (the Tweedie
+    power search) set ``_suppress_convergence_warning``: they disclose
+    convergence in their own result instead of warning per candidate.
+    ``stacklevel`` counts from the caller of this function, as
+    ``warnings.warn`` does.
+    """
+    if getattr(model, "_suppress_convergence_warning", False):
+        return
+    from superglm.diagnostics.convergence import (
+        warn_coefficient_nonconvergence,
+        warn_reml_nonconvergence,
+    )
+
+    reml_result = getattr(model, "_reml_result", None)
+    if reml_result is not None:
+        warn_reml_nonconvergence(reml_result, stacklevel=stacklevel + 1)
+    else:
+        # No REML-eligible groups: fit_reml fell back to the plain coefficient
+        # fit, whose own convergence must not go unreported.
+        warn_coefficient_nonconvergence(getattr(model, "_result", None), stacklevel=stacklevel + 1)
 
 
 def _record_reml_terminal_best_effort(model, debug_recorder) -> None:
@@ -1979,7 +2011,7 @@ def _fit_reml_in_workspace(
     y_ref,
     sample_weight_ref,
     offset_ref,
-    max_reml_iter=20,
+    max_reml_iter=None,
     reml_tol=None,
     pirls_tol=1e-6,
     max_pirls_iter=100,
@@ -2014,7 +2046,11 @@ def _fit_reml_in_workspace(
 
     _t_total_start = _time.perf_counter()
     _profile: dict = {}
-    _profile.update(_resolve_interaction_reml_mode(model, interaction_mode, max_reml_iter))
+    _profile.update(
+        _resolve_interaction_reml_mode(
+            model, interaction_mode, resolve_max_reml_iter(max_reml_iter, engine="newton")
+        )
+    )
     _validate_runtime_validation_mode(runtime_validation)
     effective_max_reml_iter = _profile["effective_max_reml_iter"]
     if _profile["interaction_candidate_active"] and reml_tol is None:
@@ -2037,6 +2073,15 @@ def _fit_reml_in_workspace(
     _has_monotone, _has_qp_monotone, _has_scop_monotone = constraint_engine_flags(model._groups)
     if _has_qp_monotone and _has_scop_monotone:
         raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
+    if max_reml_iter is None and _has_scop_monotone:
+        # The SCOP engine steps by Fellner-Schall: its own, larger default cap.
+        _profile.update(
+            _resolve_interaction_reml_mode(
+                model, interaction_mode, resolve_max_reml_iter(None, engine="step")
+            )
+        )
+        effective_max_reml_iter = _profile["effective_max_reml_iter"]
+    _profile["max_reml_iter_defaulted"] = max_reml_iter is None
     debug_recorder = _make_reml_debug_recorder(
         model,
         y=y,
@@ -2118,7 +2163,23 @@ def _fit_reml_in_workspace(
     # Initialize per-component lambdas (penalty-indexed, not term-indexed)
     # Partition into fixed (policy.mode == "fixed") and estimated components.
     lam_init = lambda2_init if lambda2_init is not None else configured_smoothing
-    lambdas, estimated_names = initialize_component_lambdas(reml_penalties, lam_init)
+    # A mapping lambda2_init (a previous fit's ``reml_diagnostics()["lambdas"]``)
+    # is a warm start the engines bootstrap from; a scalar keeps its cold meaning.
+    # Under a mapping, every component it does not warm-start -- unnamed, or in
+    # a block it names only in part -- starts exactly as a fit without it: the
+    # engines read these values too (the tensor bootstrap caps its first step
+    # around them), so a refused warm value left here still steered the fit.
+    lambdas, estimated_names = initialize_component_lambdas(
+        reml_penalties,
+        configured_smoothing if isinstance(lambda2_init, Mapping) else lam_init,
+    )
+    warm_lambdas = warm_start_lambdas(
+        reml_penalties,
+        lambda2_init,
+        estimated_names,
+        other_names=[group.name for group in model._groups],
+    )
+    lambdas.update(warm_lambdas)
     _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
     # QP monotone with auto lambda → two-stage passthrough heuristic:
@@ -2193,6 +2254,7 @@ def _fit_reml_in_workspace(
                 lambdas=lambdas,
                 estimated_names=estimated_names,
                 lam_init=lam_init,
+                warm_lambdas=warm_lambdas,
                 reml_penalties=reml_penalties,
                 max_reml_iter=effective_max_reml_iter,
                 reml_tol=reml_tol,
@@ -2255,6 +2317,7 @@ def _fit_reml_in_workspace(
             model_optimize_direct_reml=model_optimize_direct_reml,
             model_optimize_efs_reml=model_optimize_efs_reml,
             debug_recorder=debug_recorder,
+            warm_lambdas=warm_lambdas,
         )
         lambdas, n_reml_iter, converged = finalize_reml_fit(
             model,

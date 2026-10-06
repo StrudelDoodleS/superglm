@@ -7,6 +7,11 @@ from typing import Any
 from superglm.editor.errors import EditorValueError
 from superglm.editor.terms import resolve_refit_method
 
+# The penalties a Refit was given explicitly ({"lambda1": ..., "lambda2": ...}),
+# kept on the refitted model and carried by later Refits, so Run CV and Final
+# fit keep the analyst's choice instead of the opened model's declaration.
+EXPLICIT_PENALTY_ATTRIBUTE = "_editor_explicit_penalty"
+
 
 def fit_refit_model(
     source_model,

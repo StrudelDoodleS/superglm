@@ -14,8 +14,24 @@ class FakeElement {
     this.tagName = tagName.toUpperCase();
     this.dataset = {};
     this.disabled = false;
+    this.hidden = false;
+    this.textContent = "";
     this.isContentEditable = false;
     this.listeners = new Map();
+    this.attributes = new Map();
+    this.classes = new Set();
+    this.classList = {
+      toggle: (name, force) => (force ? this.classes.add(name) : this.classes.delete(name)),
+      contains: (name) => this.classes.has(name),
+    };
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
   }
 
   addEventListener(name, listener) {
@@ -97,11 +113,13 @@ test("global undo and redo shortcuts pause while any native dialog is open", (t)
     redoButton,
     revertButton: new FakeButton(),
     refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
     onView: () => {},
     onUndo: () => { undoCalls += 1; },
     onRedo: () => { redoCalls += 1; },
     onRevert: () => {},
     onRefresh: () => {},
+    onRefit: () => {},
   });
 
   documentHub.openDialog = new FakeElement("dialog");
@@ -128,6 +146,8 @@ test("Refresh is disabled while busy and Revert only when something can be rever
     redoButton: new FakeButton(),
     revertButton: new FakeButton(),
     refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    refitCount: new FakeElement("span"),
   };
   const render = (overrides) => renderAppBar({
     root,
@@ -137,6 +157,7 @@ test("Refresh is disabled while busy and Revert only when something can be rever
     redoLabel: null,
     canRevert: false,
     busy: false,
+    pendingCount: 0,
     ...overrides,
   });
 
@@ -161,10 +182,13 @@ test("Undo and Redo follow the snapshot and name what they would take", () => {
     redoButton: new FakeButton(),
     revertButton: new FakeButton(),
     refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    refitCount: new FakeElement("span"),
   };
   const render = (undoLabel, redoLabel) => {
     renderAppBar({
       root, activeView: "editor", ...buttons, undoLabel, redoLabel, canRevert: false, busy: false,
+      pendingCount: 0,
     });
     const { undoButton, redoButton } = buttons;
     return [undoButton.disabled, undoButton.dataset.popoverBody,
@@ -199,6 +223,115 @@ test("Revert is available whenever anything differs from the opened model", () =
     revertAvailable(snapshot({ undo_redo: { undo: "revert to original model", redo: "x" } })),
     false,
   );
+  // A change waiting for Refit is something Revert takes back too; an undone one is not.
+  const waiting = {
+    kind: "pending", status: "waiting", label: "collapse B10 + B11 in brand", redo: false,
+  };
+  assert.equal(revertAvailable(snapshot({ timeline: [waiting, marker] })), true);
+  assert.equal(revertAvailable(snapshot({ timeline: [marker, { ...waiting, redo: true }] })), false);
   // A structural step or a distribution re-profile puts another model in force.
   assert.equal(revertAvailable(snapshot({ in_force_is_original: false })), true);
+});
+
+function installDocument(t) {
+  const saved = ["document", "Element", "HTMLElement", "HTMLButtonElement"].map(
+    (name) => [name, globalThis[name]],
+  );
+  const documentHub = new FakeElement("document");
+  globalThis.document = documentHub;
+  globalThis.Element = FakeElement;
+  globalThis.HTMLElement = FakeElement;
+  globalThis.HTMLButtonElement = FakeButton;
+  t.after(() => {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete globalThis[name];
+      else globalThis[name] = value;
+    }
+  });
+  return documentHub;
+}
+
+test("Refit shows the waiting count, and only a count enables it", () => {
+  const root = new FakeElement("nav");
+  const buttons = {
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    refitCount: new FakeElement("span"),
+  };
+  const render = (pendingCount, busy = false) => renderAppBar({
+    root, activeView: "editor", ...buttons, undoLabel: null, redoLabel: null,
+    canRevert: false, busy, pendingCount,
+  });
+  const { refitButton, refitCount } = buttons;
+
+  render(0);
+  assert.deepEqual(
+    [refitButton.disabled, refitCount.hidden, refitButton.classList.contains("has-pending")],
+    [true, true, false],
+  );
+  assert.equal(refitButton.getAttribute("aria-label"), "Refit, nothing waiting");
+  render(2);
+  assert.deepEqual(
+    [refitButton.disabled, refitCount.hidden, refitCount.textContent,
+      refitButton.classList.contains("has-pending")],
+    [false, false, "2", true],
+  );
+  assert.equal(refitButton.getAttribute("aria-label"), "Refit, 2 changes waiting");
+  assert.equal(
+    refitButton.dataset.popoverBody,
+    "Apply 2 changes in one fit. Hand edits on terms whose structure did not change are kept.",
+  );
+  render(1);
+  assert.equal(refitButton.getAttribute("aria-label"), "Refit, 1 change waiting");
+  render(1, true);
+  assert.equal(refitButton.disabled, true);
+});
+
+test("R refits what is waiting, except while typing, with a modifier, in a dialog, or with nothing waiting", (t) => {
+  const documentHub = installDocument(t);
+  const root = new FakeElement("nav");
+  const refitButton = new FakeButton();
+  let refits = 0;
+  const binding = bindAppBar({
+    root,
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton,
+    onView: () => {},
+    onUndo: () => {},
+    onRedo: () => {},
+    onRevert: () => {},
+    onRefresh: () => {},
+    onRefit: () => { refits += 1; },
+  });
+
+  const pressed = documentHub.emit("keydown", { key: "r" });
+  assert.equal(refits, 1);
+  assert.equal(pressed.defaultPrevented, true);
+  documentHub.emit("keydown", { key: "R", shiftKey: true });
+  assert.equal(refits, 2);
+
+  // Reload stays the browser's; typing and dialogs keep their keys.
+  documentHub.emit("keydown", { key: "r", ctrlKey: true });
+  documentHub.emit("keydown", { key: "r", metaKey: true });
+  documentHub.emit("keydown", { key: "r", target: new FakeElement("input") });
+  documentHub.openDialog = new FakeElement("dialog");
+  documentHub.emit("keydown", { key: "r" });
+  documentHub.openDialog = null;
+  refitButton.disabled = true;
+  documentHub.emit("keydown", { key: "r" });
+  assert.equal(refits, 2);
+
+  refitButton.disabled = false;
+  refitButton.emit("click");
+  assert.equal(refits, 3);
+  binding.destroy();
+  documentHub.emit("keydown", { key: "r" });
+  refitButton.emit("click");
+  assert.equal(refits, 3);
 });

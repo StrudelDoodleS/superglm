@@ -1316,7 +1316,86 @@ def penalty_component_matvec(
         repeat_count, block_width = _repeated_penalty_geometry(component)
         blocks = beta.reshape(repeat_count, block_width)
         return np.asarray(blocks @ omega.T, dtype=np.float64).ravel()
+    rank = int(round(float(component.rank)))
+    if omega is not None and 0 < rank < omega.shape[0]:
+        # Over the penalty's range, as ``penalty_component_quadratic`` evaluates it:
+        # ``V (Lambda (V' beta))`` keeps its rounding in the range.  The dense
+        # product leaks rounding into the null space, where the penalty has no
+        # curvature to absorb it, and at very large lambda that leak stalls PIRLS
+        # (test_sz_reml_beside_weightless_levels_converges_from_a_large_main_lambda).
+        values, vectors = _penalty_range_basis(component, omega, rank)
+        return _range_product(values, vectors, beta)
     return omega @ beta
+
+
+def penalty_product_rounding(width: int, components: Sequence[PenaltyComponent] | None) -> int:
+    """``k`` with ``|fl(S v) - S v| <= gamma_k fl(|S| |v|)`` entrywise, for a penalty product.
+
+    The product is either one formed dense ``S`` times ``v`` (``components``
+    None), or the components' products summed as ``product[sl] += lam *
+    penalty_component_matvec(...)`` (``irls_direct``'s ``penalty_matvec``,
+    ``total_penalty_matvec``), with the magnitude ``|S| |v|`` summed the same
+    way (``penalty_component_magnitude_matvec``).  Counting roundings along
+    each entry's chain (Higham 2002, sections 3.1 and 3.5):
+
+    - one component's entry, against its own magnitude: none for the
+      identity; a ``b``-term dot for a repeated block (``b <= w``); a
+      ``w``-term dot for a full-rank dense penalty; over a rank-deficient
+      dense penalty's range, ``V' v`` (``w`` terms), the eigenvalue scaling
+      and ``V (.)`` (``r`` terms), ``w + r + 1 <= 2 w`` since ``r < w`` (the
+      powers of two of ``_range_product`` are exact); for sum-to-zero, the
+      expansion's ``L - 2`` additions, a ``b``-term dot and the adjoint's
+      subtraction, ``L + b - 1 <= 2 w`` for ``w = (L - 1) b``, ``L >= 2``.
+      So at most ``2 w``, ``w`` the component's width, and none for an
+      identity;
+    - one more for ``lam`` times it, and ``m - 1`` for adding the ``m``
+      components that cover the coefficient: at most ``2 w + m``;
+    - the magnitude is formed by the same chain on non-negative terms, so
+      the computed one is at least ``(1 - gamma_k)`` times the exact one, and
+      ``gamma_k / (1 - gamma_k) <= gamma_{k+1}`` (when ``k (k + 1) u <= 1``)
+      puts the bound on the computed magnitude: one more.
+
+    That is ``2 w_max + m_max + 1`` over the components, ``w_max`` the
+    widest that is not an identity and ``m_max`` the most covering one
+    coefficient.  A formed dense
+    ``S`` takes one ``width``-term dot and the magnitude's own rounding,
+    ``width + 1``; ``width + 2``, the count these products' readers always
+    used for it, covers that.
+    """
+    if components is None:
+        return int(width) + 2
+    covering = np.zeros(int(width), dtype=np.int64)
+    widest = 0
+    for component in components:
+        covering[component.group_sl] += 1
+        if component.penalty_kind != "identity":
+            widest = max(widest, component.group_sl.stop - component.group_sl.start)
+    return 2 * widest + max(int(np.max(covering, initial=0)), 1) + 1
+
+
+def _binary_exponent(values: NDArray) -> int:
+    """``e`` with the largest ``|values|`` in ``[2**(e - 1), 2**e)``; 0 when there is none."""
+    largest = float(np.max(np.abs(values), initial=0.0))
+    return int(np.frexp(largest)[1]) if np.isfinite(largest) and largest > 0.0 else 0
+
+
+def _range_product(values: NDArray, vectors: NDArray, beta: NDArray) -> NDArray:
+    """``V (Lambda (V' beta))``, with ``beta`` and ``Lambda`` brought to ``[1/2, 1)`` by powers of two.
+
+    Each scaling is exact, and so is undoing both at the end, so wherever no
+    intermediate leaves the normal range the result is bit for bit the
+    unscaled product.  The scaling keeps ``V' beta`` from overflowing ahead
+    of an eigenvalue small enough to bring the product back into range, and
+    a subnormal eigenvalue from losing digits (AGENTS.md, numerical policy).
+    A result outside the range is inf, or rounds towards 0, as the true one
+    does; callers check it is finite.
+    """
+    beta_exponent = _binary_exponent(beta)
+    value_exponent = _binary_exponent(values)
+    scaled = vectors @ (
+        np.ldexp(values, -value_exponent) * (vectors.T @ np.ldexp(beta, -beta_exponent))
+    )
+    return np.ldexp(scaled, beta_exponent + value_exponent)
 
 
 def penalty_component_magnitude_matvec(
@@ -1330,13 +1409,18 @@ def penalty_component_magnitude_matvec(
     identity, ``[I; -1]`` for sum-to-zero, or the repeat).  Each entry that
     routine forms rounds to within ``gamma_m`` times this for ``m`` additions
     along its chain (Higham 2002, section 3.1), at most the group width plus two.
+    A rank-deficient dense penalty's product over its range sums ``|V| |Lambda|
+    |V'| |beta|`` instead, along a chain of at most twice the group width.
     """
     magnitude = np.asarray(beta_magnitude, dtype=np.float64)
     if component.penalty_kind == "identity":
         return magnitude.copy()
-    omega = np.abs(
-        np.asarray(_penalty_component_omega_ssp(component, group_matrix), dtype=np.float64)
-    )
+    signed = np.asarray(_penalty_component_omega_ssp(component, group_matrix), dtype=np.float64)
+    rank = int(round(float(component.rank)))
+    if component.penalty_kind == "dense" and 0 < rank < signed.shape[0]:
+        values, vectors = _penalty_range_basis(component, signed, rank)
+        return _range_product(np.abs(values), np.abs(vectors), magnitude)
+    omega = np.abs(signed)
     if component.penalty_kind == "sum_to_zero":
         n_levels, block_width = _sum_to_zero_penalty_geometry(component)
         free = magnitude.reshape(n_levels - 1, block_width)

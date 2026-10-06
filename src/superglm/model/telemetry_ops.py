@@ -11,6 +11,10 @@ from typing import Any
 import numpy as np
 
 from superglm import __version__
+from superglm.diagnostics.convergence import (
+    coefficient_nonconvergence_message,
+    reml_nonconvergence_message,
+)
 
 
 def training_telemetry(model) -> dict[str, Any]:
@@ -62,20 +66,36 @@ def reml_diagnostics(model) -> dict[str, Any]:
     """Return REML telemetry for an already-fitted model.
 
     If the model was not fit with REML, the returned payload has
-    ``enabled=False`` and empty lambda/history fields.
+    ``enabled=False`` and empty lambda/history fields. A ``fit_reml`` fit with
+    no smoothing to select fits its coefficients directly; its payload also
+    carries that fit's ``converged``, ``termination_reason``,
+    ``convergence_note`` and ``terminal_refit_termination``.
+    ``terminal_refit_termination`` names the final coefficient fit's stop when
+    that fit missed its convergence test, and is None otherwise.
     """
     reml = getattr(model, "_reml_result", None)
     lambdas = _model_lambdas(model)
     profile = getattr(model, "_reml_profile", None) or {}
     if reml is None:
-        return _json_ready(
-            {
-                "enabled": False,
-                "lambdas": {},
-                "lambda_history": [],
-                "profile": profile,
-            }
-        )
+        payload: dict[str, Any] = {
+            "enabled": False,
+            "lambdas": {},
+            "lambda_history": [],
+            "profile": profile,
+        }
+        if (getattr(model, "_last_fit_meta", None) or {}).get("method") == "fit_reml":
+            # The ConvergenceWarning points here; the coefficient fit is the
+            # only stage, so its stop is the terminal fit's.
+            result = getattr(model, "_result", None)
+            converged = None if result is None else bool(result.converged)
+            reason = getattr(result, "termination_reason", None)
+            payload.update(
+                converged=converged,
+                termination_reason=reason,
+                convergence_note=coefficient_nonconvergence_message(result),
+                terminal_refit_termination=None if converged is not False else reason,
+            )
+        return _json_ready(payload)
     return _json_ready(
         {
             "enabled": True,
@@ -84,9 +104,18 @@ def reml_diagnostics(model) -> dict[str, Any]:
             "n_reml_iter": getattr(reml, "n_reml_iter", None),
             "converged": getattr(reml, "converged", None),
             "termination_reason": getattr(reml, "termination_reason", None),
+            "convergence_note": reml_nonconvergence_message(reml),
+            "terminal_refit_termination": getattr(reml, "terminal_refit_termination", None),
             "objective": getattr(reml, "objective", None),
             "objective_history": getattr(reml, "objective_history", None),
             "inner_iter_history": getattr(reml, "inner_iter_history", None),
+            # The monotone (SCOP) engine's step per iteration ("newton",
+            # "efs", "efs_fisher" where a Fisher-fallback iterate took an EFS
+            # step, or "efs_uncorrected" where the Newton Jacobian's SCOP terms
+            # could not be formed), and why the run fell back to EFS steps, or None
+            # (``REMLResult.scop_newton_fallback`` lists the reasons).
+            "scop_outer_steps": getattr(reml, "scop_outer_steps", None),
+            "scop_newton_fallback": getattr(reml, "scop_newton_fallback", None),
             "profile": profile,
         }
     )

@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-from itertools import chain
 from typing import Any
 
 import numpy as np
 
-from superglm.editor._types import StructuralStep
-from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES
+from superglm.editor._types import PendingStep, StructuralStep
+from superglm.editor.collapse import KEPT_REFERENCE_ATTRIBUTE
+from superglm.editor.controls import (
+    CONTROL_HANDLE_TERM_TYPES,
+    OrderedSplineGeometry,
+    ordered_control_points,
+    spline_fits_levels,
+)
 from superglm.editor.group_display import build_group_display
-from superglm.editor.shapes import shape_payload
+from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
+from superglm.editor.unseen import unseen_payload
+from superglm.features.categorical import Categorical
+from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.rebuild import base_names_level
 
 _MAX_INTERACTIVE_HANDLES = 420
 
@@ -26,12 +35,15 @@ def session_payload(
     # link-scale session state to relativity-scale display arrays and includes
     # only JSON-safe primitives.
     payload: dict[str, dict[str, Any]] = {}
+    edited = set(session.edited_terms())
     for name, term in session.terms.items():
         x_values = list(range(term.size)) if term.x is None else [float(v) for v in term.x]
         weights = _term_weights(term)
         edit_delta = np.asarray(term.edited_log_effect - term.original_log_effect, dtype=np.float64)
         reference_log_effect = _reference_log_effect(session, name, term)
         ci_lower, ci_upper = _ci_payload(term, edit_delta)
+        n_handles = None if control_counts is None else control_counts.get(name)
+        ordered_controls, spline_view = _ordered_spline_payloads(session, name, term, n_handles)
         term_payload = {
             "kind": term.kind,
             "term_type": str(term.metadata.get("term_type", term.kind)),
@@ -40,12 +52,12 @@ def session_payload(
             "y": [float(v) for v in np.exp(term.edited_log_effect)],
             "original_y": [float(v) for v in np.exp(reference_log_effect)],
             "previous_y": _previous_y(session, name, term),
-            "controls": _controls_payload(
-                session,
-                name,
-                term,
-                None if control_counts is None else control_counts.get(name),
+            "controls": (
+                ordered_controls
+                if spline_view is not None
+                else _controls_payload(session, name, term, n_handles)
             ),
+            "spline_view": spline_view,
             "ci_lower_y": ci_lower,
             "ci_upper_y": ci_upper,
             "weights": weights,
@@ -58,7 +70,10 @@ def session_payload(
             "level_order_changed": _level_order_changed(session, name),
             "reference": _reference_payload(session, name),
             "shape": shape_payload(session.model, name, term.metadata.get("shape_support")),
+            "pending": _pending_term_payload(session, name),
+            "unseen": unseen_payload(session, name),
             "effective_df": _finite_float(term.metadata.get("edf")),
+            "edited": name in edited,
             "x_label": name,
             "y_label": "relativity",
             "title": name,
@@ -71,40 +86,52 @@ def session_payload(
 def timeline_payload(session) -> list[dict[str, Any]]:
     """Every action in the session, oldest first, with a marker at the current position.
 
-    Before the marker: for each structural step on the undo stack, the edits
-    made before it and then the step, then the live edits. After it, what
-    Redo would put back in the order it would: the undone edits, then each
-    undone step followed by the edits undone after it. A step on the undo
-    stack holds the state before it; on the redo stack, the state it left.
+    The order is the session's own (``EditorSession.timeline_items``). Before
+    the marker comes what Undo would take back, latest last; after it, what
+    Redo would put back, in the order it would. Each action carries its id,
+    its time (seconds since the epoch), its note and its status: ``"edit"``,
+    ``"waiting"`` or ``"applied"``. A structural change a Refit applies, or
+    that still waits for one, is a ``"pending"`` entry.
     """
-    done = [
-        *chain.from_iterable(map(_before_step, session.structure_history)),
-        *session.history,
-    ]
-    undone = [
-        *reversed(session.redo_stack),
-        *chain.from_iterable(map(_after_step, reversed(session.structure_redo))),
-    ]
+    done, undone = session.timeline_items()
+    notes = getattr(session, "step_notes", {})
     entries: list[dict[str, Any]] = []
     parent: str | None = None
-    for position, item in enumerate([*done, None, *undone]):
+    for position, pair in enumerate([*done, None, *undone]):
+        if pair is None:
+            entries.append({"kind": "marker"})
+            continue
+        item, status = pair
         entry = _timeline_entry(item, parent, redo=position > len(done))
+        entry.update(
+            id=item.step_id,
+            time=float(item.created_at),
+            note=notes.get(item.step_id),
+            status=status,
+        )
         parent = entry.get("hash", parent)
         entries.append(entry)
     return entries
 
 
-def _before_step(step: StructuralStep) -> list[Any]:
-    return [*step.state.history, step]
-
-
-def _after_step(step: StructuralStep) -> list[Any]:
-    return [step, *reversed(step.state.redo_stack)]
+def pending_payload(session) -> list[dict[str, Any]]:
+    """The structural changes waiting for a Refit, oldest first."""
+    notes = getattr(session, "step_notes", {})
+    return [
+        {
+            "id": step.step_id,
+            "operation": step.operation,
+            "term": step.term,
+            "label": step.label,
+            "params": _json_safe(step.params),
+            "note": notes.get(step.step_id),
+            "time": float(step.created_at),
+        }
+        for step in getattr(session, "pending", ())
+    ]
 
 
 def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, Any]:
-    if item is None:
-        return {"kind": "marker"}
     if isinstance(item, StructuralStep):
         return {
             "kind": "structural",
@@ -113,13 +140,22 @@ def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, A
             "label": item.label,
             "redo": redo,
         }
+    if isinstance(item, PendingStep):
+        return {
+            "kind": "pending",
+            "operation": item.operation,
+            "term": item.term,
+            "label": item.label,
+            "params": _json_safe(item.params),
+            "redo": redo,
+        }
     # The hash chains through the edits in timeline order, so it names an edit
     # by its place in the session and survives its moves across the marker.
     return {
         "kind": "edit",
         "operation": str(item.operation),
         "term": str(item.term),
-        "label": _edit_label(item),
+        "label": item.label,
         "n_points": int(np.asarray(item.indices, dtype=np.intp).size),
         "params": _json_safe(item.params),
         "hash": _record_hash(item, parent_hash),
@@ -127,23 +163,54 @@ def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, A
     }
 
 
-def undo_redo_payload(session) -> dict[str, str | None]:
-    """What Undo and Redo would take next, for their popovers; None leaves one disabled."""
+def _pending_term_payload(session, name: str) -> dict[str, Any]:
+    """What the term's waiting changes would put in force; None or empty where they change nothing.
+
+    ``groups`` is the draft's whole grouping once a waiting collapse or
+    ungroup touches the term; ``ranges`` are the shaped ranges the draft adds
+    or changes; ``reference`` is the level or group the draft pins in place of
+    the fitted reference.
+    """
+    waiting = [step for step in getattr(session, "pending", ()) if step.term == name]
+    if not waiting:
+        return {"groups": None, "ranges": [], "reference": None}
+    draft, fitted = waiting[-1].draft_spec, session.model._specs[name]
+    regrouped = any(step.operation in {"collapse", "ungroup"} for step in waiting)
     return {
-        "undo": _next_label(session.history, session.structure_history),
-        "redo": _next_label(session.redo_stack, session.structure_redo),
+        "groups": _draft_groups(draft) if regrouped else None,
+        "ranges": waiting_ranges(draft, fitted),
+        "reference": _waiting_reference(draft, fitted),
     }
 
 
-def _next_label(records, steps) -> str | None:
-    """The live edits lie nearer than any structural step, either way, so they go first."""
-    if records:
-        return _edit_label(records[-1])
-    return steps[-1].label if steps else None
+def _draft_groups(draft) -> dict[str, list[str]]:
+    grouping = getattr(draft, "_grouping", None)
+    if grouping is None:
+        return {}
+    members = {
+        str(label): [str(member) for member in grouping.group_to_originals.get(label, [])]
+        for label in grouping.grouped_levels
+    }
+    return {label: levels for label, levels in members.items() if len(levels) > 1}
 
 
-def _edit_label(record) -> str:
-    return f"{record.operation.replace('_', ' ')} {record.term}"
+def _waiting_reference(draft, fitted) -> str | None:
+    """The level or group a draft pins in place of the fitted reference, or None."""
+    if not isinstance(draft, Categorical | OrderedCategorical):
+        return None
+    base = str(draft.base)
+    if not base_names_level(draft) or base == str(getattr(fitted, "_base_level", "")):
+        return None
+    return base
+
+
+def undo_redo_payload(session) -> dict[str, str | None]:
+    """What Undo and Redo would take next, for their popovers; None leaves one disabled."""
+    undo, redo = session.undo_target(), session.redo_target()
+    return {
+        "undo": None if undo is None else undo.label,
+        "redo": None if redo is None else redo.label,
+    }
 
 
 def _record_hash(record, parent_hash: str | None) -> str:
@@ -263,7 +330,10 @@ def _reference_payload(session, name: str) -> dict[str, str] | None:
     level = getattr(spec, "_base_level", "")
     if level == "":
         return None
-    policy = spec.base if spec.base in {"most_exposed", "first"} else "pinned"
+    if getattr(spec, KEPT_REFERENCE_ATTRIBUTE, False):
+        policy = "kept"
+    else:
+        policy = "pinned" if base_names_level(spec) else spec.base
     return {"level": str(level), "policy": policy}
 
 
@@ -328,6 +398,10 @@ def _controls_payload(
         controls = session.control_points(name, n_handles=n_handles)
     except TypeError:
         return None
+    return _control_payload(controls)
+
+
+def _control_payload(controls: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "x": [float(v) for v in controls["x"]],
         "y": [float(v) for v in np.exp(controls["log_effect"])],
@@ -346,7 +420,48 @@ def _controls_payload(
         payload["build_log_effect"] = [
             float(v) for v in np.asarray(controls["build_log_effect"], dtype=np.float64)
         ]
+    if "grid_x" in controls:
+        payload["grid_x"] = [float(v) for v in controls["grid_x"]]
     return payload
+
+
+def _ordered_spline_payloads(
+    session, name: str, term, n_handles: int | None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(controls, spline_view)`` for an ordered term with a spline basis.
+
+    ``(None, None)`` for every other term, and no controls with a
+    ``spline_view`` that carries the reason when the handles are off.  The
+    geometry and the coefficients are worked out once for both.
+    """
+    geometry = session.ordered_spline(name)
+    if geometry is None:
+        return None, None
+    if not isinstance(geometry, OrderedSplineGeometry):
+        return None, {
+            "available": False,
+            "reason": geometry,
+            "x": None,
+            "y": None,
+            "original_y": None,
+            "level_indices": None,
+            "fits_levels": False,
+        }
+    coefficients = session.ordered_spline_coefficients(name, geometry)
+    controls = ordered_control_points(geometry, coefficients, n_handles=n_handles)
+    # The fitted curve is the opened model's only while no structural step has
+    # replaced it; after one, the chart joins the original levels instead.
+    in_force_is_original = getattr(session, "reference_model", session.model) is session.model
+    original = geometry.grid_basis @ geometry.fitted if in_force_is_original else None
+    return _control_payload(controls), {
+        "available": True,
+        "reason": None,
+        "x": [float(v) for v in geometry.grid_x],
+        "y": [float(v) for v in np.exp(geometry.grid_basis @ coefficients)],
+        "original_y": None if original is None else [float(v) for v in np.exp(original)],
+        "level_indices": geometry.level_index.astype(int).tolist(),
+        "fits_levels": spline_fits_levels(geometry, term, session.history),
+    }
 
 
 def _handle_indices(term) -> np.ndarray:

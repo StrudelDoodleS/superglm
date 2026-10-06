@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorKeyError, EditorValueError
+from superglm.features.ordered_categorical import _declared_matcher
 
 
 def term_from_inference(ti) -> EditableTerm:
@@ -101,9 +103,9 @@ def term_weights_from_data(X_ref, sample_weight, name: str, term: EditableTerm) 
         return fallback
 
     if term.levels is not None:
-        raw_str = np.asarray([str(v) for v in np.asarray(values, dtype=object)], dtype=object)
+        texts = _level_texts(values, term.levels)
         return np.asarray(
-            [np.sum(weights[raw_str == level]) for level in term.levels], dtype=np.float64
+            [np.sum(weights[texts == level]) for level in term.levels], dtype=np.float64
         )
 
     if term.x is None or term.x.size <= 1:
@@ -129,6 +131,35 @@ def term_weights_from_data(X_ref, sample_weight, name: str, term: EditableTerm) 
         # slopes, and "error" admits no such rows in the first place.
         raw_x = np.clip(raw_x, edges[0], edges[-1])
     return np.histogram(raw_x, bins=edges, weights=weights)[0].astype(np.float64)
+
+
+def _level_texts(values, levels: list[str]) -> NDArray:
+    """Each row's level as ``levels`` spell it: its own text, else the level its number names.
+
+    The fit codes the row 1 as a level declared 1.0, but their texts are "1"
+    and "1.0". A row whose text names no level is matched as the declaration
+    matches data (``_declared_matcher``): a number by its value, a string by
+    its text alone. A row that names no level keeps its text.
+    """
+    raw = np.asarray(values, dtype=object).ravel()
+    texts = np.asarray([str(value) for value in raw], dtype=object)
+    unmatched = ~pd.Series(texts).isin(levels).to_numpy()
+    if not unmatched.any():
+        return texts
+    match = _declared_matcher(list(levels))
+
+    def named(value) -> str:
+        try:
+            return str(match(value))
+        except ValueError:  # a number two levels spell, neither exactly
+            return str(value)
+
+    rows = np.flatnonzero(unmatched)
+    # A missing value is coded -1 and keeps its text.
+    codes, uniques = pd.factorize(raw[rows])
+    found = codes >= 0
+    texts[rows[found]] = np.asarray([named(value) for value in uniques], dtype=object)[codes[found]]
+    return texts
 
 
 def _grid_is_knot_vector(term: EditableTerm) -> bool:

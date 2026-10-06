@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import datetime
+import hashlib
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
@@ -18,6 +22,7 @@ from superglm.distributions import Tweedie, weighted_log_likelihood
 # The full-frame binding pass lives in a neutral module so the public
 # SuperGLM.bind_levels runs this exact resolution without importing this one.
 from superglm.model.binding_ops import resolve_level_bindings as _resolve_level_bindings
+from superglm.model.reml_setup import live_reml_lambdas
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.validation import _normalized_gini
 
@@ -33,7 +38,11 @@ class CrossValidationResult:
     fold_scores : DataFrame
         One row per fold with columns: ``fold``, ``n_train``, ``n_test``,
         ``fit_time_s``, ``score_time_s``, ``converged``, ``n_iter``,
-        ``effective_df``, plus one column per requested metric.
+        ``effective_df``, plus one column per requested metric. Under
+        ``fit_mode="fit_reml"`` a fold is ``converged`` only when both its
+        smoothing-parameter selection and its final coefficient fit
+        converged, and two more columns say how it got there:
+        ``n_reml_iter`` (outer REML iterations) and ``warm_started``.
     mean_scores : dict
         Equal-weight mean of each per-fold metric across folds. Built-in
         deviance and negative log-likelihood are normalized within each fold
@@ -49,11 +58,59 @@ class CrossValidationResult:
         Per-fold ``(train_idx, test_idx)`` pairs from the CV splitter.
     curve_similarity : dict or None
         Fold-by-fold term similarity diagnostics for comparable main effects.
+        A correlation is NaN where two curves share fewer than two finite
+        points or either is flat there, a term a fold's penalty zeroes say.
+        A fold's distance to the fold mean is NaN where it shares no point
+        with another fold: the mean is taken where two or more folds have a
+        value.
     oof_predictions : ndarray or None
         Out-of-fold predictions (response scale), same length as *y*.
         ``None`` unless ``return_oof=True``.
     estimators : list or None
         Fitted model per fold. ``None`` unless ``return_estimators=True``.
+    n_rows : int or None
+        Number of rows the folds index: the length of ``y``.
+    data_fingerprint : str or None
+        SHA-256 of the rows the folds index: the row count, the frame library
+        and the columns of ``X`` the model reads (``fingerprint_columns``),
+        then the response, sample weights and offsets as little-endian
+        float64, with unit weights standing in for
+        ``sample_weight=None`` and zeros for ``offset=None``. Equal
+        fingerprints mean the same rows in the same order, which is what lets
+        a later consumer, such as the editor's Run CV, replay
+        ``fold_indices`` on data it holds. The recipe reads values, never a
+        library's row hash or dtype text, so a pandas or polars upgrade does
+        not change it.
+    splitter : str or None
+        Class name of the splitter that drew the folds.
+    fingerprint_columns : tuple of str or None
+        The columns of ``X`` the fingerprint covers: the model's declared
+        features and interaction parents, or every column when the model
+        takes its features from ``X``. Other columns may hold anything.
+        ``data_fingerprint`` is ``None`` when these columns cannot be hashed.
+    fit_mode : {"fit", "fit_reml"} or None
+        The fit method each fold was fitted with.
+    fingerprint_version : int or None
+        The version of the recipe ``data_fingerprint`` was made with. A
+        fingerprint of another version cannot be compared with these rows.
+        A version beside no ``data_fingerprint`` means the columns the model
+        reads could not be fingerprinted, so no rows can be checked against
+        the folds.
+    builtin_scores : tuple of str or None
+        The score columns the built-in scorers computed, in ``scoring``
+        order. A column a callable wrote is not one of them, even one named
+        ``"deviance"``, ``"nll"`` or ``"gini"``.
+    warm_start : bool or None
+        The ``warm_start`` the folds were fitted with.
+    fit_kwargs : dict or None
+        The ``fit_kwargs`` every fold's fit received, copied.
+
+    ``n_rows``, ``data_fingerprint``, ``splitter``, ``fingerprint_columns``,
+    ``fit_mode``, ``fingerprint_version``, ``builtin_scores``, ``warm_start``
+    and ``fit_kwargs`` are ``None`` on a result made before they were
+    recorded. ``warm_start`` and ``fit_kwargs`` were recorded from the release
+    that added them to :func:`cross_validate`, so a result without them was
+    fitted cold, with no extra fit arguments.
     """
 
     fold_scores: pd.DataFrame
@@ -64,17 +121,43 @@ class CrossValidationResult:
     curve_similarity: dict[str, Any] | None = None
     oof_predictions: NDArray | None = None
     estimators: list | None = None
+    n_rows: int | None = None
+    data_fingerprint: str | None = None
+    splitter: str | None = None
+    fingerprint_columns: tuple[str, ...] | None = None
+    fit_mode: str | None = None
+    fingerprint_version: int | None = None
+    builtin_scores: tuple[str, ...] | None = None
+    warm_start: bool | None = None
+    fit_kwargs: dict[str, Any] | None = None
 
     def plot_terms_by_fold(
         self,
         X: FrameLike,
         *,
+        y: NDArray | None = None,
         sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
         terms: str | list[str] | None = None,
         engine: str = "plotly",
         **kwargs,
     ):
-        """Plot fold-specific main effects using the shared comparison engine."""
+        """Plot fold-specific main effects using the shared comparison engine.
+
+        The stored folds are replayed on ``X`` and ``sample_weight``, so they
+        must be the data given to :func:`cross_validate`, in the same order.
+        Their row count is always checked. Pass ``y`` (and ``offset``, if the
+        cross-validation had one) to check the rows themselves against
+        ``data_fingerprint``; without ``y`` a reordered ``X`` of the same
+        length cannot be told apart.
+
+        Raises
+        ------
+        ValueError
+            If ``X`` or ``sample_weight`` has another row count than the folds
+            index, or, when ``y`` is passed, the data differ from the data the
+            folds were drawn on.
+        """
         if self.estimators is None:
             raise RuntimeError("return_estimators=True is required for plot_terms_by_fold().")
 
@@ -86,8 +169,23 @@ class CrossValidationResult:
         if not models:
             raise RuntimeError("No fitted fold estimators are available to plot.")
         frame = as_eager_frame(X)
-        support_by_label: dict[str, dict[str, Any]] = {}
         weight_arr = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+        expected = _fold_row_count(self.n_rows, self.fold_indices or [])
+        for name, rows in (("X", frame), ("sample_weight", weight_arr)):
+            if expected is not None and rows is not None and len(rows) != expected:
+                raise ValueError(_FOLD_ROWS.format(name=name, rows=len(rows), expected=expected))
+        if y is not None and self.data_fingerprint is None and self.fingerprint_version:
+            raise ValueError(_FOLD_UNFINGERPRINTED)
+        if y is not None and self.data_fingerprint is not None:
+            if self.fingerprint_version != FINGERPRINT_VERSION:
+                raise ValueError(_FOLD_VERSION)
+            try:
+                held = _data_fingerprint(frame, y, weight_arr, offset, self.fingerprint_columns)
+            except (KeyError, TypeError, ValueError):
+                held = None
+            if held != self.data_fingerprint:
+                raise ValueError(_FOLD_DATA.format(rows=expected))
+        support_by_label: dict[str, dict[str, Any]] = {}
         for fold, indices in enumerate(self.fold_indices or []):
             label = f"fold_{fold}"
             if label not in models:
@@ -107,6 +205,204 @@ class CrossValidationResult:
             engine=engine,
             **kwargs,
         )
+
+
+_FOLD_ROWS = (
+    "{name} has {rows:,} rows, but the folds were drawn on {expected:,}; pass the data given "
+    "to cross_validate."
+)
+_FOLD_VERSION = (
+    "This result's data fingerprint predates this version of superglm or comes from another "
+    "one, so these rows cannot be checked; run cross_validate again with this version, or pass "
+    "no y."
+)
+_FOLD_UNFINGERPRINTED = (
+    "The columns this result's model reads could not be fingerprinted (objects whose text is "
+    "not their value, or values that cannot be hashed), so these rows cannot be checked against "
+    "its folds; convert those values to text or numbers and run cross_validate again, or pass "
+    "no y."
+)
+_FOLD_DATA = (
+    "These {rows:,} rows are not the ones the folds were drawn on: the columns, dtypes, row "
+    "order or values of X, y, sample_weight or offset differ (a pandas frame and a polars one "
+    "differ too); pass the data given to cross_validate."
+)
+
+
+def _fold_row_count(n_rows: int | None, folds: Sequence[tuple[NDArray, NDArray]]) -> int | None:
+    """The recorded row count, or one past the largest index an older result holds."""
+    if n_rows is not None or not folds:
+        return n_rows
+    return 1 + max(int(np.max(np.concatenate(fold))) for fold in folds)
+
+
+def _fingerprint_columns(model, frame) -> tuple[str, ...]:
+    """The columns a model reads: its declared features and interaction parents.
+
+    A model that takes its features from ``X`` reads every column. Fold
+    replay needs only the rows the model reads to be the same, so a column it
+    never reads stays out of the fingerprint and may hold anything.
+    """
+    if not getattr(model, "_features_explicit", False):
+        return tuple(sorted(frame.columns, key=repr))
+    names = [*model._specs]
+    for spec in getattr(model, "_interaction_specs", {}).values():
+        names.extend(spec.parent_names)
+    return tuple(sorted(dict.fromkeys(names), key=repr))
+
+
+# The recipe of _data_fingerprint. A result records it beside its fingerprint,
+# and one made by another recipe is refused as such, never as other data.
+# Version 3 keeps apart equal values a grouped categorical reads as two
+# levels, -0.0 and 0.0, or 1 and 1.0 in an object column; version 2 did not.
+FINGERPRINT_VERSION = 3
+
+
+def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> str:
+    """SHA-256 of the recipe, the row count, the frame's columns, then y, weights and offsets.
+
+    The response and weights alone do not identify the rows: two rows with
+    the same response and weight can swap their features, and stored fold
+    indices would then fall on different rows. The frame enters as its
+    library ("pandas" or "polars", whose frames of the same values differ)
+    and then ``columns`` (every column when ``None``) in name order, so that
+    reordering columns alone does not change it, each as its name and
+    :func:`_column_bytes`. Unit weights stand in for ``sample_weight=None``
+    and zeros for ``offset=None``, which is how every scorer reads them, so
+    rows supplied with those explicit values match. Every variable-length
+    part carries its length, so the boundaries between the parts are fixed.
+    """
+    frame = as_eager_frame(X)
+    response = np.asarray(y, dtype=np.float64).ravel()
+    n = response.size
+    weights = np.ones(n) if sample_weight is None else sample_weight
+    offsets = np.zeros(n) if offset is None else offset
+    names = sorted(frame.columns if columns is None else columns, key=repr)
+    frame.require_columns(tuple(names))
+    digest = hashlib.sha256(_framed(b"superglm.cv-fingerprint"))
+    for count in (FINGERPRINT_VERSION, n, len(names)):
+        digest.update(count.to_bytes(8, "little"))
+    digest.update(_framed(frame.backend.encode("utf-8")))
+    for name in names:
+        digest.update(_framed(repr(name).encode("utf-8")))
+        digest.update(_column_bytes(frame, name))
+    for column in (response, weights, offsets):
+        digest.update(np.ascontiguousarray(column, dtype="<f8").ravel().tobytes())
+    return digest.hexdigest()
+
+
+def _column_bytes(frame, name) -> bytes:
+    """One column as bytes no pandas or polars version changes: a type tag, then its values.
+
+    The tag is this recipe's own, from the NumPy array the model reads: a
+    number's kind and width (``int32``, ``float64``), ``bool``, or ``values``
+    for anything else, text included, whatever its dtype is called. A
+    pandas categorical or polars Enum adds its declared categories, which
+    the fit takes as the level universe. Numbers are written at a fixed
+    width, little-endian: integers as 64-bit, floats as float64 (exact) with
+    one NaN; anything else as codes in order of first appearance (missing
+    values -1) and the text of each code's first value (:func:`_value_codes`).
+    A grouped categorical reads a level by its text, so equal values that
+    print differently stay apart: ``-0.0`` and ``0.0`` in a float column, and
+    in an object column also ``1`` and ``1.0``.
+    """
+    values = frame.column_array(name)
+    kind = values.dtype.kind
+    if kind in "iu":
+        tag = f"{'int' if kind == 'i' else 'uint'}{8 * values.dtype.itemsize}"
+        data = np.ascontiguousarray(values, dtype="<i8" if kind == "i" else "<u8").tobytes()
+    elif kind == "f":
+        tag = f"float{8 * values.dtype.itemsize}"
+        floats = np.array(values, dtype="<f8")
+        floats[np.isnan(floats)] = np.nan
+        data = floats.tobytes()
+    elif kind == "b":
+        tag, data = "bool", np.ascontiguousarray(values, dtype="<u1").tobytes()
+    else:
+        codes, uniques = _value_codes(values)
+        tag = "values"
+        data = np.ascontiguousarray(codes, dtype="<i8").tobytes() + _texts(uniques)
+    categories = frame.column_declared_categories(name)
+    declared = b"" if categories is None else _texts(categories)
+    return _framed(tag.encode("utf-8")) + _framed(declared) + _framed(data)
+
+
+def _value_codes(values) -> tuple[NDArray[np.intp], NDArray]:
+    """``pandas.factorize`` codes, split where equal values differ in type or text.
+
+    Equal text is the same text, so a column of ``str`` is coded as
+    ``pandas.factorize`` codes it. Other equal values can print differently
+    (``-0.0`` and ``0.0``, ``1``, ``1.0`` and ``True``), and each type and
+    text then takes its own code. Codes follow first appearance, missing
+    values are -1, and the second result holds each code's first value.
+    Unequal values that print alike cannot be told apart by their text, so
+    such a column is refused (ValueError), and the result has no fingerprint.
+    """
+    codes, uniques = pd.factorize(values, sort=False, use_na_sentinel=True)
+    if all(type(value) is str for value in uniques):
+        return codes, uniques
+    # Another type's text need not be its value: an object that prints
+    # "same" may read as another number through __float__, in another frame
+    # as well as this one, so only values whose text is their identity are
+    # written.
+    for value in uniques:
+        if not isinstance(value, _TEXT_IS_VALUE):
+            raise ValueError(
+                f"A {type(value).__name__} value in this column has no faithful text, so it "
+                "cannot be fingerprinted."
+            )
+    present = codes >= 0
+    kept = values[present]
+    keys = [f"{code}:{_value_text(value)}" for code, value in zip(codes[present], kept)]
+    split, _ = pd.factorize(np.asarray(keys, dtype=object), sort=False)
+    codes[present] = split
+    firsts = kept[np.unique(split, return_index=True)[1]]
+    # Values the model tells apart but that print alike would write one text
+    # for two codes, and a swap of them would leave the fingerprint as it was.
+    if len({_value_text(value) for value in firsts}) < len(firsts):
+        raise ValueError(
+            "Distinct values of this column print alike, so it cannot be fingerprinted."
+        )
+    return codes, firsts
+
+
+# The value types whose type name and text identify the value.
+_TEXT_IS_VALUE = (
+    str,
+    bytes,
+    bool,
+    int,
+    float,
+    complex,
+    Decimal,
+    Fraction,
+    np.generic,
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    pd.Timestamp,
+    pd.Timedelta,
+    # pd.cut's levels and periods: the text carries what equality compares
+    # (closed side and endpoints, the period), and neither reads as a number.
+    pd.Interval,
+    pd.Period,
+)
+
+
+def _value_text(value) -> str:
+    """A value's type name and text."""
+    return f"{type(value).__name__}:{value}"
+
+
+def _texts(values) -> bytes:
+    """The count, then each value's type name and text, UTF-8 and length-prefixed."""
+    items = [_value_text(value).encode("utf-8", "surrogatepass") for value in values]
+    return len(items).to_bytes(8, "little") + b"".join(_framed(item) for item in items)
+
+
+def _framed(data: bytes) -> bytes:
+    """``data`` after its length, so where it ends is fixed."""
+    return len(data).to_bytes(8, "little") + data
 
 
 # ── Model cloning ────────────────────────────────────────────────
@@ -220,6 +516,8 @@ _RESERVED_COLUMNS = frozenset(
         "converged",
         "n_iter",
         "effective_df",
+        "n_reml_iter",
+        "warm_started",
     }
 )
 
@@ -287,6 +585,8 @@ def cross_validate(
     return_estimators: bool = False,
     return_oof: bool = False,
     error_score: float | str = np.nan,
+    fit_kwargs: Mapping[str, Any] | None = None,
+    warm_start: bool = True,
 ) -> CrossValidationResult:
     """Cross-validate a SuperGLM model with a pluggable splitter.
 
@@ -330,6 +630,27 @@ def cross_validate(
         If True, collect out-of-fold predictions.
     error_score : float or "raise"
         Value to assign when a fold fails. ``"raise"`` propagates the error.
+    fit_kwargs : mapping, optional
+        Extra keyword arguments for every fold's fit call, for example
+        ``{"max_reml_iter": 100}``. ``sample_weight`` and ``offset`` come
+        from the split and cannot be set here.
+    warm_start : bool, default True
+        Under ``fit_mode="fit_reml"``, start every fold after the first
+        converged one from that fold's smoothing parameters
+        (``lambda2_init``), so later folds take fewer outer iterations.
+        Components a search could not leave from where that fold ended them
+        (frozen as flat by the Newton engines, or held at either flat end by
+        the SCOP engine's suppression holds: residual EDF under 0.05, or a
+        tensor margin whose penalty the other margin covers) start from the
+        engine's own bootstrap instead, together with every other component
+        of the same penalty block, so a tensor product never starts half
+        warm. Each fold still searches
+        to its own convergence test; a fold that does not converge warns and
+        reads ``converged=False``. A fold whose SCOP search found no
+        certified mode at its warm start, and started again from its own
+        bootstrap, reads ``warm_started=False``. Set ``False`` to start every fold from the
+        engine's own bootstrap. A ``lambda2_init`` in ``fit_kwargs`` takes
+        precedence for every fold.
 
     Returns
     -------
@@ -343,6 +664,15 @@ def cross_validate(
 
     if fit_mode not in ("fit", "fit_reml"):
         raise ValueError(f"fit_mode must be 'fit' or 'fit_reml', got {fit_mode!r}")
+    fit_kwargs = dict(fit_kwargs or {})
+    reserved_fit_kwargs = {"sample_weight", "offset"} & set(fit_kwargs)
+    if reserved_fit_kwargs:
+        raise ValueError(
+            f"fit_kwargs cannot set {sorted(reserved_fit_kwargs)}: cross_validate slices "
+            "sample_weight and offset per fold; pass them as its own arguments"
+        )
+    reml_warm_start = warm_start and fit_mode == "fit_reml" and "lambda2_init" not in fit_kwargs
+    warm_lambdas: dict[str, float] | None = None
 
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
@@ -403,6 +733,14 @@ def cross_validate(
     pooled_denominators: dict[str, float] = {
         name: 0.0 for name in score_names if name in _POOLED_PARTS
     }
+    # The score columns a callable wrote last in some fold that scored, its
+    # dict's keys included: such a column is not the built-in scorer's,
+    # whatever it is named, even where a built-in scorer wrote it last in
+    # another fold. A fold that failed partway is left out: error_score fills
+    # its scores. A callable's own name starts here.
+    not_built_in = {
+        name for name, scorer in scorers.items() if scorer is not _BUILTIN_SCORERS.get(name)
+    }
 
     for fold_i, (train_idx, test_idx) in enumerate(cv.split(X, y, groups)):
         train_idx = np.asarray(train_idx)
@@ -432,14 +770,43 @@ def cross_validate(
                 est._config = est._config.with_value(level_bindings=tuple(level_bindings.items()))
             t0 = time.perf_counter()
             fit_fn = getattr(est, fit_mode)
-            fit_fn(X_train, y_train, sample_weight=sw_train, offset=off_train)
+            fold_kwargs = dict(fit_kwargs)
+            # An empty mapping starts nothing warm (every component of the
+            # first converged fold was left on a flat plateau): those folds
+            # keep the model's own configured start, and read cold.
+            warm_this_fold = bool(reml_warm_start and warm_lambdas)
+            if warm_this_fold:
+                fold_kwargs["lambda2_init"] = warm_lambdas
+            fit_fn(X_train, y_train, sample_weight=sw_train, offset=off_train, **fold_kwargs)
             record["fit_time_s"] = time.perf_counter() - t0
-            record["converged"] = est._result.converged
+            # Under fit_reml the fold's convergence is its smoothing selection's
+            # as well as its final coefficient fit's: PIRLS converging at
+            # lambdas REML never settled is not a converged fold.
+            reml = getattr(est, "_reml_result", None) if fit_mode == "fit_reml" else None
+            record["converged"] = bool(est._result.converged) and (
+                reml is None or bool(reml.converged)
+            )
             record["n_iter"] = est._result.n_iter
             record["effective_df"] = est._result.effective_df
+            if fit_mode == "fit_reml":
+                record["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
+                # a fold whose search retried away from its warm start (a SCOP
+                # bootstrap with no certified mode there) did not start warm
+                kept = None if reml is None else getattr(reml, "warm_start_components", None)
+                record["warm_started"] = warm_this_fold and (kept is None or bool(kept))
+                # A model with no REML-eligible groups legitimately fits without
+                # smoothing selection (``_reml_result`` is None): nothing to warm-start.
+                if (
+                    reml_warm_start
+                    and warm_lambdas is None
+                    and record["converged"]
+                    and reml is not None
+                ):
+                    warm_lambdas = live_reml_lambdas(est)
 
             # Score
             t1 = time.perf_counter()
+            written_by_builtin: dict[str, bool] = {}
             for sname, sfn in scorers.items():
                 pooled_fn = _POOLED_PARTS.get(sname)
                 if pooled_fn is not None and sfn is _BUILTIN_SCORERS.get(sname):
@@ -462,6 +829,7 @@ def cross_validate(
                         offset=off_test,
                     )
                     record[sname] = float(numerator / denominator)
+                    written_by_builtin[sname] = True
                     pooled_numerators[sname] += numerator
                     pooled_denominators[sname] += denominator
                     continue
@@ -480,8 +848,10 @@ def cross_validate(
                                 f"Reserved: {_RESERVED_COLUMNS}"
                             )
                         record[k] = v
+                    written_by_builtin.update(dict.fromkeys(result, False))
                 else:
                     record[sname] = float(result)
+                    written_by_builtin[sname] = sfn is _BUILTIN_SCORERS.get(sname)
                     pooled_fn = _POOLED_PARTS.get(sname)
                     if pooled_fn is not None:
                         numerator, denominator = pooled_fn(
@@ -501,6 +871,9 @@ def cross_validate(
 
             if estimators_list is not None:
                 estimators_list.append(est)
+            not_built_in.update(
+                name for name, built_in in written_by_builtin.items() if not built_in
+            )
 
         except Exception as exc:
             if error_score == "raise":
@@ -511,6 +884,9 @@ def cross_validate(
             record["converged"] = False
             record["n_iter"] = 0
             record["effective_df"] = np.nan
+            if fit_mode == "fit_reml":
+                record["n_reml_iter"] = 0
+                record["warm_started"] = False
             for sname in score_names:
                 record[sname] = error_score
             if estimators_list is not None:
@@ -548,6 +924,16 @@ def cross_validate(
             n_points=200,
         )
 
+    columns = _fingerprint_columns(model, frame)
+    try:
+        fingerprint = _data_fingerprint(frame, y, sample_weight, offset, columns)
+    except (TypeError, ValueError):
+        # A column the model reads that cannot be fingerprinted: the result
+        # keeps its folds and scores, and records the recipe version beside no
+        # fingerprint, so a consumer refuses to check rows against it rather
+        # than taking it for an older result.
+        fingerprint = None
+
     return CrossValidationResult(
         fold_scores=fold_scores,
         mean_scores=mean_scores,
@@ -557,4 +943,18 @@ def cross_validate(
         curve_similarity=curve_similarity,
         oof_predictions=oof,
         estimators=estimators_list,
+        n_rows=n,
+        data_fingerprint=fingerprint,
+        splitter=type(cv).__name__,
+        fingerprint_columns=columns,
+        fit_mode=fit_mode,
+        fingerprint_version=FINGERPRINT_VERSION,
+        builtin_scores=tuple(name for name in score_names if name not in not_built_in),
+        warm_start=bool(warm_start),
+        # A mapping argument (a lambda2_init) is copied too: the record must
+        # not change when the caller later edits what it passed.
+        fit_kwargs={
+            key: dict(value) if isinstance(value, Mapping) else value
+            for key, value in fit_kwargs.items()
+        },
     )

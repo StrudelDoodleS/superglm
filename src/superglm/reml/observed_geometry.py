@@ -44,6 +44,7 @@ from superglm.links import (
 )
 from superglm.reml.penalty_algebra import (
     penalty_component_magnitude_matvec,
+    penalty_product_rounding,
     total_penalty_matvec,
 )
 from superglm.solvers.centered_system import (
@@ -1094,6 +1095,9 @@ def observed_penalized_mode_score(
         sum_w=float(geometry.sum_w),
         bar=bar,
         excluded=excluded_mask,
+        penalty_rounding=penalty_product_rounding(
+            dm.p, None if penalty is not None else reml_penalties
+        ),
     )
     slope_score = residual.slope_score
     max_abs = max(

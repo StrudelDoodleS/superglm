@@ -166,3 +166,32 @@ test("unavailable Handles falls back to the sole enabled Select radio", () => {
     [buttons[0]],
   );
 });
+
+test("Handles off with a reason stay hoverable and say why", () => {
+  const buttons = ["select", "move", "zoom", "handles", "help"].map(
+    (tool) => new FakeButton(tool),
+  );
+  const root = new FakeEventHub(buttons);
+  const modes = [];
+  const binding = bindToolRail({
+    root,
+    shortcutRoot: new FakeEventHub(),
+    onMode: (mode) => modes.push(mode),
+    onHelp: () => {},
+  });
+  const reason = "Handles are off once a band is shaped. Undo the shape to edit the spline.";
+
+  renderToolRail(root, { mode: "handles", handlesAvailable: false, handlesReason: reason });
+
+  assert.equal(buttons[3].disabled, false);
+  assert.equal(buttons[3].getAttribute("aria-disabled"), "true");
+  assert.equal(buttons[3].dataset.popoverBody, reason);
+  assert.equal(buttons[0].getAttribute("aria-checked"), "true");
+  root.emit("click", { target: buttons[3] });
+  assert.deepEqual(modes, []);
+
+  renderToolRail(root, { mode: "handles", handlesAvailable: true, handlesReason: null });
+  assert.equal(buttons[3].getAttribute("aria-disabled"), "false");
+  assert.equal(buttons[3].dataset.popoverBody, undefined);
+  binding.destroy();
+});

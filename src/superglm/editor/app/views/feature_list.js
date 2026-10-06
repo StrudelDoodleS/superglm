@@ -1,10 +1,10 @@
 // @ts-check
 
-import { fmt } from "../format.js";
+import { fmtEdf } from "../format.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {[string, string[]]} FeatureGroup */
-/** @typedef {{terms:Record<string, TermPayload>, activeTerm:string, tabStop:string|undefined}} RowState */
+/** @typedef {{terms:Record<string, TermPayload>, activeTerm:string, tabStop:string|undefined, waiting:ReadonlySet<string>}} RowState */
 
 const STORAGE_KEY = "superglm.editor.featureList";
 const STEP_KEYS = new Set(["ArrowUp", "ArrowDown", "Home", "End"]);
@@ -111,11 +111,11 @@ export function bindFeatureList({ search, rows, toggle }, { onSelect, onQuery, o
  * into view, and the collapsed strip naming it. A row that had focus keeps it.
  *
  * @param {{root:HTMLElement, rows:HTMLElement, toggle:HTMLButtonElement, strip:HTMLElement}} nodes
- * @param {{groups:FeatureGroup[], terms:Record<string, TermPayload>, activeTerm:string, query:string, open:boolean}} state
+ * @param {{groups:FeatureGroup[], terms:Record<string, TermPayload>, activeTerm:string, query:string, open:boolean, waiting?:ReadonlySet<string>}} state
  */
 export function renderFeatureList(
   { root, rows, toggle, strip },
-  { groups, terms, activeTerm, query, open },
+  { groups, terms, activeTerm, query, open, waiting = new Set() },
 ) {
   root.dataset.open = String(open);
   toggle.setAttribute("aria-expanded", String(open));
@@ -131,7 +131,7 @@ export function renderFeatureList(
     : undefined;
 
   /** @type {RowState} */
-  const rowState = { terms, activeTerm, tabStop };
+  const rowState = { terms, activeTerm, tabStop, waiting };
   rows.replaceChildren(...visible.map(([group, groupNames]) => featureGroup(doc, group, groupNames, rowState)));
   if (query.trim() && names.length === 0) {
     const notice = doc.createElement("p");
@@ -182,7 +182,7 @@ function featureGroup(doc, group, names, rowState) {
 }
 
 /** @param {Document} doc @param {string} name @param {RowState} rowState */
-function featureRow(doc, name, { terms, activeTerm, tabStop }) {
+function featureRow(doc, name, { terms, activeTerm, tabStop, waiting }) {
   const term = terms[name];
   const row = doc.createElement("button");
   row.type = "button";
@@ -190,12 +190,22 @@ function featureRow(doc, name, { terms, activeTerm, tabStop }) {
   row.dataset.term = name;
   row.tabIndex = name === tabStop ? 0 : -1;
   if (name === activeTerm) row.setAttribute("aria-current", "true");
+  row.append(span(doc, "feature-row-name", name));
+  if (waiting.has(name)) row.append(waitingDot(doc));
   row.append(
-    span(doc, "feature-row-name", name),
     span(doc, "feature-row-kind", term.term_type || term.kind || "term"),
     span(doc, "feature-row-edf", edfLabel(term.effective_df)),
   );
   return row;
+}
+
+/** An amber dot right after the name of a term with a change waiting for Refit. @param {Document} doc */
+function waitingDot(doc) {
+  const dot = doc.createElement("span");
+  dot.className = "feature-row-waiting";
+  dot.setAttribute("role", "img");
+  dot.setAttribute("aria-label", "Waiting for refit");
+  return dot;
 }
 
 /** @param {Document} doc @param {string} className @param {string} text */
@@ -208,7 +218,7 @@ function span(doc, className, text) {
 
 /** @param {number|null|undefined} edf */
 function edfLabel(edf) {
-  return edf === null || edf === undefined ? "EDF —" : `EDF ${fmt(edf)}`;
+  return edf === null || edf === undefined ? "EDF —" : fmtEdf(edf);
 }
 
 /** @param {HTMLElement} rows @returns {HTMLElement[]} */

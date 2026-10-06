@@ -190,6 +190,37 @@ def test_clone_preserves_separation_mode():
     assert clone._separation == "error"
 
 
+def test_an_unpenalised_refit_keeps_the_models_separation_mode():
+    """``refit_unpenalised`` lifts the selection penalty that exempted a separated level.
+
+    Under ``"error"`` the refit refuses the level, as a fit without the
+    penalty does; under ``"warn"`` it names it and fits. The refit's model
+    used to fall back to ``"warn"`` whatever the model declared.
+    """
+    rng = np.random.default_rng(4)
+    n = 600
+    df = pd.DataFrame(
+        {"c": rng.choice(list("ABCZ"), n, p=[0.4, 0.3, 0.28, 0.02]), "x": rng.normal(size=n)}
+    )
+    y = rng.poisson(np.exp(0.3 + 0.2 * df["x"].to_numpy())).astype(np.float64)
+    y[(df["c"] == "Z").to_numpy()] = 0.0
+
+    def fitted(separation):
+        return SuperGLM(
+            family="poisson",
+            selection_penalty=2.0,
+            separation=separation,
+            features={"c": Categorical(base="A"), "x": Numeric()},
+        ).fit(df, y)
+
+    strict = fitted("error")
+    with pytest.raises(SeparationError, match="'Z'"):
+        strict.refit_unpenalised(df, y)
+    lenient = fitted("warn")
+    with pytest.warns(SeparationWarning, match="'Z'"):
+        lenient.refit_unpenalised(df, y)
+
+
 # ── #341: runtime backstop for separation the build scan cannot see ──
 
 

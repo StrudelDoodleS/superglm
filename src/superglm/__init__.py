@@ -31,6 +31,7 @@ from superglm.constraints import (
 from superglm.constraints import (
     MonotoneRepairResult as MonotoneRepairResult,
 )
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
@@ -153,6 +154,7 @@ from superglm.stats.model_tests import (
     zero_inflation_index,
 )
 from superglm.stats.wood_pvalue import wood_test_smooth
+from superglm.structure import FeatureStructure, Structure, StructureError, read_structure
 from superglm.terms import (
     BoundInteraction,
     BoundTerm,
@@ -238,6 +240,10 @@ __all__ = [
     "FitDiagnosticReport",
     "export_rating_tables",
     "RatingTableBaseNotRepresentableError",
+    "Structure",
+    "FeatureStructure",
+    "StructureError",
+    "read_structure",
     "ModelMetrics",
     "ModelSummary",
     "RandomEffectResult",
@@ -297,6 +303,7 @@ __all__ = [
     "n_knots_from_k",
     "TermInference",
     "InteractionInference",
+    "ConvergenceWarning",
     "SeparationError",
     "SeparationWarning",
     "WeakIdentificationWarning",
@@ -326,4 +333,4 @@ __all__ = [
     "dispersion_test",
     "vuong_test",
 ]
-__version__ = "0.36.0"
+__version__ = "0.36.1"

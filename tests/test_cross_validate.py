@@ -2,6 +2,7 @@
 
 import inspect
 import pickle
+import re
 import warnings
 from types import SimpleNamespace
 
@@ -469,6 +470,221 @@ class TestFitModes:
         assert len(result.fold_scores) == 3
         assert all(result.fold_scores["converged"])
 
+    def test_fit_reml_fold_convergence_is_reml_convergence(self, poisson_data):
+        """A fold whose smoothing selection hit its cap is not a converged fold.
+
+        Mutation check: master recorded ``est._result.converged`` -- the final
+        PIRLS fit, which converges at whatever lambdas REML stopped on -- and
+        had no way to pass the cap, so these folds read ``converged=True``.
+        """
+        from superglm import ConvergenceWarning
+
+        df, y, sw = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=8)},
+        )
+        with pytest.warns(ConvergenceWarning):
+            result = cross_validate(
+                model,
+                df,
+                y,
+                cv=SimpleKFold(3),
+                sample_weight=sw,
+                fit_mode="fit_reml",
+                fit_kwargs={"max_reml_iter": 1},
+                return_estimators=True,
+            )
+        folds = result.fold_scores
+        assert all(est._result.converged for est in result.estimators)
+        assert not any(folds["converged"])
+        assert list(folds["n_reml_iter"]) == [1, 1, 1]
+
+    def test_fit_reml_warm_start_skips_a_model_without_smoothing_selection(self):
+        """A model with no REML-eligible groups fits without a REML result.
+
+        ``fit_reml`` legitimately falls back to the plain coefficient fit and
+        leaves ``_reml_result`` as None; the default warm start must not try to
+        read lambdas from it. Mutation check: extracting the warm start without
+        the None guard turns every fold's score into NaN (AttributeError inside
+        the fold), which this test rejects.
+        """
+        x = np.linspace(-1.0, 1.0, 60)
+        df = pd.DataFrame({"x": x})
+        y = 2.0 + x + 0.1 * np.cos(np.arange(60))
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()})
+        result = cross_validate(
+            model, df, y, cv=SimpleKFold(3), fit_mode="fit_reml", error_score="raise"
+        )
+        folds = result.fold_scores
+        assert np.all(np.isfinite(folds["deviance"]))
+        assert all(folds["converged"])
+        assert not any(folds["warm_started"])
+
+    def test_fit_reml_folds_warm_start_from_the_first_converged_fold(self):
+        """Later folds start from fold 0's live lambdas and converge in fewer steps.
+
+        Two converged fits of one criterion agree in objective to twice the
+        Newton engines' stopping bar ``reml_tol * (1 + |objective|)``.
+        Mutation check: master had no warm start; every fold started cold.
+        """
+        rng = np.random.default_rng(5)
+        n = 2400
+        df = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = 0.3 + 0.8 * np.sin(2 * np.pi * df["x1"]) + 0.6 * np.cos(3 * df["x2"])
+        y = rng.poisson(np.exp(eta)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x1": Spline(kind="ps", k=10), "x2": Spline(kind="ps", k=10)},
+        )
+        runs = {
+            warm: cross_validate(
+                model,
+                df,
+                y,
+                cv=SimpleKFold(4),
+                fit_mode="fit_reml",
+                warm_start=warm,
+                return_estimators=True,
+            )
+            for warm in (False, True)
+        }
+        cold, warm = runs[False].fold_scores, runs[True].fold_scores
+        assert list(warm["warm_started"]) == [False, True, True, True]
+        assert not any(cold["warm_started"])
+        assert all(warm["converged"]) and all(cold["converged"])
+        assert warm["n_reml_iter"].iloc[1:].sum() < cold["n_reml_iter"].iloc[1:].sum()
+        for cold_est, warm_est in zip(runs[False].estimators, runs[True].estimators, strict=True):
+            cold_info, warm_info = cold_est.reml_diagnostics(), warm_est.reml_diagnostics()
+            bar = (
+                2.0
+                * cold_info["profile"]["reml_tol_resolved"]
+                * (1.0 + abs(cold_info["objective"]))
+            )
+            assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
+
+    def test_fit_reml_warm_start_never_leaves_a_tensor_half_warm(self, monkeypatch):
+        """A first fold that runs one tensor margin to a flat end starts the whole
+        tensor cold in later folds, and every fold converges.
+
+        The data do not support the DrivAge x VehAge interaction: the first fold
+        (all rows) runs the VehAge margin to working infinity, which the warm
+        start leaves out. Started beside the DrivAge margin at its fitted value,
+        the cold margin's seed spreads the block's penalty past what the
+        bootstrap's log-determinant can certify. Mutation check: leaving only the
+        flat margin cold started the DrivAge margin warm, and both later folds
+        failed with PenaltyNumericalError and nan scores.
+        """
+        from superglm import Constraint
+
+        rng = np.random.default_rng(3)
+        n = 3000
+        bm = rng.uniform(50.0, 150.0, n)
+        age = rng.uniform(18.0, 90.0, n)
+        vage = rng.uniform(0.0, 20.0, n)
+        gas = np.where(rng.uniform(size=n) < 0.3, "Diesel", "Regular")
+        eta = (
+            -1.4
+            + 0.9 * (1 - np.exp(-(bm - 50) / 25))
+            + 0.4 * np.exp(-(age - 18) / 8)
+            + 0.2 * np.sin(vage / 4)
+        )
+        exposure = rng.uniform(0.3, 1.0, n)
+        y = rng.poisson(exposure * np.exp(eta)).astype(float)
+        df = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehAge": vage, "VehGas": gas})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "DrivAge": Spline(kind="ps", k=8),
+                "VehAge": Spline(kind="ps", k=8),
+                "VehGas": Categorical(base="most_exposed"),
+            },
+            interactions=[("DrivAge", "VehAge")],
+        )
+        rows = np.arange(n)
+
+        class WholeThenHalves:
+            def split(self, X, y=None, groups=None):
+                yield rows, rows[:50]
+                yield rows[: n // 2], rows[n // 2 :]
+                yield rows[n // 2 :], rows[: n // 2]
+
+            def get_n_splits(self, *args, **kwargs):
+                return 3
+
+        starts = []
+        real_fit_reml = SuperGLM.fit_reml
+
+        def spy(self, *args, **kwargs):
+            starts.append(kwargs.get("lambda2_init"))
+            return real_fit_reml(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", spy)
+        result = cross_validate(
+            model,
+            df,
+            y,
+            cv=WholeThenHalves(),
+            offset=np.log(exposure),
+            fit_mode="fit_reml",
+            return_estimators=True,
+            error_score="raise",
+        )
+        first = result.estimators[0]._reml_result
+        assert first.flat_components == ["DrivAge:VehAge:margin_VehAge"]
+        assert starts[0] is None
+        for start in starts[1:]:
+            assert set(start) == {"BonusMalus", "DrivAge", "VehAge"}
+        assert list(result.fold_scores["warm_started"]) == [False, True, True]
+        assert all(result.fold_scores["converged"])
+
+    def test_fit_reml_an_empty_warm_start_is_not_passed(self, poisson_data, monkeypatch):
+        """When the first converged fold leaves every component on a flat
+        plateau, the warm start is empty: later folds keep the model's own start
+        and read ``warm_started=False``. Mutation check: 941f9ce8 passed
+        ``lambda2_init={}``, a mapping, which seeds every component at 0.1
+        instead of the configured smoothing, and marked those folds warm."""
+        import superglm.model_selection as model_selection
+
+        df, y, sw = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=5)},
+        )
+        monkeypatch.setattr(model_selection, "live_reml_lambdas", lambda fitted: {})
+        passed = []
+        real_fit_reml = SuperGLM.fit_reml
+
+        def spy(self, *args, **kwargs):
+            passed.append("lambda2_init" in kwargs)
+            return real_fit_reml(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", spy)
+        result = cross_validate(
+            model, df, y, cv=SimpleKFold(3), sample_weight=sw, fit_mode="fit_reml"
+        )
+        assert passed == [False, False, False]
+        assert not any(result.fold_scores["warm_started"])
+        assert all(result.fold_scores["converged"])
+
+    def test_fit_kwargs_cannot_set_the_split_arrays(self, poisson_data, base_model):
+        df, y, sw = poisson_data
+        with pytest.raises(ValueError, match="fit_kwargs cannot set"):
+            cross_validate(
+                base_model,
+                df,
+                y,
+                cv=SimpleKFold(3),
+                fit_kwargs={"offset": np.zeros(len(y))},
+            )
+
     def test_invalid_fit_mode(self, poisson_data, base_model):
         """Invalid fit_mode raises ValueError."""
         df, y, sw = poisson_data
@@ -519,6 +735,65 @@ class TestScoring:
         )
         assert "mae" in result.mean_scores
         assert result.mean_scores["mae"] > 0
+
+    @pytest.mark.parametrize("built_in_last", [False, True])
+    def test_builtin_scores_follows_the_scorer_that_wrote_a_column_last(
+        self, poisson_data, base_model, built_in_last
+    ):
+        """ranking returns {"gini": 0.5}, beside the built-in gini, in either order.
+
+        The column holds what the last scorer wrote: the callable's 0.5, which
+        the result must not credit to the built-in gini, or the built-in's,
+        which it must, so that the editor's Run CV can replay it.
+        """
+        df, y, sw = poisson_data
+
+        def ranking(model, X, y, *, sample_weight=None, offset=None):
+            return {"gini": 0.5}
+
+        scoring = (ranking, "gini") if built_in_last else ("gini", ranking)
+        result = cross_validate(
+            base_model, df, y, cv=SimpleKFold(3), sample_weight=sw, scoring=scoring
+        )
+        if built_in_last:
+            built_in = cross_validate(
+                base_model, df, y, cv=SimpleKFold(3), sample_weight=sw, scoring="gini"
+            )
+            pd.testing.assert_series_equal(result.fold_scores["gini"], built_in.fold_scores["gini"])
+            assert result.builtin_scores == ("gini",)
+        else:
+            assert (result.fold_scores["gini"] == 0.5).all()
+            assert result.builtin_scores == ()
+
+    @pytest.mark.parametrize("case", ["keys vary by fold", "raises in the last fold"])
+    def test_builtin_scores_needs_the_built_in_last_in_every_fold_that_scored(
+        self, poisson_data, base_model, case
+    ):
+        """scoring=("gini", ranking): ranking writes "gini" in the first fold only.
+
+        Either its dict holds "gini" in the first fold only, or it returns
+        {"gini": 0.5} until it raises in the last fold, after the built-in
+        has scored there (error_score fills that fold's scores). The first
+        fold's gini is the callable's 0.5, so the column is not the built-in
+        scorer's, but the last fold's writers decided alone.
+        """
+        df, y, sw = poisson_data
+        calls = []
+
+        def ranking(model, X, y, *, sample_weight=None, offset=None):
+            calls.append(None)
+            if case == "keys vary by fold":
+                return {"gini": 0.5} if len(calls) == 1 else {}
+            if len(calls) == 3:
+                raise RuntimeError("the third fold cannot be ranked")
+            return {"gini": 0.5}
+
+        result = cross_validate(
+            base_model, df, y, cv=SimpleKFold(3), sample_weight=sw, scoring=("gini", ranking)
+        )
+
+        assert result.fold_scores["gini"].iloc[0] == 0.5
+        assert "gini" not in result.builtin_scores
 
     def test_callable_scorer_dict(self, poisson_data, base_model):
         """Callable scorer returning a dict produces multiple columns."""
@@ -781,6 +1056,54 @@ class TestReturnOptions:
             40,
             40,
         ]
+
+    def test_plot_terms_by_fold_refuses_rows_the_folds_were_not_drawn_on(self, monkeypatch):
+        """Stored folds replayed on other rows crash on a short X or plot the wrong rows.
+
+        The row count is checked always, from the indices on a result made
+        before it was recorded; the fingerprint when y is passed.
+        """
+        x = np.linspace(0.0, 1.0, 60)
+        X = pd.DataFrame({"x": x})
+        y = 0.5 + np.sin(3.0 * x)
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0.0, features={"x": Spline(n_knots=5)}
+        )
+        result = cross_validate(model, X, y, cv=SimpleKFold(3), return_estimators=True)
+        monkeypatch.setattr(
+            "superglm.plotting.comparison.plot_term_comparison", lambda **kwargs: "figure"
+        )
+
+        short = (
+            "{} has 40 rows, but the folds were drawn on 60; pass the data given to cross_validate."
+        )
+        older = CrossValidationResult(
+            **{**vars(result), "n_rows": None, "data_fingerprint": None, "splitter": None}
+        )
+        for cv in (result, older):
+            with pytest.raises(ValueError) as refused:
+                cv.plot_terms_by_fold(X.iloc[:40])
+            assert str(refused.value) == short.format("X")
+            with pytest.raises(ValueError) as refused:
+                cv.plot_terms_by_fold(X, sample_weight=np.ones(40))
+            assert str(refused.value) == short.format("sample_weight")
+
+        reversed_rows = X.iloc[::-1].reset_index(drop=True)
+        for args in (
+            (reversed_rows, y),
+            (X, y[::-1]),
+            (X.astype("float32"), y),
+            (pl.from_pandas(X), y),
+        ):
+            with pytest.raises(ValueError) as refused:
+                result.plot_terms_by_fold(args[0], y=args[1])
+            assert str(refused.value) == (
+                "These 60 rows are not the ones the folds were drawn on: the columns, dtypes, "
+                "row order or values of X, y, sample_weight or offset differ (a pandas frame and "
+                "a polars one differ too); pass the data given to cross_validate."
+            )
+        assert result.plot_terms_by_fold(X, y=y, sample_weight=np.ones(60)) == "figure"
+        assert result.plot_terms_by_fold(reversed_rows) == "figure"  # unchecked without y
 
     def test_return_oof(self, poisson_data, base_model):
         """return_oof=True fills correct indices."""
@@ -1964,3 +2287,406 @@ class TestFullFrameLevelBinding:
         bindings = _resolve_level_bindings(model, as_eager_frame(X), None)
 
         assert set(bindings) == {"g"}
+
+
+def test_fit_reml_without_smoothing_selection_warns_when_the_coefficient_fit_stops_early():
+    """The no-REML fallback of ``fit_reml`` must disclose an unconverged coefficient fit.
+
+    Mutation check: warning only from ``_reml_result`` (None on this path)
+    leaves a ``max_iter`` stop silent.
+    """
+    from superglm import ConvergenceWarning
+
+    x = np.linspace(-1.0, 1.0, 60)
+    df = pd.DataFrame({"x": x})
+    y = np.tile([0.0, 1.0, 2.0, 3.0, 8.0, 15.0], 10)
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()})
+    with pytest.warns(ConvergenceWarning, match="coefficient fit did not converge"):
+        model.fit_reml(df, y, max_pirls_iter=1)
+    assert model._reml_result is None
+    assert not model._result.converged
+    # The warning points at reml_diagnostics(); with no smoothing search the
+    # coefficient fit is the only stage, and its stop is published there.
+    # Mutation check: on af53c8d4 these keys were absent on this path.
+    info = model.reml_diagnostics()
+    assert info["enabled"] is False
+    assert info["converged"] is False
+    assert info["termination_reason"] == "max_iter"
+    assert info["terminal_refit_termination"] == "max_iter"
+    assert "coefficient fit did not converge" in info["convergence_note"]
+
+    # A converged no-REML fit stays silent.
+    quiet = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        quiet.fit_reml(df, y)
+    assert quiet._result.converged
+    info = quiet.reml_diagnostics()
+    assert info["converged"] is True
+    assert info["convergence_note"] is None
+    assert info["terminal_refit_termination"] is None
+
+
+# ── Data fingerprint (the editor's Run CV) ───────────────────────
+
+
+def _data_fingerprint_of(frame):
+    from superglm.model_selection import _data_fingerprint
+
+    return _data_fingerprint(frame, np.ones(len(frame)))
+
+
+class TestDataFingerprint:
+    """A result records the rows its folds index, so a consumer can replay them."""
+
+    def test_result_records_row_count_fingerprint_and_splitter(self, poisson_data, base_model):
+        from superglm.model_selection import FINGERPRINT_VERSION, _data_fingerprint
+
+        df, y, sw = poisson_data
+        offset = np.linspace(-0.1, 0.1, len(y))
+        result = cross_validate(
+            base_model, df, y, cv=SimpleKFold(3), sample_weight=sw, offset=offset
+        )
+
+        assert result.n_rows == len(y)
+        assert (result.splitter, result.fit_mode) == ("SimpleKFold", "fit")
+        assert result.fingerprint_columns == ("x",)
+        assert result.data_fingerprint == _data_fingerprint(df, y, sw, offset, ("x",))
+        assert result.fingerprint_version == FINGERPRINT_VERSION
+
+    def test_the_fingerprint_of_fixed_rows_is_pinned_across_library_versions(self):
+        """X is read through NumPy and pandas.factorize, never a row hash or a dtype's text.
+
+        So these rows give these digests under any pandas or polars version,
+        and the same text gives one digest as pandas object or string dtype
+        (pandas 3 reads text as str). The frame library is part of it.
+        """
+        from superglm.model_selection import _data_fingerprint
+
+        columns = {
+            "band": ["B", "A", None, "B"],
+            "n": np.array([3, 1, 2, 3], dtype=np.int32),
+            "x": [0.5, -0.0, np.nan, 2.0],
+        }
+        X = pd.DataFrame(columns)
+        y = np.array([0.0, 1.0, 0.0, 2.0])
+
+        pinned = _data_fingerprint(X, y)
+        assert pinned == "ca0af589de56222a9c242ea27624cb0e44408e437e9b7f9bc7e2636fe63a4a43"
+        for dtype in (object, "string"):
+            assert _data_fingerprint(X.astype({"band": dtype}), y) == pinned
+        assert _data_fingerprint(pl.DataFrame(columns), y) == (
+            "73477e609750ba9f4f771a70e6b35306e01ed13565802ea99565530572006260"
+        )
+
+    @pytest.mark.parametrize("backend", ["pandas", "polars"])
+    def test_nans_that_differ_only_in_their_payload_bits_give_one_fingerprint(self, backend):
+        """Every NaN is one value: a NaN's sign and payload bits are not part of the rows.
+
+        IEEE 754 leaves them unspecified for most operations producing a NaN,
+        so the same rows computed or read twice can carry different NaN bytes.
+        """
+        from superglm.model_selection import _data_fingerprint
+
+        quiet = np.array([0.5, np.nan, 2.0])
+        other = quiet.copy()
+        other.view(np.uint64)[1] = np.uint64(0xFFF8_0000_0000_0001)
+        assert np.isnan(other[1]) and other.tobytes() != quiet.tobytes()
+        frame = pd.DataFrame if backend == "pandas" else pl.DataFrame
+        y = np.array([0.0, 1.0, 2.0])
+
+        assert _data_fingerprint(frame({"x": other}), y) == _data_fingerprint(
+            frame({"x": quiet}), y
+        )
+
+    def test_fingerprint_sees_a_swap_of_signed_zeros_a_grouped_categorical_reads(self):
+        """-0.0 and 0.0 are one number, but a grouped categorical reads them as two levels.
+
+        Rows 0 (-0.0) and 41 (0.0) share their response, so swapping their x
+        leaves y as it was, and the fingerprint, which wrote every zero as
+        +0.0, did not change; the first fold's deviance does.
+        """
+        from superglm import collapse_levels
+        from superglm.model_selection import _data_fingerprint
+
+        x = np.tile([-0.0, 0.0, 1.0, 2.0], 30)
+        y = np.tile([1.0, 3.0, 4.0, 6.0], 30)
+        y[[0, 41]] = 2.0
+        swapped = x.copy()
+        swapped[[0, 41]] = x[[41, 0]]
+        # From a Series: on a bare float array collapse_levels finds one zero
+        # level, so "0.0" would be uncovered and every fold would fail.
+        grouping = collapse_levels(pd.Series(x), groups={})
+
+        def first_fold_deviance(values):
+            features = {"x": Categorical(grouping=grouping)}
+            model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features)
+            result = cross_validate(model, pd.DataFrame({"x": values}), y, cv=SimpleKFold(3))
+            return result.fold_scores["deviance"].iloc[0]
+
+        original, moved = first_fold_deviance(x), first_fold_deviance(swapped)
+        assert np.isfinite(original) and np.isfinite(moved)
+        assert moved != original
+        assert _data_fingerprint(pd.DataFrame({"x": swapped}), y) != _data_fingerprint(
+            pd.DataFrame({"x": x}), y
+        )
+
+    @pytest.mark.parametrize("levels", [[-0.0, 0.0, 1.0, 2.0], [1, 1.0, 2, 3]])
+    def test_fingerprint_sees_a_swap_of_equal_objects_a_grouped_categorical_reads_apart(
+        self, levels
+    ):
+        """In an object column -0.0 equals 0.0 and 1 equals 1.0, but they print as two levels.
+
+        ``pandas.factorize`` gave equal values one code, so swapping rows 4
+        and 41 (equal responses) left the fingerprint as it was, while the
+        first fold's deviance moved.
+        """
+        from superglm import collapse_levels
+        from superglm.model_selection import _data_fingerprint
+
+        x = np.array(levels * 30, dtype=object)
+        y = np.tile([1.0, 3.0, 4.0, 6.0], 30)
+        y[[4, 41]] = 2.0
+        swapped = x.copy()
+        swapped[[4, 41]] = x[[41, 4]]
+        grouping = collapse_levels(pd.Series(x), groups={})
+
+        def first_fold_deviance(values):
+            features = {"x": Categorical(grouping=grouping)}
+            model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features)
+            result = cross_validate(model, pd.DataFrame({"x": values}), y, cv=SimpleKFold(3))
+            return result.fold_scores["deviance"].iloc[0]
+
+        assert len(grouping.all_original_levels) == 4
+        original, moved = first_fold_deviance(x), first_fold_deviance(swapped)
+        assert np.isfinite(original) and np.isfinite(moved)
+        assert moved != original
+        assert _data_fingerprint(pd.DataFrame({"x": swapped}), y) != _data_fingerprint(
+            pd.DataFrame({"x": x}), y
+        )
+
+    def test_a_column_whose_distinct_values_print_alike_gets_no_fingerprint(self):
+        """Two unequal objects that both print "same": the model fits them as two levels.
+
+        The fingerprint writes each value's type and text, so a swap of the
+        two left it as it was while the fit moved. Such a column has no
+        faithful fingerprint, so the result carries none, and the editor
+        refuses to replay it by name.
+        """
+
+        class Tag:
+            def __init__(self, k):
+                self.k = k
+
+            def __str__(self):
+                return "same"
+
+            def __eq__(self, other):
+                return isinstance(other, Tag) and other.k == self.k
+
+            def __hash__(self):
+                return hash(self.k)
+
+            def __lt__(self, other):
+                return self.k < other.k
+
+        from superglm.model_selection import _FOLD_UNFINGERPRINTED, FINGERPRINT_VERSION
+
+        x = np.array([Tag(1), Tag(2), Tag(1), Tag(2)] * 30, dtype=object)
+        y = np.tile([1.0, 3.0, 1.0, 3.0], 30)
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Categorical()})
+        X = pd.DataFrame({"x": x})
+
+        result = cross_validate(model, X, y, cv=SimpleKFold(3), return_estimators=True)
+
+        # The version says the result was made under the recipe; no fingerprint
+        # beside it says these columns could not be fingerprinted, which is not
+        # an older result, so a check of the rows refuses rather than passing.
+        assert result.data_fingerprint is None
+        assert result.fingerprint_version == FINGERPRINT_VERSION
+        with pytest.raises(ValueError, match=re.escape(_FOLD_UNFINGERPRINTED)):
+            result.plot_terms_by_fold(X, y=y)
+
+    def test_a_column_the_model_reads_but_X_lacks_still_gives_a_result_under_error_score(
+        self,
+    ):
+        """The model declares z; X has no z. Each fold fails and takes error_score.
+
+        A guard, not a regression: a review read the fingerprint, taken after
+        the fold loop, as raising KeyError on the missing column. The frame
+        refuses a missing column with ValueError, which cross_validate takes
+        as no fingerprint, so the result still comes back.
+        """
+        x = np.linspace(0.0, 1.0, 60)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric(), "z": Numeric()},
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = cross_validate(model, X, 1.0 + x, cv=SimpleKFold(3), error_score=np.nan)
+
+        assert result.fold_scores["deviance"].isna().all()
+        assert result.data_fingerprint is None
+
+    def test_a_pd_cut_column_keeps_its_fingerprint(self):
+        """pd.cut without labels= gives a categorical of Interval values, which a level term reads as text.
+
+        701eba5e fingerprinted only listed value types and left Interval out,
+        so the result had no fingerprint: plot_terms_by_fold refused the very
+        rows its folds were drawn on, and the editor disabled Run CV. An
+        Interval's text carries the closed side and endpoints its equality
+        compares, as a Period's carries the period.
+        """
+        x = np.linspace(0.0, 1.0, 120)
+        X = pd.DataFrame({"band": pd.cut(x, [0.0, 0.25, 0.5, 0.75, 1.0], include_lowest=True)})
+        y = np.tile([1.0, 2.0, 3.0], 40)
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": Categorical()})
+
+        result = cross_validate(model, X, y, cv=SimpleKFold(3), return_estimators=True)
+
+        from superglm.model_selection import _data_fingerprint
+
+        # The check plot_terms_by_fold(X, y=y) and the editor make on these rows.
+        assert result.data_fingerprint is not None
+        assert result.data_fingerprint == _data_fingerprint(
+            X, y, None, None, result.fingerprint_columns
+        )
+        periods = pd.DataFrame(
+            {"p": pd.period_range("2020-01", periods=4, freq="M").astype(object)}
+        )
+        assert _data_fingerprint_of(periods) is not None
+
+    def test_a_column_of_objects_whose_text_may_not_be_their_value_is_not_fingerprinted(self):
+        """Every Tag(1) in one frame is a Tag(2) in the other: both print "same", beside "other".
+
+        Within each frame the two printed values are distinct, so nothing
+        collided, but the frames wrote the same codes and text while a term
+        reading the objects' numbers (``__float__``) saw other values. Only
+        values whose text is their identity are fingerprinted.
+        """
+        from superglm.model_selection import _data_fingerprint
+
+        class Tag:
+            def __init__(self, k):
+                self.k = k
+
+            def __str__(self):
+                return "same"
+
+            def __float__(self):
+                return float(self.k)
+
+        y = np.ones(4)
+        one, two = Tag(1), Tag(2)
+        first = pd.DataFrame({"x": np.array([one, "other", one, "other"], dtype=object)})
+        second = pd.DataFrame({"x": np.array([two, "other", two, "other"], dtype=object)})
+
+        for frame in (first, second):
+            with pytest.raises(ValueError, match="cannot be fingerprinted"):
+                _data_fingerprint(frame, y)
+
+    def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
+        self, poisson_data, base_model
+    ):
+        from superglm.model_selection import _data_fingerprint
+
+        df, y, sw = poisson_data
+        unweighted = cross_validate(base_model, df, y, cv=SimpleKFold(2))
+
+        n = len(y)
+        assert unweighted.data_fingerprint == _data_fingerprint(df, y, np.ones(n), np.zeros(n))
+        assert _data_fingerprint(df, y, sw) != _data_fingerprint(df[::-1], y[::-1], sw[::-1])
+        assert _data_fingerprint(df, y, sw) != _data_fingerprint(df, y, 2.0 * sw)
+
+    @pytest.mark.parametrize("backend", ["pandas", "polars"])
+    def test_fingerprint_sees_features_and_offsets_beside_equal_responses(self, backend):
+        from superglm.model_selection import _data_fingerprint
+
+        # Rows 0 and 2 share their response and unit weight; swapping their
+        # features leaves y and the weights byte for byte the same.
+        X = pd.DataFrame({"band": ["A", "B", "C", "A"], "x": [0.5, 1.0, 1.5, 2.0]})
+        y = np.array([0.0, 1.0, 0.0, 1.0])
+        swapped = X.iloc[[2, 1, 0, 3]].reset_index(drop=True)
+        if backend == "polars":
+            X, swapped = pl.from_pandas(X), pl.from_pandas(swapped)
+
+        original = _data_fingerprint(X, y)
+        assert _data_fingerprint(swapped, y) != original
+        assert _data_fingerprint(X, y, offset=np.full(4, 0.5)) != original
+        assert _data_fingerprint(X[["x", "band"]], y) == original
+
+    def test_a_column_the_model_does_not_read_is_left_out_of_the_fingerprint(self):
+        # Columns the model never reads may hold anything, as on master: a
+        # list in every row neither breaks cross_validate after its folds are
+        # fitted nor moves the fingerprint, while a read column still does.
+        rng = np.random.default_rng(7)
+        n = 90
+        X = pd.DataFrame({"band": rng.choice(["A", "B", "C"], n), "x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(1.0, n).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"band": Categorical(), "x": Spline(n_knots=4)},
+        )
+        plain = cross_validate(model, X, y, cv=SimpleKFold(3))
+        with_meta = cross_validate(
+            model, X.assign(meta=[[i] for i in range(n)]), y, cv=SimpleKFold(3)
+        )
+
+        assert with_meta.fingerprint_columns == ("band", "x")
+        assert with_meta.data_fingerprint == plain.data_fingerprint
+        moved = X.assign(x=X["x"].to_numpy()[::-1])
+        assert cross_validate(model, moved, y, cv=SimpleKFold(3)).data_fingerprint != (
+            plain.data_fingerprint
+        )
+
+    def test_a_fingerprint_another_recipe_made_is_refused_as_such(self, monkeypatch):
+        # A result pickled before the recipe was versioned reads None; its
+        # fingerprint cannot be compared, which is not a change in the data.
+        x = np.linspace(0.0, 1.0, 60)
+        X, y = pd.DataFrame({"x": x}), 0.5 + np.sin(3.0 * x)
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0.0, features={"x": Spline(n_knots=5)}
+        )
+        result = cross_validate(model, X, y, cv=SimpleKFold(3), return_estimators=True)
+        older = CrossValidationResult(**{**vars(result), "fingerprint_version": None})
+        monkeypatch.setattr(
+            "superglm.plotting.comparison.plot_term_comparison", lambda **kwargs: "figure"
+        )
+
+        with pytest.raises(ValueError) as refused:
+            older.plot_terms_by_fold(X, y=y)
+        assert str(refused.value) == (
+            "This result's data fingerprint predates this version of superglm or comes from "
+            "another one, so these rows cannot be checked; run cross_validate again with this "
+            "version, or pass no y."
+        )
+        assert result.plot_terms_by_fold(X, y=y) == "figure"
+
+    def test_result_pickled_before_the_fields_existed_reads_none(self):
+        # Such a pickle restores without the attributes; the dataclass
+        # defaults are class attributes, so the fields read as None.
+        old = CrossValidationResult.__new__(CrossValidationResult)
+        old.__dict__.update(
+            fold_scores=pd.DataFrame(),
+            mean_scores={},
+            pooled_scores={},
+            std_scores={},
+            fold_indices=None,
+            curve_similarity=None,
+            oof_predictions=None,
+            estimators=None,
+        )
+        restored = pickle.loads(pickle.dumps(old))
+
+        assert (
+            restored.n_rows,
+            restored.data_fingerprint,
+            restored.splitter,
+            restored.fit_mode,
+            restored.fingerprint_version,
+        ) == (None, None, None, None, None)

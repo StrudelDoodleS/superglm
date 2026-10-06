@@ -1113,3 +1113,35 @@ class TestNB2ResolveDistribution:
     def test_resolve_passthrough(self):
         nb = NegativeBinomial(theta=3.0)
         assert resolve_distribution(nb) is nb
+
+
+def test_an_unconverged_reml_publication_of_theta_warns_once(monkeypatch):
+    """``estimate_theta(fit_mode="reml")`` publishes a fit_reml refit at the
+    selected theta; when that refit stops unconverged it warns once, at the
+    caller, as ``fit_reml`` does. Forced by a one-iteration budget on the
+    publication refit. Mutation check: on af53c8d4 it installed silently."""
+    from superglm import ConvergenceWarning
+    from superglm.model import profile_ops
+
+    real_refit = profile_ops._refit_selected
+
+    def one_iteration(final_model, validated, references, fit_mode, max_reml_iter, retain):
+        return real_refit(final_model, validated, references, fit_mode, 1, retain)
+
+    monkeypatch.setattr(profile_ops, "_refit_selected", one_iteration)
+    rng = np.random.default_rng(5)
+    n = 600
+    x = rng.uniform(0.0, 1.0, n)
+    mu = np.exp(0.3 + np.sin(2.0 * np.pi * x))
+    y = rng.negative_binomial(4.0, 4.0 / (4.0 + mu)).astype(float)
+    model = SuperGLM(
+        family=NegativeBinomial(1.0),
+        selection_penalty=0.0,
+        features={"x": Spline(kind="ps", k=8)},
+    )
+    with pytest.warns(ConvergenceWarning, match="max_reml_iter") as record:
+        model.estimate_theta(pd.DataFrame({"x": x}), y, fit_mode="reml")
+    assert model._reml_result.converged is False
+    disclosed = [w for w in record if issubclass(w.category, ConvergenceWarning)]
+    assert len(disclosed) == 1
+    assert disclosed[0].filename == __file__

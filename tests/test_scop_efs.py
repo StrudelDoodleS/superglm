@@ -2123,6 +2123,12 @@ class TestSCOPEFSOuterLoop:
         ``except ObservedModeNotCertifiedError`` handler because that family is
         RuntimeError-derived, so it killed the fit rather than costing it one
         point. Both call sites now retype it.
+
+        A first start whose mode cannot be scored is retried at the
+        Hessian-scaled start, like one with no certified mode; here every
+        score is refused, so the retry's refusal is raised, an infeasible
+        point to a power search.  Mutation check: a19d2fe4 raised at the
+        first start without a retry.
         """
         import superglm.reml.scop_efs as scop_efs_module
         from superglm.reml.observed_geometry import (
@@ -2134,6 +2140,14 @@ class TestSCOPEFSOuterLoop:
             raise ObservedGeometryInfeasibleError("SCOP penalized mode score is not finite")
 
         monkeypatch.setattr(scop_efs_module, "scop_penalized_mode_score", refuse)
+        starts = []
+        real_attempt = scop_efs_module._bootstrap_attempt
+
+        def attempt(context, lambdas, last_fit):
+            starts.append(dict(lambdas))
+            return real_attempt(context, lambdas, last_fit)
+
+        monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
 
         rng = np.random.default_rng(20260818)
         n = 100
@@ -2154,6 +2168,7 @@ class TestSCOPEFSOuterLoop:
             model.fit_reml(pd.DataFrame({"z": z, "x": x}), y, max_reml_iter=2, max_pirls_iter=100)
 
         assert isinstance(excinfo.value.__cause__, ObservedGeometryInfeasibleError)
+        assert len(starts) == 2 and starts[1] != starts[0]
 
     def test_candidate_guard_backtracks_past_uphill_full_and_half_steps(self, monkeypatch):
         """A fresh converged mode is required at every log-scale trial."""
@@ -2895,24 +2910,29 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         self._run_gate(monkeypatch, self._stub(self.SHORT_RUN), captured=captured)
         assert captured.get("record_diagnostics", False) is False
 
-    def test_a_genuinely_non_converging_fit_still_raises(self, monkeypatch):
-        """A real SCOP fit that never settles is reported as a failure.
+    def test_a_genuinely_non_converging_fit_is_published_unconverged(self, monkeypatch):
+        """A real SCOP fit that never settles is reported as not converged.
 
         This quasi-separated Poisson exhausts all its PIRLS iterations with
         zero halvings and zero rejections, its deviance still moving by ~1e-3
-        relative per iteration.
+        relative per iteration, at the cold bootstrap and again at its
+        Hessian-scaled retry. Neither is accepted as a mode; the retry's fit
+        is published with ``converged=False`` (owner decision 3, 2026-09-30:
+        disclose, never refuse; 37f73863 raised here).
 
-        The message alone cannot pin that. ``did not converge to a coefficient
-        mode`` is raised for two distinct reasons: the inner fit not
-        converging, and a converged mode failing latent certification --
-        ``_fit_scop_reml_mode`` returns ``None`` for both. So we also pin
-        *which* one fired. A non-converged result returns at ``require_converged
+        The outcome alone cannot pin which failure fired: an inner fit that
+        does not converge, or a converged mode that fails latent
+        certification. A non-converged result returns at ``require_converged
         and not result.converged`` before any certification is computed, so
-        ``_scop_mode_newton_relative`` is never reached on this path; a
-        certification failure would have to call it. Zero calls therefore
-        distinguishes the two, and keeps a future change that makes this fit
-        converge from leaving the test silently green on the other failure.
+        both bootstrap attempts leave ``_scop_mode_newton_relative`` uncalled,
+        and the publication evaluates the retry's last fit without certifying
+        it. Zero calls therefore distinguishes the two, and keeps a future
+        change that makes this fit converge from leaving the test silently
+        green on the other failure. (2a4e28c7 fitted the retry's start a
+        third time to publish it, and certified that refit once.)
         """
+        from superglm import ConvergenceWarning
+
         certifications = []
         original = scop_efs_module._scop_mode_newton_relative
 
@@ -2934,8 +2954,12 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
                 "x": PSpline(n_knots=12, penalty="ssp", constraint=Constraint.fit.increasing)
             },
         )
-        with pytest.raises(RuntimeError, match="did not converge to a coefficient mode"):
+        with pytest.warns(ConvergenceWarning, match="max_pirls_iter"):
             model.fit_reml(frame, response, max_reml_iter=20)
+        diagnostics = model.reml_diagnostics()
+        assert not diagnostics["converged"]
+        assert diagnostics["termination_reason"] == "bootstrap_uncertified"
+        assert model._reml_result.terminal_refit_termination == "max_iter"
         assert certifications == []
 
     def test_a_failed_certification_gets_a_cold_final_attempt(self, monkeypatch):
@@ -2989,6 +3013,2343 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         assert warm_starts[3] is False, "the final rung must start cold"
 
 
+def _scop_frequency_fixture(diesel_share: float, seed: int = 3):
+    """A small SCOP frequency fit with one binary factor.
+
+    At ``diesel_share=0.48`` the non-base level ("Diesel", rate 1.57x) carries
+    about 62% of the IRLS weight, so its 0/1 column fails the raw-centring
+    check ``|weighted mean| <= centred RMS``; at 0.25 it carries about 37%
+    and passes it.
+    """
+    from superglm import Categorical, Spline
+
+    rng = np.random.default_rng(seed)
+    n = 4000
+    bm = rng.integers(50, 151, n).astype(float)
+    age = rng.uniform(18, 90, n)
+    gas = np.where(rng.uniform(size=n) < diesel_share, "Diesel", "Regular")
+    exposure = rng.uniform(0.2, 1.0, n)
+    eta = (
+        -1.6
+        + 0.012 * (bm - 50)
+        + 0.4 * np.exp(-(age - 18) / 8)
+        + np.where(gas == "Diesel", 0.45, 0.0)
+    )
+    y = rng.poisson(exposure * np.exp(eta)).astype(float)
+    frame = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehGas": gas})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "DrivAge": Spline(kind="ps", k=8),
+            "VehGas": Categorical(base="most_exposed"),
+        },
+    )
+    return model, frame, y, np.log(exposure)
+
+
+def _record_certification_retries(monkeypatch):
+    """Record (rung, warm-started, inner iterations) for every SCOP mode fit.
+
+    Each mode fit makes its own inner fit before any retry it recurses into,
+    so the first inner fit after entry is its own.
+    """
+    records: list[tuple[int, bool, int]] = []
+    inner_iterations: list[int] = []
+    real_fit = scop_efs_module._fit_scop_reml_mode
+    real_irls = scop_efs_module.fit_irls_direct
+
+    def counting_irls(*args, **kwargs):
+        out = real_irls(*args, **kwargs)
+        inner_iterations.append(int(out[0].n_iter))
+        return out
+
+    def recording_fit(context, lambdas, **kwargs):
+        own = len(inner_iterations)
+        mode = real_fit(context, lambdas, **kwargs)
+        records.append(
+            (
+                int(kwargs.get("_certification_retry", 0)),
+                kwargs.get("beta_init") is not None,
+                inner_iterations[own],
+            )
+        )
+        return mode
+
+    monkeypatch.setattr(scop_efs_module, "fit_irls_direct", counting_irls)
+    monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", recording_fit)
+    return records
+
+
+class TestCertificationRetryStart:
+    """A certification retry starts where the certificate says the mode is.
+
+    The SCOP inner solve is block-coordinate (an ordinary-block solve, then a
+    SCOP Newton step), so it converges linearly: a mode that met its
+    coefficient-step test but failed the sqrt(rank * eps) certificate took
+    about ten more inner iterations, each a full Gram build, to pass it at
+    1e-10 (157 inner iterations for 15 retries on the 678k-row freMTPL2 fit).
+    The certificate has already computed the joint Newton step over every
+    coefficient, so rung 1 starts from it. A loose ``pirls_tol`` makes every
+    candidate fail the certificate, so retries happen on any platform.
+    """
+
+    def test_a_retry_starts_from_the_certificate_newton_step(self, monkeypatch):
+        """Rung-1 retries converge in about one inner iteration.
+
+        Mutation check: from the plain warm start (master at 155832e8) the same
+        nine retries took 5-8 inner iterations each, 59 in all; started from
+        the Newton step they take 1-3, 14 in all.
+        """
+        model, frame, y, offset = _scop_frequency_fixture(diesel_share=0.25)
+        records = _record_certification_retries(monkeypatch)
+        model.fit_reml(frame, y, offset=offset, max_reml_iter=100, pirls_tol=1e-3)
+
+        retries = [record for record in records if record[0] == 1]
+        assert len(retries) >= 3, "a loose inner tolerance must exercise the retry ladder"
+        assert all(warm for _, warm, _ in retries)
+        assert sum(inner for _, _, inner in retries) <= 2 * len(retries)
+        assert model.reml_diagnostics()["converged"]
+
+    def test_a_retry_stays_warm_when_raw_centring_is_ill_scaled(self, monkeypatch):
+        """An ill-scaled raw centring no longer sends the retry back to a cold start.
+
+        Mutation check: with the old ``_raw_centering_well_scaled`` gate every
+        retry of this fixture started cold (14 inner iterations for the one
+        natural retry at the default tolerance); on the cleaned 678k-row book
+        20 cold retries took 808 inner iterations against 20 warm ones.
+        """
+        model, frame, y, offset = _scop_frequency_fixture(diesel_share=0.48)
+        records = _record_certification_retries(monkeypatch)
+        model.fit_reml(frame, y, offset=offset, max_reml_iter=100, pirls_tol=1e-3)
+
+        retries = [record for record in records if record[0] in (1, 2)]
+        assert retries, "a loose inner tolerance must exercise the retry ladder"
+        assert all(warm for _, warm, _ in retries), retries
+        rung_one = [inner for rung, _, inner in retries if rung == 1]
+        assert sum(rung_one) <= 2 * len(rung_one)
+        assert model.reml_diagnostics()["converged"]
+
+    def test_a_newton_step_past_the_exp_clip_keeps_the_plain_warm_start(self):
+        """A polished start the forward map cannot represent is refused.
+
+        The forward map clips its exponent at 500, so a latent step beyond it
+        lands on a different point whose linear predictor sits at the link's
+        overflow guard. On the freMTPL2 Tweedie book the cold bootstrap's
+        certificate asked for a latent step of 8.0e4; started there, the retry
+        could not take a single inner step and reported separation. Mutation
+        check: 37f73863 returned that start. The clip binds at -500 as well,
+        where the clipped point is not the Newton point either; 2a4e28c7
+        guarded only the upper end and returned the start at -501.
+        """
+        from superglm.solvers.scop import build_scop_solver_reparam
+
+        reparam = build_scop_solver_reparam(6, kind="increasing")
+        state = {"group_sl": slice(1, 6), "reparam": reparam, "beta_eff": np.full(5, -11.0)}
+        mode = SimpleNamespace(result=SimpleNamespace(intercept=1.0), scop_states={0: state})
+        latent = np.concatenate(([0.2], state["beta_eff"]))
+
+        def correction(step: float):
+            slope = np.zeros(6)
+            slope[1] = step
+            return scop_efs_module._SCOPModeNewtonCorrection(
+                latent_beta=latent, slope=slope, intercept=0.0, relative=1.0
+            )
+
+        start = scop_efs_module._newton_polished_warm_start(mode, correction(510.0))
+        assert start is not None and start[2][0]["beta_eff"][0] == 499.0
+        assert scop_efs_module._newton_polished_warm_start(mode, correction(512.0)) is None
+        assert scop_efs_module._newton_polished_warm_start(mode, correction(8.0e4)) is None
+        start = scop_efs_module._newton_polished_warm_start(mode, correction(-488.0))
+        assert start is not None and start[2][0]["beta_eff"][0] == -499.0
+        assert scop_efs_module._newton_polished_warm_start(mode, correction(-490.0)) is None
+        assert scop_efs_module._newton_polished_warm_start(mode, correction(-8.0e4)) is None
+
+
+def _tweedie_pure_premium_fixture(n: int, seed: int):
+    """A small Tweedie (p=1.5) pure-premium book shaped like freMTPL2.
+
+    About 95% of rows have no claim; BonusMalus holds 60% of the rows at 50
+    with a risk effect flat to 70, under an increasing constraint; and the
+    DrivAge x VehAge tensor has sparse cells with no claims. At the cold
+    bootstrap's 1e-4 every smooth is almost unpenalized and the inner fit
+    never reaches a certified mode.
+    """
+    from superglm import Categorical, Spline, Tweedie
+
+    rng = np.random.default_rng(seed)
+    age = np.clip(18 + rng.gamma(4.0, 6.0, n), 18, 95)
+    veh = np.clip(rng.exponential(6.0, n), 0, 30).round()
+    bm = np.where(
+        rng.uniform(size=n) < 0.6, 50.0, np.clip(50 + rng.exponential(18.0, n), 50, 150).round()
+    )
+    dens = np.clip(rng.normal(6.0, 2.0, n), 0.0, 10.5)
+    shares = np.array([20, 15, 12, 10, 10, 9, 8, 7, 5, 4]) / 100
+    region = rng.choice(list("ABCDEFGHIJ"), size=n, p=shares)
+    exposure = rng.uniform(0.05, 1.0, n)
+    region_effect = dict(zip("ABCDEFGHIJ", rng.normal(0, 0.15, 10), strict=True))
+    eta = (
+        np.log(0.1)
+        + np.where(bm <= 70, 0.0, 0.02 * (bm - 70))
+        + 0.6 * np.exp(-(age - 18) / 6)
+        + 0.2 * ((age - 50) / 30) ** 2
+        - 0.03 * veh
+        + 0.05 * (dens - 6)
+        + np.array([region_effect[r] for r in region])
+    )
+    counts = rng.poisson(exposure * np.exp(eta))
+    amount = np.array([rng.gamma(0.8, 1500.0 / 0.8, c).sum() if c else 0.0 for c in counts])
+    frame = pd.DataFrame(
+        {"DrivAge": age, "VehAge": veh, "BonusMalus": bm, "LogDensity": dens, "Region": region}
+    )
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "DrivAge": Spline(kind="ps", k=12),
+            "VehAge": Spline(kind="ps", k=10),
+            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "LogDensity": Spline(kind="ps", k=8),
+            "Region": Categorical(base="most_exposed"),
+        },
+        interactions=[("DrivAge", "VehAge")],
+    )
+    return model, frame, np.minimum(amount, 50000.0) / exposure, exposure
+
+
+def _three_kind_fixture(family="tweedie", n: int = 240, seed: int = 11):
+    """An ordinary spline, a SCOP block and a two-margin tensor, with prior weights."""
+    from superglm import Spline, Tweedie
+
+    rng = np.random.default_rng(seed)
+    frame = pd.DataFrame({name: rng.uniform(0.0, 1.0, n) for name in ("s", "m", "a", "b")})
+    mean = np.exp(0.5 + np.sin(3.0 * frame["s"]) + frame["m"] + 0.5 * frame["a"] * frame["b"])
+    y = rng.poisson(mean).astype(float)
+    if family == "tweedie":
+        family = Tweedie(p=1.5)
+        y = y * rng.gamma(2.0, 0.5, n)
+    model = SuperGLM(
+        family=family,
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "s": Spline(kind="ps", k=8),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "a": Spline(kind="ps", k=6),
+            "b": Spline(kind="ps", k=6),
+        },
+        interactions=[("a", "b")],
+    )
+    return model, frame, y, rng.uniform(0.2, 2.0, n)
+
+
+class _BootstrapCapturedError(Exception):
+    """Stops a fit at its first bootstrap start, carrying the fit context."""
+
+    def __init__(self, context, lambdas):
+        super().__init__("bootstrap captured")
+        self.context = context
+        self.lambdas = lambdas
+
+
+def _bootstrap_context(monkeypatch, model, frame, y, **fit_kwargs):
+    """The SCOP REML fit context and first bootstrap start, before any inner fit."""
+
+    def capture(context, lambdas, **kwargs):
+        raise _BootstrapCapturedError(context, dict(lambdas))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scop_efs_module, "_fit_scop_reml_mode", capture)
+        with pytest.raises(_BootstrapCapturedError) as info:
+            model.fit_reml(frame, y, **fit_kwargs)
+    return info.value.context, info.value.lambdas
+
+
+def _scaled_start_oracle(context, lambdas):
+    """``{name: (sum A_ii / sum S_j,ii, kappa, m)}`` in exact arithmetic, and the row count.
+
+    ``A`` is the two-pass centred Fisher Gram at the initial mean (no
+    offset), from the dense design; ``S_j`` the dense penalty with only
+    ``name`` at one; ``kappa = sum g_ii / sum A_ii``, ``g = diag(X' W X)``;
+    ``m`` the support's size.
+    """
+    from fractions import Fraction
+
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.solvers.working_rows import coefficient_initial_intercept, fisher_working_weights
+
+    assert not np.any(context.offset_arr)
+    weights = np.asarray(context.sample_weight, dtype=np.float64)
+    intercept = coefficient_initial_intercept(
+        distribution=context.distribution, link=context.link, y=context.y, sample_weight=weights
+    )
+    eta = stabilize_eta(intercept + context.offset_arr, context.link)
+    mu = clip_mu(context.link.inverse(eta), context.distribution)
+    fisher = fisher_working_weights(
+        distribution=context.distribution, link=context.link, mu=mu, eta=eta, sample_weight=weights
+    )
+    design = context.dm.toarray()
+    w = [Fraction(float(value)) for value in fisher]
+    sum_w = sum(w)
+    moments: dict[int, tuple[Fraction, Fraction]] = {}
+
+    def column(j: int) -> tuple[Fraction, Fraction]:
+        if j not in moments:
+            x = [Fraction(float(value)) for value in design[:, j]]
+            mean = sum(wi * xi for wi, xi in zip(w, x, strict=True)) / sum_w
+            centred = sum(wi * (xi - mean) ** 2 for wi, xi in zip(w, x, strict=True))
+            raw = sum(wi * xi * xi for wi, xi in zip(w, x, strict=True))
+            moments[j] = (centred, raw)
+        return moments[j]
+
+    unit = dict.fromkeys(lambdas, 0.0)
+    oracle = {}
+    for name in lambdas:
+        diag = np.diagonal(
+            build_penalty_matrix(
+                list(context.dm.group_matrices),
+                context.groups,
+                {**unit, name: 1.0},
+                context.dm.p,
+                reml_penalties=context.reml_penalties,
+            )
+        )
+        support = np.flatnonzero(diag > 0.0)
+        centred = sum(column(int(j))[0] for j in support)
+        raw = sum(column(int(j))[1] for j in support)
+        penalty = sum(Fraction(float(diag[j])) for j in support)
+        oracle[name] = (float(centred / penalty), float(raw / centred), len(support))
+    return oracle, design.shape[0]
+
+
+class TestColdBootstrapStart:
+    """A bootstrap with no certified mode at the cold seeds restarts where it can.
+
+    Wood, Pya and Saefken (2016, section 3.1) start the smoothing-parameter
+    search where every smooth's effective degrees of freedom lie away from
+    their extremes. The cold seed of 1e-4 puts them at their maximum, and an
+    exp-reparameterised SCOP block can then stall short of its mode: the
+    freMTPL2 Tweedie book stopped on the inner step test at a point whose
+    certificate asked for a latent step of 8.0e4. The retry starts at the
+    Hessian-scaled values of ``_hessian_scaled_bootstrap_lambdas``.
+    """
+
+    def test_a_failed_cold_bootstrap_restarts_at_hessian_scaled_lambdas(self, monkeypatch):
+        """The fixture's cold bootstrap fails; the retry certifies and the search converges.
+
+        Mutation check: 37f73863 raised ``ObservedModeNotConvergedError`` ("SCOP
+        REML bootstrap did not converge to a coefficient mode") on this fit.
+
+        The discarded cold start's warnings do not reach the caller: its
+        SeparationWarning called the returned coefficients unusable, while
+        the published fit converged with its linear predictor far from any
+        overflow guard. Under an "error" filter for SeparationWarning the
+        cold start no longer aborts the fit before its retry. Mutation check:
+        2a4e28c7 raised the cold start's SeparationWarning here.
+        """
+        import warnings
+
+        from superglm import SeparationWarning
+
+        model, frame, y, exposure = _tweedie_pure_premium_fixture(n=10_000, seed=3)
+        boots: list[tuple[dict[str, float], bool]] = []
+        real = scop_efs_module._fit_scop_reml_mode
+
+        def recording(context, lambdas, **kwargs):
+            mode = real(context, lambdas, **kwargs)
+            if kwargs.get("phase") == "bootstrap" and kwargs.get("_certification_retry", 0) == 0:
+                boots.append((dict(lambdas), mode is not None))
+            return mode
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", recording)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            warnings.simplefilter("error", SeparationWarning)
+            model.fit_reml(frame, y, sample_weight=exposure, max_reml_iter=200)
+
+        assert not [w for w in caught if issubclass(w.category, SeparationWarning)]
+        assert [certified for _, certified in boots] == [False, True]
+        cold, scaled = boots[0][0], boots[1][0]
+        assert set(cold.values()) == {1e-4}
+        assert all(scaled[name] > cold[name] for name in cold)
+        diagnostics = model.reml_diagnostics()
+        assert diagnostics["converged"]
+        assert diagnostics["termination_reason"] == "lambda_tolerance"
+
+    def test_the_scaled_start_is_sum_a_over_sum_s(self, monkeypatch):
+        """Each start is ``sum A_ii / sum S_j,ii`` over ``S_j``'s support, clipped to [1e-6, 1e10].
+
+        ``A`` is the intercept-centred Fisher Gram at the initial mean (a SCOP
+        block's at Jacobian one: its design columns, at unit increments), on
+        an ordinary spline, a SCOP block and a two-margin tensor. The oracle
+        forms ``A_ii = sum W (x - xbar)**2`` and the ratio in exact rational
+        arithmetic from the same float64 design, weights and penalty
+        diagonal, so its one rounding is the final one.
+
+        The production value forms ``A_ii`` from raw moments, ``g - sum_w
+        m**2`` with ``g = sum W x**2``, by an unknown summation order (BLAS or
+        binned kernels), and its error is relative to ``g``, not to ``A_ii``
+        (Higham 2002, section 3.1): ``g``, ``sum W x`` and ``sum_w`` round
+        within ``gamma_(2n+4)``, ``gamma_(2n+2)`` (of ``sum W |x|``) and
+        ``gamma_n``; with ``(sum W |x|)**2 <= sum_w g`` the four further
+        roundings of the mean, its square, the product and the difference
+        leave ``|A_ii^ - A_ii| <= gamma_(10n+18) g_ii``.  The sums over the
+        ``m`` supported coefficients and the divide add ``gamma_(3m+4)``, so
+        the relative error is at most ``kappa gamma_(10n+18) + gamma_(3m+4)``,
+        ``kappa = sum g_ii / sum A_ii``, doubled for the second-order cross
+        terms.  Weights scaled by ``2**-60`` and ``2**60`` scale every ratio
+        exactly, past each clip. Mutation check: a ratio of ``g`` instead of
+        ``A`` (no centring: ``s`` off by 7e-4 relative against a bound of
+        5e-13), or over every penalized coefficient instead of ``S_j``'s
+        support (``s`` 2.7 times the oracle), fails the bound.
+        """
+        model, frame, y, weights = _three_kind_fixture()
+        context, lambdas = _bootstrap_context(monkeypatch, model, frame, y, sample_weight=weights)
+        names = set(lambdas)
+        assert len(names) >= 5
+        scaled = scop_efs_module._hessian_scaled_bootstrap_lambdas(context, lambdas, names)
+        oracle, n = _scaled_start_oracle(context, lambdas)
+        assert set(oracle) == names
+
+        u = 2.0**-53
+
+        def gamma(k: int) -> float:
+            return k * u / (1.0 - k * u)
+
+        for name, (ratio, kappa, m) in oracle.items():
+            tol = 2.0 * (kappa * gamma(10 * n + 18) + gamma(3 * m + 4))
+            assert abs(scaled[name] - ratio) <= tol * ratio, (name, scaled[name], ratio, tol)
+            assert ratio * 2.0**-60 < 1e-6 and ratio * 2.0**60 > 1e10
+        for factor, bound in ((2.0**-60, 1e-6), (2.0**60, 1e10)):
+            rescaled = replace(context, sample_weight=context.sample_weight * factor)
+            assert scop_efs_module._hessian_scaled_bootstrap_lambdas(
+                rescaled, lambdas, names
+            ) == dict.fromkeys(names, bound)
+
+    def test_an_offset_shift_leaves_the_scaled_start_unchanged(self, monkeypatch):
+        """A constant added to every offset is absorbed by the intercept, so the start ignores it.
+
+        The Fisher weights are read at the intercept-only fit given the
+        offset, relative to its largest value; with offsets on a 2**-20 grid
+        a shift of 3 is exact, and the start is the same float64 value.
+        Mutation check: 2a4e28c7 read them at the offset-free intercept plus
+        the offset, so the shift scaled every Poisson start by e**3 and every
+        Tweedie (p=1.5) start by e**1.5.
+        """
+        from superglm import Tweedie
+
+        for family in ("poisson", Tweedie(p=1.5)):
+            model, frame, y, weights = _three_kind_fixture(family=family)
+            exposure = np.random.default_rng(5).uniform(0.05, 1.0, len(y))
+            offset = np.round(np.log(exposure) * 2.0**20) / 2.0**20
+            context, lambdas = _bootstrap_context(
+                monkeypatch, model, frame, y, sample_weight=weights, offset=offset
+            )
+            assert np.array_equal(context.offset_arr, offset)
+            names = set(lambdas)
+            base = scop_efs_module._hessian_scaled_bootstrap_lambdas(context, lambdas, names)
+            shifted = replace(context, offset_arr=context.offset_arr + 3.0)
+            assert np.array_equal(shifted.offset_arr - 3.0, offset)
+            moved = scop_efs_module._hessian_scaled_bootstrap_lambdas(shifted, lambdas, names)
+            assert moved == base, family
+
+    def test_the_scaled_start_keeps_no_dense_penalty_alive(self, monkeypatch):
+        """Each component's p x p penalty is released once its diagonal is read.
+
+        ``np.diag`` returns a view, which kept every component's dense
+        penalty alive until the start was formed: ``8 m p**2`` bytes for
+        ``m`` components. Mutation check: 2a4e28c7 held all earlier ones.
+        """
+        import weakref
+
+        model, frame, y, weights = _three_kind_fixture()
+        context, lambdas = _bootstrap_context(monkeypatch, model, frame, y, sample_weight=weights)
+        made: list[weakref.ref] = []
+        alive: list[int] = []
+        real = scop_efs_module.build_penalty_matrix
+
+        def tracking(*args, **kwargs):
+            alive.append(sum(ref() is not None for ref in made))
+            matrix = real(*args, **kwargs)
+            made.append(weakref.ref(matrix))
+            return matrix
+
+        monkeypatch.setattr(scop_efs_module, "build_penalty_matrix", tracking)
+        scop_efs_module._hessian_scaled_bootstrap_lambdas(context, lambdas, set(lambdas))
+        assert len(made) == len(lambdas) >= 2
+        assert alive == [0] * len(made)
+
+    def test_a_bootstrap_with_no_observed_geometry_is_still_published(self, monkeypatch):
+        """A last iterate with signed observed rows is published, not refused.
+
+        Gamma with an identity link has observed-information rows
+        ``w (2 y - mu) / mu**3``, negative wherever ``y < mu / 2``, and the
+        SCOP moment kernels refuse signed rows. With ``max_pirls_iter=1``
+        both bootstrap starts stop on their budget, and the retry's last
+        iterate (finite coefficients) has such rows. It is published not
+        converged, evaluated on the geometry the inner fit retained (the route
+        a Fisher-curvature family always takes). Mutation check: 2a4e28c7
+        raised ValueError ("signed observed-information rows are not
+        supported") with no ConvergenceWarning and no fit.
+        """
+        from superglm import ConvergenceWarning
+        from superglm.distributions import Gamma
+        from superglm.links import IdentityLink
+
+        x = np.linspace(0.0, 1.0, 100)
+        frame = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=Gamma(),
+            link=IdentityLink(),
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        )
+        retained: list[object] = []
+        real = scop_efs_module.build_cached_scop_joint_geometry
+
+        def recording(**kwargs):
+            retained.append(real(**kwargs))
+            return retained[-1]
+
+        monkeypatch.setattr(scop_efs_module, "build_cached_scop_joint_geometry", recording)
+        with pytest.warns(ConvergenceWarning, match="max_pirls_iter"):
+            model.fit_reml(frame, np.exp(8.0 * x), max_pirls_iter=1)
+        reml = model._reml_result
+        assert not reml.converged
+        assert reml.termination_reason == "bootstrap_uncertified"
+        assert reml.terminal_refit_termination == "max_iter"
+        assert len(retained) == 1
+        assert reml.curvature_source == retained[0].curvature_source
+        assert len(reml.lambda_history) == 2
+        assert np.isfinite(model.result.effective_df)
+        assert np.all(np.isfinite(model.predict(frame)))
+
+
+class _ProbeWarning(UserWarning):
+    """A warning only these tests raise."""
+
+
+def _held_probe_a():
+    from superglm import _held_warnings
+
+    _held_warnings.warn("thread A", _ProbeWarning)
+
+
+def _held_probe_b():
+    from superglm import _held_warnings
+
+    _held_warnings.warn("thread B", _ProbeWarning)
+
+
+def _small_scop_model():
+    rng = np.random.default_rng(0)
+    n = 200
+    x = np.sort(rng.uniform(0, 1, n))
+    y = np.round(np.exp(1.0 + 1.5 * x)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+    )
+    return model, pd.DataFrame({"x": x}), y
+
+
+class TestBootstrapWarningHold:
+    """A bootstrap start's warnings are held in its own context and replayed only for the kept start.
+
+    ``warnings.catch_warnings`` swaps the process-wide filters and
+    ``showwarning``: two fits overlapping on threads (the editor's jobs) could
+    leave the process recording into a list nobody reads.  The hold is a
+    context variable (``superglm._held_warnings``).
+    """
+
+    def test_overlapping_bootstraps_leave_the_warnings_module_alone(self, monkeypatch):
+        """Two fits on two threads, their bootstraps interleaved A in, B in, A out, B out.
+
+        Each thread's kept start replays its own held probe, and nothing
+        else's; the filters and ``showwarning`` are as they were, and a
+        later warning on the main thread still reaches ``showwarning``.
+        Mutation check: a19d2fe4's ``catch_warnings`` left B's exit restoring
+        the state A installed (an "always" filter and a recording
+        ``showwarning``).
+        """
+        import threading
+        import warnings
+
+        probes = {"A": _held_probe_a, "B": _held_probe_b}
+        a_in, a_out = threading.Event(), threading.Event()
+        both_in = threading.Barrier(2, timeout=120)
+        started: set[str] = set()
+        real_fit = scop_efs_module._fit_scop_reml_mode
+        real_attempt = scop_efs_module._bootstrap_attempt
+
+        def fit(context, lambdas, **kwargs):
+            name = threading.current_thread().name
+            if kwargs.get("phase") == "bootstrap" and name not in started:
+                started.add(name)
+                probes[name]()
+                if name == "A":
+                    a_in.set()
+                both_in.wait()
+                if name == "B":
+                    assert a_out.wait(timeout=120)
+            return real_fit(context, lambdas, **kwargs)
+
+        def attempt(*args, **kwargs):
+            # A enters its attempt first, then B; A leaves first, then B
+            if threading.current_thread().name == "B":
+                assert a_in.wait(timeout=120)
+            out = real_attempt(*args, **kwargs)
+            if threading.current_thread().name == "A":
+                a_out.set()
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fit)
+        monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
+        seen: list[tuple[str, type, str, int]] = []
+
+        def show(message, category, filename, lineno, file=None, line=None):
+            seen.append((threading.current_thread().name, category, filename, lineno))
+
+        errors: list[BaseException] = []
+
+        def run():
+            try:
+                model, frame, y = _small_scop_model()
+                model.fit_reml(frame, y, max_reml_iter=5)
+            except BaseException as exc:  # reported below
+                errors.append(exc)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.showwarning = show
+            filters, shown = list(warnings.filters), warnings.showwarning
+            threads = [threading.Thread(target=run, name=name) for name in "AB"]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=600)
+            assert not errors, errors
+            assert warnings.filters == filters
+            assert warnings.showwarning is shown
+            warnings.warn("after", _ProbeWarning)
+        assert ("MainThread", _ProbeWarning) in {(name, category) for name, category, *_ in seen}
+        for name, probe in probes.items():
+            own = [
+                (filename, lineno)
+                for thread, category, filename, lineno in seen
+                if thread == name and category is _ProbeWarning and filename == __file__
+            ]
+            assert own == [(__file__, probe.__code__.co_firstlineno + 3)], (name, own)
+
+    def test_the_kept_start_warnings_reach_the_caller(self, monkeypatch):
+        """A warning the bootstrap raises through superglm reaches the caller from its own line.
+
+        On a fit whose first start certifies it arrives once, attributed to
+        the line that raised it, and an "error" filter raises it.  With the
+        first start forced to fail, only the retry's arrive.  Mutation check:
+        a no-op ``replay`` drops every one.
+        """
+        import warnings
+
+        from superglm import _held_warnings
+
+        real_fit = scop_efs_module._fit_scop_reml_mode
+        emitted: list[float] = []
+
+        def fit(context, lambdas, **kwargs):
+            if kwargs.get("phase") == "bootstrap":
+                _held_warnings.warn(f"probe {lambdas['x']!r}", _ProbeWarning)
+                emitted.append(lambdas["x"])
+            return real_fit(context, lambdas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fit)
+        line = fit.__code__.co_firstlineno + 2
+
+        def probes():
+            emitted.clear()
+            model, frame, y = _small_scop_model()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                model.fit_reml(frame, y, max_reml_iter=5)
+            return [
+                (str(w.message), w.filename, w.lineno)
+                for w in caught
+                if w.category is _ProbeWarning
+            ]
+
+        kept = probes()
+        assert emitted and set(emitted) == {1e-4}
+        assert kept == [(f"probe {1e-4!r}", __file__, line)] * len(emitted)
+        model, frame, y = _small_scop_model()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", _ProbeWarning)
+            with pytest.raises(_ProbeWarning):
+                model.fit_reml(frame, y, max_reml_iter=5)
+
+        real_relative = scop_efs_module._scop_mode_newton_relative
+        monkeypatch.setattr(
+            scop_efs_module,
+            "_scop_mode_newton_relative",
+            lambda mode: 1.0 if mode.lambdas == {"x": 1e-4} else real_relative(mode),
+        )
+        retried = probes()
+        assert 1e-4 in emitted
+        assert retried == [(f"probe {x!r}", __file__, line) for x in emitted if x != 1e-4]
+        assert retried
+
+    def test_numpy_floating_point_warnings_pass_through_as_numpy_raises_them(self, monkeypatch):
+        """NumPy's own warnings are not held: its text, and a caller's ``np.seterr`` "log".
+
+        Routed through ``np.errstate(call=...)``, the overflow came back as
+        "overflow encountered", without the ufunc a caller's message filter
+        matches, and under ``np.seterr(all="log")`` NumPy called ``write`` on
+        that handler, raising ``AttributeError`` out of the fit.  Mutation
+        check: 71c697b0 failed both.
+        """
+        import warnings
+
+        real_fit = scop_efs_module._fit_scop_reml_mode
+
+        def fit(context, lambdas, **kwargs):
+            if kwargs.get("phase") == "bootstrap":
+                np.exp(np.array([1000.0]))
+            return real_fit(context, lambdas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fit)
+        model, frame, y = _small_scop_model()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.fit_reml(frame, y, max_reml_iter=5)
+        messages = {str(w.message) for w in caught if w.category is RuntimeWarning}
+        assert messages == {"overflow encountered in exp"}
+
+        class Log:
+            def __init__(self):
+                self.lines: list[str] = []
+
+            def write(self, message):
+                self.lines.append(message)
+
+        log = Log()
+        model, frame, y = _small_scop_model()
+        with np.errstate(all="log", call=log):
+            model.fit_reml(frame, y, max_reml_iter=5)
+        assert "Warning: overflow encountered in exp\n" in log.lines
+
+    @pytest.mark.parametrize("held", [False, True], ids=["warnings_warn", "held_warn"])
+    def test_a_warning_from_code_with_no_module_is_not_dropped(self, monkeypatch, held):
+        """A warning raised from a notebook cell, whose filename names no module, reaches the caller.
+
+        A custom family defined in a notebook warns from code whose globals
+        have no ``__name__``.  Replayed with ``module=None``, Python 3.13 drops
+        it; the module is read from the frame, as ``warnings.warn`` reads it
+        (``"<string>"`` without a ``__name__``).  Mutation check: a19d2fe4
+        raised nothing under "error" for the ``warnings.warn`` case.
+        """
+        import warnings
+
+        namespace = {"warnings": warnings, "Probe": _ProbeWarning}
+        if held:
+            from superglm import _held_warnings
+
+            namespace["held_warnings"] = _held_warnings
+        source = (
+            "def emit(held):\n"
+            "    if held:\n"
+            "        held_warnings.warn('cell', Probe)\n"
+            "    else:\n"
+            "        warnings.warn('cell', Probe)\n"
+        )
+        exec(compile(source, "<notebook-cell-7>", "exec"), namespace)
+        assert "__name__" not in namespace
+        real_fit = scop_efs_module._fit_scop_reml_mode
+
+        def fit(context, lambdas, **kwargs):
+            if kwargs.get("phase") == "bootstrap":
+                namespace["emit"](held)
+            return real_fit(context, lambdas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fit)
+        model, frame, y = _small_scop_model()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", _ProbeWarning)
+            with pytest.raises(_ProbeWarning, match="cell"):
+                model.fit_reml(frame, y, max_reml_iter=5)
+        model, frame, y = _small_scop_model()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.fit_reml(frame, y, max_reml_iter=5)
+        located = {(w.filename, w.lineno) for w in caught if w.category is _ProbeWarning}
+        assert located == {("<notebook-cell-7>", 3 if held else 5)}
+
+
+class TestBootstrapRetryCoverage:
+    """The scaled retry also covers a first start whose mode cannot be scored, and warm starts."""
+
+    def test_a_first_start_whose_mode_cannot_be_scored_is_retried(self, monkeypatch):
+        """The first start's mode score refuses (a non-finite score); the scaled start certifies.
+
+        That error is "no certified mode" at that start, the case the scaled
+        start exists for, so the retry runs and the search converges from it.
+        Mutation check: a19d2fe4 raised ``ObservedModeNotConvergedError``.
+        """
+        from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+        real_score = scop_efs_module.scop_penalized_mode_score
+        calls = []
+
+        def refuse_once(**kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ObservedGeometryInfeasibleError("SCOP penalized mode score is not finite")
+            return real_score(**kwargs)
+
+        starts = []
+        real_attempt = scop_efs_module._bootstrap_attempt
+
+        def attempt(context, lambdas, last_fit):
+            starts.append(dict(lambdas))
+            return real_attempt(context, lambdas, last_fit)
+
+        monkeypatch.setattr(scop_efs_module, "scop_penalized_mode_score", refuse_once)
+        monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
+        model, frame, y = _small_scop_model()
+        model.fit_reml(frame, y, max_reml_iter=20)
+        assert len(starts) == 2 and starts[0] == {"x": 1e-4} and starts[1] != starts[0]
+        assert model.reml_diagnostics()["converged"]
+
+    def test_a_fold_whose_warm_start_was_retried_away_reads_cold(self, monkeypatch):
+        """``warm_started`` and the profile's warm components describe where the search started.
+
+        Folds two and three are warm-started from fold one; their warm
+        bootstrap is refused, and the search starts from the Hessian-scaled
+        values instead.  Mutation check: a19d2fe4 read ``warm_started`` True.
+        """
+        from sklearn.model_selection import KFold
+
+        from superglm import cross_validate
+
+        first_starts: list[dict[str, float]] = []
+        warm_calls: list[bool] = []
+        real_optimize = scop_efs_module.optimize_scop_efs_reml
+        real_attempt = scop_efs_module._bootstrap_attempt
+        real_relative = scop_efs_module._scop_mode_newton_relative
+
+        depth = [0]
+
+        def optimize(*args, **kwargs):
+            # a guard restart calls this again from inside: one record per fit
+            if depth[0] == 0:
+                warm_calls.append(kwargs.get("warm_lambdas") is not None)
+                first_starts.append({})
+            depth[0] += 1
+            try:
+                return real_optimize(*args, **kwargs)
+            finally:
+                depth[0] -= 1
+
+        def attempt(context, lambdas, last_fit):
+            if not first_starts[-1]:
+                first_starts[-1].update(lambdas)
+            return real_attempt(context, lambdas, last_fit)
+
+        def relative(mode):
+            if warm_calls[-1] and mode.lambdas == first_starts[-1]:
+                return 1.0
+            return real_relative(mode)
+
+        monkeypatch.setattr(scop_efs_module, "optimize_scop_efs_reml", optimize)
+        monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", relative)
+        # a step the first fold resolves (a flat term is not passed on warm)
+        rng = np.random.default_rng(0)
+        x = np.sort(rng.uniform(0.0, 1.0, 600))
+        y = rng.poisson(np.exp(0.5 + 1.5 / (1.0 + np.exp(-12.0 * (x - 0.5))))).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+        )
+        result = cross_validate(
+            model,
+            pd.DataFrame({"x": x}),
+            y,
+            cv=KFold(3, shuffle=True, random_state=0),
+            fit_mode="fit_reml",
+            return_estimators=True,
+        )
+        assert warm_calls == [False, True, True]
+        assert result.fold_scores["warm_started"].tolist() == [False, False, False]
+        for estimator in result.estimators[1:]:
+            profile = estimator.reml_diagnostics()["profile"]
+            assert profile["reml_warm_start_components"] == []
+            assert estimator._reml_result.warm_start_components == []
+
+    def test_a_zero_weight_row_does_not_move_the_scaled_start(self):
+        """Only positive-weight rows set the Hessian-scaled start.
+
+        A zero-weight row's offset of -800 overflowed its rescaled response
+        and switched the whole intercept-only fit to its fallback, moving the
+        published smoothing parameter of an unconverged fit and its
+        predictions.  Mutation check: a19d2fe4 published 7.50 at offset -1
+        and 5.13 at -800 here.
+        """
+        import warnings
+
+        from superglm import Spline
+
+        rng = np.random.default_rng(2)
+        x = np.linspace(0.0, 1.0, 80)
+        y = rng.poisson(np.exp(0.2 + 0.8 * x)).astype(float)
+        frame = pd.DataFrame({"x": np.append(x, 0.0)})
+        response = np.append(y, 2.0)
+        weight = np.append(np.ones(80), 0.0)
+        offsets = np.where(np.arange(80) % 2 == 0, -1.0, 0.0)
+        fitted = {}
+        for inactive in (-1.0, -800.0):
+            model = SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=True,
+                features={"x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing)},
+            )
+            offset = np.append(offsets, inactive)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model.fit_reml(
+                    frame, response, sample_weight=weight, offset=offset, max_pirls_iter=1
+                )
+            fitted[inactive] = (
+                model.reml_diagnostics()["lambdas"],
+                model.predict(frame.iloc[:80], offset=offsets),
+            )
+        assert fitted[-1.0][0] == fitted[-800.0][0]
+        np.testing.assert_array_equal(fitted[-1.0][1], fitted[-800.0][1])
+
+
+class TestSCOPAitkenTail:
+    """The EFS linear tail is extrapolated to its limit, not walked step by step."""
+
+    def test_the_aitken_jump_shortens_a_slow_tail_to_the_same_endpoint(self, monkeypatch):
+        """27 EFS iterations become 16, at the same strict endpoint.
+
+        Both runs stop on an accepted log-lambda step below ``reml_tol``. With a
+        contraction ratio r <= 0.9 each endpoint lies within
+        ``reml_tol * r / (1 - r)`` of the fixed point, so they agree to
+        ``reml_tol * (1 + 2 * 0.9 / 0.1)``. Mutation check: master has no jump
+        and takes the 27 iterations of the ``_aitken=False`` run.
+        """
+        import functools
+
+        model, frame, y, offset = _scop_frequency_fixture(diesel_share=0.25, seed=10)
+        jumps: list[int] = []
+        real = scop_efs_module.optimize_scop_efs_reml
+        real_step = scop_efs_module._aitken_step
+        # The jump belongs to the EFS step, the Newton step's fallback.
+        monkeypatch.setattr(
+            scop_efs_module, "optimize_scop_efs_reml", functools.partial(real, _outer_step="efs")
+        )
+
+        def counting_step(state, *args, **kwargs):
+            before = state.get("jumps", 0)
+            out = real_step(state, *args, **kwargs)
+            jumps.append(state.get("jumps", 0) - before)
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "_aitken_step", counting_step)
+        model.fit_reml(frame, y, offset=offset, max_reml_iter=100)
+        fast = model.reml_diagnostics()
+
+        monkeypatch.setattr(
+            scop_efs_module,
+            "optimize_scop_efs_reml",
+            functools.partial(real, _aitken=False, _outer_step="efs"),
+        )
+        plain_model, _, _, _ = _scop_frequency_fixture(diesel_share=0.25, seed=10)
+        plain_model.fit_reml(frame, y, offset=offset, max_reml_iter=100)
+        plain = plain_model.reml_diagnostics()
+
+        assert sum(jumps) >= 1
+        assert fast["termination_reason"] == plain["termination_reason"] == "lambda_tolerance"
+        assert plain["n_reml_iter"] >= 25
+        assert fast["n_reml_iter"] <= 18
+        bound = fast["profile"]["reml_tol_resolved"] * (1.0 + 2.0 * 0.9 / 0.1)
+        for name, value in plain["lambdas"].items():
+            assert abs(np.log(fast["lambdas"][name] / value)) <= bound, name
+
+
+class TestSCOPWarmStart:
+    """``lambda2_init`` as a mapping starts the SCOP Fellner-Schall search there."""
+
+    def test_a_converged_start_is_kept_and_refits_in_one_iteration(self):
+        """Seeded with its own converged lambdas, the refit stops at once.
+
+        The bootstrap is fitted at the warm lambdas and reused as the first
+        iterate, so the first EFS step is taken from the converged mode; it is
+        below ``reml_tol`` and the search stops. The engine stops on an
+        accepted log-lambda step below ``reml_tol``; with the cold fit's last
+        steps contracting at ratio ``r``, its endpoint lies within
+        ``reml_tol * r / (1 - r)`` of the fixed point, and the warm fit's within
+        one more step, which bounds the agreement asserted here.
+        Mutation check: on master (155832e8) the start was discarded and the
+        refit repeated all 11 iterations.
+        """
+        model, frame, y, offset = _scop_frequency_fixture(diesel_share=0.25)
+        model.fit_reml(frame, y, offset=offset, max_reml_iter=100)
+        cold = model.reml_diagnostics()
+        assert cold["termination_reason"] == "lambda_tolerance"
+        assert cold["n_reml_iter"] > 3
+
+        history = [{k: np.log(v) for k, v in lambdas.items()} for lambdas in cold["lambda_history"]]
+        steps = [
+            max(abs(after[k] - before[k]) for k in after)
+            for before, after in zip(history[:-1], history[1:], strict=True)
+        ]
+        ratio = min(steps[-1] / steps[-2], 0.9) if steps[-2] > 0 else 0.9
+        reml_tol = model.reml_diagnostics()["profile"]["reml_tol_resolved"]
+        bound = 2.0 * reml_tol * max(1.0, ratio / (1.0 - ratio)) + reml_tol
+
+        warm_model, _, _, _ = _scop_frequency_fixture(diesel_share=0.25)
+        warm_model.fit_reml(
+            frame, y, offset=offset, max_reml_iter=100, lambda2_init=cold["lambdas"]
+        )
+        warm = warm_model.reml_diagnostics()
+        assert warm["n_reml_iter"] <= 2
+        assert warm["converged"]
+        assert warm["profile"]["reml_warm_start_components"] == sorted(cold["lambdas"])
+        for name, value in cold["lambdas"].items():
+            assert abs(np.log(warm["lambdas"][name]) - np.log(value)) <= bound, name
+
+
+def _scop_newton_fixture(
+    family: str = "poisson", seed: int = 7, n: int = 6000, diesel_share: float | None = None
+):
+    """A small SCOP fit whose monotone term is curved, so no smoothing parameter
+    ends in a suppression hold and the fixed point is a point, not a region.
+
+    ``diesel_share`` puts that share of rows on Diesel and makes Regular the
+    base level, so the Diesel indicator carries that share of the weight."""
+    from superglm import Categorical, Spline
+
+    rng = np.random.default_rng(seed)
+    bm = rng.uniform(50.0, 150.0, n)
+    age = rng.uniform(18.0, 90.0, n)
+    share = 0.3 if diesel_share is None else diesel_share
+    gas = np.where(rng.uniform(size=n) < share, "Diesel", "Regular")
+    eta = (
+        -1.4
+        + 0.9 * (1.0 - np.exp(-(bm - 50.0) / 25.0))
+        + 0.4 * np.exp(-(age - 18.0) / 8.0)
+        + np.where(gas == "Diesel", 0.3, 0.0)
+    )
+    frame = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehGas": gas})
+    if family == "poisson":
+        exposure = rng.uniform(0.3, 1.0, n)
+        y = rng.poisson(exposure * np.exp(eta)).astype(float)
+        offset = np.log(exposure)
+    elif family == "gaussian":
+        y = 2.0 * eta + rng.normal(0.0, 0.5, n)
+        offset = None
+    else:
+        y = rng.gamma(3.0, np.exp(eta + 5.0) / 3.0)
+        offset = None
+    model = SuperGLM(
+        family=family,
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "DrivAge": Spline(kind="ps", k=8),
+            "VehGas": Categorical(base="most_exposed" if diesel_share is None else "Regular"),
+        },
+    )
+    return model, frame, y, offset
+
+
+def _flat_monotone_fixture():
+    """Poisson, 6000 rows, a monotone BonusMalus term with no signal at all.
+
+    The Newton step overshoots the EFS fixed point here into a region lower on
+    the exact LAML, from which the step back is uphill: the guard fires."""
+    from superglm import Categorical, Spline
+
+    n = 6000
+    rng = np.random.default_rng(7)
+    bm = rng.uniform(50.0, 150.0, n)
+    age = rng.uniform(18.0, 90.0, n)
+    rng.uniform(0.0, 20.0, n)
+    gas = np.where(rng.uniform(size=n) < 0.3, "Diesel", "Regular")
+    rng.choice(list("ABCDEFGHIJ"), n)
+    eta = -1.4 + 0.4 * np.exp(-(age - 18.0) / 8.0) + np.where(gas == "Diesel", 0.3, 0.0)
+    exposure = rng.uniform(0.3, 1.0, n)
+    y = rng.poisson(exposure * np.exp(eta)).astype(float)
+    frame = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehGas": gas})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "DrivAge": Spline(kind="ps", k=8),
+            "VehGas": Categorical(base="most_exposed"),
+        },
+    )
+    return model, frame, y, np.log(exposure)
+
+
+def _half_flat_tensor_fixture(n: int = 3000, seed: int = 3):
+    """A monotone term beside a DrivAge x VehAge tensor the data do not support.
+
+    The fit runs the VehAge margin to working infinity (residual EDF under
+    0.05, held against increase) and leaves the DrivAge margin finite."""
+    from superglm import Categorical, Spline
+
+    rng = np.random.default_rng(seed)
+    bm = rng.uniform(50.0, 150.0, n)
+    age = rng.uniform(18.0, 90.0, n)
+    vage = rng.uniform(0.0, 20.0, n)
+    gas = np.where(rng.uniform(size=n) < 0.3, "Diesel", "Regular")
+    eta = (
+        -1.4
+        + 0.9 * (1 - np.exp(-(bm - 50) / 25))
+        + 0.4 * np.exp(-(age - 18) / 8)
+        + 0.2 * np.sin(vage / 4)
+    )
+    exposure = rng.uniform(0.3, 1.0, n)
+    y = rng.poisson(exposure * np.exp(eta)).astype(float)
+    frame = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehAge": vage, "VehGas": gas})
+
+    def make():
+        return SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "DrivAge": Spline(kind="ps", k=8),
+                "VehAge": Spline(kind="ps", k=8),
+                "VehGas": Categorical(base="most_exposed"),
+            },
+            interactions=[("DrivAge", "VehAge")],
+        )
+
+    return make, frame, y, np.log(exposure)
+
+
+def _count_irls_fits(monkeypatch) -> list[int]:
+    """Count the SCOP engine's inner IRLS fits (one entry per call)."""
+    calls: list[int] = []
+    real = scop_efs_module.fit_irls_direct
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scop_efs_module, "fit_irls_direct", counting)
+    return calls
+
+
+def _strict_efs_lambdas(monkeypatch, family: str) -> dict[str, float]:
+    """The EFS fixed point to 1e-9: no Aitken jump, no plateau exit."""
+    import functools
+
+    real = scop_efs_module.optimize_scop_efs_reml
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            scop_efs_module,
+            "optimize_scop_efs_reml",
+            functools.partial(real, _outer_step="efs", _aitken=False),
+        )
+        patch.setattr(scop_efs_module, "_scop_plateau_steps_stalled", lambda *a, **k: False)
+        model, frame, y, offset = _scop_newton_fixture(family)
+        model.fit_reml(frame, y, offset=offset, max_reml_iter=1000, reml_tol=1e-9)
+    assert model._reml_result.termination_reason == "lambda_tolerance"
+    return dict(model._reml_result.lambdas)
+
+
+def _assert_stopped_on_a_full_newton_step(result) -> None:
+    """The premise of the 2 * reml_tol endpoint bound between two runs.
+
+    A run that stops because its full Newton step is under reml_tol is within
+    reml_tol of the local model's fixed point; that iteration adopts no move,
+    so its lambda history ends on a repeat. A strict stop on an accepted step
+    that the line search shortened, or on an EFS step, bounds nothing of the
+    kind and needs its own bound.
+    """
+    assert result.termination_reason == "lambda_tolerance"
+    assert result.scop_outer_steps[-1] == "newton"
+    assert result.lambda_history[-1] == result.lambda_history[-2]
+
+
+class TestSCOPSuppressionHold:
+    """The EFS step's decrease hold is read in effective degrees of freedom."""
+
+    @staticmethod
+    def _step(scale: float, lam: float, size: float = 1.0) -> float:
+        from superglm.reml.scop_efs import _joint_efs_lambda_step
+
+        omega = scale * _first_diff_penalty(5)
+        component = PenaltyComponent(
+            name="m",
+            group_name="m",
+            group_index=0,
+            group_sl=slice(0, 5),
+            omega_raw=omega,
+            omega_ssp=omega,
+            rank=4.0,
+        )
+        # tr(H^-1 S) = 0.00125 * 8 * scale; beta' S beta = scale * size^2.
+        beta = np.array([0.0, 0.0, 0.0, 0.0, size])
+        updated, _, _ = _joint_efs_lambda_step(
+            [component], beta, 0.00125 * np.eye(5), 1.0, {"m": lam}, {"m"}, {}, {"m": 1.0}, {}
+        )
+        return float(np.log(updated["m"] / lam))
+
+    def test_a_large_lambda_can_still_come_down(self):
+        """lambda = 200 with tr(H^-1 S) = 0.01: the penalty suppresses 2 EDF and the
+        score asks for a decrease (log step -4.6, capped at -4). The old bar read
+        tr(H^-1 S) < 0.05 alone and held it at 200. Mutation check: the old bar
+        returns a step of 0.
+        """
+        assert self._step(scale=1.0, lam=200.0) == pytest.approx(-4.0, abs=1e-12)
+
+    def test_the_hold_is_invariant_to_the_penalty_scale(self):
+        """S -> 10 S with lambda -> lambda / 10 is the same model and the same step.
+        Under the old bar the first was held (tr 0.01) and the second was not
+        (tr 0.1)."""
+        assert self._step(scale=10.0, lam=20.0) == pytest.approx(self._step(scale=1.0, lam=200.0))
+
+    def test_an_isolated_penalty_s_decrease_is_never_held(self):
+        """lambda = 2 with tr(H^-1 S) = 0.01 suppresses only 0.02 EDF, but the score
+        asks for a decrease with a slope of g = lambda beta' S beta + 0.02 - 4 = 14
+        (2 dV/d rho): the criterion is far from flat. An isolated penalty's slope
+        tends to -rank(S) as lambda -> 0, so V has no flat end there and the step
+        is the plain EFS one, log(3.98 / 18). Mutation check: the decrease bar
+        lambda tr(H^-1 S) < 0.05 held it (step 0)."""
+        assert self._step(scale=1.0, lam=2.0, size=3.0) == pytest.approx(np.log(3.98 / 18.0))
+
+    @staticmethod
+    def _covered_step(size: float) -> float:
+        """The log step of a first-difference penalty under an identity penalty
+        on the same block, at lambda 1e-4 against 1: the identity covers the
+        difference penalty's range, so d log|S|+ / d rho is 8e-4."""
+        from superglm.reml.scop_efs import _joint_efs_lambda_step
+
+        components = [
+            PenaltyComponent(
+                name=name,
+                group_name="m",
+                group_index=0,
+                group_sl=slice(0, 5),
+                omega_raw=omega,
+                omega_ssp=omega,
+                rank=rank,
+            )
+            for name, omega, rank in (
+                ("m:diff", _first_diff_penalty(5), 4.0),
+                ("m:ridge", np.eye(5), 5.0),
+            )
+        ]
+        beta = np.array([0.0, 0.0, 0.0, 0.0, size])
+        lambdas = {"m:diff": 1e-4, "m:ridge": 1.0}
+        updated, _, _ = _joint_efs_lambda_step(
+            components,
+            beta,
+            0.00125 * np.eye(5),
+            1.0,
+            lambdas,
+            {"m:diff"},
+            {},
+            {"m:diff": 1.0},
+            {},
+        )
+        return float(np.log(updated["m:diff"] / lambdas["m:diff"]))
+
+    def test_a_covered_penalty_is_held_only_while_its_end_is_flat(self):
+        """Where another penalty covers range(S_j), d log|S|+ / d rho_j (8e-4 here)
+        falls to zero as lambda_j does, and so does the slope: that end is flat.
+        With beta' S beta = 9 the slope asking for the decrease is about 1e-4,
+        under 0.05, and the decrease is held. With beta' S beta = 1e4 it is 1.0,
+        and the decrease (log(8e-4 / 1), capped at -4) goes ahead. Mutation
+        check: holding on d log|S|+ / d rho_j < 0.05 alone holds the second.
+        A held step leaves lambda as exp(log(lambda)), two roundings: within a
+        few eps of no step."""
+        assert abs(self._covered_step(3.0)) <= 4.0 * np.finfo(float).eps
+        assert self._covered_step(100.0) == pytest.approx(-4.0, abs=1e-12)
+
+    def test_a_component_at_working_infinity_is_reported_flat(self, monkeypatch):
+        """A tensor margin the data do not support runs to working infinity: its
+        residual EDF falls under 0.05, so its increase is held (not its decrease:
+        the other margin does not cover its range). ``flat_components`` is the
+        union of both holds, so it reports the margin, and the warm start
+        ``cross_validate`` takes from this fit leaves it cold, with its sibling
+        margin (a half-warm tensor is refused at the bootstrap). Mutation check:
+        built from the decrease hold alone, ``flat_components`` is empty here."""
+        from superglm.model.reml_setup import live_reml_lambdas
+        from superglm.reml.scop_efs import _scop_newton_system
+
+        captured = {}
+        real_final = scop_efs_module._finalize_scop_reml_mode
+
+        def capture(context, mode):
+            captured["mode"] = mode
+            return real_final(context, mode)
+
+        monkeypatch.setattr(scop_efs_module, "_finalize_scop_reml_mode", capture)
+        make, frame, y, offset = _half_flat_tensor_fixture()
+        model = make()
+        model.fit_reml(frame, y, offset=offset)
+        margin = "DrivAge:VehAge:margin_VehAge"
+        assert model._reml_result.flat_components == [margin]
+        mode = captured["mode"]
+        system = _scop_newton_system(
+            mode.penalty_components,
+            mode.result.beta,
+            mode.hessian_inverse,
+            1.0,
+            mode.lambdas,
+            {pc.name for pc in mode.penalty_components},
+            mode.scop_states,
+        )
+        index = system.names.index(margin)
+        assert system.increase_held[index] and not system.decrease_held[index]
+        start = live_reml_lambdas(model)
+        assert set(start) == {"DrivAge", "VehAge", "BonusMalus"}
+
+    def test_flat_components_describe_the_published_mode(self, monkeypatch):
+        """The holds are read at the mode the run publishes, not at the iterate
+        its last step left. Capped at eight iterations, the last accepted Newton
+        step takes the VehAge margin from lambda 1.2e3 (residual EDF 0.053, not
+        held) to 3.1e3 (0.024, held against increase), so the published mode is
+        flat there and a warm start taken from it leaves the tensor cold.
+        Mutation check: on af53c8d4 the holds came from the iterate before that
+        step, ``flat_components`` was empty and the warm start kept the margin."""
+        from superglm import ConvergenceWarning
+        from superglm.model.reml_setup import live_reml_lambdas
+        from superglm.reml.scop_efs import _scop_newton_system
+
+        captured = {}
+        real_final = scop_efs_module._finalize_scop_reml_mode
+
+        def capture(context, mode):
+            captured["mode"] = mode
+            return real_final(context, mode)
+
+        monkeypatch.setattr(scop_efs_module, "_finalize_scop_reml_mode", capture)
+        make, frame, y, offset = _half_flat_tensor_fixture()
+        model = make()
+        with pytest.warns(ConvergenceWarning, match="max_reml_iter"):
+            model.fit_reml(frame, y, offset=offset, max_reml_iter=8)
+        mode = captured["mode"]
+        system = _scop_newton_system(
+            mode.penalty_components,
+            mode.result.beta,
+            mode.hessian_inverse,
+            1.0,
+            mode.lambdas,
+            {pc.name for pc in mode.penalty_components},
+            mode.scop_states,
+        )
+        held = sorted(
+            name
+            for name, up, down in zip(
+                system.names, system.increase_held, system.decrease_held, strict=True
+            )
+            if up or down
+        )
+        assert held == ["DrivAge:VehAge:margin_VehAge"]
+        assert model._reml_result.flat_components == held
+        assert set(live_reml_lambdas(model)) == {"DrivAge", "VehAge", "BonusMalus"}
+
+    def test_a_strongly_identified_term_started_above_its_optimum_comes_back(self):
+        """A smooth so well identified that its penalty suppresses about 0.01 EDF at
+        its optimum is far from a flat end: V rises on both sides of it. Started
+        at 2 and 20 times its optimum, it returns to the cold fit's lambda within
+        the Newton stop's bound of 2 * reml_tol (``test_a_warm_start_above_the_
+        optimum_comes_back_down``) and is never reported flat. Mutation check:
+        under the decrease bar lambda tr(H^-1 S_j) < 0.05 both starts stopped
+        'converged' inside the band above the optimum, at 2.0 and 2.9 times it,
+        with the term reported flat."""
+        from superglm import Spline
+
+        rng = np.random.default_rng(1)
+        n = 2000
+        x = rng.uniform(0, 1, n)
+        z = rng.uniform(0, 1, n)
+        eta = 0.6 * (1 - np.exp(-3 * x)) + 0.8 * np.sin(2 * np.pi * z) + 0.5 * np.sin(5 * np.pi * z)
+        frame = pd.DataFrame({"x": x, "z": z})
+        y = eta + rng.normal(0, 0.025, n)
+
+        def fit(start=None):
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0.0,
+                discrete=True,
+                features={
+                    "x": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                    "z": Spline(kind="ps", k=12),
+                },
+            )
+            return model.fit_reml(frame, y, lambda2_init=start)
+
+        cold = fit()
+        lambdas = dict(cold._reml_result.lambdas)
+        reml_tol = cold.reml_diagnostics()["profile"]["reml_tol_resolved"]
+        assert cold._reml_result.flat_components == []
+        for factor in (2.0, 20.0):
+            start = dict(lambdas)
+            start["z"] *= factor
+            warm = fit(start)._reml_result
+            assert warm.converged
+            assert warm.flat_components == []
+            for name, value in lambdas.items():
+                assert abs(np.log(warm.lambdas[name] / value)) <= 2.0 * reml_tol, (factor, name)
+
+    def test_a_warm_start_above_the_optimum_comes_back_down(self):
+        """Started at e^5 and e^7 times its optimum, the monotone term's lambda
+        returns to the cold fit's optimum. Mutation check: under the old bar the
+        start sits in the region where every decrease is held, and the fit stopped
+        there, 'converged', at lambda 403 and 2980 against an optimum of 2.72.
+        The endpoints agree to the Newton step's stopping bound, 2 * reml_tol
+        (both runs stop on a full step under reml_tol)."""
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        cold = dict(model._reml_result.lambdas)
+        reml_tol = model.reml_diagnostics()["profile"]["reml_tol_resolved"]
+        for jump in (5.0, 7.0):
+            start = dict(cold)
+            start["BonusMalus"] = cold["BonusMalus"] * np.exp(jump)
+            warm, _, _, _ = _scop_newton_fixture()
+            warm.fit_reml(frame, y, offset=offset, lambda2_init=start)
+            assert warm._reml_result.converged
+            for name, value in cold.items():
+                got = warm._reml_result.lambdas[name]
+                assert abs(np.log(got / value)) <= 2.0 * reml_tol, (jump, name)
+
+
+class TestSCOPNewtonOuterStep:
+    """Newton on log lambda reaches the Fellner-Schall fixed point in fewer steps."""
+
+    def test_newton_reaches_the_strict_efs_fixed_point(self, monkeypatch):
+        """Every step is a Newton step, the fit stops on a full step under reml_tol,
+        and it lands on the EFS fixed point. Bound: Newton's last step bounds its
+        distance to the fixed point by reml_tol (its convergence is quadratic,
+        so the true distance is far smaller), and the strict EFS reference stops
+        within 1e-9 r / (1 - r) <= 1e-8 of it for a contraction ratio r <= 0.9;
+        2 * reml_tol covers both. Measured: 1.3e-7, 8 iterations against 12 for
+        the EFS default. Mutation check: no Newton step exists on the unfixed
+        tree (``scop_outer_steps`` is absent)."""
+        import functools
+
+        reference = _strict_efs_lambdas(monkeypatch, "poisson")
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        reml_tol = model.reml_diagnostics()["profile"]["reml_tol_resolved"]
+        assert result.converged
+        assert result.termination_reason == "lambda_tolerance"
+        assert result.scop_newton_fallback is None
+        assert set(result.scop_outer_steps) == {"newton"}
+        for name, value in reference.items():
+            assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
+
+        real = scop_efs_module.optimize_scop_efs_reml
+        monkeypatch.setattr(
+            scop_efs_module, "optimize_scop_efs_reml", functools.partial(real, _outer_step="efs")
+        )
+        efs_model, _, _, _ = _scop_newton_fixture()
+        efs_model.fit_reml(frame, y, offset=offset)
+        assert efs_model._reml_result.scop_newton_fallback == "requested"
+        assert set(efs_model._reml_result.scop_outer_steps) == {"efs"}
+        assert result.n_reml_iter < efs_model._reml_result.n_reml_iter
+
+    def test_an_estimated_scale_fit_takes_newton_steps_to_the_same_point(self, monkeypatch):
+        """Gamma profiles its scale out of the LAML, and the Jacobian carries the
+        profiled-scale term (d(1/phi)/dD_p). The fit runs on Newton steps
+        throughout and lands on the strict EFS fixed point, within the bound of
+        ``test_newton_reaches_the_strict_efs_fixed_point`` (measured 2.3e-7)."""
+        reference = _strict_efs_lambdas(monkeypatch, "gamma")
+        model, frame, y, offset = _scop_newton_fixture("gamma")
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        reml_tol = model.reml_diagnostics()["profile"]["reml_tol_resolved"]
+        assert result.converged
+        assert result.scop_newton_fallback is None
+        assert set(result.scop_outer_steps) == {"newton"}
+        for name, value in reference.items():
+            assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
+
+    def test_the_jacobian_matches_finite_differences(self, monkeypatch):
+        """At a fitted Gaussian mode the working weights are constant, so the only
+        terms the Jacobian could miss are the ones it forms: with the SCOP
+        reparameterisation terms and the profiled-scale term it must match a
+        central difference of the working gradient over refits.
+
+        Bound 1e-3 on entries of 2 to 4: the central difference carries
+        h^2 / 6 |g'''| ~ 1e-6 of truncation at h = 1e-3 and about 1e-5 from the
+        certified modes' rounding divided by h; measured 6.2e-5 across three
+        seeds. Mutation check: without the reparameterisation terms the largest
+        error is 0.04 to 0.075, and without the scale term 0.038 to 0.040.
+        """
+        from superglm import Gaussian, Spline
+        from superglm.reml.scop_efs import (
+            _fit_scop_reml_mode,
+            _reml_evaluation_phi,
+            _scop_newton_system,
+            _scop_reparam_jacobian_correction,
+        )
+
+        rng = np.random.default_rng(3)
+        n = 400
+        x = rng.uniform(0, 1, n)
+        z = rng.uniform(0, 1, n)
+        y = 1.5 * (1 - np.exp(-3 * x)) + 0.5 * np.sin(2 * np.pi * z) + rng.normal(0, 0.3, n)
+        frame = pd.DataFrame({"x": x, "z": z})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "x": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "z": Spline(kind="ps", k=8),
+            },
+        )
+        captured = {}
+        real_final = scop_efs_module._finalize_scop_reml_mode
+
+        def capture(context, mode):
+            captured["context"], captured["mode"] = context, mode
+            return real_final(context, mode)
+
+        monkeypatch.setattr(scop_efs_module, "_finalize_scop_reml_mode", capture)
+        model.fit_reml(frame, y)
+        context, mode = captured["context"], captured["mode"]
+
+        def system(at, *, scale_term=True):
+            phi = _reml_evaluation_phi(
+                at.evaluation, scale_known=False, fallback_likelihood_size=context.likelihood_size
+            )
+            derivative = at.evaluation.profiled_scale.d_inverse_phi_d_penalized_deviance
+            return _scop_newton_system(
+                at.penalty_components,
+                at.result.beta,
+                at.hessian_inverse,
+                phi,
+                at.lambdas,
+                {pc.name for pc in at.penalty_components},
+                at.scop_states,
+                inverse_phi_derivative=float(derivative) if scale_term else 0.0,
+            )
+
+        base = system(mode)
+        correction = _scop_reparam_jacobian_correction(mode, base)
+        assert correction is not None
+        h = 1e-3
+        finite = np.zeros_like(base.hessian)
+        for k, name in enumerate(base.names):
+            gradients = []
+            for sign in (1.0, -1.0):
+                lambdas = dict(mode.lambdas)
+                lambdas[name] *= np.exp(sign * h)
+                refit = _fit_scop_reml_mode(
+                    context,
+                    lambdas,
+                    beta_init=mode.result.beta,
+                    intercept_init=float(mode.result.intercept),
+                    scop_state_init=mode.scop_states,
+                    phase="fixed",
+                    reml_iteration=0,
+                    require_converged=True,
+                )
+                gradients.append(system(refit).gradient)
+            finite[:, k] = (gradients[0] - gradients[1]) / (2.0 * h)
+
+        assert np.max(np.abs(base.hessian + correction - finite)) <= 1e-3
+        assert np.max(np.abs(base.hessian - finite)) > 1e-2
+        unscaled = system(mode, scale_term=False)
+        assert np.max(np.abs(unscaled.hessian + correction - finite)) > 1e-2
+
+    def test_the_jacobian_matches_finite_differences_on_tensor_margins(self, monkeypatch):
+        """A tensor product's two margins share one penalty block, so the term
+        -d2 log|S|+ / d rho_j d rho_k is non-zero on and between them; for the
+        single-penalty smooths of ``test_the_jacobian_matches_finite_differences``
+        it vanishes identically. At a fitted Gaussian mode (constant working
+        weights) the Jacobian, reparameterisation and scale terms included,
+        matches a central difference of the working gradient within that test's
+        bound, 1e-3, on every entry. Mutation check: the fixture sees the term --
+        with it removed the margins' block misses the finite difference by more
+        than 1e-2 (by 5.0 on a Poisson book-shaped fixture, where the fit then
+        converged elsewhere)."""
+        from superglm import Gaussian, Spline
+        from superglm.reml.penalty_algebra import compute_logdet_s_derivatives
+        from superglm.reml.scop_efs import (
+            _fit_scop_reml_mode,
+            _reml_evaluation_phi,
+            _scop_newton_system,
+            _scop_reparam_jacobian_correction,
+        )
+
+        rng = np.random.default_rng(3)
+        n = 1500
+        x = rng.uniform(0, 1, n)
+        a = rng.uniform(0, 1, n)
+        v = rng.uniform(0, 1, n)
+        y = (
+            1.5 * (1 - np.exp(-3 * x))
+            + 0.5 * np.sin(2 * np.pi * a)
+            + 0.4 * np.cos(3 * v)
+            + 0.8 * (a - 0.5) * (v - 0.5)
+            + rng.normal(0, 0.3, n)
+        )
+        frame = pd.DataFrame({"x": x, "a": a, "v": v})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "x": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "a": Spline(kind="ps", k=8),
+                "v": Spline(kind="ps", k=8),
+            },
+            interactions=[("a", "v")],
+        )
+        captured = {}
+        real_final = scop_efs_module._finalize_scop_reml_mode
+
+        def capture(context, mode):
+            captured["context"], captured["mode"] = context, mode
+            return real_final(context, mode)
+
+        monkeypatch.setattr(scop_efs_module, "_finalize_scop_reml_mode", capture)
+        model.fit_reml(frame, y)
+        context, mode = captured["context"], captured["mode"]
+
+        def system(at):
+            phi = _reml_evaluation_phi(
+                at.evaluation, scale_known=False, fallback_likelihood_size=context.likelihood_size
+            )
+            return _scop_newton_system(
+                at.penalty_components,
+                at.result.beta,
+                at.hessian_inverse,
+                phi,
+                at.lambdas,
+                {pc.name for pc in at.penalty_components},
+                at.scop_states,
+                inverse_phi_derivative=float(
+                    at.evaluation.profiled_scale.d_inverse_phi_d_penalized_deviance
+                ),
+            )
+
+        base = system(mode)
+        correction = _scop_reparam_jacobian_correction(mode, base)
+        assert correction is not None
+        h = 1e-3
+        finite = np.zeros_like(base.hessian)
+        for k, name in enumerate(base.names):
+            gradients = []
+            for sign in (1.0, -1.0):
+                lambdas = dict(mode.lambdas)
+                lambdas[name] *= np.exp(sign * h)
+                refit = _fit_scop_reml_mode(
+                    context,
+                    lambdas,
+                    beta_init=mode.result.beta,
+                    intercept_init=float(mode.result.intercept),
+                    scop_state_init=mode.scop_states,
+                    phase="fixed",
+                    reml_iteration=0,
+                    require_converged=True,
+                )
+                gradients.append(system(refit).gradient)
+            finite[:, k] = (gradients[0] - gradients[1]) / (2.0 * h)
+
+        jacobian = base.hessian + correction
+        assert np.max(np.abs(jacobian - finite)) <= 1e-3
+        margins = [i for i, name in enumerate(base.names) if name.startswith("a:v:margin_")]
+        assert len(margins) == 2
+        _, logdet_hessian = compute_logdet_s_derivatives(mode.lambdas, mode.penalty_components)
+        logdet = np.array(
+            [
+                [logdet_hessian.get((name_j, name_k), 0.0) for name_k in base.names]
+                for name_j in base.names
+            ]
+        )
+        block = np.ix_(margins, margins)
+        assert np.max(np.abs((jacobian + logdet)[block] - finite[block])) > 1e-2
+
+    def test_the_correction_contracts_the_explicit_trace(self, monkeypatch):
+        """``_scop_reparam_jacobian_correction`` contracts each trace in O(p^2 q);
+        here it is checked against the explicit ``tr(H^-1 dH_k H^-1 S_j)`` with
+        dH_k formed as a p x p matrix, at a Poisson mode, where the weights vary
+        and the intercept-profiling term ``(dc c' + c dc') / sum(W)`` is not zero
+        (with Gaussian weights the SCOP block's c vanishes, so the
+        finite-difference test cannot see that term). Both forms sum the same
+        O(p) products, so they agree to rounding: bound 1e-9 of the largest
+        entry, measured 2e-14. Mutation check: the explicit form without the
+        intercept term differs by 3% of the largest entry."""
+        from superglm.reml.penalty_algebra import penalty_component_dense_matrix
+        from superglm.reml.scop_efs import (
+            _scop_newton_system,
+            _scop_reparam_jacobian_correction,
+        )
+
+        captured = {}
+        real_final = scop_efs_module._finalize_scop_reml_mode
+
+        def capture(context, mode):
+            captured["mode"] = mode
+            return real_final(context, mode)
+
+        monkeypatch.setattr(scop_efs_module, "_finalize_scop_reml_mode", capture)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        mode = captured["mode"]
+        system = _scop_newton_system(
+            mode.penalty_components,
+            mode.result.beta,
+            mode.hessian_inverse,
+            1.0,
+            mode.lambdas,
+            {pc.name for pc in mode.penalty_components},
+            mode.scop_states,
+        )
+        fast = _scop_reparam_jacobian_correction(mode, system)
+
+        hessian_inverse = mode.hessian_inverse
+        width = hessian_inverse.shape[0]
+        latent = np.asarray(mode.result.beta, dtype=np.float64).copy()
+        positivity = np.zeros(width)
+        for state in mode.scop_states.values():
+            latent[state["group_sl"]] = state["beta_eff"]
+            reparam = state["reparam"]
+            positivity[state["group_sl"]] = reparam.second_derivative_diagonal(
+                state["beta_eff"]
+            ) / reparam.jacobian_diagonal(state["beta_eff"])
+        cross = mode.joint_geometry.transformed_intercept_cross
+        sum_w = mode.joint_geometry.sum_w
+        gradient = mode.penalty @ latent
+        curvature = (
+            mode.joint_geometry.centered_hessian
+            + np.outer(cross, cross) / sum_w
+            - mode.penalty
+            + np.diag(positivity * gradient)
+        )
+        components = {pc.name: pc for pc in mode.penalty_components}
+        local = {name: penalty_component_dense_matrix(pc) for name, pc in components.items()}
+
+        def explicit(with_intercept_term: bool) -> np.ndarray:
+            out = np.zeros_like(fast)
+            for k, name_k in enumerate(system.names):
+                pc = components[name_k]
+                penalty_beta = np.zeros(width)
+                penalty_beta[pc.group_sl] = mode.lambdas[name_k] * (
+                    local[name_k] @ latent[pc.group_sl]
+                )
+                v = -(hessian_inverse @ penalty_beta)
+                v0 = -float(cross @ v) / sum_w
+                s = positivity * v
+                derivative = s[:, None] * curvature + curvature * s[None, :]
+                derivative += np.diag(positivity * (curvature @ v + cross * v0 - v * gradient))
+                if with_intercept_term:
+                    dc = s * cross
+                    derivative -= (np.outer(dc, cross) + np.outer(cross, dc)) / sum_w
+                sandwiched = hessian_inverse @ derivative @ hessian_inverse
+                for j, name_j in enumerate(system.names):
+                    block = components[name_j].group_sl
+                    out[j, k] = -mode.lambdas[name_j] * float(
+                        np.sum(sandwiched[block, block] * local[name_j].T)
+                    )
+            return out
+
+        scale = float(np.max(np.abs(fast)))
+        assert np.max(np.abs(fast - explicit(True))) <= 1e-9 * scale
+        assert np.max(np.abs(fast - explicit(False))) > 1e-3 * scale
+
+    def test_a_failed_newton_line_search_restarts_the_search_with_efs(self, monkeypatch):
+        """The guard: a Newton step none of whose three forward trials the LAML
+        accepts restarts the search from the bootstrap with EFS steps. Forced here
+        by reversing the third step, an ascent direction of 4 in log lambda (far
+        outside the plateau). The fallback is recorded with its iteration, the
+        guard spent one bounded forward search (three trials, no reflection), and
+        the run returns exactly what the EFS search returns, its iterations
+        after the three Newton ones. Mutation check: continuing EFS from the
+        guard's iterate (the earlier hand-off) gives other lambdas."""
+        import functools
+
+        real_step = scop_efs_module._scop_newton_step
+        calls = []
+
+        def reversed_third(system, jacobian=None):
+            step = real_step(system, jacobian)
+            calls.append(step)
+            if len(calls) == 3:
+                return -4.0 * np.sign(step) * (np.abs(step) > 0)
+            return step
+
+        searches = []
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+
+        def record_search(context, current, proposed, **kwargs):
+            out = real_search(context, current, proposed, **kwargs)
+            searches.append((kwargs.get("max_attempts"), kwargs.get("reflect", True), out[1]))
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "_scop_newton_step", reversed_third)
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", record_search)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.scop_newton_fallback == "line_search"
+        assert result.scop_newton_fallback_iter == 3
+        assert result.scop_outer_steps[:3] == ["newton", "newton", "newton"]
+        assert set(result.scop_outer_steps[3:]) == {"efs"}
+        assert (3, False, False) in searches
+        assert result.converged
+        monkeypatch.undo()
+
+        real = scop_efs_module.optimize_scop_efs_reml
+        monkeypatch.setattr(
+            scop_efs_module, "optimize_scop_efs_reml", functools.partial(real, _outer_step="efs")
+        )
+        efs_model, _, _, _ = _scop_newton_fixture()
+        efs_model.fit_reml(frame, y, offset=offset)
+        efs = efs_model._reml_result
+        assert result.lambdas == efs.lambdas
+        assert result.n_reml_iter == 3 + efs.n_reml_iter
+        assert result.termination_reason == efs.termination_reason
+
+    def test_an_overshooting_newton_fit_restarts_and_converges(self, monkeypatch):
+        """A monotone term with no signal: Newton overshoots the EFS fixed point
+        (log lambda 0.25 past it on DrivAge) into a region lower on the exact LAML,
+        and the step back is uphill there, so the guard fires at iteration 4.
+        The fit then converges, raises no ConvergenceWarning, and returns exactly
+        the EFS search's lambdas. Its inner fits are bounded by the EFS search's
+        plus one bootstrap refit and four fits (a candidate and three trials) per
+        Newton iteration before the restart: measured 22 against 14 + 1 + 16.
+        Mutation check: continuing EFS from the guard's iterate stalled
+        unconverged after 28 iterations and 194 inner fits, with a warning and
+        BonusMalus's lambda 3.05 log units from the EFS answer."""
+        import functools
+        import warnings
+
+        from superglm import ConvergenceWarning
+
+        newton_fits = _count_irls_fits(monkeypatch)
+        model, frame, y, offset = _flat_monotone_fixture()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        monkeypatch.undo()
+
+        efs_fits = _count_irls_fits(monkeypatch)
+        real = scop_efs_module.optimize_scop_efs_reml
+        monkeypatch.setattr(
+            scop_efs_module, "optimize_scop_efs_reml", functools.partial(real, _outer_step="efs")
+        )
+        efs_model, _, _, _ = _flat_monotone_fixture()
+        efs_model.fit_reml(frame, y, offset=offset)
+        efs = efs_model._reml_result
+
+        assert result.converged and efs.converged
+        assert result.scop_newton_fallback == "line_search"
+        assert result.lambdas == efs.lambdas
+        assert len(newton_fits) <= len(efs_fits) + 1 + 4 * result.scop_newton_fallback_iter
+
+    def test_a_rejected_step_inside_the_plateau_stops_there(self, monkeypatch):
+        """When the rejected Newton step is under the plateau's 0.01 step cap and
+        the decrease it predicts, |g' delta| / 4, is under the line search's own
+        acceptance tolerance, the mode is published as an objective plateau,
+        converged, without restarting. Forced here by rejecting every Newton
+        search whose step is under 0.01. The full step bounds the distance to the
+        fixed point, so the lambdas agree with an unforced fit's within 0.01.
+        Mutation check: without the plateau test the guard restarts the search
+        with EFS (``scop_newton_fallback == "line_search"``)."""
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+
+        def reject_small(context, current, proposed, **kwargs):
+            moved = max(
+                abs(np.log(proposed[name] / current.lambdas[name]))
+                for name in proposed
+                if name in current.lambdas
+            )
+            if kwargs.get("reflect", True) is False and 0.0 < moved < 0.01:
+                return current, False
+            return real_search(context, current, proposed, **kwargs)
+
+        reference, frame, y, offset = _scop_newton_fixture()
+        reference.fit_reml(frame, y, offset=offset)
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", reject_small)
+        model, _, _, _ = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.converged
+        assert result.termination_reason == "objective_plateau"
+        assert result.scop_newton_fallback is None
+        assert set(result.scop_outer_steps) == {"newton"}
+        for name, value in reference._reml_result.lambdas.items():
+            assert abs(np.log(result.lambdas[name] / value)) < 0.01, name
+
+    def test_a_fisher_fallback_iterate_takes_an_efs_step(self, monkeypatch):
+        """At an iterate where a SCOP block's inner solve fell back to Fisher
+        curvature, the reparameterisation terms of the Newton Jacobian cannot be
+        formed, so that iteration takes an EFS step, recorded as "efs_fisher",
+        and Newton resumes at the next. Forced by marking the third iterate's
+        blocks as Fisher fallbacks. The run still converges to the unforced
+        fit's fixed point within the Newton stop's bound, 2 * reml_tol. Mutation
+        check: the earlier loop took a Newton step there with the fixed-curvature
+        Jacobian and recorded nothing."""
+        reference, frame, y, offset = _scop_newton_fixture()
+        reference.fit_reml(frame, y, offset=offset)
+        reml_tol = reference.reml_diagnostics()["profile"]["reml_tol_resolved"]
+
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+        searches = []
+
+        def mark_second(context, current, proposed, **kwargs):
+            mode, accepted = real_search(context, current, proposed, **kwargs)
+            searches.append(mode)
+            if len(searches) == 2 and accepted:
+                states = {
+                    index: {**state, "last_fisher_fallback": True}
+                    for index, state in mode.scop_states.items()
+                }
+                mode = replace(mode, scop_states=states)
+            return mode, accepted
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", mark_second)
+        model, _, _, _ = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.scop_outer_steps[:3] == ["newton", "newton", "efs_fisher"]
+        assert "newton" in result.scop_outer_steps[3:]
+        assert result.scop_newton_fallback is None
+        assert result.scop_fisher_fallbacks >= 1
+        assert result.converged
+        _assert_stopped_on_a_full_newton_step(reference._reml_result)
+        _assert_stopped_on_a_full_newton_step(result)
+        for name, value in reference._reml_result.lambdas.items():
+            assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
+
+    def test_an_uncorrectable_iterate_takes_an_efs_step(self, monkeypatch):
+        """On an observed iterate the reparameterisation terms can still fail to
+        form (here a map that is not the exp map; the same holds when they are
+        not finite). That iteration takes an EFS step, recorded as
+        "efs_uncorrected", and Newton resumes at the next: the fixed-curvature
+        Jacobian alone is not the step's Jacobian. Forced at the third iterate's
+        correction. The run converges to the unforced fit's fixed point within
+        the Newton stop's bound, 2 * reml_tol. Mutation check: on af53c8d4 the
+        failed correction returned None and that iteration took a Newton step on
+        the uncorrected Jacobian, recorded as "newton"."""
+        reference, frame, y, offset = _scop_newton_fixture()
+        reference.fit_reml(frame, y, offset=offset)
+        reml_tol = reference.reml_diagnostics()["profile"]["reml_tol_resolved"]
+
+        class NotExp:
+            """The block's map with its second derivative doubled: not the exp map.
+            Seen only by the correction; the inner solves keep the real map."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def jacobian_diagonal(self, beta_eff):
+                return self._inner.jacobian_diagonal(beta_eff)
+
+            def second_derivative_diagonal(self, beta_eff):
+                return 2.0 * self._inner.second_derivative_diagonal(beta_eff)
+
+        real_correction = scop_efs_module._scop_reparam_jacobian_correction
+        calls = []
+
+        def not_exp_on_the_third(mode, system):
+            calls.append(1)
+            if len(calls) == 3:
+                states = {
+                    index: {**state, "reparam": NotExp(state["reparam"])}
+                    for index, state in mode.scop_states.items()
+                }
+                mode = replace(mode, scop_states=states)
+            return real_correction(mode, system)
+
+        monkeypatch.setattr(
+            scop_efs_module, "_scop_reparam_jacobian_correction", not_exp_on_the_third
+        )
+        model, _, _, _ = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.scop_outer_steps[:3] == ["newton", "newton", "efs_uncorrected"]
+        assert "newton" in result.scop_outer_steps[3:]
+        assert result.scop_newton_fallback is None
+        assert result.converged
+        _assert_stopped_on_a_full_newton_step(reference._reml_result)
+        _assert_stopped_on_a_full_newton_step(result)
+        for name, value in reference._reml_result.lambdas.items():
+            assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
+
+    def test_the_correction_distinguishes_none_from_failure(self, monkeypatch):
+        """None means the Jacobian has no reparameterisation terms (no block
+        carries a positivity coordinate); terms that exist but cannot be formed
+        raise, so the loop can take the EFS step rather than a Newton step on
+        the fixed-curvature Jacobian alone. Mutation check: on af53c8d4 a
+        non-finite correction returned None, the same value as no terms."""
+        from superglm.reml.scop_efs import (
+            _scop_newton_system,
+            _scop_reparam_jacobian_correction,
+            _SCOPCorrectionUnavailableError,
+        )
+
+        captured = {}
+        real_final = scop_efs_module._finalize_scop_reml_mode
+
+        def capture(context, mode):
+            captured["mode"] = mode
+            return real_final(context, mode)
+
+        monkeypatch.setattr(scop_efs_module, "_finalize_scop_reml_mode", capture)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        mode = captured["mode"]
+        system = _scop_newton_system(
+            mode.penalty_components,
+            mode.result.beta,
+            mode.hessian_inverse,
+            1.0,
+            mode.lambdas,
+            {pc.name for pc in mode.penalty_components},
+            mode.scop_states,
+        )
+        correction = _scop_reparam_jacobian_correction(mode, system)
+        assert correction is not None and np.all(np.isfinite(correction))
+        assert _scop_reparam_jacobian_correction(replace(mode, scop_states={}), system) is None
+        with np.errstate(invalid="ignore", over="ignore"):
+            overflowed = replace(mode, penalty=mode.penalty * np.inf)
+            with pytest.raises(_SCOPCorrectionUnavailableError, match="not finite"):
+                _scop_reparam_jacobian_correction(overflowed, system)
+
+    def test_a_newton_step_leaves_no_efs_step_size_history(self, monkeypatch):
+        """The adaptive EFS step size halves when a step reverses the previous
+        EFS step's direction and grows when it agrees. A Newton step is no EFS
+        step: at the "efs_fisher" iterate after two Newton steps the EFS step
+        reads no previous direction and leaves every step size at its start, 1.
+        Forced as in ``test_a_fisher_fallback_iterate_takes_an_efs_step``.
+        Mutation check: on af53c8d4 that step read the second Newton step's
+        direction and moved the step sizes off 1."""
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+        searches = []
+
+        def mark_second(context, current, proposed, **kwargs):
+            mode, accepted = real_search(context, current, proposed, **kwargs)
+            searches.append(mode)
+            if len(searches) == 2 and accepted:
+                states = {
+                    index: {**state, "last_fisher_fallback": True}
+                    for index, state in mode.scop_states.items()
+                }
+                mode = replace(mode, scop_states=states)
+            return mode, accepted
+
+        steps = []
+        real_step = scop_efs_module._joint_efs_lambda_step
+
+        def recording_step(*args, **kwargs):
+            previous = dict(args[8])
+            out = real_step(*args, **kwargs)
+            steps.append((previous, dict(args[7])))
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", mark_second)
+        monkeypatch.setattr(scop_efs_module, "_joint_efs_lambda_step", recording_step)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.scop_outer_steps[:3] == ["newton", "newton", "efs_fisher"]
+        # The bootstrap's step, then one per EFS iterate; the third is the first.
+        assert len(steps) == 1 + result.scop_outer_steps.count("efs_fisher")
+        previous, step_sizes = steps[1]
+        assert previous == {}
+        assert set(step_sizes.values()) == {1.0}
+        assert result.converged
+
+    def test_the_reparameterisation_terms_cut_the_inner_fits(self, monkeypatch):
+        """Counts, not time: on a Gaussian fit Newton takes no more inner IRLS fits
+        than the EFS search does (measured 6 against 32), because its Jacobian
+        carries the SCOP reparameterisation terms. Mutation check: without them
+        (``system.hessian`` alone) the steps overshot, the guard fired at
+        iteration 6 and the restarted search took 43 inner fits in all."""
+        import functools
+
+        newton_fits = _count_irls_fits(monkeypatch)
+        model, frame, y, offset = _scop_newton_fixture("gaussian")
+        model.fit_reml(frame, y, offset=offset)
+        assert model._reml_result.scop_newton_fallback is None
+        monkeypatch.undo()
+
+        efs_fits = _count_irls_fits(monkeypatch)
+        real = scop_efs_module.optimize_scop_efs_reml
+        monkeypatch.setattr(
+            scop_efs_module, "optimize_scop_efs_reml", functools.partial(real, _outer_step="efs")
+        )
+        efs_model, _, _, _ = _scop_newton_fixture("gaussian")
+        efs_model.fit_reml(frame, y, offset=offset)
+        assert len(newton_fits) <= len(efs_fits)
+
+    def test_a_newton_fit_cut_short_still_warns(self):
+        """Non-convergence is disclosed whatever the step: two Newton iterations
+        cannot finish this fit, and the run warns and reports converged=False."""
+        from superglm import ConvergenceWarning
+
+        model, frame, y, offset = _scop_newton_fixture()
+        with pytest.warns(ConvergenceWarning, match="max_reml_iter"):
+            model.fit_reml(frame, y, offset=offset, max_reml_iter=2)
+        result = model._reml_result
+        assert not result.converged
+        assert result.scop_outer_steps == ["newton", "newton"]
+
+    @pytest.mark.parametrize("family", ["gamma", "poisson"])
+    def test_a_fisher_fallback_geometry_takes_an_efs_step(self, monkeypatch, family):
+        """The joint geometry can fall back to Fisher curvature with no block
+        flagged: the observed builder's indefinite branch (Gamma) and the cached
+        builder's decomposition failure (Poisson). Its H is J F J + S, without
+        the map's -diag(e S beta) term that the reparameterisation correction
+        reads, so those iterates take an EFS step ("efs_fisher") and the
+        correction is never formed on them. Forced from the first Newton line
+        search on by failing each geometry build's first decomposition, which
+        sends the builder down its own Fisher branch. Mutation check: on
+        941f9ce8 every later iterate took a Newton step with the correction
+        formed on the Fisher geometry."""
+        import superglm.reml.scop_geometry as scop_geometry
+
+        armed = {"search": False, "build": False}
+        for builder_name, decomposer_name in (
+            ("build_observed_scop_joint_geometry", "decompose_gram"),
+            ("build_cached_scop_joint_geometry", "_decompose_with_factor_certification"),
+        ):
+            real_builder = getattr(scop_efs_module, builder_name)
+            real_decomposer = getattr(scop_geometry, decomposer_name)
+
+            def builder(*args, _real=real_builder, **kwargs):
+                armed["build"] = armed["search"]
+                try:
+                    return _real(*args, **kwargs)
+                finally:
+                    armed["build"] = False
+
+            def decomposer(*args, _real=real_decomposer, **kwargs):
+                if armed["build"]:
+                    armed["build"] = False
+                    raise np.linalg.LinAlgError("forced indefinite geometry")
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(scop_efs_module, builder_name, builder)
+            monkeypatch.setattr(scop_geometry, decomposer_name, decomposer)
+
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+
+        def arming_search(*args, **kwargs):
+            armed["search"] = True
+            return real_search(*args, **kwargs)
+
+        sources = []
+        real_correction = scop_efs_module._scop_reparam_jacobian_correction
+
+        def recording_correction(mode, system):
+            sources.append(mode.curvature_source)
+            return real_correction(mode, system)
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", arming_search)
+        monkeypatch.setattr(
+            scop_efs_module, "_scop_reparam_jacobian_correction", recording_correction
+        )
+        model, frame, y, offset = _scop_newton_fixture(family)
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.curvature_source == "fisher"
+        assert result.scop_outer_steps[0] == "newton"
+        assert set(result.scop_outer_steps[1:]) == {"efs_fisher"}
+        assert sources == ["observed"]
+        assert result.converged
+
+    def test_a_rejected_first_newton_step_hands_over_to_efs_in_place(self, monkeypatch):
+        """When the first Newton step's forward trials are all rejected, EFS
+        takes over from the same mode with the fresh state it starts from, so
+        the run is the EFS search's own, step for step. The reason names that
+        hand-over, not the restart from the bootstrap ("line_search"), which
+        did not happen. Mutation check: on 941f9ce8 the reason read
+        "line_search"."""
+        import functools
+
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+
+        def reject_first_newton(context, current, proposed, **kwargs):
+            if kwargs.get("reflect", True) is False and kwargs["reml_iteration"] == 1:
+                return current, False
+            return real_search(context, current, proposed, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", reject_first_newton)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        monkeypatch.undo()
+
+        real = scop_efs_module.optimize_scop_efs_reml
+        monkeypatch.setattr(
+            scop_efs_module, "optimize_scop_efs_reml", functools.partial(real, _outer_step="efs")
+        )
+        efs_model, _, _, _ = _scop_newton_fixture()
+        efs_model.fit_reml(frame, y, offset=offset)
+        efs = efs_model._reml_result
+        assert result.scop_newton_fallback == "line_search_first_iteration"
+        assert result.scop_newton_fallback_iter == 1
+        assert result.scop_outer_steps == efs.scop_outer_steps
+        assert result.lambdas == efs.lambdas
+        assert (result.n_reml_iter, result.termination_reason) == (
+            efs.n_reml_iter,
+            efs.termination_reason,
+        )
+
+    def test_a_rejected_newton_step_at_the_cap_stops_and_says_so(self, monkeypatch):
+        """A guard that fires on the last allowed iteration has no iteration to
+        restart in: the run stops at that mode on ``max_reml_iter``, records
+        "line_search_at_cap", and the warning says the last Newton step failed
+        and nothing was left to restart with. Forced as in
+        ``test_a_failed_newton_line_search_restarts_the_search_with_efs``, with
+        the cap at the third iteration. Mutation check: on 941f9ce8 the reason
+        read "line_search", the label of a restart that never ran, and the
+        warning did not mention the failed step."""
+        from superglm import ConvergenceWarning
+
+        real_step = scop_efs_module._scop_newton_step
+        calls = []
+
+        def reversed_third(system, jacobian=None):
+            step = real_step(system, jacobian)
+            calls.append(step)
+            if len(calls) == 3:
+                return -4.0 * np.sign(step) * (np.abs(step) > 0)
+            return step
+
+        monkeypatch.setattr(scop_efs_module, "_scop_newton_step", reversed_third)
+        model, frame, y, offset = _scop_newton_fixture()
+        with pytest.warns(ConvergenceWarning, match="no iteration was left to restart"):
+            model.fit_reml(frame, y, offset=offset, max_reml_iter=3)
+        result = model._reml_result
+        assert not result.converged
+        assert result.termination_reason == "max_reml_iter"
+        assert result.scop_newton_fallback == "line_search_at_cap"
+        assert result.scop_newton_fallback_iter == 3
+        assert result.scop_outer_steps == ["newton", "newton", "newton"]
+        assert result.lambdas == result.lambda_history[-1] == result.lambda_history[-2]
+
+    def test_aitken_never_extrapolates_from_newton_steps(self, monkeypatch):
+        """The Aitken limit reads a history of EFS steps contracting at one
+        ratio. At an isolated "efs_fisher" iterate between Newton steps the
+        history starts afresh, so no Newton step enters it. Forced by marking
+        the modes of the second and fourth line searches as Fisher fallbacks.
+        Mutation check: on 941f9ce8 the history held the preceding Newton step
+        at the first such iterate and two Newton steps at the second."""
+        real_search = scop_efs_module._backtrack_scop_efs_candidate
+        searches = []
+
+        def mark(context, current, proposed, **kwargs):
+            mode, accepted = real_search(context, current, proposed, **kwargs)
+            searches.append(mode)
+            if len(searches) in (2, 4) and accepted:
+                states = {
+                    index: {**state, "last_fisher_fallback": True}
+                    for index, state in mode.scop_states.items()
+                }
+                mode = replace(mode, scop_states=states)
+            return mode, accepted
+
+        lengths = []
+        real_aitken = scop_efs_module._aitken_step
+
+        def recording_aitken(state, name, prev_dlsp, dlsp, scaled_step):
+            out = real_aitken(state, name, prev_dlsp, dlsp, scaled_step)
+            lengths.append(len(state[name]))
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", mark)
+        monkeypatch.setattr(scop_efs_module, "_aitken_step", recording_aitken)
+        model, frame, y, offset = _scop_newton_fixture()
+        model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert result.scop_outer_steps[:5] == [
+            "newton",
+            "newton",
+            "efs_fisher",
+            "newton",
+            "efs_fisher",
+        ]
+        assert result.scop_outer_steps.count("efs") == 0
+        assert lengths and set(lengths) == {0}
+        assert result.converged
+
+
+class TestSCOPObservedGeometryCentring:
+    """The observed-curvature geometry takes ``build_centered_system`` as its authority."""
+
+    def test_a_frequent_indicator_forms_no_design_rows(self, monkeypatch):
+        """Gamma with a log link takes the observed geometry. Its Diesel
+        indicator carries about 60% of the weight, so its weighted mean exceeds
+        its centred RMS at every geometry build, and the system there comes
+        from the compact anchor-centred supports, which form no design row.
+        The answer agrees with one whose geometry centres row chunks
+        (``_force_chunked``) to the stopping bound of two converged Newton fits
+        of one criterion, 2 * reml_tol in log lambda (the centring routes
+        differ at the rounding level). Mutation check: on 941f9ce8 every build
+        was redone from 8,192-row chunks after the guard rejected it: 24 row
+        materialisations and 8 chunked builds on this fit."""
+        import functools
+
+        import superglm.reml.scop_geometry as scop_geometry
+        from superglm._group_matrix._group_matrix_centered import _raw_centering_well_scaled
+        from superglm.group_matrix import DesignMatrix
+
+        real_build = scop_geometry.build_centered_system
+        tripped = []
+
+        def recording_build(**kwargs):
+            system = real_build(**kwargs)
+            scale = np.sqrt(np.maximum(np.diag(system.data_gram), 0.0) / system.sum_w)
+            tripped.append(not _raw_centering_well_scaled(system.mean_x, scale))
+            return system
+
+        def no_rows(self, idx):
+            raise AssertionError("the observed geometry must not materialise design rows")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(scop_geometry, "build_centered_system", recording_build)
+            patch.setattr(DesignMatrix, "row_subset", no_rows)
+            model, frame, y, offset = _scop_newton_fixture("gamma", diesel_share=0.6)
+            model.fit_reml(frame, y, offset=offset)
+        result = model._reml_result
+        assert tripped and all(tripped)
+        assert result.converged and result.curvature_source == "observed"
+
+        monkeypatch.setattr(
+            scop_geometry,
+            "build_centered_system",
+            functools.partial(real_build, _force_chunked=True),
+        )
+        chunked, _, _, _ = _scop_newton_fixture("gamma", diesel_share=0.6)
+        chunked.fit_reml(frame, y, offset=offset)
+        reml_tol = model.reml_diagnostics()["profile"]["reml_tol_resolved"]
+        _assert_stopped_on_a_full_newton_step(result)
+        _assert_stopped_on_a_full_newton_step(chunked._reml_result)
+        for name, value in chunked._reml_result.lambdas.items():
+            assert abs(np.log(result.lambdas[name] / value)) <= 2.0 * reml_tol, name
+
+
 class TestCandidateStepBackoff:
     """A candidate certification failure backs the lambda step off (#179).
 
@@ -2997,8 +5358,9 @@ class TestCandidateStepBackoff:
     behind it: four call sites raised on a rejection the line search
     survives. The backoff applies the line search's own trial formula --
     damped geometric steps in log-lambda -- between the certified mode the
-    step was taken from and the proposal that failed. Sites with no
-    certified predecessor (bootstrap, fixed-lambda) keep raising.
+    step was taken from and the proposal that failed. The fixed-lambda
+    site, with no certified predecessor, keeps raising; a bootstrap with none
+    is published unconverged (``TestColdBootstrapStart``).
     """
 
     @staticmethod
@@ -3276,19 +5638,124 @@ class TestCandidateStepBackoff:
         assert accepted is True
         assert fits == []
 
-    def test_a_failed_bootstrap_has_nothing_to_back_off_to(self, monkeypatch):
-        """The recoverability principle's boundary: no predecessor, no rescue.
+    def test_a_failed_bootstrap_is_published_unconverged(self, monkeypatch):
+        """No certified mode at either bootstrap start: disclosed, not refused.
 
-        Rejecting every certification kills the bootstrap after its ladder.
-        There is no earlier certified mode to damp toward, so the loud
-        error is the designed outcome, unchanged by the candidate backoff.
+        Rejecting every certification fails the cold bootstrap and its
+        Hessian-scaled retry, and leaves the search no mode to start from or
+        damp toward. The fit at the retry's start is published with
+        ``converged=False`` and a ConvergenceWarning that names the stage and
+        what to change (owner decision 3, 2026-09-30). Mutation check:
+        37f73863 raised "SCOP REML bootstrap did not converge to a coefficient
+        mode".
+
+        What is published is the last inner fit the retry's certification
+        ladder made (rung 3: cold, at the ladder's tightest tolerance), at the
+        retry's own start, and nothing is fitted twice: four inner fits per
+        start, one per rung. Mutation check: 2a4e28c7 fitted the retry's start
+        again from scratch at the loose tolerance, a ninth inner fit that
+        repeated the retry's rung 0 bit for bit, and published that.
         """
+        from superglm import ConvergenceWarning
+
         monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", lambda mode: 1.0)
+        fits: list[tuple[str, float, object]] = []
+        real_fit = scop_efs_module.fit_irls_direct
+
+        def counting_fit(**kwargs):
+            out = real_fit(**kwargs)
+            fits.append((kwargs["debug_context"]["phase"], kwargs["tol"], out[0]))
+            return out
+
+        scaled_starts: list[dict[str, float]] = []
+        real_scaled = scop_efs_module._hessian_scaled_bootstrap_lambdas
+
+        def recording_scaled(*args, **kwargs):
+            scaled_starts.append(real_scaled(*args, **kwargs))
+            return scaled_starts[-1]
+
+        monkeypatch.setattr(scop_efs_module, "fit_irls_direct", counting_fit)
+        monkeypatch.setattr(scop_efs_module, "_hessian_scaled_bootstrap_lambdas", recording_scaled)
         model, frame, y = self._model()
-        with pytest.raises(
-            RuntimeError, match="SCOP REML bootstrap did not converge to a coefficient mode"
-        ):
+        with pytest.warns(ConvergenceWarning, match="starting smoothing parameters"):
             model.fit_reml(frame, y, max_reml_iter=5)
+        diagnostics = model.reml_diagnostics()
+        assert not diagnostics["converged"]
+        assert diagnostics["termination_reason"] == "bootstrap_uncertified"
+        assert diagnostics["n_reml_iter"] == 0
+        assert np.all(np.isfinite(model.predict(frame)))
+        # Poisson/log certifies at Fisher curvature, so rung 0 runs at the
+        # default pirls_tol and the ladder tightens to 1e-10, then 1e-11 twice.
+        assert [(phase, tol) for phase, tol, _ in fits] == [
+            ("bootstrap", tol) for tol in (1e-6, 1e-10, 1e-11, 1e-11)
+        ] * 2
+        assert model._reml_result.pirls_result is fits[-1][2]
+        assert len(scaled_starts) == 1
+        assert diagnostics["lambdas"] == scaled_starts[0]
+        assert diagnostics["lambdas"] != {"x": 1e-4}
+
+    def test_a_failed_warm_bootstrap_restarts_every_component_scaled(self, monkeypatch):
+        """A warm bootstrap with no certified mode is retried at the scaled start too.
+
+        A complete ``lambda2_init`` warms every estimated component, so
+        2a4e28c7 had no cold component to rescale: a failed warm bootstrap
+        went straight to the disclosure, which still claimed a scaled retry,
+        and the published fit sat at the warm value that had failed. Cross-
+        validation folds after the first, NB2 theta refits and user mappings
+        start that way. Every estimated component now restarts at its
+        Hessian-scaled value, and the message names only the starts that ran.
+        """
+        from superglm import ConvergenceWarning
+
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", lambda mode: 1.0)
+        starts: list[dict[str, float]] = []
+        real = scop_efs_module._fit_scop_reml_mode
+
+        def recording(context, lambdas, **kwargs):
+            if kwargs.get("phase") == "bootstrap" and kwargs.get("_certification_retry", 0) == 0:
+                starts.append(dict(lambdas))
+            return real(context, lambdas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", recording)
+        model, frame, y = self._model()
+        with pytest.warns(ConvergenceWarning) as caught:
+            model.fit_reml(frame, y, lambda2_init={"x": 3.0}, max_reml_iter=5)
+        assert len(starts) == 2
+        assert starts[0] == {"x": 3.0}
+        assert starts[1]["x"] != 3.0
+        diagnostics = model.reml_diagnostics()
+        assert diagnostics["termination_reason"] == "bootstrap_uncertified"
+        assert diagnostics["lambdas"] == starts[1]
+        message = " ".join(
+            str(w.message) for w in caught if issubclass(w.category, ConvergenceWarning)
+        )
+        assert "scaled to the data's curvature that it retried at" in message
+        assert "data-scaled starting ones" in message
+
+    def test_the_bootstrap_message_names_only_the_starts_that_ran(self):
+        """With no retry (no scaled start differed), the message claims none.
+
+        Mutation check: 2a4e28c7 claimed a retry at the scaled start whatever
+        ran.
+        """
+        from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+        def reml(*starts):
+            return SimpleNamespace(
+                converged=False,
+                termination_reason="bootstrap_uncertified",
+                n_reml_iter=0,
+                terminal_refit_termination=None,
+                lambda_history=[{"x": value} for value in starts],
+                scop_states=None,
+            )
+
+        alone = reml_nonconvergence_message(reml(1e-4))
+        assert "retried at" not in alone and "data-scaled" not in alone
+        assert "no retry ran" in alone
+        retried = reml_nonconvergence_message(reml(1e-4, 2.5))
+        assert "scaled to the data's curvature that it retried at" in retried
+        assert "no retry ran" not in retried
 
     def test_a_failed_fixed_lambda_fit_has_nothing_to_back_off_to(self, monkeypatch):
         """Fixed-lambda fits have no certified predecessor either.

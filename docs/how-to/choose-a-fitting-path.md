@@ -79,10 +79,103 @@ as converged. This trades some speed for results you can rely on.
 - **Some fits take longer.** On a claim-frequency model with 77,000 rows and
   a random effect for 942 vehicle models nested in 87 makes, the check made
   the fit about a quarter slower.
-- **A fit that cannot be checked says so.** It is returned, not refused, and
-  `model.reml_diagnostics()["converged"]` reads `False`.
+- **A fit that cannot be checked says so.** It is returned, not refused. It
+  warns with a `ConvergenceWarning` that names the reason, the summary repeats
+  it, and `model.reml_diagnostics()["converged"]` reads `False`.
+- **A monotone (SCOP) term keeps a higher iteration limit.** Its smoothing
+  search can fall back to smaller steps (see below), so its limit defaults to
+  100 rather than 20. Set `max_reml_iter` to override either default.
 - **Barely identified coefficients are left out of the check.** A
   `WeakIdentificationWarning` names them.
+
+### Smoothing search with a monotone term
+
+A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
+
+- **It needs fewer iterations.** On the 678,000-row freMTPL2 claim-frequency
+  model with a monotone BonusMalus curve, the search took 9 iterations instead
+  of 27 in the previous release on the raw counts, and 14 instead of 57 on the
+  cleaned counts.
+- **It usually reaches the same smoothing.** When every step is a Newton step,
+  it stops where the earlier search's steps would stop, to the same tolerance.
+- **A tensor interaction can settle elsewhere.** Where the data barely support
+  a tensor product, its smoothing can have more than one local optimum, and the
+  two kinds of step can end in different ones. On a 3,000-row synthetic book
+  with no interaction signal, predictions differed by up to 0.34 standard
+  errors, and the Newton search reached the lower REML objective. On the other
+  cases measured they differed by at most 0.05 standard errors.
+- **A rejected Newton step restarts the search.** If no Newton step improves
+  the REML objective, the search starts again from the beginning with the
+  smaller steps used before this release, and returns what that search
+  returns. The Newton iterations already taken are the extra cost.
+- **The restart shares the iteration limit.** It runs within the iterations
+  `max_reml_iter` has left, so it returns exactly the smaller steps' answer
+  when those are enough. If none are left, the fit stops there and warns that
+  it did not converge.
+- **A rejected first step needs no restart.** The smaller steps take over from
+  where the search stands. `model.reml_diagnostics()["scop_newton_fallback"]`
+  names which of these happened; it is `None` when the search kept its Newton
+  steps throughout.
+- **A rejected step next to the answer ends the search there.** If the
+  rejected step would move every smoothing parameter by less than 1%, and the
+  gain it predicts is too small for the REML objective to resolve, the fit
+  stops and reports convergence, as the smaller steps do when they stall.
+- **A heavily smoothed term can come back down.** Earlier releases could not
+  lower a large smoothing parameter, whatever the data said, and still
+  reported the fit as converged. A smoothing parameter is now held only where
+  the REML objective is flat in the direction of its step. On the cleaned
+  freMTPL2 counts this moved VehAge's smoothing parameter from 468 to 371 and
+  its effective degrees of freedom from 3.57 to 3.74. Predictions moved by at
+  most 0.04 standard errors on the full book and 0.27 out of fold.
+- **A term smoothed to its limit stops near the limit.** Once such a term has
+  under 0.05 effective degrees of freedom left, the search stops it, and
+  exactly where depends on the steps taken.
+- **A starting fit that cannot be checked is tried once more.** The search
+  begins with one coefficient fit at very light smoothing, or at the
+  `lambda2_init` values you pass. If the solver cannot check that fit, it fits
+  again with every smoothing value set from the data so that each term keeps
+  about half its flexibility, and the search starts from there. On the
+  678,000-row freMTPL2 pure-premium model (Tweedie, monotone BonusMalus curve)
+  this is what lets the fit finish.
+- **Only the starting fit that is kept warns.** superglm's own warnings from
+  a discarded first attempt, such as a `SeparationWarning`, are not shown.
+- **A fit with no checkable start is returned, not refused.** If the second
+  start cannot be checked either, the search does not run. The model is
+  returned at that start's smoothing values with a `ConvergenceWarning` that
+  says what to change, and `model.reml_diagnostics()["termination_reason"]`
+  reads `"bootstrap_uncertified"`. `estimate_p` skips a Tweedie power where
+  this happens.
+- **A start that cannot be scored at all is tried once more too.** If the
+  second start's fit cannot be scored either, for example because its score
+  is not a finite number, `fit_reml` raises an error that says so, and
+  `estimate_p` skips that power.
+
+### Refitting on similar data
+
+A refit on similar data, such as a cross-validation fold, a bootstrap sample
+or next year's book, can start its smoothing search where an earlier fit
+ended. That usually takes fewer iterations.
+
+```python
+first = model.fit_reml(train_df, y_train, sample_weight=exposure_train)
+start = first.reml_diagnostics()["lambdas"]
+refit = model.clone_unfitted().fit_reml(df, y, sample_weight=exposure, lambda2_init=start)
+```
+
+- **The answer is the refit's own.** The search still runs to its own
+  convergence test on the new data.
+- **Leave out terms the earlier fit switched off.** A term smoothed to its
+  limit, for example a spline reduced to a straight line, sits where the
+  search cannot tell which way to move. Started there, it stays there even if
+  the new data supports a curve. Drop such terms from `start`.
+- **A tensor interaction starts from `start` only as a whole.** If `start`
+  names some parts of a tensor interaction but not all, the whole interaction
+  starts afresh, and the fit warns. A name that matches nothing in the model
+  is ignored, also with a warning.
+- **`cross_validate(..., fit_mode="fit_reml")` does this for you.** Every
+  fold after the first starts from the first converged fold, minus the terms
+  it switched off. A tensor interaction with any part switched off starts
+  afresh as a whole. Pass `warm_start=False` to start every fold afresh.
 
 ### When a coefficient is barely identified
 

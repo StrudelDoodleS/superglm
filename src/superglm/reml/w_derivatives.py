@@ -453,7 +453,8 @@ def reml_w_correction(
     # on rows differenced from it (``centered_system.dense_mean_pair``, the
     # corrected two-pass algorithm), with the weights ``mean_x`` carries -- the
     # geometry's, else the Fisher weights at the mode -- and its own
-    # ``sum_w``.  No row and no state centre seeds it beyond pass one's
+    # ``sum_w``; ``d`` enters every product below as a rank-one correction.
+    # No row and no state centre seeds it beyond pass one's
     # rounding.  About the rounded ``mean_x`` the direction
     # ``X dbeta - mean_x' dbeta``, the signed Grams and the leverage rows all
     # cancel ``c' dbeta`` at a column's offset (at 1e16 the correction was 9.2%
@@ -465,7 +466,17 @@ def reml_w_correction(
     dense = dense_columns(dm)
     centre_hi = mean_x
     centre_lo: NDArray | None = None
-    if sum_w is not None and np.any(dense):
+    # Without a geometry the summary's pair is the final system's own: the
+    # summary, ``rank_info`` and ``mean_x`` all come from ``centered_final``
+    # (``irls_direct``), formed with the Fisher weights at the mode, so it is
+    # read, not formed again.  Older pickled summaries carry no pair.
+    summary = pirls_result.reml_geometry if geometry is None else None
+    carried_hi = None if summary is None else getattr(summary, "mean_hi", None)
+    carried_lo = None if summary is None else getattr(summary, "mean_lo", None)
+    if carried_hi is not None and carried_lo is not None and sum_w is not None and np.any(dense):
+        centre_hi = np.where(dense, np.asarray(carried_hi, dtype=np.float64), mean_x)
+        centre_lo = np.where(dense, np.asarray(carried_lo, dtype=np.float64), 0.0)
+    elif sum_w is not None and np.any(dense):
         mean_weights = (
             np.asarray(geometry.weights, dtype=np.float64)
             if geometry is not None

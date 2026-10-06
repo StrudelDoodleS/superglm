@@ -375,12 +375,6 @@ def dense_columns(dm: DesignMatrix) -> NDArray:
     return mask
 
 
-def _dense_rows(matrix, start, stop, centre, centre_lo):
-    """Rows ``start:stop`` of a dense block, ``(x - c) - c_lo`` (``c_lo`` ``None``: ``x - c``)."""
-    rows = matrix.M[start:stop] - centre
-    return rows if centre_lo is None else rows - centre_lo
-
-
 def dense_centred_matvec(
     dm: DesignMatrix, values: NDArray, center: NDArray, center_lo: NDArray | None = None
 ) -> NDArray:
@@ -388,22 +382,31 @@ def dense_centred_matvec(
 
     The dense blocks' share of ``centred_matvec`` in its fixed chunks, for a
     caller that applies every other block through its own (structured)
-    product.  ``center_lo`` makes the centre an exact pair, rows ``(x - c) -
-    c_lo`` (``centered_system.weighted_mean_pair``).
+    product.  ``center_lo`` makes the centre an exact pair ``(c, d)``, rows
+    ``(x - c) - d`` (``centered_system.dense_mean_pair``), applied as a
+    rank-one correction: ``(X_d - 1 c_d') v_d - (d' v_d) 1``.  ``d`` is the
+    pair's remainder, the rounding of the mean ``c``, so the correction is
+    far below the rows' own scale.
     """
     result = np.zeros(dm.n)
     values = np.asarray(values, dtype=np.float64)
+    shift: list[float] = []
     offset = 0
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
         if type(matrix) is DenseGroupMatrix:
             part = values[offset : offset + width]
             centre = center[offset : offset + width]
-            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            source = matrix.M
             for start in range(0, dm.n, _CHUNK):
                 stop = min(start + _CHUNK, dm.n)
-                result[start:stop] += _dense_rows(matrix, start, stop, centre, centre_lo) @ part
+                result[start:stop] += (source[start:stop] - centre) @ part
+            if center_lo is not None:
+                shift.extend(center_lo[offset : offset + width] * part)
         offset += width
+    correction = math.fsum(shift)
+    if correction != 0.0:
+        result -= correction
     return result
 
 
@@ -412,21 +415,24 @@ def dense_centred_rmatvec(
 ) -> NDArray:
     """``(X_d - 1 c_d')' r`` on the ``DenseGroupMatrix`` columns (zero elsewhere), centred row by row.
 
-    ``center_lo`` as ``dense_centred_matvec``.
+    ``center_lo`` as ``dense_centred_matvec``: the rank-one correction ``-d
+    (1' r)``.
     """
     result = np.zeros(dm.p)
     rows = np.asarray(rows, dtype=np.float64)
+    total = float(np.sum(rows)) if center_lo is not None else 0.0
     offset = 0
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
         if type(matrix) is DenseGroupMatrix:
             centre = center[offset : offset + width]
-            centre_lo = None if center_lo is None else center_lo[offset : offset + width]
+            source = matrix.M
             accumulated = np.zeros(width)
             for start in range(0, dm.n, _CHUNK):
                 stop = min(start + _CHUNK, dm.n)
-                block = _dense_rows(matrix, start, stop, centre, centre_lo)
-                accumulated += block.T @ rows[start:stop]
+                accumulated += (source[start:stop] - centre).T @ rows[start:stop]
+            if center_lo is not None:
+                accumulated -= center_lo[offset : offset + width] * total
             result[offset : offset + width] = accumulated
         offset += width
     return result
@@ -1634,18 +1640,27 @@ def _set_totals(sums: list, index: int) -> tuple[float, float, float, float, flo
     return own, absolute, represented, count, up, down
 
 
-def row_set_quadratics(sets: RowSets, p: int, apply: Callable[..., NDArray]) -> NDArray:
+def row_set_quadratics(
+    sets: RowSets, p: int, apply: Callable[..., NDArray], penalty_rounding: int | None = None
+) -> NDArray:
     """A lower bound on ``d' S d`` along each of ``sets.directions(p)``, in ``apply``'s units.
 
     ``apply(v)`` is ``S v`` and ``apply(v, magnitude=True)`` is ``|S| |v|``,
-    which bounds the product's rounding, so ``d' S d - gamma_{2p+4} |d|' |S|
-    |d|`` is a lower bound.  Where the penalty is positive along ``d`` but
+    within ``gamma_k`` of which ``S v`` is formed, ``k = penalty_rounding``
+    (``penalty_algebra.penalty_product_rounding``; None: ``p + 2``, a formed
+    dense ``S``).  The ``p``-term dot ``d' fl(S d)`` adds ``gamma_p |d|'
+    |fl(S d)|``, so the product is within ``gamma_{k + p + 1} |d|' fl(|S|
+    |d|)``, and ``size``, that sum formed by a ``p``-term dot of non-negative
+    terms, is at least ``(1 - gamma_p)`` of it: ``d' S d - gamma_{k + 2p +
+    2} size`` is a lower bound (``gamma_a / (1 - gamma_b) <= gamma_{a+b+1}``
+    while ``2 (a + b + 1) u <= 1``).  Where the penalty is positive along ``d`` but
     that bound is not, the entry is ``nan``: penalized, with no curvature
     bound.  One penalty product per reference and per joint set.  A
     ``bounded`` set's entry is 0 where the penalty is zero on the columns of
     the blocks it names, so along any direction in them, and ``nan``
     otherwise.
     """
+    rounding = p + 2 if penalty_rounding is None else int(penalty_rounding)
     out = []
     for index, direction in enumerate(sets.directions(p)):
         if direction is None:
@@ -1657,7 +1672,7 @@ def row_set_quadratics(sets: RowSets, p: int, apply: Callable[..., NDArray]) -> 
         with np.errstate(over="ignore", invalid="ignore"):
             product = float(direction @ apply(direction))
             size = float(np.abs(direction) @ apply(direction, magnitude=True))
-            lower = product - _gamma(2 * p + 4) * size
+            lower = product - _gamma(rounding + 2 * p + 2) * size
         if not product > 0.0:
             out.append(0.0 if product == 0.0 else math.nan)
         else:
@@ -1679,6 +1694,7 @@ def row_set_residual(
     set_curvature: NDArray,
     bar: float,
     underflow: float,
+    penalty_rounding: int | None = None,
 ) -> float:
     """The largest relative score of a set of rows the one-hot blocks move on their own.
 
@@ -1697,7 +1713,12 @@ def row_set_residual(
     within the bar of its own terms' size, ``sum_{i in R} |s_i| + |d_R|'
     (|S| |beta|)``, or of their rounding, ``gamma_{|R| + 2}`` of the rows'
     sum, ``u`` of their predictor's representation ``sum f_i |eta_i|`` and
-    ``gamma_{p + 2}`` of the penalty's size.  The sets (``row_sets``, formed
+    ``gamma_{k + 2p + 2}`` of the penalty's size: each entry of ``S beta`` is
+    within ``gamma_k`` of its formed size (``k = penalty_rounding``,
+    ``penalty_algebra.penalty_product_rounding``; None: ``p + 2``, a formed
+    dense ``S``), ``d_R'`` sums at most ``p`` of them and the size is that
+    sum of non-negative terms formed the same way, as in
+    ``row_set_quadratics``.  The sets (``row_sets``, formed
     once per design), by one rule (an indicator in the span of the intercept
     and the one-hot columns):
     - each level of each one-hot block (``CategoricalGroupMatrix``, random
@@ -1760,6 +1781,9 @@ def row_set_residual(
     curvature = np.asarray(column_curvature, dtype=np.float64)
     quadratics = np.asarray(set_curvature, dtype=np.float64)
     p = len(penalty)
+    gamma_penalty = _gamma(
+        (p + 2 if penalty_rounding is None else int(penalty_rounding)) + 2 * p + 2
+    )
     worst = 0.0
 
     def judge(
@@ -1788,7 +1812,7 @@ def row_set_residual(
         floor = (
             _gamma(int(count) + 2) * absolute_sum
             + _UNIT_ROUNDOFF * represented_sum
-            + _gamma(p + 2) * direction_size
+            + gamma_penalty * direction_size
         )
         ratio = math.inf if bar * scale <= underflow else residual / max(bar * scale, floor)
         # only a normal ``bar d'Sd`` bounds the distance: below 2^-1022 the
@@ -2025,6 +2049,7 @@ def truncated_direction_ratio(
     underflow: float,
     column_scale: NDArray | None = None,
     eta: NDArray | None = None,
+    penalty_rounding: int | None = None,
 ) -> tuple[float, tuple[TruncatedDirection, ...]]:
     """The directions the factorization truncates, each judged on the rows it moves.
 
@@ -2070,9 +2095,12 @@ def truncated_direction_ratio(
       (score and Fisher weights of those rows only, brought to unit scale by
       a power of two), moves each row by ``M delta`` in ``eta``.  Within
       ``bar`` or its rounding (``gamma`` of the sums, the basis's error in the
-      rows' movement and in the pull ``D' S beta``, the penalty's size, through
-      ``|C^+|``) on every row, the rows sit at their own maximum: weakly
-      identified.  Otherwise, if every row the step moves beyond its rounding
+      rows' movement and in the pull ``D' S beta``, the pull's rounding,
+      through ``|C^+|``) on every row, the rows sit at their own maximum:
+      weakly identified.  The pull reads the penalty product ``fl(S beta)``
+      (``penalty_gradient``, within ``gamma_k`` of its formed size
+      ``penalty_size``), and its ``p``-term sums are formed as the bend's
+      below: ``gamma_{k + 2p + 2}`` of ``|D|' penalty_size``.  Otherwise, if every row the step moves beyond its rounding
       improves along it (a response of 0 moving down, of 1 up):
       - along directions the penalty does not bend (``D' S D`` within its
         error), the step is a recession direction of the rows' likelihood:
@@ -2092,10 +2120,14 @@ def truncated_direction_ratio(
     The penalty's bend ``d' S d`` is judged against its error: the basis's,
     ``2 r ||d||_2 ||S d||_2 + ||S||_inf (r ||d||_2)^2`` with ``r = 4 (angle +
     gamma_{p+2})`` (``||S||_inf`` from ``penalty_size_apply``, ``|S| |v|``,
-    bounding ``||S||_2``), and its rounding.  Forming ``S d`` sums at most
-    ``p`` terms per penalty component, scales each by its ``lambda`` and adds
-    the components on a coordinate, at most ``p + 2`` of them; the product
-    ``d' fl(S d)`` adds ``p`` more: ``gamma_{3p + 5} |d|' |S| |d|`` in all.
+    bounding ``||S||_2``), and its rounding.  Each entry of ``fl(S d)`` is
+    within ``gamma_k`` of its formed size ``fl(|S| |d|)`` (``k =
+    penalty_rounding``, ``penalty_algebra.penalty_product_rounding``, which
+    counts each component's chain, its ``lambda`` and the components on a
+    coordinate; None: ``p + 2``, a formed dense ``S``); the ``p``-term
+    product ``d' fl(S d)`` and the ``p``-term sum of ``|d| fl(|S| |d|)``
+    bring it to ``gamma_{k + 2p + 2}`` of that sum, as in
+    ``row_set_quadratics``.
     ``S`` is PSD, so along a direction whose computed bend lies within that
     error the true bend lies in ``[0, 2 error]`` and may be 0, and a PSD
     matrix with a zero diagonal entry has that row and column zero (``b_jk^2
@@ -2127,6 +2159,7 @@ def truncated_direction_ratio(
     observed = np.asarray(response, dtype=np.float64)
     mean = np.asarray(mean_x, dtype=np.float64)
     p = dm.p
+    penalty_chain = p + 2 if penalty_rounding is None else int(penalty_rounding)
     moved = np.column_stack(
         [
             np.asarray(dm.matvec(basis[:, k]), dtype=np.float64) - float(mean @ basis[:, k])
@@ -2231,7 +2264,7 @@ def truncated_direction_ratio(
         bending_error = (
             2.0 * resolution * lengths * np.linalg.norm(stiffness, axis=0)
             + penalty_norm * (resolution * lengths) ** 2
-            + _gamma(3 * p + 5) * np.sum(np.abs(direction) * bent_size, axis=0)
+            + _gamma(penalty_chain + 2 * p + 2) * np.sum(np.abs(direction) * bent_size, axis=0)
         )
         # S is PSD, so a bend within its error may truly be 0, and a PSD
         # matrix with a zero diagonal entry has that row and column zero: the
@@ -2257,7 +2290,7 @@ def truncated_direction_ratio(
     rounding = (
         _gamma(len(s_local) + 2) * (np.abs(local).T @ np.abs(s_local))
         + movement_error
-        + _gamma(p + 2) * pull_size
+        + _gamma(penalty_chain + 2 * p + 2) * pull_size
         + pull_error
         + np.ldexp(underflow, exponent)
     ).ravel()
@@ -2326,6 +2359,7 @@ def penalized_mode_residual(
     column_shift: NDArray | None = None,
     decrement_noise: Callable[[NDArray], float] | None = None,
     penalty_block: Callable[[NDArray], NDArray] | None = None,
+    penalty_rounding: int | None = None,
 ) -> ModeResidual:
     """Evaluate the shared relative score (module docstring) at one iterate.
 
@@ -2333,7 +2367,10 @@ def penalized_mode_residual(
     ``intercept + mean_x' beta``; ``penalty_score = S beta``,
     ``penalty_magnitude = |S| |beta|``, ``penalty_curvature = diag(S)`` and
     ``sum_w`` the working weights' sum ``centered_scale`` is relative to
-    (``centered_scale_j^2 sum_w = D_jj``).  When every relative score is at most ``resolve_cap``
+    (``centered_scale_j^2 sum_w = D_jj``).  ``penalty_score`` is within
+    ``gamma_k`` of ``penalty_magnitude`` entrywise, ``k = penalty_rounding``
+    (``penalty_algebra.penalty_product_rounding``; None: ``p + 2``, a formed
+    dense ``S``), the penalty's term of each slope's rounding floor.  When every relative score is at most ``resolve_cap``
     (always, by default) the floors and weak tests are evaluated for every
     coefficient that misses the fixed bar: one-hot columns in closed form from
     transpose products, every other column from its own entries (one design
@@ -2426,7 +2463,8 @@ def penalized_mode_residual(
         weights = np.asarray(fisher_weights, dtype=np.float64)
         positive = np.asarray(positive_prior, dtype=bool)
         row_count = int(np.count_nonzero(positive))
-        gamma_rows, gamma_penalty = _gamma(n), _gamma(p + 2)
+        gamma_rows = _gamma(n)
+        gamma_penalty = _gamma(p + 2 if penalty_rounding is None else int(penalty_rounding))
         largest = float(np.max(weights, initial=0.0))
         predictor = weights * np.abs(eta_tilde)
         if failing[0] == 0:

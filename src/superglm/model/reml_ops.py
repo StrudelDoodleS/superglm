@@ -154,6 +154,7 @@ def model_optimize_direct_reml(
     max_pirls_iter=100,
     debug_recorder=None,
     trace_run=None,
+    warm_lambdas=None,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
     from superglm.model.reml_execute import resolve_reml_tol
@@ -189,6 +190,7 @@ def model_optimize_direct_reml(
         max_pirls_iter=max_pirls_iter,
         debug_recorder=debug_recorder,
         trace_run=trace_run,
+        warm_lambdas=warm_lambdas,
     )
     if model._discrete:
         from superglm.model.base import rebuild_dm_with_lambdas

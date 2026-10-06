@@ -1,7 +1,14 @@
 import { editorClient } from "./api/client.js";
-import { bindPointLens, drawChart, groupedTerms, updateChartSelection } from "./chart.js";
+import {
+  bindPointLens,
+  drawChart,
+  groupedTerms,
+  selectionSpanRange,
+  updateChartSelection
+} from "./chart.js";
+import { bindDragWatch } from "./chart/anchor_marks.js";
 import { chartSize } from "./chart/geometry.js";
-import { renderHistory } from "./history.js";
+import { bindHistory, renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
 import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
@@ -12,10 +19,12 @@ import {
   selectEvidenceNeedsRefresh,
   selectGroupDisplayMode,
   selectModelRevision,
+  selectPendingSteps,
   selectRenderableTerm,
   selectSnapshot,
   selectSummaryLevelDisplay,
-  selectVisibleEvidencePanels
+  selectVisibleEvidencePanels,
+  selectWaitingTerms
 } from "./state/selectors.js";
 import {
   createEditorStore,
@@ -28,19 +37,27 @@ import {
   createEvidenceTimingTracker
 } from "./state/timing.js";
 import {
-  collapseTransition,
+  applySummaryView,
+  refitAtOnceTransition,
+  refitPendingTransition,
   renderSummary,
   runDistributionProfile,
   showDistributionProfileDialog,
   runOffsetRefit,
   revertTransition,
-  setReferenceTransition,
-  shapeRangeTransition,
-  ungroupTransition
+  stageCollapse,
+  stageReference,
+  stageShapeRange,
+  stageUngroup
 } from "./summary.js";
-import { bindInteractions } from "./interactions.js";
+import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
-import { renderContextBar } from "./views/context_bar.js";
+import {
+  placeTermViewToggle,
+  renderContextBar,
+  renderNewLevelsControl
+} from "./views/context_bar.js";
+import { createCVTab } from "./views/cv_tab.js";
 import { bindExportDialog } from "./views/export_dialog.js";
 import {
   bindFeatureList,
@@ -58,7 +75,30 @@ import {
   storeShapeJoin
 } from "./views/join_toggle.js";
 import { bindPopovers } from "./views/popover.js";
-import { mountThemeControl } from "./views/theme.js";
+import {
+  bindSettingsPane,
+  loadSettings,
+  onSettingsChange,
+  renderSettingsPane,
+  saveSettings
+} from "./views/settings.js";
+import {
+  bindSummaryFilter,
+  bindSummarySearch,
+  bindSummarySections,
+  renderSummaryFilter,
+  waitingCounts
+} from "./views/summary_view.js";
+import { mountThemeSwitch } from "./views/theme.js";
+import {
+  RATING_TABLE_FAILED,
+  RATING_TABLE_LOADING,
+  bindTermViewToggle,
+  ratingTableMessage,
+  ratingTableModel,
+  renderRatingTable,
+  renderTermViewToggle
+} from "./views/rating_table.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
 const appBar = document.getElementById("appBar");
@@ -66,6 +106,8 @@ const undoAction = document.getElementById("undoAction");
 const redoAction = document.getElementById("redoAction");
 const revertAction = document.getElementById("revertAction");
 const refreshAction = document.getElementById("refreshAction");
+const refitPendingAction = document.getElementById("refitPendingAction");
+const refitPendingCount = document.getElementById("refitPendingCount");
 const appShell = document.querySelector(".app-shell");
 const appBusyOverlay = document.getElementById("appBusyOverlay");
 const appBusyAnnouncement = document.getElementById("appBusyAnnouncement");
@@ -86,6 +128,9 @@ const reportRetry = document.getElementById("reportRetry");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
+const plotColumn = document.querySelector(".plot-column");
+const termViewToggle = document.getElementById("termViewToggle");
+const ratingTableFrame = document.getElementById("ratingTableFrame");
 const featureListNodes = Object.freeze({
   root: document.getElementById("featureList"),
   search: document.getElementById("featureSearch"),
@@ -110,13 +155,14 @@ const helpPane = document.getElementById("helpPane");
 const toolRail = document.getElementById("toolRail");
 const groupDisplayWrap = document.getElementById("groupDisplayWrap");
 const groupDisplayMode = document.getElementById("groupDisplayMode");
+const newLevelsWrap = document.getElementById("newLevelsWrap");
+const newLevelsMode = document.getElementById("newLevelsMode");
 const handleCountWrap = document.getElementById("handleCountWrap");
 const handleCount = document.getElementById("handleCount");
 const handleCountValue = document.getElementById("handleCountValue");
 const basisToggle = document.getElementById("basisToggle");
 const contribPlay = document.getElementById("contribPlay");
-const buildDuration = document.getElementById("buildDuration");
-const buildDurationValue = document.getElementById("buildDurationValue");
+const contribTools = document.getElementById("contribTools");
 const resetZoom = document.getElementById("resetZoom");
 const ciToggle = document.getElementById("ciToggle");
 const resetOrder = document.getElementById("resetOrder");
@@ -130,6 +176,7 @@ const exportSave = document.getElementById("exportSave");
 const exportDownload = document.getElementById("exportDownload");
 const exportStatus = document.getElementById("exportStatus");
 const exportFormatInputs = [...document.querySelectorAll('input[name="exportFormat"]')];
+const exportPendingNote = document.getElementById("exportPendingNote");
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const setReference = document.getElementById("setReference");
@@ -165,7 +212,24 @@ const summaryStatus = document.getElementById("summaryStatus");
 const summaryRetry = document.getElementById("summaryRetry");
 const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
-const advancedTiming = document.getElementById("advancedTiming");
+const summarySearch = document.getElementById("summarySearch");
+const summarySearchCount = document.getElementById("summarySearchCount");
+const summaryFilterNode = document.getElementById("summaryFilter");
+const summaryHeader = document.getElementById("summaryHeader");
+const summaryModelChips = document.getElementById("summaryModelChips");
+const summaryTiles = document.getElementById("summaryTiles");
+let summaryQuery = "";
+let summaryFilter = "all";
+// Sections the analyst opened or closed; cleared when the chart's term or the
+// search changes, so the summary goes back to following the chart.
+const summaryToggled = new Map();
+const settingsTiming = document.getElementById("settingsTiming");
+const settingsNodes = Object.freeze({
+  root: document.getElementById("settingsPane"),
+  buildDuration: document.getElementById("buildDuration"),
+  buildDurationValue: document.getElementById("buildDurationValue"),
+  timing: settingsTiming
+});
 const historyFrame = document.getElementById("historyFrame");
 const statusNode = document.getElementById("status");
 const uiPopover = document.getElementById("uiPopover");
@@ -191,7 +255,22 @@ const actions = createEditorActions({
   scheduleVisibleEvidence
 });
 const evidenceTiming = createEvidenceTimingTracker({
-  onComplete: () => renderAdvancedTiming()
+  onComplete: () => renderTimingReadout()
+});
+
+// The Cross-validation tab draws into the report frame, which the other
+// reports share, so it draws a job's progress only while it is the open view.
+// A finished Run CV or Final fit changes the tab, and a Final fit also what
+// Export offers; a mutation running when it publishes may hold a snapshot from
+// before it, so the refresh waits for that mutation to settle.
+const cvTab = createCVTab({
+  frame: reportFrame,
+  client: editorClient,
+  onJobSettled: async (kind) => {
+    if (kind === "final_fit") await actions.refreshFromPythonWhenIdle();
+    await refreshActiveReport();
+  },
+  isShown: () => store.getState().view.activeView === "cv"
 });
 
 const undo = () => actions.executeStateMutation({
@@ -211,17 +290,36 @@ bindAppBar({
   redoButton: redoAction,
   revertButton: revertAction,
   refreshButton: refreshAction,
+  refitButton: refitPendingAction,
   onView: showView,
   onUndo: undo,
   onRedo: redo,
   onRevert: () => runStructuralRefit(revertTransition()),
-  onRefresh: refreshFromPython
+  onRefresh: refreshFromPython,
+  onRefit: refitPending
 });
-mountThemeControl({
-  button: document.getElementById("themeAction"),
+// The DAY / NIGHT switch keeps "Follow the browser" equal to the theme key.
+mountThemeSwitch({
+  button: document.getElementById("themeSwitch"),
   root: document.documentElement,
-  media: window.matchMedia("(prefers-color-scheme: dark)")
+  media: window.matchMedia("(prefers-color-scheme: dark)"),
+  settings: { load: loadSettings, save: saveSettings, subscribe: onSettingsChange }
 });
+
+// Settings keep their choices in this browser (views/settings.js).
+function renderSettingsView() {
+  renderSettingsPane(settingsNodes, { settings: loadSettings() });
+  // The selection menu names its structural row by what its icons do.
+  selectionRefitLabel.textContent = loadSettings().refitEveryChange ? "Refit" : "Structure";
+}
+
+bindSettingsPane(settingsNodes, {
+  onToggle: (key) => saveSettings({ [key]: !loadSettings()[key] }),
+  onGroupsDefault: (groupsDefault) => saveSettings({ groupsDefault }),
+  onBuildDuration: (buildDurationMs) => saveSettings({ buildDurationMs })
+});
+onSettingsChange(renderSettingsView);
+renderSettingsView();
 
 async function refreshFromPython() {
   const result = await actions.refreshFromPython();
@@ -242,7 +340,9 @@ const chartContext = {
   showCi: () => store.getState().view.showCi,
   showContrib: () => store.getState().view.showContrib,
   buildProgress: () => buildProgress,
-  groupDisplayMode: () => activeGroupDisplayMode()
+  groupDisplayMode: () => activeGroupDisplayMode(),
+  selectionAnchor: () => store.getState().view.selectionAnchor,
+  selectionSpan: () => store.getState().view.selectionSpan
 };
 
 let openHelp = () => inspectorToggle.click();
@@ -270,6 +370,12 @@ const inspector = bindInspector({
   isNarrow: () => narrowQuery.matches,
 });
 openHelp = () => inspector.open("help");
+
+// A History note is saved through the action controller like an edit, so a
+// failed save gets the same alert and Retry.
+bindHistory(historyFrame, {
+  onNote: (id, note) => executeStateMutation("/note", { id, note })
+});
 
 function renderInspectorView() {
   const view = store.getState().view;
@@ -312,6 +418,17 @@ syncViewport();
 // redraw never changes the chart's layout, so it cannot loop. A hidden chart
 // keeps its drawing until it is shown again.
 new ResizeObserver(redrawChartToFit).observe(svg);
+
+// The toolbar's rows change with its width and its fonts, not with where the
+// Chart / Table switch stands, which changes only its height; so a width that
+// has not changed asks for nothing, and placing the switch cannot loop.
+let contextBarWidth = 0;
+new ResizeObserver(([entry]) => {
+  if (entry.contentRect.width === contextBarWidth) return;
+  contextBarWidth = entry.contentRect.width;
+  placeTermViewToggle(contextBar, termViewToggle, contribTools);
+}).observe(contextBar);
+document.fonts?.ready.then(() => placeTermViewToggle(contextBar, termViewToggle, contribTools));
 
 function redrawChartToFit() {
   const drawn = svg.viewBox.baseVal;
@@ -395,6 +512,18 @@ function interactionMode() {
   return store.getState().view.mode;
 }
 
+function selectionAnchor() {
+  return store.getState().view.selectionAnchor;
+}
+
+function setSelectionAnchor(anchor) {
+  actions.patchView({ selectionAnchor: anchor });
+}
+
+function setSelectionSpan(span) {
+  actions.patchView({ selectionSpan: span });
+}
+
 function setInteractionPreview(term, payload, selection) {
   store.update((state) => setPreviewTermState(state, term, payload, selection));
 }
@@ -454,8 +583,43 @@ function summaryNodes() {
     ungroupLevels,
     summaryStatus,
     summaryNote,
-    summaryFrame
+    summaryFrame,
+    summarySearchCount,
+    summaryHeader,
+    summaryModelChips,
+    summaryTiles,
+    summaryView
   };
+}
+
+// What the inspector shows of the summary; summary.js reapplies it on every
+// render, so a refit or a new payload keeps the search.
+function summaryView() {
+  const state = store.getState();
+  const snapshot = state.remote.snapshot;
+  const terms = snapshot ? snapshot.terms : {};
+  const names = Object.keys(terms);
+  return {
+    query: summaryQuery,
+    termNames: names,
+    filter: summaryFilter,
+    currentTerm: selectActiveTermName(state),
+    toggled: summaryToggled,
+    edited: names.filter((name) => terms[name].edited === true),
+    waiting: waitingCounts(snapshot?.pending ?? []),
+    kinds: Object.fromEntries(
+      names.map((name) => [name, terms[name].term_type || terms[name].kind || ""])
+    )
+  };
+}
+
+// What the summary reads from the state besides its payload: which terms
+// carry hand edits and which wait for a refit.
+function selectSummaryMarks(state) {
+  const snapshot = state.remote.snapshot;
+  if (!snapshot) return "";
+  const edited = Object.keys(snapshot.terms).filter((name) => snapshot.terms[name].edited === true);
+  return JSON.stringify([edited, waitingCounts(snapshot.pending ?? [])]);
 }
 
 if (profileDialogClose && profileDialog) {
@@ -536,9 +700,15 @@ bindExportDialog({
     openDirectory: exportOpenDirectory instanceof HTMLButtonElement
       ? exportOpenDirectory
       : null,
-    status: exportStatus
+    status: exportStatus,
+    pendingNote: exportPendingNote instanceof HTMLElement ? exportPendingNote : null
   },
-  saveBlobToFile
+  saveBlobToFile,
+  pendingCount: () => selectPendingSteps(store.getState()).length,
+  finalFitAvailable: () => {
+    const finalFit = store.getState().remote.snapshot?.final_fit;
+    return Boolean(finalFit?.available && !finalFit.stale);
+  }
 });
 
 async function refreshMetricsView() {
@@ -603,6 +773,42 @@ function scheduleVisibleEvidenceCatchUp() {
   const revision = store.getState().remote.snapshot?.model_revision;
   if (revision === undefined) return;
   scheduleVisibleEvidence(revision, { immediate: true, onlyStale: true });
+}
+
+// A structural change waits: Python builds it and keeps it, drawn on the
+// chart, until Refit applies every waiting change in one fit. Nothing is
+// fitted, so nothing blocks the page. With "Refit after every structural
+// change" on in Settings, the change goes to its operation's own route
+// instead, which stages it and refits at once: one step, which one Undo
+// takes back.
+async function runStructuralChange(descriptor) {
+  const { keepReference, refitEveryChange } = loadSettings();
+  if (refitEveryChange) {
+    const atOnce = refitAtOnceTransition(descriptor);
+    return runStructuralRefit({
+      ...atOnce,
+      payload: { ...atOnce.payload, keep_reference: keepReference }
+    });
+  }
+  if (appBusyActive || store.getState().request.mutation.status !== "idle") return null;
+  stopContributionBuild();
+  const result = await actions.executeStructuralMutation({
+    ...descriptor,
+    blocking: false,
+    payload: {
+      ...descriptor.payload,
+      keep_reference: keepReference,
+      level_display: selectSummaryLevelDisplay(store.getState())
+    }
+  });
+  return result.ok ? result.envelope : null;
+}
+
+// The Refit button and its R shortcut come here.
+async function refitPending() {
+  const count = selectPendingSteps(store.getState()).length;
+  if (count === 0) return null;
+  return runStructuralRefit(refitPendingTransition(count));
 }
 
 // A structural step loses nothing: Undo puts back the state before it, edits
@@ -700,7 +906,12 @@ function restoreFocusAfterBusy(opener) {
 }
 
 if (new URLSearchParams(window.location.search).get("test") === "1") {
-  window.__superglmTest = Object.freeze({ setAppBusy });
+  window.__superglmTest = Object.freeze({
+    setAppBusy,
+    // A selection posts without the busy overlay; tests wait on this before
+    // the next click, which a running mutation would skip.
+    mutationStatus: () => store.getState().request.mutation.status
+  });
 }
 
 function showTimingStatus(payload, timing) {
@@ -710,18 +921,19 @@ function showTimingStatus(payload, timing) {
   if (summaryStatus) {
     summaryStatus.textContent = `Refit completed in ${formatMilliseconds(timing.client_total_ms)}`;
   }
-  renderAdvancedTiming();
+  renderTimingReadout();
   if (summaryNote) summaryNote.textContent = payload.note || "";
 }
 
-function renderAdvancedTiming() {
-  if (!advancedTiming) return;
+// Settings › Request timings: the last refit's and each panel's durations.
+function renderTimingReadout() {
+  if (!settingsTiming) return;
   const sections = [];
   if (latestTransitionTiming) sections.push(formatTimingDetails(latestTransitionTiming));
   const evidenceDetails = formatEvidenceTimingDetails(evidenceTiming.durations());
   if (evidenceDetails) sections.push(evidenceDetails);
   const details = sections.filter(Boolean).join(" · ");
-  advancedTiming.textContent = latestTimingNote && details
+  settingsTiming.textContent = latestTimingNote && details
     ? `${latestTimingNote} · ${details}`
     : latestTimingNote || details;
 }
@@ -764,7 +976,7 @@ function formatMilliseconds(value) {
 }
 
 async function showView(view) {
-  const activeView = view === "final" ? "final" : view === "validation" ? "validation" : "editor";
+  const activeView = ["validation", "cv", "final"].includes(view) ? view : "editor";
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -776,6 +988,8 @@ async function showView(view) {
 function renderAppView(activeView) {
   editorView.hidden = activeView !== "editor";
   reportPanel.hidden = activeView === "editor";
+  // The Cross-validation tab lays the panel out its own way (cv.css).
+  reportPanel.dataset.report = activeView;
 }
 
 function renderChartWorkspace() {
@@ -792,17 +1006,23 @@ function renderChartWorkspace() {
     stopContributionBuild();
   }
   if (applyTermDefaults(term)) return;
+  const tableView = renderTermView(view.termView);
   const selection = view.preview && view.preview.term === selected
     ? new Set(view.preview.selection)
     : currentSelection();
   statusNode.classList.remove("is-error");
   if (updateHandleCount(term)) return;
-  renderToolRail(toolRail, { mode: view.mode, handlesAvailable: Boolean(term.controls) });
+  renderToolRail(toolRail, {
+    mode: view.mode,
+    handlesAvailable: Boolean(term.controls),
+    handlesReason: term.spline_view?.reason ?? null
+  });
   updateGroupDisplayControl(term);
+  updateNewLevelsControl(term);
   updateCollapseAction(term, selection);
   updateShapeActions(term, selection);
   updateResetOrderAction(term);
-  drawChart(term, selection, chartContext);
+  if (!tableView) drawChart(term, selection, chartContext);
   const collapsedOriginalNote = selectionContextNote(term);
   renderContextBar(
     {
@@ -812,14 +1032,66 @@ function renderChartWorkspace() {
       referenceNode: termReference,
       statusNode
     },
-    { name: selected, term, selectionSize: selection.size, note: collapsedOriginalNote }
+    {
+      name: selected,
+      term,
+      selectionSize: selection.size,
+      note: collapsedOriginalNote,
+      pendingCount: selectPendingSteps(editorState).length,
+      range: selectionSpanRange(term, selection, chartContext)
+    }
   );
+  placeTermViewToggle(contextBar, termViewToggle, contribTools);
+}
+
+// Table puts the term's rating-table block where the chart was; the chart
+// keeps its mode, zoom and selection for when Chart comes back.
+function renderTermView(termView) {
+  const tableView = termView === "table";
+  renderTermViewToggle(termViewToggle, termView);
+  plotColumn.classList.toggle("is-table-view", tableView);
+  // An SVG element has no `hidden` property; the attribute is what CSS hides.
+  svg.toggleAttribute("hidden", tableView);
+  ratingTableFrame.hidden = !tableView;
+  if (tableView) stopContributionBuild();
+  return tableView;
+}
+
+let ratingTableSequence = 0;
+
+function selectRatingTableRequest(state) {
+  return {
+    table: state.view.termView === "table",
+    term: selectActiveTermName(state),
+    revision: selectModelRevision(state)
+  };
+}
+
+function sameRatingTableRequest(next, previous) {
+  return next.table === previous.table &&
+    next.term === previous.term &&
+    next.revision === previous.revision;
+}
+
+// One request per term and model revision while Table is shown; a reply
+// that a newer request has overtaken is dropped.
+async function refreshRatingTable({ table, term, revision }) {
+  if (!table || !term || revision < 0) return;
+  const sequence = ++ratingTableSequence;
+  renderRatingTable(ratingTableFrame, ratingTableMessage(term, RATING_TABLE_LOADING));
+  let model;
+  try {
+    model = ratingTableModel(await editorClient.ratingTable(term));
+  } catch {
+    model = ratingTableMessage(term, RATING_TABLE_FAILED);
+  }
+  if (sequence === ratingTableSequence) renderRatingTable(ratingTableFrame, model);
 }
 
 function renderChartOnly() {
   const state = store.getState();
   const term = currentTerm();
-  if (!state.remote.snapshot || !term) return;
+  if (!state.remote.snapshot || !term || state.view.termView === "table") return;
   const selection = state.view.preview && state.view.preview.term === selectedTerm()
     ? new Set(state.view.preview.selection)
     : currentSelection();
@@ -832,14 +1104,16 @@ function termCatalogueKey(terms) {
   ).join("\u0001");
 }
 
-// The revision stands in for every row's EDF, which only a refit changes.
+// The revision stands in for every row's EDF, which only a refit changes; a
+// stage leaves the revision, so the waiting terms are keyed on their own.
 function selectFeatureListRenderState(state) {
   const snapshot = selectSnapshot(state);
   return {
     ready: snapshot !== null,
     catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}) : "",
     revision: selectModelRevision(state),
-    activeTerm: selectActiveTermName(state)
+    activeTerm: selectActiveTermName(state),
+    waiting: selectWaitingTerms(state).join("\u0000")
   };
 }
 
@@ -847,7 +1121,8 @@ function sameFeatureListRenderState(next, previous) {
   return next.ready === previous.ready &&
     next.catalogueKey === previous.catalogueKey &&
     next.revision === previous.revision &&
-    next.activeTerm === previous.activeTerm;
+    next.activeTerm === previous.activeTerm &&
+    next.waiting === previous.waiting;
 }
 
 function renderFeatureListState() {
@@ -858,7 +1133,8 @@ function renderFeatureListState() {
     terms,
     activeTerm: selectActiveTermName(state),
     query: featureQuery,
-    open: featureListOpen
+    open: featureListOpen,
+    waiting: new Set(selectWaitingTerms(state))
   });
 }
 
@@ -870,6 +1146,7 @@ function selectChartRenderState(state) {
     chartEpoch: state.remote.chartEpoch,
     activeTerm,
     mode: view.mode,
+    termView: view.termView,
     showCi: view.showCi,
     showContrib: view.showContrib,
     zoom: view.zoomByTerm[activeTerm] || null,
@@ -884,6 +1161,7 @@ function sameChartRenderState(next, previous) {
     next.chartEpoch === previous.chartEpoch &&
     next.activeTerm === previous.activeTerm &&
     next.mode === previous.mode &&
+    next.termView === previous.termView &&
     next.showCi === previous.showCi &&
     next.showContrib === previous.showContrib &&
     next.zoom === previous.zoom &&
@@ -911,7 +1189,8 @@ function selectAppBarRenderState(state) {
     undoLabel: snapshot?.undo_redo.undo ?? null,
     redoLabel: snapshot?.undo_redo.redo ?? null,
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
-    busy: state.request.mutation.status === "running"
+    busy: state.request.mutation.status === "running",
+    pendingCount: selectPendingSteps(state).length
   };
 }
 
@@ -921,7 +1200,8 @@ function sameAppBarRenderState(next, previous) {
     next.undoLabel === previous.undoLabel &&
     next.redoLabel === previous.redoLabel &&
     next.canRevert === previous.canRevert &&
-    next.busy === previous.busy;
+    next.busy === previous.busy &&
+    next.pendingCount === previous.pendingCount;
 }
 
 function renderAppBarState(state) {
@@ -936,7 +1216,10 @@ function renderAppBarState(state) {
     undoLabel: state.undoLabel,
     redoLabel: state.redoLabel,
     canRevert: state.canRevert,
-    busy: state.busy
+    busy: state.busy,
+    refitButton: refitPendingAction,
+    refitCount: refitPendingCount,
+    pendingCount: state.pendingCount
   });
 }
 
@@ -988,7 +1271,9 @@ function renderSelectionState({ termName, indices }) {
       name: termName,
       term,
       selectionSize: selection.size,
-      note: selectionContextNote(term)
+      note: selectionContextNote(term),
+      pendingCount: selectPendingSteps(store.getState()).length,
+      range: selectionSpanRange(term, selection, chartContext)
     }
   );
 }
@@ -1000,7 +1285,10 @@ function selectSelectionState(state) {
     termName,
     indices: selectCurrentSelection(state),
     weightedMeanRelativity: impact.weighted_mean_relativity,
-    selectedWeightShare: impact.selected_weight_share
+    selectedWeightShare: impact.selected_weight_share,
+    // The anchor's marks and a Shift-click's range follow them as well.
+    anchor: state.view.selectionAnchor,
+    span: state.view.selectionSpan
   };
 }
 
@@ -1009,6 +1297,8 @@ function sameSelectionState(next, previous) {
     next.termName !== previous.termName ||
     next.weightedMeanRelativity !== previous.weightedMeanRelativity ||
     next.selectedWeightShare !== previous.selectedWeightShare ||
+    next.anchor !== previous.anchor ||
+    next.span !== previous.span ||
     next.indices.length !== previous.indices.length
   ) {
     return false;
@@ -1095,6 +1385,12 @@ function renderMetricsEvidence(evidence) {
   });
 }
 
+const REPORT_TITLES = Object.freeze({
+  validation: "Validation Report",
+  cv: "Cross-validation",
+  final: "Final Fit Report"
+});
+
 function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
   reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
@@ -1102,9 +1398,9 @@ function renderReportEvidence(evidence, activeView) {
   if (activeView === "editor") return;
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
-    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame });
+    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame }, cvTab);
   } else {
-    reportTitle.textContent = activeView === "final" ? "Final Fit Report" : "Validation Report";
+    reportTitle.textContent = REPORT_TITLES[activeView] || REPORT_TITLES.validation;
     reportFrame.innerHTML = "";
   }
   if (!payloadMatchesView && evidence.status !== "error" && evidence.status !== "stale") {
@@ -1200,6 +1496,11 @@ function updateGroupDisplayControl(term) {
   groupDisplayMode.value = activeGroupDisplayMode();
 }
 
+function updateNewLevelsControl(term) {
+  if (!newLevelsWrap || !(newLevelsMode instanceof HTMLSelectElement) || !term) return;
+  renderNewLevelsControl({ wrap: newLevelsWrap, select: newLevelsMode }, term);
+}
+
 function updateCollapseAction(term, selection) {
   const type = term.term_type || term.kind || "";
   const isLevelTerm = type === "categorical" || type === "ordered categorical";
@@ -1248,6 +1549,15 @@ function renderShapeReason(button, reason) {
   button.dataset.popoverBody = reason;
 }
 
+// The selected source levels by label, in axis order: what a staged change names.
+function selectedLevels(term, selection) {
+  const levels = Array.isArray(term.levels) ? term.levels : [];
+  return [...selection]
+    .sort((left, right) => left - right)
+    .filter((index) => index >= 0 && index < levels.length)
+    .map((index) => String(levels[index]));
+}
+
 // One displayed level: a single source level, or one whole collapsed group.
 function selectedLevelLabel(term, selection) {
   if (selection.size === 1) {
@@ -1286,8 +1596,8 @@ function updateHandleCount(term) {
   const canShowContrib = active && Array.isArray(controls.basis) && controls.basis.length > 0;
   basisToggle.hidden = !canShowContrib;
   contribPlay.hidden = !canShowContrib;
+  contribTools.hidden = !canShowContrib;
   contribPlay.disabled = buildFrame !== null;
-  updateBuildDurationLabel();
   basisToggle.setAttribute("aria-pressed", String(Boolean(view.showContrib && canShowContrib)));
   if (!canShowContrib) {
     stopContributionBuild();
@@ -1310,6 +1620,7 @@ function updateHandleCount(term) {
 function applyTermDefaults(term) {
   const view = store.getState().view;
   const patch = {};
+  // A grouped term opens as Settings' "Groups shown as" says.
   if (
     term.group_display &&
     term.group_display.available &&
@@ -1317,7 +1628,7 @@ function applyTermDefaults(term) {
   ) {
     patch.groupModeByTerm = {
       ...view.groupModeByTerm,
-      [selectedTerm()]: term.group_display.default_mode || "expanded"
+      [selectedTerm()]: loadSettings().groupsDefault
     };
   }
   if (!term.controls) {
@@ -1343,14 +1654,7 @@ function canShowContributions(term) {
 }
 
 function buildDurationMs() {
-  return Math.max(500, Number(buildDuration.value) || 10000);
-}
-
-function updateBuildDurationLabel() {
-  const seconds = buildDurationMs() / 1000;
-  buildDurationValue.textContent = Number.isInteger(seconds)
-    ? `${seconds}s`
-    : `${seconds.toFixed(1)}s`;
+  return loadSettings().buildDurationMs;
 }
 
 function startContributionBuild() {
@@ -1434,6 +1738,9 @@ const interactions = bindInteractions({
   selectedTerm,
   currentTerm,
   currentSelection,
+  selectionAnchor,
+  setSelectionAnchor,
+  setSelectionSpan,
   setPreviewTerm: setInteractionPreview,
   clearPreviewTerm: clearInteractionPreview,
   setZoom,
@@ -1441,6 +1748,8 @@ const interactions = bindInteractions({
   actions,
 });
 bindPointLens(svg);
+// The anchor's tags step aside while the pointer drags on the chart.
+bindDragWatch(svg, document.querySelector(".chart-shell"), CLICK_SLOP);
 
 async function selectFeature(term) {
   if (term === selectedTerm()) return;
@@ -1469,6 +1778,34 @@ bindFeatureList(featureListNodes, {
   }
 });
 renderFeatureListState();
+
+bindSummarySearch(summarySearch, (query) => {
+  summaryQuery = query;
+  summaryToggled.clear();
+  applySummaryView(summaryNodes());
+});
+bindSummaryFilter(summaryFilterNode, (filter) => {
+  summaryFilter = filter;
+  renderSummaryFilter(summaryFilterNode, filter);
+  applySummaryView(summaryNodes());
+});
+bindSummarySections(summaryFrame, (term, open) => {
+  summaryToggled.set(term, !open);
+  applySummaryView(summaryNodes());
+});
+
+// New levels → is a session operation on the in-force model: no refit, and
+// one entry on the one Undo history.
+if (newLevelsMode instanceof HTMLSelectElement) {
+  newLevelsMode.addEventListener("change", async () => {
+    await executeStateMutation("/set_unseen", {
+      term: selectedTerm(),
+      unseen: newLevelsMode.value
+    });
+    // A refused choice leaves the policy in force, which the select shows again.
+    updateNewLevelsControl(currentTerm());
+  });
+}
 
 if (groupDisplayMode) {
   groupDisplayMode.addEventListener("change", () => {
@@ -1503,8 +1840,9 @@ basisToggle.addEventListener("click", () => {
 
 contribPlay.addEventListener("click", startContributionBuild);
 
-buildDuration.addEventListener("input", updateBuildDurationLabel);
-buildDuration.addEventListener("change", updateBuildDurationLabel);
+bindTermViewToggle(termViewToggle, {
+  onChange: (termView) => actions.patchView({ termView })
+});
 
 handleCount.addEventListener("input", () => {
   handleCountValue.textContent = handleCount.value;
@@ -1583,12 +1921,16 @@ if (profileRun) {
 }
 if (collapseLevels) {
   collapseLevels.addEventListener("click", async () => {
-    await runStructuralRefit(collapseTransition(selectedTerm()));
+    const term = currentTerm();
+    if (!term) return;
+    await runStructuralChange(stageCollapse(selectedTerm(), selectedLevels(term, currentSelection())));
   });
 }
 if (ungroupLevels) {
   ungroupLevels.addEventListener("click", async () => {
-    await runStructuralRefit(ungroupTransition(selectedTerm()));
+    const term = currentTerm();
+    if (!term) return;
+    await runStructuralChange(stageUngroup(selectedTerm(), selectedLevels(term, currentSelection())));
   });
 }
 if (setReference) {
@@ -1596,7 +1938,7 @@ if (setReference) {
     const term = currentTerm();
     const label = term ? selectedLevelLabel(term, currentSelection()) : null;
     if (label === null) return;
-    await runStructuralRefit(setReferenceTransition(selectedTerm(), label));
+    await runStructuralChange(stageReference(selectedTerm(), label));
   });
 }
 for (const button of shapeButtons) {
@@ -1605,8 +1947,8 @@ for (const button of shapeButtons) {
     const range = term && shapeRangeForSelection(term, currentSelection());
     if (!range || button.getAttribute("aria-disabled") === "true") return;
     const degree = Number(button.dataset.shapeDegree);
-    await runStructuralRefit(
-      shapeRangeTransition(
+    await runStructuralChange(
+      stageShapeRange(
         selectedTerm(), range.lo, range.hi, degree,
         effectiveShapeJoin(shapeJoinChoice, term.shape.joins)
       )
@@ -1616,6 +1958,7 @@ for (const button of shapeButtons) {
 
 
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
+store.subscribe(selectRatingTableRequest, refreshRatingTable, sameRatingTableRequest);
 store.subscribe(
   selectFeatureListRenderState,
   renderFeatureListState,
@@ -1660,6 +2003,11 @@ store.subscribe(
   sameInteractionState,
 );
 store.subscribe(selectSelectionState, renderSelectionState, sameSelectionState);
+store.subscribe(selectActiveTermName, () => {
+  summaryToggled.clear();
+  applySummaryView(summaryNodes(), { follow: true });
+});
+store.subscribe(selectSummaryMarks, () => applySummaryView(summaryNodes()));
 store.subscribe((state) => state.request.recovery, renderRecovery);
 store.subscribe((state) => state.request.mutation, renderMutationBusy);
 store.subscribe(

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 from scipy.linalg import cho_factor, cho_solve, norm
 from scipy.sparse.linalg import LinearOperator, minres
@@ -36,6 +37,31 @@ from superglm.group_matrix import _disc_disc_2d_hist
 from superglm.solvers.scop import SCOPSolverReparam
 
 _SQRT_EPS = float(np.finfo(np.float64).eps) ** 0.5
+
+
+@njit(cache=True)
+def _scop_bin_aggregates(bin_idx, W, z, eta_bin, n_bins):
+    """``bincount(W)``, ``bincount(W*z)`` and ``bincount(W*(z - eta_bin[bin]))`` in one pass.
+
+    For one discretized SCOP group. Each bin accumulates the same products in
+    the same ascending-row order as the three ``np.bincount`` calls it
+    replaces, so the sums are bitwise identical, and the n-length eta,
+    residual and weighted products are never formed (perf_scout_scop,
+    finding 4: about 10 O(n) passes per joint step fused into one).
+    """
+    W_agg = np.zeros(n_bins)
+    Wz_agg = np.zeros(n_bins)
+    Wr_agg = np.zeros(n_bins)
+    for r in range(W.shape[0]):
+        b = bin_idx[r]
+        w = W[r]
+        zr = z[r]
+        W_agg[b] += w
+        Wz_agg[b] += w * zr
+        Wr_agg[b] += w * (zr - eta_bin[b])
+    return W_agg, Wz_agg, Wr_agg
+
+
 """Pya & Wood (2015) §3.2 singular-value cutoff, relative to the largest."""
 
 _NEWTON_CURVATURE_MARGIN = 1e-10
@@ -1399,7 +1425,20 @@ def scop_joint_newton_step(
         offset += q_i
 
     q_total = offset
-    objective_cache = _build_joint_objective_cache(scop_items, W, z_scop)
+    # One discretized group (the shipped case): fuse its bin aggregates.
+    fused = n_groups == 1 and scop_items[0][1]["bin_idx"] is not None
+    if fused:
+        state0 = scop_items[0][1]
+        eta_bin0 = state0["B_scop"] @ state0["reparam"].forward(state0["beta_scop"].copy())
+        W_agg0, Wz_agg0, Wr_agg0 = _scop_bin_aggregates(
+            state0["bin_idx"], W, z_scop, eta_bin0, state0["B_scop"].shape[0]
+        )
+        objective_cache = _JointObjectiveCache(
+            half_zwz=0.5 * float(np.sum(W * z_scop**2)),
+            btwz=[state0["B_scop"].T @ Wz_agg0],
+        )
+    else:
+        objective_cache = _build_joint_objective_cache(scop_items, W, z_scop)
 
     # --- Step 1: Forward map and derivatives, compute shared residual ---
     betas = []
@@ -1414,17 +1453,24 @@ def scop_joint_newton_step(
         gammas.append(gamma_i)
         j_diags.append(st["reparam"].jacobian_diagonal(beta_i))
         second_diags.append(st["reparam"].second_derivative_diagonal(beta_i))
+        if fused:
+            etas.append(None)
+            continue
         eta_bin_i = st["B_scop"] @ gamma_i
         eta_i = eta_bin_i
         if st["bin_idx"] is not None:
             eta_i = eta_i[st["bin_idx"]]
         etas.append(eta_i)
 
-    # Shared residual: z_scop minus ALL SCOP group etas
-    total_scop_eta = np.zeros_like(z_scop)
-    for eta_i in etas:
-        total_scop_eta += eta_i
-    residual = z_scop - total_scop_eta
+    # Shared residual: z_scop minus ALL SCOP group etas (the fused path has
+    # already aggregated it by bin and never forms it row by row)
+    if fused:
+        total_scop_eta = residual = None
+    else:
+        total_scop_eta = np.zeros_like(z_scop)
+        for eta_i in etas:
+            total_scop_eta += eta_i
+        residual = z_scop - total_scop_eta
 
     # --- Step 2: Per-group BtWB and gradient ---
     beta_joint = np.concatenate(betas)
@@ -1437,7 +1483,11 @@ def scop_joint_newton_step(
         bi_i = st["bin_idx"]
         j_i = j_diags[idx]
 
-        if bi_i is not None:
+        if fused:
+            W_agg, Wr_agg = W_agg0, Wr_agg0
+            BtWB_ii = B_i.T @ (B_i * W_agg[:, None])
+            r_eff_i = B_i.T @ Wr_agg
+        elif bi_i is not None:
             n_bins = B_i.shape[0]
             W_agg = np.bincount(bi_i, weights=W, minlength=n_bins)
             Wr_agg = np.bincount(bi_i, weights=W * residual, minlength=n_bins)

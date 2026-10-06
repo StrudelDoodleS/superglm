@@ -1135,10 +1135,20 @@ class TestSCOPPlateauExit:
         assert r.converged
         assert str(r.termination_reason) == "lambda_tolerance"
 
-    def test_an_unreachable_tolerance_classifies_as_plateau(self):
+    def test_an_unreachable_tolerance_classifies_as_plateau(self, monkeypatch):
         """Below the machinery noise floor (steps stall near 2e-5 on this
         fixture), the honest exit is the plateau classification with
-        converged=True -- the step-engine converged_at_precision."""
+        converged=True -- the step-engine converged_at_precision. The EFS
+        step's floor: the Newton step reaches this tolerance on this fixture."""
+        import functools
+
+        import superglm.reml.scop_efs as scop_efs
+
+        monkeypatch.setattr(
+            scop_efs,
+            "optimize_scop_efs_reml",
+            functools.partial(scop_efs.optimize_scop_efs_reml, _outer_step="efs"),
+        )
         frame, y, features = self._monotone_fixture(400)
         model = SuperGLM(family="poisson", features=features)
         model.fit_reml(frame, y, runtime_validation="skip", reml_tol=1e-11, max_reml_iter=60)
@@ -1159,15 +1169,81 @@ class TestPublicationREMLBudget:
     mode refuses it rather than letting it sit inert.
     """
 
-    def test_the_budget_reaches_the_publication_refit(self):
+    @pytest.mark.parametrize("search_fit_mode", ["fit", "reml"])
+    def test_the_budget_reaches_the_publication_refit(self, search_fit_mode, monkeypatch):
+        """The unconverged publication refit is a fit_reml fit the caller
+        receives, so it warns once, at the caller, as fit_reml does; the
+        search's REML candidates (``search_fit_mode="reml"``, capped here at one
+        iteration too) are discarded and stay silent. Mutation check: on
+        af53c8d4 the publication installed silently."""
+        from superglm import ConvergenceWarning
+
+        candidates = []
+        real_fit_reml = SuperGLM.fit_reml
+
+        def capped_candidates(self, *args, **kwargs):
+            if getattr(self, "_suppress_convergence_warning", False):
+                candidates.append(1)
+                kwargs["max_reml_iter"] = 1
+            return real_fit_reml(self, *args, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", capped_candidates)
         frame, y, features = _small_search_fixture()
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit", max_reml_iter=1)
+        with pytest.warns(ConvergenceWarning, match="max_reml_iter") as record:
+            result = model.estimate_p(
+                frame, y, fit_mode="reml", search_fit_mode=search_fit_mode, max_reml_iter=1
+            )
 
         # One outer iteration can never satisfy the two-evaluation
         # convergence contract: the budget provably bound the refit.
         assert int(model._reml_result.n_reml_iter) == 1
         assert result.converged is False
+        disclosed = [w for w in record if issubclass(w.category, ConvergenceWarning)]
+        assert len(disclosed) == 1
+        assert disclosed[0].filename == __file__
+        assert bool(candidates) == (search_fit_mode == "reml")
+
+    @pytest.mark.parametrize("estimate", ["p", "theta"])
+    def test_an_unset_budget_resolves_per_engine(self, estimate):
+        """An unset budget is ``fit_reml``'s: 100 outer iterations for a SCOP model.
+
+        It read as 20, so the publication refit of a model with a monotone
+        (SCOP) term stopped at 20 outer iterations where ``fit_reml`` and the
+        search's own REML candidates run to 100, and warned of a cap the
+        caller never set; ``estimate_theta`` takes no budget at all and had
+        the same 20. Mutation check: 7ed61b05 published 20 for both.
+        """
+        from superglm import Constraint
+
+        rng = np.random.default_rng(3)
+        n = 500
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n), "z": rng.uniform(0.0, 1.0, n)})
+        mean = np.exp(0.2 + 0.8 * frame["x"] + 0.3 * np.sin(6.0 * frame["z"])).to_numpy()
+        features = {
+            "x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "z": Spline(kind="ps", k=8),
+        }
+        if estimate == "p":
+            counts = rng.poisson(mean)
+            y = np.array([rng.gamma(2.0, 0.5, count).sum() for count in counts])
+            model = SuperGLM(
+                family=families.tweedie(p=1.5),
+                selection_penalty=0.0,
+                discrete=True,
+                features=features,
+            )
+            model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit")
+        else:
+            y = rng.poisson(mean * rng.gamma(2.0, 0.5, n)).astype(float)
+            model = SuperGLM(
+                family=families.nb2(theta=1.0),
+                selection_penalty=0.0,
+                discrete=True,
+                features=features,
+            )
+            model.estimate_theta(frame, y, fit_mode="reml")
+        assert model.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 100
 
     def test_a_pure_ml_publication_refuses_the_reml_budget(self):
         frame, y, features = _small_search_fixture()

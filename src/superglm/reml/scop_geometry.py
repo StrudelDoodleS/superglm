@@ -22,7 +22,6 @@ from superglm.reml.observed_geometry import (
     compute_scop_observed_information_weights,
 )
 from superglm.solvers.centered_system import (
-    build_anchor_centered_system,
     build_centered_system,
     grouped_weighted_factor,
     penalty_factor,
@@ -221,7 +220,10 @@ def scop_penalized_mode_score(
     if not np.all(np.isfinite(row_score)):
         raise ObservedGeometryInfeasibleError("SCOP penalized mode score is not finite")
 
-    intercept_score = math.fsum(float(value) for value in row_score)
+    # fsum reads the array's binary64 values directly; the per-row ``float``
+    # generator it replaces cost ~40% more and changed nothing, since fsum
+    # returns the correctly rounded exact sum of the same values either way.
+    intercept_score = math.fsum(row_score)
     mapped_scale = np.sqrt(np.maximum(np.diag(centered_fisher_gram), 0.0) / fisher_sum_w)
     raw_centering_safe = _raw_centering_well_scaled(fisher_mean_x, mapped_scale)
     if raw_centering_safe:
@@ -980,6 +982,16 @@ def build_observed_scop_joint_geometry(
     observed_sum_w = float(np.sum(observed_weights, dtype=np.float64))
     if not np.isfinite(observed_sum_w) or observed_sum_w <= 0.0:
         raise ValueError("SCOP observed intercept curvature must be positive and finite")
+    # ``build_centered_system`` is the authority, as in the coefficient
+    # solver's SCOP step (``irls_direct``): it subtracts raw moments only where
+    # ``_raw_centering_well_scaled`` accepts them, on the very means and scales
+    # it returns, and otherwise centres before it multiplies (anchor-centred
+    # compact supports, centred row chunks, a dense column's corrected
+    # two-pass pair). Re-reading that test on its output can only reject a
+    # column it centred first, so the rebuild that followed a rejection here
+    # recomputed a centred Gram from 8,192-row chunks of the design at every
+    # LAML evaluation of a Gamma or Tweedie log-link SCOP fit with a 0/1
+    # column of weight share above 1/2.
     observed_centered = build_centered_system(
         dm=dm,
         W=observed_weights,
@@ -987,14 +999,6 @@ def build_observed_scop_joint_geometry(
         penalty=np.zeros_like(penalty),
         tabmat_split=dm.tabmat_centering_split,
     )
-    observed_scale = np.sqrt(np.maximum(np.diag(observed_centered.data_gram), 0.0) / observed_sum_w)
-    if not _raw_centering_well_scaled(observed_centered.mean_x, observed_scale):
-        observed_centered = build_anchor_centered_system(
-            dm=dm,
-            W=observed_weights,
-            z_off=np.zeros(dm.n, dtype=np.float64),
-            penalty=np.zeros_like(penalty),
-        )
 
     variance = np.maximum(
         np.asarray(distribution.variance(mu), dtype=np.float64),

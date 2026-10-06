@@ -1173,7 +1173,25 @@ def clone_without_features(
         # one the moment a term was dropped -- which is the path `drop1`,
         # term importance and `refit_unpenalised` all take.
         weight_semantics=model_weight_semantics(model),
+        # Its other model-level rules too: falling through, `separation="error"`
+        # became "warn" and `group_pricing="spanned"` became "rank" on every
+        # clone (and the editor's Refit and `Structure.apply`, which clone
+        # here), refitting a different pricing rule. A model pickled before
+        # `group_pricing` existed keeps "spanned", as `model_build_design_matrix`
+        # reads it.
+        separation=getattr(model, "_separation", "warn"),
+        group_pricing=getattr(model, "_group_pricing", "spanned"),
     )
+    # The universes `bind_levels` bound, for the features kept.
+    bindings = {
+        name: binding
+        for name, binding in dict(getattr(model, "_level_bindings", None) or ()).items()
+        if name not in drop
+    }
+    if bindings:
+        stored = tuple(bindings.items())
+        new_model._level_bindings = stored
+        new_model._config = new_model._config.with_value(level_bindings=stored)
 
     # Resolve lambda2
     if lambda2 is ...:

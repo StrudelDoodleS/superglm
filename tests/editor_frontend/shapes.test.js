@@ -4,7 +4,6 @@ import test from "node:test";
 
 import {
   GROUPED_EDGE,
-  NOT_CONTIGUOUS,
   SPECIAL_LEVEL,
   TOO_FEW_POINTS,
   shapeButtonState,
@@ -14,6 +13,7 @@ import {
 } from "../../src/superglm/editor/app/shapes.js";
 import {
   OPERATION_HELP,
+  STRUCTURE_HELP,
   helpForElement
 } from "../../src/superglm/editor/app/views/help_content.js";
 
@@ -56,8 +56,10 @@ test("a run next to a shaped range meets it when no drawn point lies between the
   assert.deepEqual(shapeRangeForSelection(shaped([left]), new Set([2, 3])), { lo: 25, hi: 30 });
 });
 
-test("a gap in the selection gives no range, nor does an empty one", () => {
-  assert.equal(shapeRangeForSelection(numeric, new Set([1, 3])), null);
+test("a selection with gaps spans its first to its last point; an empty one names no range", () => {
+  // A Ctrl-clicked selection: the shape covers everything between its ends.
+  assert.deepEqual(shapeRangeForSelection(numeric, new Set([4, 1, 3])), { lo: 20, hi: 40 });
+  assert.deepEqual(shapeRangeForSelection(ordered(), new Set([4, 1])), { lo: "B2", hi: "B5" });
   assert.equal(shapeRangeForSelection(numeric, new Set()), null);
 });
 
@@ -84,11 +86,11 @@ test("categorical terms hide the icons", () => {
   assert.equal(shapeButtonState(term, new Set([0])).visible, false);
 });
 
-test("a broken run or a single point disables the icons and says so", () => {
+test("a selection with gaps enables the icons; a single point says why not", () => {
   assert.deepEqual(shapeButtonState(numeric, new Set([1, 3])), {
     visible: true,
-    enabled: false,
-    reason: NOT_CONTIGUOUS
+    enabled: true,
+    reason: null
   });
   assert.equal(shapeButtonState(numeric, new Set([2])).reason, TOO_FEW_POINTS);
   assert.deepEqual(shapeButtonState(numeric, new Set([1, 2, 3])), {
@@ -120,6 +122,9 @@ test("a run taking in a special level is refused before it is sent", () => {
   const term = { ...ordered(), shape: { ...AVAILABLE, specials: ["B6"] } };
   assert.equal(shapeButtonState(term, new Set([4, 5]), 1).reason, SPECIAL_LEVEL);
   assert.equal(shapeButtonState(term, new Set([3, 4]), 1).enabled, true);
+  // The span is what is shaped, so a special between two clicked bands counts.
+  const inside = { ...ordered(), shape: { ...AVAILABLE, specials: ["B4"] } };
+  assert.equal(shapeButtonState(inside, new Set([2, 5]), 1).reason, SPECIAL_LEVEL);
 });
 
 test("bands bound the degree an ordered range can carry", () => {
@@ -206,7 +211,7 @@ class FakeElement {
 globalThis.HTMLElement = FakeElement;
 
 test("a disabled shape icon's reason outranks its operation help", () => {
-  assert.equal(OPERATION_HELP.shape_line.title, "Line and refit");
+  assert.equal(OPERATION_HELP.shape_line.title, "Line");
   assert.deepEqual(Object.keys(OPERATION_HELP).filter((key) => key.startsWith("shape_")), [
     "shape_flat", "shape_line", "shape_quadratic", "shape_cubic"
   ]);
@@ -214,8 +219,32 @@ test("a disabled shape icon's reason outranks its operation help", () => {
   assert.strictEqual(helpForElement(enabled), OPERATION_HELP.shape_line);
   const disabled = new FakeElement({
     helpOperation: "shape_line",
-    popoverTitle: "Line and refit",
+    popoverTitle: "Line",
     popoverBody: GROUPED_EDGE
   });
-  assert.deepEqual(helpForElement(disabled), { title: "Line and refit", body: GROUPED_EDGE });
+  assert.deepEqual(helpForElement(disabled), { title: "Line", body: GROUPED_EDGE });
+});
+
+test("a run next to a waiting range meets it too, so ranges staged back to back leave no sliver", () => {
+  const term = {
+    ...numeric,
+    pending: {
+      groups: null,
+      reference: null,
+      ranges: [{ lo: 35, hi: 50, degree: 1, join: "tangent", label: "Line" }]
+    }
+  };
+  assert.deepEqual(shapeRangeForSelection(term, new Set([1, 2, 3])), { lo: 20, hi: 35 });
+});
+
+test("every structural icon's help says the change waits for Refit", () => {
+  for (const key of [
+    "collapse_levels", "ungroup_levels", "set_reference",
+    "shape_flat", "shape_line", "shape_quadratic", "shape_cubic"
+  ]) {
+    assert.match(OPERATION_HELP[key].body, /waits for Refit/, key);
+    assert.doesNotMatch(OPERATION_HELP[key].title, /refit/i, key);
+  }
+  assert.equal(STRUCTURE_HELP.refit_pending.title, "Refit");
+  assert.equal(STRUCTURE_HELP.refit_pending.shortcut, "R");
 });

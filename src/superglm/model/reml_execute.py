@@ -32,6 +32,17 @@ from superglm.solvers.mode_score import linear_predictor
 NEWTON_REML_TOL_DEFAULT = 1e-9
 STEP_REML_TOL_DEFAULT = 1e-6
 
+# The iteration cap resolves per engine for the same reason. A Newton engine
+# converges quadratically near the optimum (8 outer iterations on the
+# 678k-row freMTPL2 frequency fit). The SCOP engine's Fellner-Schall steps
+# converge linearly (Wood & Fasiolo 2017, corollary of Theorem 3): measured
+# 14-43 outer iterations on raw-count freMTPL2 subsamples of 30k-240k rows,
+# 27 on the full 678k-row book and 57 on its cleaned counts, so a cap of 20
+# stopped 7 of 13 of those fits unconverged. Its late iterations are the
+# cheap ones (one or two inner steps each), so headroom costs little.
+NEWTON_MAX_REML_ITER_DEFAULT = 20
+STEP_MAX_REML_ITER_DEFAULT = 100
+
 
 def resolve_reml_tol(reml_tol: float | None, *, engine: str) -> float:
     """Resolve the public ``reml_tol`` sentinel to the engine's default."""
@@ -40,6 +51,15 @@ def resolve_reml_tol(reml_tol: float | None, *, engine: str) -> float:
     if reml_tol is not None:
         return float(reml_tol)
     return NEWTON_REML_TOL_DEFAULT if engine == "newton" else STEP_REML_TOL_DEFAULT
+
+
+def resolve_max_reml_iter(max_reml_iter: int | None, *, engine: str) -> int:
+    """Resolve the public ``max_reml_iter`` sentinel to the engine's default."""
+    if engine not in ("newton", "step"):
+        raise ValueError(f"unknown REML engine {engine!r}; expected 'newton' or 'step'")
+    if max_reml_iter is not None:
+        return int(max_reml_iter)
+    return NEWTON_MAX_REML_ITER_DEFAULT if engine == "newton" else STEP_MAX_REML_ITER_DEFAULT
 
 
 def _trace_rows_enabled(debug_recorder) -> bool:
@@ -231,7 +251,7 @@ def run_scop_efs_reml(
     offset_arr,
     lambdas: dict[str, float],
     estimated_names: set[str],
-    lam_init: float,
+    lam_init: Any,
     reml_penalties: list[Any],
     max_reml_iter: int,
     reml_tol: float | None,
@@ -242,18 +262,22 @@ def run_scop_efs_reml(
     total_start: float,
     compute_fit_stats,
     debug_recorder=None,
+    warm_lambdas: dict[str, float] | None = None,
 ):
     """Run the SCOP EFS REML path and update the model in place."""
     reml_tol = resolve_reml_tol(reml_tol, engine="step")
     if profile is not None:
         profile["reml_tol_resolved"] = float(reml_tol)
-    promote_estimated_scop_lambdas(
+    scop_warm = promote_estimated_scop_lambdas(
         model._groups,
         model._specs,
         lambdas,
         estimated_names,
         lam_init,
     )
+    warm_lambdas = {**(warm_lambdas or {}), **scop_warm}
+    if profile is not None:
+        profile["reml_warm_start_components"] = sorted(warm_lambdas)
 
     from superglm.reml.scop_efs import optimize_scop_efs_reml
 
@@ -276,8 +300,13 @@ def run_scop_efs_reml(
         reml_penalties=reml_penalties,
         convergence=model._convergence,
         debug_recorder=debug_recorder,
+        warm_lambdas=warm_lambdas or None,
     )
 
+    if profile is not None and best.warm_start_components is not None:
+        # what the search started from: a warm start its bootstrap retried
+        # away from is not one
+        profile["reml_warm_start_components"] = list(best.warm_start_components)
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
     model._reml_penalties = best.reml_penalties if best.reml_penalties else reml_penalties
@@ -330,11 +359,13 @@ def optimize_reml_best(
     model_optimize_direct_reml,
     model_optimize_efs_reml,
     debug_recorder=None,
+    warm_lambdas: dict[str, float] | None = None,
 ):
     """Run the appropriate REML optimizer and return its best result object."""
     reml_tol = resolve_reml_tol(reml_tol, engine="newton" if use_direct else "step")
     if profile is not None:
         profile["reml_tol_resolved"] = float(reml_tol)
+        profile["reml_warm_start_components"] = sorted(warm_lambdas or ())
     trace_run = getattr(debug_recorder, "trace_run", None)
     if not estimated_names:
         if use_direct:
@@ -404,6 +435,7 @@ def optimize_reml_best(
             max_pirls_iter=max_pirls_iter,
             debug_recorder=debug_recorder,
             trace_run=trace_run,
+            warm_lambdas=warm_lambdas or None,
         )
         _record_non_scop_reml_trace(best, debug_recorder)
         return best

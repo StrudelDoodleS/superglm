@@ -137,10 +137,10 @@ def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> 
 
     model, y, weights, offset = _scop_fit_inputs()
 
-    def unexpected_anchor_matvec(**kwargs):
-        raise AssertionError("anchor prediction is reserved for unsafe translated designs")
+    def unexpected_centred_matvec(*args, **kwargs):
+        raise AssertionError("centred prediction is reserved for ill-scaled columns")
 
-    monkeypatch.setattr(irls_direct, "stable_centered_matvec", unexpected_anchor_matvec)
+    monkeypatch.setattr(irls_direct, "_centred_system_matvec", unexpected_centred_matvec)
     result, _ = irls_direct.fit_irls_direct(
         model._dm,
         y,
@@ -491,3 +491,207 @@ def test_poisson_scop_terminal_inference_keeps_known_dispersion() -> None:
     )
 
     assert result.phi == 1.0
+
+
+def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) -> None:
+    """A bounded column whose weighted mean exceeds its spread keeps every product compact.
+
+    Level ``b`` holds about 3/4 of the rows, so its indicator's mean exceeds its
+    centred RMS (ratio ``sqrt(p / (1 - p))``, about 1.7) and
+    ``_raw_centering_well_scaled`` rejects on every iteration.  The reduced
+    system was centred first by ``build_centered_system``, so the rejection
+    may only change how eta is formed; rebuilding that system from row chunks,
+    three passes an iteration, and centring the final full system (SCOP
+    columns included) in row chunks made a 678k-row fit tens of times slower
+    once one indicator's weighted frequency crossed 1/2.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.features.categorical import Categorical
+
+    rng = np.random.default_rng(20261004)
+    n = 400
+    x = np.sort(rng.uniform(0.0, 1.0, size=n))
+    level = np.where(rng.uniform(size=n) < 0.75, "b", "a")
+    y = 0.5 + 2.0 * x + 0.3 * (level == "b") + rng.normal(scale=0.05, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+            "g": Categorical(base="a"),
+        },
+    )
+    y_out, weights, offset = model_build_design_matrix(
+        model, pd.DataFrame({"x": x, "g": level}), y, np.ones_like(y), None
+    )
+
+    verdicts: list[bool] = []
+    guard = irls_direct._raw_centering_well_scaled
+
+    def recording_guard(mean_x, scale):
+        verdicts.append(guard(mean_x, scale))
+        return verdicts[-1]
+
+    materialised: list[int] = []
+    row_subset = DesignMatrix.row_subset
+
+    def recording_row_subset(self, idx):
+        materialised.append(len(idx))
+        return row_subset(self, idx)
+
+    monkeypatch.setattr(irls_direct, "_raw_centering_well_scaled", recording_guard)
+    monkeypatch.setattr(DesignMatrix, "row_subset", recording_row_subset)
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y_out,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": 1.0},
+        offset=offset,
+        max_iter=4,
+        weight_semantics="frequency",
+    )
+
+    assert verdicts and not any(verdicts), "the frequent indicator must trip the certificate"
+    assert sum(materialised) == 0, f"materialised {sum(materialised)} design rows"
+    assert result.converged or result.n_iter == 4
+
+
+def test_centred_scop_prediction_rounds_at_the_centred_rows() -> None:
+    """``(X - 1 m') beta`` about the system's pair: error bounded by the centred rows.
+
+    Exact-rational reference on the float inputs.  Each term passes through at
+    most ``p + 4`` roundings (the centre's ``L``-term dot, a subtraction and
+    the accumulation, the pair's remainder and its subtraction), so ``|t -
+    t*| <= gamma_{p+4} (|x - hi| |beta| + |v| + sum |m| |beta| + |lo| |beta|)``
+    (Higham 2002, sec. 3.1).  A row formed natively, ``x beta - m' beta``,
+    rounds at ``u |x| |beta|``, about 1e10 times this bound.
+    """
+    from fractions import Fraction
+
+    from superglm.group_matrix import CategoricalGroupMatrix
+    from superglm.solvers.centered_system import build_centered_system
+    from superglm.solvers.irls_direct import _centred_system_matvec
+
+    rng = np.random.default_rng(20261004)
+    n, levels = 64, 2
+    translated = 1.0e10 + rng.normal(size=n)
+    codes = np.where(rng.uniform(size=n) < 0.75, 1, rng.integers(-1, 1, size=n))
+    dm = DesignMatrix(
+        [DenseGroupMatrix(translated[:, None]), CategoricalGroupMatrix(codes, levels)],
+        n=n,
+        p=1 + levels,
+    )
+    weights = rng.uniform(0.5, 2.0, size=n)
+    system = build_centered_system(
+        dm=dm, W=weights, z_off=rng.normal(size=n), penalty=np.zeros((1 + levels, 1 + levels))
+    )
+    beta = rng.normal(size=1 + levels)
+
+    computed = _centred_system_matvec(dm, beta, system)
+
+    hi, lo = system.centre_pair()
+    assert lo is not None and system.mean_x[2] > 0.5  # the pair, and a frequent level
+    u = Fraction(2) ** -53
+    k = Fraction(dm.p + 4)
+    gamma = k * u / (1 - k * u)
+    rows = dm.toarray()
+    for i in range(n):
+        exact = (Fraction(rows[i, 0]) - Fraction(hi[0]) - Fraction(lo[0])) * Fraction(beta[0])
+        scale = abs(Fraction(rows[i, 0]) - Fraction(hi[0])) * abs(Fraction(beta[0]))
+        scale += abs(Fraction(lo[0]) * Fraction(beta[0]))
+        for j in range(1, dm.p):
+            exact += (Fraction(rows[i, j]) - Fraction(hi[j])) * Fraction(beta[j])
+            scale += (Fraction(rows[i, j]) + abs(Fraction(hi[j]))) * abs(Fraction(beta[j]))
+        assert abs(Fraction(computed[i]) - exact) <= gamma * scale, i
+
+
+def _scop_tensor_frequent_level_fit(monkeypatch, counts: dict):
+    """A small monotone REML fit whose centring rungs reject on every fit: run counts, predictions."""
+    import superglm._group_matrix._group_matrix_centered as centered
+    import superglm.reml.scop_efs as scop_efs
+    import superglm.solvers.centered_system as centered_system
+    from superglm.features.categorical import Categorical
+
+    def count(name, function):
+        def counted(*args, **kwargs):
+            counts[name] = counts.get(name, 0) + 1
+            return function(*args, **kwargs)
+
+        return counted
+
+    monkeypatch.setattr(centered, "_MIN_MIXED_RAW_MOMENT_CELLS", 0)  # let the raw rung run
+    for module, name in (
+        (centered, "_build_pattern_plan"),
+        (centered, "_try_pattern_tensor_centering"),
+        (centered_system, "try_raw_moment_centering"),
+        (scop_efs, "fit_irls_direct"),
+    ):
+        monkeypatch.setattr(module, name, count(name, getattr(module, name)))
+    rng = np.random.default_rng(20261004)
+    n = 1500
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(0.0, 1.0, n),
+            "a": rng.uniform(0.0, 1.0, n),
+            "b": rng.uniform(0.0, 1.0, n),
+            "g": np.where(rng.uniform(size=n) < 0.75, "frequent", "rare"),
+        }
+    )
+    eta = -1.0 + 0.8 * frame["x"] + 0.4 * np.sin(3.0 * frame["a"] * frame["b"])
+    y = rng.poisson(np.exp(eta + 0.3 * (frame["g"] == "frequent"))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+            "a": PSpline(n_knots=5),
+            "b": PSpline(n_knots=5),
+            "g": Categorical(base="rare"),
+        },
+        interactions=[("a", "b")],
+    )
+    model.fit_reml(frame, y, max_reml_iter=3)
+    return model, np.asarray(model.predict(frame))
+
+
+def test_scop_reml_run_builds_its_reduced_plan_once_and_carries_refusals(monkeypatch) -> None:
+    """One pattern plan and one attempt of each rejected rung per REML run, bitwise unchanged.
+
+    The frequent level's indicator trips the raw-centring certificate under every
+    fit's weights, so the tensor pattern rung (reduced design) and the
+    raw-moment rung (full design) reject each time.  Each PIRLS fit rebuilt the
+    reduced design, its pattern plan, and both rejected rungs: 11 s of rejected
+    raw moments and 5 s of plan rebuilds on the 678k-row fit.  A refusal
+    carried through the run (``SCOPRunCentring``) leaves every fit on the
+    route it reached anyway, so the run must match a run with a fresh state
+    per fit bit for bit.
+    """
+    from superglm.solvers.irls_direct import SCOPRunCentring
+
+    counts: dict = {}
+    model, predictions = _scop_tensor_frequent_level_fit(monkeypatch, counts)
+    fits = counts["fit_irls_direct"]
+    assert fits >= 4
+    assert counts["_build_pattern_plan"] == 1
+    assert counts["_try_pattern_tensor_centering"] == 1
+    assert counts["try_raw_moment_centering"] == 1
+
+    original_bind = SCOPRunCentring.bind
+
+    def fresh_bind(self, owners):
+        self.owners = ()
+        original_bind(self, owners)
+
+    fresh_counts: dict = {}
+    monkeypatch.setattr(SCOPRunCentring, "bind", fresh_bind)
+    fresh_model, fresh_predictions = _scop_tensor_frequent_level_fit(monkeypatch, fresh_counts)
+    assert fresh_counts["fit_irls_direct"] == fits
+    assert fresh_counts["_build_pattern_plan"] == fits  # the cost the carry removes
+    np.testing.assert_array_equal(predictions, fresh_predictions)
+    assert model.result.deviance == fresh_model.result.deviance
+    assert model.reml_diagnostics()["lambdas"] == fresh_model.reml_diagnostics()["lambdas"]

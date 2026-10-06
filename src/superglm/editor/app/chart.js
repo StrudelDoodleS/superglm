@@ -1,11 +1,26 @@
 import { fmt } from "./format.js";
+import {
+  anchorMarks,
+  createAnchorMarks,
+  placeAnchorMarks,
+  spanRange
+} from "./chart/anchor_marks.js";
 import { drawShapeOverlay } from "./chart/shape_overlay.js";
+import {
+  WAITING_BRACKET_ROW,
+  drawPendingGroupBrackets,
+  drawPendingGroupRings,
+  drawPendingRanges,
+  pendingGroupMarks,
+  pendingUngroupMarks
+} from "./chart/pending_overlay.js";
 import {
   chartSize,
   evenlySpacedIndices,
   planCategoricalAxis,
   splitLabelGraphemes
 } from "./chart/geometry.js";
+import { contributionX, levelPolyline, splineCurves } from "./chart/ordered_spline.js";
 import { el, line, text } from "./chart/svg.js";
 
 const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
@@ -13,6 +28,8 @@ const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
 // selected, hovered, or within the lens around the pointer.
 const DENSE_POINT_COUNT = 40;
 const LENS_HALF_WIDTH = 26;
+// The x-axis title's own row, as planCategoricalAxis reserves it by default.
+const AXIS_TITLE_HEIGHT = 14;
 const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
   "font-family",
   "font-size",
@@ -61,6 +78,7 @@ export function drawChart(term, selection, context) {
   const { svg } = context;
   const visualMode = context.visualMode();
   svg.innerHTML = "";
+  svg._anchorMarks = null;
   // Draw at the chart's own CSS-pixel size so nothing is scaled: text keeps
   // its nominal size and the plot fills its panel. A hidden chart, or a DOM
   // without layout, draws at the fallback size.
@@ -71,6 +89,14 @@ export function drawChart(term, selection, context) {
     term,
     context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
   );
+  // A waiting group or ungroup is named on a bracket under the axis labels,
+  // which takes a row of its own. The handles view draws neither groups nor
+  // brackets.
+  const drawsGroups = !(visualMode === "handles" && term.controls);
+  const waitingGroups = drawsGroups ? pendingGroupMarks(term, view) : [];
+  const waitingUngroups = drawsGroups ? pendingUngroupMarks(term, view) : [];
+  const waitingBrackets = [...waitingUngroups, ...waitingGroups];
+  const bracketRow = waitingBrackets.length ? WAITING_BRACKET_ROW : 0;
   const x = view.x;
   const y = view.y;
   const original = view.original_y;
@@ -95,7 +121,8 @@ export function drawChart(term, selection, context) {
         xMax,
         width - baseMargin.left - baseMargin.right,
         height,
-        baseMargin
+        baseMargin,
+        bracketRow
       )
     : null;
   if (!categoricalLayout) svg.dataset.axisMeasurementCount = "0";
@@ -119,13 +146,17 @@ export function drawChart(term, selection, context) {
   const buildEnvelope = buildActive ? buildContributionEnvelope(term) : [];
   const buildValues = buildEnvelope.flat();
   const previousValues = previous || [];
+  // A grouped display never carries a spline: the tools are off for groups.
+  const spline = view.displayIsCollapsed ? null : splineCurves(term);
+  const splineValues = spline ? [...(spline.y || []), ...(spline.originalY || [])] : [];
   const yMinRaw = Math.min(
     ...y,
     ...original,
     ...previousValues,
     ...ciValues,
     ...controlValues,
-    ...buildValues
+    ...buildValues,
+    ...splineValues
   );
   const yMaxRaw = Math.max(
     ...y,
@@ -133,7 +164,8 @@ export function drawChart(term, selection, context) {
     ...previousValues,
     ...ciValues,
     ...controlValues,
-    ...buildValues
+    ...buildValues,
+    ...splineValues
   );
   const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
   const baseYMin = yMinRaw - yPad;
@@ -145,7 +177,7 @@ export function drawChart(term, selection, context) {
 
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
   // curves and interactive handles/points.
-  exposureLayer(svg, view, sx, margin, innerW, innerH, exposure);
+  exposureLayer(svg, view, sx, margin, innerW, innerH, exposure, waitingSlots(waitingBrackets));
   for (const tick of ticks(yMin, yMax, tickCount(innerH, 70))) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
     text(svg, margin.left - 8, sy(tick) + 4, fmt(tick), "tick-label", "end");
@@ -188,7 +220,7 @@ export function drawChart(term, selection, context) {
   text(
     svg,
     margin.left + innerW / 2,
-    categoricalLayout ? categoricalLayout.titleY : height - 12,
+    categoricalLayout ? categoricalLayout.titleY + bracketRow : height - 12,
     term.x_label,
     "label x-axis-title",
     "middle"
@@ -198,6 +230,7 @@ export function drawChart(term, selection, context) {
   // Shaped ranges sit above the grid and beneath the curves; a Build animation
   // shows the basis alone.
   if (!buildActive) drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH });
+  if (!buildActive) drawPendingRanges(svg, { term, view, sx, margin, innerW, innerH });
 
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
@@ -219,9 +252,7 @@ export function drawChart(term, selection, context) {
     build.setAttribute("data-active-basis", String(buildCurve.activeIndex));
     build.setAttribute("style", `stroke: ${mixBuildColor(progress)}`);
   }
-  if (!buildActive) path(svg, x, original, sx, sy, "original");
-  if (!buildActive && previous) path(svg, x, previous, sx, sy, "previous-edit");
-  if (!buildActive) path(svg, x, y, sx, sy, "edited");
+  if (!buildActive) drawTermLines(svg, { x, y, original, previous, spline, sx, sy });
   const displaySelected = displaySelection(view, selection);
   const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
   const handlesMode = visualMode === "handles" && term.controls;
@@ -230,6 +261,17 @@ export function drawChart(term, selection, context) {
   if (!handlesMode) {
     if (view.displayIsCollapsed) drawCollapsedLevelGroups(svg, view, sx, sy);
     else drawLevelGroups(svg, view, sx, sy);
+  }
+  if (waitingBrackets.length && categoricalLayout) {
+    drawPendingGroupRings(svg, waitingGroups, { view, sx, sy, color: levelGroupColor });
+    drawPendingGroupBrackets(svg, waitingBrackets, {
+      view,
+      sx,
+      top: categoricalLayout.labelsBottom,
+      left: margin.left,
+      right: margin.left + innerW,
+      color: levelGroupColor
+    });
   }
   const visiblePoints = visiblePointIndices(view, displaySelected);
   const basePoints = new Set(basePointIndices(view));
@@ -253,8 +295,17 @@ export function drawChart(term, selection, context) {
       drawPoint(svg, pointLayer, view, x, y, sx, sy, i, true, !basePoints.has(i));
     }
   } else {
+    // An ordered spline keeps its level dots on the curve beside the handles;
+    // they read the drag preview's values, so they move with the curve.
+    if (spline && !buildActive) drawSplineLevelDots(svg, x, y, sx, sy);
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
+  // The anchor is marked where points are drawn; a Build animation, which
+  // shows the basis alone, marks none.
+  svg._anchorMarks = pointLayer && !buildActive ? createAnchorMarks(svg, pointLayer) : null;
+  placeChartAnchorMarks(svg, view, selection, context, {
+    sx, sy, x, y, xMin, xMax, margin, innerW, innerH
+  });
   applyPlotClip(svg);
   const legendLayer = el("g", { class: "legend-layer" });
   svg.appendChild(legendLayer);
@@ -349,6 +400,29 @@ export function updateChartSelection(term, selection, context) {
       );
   updateSelectionBounds(svg, bounds, { top: scale.margin.top, height: scale.innerH });
   positionSelectionMenu(svg, context.selectionMenu, bounds);
+  placeChartAnchorMarks(svg, view, selection, context, scale);
+}
+
+/**
+ * The Shift-click span's ends as the axis reads them, for the status line, or
+ * null when the selection is no such span.
+ */
+export function selectionSpanRange(term, selection, context) {
+  const view = resolveDisplayTerm(
+    term,
+    context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
+  );
+  return spanRange(
+    view, context.selectedTerm(), context.selectionAnchor(), context.selectionSpan(), selection
+  );
+}
+
+function placeChartAnchorMarks(svg, view, selection, context, scale) {
+  if (!svg._anchorMarks) return;
+  const marks = anchorMarks(
+    view, context.selectedTerm(), context.selectionAnchor(), context.selectionSpan(), selection
+  );
+  placeAnchorMarks(svg._anchorMarks, marks, scale);
 }
 
 /**
@@ -464,7 +538,9 @@ function applyPlotClip(svg) {
     ".basis-build",
     ".level-group-link",
     ".level-group-marker",
+    ".pending-group-ring",
     ".point",
+    ".spline-level-dot",
     ".control-stem",
     ".control-handle"
   ].join(",");
@@ -647,6 +723,16 @@ function drawLevelGroupMarker(svg, x, y, sx, sy, groupIndex) {
   }
 }
 
+// The palette slot of each displayed point a waiting group takes in, or a
+// waiting ungroup takes out of its fitted group; a group listed later wins.
+function waitingSlots(marks) {
+  const slots = new Map();
+  for (const mark of marks) {
+    for (const position of mark.display) slots.set(position, mark.slot);
+  }
+  return slots;
+}
+
 // The categorical palettes live in tokens.css, one value per theme: the SVG
 // names a colour by index and the stylesheet supplies it, at the alpha asked.
 function levelGroupColor(index, alpha = 1) {
@@ -657,6 +743,20 @@ function paletteColor(palette, count, index, alpha) {
   const slot = Math.abs(Number(index) || 0) % count;
   const percent = Math.max(0, Math.min(1, Number(alpha))) * 100;
   return `color-mix(in srgb, var(--${palette}-${slot}) ${percent}%, transparent)`;
+}
+
+// The dots Select draws, levels on the curve and special levels apart, as
+// marks only: in Handles mode the handles take the pointer.
+function drawSplineLevelDots(svg, x, y, sx, sy) {
+  for (let i = 0; i < y.length; i++) {
+    svg.appendChild(el("circle", {
+      cx: sx(x[i]),
+      cy: sy(y[i]),
+      r: 3.4,
+      class: "spline-level-dot",
+      "data-level-index": i
+    }));
+  }
 }
 
 function drawControlHandles(svg, term, sx, sy, margin, innerH) {
@@ -681,21 +781,40 @@ function drawControlHandles(svg, term, sx, sy, margin, innerH) {
   }
 }
 
+// An ordered spline draws its curves on the level-axis grid and leaves its
+// special levels as lone dots; every other term joins its points.
+function drawTermLines(svg, { x, y, original, previous, spline, sx, sy }) {
+  const join = (values) => (spline ? levelPolyline(x, values, spline.levelIndices) : { x, y: values });
+  const originalLine = spline && spline.originalY
+    ? { x: spline.x, y: spline.originalY }
+    : join(original);
+  path(svg, originalLine.x, originalLine.y, sx, sy, "original");
+  if (previous) {
+    const previousLine = join(previous);
+    path(svg, previousLine.x, previousLine.y, sx, sy, "previous-edit");
+  }
+  const editedLine = spline && spline.y ? { x: spline.x, y: spline.y } : join(y);
+  path(svg, editedLine.x, editedLine.y, sx, sy, "edited");
+}
+
+// Basis rows are sampled at contributionX(term): the ordered spline's grid,
+// or the term's own x.
 function basisContributions(svg, term, sx, sy, buildActive = false) {
   const { basis, logEffects } = contributionComponents(term);
+  const gridX = contributionX(term);
   for (let i = 0; i < basis.length; i++) {
     const row = basis[i];
-    if (!Array.isArray(row) || row.length !== term.x.length) continue;
+    if (!Array.isArray(row) || row.length !== gridX.length) continue;
     const beta = Array.isArray(logEffects) ? Number(logEffects[i] || 0) : 0;
     const y = row.map((v) => Math.exp((Number(v) || 0) * beta));
-    const contribution = path(svg, term.x, y, sx, sy, "basis-contribution");
+    const contribution = path(svg, gridX, y, sx, sy, "basis-contribution");
     contribution.setAttribute("data-basis-index", i);
   }
 }
 
 function buildAccumulationCurve(term, progress) {
   const { basis, logEffects } = contributionComponents(term);
-  const x = term.x || [];
+  const x = contributionX(term) || [];
   if (!x.length) return { x: [], y: [], activeIndex: -1 };
   const eta = new Array(x.length).fill(0);
   const activeIndex = activeBasisIndex(basis, progress);
@@ -723,21 +842,23 @@ function drawActiveBasis(svg, term, index, sx, sy) {
   if (index < 0) return;
   const { basis, logEffects } = contributionComponents(term);
   const row = basis[index];
-  if (!Array.isArray(row) || row.length !== term.x.length) return;
+  const gridX = contributionX(term);
+  if (!Array.isArray(row) || row.length !== gridX.length) return;
   const beta = Number(logEffects[index] || 0);
   const y = row.map((v) => Math.exp((Number(v) || 0) * beta));
-  const active = path(svg, term.x, y, sx, sy, "basis-active");
+  const active = path(svg, gridX, y, sx, sy, "basis-active");
   active.setAttribute("data-basis-index", index);
   active.setAttribute("style", `stroke: ${basisColor(index, 0.72)}`);
 }
 
 function buildContributionEnvelope(term) {
   const { basis, logEffects } = contributionComponents(term);
-  const finalEta = finalContributionEta(basis, logEffects, term.x.length);
+  const n = contributionX(term).length;
+  const finalEta = finalContributionEta(basis, logEffects, n);
   const values = [finalEta.map((value) => Math.exp(value))];
   for (let j = 0; j < basis.length; j++) {
     const row = basis[j];
-    if (!Array.isArray(row) || row.length !== term.x.length) continue;
+    if (!Array.isArray(row) || row.length !== n) continue;
     const beta = Number(logEffects[j] || 0);
     values.push(row.map((v) => Math.exp((Number(v) || 0) * beta)));
   }
@@ -897,6 +1018,12 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
       left: centeredLeft,
       top: plotBottom.y - parentBox.top + pad
     });
+    // The top of the plot, above the curve, where the board draws it: clear
+    // of the next click when the curve runs through every other place.
+    candidates.push({
+      left: centeredLeft,
+      top: svgClientPoint(svg, scale.margin.left, scale.margin.top).y - parentBox.top + pad
+    });
   }
   // The palette keeps to the plot area when it fits there, so it never sits
   // on the axes or their labels; otherwise the chart's own box bounds it.
@@ -913,10 +1040,13 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
     left: Math.max(limits.minLeft, Math.min(limits.maxLeft, candidate.left)),
     top: Math.max(limits.minTop, Math.min(limits.maxTop, candidate.top))
   }));
+  // Read every point's box once: the candidates are scored against the same points.
+  const pointBoxes = [...svg.querySelectorAll("circle.point[data-index]")]
+    .map((point) => point.getBoundingClientRect());
   let best = positioned[0];
-  let bestIntersections = selectionMenuPointIntersections(svg, parentBox, menuBox, best);
+  let bestIntersections = selectionMenuPointIntersections(pointBoxes, parentBox, menuBox, best);
   for (const candidate of positioned.slice(1)) {
-    const intersections = selectionMenuPointIntersections(svg, parentBox, menuBox, candidate);
+    const intersections = selectionMenuPointIntersections(pointBoxes, parentBox, menuBox, candidate);
     if (intersections >= bestIntersections) continue;
     best = candidate;
     bestIntersections = intersections;
@@ -966,15 +1096,17 @@ function plotLimits(svg, scale, parentBox, menuBox, pad, fallback) {
   return fits ? limits : fallback;
 }
 
-function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
+// The points the palette must not cover: every point on the curve, shown or
+// not. A dense curve hides its points until reached for, but each is a click
+// target: the next click or Shift-click of a range goes to it.
+function selectionMenuPointIntersections(pointBoxes, parentBox, menuBox, candidate) {
   const clearance = 2;
   const menuLeft = parentBox.left + candidate.left - clearance;
   const menuTop = parentBox.top + candidate.top - clearance;
   const menuRight = menuLeft + menuBox.width + clearance * 2;
   const menuBottom = menuTop + menuBox.height + clearance * 2;
   let intersections = 0;
-  for (const point of svg.querySelectorAll(visiblePointSelector(svg))) {
-    const pointBox = point.getBoundingClientRect();
+  for (const pointBox of pointBoxes) {
     if (
       pointBox.right >= menuLeft &&
       pointBox.left <= menuRight &&
@@ -985,15 +1117,6 @@ function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
     }
   }
   return intersections;
-}
-
-// The points the palette must not cover: on a dense curve only the selected
-// ones show, so only they count.
-function visiblePointSelector(svg) {
-  const layer = svg.querySelector(".point-layer");
-  return layer && layer.getAttribute("data-dense") === "true"
-    ? "circle.point.selected[data-index]"
-    : "circle.point[data-index]";
 }
 
 function svgClientPoint(svg, x, y) {
@@ -1012,7 +1135,9 @@ function svgClientPoint(svg, x, y) {
   };
 }
 
-function categoricalAxisLayout(svg, view, xMin, xMax, availableWidth, svgHeight, baseMargin) {
+function categoricalAxisLayout(
+  svg, view, xMin, xMax, availableWidth, svgHeight, baseMargin, extraRow = 0
+) {
   const labels = view.levels.map(String);
   if (view.x.length !== labels.length) {
     throw new RangeError("categorical axis values and labels must have the same length");
@@ -1031,7 +1156,8 @@ function categoricalAxisLayout(svg, view, xMin, xMax, availableWidth, svgHeight,
     availableWidth,
     svgHeight,
     baseLeft: baseMargin.left,
-    baseBottom: baseMargin.bottom
+    baseBottom: baseMargin.bottom,
+    titleHeight: AXIS_TITLE_HEIGHT + extraRow
   });
 }
 
@@ -1138,7 +1264,7 @@ function ticks(min, max, n) {
   return Array.from({ length: n }, (_, i) => min + i * step);
 }
 
-function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure) {
+function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure, waiting = new Map()) {
   // Exposure uses a secondary visual scale inside the plot area. It is
   // contextual, not part of the relativity y-axis scale.
   if (!exposure || !exposure.y || !exposure.y.length) return;
@@ -1157,15 +1283,25 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure) {
       : innerW / 12;
     for (let i = 0; i < exposure.y.length; i++) {
       const h = Math.max(1, maxH * exposure.y[i] / maxWeight);
-      svg.appendChild(el("rect", {
+      const bar = el("rect", {
         x: sx(x[i]) - nominalW / 2,
         y: yBase - h,
         width: nominalW,
         height: h,
         rx: 2,
         ry: 2,
-        class: "exposure"
-      }));
+        class: waiting.has(i) ? "exposure waiting" : "exposure"
+      });
+      // A level a waiting change groups or ungroups shows its bar dashed, in
+      // the colour of the group it joins or leaves.
+      if (waiting.has(i)) {
+        const slot = waiting.get(i);
+        bar.setAttribute(
+          "style",
+          `fill: ${levelGroupColor(slot, 0.22)}; stroke: ${levelGroupColor(slot, 0.95)}`
+        );
+      }
+      svg.appendChild(bar);
     }
   }
   exposureAxis(svg, margin.left + innerW, yBase, maxH, maxWeight);
