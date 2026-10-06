@@ -101,7 +101,10 @@ def test_assembly_keeps_each_exceptional_operand_guard(monkeypatch, operand):
     x = large if operand in ("B_unique", "R_inv") else 1.0
     np.testing.assert_array_equal(moments.gram, [[x * weights[0] * x]])
     np.testing.assert_array_equal(moments.xt_rhs[0], [x * rhs[0]])
-    assert len(calls) == 1
+    # An out-of-range factor keeps the exact route; out-of-range weights or
+    # rhs alone take the ordinary route at a power-of-two shift
+    # (``_shifted_moments``), exact here as every value is a power of two.
+    assert len(calls) == int(operand in ("B_unique", "R_inv"))
 
 
 @pytest.mark.parametrize("replace", [False, True])

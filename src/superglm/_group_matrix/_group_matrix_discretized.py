@@ -12,6 +12,7 @@ from ._group_matrix_kernels import (
     _cell_csr_matches,
     _disc_disc_2d_hist,
     _exact_ssp_moments,
+    _float64_operand_exponent_bounds,
     _fused_2d_bincount_2,
     _fused_bincount_2,
     _indexed_row_dot,
@@ -22,6 +23,71 @@ from ._row_lookup import build_row_lookup
 
 if TYPE_CHECKING:
     from ..types import TensorRawChannels
+
+
+def _range_shift(weights: NDArray) -> int | None:
+    """``k`` with every nonzero of ``2**k * weights`` in ``[2**-128, 2**128]``, or ``None``.
+
+    The exact-moment gate (``_ssp_gram_needs_exact``) admits operands in
+    that range; a finite float64 vector spanning at most 255 binades gets
+    there by a power of two.  ``None`` otherwise (a non-finite entry spans
+    the whole exponent range).
+    """
+    weights = np.asarray(weights)
+    if weights.dtype != np.float64 or weights.ndim != 1:
+        return None
+    low, high = _float64_operand_exponent_bounds(weights.reshape(-1, 1))
+    if high - low > 255:
+        return None
+    return -((low + high) // 2)
+
+
+def _shifted_moments(compute, factors: tuple, weights: tuple, owners: tuple) -> tuple | None:
+    """The ordinary route's moments of out-of-range weights, at a power-of-two shift.
+
+    Rows whose fitted mean runs to zero carry working weights far below the
+    gate's ``2**-128`` beside ordinary ones, and the gate then sends the
+    whole block to the exact rational route.  Every moment here is linear in
+    one weight vector (``owners[i]`` indexes it), so this computes the
+    ordinary route on ``w' = 2**k w`` and returns ``2**-k`` times its result.
+
+    **Error.**  With every operand in the gate's range no product underflows
+    or overflows (the gate's own argument), so each operation of the route
+    obeys ``fl(x op y) = (x op y)(1 + d)``, ``|d| <= u``: bin sums of at most
+    ``n`` rows, one product with the support, and a length-``m`` contraction
+    over the bins give ``|M^(w') - M(w')| <= gamma_{n+m} |S|'(|S| o |w'|_b)``
+    entrywise (Higham 2002, eq. 3.5 and sec. 4.2), ``S`` the support and
+    ``|w|_b`` the bin sums of ``|w|``.  Scaling by ``2**k`` is exact, and the
+    shift back is taken only where it is too (it shifts forward to the same
+    bits: no result went subnormal), so ``M^ = 2**-k M^(w')`` meets
+    ``|M^ - M(w)| <= gamma_{n+m} |S|'(|S| o |w|_b)``: the bound the route
+    has for any in-range ``w``, homogeneous in ``w``, and against the same
+    support ``S = fl(B R)`` (or the certified one).
+
+    Only for float64 factors (or a support the caller certified), weights
+    whose span the shift can place, and shifted operands the gate admits;
+    otherwise ``None`` and the caller keeps the exact route.
+    """
+    if any(np.asarray(factor).dtype != np.float64 for factor in factors):
+        return None
+    shifts: list[int] = []
+    for vector in weights:
+        shift = _range_shift(vector)
+        if shift is None:
+            return None
+        shifts.append(shift)
+    shifted = tuple(np.ldexp(vector, shift) for vector, shift in zip(weights, shifts, strict=True))
+    if _ssp_gram_needs_exact(*factors, *shifted):
+        return None
+    moments = compute(*shifted)
+    back = []
+    with np.errstate(over="ignore", under="ignore"):
+        for moment, owner in zip(moments, owners, strict=True):
+            restored = np.ldexp(moment, -shifts[owner])
+            if not np.array_equal(np.ldexp(restored, shifts[owner]), moment):
+                return None
+            back.append(restored)
+    return tuple(back)
 
 
 class DiscretizedSSPGroupMatrix:
@@ -80,6 +146,22 @@ class DiscretizedSSPGroupMatrix:
         # certify factors. A supplied projection alone is not a certificate.
         factors = () if _support_factors_in_range else (self.B_unique, self.R_inv)
         if _ssp_gram_needs_exact(*factors, W):
+            # Weights alone out of range take the ordinary route at a
+            # power-of-two shift (``_shifted_moments``).
+            shifted = _shifted_moments(
+                lambda w: (
+                    self.gram(
+                        w,
+                        _support=_support,
+                        _support_factors_in_range=_support_factors_in_range,
+                    ),
+                ),
+                factors,
+                (W,),
+                (0,),
+            )
+            if shifted is not None:
+                return shifted[0]
             return _exact_ssp_moments(self.B_unique, self.R_inv, W, bin_indices=self.bin_idx)[0]
         W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
         if self.B_unique.dtype != np.float64 or self.R_inv.dtype != np.float64:
@@ -109,6 +191,19 @@ class DiscretizedSSPGroupMatrix:
         """
         factors = () if _support_factors_in_range else (self.B_unique, self.R_inv)
         if _ssp_gram_needs_exact(*factors, W, Wz):
+            shifted = _shifted_moments(
+                lambda w, wz: self.gram_rmatvec(
+                    w,
+                    wz,
+                    _support=_support,
+                    _support_factors_in_range=_support_factors_in_range,
+                ),
+                factors,
+                (W, Wz),
+                (0, 0, 1),
+            )
+            if shifted is not None:
+                return shifted[0], shifted[1], shifted[2]
             gram, xtw, xtwz = _exact_ssp_moments(
                 self.B_unique, self.R_inv, W, Wz, bin_indices=self.bin_idx
             )
