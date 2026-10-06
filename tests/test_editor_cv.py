@@ -1696,25 +1696,28 @@ def test_run_cv_and_final_fit_put_an_edit_back_as_set_on_a_group_they_widen(monk
 
 
 @pytest.mark.parametrize(
-    ("unseen", "levels", "sentence"),
+    ("unseen", "levels", "bind", "sentence"),
     [
-        ("error", None, "UNCOVERED_LEVELS"),
-        ("base", None, "UNCOVERED_LEVELS"),
-        ("Other", ["A", "B", "C", "D"], "OUTSIDE_DECLARED_LEVELS"),
+        ("error", None, False, "UNCOVERED_LEVELS"),
+        ("base", None, False, "UNCOVERED_LEVELS"),
+        ("Other", ["A", "B", "C", "D"], False, "OUTSIDE_DECLARED_LEVELS"),
+        ("Other", None, True, "OUTSIDE_DECLARED_LEVELS"),
     ],
 )
 def test_run_cv_and_final_fit_refuse_levels_no_group_takes_in_one_sentence(
-    unseen, levels, sentence
+    unseen, levels, bind, sentence
 ):
-    """Without a group for new levels, or under a levels= that leaves them out, they are refused.
+    """Without a group for new levels, or under a universe that leaves them out, they are refused.
 
-    Placing them in Other would widen the model's declaration.
+    Placing them in Other would widen the model's declaration, whether
+    levels= made it or bind_levels did (the last case widened the grouping
+    past the binding, and Final fit fitted N and E in Other without a word).
     """
     import superglm.editor.cv as cv
     from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
     from superglm.editor.errors import EditorValueError
 
-    session = _new_levels_session(unseen, levels)
+    session = _new_levels_session(unseen, levels, bind=bind)
 
     with pytest.raises(EditorValueError) as final:
         run_final_fit(capture_final_fit(session), _Context())
@@ -1784,6 +1787,58 @@ def test_run_cv_and_final_fit_keep_a_reference_level_named_first_when_placing_ne
 
     assert final._specs["x"]._base_level == "first"
     assert fold_references == ["first"] * 3
+
+
+def test_run_cv_and_final_fit_refuse_levels_outside_a_grouped_term_s_bound_universe():
+    """x is opened grouped (Other = C + D, where new levels go) and bound by bind_levels to A-D.
+
+    The binding names x's universe, but the placement read only levels=, so
+    it widened the grouping past the binding and Final fit fitted N and E in
+    Other without a word. Both jobs refuse them as outside the universe.
+    """
+    import superglm.editor.cv as cv
+    from superglm import collapse_levels
+    from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    rng = np.random.default_rng(20261006)
+
+    def rows(levels, n):
+        x = rng.choice(levels, n)
+        power = rng.normal(0.0, 1.0, n)
+        eta = -0.3 + 0.1 * power + 0.3 * (x == "B") - 0.2 * np.isin(x, ["C", "D"])
+        return pd.DataFrame({"power": power, "x": x}), rng.poisson(np.exp(eta)).astype(float)
+
+    train, validation = rows(["A", "B", "C", "D"], 400), rows(["A", "B", "N", "E"], 100)
+    X = pd.concat([train[0], validation[0]], ignore_index=True)
+    y = np.concatenate([train[1], validation[1]])
+    grouping = collapse_levels(train[0]["x"], groups={"Other": ["C", "D"]})
+    features = {
+        "power": Numeric(),
+        "x": Categorical(base="first", grouping=grouping, unseen="Other"),
+    }
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+    model.bind_levels(train[0])
+    supplied = cross_validate(
+        SuperGLM(family="poisson", selection_penalty=0.0, features={"power": Numeric()}),
+        X,
+        y,
+        cv=KFold(3, shuffle=True, random_state=0),
+        scoring=("deviance",),
+    )
+    session = EditorSession.from_model(
+        model.fit(*train), cv=supplied, cv_data=(X, y), train_data=train, validation_data=validation
+    )
+
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    for job, refused in (("Final fit", final), ("Run CV", run)):
+        assert refused.value.public_message == cv.OUTSIDE_DECLARED_LEVELS.format(
+            job=job, term="x", levels=["E", "N"]
+        )
 
 
 @pytest.mark.parametrize("bind", [False, True], ids=["levels", "bind_levels"])

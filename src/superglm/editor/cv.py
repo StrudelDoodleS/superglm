@@ -862,6 +862,12 @@ def _covering_template(template, X, job: str):
             continue
         if spec._declared_levels is not None:
             raise EditorValueError(OUTSIDE_DECLARED_LEVELS.format(job=job, term=name, levels=new))
+        # A binding (or a categorical dtype) names the universe as levels= does.
+        outside = _outside_universe(values, frame, name, spec, bindings.get(name))
+        if outside:
+            raise EditorValueError(
+                OUTSIDE_DECLARED_LEVELS.format(job=job, term=name, levels=outside)
+            )
         if spec.unseen in ("error", "base"):
             raise EditorValueError(UNCOVERED_LEVELS.format(job=job, term=name, levels=new))
         widened = LevelGrouping(
@@ -887,7 +893,7 @@ def _covering_template(template, X, job: str):
 def _outside_universe(
     values, frame, name: str, spec: Categorical | RandomEffect, binding
 ) -> list[str]:
-    """The labels in ``values``, column ``name``, outside ungrouped ``spec``'s universe, as text.
+    """The labels in ``values``, column ``name``, outside ``spec``'s universe, as text.
 
     The universe is the one the fit binds: ``levels=``, else a categorical
     dtype on the column (which holds every value it has), else ``binding``.
