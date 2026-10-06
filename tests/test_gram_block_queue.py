@@ -259,6 +259,7 @@ def _kernel_calls():
         "_cat_cat_weighted_crosstab": lambda: kernels._cat_cat_weighted_crosstab(
             codes, other_codes, W, levels, levels
         ),
+        "_level_sums": lambda: kernels._level_sums(other_codes, Wz, levels + 1)[0],
     }
 
 
@@ -299,6 +300,55 @@ def test_pooled_kernels_run_without_the_gil_from_many_threads_bitwise():
     for thread in threads:
         thread.join()
     assert not mismatches
+
+
+def test_level_sums_are_np_bincount_bitwise():
+    """``_level_sums`` adds each row into its level in row order, as ``np.bincount`` does.
+
+    Weights spanning 24 decades of both signs make the sum order-sensitive,
+    so any other order (pairwise, by level, reversed: the mutation checks)
+    moves bits.  A code outside ``[0, length)`` and a length mismatch are
+    refused (``ok`` False) for ``np.bincount`` to handle.
+    """
+    rng = np.random.default_rng(31)
+    n, levels = 50_000, 11
+    codes = rng.integers(0, levels + 1, n)
+    weights = rng.choice([-1.0, 1.0], n) * 10.0 ** rng.uniform(-12.0, 12.0, n)
+    sums, ok = kernels._level_sums(codes, weights, levels + 1)
+    expected = np.bincount(codes, weights=weights, minlength=levels + 1)
+    assert ok and np.array_equal(sums.view(np.uint64), expected.view(np.uint64))
+    assert not kernels._level_sums(codes, weights, levels)[1]
+    assert not kernels._level_sums(codes - 1, weights, levels + 1)[1]
+    assert not kernels._level_sums(codes, weights[:-1], levels + 1)[1]
+
+
+def test_categorical_blocks_sum_their_levels_without_np_bincount(monkeypatch):
+    """A categorical Gram diagonal and ``X'w`` no longer go through ``np.bincount``.
+
+    ``np.bincount`` holds the GIL for its whole pass, so the categorical
+    diagonals the block queue runs on its workers ran one at a time; against
+    the former ``np.bincount`` calls both lines below raise.  The values are
+    ``np.bincount``'s to the bit, and an input the kernel refuses still
+    reaches ``np.bincount``.
+    """
+    rng = np.random.default_rng(37)
+    n, levels = 20_000, 9
+    codes = rng.integers(-1, levels, n)
+    W = rng.uniform(0.0, 3.0, n)
+    gm = CategoricalGroupMatrix(codes, levels)
+    expected_gram = np.diag(np.bincount(gm.codes, weights=W, minlength=levels + 1)[:levels])
+    expected_rmatvec = np.bincount(gm.codes, weights=-W, minlength=levels + 1)[:levels]
+    bincount = np.bincount
+
+    def refused(*args, **kwargs):
+        raise AssertionError("np.bincount on a categorical block")
+
+    monkeypatch.setattr(np, "bincount", refused)
+    assert np.array_equal(gm.gram(W).view(np.uint64), expected_gram.view(np.uint64))
+    assert np.array_equal(gm.rmatvec(-W).view(np.uint64), expected_rmatvec.view(np.uint64))
+    monkeypatch.setattr(np, "bincount", bincount)
+    wide = CategoricalGroupMatrix(np.full(4, levels + 2), levels)
+    assert np.array_equal(wide.rmatvec(np.ones(4)), np.zeros(levels))
 
 
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():

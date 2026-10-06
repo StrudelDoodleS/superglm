@@ -860,6 +860,26 @@ def _cat_weighted_bincount(codes, bin_idx, W, n_bins, n_levels):
 
 
 @njit(cache=True, nogil=True)
+def _level_sums(codes, weights, length):
+    """``np.bincount(codes, weights, minlength=length)``, row by row in the same order.
+
+    Bitwise ``np.bincount``'s sums (one ``+=`` per row, in row order), without
+    the GIL ``np.bincount`` holds.  ``ok`` is False where a code falls
+    outside ``[0, length)`` or the lengths differ; the caller then takes
+    ``np.bincount`` itself.
+    """
+    out = np.zeros(length)
+    if weights.shape[0] != codes.shape[0]:
+        return out, False
+    for i in range(codes.shape[0]):
+        code = codes[i]
+        if code < 0 or code >= length:
+            return out, False
+        out[code] += weights[i]
+    return out, True
+
+
+@njit(cache=True, nogil=True)
 def _cat_cat_weighted_crosstab(codes_i, codes_j, W, n_levels_i, n_levels_j):
     """Weighted crosstab: X_i.T @ diag(W) @ X_j for two categoricals."""
     result = np.zeros((n_levels_i, n_levels_j))
@@ -941,6 +961,7 @@ _POOLED_BLOCK_KERNELS = (
     _fused_2d_bincount_2,
     _cat_weighted_bincount,
     _cat_cat_weighted_crosstab,
+    _level_sums,
 )
 """The kernels a diagonal or cross Gram block can reach: exactly the ``nogil`` ones."""
 
@@ -1063,3 +1084,8 @@ def _warmup_group_matrix_kernels() -> None:
     )
     _cat_weighted_bincount(codes, codes, values, 2, 2)
     _cat_cat_weighted_crosstab(codes, codes, values, 2, 2)
+    frozen_weights = values.copy()
+    frozen_weights.setflags(write=False)
+    for level_codes in (codes, frozen_codes):
+        for level_weights in (values, frozen_weights):
+            _level_sums(level_codes, level_weights, 3)
