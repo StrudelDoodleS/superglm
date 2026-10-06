@@ -55,6 +55,15 @@ def _curve_correlation(left: NDArray[np.float64], right: NDArray[np.float64]) ->
 
     It needs two such points, and both curves must vary across them: one
     shared point, or a flat curve, has no correlation, neither 1 nor 0.
+
+    Each curve is shifted by one of its own points and scaled by its range
+    before it is centred. Centring at the mean alone cancels in a curve whose
+    range is a few units in the last place of its values, the case shifted
+    data guards against (Chan, Golub and LeVeque, *Algorithms for computing
+    the sample variance: analysis and recommendations*, The American
+    Statistician 37(3), 1983): a point within a factor of two of the shift
+    point subtracts exactly (Sterbenz's lemma), and the scaled curve has
+    range 1.
     """
     left = np.asarray(left, dtype=np.float64)
     right = np.asarray(right, dtype=np.float64)
@@ -62,6 +71,8 @@ def _curve_correlation(left: NDArray[np.float64], right: NDArray[np.float64]) ->
     left, right = left[shared], right[shared]
     if left.size < 2 or np.ptp(left) == 0.0 or np.ptp(right) == 0.0:
         return float("nan")
+    left = (left - left[0]) / np.ptp(left)
+    right = (right - right[0]) / np.ptp(right)
     return float(np.corrcoef(left, right)[0, 1])
 
 
@@ -137,7 +148,11 @@ def build_cv_curve_similarity(
     sample_weight: NDArray | None = None,
     n_points: int = 200,
 ) -> dict[str, Any]:
-    """Build fold-curve similarity diagnostics for all comparable main effects."""
+    """Build fold-curve similarity diagnostics for all comparable main effects.
+
+    A correlation is NaN where two curves share fewer than two finite points
+    or either is flat there.
+    """
     labeled_models = {f"fold_{i}": model for i, model in enumerate(models) if model is not None}
     if not labeled_models:
         return {}

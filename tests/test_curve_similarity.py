@@ -55,6 +55,27 @@ def test_a_correlation_needs_two_shared_points_and_a_spread_in_both_curves():
     assert abs(correlation.loc["fold_0", "fold_0"] - 1.0) <= 8 * _U
 
 
+def test_a_nearly_constant_curve_keeps_its_correlation():
+    """Curves whose range is a few units in the last place of their values.
+
+    [1, 1 + 2u] and [1, 1 + 4u] are exactly correlated, but their means
+    round: 1 + u is not a float64, so centring at it cancelled and the
+    correlation came out 1/sqrt(2). Each curve is shifted by one of its own
+    points and scaled by its range first, which leaves these two exact.
+    """
+    from superglm.plotting.curve_similarity import _curve_correlation
+
+    rising = np.array([1.0, 1.0 + 2 * _U])
+    steeper = np.array([1.0, 1.0 + 4 * _U])
+    three = np.array([1.0, 1.0 + 2 * _U, 1.0 + 4 * _U])
+
+    # Shifted and scaled, each pair is [0, 1] against [0, 1] or [1, 0]: the
+    # correlation is a few roundings from exact.
+    assert abs(_curve_correlation(rising, steeper) - 1.0) <= 8 * _U
+    assert abs(_curve_correlation(rising, steeper[::-1]) + 1.0) <= 8 * _U
+    assert abs(_curve_correlation(three, 2.0 * three) - 1.0) <= 8 * _U
+
+
 def test_weighting_changes_rmse_in_expected_direction():
     from superglm.plotting.curve_similarity import _pairwise_curve_similarity
 

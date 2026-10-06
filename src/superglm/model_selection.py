@@ -50,6 +50,8 @@ class CrossValidationResult:
         Per-fold ``(train_idx, test_idx)`` pairs from the CV splitter.
     curve_similarity : dict or None
         Fold-by-fold term similarity diagnostics for comparable main effects.
+        A correlation is NaN where two curves share fewer than two finite
+        points or either is flat there, a term a fold's penalty zeroes say.
     oof_predictions : ndarray or None
         Out-of-fold predictions (response scale), same length as *y*.
         ``None`` unless ``return_oof=True``.
