@@ -323,6 +323,10 @@ def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
             )
 
 
+class GroupNamedAsSpecialError(ValueError):
+    """A group of other levels is named as a free level is spelled."""
+
+
 def _require_no_group_named_as_special(grouping: Any, spellings: dict[str, Any]) -> None:
     """Refuse a group of other levels whose label is a spelling of a special.
 
@@ -336,7 +340,7 @@ def _require_no_group_named_as_special(grouping: Any, spellings: dict[str, Any])
     for label, originals in grouping.group_to_originals.items():
         text = str(label)
         if text in spellings and [str(member) for member in originals] != [str(spellings[text])]:
-            raise ValueError(
+            raise GroupNamedAsSpecialError(
                 f"OrderedCategorical grouping names a group of other levels {text!r}, a "
                 f"spelling of the free level {spellings[text]!r}, so that level's indicator would "
                 "claim the group's rows; give the group another name."

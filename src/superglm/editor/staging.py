@@ -43,6 +43,7 @@ from superglm.features._spline_ranges import (
     UndeterminedRangeError,
     UndeterminedStretchError,
 )
+from superglm.features.ordered_categorical import GroupNamedAsSpecialError
 
 if TYPE_CHECKING:
     from superglm.editor.session import EditorSession
@@ -78,9 +79,14 @@ _SHAPE_SENTENCES = (
     (NarrowGapError, _NARROW_REFUSED),
     (RangeError, _SHAPE_REFUSED),
 )
+_COLLAPSE_NAMED_AS_SPECIAL = (
+    "That group name is how a free level of this term is spelled, so the free level "
+    "would claim the group's rows. Give the group another name."
+)
 _COLLAPSE_SENTENCES = (
     (UndeterminedRangeError, _COLLAPSE_IN_RANGE_REFUSED),
     (UndeterminedStretchError, _COLLAPSE_STRETCH_REFUSED),
+    (GroupNamedAsSpecialError, _COLLAPSE_NAMED_AS_SPECIAL),
 )
 _STAGED_SENTENCES = {"collapse": _COLLAPSE_SENTENCES, "shape": _SHAPE_SENTENCES}
 # A waiting change's operation, and the operation its step carries when a
@@ -102,11 +108,11 @@ def _refit_label(count: int) -> str:
 
 
 def _range_refusal(exc: BaseException, sentences) -> str | None:
-    """The sentence for the first range refusal on ``exc``'s cause chain, or None.
+    """The sentence for the first refusal ``sentences`` names on ``exc``'s cause chain, or None.
 
     The fit re-raises a term's build refusal to name the term, so the
     library's own error can sit one or more causes down. Anything else, a
-    solver failure say, is not a range refusal and keeps its own error.
+    solver failure say, is not one of these refusals and keeps its own error.
     """
     return next(filter(None, (_sentence_for(cause, sentences) for cause in _causes(exc))), None)
 

@@ -27,6 +27,7 @@ from superglm import (
 )
 from superglm import structure as structure_module
 from superglm.editor import EditorSession
+from superglm.editor.errors import EditorValueError
 from superglm.features._spline_ranges import RangeError
 from superglm.structure import FORMAT, FeatureStructure, StructureError
 
@@ -986,9 +987,15 @@ def test_a_group_of_ordered_levels_named_as_a_special_is_refused():
     # Structure.apply refuses in its own sentence and reports the library's as the cause.
     assert str(applied.value.__cause__) == refusal
     session = EditorSession.from_model(declared().fit(X, y), train_data=(X, y))
-    with pytest.raises(ValueError, match=re.escape(refusal)):
+    # The editor refuses the name when it is staged, in a sentence of its own
+    # (an EditorClientError, so the browser shows it, not an internal error).
+    with pytest.raises(EditorValueError) as staged:
         session.stage_structural("collapse", "band", {"levels": ["5.0", "6.0"], "group_label": "9"})
-        session.refit_pending(method="fit")
+    assert str(staged.value) == (
+        "That group name is how a free level of this term is spelled, so the free level "
+        "would claim the group's rows. Give the group another name."
+    )
+    assert session.pending == []
 
 
 def test_a_reference_named_like_a_base_policy_is_that_level_after_apply():
