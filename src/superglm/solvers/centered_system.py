@@ -598,10 +598,14 @@ def _raw_rung_system(
     certificate rejected in this build (``column_local_centering``), which
     recentres only the failing columns, each inside its own group.  A build
     reaches that repair only where it used to take the chunked ``O(n p^2)``
-    pass, so every other route is unchanged, and a refusal latches as before
-    unless the repair served the build.  ``recentred`` is the repair's
-    recentred columns (``RecentredColumns``), empty on every other route.
-    Called only with a design free of ``DenseGroupMatrix`` columns.
+    pass, so every other route is unchanged.  The raw-moment rung's refusal
+    latches as before unless the repair served the build from that rung's
+    own moments, which the next build needs again; after a factored-rung
+    rejection it stays latched, which costs nothing, as the factored rung is
+    never latched and forms the moments at every build.  ``recentred`` is
+    the repair's recentred columns (``RecentredColumns``), empty on every
+    other route.  Called only with a design free of ``DenseGroupMatrix``
+    columns.
     """
     rejected = RawMomentRejection()
     packed = packed_centered_gram_rhs(

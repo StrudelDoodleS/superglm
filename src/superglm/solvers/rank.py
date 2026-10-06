@@ -311,8 +311,10 @@ def diagonal_of_square(matrix: NDArray) -> NDArray:
 #
 # A leaf holds ``_TSQR_LEAF_COPIES`` copies of its rows while it is factored
 # (the weighted rows, ``numpy.linalg.qr``'s working copy and its Fortran
-# buffer), so its row count is ``_TSQR_LEAF_BYTES / (3 * 8 * width)``: 4,294
-# rows at width 814.  The leaves, and so the tree, depend only on the row count
+# buffer), so its row count is ``_TSQR_LEAF_BYTES / (3 * 8 * width)``: 4,293
+# rows at width 814.  A leaf has at least ``2 * width`` rows, a floor reached
+# above width 1,322, where it holds ``48 width^2`` bytes, above the budget.
+# The leaves, and so the tree, depend only on the row count
 # and the width -- never on the worker count -- so the factor is bitwise the
 # same however many workers factor the leaves.
 _TSQR_LEAF_BYTES = 80 << 20
@@ -459,9 +461,12 @@ def _tsqr_weighted_factor(
     ``ceil(log2 m)`` merges of ``2n`` rows, so the bound grows with ``L + 2n
     ceil(log2 m)`` rows where the chunked chain's grows with all ``N`` rows
     (Mori, Yamamoto & Zhang, *Japan J. Indust. Appl. Math.* 29:111, 2012,
-    who show the TSQR bound is the smaller).  The certificate reads ``R``
-    only through ``decompose_factor``, which cuts at ``sqrt(eps)`` relative
-    singular value, far above either bound.
+    who show the TSQR bound is the smaller).  That ordering is what is
+    proven, not a margin: at ``N = 678,007`` rows and ``n = 814`` the
+    chain's ``N n u`` is 6.1e-8 and the TSQR's ``(L + 2n ceil(log2 m)) n u``
+    1.6e-9, against ``decompose_factor``'s rank cut at ``sqrt(eps)`` (1.5e-8)
+    relative singular value; observed errors sit near ``sqrt(k) u``.  The
+    factor also feeds ``log_pdet`` and the QR-route solves directly.
     """
     from superglm._blas_threads import pooled_blas_threads
     from superglm._parallel import pool_workers

@@ -19,7 +19,10 @@ from ._group_matrix_kernels import _fused_bincount_2
 # Support rows anchored at a time: bounds the (rows, raw width) transient.
 _SUPPORT_CHUNK_BYTES = 8 << 20
 # Ceiling on the centred support columns the repair holds at once, over every
-# failing column: 128 columns of a 256 x 256 tensor grid.
+# failing column: 128 columns of a 256 x 256 tensor grid.  It bounds the
+# centred arrays only: a categorical or SCOP support's value copy and the own
+# block's mass-weighted temporary take the transient to about three times it,
+# beside one O(n) gather a failing column.
 _MAX_CENTRED_COLUMN_BYTES = 64 << 20
 
 

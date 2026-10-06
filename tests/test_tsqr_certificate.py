@@ -287,7 +287,9 @@ def test_tsqr_holds_at_most_one_leaf_beyond_its_workers(monkeypatch):
     copies plus the tree's ``log2(64) + 1`` triangles and the per-leaf
     weights, under a third of what holding every leaf would take.  The
     workers are slowed (a sleep in each leaf, not a timing assertion) so a
-    producer without backpressure would queue every leaf.
+    producer without backpressure would queue every leaf.  ``tracemalloc``
+    sees NumPy's allocations but not LAPACK's ``malloc``-ed working buffer,
+    so this checks the backpressure, not the whole three-copy working set.
     """
     n, p, leaf, workers = 64 * 512, 16, 512, 4
     X, weights = _near_rank_rows(n, p, seed=3)

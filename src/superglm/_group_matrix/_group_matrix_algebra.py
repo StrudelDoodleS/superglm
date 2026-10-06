@@ -1056,11 +1056,13 @@ def _tensor_channel_workspace_bytes(
     """Bound one block's per-operation workspace: its histogram and stage buffers.
 
     This is not a whole-model/RSS limit.  The grid's cell order
-    (``grid.cell_csr()``, cached on the group matrix for the fit, with the
-    counting-sort fill that builds it) and the weights permuted into that
-    order (kept by the build's cache, one vector per grid tensor) are
-    fit-owned O(n) state, as the groups' own row indexes are, and are not
-    charged: charging them made the admission depend on the row count, so
+    (``grid.cell_csr()``, with the counting-sort fill that builds it) is
+    cached on the group matrix and outlives the fit, about ``8 n`` bytes and
+    the cell pointers a grid tensor, as the groups' own row indexes do; the
+    weights permuted into that order are the build's (its cache keeps one
+    ``n``-vector a grid tensor until the build ends).  Neither is charged,
+    nor bounded by this cap: charging them made the admission depend on the
+    row count, so
     above about 444k rows every 256 x 256 block silently fell from the raw
     band to the dense stage.  The O(n) stage-one gathers
     (``_gather_cell_order``), and the permuted weights of a call without a
