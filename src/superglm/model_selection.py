@@ -304,6 +304,8 @@ def _value_codes(values) -> tuple[NDArray[np.intp], NDArray]:
     (``-0.0`` and ``0.0``, ``1``, ``1.0`` and ``True``), and each type and
     text then takes its own code. Codes follow first appearance, missing
     values are -1, and the second result holds each code's first value.
+    Unequal values that print alike cannot be told apart by their text, so
+    such a column is refused (ValueError), and the result has no fingerprint.
     """
     codes, uniques = pd.factorize(values, sort=False, use_na_sentinel=True)
     if all(type(value) is str for value in uniques):
@@ -313,7 +315,14 @@ def _value_codes(values) -> tuple[NDArray[np.intp], NDArray]:
     keys = [f"{code}:{_value_text(value)}" for code, value in zip(codes[present], kept)]
     split, _ = pd.factorize(np.asarray(keys, dtype=object), sort=False)
     codes[present] = split
-    return codes, kept[np.unique(split, return_index=True)[1]]
+    firsts = kept[np.unique(split, return_index=True)[1]]
+    # Values the model tells apart but that print alike would write one text
+    # for two codes, and a swap of them would leave the fingerprint as it was.
+    if len({_value_text(value) for value in firsts}) < len(firsts):
+        raise ValueError(
+            "Distinct values of this column print alike, so it cannot be fingerprinted."
+        )
+    return codes, firsts
 
 
 def _value_text(value) -> str:

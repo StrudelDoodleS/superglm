@@ -2205,6 +2205,39 @@ class TestDataFingerprint:
             pd.DataFrame({"x": x}), y
         )
 
+    def test_a_column_whose_distinct_values_print_alike_gets_no_fingerprint(self):
+        """Two unequal objects that both print "same": the model fits them as two levels.
+
+        The fingerprint writes each value's type and text, so a swap of the
+        two left it as it was while the fit moved. Such a column has no
+        faithful fingerprint, so the result carries none, and the editor
+        refuses to replay it by name.
+        """
+
+        class Tag:
+            def __init__(self, k):
+                self.k = k
+
+            def __str__(self):
+                return "same"
+
+            def __eq__(self, other):
+                return isinstance(other, Tag) and other.k == self.k
+
+            def __hash__(self):
+                return hash(self.k)
+
+            def __lt__(self, other):
+                return self.k < other.k
+
+        x = np.array([Tag(1), Tag(2), Tag(1), Tag(2)] * 30, dtype=object)
+        y = np.tile([1.0, 3.0, 1.0, 3.0], 30)
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Categorical()})
+
+        result = cross_validate(model, pd.DataFrame({"x": x}), y, cv=SimpleKFold(3))
+
+        assert result.data_fingerprint is None and result.fingerprint_version is None
+
     def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
         self, poisson_data, base_model
     ):
