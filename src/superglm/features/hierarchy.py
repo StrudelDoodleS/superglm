@@ -44,16 +44,21 @@ ColumnReader = Callable[[Hashable], NDArray]
 def normalize_label(value: Any) -> Any:
     """The comparison form of one text label; other values are returned unchanged.
 
-    NFKC folds compatibility characters (full-width letters, ligatures,
-    non-breaking spaces), ``str.casefold`` folds case, and the second NFKC
-    restores the normal form casefolding can break (the Unicode Standard,
-    section 3.13, *Default Caseless Matching*).  ``str.split()`` then strips
+    Two labels compare equal exactly when they are a *compatibility caseless
+    match* (the Unicode Standard, section 3.13, definition D146):
+    ``NFKD(toCasefold(NFKD(toCasefold(NFKD(toCasefold(NFD(X)))))))``, with
+    ``str.casefold`` as ``toCasefold``.  That folds case and compatibility
+    characters (full-width letters, ligatures, no-break spaces).  NFC then
+    recomposes the result for display, which keeps those equalities because
+    every input to it is already decomposed.  ``str.split()`` finally strips
     the ends and collapses every internal whitespace run to one space.
     """
     if not isinstance(value, str):
         return value
-    folded = unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", value).casefold())
-    return " ".join(folded.split())
+    folded = unicodedata.normalize("NFD", value)
+    for _ in range(3):
+        folded = unicodedata.normalize("NFKD", folded.casefold())
+    return " ".join(unicodedata.normalize("NFC", folded).split())
 
 
 def _sorted_values(values) -> list:
