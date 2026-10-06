@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
@@ -200,9 +203,10 @@ _FOLD_VERSION = (
     "no y."
 )
 _FOLD_UNFINGERPRINTED = (
-    "The columns this result's model reads could not be fingerprinted (values that differ "
-    "but print alike, or that cannot be hashed), so these rows cannot be checked against its "
-    "folds; give those values distinct text and run cross_validate again, or pass no y."
+    "The columns this result's model reads could not be fingerprinted (objects whose text is "
+    "not their value, or values that cannot be hashed), so these rows cannot be checked against "
+    "its folds; convert those values to text or numbers and run cross_validate again, or pass "
+    "no y."
 )
 _FOLD_DATA = (
     "These {rows:,} rows are not the ones the folds were drawn on: the columns, dtypes, row "
@@ -323,6 +327,16 @@ def _value_codes(values) -> tuple[NDArray[np.intp], NDArray]:
     codes, uniques = pd.factorize(values, sort=False, use_na_sentinel=True)
     if all(type(value) is str for value in uniques):
         return codes, uniques
+    # Another type's text need not be its value: an object that prints
+    # "same" may read as another number through __float__, in another frame
+    # as well as this one, so only values whose text is their identity are
+    # written.
+    for value in uniques:
+        if not isinstance(value, _TEXT_IS_VALUE):
+            raise ValueError(
+                f"A {type(value).__name__} value in this column has no faithful text, so it "
+                "cannot be fingerprinted."
+            )
     present = codes >= 0
     kept = values[present]
     keys = [f"{code}:{_value_text(value)}" for code, value in zip(codes[present], kept)]
@@ -336,6 +350,25 @@ def _value_codes(values) -> tuple[NDArray[np.intp], NDArray]:
             "Distinct values of this column print alike, so it cannot be fingerprinted."
         )
     return codes, firsts
+
+
+# The value types whose type name and text identify the value.
+_TEXT_IS_VALUE = (
+    str,
+    bytes,
+    bool,
+    int,
+    float,
+    complex,
+    Decimal,
+    Fraction,
+    np.generic,
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    pd.Timestamp,
+    pd.Timedelta,
+)
 
 
 def _value_text(value) -> str:

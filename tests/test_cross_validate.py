@@ -2248,6 +2248,35 @@ class TestDataFingerprint:
         with pytest.raises(ValueError, match=re.escape(_FOLD_UNFINGERPRINTED)):
             result.plot_terms_by_fold(X, y=y)
 
+    def test_a_column_of_objects_whose_text_may_not_be_their_value_is_not_fingerprinted(self):
+        """Every Tag(1) in one frame is a Tag(2) in the other: both print "same", beside "other".
+
+        Within each frame the two printed values are distinct, so nothing
+        collided, but the frames wrote the same codes and text while a term
+        reading the objects' numbers (``__float__``) saw other values. Only
+        values whose text is their identity are fingerprinted.
+        """
+        from superglm.model_selection import _data_fingerprint
+
+        class Tag:
+            def __init__(self, k):
+                self.k = k
+
+            def __str__(self):
+                return "same"
+
+            def __float__(self):
+                return float(self.k)
+
+        y = np.ones(4)
+        one, two = Tag(1), Tag(2)
+        first = pd.DataFrame({"x": np.array([one, "other", one, "other"], dtype=object)})
+        second = pd.DataFrame({"x": np.array([two, "other", two, "other"], dtype=object)})
+
+        for frame in (first, second):
+            with pytest.raises(ValueError, match="cannot be fingerprinted"):
+                _data_fingerprint(frame, y)
+
     def test_fingerprint_reads_no_weights_as_unit_weights_and_sees_row_order(
         self, poisson_data, base_model
     ):

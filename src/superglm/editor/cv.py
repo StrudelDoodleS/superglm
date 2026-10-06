@@ -96,8 +96,9 @@ NO_FINGERPRINT = (
 )
 UNFINGERPRINTED = (
     "Run CV cannot check that these rows are the ones this result's folds were drawn on: the "
-    "columns its model reads could not be fingerprinted (values that differ but print alike, "
-    "or that cannot be hashed). Give those values distinct text and run cross_validate again."
+    "columns its model reads could not be fingerprinted (objects whose text is not their value, "
+    "or values that cannot be hashed). Convert those values to text or numbers and run "
+    "cross_validate again."
 )
 NO_FIT_MODE = (
     "This result was made before cross_validate recorded its fit method, so Run CV fits "

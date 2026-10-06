@@ -532,9 +532,9 @@ Run CV is disabled, with the reason on hover, when it cannot use the rows:
   `y`, `sample_weight` and `offset` you gave `cross_validate`.
 - The result's data fingerprint was made by an earlier development build of superglm, or by
   another version, so its rows cannot be checked. Run `cross_validate` again.
-- A column the model reads could not be fingerprinted: its values cannot be hashed, or
-  values that differ print alike. Give those values distinct text and run `cross_validate`
-  again.
+- A column the model reads could not be fingerprinted: it holds objects whose text is not
+  their value, or values that cannot be hashed. Convert those values to text or numbers and
+  run `cross_validate` again.
 
 A result from an older superglm version records no fingerprint of its data, so only the row count
 is checked. An older result records no fit method either, so Run CV fits each fold the way the current
