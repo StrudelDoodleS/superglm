@@ -20,6 +20,7 @@ from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
+    DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
 )
@@ -443,3 +444,51 @@ def test_an_admitted_column_whose_projection_cancels_meets_a_recentred_one_as_it
     fitted = _gamma(p + 2) * (abs(fit.intercept) + np.abs(dm.toarray()) @ np.abs(fit.beta))
     assert np.sqrt(fit.deviance) <= np.sqrt(2 * scaled**2 / lam) + np.linalg.norm(fitted)
     assert abs(fit.beta[k]) <= 2 * scaled / (lam * D[k])
+
+
+@pytest.mark.parametrize("carried", [True, False])
+def test_the_repair_projects_only_the_supports_the_rejected_build_did_not(monkeypatch, carried):
+    """No projection the rejected raw build formed is formed again; any other, one at a time.
+
+    The rejected build reads each tensor through its projected joint support
+    (its cross with the indicator), and the rejection carries those
+    projections.  The raw Gram never projects a spline-by-category level, so
+    the repair projects that one itself.  Three builds, one projection each.
+    Mutation check: a rejection that carries none (``carried=False``) costs
+    three a build, the two tensors' as well.
+    """
+    from superglm._group_matrix import _column_local_centering as local
+
+    rng = np.random.default_rng(20261010)
+    n = 20_000
+    first, second = (_tensor(rng, n, (50, 50), (3, 3), 6, tensor_id) for tensor_id in (1, 2))
+    level = DiscretizedSplineCategoricalGroupMatrix(
+        rng.uniform(size=(15, 5)),
+        rng.normal(size=(5, 4)),
+        rng.integers(0, 15, size=n),
+        np.flatnonzero(rng.uniform(size=n) < 0.3),
+    )
+    heavy = CategoricalGroupMatrix(np.where(rng.uniform(size=n) < 0.55, 0, -1), 1)
+    groups = [first, heavy, second, level]
+    dm = DesignMatrix(groups, n, sum(group.shape[1] for group in groups))
+    projections = []
+    monkeypatch.setattr(local, "_project", _counted(projections, local._project))
+    if not carried:
+        record = centered.RawMomentRejection.record
+        monkeypatch.setattr(
+            centered.RawMomentRejection,
+            "record",
+            lambda self, source, **moments: record(self, source, **{**moments, "supports": None}),
+        )
+    state, profile, builds = TabmatCenteringState(), {}, 3
+    for _ in range(builds):
+        build_centered_system(
+            dm=dm,
+            W=rng.uniform(0.5, 2.0, n),
+            z_off=rng.normal(size=n),
+            penalty=np.zeros((dm.p, dm.p)),
+            tabmat_state=state,
+            profile=profile,
+        )
+    assert profile["centered_column_local_hits"] == builds
+    assert len(projections) == builds * (1 if carried else 3)

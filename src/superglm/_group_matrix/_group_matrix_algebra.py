@@ -517,6 +517,11 @@ class _BlockWeightCache:
             _profile_count(self._profile, "block_solver_support_reuses")
         return support
 
+    @property
+    def supports(self) -> dict[DiscretizedSSPGroupMatrix, NDArray]:
+        """Every projection ``solver_support`` formed in this assembly, keyed by its group."""
+        return self._supports
+
     def cell_weights(self, order: NDArray, W: NDArray) -> NDArray:
         """``W`` in a grid tensor's cell order, permuted once per grid per build.
 

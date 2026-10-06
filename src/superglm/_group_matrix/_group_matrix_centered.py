@@ -10,6 +10,7 @@ import numpy as np
 import tabmat  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from ._group_matrix_algebra import _BlockWeightCache
 from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
     _fused_bincount_2,
@@ -61,6 +62,10 @@ class RawMomentRejection:
     (``try_raw_moment_centering``).  The factored rung and the raw-moment
     rung form the same moments by the same execution-plan call, so a
     factored rejection decides the raw-moment rung of the same build.
+    ``supports`` maps each discretized SSP group those two rungs' build
+    projected to that projection, ``B_unique @ R_inv``
+    (``_BlockWeightCache.supports``), which the repair reads instead of
+    projecting again; ``None`` from the pattern rung.
     """
 
     source: str | None = None
@@ -69,11 +74,15 @@ class RawMomentRejection:
     raw_rhs: NDArray | None = None
     weighted_z: NDArray | None = None
     sum_weighted_z: float | None = None
+    supports: dict | None = None
 
-    def record(self, source, *, raw_gram, xtw, raw_rhs, weighted_z, sum_weighted_z=None) -> None:
+    def record(
+        self, source, *, raw_gram, xtw, raw_rhs, weighted_z, sum_weighted_z=None, supports=None
+    ) -> None:
         self.source = source
         self.raw_gram, self.xtw, self.raw_rhs = raw_gram, xtw, raw_rhs
         self.weighted_z, self.sum_weighted_z = weighted_z, sum_weighted_z
+        self.supports = supports
 
 
 class _TensorGridCache:
@@ -132,13 +141,13 @@ def _certify_raw_centering(
 
 
 def _certify_or_record(
-    rejected: RawMomentRejection | None, source: str, **moments
+    rejected: RawMomentRejection | None, source: str, supports=None, **moments
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """``_certify_raw_centering(**moments)``; a rejection hands the moments to ``rejected``."""
     certified = _certify_raw_centering(**moments)
     if certified is None and rejected is not None:
         moments.pop("sum_w")
-        rejected.record(source, **moments)
+        rejected.record(source, supports=supports, **moments)
     return certified
 
 
@@ -308,12 +317,14 @@ def try_raw_moment_centering(
     # Raw moments can overflow on ill-scaled designs.  The certificate below
     # rejects non-finite intermediates, but the accumulation itself must not
     # raise under a caller that has promoted floating-point warnings to errors.
+    cache = _BlockWeightCache()
     try:
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             moments = dm.execution_plan._moments_prevalidated(
                 W,
                 rhs=(weighted_z,),
                 include_xtw=True,
+                _cache=cache,
             )
     except FloatingPointError:
         return None
@@ -322,6 +333,7 @@ def try_raw_moment_centering(
     return _certify_or_record(
         rejected,
         "raw_moment",
+        supports=cache.supports,
         raw_gram=moments.gram,
         xtw=moments.xtw,
         raw_rhs=moments.xt_rhs[0],
@@ -353,16 +365,19 @@ def _try_factored_tensor_centering(
     if not np.isfinite(sum_weighted_z):
         return None
 
+    cache = _BlockWeightCache()
     moments = dm.execution_plan._moments_prevalidated(
         W,
         rhs=(weighted_z,),
         include_xtw=True,
+        _cache=cache,
     )
     if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
         raise RuntimeError("execution plan did not return X'W")
     return _certify_or_record(
         rejected,
         "factored",
+        supports=cache.supports,
         raw_gram=moments.gram,
         xtw=moments.xtw,
         raw_rhs=moments.xt_rhs[0],
