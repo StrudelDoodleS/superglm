@@ -407,6 +407,55 @@ def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(monk
     assert parts == {104: [1, 1, 1, 4, 1, 1, 1], 103: [1] * 7}
 
 
+def test_blocks_split_at_once_share_one_memory_budget(monkeypatch):
+    """Each split adds one histogram, and every split block's parts can run at once.
+
+    Two pairs of 40 small units in 86, each above the eight-worker bound of
+    10.75, each adding 100 bytes when split.  A budget of eight one-byte
+    tasks and one split splits only the first pair in LPT order (ties in
+    serial order); one that covers both splits both.  Checked one split at a
+    time, both split under the smaller budget and held 200 bytes against
+    its 100.
+    """
+
+    def tasks() -> list[BlockTask]:
+        small = queue._TINY_COST / 4
+        costs = (1, 40, 1, 40, 1, 1, 1, 1)
+        return [
+            BlockTask(
+                index,
+                cost * small,
+                1,
+                lambda cache, profile: None,
+                lambda value: None,
+                split_bytes=100 if cost == 40 else 0,
+            )
+            for index, cost in enumerate(costs)
+        ]
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 8)
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    parts = {}
+    for budget in (8 * 1 + 100, 8 * 1 + 199, 8 * 1 + 200):
+        planned = tasks()
+        with block_queue_config(min_cost=0), parallel_config(max_memory=budget):
+            queue.run_block_tasks(planned, Cache(), None)
+        parts[budget] = [t.parts for t in planned]
+    # ceil(40 * 8 / 86) = 4 parts a split block.
+    assert parts == {
+        108: [1, 4, 1, 1, 1, 1, 1, 1],
+        207: [1, 4, 1, 1, 1, 1, 1, 1],
+        208: [1, 4, 1, 4, 1, 1, 1, 1],
+    }
+
+
 def test_estimator_threads_never_change_the_fit(monkeypatch):
     """``n_jobs`` and ``max_memory`` are constructor intent, applied inside the fit only."""
     for bad in (0, -1, True, 1.5, "many"):

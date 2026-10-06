@@ -16,8 +16,9 @@ blocks "in order of decreasing computational cost".  This module does that:
   workers`` runs its row stage in parts (``_cell_hist_raw_kron_parts``):
   runs of grid cells, whose rows sum into disjoint rows of the histogram, so
   the split block is bitwise the whole one.  The parts hold one more
-  histogram, so a block splits only while the budget also covers that
-  (``split_bytes``).  Other blocks always run whole.
+  histogram, so blocks split, largest first, only while the budget also
+  covers every split block's extra histogram (``split_bytes``) at once.
+  Other blocks always run whole.
 - **Workers.**  ``_parallel.pool_workers``: ``n_jobs`` capped by the task
   count and by ``max_memory`` over the largest task's working set.  One
   parallelism level: BLAS runs on one thread for the whole assembly
@@ -329,18 +330,19 @@ def run_block_tasks(
     else:
         workers = pool_workers(len(units), max(task.nbytes for task in tasks))
 
+    # Every split block's parts can run at once, each block holding one more
+    # histogram, so the splits share what the workers' largest tasks leave of
+    # the budget, the largest blocks first.
     largest = max((task.nbytes for task in tasks), default=0)
-    for task in tasks:
+    headroom = resolve_max_memory() - workers * largest if workers > 1 else 0
+    for task in sorted(tasks, key=lambda task: (-task.cost, task.index)):
         if not task.split_bytes:
             continue
         if override.split is not None:
             task.parts = max(1, int(override.split))
-        elif (
-            workers > 1
-            and task.cost * workers > total
-            and workers * largest + task.split_bytes <= resolve_max_memory()
-        ):
+        elif workers > 1 and task.cost * workers > total and task.split_bytes <= headroom:
             task.parts = min(workers, math.ceil(task.cost * workers / total))
+            headroom -= task.split_bytes
 
     with pooled_blas_threads():
         if workers == 1:
