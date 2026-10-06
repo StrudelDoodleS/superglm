@@ -2895,24 +2895,27 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         self._run_gate(monkeypatch, self._stub(self.SHORT_RUN), captured=captured)
         assert captured.get("record_diagnostics", False) is False
 
-    def test_a_genuinely_non_converging_fit_still_raises(self, monkeypatch):
-        """A real SCOP fit that never settles is reported as a failure.
+    def test_a_genuinely_non_converging_fit_is_published_unconverged(self, monkeypatch):
+        """A real SCOP fit that never settles is reported as not converged.
 
         This quasi-separated Poisson exhausts all its PIRLS iterations with
         zero halvings and zero rejections, its deviance still moving by ~1e-3
-        relative per iteration.
+        relative per iteration, at the cold bootstrap and again at its
+        Hessian-scaled retry. Neither is accepted as a mode; the retry's fit
+        is published with ``converged=False`` (owner decision 3, 2026-09-30:
+        disclose, never refuse; 37f73863 raised here).
 
-        The message alone cannot pin that. ``did not converge to a coefficient
-        mode`` is raised for two distinct reasons: the inner fit not
-        converging, and a converged mode failing latent certification --
-        ``_fit_scop_reml_mode`` returns ``None`` for both. So we also pin
-        *which* one fired. A non-converged result returns at ``require_converged
+        The outcome alone cannot pin which failure fired: an inner fit that
+        does not converge, or a converged mode that fails latent
+        certification. A non-converged result returns at ``require_converged
         and not result.converged`` before any certification is computed, so
-        ``_scop_mode_newton_relative`` is never reached on this path; a
-        certification failure would have to call it. Zero calls therefore
+        both bootstrap attempts leave ``_scop_mode_newton_relative`` uncalled
+        and only the published last resort computes one. One call therefore
         distinguishes the two, and keeps a future change that makes this fit
         converge from leaving the test silently green on the other failure.
         """
+        from superglm import ConvergenceWarning
+
         certifications = []
         original = scop_efs_module._scop_mode_newton_relative
 
@@ -2934,9 +2937,13 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
                 "x": PSpline(n_knots=12, penalty="ssp", constraint=Constraint.fit.increasing)
             },
         )
-        with pytest.raises(RuntimeError, match="did not converge to a coefficient mode"):
+        with pytest.warns(ConvergenceWarning, match="max_pirls_iter"):
             model.fit_reml(frame, response, max_reml_iter=20)
-        assert certifications == []
+        diagnostics = model.reml_diagnostics()
+        assert not diagnostics["converged"]
+        assert diagnostics["termination_reason"] == "bootstrap_uncertified"
+        assert model._reml_result.terminal_refit_termination == "max_iter"
+        assert len(certifications) == 1
 
     def test_a_failed_certification_gets_a_cold_final_attempt(self, monkeypatch):
         """The final retry rung drops the warm start, not just the tolerance.
@@ -3107,6 +3114,127 @@ class TestCertificationRetryStart:
         rung_one = [inner for rung, _, inner in retries if rung == 1]
         assert sum(rung_one) <= 2 * len(rung_one)
         assert model.reml_diagnostics()["converged"]
+
+    def test_a_newton_step_past_the_exp_clip_keeps_the_plain_warm_start(self):
+        """A polished start the forward map cannot represent is refused.
+
+        The forward map clips its exponent at 500, so a latent step beyond it
+        lands on a different point whose linear predictor sits at the link's
+        overflow guard. On the freMTPL2 Tweedie book the cold bootstrap's
+        certificate asked for a latent step of 8.0e4; started there, the retry
+        could not take a single inner step and reported separation. Mutation
+        check: 37f73863 returned that start.
+        """
+        from superglm.solvers.scop import build_scop_solver_reparam
+
+        reparam = build_scop_solver_reparam(6, kind="increasing")
+        state = {"group_sl": slice(1, 6), "reparam": reparam, "beta_eff": np.full(5, -11.0)}
+        mode = SimpleNamespace(result=SimpleNamespace(intercept=1.0), scop_states={0: state})
+        latent = np.concatenate(([0.2], state["beta_eff"]))
+
+        def correction(step: float):
+            slope = np.zeros(6)
+            slope[1] = step
+            return scop_efs_module._SCOPModeNewtonCorrection(
+                latent_beta=latent, slope=slope, intercept=0.0, relative=1.0
+            )
+
+        start = scop_efs_module._newton_polished_warm_start(mode, correction(510.0))
+        assert start is not None and start[2][0]["beta_eff"][0] == 499.0
+        assert scop_efs_module._newton_polished_warm_start(mode, correction(512.0)) is None
+        assert scop_efs_module._newton_polished_warm_start(mode, correction(8.0e4)) is None
+
+
+def _tweedie_pure_premium_fixture(n: int, seed: int):
+    """A small Tweedie (p=1.5) pure-premium book shaped like freMTPL2.
+
+    About 95% of rows have no claim; BonusMalus holds 60% of the rows at 50
+    with a risk effect flat to 70, under an increasing constraint; and the
+    DrivAge x VehAge tensor has sparse cells with no claims. At the cold
+    bootstrap's 1e-4 every smooth is almost unpenalized and the inner fit
+    never reaches a certified mode.
+    """
+    from superglm import Categorical, Spline, Tweedie
+
+    rng = np.random.default_rng(seed)
+    age = np.clip(18 + rng.gamma(4.0, 6.0, n), 18, 95)
+    veh = np.clip(rng.exponential(6.0, n), 0, 30).round()
+    bm = np.where(
+        rng.uniform(size=n) < 0.6, 50.0, np.clip(50 + rng.exponential(18.0, n), 50, 150).round()
+    )
+    dens = np.clip(rng.normal(6.0, 2.0, n), 0.0, 10.5)
+    shares = np.array([20, 15, 12, 10, 10, 9, 8, 7, 5, 4]) / 100
+    region = rng.choice(list("ABCDEFGHIJ"), size=n, p=shares)
+    exposure = rng.uniform(0.05, 1.0, n)
+    region_effect = dict(zip("ABCDEFGHIJ", rng.normal(0, 0.15, 10), strict=True))
+    eta = (
+        np.log(0.1)
+        + np.where(bm <= 70, 0.0, 0.02 * (bm - 70))
+        + 0.6 * np.exp(-(age - 18) / 6)
+        + 0.2 * ((age - 50) / 30) ** 2
+        - 0.03 * veh
+        + 0.05 * (dens - 6)
+        + np.array([region_effect[r] for r in region])
+    )
+    counts = rng.poisson(exposure * np.exp(eta))
+    amount = np.array([rng.gamma(0.8, 1500.0 / 0.8, c).sum() if c else 0.0 for c in counts])
+    frame = pd.DataFrame(
+        {"DrivAge": age, "VehAge": veh, "BonusMalus": bm, "LogDensity": dens, "Region": region}
+    )
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "DrivAge": Spline(kind="ps", k=12),
+            "VehAge": Spline(kind="ps", k=10),
+            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "LogDensity": Spline(kind="ps", k=8),
+            "Region": Categorical(base="most_exposed"),
+        },
+        interactions=[("DrivAge", "VehAge")],
+    )
+    return model, frame, np.minimum(amount, 50000.0) / exposure, exposure
+
+
+class TestColdBootstrapStart:
+    """A bootstrap with no certified mode at the cold seeds restarts where it can.
+
+    Wood, Pya and Saefken (2016, section 3.1) start the smoothing-parameter
+    search where every smooth's effective degrees of freedom lie away from
+    their extremes. The cold seed of 1e-4 puts them at their maximum, and an
+    exp-reparameterised SCOP block can then stall short of its mode: the
+    freMTPL2 Tweedie book stopped on the inner step test at a point whose
+    certificate asked for a latent step of 8.0e4. The retry starts at the
+    Hessian-scaled values of ``_hessian_scaled_bootstrap_lambdas``.
+    """
+
+    def test_a_failed_cold_bootstrap_restarts_at_hessian_scaled_lambdas(self, monkeypatch):
+        """The fixture's cold bootstrap fails; the retry certifies and the search converges.
+
+        Mutation check: 37f73863 raised ``ObservedModeNotConvergedError`` ("SCOP
+        REML bootstrap did not converge to a coefficient mode") on this fit.
+        """
+        model, frame, y, exposure = _tweedie_pure_premium_fixture(n=10_000, seed=3)
+        boots: list[tuple[dict[str, float], bool]] = []
+        real = scop_efs_module._fit_scop_reml_mode
+
+        def recording(context, lambdas, **kwargs):
+            mode = real(context, lambdas, **kwargs)
+            if kwargs.get("phase") == "bootstrap" and kwargs.get("_certification_retry", 0) == 0:
+                boots.append((dict(lambdas), mode is not None))
+            return mode
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", recording)
+        model.fit_reml(frame, y, sample_weight=exposure, max_reml_iter=200)
+
+        assert [certified for _, certified in boots] == [False, True]
+        cold, scaled = boots[0][0], boots[1][0]
+        assert set(cold.values()) == {1e-4}
+        assert all(scaled[name] > cold[name] for name in cold)
+        diagnostics = model.reml_diagnostics()
+        assert diagnostics["converged"]
+        assert diagnostics["termination_reason"] == "lambda_tolerance"
 
 
 class TestSCOPAitkenTail:
@@ -4532,8 +4660,9 @@ class TestCandidateStepBackoff:
     behind it: four call sites raised on a rejection the line search
     survives. The backoff applies the line search's own trial formula --
     damped geometric steps in log-lambda -- between the certified mode the
-    step was taken from and the proposal that failed. Sites with no
-    certified predecessor (bootstrap, fixed-lambda) keep raising.
+    step was taken from and the proposal that failed. The fixed-lambda
+    site, with no certified predecessor, keeps raising; a bootstrap with none
+    is published unconverged (``TestColdBootstrapStart``).
     """
 
     @staticmethod
@@ -4811,19 +4940,28 @@ class TestCandidateStepBackoff:
         assert accepted is True
         assert fits == []
 
-    def test_a_failed_bootstrap_has_nothing_to_back_off_to(self, monkeypatch):
-        """The recoverability principle's boundary: no predecessor, no rescue.
+    def test_a_failed_bootstrap_is_published_unconverged(self, monkeypatch):
+        """No certified mode at either bootstrap start: disclosed, not refused.
 
-        Rejecting every certification kills the bootstrap after its ladder.
-        There is no earlier certified mode to damp toward, so the loud
-        error is the designed outcome, unchanged by the candidate backoff.
+        Rejecting every certification fails the cold bootstrap and its
+        Hessian-scaled retry, and leaves the search no mode to start from or
+        damp toward. The fit at the retry's start is published with
+        ``converged=False`` and a ConvergenceWarning that names the stage and
+        what to change (owner decision 3, 2026-09-30). Mutation check:
+        37f73863 raised "SCOP REML bootstrap did not converge to a coefficient
+        mode".
         """
+        from superglm import ConvergenceWarning
+
         monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", lambda mode: 1.0)
         model, frame, y = self._model()
-        with pytest.raises(
-            RuntimeError, match="SCOP REML bootstrap did not converge to a coefficient mode"
-        ):
+        with pytest.warns(ConvergenceWarning, match="starting smoothing parameters"):
             model.fit_reml(frame, y, max_reml_iter=5)
+        diagnostics = model.reml_diagnostics()
+        assert not diagnostics["converged"]
+        assert diagnostics["termination_reason"] == "bootstrap_uncertified"
+        assert diagnostics["n_reml_iter"] == 0
+        assert np.all(np.isfinite(model.predict(frame)))
 
     def test_a_failed_fixed_lambda_fit_has_nothing_to_back_off_to(self, monkeypatch):
         """Fixed-lambda fits have no certified predecessor either.

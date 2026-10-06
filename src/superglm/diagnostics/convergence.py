@@ -34,6 +34,11 @@ _REML_REASON_TEXT = {
     "max_reml_iter": "it reached the max_reml_iter limit",
     "line_search_failed": "no smoothing step improved the REML objective",
     "line_search_stalled": "no smoothing step improved the REML objective",
+    "bootstrap_uncertified": (
+        "no coefficient fit at its starting smoothing parameters, nor at the start scaled to "
+        "the data that a cold start is retried at, reached a mode that passes the convergence "
+        "certificate"
+    ),
 }
 
 # Termination reasons of a smoothing search that met its convergence test. A
@@ -103,6 +108,18 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
             + (" and a larger max_pirls_iter" if refit_reason == "max_iter" else "")
             + ", passing lambda2_init=model.reml_diagnostics()['lambdas'] to continue "
             "from this fit."
+        )
+    elif reason == "bootstrap_uncertified":
+        states = getattr(reml_result, "scop_states", None) or {}
+        names = sorted({str(state.get("group_name")) for state in states.values()})
+        terms = f" ({', '.join(repr(name) for name in names)})" if names else ""
+        message += (
+            f" The inner fit of the shape-constrained terms{terms} did not settle, so the "
+            "smoothing parameters are the starting ones in model.reml_diagnostics()['lambdas']. "
+            "Refit with lambda2_init naming larger starting values for the smooth terms"
+            + (", or with a larger max_pirls_iter" if refit_reason == "max_iter" else "")
+            + ", or with a smaller basis (k) for the shape-constrained terms and the terms "
+            "they interact with."
         )
     elif refit_reason == "max_iter":
         message += " Refit with a larger max_pirls_iter to let the final fit finish."

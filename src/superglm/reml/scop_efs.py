@@ -68,7 +68,7 @@ from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram_if_authoritative,
 )
-from superglm.solvers.working_rows import fisher_working_weights
+from superglm.solvers.working_rows import coefficient_initial_intercept, fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
 # These private thresholds intentionally mix units: absolute lambda scale for the
@@ -1118,6 +1118,15 @@ def _newton_polished_warm_start(
     afresh: this changes only where it starts, never what it must satisfy.
     Returns None when the step is not finite, so the caller keeps the plain
     warm start.
+
+    A step that carries a latent coordinate past the point where the forward
+    map saturates its exponent (``solvers/scop.py`` clips it at 500) counts
+    as not finite too: ``exp`` overflows there, the clipped point is not the
+    Newton point at all, and its linear predictor sits at the link's overflow
+    guard.  Such a step comes from a mode whose latent curvature is nearly
+    singular, so the Newton step is not to be trusted (measured on the
+    freMTPL2 Tweedie book at the cold 1e-4 bootstrap: a latent step of 8.0e4,
+    whose start the inner fit could not leave).
     """
     polished = correction.latent_beta + correction.slope
     intercept = float(mode.result.intercept) + correction.intercept
@@ -1128,7 +1137,13 @@ def _newton_polished_warm_start(
     for group_index, state in mode.scop_states.items():
         group_slice = state["group_sl"]
         beta_eff = polished[group_slice].copy()
-        beta[group_slice] = state["reparam"].forward(beta_eff)
+        mapped = state["reparam"].forward(beta_eff)
+        free_dim = getattr(state["reparam"], "free_dim", None)
+        if free_dim is not None:
+            with np.errstate(over="ignore"):
+                if np.any(np.exp(beta_eff[free_dim:]) > mapped[free_dim:]):
+                    return None
+        beta[group_slice] = mapped
         states[group_index] = {**state, "beta_eff": beta_eff}
     if not np.all(np.isfinite(beta)):
         return None
@@ -1198,8 +1213,14 @@ def _fit_scop_reml_mode(
     trial_alpha: float | None = None,
     require_converged: bool,
     _certification_retry: int = 0,
+    _publish_uncertified: bool = False,
 ) -> _SCOPREMLMode | None:
-    """Fit and evaluate one mode, optionally rejecting a failed inner solve."""
+    """Fit and evaluate one mode, optionally rejecting a failed inner solve.
+
+    ``_publish_uncertified`` (with ``require_converged=False``) returns a mode
+    that fails the certificate instead of raising: the bootstrap's last resort
+    publishes it as not converged (``optimize_scop_efs_reml``).
+    """
     debug_context: dict[str, Any] = {
         "phase": phase,
         "reml_iteration": reml_iteration,
@@ -1436,6 +1457,8 @@ def _fit_scop_reml_mode(
             )
         if require_converged:
             return None
+        if _publish_uncertified:
+            return mode
         raise _scop_certification_failure(
             mode_newton_relative, mode_tolerance, mode_score.relative_max
         )
@@ -2419,6 +2442,87 @@ def _scop_flat_components(mode: _SCOPREMLMode, names: set[str], phi: float) -> l
     return sorted(flat)
 
 
+def _hessian_scaled_bootstrap_lambdas(
+    context: _SCOPREMLFitContext,
+    boot_lambdas: Mapping[str, float],
+    cold_names: set[str],
+) -> dict[str, float]:
+    """Starting smoothing parameters scaled to the data Hessian, for the bootstrap's retry.
+
+    Wood, Pya and Saefken (2016, JASA 111(516), section 3.1, outer step 1)
+    start the smoothing-parameter search where every smooth's effective
+    degrees of freedom lie away from their extremes; mgcv's documentation
+    (``initial.sp``) states the same goal per penalized coefficient, reached
+    by a crude e.d.f. approximation.  The cold seed of 1e-4 puts every e.d.f.
+    at its maximum instead.  Under an exp-reparameterised SCOP block that
+    start can stall: the QP initialiser maps a zero increment to the latent
+    floor log(1e-8), where the map's Jacobian is 1e-8, and an almost
+    unpenalized latent Newton step is then far too long for the inner line
+    search to shorten, so the inner fit stops on its coefficient-step test at
+    a point the mode certificate refuses (the capped freMTPL2 Tweedie book),
+    or it creeps until its iteration budget runs out (the uncapped one).
+
+    The crude approximation here is the diagonal one, ``edf_i = A_ii / (A_ii
+    + lambda_j S_j,ii)``, with ``A`` the intercept-centred Fisher Gram at the
+    cold start (every coefficient zero, the intercept at the family's
+    initial mean).  ``lambda_j = sum A_ii / sum S_j,ii`` over the
+    coefficients ``S_j`` penalizes puts the typical one at 1/2.  A SCOP
+    block's ``A`` is its latent Hessian at unit increments (latent zero,
+    Jacobian one).  Only ``cold_names`` move; a component whose ratio is not
+    a positive finite number keeps its seed.
+    """
+    groups = context.groups
+    dm = context.dm
+    weights = np.asarray(context.sample_weight, dtype=np.float64)
+    intercept = coefficient_initial_intercept(
+        distribution=context.distribution,
+        link=context.link,
+        y=context.y,
+        sample_weight=weights,
+    )
+    eta = stabilize_eta(intercept + context.offset_arr, context.link)
+    mu = clip_mu(context.link.inverse(eta), context.distribution)
+    fisher = fisher_working_weights(
+        distribution=context.distribution,
+        link=context.link,
+        mu=mu,
+        eta=eta,
+        sample_weight=weights,
+    )
+    sum_w = float(np.sum(fisher))
+    gram_diag = np.zeros(dm.p, dtype=np.float64)
+    unit = {name: 0.0 for name in boot_lambdas}
+    penalty_diags: dict[str, NDArray] = {}
+    for name in cold_names:
+        penalty_diags[name] = np.diag(
+            build_penalty_matrix(
+                list(dm.group_matrices),
+                groups,
+                {**unit, name: 1.0},
+                dm.p,
+                reml_penalties=context.reml_penalties,
+            )
+        )
+    touched = np.zeros(dm.p, dtype=bool)
+    for diag in penalty_diags.values():
+        touched |= diag > 0.0
+    for gm, group in zip(dm.group_matrices, groups, strict=True):
+        if group.end <= group.start or not np.any(touched[group.sl]):
+            continue
+        column_mean = np.asarray(gm.rmatvec(fisher), dtype=np.float64) / sum_w
+        gram_diag[group.sl] = np.maximum(
+            np.diag(np.asarray(gm.gram(fisher), dtype=np.float64)) - sum_w * column_mean**2,
+            0.0,
+        )
+    scaled = dict(boot_lambdas)
+    for name, diag in penalty_diags.items():
+        support = diag > 0.0
+        ratio = float(np.sum(gram_diag[support]) / np.sum(diag[support])) if support.any() else 0.0
+        if np.isfinite(ratio) and ratio > 0.0:
+            scaled[name] = float(np.clip(ratio, 1e-6, 1e10))
+    return scaled
+
+
 def optimize_scop_efs_reml(
     dm: DesignMatrix,
     distribution: Any,
@@ -2477,6 +2581,12 @@ def optimize_scop_efs_reml(
     (``"efs_fisher"`` in ``scop_outer_steps``), and so does an observed
     iterate where those terms cannot be formed (``"efs_uncorrected"``).
     ``_outer_step="efs"`` runs EFS throughout.
+
+    The bootstrap is fitted at 1e-4 for every cold component. When that fit
+    has no certified mode, it is fitted again at Hessian-scaled starting
+    values (``_hessian_scaled_bootstrap_lambdas``); when that fails too, the
+    fit at those values is returned unconverged with termination reason
+    ``"bootstrap_uncertified"``, and the search never starts.
 
     Parameters
     ----------
@@ -2594,9 +2704,63 @@ def optimize_scop_efs_reml(
         reml_iteration=0,
         require_converged=True,
     )
+    cold_names = set(estimated_names) - warm_names
+    if boot_mode is None and cold_names:
+        # No certified mode at the cold seeds: start where every smooth's
+        # e.d.f. lies away from its extremes instead (Wood, Pya and Saefken
+        # 2016, section 3.1), as ``_hessian_scaled_bootstrap_lambdas`` says.
+        # A fit whose seeded bootstrap certifies never reaches this.
+        boot_lambdas = _hessian_scaled_bootstrap_lambdas(fit_context, boot_lambdas, cold_names)
+        logger.info(
+            "SCOP REML bootstrap: no certified mode at the cold seeds; retrying at "
+            "Hessian-scaled starting lambdas %s",
+            {name: f"{boot_lambdas[name]:.4g}" for name in sorted(cold_names)},
+        )
+        boot_mode = _fit_scop_reml_mode(
+            fit_context,
+            boot_lambdas,
+            beta_init=None,
+            intercept_init=None,
+            scop_state_init=None,
+            phase="bootstrap",
+            reml_iteration=0,
+            require_converged=True,
+        )
     if boot_mode is None:
-        raise ObservedModeNotConvergedError(
-            "SCOP REML bootstrap did not converge to a coefficient mode"
+        # Neither start reached a certified mode, so the search has nowhere to
+        # begin. The inner fit at the last start is published as not
+        # converged rather than refused (owner decision 3, 2026-09-30); the
+        # ``"bootstrap_uncertified"`` reason names this stage to the user.
+        uncertified = _fit_scop_reml_mode(
+            fit_context,
+            boot_lambdas,
+            beta_init=None,
+            intercept_init=None,
+            scop_state_init=None,
+            phase="bootstrap",
+            reml_iteration=0,
+            require_converged=False,
+            _certification_retry=3,
+            _publish_uncertified=True,
+        )
+        return REMLResult(
+            lambdas=dict(boot_lambdas),
+            pirls_result=_finalize_scop_reml_mode(fit_context, uncertified),
+            n_reml_iter=0,
+            converged=False,
+            lambda_history=[dict(boot_lambdas)],
+            reml_penalties=uncertified.penalty_components,
+            scop_states=uncertified.scop_states if uncertified.scop_states else None,
+            objective=float(uncertified.evaluation.value),
+            inner_iter_history=[int(uncertified.result.n_iter)],
+            objective_history=[float(uncertified.objective)],
+            curvature_source=uncertified.curvature_source,
+            termination_reason="bootstrap_uncertified",
+            scop_outer_steps=[],
+            terminal_refit_termination=(
+                None if uncertified.result.converged else str(uncertified.result.termination_reason)
+            ),
+            tweedie_scale_data=tweedie_scale_data,
         )
     boot_result = boot_mode.result
     boot_scop_states = boot_mode.scop_states
