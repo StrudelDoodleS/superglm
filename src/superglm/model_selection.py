@@ -626,12 +626,13 @@ def cross_validate(
     pooled_denominators: dict[str, float] = {
         name: 0.0 for name in score_names if name in _POOLED_PARTS
     }
-    # Whether a built-in scorer wrote each score column last. A column a
-    # callable writes, its dict's keys included, is not the built-in scorer's,
-    # whatever it is named; one a built-in scorer writes after it again is.
-    # Every fold scores in one order, so the last fold's writers are all folds'.
-    written_by_builtin = {
-        name: scorer is _BUILTIN_SCORERS.get(name) for name, scorer in scorers.items()
+    # The score columns a callable wrote last in some fold that scored, its
+    # dict's keys included: such a column is not the built-in scorer's,
+    # whatever it is named, even where a built-in scorer wrote it last in
+    # another fold. A fold that failed partway is left out: error_score fills
+    # its scores. A callable's own name starts here.
+    not_built_in = {
+        name for name, scorer in scorers.items() if scorer is not _BUILTIN_SCORERS.get(name)
     }
 
     for fold_i, (train_idx, test_idx) in enumerate(cv.split(X, y, groups)):
@@ -670,6 +671,7 @@ def cross_validate(
 
             # Score
             t1 = time.perf_counter()
+            written_by_builtin: dict[str, bool] = {}
             for sname, sfn in scorers.items():
                 pooled_fn = _POOLED_PARTS.get(sname)
                 if pooled_fn is not None and sfn is _BUILTIN_SCORERS.get(sname):
@@ -734,6 +736,9 @@ def cross_validate(
 
             if estimators_list is not None:
                 estimators_list.append(est)
+            not_built_in.update(
+                name for name, built_in in written_by_builtin.items() if not built_in
+            )
 
         except Exception as exc:
             if error_score == "raise":
@@ -804,5 +809,5 @@ def cross_validate(
         fingerprint_columns=columns,
         fit_mode=fit_mode,
         fingerprint_version=None if fingerprint is None else FINGERPRINT_VERSION,
-        builtin_scores=tuple(name for name in score_names if written_by_builtin[name]),
+        builtin_scores=tuple(name for name in score_names if name not in not_built_in),
     )

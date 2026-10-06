@@ -549,6 +549,36 @@ class TestScoring:
             assert (result.fold_scores["gini"] == 0.5).all()
             assert result.builtin_scores == ()
 
+    @pytest.mark.parametrize("case", ["keys vary by fold", "raises in the last fold"])
+    def test_builtin_scores_needs_the_built_in_last_in_every_fold_that_scored(
+        self, poisson_data, base_model, case
+    ):
+        """scoring=("gini", ranking): ranking writes "gini" in the first fold only.
+
+        Either its dict holds "gini" in the first fold only, or it returns
+        {"gini": 0.5} until it raises in the last fold, after the built-in
+        has scored there (error_score fills that fold's scores). The first
+        fold's gini is the callable's 0.5, so the column is not the built-in
+        scorer's, but the last fold's writers decided alone.
+        """
+        df, y, sw = poisson_data
+        calls = []
+
+        def ranking(model, X, y, *, sample_weight=None, offset=None):
+            calls.append(None)
+            if case == "keys vary by fold":
+                return {"gini": 0.5} if len(calls) == 1 else {}
+            if len(calls) == 3:
+                raise RuntimeError("the third fold cannot be ranked")
+            return {"gini": 0.5}
+
+        result = cross_validate(
+            base_model, df, y, cv=SimpleKFold(3), sample_weight=sw, scoring=("gini", ranking)
+        )
+
+        assert result.fold_scores["gini"].iloc[0] == 0.5
+        assert "gini" not in result.builtin_scores
+
     def test_callable_scorer_dict(self, poisson_data, base_model):
         """Callable scorer returning a dict produces multiple columns."""
         df, y, sw = poisson_data
