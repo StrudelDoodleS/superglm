@@ -624,10 +624,12 @@ def cross_validate(
     pooled_denominators: dict[str, float] = {
         name: 0.0 for name in score_names if name in _POOLED_PARTS
     }
-    # The columns a callable writes, its dict's keys included: such a column
-    # is not the built-in scorer's, whatever it is named.
-    custom_columns = {
-        name for name, scorer in scorers.items() if scorer is not _BUILTIN_SCORERS.get(name)
+    # Whether a built-in scorer wrote each score column last. A column a
+    # callable writes, its dict's keys included, is not the built-in scorer's,
+    # whatever it is named; one a built-in scorer writes after it again is.
+    # Every fold scores in one order, so the last fold's writers are all folds'.
+    written_by_builtin = {
+        name: scorer is _BUILTIN_SCORERS.get(name) for name, scorer in scorers.items()
     }
 
     for fold_i, (train_idx, test_idx) in enumerate(cv.split(X, y, groups)):
@@ -688,6 +690,7 @@ def cross_validate(
                         offset=off_test,
                     )
                     record[sname] = float(numerator / denominator)
+                    written_by_builtin[sname] = True
                     pooled_numerators[sname] += numerator
                     pooled_denominators[sname] += denominator
                     continue
@@ -706,9 +709,10 @@ def cross_validate(
                                 f"Reserved: {_RESERVED_COLUMNS}"
                             )
                         record[k] = v
-                    custom_columns.update(result)
+                    written_by_builtin.update(dict.fromkeys(result, False))
                 else:
                     record[sname] = float(result)
+                    written_by_builtin[sname] = sfn is _BUILTIN_SCORERS.get(sname)
                     pooled_fn = _POOLED_PARTS.get(sname)
                     if pooled_fn is not None:
                         numerator, denominator = pooled_fn(
@@ -798,5 +802,5 @@ def cross_validate(
         fingerprint_columns=columns,
         fit_mode=fit_mode,
         fingerprint_version=None if fingerprint is None else FINGERPRINT_VERSION,
-        builtin_scores=tuple(name for name in score_names if name not in custom_columns),
+        builtin_scores=tuple(name for name in score_names if written_by_builtin[name]),
     )
