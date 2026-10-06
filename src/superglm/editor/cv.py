@@ -1152,23 +1152,21 @@ def _union_rows(datasets: Sequence[EvaluationDataset], template):
     if len(frames) == 1:
         X = frames[0].native
     elif backends == {"pandas"}:
-        names, numbers = _stacked_columns(frames, template)
+        names, casts = _stacked_columns(frames, template)
         X = pd.concat(
-            [
-                cast(pd.DataFrame, frame.native)[names].astype(dict.fromkeys(numbers, "float64"))
-                for frame in frames
-            ],
+            [cast(pd.DataFrame, frame.native)[names].astype(casts) for frame in frames],
             ignore_index=True,
         )
     else:
         import polars as pl
 
-        names, numbers = _stacked_columns(frames, template)
+        names, casts = _stacked_columns(frames, template)
+        polars_types = {"float64": pl.Float64, "int64": pl.Int64}
         X = pl.concat(
             [
                 cast(pl.DataFrame, frame.native)
                 .select(names)
-                .cast(dict.fromkeys(numbers, pl.Float64))
+                .cast({name: polars_types[kind] for name, kind in casts.items()})
                 for frame in frames
             ],
             how="vertical_relaxed",
@@ -1177,15 +1175,17 @@ def _union_rows(datasets: Sequence[EvaluationDataset], template):
     return X, y, _stacked(datasets, "sample_weight", 1.0), _stacked(datasets, "offset", 0.0)
 
 
-def _stacked_columns(frames, template) -> tuple[list[str], list[str]]:
-    """The columns ``template`` reads, and those to stack as float64; refused if a split differs.
+def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
+    """The columns ``template`` reads, and the dtype to stack some as; refused if a split differs.
 
     The fit reads a column as its NumPy array and the categories its dtype
     declares (a pandas categorical, a Polars Enum), so splits that agree on
     those stack without changing a value, however their libraries name the
     dtype or order the columns. So do numbers of other kinds or widths in a
-    column a term reads as a number, which the fit reads as float64; a level
-    term reads a number's text, and 1 and 1.0 are two levels.
+    column a term reads as a number, which the fit reads as float64. A level
+    term reads a number's text: integers of any width spell a level alike, so
+    they stack as int64, but 1 and 1.0 are two levels, and uint64 is left
+    alone, since beside a signed integer pandas would stack it as float64.
     """
     names = list(_fingerprint_columns(template, frames[0]))
     levels = {
@@ -1193,18 +1193,23 @@ def _stacked_columns(frames, template) -> tuple[list[str], list[str]]:
         for name, spec in template._specs.items()
         if isinstance(spec, Categorical | OrderedCategorical | RandomEffect)
     }
-    numbers = []
+    casts: dict[str, str] = {}
     for name in names:
         readings = {_reading(frame, name) for frame in frames}
         if len(readings) == 1:
             continue
         if ("absent", None) in readings:
             raise EditorValueError(FINAL_COLUMN_MISSING.format(column=name))
-        numeric = all(isinstance(kind, np.dtype) and kind.kind in "iuf" for kind, _ in readings)
-        if name in levels or not numeric:
+        kinds = [kind for kind, _ in readings]
+        if not all(isinstance(kind, np.dtype) for kind in kinds):
             raise EditorValueError(FINAL_COLUMN_TYPES.format(column=name))
-        numbers.append(name)
-    return names, numbers
+        if name not in levels and all(kind.kind in "iuf" for kind in kinds):
+            casts[name] = "float64"
+        elif name in levels and all(kind.kind in "iu" and kind != np.uint64 for kind in kinds):
+            casts[name] = "int64"
+        else:
+            raise EditorValueError(FINAL_COLUMN_TYPES.format(column=name))
+    return names, casts
 
 
 def _reading(frame, name) -> tuple[Any, tuple | None]:
