@@ -789,6 +789,13 @@ at around 1e-3 in log relativity with one imbalanced factor at a 5% special
 share — and it moves again if `fit_reml()` re-selects the smoothing parameter,
 which the default path does. Expect small differences rather than none.
 
+A special whose rows carry exposure but no claims (under a log link with a
+Poisson, Tweedie or similar family) has no finite estimate: its effect runs
+toward zero relativity. The fit warns with a `SeparationWarning` naming the
+level, as it does for a `Categorical` level. Drop such a level from
+`specials=`, so that the smooth carries it, or a `grouping=` that joins it to a
+neighbouring band.
+
 A declared special that the training data does not carry — no rows at all, or
 only zero-weight rows — is **pinned** rather than rejected: no indicator column
 is emitted for it, it contributes zero, one warning names it, and its `Fit`
