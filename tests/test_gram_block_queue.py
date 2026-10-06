@@ -361,6 +361,44 @@ def test_a_failing_block_stops_the_pool_and_raises(monkeypatch, tensor_plan):
     _assert_bitwise(again.gram, expected.gram)
 
 
+def test_a_pooled_worker_holds_no_finished_block():
+    """Each block is placed as it is formed, so finished blocks never outnumber the workers."""
+    lock = threading.Lock()
+    formed, placed, held = [0], [0], []
+    values: dict[int, int] = {}
+
+    def run(index):
+        def form(cache, profile):
+            with lock:
+                held.append(formed[0] - placed[0])
+                formed[0] += 1
+            return index
+
+        return form
+
+    def place(index):
+        def write(value):
+            with lock:
+                placed[0] += 1
+                values[index] = value
+
+        return write
+
+    tasks = [BlockTask(i, queue._TINY_COST, 1, run(i), place(i)) for i in range(12)]
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    with block_queue_config(workers=2, min_cost=0):
+        queue.run_block_tasks(tasks, Cache(), None)
+    assert values == {i: i for i in range(12)}
+    assert max(held) <= 2
+
+
 def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(monkeypatch):
     def tasks() -> list[BlockTask]:
         small = queue._TINY_COST / 4

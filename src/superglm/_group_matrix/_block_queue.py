@@ -27,8 +27,9 @@ blocks "in order of decreasing computational cost".  This module does that:
 - **Determinism.**  A task's arithmetic does not depend on which worker runs
   it or what ran before it: shared entries are formed once and are the
   serial values (``_SharedEntries``), scratch is per worker, and each block
-  is placed into the Gram by the calling thread.  The Gram is therefore
-  bitwise identical at every worker count, the serial one included.
+  writes its own disjoint part of the Gram as soon as it is formed, so no
+  worker holds a finished block.  The Gram is therefore bitwise identical
+  at every worker count, the serial one included.
 
 A small assembly (estimated cost below ``_MIN_POOLED_COST``) runs serially,
 in the serial order, without starting a pool.  ``block_queue_config`` is the
@@ -259,8 +260,12 @@ class _WorkQueue:
         parts.help()
         return parts.wait()
 
-    def work(self, cache: _BlockWeightCache, out: list) -> None:
-        """One worker: run units until the queue is empty or a task has failed."""
+    def work(self, cache: _BlockWeightCache) -> None:
+        """One worker: run units until the queue is empty or a task has failed.
+
+        Each block is placed as soon as it is formed: blocks write disjoint
+        parts of the Gram, so no worker holds a finished block.
+        """
         while (unit := self._next()) is not None:
             if isinstance(unit, _Parts):
                 unit.help()
@@ -268,7 +273,7 @@ class _WorkQueue:
             for task in unit:
                 cache._parts = task.parts
                 try:
-                    out.append((task, task.run(cache, cache._profile)))
+                    task.place(task.run(cache, cache._profile))
                 except BaseException as exc:
                     with self._lock:
                         if self._failure is None or task.index < self._failure[0]:
@@ -311,8 +316,8 @@ def run_block_tasks(
 
     ``tasks`` are in the serial order.  The serial run uses ``cache`` itself
     and is the established assembly; a pooled run gives each worker a view
-    of ``cache`` (shared entries, own scratch and profile) and places the
-    blocks in task order once every task has run.
+    of ``cache`` (shared entries, own scratch and profile), and each worker
+    places its blocks as it forms them.
     """
     from superglm._blas_threads import pooled_blas_threads
     from superglm._parallel import pool_workers, resolve_max_memory
@@ -356,10 +361,9 @@ def run_block_tasks(
         shared = _SharedEntries()
         queue = _WorkQueue(units)
         profiles = [None if profile is None else {} for _ in range(workers)]
-        results: list[list] = [[] for _ in range(workers)]
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-gram") as pool:
             futures = [
-                pool.submit(queue.work, cache.worker_view(shared, profiles[k], queue), results[k])
+                pool.submit(queue.work, cache.worker_view(shared, profiles[k], queue))
                 for k in range(workers)
             ]
             try:
@@ -369,10 +373,6 @@ def run_block_tasks(
                 queue.stop()
                 raise
     queue.raise_failure()
-    for task, value in sorted(
-        (entry for worker in results for entry in worker), key=lambda entry: entry[0].index
-    ):
-        task.place(value)
     if profile is not None:
         for worker_profile in profiles:
             assert worker_profile is not None
