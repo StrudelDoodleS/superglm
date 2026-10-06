@@ -164,6 +164,48 @@ def test_worker_count_is_capped_by_memory_not_cores():
             assert parallel.resolve_max_memory() == 1 << 30
 
 
+def test_default_memory_budget_honours_the_cgroup_limit(monkeypatch, tmp_path):
+    """A quarter of the tighter of physical memory and the process's cgroup limit.
+
+    Inside a memory-limited container or systemd scope a quarter of the
+    host's RAM does not bind: a 900 MiB scope on a 64 GiB host let the TSQR
+    start 16 leaves of 80 MiB and was killed for memory where one worker
+    completed.  cgroup v2 ``memory.max`` (``max`` is no limit) and v1
+    ``memory.limit_in_bytes`` are read along the process's path up to the
+    mount root, where a container sees its own limit; the tightest wins.
+    """
+    proc, root = tmp_path / "cgroup", tmp_path / "fs"
+    scope = root / "user.slice" / "app.scope"
+    scope.mkdir(parents=True)
+    (root / "user.slice" / "memory.max").write_text("max\n")
+    (scope / "memory.max").write_text("943718400\n")
+    v1 = root / "memory" / "docker" / "c1"
+    v1.mkdir(parents=True)
+    (v1 / "memory.limit_in_bytes").write_text("2147483648\n")
+    (root / "memory" / "memory.limit_in_bytes").write_text("9223372036854771712\n")
+    monkeypatch.setattr(parallel, "_PROC_CGROUP", str(proc), raising=False)
+    monkeypatch.setattr(parallel, "_CGROUP_ROOT", str(root), raising=False)
+    monkeypatch.setattr(parallel, "_physical_memory", lambda: 64 << 30)
+    cases = [
+        ("0::/user.slice/app.scope\n", 943718400 // 4),
+        ("12:memory:/docker/c1\n0::/\n", (2 << 30) // 4),
+        ("0::/user.slice\n", (64 << 30) // 4),
+        (None, (64 << 30) // 4),
+    ]
+    try:
+        for content, expected in cases:
+            if content is None:
+                proc.unlink()
+            else:
+                proc.write_text(content)
+            parallel.default_max_memory.cache_clear()
+            assert parallel.default_max_memory() == expected, content
+            with parallel_config(n_jobs=16):
+                assert pool_workers(100, 80 << 20) == min(16, expected // (80 << 20))
+    finally:
+        parallel.default_max_memory.cache_clear()
+
+
 def test_tsqr_holds_at_most_one_leaf_beyond_its_workers(monkeypatch):
     """Peak allocation is set by the workers, not by the leaf count.
 

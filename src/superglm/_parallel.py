@@ -12,7 +12,8 @@ This module only decides how many workers a kernel may use:
     True)``, which also honours the process's CPU affinity and cgroup quota).
 ``max_memory``
     Bytes the concurrently running tasks may hold.  ``"auto"`` is a quarter
-    of physical memory.  A kernel states its per-task working set, and the
+    of the memory the process may use: physical memory, or its cgroup's
+    limit where that is tighter (a container or a systemd scope).  A kernel states its per-task working set, and the
     worker count is ``min(n_jobs, tasks, max_memory // task_bytes)``, at
     least one: CPU time floats, peak memory is the constraint.
 
@@ -37,6 +38,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
@@ -47,6 +49,9 @@ _MAX_MEMORY_ENV = "SUPERGLM_MAX_MEMORY"
 _MEMORY_FRACTION = 0.25
 _FALLBACK_MAX_MEMORY = 2 << 30
 _SUFFIXES = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
+# Where a Linux process reads its cgroup path and its controllers' limits.
+_PROC_CGROUP = "/proc/self/cgroup"
+_CGROUP_ROOT = "/sys/fs/cgroup"
 
 
 @dataclass(frozen=True)
@@ -155,11 +160,60 @@ def _physical_memory() -> int | None:
     return None
 
 
+def _cgroup_limit(path: Path) -> int | None:
+    try:
+        text = path.read_text().strip()
+    except OSError:
+        return None
+    try:
+        limit = int(text)
+    except ValueError:  # cgroup v2 writes "max" for no limit
+        return None
+    return limit if limit > 0 else None
+
+
+def _cgroup_memory_limit() -> int | None:
+    """The tightest memory limit on this process's cgroup and its ancestors, else ``None``.
+
+    cgroup v2 ``memory.max`` and v1 ``memory.limit_in_bytes``, read along the
+    path ``/proc/self/cgroup`` gives up to the mount root, which is where a
+    container sees its own limit.  A v1 "unlimited" value is a page-counter
+    maximum far above physical memory, so taking the minimum ignores it.
+    """
+    try:
+        lines = Path(_PROC_CGROUP).read_text().splitlines()
+    except OSError:
+        return None
+    limits = []
+    for line in lines:
+        hierarchy, _, rest = line.partition(":")
+        controllers, _, path = rest.partition(":")
+        if hierarchy == "0" and controllers == "":
+            base, name = Path(_CGROUP_ROOT), "memory.max"
+        elif "memory" in controllers.split(","):
+            base, name = Path(_CGROUP_ROOT) / "memory", "memory.limit_in_bytes"
+        else:
+            continue
+        relative = PurePosixPath(path or "/")
+        for directory in (relative, *relative.parents):
+            limit = _cgroup_limit(base / str(directory).lstrip("/") / name)
+            if limit is not None:
+                limits.append(limit)
+    return min(limits) if limits else None
+
+
 @lru_cache(maxsize=1)
 def default_max_memory() -> int:
-    """A quarter of physical memory, or 2 GiB where the platform does not say."""
-    total = _physical_memory()
-    return _FALLBACK_MAX_MEMORY if total is None else max(int(total * _MEMORY_FRACTION), 1)
+    """A quarter of the memory this process may use, or 2 GiB where the platform does not say.
+
+    The tighter of physical memory and the process's cgroup limit, so a
+    memory-limited container or scope sizes the pool by its own limit, not
+    the host's RAM.
+    """
+    sizes = [size for size in (_physical_memory(), _cgroup_memory_limit()) if size is not None]
+    if not sizes:
+        return _FALLBACK_MAX_MEMORY
+    return max(int(min(sizes) * _MEMORY_FRACTION), 1)
 
 
 def _from_env(name: str, parse) -> int | None:
