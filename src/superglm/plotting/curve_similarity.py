@@ -154,7 +154,8 @@ def build_cv_curve_similarity(
     """Build fold-curve similarity diagnostics for all comparable main effects.
 
     A correlation is NaN where two curves share fewer than two finite points
-    or either is flat there.
+    or either is flat there, and a fold's distance to the fold mean is NaN
+    where it shares no point with another fold.
     """
     labeled_models = {f"fold_{i}": model for i, model in enumerate(models) if model is not None}
     if not labeled_models:

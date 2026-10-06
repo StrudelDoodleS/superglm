@@ -52,6 +52,9 @@ class CrossValidationResult:
         Fold-by-fold term similarity diagnostics for comparable main effects.
         A correlation is NaN where two curves share fewer than two finite
         points or either is flat there, a term a fold's penalty zeroes say.
+        A fold's distance to the fold mean is NaN where it shares no point
+        with another fold: the mean is taken where two or more folds have a
+        value.
     oof_predictions : ndarray or None
         Out-of-fold predictions (response scale), same length as *y*.
         ``None`` unless ``return_oof=True``.
