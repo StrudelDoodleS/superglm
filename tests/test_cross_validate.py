@@ -2248,6 +2248,31 @@ class TestDataFingerprint:
         with pytest.raises(ValueError, match=re.escape(_FOLD_UNFINGERPRINTED)):
             result.plot_terms_by_fold(X, y=y)
 
+    def test_a_column_the_model_reads_but_X_lacks_still_gives_a_result_under_error_score(
+        self,
+    ):
+        """The model declares z; X has no z. Each fold fails and takes error_score.
+
+        A guard, not a regression: a review read the fingerprint, taken after
+        the fold loop, as raising KeyError on the missing column. The frame
+        refuses a missing column with ValueError, which cross_validate takes
+        as no fingerprint, so the result still comes back.
+        """
+        x = np.linspace(0.0, 1.0, 60)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric(), "z": Numeric()},
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = cross_validate(model, X, 1.0 + x, cv=SimpleKFold(3), error_score=np.nan)
+
+        assert result.fold_scores["deviance"].isna().all()
+        assert result.data_fingerprint is None
+
     def test_a_column_of_objects_whose_text_may_not_be_their_value_is_not_fingerprinted(self):
         """Every Tag(1) in one frame is a Tag(2) in the other: both print "same", beside "other".
 
