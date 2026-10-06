@@ -343,3 +343,103 @@ def test_a_dense_column_meets_a_recentred_column_through_its_centred_support(mon
     error = abs(Fraction(float(system.data_gram[j, k])) - exact)
     assert error <= Fraction(bound), float(error) / bound
     assert system.data_gram[k, j] == system.data_gram[j, k]
+
+
+def test_an_admitted_column_whose_projection_cancels_meets_a_recentred_one_as_its_values():
+    """An admitted SSP column meets a recentred indicator through its projected support.
+
+    ``B_unique`` rows ``(1e16 +- 2, 1e16)`` and ``R_inv = (1, -1)'`` project
+    to ``x = +-2`` exactly (Sterbenz), on half the rows each: mean zero, RMS
+    two, admitted.  The indicator holds 60% of the weight (``kappa^2 =
+    2.5``), so it is recentred, and beside two 50 x 50 tensors the repair
+    serves the build.  Their cross entry lies within ``gamma_K sum_r |c_j(r)|
+    (|x(r)| + |m^|)`` of the exact 4000 (``column_local_centering``'s bound,
+    ``A_j = |c_j|`` for a categorical level, ``A_k = |x_k|`` for an admitted
+    column; ``K = n + n_g + n_h + q_g + q_h + 5`` over the largest groups).
+
+    A Gaussian fit of ``y`` = the indicator, which the design reproduces
+    exactly, solves ``G b = r`` with ``b* = e_j``, so ``G (b - b*) = rho``
+    with ``|rho_k| = |r_k - G_kj| <= 2 gamma_K sum_r |c_j| (M_k + |m^_k|)``
+    (the cross and the right-hand side; ``M`` the majorant each kernel
+    multiplies: ``|x|`` for the SSP column, ``|B_unique| |R_inv|`` for a
+    tensor's raw right-hand side, ``|c_j|`` for the indicator) plus a
+    Cholesky solve's ``p gamma_(p+1) D_j`` (Higham 2002, Thm 10.3).  With
+    ``D = diag(G)^(1/2)`` and ``lambda`` the least eigenvalue of ``D^-1 G
+    D^-1``, the deviance is at most ``|D^-1 rho|^2 / lambda`` and the SSP
+    coefficient ``|D^-1 rho| / (lambda D_k)``, to first order; the factor 2
+    covers second order, and the fitted values' own rounding is added.
+    Mutation check: read through ``rmatvec`` (``B_unique`` summed, then
+    projected), the sums' rounding is multiplied by ``|B_unique| |R_inv| =
+    2e16``: the entry is 4048, the deviance 0.03, the SSP coefficient -6e-4.
+    """
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.types import GroupSlice
+
+    rng = np.random.default_rng(3)
+    n = 20_000
+    first, second = (_tensor(rng, n, (50, 50), (3, 3), 6, tensor_id) for tensor_id in (1, 2))
+    indicator = np.zeros(n, dtype=bool)
+    indicator[0:7000] = indicator[10000:15000] = True
+    bins = np.repeat([0, 1], n // 2)
+    ssp = DiscretizedSSPGroupMatrix(
+        np.array([[1e16 + 2, 1e16], [1e16 - 2, 1e16]]), np.array([[1.0], [-1.0]]), bins
+    )
+    groups = [first, CategoricalGroupMatrix(np.where(indicator, 0, -1), 1), second, ssp]
+    p = sum(group.shape[1] for group in groups)
+    dm = DesignMatrix(groups, n, p)
+    j, k = first.shape[1], p - 1
+    W, y = np.ones(n), indicator.astype(np.float64)
+    profile = {}
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=y,
+        penalty=np.zeros((p, p)),
+        tabmat_state=TabmatCenteringState(),
+        profile=profile,
+    )
+    assert profile["centered_column_local_hits"] == 1
+    G = system.data_gram
+
+    x = np.where(bins == 0, 2, -2)
+    share = Fraction(int(indicator.sum()), n)
+    exact = int(np.dot(indicator, x)) - share * int(x.sum())
+    c = np.abs(y - float(share))
+    n_h, q_h = first.B_unique.shape  # the largest support; the indicator's is 2 x 1
+    K = n + 2 + n_h + 1 + q_h + 5
+    bound = _gamma(K) * float(np.sum(c * (np.abs(x) + abs(system.mean_x[k]))))
+    for entry in (G[j, k], G[k, j]):
+        assert abs(Fraction(float(entry)) - exact) <= Fraction(bound), float(entry)
+
+    starts = np.cumsum([0] + [group.shape[1] for group in groups])
+    fit, _ = fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=W,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=[
+            GroupSlice(name=f"g{g}", start=int(starts[g]), end=int(starts[g + 1]))
+            for g in range(len(groups))
+        ],
+        lambda2=0.0,
+        tol=1e-10,
+        direct_solve="gram",
+        weight_semantics="frequency",
+    )
+
+    def factored(tensor):
+        return (np.abs(tensor.B_unique) @ np.abs(tensor.R_inv))[tensor.bin_idx]
+
+    majorant = np.column_stack([factored(first), c, factored(second), np.abs(x)])
+    rho = 2 * _gamma(K) * (c @ (majorant + np.abs(system.mean_x)))
+    D = np.sqrt(np.diag(G))
+    eigenvalues = np.linalg.eigvalsh(G / np.outer(D, D))
+    lam = eigenvalues[0] - p * _gamma(2 * p) * eigenvalues[-1]
+    assert lam > 0.0
+    scaled = float(np.linalg.norm(rho / D)) + p * _gamma(p + 1) * D[j]
+    fitted = _gamma(p + 2) * (abs(fit.intercept) + np.abs(dm.toarray()) @ np.abs(fit.beta))
+    assert np.sqrt(fit.deviance) <= np.sqrt(2 * scaled**2 / lam) + np.linalg.norm(fitted)
+    assert abs(fit.beta[k]) <= 2 * scaled / (lam * D[k])
