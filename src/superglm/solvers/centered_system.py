@@ -9,7 +9,10 @@ from dataclasses import dataclass, replace
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._column_local_centering import column_local_centering
+from superglm._group_matrix._column_local_centering import (
+    column_local_centering,
+    recentred_products,
+)
 from superglm._group_matrix._group_matrix_centered import (
     RawMomentRejection,
     _compensated_add,
@@ -520,7 +523,7 @@ def build_centered_system(
             force_chunked=_force_chunked,
         )
         if packed is not None:
-            mean_x, data_gram, rhs = packed
+            mean_x, data_gram, rhs, _ = packed
             return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
     else:
         split = _dense_split(dm)
@@ -587,8 +590,8 @@ def _raw_rung_system(
     tabmat_state: TabmatCenteringState | None,
     profile: dict | None,
     force_chunked: bool,
-) -> tuple[NDArray, NDArray, NDArray] | None:
-    """``(mean_x, data_gram, rhs)`` from the first raw rung that accepts ``dm``, else ``None``.
+) -> tuple[NDArray, NDArray, NDArray, tuple] | None:
+    """``(mean_x, data_gram, rhs, recentred)`` from the first raw rung that accepts ``dm``, else ``None``.
 
     After the raw rungs, the compact anchor-support fallback, which subtracts
     no raw moment, and then column-local centring of the last raw moments a
@@ -596,8 +599,9 @@ def _raw_rung_system(
     recentres only the failing columns, each inside its own group.  A build
     reaches that repair only where it used to take the chunked ``O(n p^2)``
     pass, so every other route is unchanged, and a refusal latches as before
-    unless the repair served the build.  Called only with a design free of
-    ``DenseGroupMatrix`` columns.
+    unless the repair served the build.  ``recentred`` is the repair's
+    recentred columns (``RecentredColumns``), empty on every other route.
+    Called only with a design free of ``DenseGroupMatrix`` columns.
     """
     rejected = RawMomentRejection()
     packed = packed_centered_gram_rhs(
@@ -710,6 +714,7 @@ def _raw_rung_system(
             profile["centered_anchor_support_hits"] = (
                 profile.get("centered_anchor_support_hits", 0) + 1
             )
+    recentred = ()
     if packed is None and not force_chunked and rejected.source is not None:
         repaired = column_local_centering(dm=dm, W=W, rejected=rejected, sum_w=sum_w)
         if profile is not None:
@@ -718,18 +723,18 @@ def _raw_rung_system(
                 profile.get(f"centered_column_local_{key}", 0) + 1
             )
         if repaired is not None:
-            *system, columns = repaired
+            *system, recentred = repaired
             packed = tuple(system)
             if profile is not None:
-                profile["centered_column_local_columns"] = (
-                    profile.get("centered_column_local_columns", 0) + columns
-                )
+                profile["centered_column_local_columns"] = profile.get(
+                    "centered_column_local_columns", 0
+                ) + sum(len(group.columns) for group in recentred)
             if tabmat_state is not None and rejected.source == "raw_moment":
                 # The rung's moments served this build through the repair, so
                 # its refusal does not latch: the next build needs them again,
                 # and a latched rung sent every later build to the chunked pass.
                 tabmat_state.raw_moment_eligible = None
-    return packed
+    return None if packed is None else (*packed, recentred)
 
 
 @dataclass(frozen=True)
@@ -793,7 +798,7 @@ def _attach_dense_split(
     z_centered: NDArray,
     sum_w: float,
     mean_z: float,
-    packed: tuple[NDArray, NDArray, NDArray],
+    packed: tuple[NDArray, NDArray, NDArray, tuple],
     penalty: NDArray,
 ) -> CenteredSystem:
     """The centred system from a raw rung on the bounded columns and the corrected two-pass on the dense ones.
@@ -816,9 +821,15 @@ def _attach_dense_split(
     = N' (W (x - a)) - m_N e'``, one transpose product of the bounded design
     per dense column; ``l``'s share, ``l (N'W - m_N sum W)``, is a product of
     two roundings.  The bounded columns' raw values never meet a dense
-    column's offset, and the bounded block is the rung's own.
+    column's offset, and the bounded block is the rung's own.  A bounded
+    column the rung recentred (``column_local_centering``) failed the
+    raw-moment certificate, so its raw values would bring its ``kappa`` into
+    the product: it meets ``W (x - a)`` through its centred support instead,
+    ``sum_b c_j[b] sum_(r in b) W (x - a)`` (``recentred_products``), the
+    repair's own product with a failing partner, within the repair's stated
+    envelope with ``A_k = |x - a|``.
     """
-    mean_bounded, gram_bounded, rhs_bounded = packed
+    mean_bounded, gram_bounded, rhs_bounded, recentred = packed
     dense_width = split.dense.p
     anchor = dense_anchor(split.dense, W, sum_w)
     first, gram, response = anchored_dense_moments(split.dense, W, anchor, z_centered)
@@ -833,6 +844,8 @@ def _attach_dense_split(
         np.subtract(values, column_anchor, out=weighted)
         weighted *= W
         cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(np.sum(weighted))
+        for columns, products in recentred_products(recentred, weighted):
+            cross[columns, column] = products
     hi = anchor
     p = dense_width + split.bounded.p
     dense_index, bounded_index = split.dense_index, split.bounded_index

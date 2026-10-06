@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import NamedTuple
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -18,6 +21,35 @@ _SUPPORT_CHUNK_BYTES = 8 << 20
 # Ceiling on the centred support columns the repair holds at once, over every
 # failing column: 128 columns of a 256 x 256 tensor grid.
 _MAX_CENTRED_COLUMN_BYTES = 64 << 20
+
+
+class RecentredColumns(NamedTuple):
+    """One group's recentred columns: their design indices, centred support and row codes.
+
+    Row ``r`` of column ``columns[i]`` is ``values[codes[r], i]``, centred
+    about the column's ``mean_x`` entry.  Owner: the build that recentred
+    them; it lives as long as that build's system is assembled.
+    """
+
+    columns: NDArray
+    values: NDArray
+    codes: NDArray
+
+
+def recentred_products(
+    recentred: tuple[RecentredColumns, ...], weighted: NDArray
+) -> Iterator[tuple[NDArray, NDArray]]:
+    """``(columns, sum_r weighted_r c_j(r))`` for each group of recentred columns.
+
+    ``weighted`` summed by the group's support codes, then against its centred
+    support: the repair's own product with a failing partner of another
+    group, so a recentred column's raw values, whose ``kappa`` the repair
+    removed, never meet ``weighted``.  ``n + n_s`` roundings a term beyond
+    those that formed ``c_j`` and ``weighted``, ``n_s`` the support rows.
+    """
+    for group in recentred:
+        summed = np.bincount(group.codes, weights=weighted, minlength=group.values.shape[0])
+        yield group.columns, summed @ group.values
 
 
 def _anchor_centred_columns(
@@ -69,8 +101,8 @@ def column_local_centering(
     W: NDArray,
     rejected: RawMomentRejection,
     sum_w: float,
-) -> tuple[NDArray, NDArray, NDArray, int] | None:
-    """``(mean_x, data_gram, rhs, columns)`` from rejected raw moments, recentring only the failing columns.
+) -> tuple[NDArray, NDArray, NDArray, tuple[RecentredColumns, ...]] | None:
+    """``(mean_x, data_gram, rhs, recentred)`` from rejected raw moments, recentring only the failing columns.
 
     The raw-moment certificate (``_raw_centering_admitted``) is per column:
     subtracting raw moments keeps column ``j`` in the rounding envelope of a
@@ -96,6 +128,9 @@ def column_local_centering(
     the certificate would have returned for them on its own.  The cost is
     one gather and one transpose product of the design per failing column,
     ``O(n G)`` for ``G`` groups, against the chunked pass's ``O(n p^2)``.
+    ``recentred`` holds each group's recentred columns and centred support
+    (``RecentredColumns``), so a caller that meets them with other rows does
+    so through ``recentred_products``, never through their raw values.
     ``None`` when a failing column's group has no compact support, when the
     failing columns' centred supports exceed ``_MAX_CENTRED_COLUMN_BYTES``,
     or when an entry between admitted columns is not finite (a rejection
@@ -103,8 +138,11 @@ def column_local_centering(
 
     **Error.**  Each recentred entry is a sum over rows of ``W_r c_j(r)
     y_k(r)``: ``y_k`` is ``c_k`` (a failing partner), ``x_k - m^_k`` (an
-    admitted partner, ``m^_k`` its raw mean, applied to ``e_j``) or ``z``
-    (the right-hand side).  It is evaluated with at most ``K = n + n_g +
+    admitted partner, ``m^_k`` its raw mean, applied to ``e_j``), ``x_k -
+    a_k`` (a ``DenseGroupMatrix`` column's anchored rows, which
+    ``_attach_dense_split`` meets with ``c_j`` through
+    ``recentred_products``: ``n_h = q_h = 0``) or ``z`` (the right-hand
+    side).  It is evaluated with at most ``K = n + n_g +
     n_h + q_g + q_h + 5`` roundings a term (``n_g``, ``n_h`` the two
     groups' support rows and ``q_g``, ``q_h`` their raw widths: the row
     sums, the support sums, the two projections, the anchoring, the
@@ -191,4 +229,7 @@ def column_local_centering(
         mean_x[columns] = mean
     if not (np.all(np.isfinite(gram)) and np.all(np.isfinite(rhs)) and np.all(np.isfinite(mean_x))):
         return None
-    return mean_x, gram, rhs, len(failing)
+    recentred = tuple(
+        RecentredColumns(columns, values, codes) for columns, values, codes, *_ in centred.values()
+    )
+    return mean_x, gram, rhs, recentred

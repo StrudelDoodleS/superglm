@@ -201,7 +201,9 @@ def test_recentred_columns_match_the_two_pass_gram_within_their_bound(monkeypatc
         raw_rhs=moments.xt_rhs[0],
         weighted_z=weighted_z,
     )
-    mean, gram, rhs, columns = local.column_local_centering(dm=dm, W=W, rejected=rejection, sum_w=S)
+    mean, gram, rhs, repaired = local.column_local_centering(
+        dm=dm, W=W, rejected=rejection, sum_w=S
+    )
     raw_mean = moments.xtw / S
     raw = moments.gram - np.outer(moments.xtw, raw_mean)
     raw = 0.5 * (raw + raw.T)
@@ -210,7 +212,9 @@ def test_recentred_columns_match_the_two_pass_gram_within_their_bound(monkeypatc
     assert set(owner[~certified]) == {1, 2}, "the indicator and the offset tensor must fail"
     assert certified[5], "the light level must be admitted"
     recentred = ~certified
-    assert columns == int(np.count_nonzero(recentred))
+    np.testing.assert_array_equal(
+        np.sort(np.concatenate([group.columns for group in repaired])), np.flatnonzero(recentred)
+    )
 
     # Admitted entries: bitwise the raw rung's subtraction.
     kept = certified
@@ -273,3 +277,69 @@ def test_recentred_columns_match_the_two_pass_gram_within_their_bound(monkeypatc
     # A failing column whose group has no compact support declines to the chunked pass.
     monkeypatch.setattr(local, "_compact_support_rows", lambda group: None)
     assert local.column_local_centering(dm=dm, W=W, rejected=rejection, sum_w=S) is None
+
+
+def test_a_dense_column_meets_a_recentred_column_through_its_centred_support(monkeypatch):
+    """The cross entry of a dense column and a recentred one, against its exact two-pass value.
+
+    Beside a ``DenseGroupMatrix`` column the raw rungs run on the bounded
+    columns and ``_attach_dense_split`` forms each dense column's cross block
+    as the bounded design's transpose product of ``W (x - a)`` less its mean
+    times ``sum W (x - a)``.  For a column the repair recentred, that product
+    read the raw indicator, so the indicator's ``kappa`` multiplied the
+    rounding, which the repair exists to remove: here the light level holds
+    1e-12 of the weight, ``kappa^2 = 1e12``.  Formed from the centred support
+    instead, ``sum_b c_j[b] sum_(r in b) W (x - a)``, the entry is within ``2
+    gamma_K sum_r W_r A_j(r) A_k(r)`` of the exact value, ``A_j = |v - v*| +
+    |shift|`` the recentred indicator's majorant (as in
+    ``test_recentred_columns_match_the_two_pass_gram_within_their_bound``),
+    ``A_k = |x - a|`` the dense column's anchored rows and ``K = n + 2 n_s +
+    18``: the rows summed into ``n_s`` support bins, the dot over them, the
+    centring of the support, the weighting and the anchoring (Higham 2002,
+    sec. 3.1); the factor 2 covers the centres' own rounding, which enters
+    only at second order.  The raw product misses that bound by orders of
+    magnitude.
+    """
+    from superglm.group_matrix import DenseGroupMatrix
+
+    rng = np.random.default_rng(20261009)
+    n = 6_000
+    first, second = (_tensor(rng, n, (50, 50), (3, 3), 6, tensor_id) for tensor_id in (1, 2))
+    heavy_rows = rng.uniform(size=n) < 0.5
+    x = 3.0 + rng.normal(size=n)
+    groups = [
+        first,
+        CategoricalGroupMatrix(np.where(heavy_rows, 0, -1), 1),
+        second,
+        DenseGroupMatrix(x),
+    ]
+    dm = DesignMatrix(groups, n, sum(group.shape[1] for group in groups))
+    W = np.where(heavy_rows, 1.0, 1e-12) * rng.uniform(0.5, 2.0, n)
+    chunked, profile = [], {}
+    monkeypatch.setattr(
+        centered_system, "centered_gram_rhs", _counted(chunked, centered_system.centered_gram_rhs)
+    )
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=rng.normal(size=n),
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_state=TabmatCenteringState(),
+        profile=profile,
+    )
+    assert chunked == [] and profile["centered_column_local_columns"] == 1
+    j, k = first.shape[1], dm.p - 1
+    weights = [Fraction(w) for w in W]
+    total = sum(weights)
+    indicator = sum(w for w, h in zip(weights, heavy_rows, strict=True) if h)
+    dense = sum(w * Fraction(v) for w, v in zip(weights, x, strict=True))
+    both = sum(w * Fraction(v) for w, v, h in zip(weights, x, heavy_rows, strict=True) if h)
+    exact = both - indicator * dense / total
+    S = float(np.sum(W))
+    a = float(np.dot(W, x)) / S
+    shift = float(np.sum(W[~heavy_rows])) / S
+    majorant = float(np.sum(W * (np.where(heavy_rows, 0.0, 1.0) + shift) * np.abs(x - a)))
+    bound = 2 * _gamma(n + 2 * 2 + 18) * majorant
+    error = abs(Fraction(float(system.data_gram[j, k])) - exact)
+    assert error <= Fraction(bound), float(error) / bound
+    assert system.data_gram[k, j] == system.data_gram[j, k]
