@@ -9,6 +9,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -230,13 +231,19 @@ def _design_leaf_parts(dm: DesignMatrix) -> list[tuple]:
                 CategoricalGroupMatrix.row_subset,
                 RandomEffectGroupMatrix.row_subset,
             ):
-                parts.append((column, "one_hot", _writable_codes(gm.codes), int(gm.n_levels)))
+                one_hot = cast(CategoricalGroupMatrix, gm)
+                parts.append(
+                    (column, "one_hot", _writable_codes(one_hot.codes), int(one_hot.n_levels))
+                )
             elif kind.toarray is DiscretizedSSPGroupMatrix.toarray and kind.row_subset in (
                 DiscretizedSSPGroupMatrix.row_subset,
                 DiscretizedTensorGroupMatrix.row_subset,
             ):
-                table = np.ascontiguousarray(gm.B_unique @ gm.R_inv, dtype=np.float64)
-                parts.append((column, "gather", table, _writable_codes(gm.bin_idx)))
+                support = cast(DiscretizedSSPGroupMatrix, gm)
+                table = np.ascontiguousarray(support.B_unique @ support.R_inv, dtype=np.float64)
+                parts.append(
+                    (column, "gather", table, _writable_codes(cast(NDArray, support.bin_idx)))
+                )
             else:
                 parts.append((column, "rows", gm, None))
             column += int(gm.shape[1])

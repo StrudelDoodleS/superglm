@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from fractions import Fraction
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import scipy.linalg
@@ -391,7 +391,9 @@ def _dtpqrt_nogil():
         try:
             import ctypes
 
-            from scipy.linalg import cython_lapack
+            from scipy.linalg import (
+                cython_lapack,  # ty: ignore[unresolved-import] -- compiled, no stubs
+            )
 
             api = ctypes.pythonapi
             api.PyCapsule_GetName.restype = ctypes.c_char_p
@@ -557,11 +559,12 @@ def _pooled_tsqr(leaves: Iterator, leaf_args: Callable, workers: int) -> NDArray
     result = None
     for node in sorted(nodes):
         result = nodes[node] if result is None else _tsqr_merge(nodes[node], result)
+    assert result is not None  # the caller submits at least its first leaf
     return result
 
 
 def _tsqr_weighted_factor(
-    chunks: Iterable[tuple[int, int, NDArray]],
+    chunks: Iterable[tuple[int, int, Any]],
     weights: NDArray,
     *,
     center: NDArray | None,
@@ -635,7 +638,7 @@ def _tsqr_weighted_factor(
 
 
 def streamed_weighted_factor(
-    chunks: Iterable[tuple[int, int, NDArray]],
+    chunks: Iterable[tuple[int, int, Any]],
     weights: NDArray,
     *,
     center: NDArray | None = None,
@@ -657,7 +660,7 @@ def streamed_weighted_factor(
 
 
 def streamed_weighted_factor_rhs(
-    chunks: Iterable[tuple[int, int, NDArray]],
+    chunks: Iterable[tuple[int, int, Any]],
     weights: NDArray,
     response: NDArray,
     *,
