@@ -55,6 +55,34 @@ def test_a_correlation_needs_two_shared_points_and_a_spread_in_both_curves():
     assert abs(correlation.loc["fold_0", "fold_0"] - 1.0) <= 8 * _U
 
 
+def test_a_level_only_one_fold_estimated_is_no_evidence_of_stability():
+    """Each fold estimates levels the others do not; folds 0 and 1 share only the first.
+
+    The fold mean at a level one fold estimated is that fold's own value, so
+    it counted a zero distance: disjoint folds scored RMSE and max difference
+    0.0, and the CV tab reported a spread of 0 with nothing compared.
+    """
+    from superglm.plotting.curve_similarity import _summarize_against_fold_mean
+
+    disjoint = {
+        "fold_0": np.array([0.1, np.nan, np.nan]),
+        "fold_1": np.array([np.nan, 0.5, np.nan]),
+        "fold_2": np.array([np.nan, np.nan, 0.9]),
+    }
+    partial = {"fold_0": np.array([0.1, 0.5, np.nan]), "fold_1": np.array([0.3, np.nan, 0.9])}
+
+    apart = _summarize_against_fold_mean(disjoint, np.ones(3))
+    shared = _summarize_against_fold_mean(partial, np.ones(3))
+
+    assert apart[["rmse_to_mean", "max_abs_diff_to_mean"]].isna().all().all()
+    # Only the first level is compared: 0.1 and 0.3 about their mean, 0.2. A
+    # few roundings of values below 1: the mean, the difference, the square
+    # and the root.
+    for fold in ("fold_0", "fold_1"):
+        assert abs(shared.loc[fold, "rmse_to_mean"] - 0.1) <= 8 * _U
+        assert abs(shared.loc[fold, "max_abs_diff_to_mean"] - 0.1) <= 8 * _U
+
+
 def test_a_nearly_constant_curve_keeps_its_correlation():
     """Curves whose range is a few units in the last place of their values.
 

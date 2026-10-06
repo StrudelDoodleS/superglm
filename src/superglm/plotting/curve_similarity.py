@@ -111,7 +111,10 @@ def _summarize_against_fold_mean(
 
     The mean at each point is over the folds that have a value there, and
     each fold is read on its own points: a fold that never saw a level
-    leaves that level out of its distance rather than making it NaN.
+    leaves that level out of its distance rather than making it NaN. A point
+    only one fold has is no mean at all (that fold's own value, at distance
+    zero), so it is left out too; a fold sharing no point with another has
+    no distance, NaN.
     """
     labels = list(curves)
     stacked = np.vstack([np.asarray(curves[label], dtype=np.float64) for label in labels])
@@ -121,7 +124,7 @@ def _summarize_against_fold_mean(
         np.where(valued, stacked, 0.0).sum(axis=0),
         counts,
         out=np.full(stacked.shape[1], np.nan),
-        where=counts > 0,
+        where=counts > 1,
     )
     rows = []
     for label in labels:
