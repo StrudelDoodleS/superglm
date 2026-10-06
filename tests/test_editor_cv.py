@@ -1606,13 +1606,17 @@ def test_final_fit_refuses_categories_that_are_equal_numbers_but_other_levels():
     assert refused.value.public_message == cv.FINAL_COLUMN_TYPES.format(column="x")
 
 
-@pytest.mark.parametrize("nullable", ["Float64", "Int64"])
-def test_final_fit_stacks_a_nullable_numeric_column_beside_a_numpy_one(cv_frame, nullable):
-    """Power is a NumPy float in the train rows and a pandas nullable dtype in validation.
+def test_final_fit_stacks_a_nullable_numeric_column_beside_a_numpy_one(cv_frame):
+    """Power is a NumPy float in the train rows and a pandas Int64 in validation.
 
-    The nullable column reads as an object array, so it read as text and
-    Final fit refused the pair, though a numeric term reads both as numbers.
+    A guard, not a regression: a review read the nullable column as an object
+    array, and so as text that Final fit would refuse. The frame boundary
+    reads a masked column with no missing value as its NumPy dtype (Int64 as
+    int64), so this is int64 beside float64 on a numeric term, which stacks
+    as float64. (A Float64 column reads as float64, the same as the train
+    column, and needs no cast at all.)
     """
+    nullable = "Int64"
     from superglm.editor.cv import capture_final_fit, run_final_fit
 
     X, y, w = cv_frame
