@@ -158,10 +158,12 @@ class CategoricalGroupMatrix:
 class RandomEffectGroupMatrix(CategoricalGroupMatrix):
     """All-level categorical matrix used by structured random effects.
 
-    ``nested_in`` names the feature this effect was declared nested in
-    (``RandomEffect(nested_in=)``, validated on the training rows), or is
-    ``None``; a matrix pickled before the declaration existed reads ``None``
-    through ``declared_parent``.
+    ``nested_in`` names the fitted level this effect was declared nested in
+    (``RandomEffect(nested_in=)`` or the level above in a ``Hierarchy``,
+    validated on the training rows): a ``RandomEffect`` feature, or a
+    hierarchy level ``"<feature>:<level>"``.  It is ``None`` when undeclared;
+    a matrix pickled before the declaration existed reads ``None`` through
+    ``declared_parent``.
     """
 
     __slots__ = ("lambda_policies", "nested_in")
@@ -185,7 +187,7 @@ class RandomEffectGroupMatrix(CategoricalGroupMatrix):
 
     @property
     def declared_parent(self) -> Hashable | None:
-        """The declared parent feature's name, ``None`` when undeclared."""
+        """The declared parent level's name, ``None`` when undeclared."""
         return getattr(self, "nested_in", None)
 
     def row_subset(self, idx: NDArray) -> RandomEffectGroupMatrix:

@@ -156,6 +156,71 @@ def _population_curve_se(
     return cast(NDArray, np.sqrt(np.maximum(np.diag(mapped[1]), 0.0)))
 
 
+# Floats one block of path contrasts may hold, ``p`` coefficients by the
+# block's paths: a compact covariance is applied to a block at a time.
+_PATH_CONTRAST_FLOATS = 1 << 22
+
+
+def _hierarchy_path_se(
+    spec,
+    name: Hashable,
+    feature_groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    Cov_active,
+    *,
+    center: bool,
+) -> NDArray:
+    """Errors of a hierarchy's path totals ``M b``: ``sqrt(diag(M V M'))``.
+
+    Each row of ``M`` holds a one at the coefficient of every fitted level on
+    its path, so a path's variance is the sum of its levels' variances and
+    twice their covariances.  A dense covariance is read entry by entry (each
+    path touches a few); a compact one is applied to blocks of contrasts, as
+    the random-effect report above reads only its diagonal rather than the
+    block it may refuse to form.  ``center=True`` evaluates the same form in
+    the mean-centering contrast (``mean_centered_variance``).
+    """
+    positions = spec.leaf_coefficients()
+    active = {group.name: group for group in active_groups if group.feature_name == name}
+    term_start = feature_groups[0].start
+    to_active = np.full(feature_groups[-1].end - term_start, -1, dtype=np.intp)
+    for group in feature_groups:
+        found = active.get(group.name)
+        if found is not None:
+            to_active[group.start - term_start : group.end - term_start] = np.arange(
+                found.start, found.end
+            )
+    index = to_active[positions]
+    n_paths, n_levels = index.shape
+    variance = np.zeros(n_paths, dtype=np.float64)
+    if not np.any(index >= 0):
+        return variance
+    width = Cov_active.shape[0]
+    if hasattr(Cov_active, "solve"):
+        block = max(1, min(n_paths, _PATH_CONTRAST_FLOATS // max(width, 1)))
+        for start in range(0, n_paths, block):
+            rows = index[start : start + block]
+            contrasts = np.zeros((width, len(rows)), dtype=np.float64)
+            for level in range(n_levels):
+                hit = np.flatnonzero(rows[:, level] >= 0)
+                contrasts[rows[hit, level], hit] = 1.0
+            applied = np.asarray(_covariance_apply(Cov_active, contrasts), dtype=np.float64)
+            variance[start : start + len(rows)] = np.sum(contrasts * applied, axis=0)
+    else:
+        dense = np.asarray(Cov_active, dtype=np.float64)
+        for first in range(n_levels):
+            for second in range(n_levels):
+                hit = (index[:, first] >= 0) & (index[:, second] >= 0)
+                variance[hit] += dense[index[hit, first], index[hit, second]]
+    if center:
+        weights = np.zeros(width, dtype=np.float64)
+        np.add.at(weights, index[index >= 0], 1.0 / n_paths)
+        column = np.asarray(_covariance_apply(Cov_active, weights), dtype=np.float64)
+        cross = np.where(index >= 0, column[np.maximum(index, 0)], 0.0).sum(axis=1)
+        variance = mean_centered_variance(variance, cross, float(weights @ column))
+    return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+
+
 def feature_se_from_cov(
     name: Hashable,
     Cov_active: NDArray,
@@ -178,6 +243,7 @@ def feature_se_from_cov(
     zeros either way -- ``C 0 C'`` is ``0``.
     """
     from superglm.features.categorical import Categorical
+    from superglm.features.hierarchy import Hierarchy
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.piecewise import Piecewise
@@ -188,6 +254,11 @@ def feature_se_from_cov(
     beta = result.beta
     feature_groups = [g for g in groups if g.feature_name == name]
     spec = specs.get(name) or interaction_specs.get(name)
+
+    if isinstance(spec, Hierarchy):
+        return _hierarchy_path_se(
+            spec, name, feature_groups, active_groups, Cov_active, center=center
+        )
 
     if isinstance(spec, OrderedCategorical):
         if spec.basis == "spline":

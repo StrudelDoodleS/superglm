@@ -199,8 +199,9 @@ class GroupInfo:
     spline_cat_feature: str | None = None
     # Structured terms retain compact geometry for specialized solvers.
     structured_kind: Literal["random_effect", "factor_smooth"] | None = None
-    # A random effect's declared parent feature (``RandomEffect(nested_in=)``):
-    # its nested chain always passes through it (one-engine design §3.13).
+    # A random effect's declared parent level (``RandomEffect(nested_in=)``, or
+    # the level above in a ``Hierarchy``), by fitted name: its nested chain
+    # always passes through it (one-engine design §3.13).
     random_effect_nested_in: Hashable | None = None
     # Compact all-level factor-smooth geometry.  The repeated penalties stay
     # at marginal ``block_size x block_size`` dimensions rather than being

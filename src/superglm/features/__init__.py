@@ -2,6 +2,7 @@ from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint, ConstraintSpec
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.grouping import LevelGrouping, collapse_levels
+from superglm.features.hierarchy import Hierarchy
 from superglm.features.interaction import (
     CategoricalInteraction,
     NumericCategorical,
@@ -33,6 +34,7 @@ __all__ = [
     "ConstraintSpec",
     "FactorSmooth",
     "RandomEffect",
+    "Hierarchy",
     "LevelGrouping",
     "collapse_levels",
     "Numeric",

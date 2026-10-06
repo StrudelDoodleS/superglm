@@ -24,6 +24,7 @@ from superglm.dm_builder import (
     should_discretize_tensor_interaction,
     validate_term_name_namespace,
 )
+from superglm.features.hierarchy import feature_column, feature_source_columns
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.group_matrix import DesignMatrix, _discretize_column
 from superglm.links import Link, stabilize_eta
@@ -363,7 +364,8 @@ def _score_prediction_term_local_exact(
             f"term {term['name']!r} requires {expected_width} coefficients, got {len(beta)}"
         )
     if term["kind"] == "feature":
-        return _score_feature(term["spec"], X.column_array(term["name"]), beta)
+        values = feature_column(X.column_array, term["name"], term["spec"])
+        return _score_feature(term["spec"], values, beta)
 
     left_name, right_name = term["parent_names"]
     # A plan cached before parent specs were stashed carries no "parent_specs"
@@ -555,7 +557,7 @@ def _centred_term_contribution(
 def _term_columns(term: dict[str, Any], X: EagerFrame) -> tuple[NDArray, ...]:
     """The raw columns a term is scored on: its own, or its two parents' as fitted."""
     if term["kind"] == "feature":
-        return (X.column_array(term["name"]),)
+        return (feature_column(X.column_array, term["name"], term["spec"]),)
     spec = term["spec"]
     left_name, right_name = term["parent_names"]
     left_spec, right_spec = term.get("parent_specs", (None, None))
@@ -632,13 +634,18 @@ def _predict_eta(
         )
 
     from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION, FactorSmooth
+    from superglm.features.hierarchy import Hierarchy
     from superglm.features.random_effect import RandomEffect
 
     frame = as_eager_frame(X)
     plan = _prediction_plan(model)
     required_columns = tuple(
         dict.fromkeys(
-            [term["name"] for term in plan["features"]]
+            [
+                column
+                for term in plan["features"]
+                for column in feature_source_columns(term["name"], term["spec"])
+            ]
             + [parent for term in plan["interactions"] for parent in term["parent_names"]]
         )
     )
@@ -676,8 +683,10 @@ def _predict_eta(
             eta.add(lambda: scorer(term, frame, beta_all))
 
     for term in plan["features"]:
-        if random_effects == "population" and isinstance(term["spec"], RandomEffect):
-            term["spec"].validate_prediction_values(frame.column_array(term["name"]))
+        if random_effects == "population" and isinstance(term["spec"], RandomEffect | Hierarchy):
+            term["spec"].validate_prediction_values(
+                feature_column(frame.column_array, term["name"], term["spec"])
+            )
             continue
         score(term)
 
@@ -884,6 +893,7 @@ def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> N
     """Validate factor-smooth geometry after explicit or inferred features exist."""
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.hierarchy import Hierarchy
     from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
 
@@ -907,7 +917,7 @@ def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> N
 
     for term in terms:
         group_spec = model._specs.get(term.group)
-        if isinstance(group_spec, (Categorical, RandomEffect)):
+        if isinstance(group_spec, (Categorical, RandomEffect, Hierarchy)):
             raise ValueError(
                 f"FactorSmooth {term.name!r} group {term.group!r} duplicates "
                 "the constant null-space group-intercept geometry of "

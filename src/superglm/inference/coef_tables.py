@@ -161,6 +161,7 @@ def build_coef_rows(
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.hierarchy import Hierarchy
     from superglm.features.interaction import (
         CategoricalInteraction,
         NumericCategorical,
@@ -428,19 +429,20 @@ def build_coef_rows(
         se_g = se_dict[g.name]
         active = g.name in selected_names
 
-        if isinstance(spec, RandomEffect | FactorSmooth):
+        if isinstance(spec, RandomEffect | Hierarchy | FactorSmooth):
             edf = _get_group_edf_map().get(g.name, 0.0) if active else 0.0
             lambdas = _structured_lambdas(g.name)
-            if isinstance(spec, RandomEffect):
+            if isinstance(spec, RandomEffect | Hierarchy):
                 structured_kind = "random_effect"
             else:
                 structured_kind = f"factor_smooth_{spec.basis}"
+            level_spec = spec.level_view(g.subgroup_type) if isinstance(spec, Hierarchy) else spec
             rows.append(
                 _CoefRow(
                     name=g.name,
                     group=feature_label,
                     structured_kind=structured_kind,
-                    n_levels=len(spec._levels),
+                    n_levels=len(level_spec._levels),
                     n_params=g.size,
                     active=active,
                     group_norm=float(np.linalg.norm(b_g)) if active else 0.0,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Hashable
 from typing import Any, Literal
 
@@ -229,44 +230,199 @@ def random_effect_specs(specs) -> dict:
     return {name: spec for name, spec in specs.items() if isinstance(spec, RandomEffect)}
 
 
-def validate_declared_nesting(specs, column) -> None:
-    """Check every ``RandomEffect(nested_in=)`` declaration on the training rows.
+def _first_break(child: tuple, parent: tuple) -> tuple[int, int, int] | None:
+    """The first row whose child level already met another parent level, if any.
 
-    ``specs`` maps feature names to specs and ``column(name)`` returns a
-    feature's training values.  The declared parent must be another
-    ``RandomEffect`` feature, and every level of the child must meet one
-    parent level on the training rows; a row that breaks it raises a
-    ``ValueError`` naming the row (its position in the training data) and
-    both parent levels.  Missing values are left to the specs' own check.
+    ``child`` and ``parent`` are ``(codes, labels)`` on the same rows.
+    Returns ``(row, earlier row of the same child level, rows breaking)``.
     """
+    child_codes, child_labels = child
+    first = _first_rows(child_codes, len(child_labels))[child_codes]
+    broken = np.flatnonzero(parent[0][first] != parent[0])
+    if not broken.size:
+        return None
+    return int(broken[0]), int(first[broken[0]]), int(broken.size)
+
+
+class _TrainingLevels:
+    """Codes of every fitted random-effect level on the training rows, read once each.
+
+    A ``RandomEffect`` feature is factorized from its column; a ``Hierarchy``
+    is parsed once for all its depths, including the top parts its
+    ``nested_in`` level covers, which it reads but does not fit.
+    """
+
+    def __init__(self, specs, column):
+        from superglm.features.hierarchy import hierarchy_specs, random_effect_level_names
+
+        self._specs = specs
+        self._column = column
+        self._hierarchies = hierarchy_specs(specs)
+        self.names = random_effect_level_names(specs)
+        self._depth_of: dict[Hashable, tuple[Hashable, int]] = {
+            spec.level_name(depth): (name, depth)
+            for name, spec in self._hierarchies.items()
+            for depth in spec.fitted_depths
+        }
+        self._parsed: dict = {}
+
+    def __contains__(self, name) -> bool:
+        return name in self.names
+
+    def _hierarchy(self, name) -> list:
+        if name not in self._parsed:
+            from superglm.features.hierarchy import feature_column
+
+            spec = self._hierarchies[name]
+            self._parsed[name] = spec.training_codes(feature_column(self._column, name, spec))
+        return self._parsed[name]
+
+    def codes(self, name) -> tuple[NDArray[np.intp], Any] | None:
+        """``(codes, labels)`` of one fitted level; ``None`` when its column has gaps."""
+        if name in self._depth_of:
+            feature, depth = self._depth_of[name]
+            return self._hierarchy(feature)[depth]
+        codes, labels = _factorized(self._column(name))
+        return None if np.any(codes < 0) else (codes, labels)
+
+    def depth(self, feature, depth: int) -> tuple[NDArray[np.intp], list]:
+        """One depth of a hierarchy, fitted or covered by its ``nested_in`` level."""
+        return self._hierarchy(feature)[depth]
+
+
+def _check_same_grouping(name: Hashable, spec, levels: _TrainingLevels) -> None:
+    """A hierarchy's top parts must group the rows exactly as its ``nested_in`` level does."""
+    parent = spec.nested_in
+    prefix = levels.depth(name, spec._shared_depth - 1)
+    reference = levels.codes(parent)
+    if reference is None:
+        return
+    covered = ", ".join(spec.levels[: spec._shared_depth])
+    for finer, coarser, finer_name, coarser_name in (
+        (prefix, reference, f"{name!r} parts ({covered})", repr(parent)),
+        (reference, prefix, repr(parent), f"{name!r} parts ({covered})"),
+    ):
+        found = _first_break(finer, coarser)
+        if found is None:
+            continue
+        row, head, count = found
+        raise ValueError(
+            f"Hierarchy {name!r} is declared nested_in={parent!r}, so its first "
+            f"{spec._shared_depth} part(s) ({covered}) must group the training rows exactly "
+            f"as {parent!r} does, but {finer_name} value {finer[1][finer[0][row]]!r} meets "
+            f"{coarser_name} value {coarser[1][coarser[0][head]]!r} (row {head}) and "
+            f"{coarser[1][coarser[0][row]]!r} (row {row}); rows are counted from 0 in the "
+            f"training data, and {count} row(s) disagree. List first the columns that "
+            f"{parent!r} reads, cleaned the same way (normalize=), or remove nested_in."
+        )
+
+
+def _check_duplicated_levels(levels: _TrainingLevels) -> None:
+    """Refuse a hierarchy level that groups the rows exactly as another term's level does.
+
+    Two such levels are one random effect fitted twice: their columns are the
+    same up to order, so the data cannot split the variance between them.
+    Across two terms that is a declaration to fix (share the level through
+    ``nested_in``), so it is refused.  Two levels of one hierarchy coincide
+    only because these rows hold one group below each group above; the fit
+    still determines their combined effect (REML splits the variance evenly,
+    by symmetry), so that is disclosed in a warning rather than refused.  Two
+    plain ``RandomEffect`` features are left as they were.
+    """
+    hierarchy_levels = set(levels._depth_of)
+    if not hierarchy_levels:
+        return
+    coded = {name: levels.codes(name) for name in levels.names}
+    coded = {name: value for name, value in coded.items() if value is not None}
+    names = list(coded)
+    for position, first_name in enumerate(names):
+        for second_name in names[position + 1 :]:
+            if first_name not in hierarchy_levels and second_name not in hierarchy_levels:
+                continue
+            first, second = coded[first_name], coded[second_name]
+            if np.bincount(first[0]).nonzero()[0].size != np.bincount(second[0]).nonzero()[0].size:
+                continue
+            if _first_break(first, second) is not None:
+                continue
+            same_term = (
+                first_name in hierarchy_levels
+                and second_name in hierarchy_levels
+                and levels._depth_of[first_name][0] == levels._depth_of[second_name][0]
+            )
+            if same_term:
+                warnings.warn(
+                    f"Hierarchy levels {first_name!r} and {second_name!r} group the training "
+                    "rows identically: each group of the coarser level holds a single group of "
+                    "the finer one in these rows, so the data cannot split the variance "
+                    "between them. The fit determines their combined effect; each level's "
+                    "reported variance is an arbitrary share of it. Drop one of the two "
+                    "levels, or fit on rows that tell them apart.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                continue
+            raise ValueError(
+                f"Random-effect levels {first_name!r} and {second_name!r} group the training "
+                "rows identically, so they are one effect fitted twice and the data cannot "
+                f"split its variance between them; fit it once: give the term that repeats it "
+                f"nested_in={first_name!r}, and its levels below continue that one instead of "
+                "creating it again."
+            )
+
+
+def validate_declared_nesting(specs, column) -> None:
+    """Check every declared random-effect nesting on the training rows.
+
+    ``specs`` maps feature names to specs and ``column(name)`` returns an
+    input column's training values.  A ``RandomEffect(nested_in=)`` parent
+    must be another random-effect level of the model -- a ``RandomEffect``
+    feature or a ``Hierarchy`` level ``"<feature>:<level>"`` -- and every level
+    of the child must meet one parent level on the training rows; a row that
+    breaks it raises a ``ValueError`` naming the row (its position in the
+    training data) and both parent levels.  A ``Hierarchy(nested_in=)``'s top
+    parts must group the rows exactly as its parent level does, and a
+    hierarchy level that groups them exactly as another fitted level does is
+    refused.  Missing values are left to the specs' own check.
+    """
+    from superglm.features.hierarchy import bind_hierarchies, hierarchy_specs
+
     effects = random_effect_specs(specs)
+    hierarchies = hierarchy_specs(specs)
+    if hierarchies:
+        bind_hierarchies(specs)
+    levels = _TrainingLevels(specs, column)
     for child, spec in effects.items():
         parent = getattr(spec, "nested_in", None)
         if parent is None:
             continue
-        if parent == child or parent not in effects:
+        if parent == child or parent not in levels:
             raise ValueError(
                 f"RandomEffect {child!r} is declared nested_in={parent!r}, which is not "
-                "another RandomEffect feature of this model."
+                "another RandomEffect feature or Hierarchy level of this model; its "
+                f"random-effect levels are {sorted(levels.names, key=str)!r}."
             )
-        child_codes, child_levels = _factorized(column(child))
-        parent_codes, parent_levels = _factorized(column(parent))
-        if np.any(child_codes < 0) or np.any(parent_codes < 0):
+        child_coded = levels.codes(child)
+        parent_coded = levels.codes(parent)
+        if child_coded is None or parent_coded is None:
             continue
-        first = _first_rows(child_codes, len(child_levels))[child_codes]
-        broken = np.flatnonzero(parent_codes[first] != parent_codes)
-        if broken.size:
-            row = int(broken[0])
-            head = int(first[row])
+        found = _first_break(child_coded, parent_coded)
+        if found is not None:
+            row, head, count = found
+            child_codes, child_levels = child_coded
+            parent_codes, parent_levels = parent_coded
             raise ValueError(
                 f"RandomEffect {child!r} is declared nested_in={parent!r}, but its level "
                 f"{child_levels[child_codes[row]]!r} occurs under {parent!r} level "
                 f"{parent_levels[parent_codes[head]]!r} (row {head}) and under "
                 f"{parent_levels[parent_codes[row]]!r} (row {row}); rows are counted from 0 "
-                f"in the training data, and {broken.size} row(s) break the declaration. Fix "
+                f"in the training data, and {count} row(s) break the declaration. Fix "
                 f"those rows, or remove nested_in to fit {child!r} and {parent!r} as crossed "
                 "effects."
             )
+    for name, spec in hierarchies.items():
+        if spec.nested_in is not None:
+            _check_same_grouping(name, spec, levels)
+    _check_duplicated_levels(levels)
 
 
 def near_nesting_notes(specs, column) -> list[str]:

@@ -11,6 +11,7 @@ import scipy.sparse
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.features.hierarchy import feature_column
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
 
@@ -165,7 +166,9 @@ def _exact_runtime_design_block(
         ]
         if not projection:
             continue
-        transformed = term["spec"].transform(X.column_array(term["name"]))
+        transformed = term["spec"].transform(
+            feature_column(X.column_array, term["name"], term["spec"])
+        )
         transformed = _as_dense_block(
             transformed,
             n_rows=len(X),
