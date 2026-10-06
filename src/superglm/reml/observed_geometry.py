@@ -1557,6 +1557,8 @@ def build_observed_reml_geometry(
     try:
         decomposition = decompose_gram(hessian)
     except ValueError as error:
+        if nonnegative:
+            note_factor_route("observed", False)
         raise ObservedGeometryInfeasibleError(
             "observed REML coefficient Hessian is indefinite; "
             "the fitted coefficients do not define a valid Laplace mode"

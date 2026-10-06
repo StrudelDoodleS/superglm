@@ -3164,7 +3164,11 @@ def _fit_irls_direct_once(
                     center=step_centre,
                     center_lo=step_centre_lo,
                 )
-                iteration_rank = decompose_gram_if_authoritative(centered.hessian)
+                try:
+                    iteration_rank = decompose_gram_if_authoritative(centered.hessian)
+                except BaseException:
+                    note_factor_route("pirls", False)
+                    raise
                 note_factor_route("pirls", iteration_rank is None)
                 iteration_factor_rhs = None
                 if iteration_rank is None:
@@ -4563,7 +4567,11 @@ def _fit_irls_direct_once(
             prefetch_weighted_factor(
                 "terminal", dm, W, center=final_centre, center_lo=final_centre_lo
             )
-            reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
+            try:
+                reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
+            except BaseException:
+                note_factor_route("terminal", False)
+                raise
             note_factor_route("terminal", reml_slope_rank is None)
             if reml_slope_rank is None:
                 certification = certify_centered_factor(

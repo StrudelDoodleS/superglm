@@ -584,6 +584,64 @@ def test_data_factor_reuse_keeps_the_four_most_recently_used(monkeypatch):
         assert np.array_equal(again.view(np.uint64), factors[0].view(np.uint64))
 
 
+def test_reml_fit_abandons_the_factor_of_a_decision_that_flips(monkeypatch):
+    """A PIRLS site whose Gram certifies every other step abandons the factor started beside it.
+
+    On the aliased Tweedie fit, the wrapped decision certifies the Gram on
+    every second PIRLS step, so a factor started because the step before
+    needed one is not needed.  Each such factor is abandoned
+    (``TSQRAbandonedError`` ends its TSQR), no leaf of it starts once its
+    stop is set, and the coefficients are those of the same fit without
+    prefetch, to the bit.  Mutation check: without the abandonment none is
+    abandoned.
+    """
+    import superglm._blas_threads as blas_threads
+    import superglm.solvers.irls_direct as irls_direct
+
+    fit, _passes = _aliased_tweedie_fit(monkeypatch)
+    decide = irls_direct.decompose_gram_if_authoritative
+    calls = [0]
+
+    def flipping(matrix, *args, **kwargs):
+        calls[0] += 1
+        if calls[0] % 2:
+            return decide(matrix, *args, **kwargs)
+        return rank.decompose_gram(matrix)
+
+    monkeypatch.setattr(irls_direct, "decompose_gram_if_authoritative", flipping)
+    _leaf_rows_for(monkeypatch, 12, 60)
+    original = rank._tsqr_leaf
+    late: list[int] = []
+
+    def slow(*args):
+        stop = rank._TSQR_STOP.get()
+        if stop is not None and stop.is_set():
+            late.append(1)
+        time.sleep(0.002)
+        return original(*args)
+
+    monkeypatch.setattr(rank, "_tsqr_leaf", slow)
+    abandoned = [0]
+    pooled = rank._pooled_tsqr
+
+    def counted(*args):
+        try:
+            return pooled(*args)
+        except rank.TSQRAbandonedError:
+            abandoned[0] += 1
+            raise
+
+    monkeypatch.setattr(rank, "_pooled_tsqr", counted)
+    with parallel_config(n_jobs=2, max_memory="1G"):
+        calls[0] = 0
+        beside = fit()
+        monkeypatch.setattr(blas_threads, "fit_blas_single_threaded", lambda: False)
+        calls[0] = 0
+        after = fit()
+    assert abandoned[0] > 0 and not late
+    assert np.array_equal(beside.view(np.uint64), after.view(np.uint64))
+
+
 def test_reml_fit_forms_each_certificate_beside_its_gram_decision(monkeypatch):
     """A site whose last Gram could not certify itself starts the next factor before deciding.
 
@@ -608,6 +666,59 @@ def test_reml_fit_forms_each_certificate_beside_its_gram_decision(monkeypatch):
     assert sum(prefetched) == len(passes) - 3 > 0
     assert inputs == [entry[0] for entry in passes]
     assert np.array_equal(beside.view(np.uint64), after.view(np.uint64))
+
+
+def test_a_prefetched_factor_the_gram_does_not_need_starts_nothing_further(monkeypatch):
+    """A Gram that certifies itself abandons the factor its site started beside it.
+
+    The prefetched factor holds a pool of its own.  Once the decision does
+    not need it (``note_factor_route(site, False)``), its queued leaves are
+    dropped, its two running leaves start nothing after them, and the
+    decision returns only once they have finished and the factor's pool is
+    gone, so it never shares the cores or ``max_memory`` with the fit's next
+    pooled section; and it is never kept as a finished factor: the next
+    request for those rows runs all sixteen leaves and returns the factor's
+    own bits.  Mutation checks: without the abandonment the prefetch runs
+    all sixteen leaves and the request waits for it instead; without the
+    wait the decision returns while the pool still runs.
+    """
+    from superglm._blas_threads import solver_blas_threads
+    from superglm.solvers.centered_system import (
+        note_factor_route,
+        prefetch_weighted_factor,
+        reuse_data_factors,
+    )
+
+    n, leaf = 640, 40
+    dm = _mixed_design(n, seed=17)
+    _leaf_rows_for(monkeypatch, dm.p, leaf)
+    weights = np.random.default_rng(6).uniform(0.2, 3.0, n)
+    with parallel_config(n_jobs=1):
+        expected = grouped_weighted_factor(dm, weights)
+    gate = threading.Event()
+    started: list[str] = []
+    original = rank._tsqr_leaf
+
+    def gated(*args):
+        started.append(threading.current_thread().name)
+        gate.wait(timeout=60)
+        return original(*args)
+
+    monkeypatch.setattr(rank, "_tsqr_leaf", gated)
+    with solver_blas_threads(), parallel_config(n_jobs=2, max_memory="1G"), reuse_data_factors():
+        note_factor_route("pirls", True)
+        prefetch_weighted_factor("pirls", dm, weights)
+        deadline = time.monotonic() + 60
+        while len(started) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(started) == 2
+        threading.Timer(0.2, gate.set).start()
+        note_factor_route("pirls", False)
+        running = [t.name for t in threading.enumerate() if t.name.startswith("superglm-tsqr")]
+        assert len(started) == 2 and not running
+        factor = grouped_weighted_factor(dm, weights)
+    assert len(started) == 2 + 16
+    assert np.array_equal(factor.view(np.uint64), expected.view(np.uint64))
 
 
 def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):

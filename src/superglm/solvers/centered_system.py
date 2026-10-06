@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import contextvars
+import threading
 import weakref
 from collections.abc import Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -328,12 +329,16 @@ class _DataFactorReuse:
 
     An entry may also be a factor still being formed (:func:`prefetch_weighted_factor`):
     a hit waits for it.  ``expected`` records, per call site, whether its
-    last decision needed the factor.
+    last decision needed the factor, and ``pending`` the site's factor still
+    awaiting that decision: one the decision does not need is abandoned
+    (``rank._TSQR_STOP``: it starts no further leaf or merge) and its entry
+    dropped, so an unfinished factor is never kept as a finished one.
     """
 
     _ENTRIES = 4
     entries: list = field(default_factory=list)
     expected: dict = field(default_factory=dict)
+    pending: dict = field(default_factory=dict)
     executor: ThreadPoolExecutor | None = None
 
     def _index(self, key: tuple) -> int | None:
@@ -350,7 +355,12 @@ class _DataFactorReuse:
             return None
         entry_key, value = self.entries.pop(index)
         if isinstance(value, Future):
-            value = tuple(_freeze(part) for part in value.result())
+            from superglm.solvers.rank import TSQRAbandonedError
+
+            try:
+                value = tuple(_freeze(part) for part in value.result())
+            except TSQRAbandonedError:
+                return None
         self.entries.append((entry_key, value))
         return tuple(np.array(part) for part in value)
 
@@ -361,7 +371,10 @@ class _DataFactorReuse:
         self.entries.append((frozen, value))
         del self.entries[: -self._ENTRIES]
 
-    def prefetch(self, key: tuple) -> None:
+    def prefetch(self, site: str, key: tuple) -> None:
+        from superglm.solvers.rank import _TSQR_STOP
+
+        self.settle(site, needed=False)
         if self._index(key) is not None:
             return
         if self.executor is None:
@@ -369,10 +382,30 @@ class _DataFactorReuse:
                 max_workers=1, thread_name_prefix="superglm-prefetch"
             )
         frozen = tuple(part if not isinstance(part, np.ndarray) else _freeze(part) for part in key)
-        run = contextvars.copy_context().run
-        self.keep(frozen, self.executor.submit(run, _data_factor, *frozen))
+        stop = threading.Event()
+        context = contextvars.copy_context()
+        context.run(_TSQR_STOP.set, stop)
+        future = self.executor.submit(context.run, _data_factor, *frozen)
+        self.keep(frozen, future)
+        self.pending[site] = (future, stop)
+
+    def settle(self, site: str, *, needed: bool) -> None:
+        """The decision ``site`` was waiting on: keep its factor, or abandon an unfinished one.
+
+        An abandoned factor starts nothing more, and this waits for the
+        leaves it is running, so the fit's next pooled section never shares
+        the cores or ``max_memory`` with it.
+        """
+        future, stop = self.pending.pop(site, (None, None))
+        if future is None or needed or future.done():
+            return
+        stop.set()
+        self.entries = [entry for entry in self.entries if entry[1] is not future]
+        wait([future])
 
     def close(self) -> None:
+        for site in list(self.pending):
+            self.settle(site, needed=False)
         if self.executor is not None:
             self.executor.shutdown(wait=True, cancel_futures=True)
 
@@ -453,15 +486,16 @@ def prefetch_weighted_factor(
     only while the fit holds BLAS at one thread (``_blas_threads``): the
     factor then runs on a background thread while this thread decomposes
     the Gram, and its bits are those of the factor formed afterwards, so the
-    decision and every result are unchanged; a factor the Gram makes
-    unnecessary is discarded.
+    decision and every result are unchanged.  A factor the Gram makes
+    unnecessary is abandoned (:meth:`_DataFactorReuse.settle`): its queued
+    leaves are dropped and its running ones start nothing after them.
     """
     from superglm._blas_threads import fit_blas_single_threaded
 
     reuse = _DATA_FACTOR_REUSE.get()
     if reuse is None or not reuse.expected.get(site, False) or not fit_blas_single_threaded():
         return
-    reuse.prefetch(_factor_key(dm, W, center, center_lo, response))
+    reuse.prefetch(site, _factor_key(dm, W, center, center_lo, response))
 
 
 def note_factor_route(site: str, needed: bool) -> None:
@@ -469,6 +503,7 @@ def note_factor_route(site: str, needed: bool) -> None:
     reuse = _DATA_FACTOR_REUSE.get()
     if reuse is not None:
         reuse.expected[site] = bool(needed)
+        reuse.settle(site, needed=bool(needed))
 
 
 def grouped_weighted_factor(

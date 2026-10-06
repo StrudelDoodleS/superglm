@@ -512,6 +512,33 @@ class _TSQRTree:
         return result
 
 
+class TSQRAbandonedError(RuntimeError):
+    """A factor its caller stopped needing (``_TSQR_STOP``) before it finished."""
+
+
+# An event a deferred factor's caller sets once it no longer needs the factor
+# (``centered_system.prefetch_weighted_factor``): no leaf or merge starts
+# after it is set.  ``None`` outside such a factor.
+_TSQR_STOP: contextvars.ContextVar = contextvars.ContextVar("superglm_tsqr_stop", default=None)
+
+
+def _stop_requested() -> bool:
+    stop = _TSQR_STOP.get()
+    return stop is not None and stop.is_set()
+
+
+def _leaf_task(*args) -> NDArray:
+    if _stop_requested():
+        raise TSQRAbandonedError
+    return _tsqr_leaf(*args)
+
+
+def _merge_task(upper: NDArray, lower: NDArray) -> NDArray:
+    if _stop_requested():
+        raise TSQRAbandonedError
+    return _tsqr_merge(upper, lower)
+
+
 def _pooled_tsqr(leaves: Iterator, leaf_args: Callable, workers: int) -> NDArray:
     """The leaves and :class:`_TSQRTree`'s merges as tasks on one pool of ``workers``.
 
@@ -521,6 +548,8 @@ def _pooled_tsqr(leaves: Iterator, leaf_args: Callable, workers: int) -> NDArray
     the lowest level up, the earlier rows on top: the tree the binary counter
     builds, so the factor is bitwise its factor.  At most one leaf beyond the
     workers waits, as each holds its rows; the calling thread only schedules.
+    A task checks ``_TSQR_STOP`` as it starts, so an abandoned factor starts
+    nothing further and raises :class:`TSQRAbandonedError`.
     """
     nodes: dict[tuple[int, int], NDArray] = {}
     running: dict[Future, tuple[int, int]] = {}
@@ -535,8 +564,10 @@ def _pooled_tsqr(leaves: Iterator, leaf_args: Callable, workers: int) -> NDArray
         try:
             item = next(leaves, None)
             while item is not None or running:
+                if _stop_requested():
+                    raise TSQRAbandonedError
                 while item is not None and leaves_running <= workers:
-                    submit((0, count), _tsqr_leaf, *leaf_args(item))
+                    submit((0, count), _leaf_task, *leaf_args(item))
                     count += 1
                     leaves_running += 1
                     item = next(leaves, None)
@@ -550,7 +581,7 @@ def _pooled_tsqr(leaves: Iterator, leaf_args: Callable, workers: int) -> NDArray
                         nodes[level, index] = factor
                         continue
                     upper, lower = (sibling, factor) if index & 1 else (factor, sibling)
-                    submit((level + 1, index >> 1), _tsqr_merge, upper, lower)
+                    submit((level + 1, index >> 1), _merge_task, upper, lower)
                     del upper, lower, sibling
                 del done, factor
         finally:
@@ -632,7 +663,7 @@ def _tsqr_weighted_factor(
         for item in leaves:
             args = leaf_args(item)
             del item
-            tree.push(_tsqr_leaf(*args))
+            tree.push(_leaf_task(*args))
             del args
         return tree.finish()
 
