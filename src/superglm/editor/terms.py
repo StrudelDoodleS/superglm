@@ -92,7 +92,7 @@ def _hierarchy_path_weights(frame, sample_weight, name: str, spec, fallback: NDA
         return fallback
     try:
         leaf = spec._prediction_codes(feature_column(frame.column_array, name, spec))[
-            len(spec.levels) - 1
+            len(spec.names) - 1
         ]
     except ValueError:  # an unsplittable value or, under unseen="error", a new path
         return fallback

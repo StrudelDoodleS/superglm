@@ -337,6 +337,16 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
     _method_double(
         monkeypatch,
         superglm.SuperGLM,
+        "term_contributions",
+        return_value=pd.DataFrame(
+            0.0,
+            index=range(2),
+            columns=["Intercept", "vehicle:make", "vehicle:model", "vehicle:year"],
+        ),
+    )
+    _method_double(
+        monkeypatch,
+        superglm.SuperGLM,
         "plot_data",
         return_value=results["plot_payload"],
     )

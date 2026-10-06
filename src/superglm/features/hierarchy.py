@@ -24,6 +24,7 @@ make ``"A"`` with model ``"B-C"``); a string re-join would merge them.
 
 from __future__ import annotations
 
+import math
 import unicodedata
 import warnings
 from collections.abc import Callable, Hashable, Mapping, Sequence
@@ -37,6 +38,9 @@ from superglm.types import GroupInfo, LambdaPolicy
 
 # How many offending values or merged spellings a message names.
 _SHOWN = 5
+# The key of a part whose folded form no training label holds: equal only to
+# itself, so a path holding it matches no fitted path.
+_UNLABELLED = object()
 
 ColumnReader = Callable[[Hashable], NDArray]
 
@@ -84,7 +88,7 @@ def _level_names(values, argument: str) -> tuple[str, ...]:
     if any(":" in name for name in names):
         raise ValueError(
             f"Hierarchy level names may not contain ':', which separates a term from its "
-            f"level in fitted names; got {names!r}. Pass levels= to name them."
+            f"level in fitted names; got {names!r}. Pass names= to name them."
         )
     if len(set(names)) != len(names):
         raise ValueError(f"Hierarchy level names must be distinct, got {names!r}")
@@ -94,9 +98,10 @@ def _level_names(values, argument: str) -> tuple[str, ...]:
 class HierarchyLevel:
     """One fitted level of a :class:`Hierarchy`, read as the random effect it is.
 
-    ``random_effects()`` reports a level through the same two attributes it
-    reads from a ``RandomEffect``: ``_levels`` (here, paths) and
-    ``_prediction_codes`` (each row's path at this level, ``-1`` if unseen).
+    ``random_effects()`` reports a level through the attributes it reads from
+    a ``RandomEffect``: ``_levels`` (here, paths), ``_prediction_codes`` (each
+    row's path at this level, ``-1`` if unseen), ``unseen`` and
+    ``unseen_contrast()``.
     """
 
     def __init__(self, hierarchy: Hierarchy, depth: int):
@@ -107,8 +112,15 @@ class HierarchyLevel:
     def _levels(self) -> list[tuple]:
         return self._hierarchy._paths[self._depth]
 
+    @property
+    def unseen(self) -> str:
+        return self._hierarchy.unseen
+
     def _prediction_codes(self, x) -> NDArray[np.intp]:
         return self._hierarchy._prediction_codes(x)[self._depth]
+
+    def unseen_contrast(self) -> NDArray[np.floating]:
+        return self._hierarchy.unseen_contrast(self._depth)
 
 
 class Hierarchy:
@@ -123,13 +135,13 @@ class Hierarchy:
 
     Declare the parts in one of two ways:
 
-    - ``Hierarchy(levels=("make", "model", "year"), sep="-")`` reads the
+    - ``Hierarchy(names=("make", "model", "year"), sep="-")`` reads the
       feature's own column, whose values join the parts with ``sep``
       (``"Ford-Focus-2019"``).  Every value must split into exactly
-      ``len(levels)`` parts; a value that does not is an error naming it,
+      ``len(names)`` parts; a value that does not is an error naming it,
       because a separator inside a name cannot be split unambiguously.
     - ``Hierarchy(columns=("make", "model", "year"))`` reads one column per
-      level, top level first, and needs no separator.  ``levels=`` may rename
+      level, top level first, and needs no separator.  ``names=`` may rename
       the levels; it defaults to the column names.
 
     Each fitted level is a term of its own named ``"<feature>:<level>"``
@@ -153,17 +165,28 @@ class Hierarchy:
     ``normalize=True`` compares text parts after Unicode NFKC folding,
     casefolding, trimming and collapsing internal whitespace, so ``"FORD "``
     and ``"Ford"`` are one make.  The same folding applies at fit and at
-    prediction, the labels are reported in folded form, and every merge of
-    distinct spellings is reported: in a warning at fit and under
-    ``"merged_labels"`` in ``reconstruct_feature()``.  Values that are not
-    text (a numeric year) are used as they are.
+    prediction.  A merged label is reported in the spelling most training
+    rows use (the first seen on a tie), so ``"Ford"`` stays ``"Ford"``, and
+    every merge of distinct spellings is reported: in a warning at fit and
+    under ``"merged_labels"`` in ``reconstruct_feature()``.  Values that are
+    not text (a numeric year) are used as they are.
 
-    A row whose path was not seen in training takes the effect of the deepest
-    level it shares with the training rows: a new model of a known make gets
-    that make's effect, and a new make gets the population value
-    (``unseen="population"``, as lme4's ``allow.new.levels`` and mgcv's
-    ``bs="re"`` predict a new level).  ``unseen="error"`` refuses any row whose
-    full path is new.  Missing parts are an error.
+    A row whose path was not seen in training keeps the effect of every level
+    it shares with the training rows: a new model of a known make gets that
+    make's effect.  Each level it does not share gives
+
+    - ``unseen="population"`` (the default): zero, the population value, as
+      lme4's ``allow.new.levels`` and mgcv's ``bs="re"`` predict a new level;
+    - ``unseen="weighted"``: the mean of that level's fitted effects under
+      the deepest part the path shares with training, each weighted by its
+      training weight (``sample_weight``, or rows), so a new model of a known
+      make is priced as that make's average exposure is, and a new make as
+      the book's;
+    - ``unseen="error"``: a refusal of any row whose full path is new.
+
+    ``random_effects()`` reports, per level, what a path new from the top
+    takes there and its standard error (``RandomEffectResult``).  Missing
+    parts are an error.
 
     Notes
     -----
@@ -178,12 +201,12 @@ class Hierarchy:
     def __init__(
         self,
         *,
-        levels: Sequence[str] | None = None,
+        names: Sequence[str] | None = None,
         sep: str | None = None,
         columns: Sequence[str] | None = None,
         nested_in: Hashable | None = None,
         normalize: bool = False,
-        unseen: Literal["population", "error"] = "population",
+        unseen: Literal["population", "weighted", "error"] = "population",
         lambda_policy: LambdaPolicy | None = None,
     ):
         if (sep is None) == (columns is None):
@@ -194,12 +217,12 @@ class Hierarchy:
         if sep is not None:
             if not isinstance(sep, str) or not sep:
                 raise ValueError(f"sep must be a non-empty string, got {sep!r}")
-            if levels is None:
+            if names is None:
                 raise ValueError(
-                    "Hierarchy(sep=...) needs levels=, the name of each part from the top "
-                    "level down, e.g. levels=('make', 'model', 'year')."
+                    "Hierarchy(sep=...) needs names=, the name of each part from the top "
+                    "level down, e.g. names=('make', 'model', 'year')."
                 )
-            names = _level_names(levels, "levels")
+            level_names = _level_names(names, "names")
             source = None
         else:
             if isinstance(columns, str):
@@ -209,12 +232,12 @@ class Hierarchy:
                 raise ValueError(f"Hierarchy columns= must hold column names, got {source!r}")
             if len(set(source)) != len(source):
                 raise ValueError(f"Hierarchy columns must be distinct, got {source!r}")
-            names = _level_names(source if levels is None else levels, "levels")
-            if len(names) != len(source):
+            level_names = _level_names(source if names is None else names, "names")
+            if len(level_names) != len(source):
                 raise ValueError(
-                    f"levels= names {len(names)} level(s) but columns= lists {len(source)}"
+                    f"names= lists {len(level_names)} level(s) but columns= lists {len(source)}"
                 )
-        if len(names) < 2:
+        if len(level_names) < 2:
             raise ValueError(
                 "A Hierarchy needs at least two levels; one grouping column is a RandomEffect()."
             )
@@ -224,12 +247,12 @@ class Hierarchy:
             )
         if not isinstance(normalize, bool):
             raise TypeError(f"normalize must be True or False, got {normalize!r}")
-        if unseen not in ("population", "error"):
-            raise ValueError(f"unseen must be 'population' or 'error', got {unseen!r}")
+        if unseen not in ("population", "weighted", "error"):
+            raise ValueError(f"unseen must be 'population', 'weighted' or 'error', got {unseen!r}")
         if lambda_policy is not None and not isinstance(lambda_policy, LambdaPolicy):
             raise TypeError("lambda_policy must be a LambdaPolicy or None")
 
-        self.levels = names
+        self.names = level_names
         self.sep = sep
         self.columns = source
         self.nested_in = nested_in
@@ -243,10 +266,14 @@ class Hierarchy:
         self._paths: dict[int, list[tuple]] = {}
         self._path_codes: dict[int, dict[tuple, int]] = {}
         self._merged: dict[str, dict[Any, tuple]] = {}
+        # Folded form -> label per level (normalize=True), and each fitted
+        # depth's training weight per path (unseen="weighted").
+        self._labels: list[dict] | None = None
+        self._weights: dict[int, NDArray[np.floating]] = {}
 
     def __repr__(self) -> str:
         source = f"sep={self.sep!r}" if self.columns is None else f"columns={self.columns!r}"
-        return f"Hierarchy(levels={self.levels!r}, {source})"
+        return f"Hierarchy(names={self.names!r}, {source})"
 
     # ── Reading the parts ────────────────────────────────────────
 
@@ -255,7 +282,7 @@ class Hierarchy:
         return (name,) if self.columns is None else self.columns
 
     def read_column(self, column: ColumnReader, name: Hashable) -> NDArray:
-        """The feature's values: its joined column, or an ``(n, levels)`` array of parts."""
+        """The feature's values: its joined column, or an ``(n, len(names))`` array of parts."""
         if self.columns is None:
             return np.asarray(column(name)).ravel()
         arrays = [np.asarray(column(source)).ravel() for source in self.columns]
@@ -310,19 +337,19 @@ class Hierarchy:
         wrong = [
             (value, len(parts))
             for value, parts in zip(joined, pieces, strict=True)
-            if len(parts) != len(self.levels)
+            if len(parts) != len(self.names)
         ]
         if wrong:
             shown = ", ".join(f"{value!r} ({count} parts)" for value, count in wrong[:_SHOWN])
             raise ValueError(
                 f"Hierarchy with sep={sep!r} needs every value to split into exactly "
-                f"{len(self.levels)} parts ({', '.join(self.levels)}), but {len(wrong)} of "
+                f"{len(self.names)} parts ({', '.join(self.names)}), but {len(wrong)} of "
                 f"{len(joined)} distinct values do not: {shown}. A separator inside a name "
                 "makes the split ambiguous, and it is never guessed: store the parts in "
                 "separate columns and use Hierarchy(columns=(...)), or join them with a "
                 "separator that no name contains."
             )
-        raw = np.empty((len(pieces), len(self.levels)), dtype=object)
+        raw = np.empty((len(pieces), len(self.names)), dtype=object)
         for row, parts in enumerate(pieces):
             raw[row, :] = parts
         return raw
@@ -335,10 +362,49 @@ class Hierarchy:
             folded[:, position] = [normalize_label(value) for value in raw[:, position]]
         return folded
 
-    def _paths_of(self, x) -> tuple[NDArray[np.intp], NDArray, NDArray]:
-        """Row path codes, the distinct paths as given, and their compared form."""
+    @staticmethod
+    def _spelling_labels(codes: NDArray[np.intp], raw: NDArray, folded: NDArray) -> list[dict]:
+        """Per level, each folded form's label: its spelling on the most rows, first seen on a tie."""
+        rows = np.bincount(codes, minlength=raw.shape[0]).tolist()
+        labels = []
+        for position in range(raw.shape[1]):
+            tallies: dict[Any, dict[Any, int]] = {}
+            for given, compared, count in zip(
+                raw[:, position], folded[:, position], rows, strict=True
+            ):
+                tally = tallies.setdefault(compared, {})
+                tally[given] = tally.get(given, 0) + count
+            # ``max`` keeps the first of equal counts, and the distinct paths
+            # are in the order the rows first show them.
+            labels.append(
+                {compared: max(tally, key=tally.__getitem__) for compared, tally in tallies.items()}
+            )
+        return labels
+
+    def _paths_of(
+        self, x, labels: list[dict] | None = None
+    ) -> tuple[NDArray[np.intp], NDArray, NDArray]:
+        """Row path codes, the distinct paths as given, and their keys.
+
+        Without ``normalize`` a part is its own key.  With it, parts compare in
+        folded form and are keyed by their label, the spelling most rows use,
+        so reports read as the data does.  *labels* are the fit's at
+        prediction; ``None`` reads them from these rows.  A folded form the
+        labels do not hold keys as ``_UNLABELLED``, which matches no path.
+        """
         codes, raw = self._raw_paths(x)
-        return codes, raw, self._folded(raw)
+        return codes, raw, self._keys(codes, raw, labels)
+
+    def _keys(self, codes: NDArray[np.intp], raw: NDArray, labels: list[dict] | None) -> NDArray:
+        if not self.normalize:
+            return raw
+        folded = self._folded(raw)
+        if labels is None:
+            labels = self._spelling_labels(codes, raw, folded)
+        keys = np.empty_like(folded)
+        for position, mapping in enumerate(labels):
+            keys[:, position] = [mapping.get(value, _UNLABELLED) for value in folded[:, position]]
+        return keys
 
     @staticmethod
     def _depth_codes(parts: NDArray) -> list[tuple[NDArray[np.intp], list[tuple]]]:
@@ -365,15 +431,15 @@ class Hierarchy:
     @property
     def fitted_depths(self) -> range:
         """The depths this hierarchy fits: all but those its ``nested_in`` level covers."""
-        return range(self._shared_depth, len(self.levels))
+        return range(self._shared_depth, len(self.names))
 
     def level_name(self, depth: int) -> str:
         """The fitted term name of one level, ``"<feature>:<level>"``."""
-        return f"{self._name}:{self.levels[depth]}"
+        return f"{self._name}:{self.names[depth]}"
 
     def level_view(self, level: str) -> HierarchyLevel:
         """The fitted level named *level* (its bare name, such as ``"model"``)."""
-        depth = self.levels.index(level)
+        depth = self.names.index(level)
         if depth not in self._paths:
             raise KeyError(f"Hierarchy level {level!r} is not fitted by this term")
         return HierarchyLevel(self, depth)
@@ -382,25 +448,41 @@ class Hierarchy:
 
     def training_codes(self, x) -> list[tuple[NDArray[np.intp], list[tuple]]]:
         """Each row's code and the paths at every depth, top first, without fitting."""
-        codes, _, folded = self._paths_of(x)
-        return [(depth_codes[codes], paths) for depth_codes, paths in self._depth_codes(folded)]
+        codes, _, keys = self._paths_of(x)
+        return [(depth_codes[codes], paths) for depth_codes, paths in self._depth_codes(keys)]
 
     def build(self, x, sample_weight: NDArray | None = None) -> list[GroupInfo]:
-        """One all-level random-effect block per fitted depth, top first."""
-        del sample_weight
-        codes, raw, folded = self._paths_of(x)
-        self._merged = self._merges(raw, folded) if self.normalize else {}
+        """One all-level random-effect block per fitted depth, top first.
+
+        Each fitted path's training weight (*sample_weight*, or one per row) is
+        kept for ``unseen="weighted"``.
+        """
+        codes, raw = self._raw_paths(x)
+        self._labels = (
+            self._spelling_labels(codes, raw, self._folded(raw)) if self.normalize else None
+        )
+        keys = self._keys(codes, raw, self._labels)
+        self._merged = self._merges(raw, keys) if self.normalize else {}
         if self._merged:
             warnings.warn(self._merge_message(), UserWarning, stacklevel=2)
-        depths = self._depth_codes(folded)
+        row_weight = (
+            np.ones(len(codes), dtype=np.float64)
+            if sample_weight is None
+            else np.asarray(sample_weight, dtype=np.float64).ravel()
+        )
+        depths = self._depth_codes(keys)
         self._paths = {}
         self._path_codes = {}
+        self._weights = {}
         infos = []
         policies = None if self._lambda_policy is None else {"_default": self._lambda_policy}
         for depth in self.fitted_depths:
             depth_codes, paths = depths[depth]
             self._paths[depth] = paths
             self._path_codes[depth] = {path: index for index, path in enumerate(paths)}
+            self._weights[depth] = np.bincount(
+                depth_codes[codes], weights=row_weight, minlength=len(paths)
+            )
             if depth > self._shared_depth and self._name is not None:
                 parent = self.level_name(depth - 1)
             else:
@@ -412,22 +494,22 @@ class Hierarchy:
                     penalized=True,
                     cat_codes=depth_codes[codes],
                     lambda_policies=policies,
-                    subgroup_name=self.levels[depth],
+                    subgroup_name=self.names[depth],
                     structured_kind="random_effect",
                     random_effect_nested_in=parent,
                 )
             )
         return infos
 
-    def _merges(self, raw: NDArray, folded: NDArray) -> dict[str, dict[Any, tuple]]:
+    def _merges(self, raw: NDArray, keys: NDArray) -> dict[str, dict[Any, tuple]]:
         merged: dict[str, dict[Any, tuple]] = {}
-        for position, level in enumerate(self.levels):
+        for position, level in enumerate(self.names):
             spellings: dict[Any, set] = {}
-            for given, compared in zip(raw[:, position], folded[:, position], strict=True):
-                spellings.setdefault(compared, set()).add(given)
+            for given, label in zip(raw[:, position], keys[:, position], strict=True):
+                spellings.setdefault(label, set()).add(given)
             found = {
-                compared: tuple(sorted(given, key=str))
-                for compared, given in spellings.items()
+                label: tuple(sorted(given, key=str))
+                for label, given in spellings.items()
                 if len(given) > 1
             }
             if found:
@@ -436,39 +518,90 @@ class Hierarchy:
 
     def _merge_message(self) -> str:
         entries = [
-            f"{level} {compared!r} <- {', '.join(repr(value) for value in given)}"
+            f"{level} {label!r} <- {', '.join(repr(value) for value in given)}"
             for level, found in self._merged.items()
-            for compared, given in found.items()
+            for label, given in found.items()
         ]
         shown = "; ".join(entries[:_SHOWN])
         more = f"; and {len(entries) - _SHOWN} more" if len(entries) > _SHOWN else ""
         return (
             f"Hierarchy normalize=True merged {len(entries)} group(s) of differently spelled "
-            f"labels into one label each: {shown}{more}. reconstruct_feature() lists them all "
-            "under 'merged_labels'."
+            f"labels into one label each, reported as the spelling most rows use: "
+            f"{shown}{more}. reconstruct_feature() lists them all under 'merged_labels'."
         )
 
     def validate_prediction_values(self, x) -> None:
         """Reject missing or unsplittable values without applying the unseen policy."""
         self._raw_paths(x)
 
-    def _prediction_codes(self, x) -> dict[int, NDArray[np.intp]]:
-        """Each row's code at every fitted depth; ``-1`` where the path was not fitted."""
-        codes, _, folded = self._paths_of(x)
-        out = {}
+    def _coded(self, x) -> tuple[NDArray[np.intp], NDArray, dict[int, NDArray[np.intp]]]:
+        """Row path codes, the distinct paths' keys, and each one's code at every fitted depth."""
+        codes, raw, keys = self._paths_of(x, self._labels)
+        lookups = {}
         for depth in self.fitted_depths:
             known = self._path_codes[depth]
-            lookup = np.fromiter(
-                (known.get(tuple(path[: depth + 1]), -1) for path in folded),
+            lookups[depth] = np.fromiter(
+                (known.get(tuple(path[: depth + 1]), -1) for path in keys),
                 dtype=np.intp,
-                count=len(folded),
+                count=len(keys),
             )
-            out[depth] = lookup[codes]
-        leaf = out[len(self.levels) - 1]
+        leaf = lookups[len(self.names) - 1]
         if self.unseen == "error" and np.any(leaf < 0):
-            unseen = [tuple(path) for path in folded[np.unique(codes[leaf < 0])][:_SHOWN]]
+            unseen = [tuple(path) for path in raw[leaf < 0][:_SHOWN]]
             raise ValueError(f"Encountered unseen Hierarchy paths: {unseen}.")
-        return out
+        return codes, keys, lookups
+
+    def _prediction_codes(self, x) -> dict[int, NDArray[np.intp]]:
+        """Each row's code at every fitted depth; ``-1`` where the path was not fitted."""
+        codes, _, lookups = self._coded(x)
+        return {depth: lookup[codes] for depth, lookup in lookups.items()}
+
+    def _shares(self, depth: int) -> dict[tuple, tuple[NDArray[np.intp], NDArray[np.floating]]]:
+        """Under every training prefix above *depth*, its paths and their shares of the weight.
+
+        The empty prefix holds all of the depth's paths.  A prefix whose paths
+        carry no weight gets zero shares, the population value.
+        """
+        weights = self._weights[depth]
+        members: dict[tuple, list[int]] = {}
+        for index, path in enumerate(self._paths[depth]):
+            for length in range(depth + 1):
+                members.setdefault(path[:length], []).append(index)
+        shares = {}
+        for prefix, indices in members.items():
+            positions = np.asarray(indices, dtype=np.intp)
+            total = math.fsum(weights[positions].tolist())
+            shares[prefix] = (
+                positions,
+                weights[positions] / total if total > 0.0 else np.zeros(len(positions)),
+            )
+        return shares
+
+    def _unseen_contrasts(
+        self, depth: int, keys: NDArray, lookup: NDArray[np.intp]
+    ) -> list[tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.floating]]]:
+        """``unseen="weighted"``: the distinct paths new at *depth*, by the prefix they share.
+
+        Each entry is ``(distinct paths, member paths, shares)``: the new paths
+        take the shares-weighted mean of the depth's effects under the
+        longest prefix they share with the training paths, all of them when
+        they share none.
+        """
+        new = np.flatnonzero(lookup < 0)
+        if self.unseen != "weighted" or not new.size:
+            return []
+        shares = self._shares(depth)
+        grouped: dict[tuple, list[int]] = {}
+        for index in new.tolist():
+            path = tuple(keys[index, : depth + 1])
+            length = depth
+            while path[:length] not in shares:
+                length -= 1
+            grouped.setdefault(path[:length], []).append(index)
+        return [
+            (np.asarray(indices, dtype=np.intp), *shares[prefix])
+            for prefix, indices in grouped.items()
+        ]
 
     def _offsets(self) -> dict[int, int]:
         offsets, start = {}, 0
@@ -477,35 +610,66 @@ class Hierarchy:
             start += len(self._paths[depth])
         return offsets
 
-    def score(self, x, beta: NDArray[np.floating]) -> NDArray[np.floating]:
-        """Add each row's fitted effect at every depth it shares with training."""
+    def level_scores(self, x, beta: NDArray[np.floating]) -> dict[int, NDArray[np.floating]]:
+        """Each fitted depth's effect on every row, top first, with the unseen rule applied.
+
+        A depth the row's path shares with training gives its fitted effect.
+        A new one gives zero (``unseen="population"``) or, under
+        ``unseen="weighted"``, the training-weighted mean of the depth's
+        effects under the longest prefix the path shares with training.
+        """
         beta = np.asarray(beta, dtype=np.float64).ravel()
         offsets = self._offsets()
+        codes, keys, lookups = self._coded(x)
+        out = {}
+        for depth, lookup in lookups.items():
+            block = beta[offsets[depth] : offsets[depth] + len(self._paths[depth])]
+            values = np.zeros(len(lookup), dtype=np.float64)
+            known = lookup >= 0
+            values[known] = block[lookup[known]]
+            for paths, members, shares in self._unseen_contrasts(depth, keys, lookup):
+                values[paths] = shares @ block[members]
+            out[depth] = values[codes]
+        return out
+
+    def score(self, x, beta: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Add each row's effect at every fitted depth (``level_scores``)."""
         effects = None
-        for depth, codes in self._prediction_codes(x).items():
-            known = codes >= 0
-            block = np.zeros(len(codes), dtype=np.float64)
-            block[known] = beta[offsets[depth] + codes[known]]
+        for block in self.level_scores(x, beta).values():
             effects = block if effects is None else effects + block
         assert effects is not None
         return effects
 
     def transform(self, x) -> NDArray[np.floating]:
-        """Materialize the all-level indicator columns of every fitted depth."""
+        """Materialize the all-level columns of every fitted depth (shares where a path is new)."""
         offsets = self._offsets()
         width = sum(len(paths) for paths in self._paths.values())
-        codes_by_depth = self._prediction_codes(x)
-        n = len(next(iter(codes_by_depth.values())))
-        transformed = np.zeros((n, width), dtype=np.float64)
-        for depth, codes in codes_by_depth.items():
-            known = np.flatnonzero(codes >= 0)
-            transformed[known, offsets[depth] + codes[known]] = 1.0
-        return transformed
+        codes, keys, lookups = self._coded(x)
+        rows = np.zeros((len(keys), width), dtype=np.float64)
+        for depth, lookup in lookups.items():
+            known = np.flatnonzero(lookup >= 0)
+            rows[known, offsets[depth] + lookup[known]] = 1.0
+            for paths, members, shares in self._unseen_contrasts(depth, keys, lookup):
+                rows[np.ix_(paths, offsets[depth] + members)] = shares
+        return rows[codes]
+
+    def unseen_contrast(self, depth: int) -> NDArray[np.floating]:
+        """The weights over a depth's paths that a path new from the top level takes there.
+
+        Zero under ``unseen="population"`` (and ``"error"``, which refuses
+        such a path); the paths' shares of the training weight under
+        ``unseen="weighted"``.
+        """
+        contrast = np.zeros(len(self._paths[depth]), dtype=np.float64)
+        if self.unseen == "weighted":
+            members, shares = self._shares(depth)[()]
+            contrast[members] = shares
+        return contrast
 
     def leaf_coefficients(self) -> NDArray[np.intp]:
         """``(n_paths, n_fitted_depths)`` positions in the term's coefficients of each path's levels."""
         offsets = self._offsets()
-        leaf_depth = len(self.levels) - 1
+        leaf_depth = len(self.names) - 1
         columns = [
             np.fromiter(
                 (
@@ -522,7 +686,7 @@ class Hierarchy:
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Combined effect of every fitted level on each full path, and each level's own."""
         beta = np.asarray(beta, dtype=np.float64).ravel()
-        leaves = self._paths[len(self.levels) - 1]
+        leaves = self._paths[len(self.names) - 1]
         total = beta[self.leaf_coefficients()].sum(axis=1)
         effects = {path: float(value) for path, value in zip(leaves, total, strict=True)}
         offsets = self._offsets()
@@ -530,7 +694,7 @@ class Hierarchy:
         for depth in self.fitted_depths:
             paths = self._paths[depth]
             block = beta[offsets[depth] : offsets[depth] + len(paths)]
-            by_level[self.levels[depth]] = {
+            by_level[self.names[depth]] = {
                 path: float(value) for path, value in zip(paths, block, strict=True)
             }
         return {
@@ -581,7 +745,7 @@ def bind_hierarchies(specs: Mapping[Any, Any]) -> None:
     declared = {
         f"{name}:{level}": (name, position + 1)
         for name, spec in hierarchies.items()
-        for position, level in enumerate(spec.levels)
+        for position, level in enumerate(spec.names)
     }
     for name, spec in hierarchies.items():
         spec._name = name
@@ -597,7 +761,7 @@ def bind_hierarchies(specs: Mapping[Any, Any]) -> None:
             depth = 1
         else:
             continue  # no reference, or one reported below with the fitted levels
-        if depth >= len(spec.levels):
+        if depth >= len(spec.names):
             raise ValueError(
                 f"Hierarchy {name!r} is declared nested_in={parent!r}, which already covers "
                 f"its first {depth} part(s), so it has no deeper level to fit; list at least "
