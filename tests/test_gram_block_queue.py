@@ -461,9 +461,14 @@ def test_estimator_threads_never_change_the_fit(monkeypatch):
     for bad in (0, -1, True, 1.5, "many"):
         with pytest.raises(ValueError, match="n_jobs"):
             SuperGLM(n_jobs=bad)
-    for bad in (0, "lots", True, 2.5):
+    for bad in (0, "lots", True, 2.5, "inf", "1e400", "nan"):
         with pytest.raises(ValueError, match="max_memory"):
             SuperGLM(max_memory=bad)
+    # A malformed environment default warns and falls back; it never fails a fit.
+    with monkeypatch.context() as patched:
+        patched.setenv("SUPERGLM_MAX_MEMORY", "inf")
+        with pytest.warns(UserWarning, match="SUPERGLM_MAX_MEMORY"):
+            assert parallel.resolve_max_memory() == parallel.default_max_memory()
     X, y, _rng = _frame(4_000, seed=9)
 
     def model(**threads):

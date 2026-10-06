@@ -30,6 +30,7 @@ The pooled kernels are the data-rank factor's TSQR leaves
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import warnings
@@ -103,8 +104,10 @@ def _parse_memory(value: int | str) -> int:
         if text in ("", "AUTO"):
             return default_max_memory()
         scale = _SUFFIXES.get(text[-1:], 1)
-        number = text[:-1] if text[-1:] in _SUFFIXES else text
-        value = int(float(number) * scale)
+        number = float(text[:-1] if text[-1:] in _SUFFIXES else text) * scale
+        if not math.isfinite(number):
+            raise ValueError(f"max_memory must be a finite byte count, got {value!r}")
+        value = int(number)
     if isinstance(value, bool) or int(value) < 1:
         raise ValueError(f"max_memory must be a positive byte count or 'auto', got {value!r}")
     return int(value)
