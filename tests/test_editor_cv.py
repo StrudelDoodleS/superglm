@@ -1567,6 +1567,78 @@ def test_final_fit_keeps_a_categorical_universe_whose_splits_differ_in_order_fla
     np.testing.assert_array_equal(final.predict(X), expected.predict(X))
 
 
+def test_final_fit_stacks_a_numeric_term_read_from_categoricals_of_two_number_kinds():
+    """x is a Numeric term held as categoricals: of 0, 1, 2 in train, of 0.0, 1.0, 2.0 in validation.
+
+    A numeric term reads the numbers, not the categories, but 801e2e8b
+    compared the categories for every column, so Final fit refused a pair the
+    fit reads the same way.
+    """
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    x_train, x_valid = np.tile([0, 1, 2], 30), np.tile([0.0, 1.0, 2.0], 30)
+    train = pd.DataFrame({"x": pd.Categorical(x_train, categories=[0, 1, 2])})
+    validation = pd.DataFrame(
+        {"x": pd.Categorical(x_valid, categories=[0.0, 1.0, 2.0], ordered=True)}
+    )
+    y_train, y_valid = 1.0 + 2.0 * x_train, 1.0 + 2.0 * x_valid
+
+    def declared():
+        return SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()})
+
+    session = EditorSession.from_model(
+        declared().fit(train, y_train),
+        train_data=(train, y_train),
+        validation_data=(validation, y_valid),
+    )
+
+    final = run_final_fit(capture_final_fit(session), _Context()).model
+
+    union = pd.DataFrame({"x": np.concatenate([x_train, x_valid]).astype(np.float64)})
+    expected = declared().fit(union, np.concatenate([y_train, y_valid]))
+    np.testing.assert_array_equal(final.predict(union), expected.predict(union))
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_final_fit_refuses_a_factor_smooth_group_held_as_bool_beside_integers(cv_frame, backend):
+    """The factor smooth's group column is True/False in the train rows and int8 0/1 in validation.
+
+    The group's levels are labels (True is not 1), but the column was not
+    taken for a level column, so since c235ab7a the pair stacked as float64:
+    the fit learned levels 0.0 and 1.0, and the kept model put every row of
+    bool-typed data on the population curve without a word.
+    """
+    import polars as pl
+
+    import superglm.editor.cv as cv
+    from superglm import FactorSmooth
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    X, y, w = cv_frame
+    X = X.assign(urban=X["power"] > 0.0)
+    train = X.iloc[:400]
+    validation = X.iloc[400:500].astype({"urban": np.int8})
+    frame = pd.DataFrame if backend == "pandas" else pl.from_pandas
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=6)},
+        interactions=[FactorSmooth("age", group="urban", basis="fs", k=5)],
+    )
+    model.fit_reml(frame(train), y[:400], sample_weight=w[:400])
+    session = EditorSession.from_model(
+        model,
+        train_data=(frame(train), y[:400], w[:400]),
+        validation_data=(frame(validation), y[400:500], w[400:500]),
+    )
+
+    with pytest.raises(EditorValueError) as refused:
+        run_final_fit(capture_final_fit(session), _Context())
+
+    assert refused.value.public_message == cv.FINAL_COLUMN_TYPES.format(column="urban")
+
+
 def test_final_fit_refuses_categories_that_are_equal_numbers_but_other_levels():
     """Train categories -0.0, 1.0, 2.0 and validation's 0.0, 1.0, 2.0 (validation ordered).
 

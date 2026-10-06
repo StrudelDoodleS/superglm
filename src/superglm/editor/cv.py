@@ -34,6 +34,7 @@ from superglm.editor.jobs import JobCancelledError
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
 from superglm.features.categorical import Categorical, _codes_against, _grouping_labels
+from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.grouping import LevelGrouping, native_by_text
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.random_effect import RandomEffect
@@ -1173,14 +1174,16 @@ def _union_rows(datasets: Sequence[EvaluationDataset], template):
         X = frames[0].native
     elif backends == {"pandas"}:
         names, casts = _stacked_columns(frames, template)
-        # Splits that declare one set of categories stack as one categorical:
-        # pandas stacks two whose ordered flags differ as object, which drops
-        # a category no row holds from the universe.
+        # Splits that declare one set of categories for a column read as
+        # labels stack as one categorical: pandas stacks two whose ordered
+        # flags differ as object, which drops a category no row holds from
+        # the universe. A column read as numbers takes its cast instead.
         first = cast(pd.DataFrame, frames[0].native)
+        labelled = _label_columns(template)
         categorical = {
             name: first[name].dtype
             for name in names
-            if isinstance(first[name].dtype, pd.CategoricalDtype)
+            if name in labelled and isinstance(first[name].dtype, pd.CategoricalDtype)
         }
         X = pd.concat(
             [
@@ -1215,20 +1218,18 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
     those stack without changing a value, however their libraries name the
     dtype or order the columns. So do numbers of other kinds or widths, and
     bools, in a column a term reads as a number, which the fit reads as
-    float64 (True as 1). A level
-    term reads a number's text: integers of any width spell a level alike, so
-    they stack as int64, but 1 and 1.0 are two levels, and uint64 is left
-    alone, since beside a signed integer pandas would stack it as float64.
+    float64 (True as 1), whatever categories their dtype declares. A column
+    read as labels, a level term's or a factor smooth's group, reads a
+    number's text: integers of any width spell a level alike, so they stack
+    as int64, but 1 and 1.0, or True and 1, are two levels, and uint64 is
+    left alone, since beside a signed integer pandas would stack it as
+    float64.
     """
     names = list(_fingerprint_columns(template, frames[0]))
-    levels = {
-        name
-        for name, spec in template._specs.items()
-        if isinstance(spec, Categorical | OrderedCategorical | RandomEffect)
-    }
+    levels = _label_columns(template)
     casts: dict[str, str] = {}
     for name in names:
-        readings = {_reading(frame, name) for frame in frames}
+        readings = {_reading(frame, name, labels=name in levels) for frame in frames}
         if len(readings) == 1:
             continue
         if ("absent", None) in readings:
@@ -1249,23 +1250,37 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
     return names, casts
 
 
+def _label_columns(template) -> set[str]:
+    """The columns ``template`` reads as labels: its level terms', and its factor smooths' groups."""
+    labelled = {
+        name
+        for name, spec in template._specs.items()
+        if isinstance(spec, Categorical | OrderedCategorical | RandomEffect)
+    }
+    for spec in getattr(template, "_interaction_specs", {}).values():
+        if isinstance(spec, FactorSmooth):
+            labelled.add(spec.group)
+    return labelled
+
+
 def _holds_missing(frame, name) -> bool:
     return bool(np.asarray(pd.isna(frame.column_array(name)), dtype=bool).any())
 
 
-def _reading(frame, name) -> tuple[Any, tuple | None]:
+def _reading(frame, name, *, labels: bool = True) -> tuple[Any, tuple | None]:
     """How the fit reads ``frame``'s column ``name``: its NumPy dtype, then its declared categories.
 
     Any value not a number or a bool reads as ``"values"`` (text, whatever
     its dtype is called), and a column the frame lacks as ``"absent"``.
     Categories compare by type and text, not as values: the fit reads a
     category's text, so -0.0 and 0.0 are equal numbers but two levels, and
-    stacking 1 under the categories of "1" would lose the row.
+    stacking 1 under the categories of "1" would lose the row. A column not
+    read as ``labels`` is read as its numbers, and its categories are left out.
     """
     if name not in frame.columns:
         return "absent", None
     dtype = frame.column_array(name).dtype
-    categories = frame.column_declared_categories(name)
+    categories = frame.column_declared_categories(name) if labels else None
     kind = dtype if dtype.kind in "iufb" and categories is None else "values"
     if categories is None:
         return kind, None
