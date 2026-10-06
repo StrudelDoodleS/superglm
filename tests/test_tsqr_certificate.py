@@ -656,3 +656,57 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     # Two aliased three-level factors: their second factor's two columns are
     # the first's, so the data rank is the width less two.
     assert data.rank == model.result.beta.size - 2
+
+
+def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
+    """The direct REML loop's bootstrap fit leaves rank metadata to the published refit.
+
+    A ``RandomEffect`` on the cells of two factors beside both factors'
+    main effects: each factor level is the sum of its cells, so the data
+    Gram is singular by construction and the published ``rank_info.data``
+    needs the O(n p^2) data-rank factor.  The bootstrap fit built one as
+    well, which nothing read (the candidates and trials already skip it), so
+    against it the factor below is built twice.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm import RandomEffect, Tweedie
+
+    rng = np.random.default_rng(8)
+    n = 3_000
+    a = rng.integers(0, 4, n)
+    b = rng.integers(0, 3, n)
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(-1.0, 1.0, n),
+            "a": pd.Categorical([f"a{v}" for v in a]),
+            "b": pd.Categorical([f"b{v}" for v in b]),
+            "ab": pd.Categorical([f"{u}|{v}" for u, v in zip(a, b, strict=True)]),
+        }
+    )
+    mu = np.exp(0.3 * np.sin(2.0 * frame["x"].to_numpy()) + 0.1 * a - 0.1 * b)
+    y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.3)
+    calls: list[int] = []
+    original = irls_direct.grouped_weighted_factor
+
+    def counted(dm, W, **kwargs):
+        calls.append(len(W))
+        return original(dm, W, **kwargs)
+
+    monkeypatch.setattr(irls_direct, "grouped_weighted_factor", counted)
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "x": Spline(kind="ps", k=8),
+            "a": Categorical(),
+            "b": Categorical(),
+            "ab": RandomEffect(),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    assert calls == [n]
+    data = model.result.rank_info.data
+    assert data.method == "qr_svd" and data.rank < model.result.beta.size
