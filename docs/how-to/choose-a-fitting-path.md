@@ -145,6 +145,10 @@ A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
   says what to change, and `model.reml_diagnostics()["termination_reason"]`
   reads `"bootstrap_uncertified"`. `estimate_p` skips a Tweedie power where
   this happens.
+- **A start that cannot be scored at all is tried once more too.** If the
+  second start's fit cannot be scored either, for example because its score
+  is not a finite number, `fit_reml` raises an error that says so, and
+  `estimate_p` skips that power.
 
 ### Refitting on similar data
 

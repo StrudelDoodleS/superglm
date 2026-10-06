@@ -107,6 +107,11 @@ class REMLResult:
     # re-solving an already-solved (Dp, Mp).  Excluded from equality and repr:
     # it is a memo, not part of the result's identity.
     tweedie_scale_data: object | None = field(default=None, repr=False, compare=False)
+    # The components the smoothing search started from their warm values
+    # (``lambda2_init``), sorted: the SCOP engine empties it when its bootstrap
+    # had no certified mode at the warm start and retried at Hessian-scaled
+    # values. None where the engine does not record it.
+    warm_start_components: list[str] | None = None
 
 
 def _map_beta_between_bases(

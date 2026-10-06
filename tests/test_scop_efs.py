@@ -2123,6 +2123,12 @@ class TestSCOPEFSOuterLoop:
         ``except ObservedModeNotCertifiedError`` handler because that family is
         RuntimeError-derived, so it killed the fit rather than costing it one
         point. Both call sites now retype it.
+
+        A first start whose mode cannot be scored is retried at the
+        Hessian-scaled start, like one with no certified mode; here every
+        score is refused, so the retry's refusal is raised, an infeasible
+        point to a power search.  Mutation check: a19d2fe4 raised at the
+        first start without a retry.
         """
         import superglm.reml.scop_efs as scop_efs_module
         from superglm.reml.observed_geometry import (
@@ -2134,6 +2140,14 @@ class TestSCOPEFSOuterLoop:
             raise ObservedGeometryInfeasibleError("SCOP penalized mode score is not finite")
 
         monkeypatch.setattr(scop_efs_module, "scop_penalized_mode_score", refuse)
+        starts = []
+        real_attempt = scop_efs_module._bootstrap_attempt
+
+        def attempt(context, lambdas, last_fit):
+            starts.append(dict(lambdas))
+            return real_attempt(context, lambdas, last_fit)
+
+        monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
 
         rng = np.random.default_rng(20260818)
         n = 100
@@ -2154,6 +2168,7 @@ class TestSCOPEFSOuterLoop:
             model.fit_reml(pd.DataFrame({"z": z, "x": x}), y, max_reml_iter=2, max_pirls_iter=100)
 
         assert isinstance(excinfo.value.__cause__, ObservedGeometryInfeasibleError)
+        assert len(starts) == 2 and starts[1] != starts[0]
 
     def test_candidate_guard_backtracks_past_uphill_full_and_half_steps(self, monkeypatch):
         """A fresh converged mode is required at every log-scale trial."""
@@ -3513,6 +3528,368 @@ class TestColdBootstrapStart:
         assert len(reml.lambda_history) == 2
         assert np.isfinite(model.result.effective_df)
         assert np.all(np.isfinite(model.predict(frame)))
+
+
+def _overflow_probe_a():
+    return np.exp(np.array([1000.0]))
+
+
+def _overflow_probe_b():
+    return np.exp(np.array([1000.0]))
+
+
+class _ProbeWarning(UserWarning):
+    """A warning only these tests raise."""
+
+
+def _small_scop_model():
+    rng = np.random.default_rng(0)
+    n = 200
+    x = np.sort(rng.uniform(0, 1, n))
+    y = np.round(np.exp(1.0 + 1.5 * x)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+    )
+    return model, pd.DataFrame({"x": x}), y
+
+
+class TestBootstrapWarningHold:
+    """A bootstrap start's warnings are held in its own context and replayed only for the kept start.
+
+    ``warnings.catch_warnings`` swaps the process-wide filters and
+    ``showwarning``: two fits overlapping on threads (the editor's jobs) could
+    leave the process recording into a list nobody reads.  The hold is a
+    context variable (``superglm._held_warnings``).
+    """
+
+    def test_overlapping_bootstraps_leave_the_warnings_module_alone(self, monkeypatch):
+        """Two fits on two threads, their bootstraps interleaved A in, B in, A out, B out.
+
+        Each thread's kept start replays its own NumPy overflow probe, and
+        nothing else's; the filters and ``showwarning`` are as they were, and a
+        later warning on the main thread still reaches ``showwarning``.
+        Mutation check: a19d2fe4's ``catch_warnings`` left B's exit restoring
+        the state A installed (an "always" filter and a recording
+        ``showwarning``).
+        """
+        import threading
+        import warnings
+
+        probes = {"A": _overflow_probe_a, "B": _overflow_probe_b}
+        a_in, a_out = threading.Event(), threading.Event()
+        both_in = threading.Barrier(2, timeout=120)
+        started: set[str] = set()
+        real_fit = scop_efs_module._fit_scop_reml_mode
+        real_attempt = scop_efs_module._bootstrap_attempt
+
+        def fit(context, lambdas, **kwargs):
+            name = threading.current_thread().name
+            if kwargs.get("phase") == "bootstrap" and name not in started:
+                started.add(name)
+                probes[name]()
+                if name == "A":
+                    a_in.set()
+                both_in.wait()
+                if name == "B":
+                    assert a_out.wait(timeout=120)
+            return real_fit(context, lambdas, **kwargs)
+
+        def attempt(*args, **kwargs):
+            # A enters its attempt first, then B; A leaves first, then B
+            if threading.current_thread().name == "B":
+                assert a_in.wait(timeout=120)
+            out = real_attempt(*args, **kwargs)
+            if threading.current_thread().name == "A":
+                a_out.set()
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fit)
+        monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
+        seen: list[tuple[str, type, str, int]] = []
+
+        def show(message, category, filename, lineno, file=None, line=None):
+            seen.append((threading.current_thread().name, category, filename, lineno))
+
+        errors: list[BaseException] = []
+
+        def run():
+            try:
+                model, frame, y = _small_scop_model()
+                model.fit_reml(frame, y, max_reml_iter=5)
+            except BaseException as exc:  # reported below
+                errors.append(exc)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.showwarning = show
+            filters, shown = list(warnings.filters), warnings.showwarning
+            threads = [threading.Thread(target=run, name=name) for name in "AB"]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=600)
+            assert not errors, errors
+            assert warnings.filters == filters
+            assert warnings.showwarning is shown
+            warnings.warn("after", _ProbeWarning)
+        assert ("MainThread", _ProbeWarning) in {(name, category) for name, category, *_ in seen}
+        for name, probe in probes.items():
+            own = [
+                (filename, lineno)
+                for thread, category, filename, lineno in seen
+                if thread == name and category is RuntimeWarning and filename == __file__
+            ]
+            assert own == [(__file__, probe.__code__.co_firstlineno + 1)], (name, own)
+
+    def test_the_kept_start_warnings_reach_the_caller(self, monkeypatch):
+        """A warning the bootstrap raises through superglm reaches the caller from its own line.
+
+        On a fit whose first start certifies it arrives once, attributed to
+        the line that raised it, and an "error" filter raises it.  With the
+        first start forced to fail, only the retry's arrive.  Mutation check:
+        a no-op ``replay`` drops every one.
+        """
+        import warnings
+
+        from superglm import _held_warnings
+
+        real_fit = scop_efs_module._fit_scop_reml_mode
+        emitted: list[float] = []
+
+        def fit(context, lambdas, **kwargs):
+            if kwargs.get("phase") == "bootstrap":
+                _held_warnings.warn(f"probe {lambdas['x']!r}", _ProbeWarning)
+                emitted.append(lambdas["x"])
+            return real_fit(context, lambdas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fit)
+        line = fit.__code__.co_firstlineno + 2
+
+        def probes():
+            emitted.clear()
+            model, frame, y = _small_scop_model()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                model.fit_reml(frame, y, max_reml_iter=5)
+            return [
+                (str(w.message), w.filename, w.lineno)
+                for w in caught
+                if w.category is _ProbeWarning
+            ]
+
+        kept = probes()
+        assert emitted and set(emitted) == {1e-4}
+        assert kept == [(f"probe {1e-4!r}", __file__, line)] * len(emitted)
+        model, frame, y = _small_scop_model()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", _ProbeWarning)
+            with pytest.raises(_ProbeWarning):
+                model.fit_reml(frame, y, max_reml_iter=5)
+
+        real_relative = scop_efs_module._scop_mode_newton_relative
+        monkeypatch.setattr(
+            scop_efs_module,
+            "_scop_mode_newton_relative",
+            lambda mode: 1.0 if mode.lambdas == {"x": 1e-4} else real_relative(mode),
+        )
+        retried = probes()
+        assert 1e-4 in emitted
+        assert retried == [(f"probe {x!r}", __file__, line) for x in emitted if x != 1e-4]
+        assert retried
+
+    @pytest.mark.parametrize("held", [False, True], ids=["warnings_warn", "held_warn"])
+    def test_a_warning_from_code_with_no_module_is_not_dropped(self, monkeypatch, held):
+        """A warning raised from a notebook cell, whose filename names no module, reaches the caller.
+
+        A custom family defined in a notebook warns from code whose globals
+        have no ``__name__``.  Replayed with ``module=None``, Python 3.13 drops
+        it; the module is read from the frame, as ``warnings.warn`` reads it
+        (``"<string>"`` without a ``__name__``).  Mutation check: a19d2fe4
+        raised nothing under "error" for the ``warnings.warn`` case.
+        """
+        import warnings
+
+        namespace = {"warnings": warnings, "Probe": _ProbeWarning}
+        if held:
+            from superglm import _held_warnings
+
+            namespace["held_warnings"] = _held_warnings
+        source = (
+            "def emit(held):\n"
+            "    if held:\n"
+            "        held_warnings.warn('cell', Probe)\n"
+            "    else:\n"
+            "        warnings.warn('cell', Probe)\n"
+        )
+        exec(compile(source, "<notebook-cell-7>", "exec"), namespace)
+        assert "__name__" not in namespace
+        real_fit = scop_efs_module._fit_scop_reml_mode
+
+        def fit(context, lambdas, **kwargs):
+            if kwargs.get("phase") == "bootstrap":
+                namespace["emit"](held)
+            return real_fit(context, lambdas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fit)
+        model, frame, y = _small_scop_model()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", _ProbeWarning)
+            with pytest.raises(_ProbeWarning, match="cell"):
+                model.fit_reml(frame, y, max_reml_iter=5)
+        model, frame, y = _small_scop_model()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.fit_reml(frame, y, max_reml_iter=5)
+        located = {(w.filename, w.lineno) for w in caught if w.category is _ProbeWarning}
+        assert located == {("<notebook-cell-7>", 3 if held else 5)}
+
+
+class TestBootstrapRetryCoverage:
+    """The scaled retry also covers a first start whose mode cannot be scored, and warm starts."""
+
+    def test_a_first_start_whose_mode_cannot_be_scored_is_retried(self, monkeypatch):
+        """The first start's mode score refuses (a non-finite score); the scaled start certifies.
+
+        That error is "no certified mode" at that start, the case the scaled
+        start exists for, so the retry runs and the search converges from it.
+        Mutation check: a19d2fe4 raised ``ObservedModeNotConvergedError``.
+        """
+        from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+        real_score = scop_efs_module.scop_penalized_mode_score
+        calls = []
+
+        def refuse_once(**kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ObservedGeometryInfeasibleError("SCOP penalized mode score is not finite")
+            return real_score(**kwargs)
+
+        starts = []
+        real_attempt = scop_efs_module._bootstrap_attempt
+
+        def attempt(context, lambdas, last_fit):
+            starts.append(dict(lambdas))
+            return real_attempt(context, lambdas, last_fit)
+
+        monkeypatch.setattr(scop_efs_module, "scop_penalized_mode_score", refuse_once)
+        monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
+        model, frame, y = _small_scop_model()
+        model.fit_reml(frame, y, max_reml_iter=20)
+        assert len(starts) == 2 and starts[0] == {"x": 1e-4} and starts[1] != starts[0]
+        assert model.reml_diagnostics()["converged"]
+
+    def test_a_fold_whose_warm_start_was_retried_away_reads_cold(self, monkeypatch):
+        """``warm_started`` and the profile's warm components describe where the search started.
+
+        Folds two and three are warm-started from fold one; their warm
+        bootstrap is refused, and the search starts from the Hessian-scaled
+        values instead.  Mutation check: a19d2fe4 read ``warm_started`` True.
+        """
+        from sklearn.model_selection import KFold
+
+        from superglm import cross_validate
+
+        first_starts: list[dict[str, float]] = []
+        warm_calls: list[bool] = []
+        real_optimize = scop_efs_module.optimize_scop_efs_reml
+        real_attempt = scop_efs_module._bootstrap_attempt
+        real_relative = scop_efs_module._scop_mode_newton_relative
+
+        depth = [0]
+
+        def optimize(*args, **kwargs):
+            # a guard restart calls this again from inside: one record per fit
+            if depth[0] == 0:
+                warm_calls.append(kwargs.get("warm_lambdas") is not None)
+                first_starts.append({})
+            depth[0] += 1
+            try:
+                return real_optimize(*args, **kwargs)
+            finally:
+                depth[0] -= 1
+
+        def attempt(context, lambdas, last_fit):
+            if not first_starts[-1]:
+                first_starts[-1].update(lambdas)
+            return real_attempt(context, lambdas, last_fit)
+
+        def relative(mode):
+            if warm_calls[-1] and mode.lambdas == first_starts[-1]:
+                return 1.0
+            return real_relative(mode)
+
+        monkeypatch.setattr(scop_efs_module, "optimize_scop_efs_reml", optimize)
+        monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", relative)
+        # a step the first fold resolves (a flat term is not passed on warm)
+        rng = np.random.default_rng(0)
+        x = np.sort(rng.uniform(0.0, 1.0, 600))
+        y = rng.poisson(np.exp(0.5 + 1.5 / (1.0 + np.exp(-12.0 * (x - 0.5))))).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+        )
+        result = cross_validate(
+            model,
+            pd.DataFrame({"x": x}),
+            y,
+            cv=KFold(3, shuffle=True, random_state=0),
+            fit_mode="fit_reml",
+            return_estimators=True,
+        )
+        assert warm_calls == [False, True, True]
+        assert result.fold_scores["warm_started"].tolist() == [False, False, False]
+        for estimator in result.estimators[1:]:
+            profile = estimator.reml_diagnostics()["profile"]
+            assert profile["reml_warm_start_components"] == []
+            assert estimator._reml_result.warm_start_components == []
+
+    def test_a_zero_weight_row_does_not_move_the_scaled_start(self):
+        """Only positive-weight rows set the Hessian-scaled start.
+
+        A zero-weight row's offset of -800 overflowed its rescaled response
+        and switched the whole intercept-only fit to its fallback, moving the
+        published smoothing parameter of an unconverged fit and its
+        predictions.  Mutation check: a19d2fe4 published 7.50 at offset -1
+        and 5.13 at -800 here.
+        """
+        import warnings
+
+        from superglm import Spline
+
+        rng = np.random.default_rng(2)
+        x = np.linspace(0.0, 1.0, 80)
+        y = rng.poisson(np.exp(0.2 + 0.8 * x)).astype(float)
+        frame = pd.DataFrame({"x": np.append(x, 0.0)})
+        response = np.append(y, 2.0)
+        weight = np.append(np.ones(80), 0.0)
+        offsets = np.where(np.arange(80) % 2 == 0, -1.0, 0.0)
+        fitted = {}
+        for inactive in (-1.0, -800.0):
+            model = SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=True,
+                features={"x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing)},
+            )
+            offset = np.append(offsets, inactive)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model.fit_reml(
+                    frame, response, sample_weight=weight, offset=offset, max_pirls_iter=1
+                )
+            fitted[inactive] = (
+                model.reml_diagnostics()["lambdas"],
+                model.predict(frame.iloc[:80], offset=offsets),
+            )
+        assert fitted[-1.0][0] == fitted[-800.0][0]
+        np.testing.assert_array_equal(fitted[-1.0][1], fitted[-800.0][1])
 
 
 class TestSCOPAitkenTail:

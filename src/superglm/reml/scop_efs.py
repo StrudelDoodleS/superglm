@@ -13,8 +13,6 @@ Biometrics 73(4), 1071-1081.
 from __future__ import annotations
 
 import logging
-import sys
-import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any
@@ -22,6 +20,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm import _held_warnings as held_warnings
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
@@ -2513,7 +2512,8 @@ def _null_fit_eta(context: _SCOPREMLFitContext) -> NDArray:
     to its positive floor).  With no offset those are the original rows, bit
     for bit.  Any other family or link keeps its offset-free initial
     intercept, still placed against ``o~``, and so does a row set whose
-    rescaled response or weight is not finite.
+    rescaled response or weight is not finite.  Only positive-weight rows
+    are read: a zero-weight row's offset moves nothing here.
     """
     weights = np.asarray(context.sample_weight, dtype=np.float64)
     offset = np.asarray(context.offset_arr, dtype=np.float64)
@@ -2522,10 +2522,13 @@ def _null_fit_eta(context: _SCOPREMLFitContext) -> NDArray:
     y = np.asarray(context.y, dtype=np.float64)
     power = _log_link_variance_power(context.distribution, context.link)
     if power is not None:
+        rescaled_y, rescaled_weights = y.copy(), weights.copy()
         with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            rescaled_y = y * np.exp(-shifted)
-            rescaled_weights = weights * np.exp((2.0 - power) * shifted)
-        if np.all(np.isfinite(rescaled_y)) and np.all(np.isfinite(rescaled_weights)):
+            rescaled_y[carried] = y[carried] * np.exp(-shifted[carried])
+            rescaled_weights[carried] = weights[carried] * np.exp((2.0 - power) * shifted[carried])
+        if np.all(np.isfinite(rescaled_y[carried])) and np.all(
+            np.isfinite(rescaled_weights[carried])
+        ):
             y, weights = rescaled_y, rescaled_weights
     intercept = coefficient_initial_intercept(
         distribution=context.distribution, link=context.link, y=y, sample_weight=weights
@@ -2616,51 +2619,27 @@ def _hessian_scaled_bootstrap_lambdas(
     return scaled
 
 
-def _replay_warnings(caught: list[warnings.WarningMessage]) -> None:
-    """Re-emit recorded warnings through the caller's filters, from where they were raised.
-
-    Each goes back through ``warnings.warn_explicit`` with its own module
-    name and that module's registry, as ``warnings.warn`` would have sent
-    it, so the caller's filters and once-per-location rules apply as if it
-    had never been held back.
-    """
-    if not caught:
-        return
-    modules = {getattr(module, "__file__", None): module for module in list(sys.modules.values())}
-    for record in caught:
-        module = modules.get(record.filename)
-        warnings.warn_explicit(
-            record.message,
-            record.category,
-            record.filename,
-            record.lineno,
-            module=None if module is None else module.__name__,
-            registry=None if module is None else vars(module).setdefault("__warningregistry__", {}),
-            source=record.source,
-        )
-
-
 def _bootstrap_attempt(
     context: _SCOPREMLFitContext,
     lambdas: dict[str, float],
     last_fit: list[_SCOPInnerFit],
-) -> tuple[_SCOPREMLMode | None, list[warnings.WarningMessage]]:
+) -> tuple[_SCOPREMLMode | None, list[held_warnings.HeldWarning], Exception | None]:
     """Fit the bootstrap at one start, holding its warnings back.
 
-    The bootstrap can be fitted at a second start (``optimize_scop_efs_reml``),
-    and a start that is discarded must not speak for the fit that is
-    published: on a Tweedie book whose cold start failed, its
-    SeparationWarning called coefficients unusable whose linear predictor
-    the retry left far from any overflow guard.  Warnings are recorded under
-    an "always" filter, so a caller's "error" filter cannot abort a start
-    that may be discarded; the caller replays (``_replay_warnings``) those of
-    the start it keeps or publishes.  A start that raises replays its own
-    first, since the error is then the caller's.
+    Returns the certified mode (None when the start has none), the warnings
+    held back (``_held_warnings``), and the error that refused the start's
+    mode (``ObservedModeNotCertifiedError``: a mode that cannot be scored),
+    if one did.  The bootstrap can be fitted at a second start
+    (``optimize_scop_efs_reml``), and a start that is discarded must not
+    speak for the fit that is published, so the caller replays only the
+    warnings of the start it keeps, publishes or raises.  The hold is
+    context-local: a caller's "error" filter cannot abort a start that may be
+    discarded, and a fit on another thread is untouched.  Any other error is
+    the caller's: the start's warnings are replayed and it is raised.
     """
-    caught: list[warnings.WarningMessage] = []
+    held: list[held_warnings.HeldWarning] = []
     try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with held_warnings.hold() as held:
             mode = _fit_scop_reml_mode(
                 context,
                 lambdas,
@@ -2672,10 +2651,12 @@ def _bootstrap_attempt(
                 require_converged=True,
                 _last_fit=last_fit,
             )
+    except ObservedModeNotCertifiedError as exc:
+        return None, held, exc
     except Exception:
-        _replay_warnings(caught)
+        held_warnings.replay(held)
         raise
-    return mode, caught
+    return mode, held, None
 
 
 def _uncertified_bootstrap_mode(fit: _SCOPInnerFit) -> _SCOPREMLMode:
@@ -2765,13 +2746,17 @@ def optimize_scop_efs_reml(
     ``_outer_step="efs"`` runs EFS throughout.
 
     The bootstrap is fitted at 1e-4 for every cold component and at its warm
-    value for every warm one. When that fit has no certified mode, it is
-    fitted again with every estimated component at its Hessian-scaled
-    starting value (``_hessian_scaled_bootstrap_lambdas``); when that fails
-    too, the last inner fit of that start is returned unconverged with
-    termination reason ``"bootstrap_uncertified"``, and the search never
-    starts. Warnings of a start the fit does not continue from or publish
-    are dropped (``_bootstrap_attempt``).
+    value for every warm one. When that fit has no certified mode, or its
+    mode cannot be scored (``ObservedModeNotCertifiedError``), it is fitted
+    again with every estimated component at its Hessian-scaled starting
+    value (``_hessian_scaled_bootstrap_lambdas``), and the warm start is
+    spent (``REMLResult.warm_start_components`` is then empty). When the
+    retry has no certified mode either, its last inner fit is returned
+    unconverged with termination reason ``"bootstrap_uncertified"``, and the
+    search never starts; when the retry's mode cannot be scored, that error
+    is raised (to a power search, an infeasible point), as it is when no
+    retry differs from the first start. Warnings of a start the fit does not
+    continue from, publish or raise are dropped (``_bootstrap_attempt``).
 
     Parameters
     ----------
@@ -2882,19 +2867,17 @@ def optimize_scop_efs_reml(
         for name, val in lambdas.items()
     }
     last_fit: list[_SCOPInnerFit] = []
-    boot_mode, boot_warnings = _bootstrap_attempt(fit_context, boot_lambdas, last_fit)
+    boot_mode, held, refused = _bootstrap_attempt(fit_context, boot_lambdas, last_fit)
     bootstrap_starts = [dict(boot_lambdas)]
     if boot_mode is None:
-        # No certified mode at the first start, cold, warm or partly warm:
-        # every estimated component starts again where its e.d.f. lies away
-        # from its extremes (Wood, Pya and Saefken 2016, section 3.1), as
-        # ``_hessian_scaled_bootstrap_lambdas`` says. A warm value that gave
-        # no certified mode has no claim to be kept, and a warm block left
-        # where it failed while the rest moved would start the retry half
-        # warm; the scaled start is the documented one, so the cold seed is
-        # not tried first. The warm start is then spent: every component
-        # takes the bootstrap's EFS step, as a cold start does. A fit whose
-        # first bootstrap certifies never reaches this.
+        # No certified mode at the first start, cold, warm or partly warm, or
+        # one that cannot be scored: every estimated component starts again
+        # where its e.d.f. lies away from its extremes (Wood, Pya and Saefken
+        # 2016, section 3.1; ``_hessian_scaled_bootstrap_lambdas``). A warm
+        # value that gave no certified mode has no claim to be kept, and a
+        # warm block left where it failed would start the retry half warm, so
+        # the warm start is spent: every component then takes the bootstrap's
+        # EFS step, as a cold start does.
         scaled = _hessian_scaled_bootstrap_lambdas(fit_context, boot_lambdas, set(estimated_names))
         if scaled != boot_lambdas:
             boot_lambdas = scaled
@@ -2906,16 +2889,19 @@ def optimize_scop_efs_reml(
                 "Hessian-scaled starting lambdas %s",
                 {name: f"{boot_lambdas[name]:.4g}" for name in sorted(estimated_names)},
             )
-            boot_mode, boot_warnings = _bootstrap_attempt(fit_context, boot_lambdas, last_fit)
-    # Only the start the fit continues from, or publishes, speaks for it.
-    _replay_warnings(boot_warnings)
+            boot_mode, held, refused = _bootstrap_attempt(fit_context, boot_lambdas, last_fit)
+    # Only the start the fit continues from, publishes or raises speaks for it.
+    held_warnings.replay(held)
+    if refused is not None:
+        last_fit.clear()
+        raise refused
+    warm_start_components = sorted(warm_names)
     if boot_mode is None:
         # No start reached a certified mode, so the search has nowhere to
-        # begin. The last inner fit the last start's certification ladder
-        # made is published as not converged rather than refused (owner
-        # decision 3, 2026-09-30), without fitting it again; the
-        # ``"bootstrap_uncertified"`` reason names this stage to the user, and
-        # ``lambda_history`` holds the starts that were tried.
+        # begin. The last inner fit of the last start's certification ladder
+        # is published as not converged rather than refused (owner decision
+        # 3, 2026-09-30), without fitting it again; ``lambda_history`` holds
+        # the starts that were tried.
         uncertified = _uncertified_bootstrap_mode(last_fit[0])
         last_fit.clear()
         return REMLResult(
@@ -2936,6 +2922,7 @@ def optimize_scop_efs_reml(
                 None if uncertified.result.converged else str(uncertified.result.termination_reason)
             ),
             tweedie_scale_data=tweedie_scale_data,
+            warm_start_components=warm_start_components,
         )
     last_fit.clear()
     boot_result = boot_mode.result
@@ -3617,4 +3604,5 @@ def optimize_scop_efs_reml(
         scop_outer_steps=outer_steps,
         scop_newton_fallback=newton_fallback,
         scop_newton_fallback_iter=newton_fallback_iter,
+        warm_start_components=warm_start_components,
     )

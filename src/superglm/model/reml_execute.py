@@ -303,6 +303,10 @@ def run_scop_efs_reml(
         warm_lambdas=warm_lambdas or None,
     )
 
+    if profile is not None and best.warm_start_components is not None:
+        # what the search started from: a warm start its bootstrap retried
+        # away from is not one
+        profile["reml_warm_start_components"] = list(best.warm_start_components)
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
     model._reml_penalties = best.reml_penalties if best.reml_penalties else reml_penalties

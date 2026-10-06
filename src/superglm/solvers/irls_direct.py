@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import math
 import time
-import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -30,6 +29,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import superglm.solvers.scop_exact_support as scop_exact_support
+from superglm import _held_warnings as held_warnings
 from superglm._blas_threads import keep_narrow_cap
 from superglm._fit_trace import TraceRun
 from superglm._group_matrix._group_matrix_centered import _raw_centering_well_scaled
@@ -1338,6 +1338,12 @@ def _fit_irls_direct_once(
             )
         return product
 
+    def penalty_rounding() -> int:
+        """``k`` with ``fl(S v)`` within ``gamma_k fl(|S| |v|)`` (``penalty_product_rounding``)."""
+        from superglm.reml.penalty_algebra import penalty_product_rounding
+
+        return penalty_product_rounding(p, None if S is not None else reml_penalties)
+
     def penalty_curvature() -> NDArray:
         """``diag(S)``: the dense penalty's diagonal, or the components' without forming ``S``."""
         if S is not None:
@@ -1424,6 +1430,7 @@ def _fit_irls_direct_once(
             bar=mode_bar,
             excluded=excluded,
             resolve_cap=MODE_RESOLVE_CAP,
+            penalty_rounding=penalty_rounding(),
         )
 
     def true_mode_residual(
@@ -1603,6 +1610,7 @@ def _fit_irls_direct_once(
             column_shift=shift,
             decrement_noise=likelihood_noise,
             penalty_block=weak_penalty_block,
+            penalty_rounding=penalty_rounding(),
         )
         _last_true_residual[0] = residual
         rows_n = int(np.count_nonzero(positive))
@@ -1617,7 +1625,9 @@ def _fit_irls_direct_once(
         # design's, formed once per design (``mode_score.row_sets``)
         sets = row_sets(dm)
         if not _row_set_curvature:
-            _row_set_curvature.append(row_set_quadratics(sets, p, penalty_matvec))
+            _row_set_curvature.append(
+                row_set_quadratics(sets, p, penalty_matvec, penalty_rounding())
+            )
         with np.errstate(over="ignore", invalid="ignore"):
             column_penalty = np.ldexp(penalty_score, shift)
             column_penalty_size = np.ldexp(penalty_magnitude, shift)
@@ -1638,6 +1648,7 @@ def _fit_irls_direct_once(
                 set_curvature=set_curvature,
                 bar=mode_bar,
                 underflow=underflow,
+                penalty_rounding=penalty_rounding(),
             ),
         )
         # the directions the factorization this iteration holds truncates,
@@ -1673,6 +1684,7 @@ def _fit_irls_direct_once(
                     penalty_size_apply=lambda v: np.ldexp(
                         penalty_matvec(v, magnitude=True), -weight_exponent
                     ),
+                    penalty_rounding=penalty_rounding(),
                 )
             ratio = max(ratio, truncated_ratio)
             _judged_truncated[0] = (eta_values, truncated)
@@ -4126,7 +4138,7 @@ def _fit_irls_direct_once(
                 message = format_runtime_message(separation_ratio, it + 1, drifting, pinned)
                 if separation == "error":
                     raise SeparationError(message)
-                warnings.warn(message, SeparationWarning, stacklevel=2)
+                held_warnings.warn(message, SeparationWarning, stacklevel=2)
 
     if has_constraints:
         if A_all is None or b_all is None:  # pragma: no cover - construction invariant

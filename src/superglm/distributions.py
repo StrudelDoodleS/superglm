@@ -838,9 +838,9 @@ def weighted_log_likelihood(
     carried = np.asarray(weights, dtype=np.float64)
     if np.all((carried == 0.0) | (carried == 1.0)) or not report_contract:
         return float(family.log_likelihood(y, mu, weights, phi))
-    import warnings
+    from superglm import _held_warnings
 
-    warnings.warn(
+    _held_warnings.warn(
         f"{type(family).__name__} is not a SuperGLM-shipped family, so its EDM "
         "prior-weight normalizer cannot be derived here. Its own log_likelihood "
         "is being used unchanged, which reports sum(w * log f(y; mu, phi)) -- "

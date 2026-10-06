@@ -6,7 +6,6 @@ import copy
 import logging
 import math
 import time
-import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Literal, cast, get_args
@@ -16,6 +15,7 @@ import scipy.linalg
 import scipy.optimize
 from numpy.typing import NDArray
 
+from superglm import _held_warnings as held_warnings
 from superglm._fit_trace import TraceRun
 from superglm.distributions import Distribution
 from superglm.group_matrix import (
@@ -1908,7 +1908,7 @@ def _fit_pirls_inner(
                 message = format_runtime_message(w_ratio, outer + 1, drifting, pinned)
                 if separation == "error":
                     raise SeparationError(message)
-                warnings.warn(message, SeparationWarning, stacklevel=2)
+                held_warnings.warn(message, SeparationWarning, stacklevel=2)
     extra = ""
     if active_set:
         total_group_updates = total_inner_iters * n_groups
