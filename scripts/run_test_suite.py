@@ -43,7 +43,9 @@ PINNED_POOLS = (
     "VECLIB_MAXIMUM_THREADS",
     "BLIS_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
-    # superglm's own worker pool (``_parallel``): the data-rank factor's leaves.
+    # superglm's own worker pool (``_parallel``): the data-rank factor's leaves
+    # and every Gram assembly, so stage 1 runs both serially; the pooled path
+    # is reached only through the tests' explicit overrides.
     "SUPERGLM_N_JOBS",
 )
 # The solver's own BLAS cap: a caller's value would widen a pinned worker's
