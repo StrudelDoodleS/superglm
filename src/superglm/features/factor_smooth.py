@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 
 
 _MARGINAL_QR_CHUNK_ROWS = 65_536
+# The prediction warning's text, before the named terms and levels; SuperGLM
+# (``model.base``) and SuperLSS (``prediction_design``) give the same one.
+SZ_POPULATION_PREDICTION = (
+    "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than the "
+    "penalty's null space keep the curve their rows identify and follow the population "
+    "curve's shape where their rows say nothing; levels without weight are predicted at "
+    "the population value: "
+)
 _MarginalBuildBackend = Literal["streamed_tsqr", "dense_qr_compat"]
 
 

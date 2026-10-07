@@ -86,14 +86,10 @@ def warn_population_levels(named: Sequence[str]) -> None:
     """SuperGLM's prediction warning (``model.base``) for SuperLSS, once per call, on the caller's line."""
     if not named:
         return
+    from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION
     from superglm.profiling._scalar import warn_caller
 
-    warn_caller(
-        "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than "
-        "the penalty's null space keep the curve their rows identify and follow the "
-        "population curve's shape where their rows say nothing; levels without weight "
-        "are predicted at the population value: " + "; ".join(named) + "."
-    )
+    warn_caller(SZ_POPULATION_PREDICTION + "; ".join(named) + ".")
 
 
 def _score_interaction(
