@@ -11,8 +11,9 @@ export const REQUEST = "superglm.request";
 export const RESPONSE = "superglm.response";
 export const CHANGED = "superglm.changed";
 // Databricks caps one widget message at 5 MB. Replies come in parts; a
-// request is one message, so its body stays under this, with room for the
-// rest of the message. The editor's requests are far smaller.
+// request is one message, so the message as sent (its body escaped again
+// inside it) stays under this, with room for the comm's own envelope. The
+// editor's requests are far smaller.
 export const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MODULE_SPECIFIER = /(["'])superglm-module:([^"']+)\1/g;
 const THEME_STORAGE_KEY = "superglm.editor.theme";
@@ -72,29 +73,39 @@ export function createMessageFetch(model, realm) {
     if (init.body != null && typeof init.body !== "string") {
       return Promise.reject(new Error("The notebook editor sends text request bodies only."));
     }
-    const size = init.body == null ? 0 : new TextEncoder().encode(init.body).length;
-    if (size > MAX_REQUEST_BYTES) {
-      const megabytes = (size / 1024 / 1024).toFixed(1);
-      return Promise.reject(
-        new Error(
-          `This change is too large to send from a notebook cell: its request is ${megabytes} MB, ` +
-            "and a notebook widget message carries at most 4 MB. Make it in smaller steps, " +
-            "or in Python on the session."
-        )
-      );
-    }
     const id = `${prefix}-${nextId++}`;
-    const headers = [...new realm.Headers(init.headers).entries()];
+    const message = {
+      type: REQUEST,
+      id,
+      method: init.method || "GET",
+      url,
+      headers: [...new realm.Headers(init.headers).entries()],
+      body: init.body ?? null
+    };
+    const size = new TextEncoder().encode(JSON.stringify(message)).length;
+    if (size > MAX_REQUEST_BYTES) return Promise.resolve(tooLarge(size));
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject, parts: [], received: 0 });
-      model.send({
-        type: REQUEST,
-        id,
-        method: init.method || "GET",
-        url,
-        headers,
-        body: init.body ?? null
-      });
+      model.send(message);
+    });
+  }
+
+  /**
+   * Python's answer to a request it refuses, given here because the request
+   * cannot reach it: the client reads the 413 as a refusal, so nothing offers
+   * to retry it and a structural change reports the reason, not an
+   * uncertain outcome.
+   * @param {number} size the message's bytes
+   */
+  function tooLarge(size) {
+    const megabytes = (size / 1024 / 1024).toFixed(1);
+    const error =
+      `This change is too large to send from a notebook cell: its request is ${megabytes} MB, ` +
+      "and a notebook widget message carries at most 4 MB. Make it in smaller steps, " +
+      "or in Python on the session.";
+    return new realm.Response(JSON.stringify({ error }), {
+      status: 413,
+      headers: { "content-type": "application/json" }
     });
   }
 

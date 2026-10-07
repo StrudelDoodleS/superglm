@@ -127,18 +127,35 @@ test("a transport knows its own request ids and no other's", () => {
   assert.equal(mine.owns(0), false);
 });
 
-test("a request body over the widget-message limit is refused before it is sent", async () => {
-  // The limit counts UTF-8 bytes, not characters: "é" is two bytes.
+test("a request whose message would pass the widget-message limit is refused as Python refuses", async () => {
   const model = recordingModel();
   const transport = createMessageFetch(model, realm);
-  const atLimit = "é".repeat(MAX_REQUEST_BYTES / 2);
-  transport.fetch("/note", { method: "POST", body: atLimit });
-  assert.equal(model.sent.length, 1);
-  await assert.rejects(
-    transport.fetch("/note", { method: "POST", body: `${atLimit}x` }),
-    /too large to send from a notebook cell: its request is 4\.0 MB/
-  );
-  assert.equal(model.sent.length, 1);
+  const bytes = (/** @type {unknown} */ message) =>
+    new TextEncoder().encode(JSON.stringify(message)).length;
+  // The message's own envelope, measured on an empty body; ids -0 to -9 are one length.
+  transport.fetch("/note", { method: "POST", body: "" });
+  const envelope = bytes(model.sent[0]);
+  transport.fetch("/note", { method: "POST", body: "a".repeat(MAX_REQUEST_BYTES - envelope) });
+  assert.equal(bytes(model.sent[1]), MAX_REQUEST_BYTES);
+
+  const client = createEditorClient({ fetchImpl: transport.fetch });
+  const over = client.requestJSON("/note", {
+    method: "POST",
+    body: "a".repeat(MAX_REQUEST_BYTES - envelope + 1)
+  });
+  await assert.rejects(over, {
+    name: "EditorAPIError",
+    status: 413,
+    message: /too large to send from a notebook cell: its request is 4\.0 MB/
+  });
+  // A body escaped again inside the message counts at its size as sent:
+  // a backslash measured as one byte travels as two.
+  const escaped = transport.fetch("/note", {
+    method: "POST",
+    body: "\\".repeat(MAX_REQUEST_BYTES / 2 + 1)
+  });
+  assert.equal((await escaped).status, 413);
+  assert.equal(model.sent.length, 2);
 });
 
 test("closing fails every request still waiting", async () => {
