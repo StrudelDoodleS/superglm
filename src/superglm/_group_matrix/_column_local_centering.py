@@ -13,6 +13,7 @@ from ._group_matrix_centered import (
     _compact_support,
     _compact_support_rows,
     _raw_centering_admitted,
+    _reads_as_float64,
 )
 from ._group_matrix_kernels import _fused_bincount_2, _ssp_gram_needs_exact
 
@@ -168,7 +169,8 @@ def _anchor_centred_columns(
     arithmetic: every other reader of the column converts them so (exact for
     float32 and for integers up to ``2**53``, which round alike in all of
     them), and an integer difference would wrap.  ``None`` for a support or
-    transform that is not real binary64 or narrower.  ``mean`` projects the
+    transform ``_reads_as_float64`` declines (complex, object, and the extended
+    float on every platform).  ``mean`` projects the
     anchor and the shift apart (``column_local_centering``, **Centre**).
     """
     from superglm.group_matrix import CategoricalGroupMatrix
@@ -181,7 +183,7 @@ def _anchor_centred_columns(
     else:
         values, codes, transform = _compact_support(gm)
         operands = (values,) if transform is None else (values, transform)
-        if any(array.dtype.kind not in "biuf" or array.dtype.itemsize > 8 for array in operands):
+        if any(not _reads_as_float64(array.dtype) for array in operands):
             return None
         if transform is None:
             values = values[:, local]

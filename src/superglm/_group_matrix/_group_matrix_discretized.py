@@ -34,9 +34,9 @@ def _range_shift(weights: NDArray) -> int | None:
     the whole exponent range).
     """
     weights = np.asarray(weights)
-    # The type, not dtype equality: np.longdouble compares equal to float64
-    # where it is binary64 (macOS ARM64, Windows), and the route must not
-    # depend on the platform's long double.
+    # The type, not dtype equality: the extended float compares equal to
+    # float64 where it is binary64 (macOS ARM64, Windows), and a direct call
+    # with it keeps the exact route there, as on master.
     if weights.dtype.type is not np.float64 or weights.ndim != 1:
         return None
     low, high = _float64_operand_exponent_bounds(weights.reshape(-1, 1))
@@ -73,6 +73,8 @@ def _shifted_moments(compute, factors: tuple, weights: tuple, owners: tuple) -> 
     factors can fail it.  Otherwise ``None`` and the caller keeps the exact
     route.
     """
+    # Uncertified factors only: a support the execution plan certified
+    # arrives as ``factors=()``, admitted by the plan's own dtype test.
     if any(np.asarray(factor).dtype.type is not np.float64 for factor in factors):
         return None
     # The shift places every weight inside the gate, so only the factors can fail it.

@@ -684,3 +684,21 @@ def test_an_integer_support_is_recentred_in_float64():
     assert fit.converged
     assert np.sqrt(fit.deviance) <= np.sqrt(2 * scaled**2 / lam) + np.linalg.norm(fitted)
     assert abs(fit.beta[j] - 2.0**-63) <= 2 * scaled / (lam * D[j])
+
+
+@pytest.mark.parametrize("dtype", [np.longdouble, np.complex128, object])
+def test_the_repair_declines_a_support_it_cannot_read_as_float64(dtype):
+    """The column-local repair reads supports as the anchor route does (``_reads_as_float64``).
+
+    The extended float declines on every platform, though it is binary64 on
+    macOS ARM64 and Windows; complex and object supports decline too.
+    Mutation: without the guard the complex and object cases return columns
+    (and on macOS ARM64 and Windows the long-double case does).
+    """
+    from superglm._group_matrix._column_local_centering import _anchor_centred_columns
+
+    n = 200
+    support = np.array([[2.0], [1.0]]).astype(dtype)
+    group = DiscretizedSCOPGroupMatrix(support, (np.arange(n) % 2).astype(np.intp))
+    W = np.ones(n)
+    assert _anchor_centred_columns(group, np.array([0]), W, W.copy(), float(n)) is None
