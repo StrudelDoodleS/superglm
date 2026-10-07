@@ -690,6 +690,27 @@ if (
 // manager would open there: the dialog saves to a kernel path and stops.
 const notebookHost = globalThis.superglmEditorHost?.kind === "notebook";
 if (notebookHost && exportOpenDirectory instanceof HTMLElement) exportOpenDirectory.hidden = true;
+// One editor can show in several notebook outputs. When another output
+// changes the session, this one re-reads it, once for a burst of changes.
+if (notebookHost) {
+  let refreshing = false;
+  let again = false;
+  globalThis.superglmEditorHost.onRemoteChange = async () => {
+    if (refreshing) {
+      again = true;
+      return;
+    }
+    refreshing = true;
+    try {
+      do {
+        again = false;
+        await actions.refreshFromPythonWhenIdle();
+      } while (again);
+    } finally {
+      refreshing = false;
+    }
+  };
+}
 bindExportDialog({
   client: editorClient,
   nodes: {

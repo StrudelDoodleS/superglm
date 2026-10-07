@@ -31,7 +31,7 @@ pytestmark = pytest.mark.browser
 
 _ORIGIN = "http://notebook.test"
 _HARNESS = """<!doctype html>
-<html><body><div id="cell"></div>
+<html><body><div id="cell"></div><div id="cell2"></div>
 <script type="module">
 import host from "/host.js";
 const listeners = new Set();
@@ -50,6 +50,7 @@ async function poll() {
 }
 window.viewState = await (await fetch("/view.json")).json();
 host.render({ model, el: document.getElementById("cell") });
+if (window.viewState.views === 2) host.render({ model, el: document.getElementById("cell2") });
 poll();
 </script></body></html>"""
 
@@ -63,20 +64,21 @@ class _QueueView:
         self.outbox: queue.Queue = queue.Queue()
         self.handler = None
         self.most_parts = 0
+        self.requests: list[str] = []
 
     def on_msg(self, handler):
         self.handler = handler
 
     def send(self, content, buffers=None):
-        self.most_parts = max(self.most_parts, content["parts"])
-        self.outbox.put((content, bytes(buffers[0])))
+        self.most_parts = max(self.most_parts, content.get("parts", 0))
+        self.outbox.put((content, bytes(buffers[0]) if buffers else b""))
 
     def close(self):
         pass
 
 
 @contextmanager
-def _notebook_editor(chromium_browser, session, monkeypatch):
+def _notebook_editor(chromium_browser, session, monkeypatch, views=1):
     view = _QueueView()
     transport = widget_module.NotebookTransport
     monkeypatch.setattr(
@@ -98,8 +100,14 @@ def _notebook_editor(chromium_browser, session, monkeypatch):
                 replies.append({"content": content, "buffer": base64.b64encode(payload).decode()})
 
         page.expose_function("pyPoll", poll)
-        page.expose_function("pySend", lambda text: view.handler(view, json.loads(text), []))
-        state = {"bundle": notebook.app_bundle(), "height": 860}
+
+        def send(text):
+            content = json.loads(text)
+            view.requests.append(f"{content['method']} {content['url']}")
+            view.handler(view, content, [])
+
+        page.expose_function("pySend", send)
+        state = {"bundle": notebook.app_bundle(), "height": 860, "views": views}
         assets = {
             "/": ("text/html", _HARNESS),
             "/host.js": ("text/javascript", read_app_asset(notebook.HOST_MODULE).decode()),
@@ -115,6 +123,8 @@ def _notebook_editor(chromium_browser, session, monkeypatch):
         page.goto(f"{_ORIGIN}/")
         frame = page.frame_locator("#cell iframe")
         frame.locator("#chart path.edited").first.wait_for()
+        if views == 2:
+            page.frame_locator("#cell2 iframe").locator("#chart path.edited").first.wait_for()
         yield page, frame, widget, view
     finally:
         page.close()
@@ -216,6 +226,35 @@ def test_a_reattached_cell_rebuilds_the_editor_from_python(
         )
         frame.locator("#chart path.edited").first.wait_for()
         frame.get_by_role("button", name="Undo edit").and_(frame.locator(":enabled")).wait_for()
+
+
+def test_an_edit_in_one_output_refreshes_the_others_once(
+    chromium_browser, curve_session, monkeypatch
+):
+    """Two outputs of one widget share its session; an edit in one shows in both."""
+    with _notebook_editor(chromium_browser, curve_session, monkeypatch, views=2) as (
+        page,
+        first,
+        _w,
+        view,
+    ):
+        second = page.frame_locator("#cell2 iframe")
+        assert second.get_by_role("button", name="Undo edit").is_disabled()
+        first.get_by_role("radiogroup", name="Chart tools").get_by_role(
+            "radio", name="Select", exact=True
+        ).click()
+        first.locator('button[data-op="select_all"]').click()
+        first.locator("#selectionMenu").wait_for(state="visible")
+        first.get_by_role("button", name="Increase selection").click()
+        # The second output re-reads the session it did not change.
+        second.get_by_role("button", name="Undo edit").and_(second.locator(":enabled")).wait_for()
+        assert [record.operation for record in curve_session.history] == ["shift"]
+
+        # Re-reading sends no notice of its own: the outputs fall quiet.
+        page.wait_for_timeout(1000)
+        settled = len(view.requests)
+        page.wait_for_timeout(1000)
+        assert view.requests[settled:] == []
 
 
 def test_run_cv_reports_its_job_over_widget_messages(chromium_browser, monkeypatch):

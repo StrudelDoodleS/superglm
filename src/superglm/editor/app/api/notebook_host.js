@@ -9,6 +9,7 @@
 
 export const REQUEST = "superglm.request";
 export const RESPONSE = "superglm.response";
+export const CHANGED = "superglm.changed";
 const MODULE_SPECIFIER = /(["'])superglm-module:([^"']+)\1/g;
 const THEME_STORAGE_KEY = "superglm.editor.theme";
 // A Response with one of these statuses must have no body.
@@ -106,7 +107,12 @@ export function createMessageFetch(model, realm) {
     pending.clear();
   }
 
-  return { fetch: fetchOverMessages, receive, close, pending };
+  /** @param {unknown} id @returns {boolean} whether this transport sent the request with this id */
+  function owns(id) {
+    return typeof id === "string" && id.startsWith(`${prefix}-`);
+  }
+
+  return { fetch: fetchOverMessages, receive, close, owns, pending };
 }
 
 /**
@@ -163,8 +169,13 @@ function render({ model, el }) {
   /** @type {string[]} */
   let moduleUrls = [];
 
+  // Another view of this widget changed the session: the page re-reads it.
   /** @param {any} message @param {(DataView<ArrayBuffer>|ArrayBuffer)[]} [buffers] */
-  const onMessage = (message, buffers) => transport?.receive(message, buffers);
+  const onMessage = (message, buffers) => {
+    if (message?.type !== CHANGED) return transport?.receive(message, buffers);
+    if (!transport || transport.owns(message.origin)) return;
+    /** @type {any} */ (builtFor)?.superglmEditorHost?.onRemoteChange?.();
+  };
   model.on("msg:custom", onMessage);
 
   function revokeModules() {

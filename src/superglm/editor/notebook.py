@@ -36,6 +36,53 @@ _LOGGER = logging.getLogger(__name__)
 
 REQUEST = "superglm.request"
 RESPONSE = "superglm.response"
+CHANGED = "superglm.changed"
+
+# One widget can show in several outputs, each a page with its own copy of
+# the session. After a request through one of these routes succeeds, Python
+# tells every view, and the others re-read the session, so none acts on a
+# selection or model it no longer shows. The other POST routes only read
+# (evidence, reports, files, job status) or start a job, so a view re-reading
+# the session never sends a notice back. Every POST route is in exactly one
+# of the two sets.
+CHANGE_ROUTES = frozenset(
+    {
+        "/term",
+        "/select",
+        "/op",
+        "/drag",
+        "/control",
+        "/control_count",
+        "/refit_offset",
+        "/profile_distribution",
+        "/collapse_levels",
+        "/ungroup_levels",
+        "/reorder_levels",
+        "/revert_to_original",
+        "/set_reference",
+        "/shape_range",
+        "/stage",
+        "/refit_pending",
+        "/set_unseen",
+        "/note",
+    }
+)
+READ_ROUTES = frozenset(
+    {
+        "/metrics",
+        "/summary",
+        "/report",
+        "/rating_table",
+        "/save_model",
+        "/export_file",
+        "/open_directory",
+        "/save_directory",
+        "/profile_distribution/start",
+        "/job_start",
+        "/job_status",
+        "/job_cancel",
+    }
+)
 MODULE_PREFIX = "superglm-module:"
 ENTRY_MODULE = "main.js"
 HOST_MODULE = "api/notebook_host.js"
@@ -284,6 +331,10 @@ class NotebookTransport:
             named = [["content-type", "application/json"]]
             payload = json.dumps({"error": "internal editor error"}).encode("utf-8")
         self._reply(request_id, status, named, payload)
+        path = str(content.get("url", "/")).partition("?")[0]
+        if str(content.get("method", "GET")).upper() == "POST" and path in CHANGE_ROUTES:
+            if status < 400:
+                self.view.send({"type": CHANGED, "origin": request_id})
 
     def _reply(
         self, request_id: Any, status: int, headers: list[list[str]], payload: bytes
@@ -354,4 +405,12 @@ class NotebookTransport:
         self._loop.stop()
 
 
-__all__ = ["NotebookTransport", "app_bundle", "call_asgi", "page_html", "pack_modules"]
+__all__ = [
+    "CHANGE_ROUTES",
+    "READ_ROUTES",
+    "NotebookTransport",
+    "app_bundle",
+    "call_asgi",
+    "page_html",
+    "pack_modules",
+]

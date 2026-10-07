@@ -115,6 +115,17 @@ test("a body that is not text is refused before anything is sent", async () => {
   assert.deepEqual(model.sent, []);
 });
 
+test("a transport knows its own request ids and no other's", () => {
+  const model = recordingModel();
+  const mine = createMessageFetch(model, realm);
+  const other = createMessageFetch(model, realm);
+  mine.fetch("/op", { method: "POST", body: "{}" });
+  const id = model.sent[0].id;
+  assert.equal(mine.owns(id), true);
+  assert.equal(other.owns(id), false);
+  assert.equal(mine.owns(0), false);
+});
+
 test("closing fails every request still waiting", async () => {
   const transport = createMessageFetch(recordingModel(), realm);
   const waiting = transport.fetch("/job_status");

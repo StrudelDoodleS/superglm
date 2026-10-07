@@ -19,6 +19,7 @@ from superglm import Categorical, Spline, SuperGLM
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.notebook import MODULE_PREFIX, app_bundle, pack_modules, page_html
+from superglm.editor.server import create_editor_app
 
 
 @pytest.fixture(scope="module")
@@ -241,6 +242,34 @@ def test_a_waiting_request_never_holds_the_others(notebook_widget, monkeypatch):
     release.set()
     second, _body = _reply(view)
     assert (first["id"], second["id"]) == (8, 7)
+
+
+def test_a_change_tells_every_view_and_a_read_does_not(notebook_widget):
+    _widget, view = notebook_widget
+    _request(view, 20, "POST", "/op", {"operation": "select_all", "term": "x"})
+    content, _body = _reply(view)
+    assert content["status"] == 200
+    assert view.outbox.get(timeout=30.0) == ({"type": notebook.CHANGED, "origin": 20}, [])
+
+    _request(view, 21, "POST", "/metrics", {"metric": "deviance"})
+    _request(view, 22, "GET", "/state")
+    _request(view, 23, "POST", "/op", {"operation": "nope"})
+    replies = [_reply(view)[0] for _ in range(3)]
+    assert sorted(reply["id"] for reply in replies) == [21, 22, 23]
+    with pytest.raises(queue.Empty):
+        view.outbox.get(timeout=0.5)
+
+
+def test_every_post_route_is_a_change_or_a_read(notebook_widget):
+    """A new route must be placed: a read listed as a change would make views refresh each other."""
+    widget, _view = notebook_widget
+    posts = {
+        route.path
+        for route in create_editor_app(widget).routes
+        if "POST" in getattr(route, "methods", set())
+    }
+    assert not notebook.CHANGE_ROUTES & notebook.READ_ROUTES
+    assert posts == notebook.CHANGE_ROUTES | notebook.READ_ROUTES
 
 
 def test_messages_that_are_not_requests_are_ignored(notebook_widget):
