@@ -2660,7 +2660,7 @@ wheels = [
 
 [[package]]
 name = "superglm"
-version = "0.37.1"
+version = "0.37.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
