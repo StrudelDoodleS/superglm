@@ -954,6 +954,8 @@ def init_model(
     separation: str = "warn",
     group_pricing: str = "rank",
     weight_semantics: str = "prior",
+    n_jobs: int | str = "auto",
+    max_memory: int | str = "auto",
 ):
     """Initialize model state (body of SuperGLM.__init__)."""
     if features is not None and splines is not None:
@@ -984,6 +986,10 @@ def init_model(
         raise ValueError(f"group_pricing must be 'rank' or 'spanned', got {group_pricing!r}")
     model._group_pricing = group_pricing
     model._weight_semantics = validate_weight_semantics(weight_semantics)
+    from superglm._parallel import validate_max_memory, validate_n_jobs
+
+    model._n_jobs = validate_n_jobs(n_jobs)
+    model._max_memory = validate_max_memory(max_memory)
     model._tol = tol
     model._max_iter = max_iter
     model._retain_fit_state = bool(retain_fit_state)

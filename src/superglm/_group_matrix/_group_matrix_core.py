@@ -28,6 +28,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_support_dense_cross,
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
+    _level_sums,
     _ssp_gram_needs_exact,
 )
 from ._row_lookup import build_row_lookup
@@ -88,6 +89,24 @@ class SparseGroupMatrix:
         return SparseGroupMatrix(self.M[idx])
 
 
+def _bincount_levels(codes: NDArray, weights: NDArray, length: int) -> NDArray:
+    """``np.bincount(codes, weights, minlength=length)`` without holding the GIL.
+
+    Gram blocks run on worker threads (``_block_queue``), where
+    ``np.bincount`` held the GIL for its whole pass; ``_level_sums`` adds the
+    same rows in the same order, so the sums are bitwise ``np.bincount``'s.
+    Any input it does not take (a code outside ``[0, length)``, a length
+    mismatch, codes that are not integers) goes to ``np.bincount`` itself.
+    """
+    codes = np.asarray(codes)
+    weights = np.asarray(weights, dtype=np.float64)
+    if codes.dtype == np.intp and codes.ndim == 1 and weights.ndim == 1:
+        sums, ok = _level_sums(codes, weights, int(length))
+        if ok:
+            return sums
+    return np.bincount(codes, weights=weights, minlength=length)
+
+
 class CategoricalGroupMatrix:
     """One-hot categorical stored as integer codes — no scipy overhead.
 
@@ -117,11 +136,11 @@ class CategoricalGroupMatrix:
 
     def rmatvec(self, w: NDArray) -> NDArray:
         """X.T @ w: aggregate w by level via bincount, discard sink bin."""
-        return np.bincount(self.codes, weights=w, minlength=self.n_levels + 1)[: self.n_levels]
+        return _bincount_levels(self.codes, w, self.n_levels + 1)[: self.n_levels]
 
     def gram(self, W: NDArray) -> NDArray:
         """X.T @ diag(W) @ X: diagonal for one-hot encoding."""
-        diag = np.bincount(self.codes, weights=W, minlength=self.n_levels + 1)[: self.n_levels]
+        diag = _bincount_levels(self.codes, W, self.n_levels + 1)[: self.n_levels]
         return np.diag(diag)
 
     def toarray(self) -> NDArray:

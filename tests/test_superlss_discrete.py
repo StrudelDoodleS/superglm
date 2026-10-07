@@ -6,8 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm._group_matrix._block_queue as block_queue
+import superglm._parallel as parallel
 import superglm.distributional.solver.chunks as chunking
 from superglm import SuperLSS
+from superglm._group_matrix._block_queue import block_queue_config
 from superglm._group_matrix._cross_matrix_execution import CrossMatrixExecutionPlan
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributional import GaussianLS, Predictor, TweedieLSS
@@ -296,6 +299,56 @@ def test_public_discrete_tensor_and_categorical_interaction_parity() -> None:
         for discrete in (False, True)
     ]
     _assert_parity(*models, frame, offsets)
+
+
+def test_chunked_discrete_curvature_builds_its_gram_blocks_serially(monkeypatch) -> None:
+    """Each row chunk's Gram runs on the calling thread, even where the queue would pool it.
+
+    Pooling ~4k-row chunks cost a three-pair book fit 1.8x its wall time and
+    11x its CPU beside the Tweedie row kernel's own threads.
+    """
+    monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 8192)
+    # Every block its own unit, so a chunk this small still reaches the pool decision.
+    monkeypatch.setattr(block_queue, "_TINY_COST", 0.0)
+    frame, y, weights, offsets, family, _ = _fixture("gaussian", "frequency")
+    workers: list[int] = []
+    original = parallel.pool_workers
+
+    def recorded(*args):
+        workers.append(original(*args))
+        return workers[-1]
+
+    monkeypatch.setattr(parallel, "pool_workers", recorded)
+    predictors = (
+        Predictor(
+            "location",
+            {"x": Spline(kind="cr", n_knots=4), "z": Spline(kind="cr", n_knots=4)},
+            interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(4, 4))},
+        ),
+        Predictor("scale", {"x": Spline(kind="cr", n_knots=4)}),
+    )
+    model = model_from_templates(
+        family=family, predictors=predictors, discrete=True, n_bins=32, weight_semantics="frequency"
+    )
+    with block_queue_config(min_cost=0), parallel.parallel_config(n_jobs=4, max_memory="1G"):
+        model.fit(
+            frame,
+            y,
+            sample_weight=weights,
+            offsets=offsets,
+            lambdas=dict.fromkeys(
+                (
+                    "location:x#wiggle",
+                    "location:z#wiggle",
+                    "location:x:z#margin_x",
+                    "location:x:z#margin_z",
+                    "scale:x#wiggle",
+                ),
+                1.0,
+            ),
+        )
+    assert model.training_telemetry().resolved_chunk_size is not None
+    assert workers and max(workers) == 1
 
 
 @pytest.mark.parametrize(

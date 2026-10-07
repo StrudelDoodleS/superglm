@@ -188,3 +188,25 @@ for penalty in (1.0, 100.0, 10_000.0):
     )
 pd.DataFrame(rows).round(3)
 ```
+
+## Threads and memory
+
+A large fit spends most of its time forming the weighted cross-products of
+the design, one block per pair of terms, and checking the rank of the design.
+Both run on several threads. `n_jobs` sets how many: the default, `"auto"`,
+uses every physical core, and `n_jobs=1` runs both on the calling thread.
+`max_memory` caps the working memory those threads hold at once, as a byte
+count or a size such as `"4G"`; when one block needs more than the budget
+allows for all the threads, the fit starts fewer of them. The default is a
+quarter of the machine's memory, or of the container's memory limit where
+that is lower. Refits and inference on the fitted model, such as `summary`,
+`metrics`, `drop1` and `estimate_p`, keep the same two limits.
+
+```python
+model = SuperGLM(family="poisson", discrete=True, features=features, n_jobs=8, max_memory="4G")
+```
+
+The thread count never changes the fitted model: coefficients, smoothing
+parameters and every reported number are the same, bit for bit, at any
+`n_jobs`. The environment variables `SUPERGLM_N_JOBS` and
+`SUPERGLM_MAX_MEMORY` set the defaults for every model in a process.

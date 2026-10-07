@@ -1129,11 +1129,16 @@ def test_distinct_margin_tensor_cross_gram_bounds_its_transient():
 @pytest.mark.parametrize("raw_fits", [False, True])
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("cold", [False, True])
-def test_raw_channel_admission_counts_retained_and_simultaneous_workspace(
+def test_raw_channel_admission_counts_simultaneous_workspace(
     monkeypatch, budget, raw_fits, cached, cold
 ):
+    # The histogram takes half the budget and the two stage-one gathers 16
+    # bytes a row (24 without a cache, which permutes W for this call alone):
+    # at most 3/8 of it (fits) or all of it (declines).  What the admission
+    # bounds is the traced peak less the fit-owned state this call forms, the
+    # grid's cell order when cold and the weights the cache permutes into it.
     bins = int(np.sqrt(budget / (2 * 8 * 36)))
-    n = budget // (128 if raw_fits else 32)
+    n = budget // (64 if raw_fits else 16)
     left, right, rng = _tensor_pair(n, (bins, bins, 3, 3, 6), (bins, bins, 3, 3, 6))
     weights = rng.uniform(0.5, 1.5, n)
     expected, bound = _dense_cross(left, right, weights)
@@ -1141,10 +1146,8 @@ def test_raw_channel_admission_counts_retained_and_simultaneous_workspace(
     band, right.raw_channels = right.raw_channels, None
     algebra._cross_gram(left, right, weights)  # Compile the dense fallback too.
     right.raw_channels = band
-    retained = sum(array.nbytes for array in left.cell_csr())
     if cold:
         left._cell_csr = None
-        retained = 0
     monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
     monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", budget // 8)
     tracemalloc.start()
@@ -1155,9 +1158,11 @@ def test_raw_channel_admission_counts_retained_and_simultaneous_workspace(
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert peak + retained <= budget + (32 << 10)
+    raw = profile.get("block_cross_tensor_tensor_channel_raw", 0)
+    fit_owned = (8 * n if cached else 0) + (sum(a.nbytes for a in left.cell_csr()) if cold else 0)
+    assert peak - (fit_owned if raw else 0) <= budget + (32 << 10)
     assert profile["block_cross_tensor_tensor_channel_calls"] == 1
-    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(raw_fits)
+    assert raw == int(raw_fits)
     _assert_cross_matches(actual, expected, bound)
 
 
@@ -1183,28 +1188,51 @@ def test_raw_channel_budget_includes_marginal_validation_before_histogram(monkey
     assert profile["block_cross_tensor_tensor_channel_calls"] == 1
 
 
-def test_raw_channel_budget_includes_new_cached_weights_during_stage_two(monkeypatch):
-    budget, n = 72 << 10, 2000
-    left, right, rng = _tensor_pair(n, (4, 4, 32, 3, 6), (10, 10, 2, 2, 6))
+@pytest.mark.parametrize("charged", [False, True])
+def test_raw_channel_admission_leaves_fit_owned_state_uncharged(monkeypatch, charged):
+    """Above the old crossover row count the raw band still serves the block.
+
+    The grid's cell order (cached on the group matrix for the fit) and the
+    weights permuted into it (kept by the build's cache) are O(n) fit-owned
+    state.  Charging them to the per-operation budget made the admission
+    depend on the row count: above about 444k rows every 256 x 256 block of
+    a ten-pair fit fell from the raw band to the dense stage, 2.1x slower a
+    block.  Here the histogram takes half of a scaled budget ``B`` and the
+    stage gathers 0.4 of it: the old charge, about 32 bytes a row on top of
+    the histogram, crossed ``B`` at ``B / 64`` rows (4,096), and the fixture
+    has ``B / 40`` (6,553), below the new crossover at ``B / 32``.
+    ``charged`` is the mutation check: adding the cell order and one
+    permutation back to the charge, as the parent commit charged them,
+    takes the dense stage on this fixture.
+    """
+    budget = 256 << 10
+    bins = int(np.sqrt(budget / (2 * 8 * 36)))
+    n = budget // 40
+    left, right, rng = _tensor_pair(n, (bins, bins, 3, 3, 6), (bins, bins, 3, 3, 6))
     weights = rng.uniform(0.5, 1.5, n)
     expected, bound = _dense_cross(left, right, weights)
-    algebra._cross_gram(left, right, weights)
-    band, right.raw_channels = right.raw_channels, None
-    algebra._cross_gram(left, right, weights)
-    right.raw_channels = band
-    retained = sum(array.nbytes for array in left.cell_csr())
+    algebra._cross_gram(left, right, weights)  # Compile and build the cell order.
+    fit_owned = sum(array.nbytes for array in left.cell_csr()) + 8 * n
+    width = right.raw_channels.projection.shape[0]
+    uncharged = algebra._tensor_channel_workspace_bytes(
+        left, right, width, algebra._BlockWeightCache(), raw=True
+    )
     monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
-    tracemalloc.start()
-    try:
-        cache = algebra._BlockWeightCache()
-        profile = {}
-        actual = algebra._cross_gram(left, right, weights, cache=cache, profile=profile)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert peak + retained <= budget + (4 << 10)
-    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == 0
+    if charged:
+        workspace = algebra._tensor_channel_workspace_bytes
+        monkeypatch.setattr(
+            algebra,
+            "_tensor_channel_workspace_bytes",
+            lambda *args, **kwargs: workspace(*args, **kwargs) + fit_owned,
+        )
+    profile = {}
+    actual = algebra._cross_gram(
+        left, right, weights, cache=algebra._BlockWeightCache(profile), profile=profile
+    )
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(not charged)
     _assert_cross_matches(actual, expected, bound)
+    assert uncharged <= budget < uncharged + fit_owned, "the fixture must sit between the two"
 
 
 def test_channel_workspace_growth_and_dense_fallback_release_unused_buffers(monkeypatch):

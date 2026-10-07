@@ -1663,6 +1663,15 @@ def optimize_discrete_reml_cached_w(
     )
     _t0 = _time.perf_counter()
     final_cache: dict | None = {} if identified and not use_structured else None
+    # No rank metadata: this state's ``rank_info`` would be dead.  The
+    # objective below reads the penalised geometry (``log_det_H``,
+    # ``reml_hessian_rank``) and the centred moments, which the REML geometry
+    # summary carries with the same values (``objective.reml_laml_objective``);
+    # the only consumer of the returned state is ``finalize_reml_fit``, whose
+    # direct route (the only one that reaches this optimizer) refits at these
+    # lambdas and publishes the refit's ``rank_info`` and objective.  Asking
+    # for it cost an O(n p^2) data-rank factor whenever the unpenalised Gram
+    # could not certify itself -- one of two per fit on the real book.
     final_result, final_inv, final_xtwx = fit_irls_direct(
         X=dm,
         y=y,
@@ -1688,6 +1697,7 @@ def optimize_discrete_reml_cached_w(
         trace_purpose="reml_optimizer_final",
         weight_semantics=weight_semantics,
         cache_out=final_cache,
+        compute_rank_info=False,
     )
     final_dense = dense_hessian(final_cache)
     _t_pirls += _time.perf_counter() - _t0

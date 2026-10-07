@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from time import perf_counter
 
 import numpy as np
 from numpy.typing import NDArray
 
+from ._block_queue import (
+    BlockTask,
+    block_bytes,
+    block_cost,
+    diagonal_bytes,
+    diagonal_cost,
+    run_block_tasks,
+    split_bytes,
+)
 from ._group_matrix_algebra import (
     _BlockWeightCache,
     _ChannelBatch,
@@ -242,42 +252,55 @@ class MatrixExecutionPlan:
     def _compressed_signed_gram(self, weights: NDArray, *, profile: dict | None) -> NDArray:
         """Return a signed Gram without the general weighted-moment dispatch."""
         gram = np.zeros((self.p, self.p), dtype=np.float64)
-        cache = _BlockWeightCache(profile)
-        for left_index, (left_span, left_group) in enumerate(self._group_entries):
-            left_columns = self._group_columns[left_index]
-            diagonal_start = perf_counter() if profile is not None else 0.0
-            support = None
-            support_factors_in_range = (
-                self._support_mask[left_index]
-                and left_group.B_unique.dtype == left_group.R_inv.dtype == np.float64
-                and not _ssp_gram_needs_exact(left_group.B_unique, left_group.R_inv)
-            )
-            if support_factors_in_range:
-                support = cache.solver_support(left_group)
-            if self._support_mask[left_index]:
-                gram[left_columns, left_columns] = left_group.gram(
-                    weights, _support=support, _support_factors_in_range=support_factors_in_range
+        tasks: list[BlockTask] = []
+        for left_index, left_group in enumerate(self.group_matrices):
+            tasks.append(
+                BlockTask(
+                    index=len(tasks),
+                    cost=diagonal_cost(left_group, self.n),
+                    nbytes=diagonal_bytes(left_group, self.n),
+                    run=partial(self._signed_diagonal, left_index, weights),
+                    place=partial(self._place_signed_diagonal, left_index, gram),
                 )
-            elif self._sparse_mask[left_index]:
-                gram[left_columns, left_columns] = cache.sparse_gram(left_group, weights)[0]
-            else:
-                gram[left_columns, left_columns] = _gram_any_sign(left_group, weights)
-            if profile is not None:
-                if self._tensor_mask[left_index]:
-                    diagonal_profile_key = "block_diag_tensor_s"
-                elif self._fused_mask[left_index]:
-                    diagonal_profile_key = "block_diag_discrete_ssp_s"
-                else:
-                    diagonal_profile_key = "block_diag_other_s"
-                _profile_elapsed(profile, diagonal_profile_key, diagonal_start)
-
+            )
             for right_index in range(left_index + 1, self._n_groups):
-                right_span, right_group = self._group_entries[right_index]
-                right_columns = self._group_columns[right_index]
-                cross = _cross_gram(left_group, right_group, weights, cache, profile)
-                gram[left_columns, right_columns] = cross
-                gram[right_columns, left_columns] = cross.T
+                tasks.append(self._cross_task(len(tasks), left_index, right_index, weights, gram))
+        run_block_tasks(tasks, _BlockWeightCache(profile), profile)
         return gram
+
+    def _place_signed_diagonal(self, left_index, gram, block) -> None:
+        columns = self._group_columns[left_index]
+        gram[columns, columns] = block
+
+    def _signed_diagonal(self, left_index, weights, cache, profile) -> NDArray:
+        """One group's diagonal block of a signed Gram."""
+        left_group = self.group_matrices[left_index]
+        diagonal_start = perf_counter() if profile is not None else 0.0
+        support = None
+        support_factors_in_range = (
+            self._support_mask[left_index]
+            and left_group.B_unique.dtype == left_group.R_inv.dtype == np.float64
+            and not _ssp_gram_needs_exact(left_group.B_unique, left_group.R_inv)
+        )
+        if support_factors_in_range:
+            support = cache.solver_support(left_group)
+        if self._support_mask[left_index]:
+            block = left_group.gram(
+                weights, _support=support, _support_factors_in_range=support_factors_in_range
+            )
+        elif self._sparse_mask[left_index]:
+            block = cache.sparse_gram(left_group, weights)[0]
+        else:
+            block = _gram_any_sign(left_group, weights)
+        if profile is not None:
+            if self._tensor_mask[left_index]:
+                diagonal_profile_key = "block_diag_tensor_s"
+            elif self._fused_mask[left_index]:
+                diagonal_profile_key = "block_diag_discrete_ssp_s"
+            else:
+                diagonal_profile_key = "block_diag_other_s"
+            _profile_elapsed(profile, diagonal_profile_key, diagonal_start)
+        return block
 
     def moments(
         self,
@@ -427,10 +450,27 @@ class MatrixExecutionPlan:
         self, left_index, W, rhs_vectors, gram, xtw, xt_rhs, signed, cache, profile
     ) -> None:
         """Write one group's diagonal Gram block and its transpose products."""
+        values = self._diagonal_values(
+            left_index, W, rhs_vectors, xtw is not None, signed, cache, profile
+        )
+        self._place_diagonal(left_index, values, gram=gram, xtw=xtw, xt_rhs=xt_rhs)
+
+    def _place_diagonal(self, left_index, values, *, gram, xtw, xt_rhs) -> None:
+        columns = self._group_columns[left_index]
+        group_gram, group_xtw, group_rhs = values
+        gram[columns, columns] = group_gram
+        if xtw is not None:
+            xtw[columns] = group_xtw
+        for target, value in zip(xt_rhs, group_rhs, strict=True):
+            target[columns] = value
+
+    def _diagonal_values(self, left_index, W, rhs_vectors, want_xtw, signed, cache, profile):
+        """One group's diagonal Gram block, its ``X'W`` (if wanted) and ``X'r`` per rhs."""
         left_span, left_group = self._group_entries[left_index]
-        columns = left_span.columns
         diagonal_start = perf_counter() if profile is not None else 0.0
-        fusion_vector = rhs_vectors[0] if rhs_vectors else (W if xtw is not None else None)
+        fusion_vector = rhs_vectors[0] if rhs_vectors else (W if want_xtw else None)
+        group_xtw = None
+        group_rhs: list = [None] * len(rhs_vectors)
         # Preserve the exact source-factor route before evaluating a
         # support product that may itself overflow or cancel to NaN.
         support = None
@@ -444,7 +484,7 @@ class MatrixExecutionPlan:
         if fusion_vector is not None and self._fused_mask[left_index]:
             if self._tensor_mask[left_index]:
                 w_grid, rhs_grid = cache.tensor_w_wz_grid(left_group, W, fusion_vector)
-                group_gram, group_xtw, group_rhs = left_group.gram_rmatvec_from_grids(
+                group_gram, fused_xtw, fused_rhs = left_group.gram_rmatvec_from_grids(
                     w_grid, rhs_grid
                 )
             elif self._support_mask[left_index]:
@@ -455,7 +495,7 @@ class MatrixExecutionPlan:
                     else None
                 )
                 shared = {} if bin_sums is None else {"_bin_sums": bin_sums}
-                group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(
+                group_gram, fused_xtw, fused_rhs = left_group.gram_rmatvec(
                     W,
                     fusion_vector,
                     _support=support,
@@ -463,13 +503,12 @@ class MatrixExecutionPlan:
                     **shared,
                 )
             else:
-                group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(W, fusion_vector)
-            gram[columns, columns] = group_gram
-            if xtw is not None:
-                xtw[columns] = group_xtw
+                group_gram, fused_xtw, fused_rhs = left_group.gram_rmatvec(W, fusion_vector)
+            if want_xtw:
+                group_xtw = fused_xtw
             if rhs_vectors:
-                xt_rhs[0][columns] = group_rhs
-            remaining_rhs = zip(xt_rhs[1:], rhs_vectors[1:], strict=True)
+                group_rhs[0] = fused_rhs
+            first_remaining = 1
         else:
             # A batched channel sums a categorical's levels once for both
             # products, each of which forms the same bincount on its own.
@@ -480,22 +519,20 @@ class MatrixExecutionPlan:
             )
             if level_sums is not None:
                 level_sums = level_sums[: left_group.n_levels]
-                gram[columns, columns] = np.diag(level_sums)
+                group_gram = np.diag(level_sums)
             elif self._support_mask[left_index]:
-                gram[columns, columns] = left_group.gram(
+                group_gram = left_group.gram(
                     W, _support=support, _support_factors_in_range=support_factors_in_range
                 )
             elif self._sparse_mask[left_index]:
-                gram[columns, columns] = cache.sparse_gram(left_group, W)[0]
+                group_gram = cache.sparse_gram(left_group, W)[0]
             else:
-                gram[columns, columns] = (
-                    _gram_any_sign(left_group, W) if signed else left_group.gram(W)
-                )
-            if xtw is not None:
-                xtw[columns] = left_group.rmatvec(W) if level_sums is None else level_sums
-            remaining_rhs = zip(xt_rhs, rhs_vectors, strict=True)
-        for target, vector in remaining_rhs:
-            target[columns] = left_group.rmatvec(vector)
+                group_gram = _gram_any_sign(left_group, W) if signed else left_group.gram(W)
+            if want_xtw:
+                group_xtw = left_group.rmatvec(W) if level_sums is None else level_sums
+            first_remaining = 0
+        for index in range(first_remaining, len(rhs_vectors)):
+            group_rhs[index] = left_group.rmatvec(rhs_vectors[index])
         if profile is not None:
             if self._tensor_mask[left_index]:
                 diagonal_profile_key = "block_diag_tensor_s"
@@ -504,6 +541,30 @@ class MatrixExecutionPlan:
             else:
                 diagonal_profile_key = "block_diag_other_s"
             _profile_elapsed(profile, diagonal_profile_key, diagonal_start)
+        return group_gram, group_xtw, group_rhs
+
+    def _diagonal_task_values(self, left_index, W, rhs_vectors, want_xtw, signed, cache, profile):
+        return self._diagonal_values(left_index, W, rhs_vectors, want_xtw, signed, cache, profile)
+
+    def _cross_task(self, task_index, left_index, right_index, W, gram) -> BlockTask:
+        """A queue task forming ``X_left' W X_right`` and placing it and its transpose."""
+        left_group = self.group_matrices[left_index]
+        right_group = self.group_matrices[right_index]
+        left_columns = self._group_columns[left_index]
+        right_columns = self._group_columns[right_index]
+
+        def place(cross) -> None:
+            gram[left_columns, right_columns] = cross
+            gram[right_columns, left_columns] = cross.T
+
+        return BlockTask(
+            index=task_index,
+            cost=block_cost(left_group, right_group, self.n),
+            nbytes=block_bytes(left_group, right_group, self.n),
+            run=lambda cache, profile: _cross_gram(left_group, right_group, W, cache, profile),
+            place=place,
+            split_bytes=split_bytes(left_group, right_group, self.n),
+        )
 
     def _moments_impl(
         self,
@@ -596,18 +657,32 @@ class MatrixExecutionPlan:
                 return WeightedMoments(gram=gram, xtw=xtw, xt_rhs=tuple(xt_rhs))
 
         cache = _BlockWeightCache(profile) if _cache is None else _cache
-        for left_index, (left_span, left_group) in enumerate(self._group_entries):
+        tasks: list[BlockTask] = []
+        for left_index, left_group in enumerate(self.group_matrices):
             left_is_ordinary = ordinary_split is not None and self._ordinary_mask[left_index]
             if not left_is_ordinary:
-                self._diagonal_block(
-                    left_index, W, rhs_vectors, gram, xtw, xt_rhs, signed, cache, profile
+                tasks.append(
+                    BlockTask(
+                        index=len(tasks),
+                        cost=diagonal_cost(left_group, self.n),
+                        nbytes=diagonal_bytes(left_group, self.n),
+                        run=partial(
+                            self._diagonal_task_values,
+                            left_index,
+                            W,
+                            rhs_vectors,
+                            xtw is not None,
+                            signed,
+                        ),
+                        place=partial(
+                            self._place_diagonal, left_index, gram=gram, xtw=xtw, xt_rhs=xt_rhs
+                        ),
+                    )
                 )
             for right_index in range(left_index + 1, self._n_groups):
-                right_span, right_group = self._group_entries[right_index]
                 if left_is_ordinary and self._ordinary_mask[right_index]:
                     continue
-                cross = _cross_gram(left_group, right_group, W, cache, profile)
-                gram[left_span.columns, right_span.columns] = cross
-                gram[right_span.columns, left_span.columns] = cross.T
+                tasks.append(self._cross_task(len(tasks), left_index, right_index, W, gram))
+        run_block_tasks(tasks, cache, profile)
 
         return WeightedMoments(gram=gram, xtw=xtw, xt_rhs=tuple(xt_rhs))

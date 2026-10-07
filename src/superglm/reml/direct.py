@@ -375,6 +375,9 @@ def optimize_direct_reml(
         S_override=S_boot,
         reml_penalties=penalties,
         debug_recorder=debug_recorder,
+        # Nothing reads the bootstrap's rank metadata, and its data rank can
+        # take an O(n p^2) factor: a traced fit records it, as for candidates.
+        compute_rank_info=loop_fit_statistics,
         debug_context={"phase": "bootstrap", "reml_iteration": 0},
         trace_run=trace_run,
         trace_purpose="reml_bootstrap",

@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._column_local_centering import (
+    column_local_centering,
+    recentred_products,
+)
 from superglm._group_matrix._group_matrix_centered import (
+    RawMomentRejection,
     _compensated_add,
     _try_mixed_discrete_centering,
     _try_raw_spline_tabmat_centering,
@@ -181,6 +189,284 @@ def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDA
         yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
 
 
+_NO_CENTRE = np.empty(0, dtype=np.float64)
+
+
+def _writable_codes(codes: NDArray) -> NDArray:
+    codes = np.ascontiguousarray(codes, dtype=np.intp)
+    return codes if codes.flags.writeable else codes.copy()
+
+
+@dataclass(frozen=True)
+class _LeafParts:
+    """How a design's column blocks write a leaf's rows (``_design_leaf_parts``).
+
+    ``held`` is the bytes of the support tables the parts hold for as long as
+    they live; ``per_leaf`` the largest table a ``rows`` block forms in each
+    leaf.  ``rank._tsqr_weighted_factor`` charges both to ``max_memory``.
+    """
+
+    parts: tuple
+    held: int
+    per_leaf: int
+
+
+def _design_leaf_parts(dm: DesignMatrix) -> _LeafParts:
+    """How each column block of ``dm`` writes a leaf's rows: ``(column, kind, a, b)``.
+
+    ``one_hot`` (codes, levels) and ``gather`` (table, index) write
+    ``toarray()``'s entries from the compact form without the GIL; ``rows``
+    (a matrix) materialises its rows by ``row_subset(...).toarray()``, the
+    whole design's when ``dm`` is not a plain ``DesignMatrix``.  A gather
+    holds its support's table ``B_unique @ R_inv``; while those tables would
+    take more than half of ``max_memory`` together, the supports materialise
+    their leaves' rows instead, one table at a time, as ``toarray`` does.
+    Inside a fit the parts are formed once (``_DataFactorReuse``).
+    """
+    from superglm._blas_threads import pooled_blas_threads
+    from superglm._group_matrix._group_matrix_core import (
+        CategoricalGroupMatrix,
+        RandomEffectGroupMatrix,
+    )
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+    )
+    from superglm._parallel import resolve_max_memory
+
+    if type(dm).toarray is not DesignMatrix.toarray or (
+        type(dm).row_subset is not DesignMatrix.row_subset
+    ):
+        return _LeafParts(((0, "rows", dm, None),), 0, 0)
+    reuse = _DATA_FACTOR_REUSE.get()
+    if reuse is not None:
+        cached = reuse.leaf_parts.get(id(dm))
+        if cached is not None and cached[0] is dm and cached[1] is dm.group_matrices:
+            return cached[2]
+        # Only the design being factored keeps its tables: a fit factors a
+        # superseded design (a REML rebuild's predecessor) no more.
+        reuse.leaf_parts.clear()
+
+    def supports(gm) -> bool:
+        kind = type(gm)
+        return kind.toarray is DiscretizedSSPGroupMatrix.toarray and kind.row_subset in (
+            DiscretizedSSPGroupMatrix.row_subset,
+            DiscretizedTensorGroupMatrix.row_subset,
+        )
+
+    table_bytes = [
+        8 * len(cast(DiscretizedSSPGroupMatrix, gm).B_unique) * int(gm.shape[1])
+        for gm in dm.group_matrices
+        if supports(gm)
+    ]
+    gather = 2 * sum(table_bytes) <= resolve_max_memory()
+    parts: list[tuple] = []
+    column = 0
+    # The table is the product ``toarray`` forms, under the pin its leaves had.
+    with pooled_blas_threads():
+        for gm in dm.group_matrices:
+            kind = type(gm)
+            if kind.toarray is CategoricalGroupMatrix.toarray and kind.row_subset in (
+                CategoricalGroupMatrix.row_subset,
+                RandomEffectGroupMatrix.row_subset,
+            ):
+                one_hot = cast(CategoricalGroupMatrix, gm)
+                parts.append(
+                    (column, "one_hot", _writable_codes(one_hot.codes), int(one_hot.n_levels))
+                )
+            elif gather and supports(gm):
+                support = cast(DiscretizedSSPGroupMatrix, gm)
+                table = np.ascontiguousarray(support.B_unique @ support.R_inv, dtype=np.float64)
+                parts.append(
+                    (column, "gather", table, _writable_codes(cast(NDArray, support.bin_idx)))
+                )
+            else:
+                parts.append((column, "rows", gm, None))
+            column += int(gm.shape[1])
+    held = sum(table_bytes) if gather else 0
+    per_leaf = 0 if gather else max(table_bytes, default=0)
+    result = _LeafParts(tuple(parts), held, per_leaf)
+    if reuse is not None:
+        reuse.leaf_parts[id(dm)] = (dm, dm.group_matrices, result)
+    return result
+
+
+class _DesignLeaf:
+    """Rows ``[start, stop)`` of a grouped design, written by the worker that factors them.
+
+    ``fill_weighted_rows`` writes ``sqrt(w_i) * ((x_ij - c_j) - c_lo_j)``,
+    the entries ``rank._tsqr_leaf`` forms from ``row_subset(...).toarray()``,
+    in the same order of operations, so the factor is bitwise the same.
+    """
+
+    __slots__ = ("_parts", "held_bytes", "leaf_bytes", "shape", "start", "stop")
+
+    def __init__(self, parts: _LeafParts, start: int, stop: int, width: int) -> None:
+        self._parts = parts.parts
+        self.held_bytes = parts.held
+        self.leaf_bytes = parts.per_leaf
+        self.start = start
+        self.stop = stop
+        self.shape = (stop - start, width)
+
+    def fill_weighted_rows(self, out, sqrt_weights, center, center_lo) -> None:
+        from superglm._group_matrix._group_matrix_kernels import (
+            _weighted_centred_one_hot,
+            _weighted_centred_rows,
+        )
+
+        centre = _NO_CENTRE if center is None else np.array(center, dtype=np.float64)
+        centre_lo = _NO_CENTRE if center_lo is None else np.array(center_lo, dtype=np.float64)
+        scale = np.ascontiguousarray(sqrt_weights, dtype=np.float64)
+        for column, kind, first, second in self._parts:
+            if kind == "one_hot":
+                _weighted_centred_one_hot(
+                    out, column, first, second, self.start, centre, centre_lo, scale
+                )
+            elif kind == "gather":
+                _weighted_centred_rows(
+                    out, column, first, second, self.start, centre, centre_lo, scale
+                )
+            else:
+                rows = np.arange(self.start, self.stop, dtype=np.intp)
+                values = np.array(first.row_subset(rows).toarray(), dtype=np.float64, order="C")
+                _weighted_centred_rows(
+                    out, column, values, rows - self.start, 0, centre, centre_lo, scale
+                )
+
+
+def iter_grouped_design_leaves(dm: DesignMatrix) -> Iterator[tuple[int, int, _DesignLeaf]]:
+    """Yield the TSQR leaves of a grouped design: ``rank.tsqr_leaf_rows(p)`` rows each.
+
+    The partition depends only on ``(n, p)``, which fixes the factor's
+    reduction tree (``rank._tsqr_weighted_factor``).  Each leaf is deferred
+    (:class:`_DesignLeaf`): the pool worker that factors it writes its
+    weighted, centred rows from the design's compact form, so no thread
+    materialises the rows of every leaf.
+    """
+    from superglm.solvers.rank import tsqr_leaf_rows
+
+    leaf_rows = tsqr_leaf_rows(dm.p)
+    if not dm.n:
+        return
+    parts = _design_leaf_parts(dm)
+    for start in range(0, dm.n, leaf_rows):
+        stop = min(start + leaf_rows, dm.n)
+        yield start, stop, _DesignLeaf(parts, start, stop, dm.p)
+
+
+@dataclass
+class _DataFactorReuse:
+    """The weighted data factors one fit has formed, keyed by the bits of their inputs.
+
+    Owner: one ``fit_reml`` call (:func:`reuse_data_factors`); lifetime: that
+    call.  A factor is a function of the design, the leaf partition
+    (``rank.tsqr_leaf_rows``), and the float64 bits of the weights, the
+    centre pair and the response: the penalty never enters it, the leaves
+    run with BLAS on one thread at any worker count, so the same inputs give
+    the same bits and an entry needs no other invalidation.  A REML fit asks
+    again for factors it has formed (the observed geometry of a line-search
+    trial and of the candidate it accepts; one PIRLS start shared by
+    successive smoothing states).  The ``_ENTRIES`` most recently used are
+    kept (a few factors of ``(p + 1)^2`` doubles and their ``n``-vectors); a
+    hit returns copies, so no caller can change an entry.  ``leaf_parts``
+    keeps the leaf parts (``_design_leaf_parts``, its support tables
+    included) of the design the fit factored last, a function of that design
+    alone, keyed by the design and its group matrices: at most one design's
+    tables are retained (``retained_bytes``).
+    """
+
+    _ENTRIES = 4
+    entries: list = field(default_factory=list)
+    leaf_parts: dict = field(default_factory=dict)
+
+    def _index(self, key: tuple) -> int | None:
+        for index, (entry_key, _) in enumerate(self.entries):
+            if len(entry_key) == len(key) and all(
+                _same_input(saved, given) for saved, given in zip(entry_key, key)
+            ):
+                return index
+        return None
+
+    def find(self, key: tuple):
+        index = self._index(key)
+        if index is None:
+            return None
+        entry_key, value = self.entries.pop(index)
+        self.entries.append((entry_key, value))
+        return tuple(np.array(part) for part in value)
+
+    def keep(self, key: tuple, value) -> None:
+        frozen = tuple(part if not isinstance(part, np.ndarray) else _freeze(part) for part in key)
+        self.entries.append((frozen, tuple(_freeze(part) for part in value)))
+        del self.entries[: -self._ENTRIES]
+
+    def retained_bytes(self) -> int:
+        """The support tables this fit keeps (``leaf_parts``), charged by every pooled section."""
+        return sum(entry[2].held for entry in list(self.leaf_parts.values()))
+
+
+def _same_input(saved, given) -> bool:
+    if not isinstance(saved, np.ndarray) or not isinstance(given, np.ndarray):
+        return saved is given if not isinstance(saved, int) else saved == given
+    return (
+        saved.shape == given.shape
+        and given.dtype == np.float64
+        and np.array_equal(saved.view(np.uint64), given.view(np.uint64))
+    )
+
+
+_DATA_FACTOR_REUSE: ContextVar[_DataFactorReuse | None] = ContextVar(
+    "superglm_data_factor_reuse", default=None
+)
+
+
+@contextmanager
+def reuse_data_factors() -> Iterator[None]:
+    """Reuse the weighted data factors formed inside this context (:class:`_DataFactorReuse`)."""
+    from superglm import _parallel
+
+    reuse = _DataFactorReuse()
+    token = _DATA_FACTOR_REUSE.set(reuse)
+    retained = _parallel._retained.set(reuse.retained_bytes)
+    try:
+        yield
+    finally:
+        _parallel._retained.reset(retained)
+        _DATA_FACTOR_REUSE.reset(token)
+
+
+def _factor_key(dm, W, center, center_lo, response) -> tuple:
+    from superglm.solvers.rank import tsqr_leaf_rows
+
+    def bits(values):
+        return None if values is None else np.asarray(values, dtype=np.float64)
+
+    return (dm, tsqr_leaf_rows(dm.p), bits(W), bits(center), bits(center_lo), bits(response))
+
+
+def _data_factor(dm, _leaf_rows, W, center, center_lo, response) -> tuple:
+    """The TSQR of :func:`grouped_weighted_factor` (``response`` ``None``) or ``_rhs``, as a tuple."""
+    from superglm.solvers.rank import streamed_weighted_factor, streamed_weighted_factor_rhs
+
+    leaves = iter_grouped_design_leaves(dm)
+    if response is None:
+        return (streamed_weighted_factor(leaves, W, center=center, center_lo=center_lo),)
+    return streamed_weighted_factor_rhs(leaves, W, response, center=center, center_lo=center_lo)
+
+
+def _reused_data_factor(dm, W, center, center_lo, response) -> tuple:
+    reuse = _DATA_FACTOR_REUSE.get()
+    if reuse is None:
+        return _data_factor(dm, None, W, center, center_lo, response)
+    key = _factor_key(dm, W, center, center_lo, response)
+    found = reuse.find(key)
+    if found is None:
+        found = _data_factor(*key)
+        reuse.keep(key, found)
+    return found
+
+
 def grouped_weighted_factor(
     dm: DesignMatrix,
     W: NDArray,
@@ -188,12 +474,8 @@ def grouped_weighted_factor(
     center: NDArray | None = None,
     center_lo: NDArray | None = None,
 ) -> NDArray:
-    """Return a streaming weighted QR factor without retaining all design rows."""
-    from superglm.solvers.rank import streamed_weighted_factor
-
-    return streamed_weighted_factor(
-        iter_grouped_design_chunks(dm), W, center=center, center_lo=center_lo
-    )
+    """Return the weighted QR factor, a TSQR over the design's leaves, without retaining all rows."""
+    return _reused_data_factor(dm, W, center, center_lo, None)[0]
 
 
 def grouped_weighted_factor_rhs(
@@ -205,15 +487,8 @@ def grouped_weighted_factor_rhs(
     center_lo: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Return a bounded weighted QR factor and its transformed response."""
-    from superglm.solvers.rank import streamed_weighted_factor_rhs
-
-    return streamed_weighted_factor_rhs(
-        iter_grouped_design_chunks(dm),
-        W,
-        response,
-        center=center,
-        center_lo=center_lo,
-    )
+    factor, transformed = _reused_data_factor(dm, W, center, center_lo, response)
+    return factor, transformed
 
 
 def penalty_factor(penalty: NDArray) -> NDArray:
@@ -503,7 +778,7 @@ def build_centered_system(
             force_chunked=_force_chunked,
         )
         if packed is not None:
-            mean_x, data_gram, rhs = packed
+            mean_x, data_gram, rhs, _ = packed
             return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
     else:
         split = _dense_split(dm)
@@ -570,14 +845,27 @@ def _raw_rung_system(
     tabmat_state: TabmatCenteringState | None,
     profile: dict | None,
     force_chunked: bool,
-) -> tuple[NDArray, NDArray, NDArray] | None:
-    """``(mean_x, data_gram, rhs)`` from the first raw rung that accepts ``dm``, else ``None``.
+) -> tuple[NDArray, NDArray, NDArray, tuple] | None:
+    """``(mean_x, data_gram, rhs, recentred)`` from the first raw rung that accepts ``dm``, else ``None``.
 
     After the raw rungs, the compact anchor-support fallback, which subtracts
-    no raw moment.  Called only with a design free of ``DenseGroupMatrix``
+    no raw moment, and then column-local centring of the last raw moments a
+    certificate rejected in this build (``column_local_centering``), which
+    recentres only the failing columns, each inside its own group.  A build
+    reaches that repair only where it used to take the chunked ``O(n p^2)``
+    pass, so every other route is unchanged.  The raw-moment rung's refusal
+    latches as before unless the repair served the build from that rung's
+    own moments, which the next build needs again; after a factored-rung
+    rejection it stays latched, which costs nothing, as the factored rung is
+    never latched and forms the moments at every build.  ``recentred`` is
+    the repair's recentred columns (``RecentredColumns``), empty on every
+    other route.  Called only with a design free of ``DenseGroupMatrix``
     columns.
     """
-    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered, state=tabmat_state)
+    rejected = RawMomentRejection()
+    packed = packed_centered_gram_rhs(
+        dm=dm, W=W, z_centered=z_centered, state=tabmat_state, rejected=rejected
+    )
     if packed is None and (tabmat_state is None or tabmat_state.eligible is not False):
         mixed_attempted, mixed = _try_mixed_discrete_centering(
             dm=dm,
@@ -653,11 +941,22 @@ def _raw_rung_system(
             )
         )
     ):
-        packed = try_raw_moment_centering(
-            dm=dm,
-            W=W,
-            weighted_z=W * z_centered,
-            sum_w=sum_w,
+        # The factored tensor rung forms these very moments, by the same
+        # execution-plan call on the same vectors, and certifies them the same
+        # way: its rejection in this build is this rung's, and recomputing them
+        # cost every rejected build a second raw-moment pass.  (The pattern
+        # rung forms them by another summation, so its rejection does not
+        # decide this rung's certificate.)
+        packed = (
+            None
+            if rejected.source == "factored"
+            else try_raw_moment_centering(
+                dm=dm,
+                W=W,
+                weighted_z=W * z_centered,
+                sum_w=sum_w,
+                rejected=rejected,
+            )
         )
         if tabmat_state is not None:
             tabmat_state.raw_moment_eligible = packed is not None
@@ -674,7 +973,27 @@ def _raw_rung_system(
             profile["centered_anchor_support_hits"] = (
                 profile.get("centered_anchor_support_hits", 0) + 1
             )
-    return packed
+    recentred = ()
+    if packed is None and not force_chunked and rejected.source is not None:
+        repaired = column_local_centering(dm=dm, W=W, rejected=rejected, sum_w=sum_w)
+        if profile is not None:
+            key = "declines" if repaired is None else "hits"
+            profile[f"centered_column_local_{key}"] = (
+                profile.get(f"centered_column_local_{key}", 0) + 1
+            )
+        if repaired is not None:
+            *system, recentred = repaired
+            packed = tuple(system)
+            if profile is not None:
+                profile["centered_column_local_columns"] = profile.get(
+                    "centered_column_local_columns", 0
+                ) + sum(len(group.columns) for group in recentred)
+            if tabmat_state is not None and rejected.source == "raw_moment":
+                # The rung's moments served this build through the repair, so
+                # its refusal does not latch: the next build needs them again,
+                # and a latched rung sent every later build to the chunked pass.
+                tabmat_state.raw_moment_eligible = None
+    return None if packed is None else (*packed, recentred)
 
 
 @dataclass(frozen=True)
@@ -738,7 +1057,7 @@ def _attach_dense_split(
     z_centered: NDArray,
     sum_w: float,
     mean_z: float,
-    packed: tuple[NDArray, NDArray, NDArray],
+    packed: tuple[NDArray, NDArray, NDArray, tuple],
     penalty: NDArray,
 ) -> CenteredSystem:
     """The centred system from a raw rung on the bounded columns and the corrected two-pass on the dense ones.
@@ -761,9 +1080,15 @@ def _attach_dense_split(
     = N' (W (x - a)) - m_N e'``, one transpose product of the bounded design
     per dense column; ``l``'s share, ``l (N'W - m_N sum W)``, is a product of
     two roundings.  The bounded columns' raw values never meet a dense
-    column's offset, and the bounded block is the rung's own.
+    column's offset, and the bounded block is the rung's own.  A bounded
+    column the rung recentred (``column_local_centering``) failed the
+    raw-moment certificate, so its raw values would bring its ``kappa`` into
+    the product: it meets ``W (x - a)`` through its centred support instead,
+    ``sum_b c_j[b] sum_(r in b) W (x - a)`` (``recentred_products``), the
+    repair's own product with a failing partner, within the repair's stated
+    envelope with ``A_k = |x - a|``.
     """
-    mean_bounded, gram_bounded, rhs_bounded = packed
+    mean_bounded, gram_bounded, rhs_bounded, recentred = packed
     dense_width = split.dense.p
     anchor = dense_anchor(split.dense, W, sum_w)
     first, gram, response = anchored_dense_moments(split.dense, W, anchor, z_centered)
@@ -778,6 +1103,8 @@ def _attach_dense_split(
         np.subtract(values, column_anchor, out=weighted)
         weighted *= W
         cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(np.sum(weighted))
+        for columns, products in recentred_products(recentred, weighted):
+            cross[columns, column] = products
     hi = anchor
     p = dense_width + split.bounded.p
     dense_index, bounded_index = split.dense_index, split.bounded_index
