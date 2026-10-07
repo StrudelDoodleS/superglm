@@ -1,9 +1,13 @@
 """Tests for the active-set constrained penalized least-squares solver."""
 
 import inspect
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
+import scipy.linalg
+import scipy.optimize
 
 from superglm._fit_trace import MemoryTraceSink, NullTraceSink, TraceRun
 from superglm.solvers.constrained_qp import (
@@ -17,6 +21,7 @@ from superglm.solvers.constrained_qp import (
     _solve_saddle_least_squares,
     solve_constrained_qp,
 )
+from superglm.solvers.irls_direct import _solve_constrained_qp_with_cold_retry
 from superglm.solvers.rank import decompose_gram, needs_factor_certification
 
 
@@ -344,11 +349,16 @@ class TestCallSiteWarnings:
 
     @staticmethod
     def _non_converging(calls):
-        """Wrap the real solver, forcing ``converged=False`` on every call."""
+        """Wrap the real solver, forcing ``converged=False`` on every call.
+
+        ``calls`` counts ordinary solves. The retry's degenerate-vertex attempt
+        is forced to fail as well, but it is not counted.
+        """
         from superglm.solvers.constrained_qp import solve_constrained_qp as real_solve
 
         def fake_solve(*args, **kwargs):
-            calls.append(1)
+            if not kwargs.get("_degeneracy_safeguards"):
+                calls.append(1)
             result = real_solve(*args, **kwargs)
             result.converged = False
             return result
@@ -2511,3 +2521,133 @@ class TestFaceMinimumAboveTheStepGate:
         bound = H.shape[0] * unit * np.linalg.cond(H) * np.max(np.abs(reference))
         assert np.max(np.abs(result.beta - reference)) <= bound
         assert bound < 1e-6  # informative on this fixture
+
+
+_ISSUE_472_QP = Path(__file__).parent / "fixtures" / "issue472_terminal_qp.json"
+
+
+class TestDegenerateVertexRetry:
+    """Issue #472: a flat monotone term at zero with more active rows than coefficients.
+
+    ``b = 0`` makes ``beta = 0`` feasible and ``H`` is positive definite, so the
+    optimum exists and is unique. On 0.37.1, rows linearly dependent on the
+    working set entered it. The per-row relative slack also read the flat
+    block's rounding residue as a violation. So the warm and cold solves both
+    returned uncertified, and REML refused the fit. The oracle is the Lagrangian
+    dual solved by Lawson-Hanson NNLS, which shares no code with the active-set
+    loop.
+    """
+
+    @staticmethod
+    def _dual_oracle(H, g, A):
+        """Minimiser of ``x'Hx/2 - g'x`` subject to ``A x >= 0``, through its dual.
+
+        ``x = H^-1 (g + A' lam)``, where ``lam >= 0`` minimises
+        ``||L^-1 (g + A' lam)||^2 / 2`` with ``H = L L'``. Scaling ``H``'s
+        diagonal by powers of two first is exact.
+        """
+        scale = np.exp2(-np.round(np.log2(np.sqrt(np.diag(H)))))
+        L = np.linalg.cholesky(H * np.outer(scale, scale))
+        M = scipy.linalg.solve_triangular(L, (A * scale).T, lower=True)
+        h = scipy.linalg.solve_triangular(L, scale * g, lower=True)
+        lam, _ = scipy.optimize.nnls(M, -h, maxiter=50 * A.shape[0])
+        return scale * scipy.linalg.solve_triangular(L.T, h + M @ lam, lower=False)
+
+    @classmethod
+    def _assert_matches_dual_oracle(cls, H, g, A, beta):
+        """Coefficients and objective agree with the dual optimum within derived bounds.
+
+        A backward-stable solve's forward error is at most ``(p + m) u`` times
+        the condition number, where ``p + m`` bounds the KKT width. The
+        objective is quadratic, so with ``d = beta - oracle`` the identity
+        ``f(beta) - f(oracle) = (H oracle - g)' d + d' H d / 2`` is exact.
+        Evaluating ``f`` in float64 adds ``gamma_(2p+2)`` times its absolute
+        terms at each point.
+        """
+        p, m = H.shape[0], A.shape[0]
+        unit = np.finfo(np.float64).eps / 2
+        oracle = cls._dual_oracle(H, g, A)
+        coefficient_bound = (p + m) * unit * np.linalg.cond(H) * np.max(np.abs(oracle))
+        assert np.max(np.abs(beta - oracle)) <= coefficient_bound
+
+        def objective(x):
+            return 0.5 * x @ H @ x - g @ x
+
+        def magnitude(x):
+            return 0.5 * np.abs(x) @ np.abs(H) @ np.abs(x) + np.abs(g) @ np.abs(x)
+
+        rounding = (2 * p + 2) * unit / (1 - (2 * p + 2) * unit)
+        objective_bound = (
+            np.sum(np.abs(H @ oracle - g)) * coefficient_bound
+            + 0.5 * np.linalg.norm(H, 2) * p * coefficient_bound**2
+            + rounding * (magnitude(beta) + magnitude(oracle))
+        )
+        assert abs(objective(beta) - objective(oracle)) <= objective_bound
+
+    @staticmethod
+    def _degenerate_vertex_problem(seed):
+        """A QP whose optimum is a degenerate vertex of one block.
+
+        Block ``Z`` has 4 coefficients and 6 homogeneous rows: a random basis
+        ``B`` plus ``2 B[0]`` and ``B[3] / 2``. The issue's monotone spline
+        rows include pairs like these. Its cone is ``{B z >= 0}``, so at the
+        planted optimum ``z = 0`` all 6 rows are active but only 4 are
+        independent. Block ``Y`` lies strictly inside its own cone of 5 rows
+        on 3 coefficients, and 8 coefficients are free. ``H`` is dense, with
+        condition number at most 50.
+        """
+        rng = np.random.default_rng(seed)
+        free, width, y_width = 8, 4, 3
+        p = free + width + y_width
+        rotation, _ = np.linalg.qr(rng.standard_normal((p, p)))
+        H = rotation @ np.diag(np.exp(rng.uniform(0.0, np.log(50.0), p))) @ rotation.T
+        H = 0.5 * (H + H.T)
+        z_basis = rng.standard_normal((width, width))
+        y_basis = rng.standard_normal((y_width, y_width))
+        y_combinations = rng.uniform(0.1, 1.0, (2, y_width))
+        A = np.zeros((11, p))
+        A[:6, free : free + width] = np.vstack([z_basis, 2.0 * z_basis[0], 0.5 * z_basis[3]])
+        A[6:, free + width :] = np.vstack([y_basis, y_combinations @ y_basis])
+        beta = np.zeros(p)
+        beta[:free] = rng.standard_normal(free)
+        beta[free + width :] = np.linalg.solve(y_basis, rng.uniform(0.5, 1.5, y_width))
+        multipliers = np.zeros(11)
+        multipliers[:6] = rng.uniform(0.5, 2.0, 6)
+        return H, H @ beta - A.T @ multipliers, A, np.zeros(11)
+
+    @pytest.mark.parametrize("order", ["C", "F"])
+    def test_issue_472_terminal_qp_is_certified_by_the_retry(self, order):
+        """A refused sweep fit's terminal QP is certified at the dual optimum.
+
+        The fixture is the QP reduced exactly onto its 12 constrained
+        coefficients (provenance inside the file). Which rounding residue the
+        flat block keeps depends on ``A``'s memory order through the BLAS
+        kernels, and the certificate must hold for both orders. Mutation: on
+        0.37.1 the Fortran-ordered case (the reduction's own output) returns
+        ``converged=False`` after 200 iterations. The C-ordered case
+        certifies there in 12.
+        """
+        doc = json.loads(_ISSUE_472_QP.read_text())
+        H, g, A, b = (np.asarray(doc[key], dtype=float) for key in ("H", "g", "A", "b"))
+        A = np.asarray(A, order=order)
+        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        assert result.converged
+        assert _is_feasible(A, result.beta, b, 1e-12)
+        self._assert_matches_dual_oracle(H, g, A, result.beta)
+
+    @pytest.mark.parametrize("order", ["C", "F"])
+    def test_a_degenerate_vertex_is_certified_by_the_retry(self, order):
+        """The retry certifies the degenerate vertex at the dual optimum.
+
+        Mutation: 0.37.1 returns ``converged=False`` on this problem. Removing
+        either safeguard alone from the retry also leaves it uncertified: the
+        dependent-row skip (``_raises_working_rank``) or the per-block zero
+        face (``_zero_block_faces``). Both hold in either memory order and at
+        every 8-byte offset of ``H``, ``g`` and ``A`` from a 64-byte boundary.
+        """
+        H, g, A, b = self._degenerate_vertex_problem(seed=113)
+        H, A = np.asarray(H, order=order), np.asarray(A, order=order)
+        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        assert result.converged
+        assert _is_feasible(A, result.beta, b, 1e-12)
+        self._assert_matches_dual_oracle(H, g, A, result.beta)

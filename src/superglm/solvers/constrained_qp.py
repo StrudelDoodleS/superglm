@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+import scipy.sparse
+import scipy.sparse.csgraph
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
@@ -750,6 +752,88 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     return beta
 
 
+def _constraint_blocks(A: NDArray) -> list[tuple[NDArray, frozenset[int]]]:
+    """Coefficient blocks that no constraint row couples, each with its rows.
+
+    These are the connected components of the bipartite row-column support
+    graph of ``A``; in a fitted model, one shape-constrained term's
+    coefficients. Each nonzero row lies in exactly one block, so a block's
+    working rows constrain only that block's coefficients.
+    """
+    m, p = A.shape
+    rows, cols = np.nonzero(A)
+    graph = scipy.sparse.coo_matrix((np.ones(rows.size), (rows, m + cols)), shape=(m + p, m + p))
+    _, labels = scipy.sparse.csgraph.connected_components(graph, directed=False)
+    blocks = []
+    for label in np.unique(labels[:m]):
+        block_cols = np.flatnonzero(labels[m:] == label)
+        if block_cols.size:
+            blocks.append((block_cols, frozenset(np.flatnonzero(labels[:m] == label).tolist())))
+    return blocks
+
+
+def _raises_working_rank(
+    A: NDArray, active: list[int], row: int, working_rank: dict[tuple[int, ...], int]
+) -> bool:
+    """Whether ``A[row]`` is numerically independent of the working rows.
+
+    The working-set rows of a primal active-set method must stay linearly
+    independent, which is what keeps the KKT matrix nonsingular (Nocedal and
+    Wright, *Numerical Optimization*, 2nd ed., 2006, section 16.5; Gill and
+    Wong, Math. Prog. Comp. 7, 2015, section 2). In exact arithmetic a row
+    ``a = A_w.T @ v`` cannot block: the face step satisfies ``A_w @ step = 0``,
+    so ``a @ step = 0``. Only rounding makes it read as blocking.
+
+    The decision is ``decompose_factor``'s rank rule. On unit-norm columns
+    ``[A_w.T, a]``, ``a`` is dependent when the rank does not increase:
+    ``sigma_(k+1) <= sqrt(2 u) * sigma_1``. This is the normal-equation boundary,
+    where a working-row Gram eigenvalue falls to ``2 u * lambda_1``. The cut
+    exceeds the SVD's own error, ``(k + 1) * 2 u * sigma_1`` at most (*LAPACK
+    Users' Guide*, 3rd ed., section 4.9, with ``p = k + 1``), for every
+    ``k + 1 < 1 / sqrt(2 u)``, about ``6.7e7``. ``working_rank`` caches the
+    working set's own rank by its index tuple.
+    """
+    if not active:
+        return True
+    key = tuple(active)
+    if key not in working_rank:
+        working_rank[key] = decompose_factor(A[active].T).rank
+    return decompose_factor(np.column_stack([A[active].T, A[row]])).rank > working_rank[key]
+
+
+def _zero_block_faces(
+    beta: NDArray,
+    A_eq: NDArray,
+    b: NDArray,
+    active: list[int],
+    blocks: list[tuple[NDArray, frozenset[int]]],
+    full_rank: dict[tuple[int, ...], bool],
+) -> NDArray:
+    """Construct the exact zero point of each block on a homogeneous zero face.
+
+    This is the ``n_eq >= p`` construction in ``solve_constrained_qp`` applied
+    to one block at a time. Rows of other blocks have no entries in a block's
+    columns. If a block's homogeneous working rows have full column rank there,
+    the face fixes ``beta[block_cols] == 0`` exactly. Without the construction,
+    cancellation residue around 1e-15 stays in the block. Primal slack is
+    measured relative to that residue and so reads as violated, up to ``-1``.
+    ``A_eq`` holds the normalized working rows in ``active`` order, and
+    ``full_rank`` caches the rank decision by row tuple.
+    """
+    for block_cols, block_rows in blocks:
+        local = [k for k, row in enumerate(active) if row in block_rows]
+        rows = tuple(active[k] for k in local)
+        if len(rows) < block_cols.size or np.any(b[list(rows)] != 0.0):
+            continue
+        if rows not in full_rank:
+            rank = decompose_factor(A_eq[np.ix_(local, block_cols)]).rank
+            full_rank[rows] = rank == block_cols.size
+        if full_rank[rows] and np.any(beta[block_cols] != 0.0):
+            beta = beta.copy()
+            beta[block_cols] = 0.0
+    return beta
+
+
 BLOCKING_TRACE_CHANNEL = "constrained_qp_blocking"
 
 
@@ -846,6 +930,7 @@ def solve_constrained_qp(
     tol: float = 1e-12,
     *,
     _trace_run: TraceRun | None = None,
+    _degeneracy_safeguards: bool = False,
 ) -> QPResult:
     """Solve a convex quadratic subject to A @ beta >= b.
 
@@ -866,6 +951,14 @@ def solve_constrained_qp(
     active_set_init supplies a warm active set. The optional _trace_run emits
     blocking decisions only when explicitly enabled. Result rank metadata
     describes the shared H decomposition; no ridge is added.
+
+    _degeneracy_safeguards changes two things at a degenerate vertex, where a
+    block's homogeneous active rows outnumber its coefficients. It skips a
+    blocking row that is linearly dependent on the working rows (see
+    _raises_working_rank). It also constructs the exact zero point of each
+    block whose homogeneous working rows have full column rank, as the
+    n_eq >= p branch does for the whole vector. Neither change alters the
+    certificate. Callers use it as a retry, so default solves stay unchanged.
     """
     # Checked at the public boundary rather than at each use: every predicate
     # below reads ``tol``, and a vacuous one is not detectable from the result.
@@ -1088,6 +1181,9 @@ def solve_constrained_qp(
     # ``_feasibility_slack``.
     abs_A = np.abs(A)
     zero_face_cache: dict[tuple[int, ...], bool] = {}
+    blocks = _constraint_blocks(A) if _degeneracy_safeguards else []
+    block_zero_face: dict[tuple[int, ...], bool] = {}
+    working_rank: dict[tuple[int, ...], int] = {}
     # Whether ``beta`` is the minimizer on the current face: the previous
     # iteration took its full step and kept the active set.  In exact
     # arithmetic the next step is then zero (Nocedal and Wright, *Numerical
@@ -1130,6 +1226,8 @@ def solve_constrained_qp(
                 if key not in zero_face_cache:
                     zero_face_cache[key] = decompose_factor(A_eq).rank == p
                 zero_face = zero_face_cache[key]
+            if not zero_face and blocks:
+                beta = _zero_block_faces(beta, A_eq, b, active, blocks, block_zero_face)
             if zero_face:
                 beta = np.zeros_like(beta)
                 step = np.zeros_like(beta)
@@ -1264,7 +1362,10 @@ def solve_constrained_qp(
                     # an ulp of drift into `beta += alpha_min * step` for no
                     # gain -- the gate is what needed to change, not the ratio.
                     alpha = float((products[i] - bounds[i]) / -raw_step[i])
-                    if alpha < alpha_min:
+                    if alpha < alpha_min and (
+                        not _degeneracy_safeguards
+                        or _raises_working_rank(A, active, i, working_rank)
+                    ):
                         alpha_min = alpha
                         blocking = i
 

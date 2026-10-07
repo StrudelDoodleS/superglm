@@ -286,6 +286,12 @@ def _solve_constrained_qp_with_cold_retry(
     certificate even though the identical problem converges from a cold active
     set. Retry only that failed warm case, and replace its best iterate only
     when the ordinary cold solve returns a complete certificate.
+
+    If both fail, one more cold solve runs with the degenerate-vertex
+    safeguards (issue #472). They are for a flat monotone term at zero with
+    more active rows than coefficients. Its result replaces the first one
+    only if it passes the same complete certificate, so a solve that
+    certifies without it is unchanged.
     """
     result = solve_constrained_qp(
         H,
@@ -304,6 +310,17 @@ def _solve_constrained_qp_with_cold_retry(
         )
         if cold_result.converged:
             return cold_result
+    if not result.converged:
+        safeguarded = solve_constrained_qp(
+            H,
+            g,
+            A,
+            b,
+            active_set_init=None,
+            _degeneracy_safeguards=True,
+        )
+        if safeguarded.converged:
+            return safeguarded
     return result
 
 
