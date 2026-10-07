@@ -252,8 +252,8 @@ therefore the same model.
 - The population curve is the global curve, and every level with data
   predicts its own fitted curve. A level whose rows all have zero weight is
   predicted at the population curve, and `predict` names it.
-- No level's line is unpenalized, so the fit gives no `SeparationWarning` and
-  no warning for thin levels.
+- No level's line is unpenalized, so the fit gives no `SeparationWarning`
+  that names this term's levels, and no warning for thin levels.
 - The penalty shrinks every level's line, not just the separated ones, so it
   changes the other levels' curves and the term's effective degrees of
   freedom.
