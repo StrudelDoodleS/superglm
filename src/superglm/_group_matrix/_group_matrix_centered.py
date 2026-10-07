@@ -793,16 +793,26 @@ def _anchor_center_support(
     sum_w: float,
     transform: NDArray | None = None,
 ) -> _CenteredSupport:
-    """Center compact support rows before any weighted cross-products."""
+    """Center compact support rows before any weighted cross-products.
+
+    The support and transform are read as float64 before any arithmetic, as
+    every other reader of the column converts them; an integer difference
+    would wrap. The mean projects the anchor and the shift apart: rounding
+    their sum first can erase a shift below the anchor's spacing, which a
+    projection that cancels the anchor then exposes.
+    """
+    values = np.asarray(values, dtype=np.float64)
     mass, weighted_z = _fused_bincount_2(codes, W, Wz, len(values))
     anchor = int(np.argmax(mass))
     differences = values - values[anchor]
     mean_difference = mass @ differences / sum_w
     centered = differences - mean_difference
-    mean = values[anchor] + mean_difference
-    if transform is not None:
+    if transform is None:
+        mean = values[anchor] + mean_difference
+    else:
+        transform = np.asarray(transform, dtype=np.float64)
         centered = centered @ transform
-        mean = mean @ transform
+        mean = values[anchor] @ transform + mean_difference @ transform
     return _CenteredSupport(
         values=centered,
         codes=codes,
@@ -1026,6 +1036,12 @@ def _anchor_support_gram_rhs(
 
     supports: list[_CenteredSupport] = []
     for gm, (values, codes, transform) in zip(dm.group_matrices, compact, strict=True):
+        # Supports are read as float64, which is exact only for real binary64 or narrower.
+        if any(
+            operand is not None and (operand.dtype.kind not in "biuf" or operand.dtype.itemsize > 8)
+            for operand in (values, transform)
+        ):
+            return None
         supports.append(
             _anchor_center_support(
                 values=values,
