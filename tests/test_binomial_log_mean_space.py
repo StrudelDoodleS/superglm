@@ -4377,3 +4377,55 @@ def test_fit_path_reports_the_block_coordinate_boundary_verdict() -> None:
     ]
     assert any(boundary)
     assert not any(c and b for c, b in zip(path.converged_path, boundary, strict=True))
+
+
+def test_the_block_coordinate_backstop_does_not_read_a_boundary_stop_as_a_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boundary stop on the last iteration is not a drifting coefficient (#477 review).
+
+    No natural fixture reaches this, so the conditions are set by hand on an
+    ordinary fit that converges at iteration ``k >= 10``. The boundary check
+    reports rows at the cap, and it is called only on a converging iteration,
+    so the stop lands on the last of ``max_iter=k``. The backstop's weight-ratio
+    and stagnation thresholds are opened. Under ``separation="error"`` the
+    exhausted-and-stagnant test would then raise ``SeparationError`` on what is
+    a finite constrained maximum. Mutation: without ``not boundary_rows`` in
+    ``exhausted_stagnant`` it raises.
+    """
+    from superglm.diagnostics import separation
+    from superglm.solvers import pirls
+
+    rng = np.random.default_rng(12)
+    n = 2000
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(-1, 1, n),
+            "s": rng.uniform(0, 1, n),
+            "f": rng.integers(0, 6, n).astype(str),
+        }
+    )
+    eta = 0.3 * frame["x"] + np.sin(3 * frame["s"]) - 0.1 * frame["f"].astype(int)
+    y = rng.poisson(np.exp(eta)).astype(float)
+
+    def fitted(**kwargs):
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.1,
+            tol=1e-10,
+            features={"x": Numeric(), "s": Spline(kind="cr", k=8), "f": Categorical()},
+            **kwargs,
+        )
+        return model.fit(frame, y)
+
+    k = fitted().result.n_iter
+    if k < 10:
+        pytest.skip(
+            f"the ordinary fit converged at iteration {k}, below the backstop's floor of 10"
+        )
+    monkeypatch.setattr(pirls, "mean_space_boundary_rows", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(separation, "EXTREME_WEIGHT_RATIO", 0.0)
+    monkeypatch.setattr(separation, "STAGNANT_DEVIANCE_DELTA", math.inf)
+    model = fitted(max_iter=k, separation="error")
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert model.result.n_iter == k

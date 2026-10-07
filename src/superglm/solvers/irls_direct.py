@@ -300,10 +300,10 @@ def _solve_constrained_qp_with_cold_retry(
     without it is unchanged.
 
     ``degeneracy_retry=False`` skips that attempt. ``fit_irls_direct`` passes
-    it once the attempt has failed in the fit, because non-convergence
-    usually persists: a QP that keeps failing pays for the attempt once, not
-    once per IRLS iteration. With the default, an uncertified result means
-    the attempt ran and failed.
+    it while the previous solve in the fit was uncertified and re-arms it
+    after any certified solve: a QP that keeps failing pays for the attempt
+    once per run of failures, not once per IRLS iteration. With the default,
+    an uncertified result means the attempt ran and failed.
     """
     result = solve_constrained_qp(
         H,
