@@ -2770,3 +2770,24 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
     np.testing.assert_array_equal(
         _nan_mask(model, frame, y, weight), _nan_mask(gram, frame, y, weight)
     )
+
+
+@pytest.mark.parametrize("solve", ["auto", "gram"])
+def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
+    """``select=True`` adds a penalty, not data, so standard errors keep the data-only estimability rule.
+
+    Every level of Sol's all-thin fixture sits at one ``x``: the data alias
+    each level's line with the main effect, and the ``null`` penalty alone
+    pins it.  A direction only a penalty pins is not estimable, so its
+    standard errors are missing (NaN), on exactly the coordinates a null
+    vector of ``[1, X]`` touches, as without ``select`` and as a random
+    effect's ridge-identified directions are.  The credibility page says so.
+    """
+    frame, y = _all_thin_frame()
+    weight = np.ones(len(y))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _all_thin_model(solve, select=True).fit_reml(frame, y)
+    missing = _nan_mask(model, frame, y, weight)
+    assert missing.any()
+    assert np.array_equal(missing, _structurally_non_estimable(model, weight))

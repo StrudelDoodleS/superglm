@@ -277,10 +277,13 @@ which others.
   standard error of the term and of its main effect missing (NaN).
 - **The structured solver names the level.** It names such a level in a
   warning. The Gram solver fits the same model without that warning.
-- **None of this applies with `select=True`.** The term then penalizes every
-  level's line, so no level keeps an unpenalized direction, the standard
-  errors are finite, and neither solver names a thin level at fit. A level
-  without weight is still predicted at the population curve, and the report's
+- **With `select=True` the term penalizes every level's line.** No level
+  keeps an unpenalized direction, and neither solver names a thin level at
+  fit. Coefficient standard errors still follow the data rule: a direction
+  only the penalty pins, such as a thin level's line or the block of a level
+  without weight, is not estimable from the data, so those standard errors
+  can still be missing (NaN), as a random effect's are. A level without
+  weight is still predicted at the population curve, and the report's
   `thin_levels` and `predict` name it.
 
 `discrete=True` bins the continuous spline support and reuses cached
