@@ -859,8 +859,9 @@ def solve_constrained_qp(
     max(|b_i|, |A_i| @ |beta|), plus a dimension-dependent rounding allowance.
     Dual signs and stationarity use normalized constraint rows and objective
     actions, so positive objective and constraint-unit changes preserve their
-    meaning. Short coefficient steps trigger the complete certificate rather
-    than establish it. An exhausted or uncertified candidate is not converged.
+    meaning. Short coefficient steps, and a full step on a full-rank H, trigger
+    the complete certificate rather than establish it. An exhausted or
+    uncertified candidate is not converged.
 
     active_set_init supplies a warm active set. The optional _trace_run emits
     blocking decisions only when explicitly enabled. Result rank metadata

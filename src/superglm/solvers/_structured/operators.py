@@ -941,5 +941,5 @@ def compact_operator_diagonal(
 
 # Retired by the one engine (design §3.12): the scalar factor's diagonal-plus-
 # low-rank inverse, which a model saved by v0.35.0 pickles.  Importable at its
-# pickled path as an inert stand-in; release 0.37.0 may drop it.
+# pickled path as an inert stand-in; a later minor release may drop it.
 __getattr__ = module_getattr(__name__, frozenset({"_DiagonalLowRank"}))

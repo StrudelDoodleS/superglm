@@ -86,8 +86,8 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
         message = (
             f"fit_reml did not converge: smoothing-parameter selection stopped after "
             f"{n_iter} iterations (termination_reason={reason!r}), but {refit}. The model "
-            "is returned, but its coefficients, effective degrees of freedom and standard "
-            "errors are those of that fit's last iterate."
+            "is returned with the coefficients, effective degrees of freedom and standard "
+            "errors of that fit's last iterate."
         )
     else:
         why = _REML_REASON_TEXT.get(str(reason), f"termination_reason={reason!r}")
