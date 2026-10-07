@@ -278,6 +278,8 @@ def _solve_constrained_qp_with_cold_retry(
     A: NDArray,
     b: NDArray,
     active_set_init: list[int] | None,
+    *,
+    degeneracy_retry: bool = True,
 ) -> QPResult:
     """Retry a failed warm active set without weakening the KKT contract.
 
@@ -288,11 +290,20 @@ def _solve_constrained_qp_with_cold_retry(
     set. Retry only that failed warm case, and replace its best iterate only
     when the ordinary cold solve returns a complete certificate.
 
-    If both fail, one more cold solve runs with the degenerate-vertex
-    safeguards (issue #472). They are for a flat monotone term at zero with
-    more active rows than coefficients. Its result replaces the first one
-    only if it passes the same complete certificate, so a solve that
-    certifies without it is unchanged.
+    If the ordinary solves end uncertified, one more cold solve runs with the
+    degenerate-vertex safeguards (issue #472). That covers a failed warm
+    solve followed by a failed cold one. It also covers a single failed cold
+    solve, made when ``active_set_init`` is ``None`` or empty. The
+    safeguards are for a flat monotone term at zero with more active rows
+    than coefficients. The safeguarded result replaces the first one only if
+    it passes the same complete certificate, so a solve that certifies
+    without it is unchanged.
+
+    ``degeneracy_retry=False`` skips that attempt. ``fit_irls_direct`` passes
+    it once the attempt has failed in the fit, because non-convergence
+    usually persists: a QP that keeps failing pays for the attempt once, not
+    once per IRLS iteration. With the default, an uncertified result means
+    the attempt ran and failed.
     """
     result = solve_constrained_qp(
         H,
@@ -311,7 +322,7 @@ def _solve_constrained_qp_with_cold_retry(
         )
         if cold_result.converged:
             return cold_result
-    if not result.converged:
+    if degeneracy_retry and not result.converged:
         safeguarded = solve_constrained_qp(
             H,
             g,
@@ -2717,6 +2728,7 @@ def _fit_irls_direct_once(
     max_halving = 20  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
     _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
+    _degeneracy_retry_failed = False  # the #472 retry runs until it fails once in this fit
     # A constrained fit-entry state has not been certified by the inner QP.
     retained_qp_converged = not has_constraints
     # Declared, not bound: the chain below is the whole set of reasons this
@@ -3245,11 +3257,17 @@ def _fit_irls_direct_once(
                     A_all,
                     b_all,
                     prev_active_set,
+                    degeneracy_retry=not _degeneracy_retry_failed,
                 )
                 beta = qp_result.beta
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
                 proposal_qp_converged = bool(qp_result.converged)
                 prev_active_set = qp_result.active_set
+                # An uncertified result means the degenerate-vertex retry ran
+                # and failed (or was already latched off). It costs up to a
+                # full active-set solve, so it is not repeated for the rest of
+                # this fit, as the log note below is not.
+                _degeneracy_retry_failed |= not qp_result.converged
                 # Non-convergence usually persists for the rest of the fit, so
                 # latch the report to the first occurrence rather than emitting
                 # one identical line per IRLS iteration. A later solve may

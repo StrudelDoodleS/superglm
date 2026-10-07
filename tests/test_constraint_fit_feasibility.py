@@ -220,6 +220,49 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     assert terminal_warnings[0].levelno == logging.WARNING
 
 
+def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A QP that keeps failing pays for the #472 retry once per fit.
+
+    The retry can cost a full active-set solve, and non-convergence usually
+    persists for the rest of a fit. Mutation: without the latch in
+    ``fit_irls_direct``, the failed retry runs again on every IRLS iteration,
+    three times here instead of once.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+
+    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    ordinary: list[None] = []
+    safeguarded: list[None] = []
+
+    def uncertified_qp(*_args, _degeneracy_safeguards=False, **_kwargs):
+        (safeguarded if _degeneracy_safeguards else ordinary).append(None)
+        return QPResult(beta=np.zeros(1), converged=False)
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", uncertified_qp)
+    result, _ = irls_direct.fit_irls_direct(
+        design,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        max_iter=3,
+        tol=1e-10,
+        convergence="coefficients",
+        weight_semantics="frequency",
+    )
+
+    assert len(ordinary) == 3
+    assert len(safeguarded) == 1
+    assert result.termination_reason == "constraint_kkt_incomplete"
+
+
 def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certificate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

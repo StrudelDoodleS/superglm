@@ -786,12 +786,16 @@ def _raises_working_rank(
 
     The decision is ``decompose_factor``'s rank rule. On unit-norm columns
     ``[A_w.T, a]``, ``a`` is dependent when the rank does not increase:
-    ``sigma_(k+1) <= sqrt(2 u) * sigma_1``. This is the normal-equation boundary,
-    where a working-row Gram eigenvalue falls to ``2 u * lambda_1``. The cut
-    exceeds the SVD's own error, ``(k + 1) * 2 u * sigma_1`` at most (*LAPACK
-    Users' Guide*, 3rd ed., section 4.9, with ``p = k + 1``), for every
-    ``k + 1 < 1 / sqrt(2 u)``, about ``6.7e7``. ``working_rank`` caches the
-    working set's own rank by its index tuple.
+    ``sigma_(k+1) <= sqrt(eps) * sigma_1 = sqrt(2 u) * sigma_1``. This is the
+    normal-equation boundary, where a working-row Gram eigenvalue falls to
+    ``2 u * lambda_1``. The cut must clear the SVD's own error. The *LAPACK
+    Users' Guide*, 3rd ed., section 4.9, bounds that error by
+    ``p(m, n) * epsilon * sigma_1``. Its ``epsilon`` is the largest relative
+    error of one operation (section 4.1), which is ``u`` here. The factor is
+    ``p x (k + 1)``, so take ``p(m, n) = max(p, k + 1)``. The cut then clears
+    the bound whenever ``max(p, k + 1) < sqrt(2 u) / u = 2**27``, about
+    ``1.3e8``. ``working_rank`` caches the working set's own rank by its
+    index tuple.
     """
     if not active:
         return True
