@@ -278,8 +278,10 @@ which others.
 - **The structured solver names the level.** It names such a level in a
   warning. The Gram solver fits the same model without that warning.
 - **None of this applies with `select=True`.** The term then penalizes every
-  level's line, so no level is thin, its standard errors are finite, and
-  neither solver warns.
+  level's line, so no level keeps an unpenalized direction, the standard
+  errors are finite, and neither solver names a thin level at fit. A level
+  without weight is still predicted at the population curve, and the report's
+  `thin_levels` and `predict` name it.
 
 `discrete=True` bins the continuous spline support and reuses cached
 sufficient statistics across REML iterations; factor identities and the SZ
