@@ -1577,6 +1577,74 @@ def test_a_declared_empty_sz_level_is_weightless_when_the_term_selects_its_lines
     assert np.array_equal(eta, population)
 
 
+def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() -> None:
+    """SuperLSS records a ``select=True`` sz term's weightless levels and predicts them as SuperGLM does (#457).
+
+    SuperLSS drops rows of weight 0 before it builds the design, so a level
+    is weightless there when ``levels=`` declares it and no row of positive
+    weight carries it (allowed under ``select=True``). Its block has no data
+    term, and the sum-to-zero constraint alone fixes it. It is predicted at
+    the population curve, as an unseen level is. Mutations: no recording at
+    the SuperLSS fit; the prediction scoring raw blocks.
+    """
+    from superglm.distributional import Predictor
+    from superglm.distributional.families.gaussian import GaussianLS
+    from tests.bound_predictor_fixtures import model_from_templates
+
+    rng = np.random.default_rng(7)
+    n = 900
+    x = rng.uniform(-1.0, 1.0, n)
+    g = rng.choice(["a", "b", "c", "d"], n)
+    slope = pd.Series(g).map({"a": 0.4, "b": -0.3, "c": 0.1, "d": 0.6}).to_numpy()
+    y = 0.7 * np.sin(2.2 * x) + slope * x + 0.3 * rng.standard_normal(n)
+    weight = np.where(g == "d", 0.0, 1.0)
+    frame = pd.DataFrame({"x": x, "g": g})
+    declared = ["a", "b", "c", "d"]
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor(
+                "location",
+                {"x": Spline("cr", k=6), "g": Categorical()},
+                interaction_specs={
+                    "x:g:sz": FactorSmooth(
+                        "x", group="g", basis="sz", k=6, select=True, levels=declared
+                    )
+                },
+            ),
+            Predictor("scale", {}),
+        ],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = model.fit(
+            frame,
+            y,
+            sample_weight=weight,
+            lambdas={
+                "location:x#wiggle": 1.0,
+                "location:x:g:sz#wiggle": 1.0,
+                "location:x:g:sz#null": 1.0,
+            },
+        )._require_fitted()
+    from superglm.distributional.prediction_design import _score_interaction, _term_indices
+
+    predictor = fitted.compiled_predictors[0]
+    spec = predictor.compiled.interaction_specs["x:g:sz"]
+    assert spec._weightless_levels == (3,)
+    # The term's coefficients as SuperLSS's prediction slices them (``_predict_one_eta``).
+    state = fitted.layout.predictors[predictor.parameter_index]
+    local = fitted.result.coefficients[state.coefficient_slice]
+    slopes = local[int(state.intercept_index is not None) :]
+    beta = slopes[_term_indices(predictor.compiled.groups, "x:g:sz")]
+    grid_x = np.linspace(-0.9, 0.9, 7)
+    level_d = np.array(["d"] * len(grid_x), dtype=object)
+    scored = _score_interaction(spec, grid_x, level_d, beta)
+    population, _ = spec._score_identified(grid_x, level_d, beta, population=True)
+    assert np.array_equal(scored, population)
+    assert not np.allclose(spec.score(grid_x, level_d, beta), population)
+
+
 def test_a_weightless_sz_level_beside_selected_lines_predicts_the_population() -> None:
     """A level without weight is predicted at the population curve when the term selects its lines (#444).
 

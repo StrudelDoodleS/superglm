@@ -88,6 +88,11 @@ def _score_interaction(
     right: NDArray,
     coefficients: NDArray,
 ) -> NDArray:
+    if getattr(spec, "_has_population_offset", False):
+        # An sz term with a level left out of its population (#432, #457):
+        # scored as SuperGLM predicts it.
+        values, _ = spec._score_identified(left, right, coefficients, population=False)
+        return np.asarray(values, dtype=np.float64)
     if hasattr(spec, "score"):
         return np.asarray(spec.score(left, right, coefficients), dtype=np.float64)
     transformed = spec.transform(left, right)
