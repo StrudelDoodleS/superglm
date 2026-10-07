@@ -37,6 +37,7 @@ from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
     _is_raw_spline_tabmat_centering_candidate,
 )
+from superglm._utils import weighted_row_sum
 from superglm.distributions import (
     Binomial,
     Distribution,
@@ -4097,7 +4098,7 @@ def _fit_irls_direct_once(
             eta_unclipped = (retained.centred_intercept + contribution) + offset
             eta = stabilize_eta(eta_unclipped, link)
             mu = clip_mu(link.inverse(eta), family)
-            dev = float(np.sum(weights * family.deviance_unit(y, mu)))
+            dev = weighted_row_sum(weights, family.deviance_unit, y, mu)
 
     # Runtime separation backstop (issue #341).  Two terminal signatures mark
     # a coefficient that walked toward +/-infinity instead of converging:

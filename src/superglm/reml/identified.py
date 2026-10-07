@@ -185,7 +185,9 @@ def laplace_excluded_coefficients(
             centre = reference + shift / total
             for lo in range(0, dm.n, _CHUNK):
                 hi = min(lo + _CHUNK, dm.n)
-                squares = (values[lo:hi] - centre) ** 2
+                centred = values[lo:hi] - centre
+                centred[~positive[lo:hi]] = 0.0  # a zero-weight row adds exactly 0 (#369)
+                squares = centred**2
                 curvature[columns] += weights[lo:hi] @ squares
                 mass[columns] += positive[lo:hi].astype(np.float64) @ squares
         else:
@@ -195,7 +197,9 @@ def laplace_excluded_coefficients(
                 values = dm.matvec(unit)
                 reference = float(values[first])
                 centre = reference + float(weights @ (values - reference)) / total
-                squares = (values - centre) ** 2
+                centred = values - centre
+                centred[~positive] = 0.0
+                squares = centred**2
                 curvature[column] = float(weights @ squares)
                 mass[column] = float(np.sum(squares[positive]))
     weak = evaluated & candidates & (mass > 0.0) & (curvature <= bar * mass)

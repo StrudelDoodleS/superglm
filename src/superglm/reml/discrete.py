@@ -21,6 +21,7 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
+from superglm._utils import weighted_row_sum
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
@@ -1387,7 +1388,7 @@ def optimize_discrete_reml_cached_w(
                 link,
             )
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
-            dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
+            dev_trial = weighted_row_sum(sample_weight, distribution.deviance_unit, y, mu_trial)
             trial_pirls = PIRLSResult(
                 beta=beta_trial,
                 intercept=intercept_trial,

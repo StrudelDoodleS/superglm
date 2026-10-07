@@ -33,6 +33,7 @@ from numpy.typing import NDArray
 from scipy.linalg import cho_factor, cho_solve, norm
 from scipy.sparse.linalg import LinearOperator, minres
 
+from superglm._utils import weighted_row_sum
 from superglm.group_matrix import _disc_disc_2d_hist
 from superglm.solvers.scop import SCOPSolverReparam
 
@@ -231,7 +232,7 @@ def _objective(
     if bin_idx is not None:
         eta = eta[bin_idx]
     residual = z - eta
-    data_term = 0.5 * np.sum(W * residual**2)
+    data_term = 0.5 * weighted_row_sum(W, np.square, residual)
     penalty_term = 0.5 * lambda2 * (beta_scop @ S_scop @ beta_scop)
     return float(data_term + penalty_term)
 
@@ -261,7 +262,7 @@ def _safe_trial_objective(
         else:
             eta_trial = eta_bin
         res = z - eta_trial
-        data_term = 0.5 * np.sum(W * res**2)
+        data_term = 0.5 * weighted_row_sum(W, np.square, res)
         penalty_term = 0.5 * lambda2 * float(beta_trial @ S_scop @ beta_trial)
         obj = data_term + penalty_term
     if not np.isfinite(obj):
@@ -1087,7 +1088,7 @@ def _safe_joint_objective(
             total_eta += eta_i
             penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
         r = z_scop - total_eta
-        data_term = 0.5 * np.sum(W * r**2)
+        data_term = 0.5 * weighted_row_sum(W, np.square, r)
         obj = data_term + penalty
     return float(obj) if np.isfinite(obj) else np.inf
 
@@ -1112,7 +1113,7 @@ def _joint_objective_from_eta(
             beta_i = beta_joint[sl_i]
             penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
         residual = z_scop - total_eta
-        data_term = 0.5 * np.sum(W * residual**2)
+        data_term = 0.5 * weighted_row_sum(W, np.square, residual)
         obj = data_term + penalty
     return float(obj) if np.isfinite(obj) else np.inf
 
@@ -1132,7 +1133,7 @@ def _build_joint_objective_cache(
         else:
             btwz.append(st["B_scop"].T @ Wz)
     return _JointObjectiveCache(
-        half_zwz=0.5 * float(np.sum(W * z_scop**2)),
+        half_zwz=0.5 * weighted_row_sum(W, np.square, z_scop),
         btwz=btwz,
     )
 
@@ -1247,7 +1248,7 @@ def _safe_joint_trial_objective(
                 eta_delta = eta_delta[st["bin_idx"]]
             total_eta += eta_delta
         residual = z_scop - total_eta
-        obj = 0.5 * np.sum(W * residual**2)
+        obj = 0.5 * weighted_row_sum(W, np.square, residual)
         for (_, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
             beta_i = beta_trial[sl_i]
             obj += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
@@ -1434,7 +1435,7 @@ def scop_joint_newton_step(
             state0["bin_idx"], W, z_scop, eta_bin0, state0["B_scop"].shape[0]
         )
         objective_cache = _JointObjectiveCache(
-            half_zwz=0.5 * float(np.sum(W * z_scop**2)),
+            half_zwz=0.5 * weighted_row_sum(W, np.square, z_scop),
             btwz=[state0["B_scop"].T @ Wz_agg0],
         )
     else:

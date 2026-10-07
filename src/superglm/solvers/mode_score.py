@@ -304,6 +304,7 @@ def column_sums(
                     centred = (
                         np.asarray(matrix.matvec(unit), dtype=np.float64) - mean_x[offset + column]
                     )
+                    centred[rows[3] == 0.0] = 0.0  # a zero-weight row adds exactly 0 (#369)
                     size = np.abs(centred)
                     squares = centred**2
                     result[:, position] = (
@@ -545,6 +546,7 @@ def weighted_column_centring(
                 if dense_values is not None
                 else np.asarray(matrix.row_subset(np.arange(lo, hi)).toarray(), dtype=np.float64)
             ) - centre
+            rows[~np.asarray(positive_prior[lo:hi], dtype=bool)] = 0.0  # adds exactly 0 (#369)
             squares += w[lo:hi] @ rows**2
             firsts += w[lo:hi] @ rows
         diagonal[columns] = np.maximum(squares - firsts**2 / sum_w, 0.0)
@@ -2614,7 +2616,9 @@ def weakly_identified_mask(
             values = matrix.M
             for lo in range(0, dm.n, _CHUNK):
                 hi = min(lo + _CHUNK, dm.n)
-                squares = (values[lo:hi] - centre) ** 2
+                centred = values[lo:hi] - centre
+                centred[~positive[lo:hi]] = 0.0  # a zero-weight row adds exactly 0 (#369)
+                squares = centred**2
                 curvature[columns] += weights[lo:hi] @ squares
                 mass[columns] += rows[lo:hi] @ squares
             continue
