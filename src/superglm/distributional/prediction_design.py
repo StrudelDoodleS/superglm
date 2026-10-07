@@ -87,11 +87,16 @@ def _score_interaction(
     left: NDArray,
     right: NDArray,
     coefficients: NDArray,
+    *,
+    named: list | None = None,
 ) -> NDArray:
+    """One interaction term's contribution; ``named`` collects the levels it predicts at the population."""
     if getattr(spec, "_has_population_offset", False):
         # An sz term with a level left out of its population (#432, #457):
         # scored as SuperGLM predicts it.
-        values, _ = spec._score_identified(left, right, coefficients, population=False)
+        values, levels = spec._score_identified(left, right, coefficients, population=False)
+        if named is not None:
+            named.extend(levels)
         return np.asarray(values, dtype=np.float64)
     if hasattr(spec, "score"):
         return np.asarray(spec.score(left, right, coefficients), dtype=np.float64)

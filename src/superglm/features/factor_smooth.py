@@ -119,8 +119,10 @@ class FactorSmooth:
     ``levels=`` binds the grouping column's level universe (spec 2026-08-11,
     §3.1).  Under ``basis="fs"`` a declared level with no training rows keeps
     its own curve block and shrinks to zero through the penalty.  ``basis="sz"``
-    rejects one: its sum-to-zero contrast is what identifies the deviations, and
-    an empty level makes that constraint vacuous.
+    rejects one unless the term has ``select=True``: its sum-to-zero contrast is
+    what identifies the deviations, and an empty level makes that constraint
+    vacuous.  With ``select=True`` every level's line is penalized, so the
+    empty level is proper and is predicted at the population curve.
 
     ``basis="sz"`` leaves each level's polynomial part (its line, with
     ``m=2``) unpenalized, as mgcv's ``sz`` does.  ``select=True`` adds a
@@ -131,7 +133,7 @@ class FactorSmooth:
     components.  It gives a level whose line separates the response, or a
     term whose every level holds fewer distinct ``x`` values than the line
     has coefficients, finite and unique curves (#444).  ``lambda_policy`` may
-    then name ``"null"``; one policy for the whole term fixes both
+    then name ``"null"``; one policy for the whole term applies to both
     components.  The option is the term's, never the data's: without it the
     lines stay unpenalized whatever the data, and such levels are named in a
     warning at fit.

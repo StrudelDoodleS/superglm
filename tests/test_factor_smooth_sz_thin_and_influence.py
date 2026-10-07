@@ -1473,12 +1473,15 @@ def test_an_sz_term_selects_its_lines_when_declared() -> None:
 
 
 def test_selected_sz_lines_are_a_selection_component() -> None:
-    """``select=True``'s ``null`` component is a ``selection`` penalty, as ``Spline(select=True)``'s is.
+    """``select=True``'s ``null`` component carries the ``selection`` tag, as ``Spline(select=True)``'s does.
 
-    That tag is what the exact and discrete REML bootstraps key their
-    no-signal snap on (``quad << trace``: the Fellner-Schall update is then
-    nearly a fixed point for any lambda).  Mutation: the component tagged
-    ``"null"`` fails.
+    The exact and discrete REML bootstraps key their no-signal snap on that
+    tag (``quad << trace``: the Fellner-Schall update is then nearly a fixed
+    point for any lambda).  The snap targets the upper bound, but an ``sz``
+    group's name holds ``:``, so the bootstrap's step cap limits it to
+    ``e**4`` per step, where a ``Spline`` main effect jumps to the bound.
+    This test pins the tag only, not a change in any fit.  Mutation: the
+    component tagged ``"null"`` fails.
     """
     rng = np.random.default_rng(11)
     n = 1500
@@ -1579,15 +1582,10 @@ def test_a_declared_empty_sz_level_is_weightless_when_the_term_selects_its_lines
     assert np.array_equal(eta, population)
 
 
-def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() -> None:
-    """SuperLSS records a ``select=True`` sz term's weightless levels and predicts them as SuperGLM does (#457).
+def _superlss_with_a_declared_empty_sz_level():
+    """A SuperLSS location with a ``select=True`` sz term whose declared level ``d`` has no weight.
 
-    SuperLSS drops rows of weight 0 before it builds the design, so a level
-    is weightless there when ``levels=`` declares it and no row of positive
-    weight carries it (allowed under ``select=True``). Its block has no data
-    term, and the sum-to-zero constraint alone fixes it. It is predicted at
-    the population curve, as an unseen level is. Mutations: no recording at
-    the SuperLSS fit; the prediction scoring raw blocks.
+    The ``g`` main effect declares ``d`` too, so public prediction accepts it.
     """
     from superglm.distributional import Predictor
     from superglm.distributional.families.gaussian import GaussianLS
@@ -1607,7 +1605,7 @@ def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() ->
         predictors=[
             Predictor(
                 "location",
-                {"x": Spline("cr", k=6), "g": Categorical()},
+                {"x": Spline("cr", k=6), "g": Categorical(levels=declared)},
                 interaction_specs={
                     "x:g:sz": FactorSmooth(
                         "x", group="g", basis="sz", k=6, select=True, levels=declared
@@ -1617,18 +1615,26 @@ def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() ->
             Predictor("scale", {}),
         ],
     )
+    lambdas = {"location:x#wiggle": 1.0, "location:x:g:sz#wiggle": 1.0, "location:x:g:sz#null": 1.0}
+    return model, frame, y, weight, lambdas
+
+
+def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() -> None:
+    """SuperLSS records a ``select=True`` sz term's weightless levels and predicts them as SuperGLM does (#457).
+
+    SuperLSS drops rows of weight 0 before it builds the design, so a level
+    is weightless there when ``levels=`` declares it and no row of positive
+    weight carries it (allowed under ``select=True``). Its block has no data
+    term, and the sum-to-zero constraint alone fixes it. It is predicted at
+    the population curve, as an unseen level is, and public prediction names
+    it in one warning, as SuperGLM's ``predict`` does; rows of other levels
+    warn nothing. Mutations: no recording at the SuperLSS fit; the
+    prediction scoring raw blocks; the names discarded.
+    """
+    model, frame, y, weight, lambdas = _superlss_with_a_declared_empty_sz_level()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        fitted = model.fit(
-            frame,
-            y,
-            sample_weight=weight,
-            lambdas={
-                "location:x#wiggle": 1.0,
-                "location:x:g:sz#wiggle": 1.0,
-                "location:x:g:sz#null": 1.0,
-            },
-        )._require_fitted()
+        fitted = model.fit(frame, y, sample_weight=weight, lambdas=lambdas)._require_fitted()
     from superglm.distributional.prediction_design import _score_interaction, _term_indices
 
     predictor = fitted.compiled_predictors[0]
@@ -1645,6 +1651,32 @@ def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() ->
     population, _ = spec._score_identified(grid_x, level_d, beta, population=True)
     assert np.array_equal(scored, population)
     assert not np.allclose(spec.score(grid_x, level_d, beta), population)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict_link(pd.DataFrame({"x": grid_x, "g": level_d}))
+        model.predict_link(pd.DataFrame({"x": grid_x, "g": "a"}))
+    messages = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    assert len(messages) == 1
+    assert messages[0].endswith(
+        "predicted at the population value: location term 'x:g:sz' levels d."
+    )
+    assert caught[0].filename == __file__
+
+
+@pytest.mark.parametrize("component", ["wiggle", "null"])
+def test_superlss_refuses_a_zero_fixed_lambda_on_selected_sz_lines(component) -> None:
+    """A fixed-lambda SuperLSS fit refuses zero on a ``select=True`` sz term's components (#457).
+
+    The constructor refuses a ``LambdaPolicy`` fixed at zero there; a zero in
+    ``fit(lambdas=)`` is the same model.  With ``null`` at zero, the declared
+    empty level's line has neither data nor penalty.  Mutation: without the
+    check the fit is accepted and the level recorded as weightless.
+    """
+    model, frame, y, weight, lambdas = _superlss_with_a_declared_empty_sz_level()
+    lambdas[f"location:x:g:sz#{component}"] = 0.0
+    with pytest.raises(ValueError, match=r"select=True penalizes every level's line"):
+        model.fit(frame, y, sample_weight=weight, lambdas=lambdas)
 
 
 def test_a_weightless_sz_level_beside_selected_lines_predicts_the_population() -> None:

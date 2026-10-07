@@ -2167,7 +2167,9 @@ def build_penalty_components(
                             ),
                             eigvals_omega=full_eigvals,
                             # select=True's lines are a selection penalty, as Spline's null space
-                            # is: REML's no-signal snap applies to them.
+                            # is, so the REML bootstraps' no-signal snap targets them.  For this
+                            # group, whose name holds ':', the bootstrap's step cap limits that
+                            # move to e**4 in lambda per bootstrap step.
                             component_type="wiggle" if suffix == "wiggle" else "selection",
                             lambda_policy=lp_map.get(suffix),
                             penalty_kind="sum_to_zero",
