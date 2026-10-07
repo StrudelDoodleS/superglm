@@ -110,6 +110,7 @@ def test_the_bundle_lists_every_module_after_the_modules_it_imports():
 def test_the_page_carries_its_styles_inline_and_runs_no_script_of_its_own():
     html = app_bundle()["html"]
     assert "<script" not in html.lower()
+    assert html.count(notebook.PAGE_POLICY) == 1
     assert "/assets/" not in html
     index = notebook.read_app_asset("index.html").decode()
     for sheet in re.findall(r'href="/assets/([^"]+)"', index):
@@ -155,6 +156,11 @@ def test_packing_refuses_an_import_cycle_by_naming_it():
 def test_packing_names_the_importer_of_a_missing_module():
     with pytest.raises(ValueError, match=r"main\.js imports '\./gone\.js'"):
         pack_modules({"main.js": 'import "./gone.js";'})
+
+
+def test_a_page_without_one_head_is_refused_rather_than_left_without_its_policy():
+    with pytest.raises(ValueError, match="one <head>"):
+        page_html("<body></body>", lambda path: "")
 
 
 def test_page_html_inlines_each_stylesheet_in_place():
@@ -277,9 +283,11 @@ def test_closing_mid_request_finishes_it_and_releases_its_threads(notebook_widge
         return {"job_id": job_id, "status": "done"}
 
     monkeypatch.setattr(widget, "_job_status", waiting_status)
+    before = set(threading.enumerate())
     _request(view, 12, "POST", "/job_status", {"job_id": "j", "wait": True})
     assert entered.wait(timeout=30.0)
-    workers = [thread for thread in threading.enumerate() if "AnyIO worker" in thread.name]
+    started = set(threading.enumerate()) - before
+    workers = [thread for thread in started if "AnyIO worker" in thread.name]
     assert workers
 
     widget.close()  # returns while the handler still waits
@@ -333,6 +341,7 @@ def test_the_mode_defaults_to_notebook_on_databricks_only(monkeypatch):
     monkeypatch.delenv("DATABRICKS_RUNTIME_VERSION", raising=False)
     assert widget_module._display_mode(None) == "server"
     monkeypatch.setenv("DATABRICKS_RUNTIME_VERSION", "15.4")
+    pytest.importorskip("anywidget")
     assert widget_module._display_mode(None) == "notebook"
     assert widget_module._display_mode("server") == "server"
     with pytest.raises(EditorValueError, match="mode must be"):

@@ -48,7 +48,6 @@ _SPECIFIER = re.compile(r"""(\b(?:from|import)\s*)(["'])(\.\.?/[^"']+)\2""")
 _STYLESHEET = re.compile(r"""<link\s+rel="stylesheet"\s+href="/assets/([^"]+)">""")
 _SCRIPT = re.compile(r"<script\b[^>]*>.*?</script\b[^>]*>\s*", re.S | re.I)
 _HEAD = re.compile(r"<head\b[^>]*>", re.I)
-_HEAD = re.compile(r"<head\b[^>]*>", re.I)
 
 
 def pack_modules(sources: Mapping[str, str], entry: str = ENTRY_MODULE) -> list[dict[str, str]]:
@@ -105,13 +104,19 @@ def page_html(index_html: str, read: Callable[[str], str]) -> str:
 
     The loader writes this into a frame, sets the theme the page's inline
     script would have set, and then runs the modules itself. The page's
-    first element is :data:`PAGE_POLICY`.
+    first element is :data:`PAGE_POLICY`; a page without a ``<head>`` to
+    carry it raises ``ValueError``.
     """
     inlined = _STYLESHEET.sub(
         lambda match: f'<style data-asset="{match.group(1)}">\n{read(match.group(1))}</style>',
         index_html,
     )
-    return _HEAD.sub(lambda match: f"{match.group(0)}{PAGE_POLICY}", _SCRIPT.sub("", inlined), 1)
+    page, heads = _HEAD.subn(
+        lambda match: f"{match.group(0)}{PAGE_POLICY}", _SCRIPT.sub("", inlined)
+    )
+    if heads != 1:
+        raise ValueError(f"The editor page needs one <head> for its script policy; it has {heads}.")
+    return page
 
 
 def app_bundle() -> dict[str, Any]:

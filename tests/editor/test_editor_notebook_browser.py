@@ -141,12 +141,22 @@ def test_the_editor_edits_the_model_from_inside_a_notebook_cell(
         assert frame.locator("html").get_attribute("data-theme") in {"light", "dark"}
         # Markup injected into the page cannot run script: it shares the
         # notebook's origin, so it admits only its own modules.
+        # The refusal itself is the evidence: a handler that never fired
+        # would leave window.injected unset just the same.
         frame.locator("body").evaluate(
-            """(body) => body.insertAdjacentHTML(
-                "beforeend", '<img src="nope:" onerror="window.injected = 1">'
-            )"""
+            """(body) => {
+                window.refused = [];
+                document.addEventListener("securitypolicyviolation",
+                    (event) => window.refused.push(event.effectiveDirective));
+                body.insertAdjacentHTML(
+                    "beforeend", '<img src="nope:" onerror="window.injected = 1">'
+                );
+            }"""
         )
-        page.wait_for_timeout(200)
+        page.wait_for_function(
+            "() => document.querySelector('#cell iframe').contentWindow.refused.length > 0"
+        )
+        assert frame.locator("body").evaluate("() => window.refused") == ["script-src-attr"]
         assert frame.locator("body").evaluate("() => window.injected") is None
 
         frame.get_by_role("radiogroup", name="Chart tools").get_by_role(
