@@ -792,9 +792,13 @@ class SuperGLM:
             machinery can resolve terminates -- on the exact engine, whose
             line search is where that limit surfaces, and on the discrete
             engine's shared-tensor line search -- as
-            ``termination_reason="converged_at_precision"`` (every active
-            gradient under ``max(1e-7, reml_tol) * (1 + |objective|)``, at
-            least one evaluated trial rejected, none left) with
+            ``termination_reason="converged_at_precision"`` (at least one
+            evaluated trial rejected, none left, and either every active
+            gradient under ``max(1e-7, reml_tol) * (1 + |objective|)`` or
+            the decrease the active set's Newton model still predicts,
+            half of ``g' H^-1 g`` for a positive definite Hessian whose
+            Newton step no step cap or trust region shortened, under
+            ``reml_tol * (1 + |objective|)``) with
             ``converged=True``; ``line_search_failed`` with
             ``converged=False`` is reserved for genuinely undetermined
             stalls. The discrete engine's exits are therefore
@@ -805,7 +809,7 @@ class SuperGLM:
             generic path even with a tensor interaction),
             ``line_search_failed`` or ``converged_at_precision``, decided
             by the same predicate the exact engine uses. A dead tensor
-            search whose active gradient is still above that bar is
+            search that meets neither condition is
             ``line_search_failed`` with ``converged=False``; the exit fires
             only once the candidate's own working-model step has settled,
             so the next iteration would repeat this one, and never on the

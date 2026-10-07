@@ -188,19 +188,70 @@ def trial_counts_as_precision_evidence(converged: bool, objective: float) -> boo
     return bool(converged) and bool(np.isfinite(objective))
 
 
+def newton_predicted_decrease(
+    gradient: NDArray,
+    eigenvalues: NDArray,
+    eigenvectors: NDArray,
+    *,
+    eigenvalue_floor: float,
+) -> float | None:
+    """Half the squared Newton decrement, ``g' H^-1 g / 2``, or None.
+
+    The decrease the quadratic model predicts from its minimizer, the
+    estimate of ``f(x) - p*`` that Newton's method stops on (Boyd &
+    Vandenberghe 2004, Convex Optimization, sec. 9.5.1 and Algorithm 9.5).
+    It is defined only for a positive definite Hessian, judged on the
+    caller's own modified-Newton floor: when every eigenvalue is at or above
+    it the modification left ``H`` unchanged, so this is the decrease of the
+    step the line search actually tried, before any step cap. Otherwise the
+    model has no minimizer and there is nothing to predict: None. Eigenvalues
+    that clear the floor (relative ``eps**0.7``) lie far above the
+    eigensolver's backward error, of order ``m u ||H||``, so their
+    perturbation moves the result by a relative amount far below the
+    decisions it informs.
+    """
+    values = np.asarray(eigenvalues, dtype=np.float64)
+    if values.size == 0 or not bool(np.all(values >= eigenvalue_floor)):
+        return None
+    coordinates = np.asarray(eigenvectors, dtype=np.float64).T @ np.asarray(
+        gradient, dtype=np.float64
+    )
+    return 0.5 * float(np.sum(coordinates * coordinates / values))
+
+
 def classify_dead_feasible_exit(
     active_gradient_norm: float,
     *,
     objective: float,
     tolerance: float,
     evaluated_trial: bool = True,
+    predicted_decrease: float | None = None,
 ) -> str:
     """Classify a line search whose every feasible trial was rejected.
 
-    The optimum is resolved when the current active set's gradient is
-    below the precision actually asked for: the resolved tolerance, never
-    tighter than the achievable-precision floor. Holding a loose-tolerance
-    fit to the floor misreported a resolved optimum as line_search_failed.
+    The optimum is resolved when either of two measures of what is left
+    falls below the precision asked for:
+
+    - the current active set's gradient is below the resolved tolerance,
+      never tighter than the achievable-precision floor, times the
+      objective's scale. Holding a loose-tolerance fit to the floor
+      misreported a resolved optimum as line_search_failed.
+    - the decrease the active set's Newton model still predicts,
+      ``predicted_decrease`` (half the squared Newton decrement, from
+      :func:`newton_predicted_decrease`; None when the active Hessian is
+      not positive definite or the caller's step cap or trust region bound
+      the Newton step), is below ``tolerance * (1 + |objective|)``: the
+      resolution at which the compound stop criterion already treats an
+      objective change as no change. This is Newton's decrement stopping
+      test (Boyd & Vandenberghe 2004, sec. 9.5.1). It catches a gradient
+      just above the bar along a strongly curved direction, where the
+      decrease left is quadratically small and below the objective's
+      evaluation noise, so rounding decides whether a trial is accepted:
+      a line search is expected to fail there (Shi, Xie, Byrd & Nocedal
+      2022, SIAM J. Optim. 32(1), sec. 4.1; Berahas, Byrd & Nocedal 2019,
+      SIAM J. Optim. 29(2)). Measured on #459's panel model: active
+      gradient 1.009 to 2.03 times the bar, predicted decrease 1.4e-3 to
+      5.8e-3 of the resolution, objective noise at fixed lambda 4.2e-7.
 
     The proof requires evidence: at least one trial whose objective was
     actually evaluated and rejected. On observed-geometry paths every
@@ -210,8 +261,11 @@ def classify_dead_feasible_exit(
     """
     if not evaluated_trial:
         return "line_search_failed"
-    bar = max(FLAT_DIRECTION_FREEZE_FLOOR, tolerance) * _score_scale(objective)
+    score_scale = _score_scale(objective)
+    bar = max(FLAT_DIRECTION_FREEZE_FLOOR, tolerance) * score_scale
     if active_gradient_norm < bar:
+        return "converged_at_precision"
+    if predicted_decrease is not None and predicted_decrease < tolerance * score_scale:
         return "converged_at_precision"
     return "line_search_failed"
 
