@@ -49,11 +49,13 @@ from superglm.solvers.irls_state import (
     _poisson_sqrt_halving_budget,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
+    mean_space_boundary_rows,
 )
 from superglm.solvers.mode_score import (
     centred_matvec,
     dense_centred_matvec,
     dense_centred_rmatvec,
+    linear_predictor,
     prior_weighted_centre,
 )
 from superglm.solvers.rank import (
@@ -2245,4 +2247,26 @@ def fit_pirls(
             weight_semantics=weight_semantics,
         )
 
+    # A converged claim on a state with rows at the mean-space boundary is
+    # not a mode: their capped mean makes the deviance flat there, and the
+    # maximum it approaches is constrained, not stationary.  The direct
+    # solver never calls such a state converged (``fit_irls_direct``); this
+    # route did, with fitted binomial/log probabilities above one (#431).
+    # A state already reported unconverged keeps its own stop.
+    if result.converged:
+        boundary = mean_space_boundary_rows(
+            family, link, linear_predictor(dm, result, offset), weights
+        )
+        if boundary:
+            logger.info(
+                "fit_pirls: %d row(s) at the boundary of the family's mean space; "
+                "the penalized maximum is constrained, fit is not converged.",
+                boundary,
+            )
+            result = replace(
+                result,
+                converged=False,
+                termination_reason="mean_space_boundary",
+                mean_space_boundary_rows=boundary,
+            )
     return result

@@ -4183,3 +4183,76 @@ def test_an_interior_maximum_above_the_old_clip_is_reached(direct_solve: str) ->
     assert plain.result.termination_reason == "converged"
     eta = plain._dm.matvec(plain.result.beta) + plain.result.intercept
     assert float(np.max(np.abs(eta - eta_star))) < 0.5 * abs(eta_star)
+
+
+def _all_events_region_frame():
+    rng = np.random.default_rng(3)
+    n = 3000
+    region = rng.choice(["A", "B", "C"], n)
+    p = np.where(region == "A", 0.30, np.where(region == "B", 0.10, 1.0))
+    y = (rng.random(n) < p).astype(np.float64)
+    frame = pd.DataFrame(
+        {
+            "region": region,
+            "x": rng.uniform(size=n),
+            "g": [f"g{c}" for c in rng.integers(0, 40, n)],
+        }
+    )
+    return frame, y
+
+
+@pytest.mark.parametrize("selection_penalty", [1e-4, 1e-2])
+def test_the_block_coordinate_route_never_calls_a_boundary_state_converged(
+    selection_penalty: float,
+) -> None:
+    """``fit()`` with a selection penalty (``fit_pirls``) demotes a boundary state, as the direct solver does (#431).
+
+    Region ``C`` has an event on every row, so the binomial/log maximum is the
+    boundary supremum: its rows' ``eta`` rises to the mean-space cap, where
+    the capped mean makes the deviance flat.  The block-coordinate route
+    reported such a state converged, with fitted probabilities above one on
+    974 rows.  It is now ``converged=False`` with ``termination_reason ==
+    "mean_space_boundary"``, the direct solver's verdict on the same data;
+    the coefficients are not moved.  Mutation: without the demotion the fit
+    reads converged.
+    """
+    frame, y = _all_events_region_frame()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=selection_penalty,
+        features={
+            "region": Categorical(base="first"),
+            "x": Numeric(),
+            "g": Categorical(base="first"),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    assert not model.result.converged
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert model.result.mean_space_boundary_rows > 0
+
+
+def test_the_block_coordinate_route_keeps_an_interior_maximum_converged() -> None:
+    """An interior binomial/log maximum on the block-coordinate route stays converged (#431).
+
+    The demotion reads the returned state's rows at the mean-space cap; an
+    interior maximum has none.  Mutation: demoting every binomial/log stop
+    fails it.
+    """
+    rng = np.random.default_rng(12)
+    n = 4000
+    frame = pd.DataFrame({"x": rng.uniform(-1, 1, n), "f": rng.integers(0, 6, n).astype(str)})
+    eta = -0.25 + 0.15 * frame["x"] - 0.05 * frame["f"].astype(int)
+    y = (rng.uniform(size=n) < np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=1e-2,
+        features={"x": Numeric(), "f": Categorical()},
+    )
+    model.fit(frame, y)
+    assert model.result.converged
+    assert model.result.mean_space_boundary_rows == 0
