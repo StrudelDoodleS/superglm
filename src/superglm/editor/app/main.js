@@ -1893,7 +1893,10 @@ for (const button of document.querySelectorAll("button[data-op]")) {
       return;
     }
     stopContributionBuild();
-    await executeStateMutation("/op", { operation });
+    // Each operation names the term this page shows: Python's selected term
+    // is shared, and another page of the same session may have moved it.
+    const term = selectedTerm();
+    await executeStateMutation("/op", term ? { operation, term } : { operation });
   });
 }
 

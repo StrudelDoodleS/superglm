@@ -10,6 +10,10 @@
 export const REQUEST = "superglm.request";
 export const RESPONSE = "superglm.response";
 export const CHANGED = "superglm.changed";
+// Databricks caps one widget message at 5 MB. Replies come in parts; a
+// request is one message, so its body stays under this, with room for the
+// rest of the message. The editor's requests are far smaller.
+export const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MODULE_SPECIFIER = /(["'])superglm-module:([^"']+)\1/g;
 const THEME_STORAGE_KEY = "superglm.editor.theme";
 // A Response with one of these statuses must have no body.
@@ -67,6 +71,17 @@ export function createMessageFetch(model, realm) {
     const url = input instanceof URL ? input.pathname + input.search : String(input);
     if (init.body != null && typeof init.body !== "string") {
       return Promise.reject(new Error("The notebook editor sends text request bodies only."));
+    }
+    const size = init.body == null ? 0 : new TextEncoder().encode(init.body).length;
+    if (size > MAX_REQUEST_BYTES) {
+      const megabytes = (size / 1024 / 1024).toFixed(1);
+      return Promise.reject(
+        new Error(
+          `This change is too large to send from a notebook cell: its request is ${megabytes} MB, ` +
+            "and a notebook widget message carries at most 4 MB. Make it in smaller steps, " +
+            "or in Python on the session."
+        )
+      );
     }
     const id = `${prefix}-${nextId++}`;
     const headers = [...new realm.Headers(init.headers).entries()];

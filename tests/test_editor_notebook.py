@@ -36,6 +36,10 @@ class _QueueView:
 
     def __init__(self):
         self.outbox: queue.Queue = queue.Queue()
+        # Change notices can overtake a reply (a job may publish before its
+        # start request is answered), so they queue apart, as a page reads
+        # them apart.
+        self.notices: queue.Queue = queue.Queue()
         self.handler = None
         self.closed = False
 
@@ -43,6 +47,9 @@ class _QueueView:
         self.handler = handler
 
     def send(self, content, buffers=None):
+        if content.get("type") == notebook.CHANGED:
+            self.notices.put(content)
+            return
         self.outbox.put((content, [bytes(buffer) for buffer in buffers or []]))
 
     def close(self):
@@ -249,7 +256,7 @@ def test_a_change_tells_every_view_and_a_read_does_not(notebook_widget):
     _request(view, 20, "POST", "/op", {"operation": "select_all", "term": "x"})
     content, _body = _reply(view)
     assert content["status"] == 200
-    assert view.outbox.get(timeout=30.0) == ({"type": notebook.CHANGED, "origin": 20}, [])
+    assert view.notices.get(timeout=30.0) == {"type": notebook.CHANGED, "origin": 20}
 
     _request(view, 21, "POST", "/metrics", {"metric": "deviance"})
     _request(view, 22, "GET", "/state")
@@ -257,7 +264,69 @@ def test_a_change_tells_every_view_and_a_read_does_not(notebook_widget):
     replies = [_reply(view)[0] for _ in range(3)]
     assert sorted(reply["id"] for reply in replies) == [21, 22, 23]
     with pytest.raises(queue.Empty):
-        view.outbox.get(timeout=0.5)
+        view.notices.get(timeout=0.5)
+
+
+def test_a_finished_profile_tells_every_view_and_a_failed_one_does_not(
+    notebook_widget, monkeypatch
+):
+    """A profile job replaces the in-force model; its start request is only a read."""
+    widget, view = notebook_widget
+    monkeypatch.setattr(widget, "_profile_distribution", lambda *a, **k: {"profile_trace": []})
+    _request(view, 30, "POST", "/profile_distribution/start", {"parameter": "tweedie_p"})
+    assert _reply(view)[0]["status"] == 200
+    assert view.notices.get(timeout=60.0) == {"type": notebook.CHANGED, "origin": None}
+
+    def refuse(*_args, **_kwargs):
+        raise EditorValueError("no profile for this family")
+
+    monkeypatch.setattr(widget, "_profile_distribution", refuse)
+    _request(view, 31, "POST", "/profile_distribution/start", {"parameter": "tweedie_p"})
+    assert _reply(view)[0]["status"] == 200
+    _request(view, 32, "GET", "/profile_distribution/status/2?wait=true")
+    content, body = _reply(view)
+    assert json.loads(body)["status"] == "error"
+    with pytest.raises(queue.Empty):
+        view.notices.get(timeout=0.5)
+
+
+def test_published_cv_and_final_fit_tell_every_view(monkeypatch):
+    pytest.importorskip("anywidget")
+    from sklearn.model_selection import KFold
+
+    from superglm import cross_validate
+
+    rng = np.random.default_rng(20261008)
+    X = pd.DataFrame({"x": rng.uniform(0.0, 10.0, 240), "c": rng.choice(list("abc"), 240)})
+    y = rng.poisson(np.exp(0.1 * np.sin(X["x"].to_numpy()))).astype(np.float64)
+
+    def model():
+        features = {"x": Spline(n_knots=5), "c": Categorical(base="first")}
+        return SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+
+    supplied = cross_validate(
+        model(), X.iloc[:180], y[:180], cv=KFold(2, shuffle=True, random_state=0)
+    )
+    session = EditorSession.from_model(
+        model().fit(X.iloc[:180], y[:180]),
+        train_data=(X.iloc[:180], y[:180]),
+        validation_data=(X.iloc[180:], y[180:]),
+        cv=supplied,
+    )
+    view = _QueueView()
+    transport = widget_module.NotebookTransport
+    monkeypatch.setattr(
+        widget_module, "NotebookTransport", lambda app, token: transport(app, token, view=view)
+    )
+    widget = session.widget(mode="notebook")
+    try:
+        for request_id, kind in ((40, "cv"), (41, "final_fit")):
+            _request(view, request_id, "POST", "/job_start", {"kind": kind})
+            assert _reply(view)[0]["status"] == 200
+            assert view.notices.get(timeout=120.0) == {"type": notebook.CHANGED, "origin": None}
+        assert widget._cv_run is not None and widget._final_fit is not None
+    finally:
+        widget.close()
 
 
 def test_every_post_route_is_a_change_or_a_read(notebook_widget):

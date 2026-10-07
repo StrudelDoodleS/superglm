@@ -1449,7 +1449,10 @@ def test_analyst_can_discover_edit_undo_redo_help_and_export(open_editor_page):
         ) as edit_response:
             increase.click()
         assert edit_response.value.status == 200
-        assert edit_response.value.request.post_data_json == {"operation": "shift_up"}
+        assert edit_response.value.request.post_data_json == {
+            "operation": "shift_up",
+            "term": "curve",
+        }
 
         undo = page.get_by_role("button", name="Undo edit")
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
@@ -2208,7 +2211,7 @@ def test_existing_svg_selection_operation_posts_linearise_unchanged(open_editor_
 
         response = operation_response.value
         assert response.status == 200
-        assert response.request.post_data_json == {"operation": "linearise"}
+        assert response.request.post_data_json == {"operation": "linearise", "term": "curve"}
         assert session.history[-1].operation == "linear_interpolate"
 
 

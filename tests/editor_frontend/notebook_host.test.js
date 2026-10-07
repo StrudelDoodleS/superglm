@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createEditorClient } from "../../src/superglm/editor/app/api/client.js";
 import {
+  MAX_REQUEST_BYTES,
   REQUEST,
   RESPONSE,
   createMessageFetch,
@@ -124,6 +125,20 @@ test("a transport knows its own request ids and no other's", () => {
   assert.equal(mine.owns(id), true);
   assert.equal(other.owns(id), false);
   assert.equal(mine.owns(0), false);
+});
+
+test("a request body over the widget-message limit is refused before it is sent", async () => {
+  // The limit counts UTF-8 bytes, not characters: "é" is two bytes.
+  const model = recordingModel();
+  const transport = createMessageFetch(model, realm);
+  const atLimit = "é".repeat(MAX_REQUEST_BYTES / 2);
+  transport.fetch("/note", { method: "POST", body: atLimit });
+  assert.equal(model.sent.length, 1);
+  await assert.rejects(
+    transport.fetch("/note", { method: "POST", body: `${atLimit}x` }),
+    /too large to send from a notebook cell: its request is 4\.0 MB/
+  );
+  assert.equal(model.sent.length, 1);
 });
 
 test("closing fails every request still waiting", async () => {

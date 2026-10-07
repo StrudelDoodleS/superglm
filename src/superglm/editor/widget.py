@@ -1059,6 +1059,13 @@ class EditorWidget:
                 job["profile_estimate"] = _normalise_profile_estimate(payload["profile_estimate"])
             job["finished_at"] = time.time()
             self._profile_condition.notify_all()
+        # The profile replaced the in-force model, its selection and history.
+        self._notify_changed()
+
+    def _notify_changed(self) -> None:
+        """Tell every in-notebook view that a job changed what they show."""
+        if self._notebook is not None:
+            self._notebook.notify_changed()
 
     def _job_start(self, kind: str) -> dict[str, Any]:
         """Capture a job's inputs under the lock, then start it off the lock."""
@@ -1078,6 +1085,7 @@ class EditorWidget:
                 if not plan.is_current(self.session):
                     raise EditorValueError(SUPERSEDED)
                 self._cv_run = run
+            self._notify_changed()
             return {"model_revision": plan.model_revision, "n_folds": len(plan.folds)}
 
         return (lambda context: run_cv(plan, context)), publish
@@ -1091,6 +1099,7 @@ class EditorWidget:
                 if not plan.is_current(self.session):
                     raise EditorValueError(SUPERSEDED)
                 self._final_fit = final
+            self._notify_changed()
             return {"model_revision": plan.model_revision, "n_rows": final.n_rows}
 
         return (lambda context: run_final_fit(plan, context)), publish

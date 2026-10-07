@@ -257,6 +257,42 @@ def test_an_edit_in_one_output_refreshes_the_others_once(
         assert view.requests[settled:] == []
 
 
+def test_an_operation_edits_the_term_its_own_output_shows(
+    chromium_browser, curve_session, monkeypatch, choose_feature
+):
+    """Python's selected term is shared; an output that shows another term edits its own."""
+    with _notebook_editor(chromium_browser, curve_session, monkeypatch, views=2) as (
+        page,
+        first,
+        _w,
+        view,
+    ):
+        second = page.frame_locator("#cell2 iframe")
+        for frame in (second, first):
+            frame.get_by_role("radiogroup", name="Chart tools").get_by_role(
+                "radio", name="Select", exact=True
+            ).click()
+        second.locator('button[data-op="select_all"]').click()
+        second.locator("#selectionMenu").wait_for(state="visible")
+
+        # The first output moves Python's selected term to territory.
+        seen = len(view.requests)
+        choose_feature(first, "territory")
+        first.locator('button[data-op="select_all"]').click()
+        first.locator("#selectionMenu").wait_for(state="visible")
+        for _ in range(100):  # the second output's re-read of the session
+            if "GET /state" in view.requests[seen:]:
+                break
+            page.wait_for_timeout(50)
+        assert "GET /state" in view.requests[seen:]
+        assert len(curve_session.selection("territory")) == 10
+
+        # The second output still shows curve, and its operation edits curve.
+        second.locator("#selectionMenu").get_by_role("button", name="Increase selection").click()
+        second.get_by_role("button", name="Undo edit").and_(second.locator(":enabled")).wait_for()
+        assert [record.term for record in curve_session.history] == ["curve"]
+
+
 def test_run_cv_reports_its_job_over_widget_messages(chromium_browser, monkeypatch):
     rng = np.random.default_rng(20261007)
     n = 400
