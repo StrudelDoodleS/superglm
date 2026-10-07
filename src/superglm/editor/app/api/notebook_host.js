@@ -92,9 +92,9 @@ export function createMessageFetch(model, realm) {
 
   /**
    * Python's answer to a request it refuses, given here because the request
-   * cannot reach it: the client reads the 413 as a refusal, so nothing offers
-   * to retry it and a structural change reports the reason, not an
-   * uncertain outcome.
+   * cannot reach it: the client reads the 413 as a refusal, so a structural
+   * change reports the reason, not an uncertain outcome. A state mutation's
+   * alert still offers Retry, as for any refusal, and a retry is refused again.
    * @param {number} size the message's bytes
    */
   function tooLarge(size) {
