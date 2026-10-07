@@ -630,3 +630,27 @@ def test_the_anchor_route_reads_an_integer_support_as_float64():
     assert integer is not None and real is not None
     for got, expected in zip(integer, real, strict=True):
         np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("part", ["complex_support", "complex_transform", "object_support"])
+def test_the_anchor_route_declines_a_support_it_cannot_read_as_float64(part):
+    """A complex or object support or transform declines the anchor route, which reads them as float64.
+
+    The design then takes the chunked pass.  Real dtypes of eight bytes or
+    fewer are read (``test_the_anchor_route_reads_an_integer_support_as_float64``).
+    Mutation: without the guard the route converts them and returns products.
+    """
+    n = 1000
+    support = np.array([[2.0, 1.0], [1.0, 3.0]])
+    transform = np.array([[1.0], [-1.0]])
+    if part == "complex_support":
+        support = support.astype(np.complex128)
+    elif part == "complex_transform":
+        transform = transform.astype(np.complex128)
+    else:
+        support = support.astype(object)
+    ssp = DiscretizedSSPGroupMatrix(support, transform, _two_bins(n))
+    result = anchor_support_centered_gram_rhs(
+        dm=DesignMatrix([ssp], n, 1), W=np.ones(n), z_centered=np.zeros(n)
+    )
+    assert result is None

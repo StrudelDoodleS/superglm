@@ -34,7 +34,10 @@ def _range_shift(weights: NDArray) -> int | None:
     the whole exponent range).
     """
     weights = np.asarray(weights)
-    if weights.dtype != np.float64 or weights.ndim != 1:
+    # The type, not dtype equality: np.longdouble compares equal to float64
+    # where it is binary64 (macOS ARM64, Windows), and the route must not
+    # depend on the platform's long double.
+    if weights.dtype.type is not np.float64 or weights.ndim != 1:
         return None
     low, high = _float64_operand_exponent_bounds(weights.reshape(-1, 1))
     if high - low > 255:
@@ -64,11 +67,16 @@ def _shifted_moments(compute, factors: tuple, weights: tuple, owners: tuple) -> 
     has for any in-range ``w``, homogeneous in ``w``, and against the same
     support ``S = fl(B R)`` (or the certified one).
 
-    Only for float64 factors (or a support the caller certified), weights
-    whose span the shift can place, and shifted operands the gate admits;
-    otherwise ``None`` and the caller keeps the exact route.
+    Only for float64 factors the gate admits (or a support the caller
+    certified) and weights whose span the shift can place: ``k`` puts every
+    nonzero weight in ``[2**-127, 2**128)``, inside the gate, so only the
+    factors can fail it.  Otherwise ``None`` and the caller keeps the exact
+    route.
     """
-    if any(np.asarray(factor).dtype != np.float64 for factor in factors):
+    if any(np.asarray(factor).dtype.type is not np.float64 for factor in factors):
+        return None
+    # The shift places every weight inside the gate, so only the factors can fail it.
+    if factors and _ssp_gram_needs_exact(*factors):
         return None
     shifts: list[int] = []
     for vector in weights:
@@ -77,8 +85,6 @@ def _shifted_moments(compute, factors: tuple, weights: tuple, owners: tuple) -> 
             return None
         shifts.append(shift)
     shifted = tuple(np.ldexp(vector, shift) for vector, shift in zip(weights, shifts, strict=True))
-    if _ssp_gram_needs_exact(*factors, *shifted):
-        return None
     moments = compute(*shifted)
     back = []
     with np.errstate(over="ignore", under="ignore"):

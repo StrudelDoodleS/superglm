@@ -12,6 +12,7 @@ import superglm.distributional.solver.chunks as chunking
 from superglm import SuperLSS
 from superglm._group_matrix._block_queue import block_queue_config
 from superglm._group_matrix._cross_matrix_execution import CrossMatrixExecutionPlan
+from superglm._group_matrix._group_matrix_algebra import _cross_gram
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributional import GaussianLS, Predictor, TweedieLSS
 from superglm.distributional.families.gamma import GammaLS
@@ -522,3 +523,25 @@ def test_public_discrete_tensors_in_two_predictors_parity(scale_knots) -> None:
         for discrete in (False, True)
     ]
     _assert_parity(*models, frame, offsets)
+
+    # The location x scale block itself, against the stored rows B R: each
+    # evaluation's every term meets at most n + cells + q_l + q_s roundings
+    # (rows into cells, the cell contraction, the two transforms; or the
+    # rows' own products and the n-term sum), so the two differ by at most
+    # 2 gamma_k |B_l||R_l|' (|w| o |B_s||R_s|).
+    location, scale = (
+        next(matrix for matrix in state.design.group_matrices if hasattr(matrix, "tensor_id"))
+        for state in models[1]._require_fitted().layout.predictors
+    )
+    n = len(location.bin_idx)  # the fit's rows: SuperLSS drops rows of weight 0
+    w = np.random.default_rng(3).normal(size=n)
+    rows = [matrix.B_unique[matrix.bin_idx] @ matrix.R_inv for matrix in (location, scale)]
+    majorants = [
+        np.abs(matrix.B_unique)[matrix.bin_idx] @ np.abs(matrix.R_inv)
+        for matrix in (location, scale)
+    ]
+    k = n + len(location.B_unique) + len(location.R_inv) + len(scale.R_inv)
+    u = np.finfo(np.float64).eps / 2
+    bound = 2 * (k * u / (1 - k * u)) * majorants[0].T @ (np.abs(w)[:, None] * majorants[1])
+    error = np.abs(_cross_gram(location, scale, w) - rows[0].T @ (w[:, None] * rows[1]))
+    assert np.all(error <= bound)

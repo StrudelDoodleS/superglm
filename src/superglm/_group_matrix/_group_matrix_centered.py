@@ -1036,7 +1036,9 @@ def _anchor_support_gram_rhs(
 
     supports: list[_CenteredSupport] = []
     for gm, (values, codes, transform) in zip(dm.group_matrices, compact, strict=True):
-        # Supports are read as float64, which is exact only for real binary64 or narrower.
+        # Supports are read as float64, as every other reader of the column
+        # converts them (exact for float32 and for integers up to 2**53, which
+        # round alike in all of them). Complex, object and wider dtypes decline.
         if any(
             operand is not None and (operand.dtype.kind not in "biuf" or operand.dtype.itemsize > 8)
             for operand in (values, transform)
