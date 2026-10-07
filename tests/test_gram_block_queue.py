@@ -599,6 +599,58 @@ def test_blocks_split_at_once_share_one_memory_budget(monkeypatch):
     }
 
 
+def test_split_headroom_leaves_the_fits_retained_tables_alone(monkeypatch):
+    """Splits share only what the fit's retained tables and the workers leave of ``max_memory``.
+
+    Eight one-byte tasks and one 100-byte split fit a budget of 108 bytes,
+    and the first 40-unit pair splits into four parts.  With one byte of
+    TSQR support tables retained by the fit (``_parallel.retained_bytes``,
+    already charged to the worker count) the split no longer fits and the
+    block runs whole; at 109 bytes it fits again.  Against b7d8e67e the
+    split takes the retained byte and the block splits at 108.
+    """
+
+    def tasks() -> list[BlockTask]:
+        small = queue._TINY_COST / 4
+        costs = (1, 40, 1, 40, 1, 1, 1, 1)
+        return [
+            BlockTask(
+                index,
+                cost * small,
+                1,
+                lambda cache, profile: None,
+                lambda value: None,
+                split_bytes=100 if cost == 40 else 0,
+            )
+            for index, cost in enumerate(costs)
+        ]
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 8)
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    parts = {}
+    for retained, budget in ((0, 108), (1, 108), (1, 109)):
+        planned = tasks()
+        token = parallel._retained.set(lambda retained=retained: retained)
+        try:
+            with block_queue_config(min_cost=0), parallel_config(max_memory=budget):
+                queue.run_block_tasks(planned, Cache(), None)
+        finally:
+            parallel._retained.reset(token)
+        parts[retained, budget] = [t.parts for t in planned]
+    assert parts == {
+        (0, 108): [1, 4, 1, 1, 1, 1, 1, 1],
+        (1, 108): [1] * 8,
+        (1, 109): [1, 4, 1, 1, 1, 1, 1, 1],
+    }
+
+
 def test_estimator_threads_never_change_the_fit(monkeypatch):
     """``n_jobs`` and ``max_memory`` are constructor intent, applied inside the fit only."""
     for bad in (0, -1, True, 1.5, "many"):

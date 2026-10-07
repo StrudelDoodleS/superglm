@@ -321,7 +321,7 @@ def run_block_tasks(
     places its blocks as it forms them.
     """
     from superglm._blas_threads import pooled_blas_threads
-    from superglm._parallel import pool_workers, resolve_max_memory
+    from superglm._parallel import pool_workers, resolve_max_memory, retained_bytes
 
     override = _override.get()
     units = _units(tasks)
@@ -337,10 +337,10 @@ def run_block_tasks(
         workers = pool_workers(len(units), max(task.nbytes for task in tasks))
 
     # Every split block's parts can run at once, each block holding one more
-    # histogram, so the splits share what the workers' largest tasks leave of
-    # the budget, the largest blocks first.
+    # histogram, so the splits share what the fit's retained tables and the
+    # workers' largest tasks leave of the budget, the largest blocks first.
     largest = max((task.nbytes for task in tasks), default=0)
-    headroom = resolve_max_memory() - workers * largest if workers > 1 else 0
+    headroom = resolve_max_memory() - retained_bytes() - workers * largest if workers > 1 else 0
     for task in sorted(tasks, key=lambda task: (-task.cost, task.index)):
         if not task.split_bytes:
             continue
