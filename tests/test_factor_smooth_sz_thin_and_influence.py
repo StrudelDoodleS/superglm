@@ -2772,7 +2772,7 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
     )
 
 
-@pytest.mark.parametrize("solve", ["auto", "gram"])
+@pytest.mark.parametrize("solve", ["structured", "gram"])
 def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
     """``select=True`` adds a penalty, not data, so standard errors keep the data-only estimability rule.
 
@@ -2782,12 +2782,15 @@ def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
     standard errors are missing (NaN), on exactly the coordinates a null
     vector of ``[1, X]`` touches, as without ``select`` and as a random
     effect's ridge-identified directions are.  The credibility page says so.
+    Mutation: estimability read from the fit's penalized system, which
+    ``select=True`` makes positive definite, reports every one finite.
     """
     frame, y = _all_thin_frame()
     weight = np.ones(len(y))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model = _all_thin_model(solve, select=True).fit_reml(frame, y)
+    assert model._reml_profile["direct_backend"] == solve
     missing = _nan_mask(model, frame, y, weight)
     assert missing.any()
     assert np.array_equal(missing, _structurally_non_estimable(model, weight))
