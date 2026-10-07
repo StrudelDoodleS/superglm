@@ -52,7 +52,8 @@ session = EditorSession.from_model(model, train_data=(X_train, y_train, w_train)
 session.widget(mode="notebook")
 ```
 
-On Databricks, `session.widget()` picks this mode by itself. Use `mode="notebook"` on any other
+On Databricks, once the package is installed, `session.widget()` picks this mode by itself; without
+it, the editor keeps its web server and warns with the install line. Use `mode="notebook"` on any other
 notebook whose browser is not on the machine running Python, such as a remote JupyterHub, and
 `mode="server"` to keep the web server where both run on one machine.
 

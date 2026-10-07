@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import queue
 import re
 import threading
 
+import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -96,9 +98,11 @@ def test_the_bundle_lists_every_module_after_the_modules_it_imports():
     assert paths[-1] == bundle["entry"] == "main.js"
     assert len(paths) == len(set(paths))
     for index, module in enumerate(bundle["modules"]):
-        assert not re.search(r"""\b(?:from|import)\s*["']\.\.?/""", module["source"]), module[
-            "path"
-        ]
+        # Any relative module string left in code, whatever form imports it,
+        # cannot resolve against a blob URL; JSDoc type imports are comments.
+        code = re.sub(r"/\*.*?\*/", "", module["source"], flags=re.S)
+        code = re.sub(r"(?m)^\s*//.*$", "", code)
+        assert not re.search(r"""["']\.\.?/[^"'\s]*\.js["']""", code), module["path"]
         for target in re.findall(rf"""["']{MODULE_PREFIX}([^"']+)["']""", module["source"]):
             assert target in paths[:index], (module["path"], target)
 
@@ -160,7 +164,10 @@ def test_page_html_inlines_each_stylesheet_in_place():
         "<SCRIPT>upper()</SCRIPT ><script>spaced()</script\n></body>",
         lambda path: f"/* {path} */",
     )
-    assert html == '<head><style data-asset="a.css">\n/* a.css */</style></head><body></body>'
+    assert html == (
+        f'<head>{notebook.PAGE_POLICY}<style data-asset="a.css">\n/* a.css */</style></head>'
+        "<body></body>"
+    )
 
 
 # -- The transport -----------------------------------------------------------
@@ -200,7 +207,9 @@ def test_a_large_reply_arrives_in_parts_that_rebuild_it_exactly(notebook_widget,
     content, body = _reply(view)
     assert content["status"] == 200 and content["parts"] == -(-len(body) // 1000) > 1
     assert dict(content["headers"])["content-disposition"].startswith("attachment;")
-    assert len(body) == len(widget._export_bytes("joblib", "m.joblib").data)
+    rebuilt = joblib.load(io.BytesIO(body))
+    direct = joblib.load(io.BytesIO(widget._export_bytes("joblib", "m.joblib").data))
+    np.testing.assert_array_equal(rebuilt.result.beta, direct.result.beta)
 
 
 def test_an_empty_reply_is_one_empty_part(notebook_widget):
@@ -333,10 +342,45 @@ def test_the_mode_defaults_to_notebook_on_databricks_only(monkeypatch):
 def test_notebook_mode_without_anywidget_says_how_to_install_it(session_model, monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "anywidget", None)
     notebook.notebook_view_class.cache_clear()
-    threads = threading.active_count()
+    before = set(threading.enumerate())
     try:
         with pytest.raises(ImportError, match=r"pip install 'superglm\[notebook\]'"):
             EditorSession.from_model(session_model).widget(mode="notebook")
-        assert threading.active_count() == threads
+        assert not set(threading.enumerate()) - before
     finally:
         notebook.notebook_view_class.cache_clear()
+
+
+def test_databricks_without_anywidget_keeps_the_local_server_and_says_why(
+    session_model, monkeypatch
+):
+    monkeypatch.setenv("DATABRICKS_RUNTIME_VERSION", "15.4")
+    monkeypatch.setitem(__import__("sys").modules, "anywidget", None)
+    notebook.notebook_view_class.cache_clear()
+    try:
+        with pytest.warns(UserWarning, match=r"%pip install 'superglm\[notebook\]'"):
+            widget = EditorSession.from_model(session_model).widget()
+        try:
+            assert widget.mode == "server" and widget.app_url is not None
+        finally:
+            widget.close()
+    finally:
+        notebook.notebook_view_class.cache_clear()
+
+
+def test_without_its_own_bundle_method_the_view_displays_by_model_id():
+    """ipywidgets 7 has no _repr_mimebundle_; its view MIME type carries the model id."""
+
+    class SevenView(_QueueView):
+        model_id = "seven"
+
+    transport = notebook.NotebookTransport(object(), "token", view=SevenView())
+    try:
+        bundle = transport.mimebundle()
+    finally:
+        transport.close()
+    assert bundle["application/vnd.jupyter.widget-view+json"] == {
+        "version_major": 2,
+        "version_minor": 0,
+        "model_id": "seven",
+    }

@@ -14,6 +14,7 @@ import os
 import secrets
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1346,14 +1347,30 @@ def _superseded_payload(
     }
 
 
+_NOTEBOOK_FALLBACK = (
+    "On Databricks the editor runs inside the notebook cell, which needs anywidget, and "
+    "anywidget is not installed. The editor uses its local server instead, which a "
+    "Databricks browser cannot reach. Install it with: %pip install 'superglm[notebook]'"
+)
+
+
 def _display_mode(mode: str | None) -> str:
     """The editor's display mode: ``mode``, else notebook on Databricks.
 
     A Databricks notebook's browser never reaches the cluster's local
-    addresses, so the local server's page cannot load there.
+    addresses, so the local server's page cannot load there. Without
+    anywidget the automatic choice stays the local server, as before notebook
+    mode existed, and warns how to install it.
     """
     if mode is None:
-        return "notebook" if os.environ.get("DATABRICKS_RUNTIME_VERSION") else "server"
+        if not os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+            return "server"
+        try:
+            notebook_view_class()
+        except ImportError:
+            warnings.warn(_NOTEBOOK_FALLBACK, UserWarning, stacklevel=4)
+            return "server"
+        return "notebook"
     if mode not in {"server", "notebook"}:
         raise EditorValueError("mode must be 'server', 'notebook' or None.")
     return mode

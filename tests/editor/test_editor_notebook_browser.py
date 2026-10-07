@@ -139,6 +139,15 @@ def test_the_editor_edits_the_model_from_inside_a_notebook_cell(
             "rgba(0, 0, 0, 0)"
         )
         assert frame.locator("html").get_attribute("data-theme") in {"light", "dark"}
+        # Markup injected into the page cannot run script: it shares the
+        # notebook's origin, so it admits only its own modules.
+        frame.locator("body").evaluate(
+            """(body) => body.insertAdjacentHTML(
+                "beforeend", '<img src="nope:" onerror="window.injected = 1">'
+            )"""
+        )
+        page.wait_for_timeout(200)
+        assert frame.locator("body").evaluate("() => window.injected") is None
 
         frame.get_by_role("radiogroup", name="Chart tools").get_by_role(
             "radio", name="Select", exact=True
