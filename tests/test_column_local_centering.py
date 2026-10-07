@@ -692,8 +692,9 @@ def test_the_repair_declines_a_support_it_cannot_read_as_float64(dtype):
 
     The extended float declines on every platform, though it is binary64 on
     macOS ARM64 and Windows; complex and object supports decline too.
-    Mutation: without the guard the complex and object cases return columns
-    (and on macOS ARM64 and Windows the long-double case does).
+    Mutation: without the guard all three cases return columns.  Against
+    the earlier kind-and-size test the long-double case fails only on macOS
+    ARM64 and Windows, where it is eight bytes.
     """
     from superglm._group_matrix._column_local_centering import _anchor_centred_columns
 
