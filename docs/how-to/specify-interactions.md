@@ -181,6 +181,11 @@ Some SZ levels do not carry enough information for their whole curve:
 - a level with fewer distinct values of the smooth's variable than the
   penalty leaves unpenalized (with the default `m=2`, a single distinct value).
 
+With `select=True`, only a level without weight is in this position. It is
+predicted at the population curve, which stays the main effect, and the
+report's `thin_levels` and `predict` name it; the solver does not name it at
+fit. The rest of this section describes terms without `select=True`.
+
 For such a level, part of its curve can trade places with the global curve
 without changing any fitted value, so the data do not decide that part. A
 `fit_reml` fit on the structured solver names these levels when it fits;
