@@ -1576,11 +1576,19 @@ class EditorSession:
         """
         return persistence.load_session(cls, path, model=model)
 
-    def widget(self):
-        """Return an optional notebook widget for this session."""
+    def widget(self, mode: str | None = None):
+        """Return the editor app for this session, to display in a notebook.
+
+        ``mode="server"`` serves the app from a local server, which the
+        browser must be able to reach, as it can when it runs on the
+        kernel's machine. ``mode="notebook"`` runs it inside the notebook
+        cell over widget messages, for hosted notebooks such as Databricks,
+        and needs ``pip install 'superglm[notebook]'``. ``None`` picks
+        notebook on Databricks and server elsewhere.
+        """
         from superglm.editor.widget import EditorWidget
 
-        return EditorWidget(self)
+        return EditorWidget(self, mode=mode)
 
     # Private guards keep public operations concise and ensure every history
     # record mutates exactly one term through the same commit path.

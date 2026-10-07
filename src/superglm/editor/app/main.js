@@ -686,6 +686,10 @@ if (
 ) {
   throw new Error("Editor export dialog is incomplete");
 }
+// Inside a notebook cell the kernel runs on another machine, so its file
+// manager would open there: the dialog saves to a kernel path and stops.
+const notebookHost = globalThis.superglmEditorHost?.kind === "notebook";
+if (notebookHost && exportOpenDirectory instanceof HTMLElement) exportOpenDirectory.hidden = true;
 bindExportDialog({
   client: editorClient,
   nodes: {
@@ -697,7 +701,7 @@ bindExportDialog({
     directory: exportDirectory,
     download: exportDownload,
     saveToKernel: exportSave,
-    openDirectory: exportOpenDirectory instanceof HTMLButtonElement
+    openDirectory: !notebookHost && exportOpenDirectory instanceof HTMLButtonElement
       ? exportOpenDirectory
       : null,
     status: exportStatus,

@@ -1,0 +1,311 @@
+"""The editor's notebook mode: its page bundle and its message transport."""
+
+from __future__ import annotations
+
+import json
+import queue
+import re
+import threading
+
+import numpy as np
+import pandas as pd
+import pytest
+
+import superglm.editor.notebook as notebook
+import superglm.editor.widget as widget_module
+from superglm import Categorical, Spline, SuperGLM
+from superglm.editor import EditorSession
+from superglm.editor.errors import EditorValueError
+from superglm.editor.notebook import MODULE_PREFIX, app_bundle, pack_modules, page_html
+
+
+@pytest.fixture(scope="module")
+def session_model():
+    rng = np.random.default_rng(20261007)
+    X = pd.DataFrame({"x": rng.uniform(0.0, 10.0, 300), "c": rng.choice(list("abcd"), 300)})
+    y = rng.poisson(np.exp(0.2 + 0.1 * np.sin(X["x"].to_numpy()))).astype(np.float64)
+    features = {"x": Spline(n_knots=6), "c": Categorical(base="first")}
+    return SuperGLM(family="poisson", selection_penalty=0.0, features=features).fit(X, y)
+
+
+class _QueueView:
+    model_id = "test-view"
+
+    def __init__(self):
+        self.outbox: queue.Queue = queue.Queue()
+        self.handler = None
+        self.closed = False
+
+    def on_msg(self, handler):
+        self.handler = handler
+
+    def send(self, content, buffers=None):
+        self.outbox.put((content, [bytes(buffer) for buffer in buffers or []]))
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def notebook_widget(session_model, monkeypatch):
+    pytest.importorskip("anywidget")
+    view = _QueueView()
+    transport = widget_module.NotebookTransport
+    monkeypatch.setattr(
+        widget_module, "NotebookTransport", lambda app, token: transport(app, token, view=view)
+    )
+    widget = EditorSession.from_model(session_model).widget(mode="notebook")
+    try:
+        yield widget, view
+    finally:
+        widget.close()
+
+
+def _request(view, request_id, method, url, payload=None, headers=None):
+    view.handler(
+        view,
+        {
+            "type": notebook.REQUEST,
+            "id": request_id,
+            "method": method,
+            "url": url,
+            "headers": headers or [["content-type", "application/json"]],
+            "body": None if payload is None else json.dumps(payload),
+        },
+        [],
+    )
+
+
+def _reply(view, timeout=30.0):
+    """One whole reply: its parts in order, as the page assembles them."""
+    content, buffers = view.outbox.get(timeout=timeout)
+    parts = {content["part"]: buffers[0]}
+    while len(parts) < content["parts"]:
+        more, buffers = view.outbox.get(timeout=timeout)
+        assert more["id"] == content["id"]
+        parts[more["part"]] = buffers[0]
+    return content, b"".join(parts[index] for index in range(content["parts"]))
+
+
+# -- The page bundle ---------------------------------------------------------
+
+
+def test_the_bundle_lists_every_module_after_the_modules_it_imports():
+    bundle = app_bundle()
+    paths = [module["path"] for module in bundle["modules"]]
+    assert paths[-1] == bundle["entry"] == "main.js"
+    assert len(paths) == len(set(paths))
+    for index, module in enumerate(bundle["modules"]):
+        assert not re.search(r"""\b(?:from|import)\s*["']\.\.?/""", module["source"]), module[
+            "path"
+        ]
+        for target in re.findall(rf"""["']{MODULE_PREFIX}([^"']+)["']""", module["source"]):
+            assert target in paths[:index], (module["path"], target)
+
+
+def test_the_page_carries_its_styles_inline_and_runs_no_script_of_its_own():
+    html = app_bundle()["html"]
+    assert "<script" not in html
+    assert "/assets/" not in html
+    index = notebook.read_app_asset("index.html").decode()
+    for sheet in re.findall(r'href="/assets/([^"]+)"', index):
+        assert f'<style data-asset="{sheet}">' in html
+    # The bundle travels in the widget's state, one message under Databricks'
+    # 5 MB limit for a widget message.
+    assert len(json.dumps(app_bundle())) < 2 * 2**20
+
+
+def test_the_module_marker_never_occurs_in_the_app_itself():
+    for module in app_bundle()["modules"]:
+        assert MODULE_PREFIX not in notebook.read_app_asset(module["path"]).decode()
+
+
+def test_packing_rewrites_every_relative_import_form():
+    modules = pack_modules(
+        {
+            "main.js": (
+                'import { a } from "./a.js";\n'
+                "import './b/side.js';\n"
+                'export * from "./b/c.js";\n'
+                "// import('./not-a-module.js') in a type comment stays\n"
+            ),
+            "a.js": 'export { c } from "./b/c.js";\nexport const a = 1;\n',
+            "b/side.js": "globalThis.side = true;\n",
+            "b/c.js": "export const c = 2;\n",
+        }
+    )
+    paths = [module["path"] for module in modules]
+    assert paths.index("b/c.js") < paths.index("a.js") < paths.index("main.js")
+    main = modules[-1]["source"]
+    assert f'from "{MODULE_PREFIX}a.js"' in main
+    assert f"import '{MODULE_PREFIX}b/side.js'" in main
+    assert f'export * from "{MODULE_PREFIX}b/c.js"' in main
+    assert "import('./not-a-module.js')" in main
+
+
+def test_packing_refuses_an_import_cycle_by_naming_it():
+    with pytest.raises(ValueError, match=r"cycle: main\.js -> a\.js -> main\.js"):
+        pack_modules({"main.js": 'import "./a.js";', "a.js": 'import "./main.js";'})
+
+
+def test_packing_names_the_importer_of_a_missing_module():
+    with pytest.raises(ValueError, match=r"main\.js imports '\./gone\.js'"):
+        pack_modules({"main.js": 'import "./gone.js";'})
+
+
+def test_page_html_inlines_each_stylesheet_in_place():
+    html = page_html(
+        '<head><script>theme()</script><link rel="stylesheet" href="/assets/a.css"></head>'
+        '<body><script type="module" src="/assets/main.js"></script></body>',
+        lambda path: f"/* {path} */",
+    )
+    assert html == '<head><style data-asset="a.css">\n/* a.css */</style></head><body></body>'
+
+
+# -- The transport -----------------------------------------------------------
+
+
+def test_a_request_gets_the_local_servers_answer(notebook_widget):
+    widget, view = notebook_widget
+    _request(view, 1, "GET", "/state")
+    content, body = _reply(view)
+    assert content["id"] == 1 and content["status"] == 200
+    state = json.loads(body)
+    assert state["selected_term"] == widget.selected_term
+    assert set(state["terms"]) == set(widget.session.terms)
+
+    _request(view, 2, "POST", "/op", {"operation": "nope"})
+    content, body = _reply(view)
+    assert content["status"] == 400
+    assert json.loads(body) == {"error": "Unknown editor operation: 'nope'"}
+
+    _request(view, 3, "GET", "/nope")
+    content, body = _reply(view)
+    assert (content["status"], json.loads(body)) == (404, {"error": "not found"})
+
+
+def test_the_page_never_supplies_the_token(notebook_widget):
+    """Python adds the widget's token itself, replacing any the page sends."""
+    _widget, view = notebook_widget
+    _request(view, 4, "GET", "/state", headers=[["X-SuperGLM-Editor-Token", "forged"]])
+    content, _body = _reply(view)
+    assert content["status"] == 200
+
+
+def test_a_large_reply_arrives_in_parts_that_rebuild_it_exactly(notebook_widget, monkeypatch):
+    widget, view = notebook_widget
+    monkeypatch.setattr(notebook, "MESSAGE_PART_BYTES", 1000)
+    _request(view, 5, "GET", "/download_export?format=joblib&filename=m.joblib")
+    content, body = _reply(view)
+    assert content["status"] == 200 and content["parts"] == -(-len(body) // 1000) > 1
+    assert dict(content["headers"])["content-disposition"].startswith("attachment;")
+    assert len(body) == len(widget._export_bytes("joblib", "m.joblib").data)
+
+
+def test_an_empty_reply_is_one_empty_part(notebook_widget):
+    _widget, view = notebook_widget
+    _request(view, 6, "GET", "/favicon.ico")
+    content, body = _reply(view)
+    assert (content["status"], content["parts"], body) == (204, 1, b"")
+
+
+def test_a_waiting_request_never_holds_the_others(notebook_widget, monkeypatch):
+    """A job-status wait blocks only its own request, as on the local server."""
+    widget, view = notebook_widget
+    release = threading.Event()
+
+    def waiting_status(job_id, wait=False):
+        release.wait(timeout=30.0)
+        return {"job_id": job_id, "status": "done"}
+
+    monkeypatch.setattr(widget, "_job_status", waiting_status)
+    _request(view, 7, "POST", "/job_status", {"job_id": "j", "wait": True})
+    _request(view, 8, "GET", "/state")
+    first, _body = _reply(view)
+    release.set()
+    second, _body = _reply(view)
+    assert (first["id"], second["id"]) == (8, 7)
+
+
+def test_messages_that_are_not_requests_are_ignored(notebook_widget):
+    _widget, view = notebook_widget
+    view.handler(view, {"type": "something else", "id": 9}, [])
+    view.handler(view, ["not", "a", "request"], [])
+    _request(view, 10, "GET", "/health")
+    content, _body = _reply(view)
+    assert content["id"] == 10 and view.outbox.empty()
+
+
+def test_closing_the_widget_closes_its_view_and_stops_answering(session_model, monkeypatch):
+    pytest.importorskip("anywidget")
+    view = _QueueView()
+    transport = widget_module.NotebookTransport
+    monkeypatch.setattr(
+        widget_module, "NotebookTransport", lambda app, token: transport(app, token, view=view)
+    )
+    widget = EditorSession.from_model(session_model).widget(mode="notebook")
+    widget.close()
+    assert view.closed
+    _request(view, 11, "GET", "/health")
+    with pytest.raises(queue.Empty):
+        view.outbox.get(timeout=0.5)
+
+
+# -- Display and mode ----------------------------------------------------------
+
+
+def test_the_real_view_answers_through_anywidget_and_displays_as_a_widget(session_model):
+    pytest.importorskip("anywidget")
+    formatters = pytest.importorskip("IPython.core.formatters")
+    widget = EditorSession.from_model(session_model).widget(mode="notebook")
+    try:
+        view = widget._notebook.view
+        sent = queue.Queue()
+        view.send = lambda content, buffers=None: sent.put((content, buffers))
+        # anywidget's own message dispatch, as a kernel delivers a page's message.
+        view._handle_custom_msg(
+            {"type": notebook.REQUEST, "id": 1, "method": "GET", "url": "/health", "headers": []},
+            [],
+        )
+        content, buffers = sent.get(timeout=30.0)
+        assert (content["status"], json.loads(bytes(buffers[0]))) == (200, {"ok": True})
+        assert view.bundle["entry"] == "main.js"
+
+        data, _metadata = formatters.DisplayFormatter().format(widget)
+        assert data["application/vnd.jupyter.widget-view+json"]["model_id"] == view.model_id
+        assert "text/html" not in data
+    finally:
+        widget.close()
+
+
+def test_server_mode_still_displays_its_local_page(session_model):
+    formatters = pytest.importorskip("IPython.core.formatters")
+    widget = EditorSession.from_model(session_model).widget(mode="server")
+    try:
+        data, _metadata = formatters.DisplayFormatter().format(widget)
+        assert widget.app_url in data["text/html"]
+        assert "application/vnd.jupyter.widget-view+json" not in data
+    finally:
+        widget.close()
+
+
+def test_the_mode_defaults_to_notebook_on_databricks_only(monkeypatch):
+    monkeypatch.delenv("DATABRICKS_RUNTIME_VERSION", raising=False)
+    assert widget_module._display_mode(None) == "server"
+    monkeypatch.setenv("DATABRICKS_RUNTIME_VERSION", "15.4")
+    assert widget_module._display_mode(None) == "notebook"
+    assert widget_module._display_mode("server") == "server"
+    with pytest.raises(EditorValueError, match="mode must be"):
+        widget_module._display_mode("iframe")
+
+
+def test_notebook_mode_without_anywidget_says_how_to_install_it(session_model, monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "anywidget", None)
+    notebook.notebook_view_class.cache_clear()
+    threads = threading.active_count()
+    try:
+        with pytest.raises(ImportError, match=r"pip install 'superglm\[notebook\]'"):
+            EditorSession.from_model(session_model).widget(mode="notebook")
+        assert threading.active_count() == threads
+    finally:
+        notebook.notebook_view_class.cache_clear()

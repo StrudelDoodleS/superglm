@@ -68,6 +68,7 @@ dev = [
     "ty==0.0.72",
     "polars>=1.42.1",
     "pre-commit",
+    "superglm[notebook]",
 ]
 bench = [
     "glum>=3.4.1",
@@ -82,6 +83,12 @@ bench = [
 ]
 plotting = [
     "plotly>=5.24",
+]
+# The editor inside a notebook cell (EditorSession.widget(mode="notebook")),
+# for hosted notebooks such as Databricks whose browser cannot reach a local
+# server.
+notebook = [
+    "anywidget>=0.10",
 ]
 
 [tool.uv]
