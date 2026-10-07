@@ -1507,10 +1507,11 @@ def optimize_discrete_reml_cached_w(
             # the set this dead step actually moved -- is classified by
             # classify_dead_feasible_exit, which grants converged_at_precision
             # only when every active gradient is under the precision asked
-            # for, or the undamped Newton step predicts a decrease below the
-            # stop resolution, AND a true objective was evaluated and
-            # rejected, and names an honest line_search_failed otherwise. Two things
-            # differ from the exact engine, both because this engine's
+            # for, or (within a decade of that bar) the undamped Newton step
+            # predicts a decrease below the stop resolution, AND a true
+            # objective was evaluated and rejected, and names an honest
+            # line_search_failed otherwise. Two things differ from the
+            # exact engine, both because this engine's
             # candidate is ONE working-model update rather than a converged
             # PIRLS. First, the break waits for candidate_mode_stationary:
             # a dead search at an unsettled working model is not evidence

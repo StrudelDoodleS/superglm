@@ -44,6 +44,24 @@ FLAT_DIRECTION_FREEZE_FLOOR = 1e-7
 FLAT_DIRECTION_CURVATURE_REL = 1e-2
 FLAT_DIRECTION_CURVATURE_ANCHOR = 0.1
 
+# The gradient ceiling of the dead-search decrement arm, in multiples of the
+# gradient bar max(1e-7, reml_tol) * (1 + |objective|). The decrement is
+# computed from the outer Hessian the step used, which by default
+# (w_correction_order=1) is a modified-Newton approximation: if it overstates
+# the curvature by a factor K the decrement understates the remaining
+# decrease by K, and no bound on K is available. The ceiling makes the arm's
+# guarantee independent of K. Along a direction of true curvature h a fit the
+# arm grants has true remaining decrease g^2 / (2h) < (10 bar)^2 / (2h): at
+# most 10^2 times the most the gradient arm already accepts at that h,
+# whatever K is. It also keeps the stall invariant the dead-search exit relies
+# on: a granted fit's active gradient is within one decade of the bar, so an
+# undetermined stall, orders above it, stays a failure. Measured: #459's
+# panel endgames sit at 1.009 to 2.03 times the bar (margin 4.9); every
+# genuine dead-search stall in the focused REML suites at 2.8e4 times it or
+# more; and at the panel's optimum the order-1 Hessian is within 0.42% of a
+# finite-difference Hessian of the exact gradient (order 2 within 2e-6).
+DECREMENT_GRADIENT_CEILING = 10.0
+
 
 def _score_scale(objective: float) -> float:
     return max(1.0 + abs(objective), 1.0)
@@ -252,6 +270,13 @@ def classify_dead_feasible_exit(
       SIAM J. Optim. 29(2)). Measured on #459's panel model: active
       gradient 1.009 to 2.03 times the bar, predicted decrease 1.4e-3 to
       5.8e-3 of the resolution, objective noise at fixed lambda 4.2e-7.
+      This arm applies only with the active gradient under
+      ``DECREMENT_GRADIENT_CEILING`` (10) times the gradient bar, so an
+      error in a modified-Newton Hessian cannot grant a fit whose gradient
+      is orders above the bar (see the constant). It does not also need
+      the exact Hessian (``w_correction_order=2``): the ceiling's bound
+      holds whatever the Hessian's error, and the default order-1 fits are
+      the ones #459 measured.
 
     The proof requires evidence: at least one trial whose objective was
     actually evaluated and rejected. On observed-geometry paths every
@@ -265,7 +290,11 @@ def classify_dead_feasible_exit(
     bar = max(FLAT_DIRECTION_FREEZE_FLOOR, tolerance) * score_scale
     if active_gradient_norm < bar:
         return "converged_at_precision"
-    if predicted_decrease is not None and predicted_decrease < tolerance * score_scale:
+    if (
+        predicted_decrease is not None
+        and active_gradient_norm < DECREMENT_GRADIENT_CEILING * bar
+        and predicted_decrease < tolerance * score_scale
+    ):
         return "converged_at_precision"
     return "line_search_failed"
 

@@ -1583,10 +1583,10 @@ def optimize_direct_reml(
             # objective units: when the Newton model of the active set
             # predicts a decrease below the stop resolution (half the
             # squared decrement of the uncapped step just tried, its
-            # Hessian unmodified), the optimum is resolved even with the
-            # gradient just above its bar -- #459 measured that decrease
-            # at 1.2e-8 against evaluation noise of 4.2e-7, so rounding
-            # alone decided whether the full step was accepted.
+            # Hessian unmodified), the optimum is resolved with the gradient
+            # above its bar but within a decade of it -- #459 measured that
+            # decrease at 1.2e-8 against evaluation noise of 4.2e-7, so
+            # rounding alone decided whether the full step was accepted.
             active_grad_norm = (
                 float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
             )

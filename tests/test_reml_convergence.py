@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from superglm.reml.convergence import (
+    DECREMENT_GRADIENT_CEILING,
     FLAT_DIRECTION_CURVATURE_ANCHOR,
     FLAT_DIRECTION_CURVATURE_REL,
     FLAT_DIRECTION_FREEZE_FLOOR,
@@ -327,6 +328,34 @@ def test_dead_feasible_exit_resolves_a_negligible_predicted_decrease() -> None:
     assert classify(None) == "line_search_failed"
     assert classify(resolution) == "line_search_failed"
     assert classify(2.948e-9, evaluated_trial=False) == "line_search_failed"
+
+
+def test_decrement_arm_never_grants_a_gradient_orders_above_the_bar() -> None:
+    """The default outer Hessian (``w_correction_order=1``) is a modified
+    approximation; one that overstates curvature by K understates the
+    decrement by K, so a tiny predicted decrease alone is no proof. The arm
+    applies only within ``DECREMENT_GRADIENT_CEILING`` (10) bars: a dead
+    search with its gradient 1000 bars up and a predicted decrease of
+    1e-12 resolutions -- a quasi-Newton Hessian off by 1e12 -- stays a
+    failure, as an undetermined stall must.
+
+    Mutation: removing the ceiling grants ``far`` and ``at_ceiling``."""
+    objective, tolerance = 2060.7156437253107, 1e-9
+    bar = max(FLAT_DIRECTION_FREEZE_FLOOR, tolerance) * (1.0 + objective)
+    negligible = 1e-12 * tolerance * (1.0 + objective)
+
+    def classify(gradient):
+        return classify_dead_feasible_exit(
+            gradient,
+            objective=objective,
+            tolerance=tolerance,
+            predicted_decrease=negligible,
+        )
+
+    assert DECREMENT_GRADIENT_CEILING == 10.0
+    assert classify(1e3 * bar) == "line_search_failed"  # far
+    assert classify(DECREMENT_GRADIENT_CEILING * bar) == "line_search_failed"  # at_ceiling
+    assert classify(0.5 * DECREMENT_GRADIENT_CEILING * bar) == "converged_at_precision"
 
 
 def test_newton_predicted_decrease_needs_a_definite_model() -> None:

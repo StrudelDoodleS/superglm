@@ -1348,7 +1348,8 @@ class TestDeadSearchNewtonDecrement:
         The second fit runs the 0.37.1 rule in place of the classifier: every
         published number must match bitwise, since the rule only names the
         exit. Where rounding takes another platform's fit through the compound
-        criterion instead, both fits converge and the comparison still holds.
+        criterion instead, both fits converge, the comparison still holds,
+        and the test skips: the arm was not exercised there.
         """
         import warnings
 
@@ -1395,6 +1396,64 @@ class TestDeadSearchNewtonDecrement:
         np.testing.assert_array_equal(
             fixed.predict(X, offset=offset), reference.predict(X, offset=offset)
         )
+        if reference._reml_result.termination_reason != "line_search_failed":
+            pytest.skip(
+                "the gradient-only rule ended this row order "
+                f"{reference._reml_result.termination_reason!r} here, not at a dead line "
+                "search, so the decrement arm was not exercised"
+            )
+        assert fixed._reml_result.termination_reason == "converged_at_precision"
+
+    def test_a_capped_newton_step_withholds_the_decrement(self, monkeypatch):
+        """The decrement is the quadratic model's prediction for the Newton
+        step; a step longer than the solver's cap of 5 log-lambda units
+        extrapolates the model past where the solver trusts it, so the arm is
+        withheld (``predicted_decrease=None``).
+
+        Every lambda move is rejected by a stand-in objective, from
+        ``lambda=1e-3`` where the first Newton step is capped: the first
+        trial sits exactly 5 units from the candidate (measured; the
+        uncapped step from ``lambda=0.1`` is 0.48). The search evaluates and
+        rejects its trials, so the cap guard alone withholds the decrement.
+        Mutation: dropping the ``max_delta > max_newton_step`` guard passes
+        the decrement of the capped step instead of None.
+        """
+        import superglm.reml.direct as direct
+        from superglm import ConvergenceWarning
+
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        evaluated: list[dict[str, float]] = []
+        classified: list[dict] = []
+        real = direct.classify_dead_feasible_exit
+
+        def reject_every_move(*args, **kwargs):
+            evaluated.append(dict(args[6]))
+            return 0.0 if evaluated[-1] == evaluated[0] else 1.0
+
+        def spy(*args, **kwargs):
+            classified.append(kwargs)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(direct, "reml_laml_objective", reject_every_move)
+        monkeypatch.setattr(direct, "classify_dead_feasible_exit", spy)
+        model = SuperGLM(family="poisson", features={"x": Spline(k=7)}, selection_penalty=0)
+        with pytest.warns(ConvergenceWarning, match="no smoothing step improved"):
+            model.fit_reml(
+                pd.DataFrame({"x": x}),
+                y,
+                lambda2_init={"x": 1e-3},
+                max_reml_iter=5,
+                runtime_validation="skip",
+            )
+
+        first_trial = max(abs(np.log(evaluated[1][k] / evaluated[0][k])) for k in evaluated[0])
+        assert first_trial == pytest.approx(5.0, rel=1e-9)
+        assert len(classified) == 1
+        assert classified[0]["evaluated_trial"] is True
+        assert classified[0]["predicted_decrease"] is None
+        assert model._reml_result.termination_reason == "line_search_failed"
 
     def test_an_undetermined_dead_search_still_reports_not_converged(self):
         """#439's documented undetermined model: the panel book under a

@@ -794,10 +794,11 @@ class SuperGLM:
             engine's shared-tensor line search -- as
             ``termination_reason="converged_at_precision"`` (at least one
             evaluated trial rejected, none left, and either every active
-            gradient under ``max(1e-7, reml_tol) * (1 + |objective|)`` or
-            the decrease the active set's Newton model still predicts,
-            half of ``g' H^-1 g`` for a positive definite Hessian whose
-            Newton step no step cap or trust region shortened, under
+            gradient under ``max(1e-7, reml_tol) * (1 + |objective|)`` or,
+            with every active gradient under ten times that bar, the
+            decrease the active set's Newton model still predicts, half of
+            ``g' H^-1 g`` for a positive definite Hessian whose Newton step
+            no step cap or trust region shortened, under
             ``reml_tol * (1 + |objective|)``) with
             ``converged=True``; ``line_search_failed`` with
             ``converged=False`` is reserved for genuinely undetermined
