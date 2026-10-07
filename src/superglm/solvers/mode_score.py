@@ -271,6 +271,9 @@ def column_sums(
     The sums have non-negative terms, so any order is within ``gamma_n``.
     """
     rows = np.vstack([*magnitudes, np.asarray(positive, dtype=np.float64)])
+    # Rows of weight 0, masked to an exact 0 in each column (#369); none in
+    # the usual fit, where the columns are formed exactly as before.
+    zero_rows = np.flatnonzero(rows[3] == 0.0)
     columns = np.asarray(columns, dtype=np.intp)
     result = np.empty((4, len(columns)))
     offset = 0
@@ -304,7 +307,8 @@ def column_sums(
                     centred = (
                         np.asarray(matrix.matvec(unit), dtype=np.float64) - mean_x[offset + column]
                     )
-                    centred[rows[3] == 0.0] = 0.0  # a zero-weight row adds exactly 0 (#369)
+                    if zero_rows.size:
+                        centred[zero_rows] = 0.0  # a zero-weight row adds exactly 0 (#369)
                     size = np.abs(centred)
                     squares = centred**2
                     result[:, position] = (
@@ -523,6 +527,9 @@ def weighted_column_centring(
     # the corrected two-pass algorithm about the rounded mean -- never a
     # design product per column, never raw moments
     factor_smooth: list[NDArray] = []
+    # Rows of weight 0, masked to an exact 0 (#369); None in the usual fit.
+    carried = np.asarray(positive_prior, dtype=bool)
+    zero_rows = None if carried.all() else ~carried
     offset = 0
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
@@ -546,7 +553,8 @@ def weighted_column_centring(
                 if dense_values is not None
                 else np.asarray(matrix.row_subset(np.arange(lo, hi)).toarray(), dtype=np.float64)
             ) - centre
-            rows[~np.asarray(positive_prior[lo:hi], dtype=bool)] = 0.0  # adds exactly 0 (#369)
+            if zero_rows is not None:
+                rows[zero_rows[lo:hi]] = 0.0  # a zero-weight row adds exactly 0 (#369)
             squares += w[lo:hi] @ rows**2
             firsts += w[lo:hi] @ rows
         diagonal[columns] = np.maximum(squares - firsts**2 / sum_w, 0.0)
@@ -2605,6 +2613,8 @@ def weakly_identified_mask(
         mass[one_hot] = on_rows * on**2 + (row_count - on_rows) * off**2
     offset = 0
     formed: list[NDArray] = []
+    # Rows of weight 0, masked to an exact 0 (#369); None in the usual fit.
+    zero_rows = None if positive.all() else ~positive
     for matrix in dm.group_matrices:
         width = matrix.shape[1]
         columns = slice(offset, offset + width)
@@ -2617,7 +2627,8 @@ def weakly_identified_mask(
             for lo in range(0, dm.n, _CHUNK):
                 hi = min(lo + _CHUNK, dm.n)
                 centred = values[lo:hi] - centre
-                centred[~positive[lo:hi]] = 0.0  # a zero-weight row adds exactly 0 (#369)
+                if zero_rows is not None:
+                    centred[zero_rows[lo:hi]] = 0.0  # a zero-weight row adds exactly 0 (#369)
                 squares = centred**2
                 curvature[columns] += weights[lo:hi] @ squares
                 mass[columns] += rows[lo:hi] @ squares

@@ -145,6 +145,8 @@ def laplace_excluded_coefficients(
     weights = np.asarray(sample_weight, dtype=np.float64)
     positive = weights > 0.0
     row_count = int(np.count_nonzero(positive))
+    # Rows of weight 0, masked to an exact 0 (#369); None in the usual fit.
+    zero_rows = None if row_count == weights.size else ~positive
     candidates = ~penalized_columns(dm.p, penalties)
     if row_count == 0 or not np.any(candidates):
         return np.zeros(0, dtype=np.intp)
@@ -186,7 +188,8 @@ def laplace_excluded_coefficients(
             for lo in range(0, dm.n, _CHUNK):
                 hi = min(lo + _CHUNK, dm.n)
                 centred = values[lo:hi] - centre
-                centred[~positive[lo:hi]] = 0.0  # a zero-weight row adds exactly 0 (#369)
+                if zero_rows is not None:
+                    centred[zero_rows[lo:hi]] = 0.0  # a zero-weight row adds exactly 0 (#369)
                 squares = centred**2
                 curvature[columns] += weights[lo:hi] @ squares
                 mass[columns] += positive[lo:hi].astype(np.float64) @ squares
@@ -198,7 +201,8 @@ def laplace_excluded_coefficients(
                 reference = float(values[first])
                 centre = reference + float(weights @ (values - reference)) / total
                 centred = values - centre
-                centred[~positive] = 0.0
+                if zero_rows is not None:
+                    centred[zero_rows] = 0.0
                 squares = centred**2
                 curvature[column] = float(weights @ squares)
                 mass[column] = float(np.sum(squares[positive]))
