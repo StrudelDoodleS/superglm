@@ -784,6 +784,20 @@ def _try_pattern_tensor_centering(
     )
 
 
+def _reads_as_float64(dtype: np.dtype) -> bool:
+    """Whether a support of ``dtype`` is read as float64 as every other reader of the column reads it.
+
+    Booleans, integers of up to eight bytes, and IEEE half, single and double:
+    exact for float32 and for integers up to ``2**53``, which round alike in
+    all of them.  Decided by type, not kind and size, because the extended
+    float is binary64 on some platforms only; it declines on every platform,
+    as do complex and object supports.
+    """
+    if dtype.kind in "biu":
+        return dtype.itemsize <= 8
+    return dtype.type in (np.float16, np.float32, np.float64)
+
+
 def _anchor_center_support(
     *,
     values: NDArray,
@@ -1036,11 +1050,8 @@ def _anchor_support_gram_rhs(
 
     supports: list[_CenteredSupport] = []
     for gm, (values, codes, transform) in zip(dm.group_matrices, compact, strict=True):
-        # Supports are read as float64, as every other reader of the column
-        # converts them (exact for float32 and for integers up to 2**53, which
-        # round alike in all of them). Complex, object and wider dtypes decline.
         if any(
-            operand is not None and (operand.dtype.kind not in "biuf" or operand.dtype.itemsize > 8)
+            operand is not None and not _reads_as_float64(operand.dtype)
             for operand in (values, transform)
         ):
             return None

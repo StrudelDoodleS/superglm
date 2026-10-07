@@ -632,9 +632,15 @@ def test_the_anchor_route_reads_an_integer_support_as_float64():
         np.testing.assert_array_equal(got, expected)
 
 
-@pytest.mark.parametrize("part", ["complex_support", "complex_transform", "object_support"])
+@pytest.mark.parametrize(
+    "part", ["complex_support", "complex_transform", "object_support", "longdouble_support"]
+)
 def test_the_anchor_route_declines_a_support_it_cannot_read_as_float64(part):
-    """A complex or object support or transform declines the anchor route, which reads them as float64.
+    """A complex, object or long-double support or transform declines the anchor route.
+
+    The route reads supports as float64.  Long double is binary64 on some
+    platforms only, so it declines on every platform and the route never
+    depends on the platform.
 
     The design then takes the chunked pass.  Real dtypes of eight bytes or
     fewer are read (``test_the_anchor_route_reads_an_integer_support_as_float64``).
@@ -647,8 +653,10 @@ def test_the_anchor_route_declines_a_support_it_cannot_read_as_float64(part):
         support = support.astype(np.complex128)
     elif part == "complex_transform":
         transform = transform.astype(np.complex128)
-    else:
+    elif part == "object_support":
         support = support.astype(object)
+    else:
+        support = support.astype(np.longdouble)
     ssp = DiscretizedSSPGroupMatrix(support, transform, _two_bins(n))
     result = anchor_support_centered_gram_rhs(
         dm=DesignMatrix([ssp], n, 1), W=np.ones(n), z_centered=np.zeros(n)
