@@ -466,3 +466,59 @@ def test_per_term_discrete_preserves_explicit_dense_execution_policy() -> None:
     assert not telemetry.discrete
     assert telemetry.execution_backend_identifier == "distributional-dense-v1"
     assert telemetry.resolved_chunk_size is None
+
+
+@pytest.mark.parametrize("scale_knots", [(4, 4), (5, 4)])
+def test_public_discrete_tensors_in_two_predictors_parity(scale_knots) -> None:
+    """A tensor in each predictor: the mean x scale block pairs two tensors.
+
+    The compiler numbered tensors per predictor, so the two tensors shared an
+    id, and their cross-Gram took the route for two parts of one tensor: one
+    tensor's marginals with the other's transform. That is a silently wrong
+    curvature block at equal widths and a shape error at unequal ones.
+    """
+    frame, y, weights, offsets, family, _ = _fixture("gaussian", "frequency")
+    rng = np.random.default_rng(20261007)
+    frame = frame.assign(
+        u=rng.choice(np.linspace(-1, 1, 8), len(frame)),
+        v=rng.choice(np.linspace(-1, 1, 6), len(frame)),
+    )
+    predictors = (
+        Predictor(
+            "location",
+            {"x": Spline(kind="cr", n_knots=4), "z": Spline(kind="cr", n_knots=4)},
+            interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(4, 4))},
+        ),
+        Predictor(
+            "scale",
+            {"u": Spline(kind="cr", n_knots=4), "v": Spline(kind="cr", n_knots=4)},
+            interaction_specs={"u:v": TensorInteraction("u", "v", n_knots=scale_knots)},
+        ),
+    )
+    names = (
+        "location:x#wiggle",
+        "location:z#wiggle",
+        "location:x:z#margin_x",
+        "location:x:z#margin_z",
+        "scale:u#wiggle",
+        "scale:v#wiggle",
+        "scale:u:v#margin_u",
+        "scale:u:v#margin_v",
+    )
+    models = [
+        model_from_templates(
+            family=family,
+            predictors=predictors,
+            discrete=discrete,
+            n_bins=32,
+            weight_semantics="frequency",
+        ).fit(
+            frame,
+            y,
+            sample_weight=weights,
+            offsets=offsets,
+            lambdas=dict.fromkeys(names, 1.0),
+        )
+        for discrete in (False, True)
+    ]
+    _assert_parity(*models, frame, offsets)

@@ -506,6 +506,9 @@ def compile_predictors(
     )
 
     built: list[CompiledPredictor] = []
+    # The mean x scale curvature pairs groups of two predictors, so their
+    # tensors are numbered apart (``compile_predictor_design``).
+    first_tensor_id = 0
     for parameter_index, (parameter, predictor) in enumerate(
         zip(parameter_tuple, predictor_tuple, strict=True)
     ):
@@ -530,7 +533,10 @@ def compile_predictors(
             n_bins_config=n_bins_config,
             lambda2=lambda2,
             separation_boundaries=boundary_tuple[parameter_index],
+            first_tensor_id=first_tensor_id,
         )
+        tensor_ids = [getattr(matrix, "tensor_id", -1) for matrix in compiled.design.group_matrices]
+        first_tensor_id = max(first_tensor_id, 1 + max(tensor_ids, default=-1))
         compiled = _center_selected_smooths(
             compiled,
             geometry_weight,
