@@ -1912,6 +1912,10 @@ def _fit_pirls_inner(
             pinned = bool(np.any((retained.eta != retained.eta_unclipped) & (weights > 0)))
             exhausted_stagnant = (
                 not converged
+                # A mean-space boundary stop sits at a finite constrained
+                # maximum, not a drift; 0.37.1 read it converged here, and the
+                # direct solver runs its backstop before its demotion.
+                and not boundary_rows
                 # Only a real budget makes exhaustion-with-stagnation
                 # evidence of a drift; warm-started micro-budget solves
                 # exhaust theirs by construction (see irls_direct).

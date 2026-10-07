@@ -2728,7 +2728,9 @@ def _fit_irls_direct_once(
     max_halving = 20  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
     _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
-    _degeneracy_retry_failed = False  # the #472 retry runs until it fails once in this fit
+    _degeneracy_retry_failed = (
+        False  # the #472 retry is off after a failure, until a solve certifies
+    )
     # A constrained fit-entry state has not been certified by the inner QP.
     retained_qp_converged = not has_constraints
     # Declared, not bound: the chain below is the whole set of reasons this
@@ -3265,9 +3267,11 @@ def _fit_irls_direct_once(
                 prev_active_set = qp_result.active_set
                 # An uncertified result means the degenerate-vertex retry ran
                 # and failed (or was already latched off). It costs up to a
-                # full active-set solve, so it is not repeated for the rest of
-                # this fit, as the log note below is not.
-                _degeneracy_retry_failed |= not qp_result.converged
+                # full active-set solve, so it is not repeated while the QP
+                # keeps failing. A certified result re-arms it: while latched,
+                # that can only be an ordinary solve, so the failure was
+                # transient and a later #472 vertex keeps its rescue.
+                _degeneracy_retry_failed = not qp_result.converged
                 # Non-convergence usually persists for the rest of the fit, so
                 # latch the report to the first occurrence rather than emitting
                 # one identical line per IRLS iteration. A later solve may

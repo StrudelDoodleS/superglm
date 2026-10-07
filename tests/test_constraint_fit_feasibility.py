@@ -263,6 +263,52 @@ def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(
     assert result.termination_reason == "constraint_kkt_incomplete"
 
 
+def test_a_certified_solve_rearms_the_degeneracy_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ordinary solve that certifies re-arms the #472 retry for the rest of the fit (#477 review).
+
+    The QP fails, certifies, then fails again.  The first failure latches the
+    retry off; the certified solve between shows the failure was transient,
+    so the third iterate's failure gets the retry again: two retries, not
+    one.  Mutation: a latch that never re-arms runs it once.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+
+    # y = +x: the optimum beta = 1 is interior, so the stand-in QP's steps
+    # 0.3, 0.6, 0.9 each lower the deviance and are accepted.
+    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    y = -y
+    ordinary: list[None] = []
+    safeguarded: list[None] = []
+
+    def qp(*_args, _degeneracy_safeguards=False, **_kwargs):
+        if _degeneracy_safeguards:
+            safeguarded.append(None)
+            return QPResult(beta=np.full(1, 0.3 * len(ordinary)), converged=False)
+        ordinary.append(None)
+        return QPResult(beta=np.full(1, 0.3 * len(ordinary)), converged=len(ordinary) == 2)
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", qp)
+    irls_direct.fit_irls_direct(
+        design,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        max_iter=3,
+        tol=1e-10,
+        convergence="coefficients",
+        weight_semantics="frequency",
+    )
+
+    assert len(ordinary) == 3
+    assert len(safeguarded) == 2
+
+
 def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certificate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
