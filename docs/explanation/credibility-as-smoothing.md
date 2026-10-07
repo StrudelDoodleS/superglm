@@ -7,8 +7,9 @@ instead of receiving unrestricted fixed effects.
 
 `FactorSmooth(..., basis="sz")` is related but has a different interpretation:
 it estimates centered level deviations around a required global curve. Its
-wiggle is smoothed, but its polynomial null space is not fully shrunk, so its
-level table is not labelled as credibility or collapse.
+wiggle is smoothed, but its polynomial null space is not fully shrunk unless
+the term has `select=True`, and its level table is not labelled as
+credibility or collapse.
 
 | SuperGLM | mgcv analogue | What varies by level |
 |---|---|---|
@@ -187,8 +188,12 @@ regional_deviation = model.factor_smooth("DrivAge:Region:sz", grid=80)
 Equivalent marginal coefficients across levels sum to zero, so the deviation
 curves also sum to zero pointwise. There is one shared `wiggle` lambda. The
 polynomial null space remains unpenalized: even an extremely large wiggle
-lambda can leave finite linear or low-order polynomial deviations.
-Consequently `regional_deviation.collapsed` is `None`, and its table reports
+lambda can leave finite linear or low-order polynomial deviations. With
+`select=True` (see "Penalizing SZ levels' lines: `select=True`" in the
+[interactions guide](../how-to/specify-interactions.md)), a second `null`
+lambda penalizes every level's line, and both lambdas at their upper bound
+shrink every deviation to zero. For every `sz` term, with or without
+`select`, `regional_deviation.collapsed` is `None`, and its table reports
 support, information, EDF, and coefficient norms without `credibility` or
 `shrinkage` columns.
 
