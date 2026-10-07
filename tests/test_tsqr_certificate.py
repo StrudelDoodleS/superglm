@@ -756,7 +756,7 @@ def test_reml_fit_abandons_the_factor_of_a_decision_that_flips(monkeypatch):
             raise
 
     monkeypatch.setattr(rank, "_pooled_tsqr", counted)
-    with parallel_config(n_jobs=2, max_memory="1G"):
+    with parallel_config(n_jobs=3, max_memory="1G"):
         calls[0] = 0
         beside = fit()
         monkeypatch.setattr(blas_threads, "fit_blas_single_threaded", lambda: False)
@@ -782,14 +782,71 @@ def test_reml_fit_forms_each_certificate_beside_its_gram_decision(monkeypatch):
     import superglm._blas_threads as blas_threads
 
     fit, passes = _aliased_tweedie_fit(monkeypatch)
-    beside = fit()
+    with parallel_config(n_jobs=2, max_memory="1G"):
+        beside = fit()
     prefetched = [thread.startswith("superglm-prefetch") for _, thread in passes]
     inputs = [entry[0] for entry in passes]
     monkeypatch.setattr(blas_threads, "fit_blas_single_threaded", lambda: False)
-    after = fit()
+    with parallel_config(n_jobs=2, max_memory="1G"):
+        after = fit()
     assert sum(prefetched) == len(passes) - 3 > 0
     assert inputs == [entry[0] for entry in passes]
     assert np.array_equal(beside.view(np.uint64), after.view(np.uint64))
+
+
+@pytest.mark.parametrize("jobs", [1, 3])
+def test_a_prefetched_factor_stays_inside_n_jobs(monkeypatch, jobs):
+    """``n_jobs=1`` prefetches nothing, so the rank check runs on the calling thread;
+    at ``n_jobs=k`` the prefetched factor's pool takes at most ``k - 1`` workers
+    beside the calling thread's Gram decision.  Mutation check: without the gate
+    an ``n_jobs=1`` fit prefetches, and without the cap its pool takes ``k``.
+    """
+    fit, passes = _aliased_tweedie_fit(monkeypatch)
+    _leaf_rows_for(monkeypatch, 12, 60)
+    used: list[int] = []
+    original = parallel.pool_workers
+
+    def recorded(*args, **kwargs):
+        workers = original(*args, **kwargs)
+        if threading.current_thread().name.startswith("superglm-prefetch"):
+            used.append(workers)
+        return workers
+
+    monkeypatch.setattr(parallel, "pool_workers", recorded)
+    with parallel_config(n_jobs=jobs, max_memory="1G"):
+        fit()
+    prefetched = [thread for _, thread in passes if thread.startswith("superglm-prefetch")]
+    if jobs == 1:
+        assert prefetched == [] and used == []
+    else:
+        assert prefetched and used and max(used) == jobs - 1
+
+
+def test_retained_support_tables_are_charged_to_every_pooled_section(monkeypatch):
+    """Tables a fit keeps for its duration count against ``max_memory`` in a Gram build too.
+
+    Inside one fit's reuse the design's support tables stay after its factor,
+    so ``retained_bytes`` reports them and every ``pool_workers`` call (the
+    Gram block queue's included, which passes no ``held``) charges them; a
+    kernel whose own ``held`` is part of them charges them once.  Mutation
+    checks: not registering the reuse, or charging only ``held``, fails.
+    """
+    import superglm.solvers.centered_system as centered_system
+
+    n, leaf = 400, 40
+    dm = _mixed_design(n, seed=31)
+    _leaf_rows_for(monkeypatch, dm.p, leaf)
+    weights = np.random.default_rng(33).uniform(0.2, 3.0, n)
+    held = 8 * (7 * 3)
+    with parallel_config(n_jobs=16, max_memory=10 * held), centered_system.reuse_data_factors():
+        assert parallel.retained_bytes() == 0
+        grouped_weighted_factor(dm, weights)
+        assert parallel.retained_bytes() == held
+        assert pool_workers(16, held) == 9
+        assert pool_workers(16, held, held=held) == 9
+    assert parallel.retained_bytes() == 0
+    with parallel_config(n_jobs=16, max_memory=10 * held):
+        assert pool_workers(16, held) == 10
 
 
 def test_a_prefetched_factor_the_gram_does_not_need_starts_nothing_further(monkeypatch):

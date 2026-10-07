@@ -34,7 +34,7 @@ import math
 import os
 import sys
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -62,6 +62,11 @@ class _Override:
 
 
 _override: ContextVar[_Override | None] = ContextVar("superglm_parallel_override", default=None)
+# Bytes a fit keeps for its whole duration (its TSQR support tables), which
+# every pooled section charges to ``max_memory`` before sizing its workers.
+_retained: ContextVar[Callable[[], int] | None] = ContextVar(
+    "superglm_parallel_retained", default=None
+)
 
 
 @contextmanager
@@ -236,6 +241,12 @@ def _from_env(name: str, parse) -> int | None:
         return None
 
 
+def retained_bytes() -> int:
+    """Bytes the current fit keeps for its whole duration (``_retained``), else 0."""
+    source = _retained.get()
+    return 0 if source is None else int(source())
+
+
 def resolve_n_jobs() -> int:
     """The context's ``n_jobs``, else ``SUPERGLM_N_JOBS``, else the physical cores."""
     override = _override.get()
@@ -297,8 +308,11 @@ def pool_workers(n_tasks: int, task_bytes: int, held: int = 0) -> int:
     """Workers for ``n_tasks`` tasks of ``task_bytes`` each: ``n_jobs`` capped by tasks and memory.
 
     ``held`` is memory the kernel keeps beside its tasks for as long as they
-    run, charged to the budget first.  At least one, so a task larger than
-    the whole budget still runs (alone).
+    run, and the fit's retained bytes (``retained_bytes``) are memory it keeps
+    for its whole duration; the larger is charged to the budget first, since
+    a kernel's ``held`` is part of what the fit retains whenever both are set.
+    At least one, so a task larger than the whole budget still runs (alone).
     """
-    by_memory = max(resolve_max_memory() - int(held), 0) // max(int(task_bytes), 1)
+    charged = max(int(held), retained_bytes())
+    by_memory = max(resolve_max_memory() - charged, 0) // max(int(task_bytes), 1)
     return max(1, min(resolve_n_jobs(), int(n_tasks), int(by_memory)))

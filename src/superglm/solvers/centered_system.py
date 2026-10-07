@@ -419,7 +419,12 @@ class _DataFactorReuse:
         self.entries.append((frozen, value))
         del self.entries[: -self._ENTRIES]
 
+    def retained_bytes(self) -> int:
+        """The support tables this fit keeps (``leaf_parts``), charged by every pooled section."""
+        return sum(entry[2].held for entry in list(self.leaf_parts.values()))
+
     def prefetch(self, site: str, key: tuple) -> None:
+        from superglm._parallel import resolve_n_jobs
         from superglm.solvers.rank import _TSQR_STOP
 
         self.settle(site, needed=False)
@@ -433,7 +438,9 @@ class _DataFactorReuse:
         stop = threading.Event()
         context = contextvars.copy_context()
         context.run(_TSQR_STOP.set, stop)
-        future = self.executor.submit(context.run, _data_factor, *frozen)
+        # The calling thread decides the Gram meanwhile: the prefetch takes the rest of n_jobs.
+        workers = max(1, resolve_n_jobs() - 1)
+        future = self.executor.submit(context.run, _prefetched_factor, workers, *frozen)
         self.keep(frozen, future)
         self.pending[site] = (future, stop)
 
@@ -476,11 +483,15 @@ _DATA_FACTOR_REUSE: ContextVar[_DataFactorReuse | None] = ContextVar(
 @contextmanager
 def reuse_data_factors() -> Iterator[None]:
     """Reuse the weighted data factors formed inside this context (:class:`_DataFactorReuse`)."""
+    from superglm import _parallel
+
     reuse = _DataFactorReuse()
     token = _DATA_FACTOR_REUSE.set(reuse)
+    retained = _parallel._retained.set(reuse.retained_bytes)
     try:
         yield
     finally:
+        _parallel._retained.reset(retained)
         _DATA_FACTOR_REUSE.reset(token)
         reuse.close()
 
@@ -492,6 +503,14 @@ def _factor_key(dm, W, center, center_lo, response) -> tuple:
         return None if values is None else np.asarray(values, dtype=np.float64)
 
     return (dm, tsqr_leaf_rows(dm.p), bits(W), bits(center), bits(center_lo), bits(response))
+
+
+def _prefetched_factor(workers: int, *key) -> tuple:
+    """:func:`_data_factor` on at most ``workers`` threads (its bits do not depend on them)."""
+    from superglm._parallel import parallel_config
+
+    with parallel_config(n_jobs=workers):
+        return _data_factor(*key)
 
 
 def _data_factor(dm, _leaf_rows, W, center, center_lo, response) -> tuple:
@@ -539,9 +558,12 @@ def prefetch_weighted_factor(
     leaves are dropped and its running ones start nothing after them.
     """
     from superglm._blas_threads import fit_blas_single_threaded
+    from superglm._parallel import resolve_n_jobs
 
     reuse = _DATA_FACTOR_REUSE.get()
     if reuse is None or not reuse.expected.get(site, False) or not fit_blas_single_threaded():
+        return
+    if resolve_n_jobs() < 2:  # n_jobs=1 runs the rank check on the calling thread
         return
     reuse.prefetch(site, _factor_key(dm, W, center, center_lo, response))
 
