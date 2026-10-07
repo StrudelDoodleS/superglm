@@ -13,6 +13,7 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
+from superglm._parallel import parallel_config
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
@@ -177,11 +178,15 @@ class PredictorExecutionPlan:
         weights: NDArray,
     ) -> NDArray[np.float64]:
         """Return one symmetric ``X.T @ diag(weights) @ X`` predictor block."""
-        moments = self.design.execution_plan.moments(
-            weights,
-            include_xtw=self.intercept,
-            signed=True,
-        )
+        # Serial Gram blocks: SuperLSS takes no ``n_jobs``, and its chunked
+        # assembly calls this once per row chunk, too small for a pool to pay
+        # for itself beside the family kernels' own threads.
+        with parallel_config(n_jobs=1):
+            moments = self.design.execution_plan.moments(
+                weights,
+                include_xtw=self.intercept,
+                signed=True,
+            )
         slope_start = int(self.intercept)
         result = np.zeros((self.width, self.width), dtype=np.float64)
         if self.intercept:

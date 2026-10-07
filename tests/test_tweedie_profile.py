@@ -384,6 +384,44 @@ class TestMaximumLikelihoodPhi:
         assert 1.5 not in profile.candidates
         assert "bootstrap" in profile.infeasible[1.5]
 
+    def test_a_reml_candidate_with_an_uncertified_terminal_qp_refit_is_infeasible(
+        self, monkeypatch
+    ):
+        """A QP-constrained candidate whose terminal refit has no KKT certificate is routed around.
+
+        fit_reml publishes that fit as not converged
+        (``terminal_refit_termination="constraint_kkt_incomplete"``). Its
+        constrained mode is not certified optimal, so it has no REML objective
+        to rank the power by, and the search scores the power infeasible, as it
+        did while finalize raised. Mutation check: without the routing in
+        ``_PowerProfile._fit_reml`` the power is scored with a finite NLL.
+        """
+        from dataclasses import replace
+
+        from superglm import Constraint
+        from superglm.model import reml_finalize
+        from superglm.profiling.tweedie import _PowerProfile
+
+        def uncertified_terminal(work_model, *, qp_saved_state, pirls_result, **_kwargs):
+            reml_finalize.restore_qp_group_state(work_model, qp_saved_state)
+            return replace(
+                pirls_result, converged=False, termination_reason="constraint_kkt_incomplete"
+            )
+
+        monkeypatch.setattr(reml_finalize, "maybe_qp_passthrough_refit", uncertified_terminal)
+        rng = np.random.default_rng(1)
+        x = rng.uniform(0.0, 1.0, 400)
+        y = rng.poisson(np.exp(0.3 + 0.8 * x)).astype(float)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.0,
+            features={"x": Spline(kind="cr", k=8, constraint=Constraint.fit.increasing)},
+        )
+        profile = _PowerProfile(model, pd.DataFrame({"x": x}), y, np.ones(y.size), None, "fit_reml")
+        assert profile(1.5) == math.inf
+        assert 1.5 not in profile.candidates
+        assert "KKT certificate" in profile.infeasible[1.5]
+
     def test_a_search_with_every_power_refused_names_the_refusal_not_reml(self):
         """Both bounds and every Brent point sit too close to 1 under plain ML fits."""
         import pandas as pd

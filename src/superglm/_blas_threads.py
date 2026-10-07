@@ -42,7 +42,12 @@ _scope_lock = threading.Lock()
 _active_scopes = 0
 _wide_scopes = 0
 _narrow_kernels = 0
+# Pooled sections (``pooled_blas_threads``) force one thread under every
+# policy, so the registration records the limit it was made at and is
+# re-made when the wanted limit changes.
+_pooled_sections = 0
 _registration = None
+_registration_limit: int | None = None
 _tls = threading.local()
 
 
@@ -89,19 +94,33 @@ def _settle(limit: int, *, narrow: bool = False) -> None:
     only on the transition out.  A narrow kernel's transition goes through
     the cached controller (``_narrow_controller``), every other one through
     ``threadpool_limits``.
+
+    A narrow kernel or a pooled section wants one thread; otherwise a fit
+    wants ``limit``.  Narrow kernels only run under the automatic policy,
+    whose ``limit`` is one, so only a pooled section inside a fit under an
+    explicit integer policy can want a different limit from the one
+    registered: the registration is then undone, returning the pools to the
+    process's own state, and made again at the wanted limit.
     """
-    global _registration
-    wanted = (_active_scopes > 0 and _wide_scopes == 0) or _narrow_kernels > 0
-    if wanted and _registration is None:
+    global _registration, _registration_limit
+    if _pooled_sections > 0 or _narrow_kernels > 0:
+        wanted: int | None = 1
+    elif _active_scopes > 0 and _wide_scopes == 0:
+        wanted = limit
+    else:
+        wanted = None
+    if _registration is not None and _registration_limit != wanted:
+        _registration.unregister()
+        _registration = None
+        _registration_limit = None
+    if wanted is not None and _registration is None:
         if narrow:
-            _registration = _narrow_controller().limit(limits=limit, user_api="blas")
+            _registration = _narrow_controller().limit(limits=wanted, user_api="blas")
         else:
             from threadpoolctl import threadpool_limits
 
-            _registration = threadpool_limits(limits=limit, user_api="blas")
-    elif not wanted and _registration is not None:
-        _registration.unregister()
-        _registration = None
+            _registration = threadpool_limits(limits=wanted, user_api="blas")
+        _registration_limit = wanted
 
 
 def _release_current_scope() -> None:
@@ -196,6 +215,36 @@ def narrow_kernel_blas_threads(width: int):
         with _scope_lock:
             _narrow_kernels -= 1
             _settle(1)
+
+
+@contextmanager
+def pooled_blas_threads():
+    """Hold BLAS at one thread while a worker pool runs, under every policy.
+
+    A pooled kernel (``_parallel``) is the one parallelism level: its
+    workers call LAPACK concurrently, so BLAS's own threads would only
+    oversubscribe the cores, and its result must not depend on the worker
+    count, which needs every task to run the same single-threaded arithmetic
+    whether one worker or many run it.  Unlike ``narrow_kernel_blas_threads``
+    this caps inside or outside a fit, at any width, and under an explicit
+    ``SUPERGLM_BLAS_THREADS`` or ``native`` policy too, for the duration of
+    the section only; the pools return to the fit's (or the process's) state
+    when the last overlapping section exits (``_settle``).
+    """
+    global _pooled_sections
+    with _scope_lock:
+        _pooled_sections += 1
+        try:
+            _settle(1, narrow=True)
+        except BaseException:
+            _pooled_sections -= 1
+            raise
+    try:
+        yield
+    finally:
+        with _scope_lock:
+            _pooled_sections -= 1
+            _settle(_resolve_limit() or 1)
 
 
 _NARROW_CONTROLLER = None

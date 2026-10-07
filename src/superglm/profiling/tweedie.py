@@ -247,6 +247,15 @@ class _PowerProfile:
             runtime_validation="skip",
             reml_tol=_SEARCH_REML_TOL,
         )
+        if getattr(clone._reml_result, "terminal_refit_termination", None) == (
+            "constraint_kkt_incomplete"
+        ):
+            # Published as not converged to a user, but a candidate whose
+            # constrained mode is not certified optimal has no objective to
+            # rank this power by.
+            raise ObservedModeNotConvergedError(
+                "terminal constrained REML refit ended without a complete inner-QP KKT certificate"
+            )
         if getattr(clone._reml_result, "termination_reason", None) == "bootstrap_uncertified":
             # A shape-constrained fit published unconverged because no start of
             # its bootstrap certified a coefficient mode has no REML objective to

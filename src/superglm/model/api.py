@@ -89,6 +89,9 @@ class SuperGLM:
         separation: str = "warn",
         group_pricing: Literal["rank", "spanned"] = "rank",
         weight_semantics: Literal["prior", "frequency"] = "prior",
+        # Threads
+        n_jobs: int | Literal["auto"] = "auto",
+        max_memory: int | str = "auto",
     ):
         """
         Parameters
@@ -242,6 +245,24 @@ class SuperGLM:
             frequency mass shapes the same support as replicated rows, while
             prior weights leave learned geometry a function of physical rows.
             Unweighted fits and fits with ``w == 1`` are identical under both.
+        n_jobs : int or "auto"
+            The most threads a fit uses for its heaviest steps: forming the
+            weighted Gram block by block and checking the rank of the design.
+            Refits and inference on the fitted model (``summary``,
+            ``metrics``, ``drop1``, ``estimate_p`` and the like) keep it.
+            ``"auto"`` (default) uses the ``SUPERGLM_N_JOBS`` environment
+            variable when it is set and the number of physical cores
+            otherwise; ``1`` runs those steps on the calling thread.  The
+            fitted model does not depend on it: every thread count gives the
+            same coefficients, bit for bit.
+        max_memory : int, str or "auto"
+            The working memory those threads may hold at once, in bytes or as
+            a size such as ``"4G"``.  A fit starts fewer threads when each
+            needs more than this budget allows, so it is the limit to set on
+            a shared machine.  ``"auto"`` (default) uses
+            ``SUPERGLM_MAX_MEMORY`` when it is set and otherwise a quarter
+            of the machine's memory, or of the container's memory limit
+            where that is lower.
         """
         if splines is not None:
             import warnings
@@ -277,6 +298,24 @@ class SuperGLM:
             separation=separation,
             group_pricing=group_pricing,
             weight_semantics=weight_semantics,
+            n_jobs=n_jobs,
+            max_memory=max_memory,
+        )
+
+    def _parallel_scope(self):
+        """The fit's thread and memory limits (``_parallel.estimator_scope``).
+
+        ``fit``, ``fit_path``, ``fit_reml`` and every public method that can
+        refit, build a Gram or factor the design enter it in their own
+        bodies, so a refit (``drop1``, ``estimate_p``) and post-fit inference
+        (``summary``, ``metrics``) keep the fit's limits.  Not through a
+        wrapper: an extra frame would move the caller every warning's
+        ``stacklevel`` points at.
+        """
+        from superglm._parallel import estimator_scope
+
+        return estimator_scope(
+            getattr(self, "_n_jobs", "auto"), getattr(self, "_max_memory", "auto")
         )
 
     def __setstate__(self, state: dict) -> None:
@@ -607,7 +646,7 @@ class SuperGLM:
                 stacklevel=2,
             )
 
-        with solver_blas_threads():
+        with solver_blas_threads(), self._parallel_scope():
             return fit_ops.fit(
                 self,
                 X,
@@ -639,7 +678,7 @@ class SuperGLM:
         from zero, rebuilding predictions from them cancels the column's
         offset (``PathResult``); predict with a fitted model instead.
         """
-        with solver_blas_threads():
+        with solver_blas_threads(), self._parallel_scope():
             return fit_ops.fit_path(
                 self,
                 X,
@@ -842,7 +881,9 @@ class SuperGLM:
         resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
         resolved_max_pirls_iter = max_pirls_iter if max_pirls_iter is not None else self._max_iter
 
-        with solver_blas_threads():
+        from superglm.solvers.centered_system import reuse_data_factors
+
+        with solver_blas_threads(), self._parallel_scope(), reuse_data_factors():
             return fit_ops.fit_reml(
                 self,
                 X,
@@ -1007,20 +1048,21 @@ class SuperGLM:
         p-value: confirm the top-ranked pairs by refitting them as the
         interaction their ``kind`` names.
         """
-        from superglm.model.screening_ops import screen_interactions
+        with self._parallel_scope():
+            from superglm.model.screening_ops import screen_interactions
 
-        return screen_interactions(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset=offset,
-            candidates=candidates,
-            edf0=edf0,
-            max_cells=max_cells,
-            screen_bins=screen_bins,
-            phi=phi,
-        )
+            return screen_interactions(
+                self,
+                X,
+                y,
+                sample_weight,
+                offset=offset,
+                candidates=candidates,
+                edf0=edf0,
+                max_cells=max_cells,
+                screen_bins=screen_bins,
+                phi=phi,
+            )
 
     # ── Properties ────────────────────────────────────────────────
 
@@ -1042,19 +1084,23 @@ class SuperGLM:
 
     @cached_property
     def _coef_covariance(self):
-        return state_ops.coef_covariance(self)
+        with self._parallel_scope():
+            return state_ops.coef_covariance(self)
 
     @cached_property
     def _fit_active_info(self):
-        return state_ops.fit_active_info(self)
+        with self._parallel_scope():
+            return state_ops.fit_active_info(self)
 
     @cached_property
     def _fit_inference_info(self):
-        return state_ops.fit_inference_info(self)
+        with self._parallel_scope():
+            return state_ops.fit_inference_info(self)
 
     @cached_property
     def _group_edf(self):
-        return state_ops.group_edf(self)
+        with self._parallel_scope():
+            return state_ops.group_edf(self)
 
     # ── Diagnostics & summary ─────────────────────────────────────
 
@@ -1069,17 +1115,18 @@ class SuperGLM:
         offset: NDArray | None = None,
     ) -> RandomEffectResult:
         """Return variance-component and per-level credibility diagnostics."""
-        from superglm.inference.random_effects import random_effect_result
+        with self._parallel_scope():
+            from superglm.inference.random_effects import random_effect_result
 
-        return random_effect_result(
-            self,
-            name,
-            exposure=exposure,
-            X=X,
-            y=y,
-            sample_weight=sample_weight,
-            offset=offset,
-        )
+            return random_effect_result(
+                self,
+                name,
+                exposure=exposure,
+                X=X,
+                y=y,
+                sample_weight=sample_weight,
+                offset=offset,
+            )
 
     def factor_smooth(
         self,
@@ -1090,15 +1137,16 @@ class SuperGLM:
         confidence_level: float = 0.95,
     ) -> FactorSmoothResult:
         """Return basis-aware penalties, level diagnostics, and smooth curves."""
-        from superglm.inference.factor_smooths import factor_smooth_result
+        with self._parallel_scope():
+            from superglm.inference.factor_smooths import factor_smooth_result
 
-        return factor_smooth_result(
-            self,
-            name,
-            grid=grid,
-            levels=levels,
-            confidence_level=confidence_level,
-        )
+            return factor_smooth_result(
+                self,
+                name,
+                grid=grid,
+                levels=levels,
+                confidence_level=confidence_level,
+            )
 
     def iteration_diagnostics(self):
         """Return per-iteration IRLS diagnostics as a DataFrame.
@@ -1172,7 +1220,8 @@ class SuperGLM:
 
     def diagnostics(self) -> dict[str, Any]:
         """Per-group diagnostic dict for programmatic / audit access."""
-        return report_ops.diagnostics(self)
+        with self._parallel_scope():
+            return report_ops.diagnostics(self)
 
     def design_summary(self) -> pd.DataFrame:
         """Describe fitted design storage and static route eligibility.
@@ -1217,12 +1266,13 @@ class SuperGLM:
         :meth:`metrics` on the same data, which evaluates the model's
         predictions on the rows passed.
         """
-        return report_ops.summary(
-            self,
-            alpha,
-            detail=detail,
-            level_display=level_display,
-        )
+        with self._parallel_scope():
+            return report_ops.summary(
+                self,
+                alpha,
+                detail=detail,
+                level_display=level_display,
+            )
 
     def _feature_groups(self, name: Hashable) -> list[GroupSlice]:
         """Get all groups belonging to a feature."""
@@ -1230,7 +1280,8 @@ class SuperGLM:
 
     def reconstruct_feature(self, name: Hashable) -> dict[str, Any]:
         """Reconstruct a fitted feature's curve or effect on its original scale."""
-        return report_ops.reconstruct_feature(self, cast(Any, name))
+        with self._parallel_scope():
+            return report_ops.reconstruct_feature(self, cast(Any, name))
 
     def knot_summary(self) -> dict[str, dict[str, Any]]:
         """Return fitted knot metadata for all spline features."""
@@ -1260,7 +1311,8 @@ class SuperGLM:
         fitting design.  On a ``discrete=True`` fit that design is the binned
         one, so the two differ slightly on the training data.
         """
-        return explain_ops.metrics(self, X, y, sample_weight, offset)
+        with self._parallel_scope():
+            return explain_ops.metrics(self, X, y, sample_weight, offset)
 
     def drop1(
         self,
@@ -1276,7 +1328,8 @@ class SuperGLM:
         At exactly zero fitted dispersion, a zero deviance change has statistic
         zero and p-value one; a nonzero deviance change is undefined and raises.
         """
-        return explain_ops.drop1(self, X, y, sample_weight, offset, test=test)
+        with self._parallel_scope():
+            return explain_ops.drop1(self, X, y, sample_weight, offset, test=test)
 
     def refit_unpenalised(
         self,
@@ -1295,14 +1348,15 @@ class SuperGLM:
         for that level, and under ``"warn"`` it fits with a
         :class:`SeparationWarning`.
         """
-        return explain_ops.refit_unpenalised(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            keep_smoothing=keep_smoothing,
-        )
+        with self._parallel_scope():
+            return explain_ops.refit_unpenalised(
+                self,
+                X,
+                y,
+                sample_weight,
+                offset,
+                keep_smoothing=keep_smoothing,
+            )
 
     def relativities(
         self, with_se: bool = False, centering: str = "native"
@@ -1320,7 +1374,8 @@ class SuperGLM:
             of identifiability constraint, so ``se_log_relativity`` changes
             with it: it becomes the error of the centered contrast.
         """
-        return explain_ops.relativities(self, with_se, centering=centering)
+        with self._parallel_scope():
+            return explain_ops.relativities(self, with_se, centering=centering)
 
     def _feature_se_from_cov(self, name, Cov_active, active_groups, n_points=200):
         return explain_ops.model_feature_se_from_cov(
@@ -1337,9 +1392,10 @@ class SuperGLM:
         seed: int = 42,
     ) -> pd.DataFrame:
         """Simultaneous confidence bands for a spline feature."""
-        return explain_ops.simultaneous_bands(
-            self, feature, alpha=alpha, n_sim=n_sim, n_points=n_points, seed=seed
-        )
+        with self._parallel_scope():
+            return explain_ops.simultaneous_bands(
+                self, feature, alpha=alpha, n_sim=n_sim, n_points=n_points, seed=seed
+            )
 
     def term_inference(
         self,
@@ -1366,17 +1422,18 @@ class SuperGLM:
             change with it: they become those of the centered contrast, and
             the level the fit pinned stops carrying a zero-width interval.
         """
-        return explain_ops.term_inference(
-            self,
-            name,
-            with_se=with_se,
-            simultaneous=simultaneous,
-            n_points=n_points,
-            alpha=alpha,
-            n_sim=n_sim,
-            seed=seed,
-            centering=centering,
-        )
+        with self._parallel_scope():
+            return explain_ops.term_inference(
+                self,
+                name,
+                with_se=with_se,
+                simultaneous=simultaneous,
+                n_points=n_points,
+                alpha=alpha,
+                n_sim=n_sim,
+                seed=seed,
+                centering=centering,
+            )
 
     # ── Profile estimation ────────────────────────────────────────
 
@@ -1477,20 +1534,21 @@ class SuperGLM:
             candidate, then ``"best_found"`` and ``"final_refit"`` with
             ``{"profile_estimate": ...}``.
         """
-        return profile_ops.estimate_p(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            fit_mode=fit_mode,
-            search_fit_mode=search_fit_mode,
-            p_bounds=p_bounds,
-            xatol=xatol,
-            ci_alpha=ci_alpha,
-            max_reml_iter=max_reml_iter,
-            progress_callback=progress_callback,
-        )
+        with self._parallel_scope():
+            return profile_ops.estimate_p(
+                self,
+                X,
+                y,
+                sample_weight,
+                offset,
+                fit_mode=fit_mode,
+                search_fit_mode=search_fit_mode,
+                p_bounds=p_bounds,
+                xatol=xatol,
+                ci_alpha=ci_alpha,
+                max_reml_iter=max_reml_iter,
+                progress_callback=progress_callback,
+            )
 
     def estimate_theta(
         self,
@@ -1542,18 +1600,19 @@ class SuperGLM:
             with ``{"profile_trace": [row]}`` for each alternation step, then
             ``"best_found"`` and ``"final_refit"`` with ``{"profile_estimate": ...}``.
         """
-        return profile_ops.estimate_theta(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            fit_mode=fit_mode,
-            theta_bounds=theta_bounds,
-            xatol=xatol,
-            ci_alpha=ci_alpha,
-            progress_callback=progress_callback,
-        )
+        with self._parallel_scope():
+            return profile_ops.estimate_theta(
+                self,
+                X,
+                y,
+                sample_weight,
+                offset,
+                fit_mode=fit_mode,
+                theta_bounds=theta_bounds,
+                xatol=xatol,
+                ci_alpha=ci_alpha,
+                progress_callback=progress_callback,
+            )
 
     # ── Plotting ──────────────────────────────────────────────────
 
@@ -1689,32 +1748,33 @@ class SuperGLM:
         >>> fig.show()                      # interactive main-effect explorer
         >>> fig.write_html("effects.html") # standalone HTML export
         """
-        return plot_ops.plot(
-            self,
-            terms,
-            kind=kind,
-            ci=ci,
-            X=X,
-            sample_weight=sample_weight,
-            show_density=show_density,
-            show_knots=show_knots,
-            show_bases=show_bases,
-            scale=scale,
-            ci_style=ci_style,
-            categorical_display=categorical_display,
-            grouped_level_display=grouped_level_display,
-            engine=engine,
-            n_points=n_points,
-            figsize=figsize,
-            title=title,
-            subtitle=subtitle,
-            plotly_style=plotly_style,
-            alpha=alpha,
-            n_sim=n_sim,
-            seed=seed,
-            centering=centering,
-            **kwargs,
-        )
+        with self._parallel_scope():
+            return plot_ops.plot(
+                self,
+                terms,
+                kind=kind,
+                ci=ci,
+                X=X,
+                sample_weight=sample_weight,
+                show_density=show_density,
+                show_knots=show_knots,
+                show_bases=show_bases,
+                scale=scale,
+                ci_style=ci_style,
+                categorical_display=categorical_display,
+                grouped_level_display=grouped_level_display,
+                engine=engine,
+                n_points=n_points,
+                figsize=figsize,
+                title=title,
+                subtitle=subtitle,
+                plotly_style=plotly_style,
+                alpha=alpha,
+                n_sim=n_sim,
+                seed=seed,
+                centering=centering,
+                **kwargs,
+            )
 
     def plot_diagnostics(
         self,
@@ -1771,20 +1831,21 @@ class SuperGLM:
         matplotlib.figure.Figure
             A figure with 4 diagnostic subplots.
         """
-        from superglm.plotting.diagnostics import plot_diagnostics
+        with self._parallel_scope():
+            from superglm.plotting.diagnostics import plot_diagnostics
 
-        return plot_diagnostics(
-            self,
-            X,
-            y,
-            sample_weight=sample_weight,
-            offset=offset,
-            n_sim=n_sim,
-            figsize=figsize,
-            max_points=max_points,
-            seed=seed,
-            residual_type=residual_type,
-        )
+            return plot_diagnostics(
+                self,
+                X,
+                y,
+                sample_weight=sample_weight,
+                offset=offset,
+                n_sim=n_sim,
+                figsize=figsize,
+                max_points=max_points,
+                seed=seed,
+                residual_type=residual_type,
+            )
 
     def plot_data(
         self,
@@ -1842,22 +1903,23 @@ class SuperGLM:
         >>> curve_df = payload["terms"][0]["effect"]
         >>> knots_df = payload["terms"][0]["knots"]
         """
-        return plot_ops.plot_data(
-            self,
-            terms,
-            kind=kind,
-            ci=ci,
-            X=X,
-            sample_weight=sample_weight,
-            show_density=show_density,
-            show_knots=show_knots,
-            show_bases=show_bases,
-            n_points=n_points,
-            alpha=alpha,
-            n_sim=n_sim,
-            seed=seed,
-            centering=centering,
-        )
+        with self._parallel_scope():
+            return plot_ops.plot_data(
+                self,
+                terms,
+                kind=kind,
+                ci=ci,
+                X=X,
+                sample_weight=sample_weight,
+                show_density=show_density,
+                show_knots=show_knots,
+                show_bases=show_bases,
+                n_points=n_points,
+                alpha=alpha,
+                n_sim=n_sim,
+                seed=seed,
+                centering=centering,
+            )
 
     # ── Prediction ────────────────────────────────────────────────
 
@@ -1997,7 +2059,8 @@ class SuperGLM:
         SuperGLM
             The model (self), with post-fit shape repairs stored.
         """
-        return monotone_ops.monotonize(self, X, sample_weight, offset, n_grid=n_grid)
+        with self._parallel_scope():
+            return monotone_ops.monotonize(self, X, sample_weight, offset, n_grid=n_grid)
 
     def apply_shape_postfit(
         self,
@@ -2008,9 +2071,10 @@ class SuperGLM:
         n_grid: int = 500,
     ) -> SuperGLM:
         """Repair postfit monotone and curvature-constrained spline terms."""
-        from superglm.model import shape_ops
+        with self._parallel_scope():
+            from superglm.model import shape_ops
 
-        return shape_ops.apply_shape_postfit(self, X, sample_weight, offset, n_grid=n_grid)
+            return shape_ops.apply_shape_postfit(self, X, sample_weight, offset, n_grid=n_grid)
 
     def apply_monotone_postfit(
         self,
@@ -2021,7 +2085,8 @@ class SuperGLM:
         n_grid: int = 500,
     ) -> SuperGLM:
         """Compatibility alias for :meth:`superglm.SuperGLM.monotonize`."""
-        return self.monotonize(X, sample_weight, offset, n_grid=n_grid)
+        with self._parallel_scope():
+            return self.monotonize(X, sample_weight, offset, n_grid=n_grid)
 
     # ── Diagnostics ───────────────────────────────────────────────
 
@@ -2036,7 +2101,8 @@ class SuperGLM:
         ``subgroup_type``, ``variance_eta``, ``sd_eta``, ``edf``,
         ``lambda``, ``group_norm``.
         """
-        return explain_ops.term_importance(self, X, sample_weight)
+        with self._parallel_scope():
+            return explain_ops.term_importance(self, X, sample_weight)
 
     def term_drop_diagnostics(
         self,
@@ -2072,18 +2138,19 @@ class SuperGLM:
             ``sample_weight`` is supplied and require ``offset_val`` for an
             offset-fitted model.
         """
-        return explain_ops.term_drop_diagnostics(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            mode=mode,
-            X_val=X_val,
-            y_val=y_val,
-            sample_weight_val=sample_weight_val,
-            offset_val=offset_val,
-        )
+        with self._parallel_scope():
+            return explain_ops.term_drop_diagnostics(
+                self,
+                X,
+                y,
+                sample_weight,
+                offset,
+                mode=mode,
+                X_val=X_val,
+                y_val=y_val,
+                sample_weight_val=sample_weight_val,
+                offset_val=offset_val,
+            )
 
     def spline_redundancy(
         self,
@@ -2091,7 +2158,8 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
     ) -> dict:
         """Spline redundancy diagnostics: knot spacing, basis correlation, effective rank."""
-        return explain_ops.spline_redundancy(self, X, sample_weight)
+        with self._parallel_scope():
+            return explain_ops.spline_redundancy(self, X, sample_weight)
 
     # ── Discretization ────────────────────────────────────────────
 
@@ -2107,7 +2175,8 @@ class SuperGLM:
         Spline and polynomial main effects into bins, and a
         continuous-by-continuous interaction onto the grid its rating-table
         block is sampled on."""
-        return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
+        with self._parallel_scope():
+            return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
 
     def export_rating_tables(
         self,
@@ -2118,9 +2187,12 @@ class SuperGLM:
         **kwargs,
     ):
         """Export deployment rating tables for the fitted model."""
-        from superglm.export import export_rating_tables
+        with self._parallel_scope():
+            from superglm.export import export_rating_tables
 
-        return export_rating_tables(self, file_path, X, y, sample_weight=sample_weight, **kwargs)
+            return export_rating_tables(
+                self, file_path, X, y, sample_weight=sample_weight, **kwargs
+            )
 
     def rating_table_payload(
         self,
@@ -2130,9 +2202,10 @@ class SuperGLM:
         **kwargs,
     ):
         """Build the renderer-independent deployment rating-table payload."""
-        from superglm.export.rating_tables import build_rating_table_payload
+        with self._parallel_scope():
+            from superglm.export.rating_tables import build_rating_table_payload
 
-        return build_rating_table_payload(self, X, y, sample_weight=sample_weight, **kwargs)
+            return build_rating_table_payload(self, X, y, sample_weight=sample_weight, **kwargs)
 
     # ── REML adapter methods (used by reml_optimizer) ─────────────
 
