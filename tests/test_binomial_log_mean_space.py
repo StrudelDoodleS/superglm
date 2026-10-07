@@ -4298,3 +4298,82 @@ def test_the_block_coordinate_trace_records_the_boundary_verdict(
         last = [event for event in sink.events if event.event_kind == kind][-1]
         assert last.payload["fit_converged"] is False, kind
         assert last.payload["termination_reason"] == "mean_space_boundary", kind
+
+
+def test_the_block_coordinate_boundary_verdict_moves_no_coefficient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Demoting the verdict leaves the fit where it stopped (#431, #477 review).
+
+    The same fit with the boundary check switched off (it reports converged,
+    as 0.37.1 did) stops at the same iteration with the same coefficients
+    and intercept, bit for bit: only the verdict changes.  Mutation: a
+    demotion that refits or perturbs the state fails the equality.
+    """
+    from superglm.solvers import pirls
+
+    frame, y = _all_events_region_frame()
+
+    def fitted():
+        model = SuperGLM(
+            family="binomial",
+            link="log",
+            selection_penalty=1e-2,
+            features={
+                "region": Categorical(base="first"),
+                "x": Numeric(),
+                "g": Categorical(base="first"),
+            },
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(frame, y)
+        return model
+
+    demoted = fitted()
+    monkeypatch.setattr(pirls, "mean_space_boundary_rows", lambda *args, **kwargs: 0)
+    undemoted = fitted()
+    assert demoted.result.termination_reason == "mean_space_boundary"
+    assert undemoted.result.converged
+    np.testing.assert_array_equal(demoted.result.beta, undemoted.result.beta)
+    assert demoted.result.intercept == undemoted.result.intercept
+    assert demoted.result.n_iter == undemoted.result.n_iter
+
+
+def test_fit_path_reports_the_block_coordinate_boundary_verdict() -> None:
+    """``fit_path`` reaches the same ``fit_pirls`` exit, so no boundary step reads converged (#431).
+
+    On the all-events frame the path's second step already holds the
+    region's rows at the mean-space cap; 0.37.1 reported it converged
+    (``[True, True, False, False]``).  The invariant: a step whose returned
+    state has positive-weight rows at the cap is not converged, and some
+    step does have them, so the check is not vacuous.  Mutation: without the
+    in-loop demotion the second step reads converged.
+    """
+    from superglm.solvers.irls_state import mean_space_boundary_rows
+
+    frame, y = _all_events_region_frame()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        features={
+            "region": Categorical(base="first"),
+            "x": Numeric(),
+            "g": Categorical(base="first"),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        path = model.fit_path(frame, y, n_lambda=4)
+    weights = np.ones(len(y))
+    boundary = [
+        mean_space_boundary_rows(
+            model._distribution,
+            model._link,
+            model._dm.matvec(beta) + intercept,
+            weights,
+        )
+        for beta, intercept in zip(path.coef_path, path.intercept_path, strict=True)
+    ]
+    assert any(boundary)
+    assert not any(c and b for c, b in zip(path.converged_path, boundary, strict=True))
