@@ -55,7 +55,6 @@ from superglm.solvers.mode_score import (
     centred_matvec,
     dense_centred_matvec,
     dense_centred_rmatvec,
-    linear_predictor,
     prior_weighted_centre,
 )
 from superglm.solvers.rank import (
@@ -1386,6 +1385,7 @@ def _fit_pirls_inner(
     # vocabulary at each assignment, so a reason this module gains has to be
     # added to ``TerminationReason`` before it can leave the loop.
     termination_reason: TerminationReason
+    boundary_rows = 0
     for outer in range(max_iter_outer):
         t_outer_start = time.perf_counter()
 
@@ -1705,10 +1705,29 @@ def _fit_pirls_inner(
             convergence_value = max(convergence_value, kkt_violation)
             iteration_converged = convergence_value < tol
 
+        # A state that would converge with rows at the mean-space boundary is
+        # not a mode: their capped mean makes the deviance flat there, and the
+        # maximum it approaches is constrained, not stationary.  The direct
+        # solver never calls such a state converged (``fit_irls_direct``); this
+        # route did, with fitted binomial/log probabilities above one (#431).
+        # The loop stops where it would have converged, with that verdict, so
+        # the step decision and state commit below carry it.
+        boundary_rows = 0
+        if iteration_converged:
+            boundary_rows = mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
+            iteration_converged = not boundary_rows
+
         if step_rejected:
             termination_reason = "step_rejected"
         elif not np.isfinite(dev):
             termination_reason = "nonfinite_deviance"
+        elif boundary_rows:
+            termination_reason = "mean_space_boundary"
+            logger.info(
+                "  PIRLS: %d row(s) at the boundary of the family's mean space; "
+                "the penalized maximum is constrained, fit is not converged.",
+                boundary_rows,
+            )
         elif iteration_converged:
             termination_reason = "converged"
         elif outer + 1 == max_iter_outer:
@@ -1859,6 +1878,8 @@ def _fit_pirls_inner(
             logger.warning(f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}")
             break
 
+        if boundary_rows:
+            break
         if iteration_converged:
             converged = True
             break
@@ -2128,6 +2149,7 @@ def _fit_pirls_inner(
         termination_reason=termination_reason,
         centred_intercept=None if state_center is None else retained.centred_intercept,
         state_center=None if state_center is None else state_center.copy(),
+        mean_space_boundary_rows=boundary_rows,
     )
 
 
@@ -2247,26 +2269,4 @@ def fit_pirls(
             weight_semantics=weight_semantics,
         )
 
-    # A converged claim on a state with rows at the mean-space boundary is
-    # not a mode: their capped mean makes the deviance flat there, and the
-    # maximum it approaches is constrained, not stationary.  The direct
-    # solver never calls such a state converged (``fit_irls_direct``); this
-    # route did, with fitted binomial/log probabilities above one (#431).
-    # A state already reported unconverged keeps its own stop.
-    if result.converged:
-        boundary = mean_space_boundary_rows(
-            family, link, linear_predictor(dm, result, offset), weights
-        )
-        if boundary:
-            logger.info(
-                "fit_pirls: %d row(s) at the boundary of the family's mean space; "
-                "the penalized maximum is constrained, fit is not converged.",
-                boundary,
-            )
-            result = replace(
-                result,
-                converged=False,
-                termination_reason="mean_space_boundary",
-                mean_space_boundary_rows=boundary,
-            )
     return result

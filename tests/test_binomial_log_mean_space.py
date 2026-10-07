@@ -4256,3 +4256,45 @@ def test_the_block_coordinate_route_keeps_an_interior_maximum_converged() -> Non
     model.fit(frame, y)
     assert model.result.converged
     assert model.result.mean_space_boundary_rows == 0
+
+
+def test_the_block_coordinate_trace_records_the_boundary_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trace's last step decision and state commit carry ``mean_space_boundary`` (#477 review).
+
+    The verdict is decided where PIRLS decides convergence, so the
+    authoritative events name it rather than a convergence the result then
+    contradicts.  Mutation: demoting only the returned result, after the
+    loop, leaves both events claiming ``fit_converged=True``.
+    """
+    from superglm._fit_trace import MemoryTraceSink, TraceRun
+    from superglm.model import fit_ops
+
+    sink = MemoryTraceSink()
+    original = fit_ops.fit_pirls
+
+    def traced(*args, **kwargs):
+        kwargs["trace_run"] = TraceRun("bcd-boundary", sink=sink)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fit_ops, "fit_pirls", traced)
+    frame, y = _all_events_region_frame()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=1e-2,
+        features={
+            "region": Categorical(base="first"),
+            "x": Numeric(),
+            "g": Categorical(base="first"),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    assert model.result.termination_reason == "mean_space_boundary"
+    for kind in ("step_decision", "state_commit"):
+        last = [event for event in sink.events if event.event_kind == kind][-1]
+        assert last.payload["fit_converged"] is False, kind
+        assert last.payload["termination_reason"] == "mean_space_boundary", kind
