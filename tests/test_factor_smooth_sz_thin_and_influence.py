@@ -1532,6 +1532,51 @@ def test_an_all_thin_sz_term_names_select_whatever_its_separation_mode() -> None
     assert not _sz_warnings(caught)
 
 
+def test_a_declared_empty_sz_level_is_weightless_when_the_term_selects_its_lines() -> None:
+    """``levels=`` may name a level the fit never sees once the term selects its lines (#457).
+
+    Without ``select`` the empty level breaks the sum-to-zero contrast, so it
+    is refused, and the message names ``select=True``. With it, every level's
+    line is penalized, so the empty block is proper: it is recorded as
+    weightless and predicted at the population curve, as a zero-weight level
+    is. Mutation: the guard applied whatever ``select`` is.
+    """
+    from superglm.model import base
+
+    frame, y = _separated_poisson()
+    declared = [*sorted(frame["g"].unique()), "g999"]
+
+    def model(select: bool) -> SuperGLM:
+        return SuperGLM(
+            family="poisson",
+            features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    levels=declared,
+                    select=select,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)},
+                )
+            ],
+            selection_penalty=0,
+            direct_solve="gram",
+        )
+
+    with pytest.raises(ValueError, match="select=True"):
+        model(False).fit_reml(frame, y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = model(True).fit_reml(frame, y)
+    spec = fitted._interaction_specs["x:g:sz"]
+    assert spec._weightless_levels == (declared.index("g999"),)
+    grid = pd.DataFrame({"x": np.linspace(0.0, 1.0, 11), "g": "g999"})
+    eta = base.predict_eta_exact(fitted, grid, warn=False)
+    population = base.predict_eta_exact(fitted, grid, random_effects="population", warn=False)
+    assert np.array_equal(eta, population)
+
+
 def test_a_weightless_sz_level_beside_selected_lines_predicts_the_population() -> None:
     """A level without weight is predicted at the population curve when the term selects its lines (#444).
 

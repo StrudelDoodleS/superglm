@@ -341,8 +341,12 @@ class FactorSmooth:
                 f"{sorted(set(outside.tolist()), key=str)}. Declared: "
                 f"{sorted(self._levels, key=str)}. Widen levels= or fix the column."
             )
-        if self.basis == "sz":
-            # An empty level does not shrink under sz, it breaks it: the
+        if self.basis == "sz" and not self._selects_lines:
+            # select=True penalizes every level's line beside its wiggle, so an
+            # empty block is proper there: it is recorded as weightless and
+            # predicted at the population curve (``_record_unidentified_levels``).
+            #
+            # Without it, an empty level does not shrink under sz, it breaks it: the
             # sum-to-zero constraint is what identifies these deviations
             # against the population smooth, and a level with no rows absorbs
             # any common curve, so the constraint stops binding.  Measured on
@@ -379,7 +383,8 @@ class FactorSmooth:
                     f"FactorSmooth basis='sz' cannot carry a declared group level with "
                     f"no training rows: {sorted(unobserved, key=str)}. Its sum-to-zero "
                     f"contrast stops identifying the deviations once a level is empty. "
-                    f"Use basis='fs', which penalizes every coordinate, or narrow levels=."
+                    f"Use select=True, which penalizes every level's line, basis='fs', which "
+                    f"penalizes every coordinate, or narrow levels=."
                 )
         return codes
 
