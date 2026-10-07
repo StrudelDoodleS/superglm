@@ -50,7 +50,7 @@ rows on the mapped scores; see [Interaction Screening](screen-interactions.md).
 |---|---|---|---|
 | Reference-coded fixed interaction | `SplineCategorical` | Model-dependent | No pooling |
 | Fully penalized random curves | `FactorSmooth(..., basis="fs")` | Optional | Wiggle and null-space directions shrink |
-| Centered deviation curves | `FactorSmooth(..., basis="sz")` | Required | Wiggle shrinks; polynomial null space remains |
+| Centered deviation curves | `FactorSmooth(..., basis="sz")` | Required | Wiggle shrinks; polynomial null space remains (shrinks with `select=True`) |
 
 Here `basis=` chooses the factor-smooth construction. `kind=` chooses the
 continuous marginal spline family; this release supports `kind="ps"` for both
@@ -144,9 +144,11 @@ not `Categorical`-parented, and in this release only the explicit
 only. Declare its universe explicitly when folds may drop a level. With
 `basis="fs"` an empty declared level is absorbed by the penalty (its curve
 shrinks to the population); `basis="sz"` rejects empty declared levels
-outright, because a level with no rows makes the centered system numerically
-singular (measured: minimum penalized eigenvalue collapses from ~0.6 to
-~4e-10).
+unless the term has `select=True`, because a level with no rows makes the
+centered system numerically singular (measured: minimum penalized eigenvalue
+collapses from ~0.6 to ~4e-10). With `select=True` every level's line is
+penalized, so an empty declared level is allowed and predicted at the
+population curve.
 
 ## Prediction behavior
 
@@ -155,9 +157,10 @@ Known levels receive their fitted FS curve or SZ deviation. With the default
 `unseen="error"` to reject it with its label. Missing values always fail.
 `FactorSmooth(levels=...)` binds the grouping factor's universe the same way
 `Categorical` does, so folds and refreshes share one set of curves; an empty
-declared level shrinks to the population smooth under `basis="fs"`, and is
-refused under `basis="sz"`, whose sum-to-zero contrast needs every level to
-carry rows.
+declared level shrinks to the population smooth under `basis="fs"`. Under
+`basis="sz"` it is refused, because the sum-to-zero contrast needs every
+level to carry rows, unless the term has `select=True`; then it is predicted
+at the population curve.
 
 ```python
 conditional = model.predict(test)
@@ -250,18 +253,22 @@ therefore the same model.
 - When every level is thin, the global curve is fitted through the trend
   across the levels, and the fit is the same on every solver.
 - The population curve is the global curve, and every level with data
-  predicts its own fitted curve. A level whose rows all have zero weight is
-  predicted at the population curve, and `predict` names it.
+  predicts its own fitted curve. A level whose rows all have zero weight, or
+  a level declared through `levels=` with no rows, is predicted at the
+  population curve, and `predict` names it.
 - No level's line is unpenalized, so the fit gives no `SeparationWarning`
   that names this term's levels, and no warning for thin levels.
+- A fit can still report a separation warning from the solver during the
+  smoothing-parameter search, before the lines' smoothing parameter grows.
+  The final curves are bounded.
 - The penalty shrinks every level's line, not just the separated ones, so it
   changes the other levels' curves and the term's effective degrees of
   freedom.
 - The smoothing parameter needs enough levels to estimate. With very few
   levels and one of them separated, REML can drive it to its lower bound and
   report that it did not converge. The lines are still finite there.
-- A lambda policy given as one `LambdaPolicy` for the whole term fixes both
-  `wiggle` and `null`. A dict of policies can name either; a component it
+- A lambda policy given as one `LambdaPolicy` for the whole term applies to
+  both `wiggle` and `null`. A dict of policies can name either; a component it
   leaves out is estimated.
 - `FactorSmooth` raises a `ValueError` for a policy that fixes `wiggle` or
   `null` at zero, which would leave part of every level unpenalized. Use

@@ -1346,6 +1346,8 @@ def _line_bound(model: SuperGLM, frame: pd.DataFrame, y: np.ndarray) -> np.ndarr
         lam["x:g:sz:wiggle"] * np.diag(components["wiggle"])
         + lam["x:g:sz:null"] * np.diag(components["null"])
     )
+    # A zero here makes the bound +inf, which every deviation would pass.
+    assert np.all(np.diag(P) > 0.0), "the term's penalty leaves a coordinate unpenalized"
     A, _, theta, _, _, _ = _working_rows(model)
     term = slice(1 + group.sl.start, 1 + group.sl.stop)
     eta = A @ theta
