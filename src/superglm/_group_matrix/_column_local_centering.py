@@ -247,7 +247,7 @@ def column_local_centering(
     (``RecentredColumns``), so a caller that meets them with other rows does
     so through ``recentred_products``, never through their raw values.
     ``None`` when a failing column's group has no compact support or one
-    that is not real binary64 or narrower (``_anchor_centred_columns``), when
+    ``_reads_as_float64`` declines (``_anchor_centred_columns``), when
     the failing columns' centred supports exceed ``_MAX_CENTRED_COLUMN_BYTES``,
     when a group's admitted columns cannot be read as their own values
     (``_admitted_readers``), or when an entry between admitted columns is
