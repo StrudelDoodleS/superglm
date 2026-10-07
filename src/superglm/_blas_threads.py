@@ -217,17 +217,6 @@ def narrow_kernel_blas_threads(width: int):
             _settle(1)
 
 
-def fit_blas_single_threaded() -> bool:
-    """Whether this thread's fit holds BLAS at one thread, as a pooled section does.
-
-    Inside a narrow fit under the single-thread cap, with no wide fit
-    releasing the pools: work overlapped with a pooled section then runs the
-    same one-thread arithmetic it would run alone.
-    """
-    stack = _scope_stack()
-    return bool(stack) and not stack[-1]["wide"] and _wide_scopes == 0 and _resolve_limit() == 1
-
-
 @contextmanager
 def pooled_blas_threads():
     """Hold BLAS at one thread while a worker pool runs, under every policy.
