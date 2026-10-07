@@ -2166,7 +2166,9 @@ def build_penalty_components(
                                 (n_levels - 1) * local_log_det + local_rank * np.log(n_levels)
                             ),
                             eigvals_omega=full_eigvals,
-                            component_type="wiggle" if suffix == "wiggle" else "null",
+                            # select=True's lines are a selection penalty, as Spline's null space
+                            # is: REML's no-signal snap applies to them.
+                            component_type="wiggle" if suffix == "wiggle" else "selection",
                             lambda_policy=lp_map.get(suffix),
                             penalty_kind="sum_to_zero",
                             repeat_count=n_levels,

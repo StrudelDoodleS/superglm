@@ -1470,6 +1470,35 @@ def test_an_sz_term_selects_its_lines_when_declared() -> None:
         FactorSmooth("x", group="g", basis="sz", select=1)
 
 
+def test_selected_sz_lines_are_a_selection_component() -> None:
+    """``select=True``'s ``null`` component is a ``selection`` penalty, as ``Spline(select=True)``'s is.
+
+    That tag is what the exact and discrete REML bootstraps key their
+    no-signal snap on (``quad << trace``: the Fellner-Schall update is then
+    nearly a fixed point for any lambda).  Mutation: the component tagged
+    ``"null"`` fails.
+    """
+    rng = np.random.default_rng(11)
+    n = 1500
+    x = rng.uniform(size=n)
+    frame = pd.DataFrame(
+        {"x": x, "g": np.array([f"g{v:02d}" for v in rng.integers(0, 8, n)], dtype=object)}
+    )
+    y = rng.poisson(np.exp(0.4 + 0.5 * np.sin(3 * x))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(n_knots=6)},
+        interactions=[FactorSmooth("x", group="g", basis="sz", select=True)],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    types = {pc.name: pc.component_type for pc in model._reml_penalties}
+    assert types["x:g:sz:null"] == "selection"
+    assert types["x:g:sz:wiggle"] == "wiggle"
+
+
 def test_an_all_thin_sz_term_names_select_whatever_its_separation_mode() -> None:
     """Without ``select``, an all-thin term with a separated line names the option in every mode (#444).
 
