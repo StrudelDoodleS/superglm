@@ -224,13 +224,19 @@ class NotebookTransport:
         self.view = notebook_view_class()(bundle=app_bundle()) if view is None else view
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
-            target=self._loop.run_forever,
+            target=self._run_loop,
             name=f"superglm-editor-notebook-{id(self):x}",
             daemon=True,
         )
         self._thread.start()
         self._closed = False
         self.view.on_msg(self._on_message)
+
+    def _run_loop(self) -> None:
+        try:
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
 
     def _on_message(self, _view: Any, content: Any, _buffers: Any = None) -> None:
         if self._closed or not isinstance(content, dict) or content.get("type") != REQUEST:
@@ -302,17 +308,31 @@ class NotebookTransport:
         }
 
     def close(self) -> None:
-        """Stop answering requests and close the view."""
+        """Stop answering requests and close the view.
+
+        Returns at once. The loop cancels the requests still running and
+        stops once they have finished, so their handlers' worker threads
+        are released; a handler blocked in a job-status wait finishes when
+        the job stops or the wait times out.
+        """
         if self._closed:
             return
         self._closed = True
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=2.0)
-        if not self._thread.is_alive():
-            self._loop.close()
+        asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
         close = getattr(self.view, "close", None)
         if callable(close):
             close()
+
+    async def _shutdown(self) -> None:
+        current = asyncio.current_task()
+        requests = [task for task in asyncio.all_tasks() if task is not current]
+        for task in requests:
+            task.cancel()
+        await asyncio.gather(*requests, return_exceptions=True)
+        # The finished requests' done-callbacks stop AnyIO's worker threads.
+        await asyncio.sleep(0)
+        await self._loop.shutdown_asyncgens()
+        self._loop.stop()
 
 
 __all__ = ["NotebookTransport", "app_bundle", "call_asgi", "page_html", "pack_modules"]

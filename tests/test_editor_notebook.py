@@ -252,6 +252,36 @@ def test_closing_the_widget_closes_its_view_and_stops_answering(session_model, m
         view.outbox.get(timeout=0.5)
 
 
+def test_closing_mid_request_finishes_it_and_releases_its_threads(notebook_widget, monkeypatch):
+    """A request still running at close ends with the loop, not after it.
+
+    Stopping the loop at once left the request unfinished and its AnyIO
+    worker thread waiting for a loop that had closed.
+    """
+    widget, view = notebook_widget
+    transport = widget._notebook
+    entered, release = threading.Event(), threading.Event()
+
+    def waiting_status(job_id, wait=False):
+        entered.set()
+        release.wait(timeout=30.0)
+        return {"job_id": job_id, "status": "done"}
+
+    monkeypatch.setattr(widget, "_job_status", waiting_status)
+    _request(view, 12, "POST", "/job_status", {"job_id": "j", "wait": True})
+    assert entered.wait(timeout=30.0)
+    workers = [thread for thread in threading.enumerate() if "AnyIO worker" in thread.name]
+    assert workers
+
+    widget.close()  # returns while the handler still waits
+    release.set()
+    transport._thread.join(timeout=30.0)
+    assert not transport._thread.is_alive() and transport._loop.is_closed()
+    for worker in workers:
+        worker.join(timeout=30.0)
+        assert not worker.is_alive(), worker.name
+
+
 # -- Display and mode ----------------------------------------------------------
 
 

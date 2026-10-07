@@ -31,24 +31,47 @@ test("a request goes to Python as one message with its id, method, url, headers 
     body: '{"operation":"reset"}'
   });
   transport.fetch(new URL("http://kernel/download_export?format=xlsx"));
+  const [first, second] = model.sent.map((message) => message.id);
+  assert.match(first, /^[0-9a-z]+-0$/);
+  assert.equal(second, first.replace(/-0$/, "-1"));
   assert.deepEqual(model.sent, [
     {
       type: REQUEST,
-      id: 0,
+      id: first,
       method: "POST",
       url: "/op",
       headers: [["content-type", "application/json"]],
       body: '{"operation":"reset"}'
     },
-    { type: REQUEST, id: 1, method: "GET", url: "/download_export?format=xlsx", headers: [], body: null }
+    { type: REQUEST, id: second, method: "GET", url: "/download_export?format=xlsx", headers: [], body: null }
   ]);
+});
+
+test("views of one widget never take each other's replies", async () => {
+  // Python's replies reach every view; a rebuilt page's new transport also
+  // overlaps the old one's requests still in flight.
+  const model = recordingModel();
+  const state = createMessageFetch(model, realm);
+  const download = createMessageFetch(model, realm);
+  const stateResponse = state.fetch("/state");
+  const downloadResponse = download.fetch("/download_export?format=joblib");
+  const [stateId, downloadId] = model.sent.map((message) => message.id);
+  assert.notEqual(stateId, downloadId);
+  const reply = { type: RESPONSE, id: stateId, status: 200, headers: [], part: 0, parts: 1 };
+  for (const view of [state, download]) view.receive(reply, [bytes('{"terms":{}}')]);
+  assert.equal(await (await stateResponse).text(), '{"terms":{}}');
+  assert.equal(download.pending.size, 1);
+  for (const view of [state, download]) {
+    view.receive({ ...reply, id: downloadId }, [bytes("model bytes")]);
+  }
+  assert.equal(await (await downloadResponse).text(), "model bytes");
 });
 
 test("a reply in parts resolves once every part has arrived, in part order", async () => {
   const model = recordingModel();
   const transport = createMessageFetch(model, realm);
   const response = transport.fetch("/state");
-  const reply = { type: RESPONSE, id: 0, status: 200, headers: [["x-superglm-validation", "train"]], parts: 3 };
+  const reply = { type: RESPONSE, id: model.sent[0].id, status: 200, headers: [["x-superglm-validation", "train"]], parts: 3 };
   transport.receive({ ...reply, part: 2 }, [bytes("c")]);
   transport.receive({ ...reply, part: 0 }, [bytes("a")]);
   assert.equal(transport.pending.size, 1);
@@ -66,18 +89,20 @@ test("an error status resolves as a Response the client reads as an error", asyn
   const client = createEditorClient({ fetchImpl: transport.fetch });
   const failed = client.postJSON("/op", { operation: "nope" });
   transport.receive(
-    { type: RESPONSE, id: 0, status: 400, headers: [["content-type", "application/json"]], part: 0, parts: 1 },
+    { type: RESPONSE, id: model.sent[0].id, status: 400, headers: [["content-type", "application/json"]], part: 0, parts: 1 },
     [bytes('{"error":"Unknown editor operation"}')]
   );
   await assert.rejects(failed, { name: "EditorAPIError", status: 400, message: "Unknown editor operation" });
 });
 
 test("a no-content reply has no body, and other messages are ignored", async () => {
-  const transport = createMessageFetch(recordingModel(), realm);
+  const model = recordingModel();
+  const transport = createMessageFetch(model, realm);
   const response = transport.fetch("/favicon.ico");
-  transport.receive({ type: "something else", id: 0 });
-  transport.receive({ type: RESPONSE, id: 99, status: 200, headers: [], part: 0, parts: 1 }, [bytes("x")]);
-  transport.receive({ type: RESPONSE, id: 0, status: 204, headers: [], part: 0, parts: 1 }, [bytes("")]);
+  const id = model.sent[0].id;
+  transport.receive({ type: "something else", id });
+  transport.receive({ type: RESPONSE, id: `${id}9`, status: 200, headers: [], part: 0, parts: 1 }, [bytes("x")]);
+  transport.receive({ type: RESPONSE, id, status: 204, headers: [], part: 0, parts: 1 }, [bytes("")]);
   const resolved = await response;
   assert.equal(resolved.status, 204);
   assert.equal(resolved.body, null);

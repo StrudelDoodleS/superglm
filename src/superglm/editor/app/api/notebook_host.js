@@ -32,17 +32,29 @@ const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
  * @property {number} received
  */
 
+/** @returns {string} a random prefix that keeps one transport's request ids its own */
+function transportPrefix() {
+  const words = new Uint32Array(2);
+  globalThis.crypto.getRandomValues(words);
+  return Array.from(words, (word) => word.toString(36)).join("");
+}
+
 /**
  * A fetch whose requests go to Python as widget messages. Python answers each
  * in one or more parts, all carrying the request's id; the Response resolves
  * once every part has arrived. Responses are built in `realm`, the page's
  * window, so the page reads them as its own.
+ *
+ * Python's replies reach every view of the widget, and a rebuilt page gets a
+ * new transport while its old requests may still be answered, so each
+ * transport's ids carry their own random prefix.
  * @param {Pick<WidgetModel, "send">} model
  * @param {Realm} realm
  */
 export function createMessageFetch(model, realm) {
+  const prefix = transportPrefix();
   let nextId = 0;
-  /** @type {Map<number, PendingRequest>} */
+  /** @type {Map<string, PendingRequest>} */
   const pending = new Map();
 
   /**
@@ -55,7 +67,7 @@ export function createMessageFetch(model, realm) {
     if (init.body != null && typeof init.body !== "string") {
       return Promise.reject(new Error("The notebook editor sends text request bodies only."));
     }
-    const id = nextId++;
+    const id = `${prefix}-${nextId++}`;
     const headers = [...new realm.Headers(init.headers).entries()];
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject, parts: [], received: 0 });
