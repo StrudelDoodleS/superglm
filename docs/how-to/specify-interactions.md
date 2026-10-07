@@ -107,7 +107,8 @@ model = SuperGLM(
 ).fit_reml(X, y)
 ```
 
-SZ is analogous to mgcv's `bs="sz"` with one shared smoothing parameter. At
+SZ is analogous to mgcv's `bs="sz"` with one shared smoothing parameter (two,
+`wiggle` and `null`, with `select=True`). At
 every value of `age`, the fitted regional deviations sum exactly to zero, so
 the required global `Spline` is the portfolio curve and the SZ term describes
 departures from it. Adding the global spline is therefore intended, not a

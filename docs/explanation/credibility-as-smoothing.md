@@ -20,7 +20,8 @@ credibility or collapse.
 All three use every fitted level rather than dropping a reference level. REML
 estimates their penalty strengths. For RE and FS this controls full shrinkage
 toward the population prediction; for SZ it controls wiggle around a
-sum-to-zero deviation surface.
+sum-to-zero deviation surface, and with `select=True` every level's line as
+well, so the deviations can shrink fully.
 
 ## Random intercept credibility
 
@@ -276,6 +277,9 @@ which others.
   standard error of the term and of its main effect missing (NaN).
 - **The structured solver names the level.** It names such a level in a
   warning. The Gram solver fits the same model without that warning.
+- **None of this applies with `select=True`.** The term then penalizes every
+  level's line, so no level is thin, its standard errors are finite, and
+  neither solver warns.
 
 `discrete=True` bins the continuous spline support and reuses cached
 sufficient statistics across REML iterations; factor identities and the SZ
