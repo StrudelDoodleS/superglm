@@ -10,9 +10,11 @@ import atexit
 import html
 import io
 import logging
+import os
 import secrets
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +54,7 @@ from superglm.editor.io import jsonable
 from superglm.editor.jobs import JobContext, JobRunner
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
+from superglm.editor.notebook import NotebookTransport, notebook_view_class
 from superglm.editor.payloads import (
     pending_payload,
     session_payload,
@@ -60,7 +63,7 @@ from superglm.editor.payloads import (
 )
 from superglm.editor.rating_preview import PREVIEW_IMPACT_BINS, RatingPreview
 from superglm.editor.reports import report_payload, split_metrics_payload
-from superglm.editor.server import EditorAppServer
+from superglm.editor.server import EditorAppServer, create_editor_app
 from superglm.editor.summaries import offset_label_payload, summary_payload
 from superglm.inference.summary_levels import validate_level_display
 from superglm.profiling._reporting import (
@@ -135,15 +138,22 @@ def _safe_export_filename(format: str, filename: str | None) -> str:
 class EditorWidget:
     """Lightweight iframe app for an :class:`EditorSession`.
 
-    The app uses a local HTTP server rather than a custom Jupyter widget model.
-    It renders in VS Code as plain HTML and updates the live Python session via
-    JSON requests to the kernel process.
+    In ``"server"`` mode the app uses a local HTTP server rather than a custom
+    Jupyter widget model. It renders in VS Code as plain HTML and updates the
+    live Python session via JSON requests to the kernel process. That needs a
+    browser on the kernel's machine; ``"notebook"`` mode runs the same app
+    inside the notebook cell instead and carries its requests over widget
+    messages, for hosted notebooks such as Databricks (see
+    :mod:`superglm.editor.notebook`).
     """
 
-    def __init__(self, session, **kwargs: Any):
+    def __init__(self, session, *, mode: str | None = None, **kwargs: Any):
         if kwargs:
             unknown = ", ".join(sorted(kwargs))
             raise TypeError(f"Unexpected EditorWidget argument(s): {unknown}")
+        self.mode = _display_mode(mode)
+        if self.mode == "notebook":
+            notebook_view_class()  # anywidget is optional: say so before starting anything
         self.session = session
         self.control_counts: dict[str, int] = {}
         self._offset_refit_model = None
@@ -175,16 +185,32 @@ class EditorWidget:
         self._closed = False
         self._evaluation_cache = EvaluationCache()
         self._evidence = EvidenceCoordinator(f"editor-{id(self):x}")
-        # A local iframe avoids Jupyter widget-extension dependencies while
-        # still letting Python own the authoritative edit state.
-        self._server = EditorAppServer(self)
-        self.host, self.port = self._server.host, self._server.port
-        self.url = f"http://127.0.0.1:{self.port}"
-        self.app_url = f"{self.url}?token={self._token}"
-        self._server.start()
+        self._server: EditorAppServer | None = None
+        self._notebook: NotebookTransport | None = None
+        self.host: str | None = None
+        self.port: int | None = None
+        self.url: str | None = None
+        self.app_url: str | None = None
+        if self.mode == "notebook":
+            self._notebook = NotebookTransport(create_editor_app(self), self._token)
+        else:
+            # A local iframe avoids Jupyter widget-extension dependencies while
+            # still letting Python own the authoritative edit state.
+            self._server = EditorAppServer(self)
+            self.host, self.port = self._server.host, self._server.port
+            self.url = f"http://127.0.0.1:{self.port}"
+            self.app_url = f"{self.url}?token={self._token}"
+            self._server.start()
         _LIVE_WIDGETS.add(self)
 
-    def _repr_html_(self) -> str:
+    def _repr_mimebundle_(self, include=None, exclude=None) -> dict[str, Any] | None:
+        if self._notebook is None:
+            return None
+        return self._notebook.mimebundle()
+
+    def _repr_html_(self) -> str | None:
+        if self.app_url is None:
+            return None
         src = html.escape(self.app_url, quote=True)
         display_url = html.escape(self.app_url, quote=True)
         return (
@@ -198,14 +224,17 @@ class EditorWidget:
         )
 
     def close(self) -> None:
-        """Stop the local editor server."""
+        """Stop the local editor server, or the in-notebook view."""
         if self._closed:
             return
         self._closed = True
         _LIVE_WIDGETS.discard(self)
         self._jobs.close()
         self._evidence.close()
-        self._server.close()
+        if self._server is not None:
+            self._server.close()
+        if self._notebook is not None:
+            self._notebook.close()
 
     def _state(self) -> dict[str, Any]:
         with self._lock:
@@ -1030,6 +1059,13 @@ class EditorWidget:
                 job["profile_estimate"] = _normalise_profile_estimate(payload["profile_estimate"])
             job["finished_at"] = time.time()
             self._profile_condition.notify_all()
+        # The profile replaced the in-force model, its selection and history.
+        self._notify_changed()
+
+    def _notify_changed(self) -> None:
+        """Tell every in-notebook view that a job changed what they show."""
+        if self._notebook is not None:
+            self._notebook.notify_changed()
 
     def _job_start(self, kind: str) -> dict[str, Any]:
         """Capture a job's inputs under the lock, then start it off the lock."""
@@ -1049,6 +1085,7 @@ class EditorWidget:
                 if not plan.is_current(self.session):
                     raise EditorValueError(SUPERSEDED)
                 self._cv_run = run
+            self._notify_changed()
             return {"model_revision": plan.model_revision, "n_folds": len(plan.folds)}
 
         return (lambda context: run_cv(plan, context)), publish
@@ -1062,6 +1099,7 @@ class EditorWidget:
                 if not plan.is_current(self.session):
                     raise EditorValueError(SUPERSEDED)
                 self._final_fit = final
+            self._notify_changed()
             return {"model_revision": plan.model_revision, "n_rows": final.n_rows}
 
         return (lambda context: run_final_fit(plan, context)), publish
@@ -1316,6 +1354,35 @@ def _superseded_payload(
         "model_revision": int(model_revision),
         "request_sequence": request_sequence,
     }
+
+
+_NOTEBOOK_FALLBACK = (
+    "On Databricks the editor runs inside the notebook cell, which needs anywidget, and "
+    "anywidget is not installed. The editor uses its local server instead, which a "
+    "Databricks browser cannot reach. Install it with: %pip install 'superglm[notebook]'"
+)
+
+
+def _display_mode(mode: str | None) -> str:
+    """The editor's display mode: ``mode``, else notebook on Databricks.
+
+    A Databricks notebook's browser never reaches the cluster's local
+    addresses, so the local server's page cannot load there. Without
+    anywidget the automatic choice stays the local server, as before notebook
+    mode existed, and warns how to install it.
+    """
+    if mode is None:
+        if not os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+            return "server"
+        try:
+            notebook_view_class()
+        except ImportError:
+            warnings.warn(_NOTEBOOK_FALLBACK, UserWarning, stacklevel=4)
+            return "server"
+        return "notebook"
+    if mode not in {"server", "notebook"}:
+        raise EditorValueError("mode must be 'server', 'notebook' or None.")
+    return mode
 
 
 def _close_live_widgets() -> None:

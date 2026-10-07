@@ -37,6 +37,38 @@ The standard iframe is 1180 by 720 pixels. At narrower notebook widths the inspe
 drawer; in a short window the workspace scrolls instead of shrinking the plot into an unusable
 strip.
 
+### On Databricks and other hosted notebooks
+
+`session.widget()` normally serves the editor from a small web server on the machine that runs
+Python, and the notebook shows that page. On a hosted notebook such as Databricks, your browser
+cannot reach that machine, and the page shows "refused to connect". Run the editor inside the
+notebook cell instead. It needs one extra package, which a notebook cell installs with
+`%pip install "superglm[notebook]"`:
+
+```python
+from superglm.editor import EditorSession
+
+session = EditorSession.from_model(model, train_data=(X_train, y_train, w_train))
+session.widget(mode="notebook")
+```
+
+On Databricks, once the package is installed, `session.widget()` picks this mode by itself; without
+it, the editor keeps its web server and warns with the install line. Use `mode="notebook"` on any other
+notebook whose browser is not on the machine running Python, such as a remote JupyterHub, and
+`mode="server"` to keep the web server where both run on one machine.
+
+The editor behaves the same in either mode, with four differences:
+
+- It answers only while the notebook is idle, so it waits while another cell runs.
+- **Export** downloads through the browser, which some workplaces block. **Save to Kernel Path**
+  writes the file on the cluster instead, for example to a Unity Catalog volume such as
+  `/Volumes/catalog/schema/volume`.
+- **Open Folder** is not offered, because the folder is on the cluster rather than on your
+  computer.
+- Each change travels to Python as one notebook message, which carries at most 4 MB. A larger
+  one, such as a very long History note, is refused with a message saying so; make it in smaller
+  steps or in Python on the session.
+
 ## Find a Feature
 
 The feature list on the left names every term in the editor, grouped as the chart groups them,

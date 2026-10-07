@@ -44,10 +44,22 @@ async function responseError(response) {
   return new EditorAPIError(errorMessage(payload, response), response.status, payload);
 }
 
+/**
+ * The page's fetch: the notebook host's when the editor runs inside a
+ * notebook cell, which carries requests over widget messages, else the
+ * browser's, to the local server.
+ * @returns {FetchImpl}
+ */
+function hostFetch() {
+  const host = /** @type {{superglmEditorHost?: {fetch?: FetchImpl}}} */ (globalThis)
+    .superglmEditorHost;
+  return host?.fetch ?? globalThis.fetch;
+}
+
 /** @param {EditorClientOptions} [options] */
 export function createEditorClient({
   token = tokenFromLocation(),
-  fetchImpl = globalThis.fetch
+  fetchImpl = hostFetch()
 } = {}) {
   /** @param {RequestInit} options */
   function withEditorToken(options) {

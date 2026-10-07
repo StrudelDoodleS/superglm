@@ -686,6 +686,31 @@ if (
 ) {
   throw new Error("Editor export dialog is incomplete");
 }
+// Inside a notebook cell the kernel runs on another machine, so its file
+// manager would open there: the dialog saves to a kernel path and stops.
+const notebookHost = globalThis.superglmEditorHost?.kind === "notebook";
+if (notebookHost && exportOpenDirectory instanceof HTMLElement) exportOpenDirectory.hidden = true;
+// One editor can show in several notebook outputs. When another output
+// changes the session, this one re-reads it, once for a burst of changes.
+if (notebookHost) {
+  let refreshing = false;
+  let again = false;
+  globalThis.superglmEditorHost.onRemoteChange = async () => {
+    if (refreshing) {
+      again = true;
+      return;
+    }
+    refreshing = true;
+    try {
+      do {
+        again = false;
+        await actions.refreshFromPythonWhenIdle();
+      } while (again);
+    } finally {
+      refreshing = false;
+    }
+  };
+}
 bindExportDialog({
   client: editorClient,
   nodes: {
@@ -697,7 +722,7 @@ bindExportDialog({
     directory: exportDirectory,
     download: exportDownload,
     saveToKernel: exportSave,
-    openDirectory: exportOpenDirectory instanceof HTMLButtonElement
+    openDirectory: !notebookHost && exportOpenDirectory instanceof HTMLButtonElement
       ? exportOpenDirectory
       : null,
     status: exportStatus,
@@ -1868,7 +1893,10 @@ for (const button of document.querySelectorAll("button[data-op]")) {
       return;
     }
     stopContributionBuild();
-    await executeStateMutation("/op", { operation });
+    // Each operation names the term this page shows: Python's selected term
+    // is shared, and another page of the same session may have moved it.
+    const term = selectedTerm();
+    await executeStateMutation("/op", term ? { operation, term } : { operation });
   });
 }
 
