@@ -32,6 +32,7 @@ from superglm.distributional.prediction_design import (
     _score_feature,
     _score_interaction,
     _term_indices,
+    warn_population_levels,
 )
 from superglm.distributional.predictor import (
     CompiledPredictor,
@@ -338,16 +339,7 @@ class DenseDistributionalModel:
                 for predictor in self.compiled_predictors
             )
         )
-        if named:
-            # SuperGLM's prediction warning (``model.base``), once per call.
-            from superglm.profiling._scalar import warn_caller
-
-            warn_caller(
-                "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than "
-                "the penalty's null space keep the curve their rows identify and follow the "
-                "population curve's shape where their rows say nothing; levels without weight "
-                "are predicted at the population value: " + "; ".join(named) + "."
-            )
+        warn_population_levels(named)
         return _readonly(eta)
 
     def predict_parameters(

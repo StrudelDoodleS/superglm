@@ -1629,7 +1629,8 @@ def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() ->
     the population curve, as an unseen level is, and public prediction names
     it in one warning, as SuperGLM's ``predict`` does; rows of other levels
     warn nothing. Mutations: no recording at the SuperLSS fit; the
-    prediction scoring raw blocks; the names discarded.
+    prediction scoring raw blocks; the names discarded, on either the point
+    or the posterior-draw path.
     """
     model, frame, y, weight, lambdas = _superlss_with_a_declared_empty_sz_level()
     with warnings.catch_warnings():
@@ -1652,16 +1653,18 @@ def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() ->
     assert np.array_equal(scored, population)
     assert not np.allclose(spec.score(grid_x, level_d, beta), population)
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        model.predict_link(pd.DataFrame({"x": grid_x, "g": level_d}))
-        model.predict_link(pd.DataFrame({"x": grid_x, "g": "a"}))
-    messages = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
-    assert len(messages) == 1
-    assert messages[0].endswith(
-        "predicted at the population value: location term 'x:g:sz' levels d."
-    )
-    assert caught[0].filename == __file__
+    named = "predicted at the population value: location term 'x:g:sz' levels d."
+    for predict in (
+        model.predict_link,
+        lambda frame: model.posterior_predictive(frame, n_draws=4, seed=0),
+        lambda frame: model.posterior_bounds(frame, "mean", n_draws=4, seed=0),
+    ):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            predict(pd.DataFrame({"x": grid_x, "g": level_d}))
+            predict(pd.DataFrame({"x": grid_x, "g": "a"}))
+        user = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert [(str(w.message).endswith(named), w.filename) for w in user] == [(True, __file__)]
 
 
 @pytest.mark.parametrize("component", ["wiggle", "null"])
