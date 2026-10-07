@@ -326,6 +326,17 @@ def test_the_real_view_answers_through_anywidget_and_displays_as_a_widget(sessio
         widget.close()
 
 
+def test_a_closed_notebook_editor_displays_as_closed_text(session_model):
+    pytest.importorskip("anywidget")
+    formatters = pytest.importorskip("IPython.core.formatters")
+    widget = EditorSession.from_model(session_model).widget(mode="notebook")
+    widget.close()
+    # The closed anywidget view has no comm, so its model id is gone.
+    assert widget._repr_mimebundle_() == {"text/plain": "SuperGLM editor (closed)"}
+    data, _metadata = formatters.DisplayFormatter().format(widget)
+    assert data == {"text/plain": "SuperGLM editor (closed)"}
+
+
 def test_server_mode_still_displays_its_local_page(session_model):
     formatters = pytest.importorskip("IPython.core.formatters")
     widget = EditorSession.from_model(session_model).widget(mode="server")

@@ -302,7 +302,12 @@ class NotebookTransport:
             self.view.send(message, buffers=[chunk])
 
     def mimebundle(self) -> dict[str, Any]:
-        """The display data that shows this transport's view."""
+        """The display data that shows this transport's view.
+
+        A closed view has no model left to show, so it displays as text.
+        """
+        if self._closed:
+            return {"text/plain": "SuperGLM editor (closed)"}
         own = getattr(self.view, "_repr_mimebundle_", None)
         if callable(own):
             data = own()

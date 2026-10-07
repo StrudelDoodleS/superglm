@@ -1584,7 +1584,8 @@ class EditorSession:
         kernel's machine. ``mode="notebook"`` runs it inside the notebook
         cell over widget messages, for hosted notebooks such as Databricks,
         and needs ``pip install 'superglm[notebook]'``. ``None`` picks
-        notebook on Databricks and server elsewhere.
+        notebook on Databricks and server elsewhere; on Databricks without
+        anywidget it keeps server and warns with the install line.
         """
         from superglm.editor.widget import EditorWidget
 
