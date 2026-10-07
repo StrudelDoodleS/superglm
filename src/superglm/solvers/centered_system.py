@@ -243,6 +243,9 @@ def _design_leaf_parts(dm: DesignMatrix) -> _LeafParts:
         cached = reuse.leaf_parts.get(id(dm))
         if cached is not None and cached[0] is dm and cached[1] is dm.group_matrices:
             return cached[2]
+        # Only the design being factored keeps its tables: a fit factors a
+        # superseded design (a REML rebuild's predecessor) no more.
+        reuse.leaf_parts.clear()
 
     def supports(gm) -> bool:
         kind = type(gm)
@@ -367,9 +370,10 @@ class _DataFactorReuse:
     successive smoothing states).  The ``_ENTRIES`` most recently used are
     kept (a few factors of ``(p + 1)^2`` doubles and their ``n``-vectors); a
     hit returns copies, so no caller can change an entry.  ``leaf_parts``
-    keeps each design's leaf parts (``_design_leaf_parts``, its support
-    tables included) for the fit: a function of the design alone, keyed by
-    the design and its group matrices.
+    keeps the leaf parts (``_design_leaf_parts``, its support tables
+    included) of the design the fit factored last, a function of that design
+    alone, keyed by the design and its group matrices: at most one design's
+    tables are retained (``retained_bytes``).
     """
 
     _ENTRIES = 4

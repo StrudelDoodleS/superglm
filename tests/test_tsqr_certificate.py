@@ -783,6 +783,63 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     assert data.rank == model.result.beta.size - 2
 
 
+def test_discrete_reml_keeps_one_design_of_support_tables(monkeypatch):
+    """A discrete REML fit rebuilds its design every outer iteration; only the latest keeps tables.
+
+    Two aliased factors keep every PIRLS step on the factor certificate, and
+    the discrete optimizer rebuilds the design each outer iteration
+    (``rebuild_design_matrix_with_lambdas``).  Each design's leaf parts
+    replace the last's, so the fit holds at most one entry and
+    ``retained_bytes`` (what every pool is charged) never exceeds one
+    design's tables.  Mutation check: without the eviction the entries
+    accumulate, one per design factored.
+    """
+    import superglm.solvers.centered_system as centered_system
+
+    rng = np.random.default_rng(3)
+    n = 4_000
+    x = rng.uniform(-1.0, 1.0, n)
+    level = rng.integers(0, 3, n)
+    frame = pd.DataFrame(
+        {
+            "x": x,
+            "a": pd.Categorical([f"a{v}" for v in level]),
+            "b": pd.Categorical([f"b{v}" for v in level]),
+        }
+    )
+    y = rng.poisson(np.exp(0.3 * np.sin(2.0 * x) + 0.2 * level)).astype(float)
+    designs: list = []
+    entries: list[int] = []
+    retained: list[int] = []
+    held: list[int] = []
+    build = centered_system._design_leaf_parts
+
+    def recorded(design):
+        parts = build(design)
+        reuse = centered_system._DATA_FACTOR_REUSE.get()
+        assert reuse is not None
+        designs.append(design)
+        entries.append(len(reuse.leaf_parts))
+        retained.append(parallel.retained_bytes())
+        held.append(parts.held)
+        return parts
+
+    monkeypatch.setattr(centered_system, "_design_leaf_parts", recorded)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={"x": Spline(kind="ps", k=8), "a": Categorical(), "b": Categorical()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    assert len({id(design) for design in designs}) >= 3
+    assert max(held) > 0
+    assert max(entries) == 1
+    assert max(retained) <= max(held)
+
+
 def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     """The direct REML loop's bootstrap fit leaves rank metadata to the published refit.
 
