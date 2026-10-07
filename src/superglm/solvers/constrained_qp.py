@@ -466,6 +466,31 @@ def _stationarity_certificate(
     return stationary, None, multipliers
 
 
+def _certifies_kkt_point(
+    H: NDArray,
+    g: NDArray,
+    beta: NDArray,
+    A: NDArray,
+    b: NDArray,
+    active: list[int],
+    tol: float,
+    abs_A: NDArray,
+) -> bool:
+    """Whether ``beta`` passes the complete KKT certificate on ``active`` as it stands.
+
+    Primal feasibility, stationarity with multipliers no more negative than
+    their allowance, and complementarity: the three tests the small-step
+    branch of ``solve_constrained_qp`` converges on, read without dropping a
+    row or repairing ``beta``.
+    """
+    if not _is_feasible(A, beta, b, tol, abs_A=abs_A):
+        return False
+    stationary, drop_idx, multipliers = _stationarity_certificate(H, g, beta, A[active], tol)
+    if not stationary or drop_idx is not None:
+        return False
+    return _complementarity_certificate(H, g, beta, A[active], b[active], multipliers, tol)
+
+
 def _is_feasible(
     A: NDArray, beta: NDArray, b: NDArray, tol: float, *, abs_A: NDArray | None = None
 ) -> bool:
@@ -1062,6 +1087,19 @@ def solve_constrained_qp(
     # ``_feasibility_slack``.
     abs_A = np.abs(A)
     zero_face_cache: dict[tuple[int, ...], bool] = {}
+    # Whether ``beta`` is the minimizer on the current face: the previous
+    # iteration took its full step and kept the active set.  In exact
+    # arithmetic the next step is then zero (Nocedal and Wright, *Numerical
+    # Optimization*, 2nd ed., 2006, Algorithm 16.3); in floating point it is
+    # the saddle solve's rounding, about u times the KKT system's condition
+    # number relative to ``beta``, which an ill-conditioned ``H`` (thin
+    # random-effect levels at a small penalty) lifts above the ``tol`` step
+    # gate below.  Without this the loop then steps along rounding until
+    # ``max_iter`` and never reaches its certificate.  Only a full-rank ``H``
+    # has one minimizer per face: on a rank-deficient one a face minimum is a
+    # whole flat set, and the loop keeps stepping to the representative its
+    # least-squares saddle solve picks (see ``kkt_may_be_singular``).
+    at_face_minimum = False
 
     for it in range(max_iter):
         # --- Equality-constrained subproblem on active set ---
@@ -1145,7 +1183,18 @@ def solve_constrained_qp(
         # material update to another.  It also preserves the previous absolute
         # Euclidean test exactly while every ``|beta_i| <= 1``.
         relative_step = step / np.maximum(1.0, np.abs(beta))
-        if np.linalg.norm(relative_step) < tol:
+        small_step = bool(np.linalg.norm(relative_step) < tol)
+        if (
+            at_face_minimum
+            and not small_step
+            and not kkt_may_be_singular
+            and _certifies_kkt_point(H_sym, g, beta, A, b, active, tol, abs_A)
+        ):
+            # The complete certificate, so a pass means the same here as at a
+            # small step; a failure changes nothing and the loop steps on.
+            return _result(beta, active, it + 1, converged=True)
+        at_face_minimum = False
+        if small_step:
             stationary, drop_idx, multipliers = _stationarity_certificate(
                 H_sym, g, beta, A[active], tol
             )
@@ -1185,6 +1234,7 @@ def solve_constrained_qp(
         if _is_feasible(A, beta_new, b, tol, abs_A=abs_A):
             # Full step is feasible
             beta = beta_new
+            at_face_minimum = True
         else:
             # Find blocking constraint (first to be violated along step)
             alpha_min = 1.0
@@ -1242,6 +1292,7 @@ def solve_constrained_qp(
                 active.append(blocking)
             else:
                 beta = beta_new
+                at_face_minimum = True
 
     # Exhaustion is unconditional non-convergence, feasible or not: the loop
     # never reached its stationarity/multiplier test, so there is no KKT
