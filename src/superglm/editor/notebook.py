@@ -46,7 +46,7 @@ MESSAGE_PART_BYTES = 1 << 20
 
 _SPECIFIER = re.compile(r"""(\b(?:from|import)\s*)(["'])(\.\.?/[^"']+)\2""")
 _STYLESHEET = re.compile(r"""<link\s+rel="stylesheet"\s+href="/assets/([^"]+)">""")
-_SCRIPT = re.compile(r"<script\b[^>]*>.*?</script>\s*", re.S)
+_SCRIPT = re.compile(r"<script\b[^>]*>.*?</script\b[^>]*>\s*", re.S | re.I)
 
 
 def pack_modules(sources: Mapping[str, str], entry: str = ENTRY_MODULE) -> list[dict[str, str]]:

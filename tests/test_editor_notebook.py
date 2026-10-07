@@ -105,7 +105,7 @@ def test_the_bundle_lists_every_module_after_the_modules_it_imports():
 
 def test_the_page_carries_its_styles_inline_and_runs_no_script_of_its_own():
     html = app_bundle()["html"]
-    assert "<script" not in html
+    assert "<script" not in html.lower()
     assert "/assets/" not in html
     index = notebook.read_app_asset("index.html").decode()
     for sheet in re.findall(r'href="/assets/([^"]+)"', index):
@@ -156,7 +156,8 @@ def test_packing_names_the_importer_of_a_missing_module():
 def test_page_html_inlines_each_stylesheet_in_place():
     html = page_html(
         '<head><script>theme()</script><link rel="stylesheet" href="/assets/a.css"></head>'
-        '<body><script type="module" src="/assets/main.js"></script></body>',
+        '<body><script type="module" src="/assets/main.js"></script>'
+        "<SCRIPT>upper()</SCRIPT ><script>spaced()</script\n></body>",
         lambda path: f"/* {path} */",
     )
     assert html == '<head><style data-asset="a.css">\n/* a.css */</style></head><body></body>'
