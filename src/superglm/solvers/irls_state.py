@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._utils import weighted_row_sum
 from superglm.distributions import Binomial, Distribution, Poisson, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import _BINOMIAL_CLIP_MU_EPS, Link, LogLink, SqrtLink, stabilize_eta
@@ -99,7 +100,7 @@ def _evaluate_irls_state(
     eta = stabilize_eta(eta_unclipped, link)
     mu = clip_mu(link.inverse(eta), family)
     retained_deviance = (
-        float(np.sum(weights * family.deviance_unit(y, mu)))
+        weighted_row_sum(weights, family.deviance_unit, y, mu)
         if deviance is None
         else float(deviance)
     )

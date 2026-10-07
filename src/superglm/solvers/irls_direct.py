@@ -37,6 +37,7 @@ from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
     _is_raw_spline_tabmat_centering_candidate,
 )
+from superglm._utils import weighted_row_sum
 from superglm.distributions import (
     Binomial,
     Distribution,
@@ -277,6 +278,8 @@ def _solve_constrained_qp_with_cold_retry(
     A: NDArray,
     b: NDArray,
     active_set_init: list[int] | None,
+    *,
+    degeneracy_retry: bool = True,
 ) -> QPResult:
     """Retry a failed warm active set without weakening the KKT contract.
 
@@ -286,6 +289,21 @@ def _solve_constrained_qp_with_cold_retry(
     certificate even though the identical problem converges from a cold active
     set. Retry only that failed warm case, and replace its best iterate only
     when the ordinary cold solve returns a complete certificate.
+
+    If the ordinary solves end uncertified, one more cold solve runs with the
+    degenerate-vertex safeguards (issue #472). That covers a failed warm
+    solve followed by a failed cold one. It also covers a single failed cold
+    solve, made when ``active_set_init`` is ``None`` or empty. The
+    safeguards are for a flat monotone term at zero with more active rows
+    than coefficients. The safeguarded result replaces the first one only if
+    it passes the same complete certificate, so a solve that certifies
+    without it is unchanged.
+
+    ``degeneracy_retry=False`` skips that attempt. ``fit_irls_direct`` passes
+    it while the previous solve in the fit was uncertified and re-arms it
+    after any certified solve: a QP that keeps failing pays for the attempt
+    once per run of failures, not once per IRLS iteration. With the default,
+    an uncertified result means the attempt ran and failed.
     """
     result = solve_constrained_qp(
         H,
@@ -304,6 +322,17 @@ def _solve_constrained_qp_with_cold_retry(
         )
         if cold_result.converged:
             return cold_result
+    if degeneracy_retry and not result.converged:
+        safeguarded = solve_constrained_qp(
+            H,
+            g,
+            A,
+            b,
+            active_set_init=None,
+            _degeneracy_safeguards=True,
+        )
+        if safeguarded.converged:
+            return safeguarded
     return result
 
 
@@ -2699,6 +2728,9 @@ def _fit_irls_direct_once(
     max_halving = 20  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
     _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
+    _degeneracy_retry_failed = (
+        False  # the #472 retry is off after a failure, until a solve certifies
+    )
     # A constrained fit-entry state has not been certified by the inner QP.
     retained_qp_converged = not has_constraints
     # Declared, not bound: the chain below is the whole set of reasons this
@@ -3227,11 +3259,19 @@ def _fit_irls_direct_once(
                     A_all,
                     b_all,
                     prev_active_set,
+                    degeneracy_retry=not _degeneracy_retry_failed,
                 )
                 beta = qp_result.beta
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
                 proposal_qp_converged = bool(qp_result.converged)
                 prev_active_set = qp_result.active_set
+                # An uncertified result means the degenerate-vertex retry ran
+                # and failed (or was already latched off). It costs up to a
+                # full active-set solve, so it is not repeated while the QP
+                # keeps failing. A certified result re-arms it: while latched,
+                # that can only be an ordinary solve, so the failure was
+                # transient and a later #472 vertex keeps its rescue.
+                _degeneracy_retry_failed = not qp_result.converged
                 # Non-convergence usually persists for the rest of the fit, so
                 # latch the report to the first occurrence rather than emitting
                 # one identical line per IRLS iteration. A later solve may
@@ -4080,7 +4120,7 @@ def _fit_irls_direct_once(
             eta_unclipped = (retained.centred_intercept + contribution) + offset
             eta = stabilize_eta(eta_unclipped, link)
             mu = clip_mu(link.inverse(eta), family)
-            dev = float(np.sum(weights * family.deviance_unit(y, mu)))
+            dev = weighted_row_sum(weights, family.deviance_unit, y, mu)
 
     # Runtime separation backstop (issue #341).  Two terminal signatures mark
     # a coefficient that walked toward +/-infinity instead of converging:

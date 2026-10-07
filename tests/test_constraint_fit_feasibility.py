@@ -7,7 +7,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import BSplineSmooth, Constraint, SuperGLM
+from superglm import (
+    BSplineSmooth,
+    Categorical,
+    Constraint,
+    OrderedCategorical,
+    RandomEffect,
+    Spline,
+    SuperGLM,
+    Tweedie,
+)
 
 
 def _one_coefficient_line_search_problem(*, constrained: bool):
@@ -49,12 +58,21 @@ def _increasing_model() -> SuperGLM:
     )
 
 
-@pytest.mark.parametrize("cold_converged", [False, True])
+@pytest.mark.parametrize(
+    ("cold_converged", "safeguarded_converged"),
+    [(False, False), (False, True), (True, False)],
+)
 def test_failed_warm_qp_retries_cold_without_weakening_certificate(
     monkeypatch: pytest.MonkeyPatch,
     cold_converged: bool,
+    safeguarded_converged: bool,
 ) -> None:
-    """A warm active set is only an optimization hint for the same QP."""
+    """A warm active set is only an optimization hint for the same QP.
+
+    The degenerate-vertex attempt (issue #472) runs only after both the warm
+    and the cold solve fail. It replaces their result only when it is
+    certified.
+    """
     import superglm.solvers.irls_direct as irls_direct
     from superglm.solvers.constrained_qp import QPResult
 
@@ -68,10 +86,17 @@ def test_failed_warm_qp_retries_cold_without_weakening_certificate(
         active_set=[],
         converged=cold_converged,
     )
-    active_sets: list[list[int] | None] = []
+    safeguarded_result = QPResult(
+        beta=np.array([0.75]),
+        active_set=[],
+        converged=safeguarded_converged,
+    )
+    calls: list[tuple[list[int] | None, bool]] = []
 
-    def fake_solve(*_args, active_set_init=None, **_kwargs):
-        active_sets.append(active_set_init)
+    def fake_solve(*_args, active_set_init=None, _degeneracy_safeguards=False, **_kwargs):
+        calls.append((active_set_init, _degeneracy_safeguards))
+        if _degeneracy_safeguards:
+            return safeguarded_result
         return warm_result if active_set_init is not None else cold_result
 
     monkeypatch.setattr(irls_direct, "solve_constrained_qp", fake_solve)
@@ -83,8 +108,12 @@ def test_failed_warm_qp_retries_cold_without_weakening_certificate(
         [0],
     )
 
-    assert active_sets == [[0], None]
-    assert result is (cold_result if cold_converged else warm_result)
+    if cold_converged:
+        assert calls == [([0], False), (None, False)]
+        assert result is cold_result
+    else:
+        assert calls == [([0], False), (None, False), (None, True)]
+        assert result is (safeguarded_result if safeguarded_converged else warm_result)
 
 
 @pytest.mark.parametrize(
@@ -100,7 +129,11 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
     active_set_init: list[int] | None,
     converged: bool,
 ) -> None:
-    """Cold retry adds no work unless a nonempty warm active set fails."""
+    """Cold retry adds no work unless a nonempty warm active set fails.
+
+    A failed cold start goes straight to the degenerate-vertex attempt,
+    and a certified solve makes no further call.
+    """
     import superglm.solvers.irls_direct as irls_direct
     from superglm.solvers.constrained_qp import QPResult
 
@@ -109,9 +142,14 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
         active_set=[] if active_set_init is None else active_set_init,
         converged=converged,
     )
+    safeguarded_result = QPResult(beta=np.array([0.5]), converged=False)
     active_sets: list[list[int] | None] = []
+    safeguarded_calls: list[list[int] | None] = []
 
-    def fake_solve(*_args, active_set_init=None, **_kwargs):
+    def fake_solve(*_args, active_set_init=None, _degeneracy_safeguards=False, **_kwargs):
+        if _degeneracy_safeguards:
+            safeguarded_calls.append(active_set_init)
+            return safeguarded_result
         active_sets.append(active_set_init)
         return result
 
@@ -125,6 +163,7 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
     )
 
     assert active_sets == [active_set_init]
+    assert safeguarded_calls == ([] if converged else [None])
     assert observed is result
 
 
@@ -141,8 +180,9 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
     calls: list[None] = []
 
-    def feasible_but_uncertified_qp(*_args, **_kwargs):
-        calls.append(None)
+    def feasible_but_uncertified_qp(*_args, _degeneracy_safeguards=False, **_kwargs):
+        if not _degeneracy_safeguards:
+            calls.append(None)
         return QPResult(beta=np.zeros(1), converged=False)
 
     monkeypatch.setattr(irls_direct, "solve_constrained_qp", feasible_but_uncertified_qp)
@@ -178,6 +218,95 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     ]
     assert len(terminal_warnings) == 1
     assert terminal_warnings[0].levelno == logging.WARNING
+
+
+def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A QP that keeps failing pays for the #472 retry once per fit.
+
+    The retry can cost a full active-set solve, and non-convergence usually
+    persists for the rest of a fit. Mutation: without the latch in
+    ``fit_irls_direct``, the failed retry runs again on every IRLS iteration,
+    three times here instead of once.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+
+    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    ordinary: list[None] = []
+    safeguarded: list[None] = []
+
+    def uncertified_qp(*_args, _degeneracy_safeguards=False, **_kwargs):
+        (safeguarded if _degeneracy_safeguards else ordinary).append(None)
+        return QPResult(beta=np.zeros(1), converged=False)
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", uncertified_qp)
+    result, _ = irls_direct.fit_irls_direct(
+        design,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        max_iter=3,
+        tol=1e-10,
+        convergence="coefficients",
+        weight_semantics="frequency",
+    )
+
+    assert len(ordinary) == 3
+    assert len(safeguarded) == 1
+    assert result.termination_reason == "constraint_kkt_incomplete"
+
+
+def test_a_certified_solve_rearms_the_degeneracy_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ordinary solve that certifies re-arms the #472 retry for the rest of the fit (#477 review).
+
+    The QP fails, certifies, then fails again.  The first failure latches the
+    retry off; the certified solve between shows the failure was transient,
+    so the third iterate's failure gets the retry again: two retries, not
+    one.  Mutation: a latch that never re-arms runs it once.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+
+    # y = +x: the optimum beta = 1 is interior, so the stand-in QP's steps
+    # 0.3, 0.6, 0.9 each lower the deviance and are accepted.
+    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    y = -y
+    ordinary: list[None] = []
+    safeguarded: list[None] = []
+
+    def qp(*_args, _degeneracy_safeguards=False, **_kwargs):
+        if _degeneracy_safeguards:
+            safeguarded.append(None)
+            return QPResult(beta=np.full(1, 0.3 * len(ordinary)), converged=False)
+        ordinary.append(None)
+        return QPResult(beta=np.full(1, 0.3 * len(ordinary)), converged=len(ordinary) == 2)
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", qp)
+    irls_direct.fit_irls_direct(
+        design,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        max_iter=3,
+        tol=1e-10,
+        convergence="coefficients",
+        weight_semantics="frequency",
+    )
+
+    assert len(ordinary) == 3
+    assert len(safeguarded) == 2
 
 
 def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certificate(
@@ -1062,3 +1191,86 @@ def test_unconstrained_line_search_still_accepts_the_full_merit_improving_propos
     assert result.iteration_log is not None
     assert result.iteration_log[0].accepted_alpha == 1.0
     assert result.iteration_log[0].step_halvings == 0
+
+
+def _issue_472_capped_reml_case() -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
+    """The #471 sweep case ``flat:1.2:600:0.5:20000:1:0-4:1e-6``, seed 2 (issue #472).
+
+    Tweedie data whose only ordered-factor effect is a small trend in ``a``,
+    with a dip at ``a6``. ``b`` and ``c`` have none, so their monotone fits
+    sit flat at zero. Each is a QP-monotone ordered-factor cr spline, beside
+    a 600-level Zipf random effect.
+    """
+    rng = np.random.default_rng(2)
+    n, levels = 20_000, 600
+    exposure = rng.uniform(0.2, 1.0, n)
+    a = rng.integers(0, 12, n)
+    b = rng.integers(0, 8, n)
+    c = rng.integers(0, 6, n)
+    state = rng.integers(0, 10, n)
+    make = np.minimum(rng.zipf(1.2, n) - 1, levels - 1)
+    effect = rng.normal(0.0, 0.5, levels)
+    eta = -2.0 + 0.03 * a - 0.2 * (a == 6) + 0.1 * np.sin(state) + effect[make]
+    mu = np.exp(eta) * exposure
+    power, phi = 1.6, 2.0
+    counts = rng.poisson(mu ** (2 - power) / (phi * (2 - power)))
+    shape = (2 - power) / (power - 1)
+    scale = phi * (power - 1) * mu ** (power - 1)
+    y = np.array([rng.gamma(shape, s, k).sum() for k, s in zip(counts, scale, strict=True)])
+    frame = pd.DataFrame(
+        {
+            "a": np.char.add("a", a.astype(str)),
+            "b": np.char.add("b", b.astype(str)),
+            "c": np.char.add("c", c.astype(str)),
+            "state": np.char.add("s", state.astype(str)),
+            "make": np.char.add("m", make.astype(str)),
+        }
+    )
+    increasing = Constraint.fit.increasing
+    model = SuperGLM(
+        family=Tweedie(p=1.6),
+        selection_penalty=0.0,
+        features={
+            "a": OrderedCategorical(
+                values={f"a{i}": float(i) for i in range(12)},
+                basis=Spline(kind="cr", k=6, constraint=increasing),
+            ),
+            "b": OrderedCategorical(
+                values={f"b{i}": float(i) for i in range(8)},
+                basis=Spline(kind="cr", k=5, constraint=increasing),
+            ),
+            "c": OrderedCategorical(
+                values={f"c{i}": float(i) for i in range(6)},
+                basis=Spline(kind="cr", k=4, constraint=Constraint.fit.decreasing),
+            ),
+            "state": Categorical(base="most_exposed"),
+            "make": RandomEffect(),
+        },
+    )
+    return model, frame, y / exposure, exposure
+
+
+@pytest.mark.slow
+def test_capped_reml_with_a_flat_monotone_term_at_zero_returns_a_certified_mode() -> None:
+    """A flat monotone term at a degenerate vertex no longer refuses the fit (issue #472).
+
+    Its terminal QP has ``b = 0``, a well-conditioned ``H``, and one term
+    flat at zero with more active rows than coefficients. Mutation: 0.37.1
+    raised ``ObservedModeNotConvergedError`` ("terminal constrained REML
+    refit ended at an infeasible coefficient mode"). Without the per-block
+    zero face (``_zero_block_faces``) it still does.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.solvers.constrained_qp import _is_feasible
+
+    model, frame, y, exposure = _issue_472_capped_reml_case()
+    with pytest.warns(ConvergenceWarning, match="smoothing-parameter selection stopped"):
+        model.fit_reml(frame, y, sample_weight=exposure, max_reml_iter=1, lambda2_init=1e-6)
+
+    assert model._reml_result.terminal_refit_termination is None
+    assert model.result.termination_reason == "converged"
+    constrained = [group for group in model._groups if group.constraints is not None]
+    assert len(constrained) == 3
+    for group in constrained:
+        A, b = group.constraints.A, group.constraints.b
+        assert _is_feasible(A, model.result.beta[group.sl], b, 1e-12)

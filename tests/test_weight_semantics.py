@@ -19,6 +19,7 @@ from scipy import stats
 import superglm._count_lattice as neutral_count_lattice
 from superglm import (
     Categorical,
+    Constraint,
     FractionalFrequencyWeightWarning,
     Gamma,
     Gaussian,
@@ -343,6 +344,215 @@ class TestZeroWeights:
             Tweedie(p=1.5), frame, y, weights, "frequency", features={"g": Categorical()}
         )
         assert np.isfinite(admitted.result.deviance)
+
+
+def _gaussian_rows(n: int, seed: int = 369, slope: float = 0.12):
+    rng = np.random.default_rng(seed)
+    g = rng.integers(0, 4, n)
+    x = rng.uniform(0.0, 10.0, n)
+    s = rng.uniform(0.0, 1.0, n)
+    y = -0.5 + slope * x + 0.2 * (g - 1.5) + 0.2 * np.sin(x) + 0.3 * rng.standard_normal(n)
+    levels = [f"L{k}" for k in range(4)]
+    frame = pd.DataFrame(
+        {"g": pd.Categorical([levels[c] for c in g], categories=levels), "x": x, "s": s}
+    )
+    return frame, y
+
+
+def _with_zero_weight_row(frame, y, *, x=5.0, response=1.0, offset=0.0):
+    """``frame`` with one zero-weight row appended: rows, response, weights, offsets."""
+    row = pd.DataFrame(
+        {"g": pd.Categorical(["L0"], categories=frame["g"].cat.categories), "x": [x], "s": [0.5]}
+    )
+    n = len(frame)
+    rows = pd.concat([frame, row], ignore_index=True)
+    return rows, np.append(y, response), np.append(np.ones(n), 0.0), np.append(np.zeros(n), offset)
+
+
+# One zero-weight row past sqrt(DBL_MAX) on each channel that reaches (y - mu)**2.
+# 2e155 is the band where 0.37.1 reported converged=True on a fit it had moved.
+_FAR_ROWS = [
+    pytest.param({"x": 1e300}, id="covariate_1e300"),
+    pytest.param({"x": 2e155}, id="covariate_2e155"),
+    pytest.param({"response": 1e200}, id="response_1e200"),
+    pytest.param({"offset": 1e200}, id="offset_1e200"),
+]
+
+
+class TestAFarZeroWeightRowIsNotInTheFit:
+    """Issue #369: a row of weight exactly 0 adds exactly 0 to every weighted sum.
+
+    A Gaussian identity mean, response or offset past ``sqrt(DBL_MAX)`` on such
+    a row made its unit deviance ``inf``, and ``0 * inf`` turned the summed
+    deviance into NaN, so every IRLS trial step was rejected: the fit moved by
+    hundreds of times its own scale, with ``converged=True`` near 2e155, and
+    REML, SCOP, cross-validation and shape repair raised or moved the same way.
+    """
+
+    @pytest.mark.parametrize("method", ["fit", "fit_reml"])
+    @pytest.mark.parametrize("far", _FAR_ROWS)
+    def test_the_fit_reads_the_row_as_an_ordinary_zero_weight_row(self, method, far):
+        """Bit for bit against the same frame with that row's values ordinary.
+
+        The control has the same shape, so every product the fit forms sees
+        identical weighted inputs and the comparison is exact on any BLAS; a
+        fit with one row fewer would compare sums of different lengths, whose
+        rounding depends on the BLAS's blocking (AGENTS.md: tests do not
+        assert BLAS round-off).
+
+        On 0.37.1 the covariate rows ended 240-520x away in relative mean (the
+        2e155 row with ``converged=True``) and the response and offset rows
+        raised.  Mutation: the zero-weight mask in ``weighted_row_sum`` removed,
+        so the deviance sums ``w * d`` over every row again.
+        """
+        frame, y = _gaussian_rows(600)
+        frame = frame[["g", "x"]]
+
+        def fitted(rows, response, weights, offset):
+            model = SuperGLM(family="gaussian", features={"g": Categorical(), "x": Numeric()})
+            getattr(model, method)(rows, response, sample_weight=weights, offset=offset)
+            screen = model.screen_interactions(
+                rows, response, sample_weight=weights, offset=offset, candidates=[("x", "g")]
+            )
+            deviance = model.metrics(rows, response, sample_weight=weights, offset=offset).deviance
+            return model, screen, deviance
+
+        reference, screen0, deviance0 = fitted(*_with_zero_weight_row(frame, y))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            model, screen, deviance = fitted(*_with_zero_weight_row(frame, y, **far))
+
+        assert model.result.converged
+        np.testing.assert_array_equal(model.predict(frame), reference.predict(frame))
+        assert model.result.deviance == reference.result.deviance
+        assert deviance == deviance0
+        for column in ("statistic", "edf0", "z"):
+            assert screen[column].iloc[0] == screen0[column].iloc[0]
+        assert screen.attrs["phi"] == screen0.attrs["phi"]
+
+    @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+    @pytest.mark.parametrize("far", [_FAR_ROWS[0], _FAR_ROWS[2]])
+    def test_reml_reads_the_row_as_an_ordinary_zero_weight_row(self, discrete, far):
+        """A far zero-weight row gives the same REML fit, bit for bit, as an ordinary one.
+
+        The control keeps the frame's shape and moves only the row's values, so
+        the comparison isolates them; the fit without the row is not the
+        reference here because lambda stops at the optimizer's tolerance, not
+        at round-off.  0.37.1 raised ``Gaussian profile inputs must be finite``
+        or stopped with ``converged=False``.  Mutation: as above; the discrete
+        arm also needs the trial-deviance sum in ``reml/discrete.py``.
+        """
+        frame, y = _gaussian_rows(800)
+        features = {"g": Categorical(), "x": Numeric(), "s": Spline(n_knots=10)}
+
+        def fitted(rows, response, weights, offset):
+            model = SuperGLM(family="gaussian", features=features, discrete=discrete)
+            return model.fit_reml(rows, response, sample_weight=weights, offset=offset)
+
+        control = fitted(*_with_zero_weight_row(frame, y))
+        model = fitted(*_with_zero_weight_row(frame, y, **far))
+
+        assert model.result.converged
+        assert model._reml_lambdas == control._reml_lambdas
+        np.testing.assert_array_equal(model.predict(frame), control.predict(frame))
+
+    @pytest.mark.parametrize("method", ["fit", "fit_reml"])
+    def test_a_constrained_spline_reads_the_row_as_an_ordinary_one(self, method):
+        """SCOP's cached working objective ``sum(W z**2)`` masks the row too.
+
+        With only the deviance masked, the response row made that sum NaN and
+        the monotone fit stopped where it started, moved 53x in relative mean
+        and reporting ``converged=True``.  Mutation: the mask removed from the
+        ``half_zwz`` sums in ``solvers/scop_newton.py``.
+        """
+        frame, y = _gaussian_rows(600, slope=0.5)
+        frame = frame[["g", "x"]]
+
+        def fitted(rows, response, weights, offset):
+            model = SuperGLM(
+                family="gaussian",
+                features={
+                    "g": Categorical(),
+                    "x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+                },
+            )
+            getattr(model, method)(rows, response, sample_weight=weights, offset=offset)
+            return model
+
+        control = fitted(*_with_zero_weight_row(frame, y))
+        model = fitted(*_with_zero_weight_row(frame, y, response=1e200))
+
+        assert model.result.converged
+        np.testing.assert_array_equal(model.predict(frame), control.predict(frame))
+
+    def test_cross_validated_deviance_skips_the_row(self):
+        """A far zero-weight validation row leaves every fold's deviance as it was.
+
+        The scorers summed ``w * d`` over the fold, so the pooled deviance read
+        NaN and the fold mean silently dropped that fold.  Mutation: the two
+        deviance scorers in ``model_selection.py`` back on the unmasked sum.
+        """
+        from superglm.model_selection import cross_validate
+
+        frame, y = _gaussian_rows(600)
+        frame = frame[["g", "x"]]
+
+        class _Folds:
+            n_splits = 2
+
+            def split(self, X, y=None, groups=None):
+                idx = np.arange(len(X))
+                for fold in np.array_split(idx, 2):
+                    yield np.setdiff1d(idx, fold), fold
+
+        def scores(rows, response, weights, offset):
+            model = SuperGLM(family="gaussian", features={"g": Categorical(), "x": Numeric()})
+            result = cross_validate(
+                model, rows, response, sample_weight=weights, offset=offset, cv=_Folds()
+            )
+            return result.mean_scores["deviance"], result.pooled_scores["deviance"]
+
+        control = scores(*_with_zero_weight_row(frame, y))
+        far = scores(*_with_zero_weight_row(frame, y, x=1e300))
+
+        assert np.all(np.isfinite(far))
+        assert far == control
+
+    @pytest.mark.parametrize("link", ["identity", "log"])
+    @pytest.mark.parametrize("method", ["fit", "fit_reml"])
+    def test_shape_repair_reads_the_row_as_an_ordinary_one(self, method, link):
+        """``apply_shape_postfit`` publishes the same repair with the row far out.
+
+        The repair's candidate deviance refused any non-finite unit deviance,
+        and its refreshed deviance, profiled intercept and Pearson scale summed
+        every row.  Mutation: any of those sums or that check back on all rows
+        (``model/shape_ops.py``, ``editor/apply.py``); each raises here.
+        """
+        rng = np.random.default_rng(7)
+        x = rng.uniform(0.0, 10.0, 800)
+        y = 0.25 * x + 0.35 * np.sin(x) + 0.2 * rng.standard_normal(800) + 3.0
+        frame = pd.DataFrame({"x": x})
+
+        def repaired(response):
+            rows = pd.concat([frame, pd.DataFrame({"x": [5.0]})], ignore_index=True)
+            weights = np.append(np.ones(len(frame)), 0.0)
+            model = SuperGLM(
+                family="gaussian",
+                link=link,
+                features={"x": Spline(kind="ps", k=10, constraint=Constraint.postfit.increasing)},
+            )
+            getattr(model, method)(rows, np.append(y, response), sample_weight=weights)
+            unrepaired = model.predict(frame)
+            model.apply_shape_postfit(rows, sample_weight=weights)
+            assert not np.array_equal(model.predict(frame), unrepaired), "repair must bind"
+            return model
+
+        control = repaired(1.0)
+        model = repaired(1e200)
+
+        np.testing.assert_array_equal(model.predict(frame), control.predict(frame))
+        assert model.result.phi == control.result.phi
+        assert model.result.deviance == control.result.deviance
 
 
 class TestNegativeBinomialThetaProfile:

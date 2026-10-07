@@ -4183,3 +4183,249 @@ def test_an_interior_maximum_above_the_old_clip_is_reached(direct_solve: str) ->
     assert plain.result.termination_reason == "converged"
     eta = plain._dm.matvec(plain.result.beta) + plain.result.intercept
     assert float(np.max(np.abs(eta - eta_star))) < 0.5 * abs(eta_star)
+
+
+def _all_events_region_frame():
+    rng = np.random.default_rng(3)
+    n = 3000
+    region = rng.choice(["A", "B", "C"], n)
+    p = np.where(region == "A", 0.30, np.where(region == "B", 0.10, 1.0))
+    y = (rng.random(n) < p).astype(np.float64)
+    frame = pd.DataFrame(
+        {
+            "region": region,
+            "x": rng.uniform(size=n),
+            "g": [f"g{c}" for c in rng.integers(0, 40, n)],
+        }
+    )
+    return frame, y
+
+
+@pytest.mark.parametrize("selection_penalty", [1e-4, 1e-2])
+def test_the_block_coordinate_route_never_calls_a_boundary_state_converged(
+    selection_penalty: float,
+) -> None:
+    """``fit()`` with a selection penalty (``fit_pirls``) demotes a boundary state, as the direct solver does (#431).
+
+    Region ``C`` has an event on every row, so the binomial/log maximum is the
+    boundary supremum: its rows' ``eta`` rises to the mean-space cap, where
+    the capped mean makes the deviance flat.  The block-coordinate route
+    reported such a state converged, with fitted probabilities above one on
+    974 rows.  It is now ``converged=False`` with ``termination_reason ==
+    "mean_space_boundary"``, the direct solver's verdict on the same data;
+    the coefficients are not moved.  Mutation: without the demotion the fit
+    reads converged.
+    """
+    frame, y = _all_events_region_frame()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=selection_penalty,
+        features={
+            "region": Categorical(base="first"),
+            "x": Numeric(),
+            "g": Categorical(base="first"),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    assert not model.result.converged
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert model.result.mean_space_boundary_rows > 0
+
+
+def test_the_block_coordinate_route_keeps_an_interior_maximum_converged() -> None:
+    """An interior binomial/log maximum on the block-coordinate route stays converged (#431).
+
+    The demotion reads the returned state's rows at the mean-space cap; an
+    interior maximum has none.  Mutation: demoting every binomial/log stop
+    fails it.
+    """
+    rng = np.random.default_rng(12)
+    n = 4000
+    frame = pd.DataFrame({"x": rng.uniform(-1, 1, n), "f": rng.integers(0, 6, n).astype(str)})
+    eta = -0.25 + 0.15 * frame["x"] - 0.05 * frame["f"].astype(int)
+    y = (rng.uniform(size=n) < np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=1e-2,
+        features={"x": Numeric(), "f": Categorical()},
+    )
+    model.fit(frame, y)
+    assert model.result.converged
+    assert model.result.mean_space_boundary_rows == 0
+
+
+def test_the_block_coordinate_trace_records_the_boundary_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trace's last step decision and state commit carry ``mean_space_boundary`` (#477 review).
+
+    The verdict is decided where PIRLS decides convergence, so the
+    authoritative events name it rather than a convergence the result then
+    contradicts.  Mutation: demoting only the returned result, after the
+    loop, leaves both events claiming ``fit_converged=True``.
+    """
+    from superglm._fit_trace import MemoryTraceSink, TraceRun
+    from superglm.model import fit_ops
+
+    sink = MemoryTraceSink()
+    original = fit_ops.fit_pirls
+
+    def traced(*args, **kwargs):
+        kwargs["trace_run"] = TraceRun("bcd-boundary", sink=sink)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fit_ops, "fit_pirls", traced)
+    frame, y = _all_events_region_frame()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=1e-2,
+        features={
+            "region": Categorical(base="first"),
+            "x": Numeric(),
+            "g": Categorical(base="first"),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    assert model.result.termination_reason == "mean_space_boundary"
+    for kind in ("step_decision", "state_commit"):
+        last = [event for event in sink.events if event.event_kind == kind][-1]
+        assert last.payload["fit_converged"] is False, kind
+        assert last.payload["termination_reason"] == "mean_space_boundary", kind
+
+
+def test_the_block_coordinate_boundary_verdict_moves_no_coefficient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Demoting the verdict leaves the fit where it stopped (#431, #477 review).
+
+    The same fit with the boundary check switched off (it reports converged,
+    as 0.37.1 did) stops at the same iteration with the same coefficients
+    and intercept, bit for bit: only the verdict changes.  Mutation: a
+    demotion that refits or perturbs the state fails the equality.
+    """
+    from superglm.solvers import pirls
+
+    frame, y = _all_events_region_frame()
+
+    def fitted():
+        model = SuperGLM(
+            family="binomial",
+            link="log",
+            selection_penalty=1e-2,
+            features={
+                "region": Categorical(base="first"),
+                "x": Numeric(),
+                "g": Categorical(base="first"),
+            },
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(frame, y)
+        return model
+
+    demoted = fitted()
+    monkeypatch.setattr(pirls, "mean_space_boundary_rows", lambda *args, **kwargs: 0)
+    undemoted = fitted()
+    assert demoted.result.termination_reason == "mean_space_boundary"
+    assert undemoted.result.converged
+    np.testing.assert_array_equal(demoted.result.beta, undemoted.result.beta)
+    assert demoted.result.intercept == undemoted.result.intercept
+    assert demoted.result.n_iter == undemoted.result.n_iter
+
+
+def test_fit_path_reports_the_block_coordinate_boundary_verdict() -> None:
+    """``fit_path`` reaches the same ``fit_pirls`` exit, so no boundary step reads converged (#431).
+
+    On the all-events frame the path's second step already holds the
+    region's rows at the mean-space cap; 0.37.1 reported it converged
+    (``[True, True, False, False]``).  The invariant: a step whose returned
+    state has positive-weight rows at the cap is not converged, and some
+    step does have them, so the check is not vacuous.  Mutation: without the
+    in-loop demotion the second step reads converged.
+    """
+    from superglm.solvers.irls_state import mean_space_boundary_rows
+
+    frame, y = _all_events_region_frame()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        features={
+            "region": Categorical(base="first"),
+            "x": Numeric(),
+            "g": Categorical(base="first"),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        path = model.fit_path(frame, y, n_lambda=4)
+    weights = np.ones(len(y))
+    boundary = [
+        mean_space_boundary_rows(
+            model._distribution,
+            model._link,
+            model._dm.matvec(beta) + intercept,
+            weights,
+        )
+        for beta, intercept in zip(path.coef_path, path.intercept_path, strict=True)
+    ]
+    assert any(boundary)
+    assert not any(c and b for c, b in zip(path.converged_path, boundary, strict=True))
+
+
+def test_the_block_coordinate_backstop_does_not_read_a_boundary_stop_as_a_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boundary stop on the last iteration is not a drifting coefficient (#477 review).
+
+    No natural fixture reaches this, so the conditions are set by hand on an
+    ordinary fit that converges at iteration ``k >= 10``. The boundary check
+    reports rows at the cap, and it is called only on a converging iteration,
+    so the stop lands on the last of ``max_iter=k``. The backstop's weight-ratio
+    and stagnation thresholds are opened. Under ``separation="error"`` the
+    exhausted-and-stagnant test would then raise ``SeparationError`` on what is
+    a finite constrained maximum. Mutation: without ``not boundary_rows`` in
+    ``exhausted_stagnant`` it raises.
+    """
+    from superglm.diagnostics import separation
+    from superglm.solvers import pirls
+
+    rng = np.random.default_rng(12)
+    n = 2000
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(-1, 1, n),
+            "s": rng.uniform(0, 1, n),
+            "f": rng.integers(0, 6, n).astype(str),
+        }
+    )
+    eta = 0.3 * frame["x"] + np.sin(3 * frame["s"]) - 0.1 * frame["f"].astype(int)
+    y = rng.poisson(np.exp(eta)).astype(float)
+
+    def fitted(**kwargs):
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.1,
+            tol=1e-10,
+            features={"x": Numeric(), "s": Spline(kind="cr", k=8), "f": Categorical()},
+            **kwargs,
+        )
+        return model.fit(frame, y)
+
+    k = fitted().result.n_iter
+    if k < 10:
+        pytest.skip(
+            f"the ordinary fit converged at iteration {k}, below the backstop's floor of 10"
+        )
+    monkeypatch.setattr(pirls, "mean_space_boundary_rows", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(separation, "EXTREME_WEIGHT_RATIO", 0.0)
+    monkeypatch.setattr(separation, "STAGNANT_DEVIANCE_DELTA", math.inf)
+    model = fitted(max_iter=k, separation="error")
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert model.result.n_iter == k

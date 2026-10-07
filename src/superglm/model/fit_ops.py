@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._utils import _explained_deviance
+from superglm._utils import _explained_deviance, weighted_row_sum
 from superglm.distributions import (
     Distribution,
     NegativeBinomial,
@@ -615,8 +615,8 @@ def _compute_fit_stats(
     pearson = pearson_chi2(
         distribution=distribution, y=y, mu=mu, sample_weight=weights, variance_floor=0.0
     )
-    null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
-    dev = float(np.sum(weights * distribution.deviance_unit(y, mu)))
+    null_dev = weighted_row_sum(weights, distribution.deviance_unit, y, null_mu)
+    dev = weighted_row_sum(weights, distribution.deviance_unit, y, mu)
     expl_dev = _explained_deviance(dev, null_dev, y, null_mu, weights)
 
     return FitStats(
