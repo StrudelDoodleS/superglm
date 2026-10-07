@@ -329,6 +329,60 @@ def test_published_cv_and_final_fit_tell_every_view(monkeypatch):
         widget.close()
 
 
+def test_choosing_a_term_and_selecting_points_tell_every_view(notebook_widget):
+    """The shared selected term and selection are what a stale output would act on."""
+    _widget, view = notebook_widget
+    _request(view, 24, "POST", "/term", {"term": "c"})
+    _request(view, 25, "POST", "/select", {"term": "x", "indices": [0, 1]})
+    assert sorted(_reply(view)[0]["status"] for _ in range(2)) == [200, 200]
+    notices = {view.notices.get(timeout=30.0)["origin"] for _ in range(2)}
+    assert notices == {24, 25}
+
+
+def test_the_route_classes_are_pinned():
+    """Moving a route between the sets is a decision, so it changes this test too.
+
+    Every change route's handler writes the session or what each output shows
+    of it (selected term, selection, values, structure, history, notes); every
+    read route only reads, writes files, or starts or polls a job, whose
+    publication sends its own notice.
+    """
+    assert notebook.CHANGE_ROUTES == {
+        "/term",
+        "/select",
+        "/op",
+        "/drag",
+        "/control",
+        "/control_count",
+        "/refit_offset",
+        "/profile_distribution",
+        "/collapse_levels",
+        "/ungroup_levels",
+        "/reorder_levels",
+        "/revert_to_original",
+        "/set_reference",
+        "/shape_range",
+        "/stage",
+        "/refit_pending",
+        "/set_unseen",
+        "/note",
+    }
+    assert notebook.READ_ROUTES == {
+        "/metrics",
+        "/summary",
+        "/report",
+        "/rating_table",
+        "/save_model",
+        "/export_file",
+        "/open_directory",
+        "/save_directory",
+        "/profile_distribution/start",
+        "/job_start",
+        "/job_status",
+        "/job_cancel",
+    }
+
+
 def test_every_post_route_is_a_change_or_a_read(notebook_widget):
     """A new route must be placed: a read listed as a change would make views refresh each other."""
     widget, _view = notebook_widget

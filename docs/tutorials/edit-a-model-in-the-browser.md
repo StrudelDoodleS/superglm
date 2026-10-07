@@ -57,7 +57,7 @@ it, the editor keeps its web server and warns with the install line. Use `mode="
 notebook whose browser is not on the machine running Python, such as a remote JupyterHub, and
 `mode="server"` to keep the web server where both run on one machine.
 
-The editor behaves the same in either mode, with three differences:
+The editor behaves the same in either mode, with four differences:
 
 - It answers only while the notebook is idle, so it waits while another cell runs.
 - **Export** downloads through the browser, which some workplaces block. **Save to Kernel Path**
@@ -65,6 +65,9 @@ The editor behaves the same in either mode, with three differences:
   `/Volumes/catalog/schema/volume`.
 - **Open Folder** is not offered, because the folder is on the cluster rather than on your
   computer.
+- Each change travels to Python as one notebook message, which carries at most 4 MB. A larger
+  one, such as a very long History note, is refused with a message saying so; make it in smaller
+  steps or in Python on the session.
 
 ## Find a Feature
 
