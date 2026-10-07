@@ -799,32 +799,9 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
     assert decisions[-1].payload["termination_reason"] == result.termination_reason
 
 
-@pytest.mark.parametrize(
-    ("failure_reason", "error_pattern"),
-    [
-        pytest.param(
-            "constraint_infeasible",
-            "terminal constrained REML refit ended at an infeasible coefficient mode",
-            id="primal-infeasible",
-        ),
-        pytest.param(
-            "constraint_kkt_incomplete",
-            "terminal constrained REML refit ended without a complete inner-QP KKT certificate",
-            id="kkt-incomplete",
-        ),
-    ],
-)
-def test_qp_reml_refuses_uncertified_terminal_state_before_objective_or_publication(
-    monkeypatch: pytest.MonkeyPatch,
-    failure_reason: str,
-    error_pattern: str,
-) -> None:
-    """The constrained terminal state gates REML objective and public install."""
+def _force_terminal_qp_refit(monkeypatch: pytest.MonkeyPatch, failure_reason: str) -> None:
+    """Make the QP passthrough's terminal refit end with *failure_reason*."""
     from superglm.model import reml_finalize
-
-    frame, y = _healthy_increasing_problem()
-    model = _increasing_model()
-    terminal_objective_calls: list[None] = []
 
     def force_uncertified_terminal(
         work_model,
@@ -847,30 +824,59 @@ def test_qp_reml_refuses_uncertified_terminal_state_before_objective_or_publicat
             termination_reason=failure_reason,
         )
 
+    monkeypatch.setattr(reml_finalize, "maybe_qp_passthrough_refit", force_uncertified_terminal)
+
+
+def test_qp_reml_refuses_an_infeasible_terminal_state_before_objective_or_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal mode outside the constraints gates REML objective and public install."""
+    from superglm.model import reml_finalize
+
+    frame, y = _healthy_increasing_problem()
+    model = _increasing_model()
+    terminal_objective_calls: list[None] = []
+
     def unexpected_terminal_objective(*_args, **_kwargs):
         terminal_objective_calls.append(None)
         raise AssertionError("terminal REML objective ran before the constraint gate")
 
-    monkeypatch.setattr(
-        reml_finalize,
-        "maybe_qp_passthrough_refit",
-        force_uncertified_terminal,
-    )
-    monkeypatch.setattr(
-        reml_finalize,
-        "reml_laml_objective",
-        unexpected_terminal_objective,
-    )
+    _force_terminal_qp_refit(monkeypatch, "constraint_infeasible")
+    monkeypatch.setattr(reml_finalize, "reml_laml_objective", unexpected_terminal_objective)
 
     with pytest.raises(
         RuntimeError,
-        match=error_pattern,
+        match="terminal constrained REML refit ended at an infeasible coefficient mode",
     ):
         model.fit_reml(frame, y, max_reml_iter=8, runtime_validation="skip")
 
     assert terminal_objective_calls == []
     assert model._result is None
     assert getattr(model, "_reml_result", None) is None
+
+
+def test_qp_reml_discloses_a_feasible_terminal_state_without_a_kkt_certificate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A feasible terminal mode short of its inner-QP certificate is published, not refused.
+
+    It keeps every constraint and is only short of certified optimality, so
+    it is published as not converged and the warning names that stage (owner
+    decision 3).  Mutation: the refusal it replaces raised
+    ``ObservedModeNotConvergedError`` and published nothing.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    frame, y = _healthy_increasing_problem()
+    model = _increasing_model()
+    _force_terminal_qp_refit(monkeypatch, "constraint_kkt_incomplete")
+
+    with pytest.warns(ConvergenceWarning, match="could not certify that its coefficients"):
+        model.fit_reml(frame, y, max_reml_iter=8, runtime_validation="skip")
+
+    assert model._reml_result is not None and not model._reml_result.converged
+    assert model._reml_result.terminal_refit_termination == "constraint_kkt_incomplete"
+    assert np.all(np.isfinite(model.predict(frame)))
 
 
 @pytest.mark.parametrize(
