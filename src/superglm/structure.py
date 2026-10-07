@@ -24,7 +24,7 @@ are byte-identical and a change to it reads as a diff::
         }
       },
       "format": "superglm.structure.v1",
-      "superglm_version": "0.36.1"
+      "superglm_version": "0.37.0"
     }
 
 Levels keep their native types, so integer levels stay JSON numbers. Every

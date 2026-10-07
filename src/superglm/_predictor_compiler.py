@@ -113,6 +113,7 @@ def compile_predictor_design(
     group_pricing: str = "rank",
     alias_prune: bool = True,
     own_specs: bool = True,
+    first_tensor_id: int = 0,
 ) -> CompiledPredictorDesign:
     """Compile an owned design without resolving scalar likelihood concerns.
 
@@ -137,6 +138,11 @@ def compile_predictor_design(
     it pairs them with a response.  ``group_pricing`` and ``alias_prune`` are
     passed through to the dimension pricing and the categorical-interaction
     pruning exactly as ``build_design_matrix`` documents them.
+
+    ``first_tensor_id`` numbers this design's discrete tensors from that
+    value. Groups with equal ids are parts of one tensor and share its
+    marginals, which selects their cross-Gram route, so a caller that pairs
+    two compiled designs in one Gram numbers them apart.
 
     ``own_specs`` selects who holds the learned state.  The default clones the
     whole graph, which a frozen predictor needs because it may not write to the
@@ -524,7 +530,7 @@ def compile_predictor_design(
         ):
             add_interaction(pair[0], pair[1], specs, interaction_specs, interaction_order)
     pending_interactions.clear()
-    _next_tensor_id = 0
+    _next_tensor_id = first_tensor_id
 
     for iname in interaction_order:
         ispec = interaction_specs[iname]

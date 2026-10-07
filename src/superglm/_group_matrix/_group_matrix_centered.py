@@ -784,6 +784,20 @@ def _try_pattern_tensor_centering(
     )
 
 
+def _reads_as_float64(dtype: np.dtype) -> bool:
+    """Whether a support of ``dtype`` is read as float64 as every other reader of the column reads it.
+
+    Booleans, integers of up to eight bytes, and IEEE half, single and double:
+    exact for float32 and for integers up to ``2**53``, which round alike in
+    all of them.  Decided by type, not kind and size, because the extended
+    float is binary64 on some platforms only; it declines on every platform,
+    as do complex and object supports.
+    """
+    if dtype.kind in "biu":
+        return dtype.itemsize <= 8
+    return dtype.type in (np.float16, np.float32, np.float64)
+
+
 def _anchor_center_support(
     *,
     values: NDArray,
@@ -793,16 +807,26 @@ def _anchor_center_support(
     sum_w: float,
     transform: NDArray | None = None,
 ) -> _CenteredSupport:
-    """Center compact support rows before any weighted cross-products."""
+    """Center compact support rows before any weighted cross-products.
+
+    The support and transform are read as float64 before any arithmetic, as
+    every other reader of the column converts them; an integer difference
+    would wrap. The mean projects the anchor and the shift apart: rounding
+    their sum first can erase a shift below the anchor's spacing, which a
+    projection that cancels the anchor then exposes.
+    """
+    values = np.asarray(values, dtype=np.float64)
     mass, weighted_z = _fused_bincount_2(codes, W, Wz, len(values))
     anchor = int(np.argmax(mass))
     differences = values - values[anchor]
     mean_difference = mass @ differences / sum_w
     centered = differences - mean_difference
-    mean = values[anchor] + mean_difference
-    if transform is not None:
+    if transform is None:
+        mean = values[anchor] + mean_difference
+    else:
+        transform = np.asarray(transform, dtype=np.float64)
         centered = centered @ transform
-        mean = mean @ transform
+        mean = values[anchor] @ transform + mean_difference @ transform
     return _CenteredSupport(
         values=centered,
         codes=codes,
@@ -1026,6 +1050,11 @@ def _anchor_support_gram_rhs(
 
     supports: list[_CenteredSupport] = []
     for gm, (values, codes, transform) in zip(dm.group_matrices, compact, strict=True):
+        if any(
+            operand is not None and not _reads_as_float64(operand.dtype)
+            for operand in (values, transform)
+        ):
+            return None
         supports.append(
             _anchor_center_support(
                 values=values,

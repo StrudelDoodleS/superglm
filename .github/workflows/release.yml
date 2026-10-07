@@ -60,6 +60,13 @@ jobs:
               raise SystemExit(
                   f"Source version {source_version!r} does not match {project_version!r}"
               )
+          locked = [
+              package["version"]
+              for package in tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))["package"]
+              if package["name"] == "superglm" and package.get("source", {}).get("editable") == "."
+          ]
+          if set(locked) != {project_version}:
+              raise SystemExit(f"uv.lock pins superglm {locked!r}, not {project_version!r}")
           PY
           git fetch --no-tags origin master:refs/remotes/origin/master
           git merge-base --is-ancestor "$GITHUB_SHA" "origin/master"

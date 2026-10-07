@@ -10,19 +10,27 @@ one is paid by the entire design rather than by that group.
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
 from superglm._group_matrix._group_matrix_centered import (
+    anchor_support_centered_gram_rhs,
     centered_gram_rhs,
     packed_centered_gram_rhs,
 )
 from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
-from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DesignMatrix,
+    DiscretizedSCOPGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+)
 from superglm.model.base import model_build_design_matrix
 
 N = 600
@@ -568,3 +576,89 @@ def test_tensor_margin_cross_grams_come_from_the_tensor_tables(monkeypatch, tens
             exact = sum(w * v[j] * v[m] for w, v in zip(weights, rows, strict=True))
             scale = sum(w * abs(v[j] * v[m]) for w, v in zip(weights, rows, strict=True))
             assert abs(Fraction(gram[j, m]) - exact) <= gamma * scale, (j, m)
+
+
+def _two_bins(n: int) -> np.ndarray:
+    bins = np.zeros(n, dtype=np.intp)
+    bins[9 * n // 10 :] = 1
+    return bins
+
+
+def test_the_anchor_route_projects_the_anchor_and_the_shift_apart():
+    """An SSP column's centre is its centred support's through a projection that cancels the anchor.
+
+    ``B_unique`` rows ``(1e16 +- 2, 1e16)`` and ``R_inv = (1, -1)'`` give the
+    column ``4 1[bin 0] - 2`` exactly, bin 0 holding 90% of the unit weight,
+    so the anchor is row 0 and the shift ``(-0.4, 0)``.  Every difference and
+    product of the support is exact (Sterbenz), so the centre
+    ``fl(v_h T) + fl(shift T)`` lies within ``gamma_2 (2 + 0.4)`` of 8/5: only
+    the shift's division and the final sum round.  ``fl(v_h + shift)`` rounds
+    the shift away against 1e16 and gives 2.
+    """
+    n = 1000
+    ssp = DiscretizedSSPGroupMatrix(
+        np.array([[1e16 + 2, 1e16], [1e16 - 2, 1e16]]), np.array([[1.0], [-1.0]]), _two_bins(n)
+    )
+    result = anchor_support_centered_gram_rhs(
+        dm=DesignMatrix([ssp], n, 1), W=np.ones(n), z_centered=np.zeros(n)
+    )
+    assert result is not None
+    u = Fraction(2) ** -53
+    gamma_2 = 2 * u / (1 - 2 * u)
+    assert abs(Fraction(float(result[0][0])) - Fraction(8, 5)) <= gamma_2 * Fraction(12, 5)
+
+
+def test_the_anchor_route_reads_an_integer_support_as_float64():
+    """An int64 SCOP support gives the products of the float64 column every reader sees.
+
+    Anchored at ``-2**63`` (90% of the rows), ``1 - (-2**63)`` wrapped in
+    int64 and reversed the centred column.  Read as float64 first, the integer
+    and float64 supports go through identical arithmetic.
+    """
+    n = 1000
+    rng = np.random.default_rng(5)
+    W, z = rng.uniform(0.5, 2.0, n), rng.normal(size=n)
+    support = np.array([[-(2**63)], [1]], dtype=np.int64)
+    integer, real = (
+        anchor_support_centered_gram_rhs(
+            dm=DesignMatrix([DiscretizedSCOPGroupMatrix(values, _two_bins(n))], n, 1),
+            W=W,
+            z_centered=z,
+        )
+        for values in (support, support.astype(np.float64))
+    )
+    assert integer is not None and real is not None
+    for got, expected in zip(integer, real, strict=True):
+        np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize(
+    "part", ["complex_support", "complex_transform", "object_support", "longdouble_support"]
+)
+def test_the_anchor_route_declines_a_support_it_cannot_read_as_float64(part):
+    """A complex, object or long-double support or transform declines the anchor route.
+
+    The route reads supports as float64.  Long double is binary64 on some
+    platforms only, so it declines on every platform and the route never
+    depends on the platform.
+
+    The design then takes the chunked pass.  Real dtypes of eight bytes or
+    fewer are read (``test_the_anchor_route_reads_an_integer_support_as_float64``).
+    Mutation: without the guard the route converts them and returns products.
+    """
+    n = 1000
+    support = np.array([[2.0, 1.0], [1.0, 3.0]])
+    transform = np.array([[1.0], [-1.0]])
+    if part == "complex_support":
+        support = support.astype(np.complex128)
+    elif part == "complex_transform":
+        transform = transform.astype(np.complex128)
+    elif part == "object_support":
+        support = support.astype(object)
+    else:
+        support = support.astype(np.longdouble)
+    ssp = DiscretizedSSPGroupMatrix(support, transform, _two_bins(n))
+    result = anchor_support_centered_gram_rhs(
+        dm=DesignMatrix([ssp], n, 1), W=np.ones(n), z_centered=np.zeros(n)
+    )
+    assert result is None

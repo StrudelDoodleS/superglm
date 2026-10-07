@@ -10,7 +10,14 @@ import scipy.sparse as sp
 import superglm._group_matrix._group_matrix_core as core
 import superglm._group_matrix._group_matrix_discretized as discrete
 import superglm._group_matrix._group_matrix_kernels as kernels
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.group_matrix import DesignMatrix, DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from tests._exact_reference import exact_matmul, exact_weighted_gram
+
+_U = 2.0**-53
+
+
+def _gamma(k: int) -> float:
+    return k * _U / (1.0 - k * _U)
 
 
 def _book():
@@ -22,7 +29,9 @@ def _book():
     bins = np.arange(n) % width
     transform = np.eye(width) + np.random.default_rng(918).normal(scale=0.1, size=(width, width))
     weights = np.ones(n)
-    weights[0] = 1e-40
+    # 300 binades below the rest: no power-of-two shift places the weights
+    # in the gate's range, so the exact route serves them.
+    weights[0] = math.ldexp(1.0, -300)
     rhs = np.ones(n)
     rhs[0] = -math.ldexp(1.0, -170)
     return support, bins, transform, weights, rhs
@@ -177,3 +186,108 @@ def test_dyadic_scale_scan_preserves_inactive_source_validation(bad):
         kernels._exact_ssp_moments(np.zeros((2, 1)), np.array([[bad]]), np.zeros(2))
     with pytest.raises(np.linalg.LinAlgError, match="finite source factors"):
         kernels._exact_ssp_moments(np.zeros((2, 1)), np.ones((1, 1)), np.array([bad, 0.0]))
+
+
+def _separated_rows(n: int = 600, bins: int = 12):
+    """A support whose last column only the last two bins reach, those bins' rows at 2**-140.
+
+    Rows whose fitted mean ran to zero carry working weights like these
+    beside ordinary ones, and the last column's moments then sit near
+    1e-42, so a bound read there is relative to them.
+    """
+    rng = np.random.default_rng(140)
+    basis = np.zeros((bins, 4))
+    basis[: bins - 2, :3] = rng.uniform(0.0, 1.0, (bins - 2, 3))
+    basis[bins - 2 :, 3] = rng.uniform(0.5, 1.0, 2)
+    transform = np.zeros((4, 4))
+    transform[:3, :3] = np.eye(3) + 0.3 * rng.standard_normal((3, 3))
+    transform[3, 3] = 1.7
+    index = np.arange(n) % bins
+    separated = index >= bins - 2
+    weights = rng.uniform(0.5, 2.0, n)
+    weights[separated] *= math.ldexp(1.0, -140)
+    rhs = rng.standard_normal(n)
+    rhs[separated] *= math.ldexp(1.0, -150)
+    return DiscretizedSSPGroupMatrix(basis, transform, index), weights, rhs
+
+
+@pytest.mark.parametrize("route", ["gram", "fused", "assembly"])
+def test_tiny_working_weights_take_the_ordinary_route_at_a_power_of_two_shift(route, monkeypatch):
+    """Weights 2**-140 below the rest take the ordinary route at ``w' = 2**k w``.
+
+    The gate (every operand in ``[2**-128, 2**128]``) sent such a block to
+    the exact rational route.  On ``w'`` the ordinary route obeys the
+    standard model, so ``2**-k`` times its moments meet ``|M^ - M| <=
+    gamma_{n+m} |S|'(|S| o |w|_b)`` against the exact moments of its support
+    ``S = fl(B R)``, ``|w|_b`` the bin sums of ``|w|`` (``_shifted_moments``),
+    for the gram, ``X'w`` and ``X'(wz)`` alike.  Mutation checks: returning
+    the shifted moments unshifted, or shifting ``X'(wz)`` back by the
+    weights' shift, leaves the bound by many orders; without the shifted
+    route the exact one is called.
+    """
+    group, weights, rhs = _separated_rows()
+    exact = []
+    original = discrete._exact_ssp_moments
+
+    def recorded(*args, **kwargs):
+        exact.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(discrete, "_exact_ssp_moments", recorded)
+    if route == "gram":
+        moments = (group.gram(weights),)
+    elif route == "fused":
+        moments = group.gram_rmatvec(weights, rhs)
+    else:
+        plan = DesignMatrix([group], len(weights), 4).execution_plan
+        result = plan.moments(weights, rhs=(rhs,), include_xtw=True)
+        moments = (result.gram, result.xtw, result.xt_rhs[0])
+    assert not exact
+    support = group.B_unique @ group.R_inv
+    rows = support[group.bin_idx]
+    n, m = len(weights), group.n_bins
+    gamma = _gamma(n + m)
+    mass = np.bincount(group.bin_idx, weights=np.abs(weights), minlength=m)
+    rhs_mass = np.bincount(group.bin_idx, weights=np.abs(rhs), minlength=m)
+    references = (
+        (
+            exact_weighted_gram(rows, rows, weights),
+            np.abs(support).T @ (np.abs(support) * mass[:, None]),
+        ),
+        (exact_matmul((rows.T, weights)), np.abs(support).T @ mass),
+        (exact_matmul((rows.T, rhs)), np.abs(support).T @ rhs_mass),
+    )
+    for moment, (reference, magnitude) in zip(moments, references):
+        assert np.all(np.abs(moment - reference) <= gamma * magnitude)
+    # The separated column's moments are themselves of order 2**-140.
+    assert 0.0 < moments[0][3, 3] < math.ldexp(1.0, -130)
+
+
+def test_a_shift_back_that_would_round_keeps_the_exact_route(monkeypatch):
+    """Weights the shift places, whose moments would go subnormal shifted back, stay exact.
+
+    ``2**-k`` times the shifted route's moments is exact only while it stays
+    normal; at weights ``2**-1000`` and a basis near ``2**-40`` the gram is
+    near ``2**-1080``, so the shift back would round and the exact route
+    keeps the once-rounded moments.  Mutation check: without the round-trip
+    test the shifted route is taken.
+    """
+    group = DiscretizedSSPGroupMatrix(
+        np.full((2, 1), math.ldexp(1.0, -40)) * np.array([[1.0], [3.0]]),
+        np.ones((1, 1)),
+        np.array([0, 1, 1]),
+    )
+    weights = np.full(3, math.ldexp(1.0, -1000)) * np.array([1.0, 1.5, 1.25])
+    exact = []
+    original = discrete._exact_ssp_moments
+
+    def recorded(*args, **kwargs):
+        exact.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(discrete, "_exact_ssp_moments", recorded)
+    gram = group.gram(weights)
+    assert exact == [1]
+    np.testing.assert_array_equal(
+        gram, original(group.B_unique, group.R_inv, weights, bin_indices=group.bin_idx)[0]
+    )
