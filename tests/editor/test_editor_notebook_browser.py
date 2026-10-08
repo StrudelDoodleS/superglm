@@ -17,6 +17,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
+from PIL import Image
 from sklearn.model_selection import KFold
 
 import superglm.editor.notebook as notebook
@@ -78,9 +79,17 @@ class _QueueView:
 
 
 @contextmanager
-def _notebook_editor(chromium_browser, session, monkeypatch, views=1):
+def _notebook_editor(
+    chromium_browser,
+    session,
+    monkeypatch,
+    views=1,
+    dark=False,
+    host_filter="",
+    host_inverts_dark=False,
+):
     view = _QueueView()
-    transport = widget_module.NotebookTransport
+    transport = notebook.NotebookTransport
     monkeypatch.setattr(
         widget_module,
         "NotebookTransport",
@@ -107,7 +116,12 @@ def _notebook_editor(chromium_browser, session, monkeypatch, views=1):
             view.handler(view, content, [])
 
         page.expose_function("pySend", send)
-        state = {"bundle": notebook.app_bundle(), "height": 860, "views": views}
+        state = {
+            "bundle": notebook.app_bundle(),
+            "height": 860,
+            "views": views,
+            "host_inverts_dark": host_inverts_dark,
+        }
         assets = {
             "/": ("text/html", _HARNESS),
             "/host.js": ("text/javascript", read_app_asset(notebook.HOST_MODULE).decode()),
@@ -120,6 +134,13 @@ def _notebook_editor(chromium_browser, session, monkeypatch, views=1):
                 body=assets[route.request.url.removeprefix(_ORIGIN)][1],
             ),
         )
+        if dark:
+            page.emulate_media(color_scheme="dark")
+        if host_filter:
+            page.add_init_script(
+                f"document.addEventListener('DOMContentLoaded', () => "
+                f"document.getElementById('cell').style.filter = '{host_filter}')"
+            )
         page.goto(f"{_ORIGIN}/")
         frame = page.frame_locator("#cell iframe")
         frame.locator("#chart path.edited").first.wait_for()
@@ -291,6 +312,48 @@ def test_an_operation_edits_the_term_its_own_output_shows(
         second.locator("#selectionMenu").get_by_role("button", name="Increase selection").click()
         second.get_by_role("button", name="Undo edit").and_(second.locator(":enabled")).wait_for()
         assert [record.term for record in curve_session.history] == ["curve"]
+
+
+def _app_bar_colour(page):
+    """The median colour of a patch of the editor's app bar, as drawn on screen."""
+    box = page.locator("#cell iframe").bounding_box()
+    patch = Image.open(
+        io.BytesIO(
+            page.screenshot(
+                clip={"x": box["x"] + box["width"] / 2, "y": box["y"] + 6, "width": 40, "height": 6}
+            )
+        )
+    ).convert("RGB")
+    return np.median(np.asarray(patch, dtype=float).reshape(-1, 3), axis=0)
+
+
+def test_databricks_dark_theme_inversion_is_undone(chromium_browser, curve_session, monkeypatch):
+    """Databricks' dark theme inverts each output; the editor shows its own colours anyway."""
+    databricks_dark = "invert(1) saturate(0.5)"
+    with _notebook_editor(chromium_browser, curve_session, monkeypatch, dark=True) as (
+        page,
+        *_rest,
+    ):
+        own = _app_bar_colour(page)
+    with _notebook_editor(
+        chromium_browser,
+        curve_session,
+        monkeypatch,
+        dark=True,
+        host_filter=databricks_dark,
+        host_inverts_dark=True,
+    ) as (page, *_rest):
+        assert page.locator("#cell iframe").evaluate("f => f.style.filter") == (
+            "invert(1) saturate(2)"
+        )
+        undone = _app_bar_colour(page)
+    with _notebook_editor(
+        chromium_browser, curve_session, monkeypatch, dark=True, host_filter=databricks_dark
+    ) as (page, *_rest):
+        inverted = _app_bar_colour(page)
+    # The night theme's dark bar comes back; left alone, the host turns it pale.
+    assert np.abs(undone - own).max() <= 6, (own, undone)
+    assert np.abs(inverted - own).max() > 100, (own, inverted)
 
 
 def test_run_cv_reports_its_job_over_widget_messages(chromium_browser, monkeypatch):
