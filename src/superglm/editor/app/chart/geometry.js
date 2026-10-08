@@ -91,6 +91,32 @@ export function evenlySpacedIndices(count, maximum) {
   return Array.from(new Set(indices)).sort((left, right) => left - right);
 }
 
+/**
+ * At most `maximum` indices one whole step apart, keeping both edges.
+ *
+ * A labelled axis takes these rather than evenlySpacedIndices: rounding a
+ * fractional step (24 levels into 14 labels steps 1.77) puts some labels on
+ * neighbouring levels while the rest skip one, and the neighbours collide.
+ * Here every gap is the step, except the last, which is wider: the last
+ * multiple of the step gives way to the last index.
+ *
+ * @param {number} count
+ * @param {number} maximum
+ * @returns {number[]}
+ */
+export function strideIndices(count, maximum) {
+  assertNonnegativeInteger("count", count);
+  assertNonnegativeInteger("maximum", maximum);
+  if (count === 0 || maximum === 0) return [];
+  if (count <= maximum) return Array.from({ length: count }, (_, index) => index);
+  if (maximum === 1) return [0];
+  const step = Math.ceil((count - 1) / (maximum - 1));
+  const indices = [];
+  for (let index = 0; index < count; index += step) indices.push(index);
+  indices[indices.length - 1] = count - 1;
+  return indices;
+}
+
 /** The drawing size for a chart that has no layout box: hidden, or a DOM without layout. */
 export const FALLBACK_CHART_SIZE = Object.freeze({ width: 940, height: 520 });
 
@@ -183,8 +209,8 @@ export function planCategoricalAxis({
   });
 
   const densityLimit = Math.max(2, Math.floor(availableWidth / MIN_ANGLED_SLOT) + 1);
-  const indices = evenlySpacedIndices(labels.length, Math.min(MAX_TICKS, densityLimit));
-  const slot = availableWidth / Math.max(indices.length - 1, 1);
+  const indices = strideIndices(labels.length, Math.min(MAX_TICKS, densityLimit));
+  const slot = narrowestSlot(values, indices, availableWidth);
   const horizontalBudget = Math.max(0, slot - 10);
   const maxMeasuredHeight = Math.max(0, ...indices.map((index) => measurements[index].height));
   const rotate = indices.some((index) => measurements[index].fullWidth > horizontalBudget);
@@ -247,6 +273,28 @@ export function planCategoricalAxis({
     labelsBottom: axisY + TICK_OFFSET + maxLabelHeight,
     labelBudget,
   };
+}
+
+/**
+ * The width between the two closest labelled ticks, which every label must
+ * fit: the selected ticks span `availableWidth`, placed by their numeric
+ * values, or evenly when the values are not all numbers.
+ * @param {readonly unknown[]} values
+ * @param {readonly number[]} indices
+ * @param {number} availableWidth
+ * @returns {number}
+ */
+function narrowestSlot(values, indices, availableWidth) {
+  if (indices.length < 2) return availableWidth;
+  const numeric = indices.every((index) => typeof values[index] === "number"
+    && Number.isFinite(values[index]));
+  const position = (/** @type {number} */ k) =>
+    numeric ? /** @type {number} */ (values[indices[k]]) : indices[k];
+  const span = position(indices.length - 1) - position(0);
+  if (!(span > 0)) return availableWidth / (indices.length - 1);
+  let gap = span;
+  for (let k = 1; k < indices.length; k += 1) gap = Math.min(gap, position(k) - position(k - 1));
+  return availableWidth * gap / span;
 }
 
 /**

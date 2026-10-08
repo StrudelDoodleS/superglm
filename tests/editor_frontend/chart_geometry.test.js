@@ -9,6 +9,7 @@ import {
   planCategoricalAxis,
   rotatedExtent,
   splitLabelGraphemes,
+  strideIndices,
 } from "../../src/superglm/editor/app/chart/geometry.js";
 
 /**
@@ -144,7 +145,7 @@ test("empty and single-category layouts remain finite and bounded", () => {
   assert.ok(single.titleY + single.titleHeight <= 520 - 12);
 });
 
-test("categorical layout caps one hundred categories at thirty unique ticks", () => {
+test("categorical layout caps one hundred categories at thirty ticks, one step apart", () => {
   const labels = Array.from({ length: 100 }, (_, index) => `Category ${index + 1}`);
   const layout = planCategoricalAxis({
     values: labels.map((_, index) => index),
@@ -155,10 +156,43 @@ test("categorical layout caps one hundred categories at thirty unique ticks", ()
     baseLeft: 76,
     baseBottom: 72,
   });
-  assert.equal(layout.ticks.length, 30);
-  assert.equal(layout.ticks[0].index, 0);
-  assert.equal(layout.ticks.at(-1)?.index, 99);
-  assert.equal(new Set(layout.ticks.map((tick) => tick.index)).size, 30);
+  const indices = layout.ticks.map((tick) => tick.index);
+  assert.ok(indices.length <= 30);
+  assert.equal(indices[0], 0);
+  assert.equal(indices.at(-1), 99);
+  const gaps = indices.slice(1).map((index, k) => index - indices[k]);
+  assert.ok(gaps.every((gap) => gap >= gaps[0]), String(gaps));
+});
+
+test("labels never fall on neighbouring levels while others skip, so none collide", () => {
+  // 24 ordered levels in room for 14 labels: rounding a 1.77 step labelled
+  // levels 5 and 6, 12 and 13, 19 and 20 side by side, and they overlapped.
+  assert.deepEqual(strideIndices(24, 14), [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 23]);
+  assert.deepEqual(strideIndices(10, 5), [0, 3, 6, 9]);
+  assert.deepEqual(strideIndices(11, 5), [0, 3, 6, 10]);
+  assert.deepEqual(strideIndices(3, 5), [0, 1, 2]);
+  assert.deepEqual(strideIndices(8, 1), [0]);
+  assert.deepEqual(strideIndices(0, 5), []);
+
+  const labels = Array.from({ length: 24 }, (_, index) =>
+    `${String(index + 1).padStart(2, "0")}) Mi${String(6 * (index + 1)).padStart(3, "0")}`);
+  const layout = planCategoricalAxis({
+    values: labels.map((_, index) => index),
+    labels,
+    measurements: labels.map((label) => measurement(label)),
+    availableWidth: 760,
+    svgHeight: 520,
+    baseLeft: 76,
+    baseBottom: 72,
+  });
+  const ticks = layout.ticks;
+  const pixel = (/** @type {number} */ index) => (760 * index) / 23;
+  for (let k = 1; k < ticks.length; k += 1) {
+    // Each label fits the room to its neighbour: none overlaps the next.
+    const room = pixel(ticks[k].index) - pixel(ticks[k - 1].index);
+    assert.ok(ticks[k].angle !== 0 || ticks[k].width <= room, `${ticks[k].fullLabel}: ${ticks[k].width} > ${room}`);
+    assert.ok(ticks[k].index - ticks[k - 1].index >= 2, `${ticks[k - 1].fullLabel} and ${ticks[k].fullLabel}`);
+  }
 });
 
 test("horizontal centered edge labels respect the viewport-side budget", () => {
