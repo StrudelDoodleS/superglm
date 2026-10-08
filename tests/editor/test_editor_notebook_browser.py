@@ -327,6 +327,22 @@ def _app_bar_colour(page):
     return np.median(np.asarray(patch, dtype=float).reshape(-1, 3), axis=0)
 
 
+def _css_saturate(rgb, amount):
+    """CSS ``saturate(amount)`` of an RGB colour: the Filter Effects 1 colour matrix."""
+    s = amount
+    matrix = np.array(
+        [
+            [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+            [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+            [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s],
+        ]
+    )
+    return matrix @ rgb
+
+
+_FRAME_FILTER = "() => document.querySelector('#cell iframe').style.filter"
+
+
 def test_databricks_dark_theme_inversion_is_undone(chromium_browser, curve_session, monkeypatch):
     """Databricks' dark theme inverts each output; the editor shows its own colours anyway."""
     databricks_dark = "invert(1) saturate(0.5)"
@@ -343,17 +359,29 @@ def test_databricks_dark_theme_inversion_is_undone(chromium_browser, curve_sessi
         host_filter=databricks_dark,
         host_inverts_dark=True,
     ) as (page, *_rest):
-        assert page.locator("#cell iframe").evaluate("f => f.style.filter") == (
-            "invert(1) saturate(2)"
-        )
+        assert page.evaluate(_FRAME_FILTER) == "invert(1) saturate(2)"
         undone = _app_bar_colour(page)
+        # In the light theme Databricks leaves outputs alone, and so does the
+        # editor; it follows the theme while open.
+        page.emulate_media(color_scheme="light")
+        page.wait_for_function(f"() => ({_FRAME_FILTER})() === ''")
+        page.emulate_media(color_scheme="dark")
+        page.wait_for_function(f"() => ({_FRAME_FILTER})() === 'invert(1) saturate(2)'")
     with _notebook_editor(
         chromium_browser, curve_session, monkeypatch, dark=True, host_filter=databricks_dark
     ) as (page, *_rest):
         inverted = _app_bar_colour(page)
-    # The night theme's dark bar comes back; left alone, the host turns it pale.
-    assert np.abs(undone - own).max() <= 6, (own, undone)
-    assert np.abs(inverted - own).max() > 100, (own, inverted)
+    # invert and saturate are linear maps that fix white and grey, so they
+    # commute, and saturate(0.5) after saturate(2) is the identity: undone is
+    # own exactly, unless saturate(2) clips, which it does not on this
+    # near-grey bar (it would on a saturated accent). What is left is the
+    # rounding of each frame's composited colour to whole levels, at most one
+    # level a channel: saturate(0.5) has non-negative rows summing to one, so
+    # it carries the first rounding's half level through at most half a level.
+    # Measured on Chromium: own (29, 32, 33), undone the same, inverted
+    # (225, 223, 223), which is the host's filter applied to own.
+    assert np.abs(undone - own).max() <= 1, (own, undone)
+    assert np.abs(inverted - _css_saturate(255 - own, 0.5)).max() <= 1, (own, inverted)
 
 
 def test_run_cv_reports_its_job_over_widget_messages(chromium_browser, monkeypatch):
