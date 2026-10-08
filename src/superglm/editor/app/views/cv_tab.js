@@ -271,17 +271,44 @@ function sectionHead(title, hint) {
     + `<span class="cv-hint">${escapeHTML(hint)}</span></div>`;
 }
 
+// A row whose folds span less than this share of the card's common scale
+// crowds into a few pixels of its strip: a fold far off in another run (one
+// supplied fold's deviance a million times the rest) does that to every
+// other row.
+const READABLE_SHARE = 0.05;
+
+/**
+ * The strip positions of each row's values: one scale for every row, so the
+ * rows compare at a glance, unless a row would crowd into under
+ * READABLE_SHARE of it; then each row gets its own scale. A row whose values
+ * are all equal sits mid-strip.
+ * @param {number[][]} rows each row's finite values
+ * @returns {{own: boolean, x: ((value:number) => number)[]}}
+ */
+export function stripScales(rows) {
+  const scale = (/** @type {number[]} */ values) => {
+    const lo = values.length ? Math.min(...values) : 0;
+    const span = values.length ? Math.max(...values) - lo : 0;
+    return (/** @type {number} */ value) => (span > 0 ? 10 + ((value - lo) / span) * 200 : 110);
+  };
+  const spans = rows.map((values) => (values.length ? Math.max(...values) - Math.min(...values) : 0));
+  const all = rows.flat();
+  const shared = all.length ? Math.max(...all) - Math.min(...all) : 0;
+  const own = shared > 0 && spans.some((span) => span > 0 && span < READABLE_SHARE * shared);
+  if (own) return { own, x: rows.map(scale) };
+  const common = scale(all);
+  return { own, x: rows.map(() => common) };
+}
+
 /**
  * @param {{name:string, label:string, lower_is_better:boolean}} metric
  * @param {CVResultPayload[]} results
  */
 function metricCard(metric, results) {
-  const values = results.flatMap((result) => result.folds.map((fold) => fold.scores[metric.name]))
-    .filter(isNumber);
-  const lo = values.length ? Math.min(...values) : 0;
-  const span = values.length ? Math.max(...values) - lo || 1 : 1;
-  const x = (/** @type {number} */ value) => 10 + ((value - lo) / span) * 200;
-  const rows = results.map((result) => {
+  const scales = stripScales(results.map((result) =>
+    result.folds.map((fold) => fold.scores[metric.name]).filter(isNumber)));
+  const rows = results.map((result, row) => {
+    const x = scales.x[row];
     const mean = result.mean[metric.name];
     const pooled = result.pooled[metric.name];
     const dots = result.folds.map((fold, index) => {
@@ -303,8 +330,9 @@ function metricCard(metric, results) {
         <path class="cv-strip-axis" d="M10,12 H210"></path>${meanTick}${dots}</svg>
     </div>`;
   }).join("");
+  const ownScales = scales.own ? " · each row on its own scale" : "";
   return `<div class="cv-card"><div class="cv-card-title">${escapeHTML(metric.label)}
-    <span>· ${metric.lower_is_better ? "lower" : "higher"} is better</span></div>${rows}</div>`;
+    <span>· ${metric.lower_is_better ? "lower" : "higher"} is better${ownScales}</span></div>${rows}</div>`;
 }
 
 /**

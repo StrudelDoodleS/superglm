@@ -16,6 +16,7 @@ import {
   levelChartMarkup,
   newerJob,
   niceTicks,
+  stripScales,
   termListMarkup
 } from "../../src/superglm/editor/app/views/cv_tab.js";
 
@@ -136,6 +137,39 @@ test("performance cards show mean ± sd, pooled, and one dot per fold for each r
   assert.match(deviance, /<strong>0\.3050<\/strong>\s*<span class="cv-card-spread">± 0\.0050 · pooled 0\.3049<\/span>/);
   assert.equal(count(deviance, /<circle /g), 4);
   assert.equal(count(deviance, /class="cv-card-row"/g), 2);
+});
+
+test("one far-off fold gives every row its own strip scale, and the card says so", () => {
+  // As supplied, one fold scored 3e10 against the others' 63, which on a
+  // shared scale crowds the current model's five folds onto one pixel.
+  const supplied = [63.4, 63.8, 3.0e10, 62.8, 62.9];
+  const current = [63.38, 63.81, 64.71, 62.83, 62.9];
+  const own = stripScales([supplied, current]);
+  assert.equal(own.own, true);
+  const positions = current.map(own.x[1]);
+  assert.equal(Math.min(...positions), 10);
+  assert.equal(Math.max(...positions), 210);
+  assert.equal(own.x[0](3.0e10), 210);
+
+  // Rows of comparable spread keep one scale, so they compare at a glance.
+  const shared = stripScales([[0.94, 1.59, 1.25, 1.33], [1.01, 1.41, 1.24, 1.28]]);
+  assert.equal(shared.own, false);
+  assert.equal(shared.x[0](1.41), shared.x[1](1.41));
+  // A row of one value, or of equal values, sits mid-strip on its own scale.
+  assert.equal(stripScales([[5, 5]]).x[0](5), 110);
+
+  const fold = (/** @type {number} */ index, /** @type {number} */ deviance) => ({
+    fold: index, n_train: 1, n_test: 1, scores: { deviance }, effective_df: 1, fit_time_s: 0, converged: true
+  });
+  const result = (/** @type {string} */ label, /** @type {string} */ origin, /** @type {number[]} */ values) => ({
+    ...cvPayload().results[0], label, origin, folds: values.map((value, index) => fold(index, value)),
+    mean: { deviance: 0 }, std: { deviance: 0 }, pooled: {}
+  });
+  const markup = cvTabMarkup(cvPayload({
+    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    results: [result("As supplied", "supplied", supplied), result("Current model", "run", current)]
+  }), idle());
+  assert.match(markup, /lower is better · each row on its own scale/);
 });
 
 test("the fold table lists the latest run's folds and a mean row", () => {
