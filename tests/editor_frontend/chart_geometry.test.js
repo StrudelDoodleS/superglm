@@ -236,7 +236,7 @@ test("the chart labels more than thirty levels one whole step apart", () => {
 
 /**
  * Each level label fits the room to its neighbours on the padded axis.
- * @param {{index:number, value:unknown, angle:number, width:number, fullLabel:string}[]} ticks
+ * @param {readonly {value:unknown, angle:number, width:number, fullLabel:string}[]} ticks
  * @param {number} width @param {[number, number]} domain
  */
 function assertNoLevelLabelOverlaps(ticks, width, [lo, hi]) {
