@@ -109,14 +109,19 @@ def test_identical_categorical_redraw_reuses_text_measurements(open_editor_page,
         )
         page.locator("#chart .x-tick-label").first.wait_for()
 
-        initial_calls = page.evaluate("window.__axisMeasurementCalls")
-        assert initial_calls > 0
+        assert page.evaluate("window.__axisMeasurementCalls") > 0
 
-        page.get_by_role("button", name="Reference CI").click()
-        page.wait_for_function(
-            "() => document.querySelector('#ciToggle')?.getAttribute('aria-pressed') === 'true'"
-        )
-        assert page.evaluate("window.__axisMeasurementCalls") == initial_calls
+        # The CI band moves the y-axis labels and so the plot's width, which can
+        # change which levels have room for a label: labels new to the chart are
+        # measured. Back to the first layout, every label was measured before,
+        # so the redraw measures nothing.
+        ci = page.get_by_role("button", name="Reference CI")
+        ci.click()
+        page.locator("#chart .ci-whisker").first.wait_for(state="attached")
+        with_band = page.evaluate("window.__axisMeasurementCalls")
+        ci.click()
+        page.locator("#chart .ci-whisker").first.wait_for(state="detached")
+        assert page.evaluate("window.__axisMeasurementCalls") == with_band
 
 
 def test_a_narrow_chart_labels_and_measures_levels_one_whole_step_apart(open_editor_page):

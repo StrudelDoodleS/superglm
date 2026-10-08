@@ -296,7 +296,9 @@ export function stripScales(rows) {
   const all = rows.flat();
   const shared = range(all);
   const centre = median(all);
-  const own = shared > 0
+  // One row, or a common scale that is rounding alone, has nothing to switch.
+  const own = rows.filter((values) => values.length).length > 1
+    && shared > all.length * UNIT_ROUNDOFF * Math.max(0, ...all.map(Math.abs))
     && range(rows.flatMap((values) => core(values, centre))) < READABLE_SHARE * shared;
   if (own) return { own, x: rows.map(stripScale) };
   const common = stripScale(all);
@@ -332,7 +334,8 @@ function stripScale(values) {
 function core(values, centre) {
   return values
     .map((value) => ({ value, distance: Math.abs(value - centre) }))
-    .sort((a, b) => a.distance - b.distance)
+    // Ties go to the smaller value, so the core is the same whatever the fold order.
+    .sort((a, b) => a.distance - b.distance || a.value - b.value)
     .slice(0, Math.ceil(values.length / 2))
     .map(({ value }) => value);
 }

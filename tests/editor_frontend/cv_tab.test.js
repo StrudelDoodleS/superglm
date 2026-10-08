@@ -170,6 +170,13 @@ test("one far-off fold gives every row its own strip scale, and the card says so
   assert.equal(rounded.own, true);
   assert.equal(rounded.x[1](0.29999999999999993), 110);
   assert.equal(rounded.x[1](0.30000000000000004), 110);
+  // The core does not depend on the order of the folds.
+  const tied = [[0, 0.5, 0.53125, 0.53125, 0.5625, 1], [0.5, 0.5, 0.53125, 0.53125, 0.5625, 0.5625]];
+  const permuted = tied.map((row) => [5, 1, 2, 3, 0, 4].map((index) => row[index]));
+  assert.equal(stripScales(permuted).own, stripScales(tied).own);
+  // One row, or rows apart by rounding alone, keep one scale.
+  assert.equal(stripScales([[63.4, 63.8, 3.0e10, 62.8, 62.9]]).own, false);
+  assert.equal(stripScales([[0.3, 0.30000000000000004], [0.3, 0.3]]).own, false);
   // A value a rounding outside a spread row's folds stays on its strip.
   assert.equal(stripScales([[1, 2, 3]]).x[0](1 - 2 ** -52), 10);
   // A row of one value, or of equal values, sits mid-strip on its own scale.
