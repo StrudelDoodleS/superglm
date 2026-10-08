@@ -271,33 +271,54 @@ function sectionHead(title, hint) {
     + `<span class="cv-hint">${escapeHTML(hint)}</span></div>`;
 }
 
-// A row whose folds span less than this share of the card's common scale
-// crowds into a few pixels of its strip: a fold far off in another run (one
-// supplied fold's deviance a million times the rest) does that to every
-// other row.
+// Folds crowd into a few pixels of their strip when the card's common scale
+// is over 1/READABLE_SHARE times wider than they spread: one supplied fold's
+// deviance a million times the rest does that to every other row.
 const READABLE_SHARE = 0.05;
 
 /**
  * The strip positions of each row's values: one scale for every row, so the
- * rows compare at a glance, unless a row would crowd into under
- * READABLE_SHARE of it; then each row gets its own scale. A row whose values
- * are all equal sits mid-strip.
+ * rows compare at a glance, unless outlying folds alone stretch it. Each row
+ * of three or more folds sets aside the fold farthest from its own median;
+ * when the folds left span under READABLE_SHARE of the common scale, each
+ * row gets its own scale. A steadier row beside a spread one keeps the common
+ * scale, which shows it is steadier. A row whose values are all equal sits
+ * mid-strip.
  * @param {number[][]} rows each row's finite values
  * @returns {{own: boolean, x: ((value:number) => number)[]}}
  */
 export function stripScales(rows) {
+  const range = (/** @type {number[]} */ values) =>
+    values.length ? Math.max(...values) - Math.min(...values) : 0;
   const scale = (/** @type {number[]} */ values) => {
     const lo = values.length ? Math.min(...values) : 0;
-    const span = values.length ? Math.max(...values) - lo : 0;
+    const span = range(values);
     return (/** @type {number} */ value) => (span > 0 ? 10 + ((value - lo) / span) * 200 : 110);
   };
-  const spans = rows.map((values) => (values.length ? Math.max(...values) - Math.min(...values) : 0));
   const all = rows.flat();
-  const shared = all.length ? Math.max(...all) - Math.min(...all) : 0;
-  const own = shared > 0 && spans.some((span) => span > 0 && span < READABLE_SHARE * shared);
+  const shared = range(all);
+  const own = shared > 0 && range(rows.flatMap(withoutFarthest)) < READABLE_SHARE * shared;
   if (own) return { own, x: rows.map(scale) };
   const common = scale(all);
   return { own, x: rows.map(() => common) };
+}
+
+/**
+ * ``values`` without the one farthest from their median, when there are
+ * three or more; fewer have no middle to be far from.
+ * @param {number[]} values
+ * @returns {number[]}
+ */
+function withoutFarthest(values) {
+  if (values.length < 3) return values;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = sorted.length / 2;
+  const median = sorted.length % 2
+    ? sorted[Math.floor(middle)]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+  const distances = values.map((value) => Math.abs(value - median));
+  const farthest = distances.indexOf(Math.max(...distances));
+  return values.filter((_, index) => index !== farthest);
 }
 
 /**

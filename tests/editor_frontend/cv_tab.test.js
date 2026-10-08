@@ -155,6 +155,12 @@ test("one far-off fold gives every row its own strip scale, and the card says so
   const shared = stripScales([[0.94, 1.59, 1.25, 1.33], [1.01, 1.41, 1.24, 1.28]]);
   assert.equal(shared.own, false);
   assert.equal(shared.x[0](1.41), shared.x[1](1.41));
+  // So does a steady row beside a spread one: no fold is far off, and on the
+  // common scale the steady row's folds bunch together, as they should.
+  const steady = stripScales([[0.305, 0.306, 0.304, 0.305, 0.305], [0.30, 0.33, 0.28, 0.31, 0.32]]);
+  assert.equal(steady.own, false);
+  // A far-off fold in each of two runs still crowds the rest.
+  assert.equal(stripScales([[63.4, 63.8, 3.0e10, 62.8], [63.38, 2.0e10, 62.83, 62.9]]).own, true);
   // A row of one value, or of equal values, sits mid-strip on its own scale.
   assert.equal(stripScales([[5, 5]]).x[0](5), 110);
 
@@ -170,6 +176,11 @@ test("one far-off fold gives every row its own strip scale, and the card says so
     results: [result("As supplied", "supplied", supplied), result("Current model", "run", current)]
   }), idle());
   assert.match(markup, /lower is better · each row on its own scale/);
+  // The current model's row is drawn on its own scale, across the strip.
+  const currentRow = markup.slice(markup.indexOf('data-origin="run"'));
+  const xs = [...currentRow.matchAll(/<circle cx="([\d.]+)"/g)].slice(0, 5).map((m) => Number(m[1]));
+  assert.equal(xs.length, 5);
+  assert.deepEqual([Math.min(...xs), Math.max(...xs)], [10, 210]);
 });
 
 test("the fold table lists the latest run's folds and a mean row", () => {
