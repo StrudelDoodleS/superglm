@@ -16,7 +16,7 @@ import {
   levelChartMarkup,
   newerJob,
   niceTicks,
-  stripScales,
+  foldStrip,
   termListMarkup
 } from "../../src/superglm/editor/app/views/cv_tab.js";
 
@@ -139,48 +139,47 @@ test("performance cards show mean ± sd, pooled, and one dot per fold for each r
   assert.equal(count(deviance, /class="cv-card-row"/g), 2);
 });
 
-test("one far-off fold gives every row its own strip scale, and the card says so", () => {
-  // As supplied, one fold scored 3e10 against the others' 63, which on a
-  // shared scale crowds the current model's five folds onto one pixel.
+test("far-off folds are pinned at the strip's ends, and the rest spread across it", () => {
+  // As supplied, one fold scored 3e10 against the others' 63, which on one
+  // scale crowds the current model's five folds onto one pixel.
   const supplied = [63.4, 63.8, 3.0e10, 62.8, 62.9];
   const current = [63.38, 63.81, 64.71, 62.83, 62.9];
-  const own = stripScales([supplied, current]);
-  assert.equal(own.own, true);
-  const positions = current.map(own.x[1]);
-  assert.equal(Math.min(...positions), 10);
-  assert.equal(Math.max(...positions), 210);
-  assert.equal(own.x[0](3.0e10), 210);
+  const strip = foldStrip([supplied, current]);
+  assert.equal(strip.pinned, true);
+  assert.equal(strip.off(3.0e10), true);
+  assert.equal(strip.x(3.0e10), 210);
+  const spread = (/** @type {number[]} */ values) =>
+    Math.max(...values.map(strip.x)) - Math.min(...values.map(strip.x));
+  assert.ok(spread(current) > 190, String(spread(current)));
+  assert.ok(current.every((value) => !strip.off(value)));
+  // A run with a far-off fold of its own, as a re-run on the same folds may
+  // have, keeps its other folds readable too.
+  const both = foldStrip([supplied, [63.38, 63.81, 2.9e10, 62.83, 62.9]]);
+  assert.deepEqual([both.off(3.0e10), both.off(2.9e10), both.off(63.81)], [true, true, false]);
+  assert.ok(Math.max(both.x(63.81), both.x(63.4)) - Math.min(both.x(62.8), both.x(62.83)) > 190);
+  // So do two far-off folds in one row, one of two folds, and one row alone.
+  assert.equal(foldStrip([[63.4, 3.0e10, 2.0e10, 62.8, 62.9], current]).off(2.0e10), true);
+  assert.equal(foldStrip([[63.4, 3.0e10], [63.38, 63.81]]).off(3.0e10), true);
+  assert.equal(foldStrip([supplied]).off(3.0e10), true);
 
-  // Rows of comparable spread keep one scale, so they compare at a glance.
-  const shared = stripScales([[0.94, 1.59, 1.25, 1.33], [1.01, 1.41, 1.24, 1.28]]);
-  assert.equal(shared.own, false);
-  assert.equal(shared.x[0](1.41), shared.x[1](1.41));
-  // So does a steady row beside a spread one: no fold is far off, and on the
-  // common scale the steady row's folds bunch together, as they should.
-  const steady = stripScales([[0.305, 0.306, 0.304, 0.305, 0.305], [0.30, 0.33, 0.28, 0.31, 0.32]]);
-  assert.equal(steady.own, false);
-  // A far-off fold in each of two runs still crowds the rest, as do two in
-  // one run, and one of two folds.
-  assert.equal(stripScales([[63.4, 63.8, 3.0e10, 62.8], [63.38, 2.0e10, 62.83, 62.9]]).own, true);
-  assert.equal(stripScales([[63.4, 3.0e10, 2.0e10, 62.8, 62.9], current]).own, true);
-  assert.equal(stripScales([[63.4, 3.0e10], [63.38, 63.81]]).own, true);
-  // Folds that differ by rounding alone are no spread: the row sits
-  // mid-strip, and its mean, a rounding below every fold, stays on the strip.
-  const rounded = stripScales([[...Array(19).fill(0.3), 3.0e10], [...Array(19).fill(0.3), 0.30000000000000004]]);
-  assert.equal(rounded.own, true);
-  assert.equal(rounded.x[1](0.29999999999999993), 110);
-  assert.equal(rounded.x[1](0.30000000000000004), 110);
-  // The core does not depend on the order of the folds.
+  // Rows of comparable spread pin nothing, so they compare at a glance; so
+  // does a steady row beside a spread one, whose folds bunch together.
+  assert.equal(foldStrip([[0.94, 1.59, 1.25, 1.33], [1.01, 1.41, 1.24, 1.28]]).pinned, false);
+  assert.equal(foldStrip([[0.305, 0.306, 0.304, 0.305, 0.305], [0.30, 0.33, 0.28, 0.31, 0.32]]).pinned, false);
+  // A fold beside folds with no spread of their own is not far off.
+  assert.equal(foldStrip([[63, 63, 63, 63.5]]).pinned, false);
+  // Folds that differ by rounding alone sit mid-strip, mean included.
+  const rounded = foldStrip([[0.3, 0.3, 0.3], [0.3, 0.3, 0.30000000000000004]]);
+  assert.equal(rounded.x(0.29999999999999993), 110);
+  // The strip does not depend on the order of the folds.
   const tied = [[0, 0.5, 0.53125, 0.53125, 0.5625, 1], [0.5, 0.5, 0.53125, 0.53125, 0.5625, 0.5625]];
   const permuted = tied.map((row) => [5, 1, 2, 3, 0, 4].map((index) => row[index]));
-  assert.equal(stripScales(permuted).own, stripScales(tied).own);
-  // One row, or rows apart by rounding alone, keep one scale.
-  assert.equal(stripScales([[63.4, 63.8, 3.0e10, 62.8, 62.9]]).own, false);
-  assert.equal(stripScales([[0.3, 0.30000000000000004], [0.3, 0.3]]).own, false);
-  // A value a rounding outside a spread row's folds stays on its strip.
-  assert.equal(stripScales([[1, 2, 3]]).x[0](1 - 2 ** -52), 10);
-  // A row of one value, or of equal values, sits mid-strip on its own scale.
-  assert.equal(stripScales([[5, 5]]).x[0](5), 110);
+  assert.deepEqual(
+    [0, 0.5, 0.5625, 1].map(foldStrip(permuted).x),
+    [0, 0.5, 0.5625, 1].map(foldStrip(tied).x)
+  );
+  // A value a rounding outside the folds stays on the strip.
+  assert.equal(foldStrip([[1, 2, 3]]).x(1 - 2 ** -52), 10);
 
   const fold = (/** @type {number} */ index, /** @type {number} */ deviance) => ({
     fold: index, n_train: 1, n_test: 1, scores: { deviance }, effective_df: 1, fit_time_s: 0, converged: true
@@ -193,12 +192,14 @@ test("one far-off fold gives every row its own strip scale, and the card says so
     metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
     results: [result("As supplied", "supplied", supplied), result("Current model", "run", current)]
   }), idle());
-  assert.match(markup, /lower is better · each row on its own scale/);
-  // The current model's row is drawn on its own scale, across the strip.
+  assert.match(markup, /lower is better · far-off folds at the strip's ends/);
+  assert.equal([...markup.matchAll(/class="cv-card-dot is-off"/g)].length, 1);
+  assert.match(markup, /Fold 3: [^<]*, off the strip<\/title>/);
+  // The current model's row spreads across the strip.
   const currentRow = markup.slice(markup.indexOf('data-origin="run"'));
   const xs = [...currentRow.matchAll(/<circle cx="([\d.]+)"/g)].slice(0, 5).map((m) => Number(m[1]));
   assert.equal(xs.length, 5);
-  assert.deepEqual([Math.min(...xs), Math.max(...xs)], [10, 210]);
+  assert.ok(Math.max(...xs) - Math.min(...xs) > 190, String(xs));
 });
 
 test("the fold table lists the latest run's folds and a mean row", () => {

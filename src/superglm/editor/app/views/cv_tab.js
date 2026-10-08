@@ -280,29 +280,70 @@ const READABLE_SHARE = 0.05;
 const UNIT_ROUNDOFF = 2 ** -53;
 
 /**
- * The strip positions of each row's values: one scale for every row, so the
- * rows compare at a glance, unless far-off folds alone stretch it. Each row's
- * core is the half of its folds nearest the median of every row's folds; when
- * the cores together span under READABLE_SHARE of the common scale, each row
- * gets its own scale.
- * A steadier row beside a spread one keeps the common scale, which shows it
- * is steadier. A row whose values are equal, or differ by no more than their
- * rounding, sits mid-strip, and a value a rounding outside its row's folds
- * (their mean, say) stays on the strip.
+ * The strip every row of a card is drawn on: one scale, so the rows compare
+ * at a glance. A far-off fold would stretch it until the others sit on one
+ * pixel, so it is pinned at the strip's end instead (``off``). Each row's
+ * core, the half of its folds nearest the median of all the folds, stays on
+ * the strip, with the folds beside the cores while they span under
+ * READABLE_SHARE of every fold's range; the folds beyond are far off. A
+ * steadier row beside a spread one pins nothing, which shows it is steadier.
+ * Folds that differ by rounding alone sit mid-strip, and every position is
+ * held on the strip.
  * @param {number[][]} rows each row's finite values
- * @returns {{own: boolean, x: ((value:number) => number)[]}}
+ * @returns {{pinned: boolean, x: (value:number) => number, off: (value:number) => boolean}}
  */
-export function stripScales(rows) {
-  const all = rows.flat();
-  const shared = range(all);
-  const centre = median(all);
-  // One row, or a common scale that is rounding alone, has nothing to switch.
-  const own = rows.filter((values) => values.length).length > 1
-    && shared > all.length * UNIT_ROUNDOFF * Math.max(0, ...all.map(Math.abs))
-    && range(rows.flatMap((values) => core(values, centre))) < READABLE_SHARE * shared;
-  if (own) return { own, x: rows.map(stripScale) };
-  const common = stripScale(all);
-  return { own, x: rows.map(() => common) };
+export function foldStrip(rows) {
+  const all = rows.flat().sort((a, b) => a - b);
+  const kept = withoutFarOff(all, rows);
+  const pinned = kept.length < all.length;
+  const [lo, hi] = [kept[0], kept[kept.length - 1]];
+  return { pinned, x: stripScale(kept), off: (value) => pinned && (value < lo || value > hi) };
+}
+
+/**
+ * ``sorted``, every row's folds together, without the far-off ones: the
+ * cores, widened through the folds beside them, the nearer first, while
+ * they span under READABLE_SHARE of the whole range.
+ * @param {number[]} sorted ascending @param {number[][]} rows
+ * @returns {number[]}
+ */
+function withoutFarOff(sorted, rows) {
+  const centre = median(sorted);
+  const cores = rows.flatMap((values) => core(values, centre));
+  if (!cores.length || !spreads(sorted)) return sorted;
+  const limit = READABLE_SHARE * range(sorted);
+  let lo = sorted.indexOf(Math.min(...cores));
+  let hi = sorted.lastIndexOf(Math.max(...cores));
+  if (!(sorted[hi] - sorted[lo] < limit)) return sorted;
+  for (;;) {
+    const below = lo > 0 ? sorted[hi] - sorted[lo - 1] : Number.POSITIVE_INFINITY;
+    const above = hi < sorted.length - 1 ? sorted[hi + 1] - sorted[lo] : Number.POSITIVE_INFINITY;
+    if (!(Math.min(below, above) < limit)) break;
+    if (below <= above) lo -= 1;
+    else hi += 1;
+  }
+  const kept = sorted.slice(lo, hi + 1);
+  return spreads(kept) ? kept : sorted;
+}
+
+/**
+ * The half of ``values`` nearest ``centre`` (the larger half of an odd
+ * count): what is left when up to half of them are far off. Ties go to the
+ * smaller value, so the core is the same whatever the fold order.
+ * @param {number[]} values @param {number} centre
+ * @returns {number[]}
+ */
+function core(values, centre) {
+  return values
+    .map((value) => ({ value, distance: Math.abs(value - centre) }))
+    .sort((a, b) => a.distance - b.distance || a.value - b.value)
+    .slice(0, Math.ceil(values.length / 2))
+    .map(({ value }) => value);
+}
+
+/** Whether ``values`` spread wider than ``n`` roundings of their largest magnitude. @param {number[]} values */
+function spreads(values) {
+  return range(values) > values.length * UNIT_ROUNDOFF * Math.max(0, ...values.map(Math.abs));
 }
 
 /** @param {number[]} values */
@@ -311,33 +352,16 @@ function range(values) {
 }
 
 /**
- * ``values`` onto the strip, 10 to 210. A span within the values' rounding,
- * ``n`` roundings of the largest magnitude, is no spread at all.
+ * ``values`` onto the strip, 10 to 210, held on it. Values that spread no
+ * wider than their rounding sit mid-strip.
  * @param {number[]} values
  * @returns {(value:number) => number}
  */
 function stripScale(values) {
   const lo = values.length ? Math.min(...values) : 0;
   const span = range(values);
-  const magnitude = Math.max(0, ...values.map(Math.abs));
-  if (!(span > values.length * UNIT_ROUNDOFF * magnitude)) return () => 110;
+  if (!spreads(values)) return () => 110;
   return (value) => Math.min(210, Math.max(10, 10 + ((value - lo) / span) * 200));
-}
-
-/**
- * The half of ``values`` nearest ``centre`` (the larger half of an odd
- * count): what is left when up to half of them are far off. The centre is
- * every row's median, so a row of two folds keeps the one nearer the rest.
- * @param {number[]} values @param {number} centre
- * @returns {number[]}
- */
-function core(values, centre) {
-  return values
-    .map((value) => ({ value, distance: Math.abs(value - centre) }))
-    // Ties go to the smaller value, so the core is the same whatever the fold order.
-    .sort((a, b) => a.distance - b.distance || a.value - b.value)
-    .slice(0, Math.ceil(values.length / 2))
-    .map(({ value }) => value);
 }
 
 /** @param {number[]} values */
@@ -353,19 +377,20 @@ function median(values) {
  * @param {CVResultPayload[]} results
  */
 function metricCard(metric, results) {
-  const scales = stripScales(results.map((result) =>
+  const strip = foldStrip(results.map((result) =>
     result.folds.map((fold) => fold.scores[metric.name]).filter(isNumber)));
-  const rows = results.map((result, row) => {
-    const x = scales.x[row];
+  const { x, off } = strip;
+  const rows = results.map((result) => {
     const mean = result.mean[metric.name];
     const pooled = result.pooled[metric.name];
     const dots = result.folds.map((fold, index) => {
       const value = fold.scores[metric.name];
       const number = foldNumber(fold, index);
-      return isNumber(value)
-        ? `<circle cx="${px(x(value))}" cy="12" r="4.5" class="cv-card-dot" style="${foldMarkStyle(number)}">`
-          + `<title>Fold ${number + 1}: ${metricText(value)}</title></circle>`
-        : "";
+      if (!isNumber(value)) return "";
+      const far = off(value);
+      return `<circle cx="${px(x(value))}" cy="12" r="4.5" class="cv-card-dot${far ? " is-off" : ""}"`
+        + ` style="${foldMarkStyle(number)}">`
+        + `<title>Fold ${number + 1}: ${metricText(value)}${far ? ", off the strip" : ""}</title></circle>`;
     }).join("");
     const meanTick = isNumber(mean) ? `<path class="cv-mean" d="M${px(x(mean))},3 V21"></path>` : "";
     const pooledText = isNumber(pooled) ? ` · pooled ${metricText(pooled)}` : "";
@@ -378,9 +403,9 @@ function metricCard(metric, results) {
         <path class="cv-strip-axis" d="M10,12 H210"></path>${meanTick}${dots}</svg>
     </div>`;
   }).join("");
-  const ownScales = scales.own ? " · each row on its own scale" : "";
+  const pinned = strip.pinned ? " · far-off folds at the strip's ends" : "";
   return `<div class="cv-card"><div class="cv-card-title">${escapeHTML(metric.label)}
-    <span>· ${metric.lower_is_better ? "lower" : "higher"} is better${ownScales}</span></div>${rows}</div>`;
+    <span>· ${metric.lower_is_better ? "lower" : "higher"} is better${pinned}</span></div>${rows}</div>`;
 }
 
 /**
