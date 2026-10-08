@@ -161,6 +161,14 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   assert.equal(foldStrip([[63.4, 3.0e10, 2.0e10, 62.8, 62.9], current]).off(2.0e10), true);
   assert.equal(foldStrip([[63.4, 3.0e10], [63.38, 63.81]]).off(3.0e10), true);
   assert.equal(foldStrip([supplied]).off(3.0e10), true);
+  // What counts as far off depends on the cores, not on the other far-off
+  // folds: a nearer one is still pinned, and an ordinary fold is not.
+  assert.equal(foldStrip([supplied, [63.38, 63.81, 1.0e5, 62.83, 62.9]]).off(1.0e5), true);
+  const near = foldStrip([[63.4, 63.8, 100, 62.8, 62.9], current]);
+  assert.deepEqual([near.off(64.71), near.off(100)], [false, true]);
+  // Scores near both ends of the float64 range still land on the strip.
+  const huge = foldStrip([[-Number.MAX_VALUE, Number.MAX_VALUE]]);
+  assert.deepEqual([huge.x(-Number.MAX_VALUE), huge.x(Number.MAX_VALUE)], [10, 210]);
 
   // Rows of comparable spread pin nothing, so they compare at a glance; so
   // does a steady row beside a spread one, whose folds bunch together.
@@ -186,13 +194,16 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   });
   const result = (/** @type {string} */ label, /** @type {string} */ origin, /** @type {number[]} */ values) => ({
     ...cvPayload().results[0], label, origin, folds: values.map((value, index) => fold(index, value)),
-    mean: { deviance: 0 }, std: { deviance: 0 }, pooled: {}
+    mean: { deviance: values.reduce((a, b) => a + b, 0) / values.length }, std: { deviance: 0 }, pooled: {}
   });
   const markup = cvTabMarkup(cvPayload({
     metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
     results: [result("As supplied", "supplied", supplied), result("Current model", "run", current)]
   }), idle());
   assert.match(markup, /lower is better · far-off folds at the strip's ends/);
+  // The supplied mean, pulled to 6e9 by its far-off fold, is pinned and says so.
+  assert.equal([...markup.matchAll(/class="cv-mean is-off"/g)].length, 1);
+  assert.match(markup, /<title>Mean: [^<]*, off the strip<\/title>/);
   assert.equal([...markup.matchAll(/class="cv-card-dot is-off"/g)].length, 1);
   assert.match(markup, /Fold 3: [^<]*, off the strip<\/title>/);
   // The current model's row spreads across the strip.

@@ -284,9 +284,10 @@ const UNIT_ROUNDOFF = 2 ** -53;
  * at a glance. A far-off fold would stretch it until the others sit on one
  * pixel, so it is pinned at the strip's end instead (``off``). Each row's
  * core, the half of its folds nearest the median of all the folds, stays on
- * the strip, with the folds beside the cores while they span under
- * READABLE_SHARE of every fold's range; the folds beyond are far off. A
- * steadier row beside a spread one pins nothing, which shows it is steadier.
+ * the strip, with the folds beside the cores while the cores keep at least
+ * READABLE_SHARE of it; the folds beyond are far off, however far the other
+ * far-off folds are. A steadier row beside a spread one pins nothing, which
+ * shows it is steadier.
  * Folds that differ by rounding alone sit mid-strip, and every position is
  * held on the strip.
  * @param {number[][]} rows each row's finite values
@@ -302,8 +303,8 @@ export function foldStrip(rows) {
 
 /**
  * ``sorted``, every row's folds together, without the far-off ones: the
- * cores, widened through the folds beside them, the nearer first, while
- * they span under READABLE_SHARE of the whole range.
+ * cores, widened through the folds beside them, the nearer first, while the
+ * cores keep READABLE_SHARE of the span.
  * @param {number[]} sorted ascending @param {number[][]} rows
  * @returns {number[]}
  */
@@ -311,10 +312,9 @@ function withoutFarOff(sorted, rows) {
   const centre = median(sorted);
   const cores = rows.flatMap((values) => core(values, centre));
   if (!cores.length || !spreads(sorted)) return sorted;
-  const limit = READABLE_SHARE * range(sorted);
   let lo = sorted.indexOf(Math.min(...cores));
   let hi = sorted.lastIndexOf(Math.max(...cores));
-  if (!(sorted[hi] - sorted[lo] < limit)) return sorted;
+  const limit = (sorted[hi] - sorted[lo]) / READABLE_SHARE;
   for (;;) {
     const below = lo > 0 ? sorted[hi] - sorted[lo - 1] : Number.POSITIVE_INFINITY;
     const above = hi < sorted.length - 1 ? sorted[hi + 1] - sorted[lo] : Number.POSITIVE_INFINITY;
@@ -343,7 +343,9 @@ function core(values, centre) {
 
 /** Whether ``values`` spread wider than ``n`` roundings of their largest magnitude. @param {number[]} values */
 function spreads(values) {
-  return range(values) > values.length * UNIT_ROUNDOFF * Math.max(0, ...values.map(Math.abs));
+  const half = Math.max(...values) / 2 - Math.min(...values) / 2;
+  return values.length > 0
+    && half > values.length * UNIT_ROUNDOFF * Math.max(0, ...values.map(Math.abs)) / 2;
 }
 
 /** @param {number[]} values */
@@ -353,15 +355,17 @@ function range(values) {
 
 /**
  * ``values`` onto the strip, 10 to 210, held on it. Values that spread no
- * wider than their rounding sit mid-strip.
+ * wider than their rounding sit mid-strip. Positions are taken from halved
+ * values, which halving leaves exact, so two finite scores of opposite sign
+ * near the float64 limit do not overflow their span.
  * @param {number[]} values
  * @returns {(value:number) => number}
  */
 function stripScale(values) {
-  const lo = values.length ? Math.min(...values) : 0;
-  const span = range(values);
   if (!spreads(values)) return () => 110;
-  return (value) => Math.min(210, Math.max(10, 10 + ((value - lo) / span) * 200));
+  const lo = Math.min(...values) / 2;
+  const span = Math.max(...values) / 2 - lo;
+  return (value) => Math.min(210, Math.max(10, 10 + ((value / 2 - lo) / span) * 200));
 }
 
 /** @param {number[]} values */
@@ -392,7 +396,11 @@ function metricCard(metric, results) {
         + ` style="${foldMarkStyle(number)}">`
         + `<title>Fold ${number + 1}: ${metricText(value)}${far ? ", off the strip" : ""}</title></circle>`;
     }).join("");
-    const meanTick = isNumber(mean) ? `<path class="cv-mean" d="M${px(x(mean))},3 V21"></path>` : "";
+    const meanOff = isNumber(mean) && off(mean);
+    const meanTick = isNumber(mean)
+      ? `<path class="cv-mean${meanOff ? " is-off" : ""}" d="M${px(x(mean))},3 V21">`
+        + `<title>Mean: ${metricText(mean)}${meanOff ? ", off the strip" : ""}</title></path>`
+      : "";
     const pooledText = isNumber(pooled) ? ` · pooled ${metricText(pooled)}` : "";
     return `<div class="cv-card-row" data-origin="${result.origin}">
       <div class="cv-card-value"><span class="cv-card-label">${escapeHTML(result.label)}</span>
