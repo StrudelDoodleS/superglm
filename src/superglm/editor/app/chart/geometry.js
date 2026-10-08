@@ -74,31 +74,11 @@ export function splitLabelGraphemes(label) {
 }
 
 /**
- * Return at most `maximum` stable indices, retaining both edges whenever possible.
- *
- * @param {number} count
- * @param {number} maximum
- * @returns {number[]}
- */
-export function evenlySpacedIndices(count, maximum) {
-  assertNonnegativeInteger("count", count);
-  assertNonnegativeInteger("maximum", maximum);
-  if (count === 0 || maximum === 0) return [];
-  if (count <= maximum) return Array.from({ length: count }, (_, index) => index);
-  if (maximum === 1) return [0];
-  const indices = [];
-  for (let position = 0; position < maximum; position += 1) {
-    indices.push(Math.round(position * (count - 1) / (maximum - 1)));
-  }
-  return Array.from(new Set(indices)).sort((left, right) => left - right);
-}
-
-/**
  * At most `maximum` indices one whole step apart, keeping both edges.
  *
- * A labelled axis takes these rather than evenlySpacedIndices: rounding a
- * fractional step (24 levels into 14 labels steps 1.77) puts some labels on
- * neighbouring levels while the rest skip one, and the neighbours collide.
+ * A labelled axis takes these rather than a rounded fractional step: 24
+ * levels into 14 labels steps 1.77, which puts some labels on neighbouring
+ * levels while the rest skip one, and the neighbours collide.
  * Here every gap is the step, except the last, which is wider: the last
  * multiple of the step gives way to the last index.
  *

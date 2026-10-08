@@ -119,6 +119,22 @@ def test_identical_categorical_redraw_reuses_text_measurements(open_editor_page,
         assert page.evaluate("window.__axisMeasurementCalls") == initial_calls
 
 
+def test_a_narrow_chart_labels_and_measures_levels_one_whole_step_apart(open_editor_page):
+    # At 640px the chart has room for nine of long_category's ten labels: it
+    # labels every other level and measures only those, where rounding nine
+    # picks measured all ten and labelled neighbours.
+    with open_editor_page(
+        selected_term="long_category", viewport={"width": 640, "height": 720}
+    ) as (page, session):
+        page.locator("#chart .x-tick-label").first.wait_for()
+        levels = list(session.terms["long_category"].levels)
+        labels = page.locator("#chart .x-tick-label").evaluate_all(
+            "ticks => ticks.map(tick => tick.getAttribute('data-full-label'))"
+        )
+        assert labels == [levels[i] for i in (0, 2, 4, 6, 9)]
+        assert page.locator("#chart").get_attribute("data-axis-measurement-count") == "5"
+
+
 def test_zoom_between_categories_does_not_draw_an_out_of_domain_tick(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, _session):
         zoom = page.locator("#chart").evaluate(

@@ -5,7 +5,6 @@ import {
   FALLBACK_CHART_SIZE,
   categoricalTickIndices,
   chartSize,
-  evenlySpacedIndices,
   fitMeasuredLabel,
   planCategoricalAxis,
   rotatedExtent,
@@ -29,23 +28,11 @@ function measurement(label, widthPerGrapheme = 7, height = 11) {
   };
 }
 
-test("tick reduction retains first, last, and evenly spaced interior categories", () => {
-  assert.deepEqual(evenlySpacedIndices(10, 5), [0, 2, 5, 7, 9]);
-  assert.deepEqual(evenlySpacedIndices(3, 5), [0, 1, 2]);
-});
-
-test("tick reduction handles empty, single, exact-limit, and thirty-cap inputs", () => {
-  assert.deepEqual(evenlySpacedIndices(0, 5), []);
-  assert.deepEqual(evenlySpacedIndices(5, 0), []);
-  assert.deepEqual(evenlySpacedIndices(1, 30), [0]);
-  assert.deepEqual(evenlySpacedIndices(8, 1), [0]);
-  assert.deepEqual(evenlySpacedIndices(30, 30), Array.from({ length: 30 }, (_, i) => i));
-
-  const capped = evenlySpacedIndices(100, 30);
-  assert.equal(capped.length, 30);
-  assert.equal(capped[0], 0);
-  assert.equal(capped.at(-1), 99);
-  assert.equal(new Set(capped).size, capped.length);
+test("tick strides handle empty, single, exact-limit, and thirty-cap inputs", () => {
+  assert.deepEqual(strideIndices(5, 0), []);
+  assert.deepEqual(strideIndices(1, 30), [0]);
+  assert.deepEqual(strideIndices(30, 30), Array.from({ length: 30 }, (_, i) => i));
+  assert.equal(strideIndices(100, 30).length, 25);
 });
 
 test("measured truncation uses a Unicode end ellipsis without changing the source", () => {
@@ -162,7 +149,8 @@ test("categorical layout caps one hundred categories at thirty ticks, one step a
   assert.equal(indices[0], 0);
   assert.equal(indices.at(-1), 99);
   const gaps = indices.slice(1).map((index, k) => index - indices[k]);
-  assert.ok(gaps.every((gap) => gap >= gaps[0]), String(gaps));
+  const [step, last] = [gaps[0], gaps[gaps.length - 1]];
+  assert.ok(gaps.slice(0, -1).every((gap) => gap === step) && last >= step, String(gaps));
 });
 
 test("labels never fall on neighbouring levels while others skip, so none collide", () => {
@@ -323,9 +311,9 @@ test("geometry rejects mismatched arrays and malformed measurements", () => {
 });
 
 test("geometry rejects nonfinite and negative dimensions", () => {
-  assert.throws(() => evenlySpacedIndices(Number.NaN, 2), /count/);
-  assert.throws(() => evenlySpacedIndices(2, Number.POSITIVE_INFINITY), /maximum/);
-  assert.throws(() => evenlySpacedIndices(-1, 2), /count/);
+  assert.throws(() => strideIndices(Number.NaN, 2), /count/);
+  assert.throws(() => strideIndices(2, Number.POSITIVE_INFINITY), /maximum/);
+  assert.throws(() => strideIndices(-1, 2), /count/);
   assert.throws(() => fitMeasuredLabel("A", measurement("A"), Number.NaN), /budget/);
   assert.throws(() => fitMeasuredLabel("A", measurement("A"), -1), /budget/);
   assert.throws(() => rotatedExtent(Number.POSITIVE_INFINITY, 10, 0), /width/);
