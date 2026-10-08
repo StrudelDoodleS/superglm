@@ -159,8 +159,19 @@ test("one far-off fold gives every row its own strip scale, and the card says so
   // common scale the steady row's folds bunch together, as they should.
   const steady = stripScales([[0.305, 0.306, 0.304, 0.305, 0.305], [0.30, 0.33, 0.28, 0.31, 0.32]]);
   assert.equal(steady.own, false);
-  // A far-off fold in each of two runs still crowds the rest.
+  // A far-off fold in each of two runs still crowds the rest, as do two in
+  // one run, and one of two folds.
   assert.equal(stripScales([[63.4, 63.8, 3.0e10, 62.8], [63.38, 2.0e10, 62.83, 62.9]]).own, true);
+  assert.equal(stripScales([[63.4, 3.0e10, 2.0e10, 62.8, 62.9], current]).own, true);
+  assert.equal(stripScales([[63.4, 3.0e10], [63.38, 63.81]]).own, true);
+  // Folds that differ by rounding alone are no spread: the row sits
+  // mid-strip, and its mean, a rounding below every fold, stays on the strip.
+  const rounded = stripScales([[...Array(19).fill(0.3), 3.0e10], [...Array(19).fill(0.3), 0.30000000000000004]]);
+  assert.equal(rounded.own, true);
+  assert.equal(rounded.x[1](0.29999999999999993), 110);
+  assert.equal(rounded.x[1](0.30000000000000004), 110);
+  // A value a rounding outside a spread row's folds stays on its strip.
+  assert.equal(stripScales([[1, 2, 3]]).x[0](1 - 2 ** -52), 10);
   // A row of one value, or of equal values, sits mid-strip on its own scale.
   assert.equal(stripScales([[5, 5]]).x[0](5), 110);
 

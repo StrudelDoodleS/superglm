@@ -276,49 +276,73 @@ function sectionHead(title, hint) {
 // deviance a million times the rest does that to every other row.
 const READABLE_SHARE = 0.05;
 
+// The unit roundoff of a float64: the relative error of one rounding.
+const UNIT_ROUNDOFF = 2 ** -53;
+
 /**
  * The strip positions of each row's values: one scale for every row, so the
- * rows compare at a glance, unless outlying folds alone stretch it. Each row
- * of three or more folds sets aside the fold farthest from its own median;
- * when the folds left span under READABLE_SHARE of the common scale, each
- * row gets its own scale. A steadier row beside a spread one keeps the common
- * scale, which shows it is steadier. A row whose values are all equal sits
- * mid-strip.
+ * rows compare at a glance, unless far-off folds alone stretch it. Each row's
+ * core is the half of its folds nearest the median of every row's folds; when
+ * the cores together span under READABLE_SHARE of the common scale, each row
+ * gets its own scale.
+ * A steadier row beside a spread one keeps the common scale, which shows it
+ * is steadier. A row whose values are equal, or differ by no more than their
+ * rounding, sits mid-strip, and a value a rounding outside its row's folds
+ * (their mean, say) stays on the strip.
  * @param {number[][]} rows each row's finite values
  * @returns {{own: boolean, x: ((value:number) => number)[]}}
  */
 export function stripScales(rows) {
-  const range = (/** @type {number[]} */ values) =>
-    values.length ? Math.max(...values) - Math.min(...values) : 0;
-  const scale = (/** @type {number[]} */ values) => {
-    const lo = values.length ? Math.min(...values) : 0;
-    const span = range(values);
-    return (/** @type {number} */ value) => (span > 0 ? 10 + ((value - lo) / span) * 200 : 110);
-  };
   const all = rows.flat();
   const shared = range(all);
-  const own = shared > 0 && range(rows.flatMap(withoutFarthest)) < READABLE_SHARE * shared;
-  if (own) return { own, x: rows.map(scale) };
-  const common = scale(all);
+  const centre = median(all);
+  const own = shared > 0
+    && range(rows.flatMap((values) => core(values, centre))) < READABLE_SHARE * shared;
+  if (own) return { own, x: rows.map(stripScale) };
+  const common = stripScale(all);
   return { own, x: rows.map(() => common) };
 }
 
+/** @param {number[]} values */
+function range(values) {
+  return values.length ? Math.max(...values) - Math.min(...values) : 0;
+}
+
 /**
- * ``values`` without the one farthest from their median, when there are
- * three or more; fewer have no middle to be far from.
+ * ``values`` onto the strip, 10 to 210. A span within the values' rounding,
+ * ``n`` roundings of the largest magnitude, is no spread at all.
  * @param {number[]} values
+ * @returns {(value:number) => number}
+ */
+function stripScale(values) {
+  const lo = values.length ? Math.min(...values) : 0;
+  const span = range(values);
+  const magnitude = Math.max(0, ...values.map(Math.abs));
+  if (!(span > values.length * UNIT_ROUNDOFF * magnitude)) return () => 110;
+  return (value) => Math.min(210, Math.max(10, 10 + ((value - lo) / span) * 200));
+}
+
+/**
+ * The half of ``values`` nearest ``centre`` (the larger half of an odd
+ * count): what is left when up to half of them are far off. The centre is
+ * every row's median, so a row of two folds keeps the one nearer the rest.
+ * @param {number[]} values @param {number} centre
  * @returns {number[]}
  */
-function withoutFarthest(values) {
-  if (values.length < 3) return values;
+function core(values, centre) {
+  return values
+    .map((value) => ({ value, distance: Math.abs(value - centre) }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, Math.ceil(values.length / 2))
+    .map(({ value }) => value);
+}
+
+/** @param {number[]} values */
+function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = sorted.length / 2;
-  const median = sorted.length % 2
-    ? sorted[Math.floor(middle)]
-    : (sorted[middle - 1] + sorted[middle]) / 2;
-  const distances = values.map((value) => Math.abs(value - median));
-  const farthest = distances.indexOf(Math.max(...distances));
-  return values.filter((_, index) => index !== farthest);
+  if (!sorted.length) return 0;
+  return sorted.length % 2 ? sorted[Math.floor(middle)] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 /**
