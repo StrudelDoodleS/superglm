@@ -31,6 +31,8 @@ const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === "function"
  * @property {number} baseLeft Symmetric left/right edge inset used for label budgeting.
  * @property {number} baseBottom
  * @property {number} [titleHeight]
+ * @property {readonly [number, number]} [domain] the x range the plot maps onto
+ *   `availableWidth`, padding included; by default the labelled ticks span it
  */
 
 /**
@@ -117,6 +119,21 @@ export function strideIndices(count, maximum) {
   return indices;
 }
 
+/**
+ * The levels a categorical axis labels, out of `count` in `availableWidth`:
+ * one whole step apart, as many as the width and MAX_TICKS allow. The chart
+ * measures only these, and planCategoricalAxis labels every one it is given.
+ *
+ * @param {number} count
+ * @param {number} availableWidth
+ * @returns {number[]}
+ */
+export function categoricalTickIndices(count, availableWidth) {
+  assertPositiveFinite("availableWidth", availableWidth);
+  const densityLimit = Math.max(2, Math.floor(availableWidth / MIN_ANGLED_SLOT) + 1);
+  return strideIndices(count, Math.min(MAX_TICKS, densityLimit));
+}
+
 /** The drawing size for a chart that has no layout box: hidden, or a DOM without layout. */
 export const FALLBACK_CHART_SIZE = Object.freeze({ width: 940, height: 520 });
 
@@ -192,6 +209,7 @@ export function planCategoricalAxis({
   baseLeft,
   baseBottom,
   titleHeight = 14,
+  domain = undefined,
 }) {
   if (values.length !== labels.length || labels.length !== measurements.length) {
     throw new RangeError("values, labels, and measurements must have the same length");
@@ -208,9 +226,8 @@ export function planCategoricalAxis({
     validateMeasurement(labels[index], measurement);
   });
 
-  const densityLimit = Math.max(2, Math.floor(availableWidth / MIN_ANGLED_SLOT) + 1);
-  const indices = strideIndices(labels.length, Math.min(MAX_TICKS, densityLimit));
-  const slot = narrowestSlot(values, indices, availableWidth);
+  const indices = categoricalTickIndices(labels.length, availableWidth);
+  const slot = narrowestSlot(values, indices, availableWidth, domain);
   const horizontalBudget = Math.max(0, slot - 10);
   const maxMeasuredHeight = Math.max(0, ...indices.map((index) => measurements[index].height));
   const rotate = indices.some((index) => measurements[index].fullWidth > horizontalBudget);
@@ -277,22 +294,26 @@ export function planCategoricalAxis({
 
 /**
  * The width between the two closest labelled ticks, which every label must
- * fit: the selected ticks span `availableWidth`, placed by their numeric
- * values, or evenly when the values are not all numbers.
+ * fit. `domain` is the x range the plot maps onto `availableWidth`, padding
+ * included; without one, or when the values are not all numbers (placed
+ * evenly by index), the labelled ticks span `availableWidth`.
  * @param {readonly unknown[]} values
  * @param {readonly number[]} indices
  * @param {number} availableWidth
+ * @param {readonly [number, number]} [domain]
  * @returns {number}
  */
-function narrowestSlot(values, indices, availableWidth) {
+function narrowestSlot(values, indices, availableWidth, domain) {
   if (indices.length < 2) return availableWidth;
   const numeric = indices.every((index) => typeof values[index] === "number"
     && Number.isFinite(values[index]));
   const position = (/** @type {number} */ k) =>
     numeric ? /** @type {number} */ (values[indices[k]]) : indices[k];
-  const span = position(indices.length - 1) - position(0);
-  if (!(span > 0)) return availableWidth / (indices.length - 1);
-  let gap = span;
+  const ticksSpan = position(indices.length - 1) - position(0);
+  if (!(ticksSpan > 0)) return availableWidth / (indices.length - 1);
+  const domainSpan = numeric && domain ? domain[1] - domain[0] : Number.NaN;
+  const span = domainSpan > 0 ? domainSpan : ticksSpan;
+  let gap = ticksSpan;
   for (let k = 1; k < indices.length; k += 1) gap = Math.min(gap, position(k) - position(k - 1));
   return availableWidth * gap / span;
 }

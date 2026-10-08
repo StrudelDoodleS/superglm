@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   FALLBACK_CHART_SIZE,
+  categoricalTickIndices,
   chartSize,
   evenlySpacedIndices,
   fitMeasuredLabel,
@@ -174,9 +175,9 @@ test("labels never fall on neighbouring levels while others skip, so none collid
   assert.deepEqual(strideIndices(8, 1), [0]);
   assert.deepEqual(strideIndices(0, 5), []);
 
-  const labels = Array.from({ length: 24 }, (_, index) =>
-    `${String(index + 1).padStart(2, "0")}) Mi${String(6 * (index + 1)).padStart(3, "0")}`);
-  const layout = planCategoricalAxis({
+  // Short labels stay level, centred one whole step apart.
+  const labels = Array.from({ length: 24 }, (_, index) => `Mi${String(6 * (index + 1)).padStart(3, "0")}`);
+  const ticks = planCategoricalAxis({
     values: labels.map((_, index) => index),
     labels,
     measurements: labels.map((label) => measurement(label)),
@@ -184,16 +185,71 @@ test("labels never fall on neighbouring levels while others skip, so none collid
     svgHeight: 520,
     baseLeft: 76,
     baseBottom: 72,
-  });
-  const ticks = layout.ticks;
-  const pixel = (/** @type {number} */ index) => (760 * index) / 23;
-  for (let k = 1; k < ticks.length; k += 1) {
-    // Each label fits the room to its neighbour: none overlaps the next.
-    const room = pixel(ticks[k].index) - pixel(ticks[k - 1].index);
-    assert.ok(ticks[k].angle !== 0 || ticks[k].width <= room, `${ticks[k].fullLabel}: ${ticks[k].width} > ${room}`);
-    assert.ok(ticks[k].index - ticks[k - 1].index >= 2, `${ticks[k - 1].fullLabel} and ${ticks[k].fullLabel}`);
-  }
+    domain: [-0.5, 23.5],
+  }).ticks;
+  assert.ok(ticks.every((tick) => tick.angle === 0));
+  assert.deepEqual(ticks.map((tick) => tick.index), strideIndices(24, 14));
+  assertNoLevelLabelOverlaps(ticks, 760, [-0.5, 23.5]);
 });
+
+test("label room is measured on the padded axis the chart draws", () => {
+  // Five levels on a 400 px plot padded half a level each side sit 80 px
+  // apart, not the 100 px the ticks' own span gives: an 88 px label kept
+  // level overlapped each neighbour by 8 px.
+  const labels = ["Level one A", "Level two B", "Level thr C", "Level fou D", "Level fiv E"];
+  const ticks = planCategoricalAxis({
+    values: labels.map((_, index) => index),
+    labels,
+    measurements: labels.map((label) => measurement(label, 8)),
+    availableWidth: 400,
+    svgHeight: 520,
+    baseLeft: 76,
+    baseBottom: 72,
+    domain: [-0.5, 4.5],
+  }).ticks;
+  assertNoLevelLabelOverlaps(ticks, 400, [-0.5, 4.5]);
+});
+
+test("the chart labels more than thirty levels one whole step apart", () => {
+  // The chart measures only the levels categoricalTickIndices picks, so the
+  // stride must hold over all the levels, not over a rounded preselection.
+  const wide = categoricalTickIndices(40, 1000);
+  assert.deepEqual(wide, [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39]);
+  assert.deepEqual(categoricalTickIndices(40, 760), wide);
+  assert.deepEqual(categoricalTickIndices(100, 4000), strideIndices(100, 30));
+
+  const labels = Array.from({ length: 40 }, (_, index) => `L${index}`);
+  const picked = wide.map((index) => labels[index]);
+  const ticks = planCategoricalAxis({
+    values: wide,
+    labels: picked,
+    measurements: picked.map((label) => measurement(label)),
+    availableWidth: 1000,
+    svgHeight: 520,
+    baseLeft: 76,
+    baseBottom: 72,
+    domain: [-0.5, 39.5],
+  }).ticks;
+  // planCategoricalAxis labels every level it is given.
+  assert.deepEqual(ticks.map((tick) => tick.value), wide);
+});
+
+/**
+ * Each level label fits the room to its neighbours on the padded axis.
+ * @param {{index:number, value:unknown, angle:number, width:number, fullLabel:string}[]} ticks
+ * @param {number} width @param {[number, number]} domain
+ */
+function assertNoLevelLabelOverlaps(ticks, width, [lo, hi]) {
+  const pixel = (/** @type {number} */ value) => (width * (value - lo)) / (hi - lo);
+  for (let k = 1; k < ticks.length; k += 1) {
+    const room = pixel(Number(ticks[k].value)) - pixel(Number(ticks[k - 1].value));
+    const halves = (ticks[k].width + ticks[k - 1].width) / 2;
+    assert.ok(
+      ticks[k].angle !== 0 || halves <= room,
+      `${ticks[k - 1].fullLabel} and ${ticks[k].fullLabel}: ${halves} > ${room}`
+    );
+  }
+}
 
 test("horizontal centered edge labels respect the viewport-side budget", () => {
   const labels = ["FourteenCharsAB", "FourteenCharsCD"];

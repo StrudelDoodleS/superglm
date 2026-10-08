@@ -16,7 +16,7 @@ import {
 } from "./chart/pending_overlay.js";
 import {
   chartSize,
-  evenlySpacedIndices,
+  categoricalTickIndices,
   planCategoricalAxis,
   splitLabelGraphemes
 } from "./chart/geometry.js";
@@ -1144,8 +1144,8 @@ function categoricalAxisLayout(
   }
   const rows = labels.map((label, index) => ({ value: view.x[index], label }));
   const visibleRows = rows.filter((row) => row.value >= xMin && row.value <= xMax);
-  const candidateIndices = evenlySpacedIndices(visibleRows.length, 30);
-  const candidates = candidateIndices.map((index) => visibleRows[index]);
+  const candidates = categoricalTickIndices(visibleRows.length, availableWidth)
+    .map((index) => visibleRows[index]);
   const candidateLabels = candidates.map((row) => row.label);
   const measurements = measureCategoricalLabels(svg, candidateLabels);
   svg.dataset.axisMeasurementCount = String(candidateLabels.length);
@@ -1157,7 +1157,8 @@ function categoricalAxisLayout(
     svgHeight,
     baseLeft: baseMargin.left,
     baseBottom: baseMargin.bottom,
-    titleHeight: AXIS_TITLE_HEIGHT + extraRow
+    titleHeight: AXIS_TITLE_HEIGHT + extraRow,
+    domain: [xMin, xMax]
   });
 }
 
