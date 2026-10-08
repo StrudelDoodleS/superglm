@@ -670,6 +670,7 @@ def test_a_waiting_range_is_a_dashed_box_until_refit_pins_it(open_editor_page):
         )
         assert [extent["left"], extent["right"]] == pytest.approx(extent["expected"], abs=1e-9)
 
+        page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
         with page.expect_response(_posted("/refit_pending")):
             page.keyboard.press("r")
         _settled_after_refit(page)

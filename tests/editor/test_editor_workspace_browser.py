@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 import pytest
+from tests.editor._chart_layout import wait_for_chart_to_fit
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -12,6 +13,8 @@ def select_chart_tool(page, name: str) -> None:
     page.get_by_role("radiogroup", name="Chart tools").get_by_role(
         "radio", name=name, exact=True
     ).click()
+    # Handles' controls can wrap the toolbar, and the chart redraws at its new size.
+    wait_for_chart_to_fit(page)
 
 
 def remember_selection_dom(page) -> None:
