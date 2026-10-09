@@ -247,12 +247,14 @@ code.
 
 To see which levels the smoothing overrides, choose **Free levels** in the chart's toolbar. The
 model is fitted again with the term's levels all free, as a plain categorical with the same groups
-and reference, and each level's free estimate is drawn behind the curve as a green diamond on its
-interval, the diamonds joined by a green line. One button turns both on and off.
+and reference, and each level's free estimate is drawn behind the curve as a green diamond, the
+diamonds joined by a green line. One button turns both on and off.
 
-- A level whose interval misses the curve is filled in orange: the curve holds it away from what
-  its own data says. A short tick on each whisker marks the fitted curve it is judged against,
-  which hand edits leave behind the drawn line.
+- Each diamond's interval shows while **Reference CI** is on, as a whisker. A short tick on each
+  whisker marks the fitted curve it is judged against, which hand edits leave behind the drawn
+  line.
+- A level whose interval misses the curve has its diamond filled in: the curve holds it away from
+  what its own data says. It is marked whether the intervals show or not.
 - The intervals allow for the curve's own pull toward each level. A model fitted with
   `retain_fit_state=False` keeps nothing to measure that pull, so each interval allows for any
   correlation between the curve and the free estimate, which makes it wider, and a note says so.

@@ -24,6 +24,11 @@ def test_free_levels_then_make_special_and_back_on_the_curve(open_editor_page):
         page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
         # Every level is on the curve, so every level is compared.
         assert page.locator("#chart .free-levels .free-level").count() == 6
+        # The intervals show with Reference CI, and go with it.
+        assert page.locator("#chart .free-levels .free-whisker").count() == 0
+        page.locator("#ciToggle").click()
+        page.locator("#chart .free-levels .free-whisker").first.wait_for(state="attached")
+        assert page.locator("#chart .free-levels .free-whisker").count() == 6
         # Each whisker carries a tick at the fitted curve its flag is judged against,
         # and the marks keep to the plot, as its points do, when it is zoomed.
         assert page.locator("#chart .free-levels .free-curve-tick").count() == 6

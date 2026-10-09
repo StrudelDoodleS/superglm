@@ -270,7 +270,9 @@ export function drawChart(term, selection, context) {
   const freeLevels = buildActive ? null : (context.freeLevels?.() ?? null);
   const freeMarks = freeLevelMarks(freeLevels, view);
   if (freeMarks.length) {
-    drawFreeLevels(svg, freeMarks, freeLevelLine(freeLevels, view), { sx, sy, yMin, yMax });
+    drawFreeLevels(svg, freeMarks, freeLevelLine(freeLevels, view), {
+      sx, sy, yMin, yMax, intervals: context.showCi()
+    });
   }
   if (!buildActive) drawTermLines(svg, { x, y, original, previous, spline, sx, sy });
   if (unsmoothed && unsmoothedLine) drawUnsmoothed(svg, unsmoothed, unsmoothedLine, sx, sy);
@@ -1398,10 +1400,11 @@ function band(svg, x, lower, upper, sx, sy, cls) {
 }
 
 // Each level fitted free, behind the curve: a line joining them, broken at a
-// level with no free value, and on it each level's interval and an open
-// diamond, filled where the interval misses the curve. The comparison never
+// level with no free value, and on it an open diamond, filled where the
+// level's interval misses the curve. The intervals, each with a tick at the
+// curve it is judged against, show with Reference CI. The comparison never
 // rescales the chart; a level off it sits at its edge.
-function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax }) {
+function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax, intervals }) {
   const layer = el("g", { class: "free-levels" });
   svg.appendChild(layer);
   // The overlay never rescales the chart: what lies past it is drawn at its edge.
@@ -1413,10 +1416,12 @@ function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax }) {
   for (const mark of marks) {
     const px = sx(mark.x);
     const flagged = mark.flagged ? " is-flagged" : "";
-    line(layer, px, inside(mark.upper), px, inside(mark.lower), `free-whisker${flagged}`);
-    // The fitted curve the flag is judged against, which hand edits leave
-    // behind the drawn line.
-    line(layer, px - 5, inside(mark.curve), px + 5, inside(mark.curve), "free-curve-tick");
+    if (intervals) {
+      line(layer, px, inside(mark.upper), px, inside(mark.lower), `free-whisker${flagged}`);
+      // The fitted curve the flag is judged against, which hand edits leave
+      // behind the drawn line.
+      line(layer, px - 5, inside(mark.curve), px + 5, inside(mark.curve), "free-curve-tick");
+    }
     const py = inside(mark.y);
     const node = el("path", { d: diamond(px, py, 4.5), class: `free-level${flagged}` });
     node.setAttribute("data-level", mark.level);
