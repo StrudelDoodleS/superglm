@@ -1432,6 +1432,13 @@ def test_a_structure_takes_levels_off_the_curve_and_puts_them_back():
     assert again.to_json() == exported.to_json()
 
     back = FeatureStructure(kind="ordered", levels=BANDS, reference="0", specials=[])
+    # An explicit empty list, unlike none at all, survives the file.
+    assert (
+        read_structure(json.loads(Structure(features={"band": back}).to_json()))
+        .features["band"]
+        .specials
+        == []
+    )
     returned = Structure(features={"band": back}).apply(special).fit(X, y)
     assert list(returned._specs["band"]._special_display) == []
     gap = np.max(np.abs(returned.predict(X) - plain.predict(X)))

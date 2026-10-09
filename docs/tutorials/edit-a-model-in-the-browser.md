@@ -253,7 +253,7 @@ curve, each with its own estimate.
 
 - The reference stays on the curve: set another reference first.
 - A level in a group cannot be made special: ungroup it first.
-- A level with no exposure in the data cannot be made special: it has nothing to estimate from.
+- A level with no rows in the data cannot be made special: it has nothing to estimate from.
 - A level where a shaped range starts or ends, or a stated knot or break, stays on the curve: move
   or remove the range first.
 - At least two levels must stay on the curve.

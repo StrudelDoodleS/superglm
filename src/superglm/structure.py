@@ -980,7 +980,7 @@ def _entry_json(name: str, entry: FeatureStructure) -> dict[str, Any]:
     }
     if entry.kind == "ordered":
         payload["ranges"] = ranges
-        if entry.specials:
+        if entry.specials is not None:
             payload["specials"] = [_plain(level, name) for level in entry.specials]
     return payload
 

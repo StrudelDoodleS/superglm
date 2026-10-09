@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+import pandas as pd
+
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 from superglm.editor.collapse import (
@@ -55,7 +58,7 @@ _POSITIONAL_BREAKS = (
 )
 _TOO_FEW = "{term!r} needs at least two levels on its curve; make fewer levels special."
 _NO_ROWS = (
-    "{level!r} has no exposure in the data the refit reads, so it has nothing to estimate "
+    "{level!r} has no rows in the data the refit reads, so it has nothing to estimate "
     "a free value from."
 )
 _INSIDE_GROUP = (
@@ -93,18 +96,20 @@ def special_feature_spec(
     for label in chosen:
         _require_alone(spec, grouping, term, label)
     declared, kept, level = _reference_to_keep(fitted, spec, term)
-    if special:
-        _require_free_to_leave(spec, term, chosen, declared)
-    else:
-        _require_free_to_return(spec, grouping, term, chosen)
     frame = as_eager_frame(X)
     frame.require_columns((term.name,))
+    column = frame.column_array(term.name)
+    if special:
+        present = {str(value) for value in pd.unique(np.asarray(column, dtype=object))}
+        _require_free_to_leave(spec, term, chosen, declared, present)
+    else:
+        _require_free_to_return(spec, grouping, term, chosen)
     changes = {"freed": tuple(chosen)} if special else {"returned": tuple(chosen)}
     replacement = rebuilt_ordered_spec(
         spec,
         grouping=grouping,
         base=declared,
-        data=frame.column_array(term.name),
+        data=column,
         level=level,
         **changes,
     )
@@ -149,14 +154,16 @@ def _require_alone(spec, grouping, term: EditableTerm, label: str) -> None:
         raise EditorValueError(_GROUPED.format(level=label, group=group, term=term.name))
 
 
-def _require_free_to_leave(spec, term: EditableTerm, chosen: list[str], reference) -> None:
+def _require_free_to_leave(
+    spec, term: EditableTerm, chosen: list[str], reference, present: set[str]
+) -> None:
+    """Refuse levels that cannot leave the curve. ``present`` holds the levels the refit's rows hold."""
     specials = special_labels(spec)
     breaks = set(_stated_break_bands(spec))
     basis = getattr(spec, "_spline_obj", None)
     if isinstance(basis, Piecewise) and isinstance(basis.breaks, list):
         if any(not isinstance(entry, str) for entry in basis.breaks):
             raise EditorValueError(_POSITIONAL_BREAKS.format(term=term.name))
-    weights = dict(zip(term.levels or [], term.weights if term.weights is not None else []))
     for label in chosen:
         if label in specials:
             raise EditorValueError(_ALREADY.format(level=label, term=term.name))
@@ -164,7 +171,7 @@ def _require_free_to_leave(spec, term: EditableTerm, chosen: list[str], referenc
             raise EditorValueError(_REFERENCE.format(level=label, term=term.name))
         if label in breaks:
             raise EditorValueError(_BREAK.format(level=label, term=term.name))
-        if term.weights is not None and not weights.get(label, 0.0) > 0.0:
+        if label not in present:
             raise EditorValueError(_NO_ROWS.format(level=label, term=term.name))
     on_curve = [
         level for level in full_level_order(spec) if level not in specials and level not in chosen

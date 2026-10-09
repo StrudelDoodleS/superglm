@@ -180,6 +180,16 @@ def test_make_special_and_back_on_the_curve_refuse_in_fixed_sentences(book):
         with pytest.raises(EditorValueError) as refused:
             session.stage_structural(operation, "band", {"levels": levels})
         assert str(refused.value) == sentence
+    # The refit's own rows decide: these hold no Mi072.
+    X = book[1]
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural(
+            "special", "band", {"levels": ["Mi072"]}, X=X[X["band"] != "Mi072"]
+        )
+    assert str(refused.value) == (
+        "'Mi072' has no rows in the data the refit reads, so it has nothing to estimate a free "
+        "value from."
+    )
     assert session.pending == []
 
 
@@ -264,14 +274,18 @@ def test_free_levels_lift_a_selection_penalty_from_the_term_only():
     assert selected.penalty.features is None
 
 
-def test_free_levels_refuse_a_categorical_term_and_a_session_without_its_data(book, monkeypatch):
+def test_free_levels_refuse_a_categorical_term_and_a_session_without_its_data(book):
     session = _session(book)
     with pytest.raises(EditorTypeError):
         free_level_comparison(session, "area")
-    X = book[1]
-    monkeypatch.setattr(session, "_resolve_refit_data", lambda *_args: (X, None, None, None))
+    X, y, w = _book(n=3000)
+    bare = SuperGLM(
+        family="poisson",
+        features={"band": OrderedCategorical(order=BANDS), "area": Categorical()},
+        retain_fit_state=False,
+    ).fit(X, y, sample_weight=w)
     with pytest.raises(EditorValueError) as missing:
-        free_level_comparison(session, "band")
+        free_level_comparison(EditorSession.from_model(bare), "band")
     assert str(missing.value) == free_levels_module._NO_DATA
 
 

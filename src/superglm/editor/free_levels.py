@@ -67,7 +67,11 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     if not isinstance(spec, OrderedCategorical):
         raise EditorTypeError(_NOT_ORDERED.format(term=name))
     _require_not_interaction_parent(session.model, name, operation="compare with free levels")
-    X, y, sample_weight, offset = session._resolve_refit_data(None, None, None, None)
+    try:
+        X, y, sample_weight, offset = session._resolve_refit_data(None, None, None, None)
+    except RuntimeError as exc:
+        # No training data was given and the model kept none.
+        raise EditorValueError(_NO_DATA) from exc
     if y is None:
         raise EditorValueError(_NO_DATA)
     column = as_eager_frame(X).column_array(name)
