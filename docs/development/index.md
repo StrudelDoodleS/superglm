@@ -13,5 +13,6 @@ migrations/group-pricing-rank
 migrations/weight-semantics-prior
 migrations/family-bound-predictors
 migrations/general-pspline-penalty
+migrations/default-spline-kind-cr
 internals/index
 ```
