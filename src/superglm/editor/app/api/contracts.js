@@ -314,7 +314,7 @@
  * @property {boolean} showCi
  * @property {boolean} showContrib
  * @property {FreeLevels|null} freeLevels the last free-level comparison, drawn
- *   while its term and model revision are the ones in view
+ *   while its term and the fit in force are the ones in view
  * @property {SummaryLevelDisplay} summaryLevelDisplay
  * @property {Record<string, unknown>} zoomByTerm
  * @property {Record<string, string>} groupModeByTerm

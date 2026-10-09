@@ -544,8 +544,6 @@ def test_both_fits_are_centred_on_one_exposure_weighted_mean(monkeypatch):
     np.testing.assert_allclose(share, exposure / math.fsum(exposure), rtol=(len(X) + 16) * u)
     term = session.terms["band"]
     curve = {level: term.original_log_effect[i] for i, level in enumerate(term.levels)}
-    # The tick on each whisker is the fitted curve the flags are judged against.
-    assert free["curve"] == [float(np.exp(curve[level])) for level in BANDS]
     gaps = np.array([np.log(free["y"][k]) - curve[level] for k, level in enumerate(BANDS)])
     # Each gap is (f_k - share.f) - (c_k - share.c), carried through exp and log
     # on the chart's scale. Each weighted mean errs by at most gamma_L of its
@@ -560,6 +558,27 @@ def test_both_fits_are_centred_on_one_exposure_weighted_mean(monkeypatch):
         np.max(np.abs(found[-1].free)) + np.max(np.abs(found[-1].curve)) + np.max(np.abs(native)),
     )
     assert abs(math.fsum(share * gaps)) <= (4 * L + 10) * u * scale
+
+
+def test_each_tick_is_the_fit_a_flag_is_judged_against_whatever_the_hand_edits(book):
+    """A hand edit moves the drawn line, not the fit the comparison judges by.
+
+    A level is flagged exactly when that fit, its tick, lies outside its interval.
+    """
+    session = _session(book)
+    session.select_levels("band", [BUMP])
+    session.shift("band", 0.3)
+    term = session.terms["band"]
+    fitted = dict(zip(term.levels, np.exp(term.original_log_effect), strict=True))
+    edited = dict(zip(term.levels, np.exp(term.edited_log_effect), strict=True))
+    free = free_level_comparison(session, "band")
+    assert free["curve"] == [float(fitted[level]) for level in free["levels"]]
+    assert free["curve"][free["levels"].index(BUMP)] != edited[BUMP]
+    assert free["flagged"]
+    for level, curve, lower, upper in zip(
+        free["levels"], free["curve"], free["lower"], free["upper"], strict=True
+    ):
+        assert (level in free["flagged"]) == (not lower <= curve <= upper)
 
 
 def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed(monkeypatch):

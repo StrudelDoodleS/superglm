@@ -548,6 +548,8 @@ function applyPlotClip(svg) {
     ".pending-group-ring",
     ".pending-special-ring",
     ".free-whisker",
+    ".free-level",
+    ".free-curve-tick",
     ".point",
     ".spline-level-dot",
     ".control-stem",
