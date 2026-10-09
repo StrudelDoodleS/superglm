@@ -240,9 +240,14 @@ interval.
 - Each level is judged on its own. Making one level special moves the curve, and with it the other
   levels' marks.
 - A level with little exposure has a wide interval. The smoothing helps such a level, so leave it
-  on the curve.
-- A level whose rows another term covers exactly, such as a categorical with one level for just
-  those rows, has no free value of its own. It gets no diamond, and a note names it.
+  on the curve. The diamonds are placed against the levels' exposure-weighted average, so such a
+  level does not move or widen the others.
+- Some levels have no free value to draw, and get no diamond; a note names them:
+  - a level whose every response is 0, such as a band with exposure but no claims;
+  - a level whose rows another term covers exactly, such as a categorical with one level for just
+    those rows.
+- If the session's training data holds the model's rows in another order, or other rows, each
+  interval is the free estimate's own, and a note says so.
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the

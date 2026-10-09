@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pickle
 import urllib.error
 
@@ -325,8 +326,9 @@ def test_free_levels_are_a_plain_categorical_fit_and_flag_the_level_the_smooth_o
     # The free levels are the plain categorical's relativities, placed against
     # the curve by the levels' mean rather than by the reference, so they agree
     # up to one factor. Each fit stops once its deviance moves by under
-    # tol = 1e-6 relative, which leaves the coefficients settled to about
-    # sqrt(tol).
+    # tol = 1e-6 relative. Near the optimum the deviance is quadratic in the
+    # coefficients' error, so that step bounds the error before it by about
+    # sqrt(tol); Newton's last step leaves it far smaller, so 1e-3 is loose.
     ratio = np.log(free["y"]) - np.log([expected[level] for level in free["levels"]])
     assert np.ptp(ratio) < 1e-3
     assert free["levels"] == BANDS
@@ -498,12 +500,24 @@ def test_a_curve_that_misfits_its_reference_flags_the_misfit_not_every_level():
     assert set(free["flagged"]) <= set(BANDS[:4])
 
 
-def test_both_fits_are_centred_over_the_levels_the_free_fit_estimated():
+def _captured_gaps(monkeypatch) -> list:
+    """Every comparison's ``_Gaps``, in order, as Free levels computes them."""
+    found = []
+    gaps = free_levels_module._gaps
+    monkeypatch.setattr(
+        free_levels_module, "_gaps", lambda *args: found.append(gaps(*args)) or found[-1]
+    )
+    return found
+
+
+def test_both_fits_are_centred_on_one_exposure_weighted_mean(monkeypatch):
     """A declared band with no rows is on the curve but not in the free fit.
 
-    Centring the curve over it as well moved every gap by one amount; over the
-    same levels, the gaps of the levels compared sum to zero.
+    Centring the curve over it as well moved every gap by one amount. Both
+    sides are centred on the compared levels' exposure-weighted mean, so the
+    gaps' weighted sum is zero.
     """
+    found = _captured_gaps(monkeypatch)
     X, y, w = _book(n=6000)
     values = {band: float(i) for i, band in enumerate([*BANDS, "Mi078"])}
     model = SuperGLM(
@@ -516,17 +530,28 @@ def test_both_fits_are_centred_over_the_levels_the_free_fit_estimated():
     ).fit(X, y, sample_weight=w)
     session = EditorSession.from_model(model, train_data=(X, y, w))
     free = free_level_comparison(session, "band")
-    assert free["levels"] == BANDS
+    assert free["levels"] == BANDS == found[-1].labels
+    share = found[-1].share
+    # Each level's exposure: the code sums a level's rows in one pass, then
+    # the levels, then divides; the test's sums are correctly rounded.
+    u = np.finfo(np.float64).eps / 2
+    exposure = np.array([math.fsum(w[X["band"].to_numpy() == level]) for level in BANDS])
+    np.testing.assert_allclose(share, exposure / math.fsum(exposure), rtol=(len(X) + 16) * u)
     term = session.terms["band"]
     curve = {level: term.original_log_effect[i] for i, level in enumerate(term.levels)}
-    gaps = [np.log(free["y"][k]) - curve[level] for k, level in enumerate(free["levels"])]
-    # Each gap is (f_k - mean f) - (c_k - mean c), carried through exp and log
-    # on the chart's scale. Each mean errs by at most gamma_L of its largest
-    # value and is shared by all L gaps, and each gap takes six more roundings.
-    u = np.finfo(np.float64).eps / 2
+    gaps = np.array([np.log(free["y"][k]) - curve[level] for k, level in enumerate(BANDS)])
+    # Each gap is (f_k - share.f) - (c_k - share.c), carried through exp and log
+    # on the chart's scale. Each weighted mean errs by at most gamma_L of its
+    # largest value and is shared by every gap, whose shares sum to one; each
+    # gap takes six more roundings, and each product of the sum one more.
     L = len(gaps)
-    scale = max(np.max(np.abs(np.log(free["y"]))), np.max(np.abs(term.original_log_effect)))
-    assert abs(sum(gaps)) <= (2 * L * L + 6 * L) * u * scale
+    scale = max(
+        np.max(np.abs(np.log(free["y"]))),
+        np.max(np.abs(term.original_log_effect)),
+        np.max(np.abs(found[-1].free)),
+        np.max(np.abs(found[-1].curve)),
+    )
+    assert abs(math.fsum(share * gaps)) <= (2 * L + 8) * u * scale
 
 
 def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed():
@@ -562,41 +587,67 @@ def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed():
         assert bool(np.max(np.abs(first - second)) <= tolerance) == same
 
 
-def test_the_gap_variance_is_both_fits_linearised_on_the_same_rows(monkeypatch):
-    """Poisson bands whose totals the curve cannot follow, so the fits weigh them apart.
+@pytest.mark.parametrize("family", ["poisson", "gamma"])
+def test_the_gap_variance_is_both_fits_linearised_on_the_same_rows(monkeypatch, family):
+    """Bands whose means the curve cannot follow, beside a second term, under unequal weights.
 
-    The free estimate's variance less the curve's was the gap's variance only
-    for a curve fitted with the free fit's weights: it put B11's at half what
-    its band totals carry through both fits, and flagged B11. The variance is
-    checked against central differences of both refits in every band's total.
+    The free estimate's variance less the curve's is the gap's only for a
+    curve fitted with the free fit's weights: on Poisson bands it put one
+    gap's variance at half its value, and flagged the band. A Gamma/log fit
+    moves with its observed curvature, not the expected one, which misplaced
+    a gap's variance by 12%. Both are checked against central differences of
+    complete refits in every band-by-area cell's weighted response total.
     """
-    totals = np.array([43, 152, 2188, 85, 15, 11, 114, 142, 39, 151, 43, 532], dtype=float)
-    k = np.repeat(np.arange(12), 50)
-    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
-    found = []
-    gaps = free_levels_module._gaps
-    monkeypatch.setattr(
-        free_levels_module, "_gaps", lambda *args: found.append(gaps(*args)) or found[-1]
+    found = _captured_gaps(monkeypatch)
+    rng = np.random.default_rng(20261009)
+    bands = TWELVE[:8]
+    band = np.repeat(np.arange(8), 50)
+    area = np.tile(np.repeat([0, 1], 25), 8)
+    cell = 2 * band + area
+    w = rng.uniform(0.5, 1.5, band.size)
+    mu = np.exp(np.array([0.0, 1.2, 3.0, 0.5, -0.5, -0.7, 0.8, 1.1])[band] + 0.3 * area)
+    y = rng.poisson(w * mu) / w if family == "poisson" else mu * rng.gamma(2.0, 0.5, band.size)
+    X = pd.DataFrame({"band": np.array(bands)[band], "area": np.where(area, "B", "A")})
+
+    def compared(y):
+        curve = OrderedCategorical(order=bands, basis=Spline(kind="ps", n_knots=4))
+        model = SuperGLM(
+            family=family,
+            link="log",
+            features={"band": curve, "area": Categorical()},
+            spline_penalty=5.0,
+            tol=1e-11,
+        ).fit(X, y, sample_weight=w)
+        free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+        return found[-1].free - found[-1].curve
+
+    compared(y)
+    gaps = found[-1]
+    totals = np.bincount(cell, weights=w * y)
+    h = 1e-2 * totals.min()
+    jacobian = np.empty((len(gaps.labels), 16))
+    for c in range(16):
+        # The fits read a cell through its weighted total alone, so the step
+        # goes on its positive rows, which no step takes below zero.
+        moved = (cell == c) & (y > 0.0)
+        step = np.where(moved, h / np.sum(w[moved]), 0.0)
+        jacobian[:, c] = (compared(y + step) - compared(y - step)) / (2 * h)
+    # A cell's weighted total varies as phi V(mu) times the cell's weight, under
+    # the free fit, here refitted on its own.
+    free = SuperGLM(
+        family=family,
+        link="log",
+        features={"band": Categorical(), "area": Categorical()},
+        tol=1e-11,
+    ).fit(X, y, sample_weight=w)
+    variance = free.result.phi * np.bincount(
+        cell, weights=w * free._distribution.variance(free.predict(X))
     )
-
-    def compared(totals):
-        y = totals[k] / 50.0
-        band = OrderedCategorical(order=TWELVE, base="B00", basis=Spline(kind="ps", n_knots=6))
-        model = SuperGLM(family="poisson", features={"band": band}, spline_penalty=1.0).fit(X, y)
-        free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
-        return free, found[-1].free - found[-1].curve
-
-    free, _gap = compared(totals)
-    assert "B11" not in free["flagged"]
-    h = 0.25
-    jacobian = np.empty((12, 12))
-    for j in range(12):
-        step = np.where(np.arange(12) == j, h, 0.0)
-        jacobian[:, j] = (compared(totals + step)[1] - compared(totals - step)[1]) / (2 * h)
-    # A band total's variance is its mean, the free fit's fitted total. Central
-    # differences err by about (h / T)^2 / 3 of each entry, T >= 11 the totals.
-    expected = (jacobian**2) @ totals
-    np.testing.assert_allclose(found[0].gap_var, expected, rtol=4 * (h / totals.min()) ** 2)
+    # Central differences err by (h / T)^2 / 3 = 3e-5 of each entry, and the
+    # refits' stopping error at tol = 1e-11 enters near 1e-4 (tightening tol
+    # from 1e-8 to 1e-13 moves it from 2e-3 to 4e-5). 1e-3 sits between that
+    # and the defects: a factor 2 on Poisson, 12% on Gamma/log.
+    np.testing.assert_allclose(gaps.gap_var, (jacobian**2) @ variance, rtol=1e-3)
 
 
 def test_free_levels_put_both_variances_on_one_dispersion():
@@ -758,19 +809,143 @@ def test_a_response_the_curve_fits_exactly_compares_with_no_dispersion():
     assert free["notice"] is None
 
 
-def test_free_level_intervals_stay_finite_for_a_level_with_almost_no_weight():
-    """The free interval of a level weighted 1e-8 is wider than float64 holds."""
+def test_a_level_with_almost_no_weight_keeps_finite_ends_and_moves_no_other_level():
+    """B05 weighs 1e-8: its free interval is wider than float64 holds.
+
+    Centred on the levels' plain mean, B05's free variance reached every other
+    level's, and every interval was some 300 wide on the log scale. Centred on
+    their exposure-weighted mean, the others are as if B05 had no rows.
+    """
     X, y, k = _gaussian(4)
-    w = np.where(k == 5, 1e-8, 1.0)
+    compared = {}
+    for thin in (True, False):
+        w = np.where(k == 5, 1e-8, 1.0)
+        rows = slice(None) if thin else k != 5
+        model = SuperGLM(
+            family="gaussian",
+            features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
+            spline_penalty=20.0,
+        ).fit(X[rows], y[rows], sample_weight=w[rows])
+        session = EditorSession.from_model(model, train_data=(X[rows], y[rows], w[rows]))
+        compared[thin] = free_level_comparison(session, "band")
+    free = compared[True]
+    json.dumps(free, allow_nan=False)
+    at = free["levels"].index("B05")
+    assert free["lower"][at] < free["y"][at] < free["upper"][at]
+    # Each gap's standard error, out of its Sidak-widened half-width.
+    sd = {
+        thin: {
+            level: (np.log(c["upper"][i]) - np.log(c["lower"][i])) / (2 * c["z"])
+            for i, level in enumerate(c["levels"])
+        }
+        for thin, c in compared.items()
+    }
+    others = [level for level in TWELVE if level != "B05"]
+    # The free fit counts B05's rows in its residual degrees of freedom, so its
+    # dispersion, and with it every other standard error, moves by one factor.
+    # Otherwise B05's 1e-8 of a band's weight moves the centre, the curve and
+    # each contrast by a relative amount of that order; Gaussian fits are
+    # direct solves, so 1e-6 leaves a factor of 100. B05's free variance in
+    # every contrast made the ratios differ by half again.
+    ratio = np.array([sd[True][level] / sd[False][level] for level in others])
+    np.testing.assert_allclose(ratio, ratio.mean(), rtol=1e-6)
+
+
+def test_a_level_whose_every_response_is_zero_is_left_out_and_named():
+    """A band with exposure and no claims has no finite free value.
+
+    Fitted free, it drifted far below the curve with a vast variance, and the
+    model's own separation="error" refused the comparison outright.
+    """
+    rng = np.random.default_rng(5)
+    k = np.repeat(np.arange(12), 50)
+    y = rng.poisson(np.exp(-1.0 + 0.1 * k)).astype(float)
+    y[k == 11] = 0.0
+    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
+    band = OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))
+    model = SuperGLM(
+        family="poisson", features={"band": band}, spline_penalty=20.0, separation="error"
+    ).fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == TWELVE[:11]
+    assert free["notice"] == (
+        "No free value is drawn for B11: every response on its rows is 0, so its free value "
+        "has no finite estimate."
+    )
+
+
+def test_free_levels_refuse_a_free_fit_that_fails_and_a_single_level_in_sentences(monkeypatch):
+    model, X, y = _twelve_bands(order=TWELVE)
+    model.fit(X, y)
+    session = EditorSession.from_model(model, train_data=(X, y))
+    one = X["band"] == "B00"
+    with pytest.raises(EditorValueError) as single:
+        free_level_comparison(
+            EditorSession.from_model(model.fit(X[one], y[one]), train_data=(X[one], y[one])),
+            "band",
+        )
+    assert str(single.value) == (
+        "Comparing 'band' with free levels needs rows of positive weight in at least two of its "
+        "levels, and the data the refit reads has them in 1."
+    )
+
+    def fails(*args, **kwargs):
+        raise ValueError("the solver gave up")
+
+    monkeypatch.setattr(free_levels_module, "fit_refit_model", fails)
+    with pytest.raises(EditorValueError) as failed:
+        free_level_comparison(session, "band")
+    assert str(failed.value) == (
+        "The free levels of 'band' could not be estimated, so there is nothing to compare."
+    )
+
+
+def test_free_levels_on_other_rows_than_the_curve_say_so_and_draw_the_free_intervals():
+    """The same rows in another order: subtracted row by row, the influences mismatched."""
+    X, y, _k = _gaussian(43, effect=lambda k: 0.5 * (k == 5))
     model = SuperGLM(
         family="gaussian",
         features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
         spline_penalty=20.0,
-    ).fit(X, y, sample_weight=w)
-    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
-    json.dumps(free, allow_nan=False)
-    at = free["levels"].index("B05")
-    assert free["lower"][at] < free["y"][at] < free["upper"][at]
+    ).fit(X, y)
+    order = np.random.default_rng(99).permutation(len(X))
+    shuffled = X.iloc[order].reset_index(drop=True), y[order]
+    free = free_level_comparison(EditorSession.from_model(model, train_data=shuffled), "band")
+    assert free["levels"] == TWELVE
+    assert free["notice"] == (
+        "Each interval is the free estimate's own, without the curve's pull toward the level: "
+        "the curve was fitted on other rows than the comparison reads."
+    )
+
+
+def test_free_levels_hold_their_intervals_whatever_the_weights_size():
+    """Gamma/log on means near 1e-30 under weights of 1e280: products of the two overflowed."""
+    k = np.repeat(np.arange(12), 50)
+    jitter = np.random.default_rng(8).gamma(3.0, 1.0 / 3.0, k.size)
+    jitter /= np.bincount(k, jitter)[k] / 50
+    y = 1e-30 * np.exp(0.05 * k + 0.8 * (k == 5)) * jitter
+    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
+    compared = []
+    for weight in (1.0, 1e280):
+        w = np.full(k.size, weight)
+        model = SuperGLM(
+            family="gamma",
+            link="log",
+            features={"band": OrderedCategorical(order=TWELVE, basis=Polynomial(powers=[1]))},
+            direct_solve="qr",
+        ).fit(X, y, sample_weight=w)
+        compared.append(
+            free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+        )
+    json.dumps(compared[1], allow_nan=False)
+    assert compared[1]["flagged"] == compared[0]["flagged"] == ["B05"]
+    # Scaling every prior weight by one factor scales the dispersion with it,
+    # and leaves each interval where it was. 1e280 is no power of two, so each
+    # weight rounds once, by u; the straight-line term keeps the fits' error
+    # within a small multiple of that, and 1e-9 leaves room for a condition
+    # number near 1e6.
+    for end in ("lower", "upper"):
+        np.testing.assert_allclose(compared[1][end], compared[0][end], rtol=1e-9)
 
 
 @pytest.mark.parametrize("collapse", [False, True])
@@ -843,6 +1018,6 @@ def test_free_levels_without_a_fitted_design_say_their_intervals_are_the_free_es
     assert free["levels"] == TWELVE
     assert free["notice"] == (
         "Each interval is the free estimate's own, without the curve's pull toward the level: "
-        "the model keeps no fitted design on these rows to measure it. Refit it with "
-        "retain_fit_state=True to include it."
+        "the model keeps no fitted design to measure it. Refit it with retain_fit_state=True to "
+        "include it."
     )

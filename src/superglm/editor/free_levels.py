@@ -26,6 +26,12 @@ interval that misses the curve are the same thing, and it is widened for the
 number of levels compared (Sidak), so a flag is rarely chance. Each level is
 judged on its own: making one level special changes the curve, and with it
 every other level's flag.
+
+Both fits are centred on the levels' mean weighted by their prior weight
+(their exposure), the same weights on both sides, so a level with little
+weight moves no other level's gap or interval. A level whose every response
+is at the family's bound has no finite free value, and one whose rows another
+term covers exactly has no free value of its own: both are left out and named.
 """
 
 from __future__ import annotations
@@ -34,12 +40,14 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
+from superglm.diagnostics.separation import _separated_flags, response_boundaries
 from superglm.distributions import clip_mu
 from superglm.editor.collapse import _require_not_interaction_parent
-from superglm.editor.errors import EditorTypeError, EditorValueError
+from superglm.editor.errors import EditorClientError, EditorTypeError, EditorValueError
 from superglm.editor.refit import fit_refit_model
 from superglm.features.categorical import Categorical, _grouping_labels
 from superglm.features.grouping import LevelGrouping
@@ -49,9 +57,13 @@ from superglm.inference._term_types import _safe_exp
 from superglm.inference.covariance import covariance_selected_block
 from superglm.links import stabilize_eta
 from superglm.model.explain_ops import _shape_repaired
-from superglm.model.state_ops import _grouped_active_state
+from superglm.model.state_ops import _grouped_active_state, _legacy_active_state
 from superglm.solvers.mode_score import linear_predictor
-from superglm.solvers.working_rows import fisher_working_weights
+from superglm.solvers.working_rows import (
+    coefficient_working_rows,
+    fisher_working_weights,
+    supports_observed_newton,
+)
 
 # The chance, across all the levels of one term, that no level's interval
 # misses the curve when every level lies on it.
@@ -68,11 +80,23 @@ _UNDETERMINED = (
     "No free value is drawn for {levels}: the model's other terms cover the same rows, "
     "so the data cannot separate {whose} value from theirs."
 )
-_NOT_LINEARISED = (
-    "Each interval is the free estimate's own, without the curve's pull toward the level: the "
-    "model keeps no fitted design on these rows to measure it. Refit it with "
-    "retain_fit_state=True to include it."
+_ONE_LEVEL = (
+    "Comparing {term!r} with free levels needs rows of positive weight in at least two of its "
+    "levels, and the data the refit reads has them in {count}."
 )
+_SEPARATED = (
+    "No free value is drawn for {levels}: every response on {whose} rows is {value}, so "
+    "{whose} free value has no finite estimate."
+)
+_OWN_INTERVAL = (
+    "Each interval is the free estimate's own, without the curve's pull toward the level: "
+)
+_NO_DESIGN = _OWN_INTERVAL + (
+    "the model keeps no fitted design to measure it. Refit it with retain_fit_state=True to "
+    "include it."
+)
+_OTHER_ROWS = _OWN_INTERVAL + "the curve was fitted on other rows than the comparison reads."
+_UNMEASURED = _OWN_INTERVAL + "this fit cannot measure it."
 _NO_DATA = (
     "Comparing with free levels refits the model, which needs its training data: open the "
     "editor with train_data, or from a model fitted with its data kept."
@@ -84,9 +108,9 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
 
     Returns the payload the chart draws: for each level on the curve, its
     free estimate and interval as relativities on the chart's own scale,
-    placed by the gap between the two fits centred on the mean of the levels,
-    and the levels whose interval misses the curve. Hand edits are not part
-    of either: both are fits.
+    placed by the gap between the two fits centred on the levels' weighted
+    mean, and the levels whose interval misses the curve. Hand edits are not
+    part of either: both are fits.
     """
     term = session._require_term(name)
     spec = session.model._specs[name]
@@ -100,23 +124,71 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
         raise EditorValueError(_NO_DATA) from exc
     if y is None:
         raise EditorValueError(_NO_DATA)
-    free = _free_categorical(spec, as_eager_frame(X).column_array(name))
+    column = as_eager_frame(X).column_array(name)
+    response = np.asarray(y, dtype=np.float64).ravel()
+    weights = (
+        np.ones(len(response))
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64).ravel()
+    )
+    # The column read once: each row's text, as the categorical reads it.
+    values = np.asarray(column, dtype=object).ravel()
+    codes, texts = pd.factorize(_grouping_labels(values))
+    first = np.unique(codes, return_index=True)[1]
+    free = _free_categorical(spec, values[first], texts)
+    supported = np.bincount(codes, weights=weights > 0.0, minlength=len(texts)) > 0.0
+    held = {free._grouping.original_to_group[str(text)] for text in texts[supported]}
+    if len(held) < 2:
+        raise EditorValueError(_ONE_LEVEL.format(term=name, count=len(held)))
     free_model = clone_with_replaced_features(session.model, {name: free})
     shrunk = _lift_selection(free_model, session.model, name)
-    fit_refit_model(
-        session.model,
+    # A level whose every response is at the family's bound is named below,
+    # whatever the model's own rule for separated levels says.
+    free_model._config = free_model._config.with_value(separation="ignore")
+    try:
+        fit_refit_model(
+            session.model,
+            free_model,
+            method="auto",
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+    except EditorClientError:
+        raise
+    except ValueError as exc:
+        raise EditorValueError(_NOT_FITTED.format(term=name)) from exc
+    # Each row's free level, and from it each level's exposure and whether
+    # its every positive-weight response is at the family's bound.
+    levels = [str(level) for level in free_model._specs[name]._levels]
+    index = {level: i for i, level in enumerate(levels)}
+    to_group = free._grouping.original_to_group
+    rows = np.array([index[to_group[str(text)]] for text in texts], dtype=np.intp)[codes]
+    separated = {}
+    for boundary in response_boundaries(free_model._distribution, free_model._link):
+        flags, _occupied = _separated_flags(rows, len(levels), response, weights, boundary)
+        if flags.any():
+            separated[boundary] = [levels[i] for i in np.flatnonzero(flags)]
+    # Both on the centred scale: a gap measured from the reference would
+    # carry the curve's misfit at the reference into every level.
+    exposure = np.bincount(rows, weights=weights, minlength=len(levels))
+    gaps = _gaps(
         free_model,
-        method="auto",
-        X=X,
-        y=y,
-        sample_weight=sample_weight,
-        offset=offset,
+        session.model,
+        name,
+        dict(zip(levels, exposure.tolist(), strict=True)),
+        {label for labels in separated.values() for label in labels},
     )
-    # Both on the mean-centred scale: a gap measured from the reference
-    # would carry the curve's misfit at the reference into every level.
-    gaps = _gaps(free_model, session.model, name)
     payload = _comparison(term, spec, gaps, shrunk=shrunk)
-    notes = []
+    notes = [
+        _SEPARATED.format(
+            levels=", ".join(labels),
+            whose="its" if len(labels) == 1 else "their",
+            value="0" if boundary == "zero" else "1",
+        )
+        for boundary, labels in separated.items()
+    ]
     if gaps.undetermined:
         notes.append(
             _UNDETERMINED.format(
@@ -124,8 +196,8 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
                 whose="its" if len(gaps.undetermined) == 1 else "their",
             )
         )
-    if not gaps.linearised:
-        notes.append(_NOT_LINEARISED)
+    if gaps.note is not None:
+        notes.append(gaps.note)
     payload["notice"] = " ".join(notes) or None
     return payload
 
@@ -135,47 +207,51 @@ class _Gaps:
     """The compared levels' centred values on both fits, and the variances that judge them."""
 
     labels: list[str]
+    share: np.ndarray
     free: np.ndarray
     curve: np.ndarray
     free_var: np.ndarray
     gap_var: np.ndarray
     undetermined: list[str]
-    linearised: bool
+    note: str | None
 
 
-def _gaps(free_model, model, name: str) -> _Gaps:
-    """Both fits' level values centred on the mean of one set of levels, and each gap's variance.
+def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[str]) -> _Gaps:
+    """Both fits' level values centred on one weighted mean of one set of levels, and each gap's variance.
 
-    The set is the levels the free fit estimated: a declared level with no
-    rows has a value on the curve but none free, and centring the two over
-    different sets would move every gap by the same amount. The levels whose
-    free value the data cannot separate from other terms are returned apart.
+    The set is the levels the free fit estimated, less those ``separated``
+    (every response at the family's bound) and those the data cannot tell
+    apart from other terms, which are returned apart. Each level weighs its
+    ``prior`` weight in the centre, on both sides alike.
     """
     free_spec, spec = free_model._specs[name], model._specs[name]
     pinned = {str(level) for level in getattr(free_spec, "_pinned_levels", ())}
-    estimated = {str(level) for level in free_spec._levels} - pinned
+    estimated = {str(level) for level in free_spec._levels} - pinned - separated
     declared = {str(level): level for level in spec._ordered_levels}
     labels, undetermined = _determined(
         free_model, name, [label for label in declared if label in estimated]
     )
-    free_rows = _categorical_contrasts(free_model, name, labels)
+    share = np.array([prior.get(label, 0.0) for label in labels], dtype=np.float64)
+    share = share / share.sum() if share.sum() > 0.0 else share
+    free_rows = _categorical_contrasts(free_model, name, labels, share)
     free_var = _free_variances(free_model, name, free_rows)
-    gap_var = _gap_variances(
+    gap_var, note = _gap_variances(
         free_model,
         free_rows,
         model,
-        _ordered_contrasts(model, name, [declared[x] for x in labels]),
+        _ordered_contrasts(model, name, [declared[x] for x in labels], share),
         name,
     )
     free_values, curve_values = (_values(fitted, name, labels) for fitted in (free_model, model))
     return _Gaps(
         labels=labels,
-        free=free_values - free_values.mean(),
-        curve=curve_values - curve_values.mean(),
+        share=share,
+        free=free_values - share @ free_values,
+        curve=curve_values - share @ curve_values,
         free_var=free_var,
         gap_var=free_var if gap_var is None else gap_var,
         undetermined=undetermined,
-        linearised=gap_var is not None,
+        note=note,
     )
 
 
@@ -245,18 +321,18 @@ def _term_columns(active, name: str) -> np.ndarray:
     return np.concatenate([np.arange(g.start, g.end) for g in active if g.feature_name == name])
 
 
-def _categorical_contrasts(model, name: str, labels: list[str]) -> np.ndarray:
-    """Rows over a categorical's columns giving its levels ``labels``, centred on their mean."""
+def _categorical_contrasts(model, name: str, labels: list[str], share: np.ndarray) -> np.ndarray:
+    """Rows over a categorical's columns giving its levels ``labels``, centred on ``share``."""
     column = {str(level): j for j, level in enumerate(model._specs[name]._non_base)}
     rows = np.zeros((len(labels), len(column)))
     for i, label in enumerate(labels):
         if label in column:
             rows[i, column[label]] = 1.0
-    return rows - rows.mean(axis=0)
+    return rows - share @ rows
 
 
-def _ordered_contrasts(model, name: str, levels: list) -> np.ndarray | None:
-    """Rows over an ordered term's active columns giving its ``levels``, centred on their mean.
+def _ordered_contrasts(model, name: str, levels: list, share: np.ndarray) -> np.ndarray | None:
+    """Rows over an ordered term's active columns giving its ``levels``, centred on ``share``.
 
     None where the curve is taken as fixed: the selection penalty removed the
     term, or the fit's covariance no longer describes it, as ``term_inference``
@@ -276,7 +352,7 @@ def _ordered_contrasts(model, name: str, levels: list) -> np.ndarray | None:
     )
     spec = model._specs[name]
     rows = np.asarray(spec.transform(np.array(levels, dtype=object)), dtype=np.float64)[:, columns]
-    return rows - rows.mean(axis=0)
+    return rows - share @ rows
 
 
 def _free_variances(model, name: str, rows: np.ndarray) -> np.ndarray:
@@ -288,95 +364,157 @@ def _free_variances(model, name: str, rows: np.ndarray) -> np.ndarray:
     return np.maximum(np.sum((rows @ block) * rows, axis=1), 0.0)
 
 
-def _gap_variances(free_model, free_rows, model, curve_rows, name: str) -> np.ndarray | None:
-    """Each gap's variance, from both fits linearised on the same rows; None without a design.
+def _gap_variances(
+    free_model, free_rows, model, curve_rows, name: str
+) -> tuple[np.ndarray | None, str | None]:
+    """Each gap's variance from both fits linearised on the same rows, or None and why not.
 
     To first order a fit's contrast moves with the response as ``s'y``, with
-    ``s = W g'(mu) X_c F c``, so the gap moves with ``s_free - s_curve``. Its
-    variance is ``sum (s_free - s_curve)^2 var(y)``, with ``var(y) = phi V(mu) / w
-    = phi / (W g'(mu)^2)`` under the free fit. A curve taken as fixed
-    (``curve_rows`` None) contributes nothing.
+    ``s = (w / (V g')) u`` and ``u`` from :func:`_influence`, so the gap moves
+    with ``s_free - s_curve``. Its variance under the free fit,
+    ``var(y) = phi V / w``, is ``phi sum W (u_free - r u_curve)^2``, with ``W``
+    the free fit's Fisher weight and ``r`` the ratio of the two fits' ``V g'``:
+    the prior weights cancel, so no product leaves the float range that the
+    fits themselves stay in. A curve taken as fixed (``curve_rows`` None), or
+    one that fits exactly, contributes nothing. The sum runs row by row, so
+    the two fits must have read the same rows, response, weights and offset,
+    which their fit fingerprints decide.
     """
     phi = float(free_model.result.phi)
     if not phi > 0.0:
-        return np.zeros(len(free_rows))
-    free_side = _influence(free_model, name)
-    curve_side = None if curve_rows is None else _influence(model, name)
-    if free_side is None or (curve_rows is not None and curve_side is None):
-        return None
-    free_influence, weights, slope = free_side
-    if curve_side is not None and len(curve_side[1]) != len(weights):
-        # The curve was fitted on other rows than the refit reads.
-        return None
-    informative = weights > 0.0
-    precision = weights[informative] * slope[informative] ** 2
+        return np.zeros(len(free_rows)), None
+    if not float(model.result.phi) > 0.0:
+        curve_rows = None
+    if curve_rows is not None:
+        fingerprints = [getattr(fit, "_fit_geometry_guard", None) for fit in (free_model, model)]
+        if None in fingerprints:
+            return None, _UNMEASURED
+        if fingerprints[0] != fingerprints[1]:
+            return None, _OTHER_ROWS
+    sides = [(_influence(free_model, name), free_rows)]
+    if curve_rows is not None:
+        sides.append((_influence(model, name), curve_rows))
+    for side, rows in sides:
+        if isinstance(side, str):
+            return None, side
+        if side.width != rows.shape[1]:
+            return None, _UNMEASURED
+    free_side = sides[0][0]
+    informative = free_side.fisher > 0.0
+    root = np.sqrt(free_side.fisher[informative])
+    curve_side = sides[1][0] if len(sides) > 1 else None
+    ratio = None if curve_side is None else free_side.spread / curve_side.spread
     variances = np.empty(len(free_rows))
     for i, row in enumerate(free_rows):
-        moved = free_influence(row)
+        moved = free_side.influence(row)
         if curve_side is not None:
-            moved = moved - curve_side[0](curve_rows[i])
-        variances[i] = phi * float(np.sum(moved[informative] ** 2 / precision))
-    return variances
+            moved = moved - ratio * curve_side.influence(curve_rows[i])
+        variances[i] = phi * float(np.sum((root * moved[informative]) ** 2))
+    return variances, None
 
 
-def _influence(model, name: str):
-    """``c -> W g'(mu) X_c F c`` over the term's active columns, with ``W`` and ``g'(mu)``; or None.
+@dataclass(frozen=True)
+class _Influence:
+    """A fit's first-order response to its data, for contrasts over one term's columns."""
 
-    ``F`` is the fit's slope covariance over its dispersion, the inverse of
-    the penalised information with the intercept profiled out, so the design
-    is centred on the working weights' mean. None when the fit kept no design
-    (``retain_fit_state=False``) or the fit has no dispersion to divide out.
+    influence: Any
+    width: int
+    fisher: np.ndarray
+    spread: np.ndarray
+
+
+def _influence(model, name: str) -> _Influence | str:
+    """``c -> X_c F c`` over the term's active columns, or the sentence saying why not.
+
+    At the fitted optimum a contrast moves with the response as
+    ``(w / (V g')) X_c F c`` (the implicit function theorem), with ``F`` the
+    inverse of the penalised curvature of the fit's objective and the
+    intercept profiled out, so the design is centred on the curvature
+    weights' mean. Gamma and Tweedie with a log link declare their observed
+    curvature (:func:`supports_observed_newton`), which is used here; every
+    other pair takes the expected curvature, which a canonical link's
+    observed one equals and which stands in for it otherwise, as in every
+    interval the library draws. Comes with the Fisher weights, which carry
+    each row's variance, and ``V g'``. The sentence instead when the fit
+    kept no design, or its design and curvature do not share coordinates.
+    The fit has a positive dispersion.
     """
-    scale = float(model.result.phi)
-    if getattr(model, "_dm", None) is None or not scale > 0.0:
-        return None
-    covariance, active = model._coef_covariance
-    X, _active, _columns = _grouped_active_state(model, {group.name for group in active})
-    if X.p != covariance.shape[0]:
-        return None
+    if getattr(model, "_dm", None) is None:
+        return _NO_DESIGN
+    distribution, link = model._distribution, model._link
     solver = model._solver_pirls_result()
-    eta = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-    weights = fisher_working_weights(
-        distribution=model._distribution,
-        link=model._link,
-        mu=mu,
-        eta=eta,
-        sample_weight=model._fit_weights,
+    eta = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), link)
+    mu = clip_mu(link.inverse(eta), distribution)
+    prior = (
+        np.ones(model._dm.n)
+        if model._fit_weights is None
+        else np.asarray(model._fit_weights, dtype=np.float64)
     )
-    slope = np.asarray(model._link.deriv(mu), dtype=np.float64)
-    lever = weights * slope
-    total = float(np.sum(weights))
-    columns = _term_columns(active, name)
+    fisher = fisher_working_weights(
+        distribution=distribution, link=link, mu=mu, eta=eta, sample_weight=prior
+    )
+    spread = np.asarray(distribution.variance(mu) * link.deriv(mu), dtype=np.float64)
+    if supports_observed_newton(distribution, link):
+        curvature = coefficient_working_rows(
+            distribution=distribution,
+            link=link,
+            y=np.asarray(model._fit_y_ref, dtype=np.float64).ravel(),
+            mu=mu,
+            eta=eta,
+            sample_weight=prior,
+            prefer_observed=True,
+        ).weights
+        X, active, _inverse, _augmented, _gram, inverse, _rank = _legacy_active_state(
+            model, solver, curvature
+        )
 
-    def apply(contrast: np.ndarray) -> np.ndarray:
-        if hasattr(covariance, "solve"):
-            return np.asarray(covariance.solve(contrast), dtype=np.float64)
-        return np.asarray(covariance @ contrast, dtype=np.float64)
+        def apply(contrast: np.ndarray) -> np.ndarray:
+            return inverse @ contrast
+
+        width = inverse.shape[0]
+    else:
+        curvature = fisher
+        covariance, active = model._coef_covariance
+        X, _active, _columns = _grouped_active_state(model, {group.name for group in active})
+        scale = float(model.result.phi)
+
+        def apply(contrast: np.ndarray) -> np.ndarray:
+            if hasattr(covariance, "solve"):
+                return np.asarray(covariance.solve(contrast), dtype=np.float64) / scale
+            return np.asarray(covariance @ contrast, dtype=np.float64) / scale
+
+        width = covariance.shape[0]
+    if X.p != width:
+        return _UNMEASURED
+    columns = _term_columns(active, name)
+    # The weighted mean's sums, on weights rescaled by a power of two (exact),
+    # stay in range whatever the prior weights' size.
+    largest = float(np.max(np.abs(curvature), initial=0.0))
+    unit = np.ldexp(curvature, -int(np.frexp(largest)[1])) if largest > 0.0 else curvature
+    total = float(np.sum(unit))
 
     def influence(row: np.ndarray) -> np.ndarray:
-        contrast = np.zeros(covariance.shape[0])
+        contrast = np.zeros(width)
         contrast[columns] = row
-        moved = X.matvec(apply(contrast) / scale)
-        return lever * (moved - float(weights @ moved) / total)
+        moved = X.matvec(apply(contrast))
+        return moved - float(unit @ moved) / total
 
-    return influence, weights, slope
+    return _Influence(influence=influence, width=len(columns), fisher=fisher, spread=spread)
 
 
-def _free_categorical(spec: OrderedCategorical, column) -> Categorical:
+def _free_categorical(spec: OrderedCategorical, raw, texts) -> Categorical:
     """``spec``'s levels as a plain categorical: the same groups, the same reference.
 
     The ordered term reads its column through its declaration (a column of
     1.0, 2.0 against ``order=[1, 2]`` is levels 1 and 2), so the categorical
     groups the column's own texts under the term's levels and groups, and is
-    named as the term names them. Each text the categorical reads gets one:
-    1 and 1.0 are one value to a hash but two texts to the column. A
+    named as the term names them. ``texts`` are the column's distinct texts as
+    the categorical reads them, ``raw`` a value of each: 1 and 1.0 are one
+    value to a hash but two texts to the column, and each needs its level. A
     reference the rows do not hold gives way to the first level they do; the
-    comparison is centred on the levels' mean, so the reference moves nothing.
+    comparison is centred, so the reference moves nothing.
     """
-    values = np.asarray(column, dtype=object).ravel()
-    texts, first = np.unique(_grouping_labels(values), return_index=True)
-    levels = [str(level) for level in spec._canonical(values[first])]
+    levels = [str(level) for level in spec._canonical(raw)]
     grouping = getattr(spec, "_grouping", None)
     to_group = {
         str(text): level if grouping is None else str(grouping.original_to_group.get(level, level))
@@ -430,7 +568,7 @@ def _lift_selection(free_model, model, name: str) -> bool:
 
 
 def _comparison(term, spec: OrderedCategorical, gaps: _Gaps, *, shrunk: bool) -> dict[str, Any]:
-    """Each level's mean-centred free estimate against the mean-centred curve.
+    """Each level's centred free estimate against the centred curve.
 
     The gap is drawn on the chart's own scale: the diamond sits that far from
     the curve, whatever the chart centres it on.
