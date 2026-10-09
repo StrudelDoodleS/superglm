@@ -217,8 +217,12 @@
    diamonds on the axis with faint guides, over a band where a click adds one.
    A knot a waiting change places is amber; a knot in force it moves or
    removes is a dashed grey ghost, a removed one crossed out. */
-.knot-tick { stroke: var(--muted); stroke-width: 1.4; pointer-events: none; }
+.knot-tick { stroke: var(--muted); stroke-width: 1.6; pointer-events: none; }
 .knot-tick.is-placed { stroke: var(--group-0); stroke-width: 2; }
+/* In Knots mode the knots take the pointer: the points are marks only, and a
+   dense curve's points stay hidden rather than following the pointer. */
+.point-layer[data-knots="true"] .point { pointer-events: none; }
+.point-layer[data-knots="true"][data-dense="true"] .point:not(.selected) { opacity: 0; }
 .knot-band { fill: var(--blue-soft); opacity: 0.55; pointer-events: none; }
 .knot-band-hit { fill: transparent; cursor: copy; }
 .knot-guide {
@@ -239,7 +243,7 @@
 .knot-handle.is-selected { fill: var(--blue); }
 .knot-handle.is-placed { fill: color-mix(in srgb, var(--group-0) 42%, var(--surface)); stroke: var(--group-0); }
 .knot-handle.is-placed.is-selected { fill: var(--group-0); }
-.knot-handle.is-removing { fill: var(--surface); stroke: var(--danger); stroke-dasharray: 2 2; }
+.knot-layer .knot-handle.is-removing { fill: var(--surface); stroke: var(--danger); stroke-dasharray: 2 2; }
 .knot-hit { fill: transparent; cursor: ew-resize; }
 .knot-ghost {
   fill: none;

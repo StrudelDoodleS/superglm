@@ -289,7 +289,9 @@ export function drawChart(term, selection, context) {
   if (!handlesMode) {
     pointLayer = el("g", {
       class: "point-layer",
-      "data-dense": String(basePoints.size > DENSE_POINT_COUNT)
+      "data-dense": String(basePoints.size > DENSE_POINT_COUNT),
+      // In Knots mode the points are marks only, and a dense curve's stay hidden.
+      "data-knots": String(visualMode === "knots")
     });
     svg.appendChild(pointLayer);
     for (const i of visiblePoints) {

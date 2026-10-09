@@ -199,8 +199,8 @@ export function renderKnotStatus(statusNode, { pendingCount = 0, message = null 
   } else {
     parts.push(
       node("strong", "Knots."),
-      " Drag a knot to move it · click the axis to add one · drag one below the axis to remove"
-        + " it · arrow keys nudge the selected knot, ",
+      " Drag to move · click the axis to add · drag below the axis to remove · arrow keys nudge"
+        + " the selected knot, ",
       node("kbd", "Delete"),
       " removes it"
     );

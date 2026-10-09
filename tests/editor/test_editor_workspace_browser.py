@@ -2090,6 +2090,7 @@ def test_tool_rail_selects_one_mode_and_supports_roving_shortcuts(open_editor_pa
         move = rail.get_by_role("radio", name="Move", exact=True)
         zoom = rail.get_by_role("radio", name="Zoom", exact=True)
         handles = rail.get_by_role("radio", name="Handles", exact=True)
+        knots = rail.get_by_role("radio", name="Knots", exact=True)
 
         assert select.get_attribute("aria-checked") == "true"
         assert select.get_attribute("tabindex") == "0"
@@ -2106,9 +2107,12 @@ def test_tool_rail_selects_one_mode_and_supports_roving_shortcuts(open_editor_pa
         assert zoom.get_attribute("aria-checked") == "true"
         assert zoom.evaluate("node => document.activeElement === node")
 
+        # Knots, after Handles, is the last tool on a spline term.
         page.keyboard.press("End")
+        assert knots.get_attribute("aria-checked") == "true"
+        assert knots.evaluate("node => document.activeElement === node")
+        page.keyboard.press("ArrowLeft")
         assert handles.get_attribute("aria-checked") == "true"
-        assert handles.evaluate("node => document.activeElement === node")
         assert rail.get_by_role("radio", name="Breaks").count() == 0
 
         page.locator("#chart").focus()

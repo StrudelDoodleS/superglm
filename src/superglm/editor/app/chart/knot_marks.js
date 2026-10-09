@@ -48,7 +48,8 @@ import { el, line, text } from "./svg.js";
  *   removing:boolean}[]} handles
  * @property {boolean} band
  * @property {number|null} adding where the dashed ghost of a new knot goes, in px
- * @property {{top:number, height:number, label:string}|null} removeZone
+ * @property {{top:number, height:number, label:string, labelX:number}|null} removeZone the
+ *   zone, its label in the half the knot being removed is not in
  * @property {{px:number, text:string}|null} tag
  */
 
@@ -61,8 +62,9 @@ const HIT_HALF_WIDTH = 11;
 const HIT_HALF_HEIGHT = 13;
 const BAND_HALF = 9;
 const BAND_HIT_HALF = 14;
+// Longer than the axis's own 5px ticks, so a knot on a tick still reads as one.
 const TICK_TOP = 2;
-const TICK_BOTTOM = 8;
+const TICK_BOTTOM = 9;
 const CROSS_TOP = 10;
 const CROSS_HALF = 4;
 const ZONE_OFFSET = 28;
@@ -235,11 +237,16 @@ export function knotLayout(frame, ui) {
       ghosts, guides: [], handles: [], band: false, adding: null, removeZone: null, tag: null
     };
   }
+  const middle = (frame.left + frame.right) / 2;
+  const draggedPx = drag ? knotPx(frame, drag.x) : middle;
   const removeZone = drag
     ? {
         top: zoneTop(frame),
         height: ZONE_HEIGHT,
-        label: frame.positions.length > 1 ? REMOVE_LABEL : AT_LEAST_ONE
+        label: frame.positions.length > 1 ? REMOVE_LABEL : AT_LEAST_ONE,
+        // The knot dropping into the zone never covers its label.
+        labelX: !drag.remove ? middle
+          : draggedPx < middle ? (middle + frame.right) / 2 : (frame.left + middle) / 2
       }
     : null;
   const handles = marks.map((mark) => {
@@ -333,8 +340,7 @@ export function drawKnotLayer(svg, frame, ui) {
       class: "knot-remove-zone", x: left, y: zone.top, width: right - left, height: zone.height,
       rx: 4, ry: 4
     }));
-    text(layer, (left + right) / 2, zone.top + zone.height / 2 + 4, zone.label,
-      "knot-remove-label", "middle");
+    text(layer, zone.labelX, zone.top + zone.height / 2 + 4, zone.label, "knot-remove-label", "middle");
   }
   for (const handle of layout.handles) {
     layer.appendChild(el("path", {

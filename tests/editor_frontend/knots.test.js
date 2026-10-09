@@ -261,12 +261,15 @@ test("in Knots mode the selected or dragged knot is tagged, and a drop below the
   assert.equal(dragging.handles[1].placed, true);
   assert.equal(dragging.tag.text, "5.1");
   assert.equal(dragging.removeZone.label, REMOVE_LABEL);
+  assert.equal(dragging.removeZone.labelX, (PLOT.left + PLOT.right) / 2);
 
   const removing = knotLayout(frame, { ...NO_UI, drag: { from: 4, x: 4, moved: true, remove: true } });
   const zone = removing.removeZone;
   assert.equal(removing.handles[1].cy, zone.top + zone.height / 2);
   assert.equal(removing.handles[1].removing, true);
   assert.equal(removing.guides.length, 3);
+  // The knot drops into the zone's left half, so its label moves to the right half.
+  assert.equal(removing.removeZone.labelX, (PLOT.left + 3 * PLOT.right) / 4);
   const last = knotFrame(numericTerm({ knots: { positions: [5], count: 1 } }), PLOT, true);
   assert.equal(knotLayout(last, { ...NO_UI, drag: { from: 5, x: 5, moved: true, remove: true } })
     .removeZone.label, AT_LEAST_ONE);

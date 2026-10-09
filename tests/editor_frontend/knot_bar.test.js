@@ -175,8 +175,8 @@ test("in Knots mode the status line explains the gestures, or why the last did n
   renderKnotStatus(status, {});
   assert.equal(
     status.textContent,
-    "Knots. Drag a knot to move it · click the axis to add one · drag one below the axis to remove"
-      + " it · arrow keys nudge the selected knot, Delete removes it",
+    "Knots. Drag to move · click the axis to add · drag below the axis to remove · arrow keys nudge"
+      + " the selected knot, Delete removes it",
   );
   assert.equal(status.children.find((child) => child.tagName === "KBD").textContent, "Delete");
   renderKnotStatus(status, { pendingCount: 1, message: AT_LEAST_ONE });
