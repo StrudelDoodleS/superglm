@@ -45,7 +45,7 @@ def browser_editor_widget():
     model = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"age": Spline(n_knots=7), "region": Categorical(base="first")},
+        features={"age": Spline(kind="ps", n_knots=7), "region": Categorical(base="first")},
     )
     model.fit(X, y)
     widget = EditorSession.from_model(model, terms=["age", "region"]).widget()
