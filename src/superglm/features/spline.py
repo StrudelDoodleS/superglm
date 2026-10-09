@@ -53,6 +53,14 @@ def _weighted_quantile_knots(
     )
 
 
+# A natural spline (``cr``, the default, or ``ns``) has no range to place its
+# knots on when the column holds one value.
+_ONE_VALUE = (
+    "every value of this column is {value}, so a natural spline has no range to place its "
+    "knots on. Drop the term, or pass kind='ps', which fits a column with one value."
+)
+
+
 class _SplineBase:
     """Base class for all spline feature specs.
 
@@ -353,6 +361,8 @@ class _SplineBase:
 
     def _natural_constraint_rows(self) -> NDArray:
         """The 2 x K natural boundary rows f''(lo) = f''(hi) = 0."""
+        if not self._hi > self._lo:
+            raise ValueError(_ONE_VALUE.format(value=f"{self._lo:g}"))
         return _spline_constraints.build_natural_constraint_rows(
             self._knots,
             self.degree,

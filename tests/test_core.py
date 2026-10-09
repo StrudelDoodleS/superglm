@@ -12,6 +12,7 @@ from superglm.features.numeric import Numeric
 from superglm.features.spline import (
     CubicRegressionSpline,
     NaturalSpline,
+    PSpline,
     Spline,
     _SplineBase,
 )
@@ -249,7 +250,7 @@ class TestSplineBaseHierarchy:
 
 
 class TestSplineExtrapolation:
-    @pytest.mark.parametrize("spec_cls", [Spline, NaturalSpline, CubicRegressionSpline])
+    @pytest.mark.parametrize("spec_cls", [PSpline, NaturalSpline, CubicRegressionSpline])
     def test_clip_freezes_at_boundary(self, spec_cls):
         """Default clipping should reuse the boundary basis outside fit range."""
         x_train = np.linspace(0.0, 1.0, 200)
@@ -264,7 +265,7 @@ class TestSplineExtrapolation:
         np.testing.assert_allclose(below, at_lo, atol=1e-12)
         np.testing.assert_allclose(above, at_hi, atol=1e-12)
 
-    @pytest.mark.parametrize("spec_cls", [Spline, NaturalSpline, CubicRegressionSpline])
+    @pytest.mark.parametrize("spec_cls", [PSpline, NaturalSpline, CubicRegressionSpline])
     def test_error_mode_rejects_out_of_range(self, spec_cls):
         """extrapolation='error' should fail on out-of-range prediction."""
         x_train = np.linspace(0.0, 1.0, 200)

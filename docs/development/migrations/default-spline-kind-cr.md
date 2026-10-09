@@ -41,7 +41,8 @@ Four changes follow from it:
   interaction or a spline-by-factor interaction takes its margins from its
   parents' kind.
 - **A spline with no kind on a column with one distinct value**: the fit now
-  stops with an error naming the feature. A P-spline fitted it.
+  stops with an error naming the feature and saying to pass `kind="ps"`. A
+  P-spline fitted it.
 - **An ordered term with no `basis` whose levels are all grouped into one
   band**: the fit now stops with an error. A P-spline fitted it.
 - **`FactorSmooth` curves**: nothing changes. They stay P-splines whatever the
