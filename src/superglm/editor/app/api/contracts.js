@@ -195,6 +195,8 @@
  * @property {number} count
  * @property {KnotStrategy} strategy
  * @property {number|null} alpha
+ * @property {boolean} from_editor the knots it leaves were set in the editor, as
+ *   `TermKnots.from_editor` reads them after a Refit
  */
 /**
  * One knot change, as /stage and /knots take it: a count placed by a rule

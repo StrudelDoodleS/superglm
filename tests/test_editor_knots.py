@@ -77,6 +77,7 @@ def test_a_knot_change_waits_refits_undoes_and_puts_back_the_original_fit(book):
         "count": 7,
         "strategy": "explicit",
         "alpha": 0.2,
+        "from_editor": True,
     }
     np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
 
@@ -338,6 +339,32 @@ def test_reset_puts_back_the_declared_knots_and_the_export_drops_them(book):
     session.refit_pending()
     np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
     assert "knots" not in json.loads(session.export_structure())["features"]["age"]
+
+
+@pytest.mark.parametrize(
+    ("term", "moved"),
+    [("age", AGE_KNOTS[:-1] + [60.0]), ("band", [1.5, 2.0, 4.5])],
+)
+def test_a_waiting_reset_is_not_a_hand_placement(term, moved):
+    """A waiting change says whether it places the knots by hand, as the refitted term will.
+
+    The age term is declared with knots of its own, so its reset is listed in code. The band
+    term is declared by a rule, so its reset only clears the flag.
+    """
+    X, y, w = _book()
+    declared = _declared(age=Spline(knots=AGE_KNOTS)) if term == "age" else _declared()
+    model = declared.fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+
+    session.stage_structural("knots", term, {"positions": moved})
+    assert session_payload(session)[term]["pending"]["knots"]["from_editor"] is True
+    session.refit_pending()
+    session.stage_structural("knots", term, {"reset": True})
+    waiting = session_payload(session)[term]["pending"]["knots"]
+    assert waiting["from_editor"] is False
+    session.refit_pending()
+    assert session_payload(session)[term]["knots"]["from_editor"] is False
+    np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
 
 
 def test_a_shaped_range_and_a_knot_change_compose_in_either_order(book):

@@ -219,6 +219,27 @@ test("the chip names the shown knots and their rule, and tints while a knot chan
   assert.equal(knotChip(numericTerm({ knots: { positions: null } })), null);
 });
 
+test("a waiting reset reads as listed in code, a waiting hand move as placed by hand", () => {
+  const reset = numericTerm({
+    knots: { positions: [2, 5, 6, 8], strategy: "explicit", from_editor: true },
+    pending: {
+      knots: {
+        positions: [2, 4, 6, 8], count: 4, strategy: "explicit", alpha: 0.2, from_editor: false,
+      },
+    },
+  });
+  assert.deepEqual(knotChip(reset), { text: "4 knots · listed in code", waiting: true });
+  const moved = numericTerm({
+    knots: { strategy: "explicit" },
+    pending: {
+      knots: {
+        positions: [2, 5, 6, 8], count: 4, strategy: "explicit", alpha: 0.2, from_editor: true,
+      },
+    },
+  });
+  assert.deepEqual(knotChip(moved), { text: "4 knots · placed by hand", waiting: true });
+});
+
 test("a waiting change's moved knots are ghosts, its removed ones crossed, its new ones placed", () => {
   const inForce = [2, 4, 6, 8];
   assert.deepEqual(waitingMarks(inForce, [2, 5, 6, 8], 1e-7), {

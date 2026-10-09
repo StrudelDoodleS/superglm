@@ -359,9 +359,12 @@ export function stepperState(shown, axis, rule) {
 export function knotChip(term) {
   const shown = shownKnots(term);
   if (!shown) return null;
+  // A waiting change reads as the knots will after a Refit: a reset to the
+  // declared ones is not placed by hand.
+  const fromEditor = shown.waiting ? term.pending?.knots?.from_editor : term.knots?.from_editor;
   const placed = shown.strategy !== "explicit"
     ? RULE_TEXT[shown.strategy]
-    : shown.waiting || term.knots?.from_editor ? "placed by hand" : "listed in code";
+    : fromEditor ? "placed by hand" : "listed in code";
   const count = `${shown.count} ${shown.count === 1 ? "knot" : "knots"}`;
   return { text: `${count} · ${placed}`, waiting: shown.waiting };
 }
