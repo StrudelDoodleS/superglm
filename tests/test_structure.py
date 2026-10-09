@@ -570,7 +570,7 @@ def _plain(**overrides) -> SuperGLM:
     features = {
         "brand": Categorical(base="first"),
         "area": Categorical(base="first"),
-        "age": Spline(n_knots=6),
+        "age": Spline(kind="ps", n_knots=6),
         "band": OrderedCategorical(order=BANDS, basis=Spline(kind="bs", n_knots=4)),
     }
     features.update(overrides)

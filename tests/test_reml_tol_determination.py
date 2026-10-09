@@ -1438,7 +1438,9 @@ class TestDeadSearchNewtonDecrement:
 
         monkeypatch.setattr(direct, "reml_laml_objective", reject_every_move)
         monkeypatch.setattr(direct, "classify_dead_feasible_exit", spy)
-        model = SuperGLM(family="poisson", features={"x": Spline(k=7)}, selection_penalty=0)
+        model = SuperGLM(
+            family="poisson", features={"x": Spline(kind="ps", k=7)}, selection_penalty=0
+        )
         with pytest.warns(ConvergenceWarning, match="no smoothing step improved"):
             model.fit_reml(
                 pd.DataFrame({"x": x}),

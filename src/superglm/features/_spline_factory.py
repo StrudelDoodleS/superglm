@@ -42,7 +42,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
 
 def Spline(
-    kind: str = "ps",
+    kind: str = "cr",
     *,
     k: int | None = None,
     n_knots: int | None = None,
@@ -96,6 +96,13 @@ def Spline(
         )
     # Only the two supporting classes take the keyword; the others never see it.
     range_kwargs = {"polynomial_ranges": polynomial_ranges} if polynomial_ranges else {}
+
+    if kind in ("cr", "cr_cardinal") and degree != 3:
+        raise ValueError(
+            f"A cubic regression spline (kind={kind!r}; 'cr' is the default) is always cubic, "
+            f"so degree={degree} cannot apply. Pass kind='ps' or kind='bs' for a "
+            f"degree-{degree} spline."
+        )
 
     if constraint is not None and kind == "ns":
         raise NotImplementedError(

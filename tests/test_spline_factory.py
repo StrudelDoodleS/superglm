@@ -28,9 +28,9 @@ class TestSplineFactoryDispatch:
     def test_n_knots_function_stays_on_public_module(self):
         assert n_knots_from_k.__module__ == "superglm.features.spline"
 
-    def test_bs_default(self):
+    def test_default_dispatch(self):
         s = Spline(n_knots=8)
-        assert isinstance(s, PSpline)
+        assert isinstance(s, CubicRegressionSpline)
 
     def test_bs_explicit(self):
         s = Spline(kind="bs", n_knots=8, penalty="ssp")
@@ -74,8 +74,8 @@ class TestSplineFactoryDispatch:
         assert s.penalty == "none"
         assert s.extrapolation == "extend"
 
-    def test_cr_ignores_degree(self):
-        """CR is always cubic regardless of degree param."""
+    def test_cr_is_cubic(self):
+        """CR is always cubic; a degree other than 3 is refused (TestDefaultKindIsCr)."""
         s = Spline(kind="cr", n_knots=8)
         assert s.degree == 3
 
@@ -228,9 +228,9 @@ class TestDirectClasses:
         assert info.n_cols > 0
 
     def test_old_spline_syntax(self):
-        """Spline(n_knots=8, penalty='ssp') still works (defaults to kind='ps')."""
+        """Spline(n_knots=8, penalty='ssp') still works (defaults to kind='cr')."""
         s = Spline(n_knots=8, penalty="ssp")
-        assert isinstance(s, PSpline)
+        assert isinstance(s, CubicRegressionSpline)
         x = np.linspace(0, 1, 100)
         info = s.build(x)
         assert info.n_cols > 0
@@ -238,7 +238,7 @@ class TestDirectClasses:
     def test_default_n_knots(self):
         """Spline() with no size arg uses n_knots=10 default."""
         s = Spline()
-        assert isinstance(s, PSpline)
+        assert isinstance(s, CubicRegressionSpline)
         assert s.n_knots == 10
 
 
@@ -315,21 +315,64 @@ class TestPSplineFactory:
         assert n_knots_from_k("ps", 20, degree=3) == 16
 
 
-# ── Default kind is "ps" ────────────────────────────────────────
+# ── Default kind is "cr" ────────────────────────────────────────
 
 
-class TestDefaultKindIsPs:
-    """The Spline() factory now defaults to kind='ps'."""
+class TestDefaultKindIsCr:
+    """``Spline()`` and ``s()`` default to kind='cr' from 0.40 (it was 'ps').
 
-    def test_default_is_pspline(self):
+    Every test here fails on the 0.39 factory: its default built a PSpline,
+    and it accepted any ``degree`` for a cubic regression spline and ignored
+    it, so a ``degree=2`` request silently fitted a cubic.
+    """
+
+    def test_default_is_cubic_regression_spline(self):
         s = Spline(n_knots=8)
-        assert isinstance(s, PSpline)
+        assert isinstance(s, CubicRegressionSpline)
+        assert not isinstance(s, PSpline)
+
+    def test_default_builds_exactly_the_explicit_cr(self):
+        x = np.random.default_rng(0).uniform(0.0, 10.0, 300)
+        default = Spline(n_knots=8).build(x)
+        explicit = Spline(kind="cr", n_knots=8).build(x)
+
+        def dense(columns):
+            return columns.toarray() if hasattr(columns, "toarray") else np.asarray(columns)
+
+        assert default.n_cols == explicit.n_cols == 9  # 8 interior + 2 boundary knots, centred
+        np.testing.assert_array_equal(dense(default.columns), dense(explicit.columns))
+        np.testing.assert_array_equal(default.penalty_matrix, explicit.penalty_matrix)
+
+    def test_s_default_is_cubic_regression_spline(self):
+        from superglm.terms import s
+
+        assert isinstance(s("age", n_knots=8).spec, CubicRegressionSpline)
 
     def test_default_no_warning(self):
-        """Default kind='ps' should not emit a FutureWarning."""
+        """The default kind should not emit a FutureWarning."""
         with warnings.catch_warnings():
             warnings.simplefilter("error", FutureWarning)
             Spline(n_knots=8)  # should not raise
+
+    @pytest.mark.parametrize("kind", ["cr", "cr_cardinal"])
+    @pytest.mark.parametrize("degree", [1, 2, 4])
+    def test_cubic_regression_kinds_refuse_another_degree(self, kind, degree):
+        with pytest.raises(ValueError, match="always cubic") as excinfo:
+            Spline(kind=kind, n_knots=8, degree=degree)
+        message = str(excinfo.value)
+        assert f"degree={degree} cannot apply" in message
+        assert "kind='ps' or kind='bs'" in message
+
+    def test_default_kind_refuses_a_degree_rather_than_fitting_a_cubic(self):
+        """Under the new default, ``Spline(degree=2)`` (a quadratic P-spline in
+        0.39) must not silently become a cubic regression spline."""
+        from superglm.terms import s
+
+        with pytest.raises(ValueError, match="kind='cr'.*always cubic"):
+            Spline(n_knots=8, degree=2)
+        with pytest.raises(ValueError, match="kind='cr'.*always cubic"):
+            s("age", n_knots=8, degree=2)
+        assert Spline(kind="ps", n_knots=8, degree=2).degree == 2
 
 
 # ── kind="bs" is real BSplineSmooth ─────────────────────────────

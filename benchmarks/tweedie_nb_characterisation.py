@@ -165,7 +165,7 @@ def _book_case(name: str, weight_semantics: str):
         features = {"band": Categorical(), "level": Categorical()}
     else:
         X = pd.DataFrame({"x": x, "level": level})
-        features = {"x": Spline(n_knots=10), "level": Categorical()}
+        features = {"x": Spline(kind="ps", n_knots=10), "level": Categorical()}
     model = SuperGLM(family=Tweedie(p=1.5), features=features, weight_semantics=weight_semantics)
     return model, X, y
 

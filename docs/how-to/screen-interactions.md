@@ -493,8 +493,8 @@ discretize at all, so OC pairs stay exact on both sides.
   fallback is a third door. So do not read the level count alone to decide
   which kernel scored a pair — and read the *unpinned* level count when you
   do, since a `levels=` universe with no training rows behind it is pinned to
-  base and widens no block: against a library-default `Spline()` margin (13
-  probe columns) over a 400-point support, 140 declared levels of which 105
+  base and widens no block: against a `Spline(kind="ps")` margin of the default
+  size (13 probe columns) over a 400-point support, 140 declared levels of which 105
   are populated stays on the dense path at a block of 13 x 104 = 1,352, where
   106 populated levels would not. The support matters because the block width
   is only the first gate — hold that same 140/105 factor and widen the spline

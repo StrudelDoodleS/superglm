@@ -312,7 +312,7 @@ def auto_detect_features(
             spec = PSpline(n_knots=nk, degree=degree, penalty="ssp")
             specs[col] = spec
             feature_order.append(col)
-            lines.append(f"  {str(col):<20s} → Spline(n_knots={nk}, degree={degree})")
+            lines.append(f"  {str(col):<20s} → Spline(kind='ps', n_knots={nk}, degree={degree})")
         elif kind == "categorical":
             base = categorical_base
             if base == "most_exposed" and sample_weight is None:

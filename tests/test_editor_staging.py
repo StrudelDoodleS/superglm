@@ -59,7 +59,7 @@ def book():
         features={
             "brand": Categorical(base="first"),
             "area": Categorical(base="first"),
-            "age": Spline(n_knots=6),
+            "age": Spline(kind="ps", n_knots=6),
         },
     )
     model.fit(X, y)

@@ -10,7 +10,8 @@ in the mgcv sense; the fitted smooth then absorbs the identifiability
 constraint.
 
 ```python
-Spline(kind="ps", k=14)                   # default P-spline choice
+Spline(k=10)                              # no kind: a cubic regression spline
+Spline(kind="ps", k=14)                   # P-spline
 Spline(kind="bs", k=14)                   # integrated-derivative B-spline smooth
 Spline(kind="cr", k=10)                   # cubic regression spline
 Spline(kind="ns", k=10)                   # natural spline
@@ -18,13 +19,18 @@ Spline(kind="ps", k=14, select=True)      # REML + double-penalty shrinkage
 Spline(kind="cr", k=12, m=(1, 2))         # multi-order penalty
 ```
 
+`kind` defaults to `"cr"`, so `Spline(...)` and `s(...)` with no `kind` give a
+cubic regression spline. Before 0.40 they gave a P-spline; pass `kind="ps"` to
+keep that fit. See the
+[migration note](../development/migrations/default-spline-kind-cr.md).
+
 ### Which spline kind to choose
 
 | Kind | Use when | Notes |
 |------|----------|-------|
-| `"ps"` | default pricing spline | P-spline with difference penalty |
+| `"cr"` | the default; you want a cubic regression spline / mgcv-style `cr` basis | natural boundary constraints plus identifiability; always cubic, so a `degree` other than 3 is refused |
+| `"ps"` | you want a P-spline, or a degree other than 3 | P-spline with difference penalty |
 | `"bs"` | you want a proper B-spline smooth / mgcv-style `bs` basis | integrated-derivative penalty on the same raw B-spline geometry |
-| `"cr"` | you want a cubic regression spline / mgcv-style `cr` basis | natural boundary constraints plus identifiability |
 | `"ns"` | you want a natural spline with fixed natural boundaries | does not support monotone fitting |
 
 ### Knot strategies
@@ -532,7 +538,8 @@ OrderedCategorical(
 
 `basis=` is the only configuration channel and takes the shape itself — a
 `Spline(...)`, a `Piecewise(...)`, or a `Polynomial(...)` object; omitting
-`basis` keeps the default P-spline (`kind="ps"`, `n_knots=5`). The legacy
+`basis` gives the default cubic regression spline (`kind="cr"`, `n_knots=5`;
+a P-spline, `kind="ps"`, before 0.40). The legacy
 `basis="spline"` string, the spline shortcut arguments (`kind=`, `n_knots=`,
 `degree=`, `select=`, `penalty=`), and step smoothing with `basis="step"` were
 removed in 0.24.0 — configure the shape on `basis=`, or use `Categorical(...)`

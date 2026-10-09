@@ -820,8 +820,8 @@ class TestDiscretizedTensorInteraction:
             family="poisson",
             selection_penalty=0.0,
             features={
-                "age": Spline(n_knots=10, penalty="ssp"),
-                "bm": Spline(n_knots=8, penalty="ssp"),
+                "age": Spline(kind="ps", n_knots=10, penalty="ssp"),
+                "bm": Spline(kind="ps", n_knots=8, penalty="ssp"),
             },
             interactions=[("age", "bm")],
         )
@@ -833,8 +833,8 @@ class TestDiscretizedTensorInteraction:
             discrete=True,
             n_bins={"age": 64, "bm": 48},
             features={
-                "age": Spline(n_knots=10, penalty="ssp"),
-                "bm": Spline(n_knots=8, penalty="ssp"),
+                "age": Spline(kind="ps", n_knots=10, penalty="ssp"),
+                "bm": Spline(kind="ps", n_knots=8, penalty="ssp"),
             },
             interactions=[("age", "bm")],
         )

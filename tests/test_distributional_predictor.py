@@ -179,7 +179,7 @@ def test_offsets_reject_unknown_names_bad_shapes_and_nonfinite_values() -> None:
 
 
 def test_reused_feature_objects_compile_to_independent_predictor_state() -> None:
-    shared = Spline(n_knots=5, degree=2, penalty="ssp", select=True)
+    shared = Spline(kind="ps", n_knots=5, degree=2, penalty="ssp", select=True)
     caller_before = pickle.dumps(shared)
     predictors = (
         Predictor("location", {"x": shared}),
