@@ -136,7 +136,7 @@ ordered term, **Free levels** does this job instead: see
 - The choice stays on as you move between spline terms, until you turn it off.
 - Hand edits keep the line. A refit fits it again.
 - A spline needs rows under each of its basis functions to be fitted without smoothing. Across
-  a gap in the data it has none there, so no line is drawn, and the icon is off. Hover over it
+  a gap in the data it has none there, so no line is drawn, and the icon stays on. Hover over it
   for the reason. Fewer knots, or knots where the rows are, fix it.
 - A line far from the curve does not squash the chart: past the curve's own range again above
   and below, it runs off the plot.

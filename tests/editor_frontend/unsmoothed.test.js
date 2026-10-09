@@ -49,7 +49,7 @@ test("the toggle is busy while its fit runs and off, saying why, where the fit w
     hidden: false, pressed: true, busy: true, disabled: false, body: UNSMOOTHED_BUSY
   });
   assert.deepEqual(unsmoothedToggle(true, spline, entry("refused", { reason: REFUSAL })), {
-    hidden: false, pressed: true, busy: false, disabled: true, body: REFUSAL
+    hidden: false, pressed: true, busy: false, disabled: false, body: REFUSAL
   });
   // A failed request is said, but the toggle stays on hand to try again.
   const failed = unsmoothedToggle(true, spline, entry("failed", { reason: "HTTP 502" }));
@@ -61,6 +61,13 @@ test("the toggle is busy while its fit runs and off, saying why, where the fit w
   assert.deepEqual(unsmoothedToggle(false, spline, entry("refused", { reason: REFUSAL })), {
     hidden: false, pressed: false, busy: false, disabled: false, body: UNSMOOTHED_HELP
   });
+});
+
+test("a refused line never disables the toggle, so the choice can always be turned off", () => {
+  for (const status of ["refused", "failed", "running", "ready"]) {
+    const toggle = unsmoothedToggle(true, spline, entry(status, { reason: REFUSAL }));
+    assert.equal(toggle.disabled, false, status);
+  }
 });
 
 test("an entry belongs to its fit, and a slow answer for an older fit does not replace it", () => {

@@ -1719,7 +1719,7 @@ function patchUnsmoothed(term, entry) {
 
 // One fit per term and fit in force, asked for while the toggle is on. It
 // runs without holding the editor, so nothing blocks: the toggle is busy, and
-// a refusal disables it with Python's sentence for that fit.
+// a refusal shows Python's sentence for that fit as its hover text.
 async function fetchUnsmoothed(term, fitToken) {
   patchUnsmoothed(term, { fit_token: fitToken, status: "running", line: null, reason: null });
   try {
