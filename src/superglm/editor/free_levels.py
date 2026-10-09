@@ -328,8 +328,7 @@ def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[
     labels, undetermined = _determined(
         free_model, name, [label for label in declared if label in estimated]
     )
-    share = np.array([prior.get(label, 0.0) for label in labels], dtype=np.float64)
-    share = share / share.sum() if share.sum() > 0.0 else share
+    share = _centring_share(labels, prior)
     free_rows = _categorical_contrasts(free_model, name, labels, share)
     curve_rows = _ordered_contrasts(model, name, [declared[x] for x in labels], share)
     free_var = _contrast_variances(free_model, name, free_rows)
@@ -355,6 +354,12 @@ def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[
         undetermined=undetermined,
         note=note,
     )
+
+
+def _centring_share(labels: list[str], prior: dict[str, float]) -> np.ndarray:
+    """Each of ``labels``' share of their ``prior`` weight: the weights both fits are centred on."""
+    share = np.array([prior.get(label, 0.0) for label in labels], dtype=np.float64)
+    return share / share.sum() if share.sum() > 0.0 else share
 
 
 def _determined(

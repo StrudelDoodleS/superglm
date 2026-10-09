@@ -450,7 +450,9 @@
  * @property {boolean} showCi
  * @property {boolean} showContrib
  * @property {FreeLevels|null} freeLevels the last free-level comparison, drawn
- *   while its term and the fit in force are the ones in view
+ *   while it is shown and its term and the fit in force are the ones in view
+ * @property {boolean} showFreeLevels Free levels is on; turned off, the comparison
+ *   is kept, so turning it on again for the same term and fit draws it at once
  * @property {boolean} showUnsmoothed the Unsmoothed toggle, off until turned on
  * @property {Record<string, UnsmoothedEntry>} unsmoothed each term's latest line
  *   or refusal, drawn while its fit is the one in force

@@ -62,3 +62,51 @@ def test_free_levels_then_make_special_and_back_on_the_curve(open_editor_page):
             "55-64",
             "65+",
         ]
+
+
+def _diamond_centres(page) -> list[tuple[float, float]]:
+    paths = page.locator("#chart .free-levels .free-level").evaluate_all(
+        "els => els.map(e => e.getAttribute('d'))"
+    )
+    # "M cx top L right cy L ...": the centre is the first x and the second point's y.
+    return sorted((float(d.split()[1]), float(d.split()[5])) for d in paths)
+
+
+def test_free_levels_off_and_on_again_takes_no_fit_and_unsmoothed_runs_through_its_diamonds(
+    open_editor_page,
+):
+    with open_editor_page(selected_term="age_band") as (page, _session):
+        fits = []
+        page.on(
+            "request",
+            lambda request: fits.append(request.url) if "/free_levels" in request.url else None,
+        )
+        toggle = page.locator("#freeLevelsToggle")
+        toggle.click()
+        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
+        diamonds = _diamond_centres(page)
+        assert len(diamonds) == 6 and len(fits) == 1
+
+        toggle.click()
+        page.wait_for_function("() => !document.querySelector('#chart .free-levels .free-level')")
+        assert toggle.get_attribute("aria-pressed") == "false"
+        # On again for the same term and fit: the kept comparison, drawn with no fit.
+        toggle.click()
+        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
+        assert toggle.get_attribute("aria-pressed") == "true"
+        assert _diamond_centres(page) == diamonds
+        assert len(fits) == 1
+
+        # The Unsmoothed line is the same fit: a dot on each level, on its diamond.
+        page.locator("#unsmoothedToggle").click()
+        dots = page.locator("#chart .unsmoothed-layer .unsmoothed-dot")
+        dots.first.wait_for(state="attached")
+        centres = dots.evaluate_all(
+            "els => els.map(e => [Number(e.getAttribute('cx')), Number(e.getAttribute('cy'))])"
+        )
+        assert len(centres) == 6
+        assert page.locator("#chart .unsmoothed-layer path.unsmoothed").count() == 1
+        # Measured again: the line may widen the y-axis.
+        diamonds = _diamond_centres(page)
+        for (dx, dy), (fx, fy) in zip(sorted(map(tuple, centres)), diamonds, strict=True):
+            assert abs(dx - fx) <= 0.01 and abs(dy - fy) <= 0.01

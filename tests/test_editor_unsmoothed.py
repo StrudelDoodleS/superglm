@@ -90,20 +90,24 @@ def test_an_ordered_line_is_its_free_fit_and_one_fit_serves_free_levels_too(book
         line = _post_json(f"{widget.url}/unsmoothed", {"term": "band"})
         assert len(fitted) == 1
         free = fitted[0].term_inference("band", with_se=False)
-        expected = {
-            str(level): float(np.exp(value))
-            for level, value in zip(free.levels, free.log_relativity, strict=True)
-        }
-        # The chart's reference is the free fit's too, so each level is drawn
-        # at its own free relativity, unshifted.
-        assert model._specs["band"]._base_level == fitted[0]._specs["band"]._base_level
         assert line["levels"] == BANDS
-        assert line["y"] == [expected[level] for level in BANDS]
         assert line["gaps"] == [] and line["note"] is None
         assert line["fit_token"] == widget._state()["fit_token"]
-        # A second line and the comparison take no fit of their own.
+        # The line has the free fit's shape: its level-to-level ratios.
+        own = dict(zip(map(str, free.levels), free.log_relativity, strict=True))
+        expected = np.array([own[level] for level in BANDS])
+        np.testing.assert_allclose(
+            np.log(line["y"]) - np.log(line["y"][0]),
+            expected - expected[0],
+            rtol=0.0,
+            atol=64 * np.finfo(np.float64).eps,
+        )
+        # A second line and the comparison take no fit of their own, and the
+        # line runs through the comparison's diamonds.
         assert _post_json(f"{widget.url}/unsmoothed", {"term": "band"}) == line
-        assert _post_json(f"{widget.url}/free_levels", {"term": "band"})["levels"] == BANDS
+        compared = _post_json(f"{widget.url}/free_levels", {"term": "band"})
+        assert compared["levels"] == BANDS
+        assert compared["y"] == line["y"]
         assert len(fitted) == 1
     finally:
         widget.close()

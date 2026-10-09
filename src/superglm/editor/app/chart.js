@@ -1421,22 +1421,27 @@ function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
 }
 
 // The term fitted with its smoothing switched off, dashed over the curve: one
-// path per run between the levels the free fit left out, and a dot for a
-// level alone between two of them. Its hover text names what it is and any
-// level it skips.
+// path per run between the levels the free fit left out. An ordered term's
+// line marks each level with a dot, as its curve does; a spline's has none.
+// Its hover text names what it is and any level it skips.
 function drawUnsmoothed(svg, series, line, sx, sy) {
   const layer = el("g", { class: "unsmoothed-layer" });
   svg.appendChild(layer);
   const label = `${line.term} fitted with its smoothing switched off`
     + `${line.note ? `. ${line.note}` : ""}`;
-  for (const run of unsmoothedRuns(series)) {
-    const node = run.x.length > 1
-      ? path(layer, run.x, run.y, sx, sy, "unsmoothed")
-      : el("circle", { cx: sx(run.x[0]), cy: sy(run.y[0]), r: 2.6, class: "unsmoothed-dot" });
-    if (!node.parentNode) layer.appendChild(node);
+  const titled = (/** @type {Element} */ node, /** @type {string} */ text) => {
     const title = el("title", {});
-    title.textContent = label;
+    title.textContent = text;
     node.appendChild(title);
+  };
+  for (const run of unsmoothedRuns(series)) {
+    if (run.x.length > 1) titled(path(layer, run.x, run.y, sx, sy, "unsmoothed"), label);
+    if (!line.levels && run.x.length > 1) continue;
+    run.x.forEach((x, i) => {
+      const dot = el("circle", { cx: sx(x), cy: sy(run.y[i]), r: 3, class: "unsmoothed-dot" });
+      layer.appendChild(dot);
+      titled(dot, `${label}: ${fmt(run.y[i])}`);
+    });
   }
 }
 

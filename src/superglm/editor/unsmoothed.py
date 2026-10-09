@@ -21,9 +21,10 @@ line is refused rather than drawn; the refit's own rank decision on its
 penalised system decides. A selection penalty is lifted from the term in both
 cases, as Free levels lifts it, so the line is not shrunk.
 
-The line is drawn on the chart's reference, as the opened model's line is: a
-numeric spline's under the same centring rule as its curve, an ordered term's
-relative to the reference level. A level the free fit cannot estimate (no rows
+A numeric spline's line is drawn under the same centring rule as its curve.
+An ordered term's runs through the diamonds Free levels draws: each level at
+the curve plus the gap between the two fits, both centred on the levels' mean
+weighted by their prior weight, so the two views of the one fit agree. A level the free fit cannot estimate (no rows
 of positive weight, every response at the family's bound, or rows another
 term covers exactly) is a gap in the line, and a note names it. Hand edits are
 not part of it: it is a fit.
@@ -41,6 +42,7 @@ from superglm.editor.errors import EditorClientError, EditorTypeError, EditorVal
 from superglm.editor.free_levels import (
     FreeFit,
     FreeFitWording,
+    _centring_share,
     _determined,
     _lift_selection,
     _values,
@@ -129,17 +131,16 @@ class _Levels:
 
     ``levels`` are on the curve in axis order; ``group`` takes each to its
     level or group in the fit in force; ``declared`` are those levels and
-    groups in the term's order; ``curve`` is the fitted curve in the model's
-    own centring at each of them, on the log scale, and ``offset`` what the
-    chart's centring adds to it; ``reference`` is the chart's reference.
+    groups in the term's order; ``curve`` is the fitted curve at each of
+    them in the model's own centring, and ``drawn`` the chart's curve at each
+    level, both on the log scale.
     """
 
     levels: list[str]
     group: dict[str, str]
     declared: list[str]
     curve: dict[str, float]
-    offset: dict[str, float]
-    reference: str
+    drawn: dict[str, float]
 
 
 def unsmoothed_job(session, name: str, free_fit: FreeFit | None = None) -> Callable[[], Unsmoothed]:
@@ -157,7 +158,7 @@ def unsmoothed_job(session, name: str, free_fit: FreeFit | None = None) -> Calla
         raise EditorTypeError(_NOT_SMOOTHED.format(term=name))
     if kind == SPLINE:
         return _spline_job(session, name, term)
-    shown = _shown_levels(term, spec)
+    shown = _shown_levels(term, session.model, name)
     if free_fit is not None:
         return lambda: Unsmoothed(free_line(name, shown, free_fit), free_fit)
     fit = prepare_free_fit(session, name, _WORDING)
@@ -172,10 +173,11 @@ def unsmoothed_job(session, name: str, free_fit: FreeFit | None = None) -> Calla
 def free_line_payload(session, name: str, fit: FreeFit) -> dict[str, Any]:
     """``name``'s unsmoothed line from a free fit already made, as Free levels makes it."""
     term = session._require_term(name)
-    return free_line(name, _shown_levels(term, session.model._specs[name]), fit)
+    return free_line(name, _shown_levels(term, session.model, name), fit)
 
 
-def _shown_levels(term, spec: OrderedCategorical) -> _Levels:
+def _shown_levels(term, model, name: str) -> _Levels:
+    spec = model._specs[name]
     specials = special_labels(spec)
     grouping = getattr(spec, "_grouping", None)
     levels = [str(level) for level in term.levels if str(level) not in specials]
@@ -184,34 +186,24 @@ def _shown_levels(term, spec: OrderedCategorical) -> _Levels:
         for level in levels
     }
     shown = np.asarray(term.original_log_effect, dtype=np.float64)
-    native = np.asarray(term.metadata.get("native_original_log_effect", shown), dtype=np.float64)
-    curve: dict[str, float] = {}
-    offset: dict[str, float] = {}
-    for level, value, drawn in zip(term.levels, native, shown, strict=True):
-        if str(level) in group and group[str(level)] not in curve:
-            curve[group[str(level)]] = float(value)
-            offset[group[str(level)]] = float(drawn - value)
+    declared = [str(level) for level in spec._ordered_levels]
     return _Levels(
         levels=levels,
         group=group,
-        declared=[str(level) for level in spec._ordered_levels],
-        curve=curve,
-        offset=offset,
-        reference=str(spec._base_level),
+        declared=declared,
+        # Read as Free levels reads the curve, so the two place a level alike.
+        curve=dict(zip(declared, _values(model, name, declared).tolist(), strict=True)),
+        drawn={str(level): float(value) for level, value in zip(term.levels, shown, strict=True)},
     )
 
 
 def free_line(name: str, shown: _Levels, fit: FreeFit) -> dict[str, Any]:
-    """The line through each level's free estimate, relative to the chart's reference.
+    """The line through each level's free estimate, where Free levels draws its diamond.
 
-    Each level is drawn at ``f(level) - f(anchor) + c(anchor)``, with ``f``
-    the free fit's log-relativities and ``c`` the chart's curve. The anchor is
-    the chart's reference, where the model's own centring puts the curve at
-    zero exactly (its evaluation there is round-off) and the free fit's is
-    zero, so the line is the free fit's own relativities, moved only by what
-    the chart's centring adds. Where the free fit has no value at the
-    reference, its own reference, else its first level, anchors the line on
-    the curve.
+    Each level is drawn at the chart's curve plus the gap between the free
+    fit and the curve, each centred on the compared levels' mean weighted by
+    their prior weight (:func:`superglm.editor.free_levels.free_level_comparison`),
+    so the line has the free fit's shape and runs through the diamonds.
     """
     free_model = fit.model
     free_spec = free_model._specs[name]
@@ -226,25 +218,17 @@ def free_line(name: str, shown: _Levels, fit: FreeFit) -> dict[str, Any]:
     labels, aliased = _determined(
         free_model, name, [label for label in shown.declared if label in estimated], active=active
     )
-    values = dict(zip(labels, _values(free_model, name, labels).tolist(), strict=True))
-    anchor = next(
-        (
-            label
-            for label in (shown.reference, str(free_spec._base_level), *labels)
-            if label in values
-        ),
-        None,
-    )
-    shift = 0.0
-    if anchor is not None:
-        on_curve = 0.0 if anchor == shown.reference else shown.curve.get(anchor, 0.0)
-        shift = shown.offset.get(anchor, 0.0) + on_curve - values[anchor]
+    share = _centring_share(labels, fit.exposure)
+    free = _values(free_model, name, labels)
+    curve = np.array([shown.curve[label] for label in labels], dtype=np.float64)
+    gaps = (free - share @ free) - (curve - share @ curve)
+    gap = dict(zip(labels, gaps.tolist(), strict=True))
     y: list[float | None] = []
     skipped: dict[str, list[str]] = {}
     for level in shown.levels:
         group = shown.group[level]
-        if group in values:
-            y.append(float(_safe_exp(values[group] + shift)))
+        if group in gap:
+            y.append(float(_safe_exp(shown.drawn[level] + gap[group])))
             continue
         y.append(None)
         if group in at_bound:

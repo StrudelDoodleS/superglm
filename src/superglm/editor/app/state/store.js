@@ -20,6 +20,7 @@ export function createInitialEditorState(snapshot = null) {
       showCi: false,
       showContrib: false,
       freeLevels: null,
+      showFreeLevels: false,
       showUnsmoothed: false,
       unsmoothed: {},
       summaryLevelDisplay: "expanded",

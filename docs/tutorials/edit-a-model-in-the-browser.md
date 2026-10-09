@@ -131,8 +131,11 @@ spline term and on an ordered term with a spline basis.
 - On a spline term the model is fitted again with the term's smoothing at zero, on the same
   knots. Every other term keeps the smoothing the model chose for it.
 - On an ordered term each level is fitted free, as a plain categorical: the same fit **Free
-  levels** makes, and the two share it.
-- The line is relative to the same reference as the curve, so the two meet at the reference.
+  levels** makes, and the two share it. Each level gets a dot, and the line runs through the
+  **Free levels** diamonds.
+- A spline term's line is relative to the same reference as the curve, so the two meet at the
+  reference. An ordered term's line is placed against the levels' exposure-weighted average, as
+  the diamonds are, so it need not meet the curve at the reference.
 - The line is one fit per term. The icon is busy while it runs, and you can go on editing.
 - The choice stays on as you move between terms, until you turn it off.
 - Hand edits keep the line. A refit fits it again.
@@ -283,6 +286,7 @@ interval.
   draws its levels flat.
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
+- Turned off and on again for the same term and model, it comes back at once, with no new fit.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the
   free levels are not shrunk. The other terms keep theirs. A custom penalty that cannot be limited
   to some terms shrinks the free levels too, or removes them, and the legend then says so.

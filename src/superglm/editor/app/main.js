@@ -1268,6 +1268,7 @@ function selectChartRenderState(state) {
     showCi: view.showCi,
     showContrib: view.showContrib,
     freeLevels: view.freeLevels,
+    showFreeLevels: view.showFreeLevels,
     showUnsmoothed: view.showUnsmoothed,
     unsmoothed: view.unsmoothed,
     zoom: view.zoomByTerm[activeTerm] || null,
@@ -1286,6 +1287,7 @@ function sameChartRenderState(next, previous) {
     next.showCi === previous.showCi &&
     next.showContrib === previous.showContrib &&
     next.freeLevels === previous.freeLevels &&
+    next.showFreeLevels === previous.showFreeLevels &&
     next.showUnsmoothed === previous.showUnsmoothed &&
     next.unsmoothed === previous.unsmoothed &&
     next.zoom === previous.zoom &&
@@ -1653,19 +1655,30 @@ function renderSpecialAction(button, state) {
   renderShapeReason(button, state.reason);
 }
 
-// The free-level comparison in view: the last one fitted, while its term and
-// the fit in force are the ones shown.
-function shownFreeLevels() {
+// The last free-level comparison fitted, while its term and the fit in force
+// are the ones in view, shown or not.
+function keptFreeLevels() {
   const state = store.getState();
   const free = state.view.freeLevels;
   return freeLevelsShown(free, selectedTerm(), state.remote.snapshot?.fit_token) ? free : null;
 }
 
+// The free-level comparison in view: the kept one, while Free levels is on.
+function shownFreeLevels() {
+  return store.getState().view.showFreeLevels ? keptFreeLevels() : null;
+}
+
 // Free levels refits the model with the term's levels free, as Refit does a
 // structural change, and draws them until the term or the model changes.
+// Turned off, the comparison is kept: on again for the same term and fit, it
+// is drawn at once, with no fit.
 async function toggleFreeLevels() {
   if (shownFreeLevels()) {
-    actions.patchView({ freeLevels: null });
+    actions.patchView({ showFreeLevels: false });
+    return;
+  }
+  if (keptFreeLevels()) {
+    actions.patchView({ showFreeLevels: true });
     return;
   }
   if (appBusyActive || store.getState().request.mutation.status !== "idle") return;
@@ -1674,7 +1687,7 @@ async function toggleFreeLevels() {
   setAppBusy(true, "Fitting free levels", `Refitting the model with ${term}'s levels free`);
   try {
     const free = await editorClient.freeLevels(term);
-    actions.patchView({ freeLevels: free });
+    actions.patchView({ freeLevels: free, showFreeLevels: true });
     if (free.notice) actions.showNotice(free.notice);
   } catch (error) {
     actions.showNotice(error instanceof Error ? error.message : String(error));
