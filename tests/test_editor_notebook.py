@@ -359,6 +359,7 @@ def test_the_route_classes_are_pinned():
         "/collapse_levels",
         "/ungroup_levels",
         "/special_levels",
+        "/knots",
         "/reorder_levels",
         "/revert_to_original",
         "/set_reference",

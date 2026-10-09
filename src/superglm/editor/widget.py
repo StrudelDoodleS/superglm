@@ -1265,6 +1265,22 @@ class EditorWidget:
             level_display=level_display,
         )
 
+    def _knots(
+        self,
+        term: str,
+        params: dict[str, Any],
+        *,
+        method: str = "auto",
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        """Change a spline term's knots and refit at once."""
+        return self._structural_step(
+            "set_knots",
+            lambda target: self.session.replace_with_knots(target, params, method=method),
+            term=term,
+            level_display=level_display,
+        )
+
     def _shape_range(
         self,
         term: str,

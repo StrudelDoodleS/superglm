@@ -1348,6 +1348,15 @@ class EditorSession:
             self, operation, term, {"levels": list(levels)}, **refit_kwargs
         )
 
+    def replace_with_knots(self, term: str, params: dict[str, Any], **refit_kwargs: Any):
+        """Change ``term``'s knots and refit at once, as one structural step.
+
+        ``params`` is ``{"count", "strategy"}`` with an optional ``"alpha"``,
+        ``{"positions": [...]}`` in chart coordinates, or ``{"reset": True}``
+        for the opened model's knots (``superglm.editor.knots``).
+        """
+        return staging.stage_and_refit(self, "knots", term, dict(params), **refit_kwargs)
+
     def replace_with_shaped_range(
         self, term: str, *, lo, hi, degree: int, join: str = "tangent", **refit_kwargs: Any
     ):

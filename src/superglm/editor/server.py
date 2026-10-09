@@ -329,6 +329,17 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
+    @app.post("/knots")
+    def knots(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._knots(
+                str(_required(payload, "term")),
+                _stage_params({"params": _required(payload, "params")}),
+                method=str(payload.get("method", "auto")),
+                level_display=_level_display(payload),
+            )
+        )
+
     @app.post("/shape_range")
     def shape_range(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
@@ -623,6 +634,11 @@ def _stage_params(payload: dict[str, Any]) -> dict[str, Any]:
         if name in params:
             parsed[name] = _range_edge(params[name])
     for name in ("degree", "join"):
+        if name in params:
+            parsed[name] = params[name]
+    # The knot fields pass through as JSON gave them: the knot builder checks
+    # each one and refuses with its fixed sentences.
+    for name in ("count", "strategy", "alpha", "positions", "reset"):
         if name in params:
             parsed[name] = params[name]
     return parsed

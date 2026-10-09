@@ -34,6 +34,7 @@ from superglm.editor.errors import (
     EditorTypeError,
     EditorValueError,
 )
+from superglm.editor.knots import LEVEL_OPERATIONS, knots_feature_spec
 from superglm.editor.shapes import shaped_feature_spec
 from superglm.editor.specials import special_feature_spec
 from superglm.editor.unseen import require_group_kept
@@ -116,6 +117,7 @@ _REFIT_AT_ONCE = {
     "shape": "shape_range",
     "special": "special_levels",
     "on_curve": "on_curve_levels",
+    "knots": "set_knots",
 }
 _UNKNOWN_ENTRY = "Unknown history entry."
 _NOTE_LIMIT = 2000
@@ -169,8 +171,10 @@ def stage_structural(
     ``operation`` is ``"collapse"`` (``levels``, optional ``group_label``),
     ``"ungroup"`` (``levels``), ``"set_reference"`` (``level``),
     ``"shape"`` (``lo``, ``hi``, ``degree``, optional ``join``), ``"special"``
-    (``levels``, taken off an ordered term's curve) or ``"on_curve"``
-    (``levels``, put back on it); levels are display labels. A change its builder refuses is refused now, with
+    (``levels``, taken off an ordered term's curve), ``"on_curve"``
+    (``levels``, put back on it) or ``"knots"`` (``count`` and ``strategy``
+    with an optional ``alpha``, ``positions`` in chart coordinates, or
+    ``reset``); levels are display labels. A change its builder refuses is refused now, with
     today's sentence. Nothing is fitted: the model, the curves and the model
     revision stay as they are. ``X`` and ``sample_weight`` are the frame and
     weights the refit will read (default: the session's refit data).
@@ -531,6 +535,18 @@ def _draft_for(
     if operation == "set_reference":
         level = str(_param(params, "level"))
         return reference_feature_spec(session.model, editable, level, X=X, draft_spec=draft)
+    if operation == "knots":
+        waiting = [step.operation for step in session.pending if step.term == editable.name]
+        return knots_feature_spec(
+            session.model,
+            editable,
+            params,
+            X=X,
+            sample_weight=sample_weight,
+            draft_spec=draft,
+            reference_model=session.reference_model,
+            levels_waiting=bool(LEVEL_OPERATIONS.intersection(waiting)),
+        )
     if operation in {"special", "on_curve"}:
         levels = _param(params, "levels")
         if not isinstance(levels, list | tuple):
@@ -583,6 +599,13 @@ def _label_params(operation: str, metadata: dict[str, Any]) -> dict[str, Any]:
         return {"levels": list(metadata["levels"])}
     if operation == "set_reference":
         return {"level": metadata["level"]}
+    if operation == "knots":
+        return {
+            "count": metadata["count"],
+            "strategy": metadata["strategy"],
+            "alpha": metadata["alpha"],
+            "positions": list(metadata["chart_positions"]),
+        }
     return {name: metadata[name] for name in ("lo", "hi", "degree", "join")}
 
 

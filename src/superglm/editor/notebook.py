@@ -61,6 +61,7 @@ CHANGE_ROUTES = frozenset(
         "/collapse_levels",
         "/ungroup_levels",
         "/special_levels",
+        "/knots",
         "/reorder_levels",
         "/revert_to_original",
         "/set_reference",
