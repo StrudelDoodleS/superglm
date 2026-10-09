@@ -123,6 +123,20 @@ def test_the_structure_export_records_the_knots_and_applies_them_to_the_declarat
     assert "knots" not in json.loads(_session(book).export_structure())["features"][term]
 
 
+def test_a_term_a_refit_left_alone_still_takes_a_knot_change(book):
+    """After a refit for another term, this term's declaration holds the fit's state."""
+    model, X, *_ = book
+    session = _session(book)
+    session.replace_with_knots("band", {"count": 5, "strategy": "uniform"})
+    session.stage_structural("knots", "age", {"count": 8, "strategy": "quantile_rows"})
+    session.refit_pending()
+    assert _knots(session.model, "age").size == 8
+    session.undo()
+    session.undo()
+    session.undo()
+    np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
+
+
 def test_an_ordered_term_takes_at_most_one_knot_fewer_than_its_levels(book):
     """The constructor clamps a larger count; the editor refuses it and names the maximum."""
     session = _session(book)

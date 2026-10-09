@@ -161,7 +161,7 @@ def initialize_spec(
         knot_alpha=knot_alpha,
         boundary=boundary,
     )
-    _initialize_runtime_state(spec, knot_strategy, lambda_policy)
+    initialize_runtime_state(spec, knot_strategy, lambda_policy)
 
 
 def configure_knots(
@@ -224,7 +224,7 @@ def _coerce_boundary(
     return (lo_bound, hi_bound)
 
 
-def _initialize_runtime_state(
+def initialize_runtime_state(
     spec: Any,
     knot_strategy: str,
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None,

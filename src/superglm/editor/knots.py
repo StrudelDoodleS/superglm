@@ -382,7 +382,7 @@ def _settings(spline: _SplineBase) -> tuple:
 
 
 def _numeric_declaration(model, name: str, draft_spec) -> _SplineBase:
-    """The unfitted spline a numeric term's knots are changed on: its draft, else its declaration."""
+    """The spline a numeric term's knots are changed on: its draft, else its declaration."""
     if isinstance(draft_spec, _SplineBase):
         return draft_spec
     declared = declared_spline(model, name)

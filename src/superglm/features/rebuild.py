@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from superglm.features._spline_config import configure_knots
+from superglm.features._spline_config import configure_knots, initialize_runtime_state
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, native_by_text
@@ -544,21 +544,24 @@ def respaced_spline(
     knot_strategy: str | None = None,
     knot_alpha: float | None = None,
 ) -> _SplineBase:
-    """A copy of the unfitted spline ``source`` with new knots, every other setting kept.
+    """A copy of the spline ``source`` with new knots, every other setting kept, ready to fit.
 
     ``knots`` states interior positions on the spline's own axis, or band
     names on an ordered term's basis; otherwise ``n_knots`` knots are placed
     by ``knot_strategy``. Unset arguments keep ``source``'s. The boundary,
     shaped ranges, constraint, penalty and smoothing settings carry over.
+    ``source`` is the spline as the model declares it, which after a refit
+    holds that fit's state for a term the refit left alone; the copy's
+    build-time state is reset, and the fit places everything again.
     """
-    if source._knots.size:
-        raise ValueError("respaced_spline needs an unfitted spline: a declaration.")
     spline = copy.deepcopy(source)
+    strategy = source.knot_strategy if knot_strategy is None else knot_strategy
+    initialize_runtime_state(spline, strategy, source._lambda_policy)
     configure_knots(
         spline,
         knots=knots,
         n_knots=source.n_knots if n_knots is None else n_knots,
-        knot_strategy=source.knot_strategy if knot_strategy is None else knot_strategy,
+        knot_strategy=strategy,
         knot_alpha=source.knot_alpha if knot_alpha is None else knot_alpha,
         boundary=source._explicit_boundary,
     )
