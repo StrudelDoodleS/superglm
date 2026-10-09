@@ -1,4 +1,4 @@
-"""The Unsmoothed line in the editor: a term's curve with its smoothing switched off."""
+"""The Unsmoothed line in the editor: a spline term's curve with its smoothing switched off."""
 
 from __future__ import annotations
 
@@ -19,10 +19,8 @@ from superglm.editor.unsmoothed import unsmoothed_job, unsmoothed_lambdas
 from tests.test_editor import _post_json
 from tests.test_editor_special_levels import (
     BANDS,
-    TWELVE,
     _book,
     _declared,
-    _fitted_free_models,
 )
 
 
@@ -81,66 +79,6 @@ def _refused(url: str, term: str) -> str:
     return json.loads(refused.value.read().decode("utf-8"))["error"]
 
 
-def test_an_ordered_line_is_its_free_fit_and_one_fit_serves_free_levels_too(book, monkeypatch):
-    fitted = _fitted_free_models(monkeypatch)
-    model, X, y, w = book
-    session = EditorSession.from_model(model, train_data=(X, y, w))
-    widget = session.widget()
-    try:
-        line = _post_json(f"{widget.url}/unsmoothed", {"term": "band"})
-        assert len(fitted) == 1
-        free = fitted[0].term_inference("band", with_se=False)
-        assert line["levels"] == BANDS
-        assert line["gaps"] == [] and line["note"] is None
-        assert line["fit_token"] == widget._state()["fit_token"]
-        # The line has the free fit's shape: its level-to-level ratios.
-        own = dict(zip(map(str, free.levels), free.log_relativity, strict=True))
-        expected = np.array([own[level] for level in BANDS])
-        np.testing.assert_allclose(
-            np.log(line["y"]) - np.log(line["y"][0]),
-            expected - expected[0],
-            rtol=0.0,
-            atol=64 * np.finfo(np.float64).eps,
-        )
-        # A second line and the comparison take no fit of their own, and the
-        # line runs through the comparison's diamonds.
-        assert _post_json(f"{widget.url}/unsmoothed", {"term": "band"}) == line
-        compared = _post_json(f"{widget.url}/free_levels", {"term": "band"})
-        assert compared["levels"] == BANDS
-        assert compared["y"] == line["y"]
-        assert len(fitted) == 1
-    finally:
-        widget.close()
-    # The other way round, the comparison's fit draws the line.
-    widget = EditorSession.from_model(model, train_data=(X, y, w)).widget()
-    try:
-        _post_json(f"{widget.url}/free_levels", {"term": "band"})
-        assert _post_json(f"{widget.url}/unsmoothed", {"term": "band"})["y"] == line["y"]
-        assert len(fitted) == 2
-    finally:
-        widget.close()
-
-
-def test_a_level_the_free_fit_cannot_estimate_is_a_gap_its_note_names():
-    """B11 has rows and no claims; B12 is declared on the curve and has no rows."""
-    rng = np.random.default_rng(5)
-    k = np.repeat(np.arange(12), 50)
-    y = rng.poisson(np.exp(-1.0 + 0.1 * k)).astype(float)
-    y[k == 11] = 0.0
-    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
-    band = OrderedCategorical(order=[*TWELVE, "B12"], basis=Spline(kind="ps", n_knots=6))
-    model = SuperGLM(family="poisson", features={"band": band}, spline_penalty=20.0).fit(X, y)
-    line = unsmoothed_job(EditorSession.from_model(model, train_data=(X, y)), "band")().payload
-    assert line["levels"] == [*TWELVE, "B12"]
-    assert [value is None for value in line["y"]] == [False] * 11 + [True, True]
-    assert line["gaps"] == ["B11", "B12"]
-    assert line["note"] == (
-        "The line skips B11: every response on its rows is 0, so its free value has no finite "
-        "estimate. The line skips B12: the data the refit reads has no rows of positive weight "
-        "for it."
-    )
-
-
 def test_a_spline_line_is_the_refit_with_its_smoothing_off_and_every_other_held(
     spline_book, monkeypatch
 ):
@@ -171,7 +109,7 @@ def test_a_spline_line_is_the_refit_with_its_smoothing_off_and_every_other_held(
     # default smoothing, or ten times stiffer, moves the line by 0.055 and
     # 0.096; leaving age smoothed is the curve, 0.33 away.
     np.testing.assert_allclose(np.log(line["y"]), inference.log_relativity, rtol=0, atol=1e-5)
-    assert line["kind"] == "spline" and line["gaps"] == [] and line["note"] is None
+    assert line["note"] is None
 
 
 def test_the_line_is_kept_through_a_hand_edit_and_dropped_by_a_refit(spline_book, monkeypatch):
@@ -231,10 +169,12 @@ def test_the_line_is_offered_for_smoothed_terms_and_refused_in_sentences_elsewhe
 ):
     session = EditorSession.from_model(book[0], train_data=book[1:])
     flags = {name: term["unsmoothed"] for name, term in session_payload(session).items()}
-    assert flags == {"band": True, "area": False}
+    assert flags == {"band": False, "area": False}
     widget = session.widget()
     try:
         assert _refused(widget.url, "area") == unsmoothed_module._NOT_SMOOTHED.format(term="area")
+        # An ordered term's levels fitted free, joined by a line, are Free levels'.
+        assert _refused(widget.url, "band") == unsmoothed_module._ORDERED
     finally:
         widget.close()
     X, y, w = _book(n=3000)

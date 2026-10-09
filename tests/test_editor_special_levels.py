@@ -843,11 +843,26 @@ def test_a_level_another_term_aliases_is_left_out_and_named(first):
     ).fit(X, y)
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["levels"] == [level for level in TWELVE if level != "B05"]
+    assert free["gaps"] == ["B05"]
     assert free["flagged"] == []
     assert free["notice"] == (
         "No free value is drawn for B05: the model's other terms cover the same rows, "
         "so the data cannot separate its value from theirs."
     )
+
+
+def test_the_line_through_the_diamonds_breaks_at_a_level_with_no_free_value():
+    """B11 has rows and no claims; B12 is declared on the curve and has no rows."""
+    rng = np.random.default_rng(5)
+    k = np.repeat(np.arange(12), 50)
+    y = rng.poisson(np.exp(-1.0 + 0.1 * k)).astype(float)
+    y[k == 11] = 0.0
+    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
+    band = OrderedCategorical(order=[*TWELVE, "B12"], basis=Spline(kind="ps", n_knots=6))
+    model = SuperGLM(family="poisson", features={"band": band}, spline_penalty=20.0).fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == TWELVE[:11]
+    assert free["gaps"] == ["B11", "B12"]
 
 
 def test_a_response_the_curve_fits_exactly_compares_with_no_dispersion():

@@ -273,6 +273,8 @@
  * @property {number[]} lower
  * @property {number[]} upper
  * @property {string[]} flagged
+ * @property {string[]} gaps the levels on the curve with no free value, where the line
+ *   joining the free estimates breaks
  * @property {number} confidence the chance no interval misses a curve every level lies on
  * @property {number} z
  * @property {boolean} shrunk whether a selection penalty still shrinks the free levels
@@ -332,11 +334,8 @@
  * reference; ``fit_token`` is the fit in force it was fitted beside.
  * @typedef {Object} UnsmoothedLine
  * @property {string} term
- * @property {'spline'|'free'} kind
- * @property {string[]|null} levels
- * @property {number[]|null} x
+ * @property {number[]} x
  * @property {Array<number|null>} y
- * @property {string[]} gaps
  * @property {string|null} note
  * @property {number} fit_token
  */

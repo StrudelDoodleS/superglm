@@ -24,7 +24,7 @@ import {
 } from "./chart/geometry.js";
 import { contributionX, levelPolyline, splineCurves } from "./chart/ordered_spline.js";
 import { el, line, text } from "./chart/svg.js";
-import { freeLevelMarks, waitingSpecials } from "./specials.js";
+import { freeLevelLine, freeLevelMarks, waitingSpecials } from "./specials.js";
 import { unsmoothedRange, unsmoothedRuns, unsmoothedSeries } from "./unsmoothed.js";
 
 const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
@@ -175,7 +175,7 @@ export function drawChart(term, selection, context) {
   // The Unsmoothed line takes part in the range like any series, up to a
   // reach that keeps the curve readable; past it the line runs off the plot.
   const unsmoothedLine = buildActive ? null : (context.unsmoothed?.() ?? null);
-  const unsmoothed = unsmoothedSeries(unsmoothedLine, view);
+  const unsmoothed = unsmoothedSeries(unsmoothedLine);
   const [yMinRaw, yMaxRaw] = unsmoothed
     ? unsmoothedRange(curveMin, curveMax, unsmoothed.y)
     : [curveMin, curveMax];
@@ -267,8 +267,11 @@ export function drawChart(term, selection, context) {
     build.setAttribute("data-active-basis", String(buildCurve.activeIndex));
     build.setAttribute("style", `stroke: ${mixBuildColor(progress)}`);
   }
-  const freeMarks = buildActive ? [] : freeLevelMarks(context.freeLevels?.() ?? null, view);
-  if (freeMarks.length) drawFreeLevels(svg, freeMarks, { sx, sy, yMin, yMax });
+  const freeLevels = buildActive ? null : (context.freeLevels?.() ?? null);
+  const freeMarks = freeLevelMarks(freeLevels, view);
+  if (freeMarks.length) {
+    drawFreeLevels(svg, freeMarks, freeLevelLine(freeLevels, view), { sx, sy, yMin, yMax });
+  }
   if (!buildActive) drawTermLines(svg, { x, y, original, previous, spline, sx, sy });
   if (unsmoothed && unsmoothedLine) drawUnsmoothed(svg, unsmoothed, unsmoothedLine, sx, sy);
   const displaySelected = displaySelection(view, selection);
@@ -583,6 +586,7 @@ function applyPlotClip(svg) {
     ".level-group-marker",
     ".pending-group-ring",
     ".pending-special-ring",
+    ".free-line",
     ".free-whisker",
     ".free-level",
     ".free-curve-tick",
@@ -1393,14 +1397,19 @@ function band(svg, x, lower, upper, sx, sy, cls) {
   svg.appendChild(el("path", { d: `${top} ${bottom} Z`, class: cls }));
 }
 
-// Each level fitted free, behind the curve: its interval and an open
+// Each level fitted free, behind the curve: a line joining them, broken at a
+// level with no free value, and on it each level's interval and an open
 // diamond, filled where the interval misses the curve. The comparison never
 // rescales the chart; a level off it sits at its edge.
-function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
+function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax }) {
   const layer = el("g", { class: "free-levels" });
   svg.appendChild(layer);
   // The overlay never rescales the chart: what lies past it is drawn at its edge.
-  const inside = (/** @type {number} */ value) => sy(Math.min(Math.max(value, yMin), yMax));
+  const clamp = (/** @type {number} */ value) => Math.min(Math.max(value, yMin), yMax);
+  const inside = (/** @type {number} */ value) => sy(clamp(value));
+  for (const run of joined ? unsmoothedRuns(joined) : []) {
+    if (run.x.length > 1) path(layer, run.x, run.y.map(clamp), sx, sy, "free-line");
+  }
   for (const mark of marks) {
     const px = sx(mark.x);
     const flagged = mark.flagged ? " is-flagged" : "";
@@ -1420,28 +1429,22 @@ function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
   }
 }
 
-// The term fitted with its smoothing switched off, solid over the curve: one
-// path per run between the levels the free fit left out. An ordered term's
-// line marks each level with a dot, as its curve does; a spline's has none.
-// Its hover text names what it is and any level it skips.
+// The spline fitted with its smoothing switched off, solid over the curve:
+// one path per run between values that are not finite, a dot for a point
+// alone. Its hover text names what it is.
 function drawUnsmoothed(svg, series, line, sx, sy) {
   const layer = el("g", { class: "unsmoothed-layer" });
   svg.appendChild(layer);
   const label = `${line.term} fitted with its smoothing switched off`
     + `${line.note ? `. ${line.note}` : ""}`;
-  const titled = (/** @type {Element} */ node, /** @type {string} */ text) => {
-    const title = el("title", {});
-    title.textContent = text;
-    node.appendChild(title);
-  };
   for (const run of unsmoothedRuns(series)) {
-    if (run.x.length > 1) titled(path(layer, run.x, run.y, sx, sy, "unsmoothed"), label);
-    if (!line.levels && run.x.length > 1) continue;
-    run.x.forEach((x, i) => {
-      const dot = el("circle", { cx: sx(x), cy: sy(run.y[i]), r: 3, class: "unsmoothed-dot" });
-      layer.appendChild(dot);
-      titled(dot, `${label}: ${fmt(run.y[i])}`);
-    });
+    const node = run.x.length > 1
+      ? path(layer, run.x, run.y, sx, sy, "unsmoothed")
+      : el("circle", { cx: sx(run.x[0]), cy: sy(run.y[0]), r: 2.6, class: "unsmoothed-dot" });
+    if (!node.parentNode) layer.appendChild(node);
+    const title = el("title", {});
+    title.textContent = label;
+    node.appendChild(title);
   }
 }
 
@@ -1506,6 +1509,7 @@ function legend(
     if (cls === "legend-swatch") {
       svg.appendChild(el("rect", { x, y: y - 5, width: keyWidth, height: 10, rx: 2, ry: 2, class: cls }));
     } else if (cls === "free-level") {
+      line(svg, x, y, x + keyWidth, y, "free-line");
       svg.appendChild(el("path", { d: diamond(x + keyWidth / 2, y, 4), class: cls }));
     } else {
       line(svg, x, y, x + keyWidth, y, cls);

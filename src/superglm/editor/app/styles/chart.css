@@ -199,7 +199,9 @@
 /* A level fitted free, behind the curve: an open diamond on its interval. A
    level whose interval misses the curve is filled, the smoothing overrides it. */
 .free-whisker { stroke: var(--muted); stroke-opacity: 0.55; stroke-width: 1.2; }
-.free-level { fill: var(--surface); stroke: var(--muted); stroke-width: 1.4; }
+/* The levels fitted free: one green series, a line joining open diamonds. */
+.free-line { fill: none; stroke: var(--unsmoothed); stroke-width: 1.8; stroke-linejoin: round; }
+.free-level { fill: var(--surface); stroke: var(--unsmoothed); stroke-width: 1.4; }
 .free-level.is-flagged { fill: var(--orange); stroke: var(--orange); }
 .free-whisker.is-flagged { stroke: var(--orange); stroke-opacity: 0.8; }
 .free-curve-tick { stroke: var(--text); stroke-width: 1.5; }

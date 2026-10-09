@@ -72,7 +72,7 @@ def _diamond_centres(page) -> list[tuple[float, float]]:
     return sorted((float(d.split()[1]), float(d.split()[5])) for d in paths)
 
 
-def test_free_levels_off_and_on_again_takes_no_fit_and_unsmoothed_runs_through_its_diamonds(
+def test_free_levels_is_one_button_for_the_diamonds_and_their_line_and_comes_back_with_no_fit(
     open_editor_page,
 ):
     with open_editor_page(selected_term="age_band") as (page, _session):
@@ -81,43 +81,31 @@ def test_free_levels_off_and_on_again_takes_no_fit_and_unsmoothed_runs_through_i
             "request",
             lambda request: fits.append(request.url) if "/free_levels" in request.url else None,
         )
+        # On an ordered term the line is Free levels' own: no Unsmoothed button.
+        assert page.locator("#unsmoothedToggle").is_hidden()
         toggle = page.locator("#freeLevelsToggle")
         toggle.click()
         page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
         diamonds = _diamond_centres(page)
         assert len(diamonds) == 6 and len(fits) == 1
+        # One line joins the six diamonds, through each centre.
+        line = page.locator("#chart .free-levels path.free-line")
+        assert line.count() == 1
+        assert line.get_attribute("clip-path") == "url(#plotClip)"
+        corners = [
+            tuple(map(float, step.split()[1:3]))
+            for step in line.get_attribute("d").replace("L", "|L").replace("M", "|M").split("|")
+            if step.strip()
+        ]
+        assert sorted(corners) == [(round(x, 2), round(y, 2)) for x, y in diamonds]
+        assert page.locator("#chart .legend-layer line.free-line").count() == 1
 
         toggle.click()
-        page.wait_for_function("() => !document.querySelector('#chart .free-levels .free-level')")
+        page.wait_for_function("() => !document.querySelector('#chart .free-levels')")
         assert toggle.get_attribute("aria-pressed") == "false"
         # On again for the same term and fit: the kept comparison, drawn with no fit.
         toggle.click()
-        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
+        page.locator("#chart .free-levels path.free-line").wait_for(state="attached")
         assert toggle.get_attribute("aria-pressed") == "true"
         assert _diamond_centres(page) == diamonds
-        assert len(fits) == 1
-
-        # The Unsmoothed line is the same fit: a dot on each level, on its diamond.
-        page.locator("#unsmoothedToggle").click()
-        dots = page.locator("#chart .unsmoothed-layer .unsmoothed-dot")
-        dots.first.wait_for(state="attached")
-        centres = dots.evaluate_all(
-            "els => els.map(e => [Number(e.getAttribute('cx')), Number(e.getAttribute('cy'))])"
-        )
-        assert len(centres) == 6
-        assert page.locator("#chart .unsmoothed-layer path.unsmoothed").count() == 1
-        # Measured again: the line may widen the y-axis.
-        diamonds = _diamond_centres(page)
-        for (dx, dy), (fx, fy) in zip(sorted(map(tuple, centres)), diamonds, strict=True):
-            assert abs(dx - fx) <= 0.01 and abs(dy - fy) <= 0.01
-
-        # Unsmoothed off clears every mark of the fit, the diamonds too.
-        page.locator("#unsmoothedToggle").click()
-        page.wait_for_function(
-            "() => !document.querySelector('#chart .unsmoothed-layer')"
-            " && !document.querySelector('#chart .free-levels .free-level')"
-        )
-        assert toggle.get_attribute("aria-pressed") == "false"
-        toggle.click()
-        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
         assert len(fits) == 1

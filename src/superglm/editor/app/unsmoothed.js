@@ -13,9 +13,8 @@
 
 /** The toggle's hover text and Help entry: what the line is. */
 export const UNSMOOTHED_HELP =
-  "Draw the term fitted again with its smoothing switched off, drawn over the curve. A spline "
-  + "keeps its knots and an ordered term's levels are each fitted free; every other term stays "
-  + "as fitted. One fit per term, kept until the model changes.";
+  "Draw the spline fitted again with its smoothing switched off, over the curve. It keeps its "
+  + "knots, and every other term stays as fitted. One fit per term, kept until the model changes.";
 export const UNSMOOTHED_BUSY = "Fitting the model with this term's smoothing switched off.";
 // The line may stretch the y range by the curve's own range on each side, so
 // to three times it, and by at least the 0.1 a flat curve's chart is tall.
@@ -71,47 +70,19 @@ export function unsmoothedToggle(show, term, entry) {
 }
 
 /**
- * The line on the displayed axis, in axis order, null at a level the free fit
- * left out. An ordered term's levels go to their displayed points: a collapsed
- * group's members share its point and its one value, and a special level,
- * which the line does not take, keeps no place on it.
+ * The spline's line on its own grid, null where a value is not finite.
  * @param {UnsmoothedLine|null} line
- * @param {{x:number[], levels?:string[]|null, displayIsCollapsed?:boolean,
- *   displaySourceLevels?:string[][]}} view
  * @returns {{x:number[], y:Array<number|null>}|null}
  */
-export function unsmoothedSeries(line, view) {
-  if (!line) return null;
+export function unsmoothedSeries(line) {
+  if (!line?.x) return null;
   const finite = (/** @type {number|null} */ value) =>
     (typeof value === "number" && Number.isFinite(value) ? value : null);
-  if (!line.levels) {
-    if (!line.x) return null;
-    return { x: line.x.slice(), y: line.y.map(finite) };
-  }
-  if (!Array.isArray(view.levels)) return null;
-  /** @type {Map<string, number>} */
-  const pointOf = new Map();
-  view.levels.forEach((label, index) => {
-    const members = view.displayIsCollapsed && view.displaySourceLevels?.[index]
-      ? view.displaySourceLevels[index]
-      : [label];
-    for (const member of members) pointOf.set(String(member), index);
-  });
-  /** @type {Map<number, number|null>} */
-  const valueAt = new Map();
-  line.levels.forEach((level, k) => {
-    const index = pointOf.get(level);
-    if (index !== undefined && !valueAt.has(index)) valueAt.set(index, finite(line.y[k]));
-  });
-  const points = [...valueAt.keys()].sort((left, right) => left - right);
-  return {
-    x: points.map((index) => view.x[index]),
-    y: points.map((index) => valueAt.get(index) ?? null)
-  };
+  return { x: line.x.slice(), y: line.y.map(finite) };
 }
 
 /**
- * The runs of the line between its gaps; a run of one point is a lone level.
+ * The runs of a line between its gaps; a run of one point is a lone level.
  * @param {{x:number[], y:Array<number|null>}} series
  * @returns {Array<{x:number[], y:number[]}>}
  */

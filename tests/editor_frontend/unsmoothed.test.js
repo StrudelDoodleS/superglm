@@ -17,15 +17,14 @@ import { HELP_SECTIONS } from "../../src/superglm/editor/app/views/help_content.
 const REFUSAL = "With its smoothing off, the curve of 'age' is not determined.";
 
 /**
- * An ordered line over bands A to E: D has no free value.
+ * A spline's line on its own grid, with the note the fit gave it.
  * @param {Record<string, unknown>} [overrides]
  * @returns {import("../../src/superglm/editor/app/api/contracts.js").UnsmoothedLine}
  */
-function orderedLine(overrides = {}) {
+function splineLine(overrides = {}) {
   return /** @type {any} */ ({
-    term: "band", kind: "free", levels: ["A", "B", "C", "D", "E"], x: null,
-    y: [0.8, 1, 1.3, null, 1.1], gaps: ["D"], note: "The line skips D.", fit_token: 4,
-    ...overrides
+    term: "age", x: [18, 30, 50], y: [1.2, 0.9, 1.05], note: "The refit stopped early.",
+    fit_token: 4, ...overrides
   });
 }
 
@@ -55,9 +54,9 @@ test("the toggle is busy while its fit runs and off, saying why, where the fit w
   // A failed request is said, but the toggle stays on hand to try again.
   const failed = unsmoothedToggle(true, spline, entry("failed", { reason: "HTTP 502" }));
   assert.deepEqual([failed.disabled, failed.body], [false, "HTTP 502"]);
-  // A line's note, the levels it skips, joins the hover text.
-  const ready = unsmoothedToggle(true, spline, entry("ready", { line: orderedLine() }));
-  assert.equal(ready.body, `${UNSMOOTHED_HELP} The line skips D.`);
+  // A line's note joins the hover text.
+  const ready = unsmoothedToggle(true, spline, entry("ready", { line: splineLine() }));
+  assert.equal(ready.body, `${UNSMOOTHED_HELP} The refit stopped early.`);
   // Turned off, the toggle is plain whatever the fit did.
   assert.deepEqual(unsmoothedToggle(false, spline, entry("refused", { reason: REFUSAL })), {
     hidden: false, pressed: false, busy: false, disabled: false, body: UNSMOOTHED_HELP
@@ -75,29 +74,12 @@ test("an entry belongs to its fit, and a slow answer for an older fit does not r
   assert.equal(entries.band.fit_token, 5);
 });
 
-test("a spline's line is its own grid, and an ordered line meets each displayed level", () => {
-  const numeric = /** @type {any} */ ({
-    term: "age", kind: "spline", levels: null, x: [18, 30, 50], y: [1.2, 0.9, 1.05], gaps: [],
-    note: null, fit_token: 1
+test("a spline's line is its own grid, a value that is not finite a gap in it", () => {
+  assert.deepEqual(unsmoothedSeries(splineLine()), { x: [18, 30, 50], y: [1.2, 0.9, 1.05] });
+  assert.deepEqual(unsmoothedSeries(splineLine({ y: [1.2, Infinity, 1.05] })), {
+    x: [18, 30, 50], y: [1.2, null, 1.05]
   });
-  assert.deepEqual(unsmoothedSeries(numeric, { x: [18, 30, 50] }), {
-    x: [18, 30, 50], y: [1.2, 0.9, 1.05]
-  });
-  // F is special: off the line, its point keeps no place on it.
-  const expanded = { x: [0, 1, 2, 3, 4, 5], levels: ["A", "B", "C", "D", "E", "F"] };
-  assert.deepEqual(unsmoothedSeries(orderedLine(), expanded), {
-    x: [0, 1, 2, 3, 4], y: [0.8, 1, 1.3, null, 1.1]
-  });
-  // Collapsed, B and C are one group point with one value.
-  const grouped = orderedLine({ y: [0.8, 1.2, 1.2, null, 1.1] });
-  const collapsed = {
-    x: [0, 1, 2, 3, 4], levels: ["A", "B+C", "D", "E", "F"], displayIsCollapsed: true,
-    displaySourceLevels: [["A"], ["B", "C"], ["D"], ["E"], ["F"]]
-  };
-  assert.deepEqual(unsmoothedSeries(grouped, collapsed), {
-    x: [0, 1, 2, 3], y: [0.8, 1.2, null, 1.1]
-  });
-  assert.equal(unsmoothedSeries(null, expanded), null);
+  assert.equal(unsmoothedSeries(null), null);
 });
 
 test("the line breaks at a gap, and a level alone between two gaps is a point", () => {

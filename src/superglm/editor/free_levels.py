@@ -36,7 +36,6 @@ term covers exactly has no free value of its own: both are left out and named.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -124,61 +123,27 @@ _NO_DATA = (
 )
 
 
-@dataclass(frozen=True)
-class FreeFitWording:
-    """The sentences a refused free fit says, in the words of the tool that asked for it."""
+def free_level_comparison(session, name: str) -> dict[str, Any]:
+    """Refit the in-force model with ``name``'s levels free and compare them with its curve.
 
-    operation: str
-    no_data: str
-    one_level: str
-    not_fitted: str
-
-
-COMPARE_WORDING = FreeFitWording(
-    operation="compare with free levels",
-    no_data=_NO_DATA,
-    one_level=_ONE_LEVEL,
-    not_fitted=_NOT_FITTED,
-)
-
-
-@dataclass(frozen=True)
-class FreeFit:
-    """The model refitted with an ordered term's levels free, and what its rows say of each level.
-
-    ``exposure`` is each free level's prior weight, ``separated`` the levels
-    whose every response is at a bound of the family, by bound, and
-    ``shrunk`` whether a selection penalty that could not be lifted from the
-    term still shrinks them. Free levels compares it with the curve and the
-    Unsmoothed line draws it, so one fit serves both.
+    Returns the payload the chart draws: for each level on the curve, its
+    free estimate and interval as relativities on the chart's own scale,
+    placed by the gap between the two fits centred on the levels' weighted
+    mean, and the levels whose interval misses the curve. Hand edits are not
+    part of either: both are fits.
     """
-
-    model: Any
-    exposure: dict[str, float]
-    separated: dict[str, list[str]]
-    shrunk: bool
-
-
-def prepare_free_fit(
-    session, name: str, wording: FreeFitWording = COMPARE_WORDING
-) -> Callable[[], FreeFit]:
-    """Read what the free fit of ``name`` needs from the session; the call returned fits it.
-
-    Everything the fit reads is taken here, so a caller holding the editor's
-    lock may release it before the call.
-    """
-    session._require_term(name)
+    term = session._require_term(name)
     spec = session.model._specs[name]
     if not isinstance(spec, OrderedCategorical):
         raise EditorTypeError(_NOT_ORDERED.format(term=name))
-    _require_not_interaction_parent(session.model, name, operation=wording.operation)
+    _require_not_interaction_parent(session.model, name, operation="compare with free levels")
     try:
         X, y, sample_weight, offset = session._resolve_refit_data(None, None, None, None)
     except RuntimeError as exc:
         # No training data was given and the model kept none.
-        raise EditorValueError(wording.no_data) from exc
+        raise EditorValueError(_NO_DATA) from exc
     if y is None:
-        raise EditorValueError(wording.no_data)
+        raise EditorValueError(_NO_DATA)
     column = as_eager_frame(X).column_array(name)
     response = np.asarray(y, dtype=np.float64).ravel()
     weights = (
@@ -194,94 +159,61 @@ def prepare_free_fit(
     supported = np.bincount(codes, weights=weights > 0.0, minlength=len(texts)) > 0.0
     held = {to_group[str(text)] for text in texts[supported]}
     if len(held) < 2:
-        raise EditorValueError(wording.one_level.format(term=name, count=len(held)))
-    source = session.model
-    free_model = clone_with_replaced_features(source, {name: free})
-    shrunk = _lift_selection(free_model, source, name)
-    # A level whose every response is at the family's bound is named by the
-    # comparison and the line, whatever the model's own rule for separated
-    # levels says.
+        raise EditorValueError(_ONE_LEVEL.format(term=name, count=len(held)))
+    free_model = clone_with_replaced_features(session.model, {name: free})
+    shrunk = _lift_selection(free_model, session.model, name)
+    # A level whose every response is at the family's bound is named below,
+    # whatever the model's own rule for separated levels says.
     free_model._config = free_model._config.with_value(separation="ignore")
-
-    def fit() -> FreeFit:
-        try:
-            fit_refit_model(
-                source,
-                free_model,
-                method="auto",
-                X=X,
-                y=y,
-                sample_weight=sample_weight,
-                offset=offset,
-            )
-        except EditorClientError:
-            raise
-        except ValueError as exc:
-            raise EditorValueError(wording.not_fitted.format(term=name)) from exc
-        # Each row's free level, and from it each level's exposure and whether
-        # its every positive-weight response is at the family's bound.
-        levels = [str(level) for level in free_model._specs[name]._levels]
-        index = {level: i for i, level in enumerate(levels)}
-        rows = np.array([index[to_group[str(text)]] for text in texts], dtype=np.intp)[codes]
-        separated = {}
-        for boundary in response_boundaries(free_model._distribution, free_model._link):
-            flags, _occupied = _separated_flags(rows, len(levels), response, weights, boundary)
-            if flags.any():
-                separated[boundary] = [levels[i] for i in np.flatnonzero(flags)]
-        exposure = np.bincount(rows, weights=weights, minlength=len(levels))
-        return FreeFit(
-            model=free_model,
-            exposure=dict(zip(levels, exposure.tolist(), strict=True)),
-            separated=separated,
-            shrunk=shrunk,
+    try:
+        fit_refit_model(
+            session.model,
+            free_model,
+            method="auto",
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
         )
-
-    return fit
-
-
-def fit_free_levels(session, name: str, wording: FreeFitWording = COMPARE_WORDING) -> FreeFit:
-    """Refit the in-force model with ``name``'s levels free: one full fit, like Refit."""
-    return prepare_free_fit(session, name, wording)()
-
-
-def free_level_comparison(session, name: str, fit: FreeFit | None = None) -> dict[str, Any]:
-    """Compare ``name``'s levels fitted free with its curve; ``fit`` is the free fit, else fitted here.
-
-    Returns the payload the chart draws: for each level on the curve, its
-    free estimate and interval as relativities on the chart's own scale,
-    placed by the gap between the two fits centred on the levels' weighted
-    mean, and the levels whose interval misses the curve. Hand edits are not
-    part of either: both are fits.
-    """
-    if fit is None:
-        fit = fit_free_levels(session, name)
-    term = session._require_term(name)
-    spec = session.model._specs[name]
-    free_model = fit.model
+    except EditorClientError:
+        raise
+    except ValueError as exc:
+        raise EditorValueError(_NOT_FITTED.format(term=name)) from exc
+    # Each row's free level, and from it each level's exposure and whether
+    # its every positive-weight response is at the family's bound.
+    levels = [str(level) for level in free_model._specs[name]._levels]
+    index = {level: i for i, level in enumerate(levels)}
+    rows = np.array([index[to_group[str(text)]] for text in texts], dtype=np.intp)[codes]
+    separated = {}
+    for boundary in response_boundaries(free_model._distribution, free_model._link):
+        flags, _occupied = _separated_flags(rows, len(levels), response, weights, boundary)
+        if flags.any():
+            separated[boundary] = [levels[i] for i in np.flatnonzero(flags)]
     # Both on the centred scale: a gap measured from the reference would
     # carry the curve's misfit at the reference into every level.
+    exposure = np.bincount(rows, weights=weights, minlength=len(levels))
     gaps = _gaps(
         free_model,
         session.model,
         name,
-        fit.exposure,
-        {label for labels in fit.separated.values() for label in labels},
+        dict(zip(levels, exposure.tolist(), strict=True)),
+        {label for labels in separated.values() for label in labels},
     )
     # A fit that stopped before converging holds no estimates to judge by:
     # its diamonds are drawn, and no level is flagged.
     unconverged = [
-        label
-        for label, model in (("free fit", free_model), ("model in force", session.model))
+        fit
+        for fit, model in (("free fit", free_model), ("model in force", session.model))
         if not bool(getattr(model.result, "converged", True))
     ]
-    payload = _comparison(term, spec, gaps, shrunk=fit.shrunk, judge=not unconverged)
+    payload = _comparison(term, spec, gaps, shrunk=shrunk, judge=not unconverged)
     notes = [
         _SEPARATED.format(
             levels=", ".join(labels),
             whose="its" if len(labels) == 1 else "their",
             value="0" if boundary == "zero" else "1",
         )
-        for boundary, labels in fit.separated.items()
+        for boundary, labels in separated.items()
     ]
     if gaps.undetermined:
         notes.append(
@@ -290,7 +222,7 @@ def free_level_comparison(session, name: str, fit: FreeFit | None = None) -> dic
                 whose="its" if len(gaps.undetermined) == 1 else "their",
             )
         )
-    notes.extend(_UNCONVERGED.format(fit=label) for label in unconverged)
+    notes.extend(_UNCONVERGED.format(fit=fit) for fit in unconverged)
     if _term_covariance(free_model, name) is None:
         notes.append(_REMOVED.format(term=name))
     if gaps.note is not None:
@@ -328,7 +260,8 @@ def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[
     labels, undetermined = _determined(
         free_model, name, [label for label in declared if label in estimated]
     )
-    share = _centring_share(labels, prior)
+    share = np.array([prior.get(label, 0.0) for label in labels], dtype=np.float64)
+    share = share / share.sum() if share.sum() > 0.0 else share
     free_rows = _categorical_contrasts(free_model, name, labels, share)
     curve_rows = _ordered_contrasts(model, name, [declared[x] for x in labels], share)
     free_var = _contrast_variances(free_model, name, free_rows)
@@ -356,15 +289,7 @@ def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[
     )
 
 
-def _centring_share(labels: list[str], prior: dict[str, float]) -> np.ndarray:
-    """Each of ``labels``' share of their ``prior`` weight: the weights both fits are centred on."""
-    share = np.array([prior.get(label, 0.0) for label in labels], dtype=np.float64)
-    return share / share.sum() if share.sum() > 0.0 else share
-
-
-def _determined(
-    model, name: str, labels: list[str], active: bool | None = None
-) -> tuple[list[str], list[str]]:
+def _determined(model, name: str, labels: list[str]) -> tuple[list[str], list[str]]:
     """The largest set of ``labels`` the free fit tells apart, and the rest.
 
     A level aliased with another term's columns (a categorical whose one
@@ -372,16 +297,10 @@ def _determined(
     mean taken over it is not estimable either, so it would move every gap.
     Estimable differences fall into classes, since ``a - c = (a - b) + (b - c)``,
     and a mean over levels of two classes is not estimable: the gaps are
-    measured within the largest class. ``active`` says whether selection kept
-    the term, where the caller knows it without the fit's covariance.
+    measured within the largest class.
     """
     rank = getattr(model.result, "rank_info", None)
-    if rank is None:
-        return labels, []
-    if active is None:
-        # Whether selection kept the term, as the fit's covariance says.
-        active = _term_covariance(model, name) is not None
-    if not active:
+    if rank is None or _term_covariance(model, name) is None:
         return labels, []
     starts = [group.start for group in model._groups if group.feature_name == name]
     column = {str(level): starts[0] + j for j, level in enumerate(model._specs[name]._non_base)}
@@ -818,7 +737,8 @@ def _comparison(
     """Each level's centred free estimate against the centred curve.
 
     The gap is drawn on the chart's own scale: the diamond sits that far from
-    the curve, whatever the chart centres it on.
+    the curve, whatever the chart centres it on. ``gaps`` are the levels on
+    the curve with no free value, where the line joining the diamonds breaks.
     """
     levels = [str(level) for level in term.levels]
     specials = special_labels(spec)
@@ -827,9 +747,15 @@ def _comparison(
     at = {level: i for i, level in enumerate(levels)}
     compared = {label: i for i, label in enumerate(gaps.labels)}
     found = []
+    # A level on the curve with no free value to compare: the line through
+    # the diamonds breaks there.
+    missing = []
     for level in levels:
         group = level if grouping is None else str(grouping.original_to_group.get(level, level))
-        if level in specials or group not in compared:
+        if level in specials:
+            continue
+        if group not in compared:
+            missing.append(level)
             continue
         i = compared[group]
         gap = float(gaps.free[i] - gaps.curve[i])
@@ -869,6 +795,7 @@ def _comparison(
         "lower": [row["lower"] for row in rows],
         "upper": [row["upper"] for row in rows],
         "flagged": [row["level"] for row in rows if row["flagged"]],
+        "gaps": missing,
         "confidence": CONFIDENCE,
         "z": z,
         "shrunk": shrunk,

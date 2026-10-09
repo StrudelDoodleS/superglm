@@ -240,9 +240,9 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Unsmoothed line",
     items: Object.freeze([
-      `The Unsmoothed icon above the chart, on a spline or an ordered term with a spline basis: ${UNSMOOTHED_HELP}`,
+      `The Unsmoothed icon above the chart, on a spline term: ${UNSMOOTHED_HELP}`,
       "It stays on as you move between terms. Each term's line is fitted the first time it shows; the icon is busy meanwhile, and the editor stays free. Hand edits keep the line; a refit fits it again.",
-      "An ordered term's line joins each level's free estimate, the fit Free levels compares with, and the two share it. A level the free fit cannot estimate leaves a gap; hovering the line or the icon names it.",
+      "On an ordered term, Free levels draws each level fitted free, joined by a line: one button for the diamonds and the line. A level with no free value leaves a gap in the line.",
       "A spline whose rows cannot pin down every basis function without smoothing, as across a gap in the data, gets no line: the icon is off and its hover text says why.",
       "The line widens the chart's range by at most the curve's own range on each side; past that it runs off the plot.",
     ]),

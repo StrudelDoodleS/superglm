@@ -1,15 +1,8 @@
-"""The Unsmoothed line: a term's curve with its smoothing switched off, drawn over its curve.
+"""The Unsmoothed line: a spline term's curve with its smoothing switched off, drawn over it.
 
-An ordered term with a spline basis draws each level's free estimate: the
-model refitted with the term as a plain categorical, every other term kept,
-the factor fitted unconstrained that practice sets beside a smoothed one
-(Anderson et al., *A Practitioner's Guide to Generalized Linear Models*, CAS
-2007, sections 2.27-2.33). It is the very fit Free levels makes
-(:mod:`superglm.editor.free_levels`), and the editor shares it between the two.
-
-A numeric spline draws the model refitted with the term's smoothing parameter
-at 0, on the same basis and knots, and every other term's smoothing parameter
-held where the fit in force put it: a plain penalised fit at fixed smoothing
+The line is the model refitted with the term's smoothing parameter at 0, on
+the same basis and knots, and every other term's smoothing parameter held
+where the fit in force put it: a plain penalised fit at fixed smoothing
 parameters, so nothing is selected again. With its penalty at 0 a P-spline is
 B-spline regression (Eilers and Marx, "Flexible smoothing with B-splines and
 penalties", Statistical Science 11(2), 1996), whose coefficients the rows
@@ -18,57 +11,38 @@ condition, that some rows can be matched one to each basis function, inside
 its support, as ``scipy.interpolate.make_lsq_spline`` documents. Across a gap
 in the data it fails, the penalty was all that held the curve there, and the
 line is refused rather than drawn; the refit's own rank decision on its
-penalised system decides. A selection penalty is lifted from the term in both
-cases, as Free levels lifts it, so the line is not shrunk.
+penalised system decides. A selection penalty is lifted from the term, as
+Free levels lifts it, so the line is not shrunk.
 
-A numeric spline's line is drawn under the same centring rule as its curve.
-An ordered term's runs through the diamonds Free levels draws: each level at
-the curve plus the gap between the two fits, both centred on the levels' mean
-weighted by their prior weight, so the two views of the one fit agree. A level the free fit cannot estimate (no rows
-of positive weight, every response at the family's bound, or rows another
-term covers exactly) is a gap in the line, and a note names it. Hand edits are
-not part of it: it is a fit.
+The line is drawn under the same centring rule as the curve. Hand edits are
+not part of it: it is a fit. An ordered term's levels fitted free, joined by
+a line, are Free levels' (:mod:`superglm.editor.free_levels`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from superglm.editor.errors import EditorClientError, EditorTypeError, EditorValueError
-from superglm.editor.free_levels import (
-    FreeFit,
-    FreeFitWording,
-    _centring_share,
-    _determined,
-    _lift_selection,
-    _values,
-    prepare_free_fit,
-)
+from superglm.editor.free_levels import _lift_selection
 from superglm.editor.refit import fit_refit_model
 from superglm.features.ordered_categorical import OrderedCategorical
-from superglm.features.rebuild import clone_with_replaced_features, special_labels
+from superglm.features.rebuild import clone_with_replaced_features
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_types import _safe_exp
 from superglm.model.fit_state import fitted_lambda2
 
-FREE = "free"
-SPLINE = "spline"
-
-_NOT_SMOOTHED = (
-    "Unsmoothed is for a spline term or an ordered term with a spline basis: {term!r} has no "
-    "smoothing to switch off."
+_NOT_SMOOTHED = "Unsmoothed is for a spline term: {term!r} has no smoothing to switch off."
+_ORDERED = (
+    "On an ordered term, Free levels draws its levels fitted free, joined by a line: choose "
+    "Free levels above the chart."
 )
 _NO_DATA = (
     "The unsmoothed line refits the model, which needs its training data: open the editor with "
     "train_data, or from a model fitted with its data kept."
-)
-_ONE_LEVEL = (
-    "The unsmoothed line of {term!r} needs rows of positive weight in at least two of its "
-    "levels, and the data the refit reads has them in {count}."
 )
 _NOT_FITTED = (
     "The model could not be fitted with the smoothing of {term!r} switched off, so there is no "
@@ -83,17 +57,6 @@ _REML_ONLY = (
     "The unsmoothed line holds every other term's smoothing where the fit put it, in a plain "
     "fit, and {terms} can only be fitted by REML, which chooses it again."
 )
-_GAP_NO_ROWS = (
-    "The line skips {levels}: the data the refit reads has no rows of positive weight for {whom}."
-)
-_GAP_SEPARATED = (
-    "The line skips {levels}: every response on {whose} rows is {value}, so {whose} free value "
-    "has no finite estimate."
-)
-_GAP_ALIASED = (
-    "The line skips {levels}: the model's other terms cover the same rows, so the data cannot "
-    "separate {whose} value from theirs."
-)
 _UNCONVERGED = (
     "The refit stopped before it converged, so the line is where it stopped: raise the model's "
     "max_iter to settle it."
@@ -102,169 +65,29 @@ _SHRUNK = (
     "The model's selection penalty cannot be lifted from {term!r} alone, so it shrinks the line."
 )
 
-_WORDING = FreeFitWording(
-    operation="draw the unsmoothed line",
-    no_data=_NO_DATA,
-    one_level=_ONE_LEVEL,
-    not_fitted=_NOT_FITTED,
-)
+
+def unsmoothed_available(spec) -> bool:
+    """Whether ``spec`` takes the Unsmoothed line: a spline term."""
+    return isinstance(spec, _SplineBase)
 
 
-def unsmoothed_kind(spec) -> str | None:
-    """``"free"`` for an ordered term with a spline basis, ``"spline"`` for a spline term, else None."""
-    if isinstance(spec, OrderedCategorical):
-        return FREE if spec.basis_kind == "spline" else None
-    return SPLINE if isinstance(spec, _SplineBase) else None
-
-
-@dataclass(frozen=True)
-class Unsmoothed:
-    """One term's unsmoothed line, and the free fit it was drawn from, which Free levels can share."""
-
-    payload: dict[str, Any]
-    free_fit: FreeFit | None
-
-
-@dataclass(frozen=True)
-class _Levels:
-    """An ordered term's levels on its curve as the chart draws them, read with the session.
-
-    ``levels`` are on the curve in axis order; ``group`` takes each to its
-    level or group in the fit in force; ``declared`` are those levels and
-    groups in the term's order; ``curve`` is the fitted curve at each of
-    them in the model's own centring, and ``drawn`` the chart's curve at each
-    level, both on the log scale.
-    """
-
-    levels: list[str]
-    group: dict[str, str]
-    declared: list[str]
-    curve: dict[str, float]
-    drawn: dict[str, float]
-
-
-def unsmoothed_job(session, name: str, free_fit: FreeFit | None = None) -> Callable[[], Unsmoothed]:
+def unsmoothed_job(session, name: str) -> Callable[[], dict[str, Any]]:
     """Read what ``name``'s unsmoothed line needs from the session; the call returned draws it.
 
-    The call does the one fit, or none for an ordered term whose free fit is
-    given, and reads nothing more from the session, so a caller holding the
-    editor's lock may release it first. Refusals are fixed sentences
-    (:class:`EditorValueError`), here or from the call.
+    The call does the one fit and reads nothing more from the session, so a
+    caller holding the editor's lock may release it first. Refusals are
+    fixed sentences (:class:`EditorValueError`), here or from the call.
     """
     term = session._require_term(name)
     spec = session.model._specs[name]
-    kind = unsmoothed_kind(spec)
-    if kind is None:
+    if isinstance(spec, OrderedCategorical):
+        raise EditorTypeError(_ORDERED)
+    if not unsmoothed_available(spec):
         raise EditorTypeError(_NOT_SMOOTHED.format(term=name))
-    if kind == SPLINE:
-        return _spline_job(session, name, term)
-    shown = _shown_levels(term, session.model, name)
-    if free_fit is not None:
-        return lambda: Unsmoothed(free_line(name, shown, free_fit), free_fit)
-    fit = prepare_free_fit(session, name, _WORDING)
-
-    def run() -> Unsmoothed:
-        found = fit()
-        return Unsmoothed(free_line(name, shown, found), found)
-
-    return run
+    return _spline_job(session, name, term)
 
 
-def free_line_payload(session, name: str, fit: FreeFit) -> dict[str, Any]:
-    """``name``'s unsmoothed line from a free fit already made, as Free levels makes it."""
-    term = session._require_term(name)
-    return free_line(name, _shown_levels(term, session.model, name), fit)
-
-
-def _shown_levels(term, model, name: str) -> _Levels:
-    spec = model._specs[name]
-    specials = special_labels(spec)
-    grouping = getattr(spec, "_grouping", None)
-    levels = [str(level) for level in term.levels if str(level) not in specials]
-    group = {
-        level: level if grouping is None else str(grouping.original_to_group.get(level, level))
-        for level in levels
-    }
-    shown = np.asarray(term.original_log_effect, dtype=np.float64)
-    declared = [str(level) for level in spec._ordered_levels]
-    return _Levels(
-        levels=levels,
-        group=group,
-        declared=declared,
-        # Read as Free levels reads the curve, so the two place a level alike.
-        curve=dict(zip(declared, _values(model, name, declared).tolist(), strict=True)),
-        drawn={str(level): float(value) for level, value in zip(term.levels, shown, strict=True)},
-    )
-
-
-def free_line(name: str, shown: _Levels, fit: FreeFit) -> dict[str, Any]:
-    """The line through each level's free estimate, where Free levels draws its diamond.
-
-    Each level is drawn at the chart's curve plus the gap between the free
-    fit and the curve, each centred on the compared levels' mean weighted by
-    their prior weight (:func:`superglm.editor.free_levels.free_level_comparison`),
-    so the line has the free fit's shape and runs through the diamonds.
-    """
-    free_model = fit.model
-    free_spec = free_model._specs[name]
-    pinned = {str(level) for level in getattr(free_spec, "_pinned_levels", ())}
-    at_bound = {label: bound for bound, labels in fit.separated.items() for label in labels}
-    estimated = {str(level) for level in free_spec._levels} - pinned - set(at_bound)
-    # Whether selection kept the term, from the fit's own record, so the
-    # comparison's covariance is not formed for the line.
-    rank = getattr(free_model.result, "rank_info", None)
-    kept = set() if rank is None else set(rank.selected_group_names)
-    active = any(g.name in kept for g in free_model._groups if g.feature_name == name)
-    labels, aliased = _determined(
-        free_model, name, [label for label in shown.declared if label in estimated], active=active
-    )
-    share = _centring_share(labels, fit.exposure)
-    free = _values(free_model, name, labels)
-    curve = np.array([shown.curve[label] for label in labels], dtype=np.float64)
-    gaps = (free - share @ free) - (curve - share @ curve)
-    gap = dict(zip(labels, gaps.tolist(), strict=True))
-    y: list[float | None] = []
-    skipped: dict[str, list[str]] = {}
-    for level in shown.levels:
-        group = shown.group[level]
-        if group in gap:
-            y.append(float(_safe_exp(shown.drawn[level] + gap[group])))
-            continue
-        y.append(None)
-        if group in at_bound:
-            reason = f"bound:{at_bound[group]}"
-        else:
-            reason = "aliased" if group in aliased else "no rows"
-        skipped.setdefault(reason, []).append(level)
-    notes = [_gap_note(reason, levels) for reason, levels in skipped.items()]
-    if not bool(getattr(free_model.result, "converged", True)):
-        notes.append(_UNCONVERGED)
-    if fit.shrunk:
-        notes.append(_SHRUNK.format(term=name))
-    return {
-        "term": name,
-        "kind": FREE,
-        "levels": shown.levels,
-        "x": None,
-        "y": y,
-        "gaps": [level for levels in skipped.values() for level in levels],
-        "note": " ".join(notes) or None,
-    }
-
-
-def _gap_note(reason: str, levels: list[str]) -> str:
-    one = len(levels) == 1
-    named = ", ".join(levels)
-    if reason == "no rows":
-        return _GAP_NO_ROWS.format(levels=named, whom="it" if one else "them")
-    whose = "its" if one else "their"
-    if reason == "aliased":
-        return _GAP_ALIASED.format(levels=named, whose=whose)
-    value = "0" if reason == "bound:zero" else "1"
-    return _GAP_SEPARATED.format(levels=named, whose=whose, value=value)
-
-
-def _spline_job(session, name: str, term) -> Callable[[], Unsmoothed]:
+def _spline_job(session, name: str, term) -> Callable[[], dict[str, Any]]:
     """The refit of a spline term with its smoothing parameter 0 and every other one held."""
     source = session.model
     reml_only = _reml_only_terms(source)
@@ -282,7 +105,7 @@ def _spline_job(session, name: str, term) -> Callable[[], Unsmoothed]:
     grid = np.asarray(term.x, dtype=np.float64)
     n_points, centering = session.n_points, session.centering
 
-    def run() -> Unsmoothed:
+    def run() -> dict[str, Any]:
         try:
             fit_refit_model(
                 source,
@@ -312,16 +135,12 @@ def _spline_job(session, name: str, term) -> Callable[[], Unsmoothed]:
             notes.append(_UNCONVERGED)
         if shrunk:
             notes.append(_SHRUNK.format(term=name))
-        payload = {
+        return {
             "term": name,
-            "kind": SPLINE,
-            "levels": None,
             "x": grid.tolist(),
             "y": [float(value) for value in _safe_exp(values)],
-            "gaps": [],
             "note": " ".join(notes) or None,
         }
-        return Unsmoothed(payload, None)
 
     return run
 

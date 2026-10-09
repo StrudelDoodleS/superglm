@@ -122,28 +122,19 @@ level. Special levels (`specials=`) are drawn as separate dots.
 
 When Handles is off, hover over it to see the reason.
 
-## See a Term Without Its Smoothing
+## See a Spline Without Its Smoothing
 
-The **Unsmoothed** icon in the chart's toolbar draws the term fitted again with its smoothing
-switched off, as a solid green line over the curve, with **unsmoothed** in the legend. It shows
-on a spline term and on an ordered term with a spline basis.
+The **Unsmoothed** icon in the chart's toolbar draws a spline term fitted again with its smoothing
+switched off, as a solid green line over the curve, with **unsmoothed** in the legend. On an
+ordered term, **Free levels** does this job instead: see
+[Compare with free levels](#compare-with-free-levels).
 
-- On a spline term the model is fitted again with the term's smoothing at zero, on the same
-  knots. Every other term keeps the smoothing the model chose for it.
-- On an ordered term each level is fitted free, as a plain categorical: the same fit **Free
-  levels** makes, and the two share it. Each level gets a dot, and the line runs through the
-  **Free levels** diamonds.
-- A spline term's line is relative to the same reference as the curve, so the two meet at the
-  reference. An ordered term's line is placed against the levels' exposure-weighted average, as
-  the diamonds are, so it need not meet the curve at the reference.
+- The model is fitted again with the term's smoothing at zero, on the same knots. Every other
+  term keeps the smoothing the model chose for it.
+- The line is relative to the same reference as the curve, so the two meet at the reference.
 - The line is one fit per term. The icon is busy while it runs, and you can go on editing.
-- The choice stays on as you move between terms, until you turn it off. Turning it off also
-  turns **Free levels** off, so no marks of the fit are left; **Free levels** comes back at once
-  if you turn it on again.
+- The choice stays on as you move between spline terms, until you turn it off.
 - Hand edits keep the line. A refit fits it again.
-- A level the free fit cannot estimate leaves a gap in the line: one with no rows, one whose
-  every response is 0 (or 1 for a yes/no response), or one whose rows another term covers
-  exactly. Hover over the line or the icon to see which levels and why.
 - A spline needs rows under each of its basis functions to be fitted without smoothing. Across
   a gap in the data it has none there, so no line is drawn, and the icon is off. Hover over it
   for the reason. Fewer knots, or knots where the rows are, fix it.
@@ -256,8 +247,8 @@ code.
 
 To see which levels the smoothing overrides, choose **Free levels** in the chart's toolbar. The
 model is fitted again with the term's levels all free, as a plain categorical with the same groups
-and reference, and each level's free estimate is drawn behind the curve as a diamond on its
-interval.
+and reference, and each level's free estimate is drawn behind the curve as a green diamond on its
+interval, the diamonds joined by a green line. One button turns both on and off.
 
 - A level whose interval misses the curve is filled in orange: the curve holds it away from what
   its own data says. A short tick on each whisker marks the fitted curve it is judged against,
@@ -289,6 +280,7 @@ interval.
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
 - Turned off and on again for the same term and model, it comes back at once, with no new fit.
+- A level with no free value, named in the note, leaves a gap in the line.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the
   free levels are not shrunk. The other terms keep theirs. A custom penalty that cannot be limited
   to some terms shrinks the free levels too, or removes them, and the legend then says so.
