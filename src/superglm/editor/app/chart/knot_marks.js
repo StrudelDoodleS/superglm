@@ -21,6 +21,9 @@ import { el, line, text } from "./svg.js";
  * @property {number[]} positions the knots shown, ascending
  * @property {boolean[]} placed which of them a waiting change places
  * @property {{x:number, removed:boolean}[]} ghosts in-force knots a waiting change moves or removes
+ * @property {number[]} inForce the knots in force, ascending
+ * @property {boolean} waiting the knots shown are a waiting change's
+ * @property {import('../api/contracts.js').KnotBasis|null} basis how to rebuild the basis
  * @property {boolean} editing Knots mode is on
  * @property {number} xMin the x range drawn
  * @property {number} xMax
@@ -94,7 +97,10 @@ export function knotFrame(term, plot, editing) {
   const { placed, ghosts } = shown.waiting
     ? waitingMarks(inForce, shown.positions, sameKnotTolerance(axis))
     : { placed: shown.positions.map(() => false), ghosts: [] };
-  return { axis, positions: shown.positions, placed, ghosts, editing, ...plot };
+  return {
+    axis, positions: shown.positions, placed, ghosts, inForce, waiting: shown.waiting,
+    basis: term.knots?.basis ?? null, editing, ...plot
+  };
 }
 
 /** Two positions this close are one knot: far below the grid. @param {KnotAxis} axis */

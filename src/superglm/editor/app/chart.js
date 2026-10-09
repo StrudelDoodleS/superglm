@@ -5,6 +5,7 @@ import {
   placeAnchorMarks,
   spanRange
 } from "./chart/anchor_marks.js";
+import { drawKnotBasis } from "./chart/basis_overlay.js";
 import { NO_KNOT_GESTURE, drawKnotLayer, knotFrame } from "./chart/knot_marks.js";
 import { drawShapeOverlay } from "./chart/shape_overlay.js";
 import {
@@ -234,6 +235,9 @@ export function drawChart(term, selection, context) {
   // shows the basis alone.
   if (!buildActive) drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH });
   if (!buildActive) drawPendingRanges(svg, { term, view, sx, margin, innerW, innerH });
+  // The basis a knot change reshapes goes here, beneath the curves; the knot
+  // layer's frame and gesture fill it once they are known.
+  svg.appendChild(el("g", { class: "knot-basis-layer", "clip-path": "url(#plotClip)" }));
 
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
@@ -330,7 +334,9 @@ export function drawChart(term, selection, context) {
         axisY: margin.top + innerH,
         bottom: height
       }, visualMode === "knots");
-  drawKnotLayer(svg, svg._knotFrame, context.knotUi ? context.knotUi() : NO_KNOT_GESTURE);
+  const knotUi = context.knotUi ? context.knotUi() : NO_KNOT_GESTURE;
+  drawKnotLayer(svg, svg._knotFrame, knotUi);
+  drawKnotBasis(svg, svg._knotFrame, knotUi);
   const legendLayer = el("g", { class: "legend-layer" });
   svg.appendChild(legendLayer);
   legend(legendLayer, width - 10, 13, {

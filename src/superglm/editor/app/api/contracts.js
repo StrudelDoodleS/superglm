@@ -139,6 +139,22 @@
  * @property {string|null} even_only why the term takes evenly spaced knots
  *   only (a natural spline, or a P-spline whose penalty order exceeds its
  *   degree), as Python refuses uneven ones; null where any spacing goes
+ * @property {KnotBasis|null} [basis] how the browser rebuilds the term's
+ *   B-spline basis to draw it; null for a cardinal spline, which has none
+ */
+/**
+ * A spline basis's construction: its ``degree``; its ``ends``, "open" for a
+ * P-spline or B-spline (the boundary widened by 0.001 of its range, the knots
+ * carried on past it at the end spacings) or "clamped" for a cubic regression
+ * or natural spline (each end repeated ``degree + 1`` times); the fitted
+ * ``boundary`` in chart x; and an ordered term's ``level_values``, its smooth
+ * levels on the spline's own axis, through which chart x maps to it (null on
+ * a numeric term).
+ * @typedef {Object} KnotBasis
+ * @property {number} degree
+ * @property {"open"|"clamped"} ends
+ * @property {[number, number]} boundary
+ * @property {number[]|null} level_values
  */
 /**
  * The knots a waiting change leaves on a term, in chart x, ascending.

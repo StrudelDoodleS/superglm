@@ -8,6 +8,7 @@ import {
 } from "./chart.js";
 import { bindDragWatch } from "./chart/anchor_marks.js";
 import { chartSize } from "./chart/geometry.js";
+import { drawKnotBasis } from "./chart/basis_overlay.js";
 import { NO_KNOT_GESTURE, drawKnotLayer } from "./chart/knot_marks.js";
 import { bindKnotGestures } from "./knot_gestures.js";
 import { knotToolState } from "./knots.js";
@@ -1913,7 +1914,10 @@ knotGestures = bindKnotGestures({
   active: () => knotsModeOn(),
   onChange: stageKnotChange,
   onStatus: renderKnotStatusLine,
-  redraw: (ui) => drawKnotLayer(svg, svg._knotFrame ?? null, ui)
+  redraw: (ui) => {
+    drawKnotLayer(svg, svg._knotFrame ?? null, ui);
+    drawKnotBasis(svg, svg._knotFrame ?? null, ui);
+  }
 });
 bindKnotBar(knotBarNodes, {
   term: currentTerm,

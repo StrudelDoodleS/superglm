@@ -290,3 +290,21 @@
    hand, and the hover text says why. */
 .knot-layer.is-even-only .knot-band-hit,
 .knot-layer.is-even-only .knot-hit { cursor: not-allowed; }
+
+/* The basis a knot change reshapes, in a band along the bottom of the plot,
+   beneath the curve: the functions it reaches in the basis palette, a pastel
+   fill under a line of the same hue; the rest faint, for the tiling. */
+.knot-basis-layer { pointer-events: none; }
+.knot-basis-band { fill: var(--surface); fill-opacity: 0.62; }
+.knot-basis {
+  fill: none;
+  stroke: var(--muted);
+  stroke-opacity: 0.3;
+  stroke-width: 1;
+}
+.knot-basis.is-reached {
+  fill: color-mix(in srgb, var(--knot-basis) 18%, transparent);
+  stroke: var(--knot-basis);
+  stroke-opacity: 0.9;
+  stroke-width: 1.6;
+}

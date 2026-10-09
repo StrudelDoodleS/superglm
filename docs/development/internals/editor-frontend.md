@@ -200,6 +200,8 @@ lo, hi, min_gap        knots lie strictly inside (lo, hi), at least min_gap apar
 max_count              an ordered term's most knots, one fewer than its levels on the curve
 resettable             the knots in force or waiting differ from the opened model's
 even_only              why the term takes evenly spaced knots only, else null
+basis                  {degree, ends, boundary, level_values}: how the browser rebuilds the
+                       B-spline basis to draw it; null for a cardinal spline
 ```
 
 Chart coordinates are a numeric spline's own values, and an ordered term's display positions,
@@ -288,6 +290,10 @@ one of the fixed sentences in `rating_preview.py`, never builder text.
 - `knot_gestures.js` binds Knots mode's pointer and key gestures. It owns the gesture in progress
   and the selected knot, redraws only the knot layer while a knot moves, and stages the finished
   change.
+- `chart/knot_basis.js` rebuilds a term's B-spline basis from `term.knots.basis` and evaluates
+  it (Piegl and Tiller's FindSpan and BasisFuns); it says which functions a dragged knot or a
+  waiting change reshapes. `chart/basis_overlay.js` draws them, while a knot is dragged in Knots
+  mode or a knot change waits, in a band along the bottom of the plot beneath the curve.
 - `views/knot_bar.js` renders and binds the count stepper, Placed by, alpha and Reset knots,
   the knots chip in the term line, and the status line's sentence in Knots mode.
 - `views/summary_view.js` decides which summary rows a search and the All / Edited / Waiting filter
