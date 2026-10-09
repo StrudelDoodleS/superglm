@@ -1429,8 +1429,9 @@ def test_a_flat_range_over_the_whole_axis_is_refused_when_staged(book):
     with pytest.raises(EditorValueError) as refused:
         session.stage_structural("shape", "age", {"lo": 0.0, "hi": 100.0, "degree": 0})
     assert refused.value.public_message == (
-        "A Flat range over the whole axis leaves the term one constant, which the intercept "
-        "already carries. Choose a Line, or leave part of the axis free."
+        "A Flat range over the whole axis would set this term to 1 at every value: the intercept "
+        "already carries any constant, so the term would have no effect left. To take the term "
+        "out of the model, remove it in code; here, leave part of the axis free or choose a Line."
     )
     assert session.pending == []
 

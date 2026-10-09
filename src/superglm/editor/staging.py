@@ -54,8 +54,9 @@ _SHAPE_REFUSED = (
     "That range cannot be shaped. Choose a range with more distinct values, or a lower degree."
 )
 _CONSTANT_REFUSED = (
-    "A Flat range over the whole axis leaves the term one constant, which the intercept "
-    "already carries. Choose a Line, or leave part of the axis free."
+    "A Flat range over the whole axis would set this term to 1 at every value: the intercept "
+    "already carries any constant, so the term would have no effect left. To take the term "
+    "out of the model, remove it in code; here, leave part of the axis free or choose a Line."
 )
 _STRETCH_REFUSED = (
     "That range leaves too few values beside it to fit the rest of the curve. "
