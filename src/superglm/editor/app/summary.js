@@ -12,6 +12,8 @@ import {
 /** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
 /** @typedef {import('./api/contracts.js').KnotParams} KnotParams */
 /** @typedef {import('./api/contracts.js').KnotsRequest} KnotsRequest */
+/** @typedef {import('./api/contracts.js').BasisParams} BasisParams */
+/** @typedef {import('./api/contracts.js').BasisRequest} BasisRequest */
 /** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
 /** @typedef {import('./api/contracts.js').ShapeRangeRequest} ShapeRangeRequest */
 /** @typedef {import('./api/contracts.js').StageRequest} StageRequest */
@@ -243,6 +245,18 @@ export function stageKnots(term, params) {
 }
 
 /**
+ * One basis change on ``term``: another kind, or Shrink turned on or off.
+ * @param {string} term @param {BasisParams} params
+ */
+export function stageBasis(term, params) {
+  if ("kind" in params) {
+    return stageTransition("basis", term, { kind: params.kind }, "change the spline kind");
+  }
+  const name = params.select ? "turn shrinkage on" : "turn shrinkage off";
+  return stageTransition("basis", term, { select: params.select }, name);
+}
+
+/**
  * Refit: every waiting change in one fit, and one step on the timeline.
  * @param {number} count how many changes wait, for the busy overlay
  * @returns {{name:string, path:string, payload:EmptyStructuralRequest}}
@@ -262,10 +276,11 @@ export function refitPendingTransition(count) {
  * back, refused with the operation's own sentences. Collapse and ungroup act
  * on the selection Python holds, the one their levels were read from.
  * @param {{name:string, payload:StageRequest}} staged a descriptor from stageCollapse,
- *   stageUngroup, stageReference, stageShapeRange, stageSpecial, stageOnCurve or stageKnots
+ *   stageUngroup, stageReference, stageShapeRange, stageSpecial, stageOnCurve, stageKnots
+ *   or stageBasis
  * @returns {{name:string, path:string,
  *   payload:{term:string, method:string}|SetReferenceRequest|ShapeRangeRequest
- *     |SpecialLevelsRequest|KnotsRequest}}
+ *     |SpecialLevelsRequest|KnotsRequest|BasisRequest}}
  */
 export function refitAtOnceTransition({ name, payload: { operation, term, params } }) {
   const method = "auto";
@@ -285,6 +300,10 @@ export function refitAtOnceTransition({ name, payload: { operation, term, params
     case "knots": {
       const knots = /** @type {KnotParams} */ (params);
       return { name, path: "/knots", payload: { term, params: knots, method } };
+    }
+    case "basis": {
+      const basis = /** @type {BasisParams} */ (params);
+      return { name, path: "/basis", payload: { term, params: basis, method } };
     }
     default: {
       const { lo, hi, degree, join } = params;

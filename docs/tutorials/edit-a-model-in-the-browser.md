@@ -434,15 +434,27 @@ In the Knots tool, the chart's toolbar shows the rest:
 - **Placed by:** the rule that places them. Choose Even spacing, Quantiles of values, Quantiles of
   rows, or Tempered quantiles with an alpha from 0 to 1. Knots placed by hand show as Hand.
 - **Reset knots:** returns the knots to the ones declared in code.
+- **Kind:** the kind of spline. Choose P-spline, B-spline, Cubic regression or Natural. The knots
+  stay where they are. A spline declared in code as a cardinal cubic regression spline
+  (`kind="cr_cardinal"`) shows as Cardinal cubic regression, which cannot be chosen.
+- **Shrink:** a second penalty, on the term's straight-line part. With it on, the fit can shrink the
+  term towards a straight line and, where the data do not support it, out of the model. In code
+  this is `select=True`. Hover a greyed-out Shrink to see why it is off.
 
 Changing the count or the rule places every knot again by that rule. This drops any knot you moved
 by hand. Undo brings them back.
+
+A P-spline penalises the differences between neighbouring coefficients. A B-spline penalises the
+curve's bending itself. A cubic regression spline and a natural spline are cubic, and are held
+straight at each end of the data. A P-spline or B-spline takes the degree declared in code.
 
 Outside the tool, the knots show as small ticks under the axis. While a knot change waits, the
 knots it places are amber. The knots it moves or removes stay as dashed grey outlines until Refit,
 and a removed one is crossed out.
 
-A knot change waits for Refit, like the other structural changes. With **Refit after every
+A knot, Kind or Shrink change waits for Refit, like the other structural changes. While a Kind or
+Shrink change waits, that control is amber, and History names the change, for example
+`kind cr in BonusMalus` or `shrinkage on in BonusMalus`. With **Refit after every
 structural change** on in Settings, it refits at once. Undo, Redo and **Revert to original model**
 cover it. The refit drops hand edits on the term, as it does for every structural change. A
 monotone or convex term keeps its constraint, and the refit chooses the smoothing again. **Run CV**
@@ -451,13 +463,28 @@ compares the edited knots with the original model.
 Knot changes have these limits:
 
 - **Count:** an ordered term takes at most one knot fewer than the levels on its curve.
-- **Interactions:** a term used by an interaction keeps its knots.
+- **Interactions:** a term used by an interaction keeps its knots, kind and shrinkage.
 - **Evenly spaced only:** a natural spline (`kind="ns"`), and a P-spline whose penalty order `m` is
   above its degree, take only evenly spaced knots. The tool shows their knots but does not move,
   add or remove them by hand, and **Placed by** offers Even spacing only. Hovering the axis says
   why. Their count can still change, and **Reset knots** still works.
 - **Waiting level changes:** while a waiting change alters an ordered term's levels, refit before
-  you change its knots.
+  you change its knots, kind or shrinkage.
+
+Kind and Shrink have these limits too:
+
+- **Shaped ranges:** a term with shaped ranges takes a B-spline or a cubic regression spline only.
+- **Shaped ranges and Shrink:** a term with shaped ranges cannot shrink.
+- **Natural splines and constraints:** a natural spline takes no shape constraint.
+- **Natural splines and Shrink:** a natural spline cannot shrink.
+- **Natural splines and knots:** a natural spline takes evenly spaced knots only. Choose Even
+  spacing under **Placed by** before you choose Natural.
+- **Penalty order:** a B-spline or a cubic regression spline needs a penalty order `m` no higher
+  than its degree.
+- **Penalty order and Shrink:** a P-spline or B-spline shrinks only with a penalty order `m` of 2
+  or less.
+- **Constraints and Shrink:** a term whose shape constraint the fit enforces (`Constraint.fit`)
+  cannot shrink. A constraint applied after the fit (`Constraint.postfit`) can.
 
 ## Rating-Table Preview
 
@@ -619,7 +646,8 @@ holds:
 - the shaped ranges, with their degree and join;
 - where new levels go;
 - which levels of an ordered term are special;
-- the knots chosen with the **Knots** tool, where there are any.
+- the knots chosen with the **Knots** tool, where there are any;
+- the kind of spline and its shrinkage, where chosen with **Kind** and **Shrink**.
 
 Knots are recorded only where the editor chose them. Knots declared in code are not recorded. A
 spline with editor knots has a `knots` entry. Knots moved by hand are recorded with
@@ -636,6 +664,17 @@ positions are on the axis its spline is fitted over.
     "positions": [21.0, 26.5, 33.0, 41.0, 52.5, 68.0],
     "strategy": "explicit"
   },
+  "ranges": []
+}
+```
+
+A kind or shrinkage chosen in the editor is recorded in a `basis` entry, with the kind and whether
+the term shrinks. A spline whose kind and shrinkage come from code has no `basis` entry.
+
+```json
+"DrivAge": {
+  "basis": {"kind": "cr", "select": true},
+  "kind": "spline",
   "ranges": []
 }
 ```
@@ -672,6 +711,12 @@ estimated is not carried over, so fit the copy with `fit_reml` to estimate it ag
 - A spline whose file has a `knots` entry is rebuilt with those knots. A file without one keeps the
   declared knots.
 - A file with a `knots` entry needs superglm 0.39 or later. Older releases refuse it.
+- A spline whose file has a `basis` entry is rebuilt as that kind, with or without shrinkage,
+  before its knots and ranges. It keeps its other declared settings.
+- A `basis` the declared spline cannot take, such as a natural spline on a term with a shape
+  constraint, is refused, naming the feature.
+- A file with a `basis` entry needs a superglm release later than 0.39. Release 0.39 and older
+  refuse it.
 - A feature the model does not have is refused, by name.
 - A feature that is another kind of term in the model is refused, by name.
 - A level the file makes special is taken off the model's curve.

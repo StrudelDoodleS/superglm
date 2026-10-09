@@ -540,12 +540,14 @@ body {
 /* Off with a reason: still hoverable, so its popover can say why. */
 .context-bar .knot-stepper button[aria-disabled="true"],
 .context-bar .knot-bar > button[aria-disabled="true"],
+.context-bar .knot-basis button[aria-disabled="true"],
 .context-bar #unsmoothedToggle[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.4;
 }
 .context-bar .knot-stepper button[aria-disabled="true"]:hover,
 .context-bar .knot-bar > button[aria-disabled="true"]:hover,
+.context-bar .knot-basis button[aria-disabled="true"]:hover,
 .context-bar #unsmoothedToggle[aria-disabled="true"]:hover {
   background: transparent;
 }
@@ -582,6 +584,40 @@ body {
   padding: 0 4px;
   border-color: var(--border);
   color: var(--text);
+}
+/* The kind and Shrink change how the spline is built, not where its knots
+   sit, so a rule sets them apart from the knot controls. */
+.knot-basis {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+/* Shrink is a switch: its mark is filled while it is on, in either tint. */
+.context-bar #knotShrink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.context-bar #knotShrink::before {
+  width: 7px;
+  height: 7px;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  content: "";
+}
+.context-bar #knotShrink[aria-pressed="true"]::before {
+  background: currentColor;
+}
+/* A kind or shrinkage a waiting change puts in force, until Refit: the
+   waiting tint of the knots chip. */
+.context-bar .knot-basis select[data-waiting="true"],
+.context-bar .knot-basis button[data-waiting="true"] {
+  border-color: var(--sig-weak-fg);
+  background: var(--sig-weak-bg);
+  color: var(--sig-weak-fg);
 }
 .knot-field input {
   width: 58px;

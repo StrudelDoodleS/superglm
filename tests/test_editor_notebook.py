@@ -360,6 +360,7 @@ def test_the_route_classes_are_pinned():
         "/ungroup_levels",
         "/special_levels",
         "/knots",
+        "/basis",
         "/reorder_levels",
         "/revert_to_original",
         "/set_reference",

@@ -1,10 +1,11 @@
 """Rebuild a term's spec with new structural decisions.
 
 A structural decision -- how a categorical's levels are grouped, which level
-is the reference, where new levels go, the polynomial ranges of a spline --
-is built into a fresh, unfitted spec made from the term's declaration, never
-by mutating a fitted one, and the new spec goes into a clone of the model.
-The editor's collapse, ungroup, reference and shape steps and
+is the reference, where new levels go, the polynomial ranges, knots and kind
+of a spline -- is built into a fresh, unfitted spec made from the term's
+declaration, never by mutating a fitted one, and the new spec goes into a
+clone of the model.
+The editor's collapse, ungroup, reference, shape, knot and basis steps and
 :meth:`superglm.structure.Structure.apply` build terms here, so the two share
 one implementation and the library never imports the editor.
 """
@@ -24,6 +25,7 @@ import pandas as pd
 from superglm.features._spline_config import configure_knots, initialize_runtime_state
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
+from superglm.features.constraint import Constraint
 from superglm.features.grouping import LevelGrouping, native_by_text
 from superglm.features.ordered_categorical import (
     _CLAMP_WARNING_PREFIX,
@@ -43,6 +45,14 @@ FREED_LEVELS_ATTRIBUTE = "_freed_levels"
 # Set on a spline whose knots were chosen in the editor, read by structure.py:
 # a structure file records the knots of a spline carrying it, and no others.
 EDITOR_KNOTS_ATTRIBUTE = "_editor_chosen_knots"
+# Set on a spline whose kind or shrinkage (select=True) was chosen in the
+# editor, read by structure.py: a structure file records the basis of a spline
+# carrying it, and no others.
+EDITOR_BASIS_ATTRIBUTE = "_editor_chosen_basis"
+# The editor's marks, which a spline rebuilt from a marked one keeps.
+EDITOR_MARKS = (EDITOR_KNOTS_ATTRIBUTE, EDITOR_BASIS_ATTRIBUTE)
+# The kinds that are cubic whatever spline they are rebuilt from.
+CUBIC_KINDS = frozenset({"cr", "cr_cardinal", "ns"})
 
 TOO_FEW_POINTS = "Select at least two points to shape a range."
 
@@ -443,9 +453,13 @@ def special_labels(spec: OrderedCategorical) -> set[str]:
 # -- Polynomial ranges -----------------------------------------------------------
 
 
-def shape_unavailable_reason(model, name: str) -> str | None:
-    """Why ``name`` cannot take polynomial ranges, as one sentence, or None when it can."""
-    source = source_spline(model._specs[name])
+def shape_unavailable_reason(model, name: str, source=None) -> str | None:
+    """Why ``name`` cannot take polynomial ranges, as one sentence, or None when it can.
+
+    ``source`` is the spline to judge in place of the term's own, such as the
+    declaration rebuilt with a structure file's basis.
+    """
+    source = source_spline(model._specs[name]) if source is None else source
     if source is None:
         return "Shapes need a spline term."
     if isinstance(source, CardinalCRSpline):
@@ -615,7 +629,7 @@ def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBas
     Range edges repeat knots, which the equal-spacing difference penalties
     cannot take; a ``bs`` with the same knots, degree and penalty order is
     the derivative-penalty spline whose penalty can skip the pinned ranges.
-    Knots chosen in the editor stay marked as such.
+    Knots and a basis chosen in the editor stay marked as such.
     """
     shaped = Spline(
         kind="cr" if _spline_kind_name(source) == "cr" else "bs",
@@ -633,11 +647,62 @@ def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBas
         lambda_policy=source._lambda_policy,
         polynomial_ranges=ranges,
     )
-    if getattr(source, EDITOR_KNOTS_ATTRIBUTE, False):
-        setattr(shaped, EDITOR_KNOTS_ATTRIBUTE, True)
+    _carry_marks(source, shaped)
     return shaped
 
 
 def edge_text(edge) -> str:
     """A range edge as a sentence names it: a band as it is, a number as ``%g``."""
     return edge if isinstance(edge, str) else f"{edge:g}"
+
+
+# -- Basis kind ------------------------------------------------------------------
+
+
+def rebased_spline(
+    source: _SplineBase, *, kind: str, select: bool, degree: int | None = None
+) -> _SplineBase:
+    """A fresh spline of ``kind``, with ``select``, every other setting of ``source`` kept.
+
+    The knots (stated, or a count and a placement rule), boundary, penalty
+    order ``m``, shape constraint, polynomial ranges, penalty,
+    extrapolation, binning and smoothing policy carry over, and so do the
+    editor's marks. A ``ps`` or ``bs`` spline takes ``degree``, by default
+    ``source``'s; the ``cr``, ``cr_cardinal`` and ``ns`` kinds are cubic.
+    The spline is built from these settings, never from a fitted copy, so the
+    fit places everything again. A combination ``kind`` cannot take, such as
+    a constraint on ``ns`` or ranges on ``ps``, is refused by the library
+    with its own error.
+    """
+    stated = source._named_knots if source._named_knots is not None else source._explicit_knots
+    constraint = None
+    if source.constraint_kind is not None:
+        constraint = getattr(getattr(Constraint, source.constraint_mode), source.constraint_kind)
+    orders = tuple(source._m_orders)
+    spline = Spline(
+        kind=kind,
+        n_knots=source.n_knots,
+        knots=stated,
+        degree=3 if kind in CUBIC_KINDS else source.degree if degree is None else degree,
+        knot_strategy=source.knot_strategy,
+        knot_alpha=source.knot_alpha,
+        boundary=source._explicit_boundary,
+        penalty=source.penalty,
+        select=select,
+        discrete=source.discrete,
+        n_bins=source.n_bins,
+        extrapolation=source.extrapolation,
+        constraint=constraint,
+        m=orders[0] if len(orders) == 1 else orders,
+        lambda_policy=source._lambda_policy,
+        polynomial_ranges=source.polynomial_ranges or None,
+    )
+    _carry_marks(source, spline)
+    return spline
+
+
+def _carry_marks(source: _SplineBase, spline: _SplineBase) -> None:
+    """Mark ``spline`` with the editor's marks ``source`` carries."""
+    for mark in EDITOR_MARKS:
+        if getattr(source, mark, False):
+            setattr(spline, mark, True)

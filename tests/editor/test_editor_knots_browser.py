@@ -94,3 +94,51 @@ def test_a_dropped_knot_stays_where_it_was_dropped_while_its_change_is_staged(op
         assert released, "the knot change was not staged"
         assert before[3] not in released
         assert len(released) == len(before)
+
+
+def _in_force_kind(session) -> str:
+    return type(session.model._specs["curve"]).__name__
+
+
+def _wait_for_kind(page, kind: str, *, waiting: bool) -> None:
+    page.wait_for_function(
+        """([kind, waiting]) => {
+            const select = document.querySelector("#knotKind");
+            return select && select.value === kind && select.dataset.waiting === String(waiting);
+        }""",
+        arg=[kind, waiting],
+    )
+
+
+def test_a_kind_change_waits_for_refit_and_undo_takes_it_back(open_editor_page):
+    with open_editor_page() as (page, session):
+        # The curve term is Spline(n_knots=7): a P-spline, without shrinkage.
+        page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+            "radio", name="Knots", exact=True
+        ).click()
+        kind = page.get_by_role("combobox", name="Kind")
+        _wait_for_kind(page, "ps", waiting=False)
+        assert page.get_by_role("button", name="Shrink").get_attribute("aria-pressed") == "false"
+
+        kind.select_option("cr")
+        _wait_for_kind(page, "cr", waiting=True)
+        refit = page.locator("#refitPendingAction")
+        page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
+        assert refit.get_attribute("aria-label") == "Refit, 1 change waiting"
+        undo = page.get_by_role("button", name="Undo edit")
+        assert undo.get_attribute("data-popover-body") == "Undo: kind cr in curve"
+        assert _in_force_kind(session) == "PSpline"
+
+        refit.click()
+        _wait_for_kind(page, "cr", waiting=False)
+        assert _in_force_kind(session) == "CubicRegressionSpline"
+        # The knots stay where they were.
+        assert page.locator("#chart .knot-handle").count() == 7
+
+        # Undo after a Refit brings the change back as waiting, the fit before it in force.
+        undo.click()
+        _wait_for_kind(page, "cr", waiting=True)
+        assert _in_force_kind(session) == "PSpline"
+        undo.click()
+        _wait_for_kind(page, "ps", waiting=False)
+        assert refit.is_disabled()

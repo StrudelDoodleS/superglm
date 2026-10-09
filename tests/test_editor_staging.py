@@ -1184,6 +1184,7 @@ def test_widget_http_stage_waits_without_fitting_and_says_what_waits(book, monke
         "reference": None,
         "specials": None,
         "knots": None,
+        "basis": None,
     }
     assert terms["area"]["pending"] == {
         "groups": None,
@@ -1191,6 +1192,7 @@ def test_widget_http_stage_waits_without_fitting_and_says_what_waits(book, monke
         "reference": "B",
         "specials": None,
         "knots": None,
+        "basis": None,
     }
     assert terms["age"]["pending"] == {
         "groups": None,
@@ -1198,6 +1200,8 @@ def test_widget_http_stage_waits_without_fitting_and_says_what_waits(book, monke
         "reference": None,
         "specials": None,
         "knots": None,
+        # A shaped range makes the P-spline a B-spline at the Refit.
+        "basis": {"kind": "bs", "select": False},
     }
     assert state["undo_redo"]["undo"] == "Line 30–45 in age"
     assert [(entry["kind"], entry.get("status")) for entry in state["timeline"]] == [

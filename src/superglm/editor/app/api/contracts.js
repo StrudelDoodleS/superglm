@@ -109,7 +109,7 @@
  * @property {string} level
  * @property {string} method
  */
-/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"|"special"|"on_curve"|"knots"} StagedOperation */
+/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"|"special"|"on_curve"|"knots"|"basis"} StagedOperation */
 /**
  * How a spline's knots are placed: a rule, or "explicit" positions (set in
  * code, or by hand in the editor).
@@ -141,6 +141,38 @@
  *   degree), as Python refuses uneven ones; null where any spacing goes
  * @property {KnotBasis|null} [basis] how the browser rebuilds the term's
  *   B-spline basis to draw it; null for a cardinal spline, which has none
+ * @property {BasisKind|null} [kind] the spline's kind in force
+ * @property {boolean|null} [select] whether shrinkage (``select=True``) is on
+ * @property {BasisKind[]} [kinds] the kinds the term can be switched to
+ * @property {boolean} [select_available] whether Shrink can be turned on or
+ *   off on the term as its waiting changes leave it
+ * @property {string|null} [select_reason] why it cannot, for its popover
+ */
+/**
+ * A spline's kind: P-spline, B-spline, cubic regression, natural, or the
+ * cardinal cubic regression spline, which code can declare and the editor
+ * shows but does not offer.
+ * @typedef {"ps"|"bs"|"cr"|"ns"|"cr_cardinal"} BasisKind
+ */
+/**
+ * The basis a term's waiting changes put in force, while it differs from the
+ * one in force.
+ * @typedef {Object} PendingBasis
+ * @property {BasisKind} kind
+ * @property {boolean} select
+ */
+/**
+ * One basis change, as /stage and /basis take it: another kind, or Shrink
+ * turned on or off.
+ * @typedef {{kind:Exclude<BasisKind, "cr_cardinal">}|{select:boolean}} BasisParams
+ */
+/**
+ * The /basis request, which refits at once: Settings' "Refit after every
+ * structural change" sends a basis change this way.
+ * @typedef {Object} BasisRequest
+ * @property {string} term
+ * @property {BasisParams} params
+ * @property {string} method
  */
 /**
  * A spline basis's construction: its ``degree``; its ``ends``, "open" for a
@@ -225,6 +257,8 @@
  *   waiting changes apply, when one of them takes levels off the curve or back
  * @property {PendingKnots|null} [knots] the term's knots once its waiting
  *   changes apply, while a knot change waits
+ * @property {PendingBasis|null} [basis] the term's kind and shrinkage once its
+ *   waiting changes apply, while they differ from the ones in force
  */
 /**
  * An ordered term's levels fitted free beside its curve (/free_levels): for
