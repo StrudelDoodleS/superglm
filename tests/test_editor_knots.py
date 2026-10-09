@@ -313,6 +313,42 @@ def test_the_least_gap_is_held_to_the_round_off_of_the_values(lo, hi, gap, posit
     assert session.pending == []
 
 
+@pytest.mark.parametrize(
+    ("term", "params"),
+    [
+        ("age", {"count": 8, "strategy": "quantile_rows"}),
+        ("band", {"count": 5, "strategy": "uniform"}),
+    ],
+)
+def test_knot_weights_of_the_wrong_shape_are_refused_before_the_probe_indexes_them(
+    book, term, params
+):
+    """The probe indexes the weights row by row, so it refuses a mismatch as the fit does."""
+    model, X, y, w = book
+    session = _session(book)
+    refusals = [
+        (w[:-1], f"sample_weight must have length {len(X)}, got {len(X) - 1}."),
+        (w.reshape(-1, 1), "sample_weight must be one-dimensional."),
+    ]
+    for weights, sentence in refusals:
+        with pytest.raises(EditorValueError) as refused:
+            session.stage_structural("knots", term, params, X=X, sample_weight=weights)
+        assert str(refused.value) == sentence
+    assert session.pending == []
+
+
+def test_a_refit_with_weights_of_the_wrong_length_refuses_and_keeps_the_waiting_knots(book):
+    model, X, y, w = book
+    session = _session(book)
+    session.stage_structural("knots", "age", {"count": 8, "strategy": "quantile_rows"})
+    with pytest.raises(EditorValueError) as refused:
+        session.refit_pending(X=X, y=y, sample_weight=w[:-1])
+    fit_sentence = f"sample_weight must have length {len(X)}, got {len(X) - 1}"
+    assert str(refused.value.__cause__) == fit_sentence
+    assert str(refused.value).startswith(f"The refit was refused: {fit_sentence}.")
+    assert [step.operation for step in session.pending] == ["knots"]
+
+
 def test_a_level_change_waiting_on_an_ordered_term_holds_its_knots(book):
     session = _session(book)
     session.stage_structural("collapse", "band", {"levels": ["B6", "B7"]})

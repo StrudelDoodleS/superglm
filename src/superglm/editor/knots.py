@@ -106,6 +106,8 @@ _COLLAPSED = (
 _NO_REFERENCE = (
     "The opened model does not keep the declaration of {term!r}, so there is nothing to reset to."
 )
+_WEIGHTS_DIMENSION = "sample_weight must be one-dimensional."
+_WEIGHTS_LENGTH = "sample_weight must have length {rows}, got {got}."
 
 
 def knots_unavailable_reason(model, name: str, term: EditableTerm) -> str | None:
@@ -524,6 +526,13 @@ def _placed_spline(model, name: str, replacement, X, sample_weight, *, raw: bool
     probe = copy.deepcopy(replacement)
     column = as_eager_frame(X).column_array(name)
     reporting = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    # The fit refuses weights of the wrong shape before it places knots. The probe indexes the
+    # weights by the rows of the column, so it refuses them first, in the fit's sentences.
+    if reporting is not None:
+        if reporting.ndim != 1:
+            raise EditorValueError(_WEIGHTS_DIMENSION)
+        if len(reporting) != len(column):
+            raise EditorValueError(_WEIGHTS_LENGTH.format(rows=len(column), got=len(reporting)))
     # The fit's own rule for the weights that place knots.
     weights = knot_geometry_weight(reporting, model._weight_semantics)
     try:
