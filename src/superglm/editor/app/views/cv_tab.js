@@ -291,9 +291,11 @@ const UNIT_ROUNDOFF = 2 ** -53;
  * the kept folds then lie a mark's width inside them. Folds that differ by
  * rounding alone sit mid-strip, and every position is held on the strip.
  *
- * Scores beyond 2^1021 in size are first scaled by 1/4, a power of two and
- * so exact for them, so that no difference, sum or span below overflows;
- * smaller scores, subnormal ones included, are left exactly as they are.
+ * When a score is beyond 2^1021 in size, every score is first scaled by 1/4,
+ * a power of two, so that no difference, sum or span below overflows. That
+ * is exact for every score of at least 2^-1020 in size; smaller ones can
+ * round together. With no score that large, every score, subnormal ones
+ * included, is left exactly as it is.
  * @param {number[][]} rows each row's finite values
  * @returns {{pinned: boolean, x: (value:number) => number, off: (value:number) => boolean}}
  */
@@ -416,9 +418,15 @@ function metricCard(metric, results) {
         + ` style="${foldMarkStyle(folds[0].number)}">`
         + `<title>${names.join("; ")}, off the strip</title></circle>`;
     }).join("");
-    const meanOff = isNumber(mean) && off(mean);
-    const meanTick = isNumber(mean)
-      ? `<path class="cv-mean${meanOff ? " is-off" : ""}" d="M${px(x(mean))},3 V21">`
+    // An equal-weight mean lies among its folds; holding it there removes only
+    // its rounding, which could otherwise carry it past the kept folds.
+    const values = result.folds.map((fold) => fold.scores[metric.name]).filter(isNumber);
+    const held = isNumber(mean) && values.length
+      ? Math.min(Math.max(...values), Math.max(Math.min(...values), mean))
+      : mean;
+    const meanOff = isNumber(held) && off(held);
+    const meanTick = isNumber(held)
+      ? `<path class="cv-mean${meanOff ? " is-off" : ""}" d="M${px(x(held))},3 V21">`
         + `<title>Mean: ${metricText(mean)}${meanOff ? ", off the strip" : ""}</title></path>`
       : "";
     const pooledText = isNumber(pooled) ? ` · pooled ${metricText(pooled)}` : "";

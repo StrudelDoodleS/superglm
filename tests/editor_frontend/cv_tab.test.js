@@ -221,6 +221,14 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   assert.match(markup, /<title>Mean: [^<]*, off the strip<\/title>/);
   assert.equal([...markup.matchAll(/class="cv-card-dot is-off"/g)].length, 1);
   assert.match(markup, /Fold 3: [^<]*, off the strip<\/title>/);
+  // A steady run's mean, a rounding above its folds, stays with them.
+  const steady = cvTabMarkup(cvPayload({
+    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    results: [result("As supplied", "supplied", [0.08, 0.09, 3.0e10]), result("Current model", "run", [0.1, 0.1, 0.1])]
+  }), idle());
+  const runRow = steady.slice(steady.indexOf('data-origin="run"'));
+  assert.ok((0.1 + 0.1 + 0.1) / 3 > 0.1); // the fixture reaches the rounding
+  assert.doesNotMatch(runRow, /class="cv-mean is-off"/);
   // Two far-off folds at one end share one ring that names both.
   const twice = cvTabMarkup(cvPayload({
     metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
