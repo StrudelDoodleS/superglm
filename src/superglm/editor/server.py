@@ -180,6 +180,10 @@ def create_editor_app(widget: Any) -> FastAPI:
     def free_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._free_level_comparison(str(_required(payload, "term"))))
 
+    @app.post("/unsmoothed")
+    def unsmoothed(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._unsmoothed_line(str(_required(payload, "term"))))
+
     @app.post("/rating_table")
     def rating_table(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._rating_table(str(_required(payload, "term"))))

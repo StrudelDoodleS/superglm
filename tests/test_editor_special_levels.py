@@ -414,14 +414,7 @@ def test_free_levels_refuse_a_categorical_term_and_a_session_without_its_data(bo
 
 
 def test_the_widget_fits_free_levels_once_per_fit_in_force(book, monkeypatch):
-    calls = []
-    real = free_levels_module.free_level_comparison
-
-    def counted(session, name):
-        calls.append(name)
-        return real(session, name)
-
-    monkeypatch.setattr(free_levels_module, "free_level_comparison", counted)
+    fitted = _fitted_free_models(monkeypatch)
     session = _session(book)
     widget = session.widget()
     try:
@@ -433,11 +426,11 @@ def test_the_widget_fits_free_levels_once_per_fit_in_force(book, monkeypatch):
         session.shift("band", 0.05)
         second = _post_json(f"{widget.url}/free_levels", {"term": "band"})
         assert first == second and widget._state()["fit_token"] == token
-        assert calls == ["band"]
+        assert len(fitted) == 1
         _post_json(f"{widget.url}/special_levels", {"term": "band", "levels": [BUMP]})
         assert list(session.model._specs["band"]._special_display) == [BUMP]
         third = _post_json(f"{widget.url}/free_levels", {"term": "band"})
-        assert calls == ["band", "band"] and BUMP not in third["levels"]
+        assert len(fitted) == 2 and BUMP not in third["levels"]
         with pytest.raises(urllib.error.HTTPError) as refused:
             _post_json(
                 f"{widget.url}/special_levels", {"term": "band", "levels": [BUMP], "special": "yes"}

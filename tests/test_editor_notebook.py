@@ -375,6 +375,7 @@ def test_the_route_classes_are_pinned():
         "/report",
         "/rating_table",
         "/free_levels",
+        "/unsmoothed",
         "/save_model",
         "/export_file",
         "/open_directory",
