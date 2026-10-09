@@ -46,8 +46,9 @@ export function withUnsmoothed(entries, term, entry) {
 
 /**
  * What the toggle shows for ``term``: hidden on a term without smoothing to
- * switch off; pressed while the choice is on; busy while its fit runs;
- * disabled, with the sentence why, where the fit in force refused it.
+ * switch off; pressed while the choice is on; busy while its fit runs; and,
+ * where the fit in force refused it, the sentence why as its hover text. Never
+ * disabled, so a refused line can still be turned off.
  * @param {boolean} show the choice, kept for the session
  * @param {TermPayload|null|undefined} term
  * @param {UnsmoothedEntry|null} entry
@@ -62,7 +63,7 @@ export function unsmoothedToggle(show, term, entry) {
     hidden: !term?.unsmoothed,
     pressed: show,
     busy: show && running,
-    disabled: show && refused,
+    disabled: false,
     body: (show && (refused || failed) && entry?.reason)
       || (show && running ? UNSMOOTHED_BUSY : null)
       || (show && note ? `${UNSMOOTHED_HELP} ${note}` : UNSMOOTHED_HELP)
