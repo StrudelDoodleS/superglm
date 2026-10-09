@@ -98,8 +98,39 @@ def _validated_matrix(matrix: NDArray) -> NDArray:
     return symmetric
 
 
-def _component_root(matrix: NDArray) -> tuple[NDArray, bool, NDArray]:
-    """Root of the full selected PSD representative, plus Gram evidence."""
+def _gapped_rank_mask(retained: NDArray, rcond: float) -> NDArray:
+    """Keep the eigenvalues above ``rcond * max``, refusing a cut without a gap.
+
+    The Gram cut in ``decompose_gram`` sits at the eigensolver's resolution
+    ``p(n) eps ||A||_2`` (LAPACK Users' Guide, 3rd ed., sec. 4.7). A penalty
+    formed as a product, such as a spline penalty restricted by boundary
+    constraints, carries its own formation round-off in its exact null space
+    at that same scale, so the floor cut decides the sign of that round-off
+    and the rank can differ between BLAS builds. A numerical rank is
+    well-determined only inside a gap of the spectrum (Golub, Klema and
+    Stewart, Stanford TR STAN-CS-76-559, 1976; Golub and Van Loan, Matrix
+    Computations, 4th ed., 2013, sec. 5.4.1): here no retained eigenvalue may
+    lie within ``certification_band`` of the cut on either side, otherwise
+    ``PenaltyNumericalError`` asks the caller for its own fallback.
+    """
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
+    band = SHARED_RANK_POLICY.certification_band
+    cut = rcond * float(np.max(retained))
+    if np.any((retained > cut / band) & (retained <= cut * band)):
+        raise PenaltyNumericalError("penalty spectrum has no gap at the requested rank cut")
+    return retained > cut
+
+
+def _component_root(
+    matrix: NDArray, *, rcond: float | None = None
+) -> tuple[NDArray, bool, NDArray]:
+    """Root of the full selected PSD representative, plus Gram evidence.
+
+    ``rcond`` additionally drops retained eigen-directions at or below
+    ``rcond`` times the largest, where the spectrum has a gap there
+    (``_gapped_rank_mask``). The reconstruction bound then covers them.
+    """
     values = _validated_matrix(matrix)
     try:
         d = decompose_gram(values, allow_indefinite=False, fallback_factor=None)
@@ -114,7 +145,11 @@ def _component_root(matrix: NDArray) -> tuple[NDArray, bool, NDArray]:
         retained = d.retained_values
         if retained is None or not np.all(np.isfinite(retained)) or np.any(retained <= 0):
             raise PenaltyNumericalError("invalid retained component spectrum")
-        root = np.sqrt(retained)[:, None] * d.estimable_functional_basis.T
+        basis = d.estimable_functional_basis
+        if rcond is not None:
+            keep = _gapped_rank_mask(retained, rcond)
+            retained, basis = retained[keep], basis[:, keep]
+        root = np.sqrt(retained)[:, None] * basis.T
     else:
         raise PenaltyNumericalError("unsupported component root representation")
     root = _finite_double(root, "component root")
@@ -131,10 +166,12 @@ def _component_root(matrix: NDArray) -> tuple[NDArray, bool, NDArray]:
     )
 
 
-def _penalty_support(penalty_matrices: Sequence[NDArray]) -> _PenaltySupport:
+def _penalty_support(
+    penalty_matrices: Sequence[NDArray], *, rcond: float | None = None
+) -> _PenaltySupport:
     if not penalty_matrices:
         raise ValueError("at least one penalty matrix is required")
-    extracted = tuple(_component_root(matrix) for matrix in penalty_matrices)
+    extracted = tuple(_component_root(matrix, rcond=rcond) for matrix in penalty_matrices)
     if len({root.shape[1] for root, _, _ in extracted}) != 1:
         raise ValueError("penalty matrices must have a common shape")
     support = _penalty_support_from_roots(

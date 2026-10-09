@@ -2311,7 +2311,9 @@ def build_penalty_components(
             raw = (
                 None
                 if force_solver_rank
-                else _single_penalty_raw_family(gm, group_components, rank, _reuse_raw_from)
+                else _single_penalty_raw_family(
+                    gm, group_components, rank, _reuse_raw_from, rank_rcond=eps_thresh
+                )
             )
             if isinstance(raw, _RawPenaltyRefusalReceipt):
                 raw_refusal, raw = raw, None
@@ -2691,7 +2693,7 @@ def compute_logdet_s_derivatives(
     return evaluation.gradient, evaluation.hessian
 
 
-def _single_penalty_raw_family(gm, grouped, declared_rank, source):
+def _single_penalty_raw_family(gm, grouped, declared_rank, source, *, rank_rcond=None):
     """Select one dense penalty on its raw basis, independently of the SSP map.
 
     The solver penalty is ``C.T @ Omega @ C`` for the group's SSP coordinate
@@ -2719,6 +2721,13 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source):
     (rank policy, unit roundoff and kernel identities). The volume, transported
     root and agreement are rebuilt for every map, so lambda, weights and basis
     never transfer.
+
+    The raw support is selected at ``rank_rcond``, the relative threshold
+    that set ``declared_rank``, and only where the raw spectrum has a gap
+    there (``penalty_support._gapped_rank_mask``). At the eigensolver's
+    resolution floor instead, the formation round-off in a constrained
+    penalty's exact null space (cr: about 0.1 of the floor on x86-64) could
+    add a direction on another BLAS build and refuse the raw path there.
 
     Returns ``None`` when the cheap map checks decline (non-float64 inputs,
     inconsistent shapes, a non-finite map, or ``np.eye``, which is either the
@@ -2750,7 +2759,7 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source):
         if refusal is not None:
             return refusal
         try:
-            support = _penalty_support([omega])
+            support = _penalty_support([omega], rcond=rank_rcond)
         except (PenaltyNumericalError, ValueError):
             # Its ValueErrors are the raw matrix's own admissibility checks
             # (symmetry, semidefiniteness), which the solver-space path never
