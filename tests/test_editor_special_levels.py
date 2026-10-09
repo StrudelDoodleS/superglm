@@ -15,6 +15,8 @@ from scipy.stats import norm
 from superglm import (
     Categorical,
     Constraint,
+    GroupLasso,
+    Numeric,
     OrderedCategorical,
     Piecewise,
     Polynomial,
@@ -937,9 +939,8 @@ def test_free_levels_on_other_rows_than_the_curve_say_so_and_take_the_fits_as_in
 ):
     """The same rows in another order: subtracted row by row, the influences mismatched.
 
-    The fingerprints cannot tell a reordering from other rows, so both are
-    judged as independent fits, each interval the sum of both variances:
-    exact on disjoint rows, a bound on shared ones.
+    The fingerprints cannot tell a reordering from other rows, so each gap's
+    variance is bounded whatever the two fits' correlation, (sd + sd)^2.
     """
     found = _captured_gaps(monkeypatch)
     X, y, _k = _gaussian(43, effect=lambda k: 0.5 * (k == 5))
@@ -953,8 +954,8 @@ def test_free_levels_on_other_rows_than_the_curve_say_so_and_take_the_fits_as_in
     free = free_level_comparison(EditorSession.from_model(model, train_data=shuffled), "band")
     assert free["levels"] == TWELVE
     assert free["notice"] == (
-        "Each interval takes the curve and the free estimate as independent, without the curve's "
-        "pull toward the level: "
+        "Each interval allows for any correlation between the curve and the free estimate, "
+        "without the curve's pull toward the level: "
         "the curve was fitted on other rows than the comparison reads."
     )
     assert np.all(found[-1].gap_var > found[-1].free_var)
@@ -967,7 +968,7 @@ def test_free_levels_say_when_the_fits_cannot_be_matched_or_their_curvature_is_s
 
     Gaussian/log rows above twice their fitted mean have negative observed
     curvature, which the comparison does not factor; both fall back to the
-    two fits taken as independent, and say so.
+    bound that holds for any correlation, and say so.
     """
     found = _captured_gaps(monkeypatch)
     X, y, k = _gaussian(7)
@@ -979,8 +980,8 @@ def test_free_levels_say_when_the_fits_cannot_be_matched_or_their_curvature_is_s
     model._fit_geometry_guard = None
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["notice"] == (
-        "Each interval takes the curve and the free estimate as independent, without the curve's "
-        "pull toward the level: "
+        "Each interval allows for any correlation between the curve and the free estimate, "
+        "without the curve's pull toward the level: "
         "this fit cannot measure it."
     )
     mu = np.exp(0.1 * k)
@@ -994,8 +995,8 @@ def test_free_levels_say_when_the_fits_cannot_be_matched_or_their_curvature_is_s
     ).fit(X, y)
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["notice"] == (
-        "Each interval takes the curve and the free estimate as independent, without the curve's "
-        "pull toward the level: "
+        "Each interval allows for any correlation between the curve and the free estimate, "
+        "without the curve's pull toward the level: "
         "under this family and link, rows far from their fitted mean leave it unmeasured."
     )
     assert np.all(found[-1].gap_var > found[-1].free_var)
@@ -1156,10 +1157,102 @@ def test_a_scop_curve_takes_the_fits_as_independent(family):
     assert model._solver_pirls_result().scop_inference is not None
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["notice"] == (
-        "Each interval takes the curve and the free estimate as independent, without the "
-        "curve's pull toward the level: a shape-constrained P-spline in the model is fitted "
-        "through a transformation the comparison does not follow."
+        "Each interval allows for any correlation between the curve and the free estimate, "
+        "without the curve's pull toward the level: a shape-constrained P-spline in the model "
+        "is fitted through a transformation the comparison does not follow."
     )
+
+
+def test_a_binding_face_the_solve_cannot_resolve_falls_back_rather_than_flag():
+    """A flat increasing curve over a band of weight 1e-16.
+
+    That band leaves the fit a direction of nearly no information that the
+    binding rows cross, and R F R' a condition near 1e16: its default
+    pseudo-inverse dropped binding directions, gave the flat curve a pull,
+    and flagged two bands.
+    """
+    bands = TWELVE[:8]
+    k = np.repeat(np.arange(8), 30)
+    noise = np.random.default_rng(3).normal(0.0, 1.0, k.size)
+    noise -= np.bincount(k, noise)[k] / 30
+    y = 20.0 - 0.1 * k + noise
+    w = np.where(k == 7, 1e-16, 1.0)
+    X = pd.DataFrame({"band": np.array(bands)[k]})
+    band = OrderedCategorical(
+        order=bands, basis=Spline(kind="bs", n_knots=4, constraint=Constraint.fit.increasing)
+    )
+    model = SuperGLM(family="gaussian", features={"band": band}, spline_penalty=0.0, tol=1e-12).fit(
+        X, y, sample_weight=w
+    )
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+    assert free["flagged"] == []
+    assert free["notice"] == (
+        "Each interval allows for any correlation between the curve and the free estimate, "
+        "without the curve's pull toward the level: this fit cannot measure it."
+    )
+
+
+def test_fits_on_partly_shared_rows_are_judged_on_a_bound_for_any_correlation(monkeypatch):
+    """Two Gaussian fits sharing four rows, the other term's column flipped on the rest.
+
+    Shared rows need not make the two fits correlate positively: here the
+    exact least-squares gap variance is 0.164877, and the sum of the two
+    fits' variances, 0.129840, flagged both levels at z 2.19 against 2.24.
+    """
+    found = _captured_gaps(monkeypatch)
+    shared_k = np.array([-0.5, -0.5, 0.5, 0.5])
+    shared_x = np.array([-1.0, 1.0, -1.0, 1.0])
+    own_k = np.repeat([-0.5, 0.5], 20)
+
+    def frame(sign):
+        k = np.concatenate([shared_k, own_k])
+        x = np.concatenate([shared_x, sign * own_k])
+        noise = np.concatenate([1.2 * shared_x, np.tile([-1.0, 1.0], 20)])
+        X = pd.DataFrame({"band": np.where(k < 0, "A", "B"), "x": x})
+        return X, 10.0 + 0.2 * k + 0.3 * x + noise
+
+    def features():
+        return {
+            "band": OrderedCategorical(order=["A", "B"], basis=Polynomial(powers=[1])),
+            "x": Numeric(),
+        }
+
+    model = SuperGLM(family="gaussian", features=features()).fit(*frame(1.0))
+    free = free_level_comparison(EditorSession.from_model(model, train_data=frame(-1.0)), "band")
+    assert free["flagged"] == []
+    assert np.all(found[-1].gap_var >= 0.164877)
+
+
+def test_a_free_term_a_custom_penalty_removes_is_drawn_unjudged():
+    """A penalty with no feature list cannot be lifted, and here it selects the free term out."""
+
+    class Custom:
+        def __init__(self, lambda1):
+            self._inner = GroupLasso(lambda1=lambda1)
+            self.lambda1 = lambda1
+            self.flavor = None
+
+        def prox(self, *args, **kwargs):
+            return self._inner.prox(*args, **kwargs)
+
+        def prox_group(self, *args, **kwargs):
+            return self._inner.prox_group(*args, **kwargs)
+
+        def eval(self, *args, **kwargs):
+            return self._inner.eval(*args, **kwargs)
+
+    k = np.repeat(np.arange(12), 100)
+    y = np.random.default_rng(9).poisson(0.5, k.size).astype(float)
+    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
+    model = SuperGLM(
+        family="poisson",
+        features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+        penalty=Custom(1000.0),
+    ).fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["shrunk"] is True
+    assert free["flagged"] == []
 
 
 def test_free_levels_hold_their_intervals_whatever_the_weights_size():
@@ -1261,8 +1354,8 @@ def test_free_levels_without_a_fitted_design_say_they_take_the_fits_as_independe
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["levels"] == TWELVE
     assert free["notice"] == (
-        "Each interval takes the curve and the free estimate as independent, without the curve's "
-        "pull toward the level: "
+        "Each interval allows for any correlation between the curve and the free estimate, "
+        "without the curve's pull toward the level: "
         "the model keeps no fitted design to measure it. Refit it with retain_fit_state=True to "
         "include it."
     )

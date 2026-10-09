@@ -41,6 +41,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
@@ -91,8 +92,8 @@ _SEPARATED = (
     "{whose} free value has no finite estimate."
 )
 _INDEPENDENT = (
-    "Each interval takes the curve and the free estimate as independent, without the curve's "
-    "pull toward the level: "
+    "Each interval allows for any correlation between the curve and the free estimate, "
+    "without the curve's pull toward the level: "
 )
 _NO_DESIGN = _INDEPENDENT + (
     "the model keeps no fitted design to measure it. Refit it with retain_fit_state=True to "
@@ -260,14 +261,15 @@ def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[
     free_var = _contrast_variances(free_model, name, free_rows)
     gap_var, note = _gap_variances(free_model, free_rows, model, curve_rows, name)
     if gap_var is None:
-        # Unmeasured, the two fits are taken as independent: exact for fits on
-        # disjoint rows, and a bound for fits on shared rows, which correlate
-        # positively.
-        gap_var = free_var + (
+        # Unmeasured, the gap's variance is bounded whatever the two fits'
+        # correlation: var(b - f) <= (sd(b) + sd(f))^2. Fits on shared rows
+        # need not correlate positively, so the sum of the two is no bound.
+        curve_var = (
             np.zeros(len(labels))
             if curve_rows is None
             else _contrast_variances(model, name, curve_rows)
         )
+        gap_var = (np.sqrt(free_var) + np.sqrt(curve_var)) ** 2
     free_values, curve_values = (_values(fitted, name, labels) for fitted in (free_model, model))
     return _Gaps(
         labels=labels,
@@ -407,7 +409,9 @@ def _gap_variances(
     which their fit fingerprints decide.
     """
     phi = float(free_model.result.phi)
-    if not phi > 0.0:
+    if not phi > 0.0 or _term_covariance(free_model, name) is None:
+        # No dispersion, or a selection penalty that cannot be lifted removed
+        # the free term: there is no free variance to judge by.
         return np.zeros(len(free_rows)), None
     if not float(model.result.phi) > 0.0:
         curve_rows = None
@@ -493,7 +497,7 @@ def _observed_rows(distribution, link, y, mu, eta, fisher) -> np.ndarray | None:
     return fisher * (1.0 + (y - mu) * bracket)
 
 
-def _on_binding_face(model, active, width: int, apply):
+def _on_binding_face(model, active, width: int, apply) -> Any:
     """``apply`` restricted to the face of the fit's binding shape constraints.
 
     A constraint ``A theta >= b`` that binds at the fit holds the solution on
@@ -502,7 +506,8 @@ def _on_binding_face(model, active, width: int, apply):
     ``F``; a curve held flat by its monotone constraint does not move at all.
     A row binds when its slack, in the QP's own units, is within the
     feasibility tolerance the solver holds its active rows to, and the dot
-    product's rounding: the solver keeps those rows on their face.
+    product's rounding: the solver keeps those rows on their face. None when
+    the restriction cannot be formed to a relative accuracy of 1e-6.
     """
     full = {group.name: group for group in model._groups}
     beta = np.asarray(model.result.beta, dtype=np.float64)
@@ -523,8 +528,23 @@ def _on_binding_face(model, active, width: int, apply):
     if not rows:
         return apply
     R = np.array(rows)
+    # The independent rows, decided on the rows themselves: a pivoted QR of
+    # R', whose diagonal falls below the rounding of its first entry only at
+    # a row the others already span.
+    _q, triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
+    diagonal = np.abs(np.diag(triangle))
+    u = np.finfo(np.float64).eps / 2
+    R = R[order[diagonal > width * u * diagonal[0]]]
     moves = np.column_stack([apply(row) for row in R])
-    held = np.linalg.pinv(R @ moves, hermitian=True)
+    gram = 0.5 * (R @ moves + (R @ moves).T)
+    values, vectors = np.linalg.eigh(gram)
+    # Solving with R F R' loses about its condition number times u of each
+    # result; past 1e-6 relative the restriction no longer resolves what an
+    # interval shows, as when a level of almost no weight leaves F a
+    # direction of nearly no information that the binding rows cross.
+    if not (np.all(np.isfinite(values)) and values[0] > 0.0 and values[-1] * u <= 1e-6 * values[0]):
+        return None
+    held = (vectors / values) @ vectors.T
 
     def restricted(contrast: np.ndarray) -> np.ndarray:
         moved = apply(contrast)
@@ -614,6 +634,8 @@ def _influence(model, name: str) -> _Influence | str:
     if X.p != width:
         return _UNMEASURED
     move = _on_binding_face(model, active, width, apply)
+    if move is None:
+        return _UNMEASURED
     columns = _term_columns(active, name)
     # The weighted mean's sums, on weights rescaled by a power of two (exact),
     # stay in range whatever the prior weights' size.
