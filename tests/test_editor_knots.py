@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -517,47 +518,92 @@ def test_the_widget_stages_knots_and_refits_them_at_once(book):
     assert _knots(session.model, "band").size == 3
 
 
-def _browser_knot_vector(basis: dict, positions: list[float]) -> np.ndarray:
-    """The knot vector the browser builds from ``term.knots`` (app/chart/knot_basis.js)."""
-    values = basis["level_values"]
+KNOT_BASIS_FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "knot_basis.json"
+ORDERED_VALUES = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}
 
-    def to_axis(chart):
-        chart = np.asarray(chart, dtype=np.float64)
-        return chart if values is None else np.interp(chart, np.arange(len(values)), values)
 
-    degree = basis["degree"]
-    lo, hi = to_axis(basis["boundary"])
-    interior = to_axis(positions)
-    if basis["ends"] == "clamped":
-        return np.concatenate([np.repeat(lo, degree + 1), interior, np.repeat(hi, degree + 1)])
-    pad = 0.001 * (hi - lo)
-    inner = np.concatenate([[lo - pad], interior, [hi + pad]])
-    below = inner[0] - (inner[1] - inner[0]) * np.arange(degree, 0, -1)
-    above = inner[-1] + (inner[-1] - inner[-2]) * np.arange(1, degree + 1)
-    return np.concatenate([below, inner, above])
+def _ordered_band_fit():
+    """Six levels on uneven values, banded by a two-knot cubic regression spline on their axis."""
+    X, y, w = _book(n=4000)
+    X = X.assign(band=X["band"].map(lambda b: f"B{int(b[1:]) % 6}"))
+    band = OrderedCategorical(values=ORDERED_VALUES, basis=Spline(kind="cr", n_knots=2))
+    return _declared(band=band).fit(X, y, sample_weight=w), X, y, w
+
+
+def _knot_basis_fixture() -> dict[str, dict]:
+    """The payload's basis and positions, and the fitted knots, for each case the browser checks.
+
+    tests/editor_frontend/fixtures/knot_basis.json holds this, written by
+    ``uv run python -m tests.test_editor_knots``. knot_basis.test.js requires the browser's
+    ``knotVector``, built from ``basis`` and ``positions``, to reproduce ``knots`` (``spec._knots``).
+    """
+    cases = {}
+    X, y, w = _book(n=3000)
+    for name, spline in [
+        ("p_spline", Spline(kind="ps", n_knots=5)),
+        ("b_spline", Spline(kind="bs", n_knots=5)),
+        ("cubic_regression", Spline(kind="cr", n_knots=5)),
+    ]:
+        model = _declared(age=spline).fit(X, y, sample_weight=w)
+        payload = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))
+        knots = payload["age"]["knots"]
+        cases[name] = {
+            "basis": knots["basis"],
+            "positions": knots["positions"],
+            "knots": model._specs["age"]._knots.tolist(),
+        }
+    model, X, y, w = _ordered_band_fit()
+    knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["band"]["knots"]
+    cases["ordered_cubic_regression"] = {
+        "basis": knots["basis"],
+        "positions": knots["positions"],
+        "knots": model._specs["band"]._basis_spline._knots.tolist(),
+    }
+    return cases
 
 
 @pytest.mark.parametrize("kind", ["ps", "bs", "cr", "ns"])
-def test_the_payload_describes_the_basis_the_browser_draws(kind):
+def test_the_payload_describes_the_spline_it_was_built_from(kind):
     X, y, w = _book(n=3000)
     model = _declared(age=Spline(kind=kind, n_knots=5)).fit(X, y, sample_weight=w)
+    spec = model._specs["age"]
     knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["age"]["knots"]
-    rebuilt = _browser_knot_vector(knots["basis"], knots["positions"])
-    # Only a natural spline's 1e-6 widening of its clamped ends is left out.
-    pad = (2e-6 if kind == "ns" else 1e-12) * (knots["hi"] - knots["lo"])
-    np.testing.assert_allclose(rebuilt, model._specs["age"]._knots, rtol=0, atol=pad)
+    assert knots["basis"]["degree"] == spec.degree
+    assert knots["basis"]["ends"] == ("open" if kind in ("ps", "bs") else "clamped")
+    np.testing.assert_array_equal(knots["positions"], spec.fitted_base_knots)
+    np.testing.assert_array_equal(knots["basis"]["boundary"], spec.fitted_boundary)
+
+
+def test_the_knot_basis_fixture_is_current():
+    stored = json.loads(KNOT_BASIS_FIXTURE.read_text(encoding="utf-8"))
+    fresh = _knot_basis_fixture()
+    assert stored.keys() == fresh.keys()
+    u = np.finfo(np.float64).eps / 2
+    for name, case in fresh.items():
+        old = stored[name]
+        assert old["basis"]["degree"] == case["basis"]["degree"], name
+        assert old["basis"]["ends"] == case["basis"]["ends"], name
+        assert old["basis"]["level_values"] == case["basis"]["level_values"], name
+        # Within 64 u M, M the largest magnitude involved. A fused multiply-add can round numpy's
+        # interpolation of an ordered term's positions differently on another platform, so the
+        # file is held to the rounding rather than to its bytes. The browser test holds the tight
+        # count, and a change to the construction moves a knot far beyond this.
+        magnitudes = [old["knots"], old["positions"], old["basis"]["boundary"]]
+        scale = np.max(np.abs(np.concatenate(magnitudes)))
+        for key, got, want in [
+            ("knots", case["knots"], old["knots"]),
+            ("positions", case["positions"], old["positions"]),
+            ("boundary", case["basis"]["boundary"], old["basis"]["boundary"]),
+        ]:
+            np.testing.assert_allclose(
+                got, want, rtol=0, atol=64 * u * scale, err_msg=f"{name} {key}"
+            )
 
 
 def test_an_ordered_terms_basis_is_built_on_its_level_values():
-    values = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}
-    X, y, w = _book(n=4000)
-    X = X.assign(band=X["band"].map(lambda b: f"B{int(b[1:]) % 6}"))
-    band = OrderedCategorical(values=values, basis=Spline(kind="cr", n_knots=2))
-    model = _declared(band=band).fit(X, y, sample_weight=w)
+    model, X, y, w = _ordered_band_fit()
     knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["band"]["knots"]
-    assert knots["basis"]["level_values"] == list(values.values())
-    rebuilt = _browser_knot_vector(knots["basis"], knots["positions"])
-    np.testing.assert_allclose(rebuilt, model._specs["band"]._basis_spline._knots, atol=1e-12)
+    assert knots["basis"]["level_values"] == list(ORDERED_VALUES.values())
 
 
 def test_a_cardinal_spline_has_no_basis_to_draw():
@@ -584,3 +630,10 @@ def test_a_term_whose_column_holds_one_value_opens_with_its_knots_unavailable():
         "Every value of this term's column is the same, so it has no range to place knots on.",
     )
     session.widget().close()
+
+
+if __name__ == "__main__":
+    KNOT_BASIS_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+    KNOT_BASIS_FIXTURE.write_text(
+        json.dumps(_knot_basis_fixture(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )

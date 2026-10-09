@@ -1,6 +1,7 @@
 // @ts-nocheck
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -35,6 +36,52 @@ test("the knot vectors match superglm's open and clamped constructions", () => {
   const ordered = { ...CLAMPED, boundary: [0, 3], level_values: [0, 1, 4, 5] };
   assert.deepEqual(knotVector(ordered, [1.5, 2.5]), [0, 0, 0, 0, 2.5, 4.5, 5, 5, 5, 5]);
   assert.equal(axisMap([0, 1, 4, 5])(2.25), 4.25);
+});
+
+// The fixture tests/test_editor_knots.py writes: for each case, the payload's basis and chart
+// positions, and the fitted spec._knots that knotVector must reproduce from the first two.
+const KNOT_BASIS_CASES = JSON.parse(
+  readFileSync(new URL("./fixtures/knot_basis.json", import.meta.url), "utf8"),
+);
+
+// The rounding count c of a case, the bound being c u M for u = 2**-53 and M the knots' scale.
+// Each count is of the roundings on one construction's longest chain, and the two constructions
+// (superglm's and the browser's) differ by at most the sum of their errors:
+// - Clamped on numbers (cubic regression): the knots are copies of the boundary and the positions,
+//   with no arithmetic, so c = 0 and the rebuilt vector is the fitted one exactly.
+// - Open on numbers (P-spline, B-spline), degree 3: the padded end lo - pad, pad = 0.001 (hi - lo),
+//   is within 1.01 u M of exact (0.01 u M from pad's own rounding, one more from the subtraction).
+//   The first spacing is within 3.01 u M (its subtraction rounds at most 2 u M more). The carried
+//   knot is the end plus the spacing times the degree: 1.01 + 3 (3.01 + 2) + 1 = 17.04 u M, the 2
+//   being the product's rounding per unit of degree and the last 1 the sum's. Each side is within
+//   18 u M of exact, so the two differ by at most c = 36.
+// - Ordered (clamped here), L levels with largest gap G: numpy places the positions by inverse
+//   interpolation, which rounds the chart index to within (L + 3) u, so a knot is off by at most
+//   G (L + 3) u. The browser's map back rounds the gap twice (2 G u, its offset being at most 1)
+//   and the sum once (u M). So c = (L + 5) G / M + 1.
+function roundingCount(basis, scale) {
+  if (!basis.level_values) return basis.ends === "open" ? 36 : 0;
+  assert.equal(basis.ends, "clamped", "an ordered open spline needs its open count added to this one");
+  const values = basis.level_values;
+  const gap = Math.max(...values.slice(1).map((v, i) => v - values[i]));
+  return ((values.length + 5) * gap) / scale + 1;
+}
+
+test("the knots the browser builds reproduce the fitted knots, within their rounding bound", () => {
+  // M = max(|lo|, |hi|, R), with lo and hi on the spline's own axis and R the largest |knot|.
+  const u = Number.EPSILON / 2;
+  for (const [name, { basis, positions, knots }] of Object.entries(KNOT_BASIS_CASES)) {
+    const toAxis = axisMap(basis.level_values);
+    const lo = toAxis(basis.boundary[0]);
+    const hi = toAxis(basis.boundary[1]);
+    const scale = Math.max(Math.abs(lo), Math.abs(hi), ...knots.map(Math.abs));
+    const bound = roundingCount(basis, scale) * u * scale;
+    const rebuilt = knotVector(basis, positions);
+    assert.equal(rebuilt.length, knots.length, name);
+    rebuilt.forEach((t, k) => {
+      assert.ok(Math.abs(t - knots[k]) <= bound, `${name}, knot ${k}: ${t} against ${knots[k]}, bound ${bound}`);
+    });
+  }
 });
 
 test("inside the boundary the basis sums to one and never goes below zero", () => {
