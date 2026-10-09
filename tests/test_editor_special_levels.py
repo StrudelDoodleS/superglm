@@ -934,7 +934,7 @@ def test_free_levels_refuse_a_free_fit_that_fails_and_a_single_level_in_sentence
     )
 
 
-def test_free_levels_on_other_rows_than_the_curve_say_so_and_take_the_fits_as_independent(
+def test_free_levels_on_other_rows_than_the_curve_say_so_and_bound_the_gap(
     monkeypatch,
 ):
     """The same rows in another order: subtracted row by row, the influences mismatched.
@@ -1135,7 +1135,7 @@ def test_the_generic_observed_rows_are_the_library_kernels_where_it_declares_the
 
 
 @pytest.mark.parametrize("family", ["gamma", "poisson"])
-def test_a_scop_curve_takes_the_fits_as_independent(family):
+def test_a_scop_curve_bounds_the_gap(family):
     """A monotone P-spline fitted through its exponential reparametrisation.
 
     Its coefficients are an exponential map of the fitted ones, so even under
@@ -1195,9 +1195,9 @@ def test_a_binding_face_the_solve_cannot_resolve_falls_back_rather_than_flag():
 def test_fits_on_partly_shared_rows_are_judged_on_a_bound_for_any_correlation(monkeypatch):
     """Two Gaussian fits sharing four rows, the other term's column flipped on the rest.
 
-    Shared rows need not make the two fits correlate positively: here the
-    exact least-squares gap variance is 0.164877, and the sum of the two
-    fits' variances, 0.129840, flagged both levels at z 2.19 against 2.24.
+    Shared rows need not make the two fits correlate positively: here the sum
+    of the two fits' variances, 0.1298, fell below the exact gap variance and
+    flagged both levels at z 2.19 against 2.24.
     """
     found = _captured_gaps(monkeypatch)
     shared_k = np.array([-0.5, -0.5, 0.5, 0.5])
@@ -1217,10 +1217,29 @@ def test_fits_on_partly_shared_rows_are_judged_on_a_bound_for_any_correlation(mo
             "x": Numeric(),
         }
 
-    model = SuperGLM(family="gaussian", features=features()).fit(*frame(1.0))
-    free = free_level_comparison(EditorSession.from_model(model, train_data=frame(-1.0)), "band")
+    (X_curve, y_curve), (X_free, y_free) = frame(1.0), frame(-1.0)
+    model = SuperGLM(family="gaussian", features=features()).fit(X_curve, y_curve)
+    free = free_level_comparison(
+        EditorSession.from_model(model, train_data=(X_free, y_free)), "band"
+    )
     assert free["flagged"] == []
-    assert np.all(found[-1].gap_var >= 0.164877)
+
+    def design(X):
+        return np.column_stack([np.ones(len(X)), X["band"] == "B", X["x"]]).astype(float)
+
+    def coefficient_b(X):
+        """Row of the least-squares map from the response to the B coefficient."""
+        return np.linalg.solve(design(X).T @ design(X), design(X).T)[1]
+
+    # Both fits are least squares, and the two levels weigh alike, so each
+    # level's centred gap is half the difference of the two B coefficients:
+    # linear in the 84 distinct observations, the four shared ones read by both.
+    a_free, a_curve = coefficient_b(X_free), coefficient_b(X_curve)
+    moved = np.concatenate([a_free[:4] - a_curve[:4], a_free[4:], -a_curve[4:]])
+    residual = y_free - design(X_free) @ np.linalg.lstsq(design(X_free), y_free, rcond=None)[0]
+    sigma2 = residual @ residual / (len(y_free) - 3)
+    exact = 0.25 * sigma2 * float(moved @ moved)
+    assert np.all(found[-1].gap_var >= exact)
 
 
 def test_a_free_term_a_custom_penalty_removes_is_drawn_unjudged():
@@ -1253,6 +1272,10 @@ def test_a_free_term_a_custom_penalty_removes_is_drawn_unjudged():
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["shrunk"] is True
     assert free["flagged"] == []
+    assert free["notice"] == (
+        "The model's penalty removes 'band' from the free fit, so its levels are drawn flat and "
+        "no level is judged."
+    )
 
 
 def test_free_levels_hold_their_intervals_whatever_the_weights_size():
@@ -1348,7 +1371,7 @@ def test_free_levels_give_each_text_of_the_column_its_level():
     assert free["levels"] == [str(level) for level in range(1, 13)]
 
 
-def test_free_levels_without_a_fitted_design_say_they_take_the_fits_as_independent():
+def test_free_levels_without_a_fitted_design_say_they_bound_the_gap():
     model, X, y = _twelve_bands(retain_fit_state=False, order=TWELVE)
     model.fit(X, y)
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")

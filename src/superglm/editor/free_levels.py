@@ -109,6 +109,10 @@ _SCOP = _INDEPENDENT + (
     "a shape-constrained P-spline in the model is fitted through a transformation the "
     "comparison does not follow."
 )
+_REMOVED = (
+    "The model's penalty removes {term!r} from the free fit, so its levels are drawn flat and "
+    "no level is judged."
+)
 _UNCONVERGED = (
     "The {fit} stopped before it converged, so no level is judged: raise the model's max_iter "
     "to compare."
@@ -219,6 +223,8 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
             )
         )
     notes.extend(_UNCONVERGED.format(fit=fit) for fit in unconverged)
+    if _term_covariance(free_model, name) is None:
+        notes.append(_REMOVED.format(term=name))
     if gaps.note is not None:
         notes.append(gaps.note)
     payload["notice"] = " ".join(notes) or None
