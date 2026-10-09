@@ -56,6 +56,8 @@ _RULE_TEXT = {
 LEVEL_OPERATIONS = frozenset({"collapse", "ungroup", "special", "on_curve"})
 # The display step a knot snaps to on an ordered term's level axis.
 _ORDERED_STEP = 0.1
+# Unit roundoff of float64, u = 2**-53: the bound on the relative error of one rounding.
+_UNIT_ROUNDOFF = 2.0**-53
 
 _NOT_SPLINE = "Knots are for spline terms and ordered terms with a spline basis."
 _INTERACTION = "A term used by an interaction keeps its knots."
@@ -319,9 +321,18 @@ def _positions_basis(name: str, fitted, source: _SplineBase, axis: _Axis, positi
     if not all(_is_real(v) and math.isfinite(v) for v in positions):
         raise EditorValueError(_POSITIONS.format(term=name, gap=_gap_text(gap)))
     chart = np.sort(np.asarray(positions, dtype=np.float64))
-    # A relative slack of 1e-9 accepts a gap the browser snapped to exactly the step.
-    tight = gap * (1.0 - 1e-9)
-    if chart[0] - lo < tight or hi - chart[-1] < tight or np.any(np.diff(chart) < tight):
+    # A knot one least gap from an end or a neighbour reads short by at most five
+    # roundings of u M, with M = max(|lo|, |hi|): one for each of the two values, two
+    # for their difference (|difference| <= 2 M) and one for the gap (gap <= M). The
+    # rounding sits in the values, not the span. Where it reaches the gap, float64
+    # cannot tell a knot from its end, so none is accepted.
+    tight = gap - 5.0 * _UNIT_ROUNDOFF * max(abs(lo), abs(hi))
+    if (
+        tight <= 0.0
+        or chart[0] - lo < tight
+        or hi - chart[-1] < tight
+        or np.any(np.diff(chart) < tight)
+    ):
         raise EditorValueError(_POSITIONS.format(term=name, gap=_gap_text(gap)))
     _require_count(name, axis, int(chart.size))
     _require_uneven_allowed(name, source)

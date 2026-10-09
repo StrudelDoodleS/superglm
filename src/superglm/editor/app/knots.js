@@ -63,9 +63,13 @@ export const DEFAULT_ALPHA = 0.2;
 export const AT_LEAST_ONE = "A spline needs at least one knot.";
 export const SHOWN_GROUPED =
   "Knots sit on the expanded level axis. Show the groups expanded to see them.";
-// A distance on the grid may fall short of the least gap by this fraction of
-// it, the round-off of differencing two grid points; Python allows the same.
+// Round-off the snap and the level label allow: a value this close to a grid
+// point or a whole level counts as on it.
 const SLACK = 1e-9;
+// Round-off the least gap is compared with: five roundings of u times the larger
+// end in magnitude, as knots.py's _positions_basis bounds it. Where it reaches the
+// gap, nothing fits.
+const UNIT_ROUNDOFF = 2 ** -53;
 
 /** @param {unknown} value @returns {value is number} */
 function isFiniteNumber(value) {
@@ -133,7 +137,8 @@ export function snapKnot(x, axis, direction = 0) {
  * @param {number} x @param {readonly number[]} others @param {KnotAxis} axis
  */
 export function knotFits(x, others, axis) {
-  const tight = axis.gap * (1 - SLACK);
+  const tight = axis.gap - 5 * UNIT_ROUNDOFF * Math.max(Math.abs(axis.lo), Math.abs(axis.hi));
+  if (!(tight > 0)) return false;
   if (!(x > axis.lo && x < axis.hi)) return false;
   if (x - axis.lo < tight || axis.hi - x < tight) return false;
   return others.every((other) => {

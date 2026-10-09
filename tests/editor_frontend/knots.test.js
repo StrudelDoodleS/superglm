@@ -12,6 +12,7 @@ import {
   freeSpot,
   knotAxis,
   knotChip,
+  knotFits,
   knotTagText,
   knotToolState,
   nudgeKnot,
@@ -122,6 +123,21 @@ test("a knot dropped too close to another settles on the nearest free spot, or s
   assert.equal(freeSpot([5], 0.2, axis), 0.5);
   // On a span with no room left, it goes back where it was.
   assert.equal(freeSpot([0.5], 0.52, axisOf(0, 1, 0.4)), null);
+});
+
+test("the least gap is held to the round-off of the values, at any magnitude", () => {
+  // 1e7 + 0.1 reads 0.1 - 3.7e-10 from 1e7, which the old 1e-9 relative slack refused.
+  const far = axisOf(1e7, 1e7 + 50, 0.1);
+  assert.equal(knotFits(1e7 + 0.1, [], far), true);
+  assert.equal(knotFits(1e7 + 20.1, [1e7 + 20], far), true);
+  assert.equal(knotFits(1e7 + 0.1 - 1e-8, [], far), false);
+  // Near zero, 5e-11 short is outside the round-off, though the old slack took it.
+  const near = axisOf(0, 50, 0.1);
+  assert.equal(knotFits(0.1, [], near), true);
+  assert.equal(knotFits(0.1 - 5e-11, [], near), false);
+  assert.equal(knotFits(10.1 - 5e-11, [10], near), false);
+  // Where five roundings reach the gap, float64 cannot tell a knot from its end.
+  assert.equal(knotFits(1e15 + 2, [], axisOf(1e15, 1e15 + 10, 0.1)), false);
 });
 
 test("a dragged knot may pass its neighbours; below the axis it is removed, never the last", () => {
