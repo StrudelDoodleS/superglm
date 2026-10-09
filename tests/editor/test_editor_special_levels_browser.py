@@ -134,3 +134,27 @@ def test_free_levels_is_one_button_for_the_diamonds_and_their_line_and_comes_bac
         assert toggle.get_attribute("aria-pressed") == "true"
         assert _diamond_centres(page) == diamonds
         assert len(fits) == 1
+
+
+def test_an_error_banner_does_not_hold_the_editor(open_editor_page):
+    """A refused change leaves its banner, and the next action goes ahead without Dismiss."""
+    with open_editor_page(selected_term="age_band") as (page, _session):
+        page.route(
+            "**/stage*",
+            lambda route: route.fulfill(
+                status=400,
+                content_type="application/json",
+                body='{"error":"Refused for the browser test."}',
+            ),
+        )
+        page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+            "radio", name="Knots", exact=True
+        ).click()
+        page.get_by_role("button", name="One knot more").click()
+        alert = page.locator("#appAlert")
+        alert.wait_for(state="visible")
+        assert "Refused for the browser test." in alert.inner_text()
+
+        page.locator("#freeLevelsToggle").click()
+        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
+        assert alert.is_hidden()

@@ -855,7 +855,7 @@ async function runStructuralChange(descriptor) {
       payload: { ...atOnce.payload, keep_reference: keepReference }
     });
   }
-  if (appBusyActive || store.getState().request.mutation.status !== "idle") return null;
+  if (editorOccupied()) return null;
   stopContributionBuild();
   const result = await actions.executeStructuralMutation({
     ...descriptor,
@@ -869,6 +869,13 @@ async function runStructuralChange(descriptor) {
   return result.ok ? result.envelope : null;
 }
 
+// Whether a change is running and the editor must wait for it. An error from
+// an earlier change does not hold it: the state was read back from Python
+// when it failed, and the next change clears its banner.
+function editorOccupied() {
+  return appBusyActive || store.getState().request.mutation.status === "running";
+}
+
 // The Refit button and its R shortcut come here.
 async function refitPending() {
   const count = selectPendingSteps(store.getState()).length;
@@ -879,9 +886,7 @@ async function refitPending() {
 // A structural step loses nothing: Undo puts back the state before it, edits
 // included, so it runs without asking.
 async function runStructuralRefit(descriptor) {
-  if (appBusyActive || store.getState().request.mutation.status !== "idle") {
-    return { ok: false, skipped: true };
-  }
+  if (editorOccupied()) return { ok: false, skipped: true };
   stopContributionBuild();
   summarySource.value = "selected";
   const operationStart = performance.now();
@@ -1681,7 +1686,9 @@ async function toggleFreeLevels() {
     actions.patchView({ showFreeLevels: true });
     return;
   }
-  if (appBusyActive || store.getState().request.mutation.status !== "idle") return;
+  if (editorOccupied()) return;
+  // A new action takes the place of an old error: its banner goes.
+  actions.dismissRecovery();
   const term = selectedTerm();
   stopContributionBuild();
   setAppBusy(true, "Fitting free levels", `Refitting the model with ${term}'s levels free`);
