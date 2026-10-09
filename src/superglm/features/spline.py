@@ -130,6 +130,30 @@ class _SplineBase:
     _polynomial_ranges: tuple[PolynomialRange, ...] = ()
     _base_interior_knots: NDArray | None = None
 
+    # Configuration and build-time state, assigned by ``_spline_config`` and by the
+    # build helpers in ``_spline_runtime`` and ``_spline_cardinal_spec``. Annotations
+    # only: they declare the types for the checker and add no class attribute, so
+    # runtime lookups are unchanged.
+    n_knots: int
+    degree: int
+    knot_strategy: str
+    knot_alpha: float
+    penalty: str
+    discrete: bool | None
+    n_bins: int | None
+    extrapolation: str
+    select: bool
+    constraint_kind: str | None
+    constraint_mode: str
+    _m_orders: tuple[int, ...]
+    _explicit_knots: NDArray | None
+    _named_knots: list[Any] | None
+    _explicit_boundary: tuple[float, float] | None
+    _knot_strategy_actual: str
+    _lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None
+    _lo: float
+    _hi: float
+
     def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
         """Whether select=True is supported with these m orders.
 

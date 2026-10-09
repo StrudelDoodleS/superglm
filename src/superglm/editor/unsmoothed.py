@@ -138,7 +138,7 @@ def _spline_job(session, name: str, term) -> Callable[[], dict[str, Any]]:
         return {
             "term": name,
             "x": grid.tolist(),
-            "y": [float(value) for value in _safe_exp(values)],
+            "y": [float(value) for value in np.asarray(_safe_exp(values))],
             "note": " ".join(notes) or None,
         }
 
