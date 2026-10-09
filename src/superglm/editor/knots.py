@@ -428,7 +428,10 @@ def _waiting_spline(session, name: str) -> _SplineBase:
         (step.draft_spec for step in reversed(session.pending) if step.term == name), None
     )
     spline = None if waiting is None else source_spline(waiting)
-    return declared_spline(session.model, name) if spline is None else spline
+    declared = declared_spline(session.model, name) if spline is None else spline
+    if declared is None:  # pragma: no cover - knots_unavailable_reason refuses it first
+        raise EditorValueError(_NO_DECLARATION)
+    return declared
 
 
 def _resettable(session, name: str) -> bool:

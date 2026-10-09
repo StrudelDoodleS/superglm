@@ -839,6 +839,7 @@ class EditorWidget:
                     self._unsmoothed[term] = found
         if isinstance(found, str):
             raise EditorValueError(found)
+        assert found is not None
         return {**found, "fit_token": token}
 
     def _rating_table(self, term: str) -> dict[str, Any]:
