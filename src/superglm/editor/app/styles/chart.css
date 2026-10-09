@@ -203,6 +203,9 @@
 .free-level.is-flagged { fill: var(--orange); stroke: var(--orange); }
 .free-whisker.is-flagged { stroke: var(--orange); stroke-opacity: 0.8; }
 .free-curve-tick { stroke: var(--text); stroke-width: 1.5; }
+/* The term fitted with its smoothing switched off: dashed, over the curve. */
+.unsmoothed { fill: none; stroke: var(--unsmoothed); stroke-width: 1.8; stroke-dasharray: 6 4; stroke-linejoin: round; }
+.unsmoothed-dot { fill: var(--unsmoothed); stroke: none; }
 
 /* A level a waiting change takes off the curve, or puts back on it. */
 .pending-special-ring {

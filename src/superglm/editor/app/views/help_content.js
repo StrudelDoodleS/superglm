@@ -1,5 +1,7 @@
 // @ts-check
 
+import { UNSMOOTHED_HELP } from "../unsmoothed.js";
+
 /**
  * @typedef {object} HelpEntry
  * @property {string} title
@@ -231,6 +233,16 @@ export const HELP_SECTIONS = Object.freeze([
       "An ordered categorical fitted with a spline is drawn as its spline, with a dot on each level. Special levels are separate dots.",
       "Handles edit it like a numeric spline: each handle is one spline coefficient, and moving it sets every level to the spline the handles draw, so a handle can sit off the curve. Special levels do not move. Contrib and Build show the spline's basis.",
       "Handles are off while levels are grouped or a band is shaped; the Handles tool says which.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Unsmoothed line",
+    items: Object.freeze([
+      `The Unsmoothed icon above the chart, on a spline or an ordered term with a spline basis: ${UNSMOOTHED_HELP}`,
+      "It stays on as you move between terms. Each term's line is fitted the first time it shows; the icon is busy meanwhile, and the editor stays free. Hand edits keep the line; a refit fits it again.",
+      "An ordered term's line joins each level's free estimate, the fit Free levels compares with, and the two share it. A level the free fit cannot estimate leaves a gap; hovering the line or the icon names it.",
+      "A spline whose rows cannot pin down every basis function without smoothing, as across a gap in the data, gets no line: the icon is off and its hover text says why.",
+      "The line widens the chart's range by at most the curve's own range on each side; past that it runs off the plot.",
     ]),
   }),
   Object.freeze({

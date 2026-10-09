@@ -106,6 +106,11 @@ export function createEditorClient({
     return postJSON("/free_levels", { term });
   }
 
+  /** @param {string} term refitted with its smoothing switched off @returns {Promise<unknown>} */
+  function unsmoothed(term) {
+    return postJSON("/unsmoothed", { term });
+  }
+
   /** @param {string} kind "cv" or "final_fit" */
   function jobStart(kind) {
     return postJSON("/job_start", { kind });
@@ -122,7 +127,8 @@ export function createEditorClient({
   }
 
   return {
-    requestJSON, postJSON, requestBlob, getState, ratingTable, freeLevels, jobStart, jobStatus, jobCancel
+    requestJSON, postJSON, requestBlob, getState, ratingTable, freeLevels, unsmoothed, jobStart,
+    jobStatus, jobCancel
   };
 }
 

@@ -21,6 +21,7 @@ from superglm.editor.knots import knots_payload, pending_knots
 from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
 from superglm.editor.unseen import unseen_payload
+from superglm.editor.unsmoothed import unsmoothed_kind
 from superglm.features.categorical import Categorical
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import base_names_level
@@ -74,6 +75,7 @@ def session_payload(
             "knots": knots_payload(session, name, term),
             "pending": _pending_term_payload(session, name),
             "unseen": unseen_payload(session, name),
+            "unsmoothed": unsmoothed_kind(session.model._specs[name]) is not None,
             "effective_df": _finite_float(term.metadata.get("edf")),
             "edited": name in edited,
             "x_label": name,

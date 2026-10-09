@@ -539,13 +539,23 @@ body {
 }
 /* Off with a reason: still hoverable, so its popover can say why. */
 .context-bar .knot-stepper button[aria-disabled="true"],
-.context-bar .knot-bar > button[aria-disabled="true"] {
+.context-bar .knot-bar > button[aria-disabled="true"],
+.context-bar #unsmoothedToggle[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.4;
 }
 .context-bar .knot-stepper button[aria-disabled="true"]:hover,
-.context-bar .knot-bar > button[aria-disabled="true"]:hover {
+.context-bar .knot-bar > button[aria-disabled="true"]:hover,
+.context-bar #unsmoothedToggle[aria-disabled="true"]:hover {
   background: transparent;
+}
+/* While its fit runs, the raw line in the Unsmoothed icon draws itself along. */
+#unsmoothedToggle[aria-busy="true"] .unsmoothed-raw {
+  stroke-dasharray: 3 2.4;
+  animation: unsmoothed-fitting 0.9s linear infinite;
+}
+@keyframes unsmoothed-fitting {
+  to { stroke-dashoffset: -10.8; }
 }
 .knot-stepper output {
   min-width: 30px;

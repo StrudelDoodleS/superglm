@@ -122,6 +122,29 @@ level. Special levels (`specials=`) are drawn as separate dots.
 
 When Handles is off, hover over it to see the reason.
 
+## See a Term Without Its Smoothing
+
+The **Unsmoothed** icon in the chart's toolbar draws the term fitted again with its smoothing
+switched off, as a dashed line over the curve, with **unsmoothed** in the legend. It shows on a
+spline term and on an ordered term with a spline basis.
+
+- On a spline term the model is fitted again with the term's smoothing at zero, on the same
+  knots. Every other term keeps the smoothing the model chose for it.
+- On an ordered term each level is fitted free, as a plain categorical: the same fit **Free
+  levels** makes, and the two share it.
+- The line is relative to the same reference as the curve, so the two meet at the reference.
+- The line is one fit per term. The icon is busy while it runs, and you can go on editing.
+- The choice stays on as you move between terms, until you turn it off.
+- Hand edits keep the line. A refit fits it again.
+- A level the free fit cannot estimate leaves a gap in the line: one with no rows, one whose
+  every response is 0 (or 1 for a yes/no response), or one whose rows another term covers
+  exactly. Hover over the line or the icon to see which levels and why.
+- A spline needs rows under each of its basis functions to be fitted without smoothing. Across
+  a gap in the data it has none there, so no line is drawn, and the icon is off. Hover over it
+  for the reason. Fewer knots, or knots where the rows are, fix it.
+- A line far from the curve does not squash the chart: past the curve's own range again above
+  and below, it runs off the plot.
+
 ## Curve Selection Operations
 
 The floating palette acts on the current selection:

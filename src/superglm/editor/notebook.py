@@ -79,6 +79,7 @@ READ_ROUTES = frozenset(
         "/report",
         "/rating_table",
         "/free_levels",
+        "/unsmoothed",
         "/save_model",
         "/export_file",
         "/open_directory",

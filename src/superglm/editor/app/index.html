@@ -289,6 +289,14 @@
         <button id="freeLevelsToggle" type="button" aria-pressed="false" hidden
           data-popover-title="Free levels"
           data-popover-body="Fit the model again with this term's levels free, as a plain categorical, and draw each level's estimate and interval behind the curve. A level whose interval misses the curve is marked: the smoothing overrides it.">Free levels</button>
+        <button id="unsmoothedToggle" class="icon-button" type="button" aria-pressed="false"
+          aria-label="Unsmoothed" hidden data-popover-title="Unsmoothed"
+          data-popover-body="Draw the term fitted again with its smoothing switched off, dashed over the curve. A spline keeps its knots and an ordered term's levels are each fitted free; every other term stays as fitted. One fit per term, kept until the model changes.">
+          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 15.5c4.5-3 7.5-4 10.5-3.5s5.5-1.6 7.5-3.5" opacity="0.45"></path>
+            <path class="unsmoothed-raw" d="m3 17 3.5-6.5 3.5 5 3.5-9.5 3.5 7 4-4.5"></path>
+          </svg>
+        </button>
         <button type="button" data-op="select_all">Select all</button>
         <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
         <button type="button" data-op="reset" data-popover-title="Reset"

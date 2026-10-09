@@ -176,12 +176,18 @@ class EditorWidget:
             Callable[[], tuple[Callable[[JobContext], Any], Callable[[Any], dict[str, Any]]]],
         ] = {"cv": self._cv_job, "final_fit": self._final_fit_job}
         self._rating_preview: RatingPreview | None = None
-        # Free-level comparisons by term, for the fit in force. A hand edit
-        # changes neither side of a comparison, so only a new fit, its token,
-        # puts the cache aside.
+        # Free-level comparisons and Unsmoothed lines by term, for the fit in
+        # force. A hand edit changes neither, so only a new fit, its token,
+        # puts them aside. An Unsmoothed line is its payload, or the sentence
+        # that refused it. An ordered term's free fit serves both: it is kept,
+        # with its fitted model, from the line until the comparison takes it,
+        # so at most one free model per term drawn but not compared lives as
+        # long as the fit in force.
         self._fit_model: Any = None
         self._fit_token = 0
         self._free_levels: dict[str, dict[str, Any]] = {}
+        self._free_fits: dict[str, Any] = {}
+        self._unsmoothed: dict[str, dict[str, Any] | str] = {}
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
         self.selected_term = next(iter(self.terms), "")
@@ -797,20 +803,62 @@ class EditorWidget:
             self._fit_model = self.session.model
             self._fit_token += 1
             self._free_levels = {}
+            self._free_fits = {}
+            self._unsmoothed = {}
         return self._fit_token
 
     def _free_level_comparison(self, term: str) -> dict[str, Any]:
         """``term``'s curve beside its levels fitted free, refitted once per fit in force.
 
-        The refit is a full fit, like Refit, and holds the session while it runs.
+        The refit is a full fit, like Refit, and holds the session while it
+        runs. A free fit the Unsmoothed line made is used instead, and a new
+        one draws the line too, so the two share one fit.
         """
-        from superglm.editor.free_levels import free_level_comparison
+        from superglm.editor.free_levels import fit_free_levels, free_level_comparison
+        from superglm.editor.unsmoothed import FREE, free_line_payload, unsmoothed_kind
 
         with self._lock:
             token = self._current_fit_token()
             if term not in self._free_levels:
-                self._free_levels[term] = free_level_comparison(self.session, term)
+                fit = self._free_fits.get(term) or fit_free_levels(self.session, term)
+                self._free_levels[term] = free_level_comparison(self.session, term, fit)
+                self._free_fits.pop(term, None)
+                if unsmoothed_kind(self.session.model._specs[term]) == FREE:
+                    self._unsmoothed.setdefault(term, free_line_payload(self.session, term, fit))
             return {**self._free_levels[term], "fit_token": token}
+
+    def _unsmoothed_line(self, term: str) -> dict[str, Any]:
+        """``term``'s curve with its smoothing off, fitted once per fit in force.
+
+        The fit runs without the lock, on what the session held when it was
+        asked for, so the editor stays free while it runs. Its line, or the
+        sentence refusing it, is kept only while that fit is still in force.
+        """
+        from superglm.editor.unsmoothed import unsmoothed_job
+
+        with self._lock:
+            token = self._current_fit_token()
+            found = self._unsmoothed.get(term)
+            job = (
+                None
+                if found is not None
+                else unsmoothed_job(self.session, term, self._free_fits.get(term))
+            )
+        if job is not None:
+            free_fit = None
+            try:
+                drawn = job()
+                found, free_fit = drawn.payload, drawn.free_fit
+            except EditorValueError as refusal:
+                found = refusal.public_message
+            with self._lock:
+                if self._current_fit_token() == token:
+                    self._unsmoothed[term] = found
+                    if free_fit is not None and term not in self._free_levels:
+                        self._free_fits[term] = free_fit
+        if isinstance(found, str):
+            raise EditorValueError(found)
+        return {**found, "fit_token": token}
 
     def _rating_table(self, term: str) -> dict[str, Any]:
         """``term``'s block of the Excel rating table, for the Table view.
