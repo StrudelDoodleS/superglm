@@ -744,6 +744,17 @@ export function createEditorActions({
     });
   }
 
+  /**
+   * A refusal, or a note, that changed nothing, in the alert with no Retry.
+   * @param {string} message @returns {void}
+   */
+  function showNotice(message) {
+    store.update((state) => ({
+      ...state,
+      request: { ...state.request, recovery: { message, retry: null } }
+    }));
+  }
+
   /** @param {Partial<EditorState['view']>} patch @returns {void} */
   function patchView(patch) {
     store.update((state) => patchViewState(state, patch));
@@ -761,6 +772,7 @@ export function createEditorActions({
     retryMutation,
     retryEvidence,
     dismissRecovery,
+    showNotice,
     patchView
   };
 }

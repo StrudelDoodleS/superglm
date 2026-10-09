@@ -17,6 +17,7 @@ from superglm import (
     BSplineSmooth,
     Categorical,
     OrderedCategorical,
+    Piecewise,
     PolynomialRange,
     PSpline,
     Spline,
@@ -1409,3 +1410,113 @@ def test_reading_and_applying_a_structure_never_imports_the_editor():
         timeout=300,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def _band_model(specials=None):
+    order = BANDS if specials is None else [*BANDS, *specials]
+    basis = Spline(kind="bs", n_knots=4)
+    return _declared({"band": OrderedCategorical(order=order, specials=specials, basis=basis)})
+
+
+def test_a_structure_takes_levels_off_the_curve_and_puts_them_back():
+    """specials= in a file frees a band of the declaration; a file without it puts the band back."""
+    X, y = _frame()
+    plain = _band_model().fit(X, y)
+    entry = FeatureStructure(kind="ordered", levels=BANDS, reference="0", specials=["3"])
+    special = Structure(features={"band": entry}).apply(_band_model()).fit(X, y)
+    assert list(special._specs["band"]._special_display) == ["3"]
+    exported = Structure.from_model(special)
+    assert json.loads(exported.to_json())["features"]["band"]["specials"] == ["3"]
+    # The level keeps its place: the export lists the bands in order.
+    assert exported.features["band"].levels == BANDS
+    again = Structure.from_model(exported.apply(_band_model()).fit(X, y))
+    assert again.to_json() == exported.to_json()
+
+    back = FeatureStructure(kind="ordered", levels=BANDS, reference="0", specials=[])
+    # An explicit empty list, unlike none at all, survives the file.
+    assert (
+        read_structure(json.loads(Structure(features={"band": back}).to_json()))
+        .features["band"]
+        .specials
+        == []
+    )
+    returned = Structure(features={"band": back}).apply(special).fit(X, y)
+    assert list(returned._specs["band"]._special_display) == []
+    gap = np.max(np.abs(returned.predict(X) - plain.predict(X)))
+    assert gap <= _linear_predictor_bound(X, returned, plain)
+    # A file that names no specials keeps only the declared ones: the export of
+    # the returned model puts "3" back on the special model's curve too.
+    again = Structure.from_model(returned).apply(special)
+    assert list(again._specs["band"]._special_display) == []
+
+
+def test_a_structure_refuses_to_free_a_level_of_a_term_with_positional_breaks():
+    """Freeing a band would move every break stated by a position after it."""
+    declared = _declared({"band": OrderedCategorical(order=BANDS, basis=Piecewise(breaks=[3, 5]))})
+    entry = FeatureStructure(kind="ordered", levels=BANDS, reference="0", specials=["2"])
+    with pytest.raises(StructureError) as refused:
+        Structure(features={"band": entry}).apply(declared)
+    assert str(refused.value) == (
+        "'band' states its Piecewise breaks by position, which a level the structure makes "
+        "special would move; state them by band name."
+    )
+
+
+def test_a_structure_without_specials_keeps_the_declared_ones_and_cannot_put_them_on_the_curve():
+    X, y = _frame()
+    X.loc[X.index[:80], "band"] = "MISSING"
+    declared = _band_model(specials=["MISSING"]).fit(X, y)
+    legacy = json.loads(Structure.from_model(declared).to_json())
+    assert legacy["features"]["band"]["specials"] == ["MISSING"]
+    del legacy["features"]["band"]["specials"]
+    kept = read_structure(legacy).apply(_band_model(specials=["MISSING"]))
+    assert list(kept._specs["band"]._special_display) == ["MISSING"]
+
+    legacy["features"]["band"]["specials"] = []
+    with pytest.raises(StructureError) as refused:
+        read_structure(legacy).apply(_band_model(specials=["MISSING"]))
+    assert str(refused.value) == (
+        "'MISSING' is declared special in the model's 'band', so it has no place on the curve for "
+        "the structure to put it in; list it among the structure's specials, or declare it on the "
+        "curve."
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "sentence"),
+    [
+        (
+            {"specials": ["9"]},
+            "'9' of 'band' is listed as a special level but is not one of its levels; add it to "
+            "the levels or take it out of the specials.",
+        ),
+        (
+            {"specials": ["3"], "groups": {"3-4": ["3", "4"]}},
+            "Special level '3' of 'band' is in group '3-4'; a special level stands alone, so take "
+            "it out of the group.",
+        ),
+        (
+            {"specials": ["0"]},
+            "The reference '0' of 'band' is a special level, and the reference must lie on the "
+            "curve; choose a level on the curve.",
+        ),
+        (
+            {"specials": "3"},
+            "The structure entry for 'band' has a malformed 'specials'; export the structure again.",
+        ),
+    ],
+)
+def test_structure_specials_are_checked_in_fixed_sentences(change, sentence):
+    entry = {"kind": "ordered", "levels": BANDS, "reference": "0", **change}
+    with pytest.raises(StructureError) as refused:
+        Structure(features={"band": FeatureStructure(**entry)})
+    assert str(refused.value) == sentence
+
+
+def test_only_an_ordered_entry_may_name_specials():
+    entry = FeatureStructure(kind="categorical", levels=BRANDS, reference="B1", specials=["B2"])
+    with pytest.raises(StructureError) as refused:
+        Structure(features={"brand": entry})
+    assert str(refused.value) == (
+        "The structure entry for 'brand' has a malformed 'specials'; export the structure again."
+    )

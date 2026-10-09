@@ -33,6 +33,13 @@ from superglm.features.spline import CardinalCRSpline, Spline, _SplineBase
 
 # The declared bases a fit resolves to a level itself.
 SYMBOLIC_BASE_POLICIES = frozenset({"first", "most_exposed"})
+# The levels a structural decision took off an ordered term's curve, by label,
+# each with what it needs to go back: its value on the axis, and the levels
+# before it in the term's order, nearest first. Levels declared special have
+# neither, so they cannot go onto the curve. A plain dict of tuples, so a
+# pickled spec needs no class from here.
+FREED_LEVELS_ATTRIBUTE = "_freed_levels"
+
 TOO_FEW_POINTS = "Select at least two points to shape a range."
 
 
@@ -193,6 +200,8 @@ def rebuilt_ordered_spec(
     data,
     basis=None,
     level: bool = False,
+    freed: tuple[str, ...] = (),
+    returned: tuple[str, ...] = (),
 ) -> OrderedCategorical:
     """A fresh, unfitted OrderedCategorical like ``spec`` with this grouping and base.
 
@@ -200,21 +209,49 @@ def rebuilt_ordered_spec(
     declared basis is cloned. A fitted spec is never mutated: its resolved base
     is sticky and would silently survive a changed ``base``. ``level=True``
     says ``base`` names a band or group, as :func:`rebuilt_categorical`'s does.
+
+    ``freed`` names levels on the curve to take off it, as special levels, and
+    ``returned`` special levels to put back on it, by label; each returned
+    level must be one :func:`freed_levels` records. The levels taken off keep
+    what they need to go back on the spec, ``FREED_LEVELS_ATTRIBUTE``.
     """
     named = level or str(base) not in SYMBOLIC_BASE_POLICIES
     values, native_base = _ordered_original_values(spec, grouping, data, base, named=named)
-    # A special the declaration also named in order= or values= is reported
-    # under that domain spelling (9.0 beside 1.0 and 2.0) and matches rows
-    # through its raw label (9). The smooth's values lack it, so it is named
-    # in values= again, which takes it out of the smooth as the declaration
-    # did and keeps the spelling; the value given is never read.
-    values.update(dict.fromkeys(spec._special_display, 0.0))
     # Clone the RAW declarations, not the string-coerced ``_specials``. A special
     # declared as ``9`` on a float column matches through its raw label -- the
     # string view renders 9.0 as "9.0", which never equals "9" -- so rebuilding
     # from the coerced form silently drops that fallback and the special's
     # indicator comes back all-zero on a refit.
     specials = list(spec._special_raw) or list(spec._specials)
+    shown = list(spec._special_display)
+    record = freed_levels(spec)
+    order = full_level_order(spec) if freed or returned else []
+    positional = not isinstance(getattr(spec, "_spline_obj", None), _SplineBase)
+    for label in returned:
+        at = next(i for i, special in enumerate(shown) if str(special) == label)
+        value = _returned_value(record.pop(label), values, positional=positional)
+        del specials[at]
+        display = shown.pop(at)
+        values[display if grouping is None else label] = value
+    if returned:
+        # Levels sharing a value keep their order by place: the term sorts its
+        # values stably, so a level appended last would follow its equals.
+        place = {label: i for i, label in enumerate(order)}
+        values = dict(sorted(values.items(), key=lambda item: place.get(str(item[0]), 0)))
+        if grouping is not None:
+            grouping = _grouping_in_axis_order(grouping, values, place)
+    for label in freed:
+        key = next(key for key in values if str(key) == label)
+        before = order[: order.index(label)]
+        record[label] = (values.pop(key), tuple(reversed(before)))
+        specials.append(key)
+        shown.append(key)
+    # A special the declaration also named in order= or values= is reported
+    # under that domain spelling (9.0 beside 1.0 and 2.0) and matches rows
+    # through its raw label (9). The smooth's values lack it, so it is named
+    # in values= again, which takes it out of the smooth as the declaration
+    # did and keeps the spelling; the value given is never read.
+    values.update(dict.fromkeys(shown, 0.0))
     source = pristine_basis(spec) if basis is None else basis
     # Collapsing levels shrinks the level count, so the pristine spline's
     # ``n_knots`` routinely exceeds the new ``n_levels - 1`` and construction
@@ -236,7 +273,99 @@ def rebuilt_ordered_spec(
             specials=specials or None,
         )
     rebuilt._base_is_level = named and str(base) in SYMBOLIC_BASE_POLICIES
+    if record:
+        setattr(rebuilt, FREED_LEVELS_ATTRIBUTE, record)
     return rebuilt
+
+
+def freed_levels(spec) -> dict[str, tuple[float, tuple[str, ...]]]:
+    """The special levels of ``spec`` a structural decision took off its curve.
+
+    Each label maps to its value on the axis and the levels before it in the
+    term's order, nearest first: what putting it back needs. A copy, so a
+    caller can change it freely.
+    """
+    return dict(getattr(spec, FREED_LEVELS_ATTRIBUTE, None) or {})
+
+
+def full_level_order(spec: OrderedCategorical) -> list[str]:
+    """The term's levels in order: those on its curve, and those taken off it in their place.
+
+    Levels declared special have no place and are left out. Each level taken
+    off goes back after the nearest level before it that is in the list, so
+    one taken off next to another goes back beside it.
+    """
+    order = [str(level) for level in spec._declared_smooth_levels]
+    for label, (_value, before) in freed_levels(spec).items():
+        after = next((name for name in before if name in order), None)
+        order.insert(0 if after is None else order.index(after) + 1, label)
+    return order
+
+
+def _grouping_in_axis_order(
+    grouping: LevelGrouping, values: dict, place: dict[str, int]
+) -> LevelGrouping:
+    """``grouping`` in axis order: a level put back on the curve takes its place.
+
+    A term's bands follow its grouping's order, its levels as shown follow the
+    grouping's originals, and a grouping made while a level was special lists
+    that level last in both. Each original sits at its value and each group at
+    its members' mean; a special, with no value, keeps its place after them.
+    Equal values follow ``place``, each original's place in the term's order,
+    and a group's is its first member's.
+    """
+    axis = {str(key): float(at) for key, at in values.items()}
+
+    def placed(label) -> int:
+        members = grouping.group_to_originals.get(label, [label])
+        return min((place.get(str(m), len(place)) for m in members), default=len(place))
+
+    def position(label) -> float:
+        members = [
+            axis[str(m)] for m in grouping.group_to_originals.get(label, [label]) if str(m) in axis
+        ]
+        return sum(members) / len(members) if members else float("inf")
+
+    return dataclasses.replace(
+        grouping,
+        grouped_levels=sorted(
+            grouping.grouped_levels, key=lambda label: (position(label), placed(label))
+        ),
+        all_original_levels=sorted(
+            grouping.all_original_levels,
+            key=lambda original: (axis.get(str(original), float("inf")), placed(original)),
+        ),
+    )
+
+
+def states_positional_breaks(spec) -> bool:
+    """Whether ``spec`` states Piecewise breaks by position, which a level leaving the curve moves."""
+    from superglm.features.piecewise import Piecewise
+
+    basis = getattr(spec, "_spline_obj", None)
+    breaks = getattr(basis, "breaks", None) if isinstance(basis, Piecewise) else None
+    return isinstance(breaks, list) and any(not isinstance(entry, str) for entry in breaks)
+
+
+def _returned_value(
+    entry: tuple[float, tuple[str, ...]], values: dict, *, positional: bool
+) -> float:
+    """The axis value a level put back on the curve takes.
+
+    A spline's axis keeps the declared values, so the level takes its own. A
+    Piecewise or Polynomial axis numbers the bands 0..L-1 again on every
+    build, so its old number may now be another band's: the level goes
+    between the nearest level before it still on the curve and the next band.
+    """
+    value, before = entry
+    if not positional:
+        return value
+    axis = {str(key): float(at) for key, at in values.items()}
+    after = next((axis[name] for name in before if name in axis), None)
+    if after is None:
+        return min(axis.values(), default=1.0) - 1.0
+    later = [at for at in axis.values() if at > after]
+    return after + 0.5 if not later else (after + min(later)) / 2.0
 
 
 def pristine_basis(spec: OrderedCategorical):

@@ -176,6 +176,12 @@ class EditorWidget:
             Callable[[], tuple[Callable[[JobContext], Any], Callable[[Any], dict[str, Any]]]],
         ] = {"cv": self._cv_job, "final_fit": self._final_fit_job}
         self._rating_preview: RatingPreview | None = None
+        # Free-level comparisons by term, for the fit in force. A hand edit
+        # changes neither side of a comparison, so only a new fit, its token,
+        # puts the cache aside.
+        self._fit_model: Any = None
+        self._fit_token = 0
+        self._free_levels: dict[str, dict[str, Any]] = {}
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
         self.selected_term = next(iter(self.terms), "")
@@ -241,6 +247,7 @@ class EditorWidget:
             self.terms = session_payload(self.session, self.control_counts)
             state = {
                 "model_revision": self.session.model_revision,
+                "fit_token": self._current_fit_token(),
                 "selected_term": self.selected_term,
                 "terms": self.terms,
                 "selection": {
@@ -784,6 +791,27 @@ class EditorWidget:
         )
         return payload, revision
 
+    def _current_fit_token(self) -> int:
+        """A token that changes only when the fitted model in force is replaced."""
+        if self.session.model is not self._fit_model:
+            self._fit_model = self.session.model
+            self._fit_token += 1
+            self._free_levels = {}
+        return self._fit_token
+
+    def _free_level_comparison(self, term: str) -> dict[str, Any]:
+        """``term``'s curve beside its levels fitted free, refitted once per fit in force.
+
+        The refit is a full fit, like Refit, and holds the session while it runs.
+        """
+        from superglm.editor.free_levels import free_level_comparison
+
+        with self._lock:
+            token = self._current_fit_token()
+            if term not in self._free_levels:
+                self._free_levels[term] = free_level_comparison(self.session, term)
+            return {**self._free_levels[term], "fit_token": token}
+
     def _rating_table(self, term: str) -> dict[str, Any]:
         """``term``'s block of the Excel rating table, for the Table view.
 
@@ -1214,6 +1242,25 @@ class EditorWidget:
         return self._structural_step(
             "set_reference",
             lambda target: self.session.replace_with_reference_level(target, level, method=method),
+            term=term,
+            level_display=level_display,
+        )
+
+    def _special_levels(
+        self,
+        term: str,
+        levels: list[str],
+        *,
+        special: bool = True,
+        method: str = "auto",
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        """Take levels off an ordered term's curve, or put them back, and refit at once."""
+        return self._structural_step(
+            "special_levels" if special else "on_curve_levels",
+            lambda target: self.session.replace_with_special_levels(
+                target, levels, special=special, method=method
+            ),
             term=term,
             level_display=level_display,
         )

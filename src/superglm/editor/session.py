@@ -850,13 +850,20 @@ class EditorSession:
         *,
         keep_reference: bool = True,
         X=None,
+        sample_weight=None,
     ) -> PendingStep:
         """Stage one structural change to wait for a Refit.
 
         See ``superglm.editor.staging.stage_structural``.
         """
         return staging.stage_structural(
-            self, operation, term, params, keep_reference=keep_reference, X=X
+            self,
+            operation,
+            term,
+            params,
+            keep_reference=keep_reference,
+            X=X,
+            sample_weight=sample_weight,
         )
 
     def refit_pending(self, *, method: str = "auto", **refit_kwargs: Any) -> StructuralStep:
@@ -1325,6 +1332,20 @@ class EditorSession:
         """Pin ``level`` as ``term``'s reference and refit at once, as one structural step."""
         return staging.stage_and_refit(
             self, "set_reference", term, {"level": level}, **refit_kwargs
+        )
+
+    def replace_with_special_levels(
+        self, term: str, levels: list[str], *, special: bool = True, **refit_kwargs: Any
+    ):
+        """Take ``levels`` off ``term``'s curve (or, ``special=False``, put them back) and refit.
+
+        One structural step, which one Undo takes back. ``levels`` are display
+        labels of an ordered term; a level taken off is fitted with a free
+        estimate of its own, as ``specials=`` declares.
+        """
+        operation = "special" if special else "on_curve"
+        return staging.stage_and_refit(
+            self, operation, term, {"levels": list(levels)}, **refit_kwargs
         )
 
     def replace_with_shaped_range(

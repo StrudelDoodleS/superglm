@@ -141,8 +141,8 @@ explanations describe the action before it is run.
 
 ## Waiting Changes and Refit
 
-Collapse, Ungroup, Set reference and the four shapes (Flat, Line, Quadratic and Cubic) change the
-structure of a term, so the model must be refit before they take effect. They do not refit one by
+Collapse, Ungroup, Set reference, Make special, Back on the curve and the four shapes (Flat,
+Line, Quadratic and Cubic) change the structure of a term, so the model must be refit before they take effect. They do not refit one by
 one: each change waits, and **Refit** in the application bar applies every waiting change in one
 fit.
 
@@ -215,6 +215,78 @@ example "reference B3 · waiting".
 - In the Collapsed display, selecting a whole group pins the group.
 - Special levels of an ordered term cannot be the reference.
 - A term used by an interaction cannot change its reference.
+
+## Special Levels of an Ordered Term
+
+An ordered term's curve smooths each level toward its neighbours. A level that is different in kind,
+such as a missing-value band or a level with a structural zero, can be taken off the curve as a
+special level, with an estimate of its own, as `OrderedCategorical(specials=[...])` declares in
+code.
+
+### Compare with free levels
+
+To see which levels the smoothing overrides, choose **Free levels** in the chart's toolbar. The
+model is fitted again with the term's levels all free, as a plain categorical with the same groups
+and reference, and each level's free estimate is drawn behind the curve as a diamond on its
+interval.
+
+- A level whose interval misses the curve is filled in orange: the curve holds it away from what
+  its own data says. A short tick on each whisker marks the fitted curve it is judged against,
+  which hand edits leave behind the drawn line.
+- The intervals allow for the curve's own pull toward each level. A model fitted with
+  `retain_fit_state=False` keeps nothing to measure that pull, so each interval allows for any
+  correlation between the curve and the free estimate, which makes it wider, and a note says so.
+- The intervals are widened for the number of levels compared, so a filled diamond is rarely
+  chance.
+- Each level is judged on its own. Making one level special moves the curve, and with it the other
+  levels' marks.
+- A level with little exposure has a wide interval. The smoothing helps such a level, so leave it
+  on the curve. The diamonds are placed against the levels' exposure-weighted average, so such a
+  level does not move or widen the others.
+- Some levels have no free value to draw, and get no diamond; a note names them:
+  - a level whose every response is 0, such as a band with exposure but no claims, or, for a
+    yes/no response, every response 1;
+  - a level whose rows another term covers exactly, such as a categorical with one level for just
+    those rows.
+- The intervals also allow for any correlation between the two fits, and a note says why, when
+  the session's training data holds the model's rows in another order or other rows, when the
+  family and link leave the pull unmeasured where rows sit far from their fitted mean (a Gaussian
+  response with a log link, say), when the model has a shape-constrained P-spline, when a
+  curve's binding constraints cross a level of almost no weight, or when the fit cannot be
+  measured for another reason the note gives.
+- No level is judged, and a note says why, when either fit stops before it converges (raise the
+  model's `max_iter`), or when a custom penalty removes the term from the free fit, which then
+  draws its levels flat.
+- The comparison is one more fit, like Refit, and holds the editor while it runs.
+- It stays on the chart until you choose another term or the model changes.
+- If the model has a selection penalty, it is lifted from this term for the comparison, so the
+  free levels are not shrunk. The other terms keep theirs. A custom penalty that cannot be limited
+  to some terms shrinks the free levels too, or removes them, and the legend then says so.
+- Hand edits are not part of either side: the curve and the free levels are both fits.
+
+### Make special and Back on the curve
+
+Select one or more levels on the curve and choose **Make special** in the selection palette. It
+waits for Refit, with a dashed ring round each level. After the refit the levels sit apart from the
+curve, each with its own estimate.
+
+- The reference stays on the curve: set another reference first.
+- A level in a group cannot be made special: ungroup it first.
+- A level with no rows in the data cannot be made special: it has nothing to estimate from.
+- A level where a shaped range starts or ends, or a stated knot or break, stays on the curve: move
+  or remove the range first.
+- At least two levels must stay on the curve.
+
+To put special levels back, select them and choose **Back on the curve**. Each goes back to its
+place in the order.
+
+- A level declared special in the term's code has no place on the curve, so Back on the curve is
+  unavailable for it. Change the declaration instead.
+- As with other structural changes, hand edits on the term are dropped by the refit, and Undo
+  brings them back.
+
+Run CV on the current model afterwards to check that the change holds up across the folds.
+Structure files record the special levels, so the next model can make the same levels special.
 
 ## Where New Levels Go
 
@@ -466,7 +538,8 @@ holds:
 - the groupings of its levels;
 - the reference level;
 - the shaped ranges, with their degree and join;
-- where new levels go.
+- where new levels go;
+- which levels of an ordered term are special.
 
 Choose **Export > Structure (JSON)**, or call `session.export_structure("structure.json")` from
 Python. The file is JSON with sorted keys, so two versions compare cleanly in a diff.
@@ -499,6 +572,12 @@ estimated is not carried over, so fit the copy with `fit_reml` to estimate it ag
 - A P-spline or natural spline with a shaped range is rebuilt as a B-spline, as in the editor.
 - A feature the model does not have is refused, by name.
 - A feature that is another kind of term in the model is refused, by name.
+- A level the file makes special is taken off the model's curve.
+- A level the model's code declares special cannot be put on the curve by a file. It is refused, by
+  name.
+- A file that names no special levels keeps only those the model's code declares.
+- A level a Piecewise term with breaks stated by position would lose is refused, by name: state the
+  breaks by band name.
 
 Each refusal from `apply` is a `superglm.StructureError` whose message names the feature.
 
