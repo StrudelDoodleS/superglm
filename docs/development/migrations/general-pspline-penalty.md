@@ -6,7 +6,9 @@
 
 A P-spline (`Spline(kind="ps")`) penalises differences between neighbouring
 coefficients. That penalty measures wiggliness only when the knots are evenly
-spaced. Knots placed by the `"uniform"` rule are unchanged. Knots stated with
+spaced. Evenly spaced knots are unchanged: those the `"uniform"` rule places,
+and stated or quantile-placed knots that fall at the same even spacing, such as
+`fitted_knots` passed back with `fitted_boundary`. Other knots stated with
 `knots=[...]`, or placed by a quantile rule (`"quantile"`, `"quantile_rows"` or
 `"quantile_tempered"`), are unevenly spaced, and for those the penalty now is
 the general difference penalty:
@@ -19,7 +21,15 @@ Spline(kind="ps", n_knots=8, knot_strategy="uniform")  # standard penalty, uncha
 The general penalty of Li and Cao, "General P-splines for non-uniform
 B-splines" (2022, arXiv:2201.06808), smooths towards a straight line, that is
 towards polynomials of degree below the penalty order `m`, wherever the knots
-sit. On evenly spaced knots it equals the standard penalty.
+sit. It is scaled to the size of the standard penalty for the same number of
+coefficients, so a fixed `spline_penalty` smooths about as strongly as it did.
+
+Some knots are too uneven for the general penalty to be computed reliably. Its
+largest and smallest stiffnesses then differ by more than a factor of
+`1/sqrt(eps)`, about 7e7. This happens on heavily skewed columns such as
+freMTPL2's `Density`, and on knots crowded into a small part of the axis. For
+those the penalty is the standard one with the polynomials of degree below `m`
+taken out of it. A heavily smoothed term is still a straight line.
 
 ## Why
 
@@ -31,7 +41,7 @@ whatever its knots.
 
 ## Who is affected
 
-- **Uniform knots**: nothing changes.
+- **Uniform knots, or stated knots at the same even spacing**: nothing changes.
 - **Stated knots or a quantile rule**: the fit can change. The smoothing
   parameter, the effective degrees of freedom and the curve can all move.
 - **A penalty order `m` above the degree**: the standard penalty is kept, so
@@ -60,3 +70,44 @@ whatever its knots.
   line is unpenalised on stated and quantile-placed knots, the most-smoothed fit
   is a line, and the uniform rule, evenly spaced knots and an order above the
   degree keep the standard penalty.
+- The same file pins the knots too uneven for the general penalty. These are a
+  crowded cluster of stated knots, knots 1e-160 apart, `m=3` on lognormal(0, 2)
+  quantile knots, and a tensor interaction with a skewed quantile margin. Each
+  fit completes. On the crowded and the 1e-160 knots the line stays
+  unpenalised. On `quantile_rows` knots of lognormal(0, 1.5) data REML counts
+  the penalty's full rank. `tests/test_realdata_parity.py` fits `select=True`
+  on freMTPL2's `VehAge` and `Density` with `quantile_rows` knots.
+
+## Performance
+
+Measured on the full freMTPL2 frequency book (678,013 rows): a Poisson
+`fit_reml` with a log-exposure offset, eight threads in every pool, runs in
+A-B-B-A order. Columns are clipped as in `tests/test_realdata_parity.py`. The
+backend dispatched was `gram` in every run.
+
+**Like for like.** `BonusMalus` (`quantile`, 12 knots), `DrivAge`
+(`quantile_tempered`, 12) and `VehPower` (`quantile_tempered`, 8) take the
+general penalty both before and after the rescaling, so only its size differs.
+
+| Build | Wall time (s) | Peak RSS (MiB) | Deviance | EDF | REML iterations |
+|---|---|---|---|---|---|
+| Unscaled general penalty | 4.07, 4.13 | 1223, 1331 | 217456.43271 | 31.14590 | 7 |
+| Scaled, with the fallback | 4.57, 3.92 | 1275, 1273 | 217456.43274 | 31.14588 | 7 |
+
+The smoothing parameters differ by the scale factor: `BonusMalus` 2.117 and
+2.924, `DrivAge` 21.67 and 41.48, `VehPower` 2.071 and 6.423.
+
+**With a strongly skewed column.** `VehAge` and `BonusMalus` (`quantile`,
+12 knots), `Density` (`quantile`, 10) and `DrivAge` (uniform, 10). `Density`'s
+general penalty has a condition of 1.7e9, so it now takes the fallback, and
+`VehAge`'s quantile knots fall at the even spacing and take the standard
+penalty.
+
+| Build | Wall time (s) | Peak RSS (MiB) | Deviance | EDF | REML iterations | Density lambda |
+|---|---|---|---|---|---|---|
+| 0.39.0 (standard penalty) | 37.38 | 838 | 211895.68 | 37.68 | 8 | 13550 |
+| Unscaled general penalty | 35.86, 32.62 | 835, 823 | 211899.95 | 40.37 | 8 | 6.088 |
+| Scaled, with the fallback | 40.02, 38.37 | 812, 817 | 211888.12 | 40.38 | 10 | 907.5 |
+
+The fallback changes `Density`'s penalty, and REML takes two more iterations
+to settle it; the time per iteration is unchanged.
