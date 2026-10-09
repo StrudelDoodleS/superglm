@@ -171,7 +171,7 @@
  * @property {number} z
  * @property {boolean} shrunk whether a selection penalty still shrinks the free levels
  * @property {number} fit_token the fit in force it was compared with; a hand edit keeps it
- * @property {string|null} notice the levels left without a free value, and why
+ * @property {string|null} notice what the comparison leaves out or could not measure, and why
  */
 /**
  * The /revert_to_original request carries no fields.

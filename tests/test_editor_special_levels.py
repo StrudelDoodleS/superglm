@@ -24,7 +24,7 @@ from superglm import (
     SuperGLM,
     collapse_levels,
 )
-from superglm.distributions import NegativeBinomial, Tweedie
+from superglm.distributions import Binomial, NegativeBinomial, Tweedie
 from superglm.editor import EditorSession
 from superglm.editor import free_levels as free_levels_module
 from superglm.editor.errors import EditorTypeError, EditorValueError
@@ -36,6 +36,7 @@ from superglm.features.rebuild import (
     full_level_order,
     rebuilt_ordered_spec,
 )
+from superglm.links import LogitLink
 from superglm.solvers.working_rows import coefficient_working_rows, fisher_working_weights
 from tests.test_editor import _post_json
 
@@ -1163,7 +1164,7 @@ def test_the_generic_observed_rows_are_the_library_kernels_where_it_declares_the
     fisher = fisher_working_weights(
         distribution=distribution, link=link, mu=fitted, eta=eta, sample_weight=w
     )
-    generic = free_levels_module._observed_rows(distribution, link, y, fitted, eta, fisher)
+    generic = free_levels_module._observed_rows(distribution, link, y, eta, fisher)
     kernel = coefficient_working_rows(
         distribution=distribution,
         link=link,
@@ -1179,6 +1180,21 @@ def test_the_generic_observed_rows_are_the_library_kernels_where_it_declares_the
     p = 2.0 if family == "gamma" else 1.5
     scale = fisher * (1.0 + np.abs(y - fitted) * (p - 1.0) / fitted)
     assert np.all(np.abs(generic - kernel) <= 16 * u * scale)
+
+
+def test_a_logit_row_past_the_binomial_clip_is_still_canonical():
+    """At eta = -17 the binomial clips the mean to 1e-7, while expit(eta) is 4.1e-8.
+
+    Read at the clipped mean, V'/V no longer cancelled the link's own term,
+    so a logit fit left its covariance for the dense rebuild, or fell back
+    to the bound as if the pair were not canonical.
+    """
+    eta = np.array([-17.0, 0.3, 17.0])
+    fisher = np.array([4.1e-8, 0.24, 4.1e-8])
+    rows = free_levels_module._observed_rows(
+        Binomial(), LogitLink(), np.array([1.0, 0.0, 0.0]), eta, fisher
+    )
+    assert rows is fisher
 
 
 @pytest.mark.parametrize("family", ["gamma", "poisson"])

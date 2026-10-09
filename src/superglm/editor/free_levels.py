@@ -471,10 +471,10 @@ def _observed_curvature(model, mu, eta, prior, fisher) -> np.ndarray | None:
             sample_weight=prior,
             prefer_observed=True,
         ).weights
-    return _observed_rows(distribution, link, y, mu, eta, fisher)
+    return _observed_rows(distribution, link, y, eta, fisher)
 
 
-def _observed_rows(distribution, link, y, mu, eta, fisher) -> np.ndarray | None:
+def _observed_rows(distribution, link, y, eta, fisher) -> np.ndarray | None:
     """The observed rows ``alpha W``, or ``fisher`` itself under a canonical link.
 
     ``alpha = 1 + (y - mu)(V'/V + g''/g')`` (Wood, JRSSB 73(1), 2011, section
@@ -489,9 +489,12 @@ def _observed_rows(distribution, link, y, mu, eta, fisher) -> np.ndarray | None:
     if second is None or variance_slope is None:
         return None
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        # Every factor of alpha at one point: the link's own mean, not the
+        # clipped one, which a binomial holds off 0 and 1 while eta runs on.
+        mean = np.asarray(link.inverse(eta), dtype=np.float64)
         first = np.asarray(link.deriv_inverse(eta), dtype=np.float64)
-        spreading = np.asarray(variance_slope(mu), dtype=np.float64) / np.asarray(
-            distribution.variance(mu), dtype=np.float64
+        spreading = np.asarray(variance_slope(mean), dtype=np.float64) / np.asarray(
+            distribution.variance(mean), dtype=np.float64
         )
         bending = np.asarray(second(eta), dtype=np.float64) / first**2
         bracket = spreading - bending
@@ -500,7 +503,7 @@ def _observed_rows(distribution, link, y, mu, eta, fisher) -> np.ndarray | None:
     u = np.finfo(np.float64).eps / 2
     if np.all(np.abs(bracket) <= 8 * u * (np.abs(spreading) + np.abs(bending))):
         return fisher
-    return fisher * (1.0 + (y - mu) * bracket)
+    return fisher * (1.0 + (y - mean) * bracket)
 
 
 def _on_binding_face(model, active, width: int, apply) -> Any:
