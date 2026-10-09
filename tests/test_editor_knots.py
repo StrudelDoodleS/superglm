@@ -209,6 +209,31 @@ def test_an_ordered_term_takes_at_most_one_knot_fewer_than_its_levels(book):
     )
 
 
+@pytest.mark.parametrize("levels", [["B6", "B7"], ["B2", "B3"]])
+def test_a_collapsed_ordered_term_keeps_its_knots_on_the_expanded_level_axis(book, levels):
+    """The chart draws each original band at its own place, and the knots sit on those places."""
+    session = _session(book)
+    session.stage_structural("collapse", "band", {"levels": levels})
+    session.refit_pending()
+    knots = session_payload(session)["band"]["knots"]
+    assert (knots["available"], knots["reason"]) == (True, None)
+    # Seven levels on the curve, one of them a group.
+    assert knots["max_count"] == 6
+    original = session.model._specs["band"]._original_level_to_value
+    values = [original[band] for band in BANDS]
+    np.testing.assert_allclose(
+        np.interp(knots["positions"], np.arange(len(BANDS)), values),
+        _knots(session.model, "band"),
+        rtol=0,
+        atol=1e-12,
+    )
+    session.stage_structural("knots", "band", {"positions": [1.5, 4.0, 5.5]})
+    session.refit_pending()
+    np.testing.assert_allclose(
+        session_payload(session)["band"]["knots"]["positions"], [1.5, 4.0, 5.5], rtol=0, atol=1e-12
+    )
+
+
 def test_a_knot_between_two_levels_sits_between_their_values_on_the_axis():
     """Chart positions run 0..L-1 over the smooth levels; the spline's own axis is their values."""
     values = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}

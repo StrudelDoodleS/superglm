@@ -555,13 +555,17 @@ def _strategy(spline: _SplineBase) -> str:
 class _Axis:
     """Chart coordinates of a term's knot axis: identity, or an ordered term's level positions."""
 
-    def __init__(self, values: NDArray | None):
+    def __init__(self, values: NDArray | None, max_count: int | None = None):
         self.values = values
-        self.max_count = None if values is None else int(values.size) - 1
+        self.max_count = max_count
 
     @classmethod
     def of(cls, spec, term: EditableTerm) -> _Axis:
-        return cls(_ordered_axis(spec, term) if isinstance(spec, OrderedCategorical) else None)
+        if not isinstance(spec, OrderedCategorical):
+            return cls(None)
+        values = _ordered_axis(spec, term)
+        # The spline sees one value per level on the curve, a group being one.
+        return cls(values, None if values is None else len(spec._smooth_levels) - 1)
 
     def to_axis(self, chart) -> NDArray:
         chart = np.asarray(chart, dtype=np.float64)
@@ -583,18 +587,34 @@ class _Axis:
 
 
 def _ordered_axis(spec: OrderedCategorical, term: EditableTerm) -> NDArray | None:
-    """The axis values of an ordered term's smooth levels, in display order, or None.
+    """The axis values of the levels an ordered term draws on its curve, in display order, or None.
 
-    None unless the chart shows the smooth levels first, in the axis's order,
-    with strictly increasing values: the mapping a knot position needs.
+    The chart draws a grouped term with its groups expanded, each original
+    level at its own place, so the knots sit on that expanded axis: an
+    original level at its own value, as the term was declared. None unless
+    the chart shows those levels first, in the axis's order, with strictly
+    increasing values: the mapping a knot position needs.
     """
-    smooth = list(spec._smooth_levels)
-    if term.levels is None or term.levels[: len(smooth)] != [str(level) for level in smooth]:
+    grouping = getattr(spec, "_grouping", None)
+    if grouping is None:
+        shown = list(spec._smooth_levels)
+        values = [spec._level_to_value[level] for level in shown]
+    else:
+        original = getattr(spec, "_original_level_to_value", None) or {}
+        shown = [
+            member
+            for group in spec._smooth_levels
+            for member in grouping.group_to_originals.get(str(group), ())
+        ]
+        if any(str(member) not in original for member in shown):
+            return None
+        values = [original[str(member)] for member in shown]
+    if term.levels is None or term.levels[: len(shown)] != [str(level) for level in shown]:
         return None
-    values = np.asarray([spec._level_to_value[level] for level in smooth], dtype=np.float64)
-    if values.size < 2 or not np.all(np.diff(values) > 0.0):
+    axis = np.asarray(values, dtype=np.float64)
+    if axis.size < 2 or not np.all(np.diff(axis) > 0.0):
         return None
-    return values
+    return axis
 
 
 def _gap_text(gap: float) -> str:
