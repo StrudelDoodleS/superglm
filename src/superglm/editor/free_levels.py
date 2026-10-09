@@ -58,6 +58,7 @@ from superglm.inference.covariance import covariance_selected_block
 from superglm.links import stabilize_eta
 from superglm.model.explain_ops import _shape_repaired
 from superglm.model.state_ops import _grouped_active_state, _legacy_active_state
+from superglm.solvers.constrained_qp import _feasibility_slack, _roundoff_tolerance
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -102,6 +103,10 @@ _SIGNED = (
     + "under this family and link, rows far from their fitted mean leave it unmeasured."
 )
 _UNMEASURED = _INDEPENDENT + "this fit cannot measure it."
+_UNCONVERGED = (
+    "The {fit} stopped before it converged, so no level is judged: raise the model's max_iter "
+    "to compare."
+)
 _NO_DATA = (
     "Comparing with free levels refits the model, which needs its training data: open the "
     "editor with train_data, or from a model fitted with its data kept."
@@ -184,7 +189,14 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
         dict(zip(levels, exposure.tolist(), strict=True)),
         {label for labels in separated.values() for label in labels},
     )
-    payload = _comparison(term, spec, gaps, shrunk=shrunk)
+    # A fit that stopped before converging holds no estimates to judge by:
+    # its diamonds are drawn, and no level is flagged.
+    unconverged = [
+        fit
+        for fit, model in (("free fit", free_model), ("model in force", session.model))
+        if not bool(getattr(model.result, "converged", True))
+    ]
+    payload = _comparison(term, spec, gaps, shrunk=shrunk, judge=not unconverged)
     notes = [
         _SEPARATED.format(
             levels=", ".join(labels),
@@ -200,6 +212,7 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
                 whose="its" if len(gaps.undetermined) == 1 else "their",
             )
         )
+    notes.extend(_UNCONVERGED.format(fit=fit) for fit in unconverged)
     if gaps.note is not None:
         notes.append(gaps.note)
     payload["notice"] = " ".join(notes) or None
@@ -427,14 +440,9 @@ def _gap_variances(
 def _observed_curvature(model, mu, eta, prior, fisher) -> np.ndarray | None:
     """Each row's curvature of the fit's own objective at its optimum; ``fisher`` itself if equal.
 
-    The observed rows are ``alpha W`` with ``alpha = 1 + (y - mu)(V'/V + g''/g')``
-    (Wood, JRSSB 73(1), 2011, section 3), whatever rows the fit iterated on:
-    the optimum is the same. With ``h`` the inverse link, ``g''/g' = -h''/h'^2``.
-    The bracket vanishes under a canonical link, where Fisher's rows are the
-    observed ones; it is taken as vanishing when every row's value is within
-    the rounding of its two terms. Gamma and Tweedie with a log link take the
-    library's own observed kernels. None when the family or link does not
-    give the derivatives.
+    Gamma and Tweedie with a log link take the library's own observed
+    kernels; every other pair :func:`_observed_rows`. None when the family or
+    link does not give the derivatives.
     """
     distribution, link = model._distribution, model._link
     y = np.asarray(model._fit_y_ref, dtype=np.float64).ravel()
@@ -448,6 +456,19 @@ def _observed_curvature(model, mu, eta, prior, fisher) -> np.ndarray | None:
             sample_weight=prior,
             prefer_observed=True,
         ).weights
+    return _observed_rows(distribution, link, y, mu, eta, fisher)
+
+
+def _observed_rows(distribution, link, y, mu, eta, fisher) -> np.ndarray | None:
+    """The observed rows ``alpha W``, or ``fisher`` itself under a canonical link.
+
+    ``alpha = 1 + (y - mu)(V'/V + g''/g')`` (Wood, JRSSB 73(1), 2011, section
+    3), whatever rows the fit iterated on: the optimum is the same. With ``h``
+    the inverse link, ``g''/g' = -h''/h'^2``. The bracket vanishes under a
+    canonical link, where Fisher's rows are the observed ones; it is taken as
+    vanishing when every row's value is within the rounding of its two terms.
+    None when the family or link does not give the derivatives.
+    """
     second = getattr(link, "deriv2_inverse", None)
     variance_slope = getattr(distribution, "variance_derivative", None)
     if second is None or variance_slope is None:
@@ -467,6 +488,47 @@ def _observed_curvature(model, mu, eta, prior, fisher) -> np.ndarray | None:
     return fisher * (1.0 + (y - mu) * bracket)
 
 
+def _on_binding_face(model, active, width: int, apply):
+    """``apply`` restricted to the face of the fit's binding shape constraints.
+
+    A constraint ``A theta >= b`` that binds at the fit holds the solution on
+    its face under any small change of the response, so the fit moves with
+    ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
+    ``F``; a curve held flat by its monotone constraint does not move at all.
+    A row binds when its slack, in the QP's own units, is within the fit's
+    coefficient precision, about ``sqrt(tol)``, and the dot product's
+    rounding: a row that close cannot be told from a binding one, and taken
+    as binding it only widens an interval.
+    """
+    full = {group.name: group for group in model._groups}
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    rows = []
+    for group in active:
+        constraints = getattr(full.get(group.name), "constraints", None)
+        if constraints is None or not constraints.n_constraints:
+            continue
+        source = full[group.name]
+        theta = beta[source.start : source.end]
+        A = np.asarray(constraints.A, dtype=np.float64)
+        slack = _feasibility_slack(A, theta, np.asarray(constraints.b, dtype=np.float64))
+        within = float(np.sqrt(model._tol)) + _roundoff_tolerance(A.shape[1])
+        for row in A[slack <= within]:
+            embedded = np.zeros(width)
+            embedded[group.start : group.end] = row
+            rows.append(embedded)
+    if not rows:
+        return apply
+    R = np.array(rows)
+    moves = np.column_stack([apply(row) for row in R])
+    held = np.linalg.pinv(R @ moves, hermitian=True)
+
+    def restricted(contrast: np.ndarray) -> np.ndarray:
+        moved = apply(contrast)
+        return moved - moves @ (held @ (R @ moved))
+
+    return restricted
+
+
 @dataclass(frozen=True)
 class _Influence:
     """A fit's first-order response to its data, for contrasts over one term's columns."""
@@ -481,7 +543,8 @@ def _influence(model, name: str) -> _Influence | str:
     """``c -> X_c F c`` over the term's active columns, or the sentence saying why not.
 
     At the fitted optimum a contrast moves with the response as
-    ``(w / (V g')) X_c F c`` (the implicit function theorem), with ``F`` the
+    ``(w / (V g')) X_c F c`` (the implicit function theorem), conditional on
+    the fitted smoothing parameters, as a REML fit's ``Vp`` is, with ``F`` the
     inverse of the penalised curvature of the fit's own objective, its
     observed curvature (:func:`_observed_curvature`), and the intercept
     profiled out, so the design is centred on the curvature weights' mean.
@@ -513,6 +576,10 @@ def _influence(model, name: str) -> _Influence | str:
     if observed is not fisher:
         if np.any(observed < 0.0):
             return _SIGNED
+        if getattr(solver, "scop_inference", None) is not None:
+            # A SCOP term's shape lives in its reparametrisation, whose
+            # geometry only the fit's own covariance reads.
+            return _UNMEASURED
         curvature = observed
         try:
             X, active, _inverse, _augmented, _gram, inverse, _rank = _legacy_active_state(
@@ -541,6 +608,7 @@ def _influence(model, name: str) -> _Influence | str:
         width = covariance.shape[0]
     if X.p != width:
         return _UNMEASURED
+    move = _on_binding_face(model, active, width, apply)
     columns = _term_columns(active, name)
     # The weighted mean's sums, on weights rescaled by a power of two (exact),
     # stay in range whatever the prior weights' size.
@@ -551,7 +619,7 @@ def _influence(model, name: str) -> _Influence | str:
     def influence(row: np.ndarray) -> np.ndarray:
         contrast = np.zeros(width)
         contrast[columns] = row
-        moved = X.matvec(apply(contrast))
+        moved = X.matvec(move(contrast))
         return moved - float(unit @ moved) / total
 
     return _Influence(influence=influence, width=len(columns), fisher=fisher, spread=spread)
@@ -623,7 +691,9 @@ def _lift_selection(free_model, model, name: str) -> bool:
     return False
 
 
-def _comparison(term, spec: OrderedCategorical, gaps: _Gaps, *, shrunk: bool) -> dict[str, Any]:
+def _comparison(
+    term, spec: OrderedCategorical, gaps: _Gaps, *, shrunk: bool, judge: bool = True
+) -> dict[str, Any]:
     """Each level's centred free estimate against the centred curve.
 
     The gap is drawn on the chart's own scale: the diamond sits that far from
@@ -645,7 +715,7 @@ def _comparison(term, spec: OrderedCategorical, gaps: _Gaps, *, shrunk: bool) ->
         free_var, gap_var = float(gaps.free_var[i]), float(gaps.gap_var[i])
         if gap_var <= (1.0 - _MAX_LEVERAGE) * free_var:
             gap_var = free_var
-        found.append((level, group, gap, gap_var, free_var > 0.0))
+        found.append((level, group, gap, gap_var, judge and free_var > 0.0))
     # One comparison per group judged: a group's members share one free
     # estimate. A level with no free variance has nothing to judge.
     judged_groups = {group for _, group, _, _, judged in found if judged}
