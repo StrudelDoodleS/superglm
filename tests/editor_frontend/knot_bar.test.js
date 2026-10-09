@@ -299,7 +299,7 @@ test("the chip names the knots in every mode and takes the waiting tint", () => 
   renderKnotChip(chip, orderedTerm());
   assert.deepEqual([chip.hidden, chip.textContent, chip.dataset.waiting], [false, "1 knot · even spacing", "false"]);
   renderKnotChip(chip, orderedTerm({}, {
-    knots: { positions: [1, 2.5], count: 2, strategy: "explicit", alpha: 0.2 },
+    knots: { positions: [1, 2.5], count: 2, strategy: "explicit", alpha: 0.2, from_editor: true },
   }));
   assert.deepEqual([chip.textContent, chip.dataset.waiting], ["2 knots · placed by hand", "true"]);
   renderKnotChip(chip, { kind: "categorical", knots: null });

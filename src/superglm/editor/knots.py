@@ -195,11 +195,14 @@ def pending_knots(session, name: str) -> dict[str, Any] | None:
             return None
         if step.operation == "knots":
             meta = step.metadata
+            # Read as TermKnots.from_editor will be after a Refit: a reset is not by hand.
+            spline = source_spline(step.draft_spec)
             return {
                 "positions": list(meta["chart_positions"]),
                 "count": int(meta["count"]),
                 "strategy": meta["strategy"],
                 "alpha": meta["alpha"],
+                "from_editor": bool(getattr(spline, EDITOR_KNOTS_ATTRIBUTE, False)),
             }
     return None
 
