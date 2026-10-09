@@ -66,6 +66,7 @@ _NO_DECLARATION = (
     "This model does not keep the term's declaration; refit it with this version of superglm "
     "to move its knots."
 )
+_NO_RANGE = "Every value of this term's column is the same, so it has no range to place knots on."
 _LEVELS_WAITING = (
     "A waiting change on {term!r} changes its levels; refit it before changing the knots."
 )
@@ -112,6 +113,10 @@ def knots_unavailable_reason(model, name: str, term: EditableTerm) -> str | None
         return _INTERACTION
     if isinstance(spec, OrderedCategorical) and _ordered_axis(spec, term) is None:
         return _NO_AXIS
+    fitted = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+    boundary = fitted.fitted_boundary
+    if boundary is not None and not boundary[1] > boundary[0]:
+        return _NO_RANGE
     if declared_spline(model, name) is None:
         return _NO_DECLARATION
     return None

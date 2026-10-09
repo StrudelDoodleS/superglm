@@ -434,3 +434,22 @@ def test_a_cardinal_spline_has_no_basis_to_draw():
     model = _declared(age=Spline(kind="cr_cardinal", n_knots=5)).fit(X, y, sample_weight=w)
     knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["age"]["knots"]
     assert knots["available"] and knots["basis"] is None
+
+
+def test_a_term_whose_column_holds_one_value_opens_with_its_knots_unavailable():
+    """A P-spline fitted on one value has a zero-width domain, with no knot step to snap to."""
+    X = pd.DataFrame({"x": np.full(100, 5.0)})
+    y = np.arange(100) / 100
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Spline(kind="ps")},
+        selection_penalty=0,
+        retain_fit_state=False,
+    ).fit(X, y)
+    session = EditorSession.from_model(model)
+    knots = session_payload(session)["x"]["knots"]
+    assert (knots["available"], knots["reason"]) == (
+        False,
+        "Every value of this term's column is the same, so it has no range to place knots on.",
+    )
+    session.widget().close()
