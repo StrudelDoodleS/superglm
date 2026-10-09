@@ -351,8 +351,16 @@ the shape and its edges.
   fitting a level, use **Level from left** or **Level from right**. That is an edit, not a refit.
 - To fit one polynomial over the whole axis, choose Select all and then a shape.
 - A term can hold several ranges, each added as its own change.
-- A new range may not overlap one already shaped. Undo the old one, or choose a range outside it.
+- A new range paints over the ranges it overlaps. A range it covers goes. A range it overlaps at
+  one end keeps the part outside the new range, and a range it falls inside is split in two around
+  it. Each part keeps its shape and join and meets the new range at its edge.
 - Choosing a new shape on exactly the same range replaces the old shape.
+- The History names what a change does to the ranges it paints over, such as
+  "Flat 85 – 110 (trims Line 97 – 150 to 110 – 150)". Until Refit, each part a waiting change
+  leaves is drawn as a dashed box too, and the range in force keeps its band.
+- Each part kept of a cut range needs as many values as any range of its shape. If one would hold
+  too few, SuperGLM refuses the new range and names the range it would cut. Cover all of that
+  range, or leave more of it outside the new one.
 - A Line needs at least two distinct values in the range, a Quadratic three and a Cubic four. On
   an ordered term each band is one value, and so is a collapsed group inside the range. When the
   selection holds too few, the icon is disabled and says so on hover.

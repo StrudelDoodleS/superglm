@@ -481,8 +481,16 @@ def test_two_waiting_shapes_on_one_spline_compose_on_the_fitted_knots(book):
     np.testing.assert_array_equal(second._explicit_knots, fitted.fitted_base_knots)
     assert second._explicit_boundary == fitted.fitted_boundary
     assert step["label"] == "Flat 60–70 in age"
-    with pytest.raises(EditorValueError, match="^This range overlaps the Line range 30–45."):
-        shaped_feature_spec(model, "age", lo=40.0, hi=50.0, degree=0, X=X, draft_spec=first)
+    # A third is painted over the waiting Line, which keeps the part outside it.
+    third, step = shaped_feature_spec(
+        model, "age", lo=40.0, hi=50.0, degree=0, X=X, draft_spec=second
+    )
+    assert [(r.lo, r.hi, r.degree) for r in third.polynomial_ranges] == [
+        (30.0, 40.0, 1),
+        (40.0, 50.0, 0),
+        (60.0, 70.0, 0),
+    ]
+    assert step["label"] == "Flat 40–50 in age (trims Line 30–45 to 30–40)"
 
 
 def test_step_ids_are_seven_hex_digits_unique_in_the_process():

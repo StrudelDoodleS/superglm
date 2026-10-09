@@ -16,7 +16,7 @@ import dataclasses
 import re
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -520,6 +520,47 @@ def merged_ranges(
             )
         kept.append(current)
     return [*kept, new]
+
+
+class PaintedRanges(NamedTuple):
+    """The ranges once a new one is painted over those it overlaps.
+
+    ``ranges`` are in axis order. ``cut`` pairs each range the new one
+    overlapped, in axis order, with what is left of it: nothing when the new
+    range covers it, one piece when it overlaps one end, two when the new
+    range lies strictly inside it.
+    """
+
+    ranges: list[PolynomialRange]
+    cut: list[tuple[PolynomialRange, tuple[PolynomialRange, ...]]]
+
+
+def painted_ranges(
+    existing: tuple[PolynomialRange, ...],
+    new: PolynomialRange,
+    position: Callable[[Any], float],
+) -> PaintedRanges:
+    """``existing`` with ``new`` painted over it: wherever they overlap, ``new`` wins.
+
+    A range ``new`` covers is removed, the same span included. One it
+    overlaps at an end keeps the part outside ``new``, and one that holds it
+    strictly is split around it; each piece keeps its degree and join and
+    shares its edge with ``new``, as tiled ranges do. A range ``new`` only
+    touches is kept whole. The editor's shapes paint; a structure file states
+    no overlaps, and :func:`merged_ranges` applies it.
+    """
+    span = (position(new.lo), position(new.hi))
+    kept, cut = [], []
+    for current in sorted(existing, key=lambda r: position(r.lo)):
+        at = (position(current.lo), position(current.hi))
+        if at[1] <= span[0] or span[1] <= at[0]:
+            kept.append(current)
+            continue
+        left = [dataclasses.replace(current, hi=new.lo)] if at[0] < span[0] else []
+        right = [dataclasses.replace(current, lo=new.hi)] if span[1] < at[1] else []
+        kept += left + right
+        cut.append((current, (*left, *right)))
+    return PaintedRanges(sorted([*kept, new], key=lambda r: position(r.lo)), cut)
 
 
 def declared_spline(model, name: str) -> _SplineBase | None:
