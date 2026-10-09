@@ -200,12 +200,15 @@ available, reason      whether the tool works on the term, and why not (its popo
 positions, count       the interior knots in force, ascending, in chart coordinates
 strategy, alpha        the rule that placed them, or "explicit"; the tempered quantiles' power
 from_editor            the knots in force were set in the editor
-lo, hi, min_gap        knots lie strictly inside (lo, hi), at least min_gap apart and from the ends
+lo, hi                 knots lie strictly inside (lo, hi)
+min_gap                an ordered term's grid and least gap, a tenth of a level; null when numeric
 max_count              an ordered term's most knots, one fewer than its levels on the curve
 resettable             the knots in force or waiting differ from the opened model's
 even_only              why the term takes evenly spaced knots only, else null
 basis                  {degree, ends, boundary, level_values}: how the browser rebuilds the
                        B-spline basis to draw it; null for a cardinal spline
+waiting_basis          the same for the basis waiting changes put in force, such as another
+                       kind's, while it is built differently; else null
 kind, select           the spline's kind ("ps", "bs", "cr", "ns" or "cr_cardinal") and
                        shrinkage in force (superglm/editor/basis.py)
 kinds                  the kinds the Kind dropdown offers; a cardinal spline is named, not offered
@@ -214,10 +217,13 @@ select_reason          changes leave it, and the fixed sentence why not
 ```
 
 Chart coordinates are a numeric spline's own values, and an ordered term's display positions,
-where smooth level `i` sits at `i` and the spline's axis maps linearly between levels. The
-browser snaps a numeric knot to three significant figures of `hi - lo`, the grid a shaped range's
-edges snap to, and an ordered one to a tenth of a level; `min_gap` is that same step, and Python
-refuses a knot closer than it. With `even_only` set, no knot moves or arrives by hand and Placed
+where level `i` on the curve sits at `i` and the spline's axis maps linearly between levels; a
+grouped term's knots sit on its expanded levels, each original level at its own declared value.
+The browser snaps a numeric knot to two significant figures of the space between the knots or
+ends beside it, so knots a rule put close together where the data is dense move in steps that
+suit them, and an ordered one to a tenth of a level (`min_gap`). Python refuses a knot a change
+places closer than that step to the knots or ends beside it; the knots a change keeps stay as
+close as they are. With `even_only` set, no knot moves or arrives by hand and Placed
 by offers even spacing alone; the count and Reset knots still stage a change.
 
 Every finished gesture stages one `knots` change: a drag, a click on the axis, a drag below it or
@@ -299,7 +305,8 @@ one of the fixed sentences in `rating_preview.py`, never builder text.
   keeps the drawn frame on the svg as `_knotFrame`.
 - `knot_gestures.js` binds Knots mode's pointer and key gestures. It owns the gesture in progress
   and the selected knot, redraws only the knot layer while a knot moves, and stages the finished
-  change.
+  change. One change is staged at a time: a gesture finished meanwhile acts on the knots as drawn
+  and its change follows that one, the latest only, so a held arrow key moves the same knot on.
 - `chart/knot_basis.js` rebuilds a term's B-spline basis from `term.knots.basis` and evaluates
   it (Piegl and Tiller's FindSpan and BasisFuns); it says which functions a dragged knot or a
   waiting change reshapes. `chart/basis_overlay.js` draws them, while a knot is dragged in Knots
