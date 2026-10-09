@@ -13,7 +13,6 @@ import {
   stepRule,
   stepperState
 } from "../knots.js";
-import { waitingLabel } from "./context_bar.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('../api/contracts.js').KnotParams} KnotParams */
@@ -185,24 +184,23 @@ export function renderKnotChip(node, term) {
 
 /**
  * The status line while Knots mode is on: what each gesture does, or why the
- * last one did nothing, after the changes waiting for refit. On a term that
- * takes evenly spaced knots only, what can change them instead.
+ * last one did nothing; on a term that takes evenly spaced knots only, what
+ * can change them instead. It leaves out the changes waiting for refit, which
+ * the Refit button's count and the knots chip's tint already show, so the
+ * gestures fit the line.
  * @param {HTMLElement} statusNode
- * @param {{pendingCount?:number, message?:string|null, evenOnly?:boolean}} state
+ * @param {{message?:string|null, evenOnly?:boolean}} state
  */
-export function renderKnotStatus(statusNode, { pendingCount = 0, message = null, evenOnly = false }) {
+export function renderKnotStatus(statusNode, { message = null, evenOnly = false }) {
   const doc = statusNode.ownerDocument;
-  /** @param {string} tag @param {string} content @param {string} [className] */
-  const node = (tag, content, className) => {
+  /** @param {string} tag @param {string} content */
+  const node = (tag, content) => {
     const element = doc.createElement(tag);
     element.textContent = content;
-    if (className) element.className = className;
     return element;
   };
   /** @type {(Node|string)[]} */
-  const parts = pendingCount > 0
-    ? [node("strong", waitingLabel(pendingCount), "status-waiting"), " · "]
-    : [];
+  const parts = [];
   if (message) {
     parts.push(message);
   } else if (evenOnly) {

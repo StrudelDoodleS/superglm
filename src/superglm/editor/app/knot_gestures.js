@@ -129,7 +129,8 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
     }
     event.preventDefault();
     svg.setPointerCapture(event.pointerId);
-    svg.focus({ preventScroll: true });
+    // The chart takes the arrow keys next; a ring round it is for keyboard focus only.
+    svg.focus({ preventScroll: true, focusVisible: false });
     draw();
   }
 

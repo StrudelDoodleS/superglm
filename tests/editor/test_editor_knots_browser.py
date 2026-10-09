@@ -44,6 +44,9 @@ def test_one_knot_more_waits_for_refit_and_undo_takes_it_back(open_editor_page):
         refit = page.locator("#refitPendingAction")
         page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
         assert refit.get_attribute("aria-label") == "Refit, 1 change waiting"
+        # The Refit count and the chip show the change waiting; the status line keeps to the
+        # gestures, so they fit it.
+        assert page.locator("#status").inner_text().startswith("Knots. Drag to move")
         # The waiting draft's knots are drawn; the fit in force is untouched until Refit.
         assert page.locator("#chart .knot-handle").count() == 8
         assert _in_force_count(session) == 7

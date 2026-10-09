@@ -1136,7 +1136,6 @@ function renderKnotStatusLine() {
   const term = currentTerm();
   if (!knotGestures || !knotsModeOn(term)) return;
   renderKnotStatus(statusNode, {
-    pendingCount: selectPendingSteps(store.getState()).length,
     message: knotGestures.message(),
     evenOnly: Boolean(term.knots.even_only)
   });

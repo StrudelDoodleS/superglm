@@ -226,9 +226,8 @@ test("in Knots mode the status line explains the gestures, or why the last did n
       + " the selected knot, Delete removes it",
   );
   assert.equal(status.children.find((child) => child.tagName === "KBD").textContent, "Delete");
-  renderKnotStatus(status, { pendingCount: 1, message: AT_LEAST_ONE });
-  assert.equal(status.children[0].className, "status-waiting");
-  assert.equal(status.textContent, `1 change waiting for refit · ${AT_LEAST_ONE}`);
+  renderKnotStatus(status, { message: AT_LEAST_ONE });
+  assert.equal(status.textContent, AT_LEAST_ONE);
   renderKnotStatus(status, { evenOnly: true });
   assert.equal(
     status.textContent,
