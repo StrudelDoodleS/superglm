@@ -1174,12 +1174,19 @@ def test_widget_http_stage_waits_without_fitting_and_says_what_waits(book, monke
         "groups": {"B10+B11": ["B10", "B11"]},
         "ranges": [],
         "reference": None,
+        "specials": None,
     }
-    assert terms["area"]["pending"] == {"groups": None, "ranges": [], "reference": "B"}
+    assert terms["area"]["pending"] == {
+        "groups": None,
+        "ranges": [],
+        "reference": "B",
+        "specials": None,
+    }
     assert terms["age"]["pending"] == {
         "groups": None,
         "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line", "join": "tangent"}],
         "reference": None,
+        "specials": None,
     }
     assert state["undo_redo"]["undo"] == "Line 30–45 in age"
     assert [(entry["kind"], entry.get("status")) for entry in state["timeline"]] == [

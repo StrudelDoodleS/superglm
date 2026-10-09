@@ -22,6 +22,7 @@ import {
 } from "./chart/geometry.js";
 import { contributionX, levelPolyline, splineCurves } from "./chart/ordered_spline.js";
 import { el, line, text } from "./chart/svg.js";
+import { freeLevelMarks, waitingSpecials } from "./specials.js";
 
 const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
 // A curve drawn with more points than this hides them until they are
@@ -252,6 +253,8 @@ export function drawChart(term, selection, context) {
     build.setAttribute("data-active-basis", String(buildCurve.activeIndex));
     build.setAttribute("style", `stroke: ${mixBuildColor(progress)}`);
   }
+  const freeMarks = buildActive ? [] : freeLevelMarks(context.freeLevels?.() ?? null, view);
+  if (freeMarks.length) drawFreeLevels(svg, freeMarks, { sx, sy, yMin, yMax });
   if (!buildActive) drawTermLines(svg, { x, y, original, previous, spline, sx, sy });
   const displaySelected = displaySelection(view, selection);
   const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
@@ -300,6 +303,7 @@ export function drawChart(term, selection, context) {
     if (spline && !buildActive) drawSplineLevelDots(svg, x, y, sx, sy);
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
+  if (!handlesMode && !buildActive) drawWaitingSpecials(svg, term, view, sx, sy);
   // The anchor is marked where points are drawn; a Build animation, which
   // shows the basis alone, marks none.
   svg._anchorMarks = pointLayer && !buildActive ? createAnchorMarks(svg, pointLayer) : null;
@@ -312,6 +316,7 @@ export function drawChart(term, selection, context) {
   legend(legendLayer, width - 10, 13, {
     originalProjected: view.displayIsCollapsed,
     hasPrevious: Boolean(previous),
+    freeLevels: freeMarks.length > 0,
     exposureLabel: exposure && exposure.y && exposure.y.length
       ? exposure.label || "exposure"
       : null
@@ -539,6 +544,8 @@ function applyPlotClip(svg) {
     ".level-group-link",
     ".level-group-marker",
     ".pending-group-ring",
+    ".pending-special-ring",
+    ".free-whisker",
     ".point",
     ".spline-level-dot",
     ".control-stem",
@@ -1344,6 +1351,57 @@ function band(svg, x, lower, upper, sx, sy, cls) {
   svg.appendChild(el("path", { d: `${top} ${bottom} Z`, class: cls }));
 }
 
+// Each level fitted free, behind the curve: its interval and an open
+// diamond, filled where the interval misses the curve. The comparison never
+// rescales the chart; a level off it sits at its edge.
+function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
+  const layer = el("g", { class: "free-levels" });
+  svg.appendChild(layer);
+  for (const mark of marks) {
+    const px = sx(mark.x);
+    const flagged = mark.flagged ? " is-flagged" : "";
+    line(layer, px, sy(mark.upper), px, sy(mark.lower), `free-whisker${flagged}`);
+    const py = sy(Math.min(Math.max(mark.y, yMin), yMax));
+    const node = el("path", { d: diamond(px, py, 4.5), class: `free-level${flagged}` });
+    node.setAttribute("data-level", mark.level);
+    const title = el("title", {});
+    title.textContent = `${mark.level} fitted free: ${fmt(mark.y)} (${fmt(mark.lower)} to `
+      + `${fmt(mark.upper)})${mark.flagged ? "; the curve is outside this interval" : ""}`;
+    node.appendChild(title);
+    layer.appendChild(node);
+  }
+}
+
+// A level a waiting change takes off the curve, or puts back on it: a dashed
+// ring round its point until Refit.
+function drawWaitingSpecials(svg, term, view, sx, sy) {
+  const { freed, returned } = waitingSpecials(term);
+  if (!Array.isArray(view.levels)) return;
+  for (const [labels, change] of [[freed, "made special"], [returned, "put back on the curve"]]) {
+    for (const label of labels) {
+      const index = view.levels.map(String).indexOf(label);
+      if (index < 0) continue;
+      const ring = el("circle", {
+        cx: sx(view.x[index]),
+        cy: sy(view.y[index]),
+        r: 9,
+        class: "pending-special-ring"
+      });
+      ring.setAttribute("data-level", label);
+      const title = el("title", {});
+      title.textContent = `${label} will be ${change} at the next Refit`;
+      ring.appendChild(title);
+      svg.appendChild(ring);
+    }
+  }
+}
+
+function diamond(cx, cy, r) {
+  const at = (/** @type {number} */ v) => v.toFixed(2);
+  return `M ${at(cx)} ${at(cy - r)} L ${at(cx + r)} ${at(cy)} L ${at(cx)} ${at(cy + r)} `
+    + `L ${at(cx - r)} ${at(cy)} Z`;
+}
+
 function errorBars(svg, x, lower, upper, sx, sy) {
   const cap = 6;
   for (let i = 0; i < x.length; i++) {
@@ -1358,10 +1416,11 @@ function errorBars(svg, x, lower, upper, sx, sy) {
 
 // One quiet row above the plot, ending at `right`: the series, then the
 // exposure strip's swatch.
-function legend(svg, right, y, { originalProjected, hasPrevious, exposureLabel }) {
+function legend(svg, right, y, { originalProjected, hasPrevious, freeLevels, exposureLabel }) {
   const items = [["original", originalProjected ? "original projection" : "original"]];
   if (hasPrevious) items.push(["previous-edit", "previous edit"]);
   items.push(["edited", "current edit"]);
+  if (freeLevels) items.push(["free-level", "fitted free"]);
   if (exposureLabel) items.push(["legend-swatch", exposureLabel]);
   const keyWidth = 22;
   const gap = 18;
@@ -1370,6 +1429,8 @@ function legend(svg, right, y, { originalProjected, hasPrevious, exposureLabel }
   items.forEach(([cls, label], index) => {
     if (cls === "legend-swatch") {
       svg.appendChild(el("rect", { x, y: y - 5, width: keyWidth, height: 10, rx: 2, ry: 2, class: cls }));
+    } else if (cls === "free-level") {
+      svg.appendChild(el("path", { d: diamond(x + keyWidth / 2, y, 4), class: cls }));
     } else {
       line(svg, x, y, x + keyWidth, y, cls);
     }

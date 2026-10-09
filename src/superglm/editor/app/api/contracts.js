@@ -84,6 +84,8 @@
  * @property {ShapedRange[]} ranges
  * @property {ShapeSupport|null} support
  * @property {string[]} specials
+ * @property {string[]} [returnable] the special levels that can go back on the
+ *   curve: those a structural step took off it, not those the code declares
  * @property {("tangent"|"kink")[]} [joins] the joins the term can take
  * @property {string|null} [join_reason] why a join is missing from ``joins``
  */
@@ -107,7 +109,16 @@
  * @property {string} level
  * @property {string} method
  */
-/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"} StagedOperation */
+/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"|"special"|"on_curve"} StagedOperation */
+/**
+ * The /special_levels request, which refits at once: ``special`` takes the
+ * levels off an ordered term's curve, ``false`` puts them back on it.
+ * @typedef {Object} SpecialLevelsRequest
+ * @property {string} term
+ * @property {string[]} levels
+ * @property {boolean} special
+ * @property {string} method
+ */
 /**
  * The /stage request: one structural change, with its parameters by label as
  * the session stores them. Collapse and ungroup take ``levels``. Set
@@ -140,6 +151,24 @@
  * @property {Record<string, string[]>|null} groups
  * @property {ShapedRange[]} ranges
  * @property {string|null} reference
+ * @property {string[]|null} [specials] the term's special levels once its
+ *   waiting changes apply, when one of them takes levels off the curve or back
+ */
+/**
+ * An ordered term's levels fitted free beside its curve (/free_levels): for
+ * each level on the curve, its free estimate and interval as relativities on
+ * the chart's scale, and the levels whose interval misses the curve.
+ * @typedef {Object} FreeLevels
+ * @property {string} term
+ * @property {string[]} levels
+ * @property {number[]} y
+ * @property {number[]} lower
+ * @property {number[]} upper
+ * @property {string[]} flagged
+ * @property {number} confidence the chance no interval misses a curve every level lies on
+ * @property {number} z
+ * @property {boolean} shrunk whether a selection penalty still shrinks the free levels
+ * @property {number} model_revision
  */
 /**
  * The /revert_to_original request carries no fields.
@@ -281,6 +310,8 @@
  * @property {TermView} termView
  * @property {boolean} showCi
  * @property {boolean} showContrib
+ * @property {FreeLevels|null} freeLevels the last free-level comparison, drawn
+ *   while its term and model revision are the ones in view
  * @property {SummaryLevelDisplay} summaryLevelDisplay
  * @property {Record<string, unknown>} zoomByTerm
  * @property {Record<string, string>} groupModeByTerm

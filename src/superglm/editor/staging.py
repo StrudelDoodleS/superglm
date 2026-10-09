@@ -35,6 +35,7 @@ from superglm.editor.errors import (
     EditorValueError,
 )
 from superglm.editor.shapes import shaped_feature_spec
+from superglm.editor.specials import special_feature_spec
 from superglm.editor.unseen import require_group_kept
 from superglm.features._spline_ranges import (
     ConstantRangesError,
@@ -88,7 +89,24 @@ _COLLAPSE_SENTENCES = (
     (UndeterminedStretchError, _COLLAPSE_STRETCH_REFUSED),
     (GroupNamedAsSpecialError, _COLLAPSE_NAMED_AS_SPECIAL),
 )
-_STAGED_SENTENCES = {"collapse": _COLLAPSE_SENTENCES, "shape": _SHAPE_SENTENCES}
+_SPECIAL_SENTENCES = (
+    (
+        UndeterminedRangeError,
+        "Taking those levels off the curve leaves a shaped range too few bands for its shape. "
+        "Choose levels outside it, or undo the range first.",
+    ),
+    (
+        UndeterminedStretchError,
+        "Taking those levels off the curve leaves too few bands beside a shaped range to fit the "
+        "rest of the curve. Choose fewer levels, or undo the range first.",
+    ),
+)
+_STAGED_SENTENCES = {
+    "collapse": _COLLAPSE_SENTENCES,
+    "shape": _SHAPE_SENTENCES,
+    "special": _SPECIAL_SENTENCES,
+    "on_curve": _SPECIAL_SENTENCES,
+}
 # A waiting change's operation, and the operation its step carries when a
 # legacy call refits it at once (``replace_with_*``).
 _REFIT_AT_ONCE = {
@@ -96,6 +114,8 @@ _REFIT_AT_ONCE = {
     "ungroup": "ungroup_levels",
     "set_reference": "set_reference",
     "shape": "shape_range",
+    "special": "special_levels",
+    "on_curve": "on_curve_levels",
 }
 _UNKNOWN_ENTRY = "Unknown history entry."
 _NOTE_LIMIT = 2000
@@ -146,9 +166,10 @@ def stage_structural(
     """Stage one structural change to wait for a Refit.
 
     ``operation`` is ``"collapse"`` (``levels``, optional ``group_label``),
-    ``"ungroup"`` (``levels``), ``"set_reference"`` (``level``) or
-    ``"shape"`` (``lo``, ``hi``, ``degree``, optional ``join``); levels are
-    display labels. A change its builder refuses is refused now, with
+    ``"ungroup"`` (``levels``), ``"set_reference"`` (``level``),
+    ``"shape"`` (``lo``, ``hi``, ``degree``, optional ``join``), ``"special"``
+    (``levels``, taken off an ordered term's curve) or ``"on_curve"``
+    (``levels``, put back on it); levels are display labels. A change its builder refuses is refused now, with
     today's sentence. Nothing is fitted: the model, the curves and the model
     revision stay as they are. ``X`` is the frame the refit will read
     (default: the session's refit data).
@@ -486,6 +507,18 @@ def _draft_for(
     if operation == "set_reference":
         level = str(_param(params, "level"))
         return reference_feature_spec(session.model, editable, level, X=X, draft_spec=draft)
+    if operation in {"special", "on_curve"}:
+        levels = _param(params, "levels")
+        if not isinstance(levels, list | tuple):
+            raise EditorValueError("levels must be a list of level labels.")
+        return special_feature_spec(
+            session.model,
+            editable,
+            [str(level) for level in levels],
+            special=operation == "special",
+            X=X,
+            draft_spec=draft,
+        )
     return shaped_feature_spec(
         session.model,
         editable.name,
@@ -521,7 +554,7 @@ def _label_params(operation: str, metadata: dict[str, Any]) -> dict[str, Any]:
     """A waiting change's parameters by label, as its builder resolved them."""
     if operation == "collapse":
         return {"levels": list(metadata["levels"]), "group_label": metadata["group_label"]}
-    if operation == "ungroup":
+    if operation in {"ungroup", "special", "on_curve"}:
         return {"levels": list(metadata["levels"])}
     if operation == "set_reference":
         return {"level": metadata["level"]}

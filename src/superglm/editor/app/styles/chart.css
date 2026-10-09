@@ -195,3 +195,19 @@
   stroke-width: 1.5;
   pointer-events: none;
 }
+
+/* A level fitted free, behind the curve: an open diamond on its interval. A
+   level whose interval misses the curve is filled, the smoothing overrides it. */
+.free-whisker { stroke: var(--muted); stroke-opacity: 0.55; stroke-width: 1.2; }
+.free-level { fill: var(--surface); stroke: var(--muted); stroke-width: 1.4; }
+.free-level.is-flagged { fill: var(--orange); stroke: var(--orange); }
+.free-whisker.is-flagged { stroke: var(--orange); stroke-opacity: 0.8; }
+
+/* A level a waiting change takes off the curve, or puts back on it. */
+.pending-special-ring {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 1.6;
+  stroke-dasharray: 3 2;
+  pointer-events: none;
+}

@@ -1032,6 +1032,7 @@ def test_an_unshapeable_term_says_why_and_is_refused_unchanged(region_model, fea
         "ranges": [],
         "support": None,
         "specials": [],
+        "returnable": [],
         "joins": ["tangent", "kink"],
         "join_reason": None,
     }
@@ -1065,6 +1066,7 @@ def test_categorical_and_ordered_step_terms_report_shapes_unavailable(region_mod
         "ranges": [],
         "support": None,
         "specials": [],
+        "returnable": [],
         "joins": ["tangent", "kink"],
         "join_reason": None,
     }
@@ -1320,6 +1322,7 @@ def test_widget_http_shape_range_returns_transition_envelope(aged):
             "reason": None,
             "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line", "join": "tangent"}],
             "specials": [],
+            "returnable": [],
             "joins": ["tangent", "kink"],
             "join_reason": None,
         }

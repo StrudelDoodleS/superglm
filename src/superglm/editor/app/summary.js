@@ -199,6 +199,16 @@ export function stageUngroup(term, levels) {
   return stageTransition("ungroup", term, { levels: [...levels] }, "ungroup levels");
 }
 
+/** @param {string} term @param {readonly string[]} levels levels on the curve, by label */
+export function stageSpecial(term, levels) {
+  return stageTransition("special", term, { levels: [...levels] }, "make levels special");
+}
+
+/** @param {string} term @param {readonly string[]} levels special levels, by label */
+export function stageOnCurve(term, levels) {
+  return stageTransition("on_curve", term, { levels: [...levels] }, "put levels back on the curve");
+}
+
 /** @param {string} term @param {string} level a displayed level, which may be a group label */
 export function stageReference(term, level) {
   return stageTransition("set_reference", term, { level }, "set reference");
@@ -236,9 +246,10 @@ export function refitPendingTransition(count) {
  * back, refused with the operation's own sentences. Collapse and ungroup act
  * on the selection Python holds, the one their levels were read from.
  * @param {{name:string, payload:StageRequest}} staged a descriptor from stageCollapse,
- *   stageUngroup, stageReference or stageShapeRange
+ *   stageUngroup, stageReference, stageShapeRange, stageSpecial or stageOnCurve
  * @returns {{name:string, path:string,
- *   payload:{term:string, method:string}|SetReferenceRequest|ShapeRangeRequest}}
+ *   payload:{term:string, method:string}|SetReferenceRequest|ShapeRangeRequest
+ *     |SpecialLevelsRequest}}
  */
 export function refitAtOnceTransition({ name, payload: { operation, term, params } }) {
   const method = "auto";
@@ -249,6 +260,12 @@ export function refitAtOnceTransition({ name, payload: { operation, term, params
       return { name, path: "/ungroup_levels", payload: { term, method } };
     case "set_reference":
       return { name, path: "/set_reference", payload: { term, level: params.level, method } };
+    case "special":
+    case "on_curve": {
+      const levels = /** @type {string[]} */ (params.levels);
+      const special = operation === "special";
+      return { name, path: "/special_levels", payload: { term, levels, special, method } };
+    }
     default: {
       const { lo, hi, degree, join } = params;
       return { name, path: "/shape_range", payload: { term, lo, hi, degree, join, method } };

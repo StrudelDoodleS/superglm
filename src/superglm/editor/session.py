@@ -1327,6 +1327,20 @@ class EditorSession:
             self, "set_reference", term, {"level": level}, **refit_kwargs
         )
 
+    def replace_with_special_levels(
+        self, term: str, levels: list[str], *, special: bool = True, **refit_kwargs: Any
+    ):
+        """Take ``levels`` off ``term``'s curve (or, ``special=False``, put them back) and refit.
+
+        One structural step, which one Undo takes back. ``levels`` are display
+        labels of an ordered term; a level taken off is fitted with a free
+        estimate of its own, as ``specials=`` declares.
+        """
+        operation = "special" if special else "on_curve"
+        return staging.stage_and_refit(
+            self, operation, term, {"levels": list(levels)}, **refit_kwargs
+        )
+
     def replace_with_shaped_range(
         self, term: str, *, lo, hi, degree: int, join: str = "tangent", **refit_kwargs: Any
     ):

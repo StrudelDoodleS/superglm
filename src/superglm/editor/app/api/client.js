@@ -101,6 +101,11 @@ export function createEditorClient({
     return postJSON("/rating_table", { term });
   }
 
+  /** @param {string} term an ordered term, refitted with its levels free @returns {Promise<unknown>} */
+  function freeLevels(term) {
+    return postJSON("/free_levels", { term });
+  }
+
   /** @param {string} kind "cv" or "final_fit" */
   function jobStart(kind) {
     return postJSON("/job_start", { kind });
@@ -116,7 +121,9 @@ export function createEditorClient({
     return postJSON("/job_cancel", { job_id: jobId });
   }
 
-  return { requestJSON, postJSON, requestBlob, getState, ratingTable, jobStart, jobStatus, jobCancel };
+  return {
+    requestJSON, postJSON, requestBlob, getState, ratingTable, freeLevels, jobStart, jobStatus, jobCancel
+  };
 }
 
 export const editorClient = createEditorClient();

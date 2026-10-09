@@ -65,7 +65,7 @@
     <div class="app-actions" aria-label="Edit actions">
       <button id="refitPendingAction" class="refit-action" type="button"
         aria-label="Refit, nothing waiting" aria-keyshortcuts="R" data-popover-title="Refit"
-        data-popover-body="Nothing is waiting. Collapse, Ungroup, Set reference and the shapes wait here for one refit."
+        data-popover-body="Nothing is waiting. Collapse, Ungroup, Set reference, Make special, Back on the curve and the shapes wait here for one refit."
         disabled>
         <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M20 11a8 8 0 1 0-2.3 5.7"></path>
@@ -253,6 +253,9 @@
         <div class="toolbar-actions">
         <button id="ciToggle" type="button" aria-pressed="false" aria-label="Reference CI"
           title="Show the fitted term's confidence band">Reference CI</button>
+        <button id="freeLevelsToggle" type="button" aria-pressed="false" hidden
+          data-popover-title="Free levels"
+          data-popover-body="Fit the model again with this term's levels free, as a plain categorical, and draw each level's estimate and interval behind the curve. A level whose interval misses the curve is marked: the smoothing overrides it.">Free levels</button>
         <button type="button" data-op="select_all">Select all</button>
         <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
         <button type="button" data-op="reset" data-popover-title="Reset"
@@ -400,6 +403,22 @@
             <path d="M12 18c-3-3.2-4.5-5.8-4.5-8a4.5 4.5 0 0 1 9 0c0 2.2-1.5 4.8-4.5 8z"></path>
             <circle cx="12" cy="10" r="1.5"></circle>
             <path d="M5 20h14"></path>
+          </svg>
+        </button>
+        <button id="makeSpecial" class="selection-item"
+          data-help-operation="make_special" type="button" aria-label="Make special" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 19c4-1 6-4 9-4s5 3 9 4"></path>
+            <circle cx="12" cy="6.5" r="2.5"></circle>
+            <path d="M12 10v2.5"></path>
+          </svg>
+        </button>
+        <button id="returnToCurve" class="selection-item"
+          data-help-operation="return_to_curve" type="button" aria-label="Back on the curve" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 19c4-1 6-4 9-4s5 3 9 4"></path>
+            <circle cx="12" cy="12.5" r="2"></circle>
+            <path d="M12 3v5"></path><path d="m9.5 5.5 2.5 2.5 2.5-2.5"></path>
           </svg>
         </button>
         <button id="shapeFlat" class="selection-item" data-shape-degree="0"
@@ -567,7 +586,7 @@
         <div class="setting-row">
           <div class="setting-text">
             <span id="settingRefitEveryChangeLabel" class="setting-title">Refit after every structural change</span>
-            <span id="settingRefitEveryChangeHint" class="setting-hint">Off: Collapse, Ungroup, Set reference and the shapes wait for the Refit button, so you can make several in one go.</span>
+            <span id="settingRefitEveryChangeHint" class="setting-hint">Off: Collapse, Ungroup, Set reference, Make special, Back on the curve and the shapes wait for the Refit button, so you can make several in one go.</span>
           </div>
           <button id="settingRefitEveryChange" class="setting-switch" type="button" role="switch"
             aria-checked="false" aria-labelledby="settingRefitEveryChangeLabel"
