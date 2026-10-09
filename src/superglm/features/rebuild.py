@@ -231,7 +231,10 @@ def rebuilt_ordered_spec(
         at = next(i for i, special in enumerate(shown) if str(special) == label)
         value = _returned_value(record.pop(label), values, positional=positional)
         del specials[at]
-        values[shown.pop(at) if grouping is None else label] = value
+        display = shown.pop(at)
+        values[display if grouping is None else label] = value
+    if returned and grouping is not None:
+        grouping = _grouping_in_axis_order(grouping, values)
     for label in freed:
         key = next(key for key in values if str(key) == label)
         before = order[: order.index(label)]
@@ -292,6 +295,25 @@ def full_level_order(spec: OrderedCategorical) -> list[str]:
         after = next((name for name in before if name in order), None)
         order.insert(0 if after is None else order.index(after) + 1, label)
     return order
+
+
+def _grouping_in_axis_order(grouping: LevelGrouping, values: dict) -> LevelGrouping:
+    """``grouping`` with its groups in axis order: a level put back on the curve takes its place.
+
+    A term's bands follow its grouping's order, and a grouping made while a
+    level was special lists that level last. Each group sits at its members'
+    mean value; a group with no value, a special, keeps its place after them.
+    """
+    axis = {str(key): float(at) for key, at in values.items()}
+
+    def position(label) -> float:
+        members = [
+            axis[str(m)] for m in grouping.group_to_originals.get(label, [label]) if str(m) in axis
+        ]
+        return sum(members) / len(members) if members else float("inf")
+
+    order = sorted(grouping.grouped_levels, key=position)
+    return dataclasses.replace(grouping, grouped_levels=order)
 
 
 def _returned_value(

@@ -316,7 +316,9 @@ export function drawChart(term, selection, context) {
   legend(legendLayer, width - 10, 13, {
     originalProjected: view.displayIsCollapsed,
     hasPrevious: Boolean(previous),
-    freeLevels: freeMarks.length > 0,
+    freeLevels: freeMarks.length > 0
+      ? (context.freeLevels?.()?.shrunk ? "fitted free, shrunk by the penalty" : "fitted free")
+      : null,
     exposureLabel: exposure && exposure.y && exposure.y.length
       ? exposure.label || "exposure"
       : null
@@ -1420,7 +1422,7 @@ function legend(svg, right, y, { originalProjected, hasPrevious, freeLevels, exp
   const items = [["original", originalProjected ? "original projection" : "original"]];
   if (hasPrevious) items.push(["previous-edit", "previous edit"]);
   items.push(["edited", "current edit"]);
-  if (freeLevels) items.push(["free-level", "fitted free"]);
+  if (freeLevels) items.push(["free-level", freeLevels]);
   if (exposureLabel) items.push(["legend-swatch", exposureLabel]);
   const keyWidth = 22;
   const gap = 18;

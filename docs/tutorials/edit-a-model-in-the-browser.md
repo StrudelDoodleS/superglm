@@ -242,7 +242,8 @@ interval.
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the
-  free levels are not shrunk. The other terms keep theirs.
+  free levels are not shrunk. The other terms keep theirs. A custom penalty that cannot be limited
+  to some terms shrinks the free levels too, and the legend then says so.
 - Hand edits are not part of either side: the curve and the free levels are both fits.
 
 ### Make special and Back on the curve

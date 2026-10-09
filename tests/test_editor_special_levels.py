@@ -10,7 +10,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, OrderedCategorical, Piecewise, Spline, SuperGLM, collapse_levels
+from superglm import (
+    Categorical,
+    OrderedCategorical,
+    Piecewise,
+    Polynomial,
+    Spline,
+    SuperGLM,
+    collapse_levels,
+)
 from superglm.editor import EditorSession
 from superglm.editor import free_levels as free_levels_module
 from superglm.editor.errors import EditorTypeError, EditorValueError
@@ -180,6 +188,15 @@ def test_make_special_and_back_on_the_curve_refuse_in_fixed_sentences(book):
         with pytest.raises(EditorValueError) as refused:
             session.stage_structural(operation, "band", {"levels": levels})
         assert str(refused.value) == sentence
+    session.stage_structural("special", "band", {"levels": [BUMP]})
+    for operation, levels, sentence in [
+        ("special", [BUMP], f"{BUMP!r} is already a special level of 'band'."),
+        ("special", [], "Select the levels to make special."),
+    ]:
+        with pytest.raises(EditorValueError) as refused:
+            session.stage_structural(operation, "band", {"levels": levels})
+        assert str(refused.value) == sentence
+    session.pending.clear()
     # The refit's own rows decide: these hold no Mi072.
     X = book[1]
     with pytest.raises(EditorValueError) as refused:
@@ -211,6 +228,36 @@ def test_a_declared_special_cannot_go_on_the_curve_and_a_grouped_level_cannot_le
     assert str(grouped.value) == "'Mi060' is in group 'Mi060+Mi066' of 'band'; ungroup it first."
     with pytest.raises(EditorTypeError):
         session.stage_structural("special", "area", {"levels": ["A"]})
+
+
+def test_make_special_refuses_breaks_positional_breaks_and_a_basis_left_too_small():
+    X, y, w = _book(n=3000)
+    cases = [
+        (
+            Piecewise(breaks=["Mi030", "Mi048"]),
+            ["Mi030"],
+            "'band' has a break, knot or shaped-range edge at 'Mi030', so it can't leave the "
+            "curve; move or remove it first.",
+        ),
+        (
+            Piecewise(breaks=[4, 7]),
+            [BUMP],
+            "'band' states its breaks by position, which a level leaving the curve would move; "
+            "state them by band name to make a level special.",
+        ),
+        (
+            Polynomial(powers=list(range(1, 12))),
+            [BUMP],
+            "Taking those levels off the curve of 'band' leaves its basis too few levels for its "
+            "degree; make fewer levels special, or lower the degree in code.",
+        ),
+    ]
+    for basis, levels, sentence in cases:
+        model = _declared(basis).fit(X, y, sample_weight=w)
+        session = EditorSession.from_model(model, train_data=(X, y, w))
+        with pytest.raises(EditorValueError) as refused:
+            session.stage_structural("special", "band", {"levels": levels})
+        assert str(refused.value) == sentence
 
 
 def test_a_level_returning_between_members_of_one_group_is_refused():
@@ -260,18 +307,56 @@ def test_free_levels_are_a_plain_categorical_fit_and_flag_the_level_the_smooth_o
     assert not free["lower"][at] <= curve <= free["upper"][at]
 
 
-def test_free_levels_lift_a_selection_penalty_from_the_term_only():
+def _fitted_free_models(monkeypatch) -> list:
+    """Record each model the comparison fits."""
+    fitted = []
+    real = free_levels_module.fit_refit_model
+
+    def recorded(source, refit, **kwargs):
+        fitted.append(refit)
+        return real(source, refit, **kwargs)
+
+    monkeypatch.setattr(free_levels_module, "fit_refit_model", recorded)
+    return fitted
+
+
+@pytest.mark.parametrize(
+    ("declared_features", "kept"),
+    [(None, frozenset({"area"})), (["band", "area"], frozenset({"area"})), (["band"], None)],
+)
+def test_free_levels_lift_a_selection_penalty_from_the_term_only(
+    monkeypatch, declared_features, kept
+):
     X, y, w = _book(n=6000)
-    plain = _declared().fit(X, y, sample_weight=w)
-    selected = _declared(selection_penalty=0.5).fit(X, y, sample_weight=w)
-    free_plain = free_level_comparison(
-        EditorSession.from_model(plain, train_data=(X, y, w)), "band"
-    )
-    session = EditorSession.from_model(selected, train_data=(X, y, w))
-    free_selected = free_level_comparison(session, "band")
-    # Both are the same unpenalised fit, settled to about sqrt(tol) (see above).
-    np.testing.assert_allclose(free_selected["y"], free_plain["y"], rtol=1e-3)
-    assert selected.penalty.features is None
+    selected = SuperGLM(
+        family="poisson",
+        features={"band": OrderedCategorical(order=BANDS), "area": Categorical()},
+        selection_penalty=0.5,
+        penalty_features=declared_features,
+    ).fit(X, y, sample_weight=w)
+    fitted = _fitted_free_models(monkeypatch)
+    free = free_level_comparison(EditorSession.from_model(selected, train_data=(X, y, w)), "band")
+    penalty = fitted[0].penalty
+    # The other terms keep the penalty, at its strength; with none left to
+    # penalise, it is off.
+    assert penalty.lambda1 == (0.5 if kept else None)
+    if kept:
+        assert penalty.features == kept
+    assert free["shrunk"] is False
+    # Left on, the penalty would have shrunk the free levels.
+    monkeypatch.setattr(free_levels_module, "_lift_selection", lambda *_args: False)
+    shrunk = free_level_comparison(EditorSession.from_model(selected, train_data=(X, y, w)), "band")
+    assert np.max(np.abs(np.log(shrunk["y"]) - np.log(free["y"]))) > 1e-2
+
+
+def test_a_penalty_that_cannot_be_restricted_is_reported_as_shrinking_the_free_levels():
+    class Unrestricted:
+        lambda1 = 0.5
+
+    class Model:
+        penalty = Unrestricted()
+
+    assert free_levels_module._lift_selection(Model(), Model(), "band") is True
 
 
 def test_free_levels_refuse_a_categorical_term_and_a_session_without_its_data(book):
@@ -319,6 +404,109 @@ def test_the_widget_fits_free_levels_once_per_model_revision(book, monkeypatch):
         )
     finally:
         widget.close()
+
+
+def test_a_level_freed_before_a_collapse_returns_to_its_place():
+    """Free Mi036, collapse Mi060+Mi066, put Mi036 back: as if only the collapse were made.
+
+    The collapse's grouping lists the special last, and the bands of a grouped
+    term follow its grouping: Mi036 must go back between Mi030 and Mi042.
+    """
+    X, y, w = _book(n=3000)
+    for basis in (Spline(kind="ps", n_knots=6), Piecewise(breaks=["Mi030", "Mi048"])):
+        model = _declared(basis).fit(X, y, sample_weight=w)
+        session = EditorSession.from_model(model, train_data=(X, y, w))
+        session.replace_with_special_levels("band", [BUMP])
+        session.stage_structural("collapse", "band", {"levels": ["Mi060", "Mi066"]})
+        session.refit_pending()
+        session.replace_with_special_levels("band", [BUMP], special=False)
+        only = EditorSession.from_model(model, train_data=(X, y, w))
+        only.stage_structural("collapse", "band", {"levels": ["Mi060", "Mi066"]})
+        only.refit_pending()
+        spec = session.model._specs["band"]
+        assert list(spec._smooth_levels) == list(only.model._specs["band"]._smooth_levels)
+        np.testing.assert_array_equal(session.model.predict(X), only.model.predict(X))
+
+
+def test_free_levels_put_both_variances_on_one_dispersion():
+    """A Gaussian bump the smooth flattens: the two fits estimate very different dispersions."""
+    rng = np.random.default_rng(43)
+    k = np.repeat(np.arange(12), 50)
+    noise = rng.normal(0.0, 1.0, k.size)
+    noise -= np.bincount(k, noise)[k] / 50
+    y = 10.0 + 0.05 * k + 10.0 * (k == 5) + noise
+    X = pd.DataFrame({"band": np.array(BANDS)[k]})
+    model = SuperGLM(
+        family="gaussian",
+        features={"band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+    ).fit(X, y)
+    # The free fit's dispersion is near 1, the smooth's near 6.5: on their own
+    # scales the curve's variance exceeds the free level's and nothing is judged.
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert BANDS[5] in free["flagged"]
+
+
+def test_free_levels_read_the_column_through_the_declaration():
+    """A column of 1.0..8.0 against order=[1..8]: the levels are the declaration's."""
+    order = list(range(1, 9))
+    rng = np.random.default_rng(3)
+    band = rng.choice(np.arange(1.0, 9.0), 2000)
+    y = rng.poisson(np.exp(-1 + 0.1 * band + 0.6 * (band == 4.0))).astype(float)
+    X = pd.DataFrame({"band": band})
+    for grouping in (None, collapse_levels(X["band"], groups={"6-7": ["6.0", "7.0"]})):
+        model = SuperGLM(
+            family="poisson",
+            features={"band": OrderedCategorical(order=order, grouping=grouping)},
+        ).fit(X, y)
+        session = EditorSession.from_model(model, train_data=(X, y))
+        free = free_level_comparison(session, "band")
+        assert free["levels"] == [str(level) for level in session.terms["band"].levels]
+
+
+def test_free_levels_keep_a_reference_named_first_as_a_level():
+    order = ["first", "B", "C", "D", "E", "F", "G", "H"]
+    rng = np.random.default_rng(5)
+    band = rng.choice(order, 2000)
+    y = rng.poisson(np.exp(-1 + 0.1 * np.array([order.index(b) for b in band]))).astype(float)
+    X = pd.DataFrame({"band": band})
+    model = SuperGLM(
+        family="poisson", features={"band": OrderedCategorical(order=order, base="first")}
+    ).fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["y"][free["levels"].index("first")] == 1.0
+
+
+def test_free_levels_compare_a_term_the_selection_penalty_removed():
+    rng = np.random.default_rng(9)
+    band = np.repeat(BANDS, 100)
+    y = rng.poisson(0.5, band.size).astype(float)
+    X = pd.DataFrame({"band": band})
+    model = SuperGLM(
+        family="poisson",
+        features={"band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+        selection_penalty=1000.0,
+    ).fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == BANDS
+
+
+def test_the_sidak_cut_counts_the_comparisons_judged():
+    """Twelve bands, two groups of two, the reference apart: nine comparisons, not twelve."""
+    from scipy.stats import norm
+
+    X, y, w = _book(n=6000)
+    groups = {"a": ["Mi012", "Mi018"], "b": ["Mi060", "Mi066"]}
+    grouping = collapse_levels(X["band"], groups=groups, order=BANDS)
+    band = OrderedCategorical(
+        order=BANDS, grouping=grouping, base="Mi006", basis=Spline(kind="ps", n_knots=6)
+    )
+    model = SuperGLM(
+        family="poisson", features={"band": band, "area": Categorical()}, spline_penalty=100.0
+    ).fit(X, y, sample_weight=w)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+    assert free["z"] == pytest.approx(float(norm.ppf(0.5 + 0.5 * 0.95 ** (1 / 9))), rel=1e-12)
 
 
 def test_a_grouped_term_compares_each_member_with_its_group(book):

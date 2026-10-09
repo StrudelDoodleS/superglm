@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
@@ -35,7 +36,7 @@ from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorTypeError, EditorValueError
 from superglm.editor.refit import fit_refit_model
 from superglm.features.categorical import Categorical
-from superglm.features.grouping import native_by_text
+from superglm.features.grouping import LevelGrouping
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import clone_with_replaced_features, special_labels
 
@@ -48,6 +49,7 @@ _MAX_LEVERAGE = 0.99
 _NOT_ORDERED = (
     "Compare with free levels is for ordered terms: every level of {term!r} is free already."
 )
+_NOT_FITTED = "The free levels of {term!r} could not be estimated, so there is nothing to compare."
 _NO_DATA = (
     "Comparing with free levels refits the model, which needs its training data: open the "
     "editor with train_data, or from a model fitted with its data kept."
@@ -74,10 +76,8 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
         raise EditorValueError(_NO_DATA) from exc
     if y is None:
         raise EditorValueError(_NO_DATA)
-    column = as_eager_frame(X).column_array(name)
-    free_model = clone_with_replaced_features(
-        session.model, {name: _free_categorical(spec, column)}
-    )
+    free, level_of = _free_categorical(spec, as_eager_frame(X).column_array(name))
+    free_model = clone_with_replaced_features(session.model, {name: free})
     shrunk = _lift_selection(free_model, session.model, name)
     fit_refit_model(
         session.model,
@@ -90,11 +90,21 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     )
     inference = free_model.term_inference(name, with_se=True)
     curve = session.model.term_inference(name, with_se=True)
-    return _comparison(term, spec, inference, curve, shrunk=shrunk)
+    # The two fits estimate their dispersion apart; the curve's variance is
+    # put on the free fit's, so the two variances share one scale.
+    scale = float(free_model.result.phi) / float(session.model.result.phi)
+    return _comparison(
+        term, spec, inference, curve, level_of=level_of, curve_scale=scale, shrunk=shrunk
+    )
 
 
 def _curve_se(inference, grouping) -> dict[str, float]:
-    """The curve's standard error at each displayed level, a member taking its group's."""
+    """The curve's standard error at each displayed level, a member taking its group's.
+
+    A curve the selection penalty removed is flat, with no variance.
+    """
+    if inference.se_log_relativity is None:
+        return {}
     se = {
         str(level): float(value)
         for level, value in zip(inference.levels, inference.se_log_relativity, strict=True)
@@ -106,13 +116,37 @@ def _curve_se(inference, grouping) -> dict[str, float]:
     return se
 
 
-def _free_categorical(spec: OrderedCategorical, column) -> Categorical:
-    """``spec``'s levels as a plain categorical: the same groups, the same reference."""
+def _free_categorical(spec: OrderedCategorical, column) -> tuple[Categorical, dict[str, str]]:
+    """``spec``'s levels as a plain categorical: the same groups, the same reference.
+
+    The ordered term reads its column through its declaration (a column of
+    1.0, 2.0 against ``order=[1, 2]`` is levels 1 and 2), so the categorical
+    groups the column's own texts under the term's levels and groups, and is
+    named as the term names them. Also returns each column text's level, by
+    which an expanded group member is found.
+    """
+    raw = pd.unique(np.asarray(column, dtype=object).ravel())
+    levels = [str(level) for level in spec._canonical(raw)]
     grouping = getattr(spec, "_grouping", None)
-    base = spec._base_level
-    if grouping is None:
-        base = native_by_text(np.asarray(column, dtype=object).ravel()).get(str(base), base)
-    return Categorical(base=base, grouping=grouping)
+    to_group = {
+        str(text): level if grouping is None else str(grouping.original_to_group.get(level, level))
+        for text, level in zip(raw, levels, strict=True)
+    }
+    members: dict[str, list[str]] = {}
+    for text, group in to_group.items():
+        members.setdefault(group, []).append(text)
+    free = Categorical(
+        base=str(spec._base_level),
+        grouping=LevelGrouping(
+            original_to_group=to_group,
+            group_to_originals=members,
+            all_original_levels=list(to_group),
+            grouped_levels=list(members),
+        ),
+    )
+    # The reference is a level, whatever it is called ("first" included).
+    free._base_is_level = True
+    return free, {str(text): level for text, level in zip(raw, levels, strict=True)}
 
 
 def _lift_selection(free_model, model, name: str) -> bool:
@@ -142,12 +176,21 @@ def _lift_selection(free_model, model, name: str) -> bool:
 
 
 def _comparison(
-    term, spec: OrderedCategorical, inference, curve_inference, *, shrunk: bool
+    term,
+    spec: OrderedCategorical,
+    inference,
+    curve_inference,
+    *,
+    level_of: dict[str, str],
+    curve_scale: float,
+    shrunk: bool,
 ) -> dict[str, Any]:
     levels = [str(level) for level in term.levels]
     specials = special_labels(spec)
     grouping = getattr(spec, "_grouping", None)
-    fitted = {str(level): i for i, level in enumerate(inference.levels)}
+    if inference.se_log_relativity is None:
+        raise EditorValueError(_NOT_FITTED.format(term=term.name))
+    fitted = {level_of.get(str(level), str(level)): i for i, level in enumerate(inference.levels)}
     curve_se = _curve_se(curve_inference, grouping)
     curve = np.asarray(term.original_log_effect, dtype=np.float64)
     compared = [level for level in levels if level not in specials]
@@ -159,18 +202,24 @@ def _comparison(
         # A group is the reference: its members share its value on the curve.
         reference = next(iter(grouping.group_to_originals.get(reference, [])), reference)
     anchor = curve[at[reference]] if reference in at else 0.0
-    z = float(norm.ppf(0.5 + 0.5 * CONFIDENCE ** (1.0 / max(len(compared), 1))))
-    rows = []
+    found = []
     for level in compared:
         # A grouped fit reports each member under its own name, or the group's.
         group = level if grouping is None else str(grouping.original_to_group.get(level, level))
         index = fitted.get(level, fitted.get(group))
         if index is None:
             continue
-        estimate = float(inference.log_relativity[index]) + anchor
         free_var = float(inference.se_log_relativity[index]) ** 2
-        gap_var = free_var - curve_se.get(level, 0.0) ** 2
+        gap_var = free_var - curve_scale * curve_se.get(level, 0.0) ** 2
         judged = free_var > 0.0 and gap_var > (1.0 - _MAX_LEVERAGE) * free_var
+        found.append((level, group, index, free_var, gap_var, judged))
+    # One comparison per group judged: a group's members share one free
+    # estimate, and the reference and the unjudged are never judged.
+    judged_groups = {group for _, group, _, _, _, judged in found if judged}
+    z = float(norm.ppf(0.5 + 0.5 * CONFIDENCE ** (1.0 / max(len(judged_groups), 1))))
+    rows = []
+    for level, _group, index, free_var, gap_var, judged in found:
+        estimate = float(inference.log_relativity[index]) + anchor
         se = float(np.sqrt(gap_var if judged else free_var))
         lower, upper = estimate - z * se, estimate + z * se
         on_curve = float(curve[at[level]])

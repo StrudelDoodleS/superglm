@@ -25,6 +25,7 @@ from superglm.editor.collapse import (
     _stated_break_bands,
 )
 from superglm.editor.errors import EditorTypeError, EditorValueError
+from superglm.features._spline_ranges import RangeError
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.piecewise import Piecewise
 from superglm.features.rebuild import (
@@ -65,6 +66,10 @@ _INSIDE_GROUP = (
     "{level!r} would go back between members of group {group!r} of {term!r}; ungroup it first."
 )
 _NO_LEVELS = "Select the levels to {action}."
+_BASIS_REFUSED = (
+    "Taking those levels off the curve of {term!r} leaves its basis too few levels for its "
+    "degree; make fewer levels special, or lower the degree in code."
+)
 
 
 def special_feature_spec(
@@ -105,14 +110,21 @@ def special_feature_spec(
     else:
         _require_free_to_return(spec, grouping, term, chosen)
     changes = {"freed": tuple(chosen)} if special else {"returned": tuple(chosen)}
-    replacement = rebuilt_ordered_spec(
-        spec,
-        grouping=grouping,
-        base=declared,
-        data=column,
-        level=level,
-        **changes,
-    )
+    try:
+        replacement = rebuilt_ordered_spec(
+            spec,
+            grouping=grouping,
+            base=declared,
+            data=column,
+            level=level,
+            **changes,
+        )
+    except RangeError:
+        raise
+    except ValueError as exc:
+        # A Polynomial basis needs more levels than its highest power, and a
+        # Piecewise segment more bands than its degree.
+        raise EditorValueError(_BASIS_REFUSED.format(term=term.name)) from exc
     _mark_kept(replacement, declared, kept, grouping, level=level)
     joined = " + ".join(chosen)
     label = (
