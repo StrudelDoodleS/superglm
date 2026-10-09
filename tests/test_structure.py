@@ -1609,6 +1609,31 @@ def test_editor_explicit_knots_on_an_ordered_spline_basis_round_trip_through_a_f
     assert len(knots["positions"]) == 1
 
 
+@pytest.mark.parametrize(
+    ("build", "sentence"),
+    [
+        (
+            lambda: _declared({"age": Spline(kind="cr", n_knots=6)}),
+            "Structure.from_model needs a fitted model; fit the model first.",
+        ),
+        (
+            _knot_declared,
+            "Structure.from_model needs a fitted model: 'band' has no fitted levels yet; "
+            "fit the model first.",
+        ),
+    ],
+    ids=["spline only", "spline and ordered"],
+)
+def test_an_unfitted_model_with_editor_knots_has_no_structure_to_export(build, sentence):
+    X, y = _knot_frame()
+    session = EditorSession.from_model(build().fit(X, y), train_data=(X, y))
+    session.replace_with_knots("age", {"count": 8, "strategy": "quantile_rows"})
+    applied = Structure.from_model(session.model).apply(build())
+    with pytest.raises(StructureError) as refused:
+        Structure.from_model(applied)
+    assert str(refused.value) == sentence
+
+
 def _knots(**changes):
     knots = {
         "knot_alpha": 0.2,
