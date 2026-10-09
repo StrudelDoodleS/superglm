@@ -125,8 +125,8 @@ When Handles is off, hover over it to see the reason.
 ## See a Term Without Its Smoothing
 
 The **Unsmoothed** icon in the chart's toolbar draws the term fitted again with its smoothing
-switched off, as a dashed line over the curve, with **unsmoothed** in the legend. It shows on a
-spline term and on an ordered term with a spline basis.
+switched off, as a solid green line over the curve, with **unsmoothed** in the legend. It shows
+on a spline term and on an ordered term with a spline basis.
 
 - On a spline term the model is fitted again with the term's smoothing at zero, on the same
   knots. Every other term keeps the smoothing the model chose for it.

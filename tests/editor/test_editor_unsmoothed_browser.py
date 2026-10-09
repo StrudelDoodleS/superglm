@@ -23,7 +23,7 @@ def test_the_unsmoothed_toggle_draws_the_line_and_takes_it_away(open_editor_page
         assert toggle.get_attribute("aria-pressed") == "true"
         assert toggle.get_attribute("aria-busy") is None
         assert toggle.get_attribute("aria-disabled") == "false"
-        # Dashed over the curve, kept to the plot, named in the legend and in
+        # Over the curve, kept to the plot, named in the legend and in
         # its hover text.
         assert line.get_attribute("clip-path") == "url(#plotClip)"
         assert page.locator("#chart .legend-layer line.unsmoothed").count() == 1

@@ -1420,7 +1420,7 @@ function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
   }
 }
 
-// The term fitted with its smoothing switched off, dashed over the curve: one
+// The term fitted with its smoothing switched off, solid over the curve: one
 // path per run between the levels the free fit left out. An ordered term's
 // line marks each level with a dot, as its curve does; a spline's has none.
 // Its hover text names what it is and any level it skips.

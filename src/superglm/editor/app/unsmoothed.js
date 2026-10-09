@@ -13,7 +13,7 @@
 
 /** The toggle's hover text and Help entry: what the line is. */
 export const UNSMOOTHED_HELP =
-  "Draw the term fitted again with its smoothing switched off, dashed over the curve. A spline "
+  "Draw the term fitted again with its smoothing switched off, drawn over the curve. A spline "
   + "keeps its knots and an ordered term's levels are each fitted free; every other term stays "
   + "as fitted. One fit per term, kept until the model changes.";
 export const UNSMOOTHED_BUSY = "Fitting the model with this term's smoothing switched off.";
