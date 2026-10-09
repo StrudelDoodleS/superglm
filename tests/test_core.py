@@ -107,7 +107,7 @@ class TestSpline:
 
     def test_n_basis(self):
         for nk in [5, 10, 20]:
-            info = Spline(n_knots=nk, degree=3).build(np.linspace(0, 1, 100))
+            info = Spline(kind="ps", n_knots=nk, degree=3).build(np.linspace(0, 1, 100))
             assert info.n_cols == nk + 3  # K - 1 = n_interior + degree (identifiability)
 
     def test_penalty_psd(self):
@@ -851,7 +851,7 @@ class TestStrategyActualTracking:
         y = rng.poisson(2.0, len(x)).astype(float)
 
         model = SuperGLM(
-            features={"x": Spline(n_knots=8, knot_strategy="quantile")},
+            features={"x": Spline(kind="ps", n_knots=8, knot_strategy="quantile")},
             family="poisson",
         )
         model.fit(X=df, y=y)

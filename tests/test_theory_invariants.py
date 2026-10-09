@@ -1846,7 +1846,7 @@ class TestPredictionTimeContracts:
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
-            features={"x": Spline(n_knots=6, penalty="ssp"), "z": Numeric()},
+            features={"x": Spline(kind="ps", n_knots=6, penalty="ssp"), "z": Numeric()},
         )
         model.fit(X, y)
 

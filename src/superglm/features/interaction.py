@@ -127,9 +127,9 @@ def interaction_spline_spec(
     placement the screening probe uses, which is what keeps probe and refit
     identical; an explicitly knotted or already-quantile parent is left alone.
 
-    Returns *spec* unchanged for every other spline kind, so ``ps`` -- the
-    default -- is untouched, and for the cr configurations the cardinal basis
-    cannot express (below).  The returned spec has its knots already placed on
+    Returns *spec* unchanged for every other spline kind, so ``ps`` is
+    untouched, and so are the cr configurations the cardinal basis cannot
+    express (below).  The returned spec has its knots already placed on
     *x*; callers must STORE it and read the basis back from the stored copy,
     since a predict-time basis rebuilt from the original spec would disagree
     with the design that was fitted.

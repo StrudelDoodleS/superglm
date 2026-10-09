@@ -38,7 +38,7 @@ def fitted_model(sample_data):
         penalty="group_lasso",
         selection_penalty=0.01,
         features={
-            "age": Spline(n_knots=10, penalty="ssp"),
+            "age": Spline(kind="ps", n_knots=10, penalty="ssp"),
             "region": Categorical(base="first"),
             "density": Numeric(),
         },
@@ -410,7 +410,7 @@ class TestEnrichedSummary:
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
-            features={"age": Spline(n_knots=10, penalty="ssp")},
+            features={"age": Spline(kind="ps", n_knots=10, penalty="ssp")},
         )
         model.fit(X, y, sample_weight=sample_weight)
         m = model.metrics(X, y, sample_weight=sample_weight)

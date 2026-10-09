@@ -302,7 +302,7 @@ def test_sz_structured_estimability_is_the_data_s():
     models = {
         solve: SuperGLM(
             family="gaussian",
-            features={"x": Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2))},
+            features={"x": Spline(kind="ps", n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2))},
             interactions=[
                 FactorSmooth(
                     "x",

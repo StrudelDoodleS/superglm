@@ -58,7 +58,7 @@ def region_model():
         family="gaussian",
         selection_penalty=0.0,
         spline_penalty=0.1,
-        features={"region": Categorical(base="first"), "x": Spline(n_knots=6)},
+        features={"region": Categorical(base="first"), "x": Spline(kind="ps", n_knots=6)},
     )
     model.fit(X, y)
     return model, X

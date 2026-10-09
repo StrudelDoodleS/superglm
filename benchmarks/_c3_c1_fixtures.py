@@ -108,7 +108,7 @@ def lss_model(family, knots):
             for predictor in [
                 Predictor(
                     p.name,
-                    {"x": Spline(n_knots=knots), "z": Spline(n_knots=knots)},
+                    {"x": Spline(kind="ps", n_knots=knots), "z": Spline(kind="ps", n_knots=knots)},
                     interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(knots, knots))},
                 )
                 for p in family.parameters

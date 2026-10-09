@@ -55,7 +55,7 @@ class TestSelectBuild:
     def test_select_combined_n_cols(self):
         """Combined n_cols = 1 (null) + n_range."""
         for nk in [5, 10, 20]:
-            sp = Spline(n_knots=nk, select=True)
+            sp = Spline(kind="ps", n_knots=nk, select=True)
             result = sp.build(np.linspace(0, 1, 200))
             n_basis = sp._n_basis
             n_range = n_basis - 2  # K - 2 for BS (partition of unity removes 1, null removes 1)
@@ -287,7 +287,7 @@ class TestSelectPath:
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(kind="ps", n_knots=10, select=True)},
             spline_penalty=1.0,
         )
         path = m.fit_path(X, y, sample_weight=sample_weight, n_lambda=10)

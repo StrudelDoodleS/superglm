@@ -389,7 +389,7 @@ def pristine_basis(spec: OrderedCategorical):
     # exceed the current one when a grouping is being undone. `_spline_obj` is
     # always set on a spec this version constructed; the fallback covers a
     # pre-0.24 pickle, whose `_basis_spline` read refuses a step-mode spec
-    # loudly instead of silently cloning it onto the default P-spline.
+    # loudly instead of silently cloning it onto the default spline.
     #
     # Read it with `getattr`, not `spec._spline_obj`: an attribute-less read
     # only reaches the fallback when the key EXISTS and is None, so a pickle

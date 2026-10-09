@@ -1063,7 +1063,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
 
 def Spline(
-    kind: str = "ps",
+    kind: str = "cr",
     *,
     k: int | None = None,
     n_knots: int | None = None,
@@ -1083,6 +1083,11 @@ def Spline(
     polynomial_ranges: Sequence[PolynomialRange] | None = None,
 ) -> _SplineBase:
     """Create a spline feature spec.
+
+    ``kind`` defaults to ``"cr"``, a cubic regression spline (``"ps"``, a
+    P-spline, before 0.40). ``"cr"`` and ``"cr_cardinal"`` are always cubic
+    and refuse a ``degree`` other than 3; pass ``kind="ps"`` or ``"bs"`` for
+    another degree.
 
     ``polynomial_ranges`` (``kind="bs"`` or ``"cr"`` only) pins the curve to a
     polynomial on each :class:`PolynomialRange` and leaves the rest the
