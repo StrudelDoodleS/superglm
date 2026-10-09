@@ -2,8 +2,8 @@
 
 A structure records, per feature, the decisions that shape a term rather than
 its fitted values: how a categorical's levels are grouped, which level or
-group is the reference, where levels unseen at fit go, and the polynomial
-ranges of a spline. :meth:`Structure.apply` builds those decisions into another
+group is the reference, where levels unseen at fit go, which levels of an
+ordered term are fitted off its curve, and the polynomial ranges of a spline. :meth:`Structure.apply` builds those decisions into another
 model's features, ready to fit on new data.
 
 The file is JSON, written with sorted keys so that two exports of one model
@@ -54,6 +54,8 @@ from superglm.features.rebuild import (
     band_edges,
     clone_with_replaced_features,
     current_ranges,
+    freed_levels,
+    full_level_order,
     merged_ranges,
     pristine_basis,
     rebuilt_categorical,
@@ -71,7 +73,7 @@ _POLICIES = ("error", "base")
 # The fields each kind of entry holds, besides "kind".
 _FIELDS = {
     "categorical": ("groups", "levels", "reference", "unseen"),
-    "ordered": ("groups", "levels", "ranges", "reference", "unseen"),
+    "ordered": ("groups", "levels", "ranges", "reference", "specials", "unseen"),
     "spline": ("ranges",),
 }
 _RANGE_FIELDS = ("degree", "hi", "join", "lo")
@@ -103,6 +105,23 @@ _UNSEEN = (
 )
 _ORDERED_UNSEEN = (
     "{feature!r} is an ordered term, which refuses new levels; set its unseen to 'error'."
+)
+_SPECIAL = (
+    "{special!r} of {feature!r} is listed as a special level but is not one of its levels; "
+    "add it to the levels or take it out of the specials."
+)
+_GROUPED_SPECIAL = (
+    "Special level {special!r} of {feature!r} is in group {group!r}; a special level stands "
+    "alone, so take it out of the group."
+)
+_SPECIAL_REFERENCE = (
+    "The reference {reference!r} of {feature!r} is a special level, and the reference must lie "
+    "on the curve; choose a level on the curve."
+)
+_DECLARED_SPECIAL = (
+    "{level!r} is declared special in the model's {feature!r}, so it has no place on the curve "
+    "for the structure to put it in; list it among the structure's specials, or declare it on "
+    "the curve."
 )
 _RANGE = "The spline of {feature!r} refuses the {span}; change or remove that range."
 _FITTED_OUT = (
@@ -185,6 +204,10 @@ class FeatureStructure:
     ranges : list of PolynomialRange
         The spline's polynomial ranges in the feature's own units, or between
         band names on an ordered term.
+    specials : list or None
+        An ordered term's special levels, fitted off its curve each with a
+        free estimate of its own. None, as in a file that names none, keeps
+        the specials the model declares.
     """
 
     kind: str
@@ -193,6 +216,7 @@ class FeatureStructure:
     reference: Any = None
     unseen: str = "error"
     ranges: list = field(default_factory=list)
+    specials: list | None = None
 
 
 @dataclass
@@ -495,10 +519,19 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
     if spec._base_level == "" or spec._base_level is None:
         raise StructureError(_UNFITTED.format(feature=name))
     grouping = spec._grouping
+    specials = None
     if kind == "ordered":
-        # The declared levels, specials last: an ordered term's universe is its
-        # declaration, grouped or not.
-        universe = list(spec._declared_smooth_levels) + list(spec._special_display)
+        # The declared levels, grouped or not: those on the curve with those a
+        # structural decision took off it in their places, and the levels the
+        # declaration makes special last.
+        freed = freed_levels(spec)
+        shown = {str(level): level for level in spec._special_display}
+        universe = [
+            shown.get(level, level) if level in freed else level
+            for level in _declared_by_text(spec, full_level_order(spec))
+        ]
+        universe += [level for text, level in shown.items() if text not in freed]
+        specials = list(spec._special_display) or None
         unseen = "error"
     else:
         universe = list(spec._levels)
@@ -532,6 +565,8 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
         reference = native.get(str(reference), reference)
     ranges = list(current_ranges(spec)) if kind == "ordered" else []
     _require_writable_levels(name, universe)
+    if specials is not None:
+        specials = [native.get(str(level), level) for level in specials]
     return FeatureStructure(
         kind=kind,
         levels=universe,
@@ -539,7 +574,14 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
         reference=reference,
         unseen=unseen,
         ranges=ranges,
+        specials=specials,
     )
+
+
+def _declared_by_text(spec, texts: list[str]) -> list:
+    """The declared smooth levels named by ``texts``, in their own spellings where declared."""
+    declared = {str(level): level for level in spec._declared_smooth_levels}
+    return [declared.get(text, text) for text in texts]
 
 
 def _require_writable_levels(name: str, levels: list) -> None:
@@ -671,16 +713,30 @@ def _grouping(levels: list, groups: dict, *, order: list[str]):
 
 
 def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
-    smooth = [str(level) for level in spec._declared_smooth_levels]
-    declared = [*smooth, *(str(level) for level in spec._special_display)]
+    # The levels on the curve and those a decision took off it, in order, then
+    # the levels the declaration makes special, which have no place.
+    smooth = full_level_order(spec)
+    current = [str(level) for level in spec._special_display]
+    declared_specials = [level for level in current if level not in smooth]
+    declared = [*smooth, *declared_specials]
     listed = [str(level) for level in entry.levels]
     if sorted(declared) != sorted(listed):
         raise StructureError(_UNIVERSE.format(feature=name))
+    wanted = current if entry.specials is None else [str(level) for level in entry.specials]
+    for level in declared_specials:
+        if level not in wanted:
+            raise StructureError(_DECLARED_SPECIAL.format(level=level, feature=name))
     # The groups join neighbouring bands and the ranges run between bands, so
     # the bands must lie in the order the structure was made on. The specials,
-    # free levels off the axis, follow them in any order.
-    if listed[: len(smooth)] != smooth:
+    # free levels off the axis, may stand anywhere.
+    if [level for level in listed if level not in wanted] != [
+        level for level in smooth if level not in wanted
+    ]:
         raise StructureError(_ORDER.format(feature=name))
+    changes = {
+        "freed": tuple(level for level in smooth if level in wanted and level not in current),
+        "returned": tuple(level for level in current if level not in wanted),
+    }
     grouping = _grouping(entry.levels, entry.groups, order=declared)
     # The reference is a band or group, whatever its name (level=True below).
     base = entry.reference if grouping is None else str(entry.reference)
@@ -689,7 +745,9 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     # fitted out to hold them.
     same = _same_ranges(entry.ranges, current_ranges(spec))
     if same and (column is None or not entry.ranges):
-        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data, level=True)
+        return rebuilt_ordered_spec(
+            spec, grouping=grouping, base=base, data=data, level=True, **changes
+        )
     _require_shapes(model, name, entry)
     source = pristine_basis(spec)
     knots = source._named_knots or source._explicit_knots
@@ -698,7 +756,7 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     def hosted(ranges, bound=boundary):
         basis = shaped_spline(source, ranges, knots=knots, boundary=bound)
         return rebuilt_ordered_spec(
-            spec, grouping=grouping, base=base, data=data, basis=basis, level=True
+            spec, grouping=grouping, base=base, data=data, basis=basis, level=True, **changes
         )
 
     # The term without ranges places each band on the axis the ranges name.
@@ -729,7 +787,9 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     in_order = sorted(ranges, key=lambda r: position(r.lo))
     placed = _placed_boundary(name, in_order, fits, boundary, extent, position)
     if same and placed == boundary:
-        return rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=data, level=True)
+        return rebuilt_ordered_spec(
+            spec, grouping=grouping, base=base, data=data, level=True, **changes
+        )
     return hosted(ranges, placed)
 
 
@@ -920,6 +980,8 @@ def _entry_json(name: str, entry: FeatureStructure) -> dict[str, Any]:
     }
     if entry.kind == "ordered":
         payload["ranges"] = ranges
+        if entry.specials:
+            payload["specials"] = [_plain(level, name) for level in entry.specials]
     return payload
 
 
@@ -943,6 +1005,7 @@ def _entry_from_json(name: str, entry) -> FeatureStructure:
     if not isinstance(groups, Mapping) or not all(isinstance(m, list) for m in groups.values()):
         raise StructureError(_MALFORMED.format(feature=name, field="groups"))
     levels = entry.get("levels")
+    specials = entry.get("specials")
     return FeatureStructure(
         kind=kind,
         levels=list(levels) if isinstance(levels, list) else levels,
@@ -950,6 +1013,7 @@ def _entry_from_json(name: str, entry) -> FeatureStructure:
         reference=entry.get("reference"),
         unseen=entry.get("unseen", "error"),
         ranges=parsed,
+        specials=list(specials) if isinstance(specials, list) else specials,
     )
 
 
@@ -979,6 +1043,8 @@ def _check_feature(name: str, entry: FeatureStructure) -> None:
         isinstance(r, PolynomialRange) for r in entry.ranges
     ):
         raise StructureError(_MALFORMED.format(feature=name, field="ranges"))
+    if entry.kind != "ordered" and entry.specials is not None:
+        raise StructureError(_MALFORMED.format(feature=name, field="specials"))
     if entry.kind == "spline":
         if entry.levels or entry.groups or entry.reference is not None or entry.unseen != "error":
             raise StructureError(_MALFORMED.format(feature=name, field="levels"))
@@ -998,6 +1064,7 @@ def _check_feature(name: str, entry: FeatureStructure) -> None:
     if entry.kind == "ordered":
         if entry.unseen != "error":
             raise StructureError(_ORDERED_UNSEEN.format(feature=name))
+        _check_specials(name, entry, set(texts))
         for r in entry.ranges:
             if not all(isinstance(edge, str) or _is_finite(edge) for edge in (r.lo, r.hi)):
                 raise StructureError(_range_refusal(name, r.lo, r.hi, r.degree))
@@ -1034,6 +1101,29 @@ def _check_groups(name: str, groups, texts: list[str]) -> set[str]:
         if label in known and label not in {str(member) for member in members}:
             raise StructureError(_GROUP_NAME.format(group=label, feature=name))
     return set(groups) | {text for text in texts if text not in owner}
+
+
+def _check_specials(name: str, entry: FeatureStructure, texts: set[str]) -> None:
+    """Refuse specials that are not levels, stand in a group, or include the reference."""
+    specials = entry.specials
+    if specials is None:
+        return
+    if not isinstance(specials, list) or not all(_is_scalar(level) for level in specials):
+        raise StructureError(_MALFORMED.format(feature=name, field="specials"))
+    special_texts = {str(level) for level in specials}
+    if len(special_texts) != len(specials):
+        raise StructureError(_MALFORMED.format(feature=name, field="specials"))
+    for special in specials:
+        if str(special) not in texts:
+            raise StructureError(_SPECIAL.format(special=special, feature=name))
+    for label, members in entry.groups.items():
+        for member in members:
+            if str(member) in special_texts:
+                raise StructureError(
+                    _GROUPED_SPECIAL.format(special=member, feature=name, group=label)
+                )
+    if str(entry.reference) in special_texts:
+        raise StructureError(_SPECIAL_REFERENCE.format(reference=entry.reference, feature=name))
 
 
 def _texts(levels) -> set[str]:
