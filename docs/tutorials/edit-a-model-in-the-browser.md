@@ -252,8 +252,9 @@ reference, the diamonds joined by a green line. The reference's diamond sits at 
 categorical's output. One button turns both on and off.
 
 - Each diamond's 95% interval against the reference shows while **Reference CI** is on, as a green
-  whisker just right of the level. The curve's own interval, in blue with caps, steps just left of
-  it, so the two are told apart. The reference has neither: it is 1 by definition.
+  whisker through the diamond. The free series sits just right of each level, so its intervals
+  stand beside the curve's own, in blue with caps through the curve's points. The reference has
+  neither: it is 1 by definition.
 - The free interval is usually the wider: each level is estimated from its own rows alone, while
   the curve borrows strength from its neighbours, most of all beside the reference.
 - A level the smoothing overrides has its diamond filled in: the curve holds it away from what

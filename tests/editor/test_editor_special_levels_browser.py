@@ -29,8 +29,9 @@ def test_free_levels_then_make_special_and_back_on_the_curve(open_editor_page):
         page.locator("#ciToggle").click()
         page.locator("#chart .free-levels .free-whisker").first.wait_for(state="attached")
         assert page.locator("#chart .free-levels .free-whisker").count() == 6
-        # Two intervals at one level step to either side of it: the free fit's
-        # right of its diamond, the curve's left of its point.
+        # Each interval runs through its own marker: the free series steps right
+        # of the level, the curve's bars stay on its points.
+        point_x = float(page.locator('#chart .point[data-index="2"]').get_attribute("cx"))
         diamond_x = _diamond_centres(page)[2][0]
         free_x = sorted(
             float(x)
@@ -47,8 +48,9 @@ def test_free_levels_then_make_special_and_back_on_the_curve(open_editor_page):
                 )
             }
         )[2]
-        assert free_x - diamond_x == pytest.approx(5.0, abs=0.01)
-        assert diamond_x - curve_x == pytest.approx(5.0, abs=0.01)
+        assert free_x == pytest.approx(diamond_x, abs=0.01)
+        assert diamond_x - point_x == pytest.approx(6.0, abs=0.01)
+        assert curve_x == pytest.approx(point_x, abs=0.01)
         # The marks keep to the plot, as its points do, when it is zoomed.
         for mark in ("free-level", "free-whisker"):
             node = page.locator(f"#chart .free-levels .{mark}").first

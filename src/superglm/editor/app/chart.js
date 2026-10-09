@@ -34,9 +34,10 @@ const DENSE_POINT_COUNT = 40;
 const LENS_HALF_WIDTH = 26;
 // The x-axis title's own row, as planCategoricalAxis reserves it by default.
 const AXIS_TITLE_HEIGHT = 14;
-// Where Free levels and the curve both draw an interval at one level, each
-// steps this far, in svg px, to its own side, so the two read as two series.
-const DODGE = 5;
+// Free levels' series, its diamonds, intervals and line, steps this far
+// right of each level, in svg px, so its intervals stand beside the curve's
+// rather than on them, each through its own marker.
+const DODGE = 6;
 const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
   "font-family",
   "font-size",
@@ -254,8 +255,7 @@ export function drawChart(term, selection, context) {
   const freeMarks = freeLevelMarks(freeLevels, view);
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
-      // Beside Free levels' intervals, the curve's step left of the level.
-      errorBars(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy, freeMarks.length ? -DODGE : 0);
+      errorBars(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy);
     } else {
       band(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy, "ci");
     }
@@ -1405,25 +1405,25 @@ function band(svg, x, lower, upper, sx, sy, cls) {
 // Each level fitted free, behind the curve, as its relativity to the
 // reference: a line joining them, broken at a level with no free value, and
 // on it an open diamond, filled where the smoothing overrides the level. Each
-// level's interval against the reference shows with Reference CI. The
-// comparison never rescales the chart; a level off it sits at its edge.
+// level's interval against the reference shows with Reference CI. The whole
+// series steps DODGE right of the levels, beside the curve's own intervals.
+// The comparison never rescales the chart; a level off it sits at its edge.
 function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax, intervals }) {
   const layer = el("g", { class: "free-levels" });
   svg.appendChild(layer);
   // The overlay never rescales the chart: what lies past it is drawn at its edge.
   const clamp = (/** @type {number} */ value) => Math.min(Math.max(value, yMin), yMax);
   const inside = (/** @type {number} */ value) => sy(clamp(value));
+  const dodged = (/** @type {number} */ value) => sx(value) + DODGE;
   for (const run of joined ? unsmoothedRuns(joined) : []) {
-    if (run.x.length > 1) path(layer, run.x, run.y.map(clamp), sx, sy, "free-line");
+    if (run.x.length > 1) path(layer, run.x, run.y.map(clamp), dodged, sy, "free-line");
   }
   for (const mark of marks) {
-    const px = sx(mark.x);
+    const px = dodged(mark.x);
     const flagged = mark.flagged ? " is-flagged" : "";
     if (intervals) {
-      // Right of the level, beside the curve's own interval on its left.
-      const wx = px + DODGE;
       const whisker = line(
-        layer, wx, inside(mark.upper), wx, inside(mark.lower), `free-whisker${flagged}`
+        layer, px, inside(mark.upper), px, inside(mark.lower), `free-whisker${flagged}`
       );
       const said = el("title", {});
       said.textContent = `${mark.level} fitted free: 95% interval against the reference, `
@@ -1490,10 +1490,10 @@ function diamond(cx, cy, r) {
     + `L ${at(cx - r)} ${at(cy)} Z`;
 }
 
-function errorBars(svg, x, lower, upper, sx, sy, dodge = 0) {
+function errorBars(svg, x, lower, upper, sx, sy) {
   const cap = 6;
   for (let i = 0; i < x.length; i++) {
-    const px = sx(x[i]) + dodge;
+    const px = sx(x[i]);
     const lo = sy(lower[i]);
     const hi = sy(upper[i]);
     line(svg, px, hi, px, lo, "ci-whisker");
