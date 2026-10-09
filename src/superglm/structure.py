@@ -340,6 +340,7 @@ class Structure:
         import superglm
 
         _require_superglm(model, "from_model")
+        fitted = getattr(model, "_result", None) is not None
         frame = None
         if X is not None:
             from superglm._frame import as_eager_frame
@@ -353,15 +354,16 @@ class Structure:
             if not isinstance(name, str):
                 raise StructureError(_NOT_WRITABLE.format(value=name, feature=name))
             if kind == "spline":
+                # An unfitted spline has no placed knots to write; the model is refused below.
                 features[name] = FeatureStructure(
                     kind=kind,
                     ranges=list(current_ranges(spec)),
-                    knots=_knots_entry(spec),
+                    knots=_knots_entry(spec) if fitted else None,
                     basis=_basis_entry(spec),
                 )
             else:
                 features[name] = _level_structure(name, spec, kind, frame)
-        if getattr(model, "_result", None) is None:
+        if not fitted:
             # A model with no categorical or ordered term to name says so here.
             raise StructureError(_MODEL_UNFITTED)
         return cls(features=features, superglm_version=str(superglm.__version__))
