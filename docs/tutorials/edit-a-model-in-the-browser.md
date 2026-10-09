@@ -141,8 +141,9 @@ explanations describe the action before it is run.
 
 ## Waiting Changes and Refit
 
-Collapse, Ungroup, Set reference, Make special, Back on the curve and the four shapes (Flat,
-Line, Quadratic and Cubic) change the structure of a term, so the model must be refit before they take effect. They do not refit one by
+Collapse, Ungroup, Set reference, Make special, Back on the curve, the four shapes (Flat,
+Line, Quadratic and Cubic) and knot changes change the structure of a term, so the model must be
+refit before they take effect. They do not refit one by
 one: each change waits, and **Refit** in the application bar applies every waiting change in one
 fit.
 
@@ -380,6 +381,46 @@ they are disabled, with the reason on hover:
 The summary, the Python `summary()` and the workbook note that shaped ranges were chosen in the
 editor from this data. Tests are conditional on them, so judge them on validation deviance.
 
+## Move the Knots
+
+The knots of a spline are the points where its pieces join. The **Knots** tool moves them, adds
+them and removes them. It works on a numeric spline term, and on an ordered term with a spline
+basis.
+
+Choose **Knots** in the chart's tool rail, or press K. The knots show as diamonds on the x-axis.
+
+- **Move:** drag a knot along the axis. Knots may pass each other.
+- **Add:** click the axis.
+- **Remove:** drag a knot below the axis.
+- **Keyboard:** with a knot selected, the arrow keys nudge it along the axis, and Delete removes it.
+
+The context bar shows the rest:
+
+- **Count** (− n +): the number of knots.
+- **Placed by:** the rule that places them. Choose Even spacing, Quantiles of values, Quantiles of
+  rows, or Tempered quantiles with an alpha from 0 to 1.
+- **Reset knots:** returns the knots to the ones declared in code.
+
+Changing the count or the rule places every knot again by that rule. This drops any knot you moved
+by hand. Undo brings them back.
+
+Outside the tool, the knots show as small ticks under the axis.
+
+A knot change waits for Refit, like the other structural changes. With **Refit after every
+structural change** on in Settings, it refits at once. Undo, Redo and **Revert to original model**
+cover it. The refit drops hand edits on the term, as it does for every structural change. A
+monotone or convex term keeps its constraint, and the refit chooses the smoothing again. **Run CV**
+compares the edited knots with the original model.
+
+Knot changes have these limits:
+
+- **Count:** an ordered term takes at most one knot fewer than the levels on its curve.
+- **Interactions:** a term used by an interaction keeps its knots.
+- **Evenly spaced only:** a natural spline (`kind="ns"`), and a P-spline whose penalty order `m` is
+  above its degree, take only evenly spaced knots. Their count can still change.
+- **Waiting level changes:** while a waiting change alters an ordered term's levels, refit before
+  you change its knots.
+
 ## Rating-Table Preview
 
 The **Chart / Table** switch above the chart shows the current term's block of the Excel rating
@@ -539,7 +580,23 @@ holds:
 - the reference level;
 - the shaped ranges, with their degree and join;
 - where new levels go;
-- which levels of an ordered term are special.
+- which levels of an ordered term are special;
+- the knots chosen with the **Knots** tool, where there are any.
+
+Knots are recorded only where the editor chose them. Knots declared in code are not recorded. A
+spline with editor knots has a `knots` entry:
+
+```json
+"DrivAge": {
+  "kind": "spline",
+  "knots": {
+    "knot_alpha": 0.5,
+    "n_knots": 6,
+    "positions": [18.0, 24.5, 31.0, 40.0, 52.5, 68.0],
+    "strategy": "quantile_tempered"
+  }
+}
+```
 
 Choose **Export > Structure (JSON)**, or call `session.export_structure("structure.json")` from
 Python. The file is JSON with sorted keys, so two versions compare cleanly in a diff.
@@ -570,6 +627,9 @@ estimated is not carried over, so fit the copy with `fit_reml` to estimate it ag
 - A range the spline cannot take on the new data is refused, naming the feature and the range: by
   `apply` when you pass `X=`, otherwise by the fit.
 - A P-spline or natural spline with a shaped range is rebuilt as a B-spline, as in the editor.
+- A spline whose file has a `knots` entry is rebuilt with those knots. A file without one keeps the
+  declared knots.
+- A file with a `knots` entry needs superglm 0.39 or later. Older releases refuse it.
 - A feature the model does not have is refused, by name.
 - A feature that is another kind of term in the model is refused, by name.
 - A level the file makes special is taken off the model's curve.
@@ -668,6 +728,8 @@ still works: its report is shown on the Validation tab.
 - Use Escape to close the current popover, Help drawer, inspector drawer, or dialog.
 - Use Ctrl/Cmd+Z to undo and Ctrl/Cmd+Shift+Z or Ctrl+Y to redo an edit, a waiting change or a
   step.
+- Press K to choose the Knots tool. With a knot selected, the arrow keys nudge it and Delete
+  removes it.
 - Press R to refit the waiting changes.
 
 Pointer editing remains the primary high-density curve workflow. Full per-point keyboard editing

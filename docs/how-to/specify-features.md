@@ -38,6 +38,16 @@ Spline(kind="cr", k=12, m=(1, 2))         # multi-order penalty
 `quantile_tempered` with a small `knot_alpha` is often a good pricing default
 for skewed variables like Bonus-Malus.
 
+A P-spline on stated knots (`knots=[...]`) or on a quantile rule uses the general
+difference penalty, because its knots are unevenly spaced. The usual difference
+penalty measures wiggliness only on evenly spaced knots. With uneven knots, its
+pull on a heavily smoothed fit points towards a shape set by where the knots
+fall. The general penalty of Li and Cao (2022), "General P-splines for
+non-uniform B-splines" (arXiv:2201.06808), pulls towards a straight line
+wherever the knots sit, and matches the usual penalty on evenly spaced knots.
+A fit on stated or quantile knots can change in 0.39, so refit and compare. See
+the [migration note](../development/migrations/general-pspline-penalty.md).
+
 ### `select=True`
 
 `select=True` adds mgcv-style double-penalty shrinkage to the spline term. This
