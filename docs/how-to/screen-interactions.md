@@ -196,14 +196,14 @@ features = {
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
 #  feature_a  feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge BonusMalus          ti   6.054036  2.589945   2.000000 2.417594e+01     5244   False
-# BonusMalus   VehBrand  spline_cat  12.415514  0.540125  10.000001 1.631965e+08     1012   False
-#    DrivAge BonusMalus          ti   1.963047 -0.024042   2.000000 6.895568e+01     7360   False
+#     VehAge BonusMalus          ti   6.173586  2.657017   2.000000 2.136412e+02     5244   False
+# BonusMalus   VehBrand  spline_cat  12.415513  0.540125  10.000000 1.724599e+10     1012   False
+#    DrivAge BonusMalus          ti   1.325982 -0.413100   2.000000 1.256993e+03     7360   False
 #     VehAge   VehBrand  spline_cat   7.844563 -0.481896   9.999576 3.781106e+09      627   False
 #    DrivAge     VehAge          ti   0.551591 -0.923205   2.000000 5.047925e+01     4560   False
 #    DrivAge   VehBrand  spline_cat   1.974106 -1.794641   9.999927 1.301108e+10      880   False
 # LogDensity   VehBrand numeric_cat   1.098423 -1.990453  10.000000 0.000000e+00       11   False
-# BonusMalus     Region  spline_cat   7.159725 -2.135602  21.000003 8.765718e+07     2024   False
+# BonusMalus     Region  spline_cat   7.159724 -2.135602  21.000000 9.263282e+09     2024   False
 #    DrivAge     Region  spline_cat   6.724113 -2.202810  20.999860 6.858572e+09     1760   False
 # LogDensity     Region numeric_cat   5.250606 -2.430184  21.000000 0.000000e+00       22   False
 #     VehAge     Region  spline_cat   2.008774 -2.930391  20.998739 2.449505e+09     1254   False
@@ -219,11 +219,11 @@ Confirming each by refit — the gate, not the score:
 
 | row | kind | `z` | probe df | refit gain |
 |---|---|---:|---:|---:|
-| `VehAge x BonusMalus` | `ti` | 2.59 | 2 | 43.0 |
+| `VehAge x BonusMalus` | `ti` | 2.66 | 2 | 41.7 |
 | `BonusMalus x VehBrand` | `spline_cat` | 0.54 | 10 | 72.5 |
 
-The second pair buys *more* deviance and ranks *below* the first: 43.0 on 2 df
-is 21.5 per df against 7.2 for the second pair. The current `z` adjusts the
+The second pair buys *more* deviance and ranks *below* the first: 41.7 on 2 df
+is 20.8 per df against 7.2 for the second pair. The current `z` adjusts the
 local score for probe complexity; it does not rank by total refit gain or
 directly by gain per df.
 These two gains are measured on the training data. They show that complexity
@@ -245,7 +245,7 @@ a pair down the queue; it never promotes one. Nothing here was binned or
 refused (`approx` is False throughout, no NaN rows).
 
 Read the top row against its own kind's measured noise maximum below (9.48 for
-`ti`): 2.59 does not clear it — and the refit bought 43.0 deviance anyway. That
+`ti`): 2.66 does not clear it — and the refit bought 41.7 deviance anyway. That
 is the screen working as described rather than a contradiction: the floor is
 the largest value a wide null battery produced, not a threshold a real pair
 must beat, and the confirmatory refit is what settles the question.
