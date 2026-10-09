@@ -162,6 +162,7 @@ def stage_structural(
     *,
     keep_reference: bool = True,
     X=None,
+    sample_weight=None,
 ) -> PendingStep:
     """Stage one structural change to wait for a Refit.
 
@@ -171,18 +172,27 @@ def stage_structural(
     (``levels``, taken off an ordered term's curve) or ``"on_curve"``
     (``levels``, put back on it); levels are display labels. A change its builder refuses is refused now, with
     today's sentence. Nothing is fitted: the model, the curves and the model
-    revision stay as they are. ``X`` is the frame the refit will read
-    (default: the session's refit data).
+    revision stay as they are. ``X`` and ``sample_weight`` are the frame and
+    weights the refit will read (default: the session's refit data).
     """
     editable = session._require_term(term)
     if operation not in _REFIT_AT_ONCE:
         raise EditorValueError(f"Unknown structural change: {operation!r}")
     if not isinstance(params, dict):
         raise EditorValueError("params must be an object.")
-    X_ref = session._resolve_refit_data(None, None, None, None)[0] if X is None else X
+    if X is None:
+        X_ref, _y, weights, _offset = session._resolve_refit_data(None, None, None, None)
+    else:
+        X_ref, weights = X, sample_weight
     try:
         replacement, metadata = _draft_for(
-            session, operation, editable, params, keep_reference=keep_reference, X=X_ref
+            session,
+            operation,
+            editable,
+            params,
+            keep_reference=keep_reference,
+            X=X_ref,
+            sample_weight=weights,
         )
     except EditorClientError:
         raise
@@ -248,7 +258,13 @@ def stage_and_refit(
     change = None
     try:
         change = stage_structural(
-            session, operation, term, params, keep_reference=keep_reference, X=refit_kwargs.get("X")
+            session,
+            operation,
+            term,
+            params,
+            keep_reference=keep_reference,
+            X=refit_kwargs.get("X"),
+            sample_weight=refit_kwargs.get("sample_weight"),
         )
         _apply_pending(session, before=before, alone=change, **refit_kwargs)
     except BaseException as exc:
@@ -481,7 +497,14 @@ def _waiting_draft(session: EditorSession, term: str):
 
 
 def _draft_for(
-    session: EditorSession, operation: str, editable: EditableTerm, params, *, keep_reference, X
+    session: EditorSession,
+    operation: str,
+    editable: EditableTerm,
+    params,
+    *,
+    keep_reference,
+    X,
+    sample_weight=None,
 ):
     """``operation``'s builder on the term's draft: the replacement spec and its metadata."""
     draft = _waiting_draft(session, editable.name)
@@ -517,6 +540,7 @@ def _draft_for(
             [str(level) for level in levels],
             special=operation == "special",
             X=X,
+            sample_weight=sample_weight,
             draft_spec=draft,
         )
     return shaped_feature_spec(

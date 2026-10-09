@@ -1568,7 +1568,7 @@ function renderSpecialAction(button, state) {
 function shownFreeLevels() {
   const state = store.getState();
   const free = state.view.freeLevels;
-  return freeLevelsShown(free, selectedTerm(), state.remote.snapshot?.model_revision) ? free : null;
+  return freeLevelsShown(free, selectedTerm(), state.remote.snapshot?.fit_token) ? free : null;
 }
 
 // Free levels refits the model with the term's levels free, as Refit does a
@@ -1583,7 +1583,9 @@ async function toggleFreeLevels() {
   stopContributionBuild();
   setAppBusy(true, "Fitting free levels", `Refitting the model with ${term}'s levels free`);
   try {
-    actions.patchView({ freeLevels: await editorClient.freeLevels(term) });
+    const free = await editorClient.freeLevels(term);
+    actions.patchView({ freeLevels: free });
+    if (free.notice) actions.showNotice(free.notice);
   } catch (error) {
     actions.showNotice(error instanceof Error ? error.message : String(error));
   } finally {

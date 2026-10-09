@@ -239,6 +239,8 @@ interval.
   levels' marks.
 - A level with little exposure has a wide interval. The smoothing helps such a level, so leave it
   on the curve.
+- A level whose rows another term covers exactly, such as a categorical with one level for just
+  those rows, has no free value of its own. It gets no diamond, and a note names it.
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the

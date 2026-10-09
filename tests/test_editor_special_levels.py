@@ -197,16 +197,22 @@ def test_make_special_and_back_on_the_curve_refuse_in_fixed_sentences(book):
             session.stage_structural(operation, "band", {"levels": levels})
         assert str(refused.value) == sentence
     session.pending.clear()
-    # The refit's own rows decide: these hold no Mi072.
-    X = book[1]
-    with pytest.raises(EditorValueError) as refused:
-        session.stage_structural(
-            "special", "band", {"levels": ["Mi072"]}, X=X[X["band"] != "Mi072"]
-        )
-    assert str(refused.value) == (
-        "'Mi072' has no rows in the data the refit reads, so it has nothing to estimate a free "
-        "value from."
+    # The refit's own rows and weights decide: these hold no Mi072, and then
+    # none of positive weight.
+    X, _y, w = book[1:]
+    sentence = (
+        "'Mi072' has no rows of positive weight in the data the refit reads, so it has nothing "
+        "to estimate a free value from."
     )
+    for rows, weights in (
+        (X[X["band"] != "Mi072"], None),
+        (X, np.where(X["band"] == "Mi072", 0.0, w)),
+    ):
+        with pytest.raises(EditorValueError) as refused:
+            session.stage_structural(
+                "special", "band", {"levels": ["Mi072"]}, X=rows, sample_weight=weights
+            )
+        assert str(refused.value) == sentence
     assert session.pending == []
 
 
@@ -396,8 +402,13 @@ def test_the_widget_fits_free_levels_once_per_model_revision(book, monkeypatch):
     widget = session.widget()
     try:
         first = _post_json(f"{widget.url}/free_levels", {"term": "band"})
+        token = widget._state()["fit_token"]
+        assert first["fit_token"] == token
+        # A hand edit changes neither fit: the comparison and its token stand.
+        session.select_levels("band", ["Mi042"])
+        session.shift("band", 0.05)
         second = _post_json(f"{widget.url}/free_levels", {"term": "band"})
-        assert first == second and first["model_revision"] == session.model_revision
+        assert first == second and widget._state()["fit_token"] == token
         assert calls == ["band"]
         _post_json(f"{widget.url}/special_levels", {"term": "band", "levels": [BUMP]})
         assert list(session.model._specs["band"]._special_display) == [BUMP]
@@ -469,6 +480,31 @@ def test_a_curve_that_misfits_its_reference_flags_the_misfit_not_every_level():
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
     assert free["flagged"]
     assert set(free["flagged"]) <= set(BANDS[:4])
+
+
+def test_both_fits_are_centred_over_the_levels_the_free_fit_estimated():
+    """A declared band with no rows is on the curve but not in the free fit.
+
+    Centring the curve over it as well moved every gap by one amount; over the
+    same levels, the gaps of the levels compared sum to zero.
+    """
+    X, y, w = _book(n=6000)
+    values = {band: float(i) for i, band in enumerate([*BANDS, "Mi078"])}
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "band": OrderedCategorical(values=values, basis=Spline(kind="ps", n_knots=6)),
+            "area": Categorical(),
+        },
+        spline_penalty=20.0,
+    ).fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+    free = free_level_comparison(session, "band")
+    assert free["levels"] == BANDS
+    term = session.terms["band"]
+    curve = {level: term.original_log_effect[i] for i, level in enumerate(term.levels)}
+    gaps = [np.log(free["y"][k]) - curve[level] for k, level in enumerate(free["levels"])]
+    assert abs(sum(gaps)) < 1e-9
 
 
 def test_free_levels_put_both_variances_on_one_dispersion():
@@ -572,3 +608,101 @@ def test_a_grouped_term_compares_each_member_with_its_group(book):
     at = {level: k for k, level in enumerate(free["levels"])}
     assert free["y"][at["Mi060"]] == free["y"][at["Mi066"]]
     assert free["levels"] == BANDS
+
+
+TWELVE = [f"B{i:02d}" for i in range(12)]
+
+
+def _gaussian(seed: int, *, effect=None):
+    """Twelve bands of 50 rows, the noise centred within each band."""
+    k = np.repeat(np.arange(12), 50)
+    noise = np.random.default_rng(seed).normal(0.0, 1.0, k.size)
+    noise -= np.bincount(k, noise)[k] / 50
+    y = 10.0 + 0.05 * k + (0.0 if effect is None else effect(k)) + noise
+    return pd.DataFrame({"band": np.array(TWELVE)[k]}), y, k
+
+
+@pytest.mark.parametrize("first", ["band", "area"])
+def test_a_level_another_term_aliases_is_left_out_and_named(first):
+    """``area`` is exactly B05's rows, so B05's free value is not estimable.
+
+    Centring over it moved every gap by an undetermined amount: declared
+    band first, all twelve bands were flagged, declared second only B05.
+    """
+    X, y, k = _gaussian(10, effect=lambda k: 3.0 * (k == 5))
+    X["area"] = np.where(k == 5, "x", "y")
+    features = {
+        "band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6)),
+        "area": Categorical(),
+    }
+    model = SuperGLM(
+        family="gaussian",
+        features={name: features[name] for name in (first, *(set(features) - {first}))},
+        spline_penalty=20.0,
+    ).fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == [level for level in TWELVE if level != "B05"]
+    assert free["flagged"] == []
+    assert free["notice"] == (
+        "No free value is drawn for B05: the model's other terms cover the same rows, "
+        "so the data cannot separate its value from theirs."
+    )
+
+
+def test_a_response_the_curve_fits_exactly_compares_with_no_dispersion():
+    X, _y, _k = _gaussian(0)
+    y = np.full(len(X), 10.0)
+    model = SuperGLM(
+        family="gaussian",
+        features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+    ).fit(X, y)
+    assert model.result.phi == 0.0
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == TWELVE
+    assert free["flagged"] == []
+    assert free["notice"] is None
+
+
+def test_free_level_intervals_stay_finite_for_a_level_with_almost_no_weight():
+    """The free interval of a level weighted 1e-8 is wider than float64 holds."""
+    X, y, k = _gaussian(4)
+    w = np.where(k == 5, 1e-8, 1.0)
+    model = SuperGLM(
+        family="gaussian",
+        features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+    ).fit(X, y, sample_weight=w)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+    json.dumps(free, allow_nan=False)
+    at = free["levels"].index("B05")
+    assert free["lower"][at] < free["y"][at] < free["upper"][at]
+
+
+@pytest.mark.parametrize("collapse", [False, True])
+def test_a_level_put_back_beside_an_equal_value_keeps_its_place(collapse):
+    """B05 and B06 share a value: put back last, B05 sorted after B06.
+
+    The two orders predict alike, but B04 and B05 were no longer adjacent to
+    collapse, and the exported structure no longer matched the declaration.
+    A collapse made while B05 is special lists it last in its grouping too.
+    """
+    X, y, _k = _gaussian(1)
+    values = {level: i / 11 for i, level in enumerate(TWELVE)}
+    values["B06"] = values["B05"]
+    model = SuperGLM(
+        family="gaussian",
+        features={"band": OrderedCategorical(values=values, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+    ).fit(X, y)
+    session = EditorSession.from_model(model, train_data=(X, y))
+    session.replace_with_special_levels("band", ["B05"])
+    if collapse:
+        session.stage_structural("collapse", "band", {"levels": ["B00", "B01"]})
+        session.refit_pending()
+    session.replace_with_special_levels("band", ["B05"], special=False)
+    spec = session.model._specs["band"]
+    assert full_level_order(spec) == TWELVE
+    smooth = [str(level) for level in spec._smooth_levels]
+    assert smooth[smooth.index("B05") + 1] == "B06"
+    session.stage_structural("collapse", "band", {"levels": ["B04", "B05"]})

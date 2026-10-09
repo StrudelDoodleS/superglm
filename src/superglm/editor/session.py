@@ -850,13 +850,20 @@ class EditorSession:
         *,
         keep_reference: bool = True,
         X=None,
+        sample_weight=None,
     ) -> PendingStep:
         """Stage one structural change to wait for a Refit.
 
         See ``superglm.editor.staging.stage_structural``.
         """
         return staging.stage_structural(
-            self, operation, term, params, keep_reference=keep_reference, X=X
+            self,
+            operation,
+            term,
+            params,
+            keep_reference=keep_reference,
+            X=X,
+            sample_weight=sample_weight,
         )
 
     def refit_pending(self, *, method: str = "auto", **refit_kwargs: Any) -> StructuralStep:

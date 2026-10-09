@@ -1359,11 +1359,13 @@ function band(svg, x, lower, upper, sx, sy, cls) {
 function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
   const layer = el("g", { class: "free-levels" });
   svg.appendChild(layer);
+  // The overlay never rescales the chart: what lies past it is drawn at its edge.
+  const inside = (/** @type {number} */ value) => sy(Math.min(Math.max(value, yMin), yMax));
   for (const mark of marks) {
     const px = sx(mark.x);
     const flagged = mark.flagged ? " is-flagged" : "";
-    line(layer, px, sy(mark.upper), px, sy(mark.lower), `free-whisker${flagged}`);
-    const py = sy(Math.min(Math.max(mark.y, yMin), yMax));
+    line(layer, px, inside(mark.upper), px, inside(mark.lower), `free-whisker${flagged}`);
+    const py = inside(mark.y);
     const node = el("path", { d: diamond(px, py, 4.5), class: `free-level${flagged}` });
     node.setAttribute("data-level", mark.level);
     const title = el("title", {});

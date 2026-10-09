@@ -61,8 +61,8 @@ _POSITIONAL_BREAKS = (
 )
 _TOO_FEW = "{term!r} needs at least two levels on its curve; make fewer levels special."
 _NO_ROWS = (
-    "{level!r} has no rows in the data the refit reads, so it has nothing to estimate "
-    "a free value from."
+    "{level!r} has no rows of positive weight in the data the refit reads, so it has "
+    "nothing to estimate a free value from."
 )
 _INSIDE_GROUP = (
     "{level!r} would go back between members of group {group!r} of {term!r}; ungroup it first."
@@ -81,6 +81,7 @@ def special_feature_spec(
     *,
     special: bool,
     X,
+    sample_weight=None,
     draft_spec=None,
 ) -> tuple[Any, dict[str, Any]]:
     """A fresh spec for ``term`` with ``labels`` made special, or put back on the curve.
@@ -88,7 +89,9 @@ def special_feature_spec(
     ``labels`` are displayed level labels. The reference the in-force fit
     resolved is kept. ``draft_spec`` is the term's spec as waiting changes
     leave it (None: the fitted spec), so changes to one term compose. A
-    request the term cannot take is refused in a fixed sentence.
+    request the term cannot take is refused in a fixed sentence. ``X`` and
+    ``sample_weight`` are the refit's frame and weights: a level made special
+    needs rows of positive weight there.
     """
     fitted = model._specs[term.name]
     spec = fitted if draft_spec is None else draft_spec
@@ -107,8 +110,12 @@ def special_feature_spec(
     frame.require_columns((term.name,))
     column = frame.column_array(term.name)
     if special:
-        # The column's own spelling (1.0) read through the declaration (1).
-        raw = pd.unique(np.asarray(column, dtype=object).ravel())
+        # The rows of positive weight, in the column's own spelling (1.0)
+        # read through the declaration (1).
+        rows = np.asarray(column, dtype=object).ravel()
+        if sample_weight is not None:
+            rows = rows[np.asarray(sample_weight, dtype=np.float64).ravel() > 0.0]
+        raw = pd.unique(rows)
         present = {str(level) for level in spec._canonical(raw)}
         _require_free_to_leave(spec, term, chosen, declared, present)
     else:

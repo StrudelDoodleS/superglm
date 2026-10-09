@@ -745,7 +745,7 @@ export function createEditorActions({
   }
 
   /**
-   * A refusal that changed nothing, in the alert with no Retry.
+   * A refusal, or a note, that changed nothing, in the alert with no Retry.
    * @param {string} message @returns {void}
    */
   function showNotice(message) {

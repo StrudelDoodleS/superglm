@@ -61,7 +61,7 @@ test("free-level marks sit at each compared level's point, a collapsed group's o
   const free = {
     term: "band", levels: ["A", "B", "C", "D"], y: [0.9, 1, 1.3, 1.1],
     lower: [0.8, 1, 1.2, 1], upper: [1, 1, 1.4, 1.2], flagged: ["C"],
-    confidence: 0.95, z: 2.6, shrunk: false, model_revision: 4
+    confidence: 0.95, z: 2.6, shrunk: false, fit_token: 4, notice: null
   };
   const expanded = freeLevelMarks(free, { x: [0, 1, 2, 3, 4, 5], levels: ["A", "B", "C", "D", "E", "Z"] });
   assert.deepEqual(expanded.map((mark) => [mark.level, mark.x, mark.flagged]), [
@@ -74,7 +74,7 @@ test("free-level marks sit at each compared level's point, a collapsed group's o
   });
   assert.deepEqual(collapsed.map((mark) => [mark.level, mark.x]), [["A", 0], ["B", 1], ["C", 2]]);
   assert.deepEqual(freeLevelMarks(null, { x: [0], levels: ["A"] }), []);
-  // A comparison is shown for its own term and model revision only.
+  // A comparison is shown for its own term and fit only.
   assert.equal(freeLevelsShown(free, "band", 4), true);
   assert.equal(freeLevelsShown(free, "band", 5), false);
   assert.equal(freeLevelsShown(free, "area", 4), false);

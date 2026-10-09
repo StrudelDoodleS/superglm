@@ -225,7 +225,7 @@ def rebuilt_ordered_spec(
     specials = list(spec._special_raw) or list(spec._specials)
     shown = list(spec._special_display)
     record = freed_levels(spec)
-    order = full_level_order(spec) if freed else []
+    order = full_level_order(spec) if freed or returned else []
     positional = not isinstance(getattr(spec, "_spline_obj", None), _SplineBase)
     for label in returned:
         at = next(i for i, special in enumerate(shown) if str(special) == label)
@@ -233,8 +233,13 @@ def rebuilt_ordered_spec(
         del specials[at]
         display = shown.pop(at)
         values[display if grouping is None else label] = value
-    if returned and grouping is not None:
-        grouping = _grouping_in_axis_order(grouping, values)
+    if returned:
+        # Levels sharing a value keep their order by place: the term sorts its
+        # values stably, so a level appended last would follow its equals.
+        place = {label: i for i, label in enumerate(order)}
+        values = dict(sorted(values.items(), key=lambda item: place.get(str(item[0]), 0)))
+        if grouping is not None:
+            grouping = _grouping_in_axis_order(grouping, values, place)
     for label in freed:
         key = next(key for key in values if str(key) == label)
         before = order[: order.index(label)]
@@ -297,15 +302,23 @@ def full_level_order(spec: OrderedCategorical) -> list[str]:
     return order
 
 
-def _grouping_in_axis_order(grouping: LevelGrouping, values: dict) -> LevelGrouping:
+def _grouping_in_axis_order(
+    grouping: LevelGrouping, values: dict, place: dict[str, int]
+) -> LevelGrouping:
     """``grouping`` in axis order: a level put back on the curve takes its place.
 
     A term's bands follow its grouping's order, its levels as shown follow the
     grouping's originals, and a grouping made while a level was special lists
     that level last in both. Each original sits at its value and each group at
     its members' mean; a special, with no value, keeps its place after them.
+    Equal values follow ``place``, each original's place in the term's order,
+    and a group's is its first member's.
     """
     axis = {str(key): float(at) for key, at in values.items()}
+
+    def placed(label) -> int:
+        members = grouping.group_to_originals.get(label, [label])
+        return min((place.get(str(m), len(place)) for m in members), default=len(place))
 
     def position(label) -> float:
         members = [
@@ -315,9 +328,12 @@ def _grouping_in_axis_order(grouping: LevelGrouping, values: dict) -> LevelGroup
 
     return dataclasses.replace(
         grouping,
-        grouped_levels=sorted(grouping.grouped_levels, key=position),
+        grouped_levels=sorted(
+            grouping.grouped_levels, key=lambda label: (position(label), placed(label))
+        ),
         all_original_levels=sorted(
-            grouping.all_original_levels, key=lambda original: axis.get(str(original), float("inf"))
+            grouping.all_original_levels,
+            key=lambda original: (axis.get(str(original), float("inf")), placed(original)),
         ),
     )
 

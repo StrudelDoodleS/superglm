@@ -39,7 +39,9 @@ from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import clone_with_replaced_features, special_labels
-from superglm.inference._term_covariance import feature_se_from_cov
+from superglm.inference._term_helpers import _spline_se
+from superglm.inference._term_types import _safe_exp
+from superglm.inference.covariance import covariance_selected_block
 
 # The chance, across all the levels of one term, that no level's interval
 # misses the curve when every level lies on it.
@@ -53,6 +55,10 @@ _NOT_ORDERED = (
     "Compare with free levels is for ordered terms: every level of {term!r} is free already."
 )
 _NOT_FITTED = "The free levels of {term!r} could not be estimated, so there is nothing to compare."
+_UNDETERMINED = (
+    "No free value is drawn for {levels}: the model's other terms cover the same rows, "
+    "so the data cannot separate {whose} value from theirs."
+)
 _NO_DATA = (
     "Comparing with free levels refits the model, which needs its training data: open the "
     "editor with train_data, or from a model fitted with its data kept."
@@ -63,9 +69,10 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     """Refit the in-force model with ``name``'s levels free and compare them with its curve.
 
     Returns the payload the chart draws: for each level on the curve, its
-    free estimate and interval as relativities on the chart's own scale (at
-    the reference both agree), and the levels whose interval misses the
-    curve. Hand edits are not part of either: both are fits.
+    free estimate and interval as relativities on the chart's own scale,
+    placed by the gap between the two fits centred on the mean of the levels,
+    and the levels whose interval misses the curve. Hand edits are not part
+    of either: both are fits.
     """
     term = session._require_term(name)
     spec = session.model._specs[name]
@@ -93,55 +100,146 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     )
     # Both on the mean-centred scale: a gap measured from the reference
     # would carry the curve's misfit at the reference into every level.
-    free_levels = _centred(free_model, name)
-    curve = _centred(session.model, name)
+    free_levels, curve, undetermined = _centred_pair(free_model, session.model, name)
     # The two fits estimate their dispersion apart; the curve's variance is
-    # put on the free fit's, so the two variances share one scale.
-    scale = float(free_model.result.phi) / float(session.model.result.phi)
-    return _comparison(term, spec, free_levels, curve, curve_scale=scale, shrunk=shrunk)
+    # put on the free fit's, so the two variances share one scale. A response
+    # the curve fits exactly has no dispersion, and no variance to rescale.
+    curve_phi = float(session.model.result.phi)
+    scale = float(free_model.result.phi) / curve_phi if curve_phi > 0.0 else 0.0
+    payload = _comparison(term, spec, free_levels, curve, curve_scale=scale, shrunk=shrunk)
+    payload["notice"] = (
+        _UNDETERMINED.format(
+            levels=", ".join(undetermined), whose="its" if len(undetermined) == 1 else "their"
+        )
+        if undetermined
+        else None
+    )
+    return payload
 
 
-def _centred(model, name: str) -> dict[str, tuple[float, float]]:
-    """Each fitted level's log-relativity and its standard error, centred on the mean of the levels.
+def _centred_pair(free_model, model, name: str) -> tuple[dict, dict, list[str]]:
+    """Both fits' level values and errors, centred on the mean of one set of levels.
 
-    The mean is over the term's fitted levels, its groups and specials
-    included, as for a mean-centred report; the errors are those of that
-    contrast, from the fit's covariance. A term the selection penalty
-    removed is flat, with no variance.
+    The set is the levels the free fit estimated: a declared level with no
+    rows has a value on the curve but none free, and centring the two over
+    different sets would move every gap by the same amount. The errors are
+    those of that one contrast, each from its fit's covariance. A term the
+    selection penalty removed is flat, with no variance. The levels whose
+    free value the data cannot separate from other terms are returned apart.
     """
-    spec = model._specs[name]
-    grouping = getattr(spec, "_grouping", None)
-    fitted = spec._ordered_levels if isinstance(spec, OrderedCategorical) else spec._levels
-    labels = [str(level) for level in fitted]
+    free_spec, spec = free_model._specs[name], model._specs[name]
+    pinned = {str(level) for level in getattr(free_spec, "_pinned_levels", ())}
+    estimated = {str(level) for level in free_spec._levels} - pinned
+    declared = {str(level): level for level in spec._ordered_levels}
+    labels, undetermined = _determined(
+        free_model, name, [label for label in declared if label in estimated]
+    )
+    pair = []
+    for fitted, se in (
+        (free_model, _categorical_centred_se(free_model, name, labels)),
+        (model, _ordered_centred_se(model, name, [declared[label] for label in labels])),
+    ):
+        values = np.array([_value(fitted, name, label) for label in labels])
+        centred = values - values.mean()
+        pair.append(
+            {label: (float(c), float(s)) for label, c, s in zip(labels, centred, se, strict=True)}
+        )
+    return pair[0], pair[1], undetermined
+
+
+def _determined(model, name: str, labels: list[str]) -> tuple[list[str], list[str]]:
+    """The largest set of ``labels`` the free fit tells apart, and the rest.
+
+    A level aliased with another term's columns (a categorical whose one
+    level is exactly this level's rows) has no estimable free value, and a
+    mean taken over it is not estimable either, so it would move every gap.
+    Estimable differences fall into classes, since ``a - c = (a - b) + (b - c)``,
+    and a mean over levels of two classes is not estimable: the gaps are
+    measured within the largest class.
+    """
+    rank = getattr(model.result, "rank_info", None)
+    if rank is None or _term_covariance(model, name) is None:
+        return labels, []
+    starts = [group.start for group in model._groups if group.feature_name == name]
+    column = {str(level): starts[0] + j for j, level in enumerate(model._specs[name]._non_base)}
+
+    def coordinate(label: str) -> np.ndarray:
+        # The reference is the zero contrast: its value is fixed, not fitted.
+        vector = np.zeros(len(rank.mean_x))
+        if label in column:
+            vector[column[label]] = 1.0
+        return vector
+
+    classes: list[list[str]] = []
+    for label in labels:
+        home = next(
+            (c for c in classes if rank.is_estimable(coordinate(label) - coordinate(c[0]))), None
+        )
+        if home is None:
+            classes.append([label])
+        else:
+            home.append(label)
+    kept = max(classes, key=len, default=[])
+    return kept, [label for label in labels if label not in kept]
+
+
+def _value(model, name: str, label: str) -> float:
+    """The native log-relativity of fitted level ``label``; a grouped fit may report its members."""
     native = model.term_inference(name, with_se=False)
     reported = {
         str(level): float(value)
         for level, value in zip(native.levels, native.log_relativity, strict=True)
     }
+    grouping = getattr(model._specs[name], "_grouping", None)
+    members = [] if grouping is None else grouping.group_to_originals.get(label, [])
+    found = [reported[str(m)] for m in [label, *members] if str(m) in reported]
+    return found[0] if found else 0.0
 
-    def value(label: str) -> float:
-        # A grouped fit may report its group's members rather than the group.
-        members = [] if grouping is None else grouping.group_to_originals.get(label, [])
-        found = [reported[str(m)] for m in [label, *members] if str(m) in reported]
-        return found[0] if found else 0.0
 
-    values = np.array([value(label) for label in labels])
-    if native.active:
-        covariance, active = model._coef_covariance
-        se = feature_se_from_cov(
-            name,
-            covariance,
-            active,
-            model.result,
-            model._groups,
-            model._specs,
-            model._interaction_specs,
-            center=True,
-        )
-    else:
-        se = np.zeros(len(labels))
-    centred = values - values.mean()
-    return {label: (float(c), float(s)) for label, c, s in zip(labels, centred, se, strict=True)}
+def _term_covariance(model, name: str):
+    """The fit's covariance and active groups, or None when selection removed the term."""
+    covariance, active = model._coef_covariance
+    if not any(group.feature_name == name for group in active):
+        return None
+    return covariance, active
+
+
+def _categorical_centred_se(model, name: str, labels: list[str]) -> np.ndarray:
+    """Errors of a categorical's levels centred on the mean of ``labels``."""
+    found = _term_covariance(model, name)
+    if found is None:
+        return np.zeros(len(labels))
+    covariance, active = found
+    spec = model._specs[name]
+    indices = np.concatenate([np.arange(g.start, g.end) for g in active if g.feature_name == name])
+    block = covariance_selected_block(covariance, indices)
+    column = {str(level): j for j, level in enumerate(spec._non_base)}
+    rows = np.zeros((len(labels), len(column)))
+    for i, label in enumerate(labels):
+        if label in column:
+            rows[i, column[label]] = 1.0
+    rows -= rows.mean(axis=0)
+    return np.sqrt(np.maximum(np.sum((rows @ block) * rows, axis=1), 0.0))
+
+
+def _ordered_centred_se(model, name: str, levels: list) -> np.ndarray:
+    """Errors of an ordered term's ``levels`` centred on their mean."""
+    found = _term_covariance(model, name)
+    if found is None:
+        return np.zeros(len(levels))
+    covariance, active = found
+    spec = model._specs[name]
+    return _spline_se(
+        spec,
+        name,
+        model.result.beta,
+        [group for group in model._groups if group.feature_name == name],
+        active,
+        covariance,
+        x_eval=np.array(levels, dtype=object),
+        reference_x=np.array([spec._base_level], dtype=object),
+        center=True,
+    )
 
 
 def _free_categorical(spec: OrderedCategorical, column) -> Categorical:
@@ -244,9 +342,11 @@ def _comparison(
         rows.append(
             {
                 "level": level,
-                "y": float(np.exp(on_curve + gap)),
-                "lower": float(np.exp(on_curve + gap - half)),
-                "upper": float(np.exp(on_curve + gap + half)),
+                # A level with almost no weight has an interval past what
+                # float64 holds; its ends stay finite, as the chart's own do.
+                "y": float(_safe_exp(on_curve + gap)),
+                "lower": float(_safe_exp(on_curve + gap - half)),
+                "upper": float(_safe_exp(on_curve + gap + half)),
                 "flagged": bool(judged and abs(gap) > half),
             }
         )

@@ -122,9 +122,10 @@ export function freeLevelMarks(free, view) {
 }
 
 /**
- * Whether ``free`` is the comparison for the term and model in view.
- * @param {FreeLevels|null} free @param {string} term @param {number|undefined} revision
+ * Whether ``free`` is the comparison for the term and fit in view. A hand edit
+ * keeps the fit, so the comparison stays.
+ * @param {FreeLevels|null} free @param {string} term @param {number|undefined} fitToken
  */
-export function freeLevelsShown(free, term, revision) {
-  return Boolean(free && free.term === term && free.model_revision === revision);
+export function freeLevelsShown(free, term, fitToken) {
+  return Boolean(free && free.term === term && free.fit_token === fitToken);
 }
