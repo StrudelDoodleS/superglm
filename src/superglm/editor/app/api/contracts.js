@@ -136,6 +136,9 @@
  * @property {number|null} max_count the most knots the term takes; null for no limit
  * @property {boolean} resettable the knots in force or waiting differ from the
  *   original model's
+ * @property {string|null} even_only why the term takes evenly spaced knots
+ *   only (a natural spline, or a P-spline whose penalty order exceeds its
+ *   degree), as Python refuses uneven ones; null where any spacing goes
  */
 /**
  * The knots a waiting change leaves on a term, in chart x, ascending.

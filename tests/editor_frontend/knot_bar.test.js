@@ -51,12 +51,23 @@ class FakeNode {
 function nodes() {
   const doc = { activeElement: null, createElement: (tag) => new FakeNode(tag, doc) };
   const make = (tag) => new FakeNode(tag, doc);
+  const option = (value) => Object.assign(make("option"), { value, disabled: false });
+  const hand = Object.assign(option("explicit"), { disabled: true });
+  const rule = make("select");
+  rule.options = [
+    ...["uniform", "quantile", "quantile_rows", "quantile_tempered"].map(option), hand,
+  ];
   return {
     doc,
     root: make("div"), fewer: make("button"), count: make("output"), more: make("button"),
-    rule: make("select"), hand: make("option"), alphaWrap: make("label"), alpha: make("input"),
-    reset: make("button"),
+    rule, hand, alphaWrap: make("label"), alpha: make("input"), reset: make("button"),
   };
+}
+
+/** The rule choices on offer: shown, and not disabled. */
+function offered(bar) {
+  return bar.rule.options.filter((option) => !option.hidden && !option.disabled)
+    .map((option) => option.value);
 }
 
 const LEVELS = ["18-24", "25-34", "35-44", "45-54", "55-64", "65+"];
@@ -158,6 +169,42 @@ test("each control stages one knot change, and one that cannot act says why inst
   assert.equal(changes.length, 5);
 });
 
+const EVEN_ONLY = "'age_band' is a natural spline (kind=\"ns\"), whose penalty needs evenly spaced knots; "
+  + 'change its count here, or declare it with kind="cr" or kind="ps" to place its knots freely.';
+
+test("a term that takes evenly spaced knots only is offered even spacing alone", async () => {
+  const bar = nodes();
+  renderKnotBar(bar, orderedTerm({ positions: [1, 2, 3], count: 3 }), true);
+  assert.deepEqual(offered(bar), ["uniform", "quantile", "quantile_rows", "quantile_tempered"]);
+
+  // In force by a rule it can no longer take: that rule stays named, but cannot be chosen.
+  let term = orderedTerm({
+    positions: [1, 2, 3], count: 3, strategy: "quantile", even_only: EVEN_ONLY, resettable: true,
+  });
+  renderKnotBar(bar, term, true);
+  assert.deepEqual(offered(bar), ["uniform"]);
+  const quantile = bar.rule.options[1];
+  assert.deepEqual([quantile.hidden, quantile.disabled], [false, true]);
+  assert.equal(bar.rule.options[3].hidden, true);
+  // The count re-places evenly, and Reset still works.
+  assert.equal(bar.more.dataset.popoverBody, "4 knots, all re-placed by even spacing.");
+  const changes = [];
+  bindKnotBar(bar, {
+    term: () => term,
+    onChange: async (params) => { changes.push(params); },
+    onRefuse: () => {},
+    onSettled: () => {},
+  });
+  bar.more.emit("click");
+  bar.reset.emit("click");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(changes, [{ count: 4, strategy: "uniform" }, { reset: true }]);
+  term = orderedTerm({ positions: [1, 2, 3], count: 3, even_only: EVEN_ONLY });
+  renderKnotBar(bar, term, true);
+  assert.deepEqual(offered(bar), ["uniform"]);
+  assert.equal(bar.rule.options[1].hidden, true);
+});
+
 test("the chip names the knots in every mode and takes the waiting tint", () => {
   const chip = new FakeNode();
   renderKnotChip(chip, orderedTerm());
@@ -182,4 +229,9 @@ test("in Knots mode the status line explains the gestures, or why the last did n
   renderKnotStatus(status, { pendingCount: 1, message: AT_LEAST_ONE });
   assert.equal(status.children[0].className, "status-waiting");
   assert.equal(status.textContent, `1 change waiting for refit · ${AT_LEAST_ONE}`);
+  renderKnotStatus(status, { evenOnly: true });
+  assert.equal(
+    status.textContent,
+    "Knots. This term takes evenly spaced knots only; change their count above the chart.",
+  );
 });

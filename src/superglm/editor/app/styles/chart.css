@@ -286,3 +286,7 @@
 /* In Knots mode the chart takes the arrow keys, so it takes focus. */
 #chart:focus { outline: none; }
 #chart:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* A term that takes evenly spaced knots only: nothing on the axis moves by
+   hand, and the hover text says why. */
+.knot-layer.is-even-only .knot-band-hit,
+.knot-layer.is-even-only .knot-hit { cursor: not-allowed; }

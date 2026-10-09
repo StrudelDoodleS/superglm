@@ -397,6 +397,35 @@ test("arrow keys nudge the selected knot, Delete removes it and Escape lets it g
   assert.equal(gestures.ui().selected, null);
 });
 
+const EVEN_ONLY = "The penalty order of 'curve' is above its degree, which needs evenly spaced knots; "
+  + "change its count here, or lower m in code to place its knots freely.";
+
+test("on a term that takes evenly spaced knots only, no knot moves or arrives by hand", () => {
+  const term = numericTerm({ knots: { strategy: "quantile", even_only: EVEN_ONLY } });
+  assert.equal(knotAxis(term).evenOnly, EVEN_ONLY);
+  assert.deepEqual(stepRule(term), { strategy: "uniform", alpha: 0.2 });
+  // The handles still show, but the band offers no new knot.
+  const layout = knotLayout(knotFrame(term, PLOT, true), { ...NO_UI, hover: 5 });
+  assert.equal(layout.handles.length, 4);
+  assert.equal(layout.adding, null);
+
+  const { pointer, key, px, changes, gestures } = gestureHarness(term);
+  pointer("pointerdown", px(4), 300);
+  pointer("pointermove", px(5.1), 300);
+  pointer("pointerup", px(5.1), 300);
+  assert.equal(gestures.ui().drag, null);
+  assert.equal(gestures.ui().selected, null);
+  assert.equal(gestures.message(), EVEN_ONLY);
+  pointer("pointerdown", px(5), 296);
+  pointer("pointerup", px(5), 296);
+  pointer("pointermove", px(5), 296);
+  assert.equal(gestures.ui().hover, null);
+  key("ArrowRight");
+  key("Delete");
+  assert.deepEqual(changes, []);
+  assert.equal(gestures.message(), EVEN_ONLY);
+});
+
 test("a change that is not staged gives the selection back, and outside Knots mode nothing acts", async () => {
   const harness = gestureHarness(numericTerm(), { staged: false });
   harness.pointer("pointerdown", harness.px(4), 300);

@@ -261,7 +261,8 @@ export function knotLayout(frame, ui) {
   // A knot on its way out has no position worth a tag.
   const tagged = handles.find((handle) => handle.selected && !handle.removing);
   const full = frame.axis.maxCount !== null && frame.positions.length >= frame.axis.maxCount;
-  const adding = drag || full || ui.hover === null ? null : knotPx(frame, ui.hover);
+  const closed = full || frame.axis.evenOnly !== null;
+  const adding = drag || closed || ui.hover === null ? null : knotPx(frame, ui.hover);
   return {
     ticks: [],
     ghosts,
@@ -300,7 +301,13 @@ export function drawKnotLayer(svg, frame, ui) {
     return;
   }
   const layout = knotLayout(frame, ui);
-  const layer = el("g", { class: classes("knot-layer", frame.editing && "is-editing") });
+  const evenOnly = frame.axis.evenOnly;
+  const layer = el("g", {
+    class: classes("knot-layer", frame.editing && "is-editing", evenOnly !== null && "is-even-only")
+  });
+  // Where no knot moves or arrives by hand, the axis and the knots say why on hover.
+  /** @type {Record<string, string>} */
+  const why = evenOnly === null ? {} : { "data-popover-title": "Knots", "data-popover-body": evenOnly };
   if (old) old.replaceWith(layer);
   else svg.insertBefore(layer, svg.querySelector(":scope > .legend-layer"));
   const { left, right, axisY, top } = frame;
@@ -311,7 +318,7 @@ export function drawKnotLayer(svg, frame, ui) {
     }));
     layer.appendChild(el("rect", {
       class: "knot-band-hit", x: left, y: axisY - BAND_HIT_HALF, width: right - left,
-      height: 2 * BAND_HIT_HALF
+      height: 2 * BAND_HIT_HALF, ...why
     }));
   }
   for (const guide of layout.guides) {
@@ -360,7 +367,8 @@ export function drawKnotLayer(svg, frame, ui) {
       y: handle.cy - HIT_HALF_HEIGHT,
       width: 2 * HIT_HALF_WIDTH,
       height: 2 * HIT_HALF_HEIGHT,
-      "data-knot-index": handle.index
+      "data-knot-index": handle.index,
+      ...why
     }));
   }
   if (layout.adding !== null) {

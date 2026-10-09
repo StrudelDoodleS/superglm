@@ -1132,10 +1132,12 @@ function renderKnotControls(term, knotsOn) {
 // In Knots mode the status line says what each gesture does, or why the
 // last one did nothing.
 function renderKnotStatusLine() {
-  if (!knotGestures || !knotsModeOn()) return;
+  const term = currentTerm();
+  if (!knotGestures || !knotsModeOn(term)) return;
   renderKnotStatus(statusNode, {
     pendingCount: selectPendingSteps(store.getState()).length,
-    message: knotGestures.message()
+    message: knotGestures.message(),
+    evenOnly: Boolean(term.knots.even_only)
   });
 }
 

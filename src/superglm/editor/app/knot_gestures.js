@@ -3,7 +3,9 @@
 // (it may pass its neighbours, and one dropped too close to another settles on
 // the nearest free spot), drag it below the axis to remove it, click the band
 // along the axis to add one, click a knot to select it; the arrow keys nudge
-// the selected knot, Delete or Backspace removes it and Escape lets it go.
+// the selected knot, Delete or Backspace removes it and Escape lets it go. On
+// a term that takes evenly spaced knots only, none of these move a knot: the
+// status line says why, and the count above the chart still works.
 // A gesture lives here while it runs and redraws only the knot layer; the
 // finished change goes to Python as one structural change.
 
@@ -100,6 +102,12 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
     const point = svgPoint(svg, event);
     say(null);
     const index = knotAt(current, point);
+    const evenOnly = current.axis.evenOnly;
+    if (evenOnly && (index !== null || onKnotBand(current, point))) {
+      event.preventDefault();
+      say(evenOnly);
+      return;
+    }
     if (index !== null) {
       const x = current.positions[index];
       ui.selected = x;
@@ -139,7 +147,8 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
       press.cancelled = press.cancelled || movedPastSlop(press.start, point);
       return;
     }
-    const hover = onKnotBand(current, point) && knotAt(current, point) === null
+    const hover = !current.axis.evenOnly && onKnotBand(current, point) &&
+      knotAt(current, point) === null
       ? addSpot(current.positions, knotX(current, point.x), current.axis)
       : null;
     if (hover === ui.hover) return;
@@ -194,6 +203,10 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
       event.preventDefault();
       ui.selected = null;
       draw();
+    } else if (current.axis.evenOnly && (direction !== 0 || event.key === "Delete" ||
+      event.key === "Backspace")) {
+      event.preventDefault();
+      say(current.axis.evenOnly);
     } else if (direction !== 0 && current.positions.length) {
       event.preventDefault();
       say(null);

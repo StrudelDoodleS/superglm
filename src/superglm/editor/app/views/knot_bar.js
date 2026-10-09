@@ -50,6 +50,14 @@ export function renderKnotBar(nodes, term, visible) {
   renderAction(nodes.more, "One knot more", stepper.more.enabled, stepper.more.body);
   const explicit = shown.strategy === "explicit";
   nodes.hand.hidden = !explicit;
+  // A term that takes evenly spaced knots only is offered even spacing alone;
+  // a rule it shows in force stays named, but cannot be chosen.
+  for (const option of Array.from(nodes.rule.options)) {
+    if (option === nodes.hand) continue;
+    const closed = axis.evenOnly !== null && option.value !== "uniform";
+    option.disabled = closed;
+    option.hidden = closed && option.value !== shown.strategy;
+  }
   nodes.rule.value = shown.strategy;
   nodes.alphaWrap.hidden = shown.strategy !== "quantile_tempered";
   // An alpha being typed is left alone until it is sent.
@@ -177,11 +185,12 @@ export function renderKnotChip(node, term) {
 
 /**
  * The status line while Knots mode is on: what each gesture does, or why the
- * last one did nothing, after the changes waiting for refit.
+ * last one did nothing, after the changes waiting for refit. On a term that
+ * takes evenly spaced knots only, what can change them instead.
  * @param {HTMLElement} statusNode
- * @param {{pendingCount?:number, message?:string|null}} state
+ * @param {{pendingCount?:number, message?:string|null, evenOnly?:boolean}} state
  */
-export function renderKnotStatus(statusNode, { pendingCount = 0, message = null }) {
+export function renderKnotStatus(statusNode, { pendingCount = 0, message = null, evenOnly = false }) {
   const doc = statusNode.ownerDocument;
   /** @param {string} tag @param {string} content @param {string} [className] */
   const node = (tag, content, className) => {
@@ -196,6 +205,11 @@ export function renderKnotStatus(statusNode, { pendingCount = 0, message = null 
     : [];
   if (message) {
     parts.push(message);
+  } else if (evenOnly) {
+    parts.push(
+      node("strong", "Knots."),
+      " This term takes evenly spaced knots only; change their count above the chart."
+    );
   } else {
     parts.push(
       node("strong", "Knots."),

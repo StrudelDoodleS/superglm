@@ -25,6 +25,8 @@ import { fmt } from "./format.js";
  * @property {number|null} maxCount
  * @property {Map<number, string>|null} levels an ordered term's level on the
  *   curve at each whole position; null on a numeric term
+ * @property {string|null} evenOnly why the term takes evenly spaced knots
+ *   only, so no knot moves or arrives by hand; null where any spacing goes
  */
 /**
  * The knots a term shows: the waiting draft's while a knot change waits,
@@ -91,6 +93,7 @@ export function knotAxis(term) {
     places: Math.max(0, -exponent),
     maxCount: isFiniteNumber(knots.max_count) ? knots.max_count : null,
     levels: ordered ? curveLevels(term) : null,
+    evenOnly: knots.even_only ?? null,
   };
 }
 
@@ -306,11 +309,13 @@ export function shownKnots(term) {
 
 /**
  * The rule a new count re-places the knots by: the shown one, else the one
- * in force, else even spacing, as superglm's own default.
+ * in force, else even spacing, as superglm's own default. A term that takes
+ * evenly spaced knots only is always re-placed evenly.
  * @param {TermPayload} term @returns {{strategy:KnotRule, alpha:number}}
  */
 export function stepRule(term) {
   const shown = shownKnots(term);
+  if (term.knots?.even_only) return { strategy: "uniform", alpha: shown?.alpha ?? DEFAULT_ALPHA };
   for (const strategy of [shown?.strategy, term.knots?.strategy]) {
     if (strategy && strategy !== "explicit") {
       return { strategy, alpha: shown?.alpha ?? term.knots?.alpha ?? DEFAULT_ALPHA };
