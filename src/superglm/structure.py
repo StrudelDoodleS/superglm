@@ -62,6 +62,7 @@ from superglm.features.rebuild import (
     rebuilt_ordered_spec,
     shape_unavailable_reason,
     shaped_spline,
+    states_positional_breaks,
 )
 from superglm.features.spline import _SplineBase
 from superglm.model import SuperGLM
@@ -117,6 +118,10 @@ _GROUPED_SPECIAL = (
 _SPECIAL_REFERENCE = (
     "The reference {reference!r} of {feature!r} is a special level, and the reference must lie "
     "on the curve; choose a level on the curve."
+)
+_POSITIONAL_BREAKS = (
+    "{feature!r} states its Piecewise breaks by position, which a level the structure makes "
+    "special would move; state them by band name."
 )
 _DECLARED_SPECIAL = (
     "{level!r} is declared special in the model's {feature!r}, so it has no place on the curve "
@@ -722,7 +727,10 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     listed = [str(level) for level in entry.levels]
     if sorted(declared) != sorted(listed):
         raise StructureError(_UNIVERSE.format(feature=name))
-    wanted = current if entry.specials is None else [str(level) for level in entry.specials]
+    # A file that names no specials keeps those the declaration makes.
+    wanted = (
+        declared_specials if entry.specials is None else [str(level) for level in entry.specials]
+    )
     for level in declared_specials:
         if level not in wanted:
             raise StructureError(_DECLARED_SPECIAL.format(level=level, feature=name))
@@ -737,6 +745,8 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
         "freed": tuple(level for level in smooth if level in wanted and level not in current),
         "returned": tuple(level for level in current if level not in wanted),
     }
+    if changes["freed"] and states_positional_breaks(spec):
+        raise StructureError(_POSITIONAL_BREAKS.format(feature=name))
     grouping = _grouping(entry.levels, entry.groups, order=declared)
     # The reference is a band or group, whatever its name (level=True below).
     base = entry.reference if grouping is None else str(entry.reference)

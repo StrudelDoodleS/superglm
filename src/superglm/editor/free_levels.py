@@ -39,12 +39,15 @@ from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import clone_with_replaced_features, special_labels
+from superglm.inference._term_covariance import feature_se_from_cov
 
 # The chance, across all the levels of one term, that no level's interval
 # misses the curve when every level lies on it.
 CONFIDENCE = 0.95
-# Past this leverage the curve all but passes through the level's own
-# estimate, so their gap says nothing and the level is not judged.
+# Past this leverage the curve's variance leaves the residual's bound no
+# room, so the gap is judged on the free estimate's own variance, which
+# bounds it too: a penalised smoother's residual ``(I - H) b`` varies no
+# more than ``b``.
 _MAX_LEVERAGE = 0.99
 _NOT_ORDERED = (
     "Compare with free levels is for ordered terms: every level of {term!r} is free already."
@@ -76,7 +79,7 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
         raise EditorValueError(_NO_DATA) from exc
     if y is None:
         raise EditorValueError(_NO_DATA)
-    free, level_of = _free_categorical(spec, as_eager_frame(X).column_array(name))
+    free = _free_categorical(spec, as_eager_frame(X).column_array(name))
     free_model = clone_with_replaced_features(session.model, {name: free})
     shrunk = _lift_selection(free_model, session.model, name)
     fit_refit_model(
@@ -88,42 +91,66 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
         sample_weight=sample_weight,
         offset=offset,
     )
-    inference = free_model.term_inference(name, with_se=True)
-    curve = session.model.term_inference(name, with_se=True)
+    # Both on the mean-centred scale: a gap measured from the reference
+    # would carry the curve's misfit at the reference into every level.
+    free_levels = _centred(free_model, name)
+    curve = _centred(session.model, name)
     # The two fits estimate their dispersion apart; the curve's variance is
     # put on the free fit's, so the two variances share one scale.
     scale = float(free_model.result.phi) / float(session.model.result.phi)
-    return _comparison(
-        term, spec, inference, curve, level_of=level_of, curve_scale=scale, shrunk=shrunk
-    )
+    return _comparison(term, spec, free_levels, curve, curve_scale=scale, shrunk=shrunk)
 
 
-def _curve_se(inference, grouping) -> dict[str, float]:
-    """The curve's standard error at each displayed level, a member taking its group's.
+def _centred(model, name: str) -> dict[str, tuple[float, float]]:
+    """Each fitted level's log-relativity and its standard error, centred on the mean of the levels.
 
-    A curve the selection penalty removed is flat, with no variance.
+    The mean is over the term's fitted levels, its groups and specials
+    included, as for a mean-centred report; the errors are those of that
+    contrast, from the fit's covariance. A term the selection penalty
+    removed is flat, with no variance.
     """
-    if inference.se_log_relativity is None:
-        return {}
-    se = {
+    spec = model._specs[name]
+    grouping = getattr(spec, "_grouping", None)
+    fitted = spec._ordered_levels if isinstance(spec, OrderedCategorical) else spec._levels
+    labels = [str(level) for level in fitted]
+    native = model.term_inference(name, with_se=False)
+    reported = {
         str(level): float(value)
-        for level, value in zip(inference.levels, inference.se_log_relativity, strict=True)
+        for level, value in zip(native.levels, native.log_relativity, strict=True)
     }
-    if grouping is not None:
-        for original, group in grouping.original_to_group.items():
-            if str(original) not in se and str(group) in se:
-                se[str(original)] = se[str(group)]
-    return se
+
+    def value(label: str) -> float:
+        # A grouped fit may report its group's members rather than the group.
+        members = [] if grouping is None else grouping.group_to_originals.get(label, [])
+        found = [reported[str(m)] for m in [label, *members] if str(m) in reported]
+        return found[0] if found else 0.0
+
+    values = np.array([value(label) for label in labels])
+    if native.active:
+        covariance, active = model._coef_covariance
+        se = feature_se_from_cov(
+            name,
+            covariance,
+            active,
+            model.result,
+            model._groups,
+            model._specs,
+            model._interaction_specs,
+            center=True,
+        )
+    else:
+        se = np.zeros(len(labels))
+    centred = values - values.mean()
+    return {label: (float(c), float(s)) for label, c, s in zip(labels, centred, se, strict=True)}
 
 
-def _free_categorical(spec: OrderedCategorical, column) -> tuple[Categorical, dict[str, str]]:
+def _free_categorical(spec: OrderedCategorical, column) -> Categorical:
     """``spec``'s levels as a plain categorical: the same groups, the same reference.
 
     The ordered term reads its column through its declaration (a column of
     1.0, 2.0 against ``order=[1, 2]`` is levels 1 and 2), so the categorical
     groups the column's own texts under the term's levels and groups, and is
-    named as the term names them. Also returns each column text's level, by
-    which an expanded group member is found.
+    named as the term names them.
     """
     raw = pd.unique(np.asarray(column, dtype=object).ravel())
     levels = [str(level) for level in spec._canonical(raw)]
@@ -146,7 +173,7 @@ def _free_categorical(spec: OrderedCategorical, column) -> tuple[Categorical, di
     )
     # The reference is a level, whatever it is called ("first" included).
     free._base_is_level = True
-    return free, {str(text): level for text, level in zip(raw, levels, strict=True)}
+    return free
 
 
 def _lift_selection(free_model, model, name: str) -> bool:
@@ -178,58 +205,49 @@ def _lift_selection(free_model, model, name: str) -> bool:
 def _comparison(
     term,
     spec: OrderedCategorical,
-    inference,
-    curve_inference,
+    free: dict[str, tuple[float, float]],
+    curve: dict[str, tuple[float, float]],
     *,
-    level_of: dict[str, str],
     curve_scale: float,
     shrunk: bool,
 ) -> dict[str, Any]:
+    """Each level's mean-centred free estimate against the mean-centred curve.
+
+    The gap is drawn on the chart's own scale: the diamond sits that far from
+    the curve, whatever the chart centres it on.
+    """
     levels = [str(level) for level in term.levels]
     specials = special_labels(spec)
     grouping = getattr(spec, "_grouping", None)
-    if inference.se_log_relativity is None:
-        raise EditorValueError(_NOT_FITTED.format(term=term.name))
-    fitted = {level_of.get(str(level), str(level)): i for i, level in enumerate(inference.levels)}
-    curve_se = _curve_se(curve_inference, grouping)
-    curve = np.asarray(term.original_log_effect, dtype=np.float64)
-    compared = [level for level in levels if level not in specials]
-    reference = str(spec._base_level)
+    shown = np.asarray(term.original_log_effect, dtype=np.float64)
     at = {level: i for i, level in enumerate(levels)}
-    # Both are relativities to the same reference, so they agree there; the
-    # chart may centre its curve elsewhere, and the free levels move with it.
-    if reference not in at and grouping is not None:
-        # A group is the reference: its members share its value on the curve.
-        reference = next(iter(grouping.group_to_originals.get(reference, [])), reference)
-    anchor = curve[at[reference]] if reference in at else 0.0
     found = []
-    for level in compared:
-        # A grouped fit reports each member under its own name, or the group's.
+    for level in levels:
         group = level if grouping is None else str(grouping.original_to_group.get(level, level))
-        index = fitted.get(level, fitted.get(group))
-        if index is None:
+        if level in specials or group not in free or group not in curve:
             continue
-        free_var = float(inference.se_log_relativity[index]) ** 2
-        gap_var = free_var - curve_scale * curve_se.get(level, 0.0) ** 2
-        judged = free_var > 0.0 and gap_var > (1.0 - _MAX_LEVERAGE) * free_var
-        found.append((level, group, index, free_var, gap_var, judged))
+        (free_value, free_se), (curve_value, curve_se) = free[group], curve[group]
+        gap = free_value - curve_value
+        free_var = free_se**2
+        gap_var = free_var - curve_scale * curve_se**2
+        if gap_var <= (1.0 - _MAX_LEVERAGE) * free_var:
+            gap_var = free_var
+        found.append((level, group, gap, gap_var, free_var > 0.0))
     # One comparison per group judged: a group's members share one free
-    # estimate, and the reference and the unjudged are never judged.
-    judged_groups = {group for _, group, _, _, _, judged in found if judged}
+    # estimate. A level with no free variance has nothing to judge.
+    judged_groups = {group for _, group, _, _, judged in found if judged}
     z = float(norm.ppf(0.5 + 0.5 * CONFIDENCE ** (1.0 / max(len(judged_groups), 1))))
     rows = []
-    for level, _group, index, free_var, gap_var, judged in found:
-        estimate = float(inference.log_relativity[index]) + anchor
-        se = float(np.sqrt(gap_var if judged else free_var))
-        lower, upper = estimate - z * se, estimate + z * se
-        on_curve = float(curve[at[level]])
+    for level, _group, gap, gap_var, judged in found:
+        on_curve = float(shown[at[level]])
+        half = z * float(np.sqrt(gap_var))
         rows.append(
             {
                 "level": level,
-                "y": float(np.exp(estimate)),
-                "lower": float(np.exp(lower)),
-                "upper": float(np.exp(upper)),
-                "flagged": bool(judged and not lower <= on_curve <= upper),
+                "y": float(np.exp(on_curve + gap)),
+                "lower": float(np.exp(on_curve + gap - half)),
+                "upper": float(np.exp(on_curve + gap + half)),
+                "flagged": bool(judged and abs(gap) > half),
             }
         )
     return {

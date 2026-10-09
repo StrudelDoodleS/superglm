@@ -251,6 +251,12 @@ def test_make_special_refuses_breaks_positional_breaks_and_a_basis_left_too_smal
             "Taking those levels off the curve of 'band' leaves its basis too few levels for its "
             "degree; make fewer levels special, or lower the degree in code.",
         ),
+        (
+            Piecewise(breaks=["Mi018"], degrees=[2, 1]),
+            ["Mi012"],
+            "Taking those levels off the curve of 'band' leaves its basis too few levels for its "
+            "degree; make fewer levels special, or lower the degree in code.",
+        ),
     ]
     for basis, levels, sentence in cases:
         model = _declared(basis).fit(X, y, sample_weight=w)
@@ -294,10 +300,13 @@ def test_free_levels_are_a_plain_categorical_fit_and_flag_the_level_the_smooth_o
     ).fit(X, y, sample_weight=w)
     inference = direct.term_inference("band")
     expected = dict(zip(inference.levels, np.exp(inference.log_relativity), strict=True))
-    # The free levels are the plain categorical's relativities. Each fit stops
-    # once its deviance moves by under tol = 1e-6 relative, which leaves the
-    # coefficients settled to about sqrt(tol).
-    np.testing.assert_allclose(free["y"], [expected[level] for level in free["levels"]], rtol=1e-3)
+    # The free levels are the plain categorical's relativities, placed against
+    # the curve by the levels' mean rather than by the reference, so they agree
+    # up to one factor. Each fit stops once its deviance moves by under
+    # tol = 1e-6 relative, which leaves the coefficients settled to about
+    # sqrt(tol).
+    ratio = np.log(free["y"]) - np.log([expected[level] for level in free["levels"]])
+    assert np.ptp(ratio) < 1e-3
     assert free["levels"] == BANDS
     assert free["flagged"] == [BUMP]
     assert free["shrunk"] is False
@@ -425,7 +434,41 @@ def test_a_level_freed_before_a_collapse_returns_to_its_place():
         only.refit_pending()
         spec = session.model._specs["band"]
         assert list(spec._smooth_levels) == list(only.model._specs["band"]._smooth_levels)
+        grouping = only.model._specs["band"]._grouping
+        assert spec._grouping.all_original_levels == grouping.all_original_levels
+        assert list(session.terms["band"].levels) == list(only.terms["band"].levels)
         np.testing.assert_array_equal(session.model.predict(X), only.model.predict(X))
+        # Its neighbours are its neighbours again, for a collapse.
+        session.stage_structural("collapse", "band", {"levels": [BUMP, "Mi042"]})
+        session.pending.clear()
+        with pytest.raises(EditorValueError, match="must be contiguous"):
+            session.stage_structural("collapse", "band", {"levels": ["Mi072", BUMP]})
+
+
+def test_a_curve_that_misfits_its_reference_flags_the_misfit_not_every_level():
+    """A sharp first band beside the most exposed one, which is the reference.
+
+    The smooth cannot drop that fast, so it misfits the reference itself.
+    Measured from the reference, every other level's gap carries that misfit
+    and nearly all were flagged; on freMTPL2's vehicle age, 19 of 20. Centred
+    on the levels' mean, only the bands at the drop are.
+    """
+    rng = np.random.default_rng(20261009)
+    n = 20000
+    band = rng.choice(BANDS, n, p=[0.06, 0.3] + [0.064] * 10)
+    w = rng.uniform(0.2, 1.0, n)
+    index = np.array([BANDS.index(b) for b in band])
+    y = rng.poisson(w * np.exp(-1.5 + 0.8 * (index == 0) - 0.03 * index)) / w
+    X = pd.DataFrame({"band": band})
+    model = SuperGLM(
+        family="poisson",
+        features={"band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+    ).fit(X, y, sample_weight=w)
+    assert model._specs["band"]._base_level == "Mi012"
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+    assert free["flagged"]
+    assert set(free["flagged"]) <= set(BANDS[:4])
 
 
 def test_free_levels_put_both_variances_on_one_dispersion():
@@ -462,9 +505,11 @@ def test_free_levels_read_the_column_through_the_declaration():
         session = EditorSession.from_model(model, train_data=(X, y))
         free = free_level_comparison(session, "band")
         assert free["levels"] == [str(level) for level in session.terms["band"].levels]
+        # Make special reads the refit's rows through the declaration too.
+        session.stage_structural("special", "band", {"levels": ["4"]})
 
 
-def test_free_levels_keep_a_reference_named_first_as_a_level():
+def test_free_levels_keep_a_reference_named_first_as_a_level(monkeypatch):
     order = ["first", "B", "C", "D", "E", "F", "G", "H"]
     rng = np.random.default_rng(5)
     band = rng.choice(order, 2000)
@@ -473,8 +518,9 @@ def test_free_levels_keep_a_reference_named_first_as_a_level():
     model = SuperGLM(
         family="poisson", features={"band": OrderedCategorical(order=order, base="first")}
     ).fit(X, y)
-    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
-    assert free["y"][free["levels"].index("first")] == 1.0
+    fitted = _fitted_free_models(monkeypatch)
+    free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert fitted[0]._specs["band"]._base_level == "first"
 
 
 def test_free_levels_compare_a_term_the_selection_penalty_removed():
@@ -493,7 +539,7 @@ def test_free_levels_compare_a_term_the_selection_penalty_removed():
 
 
 def test_the_sidak_cut_counts_the_comparisons_judged():
-    """Twelve bands, two groups of two, the reference apart: nine comparisons, not twelve."""
+    """Twelve bands with two groups of two: ten comparisons, one per group, not twelve."""
     from scipy.stats import norm
 
     X, y, w = _book(n=6000)
@@ -506,7 +552,7 @@ def test_the_sidak_cut_counts_the_comparisons_judged():
         family="poisson", features={"band": band, "area": Categorical()}, spline_penalty=100.0
     ).fit(X, y, sample_weight=w)
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
-    assert free["z"] == pytest.approx(float(norm.ppf(0.5 + 0.5 * 0.95 ** (1 / 9))), rel=1e-12)
+    assert free["z"] == pytest.approx(float(norm.ppf(0.5 + 0.5 * 0.95 ** (1 / 10))), rel=1e-12)
 
 
 def test_a_grouped_term_compares_each_member_with_its_group(book):

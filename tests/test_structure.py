@@ -17,6 +17,7 @@ from superglm import (
     BSplineSmooth,
     Categorical,
     OrderedCategorical,
+    Piecewise,
     PolynomialRange,
     PSpline,
     Spline,
@@ -1443,6 +1444,22 @@ def test_a_structure_takes_levels_off_the_curve_and_puts_them_back():
     assert list(returned._specs["band"]._special_display) == []
     gap = np.max(np.abs(returned.predict(X) - plain.predict(X)))
     assert gap <= _linear_predictor_bound(X, returned, plain)
+    # A file that names no specials keeps only the declared ones: the export of
+    # the returned model puts "3" back on the special model's curve too.
+    again = Structure.from_model(returned).apply(special)
+    assert list(again._specs["band"]._special_display) == []
+
+
+def test_a_structure_refuses_to_free_a_level_of_a_term_with_positional_breaks():
+    """Freeing a band would move every break stated by a position after it."""
+    declared = _declared({"band": OrderedCategorical(order=BANDS, basis=Piecewise(breaks=[3, 5]))})
+    entry = FeatureStructure(kind="ordered", levels=BANDS, reference="0", specials=["2"])
+    with pytest.raises(StructureError) as refused:
+        Structure(features={"band": entry}).apply(declared)
+    assert str(refused.value) == (
+        "'band' states its Piecewise breaks by position, which a level the structure makes "
+        "special would move; state them by band name."
+    )
 
 
 def test_a_structure_without_specials_keeps_the_declared_ones_and_cannot_put_them_on_the_curve():

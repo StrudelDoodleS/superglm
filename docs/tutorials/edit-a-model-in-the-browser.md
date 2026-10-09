@@ -557,7 +557,9 @@ estimated is not carried over, so fit the copy with `fit_reml` to estimate it ag
 - A level the file makes special is taken off the model's curve.
 - A level the model's code declares special cannot be put on the curve by a file. It is refused, by
   name.
-- A file that names no special levels keeps those the model declares.
+- A file that names no special levels keeps only those the model's code declares.
+- A level a Piecewise term with breaks stated by position would lose is refused, by name: state the
+  breaks by band name.
 
 Each refusal from `apply` is a `superglm.StructureError` whose message names the feature.
 

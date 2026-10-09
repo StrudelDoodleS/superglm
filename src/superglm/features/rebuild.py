@@ -298,11 +298,12 @@ def full_level_order(spec: OrderedCategorical) -> list[str]:
 
 
 def _grouping_in_axis_order(grouping: LevelGrouping, values: dict) -> LevelGrouping:
-    """``grouping`` with its groups in axis order: a level put back on the curve takes its place.
+    """``grouping`` in axis order: a level put back on the curve takes its place.
 
-    A term's bands follow its grouping's order, and a grouping made while a
-    level was special lists that level last. Each group sits at its members'
-    mean value; a group with no value, a special, keeps its place after them.
+    A term's bands follow its grouping's order, its levels as shown follow the
+    grouping's originals, and a grouping made while a level was special lists
+    that level last in both. Each original sits at its value and each group at
+    its members' mean; a special, with no value, keeps its place after them.
     """
     axis = {str(key): float(at) for key, at in values.items()}
 
@@ -312,8 +313,22 @@ def _grouping_in_axis_order(grouping: LevelGrouping, values: dict) -> LevelGroup
         ]
         return sum(members) / len(members) if members else float("inf")
 
-    order = sorted(grouping.grouped_levels, key=position)
-    return dataclasses.replace(grouping, grouped_levels=order)
+    return dataclasses.replace(
+        grouping,
+        grouped_levels=sorted(grouping.grouped_levels, key=position),
+        all_original_levels=sorted(
+            grouping.all_original_levels, key=lambda original: axis.get(str(original), float("inf"))
+        ),
+    )
+
+
+def states_positional_breaks(spec) -> bool:
+    """Whether ``spec`` states Piecewise breaks by position, which a level leaving the curve moves."""
+    from superglm.features.piecewise import Piecewise
+
+    basis = getattr(spec, "_spline_obj", None)
+    breaks = getattr(basis, "breaks", None) if isinstance(basis, Piecewise) else None
+    return isinstance(breaks, list) and any(not isinstance(entry, str) for entry in breaks)
 
 
 def _returned_value(

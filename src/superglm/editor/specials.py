@@ -28,11 +28,13 @@ from superglm.editor.errors import EditorTypeError, EditorValueError
 from superglm.features._spline_ranges import RangeError
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.piecewise import Piecewise
+from superglm.features.polynomial import Polynomial
 from superglm.features.rebuild import (
     freed_levels,
     full_level_order,
     rebuilt_ordered_spec,
     special_labels,
+    states_positional_breaks,
 )
 
 _NOT_ORDERED = (
@@ -105,7 +107,9 @@ def special_feature_spec(
     frame.require_columns((term.name,))
     column = frame.column_array(term.name)
     if special:
-        present = {str(value) for value in pd.unique(np.asarray(column, dtype=object))}
+        # The column's own spelling (1.0) read through the declaration (1).
+        raw = pd.unique(np.asarray(column, dtype=object).ravel())
+        present = {str(level) for level in spec._canonical(raw)}
         _require_free_to_leave(spec, term, chosen, declared, present)
     else:
         _require_free_to_return(spec, grouping, term, chosen)
@@ -123,7 +127,12 @@ def special_feature_spec(
         raise
     except ValueError as exc:
         # A Polynomial basis needs more levels than its highest power, and a
-        # Piecewise segment more bands than its degree.
+        # Piecewise segment more bands than its degree: the two rules a level
+        # leaving the curve can break. Anything else is not a refusal.
+        if not special or not isinstance(
+            getattr(spec, "_spline_obj", None), Piecewise | Polynomial
+        ):
+            raise
         raise EditorValueError(_BASIS_REFUSED.format(term=term.name)) from exc
     _mark_kept(replacement, declared, kept, grouping, level=level)
     joined = " + ".join(chosen)
@@ -172,10 +181,8 @@ def _require_free_to_leave(
     """Refuse levels that cannot leave the curve. ``present`` holds the levels the refit's rows hold."""
     specials = special_labels(spec)
     breaks = set(_stated_break_bands(spec))
-    basis = getattr(spec, "_spline_obj", None)
-    if isinstance(basis, Piecewise) and isinstance(basis.breaks, list):
-        if any(not isinstance(entry, str) for entry in basis.breaks):
-            raise EditorValueError(_POSITIONAL_BREAKS.format(term=term.name))
+    if states_positional_breaks(spec):
+        raise EditorValueError(_POSITIONAL_BREAKS.format(term=term.name))
     for label in chosen:
         if label in specials:
             raise EditorValueError(_ALREADY.format(level=label, term=term.name))
