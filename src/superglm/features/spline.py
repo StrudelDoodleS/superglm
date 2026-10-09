@@ -61,6 +61,10 @@ _ONE_VALUE = (
 )
 
 
+class OneValueError(ValueError):
+    """A natural spline's column holds one value, so its knots have no range."""
+
+
 class _SplineBase:
     """Base class for all spline feature specs.
 
@@ -386,7 +390,7 @@ class _SplineBase:
     def _natural_constraint_rows(self) -> NDArray:
         """The 2 x K natural boundary rows f''(lo) = f''(hi) = 0."""
         if not self._hi > self._lo:
-            raise ValueError(_ONE_VALUE.format(value=f"{self._lo:g}"))
+            raise OneValueError(_ONE_VALUE.format(value=f"{self._lo:g}"))
         return _spline_constraints.build_natural_constraint_rows(
             self._knots,
             self.degree,
@@ -542,13 +546,16 @@ class PSpline(_BSplineBase):
     The ``m`` parameter controls the discrete difference order(s) for the
     penalty (default 2, second-difference).
 
-    Knots placed by the ``"uniform"`` rule take the standard difference
-    penalty of Eilers and Marx (1996). Stated knots and quantile-placed ones
-    are unevenly spaced, where the standard penalty no longer measures
-    wiggliness, so they take the general difference penalty of Li and Cao
-    (2022, arXiv:2201.06808), whose null space is the polynomials of degree
-    below ``m`` however the knots are spaced. A penalty order above
-    ``degree`` keeps the standard penalty.
+    Evenly spaced knots, placed by the ``"uniform"`` rule or stated at its
+    positions, take the standard difference penalty of Eilers and Marx
+    (1996). On unevenly spaced stated or quantile-placed knots the standard
+    penalty no longer measures wiggliness, so they take the general
+    difference penalty of Li and Cao (2022, arXiv:2201.06808), whose null
+    space is the polynomials of degree below ``m`` however the knots are
+    spaced, scaled to the standard penalty's size. Knots too uneven for it
+    in double precision take the standard penalty with those polynomials
+    projected out. A penalty order above ``degree`` keeps the standard
+    penalty.
 
     Parameters
     ----------

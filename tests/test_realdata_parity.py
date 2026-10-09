@@ -522,3 +522,22 @@ class TestGammaGroupLassoSanity:
         r = np.corrcoef(y, mu)[0, 1]
         # Severity prediction is inherently weak
         assert r > 0.01, f"pred-response correlation {r:.3f} too low"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Shrinkage on the book's skewed quantile_rows knots
+#
+# Li and Cao's general penalty on these knots reaches 1e8 against the
+# standard penalty's 16, and select=True found one null eigenvalue where the
+# straight line gives two, blaming the P-spline kind. 0.39 fitted all three.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@NB2_SKIP
+@pytest.mark.parametrize(("column", "n_knots"), [("VehAge", 12), ("Density", 10), ("Density", 12)])
+def test_select_on_the_books_quantile_rows_knots_fits(column, n_knots):
+    df, y, offset = _load_nb2_data()
+    spline = Spline(kind="ps", n_knots=n_knots, knot_strategy="quantile_rows", select=True)
+    frame = df[[column]].astype(float)
+    model = SuperGLM(family="poisson", features={column: spline}).fit_reml(frame, y, offset=offset)
+    assert np.all(np.isfinite(model.predict(frame, offset=offset)))

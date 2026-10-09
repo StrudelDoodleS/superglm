@@ -78,3 +78,14 @@ def test_a_natural_spline_on_a_column_with_one_value_says_so(kind):
         Spline(kind=kind).build(np.full(300, 3.0))
     # A P-spline fits such a column, as it did when it was the default.
     Spline(kind="ps").build(np.full(300, 3.0))
+
+
+def test_an_ordered_term_at_one_level_names_its_basis_not_a_score():
+    """The level score (0.5 here) and ``kind=`` mean nothing on an ordered term."""
+    from superglm import OrderedCategorical
+
+    labels = np.full(300, "b")
+    with pytest.raises(ValueError, match=r"one level, .*basis=Spline\(kind='ps'\)") as caught:
+        OrderedCategorical(order=["a", "b", "c"]).build(labels)
+    assert "0.5" not in str(caught.value)
+    OrderedCategorical(order=["a", "b", "c"], basis=Spline(kind="ps", n_knots=2)).build(labels)

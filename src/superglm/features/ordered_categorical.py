@@ -1406,11 +1406,20 @@ class OrderedCategorical:
         """
         from dataclasses import replace
 
-        from superglm.features.spline import _SplineBase
+        from superglm.features.spline import OneValueError, _SplineBase
 
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
-            return inner.build(numeric, sample_weight=sample_weight)
+            try:
+                return inner.build(numeric, sample_weight=sample_weight)
+            except OneValueError:
+                # The spline's message names a level score and its kind=, which
+                # an ordered term has neither of; it takes its kind in basis=.
+                raise OneValueError(
+                    "every row of this ordered term is at one level, so its natural "
+                    "spline basis has no range to place its knots on. Drop the term, or "
+                    "pass basis=Spline(kind='ps'), which fits a term with one observed level."
+                ) from None
         info = inner.build(numeric, sample_weight=sample_weight)
         if isinstance(info, GroupInfo):
             # Structurally unpenalized main block for BOTH parametric bases --

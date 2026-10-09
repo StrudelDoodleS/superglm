@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from superglm.features._spline_identifiability import (
     build_identifiability_projection_for_spec,
 )
+from superglm.features._spline_ranges import _REML_RANK_THRESHOLD
 from superglm.types import GroupInfo, LambdaPolicy
 
 
@@ -21,9 +22,17 @@ def eigendecompose_select(
     n_basis: int,
     spline_kind: str,
 ) -> tuple[NDArray, NDArray, NDArray]:
-    """Eigendecompose the constrained penalty for select=True splitting."""
+    """Eigendecompose the constrained penalty for select=True splitting.
+
+    An eigenvalue is null when it is at most ``_REML_RANK_THRESHOLD`` of the
+    largest, the rule REML ranks the same penalty by, so the split agrees with
+    it. The cut is relative because a penalty scales with a power of the
+    feature's units (a cubic regression spline's with the inverse cube of its
+    range), and it sits far above the eigensolver's resolution of ``n * eps``
+    of the largest eigenvalue (*LAPACK Users' Guide*, 3rd ed., section 4.7).
+    """
     eigvals, eigvecs = np.linalg.eigh(omega_c)
-    null_mask = eigvals < 1e-10
+    null_mask = eigvals <= _REML_RANK_THRESHOLD * max(eigvals[-1], 0.0)
     n_null = int(np.sum(null_mask))
     if n_null != 2:
         raise ValueError(

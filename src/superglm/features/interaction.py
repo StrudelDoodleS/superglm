@@ -22,6 +22,7 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm.features._spline_ranges import _REML_RANK_THRESHOLD
 from superglm.features.categorical import (
     _UNSEEN_POLICIES,
     _codes_against,
@@ -1721,8 +1722,9 @@ class TensorInteraction:
         n_cols = omega.shape[0]
         if self._decompose:
             eigvals, eigvecs = np.linalg.eigh(omega)
-            tol = 1e-8 * max(float(np.max(eigvals)), 1e-12)
-            null_mask = eigvals < tol
+            # REML's rank rule, as select=True splits a spline: a margin's
+            # general penalty spans more of float64 than a fixed 1e-8 allows.
+            null_mask = eigvals <= _REML_RANK_THRESHOLD * max(eigvals[-1], 0.0)
             n_null = int(np.sum(null_mask))
             if n_null != 1:
                 raise ValueError(
