@@ -500,6 +500,19 @@ def test_server_mode_still_displays_its_local_page(session_model):
         widget.close()
 
 
+def test_the_view_undoes_the_hosts_dark_inversion_on_databricks_only(monkeypatch):
+    pytest.importorskip("anywidget")
+    monkeypatch.delenv("DATABRICKS_RUNTIME_VERSION", raising=False)
+    plain = notebook.NotebookTransport(object(), "token")
+    monkeypatch.setenv("DATABRICKS_RUNTIME_VERSION", "15.4")
+    databricks = notebook.NotebookTransport(object(), "token")
+    try:
+        assert (plain.view.host_inverts_dark, databricks.view.host_inverts_dark) == (False, True)
+    finally:
+        plain.close()
+        databricks.close()
+
+
 def test_the_mode_defaults_to_notebook_on_databricks_only(monkeypatch):
     monkeypatch.delenv("DATABRICKS_RUNTIME_VERSION", raising=False)
     assert widget_module._display_mode(None) == "server"

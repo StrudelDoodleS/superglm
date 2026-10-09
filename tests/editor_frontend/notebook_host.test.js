@@ -6,7 +6,9 @@ import {
   MAX_REQUEST_BYTES,
   REQUEST,
   RESPONSE,
+  UNDO_DATABRICKS_DARK,
   createMessageFetch,
+  hostFilter,
   linkModules
 } from "../../src/superglm/editor/app/api/notebook_host.js";
 
@@ -204,4 +206,12 @@ test("the client sends through the notebook host's fetch when the page has one",
     delete (/** @type {any} */ (globalThis)).superglmEditorHost;
   }
   assert.deepEqual(urls, ["/state"]);
+});
+
+test("the frame undoes the host's inversion only where the host inverts and prefers dark", () => {
+  assert.equal(hostFilter(false, false), "");
+  assert.equal(hostFilter(false, true), "");
+  // Databricks in its light theme leaves outputs alone: an undo would invert them.
+  assert.equal(hostFilter(true, false), "");
+  assert.equal(hostFilter(true, true), UNDO_DATABRICKS_DARK);
 });

@@ -69,6 +69,10 @@ The editor behaves the same in either mode, with four differences:
   one, such as a very long History note, is refused with a message saying so; make it in smaller
   steps or in Python on the session.
 
+Databricks' dark theme inverts the colours of every cell's output. The editor undoes that, so its
+Day and Night themes look as they do anywhere else, and **Follow the browser** follows the
+Databricks theme.
+
 ## Find a Feature
 
 The feature list on the left names every term in the editor, grouped as the chart groups them,

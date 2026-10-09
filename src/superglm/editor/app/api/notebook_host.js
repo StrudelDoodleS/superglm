@@ -180,6 +180,23 @@ function applyTheme(win) {
   win.document.documentElement.dataset.theme = dark ? "dark" : "light";
 }
 
+// Databricks' dark theme inverts each cell's output: the frame it renders
+// the output in carries `filter: invert(1) saturate(0.5)`. Nothing inside can
+// see that filter, but the output then prefers a dark colour scheme. The
+// editor draws its own night theme, so on Databricks it undoes the inversion
+// on its frame: invert and saturate commute, and the saturations multiply to
+// one, leaving only clipping on the most saturated colours.
+export const UNDO_DATABRICKS_DARK = "invert(1) saturate(2)";
+
+/**
+ * The filter the editor's frame needs: the undoing one only where the host
+ * inverts its outputs in a dark theme and the output prefers dark now.
+ * @param {boolean} hostInvertsDark @param {boolean} prefersDark
+ */
+export function hostFilter(hostInvertsDark, prefersDark) {
+  return hostInvertsDark && prefersDark ? UNDO_DATABRICKS_DARK : "";
+}
+
 /** @param {{model: WidgetModel, el: HTMLElement}} context */
 function render({ model, el }) {
   const bundle = model.get("bundle");
@@ -194,6 +211,14 @@ function render({ model, el }) {
   let builtFor = null;
   /** @type {string[]} */
   let moduleUrls = [];
+
+  // The notebook's theme can change while the editor is open.
+  const darkQuery = el.ownerDocument.defaultView?.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+  const syncHostFilter = () => {
+    frame.style.filter = hostFilter(Boolean(model.get("host_inverts_dark")), Boolean(darkQuery?.matches));
+  };
+  darkQuery?.addEventListener("change", syncHostFilter);
+  syncHostFilter();
 
   // Another view of this widget changed the session: the page re-reads it.
   /** @param {any} message @param {(DataView<ArrayBuffer>|ArrayBuffer)[]} [buffers] */
@@ -240,6 +265,7 @@ function render({ model, el }) {
   build();
   return () => {
     frame.removeEventListener("load", build);
+    darkQuery?.removeEventListener("change", syncHostFilter);
     model.off("msg:custom", onMessage);
     transport?.close();
     revokeModules();

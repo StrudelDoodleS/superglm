@@ -3,12 +3,13 @@ import test from "node:test";
 
 import {
   FALLBACK_CHART_SIZE,
+  categoricalTickIndices,
   chartSize,
-  evenlySpacedIndices,
   fitMeasuredLabel,
   planCategoricalAxis,
   rotatedExtent,
   splitLabelGraphemes,
+  strideIndices,
 } from "../../src/superglm/editor/app/chart/geometry.js";
 
 /**
@@ -27,23 +28,11 @@ function measurement(label, widthPerGrapheme = 7, height = 11) {
   };
 }
 
-test("tick reduction retains first, last, and evenly spaced interior categories", () => {
-  assert.deepEqual(evenlySpacedIndices(10, 5), [0, 2, 5, 7, 9]);
-  assert.deepEqual(evenlySpacedIndices(3, 5), [0, 1, 2]);
-});
-
-test("tick reduction handles empty, single, exact-limit, and thirty-cap inputs", () => {
-  assert.deepEqual(evenlySpacedIndices(0, 5), []);
-  assert.deepEqual(evenlySpacedIndices(5, 0), []);
-  assert.deepEqual(evenlySpacedIndices(1, 30), [0]);
-  assert.deepEqual(evenlySpacedIndices(8, 1), [0]);
-  assert.deepEqual(evenlySpacedIndices(30, 30), Array.from({ length: 30 }, (_, i) => i));
-
-  const capped = evenlySpacedIndices(100, 30);
-  assert.equal(capped.length, 30);
-  assert.equal(capped[0], 0);
-  assert.equal(capped.at(-1), 99);
-  assert.equal(new Set(capped).size, capped.length);
+test("tick strides handle empty, single, exact-limit, and thirty-cap inputs", () => {
+  assert.deepEqual(strideIndices(5, 0), []);
+  assert.deepEqual(strideIndices(1, 30), [0]);
+  assert.deepEqual(strideIndices(30, 30), Array.from({ length: 30 }, (_, i) => i));
+  assert.equal(strideIndices(100, 30).length, 25);
 });
 
 test("measured truncation uses a Unicode end ellipsis without changing the source", () => {
@@ -144,7 +133,7 @@ test("empty and single-category layouts remain finite and bounded", () => {
   assert.ok(single.titleY + single.titleHeight <= 520 - 12);
 });
 
-test("categorical layout caps one hundred categories at thirty unique ticks", () => {
+test("categorical layout caps one hundred categories at thirty ticks, one step apart", () => {
   const labels = Array.from({ length: 100 }, (_, index) => `Category ${index + 1}`);
   const layout = planCategoricalAxis({
     values: labels.map((_, index) => index),
@@ -155,11 +144,100 @@ test("categorical layout caps one hundred categories at thirty unique ticks", ()
     baseLeft: 76,
     baseBottom: 72,
   });
-  assert.equal(layout.ticks.length, 30);
-  assert.equal(layout.ticks[0].index, 0);
-  assert.equal(layout.ticks.at(-1)?.index, 99);
-  assert.equal(new Set(layout.ticks.map((tick) => tick.index)).size, 30);
+  const indices = layout.ticks.map((tick) => tick.index);
+  assert.ok(indices.length <= 30);
+  assert.equal(indices[0], 0);
+  assert.equal(indices.at(-1), 99);
+  const gaps = indices.slice(1).map((index, k) => index - indices[k]);
+  const [step, last] = [gaps[0], gaps[gaps.length - 1]];
+  assert.ok(gaps.slice(0, -1).every((gap) => gap === step) && last >= step, String(gaps));
 });
+
+test("labels never fall on neighbouring levels while others skip, so none collide", () => {
+  // 24 ordered levels in room for 14 labels: rounding a 1.77 step labelled
+  // levels 5 and 6, 12 and 13, 19 and 20 side by side, and they overlapped.
+  assert.deepEqual(strideIndices(24, 14), [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 23]);
+  assert.deepEqual(strideIndices(10, 5), [0, 3, 6, 9]);
+  assert.deepEqual(strideIndices(11, 5), [0, 3, 6, 10]);
+  assert.deepEqual(strideIndices(3, 5), [0, 1, 2]);
+  assert.deepEqual(strideIndices(8, 1), [0]);
+  assert.deepEqual(strideIndices(0, 5), []);
+
+  // Short labels stay level, centred one whole step apart.
+  const labels = Array.from({ length: 24 }, (_, index) => `Mi${String(6 * (index + 1)).padStart(3, "0")}`);
+  const ticks = planCategoricalAxis({
+    values: labels.map((_, index) => index),
+    labels,
+    measurements: labels.map((label) => measurement(label)),
+    availableWidth: 760,
+    svgHeight: 520,
+    baseLeft: 76,
+    baseBottom: 72,
+    domain: [-0.5, 23.5],
+  }).ticks;
+  assert.ok(ticks.every((tick) => tick.angle === 0));
+  assert.deepEqual(ticks.map((tick) => tick.index), strideIndices(24, 14));
+  assertNoLevelLabelOverlaps(ticks, 760, [-0.5, 23.5]);
+});
+
+test("label room is measured on the padded axis the chart draws", () => {
+  // Five levels on a 400 px plot padded half a level each side sit 80 px
+  // apart, not the 100 px the ticks' own span gives: an 88 px label kept
+  // level overlapped each neighbour by 8 px.
+  const labels = ["Level one A", "Level two B", "Level thr C", "Level fou D", "Level fiv E"];
+  const ticks = planCategoricalAxis({
+    values: labels.map((_, index) => index),
+    labels,
+    measurements: labels.map((label) => measurement(label, 8)),
+    availableWidth: 400,
+    svgHeight: 520,
+    baseLeft: 76,
+    baseBottom: 72,
+    domain: [-0.5, 4.5],
+  }).ticks;
+  assertNoLevelLabelOverlaps(ticks, 400, [-0.5, 4.5]);
+});
+
+test("the chart labels more than thirty levels one whole step apart", () => {
+  // The chart measures only the levels categoricalTickIndices picks, so the
+  // stride must hold over all the levels, not over a rounded preselection.
+  const wide = categoricalTickIndices(40, 1000);
+  assert.deepEqual(wide, [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39]);
+  assert.deepEqual(categoricalTickIndices(40, 760), wide);
+  assert.deepEqual(categoricalTickIndices(100, 4000), strideIndices(100, 30));
+
+  const labels = Array.from({ length: 40 }, (_, index) => `L${index}`);
+  const picked = wide.map((index) => labels[index]);
+  const ticks = planCategoricalAxis({
+    values: wide,
+    labels: picked,
+    measurements: picked.map((label) => measurement(label)),
+    availableWidth: 1000,
+    svgHeight: 520,
+    baseLeft: 76,
+    baseBottom: 72,
+    domain: [-0.5, 39.5],
+  }).ticks;
+  // planCategoricalAxis labels every level it is given.
+  assert.deepEqual(ticks.map((tick) => tick.value), wide);
+});
+
+/**
+ * Each level label fits the room to its neighbours on the padded axis.
+ * @param {readonly {value:unknown, angle:number, width:number, fullLabel:string}[]} ticks
+ * @param {number} width @param {[number, number]} domain
+ */
+function assertNoLevelLabelOverlaps(ticks, width, [lo, hi]) {
+  const pixel = (/** @type {number} */ value) => (width * (value - lo)) / (hi - lo);
+  for (let k = 1; k < ticks.length; k += 1) {
+    const room = pixel(Number(ticks[k].value)) - pixel(Number(ticks[k - 1].value));
+    const halves = (ticks[k].width + ticks[k - 1].width) / 2;
+    assert.ok(
+      ticks[k].angle !== 0 || halves <= room,
+      `${ticks[k - 1].fullLabel} and ${ticks[k].fullLabel}: ${halves} > ${room}`
+    );
+  }
+}
 
 test("horizontal centered edge labels respect the viewport-side budget", () => {
   const labels = ["FourteenCharsAB", "FourteenCharsCD"];
@@ -233,9 +311,9 @@ test("geometry rejects mismatched arrays and malformed measurements", () => {
 });
 
 test("geometry rejects nonfinite and negative dimensions", () => {
-  assert.throws(() => evenlySpacedIndices(Number.NaN, 2), /count/);
-  assert.throws(() => evenlySpacedIndices(2, Number.POSITIVE_INFINITY), /maximum/);
-  assert.throws(() => evenlySpacedIndices(-1, 2), /count/);
+  assert.throws(() => strideIndices(Number.NaN, 2), /count/);
+  assert.throws(() => strideIndices(2, Number.POSITIVE_INFINITY), /maximum/);
+  assert.throws(() => strideIndices(-1, 2), /count/);
   assert.throws(() => fitMeasuredLabel("A", measurement("A"), Number.NaN), /budget/);
   assert.throws(() => fitMeasuredLabel("A", measurement("A"), -1), /budget/);
   assert.throws(() => rotatedExtent(Number.POSITIVE_INFINITY, 10, 0), /width/);

@@ -498,6 +498,9 @@ def test_two_staged_collapses_wait_and_one_refit_applies_both(open_editor_page):
         )
         assert refit.get_attribute("aria-label") == "Refit, 2 changes waiting"
         assert len(session.pending) == 2
+        # The count shows when the second staging commits; Refit, and with it
+        # R, stays disabled until that staging has painted and finished.
+        page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
 
         with page.expect_response(_refit_response) as refit_info:
             page.keyboard.press("r")

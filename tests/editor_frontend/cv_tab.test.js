@@ -16,6 +16,7 @@ import {
   levelChartMarkup,
   newerJob,
   niceTicks,
+  foldStrip,
   termListMarkup
 } from "../../src/superglm/editor/app/views/cv_tab.js";
 
@@ -136,6 +137,111 @@ test("performance cards show mean ± sd, pooled, and one dot per fold for each r
   assert.match(deviance, /<strong>0\.3050<\/strong>\s*<span class="cv-card-spread">± 0\.0050 · pooled 0\.3049<\/span>/);
   assert.equal(count(deviance, /<circle /g), 4);
   assert.equal(count(deviance, /class="cv-card-row"/g), 2);
+});
+
+test("far-off folds are pinned at the strip's ends, and the rest spread across it", () => {
+  // As supplied, one fold scored 3e10 against the others' 63, which on one
+  // scale crowds the current model's five folds onto one pixel.
+  const supplied = [63.4, 63.8, 3.0e10, 62.8, 62.9];
+  const current = [63.38, 63.81, 64.71, 62.83, 62.9];
+  const strip = foldStrip([supplied, current]);
+  assert.equal(strip.pinned, true);
+  assert.equal(strip.off(3.0e10), true);
+  assert.equal(strip.x(3.0e10), 210);
+  const spread = (/** @type {number[]} */ values) =>
+    Math.max(...values.map(strip.x)) - Math.min(...values.map(strip.x));
+  assert.ok(spread(current) > 170, String(spread(current)));
+  assert.ok(current.every((value) => !strip.off(value)));
+  // A run with a far-off fold of its own, as a re-run on the same folds may
+  // have, keeps its other folds readable too.
+  const both = foldStrip([supplied, [63.38, 63.81, 2.9e10, 62.83, 62.9]]);
+  assert.deepEqual([both.off(3.0e10), both.off(2.9e10), both.off(63.81)], [true, true, false]);
+  assert.ok(Math.max(both.x(63.81), both.x(63.4)) - Math.min(both.x(62.8), both.x(62.83)) > 170);
+  // So do two far-off folds in one row, one of two folds, and one row alone.
+  assert.equal(foldStrip([[63.4, 3.0e10, 2.0e10, 62.8, 62.9], current]).off(2.0e10), true);
+  assert.equal(foldStrip([[63.4, 3.0e10], [63.38, 63.81]]).off(3.0e10), true);
+  assert.equal(foldStrip([supplied]).off(3.0e10), true);
+  // What counts as far off depends on the cores, not on the other far-off
+  // folds: a nearer one is still pinned, and an ordinary fold is not.
+  assert.equal(foldStrip([supplied, [63.38, 63.81, 1.0e5, 62.83, 62.9]]).off(1.0e5), true);
+  const near = foldStrip([[63.4, 63.8, 100, 62.8, 62.9], current]);
+  assert.deepEqual([near.off(64.71), near.off(100)], [false, true]);
+  // A pinned ring has the strip's end to itself, clear of every kept fold.
+  const alone = foldStrip([supplied]);
+  const ring = alone.x(3.0e10);
+  assert.ok(supplied.filter((v) => !alone.off(v)).every((v) => Math.abs(alone.x(v) - ring) >= 9));
+  // Scores near both ends of the float64 range land on the strip, and pin
+  // nothing they should not; subnormal scores keep their spread.
+  const MAX = Number.MAX_VALUE;
+  const huge = foldStrip([[-MAX, MAX]]);
+  assert.deepEqual([huge.x(-MAX), huge.x(MAX)], [10, 210]);
+  const across = foldStrip([[-MAX, 0, MAX]]);
+  assert.deepEqual([across.pinned, across.x(0)], [false, 110]);
+  // Near the limit the strip is the one the same folds give at a plain scale.
+  const unit = [0, 0.9, 0.95, 1];
+  const [small, large] = [foldStrip([unit]), foldStrip([unit.map((v) => v * MAX)])];
+  assert.deepEqual(unit.map((v) => large.x(v * MAX)), unit.map(small.x));
+  assert.equal(foldStrip([[0, 5e-324, 1e-323]]).x(5e-324), 110);
+  const tiny = foldStrip([[-Number.MIN_VALUE, Number.MIN_VALUE]]);
+  assert.deepEqual([tiny.x(-Number.MIN_VALUE), tiny.x(Number.MIN_VALUE)], [10, 210]);
+
+  // Rows of comparable spread pin nothing, so they compare at a glance; so
+  // does a steady row beside a spread one, whose folds bunch together.
+  assert.equal(foldStrip([[0.94, 1.59, 1.25, 1.33], [1.01, 1.41, 1.24, 1.28]]).pinned, false);
+  assert.equal(foldStrip([[0.305, 0.306, 0.304, 0.305, 0.305], [0.30, 0.33, 0.28, 0.31, 0.32]]).pinned, false);
+  // A fold beside folds with no spread of their own is not far off.
+  assert.equal(foldStrip([[63, 63, 63, 63.5]]).pinned, false);
+  // Folds that differ by rounding alone sit mid-strip, mean included.
+  const rounded = foldStrip([[0.3, 0.3, 0.3], [0.3, 0.3, 0.30000000000000004]]);
+  assert.equal(rounded.x(0.29999999999999993), 110);
+  // The strip does not depend on the order of the folds.
+  const tied = [[0, 0.5, 0.53125, 0.53125, 0.5625, 1], [0.5, 0.5, 0.53125, 0.53125, 0.5625, 0.5625]];
+  const permuted = tied.map((row) => [5, 1, 2, 3, 0, 4].map((index) => row[index]));
+  assert.deepEqual(
+    [0, 0.5, 0.5625, 1].map(foldStrip(permuted).x),
+    [0, 0.5, 0.5625, 1].map(foldStrip(tied).x)
+  );
+  // A value a rounding outside the folds stays on the strip.
+  assert.equal(foldStrip([[1, 2, 3]]).x(1 - 2 ** -52), 10);
+
+  const fold = (/** @type {number} */ index, /** @type {number} */ deviance) => ({
+    fold: index, n_train: 1, n_test: 1, scores: { deviance }, effective_df: 1, fit_time_s: 0, converged: true
+  });
+  const result = (/** @type {string} */ label, /** @type {string} */ origin, /** @type {number[]} */ values) => ({
+    ...cvPayload().results[0], label, origin, folds: values.map((value, index) => fold(index, value)),
+    mean: { deviance: values.reduce((a, b) => a + b, 0) / values.length }, std: { deviance: 0 }, pooled: {}
+  });
+  const markup = cvTabMarkup(cvPayload({
+    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    results: [result("As supplied", "supplied", supplied), result("Current model", "run", current)]
+  }), idle());
+  assert.match(markup, /lower is better · far-off folds at the strip's ends/);
+  // The supplied mean, pulled to 6e9 by its far-off fold, is pinned and says so.
+  assert.equal([...markup.matchAll(/class="cv-mean is-off"/g)].length, 1);
+  assert.match(markup, /<title>Mean: [^<]*, off the strip<\/title>/);
+  assert.equal([...markup.matchAll(/class="cv-card-dot is-off"/g)].length, 1);
+  assert.match(markup, /Fold 3: [^<]*, off the strip<\/title>/);
+  // A steady run's mean, a rounding above its folds, stays with them.
+  const steady = cvTabMarkup(cvPayload({
+    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    results: [result("As supplied", "supplied", [0.08, 0.09, 3.0e10]), result("Current model", "run", [0.1, 0.1, 0.1])]
+  }), idle());
+  const runRow = steady.slice(steady.indexOf('data-origin="run"'));
+  assert.ok((0.1 + 0.1 + 0.1) / 3 > 0.1); // the fixture reaches the rounding
+  assert.doesNotMatch(runRow, /class="cv-mean is-off"/);
+  // Two far-off folds at one end share one ring that names both.
+  const twice = cvTabMarkup(cvPayload({
+    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    results: [result("As supplied", "supplied", [63.4, 3.0e10, 2.0e10, 62.8, 62.9]), result("Current model", "run", current)]
+  }), idle());
+  const rings = [...twice.matchAll(/class="cv-card-dot is-off"[^>]*><title>([^<]*)<\/title>/g)];
+  assert.equal(rings.length, 1);
+  assert.match(rings[0][1], /^Fold 2: [^;]*; Fold 3: [^;]*, off the strip$/);
+  // The current model's row spreads across the strip.
+  const currentRow = markup.slice(markup.indexOf('data-origin="run"'));
+  const xs = [...currentRow.matchAll(/<circle cx="([\d.]+)"/g)].slice(0, 5).map((m) => Number(m[1]));
+  assert.equal(xs.length, 5);
+  assert.ok(Math.max(...xs) - Math.min(...xs) > 170, String(xs));
 });
 
 test("the fold table lists the latest run's folds and a mean row", () => {

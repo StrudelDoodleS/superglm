@@ -23,6 +23,7 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import posixpath
 import re
 import threading
@@ -251,6 +252,18 @@ async def call_asgi(
     return status, response_headers, b"".join(chunks)
 
 
+def host_inverts_dark() -> bool:
+    """Whether the notebook inverts each output in its dark theme.
+
+    Databricks does, with ``filter: invert(1) saturate(0.5)`` on the frame an
+    output renders in; that is not documented, so it is taken from the
+    Databricks community's reports and what the frame shows: it prefers dark
+    in the dark theme and light in the light one. Other notebooks restyle
+    their own page and leave outputs alone.
+    """
+    return bool(os.environ.get("DATABRICKS_RUNTIME_VERSION"))
+
+
 @functools.cache
 def notebook_view_class() -> type:
     try:
@@ -268,6 +281,8 @@ def notebook_view_class() -> type:
         _esm = read_app_asset(HOST_MODULE).decode("utf-8")
         bundle = traitlets.Dict().tag(sync=True)
         height = traitlets.Int(720).tag(sync=True)
+        # Databricks inverts each output in its dark theme; the page undoes it.
+        host_inverts_dark = traitlets.Bool(False).tag(sync=True)
 
     return EditorNotebookView
 
@@ -284,7 +299,9 @@ class NotebookTransport:
     def __init__(self, app: Any, token: str, *, view: Any | None = None):
         self._app = app
         self._token = token.encode("latin-1")
-        self.view = notebook_view_class()(bundle=app_bundle()) if view is None else view
+        if view is None:
+            view = notebook_view_class()(bundle=app_bundle(), host_inverts_dark=host_inverts_dark())
+        self.view = view
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run_loop,
