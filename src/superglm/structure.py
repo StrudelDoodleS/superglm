@@ -999,7 +999,7 @@ def _knots_entry(spec) -> dict | None:
     }
 
 
-def _knots_json(name: str, knots: dict) -> dict[str, Any]:
+def _knots_json(knots: dict) -> dict[str, Any]:
     return {
         "knot_alpha": float(knots["knot_alpha"]),
         "n_knots": int(knots["n_knots"]),
@@ -1066,7 +1066,7 @@ def _entry_json(name: str, entry: FeatureStructure) -> dict[str, Any]:
         }
         for r in entry.ranges
     ]
-    knots = None if entry.knots is None else _knots_json(name, entry.knots)
+    knots = None if entry.knots is None else _knots_json(entry.knots)
     if entry.kind == "spline":
         return {"kind": "spline", "ranges": ranges, **({} if knots is None else {"knots": knots})}
     payload = {
