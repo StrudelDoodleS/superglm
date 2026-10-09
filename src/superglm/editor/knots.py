@@ -99,6 +99,16 @@ _COLLAPSED = (
     "{rule} put several of the {count} knots of {term!r} on one value{where}, so the fit "
     "would fall back to even spacing. {remedy}"
 )
+_KNOTS_PAST_CURVE = (
+    "That change leaves the curve of {term!r} running from {first} to {last}, and {count} of "
+    "its knots at fixed positions {verb} outside it. Move or remove {them}, or place the knots "
+    "by a rule, before this change."
+)
+_KNOTS_OVER_LEVELS = (
+    "That change leaves {levels} levels on the curve of {term!r}, which take at most {most} "
+    "knots, and it has {count} at fixed positions. Remove knots, or place them by a rule, "
+    "before this change."
+)
 _NO_REFERENCE = (
     "The opened model does not keep the declaration of {term!r}, so there is nothing to reset to."
 )
@@ -431,6 +441,40 @@ def _waiting_spline(session, name: str) -> _SplineBase:
     return declared_spline(session.model, name) if spline is None else spline
 
 
+def stated_knots_refusal(name: str, replacement) -> str | None:
+    """Why a level change's draft of an ordered term cannot keep its stated knots, or None.
+
+    Knots at fixed positions stay where they are while a level change moves
+    the curve's levels under them: the change is refused while more of them
+    remain than the levels on the curve take, or any lies outside the curve's
+    first and last levels, naming which. Knots placed by a rule are placed
+    again on the new levels.
+    """
+    spline = source_spline(replacement) if isinstance(replacement, OrderedCategorical) else None
+    stated = None if spline is None else spline._explicit_knots
+    smooth = list(getattr(replacement, "_smooth_levels", ()))
+    if stated is None or len(smooth) < 2:
+        return None
+    knots = np.asarray(stated, dtype=np.float64)
+    if knots.size > len(smooth) - 1:
+        return _KNOTS_OVER_LEVELS.format(
+            levels=len(smooth), term=name, most=len(smooth) - 1, count=int(knots.size)
+        )
+    values = np.asarray([replacement._level_to_value[level] for level in smooth])
+    first, last = smooth[int(np.argmin(values))], smooth[int(np.argmax(values))]
+    outside = int(np.count_nonzero((knots <= values.min()) | (knots >= values.max())))
+    if outside == 0:
+        return None
+    return _KNOTS_PAST_CURVE.format(
+        term=name,
+        first=first,
+        last=last,
+        count=outside,
+        verb="lies" if outside == 1 else "lie",
+        them="it" if outside == 1 else "them",
+    )
+
+
 def _resettable(session, name: str) -> bool:
     """Whether the knots in force, or waiting, differ from the opened model's."""
     current = declared_spline(session.model, name)
@@ -530,16 +574,53 @@ def _placed_spline(model, name: str, replacement, X, sample_weight, *, raw: bool
 
 
 def probe_build(model, name: str, replacement, X, sample_weight) -> None:
-    """Place ``replacement``'s knots on the refit's data, as the fit's first step does.
+    """Build ``replacement`` on the refit's data as the fit's design compile does, alone.
 
-    A numeric spline places its knots and certifies its shaped ranges; an
-    ordered term builds on its column. Other terms have nothing to place. A
-    placement the library refuses raises its own error.
+    A spline term, or an ordered term on a spline basis, is compiled as the
+    one term of a design, by the fit's own builder with the model's binning,
+    smoothing and weight settings: its knots placed, its shaped ranges
+    certified, its penalty, shrinkage and smoothing policy built. So a change
+    the fit would refuse is refused when it is staged. Other terms have
+    nothing to place. A build the library refuses raises its own error.
     """
-    if isinstance(replacement, _SplineBase) or (
-        isinstance(replacement, OrderedCategorical) and source_spline(replacement) is not None
+    if not (
+        isinstance(replacement, _SplineBase)
+        or (isinstance(replacement, OrderedCategorical) and source_spline(replacement) is not None)
     ):
-        _placed_knots(model, name, replacement, X, sample_weight, raw=True)
+        return
+    from superglm._predictor_compiler import compile_predictor_design
+    from superglm.model.fit_state import configured_lambda2
+    from superglm.solvers.dispersion import PRIOR_WEIGHTS
+
+    frame = as_eager_frame(X)
+    frame.require_columns((name,))
+    n = len(frame.column_array(name))
+    weights = (
+        np.ones(n, dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64)
+    )
+    bindings = getattr(model, "_level_bindings", None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        compile_predictor_design(
+            frame,
+            weights,
+            geometry_weight=knot_geometry_weight(weights, model._weight_semantics),
+            polynomial_weight=weights,
+            categorical_reporting_weight=weights,
+            ordered_reporting_weight=weights,
+            specs={name: replacement},
+            feature_order=[name],
+            interaction_specs={},
+            interaction_order=[],
+            pending_interactions=[],
+            model_discrete=model._discrete,
+            n_bins_config=model._n_bins,
+            lambda2=configured_lambda2(model),
+            level_bindings=dict(bindings) if bindings else None,
+            physical_rows=model._weight_semantics == PRIOR_WEIGHTS,
+        )
 
 
 def _strategy(spline: _SplineBase) -> str:

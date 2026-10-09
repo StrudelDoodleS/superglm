@@ -8,7 +8,15 @@ import urllib.error
 import numpy as np
 import pytest
 
-from superglm import Categorical, Constraint, OrderedCategorical, Spline, SuperGLM, read_structure
+from superglm import (
+    Categorical,
+    Constraint,
+    LambdaPolicy,
+    OrderedCategorical,
+    Spline,
+    SuperGLM,
+    read_structure,
+)
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
@@ -207,6 +215,22 @@ def test_a_waiting_basis_change_that_allows_ranges_takes_a_range_before_the_refi
     spec = session.model._specs["age"]
     assert not spec.select
     assert [(r.lo, r.hi, r.degree) for r in spec.polynomial_ranges] == [(50.0, 70.0, 1)]
+
+
+def test_shrink_off_is_refused_where_the_lambda_policy_sets_the_shrinkage_penalty():
+    """Without shrinkage the term has no "null" penalty for its policy to set."""
+    X, y, w = _book(n=4000)
+    age = Spline(kind="ps", n_knots=6, select=True, lambda_policy={"null": LambdaPolicy.fixed(1.0)})
+    model = _declared(age=age).fit_reml(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+    sentence = (
+        "The lambda_policy of 'age' sets the shrinkage penalty (\"null\"), which it has only "
+        "with Shrink on; change lambda_policy in code to turn Shrink off."
+    )
+    knots = session_payload(session)["age"]["knots"]
+    assert (knots["select_available"], knots["select_reason"]) == (False, sentence)
+    assert _refused(session, "age", {"select": False}) == sentence
+    assert session.pending == []
 
 
 def test_a_natural_spline_refuses_uneven_knots_and_shrinkage_and_takes_even_knots_only(book):

@@ -89,6 +89,10 @@ _SELECT_CONSTRAINT = (
     "Shrinkage cannot be combined with a shape constraint the fit enforces, which {term!r} "
     "has; leave Shrink off, or apply the constraint after the fit (Constraint.postfit) in code."
 )
+_POLICY_NULL = (
+    'The lambda_policy of {term!r} sets the shrinkage penalty ("null"), which it has only '
+    "with Shrink on; change lambda_policy in code to turn Shrink off."
+)
 _NOT_BUILT = (
     "A {name} cannot take the other settings of {term!r}; choose another kind, or change the "
     "term in code."
@@ -130,8 +134,7 @@ def basis_payload(session, name: str) -> dict[str, Any]:
     reason = _levels_waiting(session, name)
     if reason is None:
         shown = _waiting_spline(session, name)
-        if not shown.select:
-            reason = _select_refusal(name, shown, _spline_kind_name(shown), True)
+        reason = _select_refusal(name, shown, _spline_kind_name(shown), not shown.select)
     return {
         "kind": _spline_kind_name(fitted),
         "select": bool(fitted.select),
@@ -269,7 +272,12 @@ def _kind_refusal(name: str, source: _SplineBase, kind: str, degree: int) -> str
 def _select_refusal(name: str, source: _SplineBase, kind: str, select: bool) -> str | None:
     """Why a ``kind`` spline built from ``source`` cannot have ``select``, or None."""
     if not select:
-        return None
+        policy = source._lambda_policy
+        return (
+            _POLICY_NULL.format(term=name)
+            if isinstance(policy, dict) and "null" in policy
+            else None
+        )
     orders = tuple(source._m_orders)
     if kind == "ns":
         return _SELECT_NS.format(term=name)

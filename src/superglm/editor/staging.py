@@ -35,7 +35,12 @@ from superglm.editor.errors import (
     EditorTypeError,
     EditorValueError,
 )
-from superglm.editor.knots import LEVEL_OPERATIONS, knots_feature_spec, probe_build
+from superglm.editor.knots import (
+    LEVEL_OPERATIONS,
+    knots_feature_spec,
+    probe_build,
+    stated_knots_refusal,
+)
 from superglm.editor.shapes import shaped_feature_spec
 from superglm.editor.specials import special_feature_spec
 from superglm.editor.unseen import require_group_kept
@@ -123,6 +128,10 @@ _REFIT_AT_ONCE = {
     "basis": "set_basis",
 }
 _CANNOT_FIT = (
+    "{change} cannot be fitted on the data the refit reads. Undo the change it builds on, "
+    "or choose another."
+)
+_CANNOT_FIT_SHAPE = (
     "{change} cannot be fitted on the data the refit reads. Choose another range or shape, "
     "or undo the change it builds on."
 )
@@ -513,6 +522,10 @@ def _require_fits(session, operation, term, replacement, metadata, X, sample_wei
     ranges on the refit's data; doing that here moves the refusal from the
     Refit, where it could only say the refit was refused, to the change.
     """
+    if operation in LEVEL_OPERATIONS:
+        refusal = stated_knots_refusal(term, replacement)
+        if refusal is not None:
+            raise EditorValueError(refusal)
     try:
         probe_build(session.model, term, replacement, X, sample_weight)
     except EditorClientError:
@@ -522,8 +535,9 @@ def _require_fits(session, operation, term, replacement, metadata, X, sample_wei
             exc, _SHAPE_SENTENCES
         )
         change = str(metadata["label"])
+        generic = _CANNOT_FIT_SHAPE if operation == "shape" else _CANNOT_FIT
         raise EditorValueError(
-            sentence or _CANNOT_FIT.format(change=change[:1].upper() + change[1:])
+            sentence or generic.format(change=change[:1].upper() + change[1:])
         ) from exc
 
 

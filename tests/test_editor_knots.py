@@ -234,6 +234,53 @@ def test_a_collapsed_ordered_term_keeps_its_knots_on_the_expanded_level_axis(boo
     )
 
 
+def test_a_level_change_under_knots_at_fixed_positions_names_the_knots_it_strands(book):
+    """Stated knots stay put while a level change moves the curve's levels under them."""
+    session = _session(book)
+    session.stage_structural("knots", "band", {"positions": [0.5 + i for i in range(7)]})
+    session.refit_pending()
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("special", "band", {"levels": ["B3"]})
+    assert str(refused.value) == (
+        "That change leaves 7 levels on the curve of 'band', which take at most 6 knots, and it "
+        "has 7 at fixed positions. Remove knots, or place them by a rule, before this change."
+    )
+    session.stage_structural("knots", "band", {"positions": [0.5, 3.5, 6.8]})
+    session.refit_pending()
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("special", "band", {"levels": ["B7"]})
+    assert str(refused.value) == (
+        "That change leaves the curve of 'band' running from B0 to B6, and 1 of its knots at "
+        "fixed positions lies outside it. Move or remove it, or place the knots by a rule, "
+        "before this change."
+    )
+    assert session.pending == []
+    # Knots placed by a rule are placed again on the new levels.
+    session.stage_structural("knots", "band", {"count": 7, "strategy": "uniform"})
+    session.refit_pending()
+    session.stage_structural("special", "band", {"levels": ["B7"]})
+    session.refit_pending()
+    assert session_payload(session)["band"]["knots"]["count"] == 6
+
+
+def test_a_change_the_fit_would_refuse_is_refused_when_staged(book, monkeypatch):
+    """The stage builds the term as the fit does, penalty included, not only its knots."""
+    from superglm.features.spline import BSplineSmooth
+
+    def refuse(self):
+        raise ValueError("no penalty for this term")
+
+    monkeypatch.setattr(BSplineSmooth, "_build_penalty", refuse)
+    session = _session(book)
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("basis", "age", {"kind": "bs"})
+    assert str(refused.value) == (
+        "Kind bs in age cannot be fitted on the data the refit reads. Undo the change it builds "
+        "on, or choose another."
+    )
+    assert session.pending == []
+
+
 def test_a_knot_between_two_levels_sits_between_their_values_on_the_axis():
     """Chart positions run 0..L-1 over the smooth levels; the spline's own axis is their values."""
     values = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}
