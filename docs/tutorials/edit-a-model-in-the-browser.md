@@ -131,7 +131,8 @@ ordered term, **Free levels** does this job instead: see
 
 - The model is fitted again with the term's smoothing at zero, on the same knots. Every other
   term keeps the smoothing the model chose for it.
-- The line is relative to the same reference as the curve, so the two meet at the reference.
+- The line is drawn under the same centring as the curve. Each is centred on its own fit, so
+  the two need not meet.
 - The line is one fit per term. The icon is busy while it runs, and you can go on editing.
 - The choice stays on as you move between spline terms, until you turn it off.
 - Hand edits keep the line. A refit fits it again.

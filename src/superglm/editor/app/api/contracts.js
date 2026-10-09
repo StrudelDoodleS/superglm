@@ -324,18 +324,18 @@
  * @property {TermUnseen|null} [unseen] the New levels choice; null except on a plain categorical
  * @property {TermKnots|null} [knots] the term's knots and the Knots tool's state
  * @property {boolean} [unsmoothed] whether the term has smoothing the Unsmoothed
- *   toggle can switch off: a spline, or an ordered term with a spline basis
+ *   toggle can switch off: a spline
  */
 /**
- * A term fitted with its smoothing switched off (/unsmoothed). A spline's
- * line is on the term's own ``x``; an ordered term's runs through ``levels``,
- * its levels on the curve in axis order, with ``y`` null at a level the free
- * fit cannot estimate, which ``note`` names. Relativities on the chart's
- * reference; ``fit_token`` is the fit in force it was fitted beside.
+ * A spline term fitted with its smoothing switched off (/unsmoothed). Its line
+ * is on the term's own ``x``, with relativities under the same centring as the
+ * curve. ``note`` holds what to show when the refit stopped before it
+ * converged or a selection penalty shrinks the line, and null otherwise;
+ * ``fit_token`` is the fit in force it was fitted beside.
  * @typedef {Object} UnsmoothedLine
  * @property {string} term
  * @property {number[]} x
- * @property {Array<number|null>} y
+ * @property {number[]} y
  * @property {string|null} note
  * @property {number} fit_token
  */
