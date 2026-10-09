@@ -143,7 +143,8 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
     if (drag && dragStart) {
       drag.moved = drag.moved || movedPastSlop(dragStart, point);
       if (!drag.moved) return;
-      drag.x = clampKnot(knotX(current, point.x), current.axis);
+      const others = current.positions.filter((x) => x !== drag.from);
+      drag.x = clampKnot(knotX(current, point.x), others, current.axis);
       drag.remove = inRemoveZone(current, point);
       draw();
       return;

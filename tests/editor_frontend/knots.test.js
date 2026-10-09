@@ -8,10 +8,12 @@ import {
   SHOWN_GROUPED,
   addOutcome,
   addSpot,
+  decadeGrid,
   dropOutcome,
   freeSpot,
   knotAxis,
   knotChip,
+  knotGrid,
   knotTagText,
   knotToolState,
   nudgeKnot,
@@ -38,7 +40,7 @@ import { bindKnotGestures } from "../../src/superglm/editor/app/knot_gestures.js
 const NO_UI = { selected: null, drag: null, hover: null };
 const AGE_BANDS = ["18-24", "25-34", "35-44", "45-54", "55-64", "65+"];
 
-/** A numeric spline on 0..10: the grid, and Python's least gap, is 0.1. */
+/** A numeric spline on 0..10, knots 2 apart: its grid there, and Python's least gap, is 0.1. */
 function numericTerm({ knots = {}, pending = null } = {}) {
   return {
     kind: "spline",
@@ -48,7 +50,7 @@ function numericTerm({ knots = {}, pending = null } = {}) {
     shape: { available: true, reason: null, ranges: [], support: null, specials: [] },
     knots: {
       available: true, reason: null, positions: [2, 4, 6, 8], count: 4, strategy: "uniform",
-      alpha: 0.2, from_editor: false, lo: 0, hi: 10, min_gap: 0.1, max_count: null,
+      alpha: 0.2, from_editor: false, lo: 0, hi: 10, min_gap: null, max_count: null,
       resettable: false, ...knots,
     },
     pending,
@@ -72,29 +74,39 @@ function orderedTerm({ knots = {}, specials = [], levels = AGE_BANDS } = {}) {
   };
 }
 
-/** A numeric axis with ends and least gap of its own. */
-function axisOf(lo, hi, gap) {
-  return knotAxis(numericTerm({ knots: { lo, hi, min_gap: gap } }));
+/** A numeric axis with ends of its own. */
+function axisOf(lo, hi) {
+  return knotAxis(numericTerm({ knots: { lo, hi, min_gap: null } }));
 }
 
 const PLOT = { xMin: 0, xMax: 10, left: 50, right: 450, top: 20, axisY: 300, bottom: 360 };
 
-test("a numeric term snaps to three significant figures of its span, an ordered one to a tenth", () => {
+test("a numeric knot snaps to two significant figures of the space it sits in, an ordered one to a tenth", () => {
+  assert.deepEqual(decadeGrid(4), { step: 0.1, places: 1 });
+  assert.deepEqual(decadeGrid(10), { step: 1, places: 0 });
+  assert.deepEqual(decadeGrid(999.9), { step: 10, places: 0 });
+  assert.deepEqual(decadeGrid(1000), { step: 100, places: 0 });
+  assert.deepEqual(decadeGrid(0.05), { step: 0.001, places: 3 });
   const ten = knotAxis(numericTerm());
-  assert.equal(snapKnot(3.14159, ten), 3.1);
-  assert.equal(snapKnot(2.71, ten, 1), 2.8);
-  assert.equal(snapKnot(2.79, ten, -1), 2.7);
-  assert.equal(snapKnot(2.7, ten, 1), 2.7);
+  assert.equal(ten.gap, null);
+  const grid = knotGrid(3.14159, [2, 4, 6, 8], ten);
+  assert.deepEqual(grid, { step: 0.1, places: 1 });
+  assert.equal(snapKnot(3.14159, grid), 3.1);
+  assert.equal(snapKnot(2.71, grid, 1), 2.8);
+  assert.equal(snapKnot(2.79, grid, -1), 2.7);
+  assert.equal(snapKnot(2.7, grid, 1), 2.7);
   // Rounding to the grid's places drops the binary residue of k * step.
-  assert.equal(snapKnot(0.30000000000000004, ten), 0.3);
-  assert.equal(snapKnot(0.7, ten), 0.7);
-  assert.equal(snapKnot(24.36, axisOf(18, 100, 0.1)), 24.4);
-  assert.equal(snapKnot(345.6, axisOf(0, 999, 1)), 346);
-  assert.equal(snapKnot(345.6, axisOf(0, 1000, 10)), 350);
-  assert.equal(snapKnot(0.12345, axisOf(0, 0.5, 0.001)), 0.123);
+  assert.equal(snapKnot(0.30000000000000004, grid), 0.3);
+  assert.equal(snapKnot(0.7, grid), 0.7);
+  // Knots a rule put close together where the data is dense take a finer grid
+  // than knots far apart on the same axis.
+  const wide = axisOf(0, 27000);
+  const crowded = [29, 61, 95, 140, 9000, 20000];
+  assert.equal(knotGrid(45, crowded, wide).step, 1);
+  assert.equal(knotGrid(15000, crowded, wide).step, 1000);
   const ordered = knotAxis(orderedTerm());
-  assert.equal(ordered.step, 0.1);
-  assert.equal(snapKnot(2.46, ordered), 2.5);
+  assert.equal(ordered.gap, 0.1);
+  assert.equal(snapKnot(2.46, knotGrid(2.46, [], ordered)), 2.5);
   assert.equal(ordered.maxCount, 5);
 });
 
@@ -114,14 +126,18 @@ test("a term without knots to adjust has no axis, and its tool says why", () => 
 });
 
 test("a knot dropped too close to another settles on the nearest free spot, or stays put", () => {
-  const axis = axisOf(0, 10, 0.5);
+  const axis = knotAxis(numericTerm());
   assert.equal(freeSpot([3, 5], 4, axis), 4);
-  assert.equal(freeSpot([3, 5], 3.2, axis), 3.5);
-  assert.equal(freeSpot([3, 5], 4.7, axis), 4.5);
-  // Too near an end is too near: the nearest free spot keeps the gap from it.
-  assert.equal(freeSpot([5], 0.2, axis), 0.5);
-  // On a span with no room left, it goes back where it was.
-  assert.equal(freeSpot([0.5], 0.52, axisOf(0, 1, 0.4)), null);
+  assert.equal(freeSpot([3, 5], 3.05, axis), 3.1);
+  assert.equal(freeSpot([3, 5], 4.97, axis), 4.9);
+  // Too near an end is too near: the nearest free spot keeps the step from it.
+  assert.equal(freeSpot([5], 0.05, axis), 0.1);
+  // Among knots crowded where the data is dense, a drop keeps their own step.
+  assert.equal(freeSpot([29, 61, 95, 9000], 45, axisOf(0, 27000)), 45);
+  assert.equal(freeSpot([29, 61, 95, 9000], 61.4, axisOf(0, 27000)), 62);
+  // On an ordered span with no room left, it goes back where it was.
+  const tight = knotAxis(orderedTerm({ knots: { lo: 0, hi: 0.25 } }));
+  assert.equal(freeSpot([0.1], 0.12, tight), null);
 });
 
 test("a dragged knot may pass its neighbours; below the axis it is removed, never the last", () => {
@@ -143,13 +159,16 @@ test("a dragged knot may pass its neighbours; below the axis it is removed, neve
 });
 
 test("an arrow key nudges a knot one step, ten with Shift, and hops a neighbour it would crowd", () => {
-  const axis = axisOf(0, 10, 0.5);
+  const axis = knotAxis(numericTerm());
   assert.equal(nudgeKnot([3, 5], 0, 1, 1, axis), 3.1);
   assert.equal(nudgeKnot([3, 5], 0, 1, 10, axis), 4);
-  assert.equal(nudgeKnot([3, 3.5], 0, 1, 1, axis), 4);
-  assert.equal(nudgeKnot([3, 3.5], 1, -1, 1, axis), 2.5);
+  assert.equal(nudgeKnot([3, 3.1], 0, 1, 1, axis), 3.2);
+  assert.equal(nudgeKnot([3, 3.1], 1, -1, 1, axis), 2.9);
   // At the end of the axis there is nowhere further to go.
-  assert.equal(nudgeKnot([0.5, 5], 0, -1, 1, axis), null);
+  assert.equal(nudgeKnot([0.1, 5], 0, -1, 1, axis), null);
+  // A knot among others crowded where the data is dense moves by their step.
+  assert.equal(nudgeKnot([1000, 1010, 1030, 9000], 1, 1, 1, axisOf(0, 10000)), 1011);
+  assert.equal(nudgeKnot([1000, 1010, 1030, 9000], 3, -1, 1, axisOf(0, 10000)), 8900);
 });
 
 test("a click on the axis adds a knot on the grid, except where it crowds one or the term is full", () => {

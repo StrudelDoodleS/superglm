@@ -38,6 +38,7 @@ from superglm.editor.errors import (
 from superglm.editor.knots import (
     LEVEL_OPERATIONS,
     knots_feature_spec,
+    pending_knots,
     probe_build,
     stated_knots_refusal,
 )
@@ -609,6 +610,7 @@ def _draft_for(
             draft_spec=draft,
             reference_model=session.reference_model,
             levels_waiting=bool(LEVEL_OPERATIONS.intersection(waiting)),
+            waiting_positions=(pending_knots(session, editable.name) or {}).get("positions", ()),
         )
     if operation == "basis":
         waiting = [step.operation for step in session.pending if step.term == editable.name]

@@ -103,9 +103,9 @@ export function knotFrame(term, plot, editing) {
   };
 }
 
-/** Two positions this close are one knot: far below the grid. @param {KnotAxis} axis */
+/** Two positions this close are one knot: far below any grid. @param {KnotAxis} axis */
 function sameKnotTolerance(axis) {
-  return axis.step * 1e-6;
+  return (axis.hi - axis.lo) * 1e-9;
 }
 
 /**

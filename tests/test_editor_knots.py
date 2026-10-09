@@ -12,6 +12,7 @@ import pytest
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, read_structure
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
+from superglm.editor.knots import decade_step
 from superglm.editor.payloads import session_payload
 from tests.test_editor import _post_json
 
@@ -303,9 +304,11 @@ def test_knot_changes_refuse_in_fixed_sentences(book):
         "or tempered quantiles."
     )
     count = "The knot count must be a whole number of at least 1."
-    positions = (
-        "Knot positions must be numbers inside the range of 'age', at least 0.1 apart "
-        "and at least 0.1 from its ends."
+    positions = "Knot positions must be numbers inside the range of 'age'."
+    # The knots either side of 30 are 12 apart, so it keeps two significant figures of that.
+    crowded = (
+        "The knot at 30 sits closer than 1 to the knot or end beside it on 'age'; "
+        "move it further from them."
     )
     forms = "Give a knot count and placement rule, a list of positions, or reset."
     refusals = [
@@ -324,7 +327,7 @@ def test_knot_changes_refuse_in_fixed_sentences(book):
             "Tempered quantiles take an alpha from 0 to 1.",
         ),
         ("age", {"positions": [10.0, 30.0]}, positions),
-        ("age", {"positions": [30.0, 30.05]}, positions),
+        ("age", {"positions": [30.0, 30.05]}, crowded),
         ("age", {"positions": ["30"]}, positions),
         ("age", {"positions": [30.0, float("nan")]}, positions),
         ("age", {"count": 4}, forms),
@@ -546,3 +549,36 @@ def test_a_term_whose_column_holds_one_value_opens_with_its_data_kept():
     with pytest.raises(EditorValueError) as refused:
         session.stage_structural("shape", "x", {"lo": 4.0, "hi": 6.0, "degree": 1})
     assert str(refused.value) == payload["shape"]["reason"]
+
+
+def test_quantile_knots_crowded_where_the_data_is_dense_still_move_by_hand():
+    """A knot keeps the step of its own neighbourhood; the knots a change keeps are not checked."""
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"value": np.exp(rng.normal(9.5, 1.6, 4000))})
+    y = rng.poisson(np.exp(0.1 * np.log(X["value"].to_numpy()) - 0.8)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        spline_penalty=0.1,
+        selection_penalty=0.0,
+        features={"value": Spline(kind="ps", n_knots=20, knot_strategy="quantile")},
+    ).fit(X, y)
+    session = EditorSession.from_model(model, train_data=(X, y))
+    knots = session_payload(session)["value"]["knots"]
+    positions, lo, hi = knots["positions"], knots["lo"], knots["hi"]
+    assert knots["min_gap"] is None
+    # Most of the rule's knots sit closer together than three figures of the whole span.
+    assert np.count_nonzero(np.diff(positions) < 10.0 ** (np.floor(np.log10(hi - lo)) - 2)) > 10
+    last = positions[-1] + decade_step(hi - positions[-2])
+    session.stage_structural("knots", "value", {"positions": [*positions[:-1], last]})
+    first = positions[0] - decade_step(positions[1] - lo)
+    step = session.stage_structural(
+        "knots", "value", {"positions": [first, *positions[1:-1], last]}
+    )
+    assert step.metadata["chart_positions"] == [first, *positions[1:-1], last]
+    # A knot added inside the cluster keeps the cluster's own step from its neighbours.
+    a, b = positions[2], positions[3]
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural(
+            "knots", "value", {"positions": sorted([*positions, a + decade_step(b - a) / 2])}
+        )
+    assert str(refused.value).startswith(f"The knot at {a + decade_step(b - a) / 2:g} sits closer")

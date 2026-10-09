@@ -19,9 +19,9 @@ import { fmt } from "./format.js";
  * @typedef {object} KnotAxis
  * @property {number} lo knots lie strictly between ``lo`` and ``hi``
  * @property {number} hi
- * @property {number} gap the least distance between two knots, and from ``lo`` and ``hi``
- * @property {number} step the grid a knot snaps to
- * @property {number} places the grid's decimal places
+ * @property {number|null} gap an ordered term's grid, and the least distance
+ *   between two knots and from ``lo`` and ``hi``: a tenth of a level. Null on
+ *   a numeric term, whose grid depends on where a knot is (``knotGrid``)
  * @property {number|null} maxCount
  * @property {Map<number, string>|null} levels an ordered term's level on the
  *   curve at each whole position; null on a numeric term
@@ -37,6 +37,11 @@ import { fmt } from "./format.js";
  * @property {KnotStrategy} strategy
  * @property {number|null} alpha
  * @property {boolean} waiting
+ */
+/**
+ * The grid a knot snaps to at one place, whose step is also the least
+ * distance it keeps from the knots or ends beside it.
+ * @typedef {{step:number, places:number}} KnotGrid
  */
 /**
  * What a finished gesture asks for: one change, and the knot to keep
@@ -73,9 +78,7 @@ function isFiniteNumber(value) {
 }
 
 /**
- * The axis ``term``'s knots sit on, or null when it has none to adjust. A
- * numeric term snaps to three significant figures of its span, the grid a
- * shaped range's edges snap to; an ordered term to a tenth of a level.
+ * The axis ``term``'s knots sit on, or null when it has none to adjust.
  * @param {TermPayload} term @returns {KnotAxis|null}
  */
 export function knotAxis(term) {
@@ -84,13 +87,11 @@ export function knotAxis(term) {
   const { lo, hi } = knots;
   if (!isFiniteNumber(lo) || !isFiniteNumber(hi) || !(hi > lo)) return null;
   const ordered = Array.isArray(term.levels);
-  const exponent = ordered ? -1 : Math.floor(Math.log10(hi - lo)) - 2;
   return {
     lo,
     hi,
-    gap: isFiniteNumber(knots.min_gap) && knots.min_gap > 0 ? knots.min_gap : 0,
-    step: 10 ** exponent,
-    places: Math.max(0, -exponent),
+    gap: ordered ? (isFiniteNumber(knots.min_gap) && knots.min_gap > 0 ? knots.min_gap : 0.1)
+      : null,
     maxCount: isFiniteNumber(knots.max_count) ? knots.max_count : null,
     levels: ordered ? curveLevels(term) : null,
     evenOnly: knots.even_only ?? null,
@@ -114,61 +115,112 @@ function curveLevels(term) {
 }
 
 /**
- * ``x`` on the axis's grid: the nearest grid point, or the next one up
+ * Two significant figures of ``width``: its grid steps a power of ten a
+ * decade below its leading digit. The exponent from ``log10`` is checked
+ * against the correctly rounded powers of ten that ``Number("1e…")`` reads, as
+ * Python's ``decade_step`` does, so both take the same step.
+ * @param {number} width @returns {KnotGrid}
+ */
+export function decadeGrid(width) {
+  let exponent = Math.floor(Math.log10(width));
+  if (Number(`1e${exponent + 1}`) <= width) exponent += 1;
+  else if (Number(`1e${exponent}`) > width) exponent -= 1;
+  exponent -= 1;
+  return { step: Number(`1e${exponent}`), places: Math.max(0, -exponent) };
+}
+
+/**
+ * The knots or ends either side of ``x``: the nearest of ``others`` strictly
+ * below and above it, else ``lo`` and ``hi``.
+ * @param {number} x @param {readonly number[]} others @param {KnotAxis} axis
+ * @returns {[number, number]}
+ */
+function fencesAround(x, others, axis) {
+  let left = axis.lo;
+  let right = axis.hi;
+  for (const other of others) {
+    if (other < x && other > left) left = other;
+    if (other > x && other < right) right = other;
+  }
+  return [left, right];
+}
+
+/**
+ * The grid of a knot between the knots or ends ``left`` and ``right``: a
+ * tenth of a level on an ordered term; on a numeric one, two significant
+ * figures of the space between them, so knots a rule put close together
+ * where the data is dense move in steps that suit them. Python checks a knot
+ * a change places by the same step.
+ * @param {number} left @param {number} right @param {KnotAxis} axis @returns {KnotGrid}
+ */
+function gridBetween(left, right, axis) {
+  if (axis.gap !== null) return { step: axis.gap, places: 1 };
+  return decadeGrid(right > left ? right - left : axis.hi - axis.lo);
+}
+
+/**
+ * The grid a knot at ``x`` snaps to, among ``others``.
+ * @param {number} x @param {readonly number[]} others @param {KnotAxis} axis
+ */
+export function knotGrid(x, others, axis) {
+  return gridBetween(...fencesAround(x, others, axis), axis);
+}
+
+/**
+ * ``x`` on ``grid``: the nearest grid point, or the next one up
  * (``direction`` 1) or down (-1). Rounding to the grid's places drops the
  * binary residue of ``k * step``.
- * @param {number} x @param {KnotAxis} axis @param {-1|0|1} [direction]
+ * @param {number} x @param {KnotGrid} grid @param {-1|0|1} [direction]
  */
-export function snapKnot(x, axis, direction = 0) {
-  const ratio = x / axis.step;
+export function snapKnot(x, grid, direction = 0) {
+  const ratio = x / grid.step;
   const k = direction > 0
     ? Math.ceil(ratio - SLACK)
     : direction < 0 ? Math.floor(ratio + SLACK) : Math.round(ratio);
-  return Number((k * axis.step).toFixed(axis.places));
+  return Number((k * grid.step).toFixed(grid.places));
 }
 
 /**
- * Whether a knot at ``x`` lies inside the axis and keeps its distance from
- * its ends and from every one of ``others``.
+ * Whether a knot at ``x`` lies inside the axis and keeps the step of its
+ * grid from the knots or ends beside it.
  * @param {number} x @param {readonly number[]} others @param {KnotAxis} axis
  */
 export function knotFits(x, others, axis) {
-  const tight = axis.gap * (1 - SLACK);
-  if (!(x > axis.lo && x < axis.hi)) return false;
-  if (x - axis.lo < tight || axis.hi - x < tight) return false;
-  return others.every((other) => {
-    const distance = Math.abs(other - x);
-    return distance > 0 && distance >= tight;
-  });
+  if (!(x > axis.lo && x < axis.hi) || others.includes(x)) return false;
+  const [left, right] = fencesAround(x, others, axis);
+  const tight = gridBetween(left, right, axis).step * (1 - SLACK);
+  return x - left >= tight && right - x >= tight;
 }
 
 /**
- * Where a dragged knot goes: on the grid, and no nearer either end than the
- * least gap. It may pass its neighbours on the way.
- * @param {number} x @param {KnotAxis} axis
+ * Where a knot dragged among ``others`` goes: on the grid where it is, and
+ * no nearer either end than the grid there. It may pass its neighbours.
+ * @param {number} x @param {readonly number[]} others @param {KnotAxis} axis
  */
-export function clampKnot(x, axis) {
-  let low = snapKnot(axis.lo + axis.gap, axis, 1);
-  if (!(low > axis.lo)) low = snapKnot(low + axis.step, axis);
-  let high = snapKnot(axis.hi - axis.gap, axis, -1);
-  if (!(high < axis.hi)) high = snapKnot(high - axis.step, axis);
-  return Math.min(high, Math.max(low, snapKnot(x, axis)));
+export function clampKnot(x, others, axis) {
+  const first = gridBetween(axis.lo, fencesAround(axis.lo, others, axis)[1], axis);
+  let low = snapKnot(axis.lo + first.step, first, 1);
+  if (!(low > axis.lo)) low = snapKnot(low + first.step, first);
+  const last = gridBetween(fencesAround(axis.hi, others, axis)[0], axis.hi, axis);
+  let high = snapKnot(axis.hi - last.step, last, -1);
+  if (!(high < axis.hi)) high = snapKnot(high - last.step, last);
+  return Math.min(high, Math.max(low, snapKnot(x, knotGrid(x, others, axis))));
 }
 
 /**
- * The grid points next to the knots and ends that a knot at ``x`` might crowd:
- * where the nearest free spot to any point lies.
+ * The free grid points nearest the knots and ends, one step in from each
+ * side of every space between them: where the nearest free spot to any
+ * point lies.
  * @param {readonly number[]} others @param {KnotAxis} axis
  */
 function spotsBeside(others, axis) {
-  return [
-    ...others.flatMap((other) => [
-      snapKnot(other - axis.gap, axis, -1),
-      snapKnot(other + axis.gap, axis, 1),
-    ]),
-    clampKnot(axis.lo, axis),
-    clampKnot(axis.hi, axis),
-  ].filter((spot) => knotFits(spot, others, axis));
+  const fences = [axis.lo, ...[...others].sort((left, right) => left - right), axis.hi];
+  return fences.slice(1).flatMap((right, index) => {
+    const left = fences[index];
+    if (!(right > left)) return [];
+    const grid = gridBetween(left, right, axis);
+    return [snapKnot(left + grid.step, grid, 1), snapKnot(right - grid.step, grid, -1)];
+  }).filter((spot) => knotFits(spot, others, axis));
 }
 
 /** @param {number[]} spots @param {number} x */
@@ -200,7 +252,8 @@ export function freeSpot(others, x, axis) {
 export function nudgeKnot(positions, index, direction, steps, axis) {
   const x = positions[index];
   const others = positions.filter((_, i) => i !== index);
-  const target = clampKnot(x + direction * steps * axis.step, axis);
+  const step = knotGrid(x, others, axis).step;
+  const target = clampKnot(x + direction * steps * step, others, axis);
   if ((target - x) * direction > 0 && knotFits(target, others, axis)) return target;
   const beyond = spotsBeside(others, axis).filter((spot) => (spot - x) * direction > 0);
   return beyond.length ? nearest(beyond, target) : null;
@@ -264,7 +317,7 @@ export function moveOutcome(positions, index, x) {
  * @returns {number|null}
  */
 export function addSpot(positions, x, axis) {
-  const spot = snapKnot(x, axis);
+  const spot = snapKnot(x, knotGrid(x, positions, axis));
   return knotFits(spot, positions, axis) ? spot : null;
 }
 

@@ -78,9 +78,14 @@ _RULE = (
 )
 _ALPHA = "Tempered quantiles take an alpha from 0 to 1."
 _ORDERED_MAX = "{term!r} has {levels} levels on its curve, so it takes at most {most} knots."
-_POSITIONS = (
-    "Knot positions must be numbers inside the range of {term!r}, at least {gap} apart "
-    "and at least {gap} from its ends."
+_POSITIONS = "Knot positions must be numbers inside the range of {term!r}."
+_CROWDED = (
+    "The knot at {x} sits closer than {gap} to the knot or end beside it on {term!r}; "
+    "move it further from them."
+)
+_CROWDED_ORDERED = (
+    "A knot sits closer than a tenth of a level to the knot or end beside it on {term!r}; "
+    "move it further from them."
 )
 _EVEN_ONLY_NS = (
     '{term!r} is a natural spline (kind="ns"), whose penalty needs evenly spaced knots; '
@@ -163,7 +168,7 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
         "from_editor": bool(getattr(source_spline(spec), EDITOR_KNOTS_ATTRIBUTE, False)),
         "lo": float(lo),
         "hi": float(hi),
-        "min_gap": axis.min_gap(float(lo), float(hi)),
+        "min_gap": axis.min_gap,
         "max_count": axis.max_count,
         "resettable": _resettable(session, name),
         "even_only": _even_only_reason(name, _waiting_spline(session, name)),
@@ -224,6 +229,7 @@ def knots_feature_spec(
     draft_spec=None,
     reference_model=None,
     levels_waiting: bool = False,
+    waiting_positions=(),
 ) -> tuple[Any, dict[str, Any]]:
     """A fresh spec for ``term`` with new knots, and the waiting change's metadata.
 
@@ -233,6 +239,9 @@ def knots_feature_spec(
     waiting changes leave it; ``levels_waiting`` says one of them changes its
     levels. ``X`` and ``sample_weight`` are the refit's data, on which the new
     knots are placed now, so a refusal comes before the Refit.
+    ``waiting_positions`` are the chart positions of a waiting knot change on
+    the term: with the knots in force, the knots it shows, which a list of
+    positions may keep where they are.
     """
     name = term.name
     _require_not_interaction_parent(model, name, operation="change the knots")
@@ -252,7 +261,9 @@ def knots_feature_spec(
     elif form == "rule":
         basis, marked = _rule_basis(name, spec, source, axis, params), True
     else:
-        basis, marked = _positions_basis(name, fitted, source, axis, params["positions"]), True
+        shown = {*_in_force_chart(fitted, axis), *map(float, waiting_positions)}
+        basis = _positions_basis(name, fitted, source, axis, params["positions"], shown)
+        marked = True
     if marked:
         setattr(basis, EDITOR_KNOTS_ATTRIBUTE, True)
     else:
@@ -317,22 +328,52 @@ def _rule_basis(name: str, spec, source: _SplineBase, axis: _Axis, params) -> _S
     )
 
 
-def _positions_basis(name: str, fitted, source: _SplineBase, axis: _Axis, positions):
+def _positions_basis(
+    name: str, fitted, source: _SplineBase, axis: _Axis, positions, shown: set[float]
+) -> _SplineBase:
+    """``source`` with knots at ``positions`` (chart coordinates).
+
+    Each knot must lie inside the term's range. A knot the change places,
+    one the term does not show already (``shown``), keeps the grid step at
+    its place (``_Axis.gap_between``) from the knots or ends beside it; the
+    knots it keeps are left where they are, as close as a rule placed them.
+    """
     inner = fitted._basis_spline if isinstance(fitted, OrderedCategorical) else fitted
     lo, hi = (float(axis.to_chart(edge)) for edge in inner.fitted_boundary)
-    gap = axis.min_gap(lo, hi)
     if not isinstance(positions, list | tuple) or not positions:
         raise EditorValueError(_COUNT)
     if not all(_is_real(v) and math.isfinite(v) for v in positions):
-        raise EditorValueError(_POSITIONS.format(term=name, gap=_gap_text(gap)))
+        raise EditorValueError(_POSITIONS.format(term=name))
     chart = np.sort(np.asarray(positions, dtype=np.float64))
-    # A relative slack of 1e-9 accepts a gap the browser snapped to exactly the step.
-    tight = gap * (1.0 - 1e-9)
-    if chart[0] - lo < tight or hi - chart[-1] < tight or np.any(np.diff(chart) < tight):
-        raise EditorValueError(_POSITIONS.format(term=name, gap=_gap_text(gap)))
+    if not (chart[0] > lo and chart[-1] < hi):
+        raise EditorValueError(_POSITIONS.format(term=name))
+    _require_room(name, axis, chart, shown, lo, hi)
     _require_count(name, axis, int(chart.size))
     _require_uneven_allowed(name, source)
     return respaced_spline(source, knots=axis.to_axis(chart))
+
+
+def _require_room(name: str, axis: _Axis, chart: NDArray, shown: set[float], lo, hi) -> None:
+    """Refuse a knot the change places nearer a knot or end beside it than the step there."""
+    fences = np.concatenate(([lo], chart, [hi]))
+    for index in range(1, fences.size - 1):
+        left, x, right = (float(v) for v in fences[index - 1 : index + 2])
+        apart = left < x < right
+        if x in shown and apart:
+            continue
+        gap = axis.gap_between(left, right) if right > left else axis.gap_between(lo, hi)
+        # A relative slack of 1e-9 accepts a gap the browser snapped to exactly the step.
+        tight = gap * (1.0 - 1e-9)
+        if not apart or x - left < tight or right - x < tight:
+            if axis.values is not None:
+                raise EditorValueError(_CROWDED_ORDERED.format(term=name))
+            raise EditorValueError(_CROWDED.format(x=f"{x:g}", gap=_gap_text(gap), term=name))
+
+
+def _in_force_chart(fitted, axis: _Axis) -> list[float]:
+    """The knots in force in chart coordinates, as the payload sends them."""
+    inner = fitted._basis_spline if isinstance(fitted, OrderedCategorical) else fitted
+    return [float(v) for v in axis.to_chart(np.asarray(inner.fitted_base_knots, dtype=np.float64))]
 
 
 def _reset_basis(reference_model, name: str, source: _SplineBase) -> tuple[_SplineBase, bool]:
@@ -660,11 +701,22 @@ class _Axis:
             return value
         return np.interp(value, self.values, np.arange(self.values.size, dtype=np.float64))
 
-    def min_gap(self, lo: float, hi: float) -> float:
-        """The snap step: a tenth of a level, or three significant figures of a numeric span."""
+    @property
+    def min_gap(self) -> float | None:
+        """An ordered term's snap step and least gap, a tenth of a level; None on a numeric term."""
+        return None if self.values is None else _ORDERED_STEP
+
+    def gap_between(self, left: float, right: float) -> float:
+        """The snap step, and least gap, of a knot between the knots or ends ``left`` and ``right``.
+
+        A tenth of a level on an ordered term. On a numeric term two significant
+        figures of the space between them, so knots that a rule put close
+        together where the data is dense move in steps that suit them, and
+        knots far apart in steps that suit those.
+        """
         if self.values is not None:
             return _ORDERED_STEP
-        return 10.0 ** (math.floor(math.log10(hi - lo)) - 2)
+        return decade_step(right - left)
 
 
 def _ordered_axis(spec: OrderedCategorical, term: EditableTerm) -> NDArray | None:
@@ -696,6 +748,21 @@ def _ordered_axis(spec: OrderedCategorical, term: EditableTerm) -> NDArray | Non
     if axis.size < 2 or not np.all(np.diff(axis) > 0.0):
         return None
     return axis
+
+
+def decade_step(width: float) -> float:
+    """Two significant figures of ``width``: the power of ten a decade below its leading digit.
+
+    The exponent from ``log10`` is checked against the correctly rounded
+    powers of ten (``float("1e…")``), so the step is the same in the browser,
+    which does the same, for a width that sits on a power of ten.
+    """
+    exponent = math.floor(math.log10(width))
+    if float(f"1e{exponent + 1}") <= width:
+        exponent += 1
+    elif float(f"1e{exponent}") > width:
+        exponent -= 1
+    return float(f"1e{exponent - 1}")
 
 
 def _gap_text(gap: float) -> str:

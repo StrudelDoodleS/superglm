@@ -132,8 +132,11 @@
  * @property {boolean} from_editor the knots in force were set in the editor
  * @property {number|null} lo knots lie strictly between ``lo`` and ``hi``
  * @property {number|null} hi
- * @property {number|null} min_gap the least distance between two knots, and
- *   between a knot and ``lo`` or ``hi``
+ * @property {number|null} min_gap an ordered term's least distance between two
+ *   knots, and between a knot and ``lo`` or ``hi``: a tenth of a level, also
+ *   its grid. Null on a numeric term, where a knot a change places keeps two
+ *   significant figures of the space between the knots or ends beside it
+ *   (``knotGrid``); the knots it keeps stay as close as they are
  * @property {number|null} max_count the most knots the term takes; null for no limit
  * @property {boolean} resettable the knots in force or waiting differ from the
  *   original model's
