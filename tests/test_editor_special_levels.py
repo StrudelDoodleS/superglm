@@ -561,11 +561,14 @@ def test_both_fits_are_centred_on_one_exposure_weighted_mean(monkeypatch):
 
 
 def test_each_tick_is_the_fit_a_flag_is_judged_against_whatever_the_hand_edits(book):
-    """A hand edit moves the drawn line, not the fit the comparison judges by.
+    """A Refit moves the fit in force off the opened model's line; a hand edit moves the drawn one.
 
-    A level is flagged exactly when that fit, its tick, lies outside its interval.
+    The tick is the fit in force, neither line, and a level is flagged
+    exactly when that fit, its tick, lies outside its interval.
     """
     session = _session(book)
+    opened = dict(zip(session.terms["band"].levels, session.terms["band"].original_log_effect))
+    session.replace_with_special_levels("band", ["Mi072"])
     session.select_levels("band", [BUMP])
     session.shift("band", 0.3)
     term = session.terms["band"]
@@ -574,6 +577,12 @@ def test_each_tick_is_the_fit_a_flag_is_judged_against_whatever_the_hand_edits(b
     free = free_level_comparison(session, "band")
     assert free["curve"] == [float(fitted[level]) for level in free["levels"]]
     assert free["curve"][free["levels"].index(BUMP)] != edited[BUMP]
+    # The Refit moved the fit off the opened model's line, by far more than
+    # rounding, so the test tells the two apart.
+    assert any(
+        not np.isclose(np.log(tick), opened[level], rtol=0.0, atol=1e-6)
+        for level, tick in zip(free["levels"], free["curve"], strict=True)
+    )
     assert free["flagged"]
     for level, curve, lower, upper in zip(
         free["levels"], free["curve"], free["lower"], free["upper"], strict=True
