@@ -1071,7 +1071,9 @@ def test_the_palette_counts_the_values_in_the_range_a_refit_builds(aged):
     support = session_payload(session)["age"]["shape"]["support"]
     counted = np.unique(X["age"][weight > 0])
     runs = [(i, i + 1) for i in range(grid.size - 1)] + [(0, grid.size - 1), (3, 40)]
-    edges = np.array([_numeric_edges(weighted._specs["age"], grid[i], grid[j]) for i, j in runs])
+    edges = np.array(
+        [_numeric_edges(weighted._specs["age"].fitted_boundary, grid[i], grid[j]) for i, j in runs]
+    )
     held = np.searchsorted(counted, edges[:, 1], side="right") - np.searchsorted(
         counted, edges[:, 0]
     )

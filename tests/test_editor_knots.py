@@ -147,6 +147,27 @@ def test_the_waiting_knots_are_the_ones_the_refit_places(book, term):
     assert step.metadata["strategy"] == "quantile_rows"
 
 
+@pytest.mark.parametrize(
+    ("operation", "params"),
+    [("knots", {"count": 8, "strategy": "quantile_rows"}), ("basis", {"kind": "bs"})],
+)
+def test_a_range_drawn_while_a_knot_or_kind_change_waits_keeps_the_knots_it_places(
+    book, operation, params
+):
+    """The waiting draft states only how to place its knots, so the range places them first."""
+    alone = _session(book)
+    alone.stage_structural(operation, "age", params)
+    alone.refit_pending()
+    session = _session(book)
+    session.stage_structural(operation, "age", params)
+    session.stage_structural("shape", "age", {"lo": 40.0, "hi": 60.0, "degree": 1})
+    session.refit_pending()
+    spec = session.model._specs["age"]
+    assert [(r.lo, r.hi, r.degree) for r in spec.polynomial_ranges] == [(40.0, 60.0, 1)]
+    np.testing.assert_array_equal(_knots(session.model, "age"), _knots(alone.model, "age"))
+    assert spec.fitted_boundary == alone.model._specs["age"].fitted_boundary
+
+
 def test_a_rule_that_would_fall_back_to_even_spacing_is_refused_with_a_count_that_works():
     """Most rows at one value put several quantile knots there; the fit would space them evenly."""
     X, y, w = _book(n=4000)

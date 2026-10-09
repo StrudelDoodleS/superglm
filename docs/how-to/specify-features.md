@@ -45,7 +45,7 @@ pull on a heavily smoothed fit points towards a shape set by where the knots
 fall. The general penalty of Li and Cao (2022), "General P-splines for
 non-uniform B-splines" (arXiv:2201.06808), pulls towards a straight line
 wherever the knots sit, and matches the usual penalty on evenly spaced knots.
-A fit on stated or quantile knots can change in 0.39, so refit and compare. See
+A fit on stated or quantile knots can change in 0.40, so refit and compare. See
 the [migration note](../development/migrations/general-pspline-penalty.md).
 
 ### `select=True`

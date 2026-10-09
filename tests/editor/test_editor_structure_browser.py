@@ -258,7 +258,7 @@ def test_back_to_back_runs_give_ranges_that_meet(open_editor_page):
         # Snapped outward on its own, the second run would start past the first
         # range and leave a free sliver, with a kink at each end, between them.
         grid = session.terms["curve"].x
-        assert _numeric_edges(spec, grid[101], grid[140])[0] > first.hi
+        assert _numeric_edges(spec.fitted_boundary, grid[101], grid[140])[0] > first.hi
 
 
 def test_feature_search_filters_the_list_and_opens_the_first_match(open_editor_page):

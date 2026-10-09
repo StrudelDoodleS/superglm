@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 from superglm.editor.errors import EditorValueError
+from superglm.editor.knots import placed_geometry
 from superglm.features._spline_ranges import NARROWEST_GAP, SHAPE_NAMES, PolynomialRange
 from superglm.features._spline_runtime import fit_support
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -46,6 +47,10 @@ def shape_availability(model, name: str) -> tuple[bool, str | None]:
 # The joins the editor offers: Tangent, and Corner (the library's kink).
 EDITOR_JOINS = ("tangent", "kink")
 _LINEAR_TANGENT = "A degree-1 spline cannot join a range along its tangent; choose Corner."
+_NO_DATA = (
+    "A waiting knot or kind change places this term's knots on the training data, which the "
+    "editor does not have: open it with train_data, or from a model fitted with its data kept."
+)
 _PIECE_TOO_SHORT = (
     "That range would cut the {shape} range {span} down to {piece}, too short for a {shape}. "
     "Cover all of it, or leave more of it outside the new range."
@@ -162,19 +167,19 @@ def shaped_feature_spec(
         raise EditorValueError(_LINEAR_TANGENT)
     ordered = isinstance(spec, OrderedCategorical)
     position = spec._range_edge_value if ordered else float
-    try:
-        lo, hi = band_edges(spec, name, lo, hi) if ordered else _numeric_edges(spec, lo, hi)
-        new = PolynomialRange(lo, hi, degree, join)
-    except RangePlacementError as exc:
-        raise EditorValueError(str(exc)) from exc
-    ranges, cut = painted_ranges(current_ranges(spec), new, position)
     if ordered:
         source = pristine_basis(spec)
         knots = source._named_knots or source._explicit_knots
         boundary = source._explicit_boundary
     else:
         source = spec
-        knots, boundary = _free_geometry(spec)
+        knots, boundary = _free_geometry(model, name, spec, X, sample_weight)
+    try:
+        lo, hi = band_edges(spec, name, lo, hi) if ordered else _numeric_edges(boundary, lo, hi)
+        new = PolynomialRange(lo, hi, degree, join)
+    except RangePlacementError as exc:
+        raise EditorValueError(str(exc)) from exc
+    ranges, cut = painted_ranges(current_ranges(spec), new, position)
     basis = shaped_spline(source, ranges, knots=knots, boundary=boundary)
     if any(pieces for _, pieces in cut):
         _require_pieces_hold(cut, *_piece_support(model, name, spec, basis, X, sample_weight))
@@ -276,7 +281,7 @@ def snap_edge(value: float, span: float, direction: int) -> float:
     return snapped
 
 
-def _numeric_edges(spec, lo, hi) -> tuple[float, float]:
+def _numeric_edges(boundary, lo, hi) -> tuple[float, float]:
     """Snap selected values outward onto the fitted span's grid, clipped to the boundary.
 
     An edge snapped onto (or past) the boundary is the boundary exactly, so
@@ -286,19 +291,24 @@ def _numeric_edges(spec, lo, hi) -> tuple[float, float]:
         raise EditorValueError("Range edges on a numeric term must be finite numbers.")
     if not lo < hi:
         raise EditorValueError(TOO_FEW_POINTS)
-    boundary = _free_geometry(spec)[1]
     return _snapped_edge(boundary, float(lo), -1), _snapped_edge(boundary, float(hi), 1)
 
 
-def _free_geometry(spec) -> tuple[Any, tuple[float, float]]:
+def _free_geometry(model, name: str, spec, X, sample_weight) -> tuple[Any, tuple[float, float]]:
     """The base knots and boundary a numeric term keeps when it is shaped.
 
-    A fitted spline reports them. A draft, the unfitted spline an earlier
-    waiting shape built (``shaped_spline``), states the fitted ones it kept.
+    A fitted spline reports them. A draft an earlier waiting shape built
+    (``shaped_spline``) states the fitted ones it kept. A draft a waiting knot
+    or basis change built states only how to place them, so they are placed
+    on the refit's data, where the refit will place them.
     """
     if spec.fitted_boundary is not None:
         return spec.fitted_base_knots, spec.fitted_boundary
-    return spec._explicit_knots, spec._explicit_boundary
+    if spec._explicit_knots is not None and spec._explicit_boundary is not None:
+        return spec._explicit_knots, spec._explicit_boundary
+    if X is None:
+        raise EditorValueError(_NO_DATA)
+    return placed_geometry(model, name, spec, X, sample_weight)
 
 
 def _snapped_edge(boundary: tuple[float, float], value: float, direction: int) -> float:

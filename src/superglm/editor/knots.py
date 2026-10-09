@@ -485,6 +485,18 @@ def _placed_knots(
     Placing them is the fit's first step, so a placement the library refuses,
     such as a knot against a shaped range's edge, is refused here.
     """
+    built = _placed_spline(model, name, replacement, X, sample_weight, raw=raw)
+    return np.asarray(built.fitted_base_knots, dtype=np.float64), _strategy(built)
+
+
+def placed_geometry(model, name: str, spline: _SplineBase, X, sample_weight):
+    """The base knots and boundary the refit gives numeric ``spline`` on its data."""
+    built = _placed_spline(model, name, spline, X, sample_weight, raw=False)
+    return np.asarray(built.fitted_base_knots, dtype=np.float64), built.fitted_boundary
+
+
+def _placed_spline(model, name: str, replacement, X, sample_weight, *, raw: bool):
+    """A copy of ``replacement``'s spline with its knots placed on the refit's data."""
     probe = copy.deepcopy(replacement)
     column = as_eager_frame(X).column_array(name)
     reporting = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
@@ -509,7 +521,7 @@ def _placed_knots(
         if raw:
             raise
         raise EditorValueError(_SHAPED_EDGE) from exc
-    return np.asarray(built.fitted_base_knots, dtype=np.float64), _strategy(built)
+    return built
 
 
 def probe_build(model, name: str, replacement, X, sample_weight) -> None:

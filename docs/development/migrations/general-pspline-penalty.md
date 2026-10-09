@@ -1,6 +1,6 @@
 # Migration: P-splines on uneven knots take the general difference penalty
 
-*Ships in 0.39.*
+*Ships in 0.40.*
 
 ## What changed
 
@@ -42,16 +42,16 @@ whatever its knots.
 
 ## What to do
 
-- **Saved models**: a model fitted and saved under 0.38 predicts the same under 0.39, and its
+- **Saved models**: a model fitted and saved under 0.39 predicts the same under 0.40, and its
   summary is unchanged. Only a refit uses the new penalty.
 
 - **Uniform knots**: nothing.
-- **Stated or quantile-placed knots**: refit under 0.39 and compare the
-  validation deviance and the curve with the 0.38 fit on the same data. A change
+- **Stated or quantile-placed knots**: refit under 0.40 and compare the
+  validation deviance and the curve with the 0.39 fit on the same data. A change
   in the curve is expected. Re-check any threshold tuned on the old fit.
-- **Editor knot changes**: an editor session can record its knots in a structure
-  file. Upgrade to 0.39 before you apply such a file: a 0.38 or older superglm
-  refuses a structure file that has a `knots` entry.
+- **Editor knot and kind changes**: an editor session can record a spline's knots and
+  its kind in a structure file. Upgrade to 0.40 before you apply such a file: a 0.39
+  or older superglm refuses a structure file that has a `knots` or `basis` entry.
 
 ## Verification trail
 

@@ -710,13 +710,12 @@ estimated is not carried over, so fit the copy with `fit_reml` to estimate it ag
 - A P-spline or natural spline with a shaped range is rebuilt as a B-spline, as in the editor.
 - A spline whose file has a `knots` entry is rebuilt with those knots. A file without one keeps the
   declared knots.
-- A file with a `knots` entry needs superglm 0.39 or later. Older releases refuse it.
+- A file with a `knots` entry needs superglm 0.40 or later. Older releases refuse it.
 - A spline whose file has a `basis` entry is rebuilt as that kind, with or without shrinkage,
   before its knots and ranges. It keeps its other declared settings.
 - A `basis` the declared spline cannot take, such as a natural spline on a term with a shape
   constraint, is refused, naming the feature.
-- A file with a `basis` entry needs a superglm release later than 0.39. Release 0.39 and older
-  refuse it.
+- A file with a `basis` entry needs superglm 0.40 or later. Older releases refuse it.
 - A feature the model does not have is refused, by name.
 - A feature that is another kind of term in the model is refused, by name.
 - A level the file makes special is taken off the model's curve.
