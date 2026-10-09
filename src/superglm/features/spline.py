@@ -61,6 +61,10 @@ _ONE_VALUE = (
 )
 
 
+class OneValueError(ValueError):
+    """A natural spline's column holds one value, so its knots have no range."""
+
+
 class _SplineBase:
     """Base class for all spline feature specs.
 
@@ -362,7 +366,7 @@ class _SplineBase:
     def _natural_constraint_rows(self) -> NDArray:
         """The 2 x K natural boundary rows f''(lo) = f''(hi) = 0."""
         if not self._hi > self._lo:
-            raise ValueError(_ONE_VALUE.format(value=f"{self._lo:g}"))
+            raise OneValueError(_ONE_VALUE.format(value=f"{self._lo:g}"))
         return _spline_constraints.build_natural_constraint_rows(
             self._knots,
             self.degree,
