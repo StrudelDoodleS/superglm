@@ -1197,18 +1197,18 @@ def test_a_logit_row_past_the_binomial_clip_is_still_canonical():
     assert rows is fisher
 
 
-def test_a_probit_row_in_the_far_upper_tail_leaves_the_comparison_measured():
-    """Past eta = 8.25, Phi(eta) rounds to 1: V(mean) is 0 and V'/V infinite.
+def test_a_probit_row_past_the_binomial_clip_takes_fishers_curvature():
+    """Past the clip the fit's weight is formed at the clipped mean, 1 - 1e-7.
 
-    The comparison then went unmeasured for every level. A row whose alpha the
-    rounding of 1 - Phi(eta) leaves unresolved, from eta about 7.5 for y = 0,
-    keeps Fisher's curvature; rows nearer in keep their observed curvature,
-    checked against the complement Phi's own tail gives. At eta = 7.3 the row
-    carries about 1e-5 of the largest row's curvature, so dropping it to its
-    Fisher weight, as an earlier cut did, was not under rounding.
+    Alpha formed at the link's own mean multiplied it, a curvature neither the
+    likelihood's nor the solver's, and past eta = 8.25, where Phi(eta) rounds to
+    1, the comparison went unmeasured for every level. Such a row now keeps
+    Fisher's curvature, as the fit's covariance does. A row inside the clip, at
+    eta = 4 with y = 0, keeps its observed curvature, checked against the
+    complement Phi's own tail gives.
     """
     link, family = ProbitLink(), Binomial()
-    eta = np.array([0.3, 6.0, 7.3, 7.8, 10.0])
+    eta = np.array([0.3, 4.0, 6.0, 7.3, 10.0])
     y = np.array([1.0, 0.0, 0.0, 0.0, 0.0])
     fisher = fisher_working_weights(
         distribution=family,
@@ -1220,16 +1220,14 @@ def test_a_probit_row_in_the_far_upper_tail_leaves_the_comparison_measured():
     rows = free_levels_module._observed_rows(family, link, y, eta, fisher)
     assert rows is not None
     alpha = rows / fisher
-    np.testing.assert_array_equal(alpha[3:], [1.0, 1.0])
+    np.testing.assert_array_equal(alpha[2:], [1.0, 1.0, 1.0])
+    mean, tail = norm.cdf(4.0), norm.sf(4.0)
+    exact = 1.0 - mean * ((1.0 - 2.0 * mean) / (mean * tail) + 4.0 / norm.pdf(4.0))
+    # 1 - Phi(4) is formed by cancellation, to a relative u / sf, and the
+    # bracket's two terms agree to 1/eta^2, which magnifies it eta^2-fold.
     u = np.finfo(np.float64).eps / 2
-    for i in (1, 2):
-        mean, tail = norm.cdf(eta[i]), norm.sf(eta[i])
-        bracket = (1.0 - 2.0 * mean) / (mean * tail) + eta[i] / norm.pdf(eta[i])
-        exact = 1.0 - mean * bracket
-        # 1 - Phi(eta) is formed by cancellation, to a relative u / sf, and the
-        # bracket's two terms agree to 1/eta^2, which magnifies it eta^2-fold.
-        assert alpha[i] > 0.0
-        assert abs(alpha[i] - exact) <= 4 * eta[i] ** 2 * u / tail * abs(exact)
+    assert alpha[1] > 1.0
+    assert abs(alpha[1] - exact) <= 4 * 16 * u / tail * abs(exact)
 
 
 @pytest.mark.parametrize("family", ["gamma", "poisson"])

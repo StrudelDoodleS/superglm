@@ -480,15 +480,14 @@ def _observed_rows(distribution, link, y, eta, fisher) -> np.ndarray | None:
     ``alpha = 1 + (y - mu)(V'/V + g''/g')`` (Wood, JRSSB 73(1), 2011, section
     3), whatever rows the fit iterated on: the optimum is the same. With ``h``
     the inverse link, ``g''/g' = -h''/h'^2``. A row keeps Fisher's curvature,
-    ``alpha = 1``, where its bracket is not resolved: where the rounding of its
-    two terms, and of the mean through ``V'/V``, reaches a quarter of the
-    bracket. The mean carries a relative ``u``, which moves ``V'/V`` by about
-    ``u |mean| (V'/V)^2`` to first order; in a binomial's tail that is the
-    cancellation in ``1 - mean``, which leaves probit's alpha unresolved past
-    ``1 - Phi(eta) = 4 u eta^2`` (eta about 7.5) and ``V(mean)`` zero past 8.25.
-    A canonical link's bracket vanishes, so none of its rows is resolved and
-    Fisher's rows are the observed ones. None when the family or link does not
-    give the derivatives.
+    ``alpha = 1``, where the family's clip moved its mean, as the fit's own
+    covariance takes it, since ``W`` there is formed at the clipped mean; and
+    where its bracket is not resolved, where the rounding of its two terms and
+    of the mean through ``V'/V`` reaches a quarter of the bracket. The mean
+    carries a relative ``u``, which moves ``V'/V`` by about ``u |mean| (V'/V)^2``
+    to first order. A canonical link's bracket vanishes, so none of its rows is
+    resolved and Fisher's rows are the observed ones. None when the family or
+    link does not give the derivatives.
     """
     second = getattr(link, "deriv2_inverse", None)
     variance_slope = getattr(distribution, "variance_derivative", None)
@@ -496,8 +495,6 @@ def _observed_rows(distribution, link, y, eta, fisher) -> np.ndarray | None:
         return None
     u = np.finfo(np.float64).eps / 2
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        # Every factor of alpha at one point: the link's own mean, not the
-        # clipped one, which a binomial holds off 0 and 1 while eta runs on.
         mean = np.asarray(link.inverse(eta), dtype=np.float64)
         first = np.asarray(link.deriv_inverse(eta), dtype=np.float64)
         spreading = np.asarray(variance_slope(mean), dtype=np.float64) / np.asarray(
@@ -506,7 +503,8 @@ def _observed_rows(distribution, link, y, eta, fisher) -> np.ndarray | None:
         bending = np.asarray(second(eta), dtype=np.float64) / first**2
         bracket = spreading - bending
         noise = u * (np.abs(mean) * spreading**2 + 8 * (np.abs(spreading) + np.abs(bending)))
-        resolved = np.isfinite(bracket) & (4 * noise < np.abs(bracket))
+        unclipped = clip_mu(mean, distribution) == mean
+        resolved = unclipped & np.isfinite(bracket) & (4 * noise < np.abs(bracket))
     if not np.any(resolved):
         return fisher
     return fisher * (1.0 + (y - mean) * np.where(resolved, bracket, 0.0))
