@@ -88,15 +88,20 @@ _SEPARATED = (
     "No free value is drawn for {levels}: every response on {whose} rows is {value}, so "
     "{whose} free value has no finite estimate."
 )
-_OWN_INTERVAL = (
-    "Each interval is the free estimate's own, without the curve's pull toward the level: "
+_INDEPENDENT = (
+    "Each interval takes the curve and the free estimate as independent, without the curve's "
+    "pull toward the level: "
 )
-_NO_DESIGN = _OWN_INTERVAL + (
+_NO_DESIGN = _INDEPENDENT + (
     "the model keeps no fitted design to measure it. Refit it with retain_fit_state=True to "
     "include it."
 )
-_OTHER_ROWS = _OWN_INTERVAL + "the curve was fitted on other rows than the comparison reads."
-_UNMEASURED = _OWN_INTERVAL + "this fit cannot measure it."
+_OTHER_ROWS = _INDEPENDENT + "the curve was fitted on other rows than the comparison reads."
+_SIGNED = (
+    _INDEPENDENT
+    + "under this family and link, rows far from their fitted mean leave it unmeasured."
+)
+_UNMEASURED = _INDEPENDENT + "this fit cannot measure it."
 _NO_DATA = (
     "Comparing with free levels refits the model, which needs its training data: open the "
     "editor with train_data, or from a model fitted with its data kept."
@@ -233,14 +238,18 @@ def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[
     share = np.array([prior.get(label, 0.0) for label in labels], dtype=np.float64)
     share = share / share.sum() if share.sum() > 0.0 else share
     free_rows = _categorical_contrasts(free_model, name, labels, share)
-    free_var = _free_variances(free_model, name, free_rows)
-    gap_var, note = _gap_variances(
-        free_model,
-        free_rows,
-        model,
-        _ordered_contrasts(model, name, [declared[x] for x in labels], share),
-        name,
-    )
+    curve_rows = _ordered_contrasts(model, name, [declared[x] for x in labels], share)
+    free_var = _contrast_variances(free_model, name, free_rows)
+    gap_var, note = _gap_variances(free_model, free_rows, model, curve_rows, name)
+    if gap_var is None:
+        # Unmeasured, the two fits are taken as independent: exact for fits on
+        # disjoint rows, and a bound for fits on shared rows, which correlate
+        # positively.
+        gap_var = free_var + (
+            np.zeros(len(labels))
+            if curve_rows is None
+            else _contrast_variances(model, name, curve_rows)
+        )
     free_values, curve_values = (_values(fitted, name, labels) for fitted in (free_model, model))
     return _Gaps(
         labels=labels,
@@ -248,7 +257,7 @@ def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[
         free=free_values - share @ free_values,
         curve=curve_values - share @ curve_values,
         free_var=free_var,
-        gap_var=free_var if gap_var is None else gap_var,
+        gap_var=gap_var,
         undetermined=undetermined,
         note=note,
     )
@@ -354,8 +363,8 @@ def _ordered_contrasts(model, name: str, levels: list, share: np.ndarray) -> np.
     return rows - share @ rows
 
 
-def _free_variances(model, name: str, rows: np.ndarray) -> np.ndarray:
-    """Each free contrast's variance from the free fit's covariance; zero when selection removed it."""
+def _contrast_variances(model, name: str, rows: np.ndarray) -> np.ndarray:
+    """Each contrast's variance from the fit's covariance; zero when selection removed the term."""
     found = _term_covariance(model, name)
     if found is None:
         return np.zeros(len(rows))
@@ -415,6 +424,49 @@ def _gap_variances(
     return variances, None
 
 
+def _observed_curvature(model, mu, eta, prior, fisher) -> np.ndarray | None:
+    """Each row's curvature of the fit's own objective at its optimum; ``fisher`` itself if equal.
+
+    The observed rows are ``alpha W`` with ``alpha = 1 + (y - mu)(V'/V + g''/g')``
+    (Wood, JRSSB 73(1), 2011, section 3), whatever rows the fit iterated on:
+    the optimum is the same. With ``h`` the inverse link, ``g''/g' = -h''/h'^2``.
+    The bracket vanishes under a canonical link, where Fisher's rows are the
+    observed ones; it is taken as vanishing when every row's value is within
+    the rounding of its two terms. Gamma and Tweedie with a log link take the
+    library's own observed kernels. None when the family or link does not
+    give the derivatives.
+    """
+    distribution, link = model._distribution, model._link
+    y = np.asarray(model._fit_y_ref, dtype=np.float64).ravel()
+    if supports_observed_newton(distribution, link):
+        return coefficient_working_rows(
+            distribution=distribution,
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=prior,
+            prefer_observed=True,
+        ).weights
+    second = getattr(link, "deriv2_inverse", None)
+    variance_slope = getattr(distribution, "variance_derivative", None)
+    if second is None or variance_slope is None:
+        return None
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        first = np.asarray(link.deriv_inverse(eta), dtype=np.float64)
+        spreading = np.asarray(variance_slope(mu), dtype=np.float64) / np.asarray(
+            distribution.variance(mu), dtype=np.float64
+        )
+        bending = np.asarray(second(eta), dtype=np.float64) / first**2
+        bracket = spreading - bending
+    if not np.all(np.isfinite(bracket)):
+        return None
+    u = np.finfo(np.float64).eps / 2
+    if np.all(np.abs(bracket) <= 8 * u * (np.abs(spreading) + np.abs(bending))):
+        return fisher
+    return fisher * (1.0 + (y - mu) * bracket)
+
+
 @dataclass(frozen=True)
 class _Influence:
     """A fit's first-order response to its data, for contrasts over one term's columns."""
@@ -430,16 +482,15 @@ def _influence(model, name: str) -> _Influence | str:
 
     At the fitted optimum a contrast moves with the response as
     ``(w / (V g')) X_c F c`` (the implicit function theorem), with ``F`` the
-    inverse of the penalised curvature of the fit's objective and the
-    intercept profiled out, so the design is centred on the curvature
-    weights' mean. Gamma and Tweedie with a log link declare their observed
-    curvature (:func:`supports_observed_newton`), which is used here; every
-    other pair takes the expected curvature, which a canonical link's
-    observed one equals and which stands in for it otherwise, as in every
-    interval the library draws. Comes with the Fisher weights, which carry
-    each row's variance, and ``V g'``. The sentence instead when the fit
-    kept no design, or its design and curvature do not share coordinates.
-    The fit has a positive dispersion.
+    inverse of the penalised curvature of the fit's own objective, its
+    observed curvature (:func:`_observed_curvature`), and the intercept
+    profiled out, so the design is centred on the curvature weights' mean.
+    Under a canonical link that is the expected curvature, and the fit's
+    own covariance serves. Comes with the Fisher weights, which carry each
+    row's variance, and ``V g'``. The sentence instead when the fit kept no
+    design, its curvature cannot be formed or factored or is negative on some
+    row (a Gaussian/log fit far below a row, say), or its design and curvature
+    do not share coordinates. The fit has a positive dispersion.
     """
     if getattr(model, "_dm", None) is None:
         return _NO_DESIGN
@@ -456,19 +507,21 @@ def _influence(model, name: str) -> _Influence | str:
         distribution=distribution, link=link, mu=mu, eta=eta, sample_weight=prior
     )
     spread = np.asarray(distribution.variance(mu) * link.deriv(mu), dtype=np.float64)
-    if supports_observed_newton(distribution, link):
-        curvature = coefficient_working_rows(
-            distribution=distribution,
-            link=link,
-            y=np.asarray(model._fit_y_ref, dtype=np.float64).ravel(),
-            mu=mu,
-            eta=eta,
-            sample_weight=prior,
-            prefer_observed=True,
-        ).weights
-        X, active, _inverse, _augmented, _gram, inverse, _rank = _legacy_active_state(
-            model, solver, curvature
-        )
+    observed = _observed_curvature(model, mu, eta, prior, fisher)
+    if observed is None:
+        return _UNMEASURED
+    if observed is not fisher:
+        if np.any(observed < 0.0):
+            return _SIGNED
+        curvature = observed
+        try:
+            X, active, _inverse, _augmented, _gram, inverse, _rank = _legacy_active_state(
+                model, solver, curvature
+            )
+        except (ValueError, ArithmeticError, np.linalg.LinAlgError):
+            return _UNMEASURED
+        if not np.all(np.isfinite(inverse)):
+            return _UNMEASURED
 
         def apply(contrast: np.ndarray) -> np.ndarray:
             return inverse @ contrast

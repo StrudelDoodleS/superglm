@@ -233,8 +233,8 @@ interval.
 - A level whose interval misses the curve is filled in orange: the curve holds it away from what
   its own data says.
 - The intervals allow for the curve's own pull toward each level. A model fitted with
-  `retain_fit_state=False` keeps nothing to measure that pull, so each interval is the free
-  estimate's own, and a note says so.
+  `retain_fit_state=False` keeps nothing to measure that pull, so each interval takes the curve
+  and the free estimate as independent, which makes it wider, and a note says so.
 - The intervals are widened for the number of levels compared, so a filled diamond is rarely
   chance.
 - Each level is judged on its own. Making one level special moves the curve, and with it the other
@@ -246,8 +246,10 @@ interval.
   - a level whose every response is 0, such as a band with exposure but no claims;
   - a level whose rows another term covers exactly, such as a categorical with one level for just
     those rows.
-- If the session's training data holds the model's rows in another order, or other rows, each
-  interval is the free estimate's own, and a note says so.
+- The intervals also take the two fits as independent, and a note says why, when the session's
+  training data holds the model's rows in another order or other rows, or when the family and
+  link leave the pull unmeasured where rows sit far from their fitted mean (a Gaussian response
+  with a log link, say).
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the

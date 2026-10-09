@@ -20,6 +20,7 @@ from superglm import (
     SuperGLM,
     collapse_levels,
 )
+from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.editor import EditorSession
 from superglm.editor import free_levels as free_levels_module
 from superglm.editor.errors import EditorTypeError, EditorValueError
@@ -541,16 +542,17 @@ def test_both_fits_are_centred_on_one_exposure_weighted_mean(monkeypatch):
     gaps = np.array([np.log(free["y"][k]) - curve[level] for k, level in enumerate(BANDS)])
     # Each gap is (f_k - share.f) - (c_k - share.c), carried through exp and log
     # on the chart's scale. Each weighted mean errs by at most gamma_L of its
-    # largest value and is shared by every gap, whose shares sum to one; each
-    # gap takes six more roundings, and each product of the sum one more.
+    # largest value and is shared by every gap; the computed shares sum to one
+    # within (L + 1) u, which leaves (1 - sum share)(share.f - share.c) over;
+    # each gap takes six more roundings, and each product of the sum one more.
     L = len(gaps)
+    native = free_levels_module._values(session.model, "band", BANDS)
     scale = max(
         np.max(np.abs(np.log(free["y"]))),
         np.max(np.abs(term.original_log_effect)),
-        np.max(np.abs(found[-1].free)),
-        np.max(np.abs(found[-1].curve)),
+        np.max(np.abs(found[-1].free)) + np.max(np.abs(found[-1].curve)) + np.max(np.abs(native)),
     )
-    assert abs(math.fsum(share * gaps)) <= (2 * L + 8) * u * scale
+    assert abs(math.fsum(share * gaps)) <= (4 * L + 10) * u * scale
 
 
 def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed(monkeypatch):
@@ -592,18 +594,36 @@ def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed(monkeypatch):
     np.testing.assert_array_equal(ends[1] - ends[0], widths[2.0, True][0])
 
 
-@pytest.mark.parametrize("family", ["poisson", "gamma"])
+# Each family with a log link, and a response with mean mu under prior weight w.
+_LOG_FAMILIES = {
+    "poisson": (lambda: "poisson", lambda rng, w, mu: rng.poisson(w * mu) / w),
+    "gamma": (lambda: "gamma", lambda rng, w, mu: mu * rng.gamma(2.0, 0.5, mu.size)),
+    "tweedie": (
+        lambda: Tweedie(p=1.5),
+        lambda rng, w, mu: rng.poisson(mu) * rng.gamma(2.0, 0.5, mu.size),
+    ),
+    "negative binomial": (
+        lambda: NegativeBinomial(theta=5.0),
+        lambda rng, w, mu: rng.negative_binomial(5.0, 5.0 / (5.0 + w * mu)) / w,
+    ),
+}
+
+
+@pytest.mark.parametrize("family", list(_LOG_FAMILIES))
 def test_the_gap_variance_is_both_fits_linearised_on_the_same_rows(monkeypatch, family):
     """Bands whose means the curve cannot follow, beside a second term, under unequal weights.
 
     The free estimate's variance less the curve's is the gap's only for a
     curve fitted with the free fit's weights: on Poisson bands it put one
-    gap's variance at half its value, and flagged the band. A Gamma/log fit
-    moves with its observed curvature, not the expected one, which misplaced
-    a gap's variance by 12%. Both are checked against central differences of
-    complete refits in every band-by-area cell's weighted response total.
+    gap's variance at half its value, and flagged the band. A fit under a
+    non-canonical link moves with its observed curvature, not the expected
+    one, which misplaced a Gamma/log gap's variance by 12%; these families'
+    observed rows are positive wherever the response is. Each is checked
+    against central differences of complete refits in every band-by-area
+    cell's weighted response total, which is all the fits read of a cell.
     """
     found = _captured_gaps(monkeypatch)
+    declared, sampled = _LOG_FAMILIES[family]
     rng = np.random.default_rng(20261009)
     bands = TWELVE[:8]
     band = np.repeat(np.arange(8), 50)
@@ -611,13 +631,13 @@ def test_the_gap_variance_is_both_fits_linearised_on_the_same_rows(monkeypatch, 
     cell = 2 * band + area
     w = rng.uniform(0.5, 1.5, band.size)
     mu = np.exp(np.array([0.0, 1.2, 3.0, 0.5, -0.5, -0.7, 0.8, 1.1])[band] + 0.3 * area)
-    y = rng.poisson(w * mu) / w if family == "poisson" else mu * rng.gamma(2.0, 0.5, band.size)
+    y = sampled(rng, w, mu)
     X = pd.DataFrame({"band": np.array(bands)[band], "area": np.where(area, "B", "A")})
 
     def compared(y):
         curve = OrderedCategorical(order=bands, basis=Spline(kind="ps", n_knots=4))
         model = SuperGLM(
-            family=family,
+            family=declared(),
             link="log",
             features={"band": curve, "area": Categorical()},
             spline_penalty=5.0,
@@ -640,7 +660,7 @@ def test_the_gap_variance_is_both_fits_linearised_on_the_same_rows(monkeypatch, 
     # A cell's weighted total varies as phi V(mu) times the cell's weight, under
     # the free fit, here refitted on its own.
     free = SuperGLM(
-        family=family,
+        family=declared(),
         link="log",
         features={"band": Categorical(), "area": Categorical()},
         tol=1e-11,
@@ -905,8 +925,16 @@ def test_free_levels_refuse_a_free_fit_that_fails_and_a_single_level_in_sentence
     )
 
 
-def test_free_levels_on_other_rows_than_the_curve_say_so_and_draw_the_free_intervals():
-    """The same rows in another order: subtracted row by row, the influences mismatched."""
+def test_free_levels_on_other_rows_than_the_curve_say_so_and_take_the_fits_as_independent(
+    monkeypatch,
+):
+    """The same rows in another order: subtracted row by row, the influences mismatched.
+
+    The fingerprints cannot tell a reordering from other rows, so both are
+    judged as independent fits, each interval the sum of both variances:
+    exact on disjoint rows, a bound on shared ones.
+    """
+    found = _captured_gaps(monkeypatch)
     X, y, _k = _gaussian(43, effect=lambda k: 0.5 * (k == 5))
     model = SuperGLM(
         family="gaussian",
@@ -918,9 +946,52 @@ def test_free_levels_on_other_rows_than_the_curve_say_so_and_draw_the_free_inter
     free = free_level_comparison(EditorSession.from_model(model, train_data=shuffled), "band")
     assert free["levels"] == TWELVE
     assert free["notice"] == (
-        "Each interval is the free estimate's own, without the curve's pull toward the level: "
+        "Each interval takes the curve and the free estimate as independent, without the curve's "
+        "pull toward the level: "
         "the curve was fitted on other rows than the comparison reads."
     )
+    assert np.all(found[-1].gap_var > found[-1].free_var)
+
+
+def test_free_levels_say_when_the_fits_cannot_be_matched_or_their_curvature_is_signed(
+    monkeypatch,
+):
+    """A fit with no fingerprint, and a Gaussian/log curve far below some rows.
+
+    Gaussian/log rows above twice their fitted mean have negative observed
+    curvature, which the comparison does not factor; both fall back to the
+    two fits taken as independent, and say so.
+    """
+    found = _captured_gaps(monkeypatch)
+    X, y, k = _gaussian(7)
+    model = SuperGLM(
+        family="gaussian",
+        features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+    ).fit(X, y)
+    model._fit_geometry_guard = None
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["notice"] == (
+        "Each interval takes the curve and the free estimate as independent, without the curve's "
+        "pull toward the level: "
+        "this fit cannot measure it."
+    )
+    mu = np.exp(0.1 * k)
+    y = mu * (1.0 + 0.6 * np.random.default_rng(1).normal(size=mu.size))
+    assert np.any(y > 2.0 * mu)
+    model = SuperGLM(
+        family="gaussian",
+        link="log",
+        features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+    ).fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["notice"] == (
+        "Each interval takes the curve and the free estimate as independent, without the curve's "
+        "pull toward the level: "
+        "under this family and link, rows far from their fitted mean leave it unmeasured."
+    )
+    assert np.all(found[-1].gap_var > found[-1].free_var)
 
 
 def test_free_levels_hold_their_intervals_whatever_the_weights_size():
@@ -1022,7 +1093,8 @@ def test_free_levels_without_a_fitted_design_say_their_intervals_are_the_free_es
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["levels"] == TWELVE
     assert free["notice"] == (
-        "Each interval is the free estimate's own, without the curve's pull toward the level: "
+        "Each interval takes the curve and the free estimate as independent, without the curve's "
+        "pull toward the level: "
         "the model keeps no fitted design to measure it. Refit it with retain_fit_state=True to "
         "include it."
     )
