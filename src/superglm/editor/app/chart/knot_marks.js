@@ -258,7 +258,8 @@ export function knotLayout(frame, ui) {
       removing
     };
   });
-  const tagged = handles.find((handle) => handle.selected);
+  // A knot on its way out has no position worth a tag.
+  const tagged = handles.find((handle) => handle.selected && !handle.removing);
   const full = frame.axis.maxCount !== null && frame.positions.length >= frame.axis.maxCount;
   const adding = drag || full || ui.hover === null ? null : knotPx(frame, ui.hover);
   return {

@@ -267,6 +267,7 @@ test("in Knots mode the selected or dragged knot is tagged, and a drop below the
   const zone = removing.removeZone;
   assert.equal(removing.handles[1].cy, zone.top + zone.height / 2);
   assert.equal(removing.handles[1].removing, true);
+  assert.equal(removing.tag, null);
   assert.equal(removing.guides.length, 3);
   // The knot drops into the zone's left half, so its label moves to the right half.
   assert.equal(removing.removeZone.labelX, (PLOT.left + 3 * PLOT.right) / 4);
