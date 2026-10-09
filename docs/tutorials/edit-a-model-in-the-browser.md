@@ -387,7 +387,7 @@ The knots of a spline are the points where its pieces join. The **Knots** tool m
 them and removes them. It works on a numeric spline term, and on an ordered term with a spline
 basis.
 
-Choose **Knots** in the chart's tool rail, or press K. The knots show as diamonds on the x-axis.
+Choose **Knots** in the mode switch at the left of the chart's toolbar, or press K. The knots show as diamonds on the x-axis.
 
 - **Move:** drag a knot along the axis. Knots may pass each other.
 - **Add:** click the axis.
@@ -584,17 +584,21 @@ holds:
 - the knots chosen with the **Knots** tool, where there are any.
 
 Knots are recorded only where the editor chose them. Knots declared in code are not recorded. A
-spline with editor knots has a `knots` entry:
+spline with editor knots has a `knots` entry. Knots moved by hand are recorded with
+`"strategy": "explicit"` and their positions; knots placed by a rule are recorded with the rule and
+their count, and applying the file places them by that rule on the data. On an ordered term the
+positions are on the axis its spline is fitted over.
 
 ```json
 "DrivAge": {
   "kind": "spline",
   "knots": {
-    "knot_alpha": 0.5,
+    "knot_alpha": 0.2,
     "n_knots": 6,
-    "positions": [18.0, 24.5, 31.0, 40.0, 52.5, 68.0],
-    "strategy": "quantile_tempered"
-  }
+    "positions": [21.0, 26.5, 33.0, 41.0, 52.5, 68.0],
+    "strategy": "explicit"
+  },
+  "ranges": []
 }
 ```
 

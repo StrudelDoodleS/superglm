@@ -42,6 +42,9 @@ whatever its knots.
 
 ## What to do
 
+- **Saved models**: a model fitted and saved under 0.38 predicts the same under 0.39, and its
+  summary is unchanged. Only a refit uses the new penalty.
+
 - **Uniform knots**: nothing.
 - **Stated or quantile-placed knots**: refit under 0.39 and compare the
   validation deviance and the curve with the 0.38 fit on the same data. A change
