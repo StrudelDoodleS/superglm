@@ -24,7 +24,7 @@ from superglm import (
     SuperGLM,
     collapse_levels,
 )
-from superglm.distributions import Binomial, NegativeBinomial, Tweedie
+from superglm.distributions import Binomial, NegativeBinomial, Tweedie, clip_mu
 from superglm.editor import EditorSession
 from superglm.editor import free_levels as free_levels_module
 from superglm.editor.errors import EditorTypeError, EditorValueError
@@ -36,7 +36,7 @@ from superglm.features.rebuild import (
     full_level_order,
     rebuilt_ordered_spec,
 )
-from superglm.links import LogitLink
+from superglm.links import LogitLink, ProbitLink
 from superglm.solvers.working_rows import coefficient_working_rows, fisher_working_weights
 from tests.test_editor import _post_json
 
@@ -1195,6 +1195,37 @@ def test_a_logit_row_past_the_binomial_clip_is_still_canonical():
         Binomial(), LogitLink(), np.array([1.0, 0.0, 0.0]), eta, fisher
     )
     assert rows is fisher
+
+
+def test_a_probit_row_in_the_far_upper_tail_leaves_the_comparison_measured():
+    """Past eta = 8.25, Phi(eta) rounds to 1: V(mean) is 0 and V'/V infinite.
+
+    The comparison then went unmeasured for every level. Such a row's Fisher
+    weight, formed at the binomial's clipped mean as the fit forms it, is
+    below u times the largest, under the rounding of every sum it enters, so
+    its alpha is 1. A row nearer in, at eta = 6 with y = 0, keeps its observed
+    curvature, checked against the complement Phi's own tail gives.
+    """
+    link, family = ProbitLink(), Binomial()
+    eta = np.array([0.3, 6.0, 10.0])
+    y = np.array([1.0, 0.0, 0.0])
+    fisher = fisher_working_weights(
+        distribution=family,
+        link=link,
+        mu=clip_mu(link.inverse(eta), family),
+        eta=eta,
+        sample_weight=np.ones(3),
+    )
+    rows = free_levels_module._observed_rows(family, link, y, eta, fisher)
+    assert rows is not None
+    alpha = rows / fisher
+    assert alpha[2] == 1.0
+    mean, tail = norm.cdf(6.0), norm.sf(6.0)
+    exact = 1.0 + (0.0 - mean) * ((1.0 - 2.0 * mean) / (mean * tail) + 6.0 / norm.pdf(6.0))
+    # 1 - Phi(6) is formed by cancellation, to a relative u / sf(6) = 1.1e-7; the
+    # bracket's two terms agree to 1/eta^2, which magnifies that 36-fold.
+    assert alpha[1] > 0.0
+    assert abs(alpha[1] - exact) <= 64 * (np.finfo(np.float64).eps / 2) / tail * abs(exact)
 
 
 @pytest.mark.parametrize("family", ["gamma", "poisson"])

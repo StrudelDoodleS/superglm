@@ -482,12 +482,19 @@ def _observed_rows(distribution, link, y, eta, fisher) -> np.ndarray | None:
     the inverse link, ``g''/g' = -h''/h'^2``. The bracket vanishes under a
     canonical link, where Fisher's rows are the observed ones; it is taken as
     vanishing when every row's value is within the rounding of its two terms.
-    None when the family or link does not give the derivatives.
+    A row whose Fisher weight is below ``u`` times the largest adds less than
+    the rounding of every sum it enters, so its alpha is taken as 1: its
+    bracket can be lost to cancellation or infinite, as in probit's upper
+    tail, where ``1 - Phi(eta)`` rounds to zero. None when the family or link
+    does not give the derivatives.
     """
     second = getattr(link, "deriv2_inverse", None)
     variance_slope = getattr(distribution, "variance_derivative", None)
     if second is None or variance_slope is None:
         return None
+    u = np.finfo(np.float64).eps / 2
+    fisher = np.asarray(fisher, dtype=np.float64)
+    live = fisher > u * np.max(fisher, initial=0.0)
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         # Every factor of alpha at one point: the link's own mean, not the
         # clipped one, which a binomial holds off 0 and 1 while eta runs on.
@@ -497,10 +504,10 @@ def _observed_rows(distribution, link, y, eta, fisher) -> np.ndarray | None:
             distribution.variance(mean), dtype=np.float64
         )
         bending = np.asarray(second(eta), dtype=np.float64) / first**2
-        bracket = spreading - bending
+        bracket = np.where(live, spreading - bending, 0.0)
+        spreading, bending = np.where(live, spreading, 0.0), np.where(live, bending, 0.0)
     if not np.all(np.isfinite(bracket)):
         return None
-    u = np.finfo(np.float64).eps / 2
     if np.all(np.abs(bracket) <= 8 * u * (np.abs(spreading) + np.abs(bending))):
         return fisher
     return fisher * (1.0 + (y - mean) * bracket)
