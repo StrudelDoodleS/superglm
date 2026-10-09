@@ -765,6 +765,9 @@ def _comparison(
                 # A level with almost no weight has an interval past what
                 # float64 holds; its ends stay finite, as the chart's own do.
                 "y": float(_safe_exp(on_curve + gap)),
+                # The fit the flags are judged against: hand edits move the
+                # drawn line, not this.
+                "curve": float(_safe_exp(on_curve)),
                 "lower": float(_safe_exp(on_curve + gap - half)),
                 "upper": float(_safe_exp(on_curve + gap + half)),
                 "flagged": bool(judge and judged and abs(gap) > half),
@@ -774,6 +777,7 @@ def _comparison(
         "term": term.name,
         "levels": [row["level"] for row in rows],
         "y": [row["y"] for row in rows],
+        "curve": [row["curve"] for row in rows],
         "lower": [row["lower"] for row in rows],
         "upper": [row["upper"] for row in rows],
         "flagged": [row["level"] for row in rows if row["flagged"]],

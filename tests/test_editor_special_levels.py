@@ -544,6 +544,8 @@ def test_both_fits_are_centred_on_one_exposure_weighted_mean(monkeypatch):
     np.testing.assert_allclose(share, exposure / math.fsum(exposure), rtol=(len(X) + 16) * u)
     term = session.terms["band"]
     curve = {level: term.original_log_effect[i] for i, level in enumerate(term.levels)}
+    # The tick on each whisker is the fitted curve the flags are judged against.
+    assert free["curve"] == [float(np.exp(curve[level])) for level in BANDS]
     gaps = np.array([np.log(free["y"][k]) - curve[level] for k, level in enumerate(BANDS)])
     # Each gap is (f_k - share.f) - (c_k - share.c), carried through exp and log
     # on the chart's scale. Each weighted mean errs by at most gamma_L of its
@@ -904,6 +906,23 @@ def test_a_level_whose_every_response_is_zero_is_left_out_and_named():
     assert free["levels"] == TWELVE[:11]
     assert free["notice"] == (
         "No free value is drawn for B11: every response on its rows is 0, so its free value "
+        "has no finite estimate."
+    )
+
+
+def test_a_level_whose_every_yes_no_response_is_one_is_named_at_that_bound():
+    """A logit fit's upper bound: a band where every response is 1."""
+    rng = np.random.default_rng(6)
+    k = np.repeat(np.arange(12), 50)
+    y = rng.binomial(1, 0.3 + 0.02 * k).astype(float)
+    y[k == 11] = 1.0
+    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
+    band = OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))
+    model = SuperGLM(family="binomial", features={"band": band}, spline_penalty=20.0).fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == TWELVE[:11]
+    assert free["notice"] == (
+        "No free value is drawn for B11: every response on its rows is 1, so its free value "
         "has no finite estimate."
     )
 

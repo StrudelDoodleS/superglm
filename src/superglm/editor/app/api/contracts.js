@@ -162,6 +162,8 @@
  * @property {string} term
  * @property {string[]} levels
  * @property {number[]} y
+ * @property {number[]} curve the fitted curve at each level, the one the flags are
+ *   judged against; with hand edits in force it is not the drawn line
  * @property {number[]} lower
  * @property {number[]} upper
  * @property {string[]} flagged

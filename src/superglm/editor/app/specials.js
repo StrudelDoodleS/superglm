@@ -78,6 +78,7 @@ export function waitingSpecials(term) {
  * @property {string} level
  * @property {number} x the displayed point's x
  * @property {number} y the free estimate, a relativity
+ * @property {number} curve the fitted curve the flag is judged against, a relativity
  * @property {number} lower
  * @property {number} upper
  * @property {boolean} flagged its interval misses the curve
@@ -114,6 +115,7 @@ export function freeLevelMarks(free, view) {
       level,
       x: view.x[index],
       y: free.y[k],
+      curve: free.curve[k],
       lower: free.lower[k],
       upper: free.upper[k],
       flagged: flagged.has(level)

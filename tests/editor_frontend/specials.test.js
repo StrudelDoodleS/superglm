@@ -66,12 +66,13 @@ test("waiting specials are the levels a waiting change takes off the curve or pu
 test("free-level marks sit at each compared level's point, a collapsed group's once", () => {
   const free = {
     term: "band", levels: ["A", "B", "C", "D"], y: [0.9, 1, 1.3, 1.1],
+    curve: [0.95, 1, 1.1, 1.1],
     lower: [0.8, 1, 1.2, 1], upper: [1, 1, 1.4, 1.2], flagged: ["C"],
     confidence: 0.95, z: 2.6, shrunk: false, fit_token: 4, notice: null
   };
   const expanded = freeLevelMarks(free, { x: [0, 1, 2, 3, 4, 5], levels: ["A", "B", "C", "D", "E", "Z"] });
-  assert.deepEqual(expanded.map((mark) => [mark.level, mark.x, mark.flagged]), [
-    ["A", 0, false], ["B", 1, false], ["C", 2, true], ["D", 3, false]
+  assert.deepEqual(expanded.map((mark) => [mark.level, mark.x, mark.flagged, mark.curve]), [
+    ["A", 0, false, 0.95], ["B", 1, false, 1], ["C", 2, true, 1.1], ["D", 3, false, 1.1]
   ]);
   // In the Collapsed display C and D are one group point, which takes one mark.
   const collapsed = freeLevelMarks(free, {

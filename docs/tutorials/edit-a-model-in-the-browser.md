@@ -231,7 +231,8 @@ and reference, and each level's free estimate is drawn behind the curve as a dia
 interval.
 
 - A level whose interval misses the curve is filled in orange: the curve holds it away from what
-  its own data says.
+  its own data says. A short tick on each whisker marks the fitted curve it is judged against,
+  which hand edits leave behind the drawn line.
 - The intervals allow for the curve's own pull toward each level. A model fitted with
   `retain_fit_state=False` keeps nothing to measure that pull, so each interval allows for any
   correlation between the curve and the free estimate, which makes it wider, and a note says so.
@@ -243,14 +244,16 @@ interval.
   on the curve. The diamonds are placed against the levels' exposure-weighted average, so such a
   level does not move or widen the others.
 - Some levels have no free value to draw, and get no diamond; a note names them:
-  - a level whose every response is 0, such as a band with exposure but no claims;
+  - a level whose every response is 0, such as a band with exposure but no claims, or, for a
+    yes/no response, every response 1;
   - a level whose rows another term covers exactly, such as a categorical with one level for just
     those rows.
 - The intervals also allow for any correlation between the two fits, and a note says why, when
   the session's training data holds the model's rows in another order or other rows, when the
   family and link leave the pull unmeasured where rows sit far from their fitted mean (a Gaussian
-  response with a log link, say), when the model has a shape-constrained P-spline, or when a
-  curve's binding constraints cross a level of almost no weight.
+  response with a log link, say), when the model has a shape-constrained P-spline, when a
+  curve's binding constraints cross a level of almost no weight, or when the fit cannot be
+  measured for another reason the note gives.
 - No level is judged, and a note says why, when either fit stops before it converges (raise the
   model's `max_iter`), or when a custom penalty removes the term from the free fit, which then
   draws its levels flat.

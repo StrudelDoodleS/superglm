@@ -1365,12 +1365,16 @@ function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
     const px = sx(mark.x);
     const flagged = mark.flagged ? " is-flagged" : "";
     line(layer, px, inside(mark.upper), px, inside(mark.lower), `free-whisker${flagged}`);
+    // The fitted curve the flag is judged against, which hand edits leave
+    // behind the drawn line.
+    line(layer, px - 5, inside(mark.curve), px + 5, inside(mark.curve), "free-curve-tick");
     const py = inside(mark.y);
     const node = el("path", { d: diamond(px, py, 4.5), class: `free-level${flagged}` });
     node.setAttribute("data-level", mark.level);
     const title = el("title", {});
     title.textContent = `${mark.level} fitted free: ${fmt(mark.y)} (${fmt(mark.lower)} to `
-      + `${fmt(mark.upper)})${mark.flagged ? "; the curve is outside this interval" : ""}`;
+      + `${fmt(mark.upper)}); the fitted curve: ${fmt(mark.curve)}`
+      + `${mark.flagged ? ", outside this interval" : ""}`;
     node.appendChild(title);
     layer.appendChild(node);
   }
