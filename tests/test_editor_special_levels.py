@@ -10,6 +10,7 @@ import urllib.error
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import norm
 
 from superglm import (
     Categorical,
@@ -1000,22 +1001,30 @@ def test_free_levels_say_when_the_fits_cannot_be_matched_or_their_curvature_is_s
     assert np.all(found[-1].gap_var > found[-1].free_var)
 
 
-@pytest.mark.parametrize("drop", [0.0, 4.0])
-def test_a_curve_held_by_its_binding_constraints_moves_only_along_their_face(monkeypatch, drop):
+@pytest.mark.parametrize(("family", "drop"), [("gaussian", 0.0), ("gaussian", 4.0), ("gamma", 0.8)])
+def test_a_curve_held_by_its_binding_constraints_moves_only_along_their_face(
+    monkeypatch, family, drop
+):
     """An increasing curve over falling bands: its constraints bind on all of it, or part.
 
     Held flat, the curve does not move with the response at all, yet its
     unconstrained influence was subtracted, which halved the end bands' gap
-    variance and flagged both. Within a face the constrained Gaussian fit is
-    linear in the response, so central differences of complete refits are
-    exact up to the fits' rounding, as long as the face holds.
+    variance and flagged both. The Gaussian fits take the fit's covariance;
+    the Gamma/log fit, binding on two of seven rows, the observed curvature.
+    Each is checked against central differences of complete refits in every
+    band's total, which is all the fits read of a band, while the face holds.
     """
     found = _captured_gaps(monkeypatch)
     bands = TWELVE[:8]
     k = np.repeat(np.arange(8), 30)
-    noise = np.random.default_rng(3).normal(0.0, 1.0, k.size)
-    noise -= np.bincount(k, noise)[k] / 30
-    y = 20.0 + (-0.1 * k if drop == 0.0 else 0.6 * k - drop * (k >= 4)) + noise
+    if family == "gaussian":
+        noise = np.random.default_rng(3).normal(0.0, 1.0, k.size)
+        noise -= np.bincount(k, noise)[k] / 30
+        y = 20.0 + (-0.1 * k if drop == 0.0 else 0.6 * k - drop * (k >= 4)) + noise
+    else:
+        jitter = np.random.default_rng(5).gamma(4.0, 0.25, k.size)
+        y = np.exp(1.0 + 0.15 * k - drop * (k >= 4)) * jitter / (np.bincount(k, jitter)[k] / 30)
+    link = "identity" if family == "gaussian" else "log"
     X = pd.DataFrame({"band": np.array(bands)[k]})
 
     def compared(y):
@@ -1024,7 +1033,7 @@ def test_a_curve_held_by_its_binding_constraints_moves_only_along_their_face(mon
             basis=Spline(kind="bs", n_knots=4, constraint=Constraint.fit.increasing),
         )
         model = SuperGLM(
-            family="gaussian", features={"band": band}, spline_penalty=1.0, tol=1e-12
+            family=family, link=link, features={"band": band}, spline_penalty=1.0, tol=1e-12
         ).fit(X, y)
         free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
         group = model._groups[0]
@@ -1033,20 +1042,29 @@ def test_a_curve_held_by_its_binding_constraints_moves_only_along_their_face(mon
         return free, found[-1], binding
 
     free, gaps, binding = compared(y)
-    assert binding.all() == (drop == 0.0) and binding.any()
+    assert binding.any() and binding.all() == (drop == 0.0)
     if drop == 0.0:
         # Flat on noise alone; over a drop the constraint does hold levels off their data.
         assert free["flagged"] == []
+    totals = np.bincount(k, y)
     h = 1e-3
     jacobian = np.empty((8, 8))
     for j in range(8):
-        step = np.where(k == j, h / 30, 0.0)
+        step = np.where(k == j, h * y / totals[j], 0.0)
         (_, up, up_binding), (_, down, down_binding) = compared(y + step), compared(y - step)
         assert np.array_equal(up_binding, binding) and np.array_equal(down_binding, binding)
         jacobian[:, j] = ((up.free - up.curve) - (down.free - down.curve)) / (2 * h)
-    # A band total varies as phi times its 30 rows, phi from the free fit's residuals.
-    phi = np.sum((y - np.bincount(k, y)[k] / 30) ** 2) / (y.size - 8)
-    np.testing.assert_allclose(gaps.gap_var, (jacobian**2) @ np.full(8, 30 * phi), rtol=1e-6)
+    # A band total varies as phi V(mu) times its 30 rows under the free fit,
+    # here refitted on its own.
+    free_fit = SuperGLM(family=family, link=link, features={"band": Categorical()}, tol=1e-12).fit(
+        X, y
+    )
+    mu = totals / 30
+    variance = free_fit.result.phi * 30 * free_fit._distribution.variance(mu)
+    # Measured at h = 1e-3, tol = 1e-12: Gaussian agrees to 1e-10, the fit
+    # being linear within its face; Gamma/log to 5e-7. 1e-5 sits above both
+    # and far below the defect, a factor of 2.
+    np.testing.assert_allclose(gaps.gap_var, (jacobian**2) @ variance, rtol=1e-5)
 
 
 def test_free_levels_judge_no_level_when_a_fit_stops_before_converging():
@@ -1067,6 +1085,8 @@ def test_free_levels_judge_no_level_when_a_fit_stops_before_converging():
     assert model.result.converged
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["flagged"] == []
+    # The intervals keep the Sidak cut for the twelve levels that would be judged.
+    assert free["z"] == pytest.approx(norm.ppf(0.5 + 0.5 * 0.95 ** (1 / 12)), rel=1e-12)
     assert free["notice"] == (
         "The free fit stopped before it converged, so no level is judged: raise the model's "
         "max_iter to compare."
@@ -1113,28 +1133,32 @@ def test_the_generic_observed_rows_are_the_library_kernels_where_it_declares_the
     assert np.all(np.abs(generic - kernel) <= 16 * u * scale)
 
 
-def test_a_scop_curve_under_a_non_canonical_link_takes_the_fits_as_independent():
+@pytest.mark.parametrize("family", ["gamma", "poisson"])
+def test_a_scop_curve_takes_the_fits_as_independent(family):
     """A monotone P-spline fitted through its exponential reparametrisation.
 
-    Its shape lives in that reparametrisation, which the observed-curvature
-    rebuild leaves out: where the shape binds, the curve's pull came out too
-    large and the intervals too narrow.
+    Its coefficients are an exponential map of the fitted ones, so even under
+    a canonical link the fit moves with a full-Newton curvature that neither
+    its covariance nor the observed rebuild reads: where the shape bends, the
+    curve's pull came out wrong.
     """
     rng = np.random.default_rng(12)
     k = np.repeat(np.arange(12), 50)
-    y = np.exp(1.0 - 0.05 * k) * rng.gamma(4.0, 0.25, k.size)
+    mu = np.exp(1.0 + 0.05 * k)
+    y = mu * rng.gamma(4.0, 0.25, k.size) if family == "gamma" else rng.poisson(mu).astype(float)
     X = pd.DataFrame({"band": np.array(TWELVE)[k]})
     band = OrderedCategorical(
         order=TWELVE, basis=Spline(kind="ps", n_knots=6, constraint=Constraint.fit.increasing)
     )
-    model = SuperGLM(family="gamma", link="log", features={"band": band}, spline_penalty=5.0).fit(
+    model = SuperGLM(family=family, link="log", features={"band": band}, spline_penalty=5.0).fit(
         X, y
     )
     assert model._solver_pirls_result().scop_inference is not None
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["notice"] == (
         "Each interval takes the curve and the free estimate as independent, without the "
-        "curve's pull toward the level: this fit cannot measure it."
+        "curve's pull toward the level: a shape-constrained P-spline in the model is fitted "
+        "through a transformation the comparison does not follow."
     )
 
 

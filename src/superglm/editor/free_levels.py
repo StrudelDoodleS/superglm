@@ -59,6 +59,7 @@ from superglm.links import stabilize_eta
 from superglm.model.explain_ops import _shape_repaired
 from superglm.model.state_ops import _grouped_active_state, _legacy_active_state
 from superglm.solvers.constrained_qp import _feasibility_slack, _roundoff_tolerance
+from superglm.solvers.irls_direct import _QP_FEASIBILITY_TOL
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -103,6 +104,10 @@ _SIGNED = (
     + "under this family and link, rows far from their fitted mean leave it unmeasured."
 )
 _UNMEASURED = _INDEPENDENT + "this fit cannot measure it."
+_SCOP = _INDEPENDENT + (
+    "a shape-constrained P-spline in the model is fitted through a transformation the "
+    "comparison does not follow."
+)
 _UNCONVERGED = (
     "The {fit} stopped before it converged, so no level is judged: raise the model's max_iter "
     "to compare."
@@ -495,10 +500,9 @@ def _on_binding_face(model, active, width: int, apply):
     its face under any small change of the response, so the fit moves with
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
-    A row binds when its slack, in the QP's own units, is within the fit's
-    coefficient precision, about ``sqrt(tol)``, and the dot product's
-    rounding: a row that close cannot be told from a binding one, and taken
-    as binding it only widens an interval.
+    A row binds when its slack, in the QP's own units, is within the
+    feasibility tolerance the solver holds its active rows to, and the dot
+    product's rounding: the solver keeps those rows on their face.
     """
     full = {group.name: group for group in model._groups}
     beta = np.asarray(model.result.beta, dtype=np.float64)
@@ -511,7 +515,7 @@ def _on_binding_face(model, active, width: int, apply):
         theta = beta[source.start : source.end]
         A = np.asarray(constraints.A, dtype=np.float64)
         slack = _feasibility_slack(A, theta, np.asarray(constraints.b, dtype=np.float64))
-        within = float(np.sqrt(model._tol)) + _roundoff_tolerance(A.shape[1])
+        within = _QP_FEASIBILITY_TOL + _roundoff_tolerance(A.shape[1])
         for row in A[slack <= within]:
             embedded = np.zeros(width)
             embedded[group.start : group.end] = row
@@ -559,6 +563,11 @@ def _influence(model, name: str) -> _Influence | str:
         return _NO_DESIGN
     distribution, link = model._distribution, model._link
     solver = model._solver_pirls_result()
+    if getattr(solver, "scop_inference", None) is not None:
+        # A SCOP term's coefficients are an exponential map of the fitted ones,
+        # so even a canonical fit moves with the full-Newton latent curvature,
+        # which neither its covariance nor the rebuild here reads.
+        return _SCOP
     eta = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), link)
     mu = clip_mu(link.inverse(eta), distribution)
     prior = (
@@ -576,10 +585,6 @@ def _influence(model, name: str) -> _Influence | str:
     if observed is not fisher:
         if np.any(observed < 0.0):
             return _SIGNED
-        if getattr(solver, "scop_inference", None) is not None:
-            # A SCOP term's shape lives in its reparametrisation, whose
-            # geometry only the fit's own covariance reads.
-            return _UNMEASURED
         curvature = observed
         try:
             X, active, _inverse, _augmented, _gram, inverse, _rank = _legacy_active_state(
@@ -715,9 +720,11 @@ def _comparison(
         free_var, gap_var = float(gaps.free_var[i]), float(gaps.gap_var[i])
         if gap_var <= (1.0 - _MAX_LEVERAGE) * free_var:
             gap_var = free_var
-        found.append((level, group, gap, gap_var, judge and free_var > 0.0))
+        found.append((level, group, gap, gap_var, free_var > 0.0))
     # One comparison per group judged: a group's members share one free
-    # estimate. A level with no free variance has nothing to judge.
+    # estimate. A level with no free variance has nothing to judge. The cut
+    # stands when an unconverged fit holds the flags back, so an interval
+    # that misses the curve still means what it says.
     judged_groups = {group for _, group, _, _, judged in found if judged}
     z = float(norm.ppf(0.5 + 0.5 * CONFIDENCE ** (1.0 / max(len(judged_groups), 1))))
     rows = []
@@ -732,7 +739,7 @@ def _comparison(
                 "y": float(_safe_exp(on_curve + gap)),
                 "lower": float(_safe_exp(on_curve + gap - half)),
                 "upper": float(_safe_exp(on_curve + gap + half)),
-                "flagged": bool(judged and abs(gap) > half),
+                "flagged": bool(judge and judged and abs(gap) > half),
             }
         )
     return {
