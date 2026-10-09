@@ -204,7 +204,6 @@
 .free-level { fill: var(--surface); stroke: var(--unsmoothed); stroke-width: 1.4; }
 .free-level.is-flagged { fill: var(--unsmoothed); }
 .free-whisker.is-flagged { stroke: var(--unsmoothed); stroke-opacity: 0.8; }
-.free-curve-tick { stroke: var(--text); stroke-width: 1.5; }
 /* The term fitted with its smoothing switched off: solid, over the curve. */
 .unsmoothed { fill: none; stroke: var(--unsmoothed); stroke-width: 1.8; stroke-linejoin: round; }
 .unsmoothed-dot { fill: var(--unsmoothed); stroke: none; }

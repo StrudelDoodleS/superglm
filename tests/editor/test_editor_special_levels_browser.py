@@ -29,10 +29,8 @@ def test_free_levels_then_make_special_and_back_on_the_curve(open_editor_page):
         page.locator("#ciToggle").click()
         page.locator("#chart .free-levels .free-whisker").first.wait_for(state="attached")
         assert page.locator("#chart .free-levels .free-whisker").count() == 6
-        # Each whisker carries a tick at the fitted curve its flag is judged against,
-        # and the marks keep to the plot, as its points do, when it is zoomed.
-        assert page.locator("#chart .free-levels .free-curve-tick").count() == 6
-        for mark in ("free-level", "free-curve-tick"):
+        # The marks keep to the plot, as its points do, when it is zoomed.
+        for mark in ("free-level", "free-whisker"):
             node = page.locator(f"#chart .free-levels .{mark}").first
             assert node.get_attribute("clip-path") == "url(#plotClip)"
         assert toggle.get_attribute("aria-pressed") == "true"

@@ -328,22 +328,24 @@ def test_free_levels_are_a_plain_categorical_fit_and_flag_the_level_the_smooth_o
         spline_penalty=20.0,
     ).fit(X, y, sample_weight=w)
     inference = direct.term_inference("band")
-    expected = dict(zip(inference.levels, np.exp(inference.log_relativity), strict=True))
-    # The free levels are the plain categorical's relativities, placed against
-    # the curve by the levels' mean rather than by the reference, so they agree
-    # up to one factor. Each fit stops once its deviance moves by under
-    # tol = 1e-6 relative. Near the optimum the deviance is quadratic in the
-    # coefficients' error, so that step bounds the error before it by about
-    # sqrt(tol); Newton's last step leaves it far smaller, so 1e-3 is loose.
-    ratio = np.log(free["y"]) - np.log([expected[level] for level in free["levels"]])
-    assert np.ptp(ratio) < 1e-3
+    expected = dict(zip(inference.levels, inference.log_relativity, strict=True))
+    se = dict(zip(inference.levels, inference.se_log_relativity, strict=True))
+    # The free levels are drawn as the plain categorical's relativities, the
+    # reference at exactly 1, with its pointwise intervals. Each fit stops once
+    # its deviance moves by under tol = 1e-6 relative. Near the optimum the
+    # deviance is quadratic in the coefficients' error, so that step bounds the
+    # error before it by about sqrt(tol); Newton's last step leaves it far
+    # smaller, so 1e-3 is loose, for the standard errors too.
     assert free["levels"] == BANDS
+    at = free["levels"].index(reference)
+    assert free["y"][at] == free["lower"][at] == free["upper"][at] == 1.0
+    log_y = np.log(free["y"])
+    np.testing.assert_allclose(log_y, [expected[level] for level in BANDS], rtol=0, atol=1e-3)
+    half = (np.log(free["upper"]) - np.log(free["lower"])) / 2
+    z = norm.ppf(0.975)
+    np.testing.assert_allclose(half, [z * se[level] for level in BANDS], rtol=1e-3, atol=1e-12)
     assert free["flagged"] == [BUMP]
     assert free["shrunk"] is False
-    term = session.terms["band"]
-    curve = np.exp(term.original_log_effect[list(term.levels).index(BUMP)])
-    at = free["levels"].index(BUMP)
-    assert not free["lower"][at] <= curve <= free["upper"][at]
 
 
 def _fitted_free_models(monkeypatch) -> list:
@@ -536,61 +538,45 @@ def test_both_fits_are_centred_on_one_exposure_weighted_mean(monkeypatch):
     u = np.finfo(np.float64).eps / 2
     exposure = np.array([math.fsum(w[X["band"].to_numpy() == level]) for level in BANDS])
     np.testing.assert_allclose(share, exposure / math.fsum(exposure), rtol=(len(X) + 16) * u)
-    term = session.terms["band"]
-    curve = {level: term.original_log_effect[i] for i, level in enumerate(term.levels)}
-    gaps = np.array([np.log(free["y"][k]) - curve[level] for k, level in enumerate(BANDS)])
-    # Each gap is (f_k - share.f) - (c_k - share.c), carried through exp and log
-    # on the chart's scale. Each weighted mean errs by at most gamma_L of its
-    # largest value and is shared by every gap; the computed shares sum to one
-    # within (L + 1) u, which leaves (1 - sum share)(share.f - share.c) over;
-    # each gap takes six more roundings, and each product of the sum one more.
+    gaps = found[-1].free - found[-1].curve
+    # Each gap is (f_k - share.f) - (c_k - share.c). Each weighted mean errs by
+    # at most gamma_L of its largest value and is shared by every gap; the
+    # computed shares sum to one within (L + 1) u, which leaves
+    # (1 - sum share)(share.f - share.c) over; each gap takes three more
+    # roundings, and each product of the sum one more.
     L = len(gaps)
     native = free_levels_module._values(session.model, "band", BANDS)
-    scale = max(
-        np.max(np.abs(np.log(free["y"]))),
-        np.max(np.abs(term.original_log_effect)),
-        np.max(np.abs(found[-1].free)) + np.max(np.abs(found[-1].curve)) + np.max(np.abs(native)),
+    scale = (
+        np.max(np.abs(found[-1].free)) + np.max(np.abs(found[-1].curve)) + np.max(np.abs(native))
     )
     assert abs(math.fsum(share * gaps)) <= (4 * L + 10) * u * scale
 
 
-def test_each_tick_is_the_fit_a_flag_is_judged_against_whatever_the_hand_edits(book):
+def test_hand_edits_move_neither_the_free_levels_nor_their_flags(book):
     """A Refit moves the fit in force off the opened model's line; a hand edit moves the drawn one.
 
-    The tick is the fit in force, neither line, and a level is flagged
-    exactly when that fit, its tick, lies outside its interval.
+    The comparison is of fits: the flags are judged against the fit in force,
+    and a hand edit moves no diamond, interval or flag.
     """
     session = _session(book)
-    opened = dict(zip(session.terms["band"].levels, session.terms["band"].original_log_effect))
     session.replace_with_special_levels("band", ["Mi072"])
+    before = free_level_comparison(session, "band")
     session.select_levels("band", [BUMP])
     session.shift("band", 0.3)
-    term = session.terms["band"]
-    fitted = dict(zip(term.levels, np.exp(term.original_log_effect), strict=True))
-    edited = dict(zip(term.levels, np.exp(term.edited_log_effect), strict=True))
-    free = free_level_comparison(session, "band")
-    assert free["curve"] == [float(fitted[level]) for level in free["levels"]]
-    assert free["curve"][free["levels"].index(BUMP)] != edited[BUMP]
-    # The Refit moved the fit off the opened model's line, by far more than
-    # rounding, so the test tells the two apart.
-    assert any(
-        not np.isclose(np.log(tick), opened[level], rtol=0.0, atol=1e-6)
-        for level, tick in zip(free["levels"], free["curve"], strict=True)
-    )
-    assert free["flagged"]
-    for level, curve, lower, upper in zip(
-        free["levels"], free["curve"], free["lower"], free["upper"], strict=True
-    ):
-        assert (level in free["flagged"]) == (not lower <= curve <= upper)
+    after = free_level_comparison(session, "band")
+    assert after == before
+    assert after["flagged"]
 
 
 def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed(monkeypatch):
     """An export with hand edits baked in keeps the covariance of the fit before them.
 
     ``term_inference`` gives such a curve no errors, and Free levels takes it
-    as fixed: its intervals come from the free fit alone, so two curves on the
-    same data, smoothed differently, get the same widths. Fitted, they differ.
+    as fixed: the gaps it judges flags by have the free fit's variance alone,
+    so two curves on the same data, smoothed differently, get the same widths.
+    Fitted, they differ.
     """
+    found = _captured_gaps(monkeypatch)
     X, y, w = _book(n=6000)
     widths = {}
     for penalty in (20.0, 2.0):
@@ -604,23 +590,18 @@ def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed(monkeypatch):
         ).fit(X, y, sample_weight=w)
         for stale in (False, True):
             model._editor_inference_stale = stale
-            free = free_level_comparison(
-                EditorSession.from_model(model, train_data=(X, y, w)), "band"
-            )
-            ends = np.log(np.array([free["lower"], free["upper"]]))
-            widths[penalty, stale] = (ends[1] - ends[0], np.max(np.abs(ends)))
-    # Each end is one exp and one log away from its log value.
-    u = np.finfo(np.float64).eps / 2
-    for stale, same in ((True, True), (False, False)):
-        (first, scale), (second, other) = widths[20.0, stale], widths[2.0, stale]
-        tolerance = 8 * u * (1.0 + max(scale, other))
-        assert bool(np.max(np.abs(first - second)) <= tolerance) == same
+            free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+            widths[penalty, stale] = np.sqrt(found[-1].gap_var)
+    # Taken as fixed, the curve adds nothing: both widths are the free fit's,
+    # which the curve's smoothing does not touch, to the last bit. Fitted, the
+    # curve's own uncertainty moves them by far more than rounding.
+    np.testing.assert_array_equal(widths[20.0, True], widths[2.0, True])
+    assert not np.allclose(widths[20.0, False], widths[2.0, False], rtol=1e-6, atol=0.0)
     # A shape repair after the fit leaves its covariance as stale: the same path.
     model._editor_inference_stale = False
     monkeypatch.setattr(free_levels_module, "_shape_repaired", lambda model, name: True)
-    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
-    ends = np.log(np.array([free["lower"], free["upper"]]))
-    np.testing.assert_array_equal(ends[1] - ends[0], widths[2.0, True][0])
+    free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+    np.testing.assert_array_equal(np.sqrt(found[-1].gap_var), widths[2.0, True])
 
 
 # Each family with a log link, and a response with mean mu under prior weight w.
@@ -882,13 +863,14 @@ def test_a_response_the_curve_fits_exactly_compares_with_no_dispersion():
     assert free["notice"] is None
 
 
-def test_a_level_with_almost_no_weight_keeps_finite_ends_and_moves_no_other_level():
+def test_a_level_with_almost_no_weight_keeps_finite_ends_and_moves_no_other_level(monkeypatch):
     """B05 weighs 1e-8: its free interval is wider than float64 holds.
 
     Centred on the levels' plain mean, B05's free variance reached every other
     level's, and every interval was some 300 wide on the log scale. Centred on
     their exposure-weighted mean, the others are as if B05 had no rows.
     """
+    found = _captured_gaps(monkeypatch)
     X, y, k = _gaussian(4)
     compared = {}
     for thin in (True, False):
@@ -900,18 +882,15 @@ def test_a_level_with_almost_no_weight_keeps_finite_ends_and_moves_no_other_leve
             spline_penalty=20.0,
         ).fit(X[rows], y[rows], sample_weight=w[rows])
         session = EditorSession.from_model(model, train_data=(X[rows], y[rows], w[rows]))
-        compared[thin] = free_level_comparison(session, "band")
-    free = compared[True]
+        compared[thin] = (free_level_comparison(session, "band"), found[-1])
+    free = compared[True][0]
     json.dumps(free, allow_nan=False)
     at = free["levels"].index("B05")
     assert free["lower"][at] < free["y"][at] < free["upper"][at]
-    # Each gap's standard error, out of its Sidak-widened half-width.
+    # Each gap's standard error, which its flag is judged on.
     sd = {
-        thin: {
-            level: (np.log(c["upper"][i]) - np.log(c["lower"][i])) / (2 * c["z"])
-            for i, level in enumerate(c["levels"])
-        }
-        for thin, c in compared.items()
+        thin: dict(zip(gaps.labels, np.sqrt(gaps.gap_var), strict=True))
+        for thin, (_free, gaps) in compared.items()
     }
     others = [level for level in TWELVE if level != "B05"]
     # The free fit counts B05's rows in its residual degrees of freedom, so its

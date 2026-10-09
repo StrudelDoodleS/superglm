@@ -29,7 +29,15 @@ every other level's flag.
 
 Both fits are centred on the levels' mean weighted by their prior weight
 (their exposure), the same weights on both sides, so a level with little
-weight moves no other level's gap or interval. A level whose every response
+weight moves no other level's gap or flag. Measured from the reference
+instead, every gap would carry the curve's misfit at the reference itself.
+
+What is drawn is the free fit as a categorical's output reads: each level's
+relativity to the reference, the reference at 1 where the chart is drawn from
+it, with its pointwise interval against the reference. The flag is judged on
+the centred gap above, so a level is marked whether or not its drawn interval
+reaches the curve. Where the reference has no free value, the levels are
+drawn by their centred gap from the curve instead, and a note says so. A level whose every response
 is at the family's bound has no finite free value, and one whose rows another
 term covers exactly has no free value of its own: both are left out and named.
 """
@@ -108,6 +116,10 @@ _UNMEASURED = _INDEPENDENT + "this fit cannot measure it."
 _SCOP = _INDEPENDENT + (
     "a shape-constrained P-spline in the model is fitted through a transformation the "
     "comparison does not follow."
+)
+_UNANCHORED = (
+    "The reference {reference} has no free value, so the free levels are drawn by their gap "
+    "from the curve, not as relativities to the reference."
 )
 _REMOVED = (
     "The model's penalty removes {term!r} from the free fit, so its levels are drawn flat and "
@@ -206,7 +218,11 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
         for fit, model in (("free fit", free_model), ("model in force", session.model))
         if not bool(getattr(model.result, "converged", True))
     ]
-    payload = _comparison(term, spec, gaps, shrunk=shrunk, judge=not unconverged)
+    reference = str(spec._base_level)
+    relative = _from_reference(free_model, name, gaps.labels, reference)
+    payload = _comparison(
+        term, spec, gaps, relative, reference, shrunk=shrunk, judge=not unconverged
+    )
     notes = [
         _SEPARATED.format(
             levels=", ".join(labels),
@@ -227,6 +243,8 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
         notes.append(_REMOVED.format(term=name))
     if gaps.note is not None:
         notes.append(gaps.note)
+    if relative is None:
+        notes.append(_UNANCHORED.format(reference=reference))
     payload["notice"] = " ".join(notes) or None
     return payload
 
@@ -731,19 +749,42 @@ def _lift_selection(free_model, model, name: str) -> bool:
     return False
 
 
-def _comparison(
-    term, spec: OrderedCategorical, gaps: _Gaps, *, shrunk: bool, judge: bool = True
-) -> dict[str, Any]:
-    """Each level's centred free estimate against the centred curve.
+def _from_reference(
+    free_model, name: str, labels: list[str], reference: str
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Each of ``labels``' free log-relativity to ``reference`` and its variance; None without one."""
+    if reference not in labels:
+        return None
+    share = np.array([float(label == reference) for label in labels])
+    values = _values(free_model, name, labels)
+    rows = _categorical_contrasts(free_model, name, labels, share)
+    return values - values[labels.index(reference)], _contrast_variances(free_model, name, rows)
 
-    The gap is drawn on the chart's own scale: the diamond sits that far from
-    the curve, whatever the chart centres it on. ``gaps`` are the levels on
+
+def _comparison(
+    term,
+    spec: OrderedCategorical,
+    gaps: _Gaps,
+    relative: tuple[np.ndarray, np.ndarray] | None,
+    reference: str,
+    *,
+    shrunk: bool,
+    judge: bool = True,
+) -> dict[str, Any]:
+    """Each level's free relativity to the reference, flagged on its centred gap from the curve.
+
+    ``relative`` is each compared level's free log-relativity to the
+    ``reference`` and its variance: a level is drawn there, on the chart's
+    scale, with its pointwise interval, the reference where the chart puts
+    it. Without it, a level is drawn its centred gap from the curve, with the
+    free estimate's own interval. ``gaps`` in the payload are the levels on
     the curve with no free value, where the line joining the diamonds breaks.
     """
     levels = [str(level) for level in term.levels]
     specials = special_labels(spec)
     grouping = getattr(spec, "_grouping", None)
     shown = np.asarray(term.original_log_effect, dtype=np.float64)
+    native = np.asarray(term.metadata.get("native_original_log_effect", shown), dtype=np.float64)
     at = {level: i for i, level in enumerate(levels)}
     compared = {label: i for i, label in enumerate(gaps.labels)}
     found = []
@@ -762,36 +803,50 @@ def _comparison(
         free_var, gap_var = float(gaps.free_var[i]), float(gaps.gap_var[i])
         if gap_var <= (1.0 - _MAX_LEVERAGE) * free_var:
             gap_var = free_var
-        found.append((level, group, gap, gap_var, free_var > 0.0))
+        if relative is None:
+            drawn, drawn_var = float(shown[at[level]]) + gap, free_var
+        else:
+            drawn, drawn_var = float(relative[0][i]), float(relative[1][i])
+        found.append((level, group, gap, gap_var, free_var > 0.0, drawn, drawn_var))
     # One comparison per group judged: a group's members share one free
     # estimate. A level with no free variance has nothing to judge. The cut
     # stands when an unconverged fit holds the flags back, so an interval
     # that misses the curve still means what it says.
-    judged_groups = {group for _, group, _, _, judged in found if judged}
+    judged_groups = {group for _, group, _, _, judged, _, _ in found if judged}
     z = float(norm.ppf(0.5 + 0.5 * CONFIDENCE ** (1.0 / max(len(judged_groups), 1))))
+    pointwise = float(norm.ppf(0.5 + 0.5 * CONFIDENCE))
+    # Relativities go where the chart puts the reference: what its centring
+    # adds there, which is nothing when the chart is drawn from the reference.
+    first = next(
+        (
+            i
+            for i, level in enumerate(levels)
+            if (level if grouping is None else str(grouping.original_to_group.get(level, level)))
+            == reference
+        ),
+        None,
+    )
+    shift = 0.0 if relative is None or first is None else float(shown[first] - native[first])
     rows = []
-    for level, _group, gap, gap_var, judged in found:
-        on_curve = float(shown[at[level]])
-        half = z * float(np.sqrt(gap_var))
+    for level, _group, gap, gap_var, judged, drawn, drawn_var in found:
+        half = pointwise * float(np.sqrt(drawn_var))
         rows.append(
             {
                 "level": level,
                 # A level with almost no weight has an interval past what
                 # float64 holds; its ends stay finite, as the chart's own do.
-                "y": float(_safe_exp(on_curve + gap)),
-                # The fit the flags are judged against: hand edits move the
-                # drawn line, not this.
-                "curve": float(_safe_exp(on_curve)),
-                "lower": float(_safe_exp(on_curve + gap - half)),
-                "upper": float(_safe_exp(on_curve + gap + half)),
-                "flagged": bool(judge and judged and abs(gap) > half),
+                "y": float(_safe_exp(drawn + shift)),
+                "lower": float(_safe_exp(drawn + shift - half)),
+                "upper": float(_safe_exp(drawn + shift + half)),
+                # Judged on the centred gap from the fit in force: hand
+                # edits move the drawn line, not this.
+                "flagged": bool(judge and judged and abs(gap) > z * float(np.sqrt(gap_var))),
             }
         )
     return {
         "term": term.name,
         "levels": [row["level"] for row in rows],
         "y": [row["y"] for row in rows],
-        "curve": [row["curve"] for row in rows],
         "lower": [row["lower"] for row in rows],
         "upper": [row["upper"] for row in rows],
         "flagged": [row["level"] for row in rows if row["flagged"]],

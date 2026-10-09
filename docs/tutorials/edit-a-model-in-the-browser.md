@@ -247,30 +247,34 @@ code.
 
 To see which levels the smoothing overrides, choose **Free levels** in the chart's toolbar. The
 model is fitted again with the term's levels all free, as a plain categorical with the same groups
-and reference, and each level's free estimate is drawn behind the curve as a green diamond, the
-diamonds joined by a green line. One button turns both on and off.
+and reference, and each level is drawn behind the curve as a green diamond at its relativity to the
+reference, the diamonds joined by a green line. The reference's diamond sits at 1, as in a
+categorical's output. One button turns both on and off.
 
-- Each diamond's interval shows while **Reference CI** is on, as a whisker. A short tick on each
-  whisker marks the fitted curve it is judged against, which hand edits leave behind the drawn
-  line.
-- A level whose interval misses the curve has its diamond filled in: the curve holds it away from
-  what its own data says. It is marked whether the intervals show or not.
-- The intervals allow for the curve's own pull toward each level. A model fitted with
-  `retain_fit_state=False` keeps nothing to measure that pull, so each interval allows for any
-  correlation between the curve and the free estimate, which makes it wider, and a note says so.
-- The intervals are widened for the number of levels compared, so a filled diamond is rarely
+- Each diamond's 95% interval against the reference shows while **Reference CI** is on, as a
+  whisker. The reference has none: it is 1 by definition.
+- A level the smoothing overrides has its diamond filled in: the curve holds it away from what
+  its own data says. It is marked whether the intervals show or not.
+- That judgement compares the free fit with the curve after centring both on the levels'
+  exposure-weighted average, not at the reference. Otherwise a curve that misses the reference
+  itself would mark nearly every level. So a filled diamond need not have its whisker miss the
+  curve, and a whisker that misses the curve need not be filled.
+- The judgement allows for the curve's own pull toward each level. A model fitted with
+  `retain_fit_state=False` keeps nothing to measure that pull, so the judgement allows for any
+  correlation between the curve and the free estimate, which makes it stricter, and a note says
+  so.
+- The judgement is widened for the number of levels compared, so a filled diamond is rarely
   chance.
 - Each level is judged on its own. Making one level special moves the curve, and with it the other
   levels' marks.
 - A level with little exposure has a wide interval. The smoothing helps such a level, so leave it
-  on the curve. The diamonds are placed against the levels' exposure-weighted average, so such a
-  level does not move or widen the others.
+  on the curve. It does not move the other levels' marks.
 - Some levels have no free value to draw, and get no diamond; a note names them:
   - a level whose every response is 0, such as a band with exposure but no claims, or, for a
     yes/no response, every response 1;
   - a level whose rows another term covers exactly, such as a categorical with one level for just
     those rows.
-- The intervals also allow for any correlation between the two fits, and a note says why, when
+- The judgement also allows for any correlation between the two fits, and a note says why, when
   the session's training data holds the model's rows in another order or other rows, when the
   family and link leave the pull unmeasured where rows sit far from their fitted mean (a Gaussian
   response with a log link, say), when the model has a shape-constrained P-spline, when a
@@ -282,7 +286,8 @@ diamonds joined by a green line. One button turns both on and off.
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
 - Turned off and on again for the same term and model, it comes back at once, with no new fit.
-- A level with no free value, named in the note, leaves a gap in the line.
+- A level with no free value, named in the note, leaves a gap in the line. If the reference has
+  none, the levels are drawn by their gap from the curve instead, and the note says so.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the
   free levels are not shrunk. The other terms keep theirs. A custom penalty that cannot be limited
   to some terms shrinks the free levels too, or removes them, and the legend then says so.
