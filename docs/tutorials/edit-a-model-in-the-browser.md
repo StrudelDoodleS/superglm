@@ -389,22 +389,27 @@ basis.
 
 Choose **Knots** in the mode switch at the left of the chart's toolbar, or press K. The knots show as diamonds on the x-axis.
 
-- **Move:** drag a knot along the axis. Knots may pass each other.
-- **Add:** click the axis.
-- **Remove:** drag a knot below the axis.
-- **Keyboard:** with a knot selected, the arrow keys nudge it along the axis, and Delete removes it.
+- **Move:** drag a knot along the axis. A tag above it shows where it is. Knots may pass each
+  other; a knot dropped too close to another moves to the nearest free spot.
+- **Add:** click the axis where the dashed diamond shows.
+- **Remove:** drag a knot below the axis, onto **Drop here to remove the knot**. A spline keeps at
+  least one knot.
+- **Keyboard:** click a knot to select it. The arrow keys nudge it along the axis, ten steps at a
+  time with Shift. Delete removes it, and Escape clears the selection.
 
-The context bar shows the rest:
+In the Knots tool, the chart's toolbar shows the rest:
 
-- **Count** (− n +): the number of knots.
+- **Count** (− n +): the number of knots. Hover a greyed-out button to see why it is off.
 - **Placed by:** the rule that places them. Choose Even spacing, Quantiles of values, Quantiles of
-  rows, or Tempered quantiles with an alpha from 0 to 1.
+  rows, or Tempered quantiles with an alpha from 0 to 1. Knots placed by hand show as Hand.
 - **Reset knots:** returns the knots to the ones declared in code.
 
 Changing the count or the rule places every knot again by that rule. This drops any knot you moved
 by hand. Undo brings them back.
 
-Outside the tool, the knots show as small ticks under the axis.
+Outside the tool, the knots show as small ticks under the axis. While a knot change waits, the
+knots it places are amber. The knots it moves or removes stay as dashed grey outlines until Refit,
+and a removed one is crossed out.
 
 A knot change waits for Refit, like the other structural changes. With **Refit after every
 structural change** on in Settings, it refits at once. Undo, Redo and **Revert to original model**
@@ -417,7 +422,9 @@ Knot changes have these limits:
 - **Count:** an ordered term takes at most one knot fewer than the levels on its curve.
 - **Interactions:** a term used by an interaction keeps its knots.
 - **Evenly spaced only:** a natural spline (`kind="ns"`), and a P-spline whose penalty order `m` is
-  above its degree, take only evenly spaced knots. Their count can still change.
+  above its degree, take only evenly spaced knots. The tool shows their knots but does not move,
+  add or remove them by hand, and **Placed by** offers Even spacing only. Hovering the axis says
+  why. Their count can still change, and **Reset knots** still works.
 - **Waiting level changes:** while a waiting change alters an ordered term's levels, refit before
   you change its knots.
 
@@ -732,8 +739,8 @@ still works: its report is shown on the Validation tab.
 - Use Escape to close the current popover, Help drawer, inspector drawer, or dialog.
 - Use Ctrl/Cmd+Z to undo and Ctrl/Cmd+Shift+Z or Ctrl+Y to redo an edit, a waiting change or a
   step.
-- Press K to choose the Knots tool. With a knot selected, the arrow keys nudge it and Delete
-  removes it.
+- Press K to choose the Knots tool. With a knot selected, the arrow keys nudge it, ten steps at a
+  time with Shift; Delete removes it and Escape clears the selection.
 - Press R to refit the waiting changes.
 
 Pointer editing remains the primary high-density curve workflow. Full per-point keyboard editing

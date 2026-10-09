@@ -88,8 +88,9 @@ debounces evidence per panel, and rejects stale responses.
 Do not add a second state store in DOM classes, select values, or module globals. A DOM attribute may
 expose state for accessibility or testing, but the store or Python session remains authoritative.
 
-Pointer drag, brush, and pan details stay in `interactions.js`. They update too frequently to belong
-in durable state; only the finished operation is sent to Python.
+Pointer drag, brush, and pan details stay in `interactions.js`, and Knots mode's in
+`knot_gestures.js`. They update too frequently to belong in durable state; only the finished
+operation is sent to Python.
 
 ## JSON Requests and Semantic Revisions
 
@@ -136,7 +137,7 @@ redraw the chart.
 
 ## Waiting Changes, Refit and Notes
 
-Collapse, Ungroup, Set reference, Make special, Back on the curve and the shapes are staged, not fitted. Each one is a
+Collapse, Ungroup, Set reference, Make special, Back on the curve, the shapes and knot changes are staged, not fitted. Each one is a
 `PendingStep` in `session.pending` holding its labels-only `params` and the draft spec it leaves;
 a term's draft is the last waiting step's spec for it, else the in-force fitted spec, so staged
 changes on one term compose. One Refit fits every draft in a single clone, records one
@@ -155,20 +156,28 @@ waiting), and re-applies hand edits on the terms it did not restructure as one m
 - `collapse`: `{levels: [label, ...], group_label: str | null}`;
 - `ungroup`: `{levels: [label, ...]}`;
 - `set_reference`: `{level: label}`;
-- `shape`: `{lo, hi, degree, join}`, with `join` either `"tangent"` or `"kink"`.
+- `shape`: `{lo, hi, degree, join}`, with `join` either `"tangent"` or `"kink"`;
+- `knots`: exactly one of `{count, strategy, alpha?}`, with `strategy` one of `"uniform"`,
+  `"quantile"`, `"quantile_rows"` and `"quantile_tempered"` and `alpha` (0 to 1) sent with
+  tempered quantiles only; `{positions: [x, ...]}`, the knots placed by hand in chart
+  coordinates; or `{reset: true}`, back to the knots the opened model declares.
 
 `keep_reference` is a JSON boolean, true when absent; any other value is refused with the fixed
 sentence "keep_reference must be true or false.". With Settings' "Refit after every structural
 change" on, the browser posts to the operation's own route (`/collapse_levels`,
-`/ungroup_levels`, `/set_reference`, `/shape_range`) instead, which stages the change and refits
-it as one step that one Undo takes back.
+`/ungroup_levels`, `/set_reference`, `/shape_range`, `/special_levels`, `/knots`) instead, which
+stages the change and refits it as one step that one Undo takes back. `/knots` takes
+`{term, params, method, level_display}`, with `params` in one of the three forms above.
 
 The state snapshot carries the waiting changes in three places:
 
 - top-level `pending`: `[{id, operation, term, label, params, note, time}]`, oldest first;
-- per term, `pending`: `{groups, ranges, reference}`. `groups` is the draft's whole grouping once a
-  waiting collapse or ungroup touches the term, else null; `ranges` lists the shaped ranges the
-  draft adds or changes; `reference` is the level or group the draft pins, else null;
+- per term, `pending`: `{groups, ranges, reference, specials, knots}`. `groups` is the draft's
+  whole grouping once a waiting collapse or ungroup touches the term, else null; `ranges` lists
+  the shaped ranges the draft adds or changes; `reference` is the level or group the draft pins,
+  else null; `specials` is the draft's special levels once a waiting change moves one, else null;
+  `knots` is `{positions, count, strategy, alpha}`, the draft's knots while a knot change waits,
+  else null;
 - each top-level `timeline` entry: `id` (seven hex digits), `time` (seconds since the epoch), `note`
   and `status`, one of `"applied"`, `"waiting"` or `"edit"`. A waiting or applied change is a
   `"pending"` entry.
@@ -177,6 +186,32 @@ Notes live in `session.step_notes`, keyed by step id, so they survive Undo and R
 Python model carries the timeline up to now as `_editor_history`, one dict per entry with its id,
 ISO 8601 time, operation, term, message, note, status and `predictor` (None until the SuperLSS
 editor names one). The Excel workbook does not carry it.
+
+### Knots
+
+Each term payload carries `knots`, the Knots tool's state, built by `superglm/editor/knots.py`:
+
+```text
+available, reason      whether the tool works on the term, and why not (its popover)
+positions, count       the interior knots in force, ascending, in chart coordinates
+strategy, alpha        the rule that placed them, or "explicit"; the tempered quantiles' power
+from_editor            the knots in force were set in the editor
+lo, hi, min_gap        knots lie strictly inside (lo, hi), at least min_gap apart and from the ends
+max_count              an ordered term's most knots, one fewer than its levels on the curve
+resettable             the knots in force or waiting differ from the opened model's
+even_only              why the term takes evenly spaced knots only, else null
+```
+
+Chart coordinates are a numeric spline's own values, and an ordered term's display positions,
+where smooth level `i` sits at `i` and the spline's axis maps linearly between levels. The
+browser snaps a numeric knot to three significant figures of `hi - lo`, the grid a shaped range's
+edges snap to, and an ordered one to a tenth of a level; `min_gap` is that same step, and Python
+refuses a knot closer than it. With `even_only` set, no knot moves or arrives by hand and Placed
+by offers even spacing alone; the count and Reset knots still stage a change.
+
+Every finished gesture stages one `knots` change: a drag, a click on the axis, a drag below it or
+a key sends `{positions}` with the whole new list; the count stepper and Placed by send
+`{count, strategy, alpha?}`; Reset knots sends `{reset: true}`.
 
 ## Settings and the Theme Switch
 
@@ -244,6 +279,17 @@ one of the fixed sentences in `rating_preview.py`, never builder text.
 - `chart/ordered_spline.js` reads an ordered spline's `spline_view`: its spline on a fine grid of
   the level axis, the level dots on it and the special levels as dots of their own.
 - `chart/anchor_marks.js` marks the selection anchor that a Shift-click spans from.
+- `knots.js` holds the pure knot helpers: the axis and its snap grid, where a dragged, nudged
+  or added knot settles, the change each gesture sends, the stepper's limits and the tag's text.
+- `chart/knot_marks.js` lays out and draws the knot layer: ticks under the axis in every mode,
+  and in Knots mode the handles, guides, axis band, remove zone and tag, with a waiting change's
+  knots amber and the in-force knots it moves or removes as ghosts. `knotLayout` is pure; chart.js
+  keeps the drawn frame on the svg as `_knotFrame`.
+- `knot_gestures.js` binds Knots mode's pointer and key gestures. It owns the gesture in progress
+  and the selected knot, redraws only the knot layer while a knot moves, and stages the finished
+  change.
+- `views/knot_bar.js` renders and binds the count stepper, Placed by, alpha and Reset knots,
+  the knots chip in the term line, and the status line's sentence in Knots mode.
 - `views/summary_view.js` decides which summary rows a search and the All / Edited / Waiting filter
   keep and which term sections are open as Summary follows the chart; `summary.js` turns the
   result into markup and reapplies it after every render.
