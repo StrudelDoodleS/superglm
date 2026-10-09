@@ -49,7 +49,7 @@ const ARROWS = Object.freeze({ ArrowLeft: -1, ArrowRight: 1 });
  */
 export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
   /** @type {KnotUi} */
-  const ui = { selected: null, drag: null, hover: null };
+  const ui = { selected: null, drag: null, hover: null, pending: null };
   /** @type {{x:number, y:number}|null} where a drag started */
   let dragStart = null;
   /** @type {{start:{x:number, y:number}, cancelled:boolean}|null} a press on the band */
@@ -87,10 +87,14 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
     }
     const before = ui.selected;
     ui.selected = outcome.select;
+    // Drawn where the gesture left them until the change is answered, so a
+    // dropped knot does not flash back to its old place on the way.
+    const positions = "positions" in outcome.params ? outcome.params.positions : null;
+    ui.pending = positions ? [...positions].sort((a, b) => a - b) : null;
     draw();
     void Promise.resolve(onChange(outcome.params)).then((staged) => {
-      if (staged || ui.selected !== outcome.select) return;
-      ui.selected = before;
+      ui.pending = null;
+      if (!staged && ui.selected === outcome.select) ui.selected = before;
       draw();
     });
   }

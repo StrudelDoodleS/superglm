@@ -32,12 +32,14 @@ import { el, line, text } from "./svg.js";
  */
 /**
  * A gesture in progress, which the gestures module owns: the selected knot by
- * position, a drag from the knot at ``from`` to ``x``, and the grid point a
- * click on the band would add a knot at.
+ * position, a drag from the knot at ``from`` to ``x``, the grid point a click
+ * on the band would add a knot at, and the knots a finished gesture staged,
+ * drawn in their new places until the change is answered.
  * @typedef {object} KnotUi
  * @property {number|null} selected
  * @property {{from:number, x:number, moved:boolean, remove:boolean}|null} drag
  * @property {number|null} hover
+ * @property {number[]|null} [pending]
  */
 /**
  * @typedef {object} KnotLayout
@@ -54,7 +56,7 @@ import { el, line, text } from "./svg.js";
  */
 
 /** @type {Readonly<KnotUi>} */
-export const NO_KNOT_GESTURE = Object.freeze({ selected: null, drag: null, hover: null });
+export const NO_KNOT_GESTURE = Object.freeze({ selected: null, drag: null, hover: null, pending: null });
 
 const HANDLE_RADIUS = 7;
 const GHOST_RADIUS = 6;
@@ -214,10 +216,30 @@ export function inRemoveZone(frame, point) {
 }
 
 /**
+ * The frame as a staged change the server has not answered yet leaves it: its
+ * knots in their new places and waiting, the ones it moves or removes as ghosts.
+ * @param {KnotFrame} frame @param {number[]} positions @returns {KnotFrame}
+ */
+function pendingFrame(frame, positions) {
+  const dropped = frame.positions.filter((x) => !positions.includes(x));
+  const removed = positions.length < frame.positions.length;
+  return {
+    ...frame,
+    positions,
+    placed: positions.map((x) => {
+      const at = frame.positions.indexOf(x);
+      return at < 0 || frame.placed[at];
+    }),
+    ghosts: [...frame.ghosts, ...dropped.map((x) => ({ x, removed }))]
+  };
+}
+
+/**
  * Where every knot mark goes, without a DOM.
  * @param {KnotFrame} frame @param {Readonly<KnotUi>} ui @returns {KnotLayout}
  */
 export function knotLayout(frame, ui) {
+  if (frame.editing && ui.pending) frame = pendingFrame(frame, ui.pending);
   const drag = frame.editing ? ui.drag : null;
   const dragged = drag ? knotIndex(frame, drag.from) : null;
   const selected = frame.editing ? knotIndex(frame, ui.selected) : null;

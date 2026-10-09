@@ -60,3 +60,34 @@ def test_one_knot_more_waits_for_refit_and_undo_takes_it_back(open_editor_page):
         _wait_for_chip(page, "7 knots · even spacing", waiting=False)
         assert page.locator("#chart .knot-handle").count() == 7
         assert refit.is_disabled()
+
+
+def test_a_dropped_knot_stays_where_it_was_dropped_while_its_change_is_staged(open_editor_page):
+    """The handle must not flash back to its old place before the staged change answers."""
+    with open_editor_page() as (page, session):
+        page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+            "radio", name="Knots", exact=True
+        ).click()
+        handles = page.locator("#chart .knot-handle")
+        handles.first.wait_for()
+        before = [float(x) for x in handles.evaluate_all("els => els.map(e => e.dataset.knotX)")]
+        released = []
+
+        def held(route):
+            # Read the knots while the stage request is still in flight.
+            released.extend(
+                float(x) for x in handles.evaluate_all("els => els.map(e => e.dataset.knotX)")
+            )
+            route.continue_()
+
+        page.route("**/stage*", held)
+        box = handles.nth(3).bounding_box()
+        y = box["y"] + box["height"] / 2
+        page.mouse.move(box["x"] + box["width"] / 2, y)
+        page.mouse.down()
+        page.mouse.move(box["x"] + box["width"] / 2 + 60, y, steps=8)
+        page.mouse.up()
+        _wait_for_chip(page, "7 knots · placed by hand", waiting=True)
+        assert released, "the knot change was not staged"
+        assert before[3] not in released
+        assert len(released) == len(before)

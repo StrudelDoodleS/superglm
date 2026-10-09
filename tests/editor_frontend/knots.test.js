@@ -355,6 +355,19 @@ test("dragging a knot along the axis stages its new place, and below the axis re
   assert.equal(gestures.ui().selected, null);
 });
 
+test("a dropped knot stays where it was dropped until its change is answered", async () => {
+  const { pointer, px, gestures, svg } = gestureHarness(numericTerm());
+  pointer("pointerdown", px(4), 300);
+  pointer("pointermove", px(5.1), 302);
+  pointer("pointerup", px(5.1), 302);
+  const shown = knotLayout(svg._knotFrame, gestures.ui());
+  assert.deepEqual(shown.handles.map((handle) => handle.x), [2, 5.1, 6, 8]);
+  assert.equal(shown.handles[1].placed, true);
+  assert.deepEqual(shown.ghosts.map((ghost) => ghost.removed), [false]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(gestures.ui().pending, null);
+});
+
 test("a click on the band adds a knot, refused on the status line when the term is full", () => {
   const harness = gestureHarness(numericTerm());
   harness.pointer("pointerdown", harness.px(5), 296);
