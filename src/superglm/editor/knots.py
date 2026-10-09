@@ -37,7 +37,13 @@ from superglm.features.rebuild import (
     respaced_spline,
     source_spline,
 )
-from superglm.features.spline import NaturalSpline, PSpline, _SplineBase
+from superglm.features.spline import (
+    CardinalCRSpline,
+    NaturalSpline,
+    PSpline,
+    _BSplineBase,
+    _SplineBase,
+)
 
 STRATEGIES = ("uniform", "quantile", "quantile_rows", "quantile_tempered")
 _RULE_TEXT = {
@@ -113,7 +119,9 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
     reason = knots_unavailable_reason(model, name, term)
     if reason is not None:
         return {
-            **dict.fromkeys(("positions", "count", "strategy", "alpha", "lo", "hi", "min_gap")),
+            **dict.fromkeys(
+                ("positions", "count", "strategy", "alpha", "lo", "hi", "min_gap", "basis")
+            ),
             "available": False,
             "reason": reason,
             "from_editor": False,
@@ -140,6 +148,28 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
         "max_count": axis.max_count,
         "resettable": _resettable(session, name),
         "even_only": _even_only_reason(name, declared_spline(model, name)),
+        "basis": _basis_payload(fitted, axis, float(lo), float(hi)),
+    }
+
+
+def _basis_payload(spline: _SplineBase, axis: _Axis, lo: float, hi: float) -> dict[str, Any] | None:
+    """How the browser rebuilds the term's B-spline basis to draw it; None for a cardinal spline.
+
+    ``ends`` is "open" for a P-spline or B-spline: the boundary is widened by 0.001 of its range
+    and the knots carry on past it at the first and last spacing. It is "clamped" for a cubic
+    regression or natural spline: each end of the boundary is repeated ``degree + 1`` times (a
+    natural spline also widens it by 1e-6 of its range, far below a pixel, which the browser
+    leaves out). ``boundary`` is in chart coordinates. ``level_values`` are an ordered term's
+    smooth levels on the spline's own axis, through which the browser maps the knots and the
+    boundary; None on a numeric term, whose chart axis is the spline's.
+    """
+    if isinstance(spline, CardinalCRSpline):
+        return None
+    return {
+        "degree": int(spline.degree),
+        "ends": "open" if isinstance(spline, _BSplineBase) else "clamped",
+        "boundary": [lo, hi],
+        "level_values": None if axis.values is None else [float(v) for v in axis.values],
     }
 
 

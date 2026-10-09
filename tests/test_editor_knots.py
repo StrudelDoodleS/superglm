@@ -318,3 +318,53 @@ def test_the_widget_stages_knots_and_refits_them_at_once(book):
         widget.close()
     session.undo()
     assert _knots(session.model, "band").size == 3
+
+
+def _browser_knot_vector(basis: dict, positions: list[float]) -> np.ndarray:
+    """The knot vector the browser builds from ``term.knots`` (app/chart/knot_basis.js)."""
+    values = basis["level_values"]
+
+    def to_axis(chart):
+        chart = np.asarray(chart, dtype=np.float64)
+        return chart if values is None else np.interp(chart, np.arange(len(values)), values)
+
+    degree = basis["degree"]
+    lo, hi = to_axis(basis["boundary"])
+    interior = to_axis(positions)
+    if basis["ends"] == "clamped":
+        return np.concatenate([np.repeat(lo, degree + 1), interior, np.repeat(hi, degree + 1)])
+    pad = 0.001 * (hi - lo)
+    inner = np.concatenate([[lo - pad], interior, [hi + pad]])
+    below = inner[0] - (inner[1] - inner[0]) * np.arange(degree, 0, -1)
+    above = inner[-1] + (inner[-1] - inner[-2]) * np.arange(1, degree + 1)
+    return np.concatenate([below, inner, above])
+
+
+@pytest.mark.parametrize("kind", ["ps", "bs", "cr", "ns"])
+def test_the_payload_describes_the_basis_the_browser_draws(kind):
+    X, y, w = _book(n=3000)
+    model = _declared(age=Spline(kind=kind, n_knots=5)).fit(X, y, sample_weight=w)
+    knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["age"]["knots"]
+    rebuilt = _browser_knot_vector(knots["basis"], knots["positions"])
+    # Only a natural spline's 1e-6 widening of its clamped ends is left out.
+    pad = (2e-6 if kind == "ns" else 1e-12) * (knots["hi"] - knots["lo"])
+    np.testing.assert_allclose(rebuilt, model._specs["age"]._knots, rtol=0, atol=pad)
+
+
+def test_an_ordered_terms_basis_is_built_on_its_level_values():
+    values = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}
+    X, y, w = _book(n=4000)
+    X = X.assign(band=X["band"].map(lambda b: f"B{int(b[1:]) % 6}"))
+    band = OrderedCategorical(values=values, basis=Spline(kind="cr", n_knots=2))
+    model = _declared(band=band).fit(X, y, sample_weight=w)
+    knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["band"]["knots"]
+    assert knots["basis"]["level_values"] == list(values.values())
+    rebuilt = _browser_knot_vector(knots["basis"], knots["positions"])
+    np.testing.assert_allclose(rebuilt, model._specs["band"]._basis_spline._knots, atol=1e-12)
+
+
+def test_a_cardinal_spline_has_no_basis_to_draw():
+    X, y, w = _book(n=3000)
+    model = _declared(age=Spline(kind="cr_cardinal", n_knots=5)).fit(X, y, sample_weight=w)
+    knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["age"]["knots"]
+    assert knots["available"] and knots["basis"] is None
