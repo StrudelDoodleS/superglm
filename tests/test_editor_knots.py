@@ -266,6 +266,52 @@ def test_knot_changes_refuse_in_fixed_sentences(book):
     assert session.pending == []
 
 
+def _axis_session(lo: float, hi: float) -> EditorSession:
+    """A Poisson spline whose training range is exactly ``lo`` to ``hi``."""
+    rng = np.random.default_rng(20261010)
+    X = pd.DataFrame({"x": rng.uniform(lo, hi, 400)})
+    y = rng.poisson(1.0, 400).astype(float)
+    w = np.ones(400)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind="cr", n_knots=4, boundary=(lo, hi))},
+        spline_penalty=10.0,
+    ).fit(X, y, sample_weight=w)
+    return EditorSession.from_model(model, train_data=(X, y, w))
+
+
+@pytest.mark.parametrize(
+    ("lo", "hi", "gap", "positions", "accepted"),
+    [
+        # 1e7 + 0.1 reads 0.1 - 3.7e-10 from 1e7, which the old 1e-9 slack refused.
+        (1e7, 1e7 + 50.0, "0.1", [1e7 + 0.1, 1e7 + 20.0, 1e7 + 40.0], True),
+        (1e7, 1e7 + 50.0, "0.1", [1e7 + 20.0, 1e7 + 20.1, 1e7 + 40.0], True),
+        # Outside the round-off at that magnitude (5.6e-9): 1e-8 short of the gap.
+        (1e7, 1e7 + 50.0, "0.1", [1e7 + 0.1 - 1e-8, 1e7 + 20.0], False),
+        (0.0, 50.0, "0.1", [0.1, 10.0], True),
+        # Near zero, 5e-11 short is outside the round-off, though the old slack took it.
+        (0.0, 50.0, "0.1", [0.1 - 5e-11, 10.0], False),
+        (0.0, 50.0, "0.1", [10.0, 10.1 - 5e-11], False),
+        # Where five roundings reach the gap, float64 cannot tell a knot from its end.
+        (1e15, 1e15 + 10.0, "0.1", [1e15 + 2.0], False),
+    ],
+)
+def test_the_least_gap_is_held_to_the_round_off_of_the_values(lo, hi, gap, positions, accepted):
+    session = _axis_session(lo, hi)
+    if accepted:
+        step = session.stage_structural("knots", "x", {"positions": positions})
+        assert step.metadata["positions"] == positions
+        return
+    sentence = (
+        f"Knot positions must be numbers inside the range of 'x', at least {gap} apart "
+        f"and at least {gap} from its ends."
+    )
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("knots", "x", {"positions": positions})
+    assert str(refused.value) == sentence
+    assert session.pending == []
+
+
 def test_a_level_change_waiting_on_an_ordered_term_holds_its_knots(book):
     session = _session(book)
     session.stage_structural("collapse", "band", {"levels": ["B6", "B7"]})
