@@ -230,6 +230,8 @@ def test_a_spline_whose_penalty_needs_even_knots_takes_only_a_count(age, sentenc
     X, y, w = _book(n=3000)
     model = _declared(age=age).fit(X, y, sample_weight=w)
     session = EditorSession.from_model(model, train_data=(X, y, w))
+    assert session_payload(session)["age"]["knots"]["even_only"] == sentence
+    assert session_payload(session)["band"]["knots"]["even_only"] is None
     for params in ({"positions": AGE_KNOTS}, {"count": 6, "strategy": "quantile"}):
         with pytest.raises(EditorValueError) as refused:
             session.stage_structural("knots", "age", params)

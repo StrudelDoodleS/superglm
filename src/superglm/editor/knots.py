@@ -119,6 +119,7 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
             "from_editor": False,
             "max_count": None,
             "resettable": False,
+            "even_only": None,
         }
     spec = model._specs[name]
     axis = _Axis.of(spec, term)
@@ -138,6 +139,7 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
         "min_gap": axis.min_gap(float(lo), float(hi)),
         "max_count": axis.max_count,
         "resettable": _resettable(session, name),
+        "even_only": _even_only_reason(name, declared_spline(model, name)),
     }
 
 
@@ -307,15 +309,22 @@ def _require_count(name: str, axis: _Axis, count: int) -> None:
 
 
 def _require_uneven_allowed(name: str, source: _SplineBase) -> None:
-    """Refuse uneven knots on a spline whose penalty is defined for even ones only.
+    reason = _even_only_reason(name, source)
+    if reason is not None:
+        raise EditorValueError(reason)
+
+
+def _even_only_reason(name: str, source: _SplineBase) -> str | None:
+    """Why ``source`` takes only evenly spaced knots, or None when it takes any.
 
     A natural spline keeps the standard difference penalty, and a P-spline
     whose penalty order exceeds its degree has no general difference penalty.
     """
     if isinstance(source, NaturalSpline):
-        raise EditorValueError(_EVEN_ONLY_NS.format(term=name))
+        return _EVEN_ONLY_NS.format(term=name)
     if isinstance(source, PSpline) and max(source._m_orders) > source.degree:
-        raise EditorValueError(_EVEN_ONLY_ORDER.format(term=name))
+        return _EVEN_ONLY_ORDER.format(term=name)
+    return None
 
 
 def _resettable(session, name: str) -> bool:
